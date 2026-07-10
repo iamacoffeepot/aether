@@ -30,11 +30,7 @@
 // Pixel-rect layout constants read clearest as float literals inline, and the
 // window rects cast small, non-negative float pixel coords to the u32
 // `FrameRect` fields.
-#![allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
+#![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 // Row-rect geometry reads clearest as plain `top + n * height` sums; the
 // `mul_add` rewrite obscures the layout math for no accuracy that matters to a
 // pixel region.
@@ -47,21 +43,18 @@ use aether_actor::Addressable;
 use aether_capabilities::RenderCapability;
 use aether_capabilities::fs::NamespaceRoots;
 use aether_capabilities::render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
-use aether_capabilities::text::{
-    FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
-};
+use aether_capabilities::text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
 use aether_data::Kind;
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_ENTER, KEY_RIGHT, KEY_TAB};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
-    CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, FrameCheck, FrameCheckResult,
-    FrameRect, FrameReduction, FrameVerdict, ImePreedit, Key, LoadComponent, LoadResult,
-    LogTailResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove, NamedMail, TextInput,
-    Tick,
+    CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, FrameCheck, FrameCheckResult, FrameRect,
+    FrameReduction, FrameVerdict, ImePreedit, Key, LoadComponent, LoadResult, LogTailResult, Modifiers, MouseButton,
+    MouseButtonRelease, MouseMove, NamedMail, TextInput, Tick,
 };
 use aether_kit::{
-    ButtonConfig, PanelConfig, SetWidgetState, SliderConfig, Theme, ThemeState, WidgetChildSpec,
-    WidgetControlState, WidgetKind, WidgetValidation,
+    ButtonConfig, PanelConfig, SetWidgetState, SliderConfig, Theme, ThemeState, WidgetChildSpec, WidgetControlState,
+    WidgetKind, WidgetValidation,
 };
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
@@ -122,19 +115,11 @@ const DARKEN_TOLERANCE: u8 = 6;
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
-    format!(
-        "aether.component/{}:panel",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    )
+    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE)
 }
 
 fn child_address(subname: &str) -> String {
-    format!(
-        "{}/{}:{}",
-        panel_address(),
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-        subname,
-    )
+    format!("{}/{}:{}", panel_address(), aether_capabilities::WasmTrampoline::NAMESPACE, subname)
 }
 
 /// The bundle's `assets/` dir — where `RobotoMono.ttf` ships, resolved relative
@@ -147,16 +132,8 @@ fn assets_dir() -> PathBuf {
 /// and whose `save://` / `config://` sink into a per-process sandbox tempdir.
 fn build_bench() -> TestBench {
     let sandbox = init_save_sandbox("widget-render-interaction");
-    let roots = NamespaceRoots {
-        save: sandbox.to_path_buf(),
-        assets: assets_dir(),
-        config: sandbox.to_path_buf(),
-    };
-    TestBench::builder()
-        .size(WINDOW_WIDTH, WINDOW_HEIGHT)
-        .namespace_roots(roots)
-        .build()
-        .expect("boot")
+    let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets: assets_dir(), config: sandbox.to_path_buf() };
+    TestBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).namespace_roots(roots).build().expect("boot")
 }
 
 /// Deterministically load `RobotoMono.ttf` into the shared `aether.text`
@@ -169,17 +146,11 @@ fn load_font(bench: &mut TestBench) -> u32 {
             "font",
             BenchOp::send_and_await(
                 "aether.text",
-                &LoadFont {
-                    namespace: "assets".to_owned(),
-                    path: "fonts/RobotoMono.ttf".to_owned(),
-                },
+                &LoadFont { namespace: "assets".to_owned(), path: "fonts/RobotoMono.ttf".to_owned() },
             ),
         )])
         .expect("load_font sequence");
-    match loaded
-        .reply::<LoadFontResult>("font")
-        .expect("decode LoadFontResult")
-    {
+    match loaded.reply::<LoadFontResult>("font").expect("decode LoadFontResult") {
         LoadFontResult::Ok { font_id, .. } => font_id,
         LoadFontResult::Err { error, .. } => panic!("load RobotoMono: {error}"),
     }
@@ -192,18 +163,10 @@ fn load_metrics(bench: &mut TestBench, font_id: u32) -> CachedFontMetrics {
     let got = bench
         .execute(vec![(
             "metrics",
-            BenchOp::send_and_await(
-                "aether.text",
-                &FontMetricsRequest {
-                    font: FontRef::Id(font_id),
-                },
-            ),
+            BenchOp::send_and_await("aether.text", &FontMetricsRequest { font: FontRef::Id(font_id) }),
         )])
         .expect("font_metrics sequence");
-    match got
-        .reply::<FontMetricsResult>("metrics")
-        .expect("decode FontMetricsResult")
-    {
+    match got.reply::<FontMetricsResult>("metrics").expect("decode FontMetricsResult") {
         FontMetricsResult::Ok { metrics } => CachedFontMetrics::new(&metrics),
         FontMetricsResult::Err { error } => panic!("grab RobotoMono metrics: {error}"),
     }
@@ -218,22 +181,14 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8], font_id: u32) {
     load_panel_with_children(bench, wasm, font_id, Vec::new());
 }
 
-fn load_panel_with_children(
-    bench: &mut TestBench,
-    wasm: &[u8],
-    font_id: u32,
-    children: Vec<WidgetChildSpec>,
-) {
+fn load_panel_with_children(bench: &mut TestBench, wasm: &[u8], font_id: u32, children: Vec<WidgetChildSpec>) {
     let config = PanelConfig {
         x: PANEL_X,
         y: PANEL_Y,
         width: PANEL_WIDTH,
         font_namespace: String::new(),
         font_path: String::new(),
-        theme: Theme {
-            font_id,
-            ..Theme::DEFAULT
-        },
+        theme: Theme { font_id, ..Theme::DEFAULT },
         children,
     };
     let loaded = bench
@@ -250,14 +205,10 @@ fn load_panel_with_children(
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
-        LoadResult::Ok { name, .. } => assert!(
-            name.ends_with(":panel"),
-            "the panel root should register under :panel; got {name}",
-        ),
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { name, .. } => {
+            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}");
+        }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }
 }
@@ -294,12 +245,7 @@ fn warm_panel(bench: &mut TestBench) {
 /// as a capture's `mails` so the panel redraws with its current widget state the
 /// same frame the substrate reads back.
 fn tick_to_panel() -> NamedMail {
-    NamedMail {
-        recipient_name: panel_address(),
-        kind_name: Tick::NAME.to_owned(),
-        payload: Vec::new(),
-        count: 1,
-    }
+    NamedMail { recipient_name: panel_address(), kind_name: Tick::NAME.to_owned(), payload: Vec::new(), count: 1 }
 }
 
 /// A left mouse-button press at `(x, y)`.
@@ -318,12 +264,7 @@ fn button_child(subname: &str, label: &str, state: WidgetControlState) -> Widget
         kind: WidgetKind::Button,
         origin: [0.0, 0.0],
         clip: None,
-        config: ButtonConfig {
-            label: label.to_owned(),
-            theme: Theme::DEFAULT,
-            state,
-        }
-        .encode_into_bytes(),
+        config: ButtonConfig { label: label.to_owned(), theme: Theme::DEFAULT, state }.encode_into_bytes(),
     }
 }
 
@@ -333,31 +274,16 @@ fn slider_child(subname: &str, state: WidgetControlState) -> WidgetChildSpec {
         kind: WidgetKind::Slider,
         origin: [0.0, 0.0],
         clip: None,
-        config: SliderConfig {
-            min: 0.0,
-            max: 1.0,
-            step: 0.1,
-            initial: 0.5,
-            theme: Theme::DEFAULT,
-            state,
-        }
-        .encode_into_bytes(),
+        config: SliderConfig { min: 0.0, max: 1.0, step: 0.1, initial: 0.5, theme: Theme::DEFAULT, state }
+            .encode_into_bytes(),
     }
 }
 
 fn control_state_children() -> Vec<WidgetChildSpec> {
-    let hidden = WidgetControlState {
-        visible: false,
-        ..WidgetControlState::default()
-    };
-    let disabled = WidgetControlState {
-        enabled: false,
-        ..WidgetControlState::default()
-    };
+    let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
+    let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     let invalid = WidgetControlState {
-        validation: WidgetValidation::Error {
-            message: "outside range".to_owned(),
-        },
+        validation: WidgetValidation::Error { message: "outside range".to_owned() },
         ..WidgetControlState::default()
     };
     vec![
@@ -369,12 +295,7 @@ fn control_state_children() -> Vec<WidgetChildSpec> {
 }
 
 fn row_clip(y: f32) -> ClipRect {
-    ClipRect {
-        x: PANEL_X,
-        y,
-        width: PANEL_WIDTH,
-        height: ROW_HEIGHT,
-    }
+    ClipRect { x: PANEL_X, y, width: PANEL_WIDTH, height: ROW_HEIGHT }
 }
 
 fn solid_for<'a>(snapshot: &'a [DrawTexturedQuads], clip: &ClipRect) -> &'a DrawTexturedQuads {
@@ -387,9 +308,7 @@ fn solid_for<'a>(snapshot: &'a [DrawTexturedQuads], clip: &ClipRect) -> &'a Draw
 fn assert_initial_control_snapshot(snapshot: &[DrawTexturedQuads], slider_y: f32, hover_y: f32) {
     let hidden_clip = row_clip(PANEL_Y);
     assert!(
-        snapshot
-            .iter()
-            .all(|batch| batch.clip.as_ref() != Some(&hidden_clip)),
+        snapshot.iter().all(|batch| batch.clip.as_ref() != Some(&hidden_clip)),
         "the hidden first child retains its slot but contributes no solid or glyph batch",
     );
 
@@ -401,21 +320,13 @@ fn assert_initial_control_snapshot(snapshot: &[DrawTexturedQuads], slider_y: f32
     );
 
     let value_batch = solid_for(snapshot, &row_clip(slider_y));
-    assert_eq!(
-        value_batch.quads.len(),
-        10,
-        "track + fill + two four-quad outlines"
-    );
+    assert_eq!(value_batch.quads.len(), 10, "track + fill + two four-quad outlines");
     assert!(
-        value_batch.quads[2..6]
-            .iter()
-            .all(|quad| quad.tint == Theme::DEFAULT.error),
+        value_batch.quads[2..6].iter().all(|quad| quad.tint == Theme::DEFAULT.error),
         "the outer validation ring uses the error role",
     );
     assert!(
-        value_batch.quads[6..10]
-            .iter()
-            .all(|quad| quad.tint == Theme::DEFAULT.accent),
+        value_batch.quads[6..10].iter().all(|quad| quad.tint == Theme::DEFAULT.accent),
         "the inset focus ring remains visible after validation",
     );
     assert_eq!(value_batch.quads[2].y, slider_y);
@@ -446,28 +357,15 @@ fn assert_updated_control_snapshot(snapshot: &[DrawTexturedQuads], slider_y: f32
     );
 }
 
-fn assert_stationary_hover_survives_focus_traversal(
-    bench: &mut TestBench,
-    panel: &str,
-    hover_y: f32,
-) {
+fn assert_stationary_hover_survives_focus_traversal(bench: &mut TestBench, panel: &str, hover_y: f32) {
     // Focus is independent from hover: Tab to the hovered button and away
     // again without moving the pointer. The button must remain hovered because
     // only a root-issued HoverLost may clear that fact.
     bench
         .execute(vec![
-            (
-                "focus_hovered_button",
-                BenchOp::send_mail(panel, &Key { code: KEY_TAB }),
-            ),
-            (
-                "focus_away_without_motion",
-                BenchOp::send_mail(panel, &Key { code: KEY_TAB }),
-            ),
-            (
-                "capture_stationary_hover",
-                BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new()),
-            ),
+            ("focus_hovered_button", BenchOp::send_mail(panel, &Key { code: KEY_TAB })),
+            ("focus_away_without_motion", BenchOp::send_mail(panel, &Key { code: KEY_TAB })),
+            ("capture_stationary_hover", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
         .expect("stationary hover survives focus traversal");
     assert_eq!(
@@ -480,28 +378,13 @@ fn assert_stationary_hover_survives_focus_traversal(
 /// A half-open window band `[min_x, max_x) × [min_y, max_y)` as an inclusive
 /// `FrameRect` (the region primitive scores an inclusive extent).
 fn rect(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> FrameRect {
-    FrameRect {
-        min_x: min_x as u32,
-        min_y: min_y as u32,
-        max_x: max_x as u32 - 1,
-        max_y: max_y as u32 - 1,
-    }
+    FrameRect { min_x: min_x as u32, min_y: min_y as u32, max_x: max_x as u32 - 1, max_y: max_y as u32 - 1 }
 }
 
 /// A region-scoped check of one reduction over `region`, scored against
 /// `background` at `tolerance`.
-fn check(
-    reduction: FrameReduction,
-    region: FrameRect,
-    background: [u8; 3],
-    tolerance: u8,
-) -> FrameCheck {
-    FrameCheck {
-        reduction,
-        tolerance,
-        background: Some(background),
-        region: Some(region),
-    }
+fn check(reduction: FrameReduction, region: FrameRect, background: [u8; 3], tolerance: u8) -> FrameCheck {
+    FrameCheck { reduction, tolerance, background: Some(background), region: Some(region) }
 }
 
 /// Capture one frame (redrawing the panel via a `Tick` in `mails`) with the
@@ -512,19 +395,11 @@ fn capture(bench: &mut TestBench, checks: Vec<FrameCheck>) -> FrameVerdict {
             "snap",
             BenchOp::send_and_await(
                 RenderCapability::NAMESPACE,
-                &CaptureFrame {
-                    mails: vec![tick_to_panel()],
-                    after_mails: Vec::new(),
-                    checks,
-                    similarity: None,
-                },
+                &CaptureFrame { mails: vec![tick_to_panel()], after_mails: Vec::new(), checks, similarity: None },
             ),
         )])
         .expect("capture with region checks");
-    match captured
-        .reply::<CaptureFrameResult>("snap")
-        .expect("decode CaptureFrameResult")
-    {
+    match captured.reply::<CaptureFrameResult>("snap").expect("decode CaptureFrameResult") {
         CaptureFrameResult::Ok { verdict, .. } => verdict.expect("checks requested → verdict"),
         CaptureFrameResult::Err { error } => panic!("capture failed: {error}"),
     }
@@ -598,18 +473,8 @@ fn text_rows() -> Vec<TextRow> {
     let (button_top, _) = row_band(BUTTON_ROW, 1.0);
 
     let mut rows = vec![
-        TextRow {
-            name: "label",
-            glyph_left: PANEL_X,
-            top: label_top,
-            background: SURFACE_SRGB,
-        },
-        TextRow {
-            name: "button",
-            glyph_left: PANEL_X,
-            top: button_top,
-            background: ACCENT_SRGB,
-        },
+        TextRow { name: "label", glyph_left: PANEL_X, top: label_top, background: SURFACE_SRGB },
+        TextRow { name: "button", glyph_left: PANEL_X, top: button_top, background: ACCENT_SRGB },
     ];
     for i in 0..3usize {
         rows.push(TextRow {
@@ -629,14 +494,8 @@ fn text_rows() -> Vec<TextRow> {
 /// stays within the row's horizontal frame (the text-x off-framing this scenario
 /// adds over the vertical-only sibling checks).
 fn assert_row_contained(row: &TextRow, result: &FrameCheckResult) {
-    let bbox = bounding_box(result)
-        .unwrap_or_else(|| panic!("row {} drew no glyphs (empty mask)", row.name));
-    let (min_x, min_y, max_x, max_y) = (
-        bbox.min_x as f32,
-        bbox.min_y as f32,
-        bbox.max_x as f32,
-        bbox.max_y as f32,
-    );
+    let bbox = bounding_box(result).unwrap_or_else(|| panic!("row {} drew no glyphs (empty mask)", row.name));
+    let (min_x, min_y, max_x, max_y) = (bbox.min_x as f32, bbox.min_y as f32, bbox.max_x as f32, bbox.max_y as f32);
     let (top, bottom) = (row.top, row.top + ROW_HEIGHT);
     let right = PANEL_X + PANEL_WIDTH;
     eprintln!(
@@ -710,12 +569,7 @@ fn panel_renders_every_text_row_inside_its_frame() {
             ),
             check(
                 FrameReduction::Coverage,
-                rect(
-                    right + 4.0,
-                    PANEL_Y,
-                    WINDOW_WIDTH as f32,
-                    button_top + ROW_HEIGHT,
-                ),
+                rect(right + 4.0, PANEL_Y, WINDOW_WIDTH as f32, button_top + ROW_HEIGHT),
                 CLEAR_SRGB,
                 PARTITION_TOLERANCE,
             ),
@@ -723,11 +577,7 @@ fn panel_renders_every_text_row_inside_its_frame() {
         .collect();
 
     let verdict = capture(&mut bench, checks);
-    assert_eq!(
-        verdict.results.len(),
-        rows.len() + 2,
-        "one result per requested check",
-    );
+    assert_eq!(verdict.results.len(), rows.len() + 2, "one result per requested check");
 
     for (row, result) in rows.iter().zip(&verdict.results) {
         assert_row_contained(row, result);
@@ -768,18 +618,9 @@ fn slider_drag_renders_fill_at_track_fraction() {
     let panel = panel_address();
     bench
         .execute(vec![
-            (
-                "drag_press",
-                BenchOp::send_mail(&panel, &press(110.0, 52.0)),
-            ),
-            (
-                "drag_move",
-                BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 }),
-            ),
-            (
-                "drag_release",
-                BenchOp::send_mail(&panel, &release(160.0, 52.0)),
-            ),
+            ("drag_press", BenchOp::send_mail(&panel, &press(110.0, 52.0))),
+            ("drag_move", BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 })),
+            ("drag_release", BenchOp::send_mail(&panel, &release(160.0, 52.0))),
         ])
         .expect("slider drag");
 
@@ -790,21 +631,9 @@ fn slider_drag_renders_fill_at_track_fraction() {
     let (slider_top, _) = row_band(SLIDER_ROW, 1.0);
     let track_height = (ROW_HEIGHT * 0.35).clamp(4.0, ROW_HEIGHT);
     let track_top = slider_top + (ROW_HEIGHT - track_height) * 0.5;
-    let region = rect(
-        PANEL_X + BORDER + 1.0,
-        track_top,
-        PANEL_X + PANEL_WIDTH - BORDER,
-        track_top + track_height,
-    );
-    let verdict = capture(
-        &mut bench,
-        vec![check(
-            FrameReduction::BoundingBox,
-            region,
-            SURFACE_RAISED_SRGB,
-            PARTITION_TOLERANCE,
-        )],
-    );
+    let region = rect(PANEL_X + BORDER + 1.0, track_top, PANEL_X + PANEL_WIDTH - BORDER, track_top + track_height);
+    let verdict =
+        capture(&mut bench, vec![check(FrameReduction::BoundingBox, region, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE)]);
 
     let bbox = bounding_box(&verdict.results[0]).expect("the drag should render a non-empty fill");
     // The fill starts at the track's left (`local x = 0`); its right edge is the
@@ -812,9 +641,7 @@ fn slider_drag_renders_fill_at_track_fraction() {
     let fill_right = bbox.max_x as f32 + 1.0;
     let fraction = (fill_right - PANEL_X) / PANEL_WIDTH;
     let expected = 191.0 / 255.0;
-    eprintln!(
-        "slider fill right edge x={fill_right:.0} → fraction {fraction:.3} (expected {expected:.3})",
-    );
+    eprintln!("slider fill right edge x={fill_right:.0} → fraction {fraction:.3} (expected {expected:.3})");
     assert!(
         (fraction - expected).abs() <= 0.05,
         "the rendered slider fill should reach {expected:.3} of the track; it reached \
@@ -841,14 +668,8 @@ fn radio_click_moves_marker_into_clicked_row() {
     let panel = panel_address();
     bench
         .execute(vec![
-            (
-                "radio_press",
-                BenchOp::send_mail(&panel, &press(30.0, 125.0)),
-            ),
-            (
-                "radio_release",
-                BenchOp::send_mail(&panel, &release(30.0, 125.0)),
-            ),
+            ("radio_press", BenchOp::send_mail(&panel, &press(30.0, 125.0))),
+            ("radio_release", BenchOp::send_mail(&panel, &release(30.0, 125.0))),
         ])
         .expect("radio click");
 
@@ -865,12 +686,7 @@ fn radio_click_moves_marker_into_clicked_row() {
             let marker_top = row_top + (ROW_HEIGHT - marker) * 0.5;
             check(
                 FrameReduction::Coverage,
-                rect(
-                    marker_left,
-                    marker_top,
-                    marker_left + marker + 1.0,
-                    marker_top + marker,
-                ),
+                rect(marker_left, marker_top, marker_left + marker + 1.0, marker_top + marker),
                 SURFACE_RAISED_SRGB,
                 PARTITION_TOLERANCE,
             )
@@ -879,15 +695,8 @@ fn radio_click_moves_marker_into_clicked_row() {
     let verdict = capture(&mut bench, checks);
 
     let fractions: Vec<f32> = verdict.results.iter().map(coverage).collect();
-    eprintln!(
-        "radio marker coverage per row: [0]={:.3} [1]={:.3} [2]={:.3}",
-        fractions[0], fractions[1], fractions[2],
-    );
-    assert!(
-        fractions[2] > 0.5,
-        "the accent marker should fill the clicked row 2; coverage was {:.3}",
-        fractions[2],
-    );
+    eprintln!("radio marker coverage per row: [0]={:.3} [1]={:.3} [2]={:.3}", fractions[0], fractions[1], fractions[2]);
+    assert!(fractions[2] > 0.5, "the accent marker should fill the clicked row 2; coverage was {:.3}", fractions[2]);
     for i in [0usize, 1] {
         assert!(
             fractions[i] < 0.1,
@@ -927,37 +736,17 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
         PANEL_X + PANEL_WIDTH - BORDER,
         text_top + ROW_HEIGHT - BORDER,
     );
-    let glyph_check = || {
-        vec![check(
-            FrameReduction::BoundingBox,
-            field_region,
-            SURFACE_RAISED_SRGB,
-            PARTITION_TOLERANCE,
-        )]
-    };
+    let glyph_check =
+        || vec![check(FrameReduction::BoundingBox, field_region, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE)];
 
     let panel = panel_address();
     // Focus the field and type; a follow-up tick + advance rasterizes any new
     // glyph ('x' is unseen) into the atlas before the measuring capture.
     bench
         .execute(vec![
-            (
-                "focus",
-                BenchOp::send_mail(&panel, &press(50.0, text_top + 10.0)),
-            ),
-            (
-                "focus_up",
-                BenchOp::send_mail(&panel, &release(50.0, text_top + 10.0)),
-            ),
-            (
-                "type",
-                BenchOp::send_mail(
-                    &panel,
-                    &TextInput {
-                        text: "hix".to_owned(),
-                    },
-                ),
-            ),
+            ("focus", BenchOp::send_mail(&panel, &press(50.0, text_top + 10.0))),
+            ("focus_up", BenchOp::send_mail(&panel, &release(50.0, text_top + 10.0))),
+            ("type", BenchOp::send_mail(&panel, &TextInput { text: "hix".to_owned() })),
             ("rasterize", BenchOp::send_mail(&panel, &Tick)),
             ("settle", BenchOp::advance(2)),
         ])
@@ -967,22 +756,11 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
     let typed_box = bounding_box(&typed.results[0]).expect("typed text should render glyphs");
     let typed_right = typed_box.max_x as f32;
 
-    bench
-        .execute(vec![(
-            "backspace",
-            BenchOp::send_mail(
-                &panel,
-                &Key {
-                    code: KEY_BACKSPACE,
-                },
-            ),
-        )])
-        .expect("backspace");
+    bench.execute(vec![("backspace", BenchOp::send_mail(&panel, &Key { code: KEY_BACKSPACE }))]).expect("backspace");
 
     let deleted = capture(&mut bench, glyph_check());
-    let deleted_right = bounding_box(&deleted.results[0])
-        .expect("the field still shows \"hi\" after one backspace")
-        .max_x as f32;
+    let deleted_right =
+        bounding_box(&deleted.results[0]).expect("the field still shows \"hi\" after one backspace").max_x as f32;
 
     let shrink = typed_right - deleted_right;
     eprintln!(
@@ -1000,18 +778,12 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
          — the neutralized-editing-key class",
     );
 
-    bench
-        .execute(vec![(
-            "commit",
-            BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }),
-        )])
-        .expect("commit");
+    bench.execute(vec![("commit", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }))]).expect("commit");
 
     let log = panel_log_messages(&mut bench);
     let joined = log.join("\n");
     assert!(
-        log.iter()
-            .any(|m| m.contains("widget text committed") && m.contains("text=hi")),
+        log.iter().any(|m| m.contains("widget text committed") && m.contains("text=hi")),
         "after typing \"hix\", one backspace, and Enter the committed string must be \"hi\"; \
          log was:\n{joined}",
     );
@@ -1044,31 +816,17 @@ fn button_press_renders_pressed_state_and_reports_click() {
         PANEL_X + PANEL_WIDTH - BORDER,
         button_top + ROW_HEIGHT - BORDER,
     );
-    let fill_check = || {
-        vec![check(
-            FrameReduction::Coverage,
-            fill_region,
-            ACCENT_FILL_SRGB,
-            DARKEN_TOLERANCE,
-        )]
-    };
+    let fill_check = || vec![check(FrameReduction::Coverage, fill_region, ACCENT_FILL_SRGB, DARKEN_TOLERANCE)];
 
     let baseline_cov = coverage(&capture(&mut bench, fill_check()).results[0]);
 
     let panel = panel_address();
     let button_x = PANEL_X + PANEL_WIDTH * 0.5;
     let button_y = button_top + ROW_HEIGHT * 0.5;
-    bench
-        .execute(vec![(
-            "press",
-            BenchOp::send_mail(&panel, &press(button_x, button_y)),
-        )])
-        .expect("button press");
+    bench.execute(vec![("press", BenchOp::send_mail(&panel, &press(button_x, button_y)))]).expect("button press");
 
     let pressed_cov = coverage(&capture(&mut bench, fill_check()).results[0]);
-    eprintln!(
-        "button fill coverage-off-accent: un-pressed {baseline_cov:.3} → pressed {pressed_cov:.3}",
-    );
+    eprintln!("button fill coverage-off-accent: un-pressed {baseline_cov:.3} → pressed {pressed_cov:.3}");
     assert!(
         baseline_cov < 0.1,
         "the un-pressed button fill should match its accent color (coverage off-accent ≈ 0); \
@@ -1080,12 +838,7 @@ fn button_press_renders_pressed_state_and_reports_click() {
          {pressed_cov:.3} — the pressed-state-not-rendered class",
     );
 
-    bench
-        .execute(vec![(
-            "release",
-            BenchOp::send_mail(&panel, &release(button_x, button_y)),
-        )])
-        .expect("button release");
+    bench.execute(vec![("release", BenchOp::send_mail(&panel, &release(button_x, button_y)))]).expect("button release");
 
     let log = panel_log_messages(&mut bench);
     let joined = log.join("\n");
@@ -1116,55 +869,21 @@ fn focus_ring_follows_tab() {
     // left/right borders. Scored against the panel surface behind the edge.
     let (slider_top, _) = row_band(SLIDER_ROW, 1.0);
     let (radio_top, _) = row_band(RADIO_ROW, 3.0);
-    let top_edge = |top: f32| {
-        rect(
-            PANEL_X + BORDER + 1.0,
-            top,
-            PANEL_X + PANEL_WIDTH - BORDER,
-            top + BORDER,
-        )
-    };
-    let slider_edge = || {
-        vec![check(
-            FrameReduction::Coverage,
-            top_edge(slider_top),
-            SURFACE_SRGB,
-            PARTITION_TOLERANCE,
-        )]
-    };
+    let top_edge = |top: f32| rect(PANEL_X + BORDER + 1.0, top, PANEL_X + PANEL_WIDTH - BORDER, top + BORDER);
+    let slider_edge = || vec![check(FrameReduction::Coverage, top_edge(slider_top), SURFACE_SRGB, PARTITION_TOLERANCE)];
 
     let panel = panel_address();
     // Tab from no focus lands on the first focusable widget — the slider.
-    bench
-        .execute(vec![(
-            "tab1",
-            BenchOp::send_mail(&panel, &Key { code: KEY_TAB }),
-        )])
-        .expect("first tab");
+    bench.execute(vec![("tab1", BenchOp::send_mail(&panel, &Key { code: KEY_TAB }))]).expect("first tab");
     let on_slider = coverage(&capture(&mut bench, slider_edge()).results[0]);
 
     // Tab again advances focus to the radio group.
-    bench
-        .execute(vec![(
-            "tab2",
-            BenchOp::send_mail(&panel, &Key { code: KEY_TAB }),
-        )])
-        .expect("second tab");
+    bench.execute(vec![("tab2", BenchOp::send_mail(&panel, &Key { code: KEY_TAB }))]).expect("second tab");
     let verdict = capture(
         &mut bench,
         vec![
-            check(
-                FrameReduction::Coverage,
-                top_edge(slider_top),
-                SURFACE_SRGB,
-                PARTITION_TOLERANCE,
-            ),
-            check(
-                FrameReduction::Coverage,
-                top_edge(radio_top),
-                SURFACE_SRGB,
-                PARTITION_TOLERANCE,
-            ),
+            check(FrameReduction::Coverage, top_edge(slider_top), SURFACE_SRGB, PARTITION_TOLERANCE),
+            check(FrameReduction::Coverage, top_edge(radio_top), SURFACE_SRGB, PARTITION_TOLERANCE),
         ],
     );
     let slider_after = coverage(&verdict.results[0]);
@@ -1228,23 +947,9 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     // Focus the field, type a value with a multibyte scalar, and rasterize it.
     bench
         .execute(vec![
-            (
-                "focus",
-                BenchOp::send_mail(&panel, &press(50.0, text_top + 10.0)),
-            ),
-            (
-                "focus_up",
-                BenchOp::send_mail(&panel, &release(50.0, text_top + 10.0)),
-            ),
-            (
-                "type",
-                BenchOp::send_mail(
-                    &panel,
-                    &TextInput {
-                        text: typed_text.to_owned(),
-                    },
-                ),
-            ),
+            ("focus", BenchOp::send_mail(&panel, &press(50.0, text_top + 10.0))),
+            ("focus_up", BenchOp::send_mail(&panel, &release(50.0, text_top + 10.0))),
+            ("type", BenchOp::send_mail(&panel, &TextInput { text: typed_text.to_owned() })),
             ("rasterize", BenchOp::send_mail(&panel, &Tick)),
             ("settle", BenchOp::advance(2)),
         ])
@@ -1257,12 +962,8 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     // testing after a font or theme change.
     let measured_boundary = metrics.caret_x(typed_text, 3, size);
     let fallback_advance = (size * 0.5).max(1.0);
-    let fallback_index =
-        ((measured_boundary / fallback_advance + 0.5) as usize).min(typed_text.chars().count());
-    assert_eq!(
-        fallback_index, 4,
-        "the measured click fixture must differ from the 0.5em fallback"
-    );
+    let fallback_index = ((measured_boundary / fallback_advance + 0.5) as usize).min(typed_text.chars().count());
+    assert_eq!(fallback_index, 4, "the measured click fixture must differ from the 0.5em fallback");
     let boundary_x = content_x + measured_boundary;
     let after_two_x = content_x + metrics.caret_x(typed_text, 2, size);
     let after_four_x = content_x + metrics.caret_x(typed_text, 4, size);
@@ -1271,28 +972,12 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     let mark_bottom = text_top + ROW_HEIGHT - PAD - 1.0;
     let selected_first_cell = rect(boundary_x + 1.0, mark_top, after_four_x - 1.0, mark_bottom);
     let selection_exclusion = rect(after_two_x + 1.0, mark_top, boundary_x - 1.0, mark_bottom);
-    let second_selected_cell = rect(
-        after_four_x + 1.0,
-        mark_top,
-        after_five_x - 1.0,
-        mark_bottom,
-    );
+    let second_selected_cell = rect(after_four_x + 1.0, mark_top, after_five_x - 1.0, mark_bottom);
     let cell_checks = || {
-        [
-            selected_first_cell,
-            selection_exclusion,
-            second_selected_cell,
-        ]
-        .into_iter()
-        .map(|region| {
-            check(
-                FrameReduction::Coverage,
-                region,
-                SURFACE_RAISED_SRGB,
-                PARTITION_TOLERANCE,
-            )
-        })
-        .collect()
+        [selected_first_cell, selection_exclusion, second_selected_cell]
+            .into_iter()
+            .map(|region| check(FrameReduction::Coverage, region, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE))
+            .collect()
     };
     let typed_cells = capture(&mut bench, cell_checks());
     let typed_first = coverage(&typed_cells.results[0]);
@@ -1304,32 +989,11 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     // expected cell and final committed value both fail.
     bench
         .execute(vec![
-            (
-                "place",
-                BenchOp::send_mail(&panel, &press(boundary_x, click_y)),
-            ),
-            (
-                "place_up",
-                BenchOp::send_mail(&panel, &release(boundary_x, click_y)),
-            ),
-            (
-                "shift",
-                BenchOp::send_mail(
-                    &panel,
-                    &Modifiers {
-                        shift: true,
-                        ..Modifiers::default()
-                    },
-                ),
-            ),
-            (
-                "extend1",
-                BenchOp::send_mail(&panel, &Key { code: KEY_RIGHT }),
-            ),
-            (
-                "extend2",
-                BenchOp::send_mail(&panel, &Key { code: KEY_RIGHT }),
-            ),
+            ("place", BenchOp::send_mail(&panel, &press(boundary_x, click_y))),
+            ("place_up", BenchOp::send_mail(&panel, &release(boundary_x, click_y))),
+            ("shift", BenchOp::send_mail(&panel, &Modifiers { shift: true, ..Modifiers::default() })),
+            ("extend1", BenchOp::send_mail(&panel, &Key { code: KEY_RIGHT })),
+            ("extend2", BenchOp::send_mail(&panel, &Key { code: KEY_RIGHT })),
         ])
         .expect("measured place + Shift-extend");
 
@@ -1361,11 +1025,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
                 "preedit",
                 BenchOp::send_mail(
                     &panel,
-                    &ImePreedit {
-                        text: "üx".to_owned(),
-                        cursor_begin: Some(0),
-                        cursor_end: Some(2),
-                    },
+                    &ImePreedit { text: "üx".to_owned(), cursor_begin: Some(0), cursor_end: Some(2) },
                 ),
             ),
             ("rasterize", BenchOp::send_mail(&panel, &Tick)),
@@ -1374,45 +1034,16 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         .expect("ime preedit");
 
     let underline_y = text_top + (ROW_HEIGHT - size) * 0.5 + size;
-    let preedit_underline = rect(
-        boundary_x + 1.0,
-        underline_y,
-        after_five_x - 1.0,
-        underline_y + 2.0,
-    );
-    let underline_exclusion = rect(
-        after_five_x + 1.0,
-        underline_y,
-        after_five_x + (after_four_x - boundary_x) - 1.0,
-        underline_y + 2.0,
-    );
+    let preedit_underline = rect(boundary_x + 1.0, underline_y, after_five_x - 1.0, underline_y + 2.0);
+    let underline_exclusion =
+        rect(after_five_x + 1.0, underline_y, after_five_x + (after_four_x - boundary_x) - 1.0, underline_y + 2.0);
     let composition = capture(
         &mut bench,
         vec![
-            check(
-                FrameReduction::Coverage,
-                selected_first_cell,
-                SURFACE_RAISED_SRGB,
-                PARTITION_TOLERANCE,
-            ),
-            check(
-                FrameReduction::Coverage,
-                second_selected_cell,
-                SURFACE_RAISED_SRGB,
-                PARTITION_TOLERANCE,
-            ),
-            check(
-                FrameReduction::Coverage,
-                preedit_underline,
-                SURFACE_RAISED_SRGB,
-                PARTITION_TOLERANCE,
-            ),
-            check(
-                FrameReduction::Coverage,
-                underline_exclusion,
-                SURFACE_RAISED_SRGB,
-                PARTITION_TOLERANCE,
-            ),
+            check(FrameReduction::Coverage, selected_first_cell, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
+            check(FrameReduction::Coverage, second_selected_cell, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
+            check(FrameReduction::Coverage, preedit_underline, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
+            check(FrameReduction::Coverage, underline_exclusion, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
         ],
     );
     let cursor_span = coverage(&composition.results[0]);
@@ -1438,15 +1069,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     // measure the caret at the end of the non-ASCII result `abéZ`.
     bench
         .execute(vec![
-            (
-                "commit_text",
-                BenchOp::send_mail(
-                    &panel,
-                    &TextInput {
-                        text: "Z".to_owned(),
-                    },
-                ),
-            ),
+            ("commit_text", BenchOp::send_mail(&panel, &TextInput { text: "Z".to_owned() })),
             ("rasterize", BenchOp::send_mail(&panel, &Tick)),
             ("settle", BenchOp::advance(2)),
         ])
@@ -1454,33 +1077,14 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
 
     let final_text = "abéZ";
     let final_caret_x = content_x + metrics.caret_x(final_text, 4, size);
-    let final_caret = rect(
-        final_caret_x - 1.0,
-        text_top + PAD,
-        final_caret_x + 2.0,
-        text_top + ROW_HEIGHT - PAD,
-    );
-    let final_caret_exclusion = rect(
-        final_caret_x + 3.0,
-        text_top + PAD,
-        final_caret_x + 6.0,
-        text_top + ROW_HEIGHT - PAD,
-    );
+    let final_caret = rect(final_caret_x - 1.0, text_top + PAD, final_caret_x + 2.0, text_top + ROW_HEIGHT - PAD);
+    let final_caret_exclusion =
+        rect(final_caret_x + 3.0, text_top + PAD, final_caret_x + 6.0, text_top + ROW_HEIGHT - PAD);
     let final_verdict = capture(
         &mut bench,
         vec![
-            check(
-                FrameReduction::Coverage,
-                final_caret,
-                SURFACE_RAISED_SRGB,
-                PARTITION_TOLERANCE,
-            ),
-            check(
-                FrameReduction::Coverage,
-                final_caret_exclusion,
-                SURFACE_RAISED_SRGB,
-                PARTITION_TOLERANCE,
-            ),
+            check(FrameReduction::Coverage, final_caret, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
+            check(FrameReduction::Coverage, final_caret_exclusion, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
         ],
     );
     let caret_coverage = coverage(&final_verdict.results[0]);
@@ -1495,18 +1099,12 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
          {caret_coverage:.3}, neighboring coverage was {caret_exclusion:.3}",
     );
 
-    bench
-        .execute(vec![(
-            "commit",
-            BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }),
-        )])
-        .expect("commit");
+    bench.execute(vec![("commit", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }))]).expect("commit");
 
     let log = panel_log_messages(&mut bench);
     let joined = log.join("\n");
     assert!(
-        log.iter()
-            .any(|m| m.contains("widget text committed") && m.contains("text=abéZ")),
+        log.iter().any(|m| m.contains("widget text committed") && m.contains("text=abéZ")),
         "clicking after `abé`, extending over `cd`, and committing `Z` must leave the non-ASCII \
          value `abéZ`; log was:\n{joined}",
     );
@@ -1535,28 +1133,13 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
             // Exercise sibling→sibling hover before settling on the button.
             (
                 "hover_slider",
-                BenchOp::send_mail(
-                    &panel,
-                    &MouseMove {
-                        x: PANEL_X + 20.0,
-                        y: slider_y + ROW_HEIGHT * 0.5,
-                    },
-                ),
+                BenchOp::send_mail(&panel, &MouseMove { x: PANEL_X + 20.0, y: slider_y + ROW_HEIGHT * 0.5 }),
             ),
             (
                 "hover_button",
-                BenchOp::send_mail(
-                    &panel,
-                    &MouseMove {
-                        x: PANEL_X + 20.0,
-                        y: hover_y + ROW_HEIGHT * 0.5,
-                    },
-                ),
+                BenchOp::send_mail(&panel, &MouseMove { x: PANEL_X + 20.0, y: hover_y + ROW_HEIGHT * 0.5 }),
             ),
-            (
-                "capture",
-                BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new()),
-            ),
+            ("capture", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
         .expect("state snapshot");
 
@@ -1566,40 +1149,21 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
     // Moving to empty clears hover; runtime mail reveals the hidden slot and
     // changes the slider's validation role without changing either value.
     let warning = WidgetControlState {
-        validation: WidgetValidation::Warning {
-            message: "check value".to_owned(),
-        },
+        validation: WidgetValidation::Warning { message: "check value".to_owned() },
         ..WidgetControlState::default()
     };
     bench
         .execute(vec![
             (
                 "hover_empty",
-                BenchOp::send_mail(
-                    &panel,
-                    &MouseMove {
-                        x: WINDOW_WIDTH as f32 - 2.0,
-                        y: WINDOW_HEIGHT as f32 - 2.0,
-                    },
-                ),
+                BenchOp::send_mail(&panel, &MouseMove { x: WINDOW_WIDTH as f32 - 2.0, y: WINDOW_HEIGHT as f32 - 2.0 }),
             ),
             (
                 "show_hidden",
-                BenchOp::send_mail(
-                    child_address("hidden"),
-                    &SetWidgetState {
-                        state: WidgetControlState::default(),
-                    },
-                ),
+                BenchOp::send_mail(child_address("hidden"), &SetWidgetState { state: WidgetControlState::default() }),
             ),
-            (
-                "warn_value",
-                BenchOp::send_mail(child_address("value"), &SetWidgetState { state: warning }),
-            ),
-            (
-                "capture_updated",
-                BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new()),
-            ),
+            ("warn_value", BenchOp::send_mail(child_address("value"), &SetWidgetState { state: warning })),
+            ("capture_updated", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
         .expect("runtime state update snapshot");
 
@@ -1616,23 +1180,13 @@ fn resident_label_glyphs_forward_the_exact_parent_row_clip() {
     boot_panel(&mut bench, &wasm);
 
     bench
-        .execute(vec![(
-            "snap",
-            BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new()),
-        )])
+        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new()))])
         .expect("capture resident clipped glyphs");
-    let expected = ClipRect {
-        x: PANEL_X,
-        y: PANEL_Y,
-        width: PANEL_WIDTH,
-        height: ROW_HEIGHT,
-    };
+    let expected = ClipRect { x: PANEL_X, y: PANEL_Y, width: PANEL_WIDTH, height: ROW_HEIGHT };
     let snapshot = bench.committed_overlay_snapshot();
     let label_batches: Vec<_> = snapshot
         .iter()
-        .filter(|batch| {
-            batch.texture_id != WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(&expected)
-        })
+        .filter(|batch| batch.texture_id != WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(&expected))
         .collect();
     assert!(
         !label_batches.is_empty(),

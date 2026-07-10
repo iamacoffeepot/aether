@@ -52,11 +52,7 @@ const COMPONENT_NAME: &str = "mv";
 /// trampoline node — exactly what `LoadResult.name` reports.
 fn component_address() -> String {
     use aether_actor::Addressable;
-    format!(
-        "aether.component/{}:{}",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-        COMPONENT_NAME,
-    )
+    format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, COMPONENT_NAME)
 }
 
 const BOX_DSL: &[u8] = b"(box 1 1 1 :color 0)\n";
@@ -90,10 +86,7 @@ fn load_viewer(bench: &mut TestBench, wasm_path: &Path) {
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { .. } => {}
         LoadResult::Err { error } => panic!("load_component: {error}"),
     }
@@ -124,11 +117,8 @@ fn dsl_box_loads_and_renders() {
     let sandbox = init_save_sandbox("kit-mesh");
     let path = write_fixture("dsl_box.dsl", BOX_DSL);
 
-    let mut bench = TestBench::builder()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench =
+        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
     // Priming tick triggers the load; the read reply lands on a later
@@ -137,16 +127,7 @@ fn dsl_box_loads_and_renders() {
     let result = bench
         .execute(vec![
             ("prime", BenchOp::advance(1)),
-            (
-                "load_mesh",
-                BenchOp::send_mail(
-                    component_address(),
-                    &LoadMesh {
-                        namespace: "save".to_owned(),
-                        path,
-                    },
-                ),
-            ),
+            ("load_mesh", BenchOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path })),
             ("post", BenchOp::advance(5)),
             ("snap", BenchOp::capture()),
         ])
@@ -170,26 +151,14 @@ fn obj_quad_loads_and_renders() {
     let sandbox = init_save_sandbox("kit-mesh");
     let path = write_fixture("obj_quad.obj", QUAD_OBJ);
 
-    let mut bench = TestBench::builder()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench =
+        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
     let result = bench
         .execute(vec![
             ("prime", BenchOp::advance(1)),
-            (
-                "load_mesh",
-                BenchOp::send_mail(
-                    component_address(),
-                    &LoadMesh {
-                        namespace: "save".to_owned(),
-                        path,
-                    },
-                ),
-            ),
+            ("load_mesh", BenchOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path })),
             ("post", BenchOp::advance(5)),
             ("snap", BenchOp::capture()),
         ])
@@ -216,11 +185,8 @@ fn parse_failure_keeps_prior_mesh() {
     let good = write_fixture("good.dsl", BOX_DSL);
     let bad = write_fixture("bad.dsl", BAD_DSL);
 
-    let mut bench = TestBench::builder()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench =
+        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
     bench
@@ -228,13 +194,7 @@ fn parse_failure_keeps_prior_mesh() {
             ("prime", BenchOp::advance(1)),
             (
                 "load_good",
-                BenchOp::send_mail(
-                    component_address(),
-                    &LoadMesh {
-                        namespace: "save".to_owned(),
-                        path: good,
-                    },
-                ),
+                BenchOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path: good }),
             ),
             ("post_good", BenchOp::advance(5)),
         ])
@@ -250,13 +210,7 @@ fn parse_failure_keeps_prior_mesh() {
         .execute(vec![
             (
                 "load_bad",
-                BenchOp::send_mail(
-                    component_address(),
-                    &LoadMesh {
-                        namespace: "save".to_owned(),
-                        path: bad,
-                    },
-                ),
+                BenchOp::send_mail(component_address(), &LoadMesh { namespace: "save".to_owned(), path: bad }),
             ),
             ("post_bad", BenchOp::advance(5)),
             ("snap", BenchOp::capture()),
@@ -264,8 +218,7 @@ fn parse_failure_keeps_prior_mesh() {
         .expect("bad load + capture");
     let png = result.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
-    differs_from_background(&img, 5)
-        .expect("cached mesh should remain visible after parse failure");
+    differs_from_background(&img, 5).expect("cached mesh should remain visible after parse failure");
 }
 
 /// Issue 964 acceptance: a good-DSL load replies `aether.mesh.load_result`
@@ -282,11 +235,8 @@ fn good_dsl_load_replies_ok() {
     let sandbox = init_save_sandbox("kit-mesh");
     let path = write_fixture("reply_good.dsl", BOX_DSL);
 
-    let mut bench = TestBench::builder()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench =
+        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
     let result = bench
@@ -294,24 +244,15 @@ fn good_dsl_load_replies_ok() {
             "load_mesh",
             BenchOp::send_and_await(
                 component_address(),
-                &LoadMesh {
-                    namespace: "save".to_owned(),
-                    path: path.clone(),
-                },
+                &LoadMesh { namespace: "save".to_owned(), path: path.clone() },
             ),
         )])
         .expect("load + reply");
 
-    let reply = result
-        .reply::<MeshLoadResult>("load_mesh")
-        .expect("decode MeshLoadResult");
+    let reply = result.reply::<MeshLoadResult>("load_mesh").expect("decode MeshLoadResult");
     assert!(reply.ok, "good DSL should load: {:?}", reply.error);
     assert!(reply.error.is_none(), "good load carries no error");
-    assert!(
-        reply.warnings.is_empty(),
-        "good load carries no warnings; got {:?}",
-        reply.warnings,
-    );
+    assert!(reply.warnings.is_empty(), "good load carries no warnings; got {:?}", reply.warnings);
     assert_eq!(reply.namespace, "save", "reply echoes request namespace");
     assert_eq!(reply.path, path, "reply echoes request path");
 }
@@ -328,11 +269,8 @@ fn bad_dsl_load_replies_err() {
     let sandbox = init_save_sandbox("kit-mesh");
     let path = write_fixture("reply_bad.dsl", BAD_DSL);
 
-    let mut bench = TestBench::builder()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench =
+        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
     let result = bench
@@ -340,17 +278,12 @@ fn bad_dsl_load_replies_err() {
             "load_mesh",
             BenchOp::send_and_await(
                 component_address(),
-                &LoadMesh {
-                    namespace: "save".to_owned(),
-                    path: path.clone(),
-                },
+                &LoadMesh { namespace: "save".to_owned(), path: path.clone() },
             ),
         )])
         .expect("load + reply");
 
-    let reply = result
-        .reply::<MeshLoadResult>("load_mesh")
-        .expect("decode MeshLoadResult");
+    let reply = result.reply::<MeshLoadResult>("load_mesh").expect("decode MeshLoadResult");
     assert!(!reply.ok, "bad DSL should not load");
     assert!(reply.error.is_some(), "bad load carries a failure reason");
     assert_eq!(reply.namespace, "save", "reply echoes request namespace");
@@ -369,49 +302,22 @@ fn overlapping_loads_reply_to_their_own_requesters() {
     let dsl_path = write_fixture("overlap_first.dsl", BOX_DSL);
     let obj_path = write_fixture("overlap_second.obj", QUAD_OBJ);
 
-    let mut bench = TestBench::builder()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench =
+        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
     load_viewer(&mut bench, &wasm_path);
 
     let first = bench
-        .send_deferred(
-            &component_address(),
-            &LoadMesh {
-                namespace: "save".to_owned(),
-                path: dsl_path.clone(),
-            },
-        )
+        .send_deferred(&component_address(), &LoadMesh { namespace: "save".to_owned(), path: dsl_path.clone() })
         .expect("enqueue first mesh load");
     let second = bench
-        .send_deferred(
-            &component_address(),
-            &LoadMesh {
-                namespace: "save".to_owned(),
-                path: obj_path.clone(),
-            },
-        )
+        .send_deferred(&component_address(), &LoadMesh { namespace: "save".to_owned(), path: obj_path.clone() })
         .expect("enqueue second mesh load");
 
-    let second_reply = bench
-        .await_deferred::<MeshLoadResult>(second)
-        .expect("second load replies");
-    let first_reply = bench
-        .await_deferred::<MeshLoadResult>(first)
-        .expect("first load replies");
+    let second_reply = bench.await_deferred::<MeshLoadResult>(second).expect("second load replies");
+    let first_reply = bench.await_deferred::<MeshLoadResult>(first).expect("first load replies");
 
-    assert!(
-        first_reply.ok,
-        "first DSL load should succeed: {:?}",
-        first_reply.error,
-    );
-    assert!(
-        second_reply.ok,
-        "second OBJ load should succeed: {:?}",
-        second_reply.error,
-    );
+    assert!(first_reply.ok, "first DSL load should succeed: {:?}", first_reply.error);
+    assert!(second_reply.ok, "second OBJ load should succeed: {:?}", second_reply.error);
     assert_eq!(first_reply.path, dsl_path, "first reply keeps its path");
     assert_eq!(second_reply.path, obj_path, "second reply keeps its path");
 }

@@ -203,9 +203,7 @@ pub fn time_budget() -> Duration {
 /// derivation is unit-testable without touching the process-global
 /// estimate.
 fn derive_budget(handoff: Duration) -> Duration {
-    handoff
-        .saturating_mul(BUDGET_HANDOFF_MULTIPLIER)
-        .clamp(MIN_ADAPTIVE_BUDGET, MAX_ADAPTIVE_BUDGET)
+    handoff.saturating_mul(BUDGET_HANDOFF_MULTIPLIER).clamp(MIN_ADAPTIVE_BUDGET, MAX_ADAPTIVE_BUDGET)
 }
 
 /// Whether idle workers may raid siblings' deques (peer-deque stealing),
@@ -299,9 +297,7 @@ pub fn burst_over_budget(time_budget: Duration) -> bool {
     if time_budget.is_zero() {
         return false;
     }
-    BURST_START
-        .get()
-        .is_some_and(|start| start.elapsed() >= time_budget)
+    BURST_START.get().is_some_and(|start| start.elapsed() >= time_budget)
 }
 
 /// Reset the local-drain burst counters (iamacoffeepot/aether#1160) and the
@@ -338,11 +334,7 @@ pub fn burst_reset() {
 /// Returns `Ok(())` when kept local (the caller skips injector + notify),
 /// or `Err(slot)` to spill. Off a pool worker there is no own deque, so
 /// always `Err` (spill).
-pub fn try_push_local_budgeted(
-    slot: Slot,
-    time_budget: Duration,
-    hard_cap: usize,
-) -> Result<(), Slot> {
+pub fn try_push_local_budgeted(slot: Slot, time_budget: Duration, hard_cap: usize) -> Result<(), Slot> {
     LOCAL.with(|w| {
         let w = w.borrow();
         match w.as_ref() {
@@ -438,10 +430,7 @@ pub fn steal_into_local(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test-setup unwraps: a failed steal/pop assertion is the test signal"
-)]
+#[allow(clippy::unwrap_used, reason = "test-setup unwraps: a failed steal/pop assertion is the test signal")]
 mod tests {
     use super::*;
     use crate::scheduler::SpinPark;
@@ -474,20 +463,14 @@ mod tests {
         // The whole point of k = 6: a ~2µs handoff (this box's measured
         // cost) derives the #1174-tuned 12µs budget, so wiring the valve to
         // the measurement is behaviour-preserving where it was tuned.
-        assert_eq!(
-            derive_budget(Duration::from_micros(2)),
-            Duration::from_micros(12),
-        );
+        assert_eq!(derive_budget(Duration::from_micros(2)), Duration::from_micros(12),);
     }
 
     #[test]
     fn derive_budget_scales_with_handoff_cost() {
         // A slower box (more expensive handoff) gets a larger budget — more
         // inlining is worth it before paying the steeper handoff.
-        assert_eq!(
-            derive_budget(Duration::from_micros(5)),
-            Duration::from_micros(30),
-        );
+        assert_eq!(derive_budget(Duration::from_micros(5)), Duration::from_micros(30),);
     }
 
     #[test]
@@ -559,10 +542,7 @@ mod tests {
         let tiny = Duration::from_nanos(1);
         burst_note_mail(tiny); // anchors the burst start
         thread::sleep(Duration::from_micros(50)); // now well past `tiny`
-        assert!(
-            burst_over_budget(tiny),
-            "burst should read over the tiny time budget"
-        );
+        assert!(burst_over_budget(tiny), "burst should read over the tiny time budget");
         assert!(
             try_push_local_budgeted(noop(), tiny, 256).is_ok(),
             "depth 0 keeps local even over budget (the chain guard)"
@@ -580,10 +560,7 @@ mod tests {
         let generous = Duration::from_secs(10);
         for _ in 0..5 {
             burst_note_mail(generous); // anchors the burst start once
-            assert!(
-                try_push_local_budgeted(noop(), generous, 256).is_ok(),
-                "under budget keeps local"
-            );
+            assert!(try_push_local_budgeted(noop(), generous, 256).is_ok(), "under budget keeps local");
         }
         drain_local();
     }
@@ -619,10 +596,7 @@ mod tests {
         thread::sleep(Duration::from_micros(50)); // now well past `tiny`
         // Depth 0 still keeps — the chain guard short-circuits before the
         // budget (and before any clock read).
-        assert!(
-            try_push_local_budgeted(noop(), tiny, 256).is_ok(),
-            "depth 0 keeps regardless of elapsed time"
-        );
+        assert!(try_push_local_budgeted(noop(), tiny, 256).is_ok(), "depth 0 keeps regardless of elapsed time");
         // Depth 1, over the time budget → spill.
         assert!(
             try_push_local_budgeted(noop(), tiny, 256).is_err(),
@@ -642,16 +616,10 @@ mod tests {
         let tiny = Duration::from_nanos(1);
         burst_note_mail(tiny); // anchors BURST_START
         thread::sleep(Duration::from_micros(50));
-        assert!(
-            burst_over_budget(tiny),
-            "the time path trips past the budget"
-        );
+        assert!(burst_over_budget(tiny), "the time path trips past the budget");
         // Time budgeting off ⇒ the time path is never consulted, even though
         // the same elapsed time has passed.
-        assert!(
-            !burst_over_budget(Duration::ZERO),
-            "time_budget 0 never trips on elapsed"
-        );
+        assert!(!burst_over_budget(Duration::ZERO), "time_budget 0 never trips on elapsed");
         burst_reset();
         assert!(!burst_over_budget(tiny), "reset clears the burst start");
     }
@@ -685,10 +653,7 @@ mod tests {
         }
         burst_reset(); // own deque drained — chain over
         for i in 1..k {
-            assert!(
-                !chain_pop_due(),
-                "pop {i} after reset must restart the count, not inherit it"
-            );
+            assert!(!chain_pop_due(), "pop {i} after reset must restart the count, not inherit it");
         }
         assert!(chain_pop_due());
     }
@@ -738,10 +703,7 @@ mod tests {
             matches!(injector.steal(), Steal::Empty),
             "under the keep-local default nothing spills to the injector"
         );
-        assert!(
-            pop_local().is_some(),
-            "both schedules stay on the local deque"
-        );
+        assert!(pop_local().is_some(), "both schedules stay on the local deque");
         assert!(pop_local().is_some());
         assert!(pop_local().is_none());
     }
@@ -761,10 +723,7 @@ mod tests {
         sibling.push(noop());
         sibling.push(noop());
         let stealers = [Worker::<Slot>::new_lifo().stealer(), sibling.stealer()];
-        assert!(
-            steal_into_local(0, &stealers, &Injector::new(), true).is_some(),
-            "should steal from sibling index 1"
-        );
+        assert!(steal_into_local(0, &stealers, &Injector::new(), true).is_some(), "should steal from sibling index 1");
 
         // Nothing anywhere → None.
         drain_local();

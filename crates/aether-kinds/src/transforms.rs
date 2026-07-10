@@ -54,10 +54,7 @@ mod tests {
             0.0, 0.0, 4.0, 0.0, //
             5.0, 6.0, 7.0, 1.0, //
         ]);
-        let out = mat4_apply(Mat4Apply {
-            matrix,
-            vector: Vec4::new(1.0, 1.0, 1.0, 1.0),
-        });
+        let out = mat4_apply(Mat4Apply { matrix, vector: Vec4::new(1.0, 1.0, 1.0, 1.0) });
         assert_eq!(out, Vec4::new(7.0, 9.0, 11.0, 1.0));
     }
 }

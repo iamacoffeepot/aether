@@ -143,16 +143,9 @@ impl Gpu {
     // takes a clone via `Arc::clone(&window)` for the surface; the
     // owning form mirrors the `RenderHandles` argument.
     #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
-    pub fn new(
-        window: Arc<Window>,
-        render_handles: RenderHandles,
-        wireframe: Option<&str>,
-    ) -> Self {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let surface = instance
-            .create_surface(Arc::clone(&window))
-            .expect("create_surface");
+    pub fn new(window: Arc<Window>, render_handles: RenderHandles, wireframe: Option<&str>) -> Self {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let surface = instance.create_surface(Arc::clone(&window)).expect("create_surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
             compatible_surface: Some(&surface),
@@ -171,11 +164,7 @@ impl Gpu {
         // adapters don't). If unsupported we fall back to filled with
         // a warning rather than failing device creation.
         let mut wireframe_mode = WireframeMode::from_config_value(wireframe);
-        if wireframe_mode.needs_polygon_mode_line()
-            && !adapter
-                .features()
-                .contains(wgpu::Features::POLYGON_MODE_LINE)
-        {
+        if wireframe_mode.needs_polygon_mode_line() && !adapter.features().contains(wgpu::Features::POLYGON_MODE_LINE) {
             tracing::warn!(
                 adapter = %adapter_info.name,
                 "AETHER_WIREFRAME requested but adapter lacks POLYGON_MODE_LINE; falling back to filled"
@@ -204,12 +193,7 @@ impl Gpu {
         let size = window.inner_size();
         let caps = surface.get_capabilities(&adapter);
         // Prefer sRGB so the clear color matches intuition.
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(wgpu::TextureFormat::is_srgb)
-            .unwrap_or(caps.formats[0]);
+        let format = caps.formats.iter().copied().find(wgpu::TextureFormat::is_srgb).unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
             // COPY_DST: the swapchain receives a texture-to-texture
             // copy from the offscreen each frame. No draw pass
@@ -225,11 +209,8 @@ impl Gpu {
         };
         surface.configure(&device, &config);
 
-        let polygon_mode = if wireframe_mode == WireframeMode::Line {
-            wgpu::PolygonMode::Line
-        } else {
-            wgpu::PolygonMode::Fill
-        };
+        let polygon_mode =
+            if wireframe_mode == WireframeMode::Line { wgpu::PolygonMode::Line } else { wgpu::PolygonMode::Fill };
         render_handles.install_gpu(RenderGpu::new(
             Arc::clone(&device),
             Arc::clone(&queue),
@@ -253,64 +234,50 @@ impl Gpu {
                 source: wgpu::ShaderSource::Wgsl(WIREFRAME_WGSL.into()),
             });
             let vertex_layout = vertex_buffer_layout();
-            Some(
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("wireframe overlay pipeline"),
-                    layout: Some(pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &wire_shader,
-                        entry_point: Some("vs_main"),
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                        buffers: slice::from_ref(&vertex_layout),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &wire_shader,
-                        entry_point: Some("fs_main"),
-                        compilation_options: wgpu::PipelineCompilationOptions::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: config.format,
-                            blend: Some(wgpu::BlendState::REPLACE),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    primitive: wgpu::PrimitiveState {
-                        topology: wgpu::PrimitiveTopology::TriangleList,
-                        strip_index_format: None,
-                        front_face: wgpu::FrontFace::Ccw,
-                        cull_mode: None,
-                        polygon_mode: wgpu::PolygonMode::Line,
-                        unclipped_depth: false,
-                        conservative: false,
-                    },
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: render::DEPTH_FORMAT,
-                        depth_write_enabled: Some(false),
-                        depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                        stencil: wgpu::StencilState::default(),
-                        bias: wgpu::DepthBiasState {
-                            constant: -1,
-                            slope_scale: -1.0,
-                            clamp: 0.0,
-                        },
-                    }),
-                    multisample: wgpu::MultisampleState::default(),
-                    multiview_mask: None,
-                    cache: None,
+            Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("wireframe overlay pipeline"),
+                layout: Some(pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &wire_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: slice::from_ref(&vertex_layout),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &wire_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
                 }),
-            )
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Line,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: render::DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState { constant: -1, slope_scale: -1.0, clamp: 0.0 },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            }))
         } else {
             None
         };
 
-        Self {
-            surface,
-            config,
-            adapter_info,
-            limits,
-            wire_pipeline,
-            render_handles,
-            last_submission: None,
-        }
+        Self { surface, config, adapter_info, limits, wire_pipeline, render_handles, last_submission: None }
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -319,10 +286,8 @@ impl Gpu {
         }
         self.config.width = size.width;
         self.config.height = size.height;
-        self.surface
-            .configure(&self.render_handles.device(), &self.config);
-        self.render_handles
-            .resize(self.config.width, self.config.height);
+        self.surface.configure(&self.render_handles.device(), &self.config);
+        self.render_handles.resize(self.config.width, self.config.height);
     }
 
     pub fn render(&mut self) {
@@ -342,8 +307,7 @@ impl Gpu {
         checks: &[FrameCheck],
         reference: Option<&ReferenceCapture>,
     ) -> CaptureOutcome {
-        self.render_impl(Some(checks), reference)
-            .ok_or_else(|| "capture did not produce a result".to_owned())?
+        self.render_impl(Some(checks), reference).ok_or_else(|| "capture did not produce a result".to_owned())?
     }
 
     /// Draw the current accumulator vertices into the offscreen target
@@ -371,10 +335,7 @@ impl Gpu {
         // against the prior frame's reads. `poll` errors (a lost device)
         // fall through to `acquire_surface_texture`, which reconfigures.
         if let Some(index) = self.last_submission.take()
-            && let Err(error) = device.poll(wgpu::PollType::Wait {
-                submission_index: Some(index),
-                timeout: None,
-            })
+            && let Err(error) = device.poll(wgpu::PollType::Wait { submission_index: Some(index), timeout: None })
         {
             tracing::warn!(
                 target: "aether_substrate::render",
@@ -383,9 +344,8 @@ impl Gpu {
             );
         }
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("frame encoder"),
-        });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame encoder") });
 
         let wire_ref = self.wire_pipeline.as_ref();
         let extras_storage: [&wgpu::RenderPipeline; 1];
@@ -399,18 +359,14 @@ impl Gpu {
         // Desktop renders every frame from current producer state —
         // commit-current semantic (false). The replay-cache mode is
         // reserved for `TestBench::capture` (iamacoffeepot/aether#847).
-        match self
-            .render_handles
-            .record_frame(&mut encoder, extra_pipelines, false)
-        {
+        match self.render_handles.record_frame(&mut encoder, extra_pipelines, false) {
             Ok(()) => {}
             Err(RenderError::VertexBufferOverflow { .. }) => return None,
         }
 
         // ADR-0140 material pass, recorded after the world pass and
         // before the screen overlay.
-        self.render_handles
-            .record_material_pass(&mut encoder, false);
+        self.render_handles.record_material_pass(&mut encoder, false);
 
         // ADR-0105 textured-quad overlay, recorded after world/material —
         // commit-current semantic to match `record_frame` above.
@@ -419,11 +375,8 @@ impl Gpu {
         // Capture path: the copy runs against the offscreen texture,
         // which is unaffected by whether a swapchain image is available
         // this frame. That decouples capture from window visibility.
-        let capture_meta = if capture.is_some() {
-            Some(self.render_handles.record_capture_copy(&mut encoder))
-        } else {
-            None
-        };
+        let capture_meta =
+            if capture.is_some() { Some(self.render_handles.record_capture_copy(&mut encoder)) } else { None };
 
         // Try to obtain a swapchain texture for presentation. If the
         // surface is occluded/lost/outdated we just skip the blit +
@@ -446,11 +399,7 @@ impl Gpu {
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
                     },
-                    wgpu::Extent3d {
-                        width: w,
-                        height: h,
-                        depth_or_array_layers: 1,
-                    },
+                    wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
                 );
             });
         }
@@ -481,8 +430,7 @@ impl Gpu {
                 visual::score_similarity(&rgba, meta.width, meta.height, reference)?;
 
             let checks = capture.unwrap_or(&[]);
-            let verdict = (!checks.is_empty())
-                .then(|| visual::run_checks(rgba, meta.width, meta.height, checks));
+            let verdict = (!checks.is_empty()).then(|| visual::run_checks(rgba, meta.width, meta.height, checks));
             Ok((png, verdict, similarity_score, similarity_pass))
         })
     }
@@ -495,13 +443,11 @@ impl Gpu {
         match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => Some(t),
             wgpu::CurrentSurfaceTexture::Suboptimal(t) => {
-                self.surface
-                    .configure(&self.render_handles.device(), &self.config);
+                self.surface.configure(&self.render_handles.device(), &self.config);
                 Some(t)
             }
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface
-                    .configure(&self.render_handles.device(), &self.config);
+                self.surface.configure(&self.render_handles.device(), &self.config);
                 None
             }
             wgpu::CurrentSurfaceTexture::Occluded | wgpu::CurrentSurfaceTexture::Timeout => None,

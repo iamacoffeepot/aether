@@ -68,8 +68,8 @@ use aether_kinds::CaptureFrame;
 // GPU-bound types.
 #[cfg(feature = "render-runtime")]
 pub use runtime::{
-    CaptureBackend, RenderConfig, RenderGpu, RenderHandles, RenderTuningConfig,
-    RenderTuningConfigLayer, RenderTuningOverlay, WHITE_TEXTURE_ID,
+    CaptureBackend, RenderConfig, RenderGpu, RenderHandles, RenderTuningConfig, RenderTuningConfigLayer,
+    RenderTuningOverlay, WHITE_TEXTURE_ID,
 };
 
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123
@@ -175,14 +175,7 @@ mod tests {
     }
 
     fn test_staged_texture(pixels: Vec<u8>) -> StagedTexture {
-        StagedTexture {
-            width: 2,
-            height: 2,
-            format: TextureFormat::Rgba8,
-            pixels,
-            realized: None,
-            dirty: true,
-        }
+        StagedTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels, realized: None, dirty: true }
     }
 
     // ADR-0082 retired the frame-bound pending counter; the
@@ -196,54 +189,30 @@ mod tests {
     #[test]
     fn destroy_texture_removes_registry_entry() {
         let observed = Arc::new(Mutex::new(Vec::<String>::new()));
-        let config = RenderConfig {
-            observed_kinds: Some(Arc::clone(&observed)),
-            ..RenderConfig::default()
-        };
+        let config = RenderConfig { observed_kinds: Some(Arc::clone(&observed)), ..RenderConfig::default() };
         let (registry, mailer) = fresh_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<RenderCapability>(config)
             .build_passive()
             .expect("build succeeds");
-        let handles = chassis
-            .handle::<RenderHandles>()
-            .expect("RenderCapability publishes RenderHandles");
+        let handles = chassis.handle::<RenderHandles>().expect("RenderCapability publishes RenderHandles");
         let texture_id = 7;
         {
-            let mut textures = handles
-                .textures
-                .lock()
-                .expect("textures mutex is not poisoned");
-            textures
-                .entries
-                .insert(texture_id, test_staged_texture(vec![0xAB; 16]));
+            let mut textures = handles.textures.lock().expect("textures mutex is not poisoned");
+            textures.entries.insert(texture_id, test_staged_texture(vec![0xAB; 16]));
         }
 
         let mail = DestroyTexture { texture_id };
         let payload = mail.encode_into_bytes();
-        deliver(
-            &registry,
-            RenderCapability::NAMESPACE,
-            <DestroyTexture as Kind>::ID,
-            &payload,
-        );
+        deliver(&registry, RenderCapability::NAMESPACE, <DestroyTexture as Kind>::ID, &payload);
 
         thread::sleep(Duration::from_millis(50));
 
-        let textures = handles
-            .textures
-            .lock()
-            .expect("textures mutex is not poisoned");
-        assert!(
-            !textures.entries.contains_key(&texture_id),
-            "destroy_texture should remove the staged registry entry",
-        );
+        let textures = handles.textures.lock().expect("textures mutex is not poisoned");
+        assert!(!textures.entries.contains_key(&texture_id), "destroy_texture should remove the staged registry entry");
         drop(textures);
 
-        let seen = observed
-            .lock()
-            .expect("observed_kinds mutex is not poisoned")
-            .clone();
+        let seen = observed.lock().expect("observed_kinds mutex is not poisoned").clone();
         assert!(
             seen.contains(&DestroyTexture::NAME.to_owned()),
             "destroy_texture handler should push its kind name; observed: {seen:?}",
@@ -261,45 +230,24 @@ mod tests {
             .with_actor::<RenderCapability>(RenderConfig::default())
             .build_passive()
             .expect("build succeeds");
-        let handles = chassis
-            .handle::<RenderHandles>()
-            .expect("RenderCapability publishes RenderHandles");
+        let handles = chassis.handle::<RenderHandles>().expect("RenderCapability publishes RenderHandles");
         let user_texture_id = 3;
         {
-            let mut textures = handles
-                .textures
-                .lock()
-                .expect("textures mutex is not poisoned");
-            textures
-                .entries
-                .insert(user_texture_id, test_staged_texture(vec![1; 16]));
-            textures
-                .entries
-                .insert(WHITE_TEXTURE_ID, test_staged_texture(vec![255; 16]));
+            let mut textures = handles.textures.lock().expect("textures mutex is not poisoned");
+            textures.entries.insert(user_texture_id, test_staged_texture(vec![1; 16]));
+            textures.entries.insert(WHITE_TEXTURE_ID, test_staged_texture(vec![255; 16]));
         }
 
         for texture_id in [99, WHITE_TEXTURE_ID] {
             let mail = DestroyTexture { texture_id };
             let payload = mail.encode_into_bytes();
-            deliver(
-                &registry,
-                RenderCapability::NAMESPACE,
-                <DestroyTexture as Kind>::ID,
-                &payload,
-            );
+            deliver(&registry, RenderCapability::NAMESPACE, <DestroyTexture as Kind>::ID, &payload);
         }
 
         thread::sleep(Duration::from_millis(50));
 
-        let textures = handles
-            .textures
-            .lock()
-            .expect("textures mutex is not poisoned");
-        assert_eq!(
-            textures.entries.len(),
-            2,
-            "unknown and reserved destroy requests must not remove registry entries",
-        );
+        let textures = handles.textures.lock().expect("textures mutex is not poisoned");
+        assert_eq!(textures.entries.len(), 2, "unknown and reserved destroy requests must not remove registry entries");
         assert!(textures.entries.contains_key(&user_texture_id));
         assert!(textures.entries.contains_key(&WHITE_TEXTURE_ID));
 
@@ -316,45 +264,20 @@ mod tests {
             .with_actor::<RenderCapability>(RenderConfig::default())
             .build_passive()
             .expect("build succeeds");
-        let handles = chassis
-            .handle::<RenderHandles>()
-            .expect("RenderCapability publishes RenderHandles");
+        let handles = chassis.handle::<RenderHandles>().expect("RenderCapability publishes RenderHandles");
         {
-            let mut textures = handles
-                .textures
-                .lock()
-                .expect("textures mutex is not poisoned");
-            textures
-                .entries
-                .insert(WHITE_TEXTURE_ID, test_staged_texture(vec![255; 16]));
+            let mut textures = handles.textures.lock().expect("textures mutex is not poisoned");
+            textures.entries.insert(WHITE_TEXTURE_ID, test_staged_texture(vec![255; 16]));
         }
 
-        let mail = UpdateTexture {
-            texture_id: WHITE_TEXTURE_ID,
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-            pixels: vec![0, 0, 0, 255],
-        };
-        deliver(
-            &registry,
-            RenderCapability::NAMESPACE,
-            <UpdateTexture as Kind>::ID,
-            &mail.encode_into_bytes(),
-        );
+        let mail =
+            UpdateTexture { texture_id: WHITE_TEXTURE_ID, x: 0, y: 0, width: 1, height: 1, pixels: vec![0, 0, 0, 255] };
+        deliver(&registry, RenderCapability::NAMESPACE, <UpdateTexture as Kind>::ID, &mail.encode_into_bytes());
         thread::sleep(Duration::from_millis(50));
 
-        let textures = handles
-            .textures
-            .lock()
-            .expect("textures mutex is not poisoned");
+        let textures = handles.textures.lock().expect("textures mutex is not poisoned");
         assert_eq!(
-            textures
-                .entries
-                .get(&WHITE_TEXTURE_ID)
-                .expect("white texture remains registered")
-                .pixels,
+            textures.entries.get(&WHITE_TEXTURE_ID).expect("white texture remains registered").pixels,
             vec![255; 16],
         );
 
@@ -369,18 +292,13 @@ mod tests {
     #[test]
     fn draw_solid_quads_accumulates_and_observed() {
         let observed = Arc::new(Mutex::new(Vec::<String>::new()));
-        let config = RenderConfig {
-            observed_kinds: Some(Arc::clone(&observed)),
-            ..RenderConfig::default()
-        };
+        let config = RenderConfig { observed_kinds: Some(Arc::clone(&observed)), ..RenderConfig::default() };
         let (registry, mailer) = fresh_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<RenderCapability>(config)
             .build_passive()
             .expect("build succeeds");
-        let handles = chassis
-            .handle::<RenderHandles>()
-            .expect("RenderCapability publishes RenderHandles");
+        let handles = chassis.handle::<RenderHandles>().expect("RenderCapability publishes RenderHandles");
 
         let mail = DrawSolidQuads {
             space: QuadSpace::Screen,
@@ -394,43 +312,20 @@ mod tests {
             }],
         };
         let payload = mail.encode_into_bytes();
-        deliver(
-            &registry,
-            RenderCapability::NAMESPACE,
-            <DrawSolidQuads as Kind>::ID,
-            &payload,
-        );
+        deliver(&registry, RenderCapability::NAMESPACE, <DrawSolidQuads as Kind>::ID, &payload);
 
         thread::sleep(Duration::from_millis(50));
 
-        let seen = observed
-            .lock()
-            .expect("observed_kinds mutex is not poisoned")
-            .clone();
+        let seen = observed.lock().expect("observed_kinds mutex is not poisoned").clone();
         assert!(
             seen.contains(&DrawSolidQuads::NAME.to_owned()),
             "draw_solid_quads handler should push its kind name; observed: {seen:?}",
         );
 
-        let batches = handles
-            .quad_frame
-            .lock()
-            .expect("quad_frame mutex is not poisoned")
-            .clone();
-        assert_eq!(
-            batches.len(),
-            1,
-            "one QuadBatch should be in the accumulator"
-        );
-        assert_eq!(
-            batches[0].texture_id, WHITE_TEXTURE_ID,
-            "batch must use the reserved white texture id",
-        );
-        assert_eq!(
-            batches[0].quads.len(),
-            1,
-            "batch must contain the one expanded quad"
-        );
+        let batches = handles.quad_frame.lock().expect("quad_frame mutex is not poisoned").clone();
+        assert_eq!(batches.len(), 1, "one QuadBatch should be in the accumulator");
+        assert_eq!(batches[0].texture_id, WHITE_TEXTURE_ID, "batch must use the reserved white texture id");
+        assert_eq!(batches[0].quads.len(), 1, "batch must contain the one expanded quad");
         assert_eq!(
             batches[0].quads[0].tint,
             Rgba::new(1.0, 0.0, 0.5, 0.8),
@@ -438,19 +333,10 @@ mod tests {
         );
         assert_eq!(batches[0].quads[0].width, 30.0);
 
-        let textures = handles
-            .textures
-            .lock()
-            .expect("textures mutex is not poisoned");
-        let white = textures
-            .entries
-            .get(&WHITE_TEXTURE_ID)
-            .expect("white texture must be lazily inserted on first send");
-        assert_eq!(
-            white.format,
-            TextureFormat::Rgba8,
-            "white texture must remain RGBA8",
-        );
+        let textures = handles.textures.lock().expect("textures mutex is not poisoned");
+        let white =
+            textures.entries.get(&WHITE_TEXTURE_ID).expect("white texture must be lazily inserted on first send");
+        assert_eq!(white.format, TextureFormat::Rgba8, "white texture must remain RGBA8");
 
         drop(chassis);
     }

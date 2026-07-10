@@ -32,13 +32,9 @@ pub struct MaterialStyle {
 /// `(0.85, 0.78, 0.55)`, Water `(0.20, 0.40, 0.70)`).
 const STYLES: [MaterialStyle; 6] = [
     // Void — never painted.
-    MaterialStyle {
-        base: Hsl::new(0.0, 0.0, 0.0),
-    },
+    MaterialStyle { base: Hsl::new(0.0, 0.0, 0.0) },
     // Grass — hsl(110, 37.5, 40).
-    MaterialStyle {
-        base: Hsl::new(110.0, 0.375, 0.4),
-    },
+    MaterialStyle { base: Hsl::new(110.0, 0.375, 0.4) },
     // Dirt — hsl(31, 42.9, 31.5).
     MaterialStyle {
         // Preserve the exact `f32` produced by the former percentage
@@ -46,17 +42,11 @@ const STYLES: [MaterialStyle; 6] = [
         base: Hsl::new(31.0, 42.9 / 100.0, 0.315),
     },
     // Stone — hsl(240, 3.45, 56.5).
-    MaterialStyle {
-        base: Hsl::new(240.0, 0.0345, 0.565),
-    },
+    MaterialStyle { base: Hsl::new(240.0, 0.0345, 0.565) },
     // Sand — hsl(46, 50, 70).
-    MaterialStyle {
-        base: Hsl::new(46.0, 0.5, 0.7),
-    },
+    MaterialStyle { base: Hsl::new(46.0, 0.5, 0.7) },
     // Water — hsl(216, 55.6, 45).
-    MaterialStyle {
-        base: Hsl::new(216.0, 0.556, 0.45),
-    },
+    MaterialStyle { base: Hsl::new(216.0, 0.556, 0.45) },
 ];
 
 /// Material style rows. `Default` seeds every row from the built-in
@@ -94,16 +84,10 @@ mod tests {
         // row, or an HSL conversion that flattened them), two materials would
         // render indistinguishably.
         let styles = StyleTable::default();
-        let colors: Vec<Rgb> = [
-            Material::Grass,
-            Material::Dirt,
-            Material::Stone,
-            Material::Sand,
-            Material::Water,
-        ]
-        .into_iter()
-        .map(|m| flat_color(styles.get(m)))
-        .collect();
+        let colors: Vec<Rgb> = [Material::Grass, Material::Dirt, Material::Stone, Material::Sand, Material::Water]
+            .into_iter()
+            .map(|m| flat_color(styles.get(m)))
+            .collect();
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {
                 assert_ne!(colors[i], colors[j], "materials {i} and {j} share a color");

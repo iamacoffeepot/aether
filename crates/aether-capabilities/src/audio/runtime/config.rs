@@ -24,11 +24,7 @@ pub struct AudioConfig {
     /// so agents fail fast instead of hanging. `env` + `cli_long`
     /// overrides pin the historical wire shape (no `D` suffix on
     /// `DISABLE`; `--audio-disable` not `--audio-disabled`).
-    #[config(
-        env = "AETHER_AUDIO_DISABLE",
-        cli_long = "audio-disable",
-        default = false
-    )]
+    #[config(env = "AETHER_AUDIO_DISABLE", cli_long = "audio-disable", default = false)]
     pub disabled: bool,
     /// `AETHER_AUDIO_SAMPLE_RATE=<hz>` requests a specific rate. If
     /// the device doesn't support it, boot falls back to nop

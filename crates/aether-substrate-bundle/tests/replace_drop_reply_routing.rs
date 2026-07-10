@@ -14,9 +14,7 @@ mod fleetbench;
 mod tests {
     use aether_capabilities::rpc::MailEnvelope;
     use aether_data::Kind;
-    use aether_kinds::{
-        DropComponent, DropResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult,
-    };
+    use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
 
     use crate::fleetbench::{FleetBench, dist_component_available, read_component_wasm};
 
@@ -42,12 +40,7 @@ mod tests {
         let load_replies = bench.send::<LoadComponent>(
             engine,
             "aether.component",
-            &LoadComponent {
-                wasm: wasm.clone(),
-                name: None,
-                config: Vec::new(),
-                export: None,
-            },
+            &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None },
         );
         let mailbox_id = match decode_reply::<LoadResult>(&load_replies) {
             LoadResult::Ok { mailbox_id, .. } => mailbox_id,
@@ -59,13 +52,7 @@ mod tests {
         let replace_replies = bench.send::<ReplaceComponent>(
             engine,
             "aether.component",
-            &ReplaceComponent {
-                mailbox_id,
-                wasm,
-                drain_timeout_ms: None,
-                config: Vec::new(),
-                export: None,
-            },
+            &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
         );
         assert!(
             !replace_replies.is_empty(),
@@ -78,8 +65,7 @@ mod tests {
 
         // Drop shares the forwarded path — assert it routes its reply
         // too. The mailbox id is stable across the replace (ADR-0022).
-        let drop_replies =
-            bench.send::<DropComponent>(engine, "aether.component", &DropComponent { mailbox_id });
+        let drop_replies = bench.send::<DropComponent>(engine, "aether.component", &DropComponent { mailbox_id });
         assert!(
             !drop_replies.is_empty(),
             "DropComponent drew zero reply events — the forwarded reply settled before the trampoline replied (issue 1466)",
@@ -97,7 +83,6 @@ mod tests {
             .iter()
             .find(|e| e.kind == R::ID)
             .unwrap_or_else(|| panic!("no reply of kind {} in the reply set", R::NAME));
-        R::decode_from_bytes(&envelope.payload)
-            .unwrap_or_else(|| panic!("undecodable {} reply", R::NAME))
+        R::decode_from_bytes(&envelope.payload).unwrap_or_else(|| panic!("undecodable {} reply", R::NAME))
     }
 }

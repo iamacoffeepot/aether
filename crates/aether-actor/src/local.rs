@@ -71,9 +71,7 @@ impl ActorSlots {
     /// backend can initialize one with no runtime cost.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            by_type: RefCell::new(BTreeMap::new()),
-        }
+        Self { by_type: RefCell::new(BTreeMap::new()) }
     }
 
     /// Pre-insert a constructed `T` so the first `with` / `with_mut::<T>`
@@ -82,10 +80,7 @@ impl ActorSlots {
     /// Overwrites any existing slot — a boot-time op that runs before any
     /// handler dispatch, so there is never a live value to clobber.
     pub fn seed<T: Default + Send + 'static>(&self, value: T) {
-        self.by_type.borrow_mut().insert(
-            TypeId::of::<T>(),
-            Box::new(RefCell::new(value)) as Box<dyn Any + Send>,
-        );
+        self.by_type.borrow_mut().insert(TypeId::of::<T>(), Box::new(RefCell::new(value)) as Box<dyn Any + Send>);
     }
 
     /// Resolve (or lazily insert) the per-type `RefCell<T>` slot and return
@@ -98,14 +93,9 @@ impl ActorSlots {
     /// node, not the pointed-to `RefCell<T>`.
     fn slot_ptr_for<T: Default + Send + 'static>(&self) -> *const RefCell<T> {
         let mut map = self.by_type.borrow_mut();
-        let entry = map
-            .entry(TypeId::of::<T>())
-            .or_insert_with(|| Box::new(RefCell::new(T::default())) as Box<dyn Any + Send>);
-        ptr::from_ref::<RefCell<T>>(
-            entry
-                .downcast_ref::<RefCell<T>>()
-                .expect("TypeId<T> ⇒ RefCell<T>"),
-        )
+        let entry =
+            map.entry(TypeId::of::<T>()).or_insert_with(|| Box::new(RefCell::new(T::default())) as Box<dyn Any + Send>);
+        ptr::from_ref::<RefCell<T>>(entry.downcast_ref::<RefCell<T>>().expect("TypeId<T> ⇒ RefCell<T>"))
     }
 
     fn with_mut<T, R>(&self, f: impl FnOnce(&mut T) -> R) -> R
@@ -164,8 +154,7 @@ pub unsafe fn install_slots_provider(provider: SlotsProvider) {
     // A `fn` pointer casts cleanly to a thin data pointer; `current_slots`
     // transmutes it back (pointer → `fn` is not a plain cast).
     let raw: *mut () = provider as *mut ();
-    let _ =
-        SLOTS_PROVIDER.compare_exchange(ptr::null_mut(), raw, Ordering::Release, Ordering::Relaxed);
+    let _ = SLOTS_PROVIDER.compare_exchange(ptr::null_mut(), raw, Ordering::Release, Ordering::Relaxed);
 }
 
 /// Read the installed provider. `None` before any install, or when the

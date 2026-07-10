@@ -62,11 +62,7 @@ impl TaskQueue {
     /// of 0 is clamped to 1 — a zero bound would queue forever.
     #[must_use]
     pub fn new(max: usize) -> Self {
-        Self {
-            max: max.max(1),
-            in_flight: 0,
-            pending: VecDeque::new(),
-        }
+        Self { max: max.max(1), in_flight: 0, pending: VecDeque::new() }
     }
 
     /// How many provider calls are running right now. Exposed for the
@@ -112,10 +108,9 @@ impl TaskQueue {
             // preceded by `HoldOpen`.
             let hold = ctx.acquire_settlement_hold();
             let reply_to = ctx.reply_target();
-            self.pending
-                .push_back(Box::new(move |ctx: &mut NativeCtx<'_>| {
-                    ctx.dispatch_blocking_resumed(hold, reply_to, work);
-                }));
+            self.pending.push_back(Box::new(move |ctx: &mut NativeCtx<'_>| {
+                ctx.dispatch_blocking_resumed(hold, reply_to, work);
+            }));
         }
     }
 
@@ -150,15 +145,7 @@ mod tests {
     /// depend on the kind inventory.
     #[repr(C)]
     #[derive(
-        Copy,
-        Clone,
-        Debug,
-        PartialEq,
-        Eq,
-        bytemuck::Pod,
-        bytemuck::Zeroable,
-        serde::Serialize,
-        serde::Deserialize,
+        Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize,
     )]
     struct Answer {
         value: u64,
@@ -174,27 +161,18 @@ mod tests {
     /// would read from `ctx.in_flight_root()`. Distinct per `cid` so a
     /// multi-request test keeps each chain's hold accounting separate.
     fn root_id(cid: u64) -> MailId {
-        MailId {
-            sender: MailboxId(1),
-            correlation_id: cid,
-        }
+        MailId { sender: MailboxId(1), correlation_id: cid }
     }
 
     fn session_reply_to(corr: u64) -> Source {
-        Source::with_correlation(
-            SourceAddr::Session(aether_data::SessionToken(aether_data::Uuid::nil())),
-            corr,
-        )
+        Source::with_correlation(SourceAddr::Session(aether_data::SessionToken(aether_data::Uuid::nil())), corr)
     }
 
     #[test]
     fn new_clamps_zero_bound_to_one() {
         let q = TaskQueue::new(0);
         assert_eq!(q.in_flight(), 0);
-        assert_eq!(
-            q.max, 1,
-            "a zero bound clamps to 1 so the first submit dispatches"
-        );
+        assert_eq!(q.max, 1, "a zero bound clamps to 1 so the first submit dispatches");
     }
 
     /// Under the bound `submit` dispatches immediately (in-flight bumps,
@@ -207,16 +185,12 @@ mod tests {
         // Register a sink for the worker's completion-wake push so it
         // routes to a real inbox rather than warn-dropping.
         registry.register_inbox("test.task_queue.actor", Arc::new(|_d| {}));
-        let binding = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            actor_mailbox,
-        ));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
 
         let mut q = TaskQueue::new(2);
         // Three submits against a bound of 2: two dispatch, one queues.
         for cid in 1..=3 {
-            let mut ctx =
-                NativeCtx::new(&binding, session_reply_to(cid), MailId::NONE, root_id(cid));
+            let mut ctx = NativeCtx::new(&binding, session_reply_to(cid), MailId::NONE, root_id(cid));
             q.submit(&mut ctx, move || Answer { value: cid });
         }
         assert_eq!(q.in_flight(), 2, "two dispatched under the bound of 2");
@@ -233,10 +207,7 @@ mod tests {
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let actor_mailbox = mailbox_id_from_name("test.task_queue.actor2");
         registry.register_inbox("test.task_queue.actor2", Arc::new(|_d| {}));
-        let binding = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            actor_mailbox,
-        ));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
 
         // Bound of 1 so the second submit queues.
         let mut q = TaskQueue::new(1);
@@ -264,11 +235,7 @@ mod tests {
             let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
             q.on_complete(&mut ctx);
         }
-        assert_eq!(
-            q.in_flight(),
-            1,
-            "one freed, one drained -> still 1 in flight"
-        );
+        assert_eq!(q.in_flight(), 1, "one freed, one drained -> still 1 in flight");
         assert_eq!(q.pending(), 0);
         assert_eq!(
             counter.held_open(root_b),
@@ -281,10 +248,6 @@ mod tests {
             let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
             q.on_complete(&mut ctx);
         }
-        assert_eq!(
-            q.in_flight(),
-            0,
-            "in-flight returns to 0 once the queue is empty"
-        );
+        assert_eq!(q.in_flight(), 0, "in-flight returns to 0 once the queue is empty");
     }
 }

@@ -27,8 +27,8 @@ use aether_capabilities::ComponentHostCapability;
 use aether_capabilities::http;
 use aether_capabilities::http::HttpServerCapability;
 use aether_capabilities::http::kinds::{
-    HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse, HttpStreamCredit,
-    RegisterRouteSelf, WebSocketAccept, WebSocketClose, WebSocketMessage,
+    HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse, HttpStreamCredit, RegisterRouteSelf,
+    WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
 use aether_capabilities::http::{ResponseStream, WebSocketStream};
 use aether_data::{Kind, MailboxId};
@@ -74,6 +74,39 @@ const STREAM_CHUNK_COUNT: u32 = 20;
 /// reassembles a deterministic body.
 ///
 /// Registered at `aether.component/aether.embedded:test.web_stream` after load.
+/// Spend one `HttpStreamCredit` grant: arm the stream handle on the first
+/// grant (ADR-0133 — the counterparty that dispatched it, so chunks flow
+/// back to whoever paced the stream rather than a hard-coded cap
+/// singleton), emit up to `credit.credit` more chunks, and terminate once
+/// all [`STREAM_CHUNK_COUNT`] have gone out. Shared verbatim by
+/// [`StreamingHttpHandler`] and [`RoutedStreamingHttpHandler`] so their
+/// e2e comparison isolates the dispatch path, not the behavior.
+fn spend_credit(
+    stream_slot: &mut Option<ResponseStream>,
+    next_index: &mut u32,
+    ended: &mut bool,
+    ctx: &mut WasmCtx<'_, Manual>,
+    credit: &HttpStreamCredit,
+) {
+    let stream = match *stream_slot {
+        Some(stream) => stream,
+        None => match ResponseStream::from_credit(ctx, credit) {
+            Some(stream) => *stream_slot.insert(stream),
+            None => return,
+        },
+    };
+    let mut budget = credit.credit;
+    while budget > 0 && *next_index < STREAM_CHUNK_COUNT {
+        stream.chunk(ctx, format!("chunk-{}\n", *next_index).into_bytes());
+        *next_index += 1;
+        budget -= 1;
+    }
+    if *next_index >= STREAM_CHUNK_COUNT && !*ended {
+        stream.end(ctx);
+        *ended = true;
+    }
+}
+
 pub struct StreamingHttpHandler {
     /// The stream this handler is feeding (ADR-0133), captured from the
     /// first credit mail — the counterparty that dispatched it plus the
@@ -90,11 +123,7 @@ impl WasmActor for StreamingHttpHandler {
     const NAMESPACE: &'static str = "test.web_stream";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(StreamingHttpHandler {
-            stream: None,
-            next_index: 0,
-            ended: false,
-        })
+        Ok(StreamingHttpHandler { stream: None, next_index: 0, ended: false })
     }
 
     /// Open a streamed `200` response. The body arrives later, one chunk per
@@ -106,17 +135,10 @@ impl WasmActor for StreamingHttpHandler {
     /// `HttpServerConfig.handler_mailbox` at
     /// `"aether.component/aether.embedded:test.web_stream"`.
     #[handler::single]
-    fn on_request(
-        &mut self,
-        _ctx: &mut WasmCtx<'_>,
-        _req: HttpServerRequest,
-    ) -> HttpResponseStreamOpen {
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
         self.next_index = 0;
         self.ended = false;
-        HttpResponseStreamOpen {
-            status: 200,
-            headers: Vec::new(),
-        }
+        HttpResponseStreamOpen { status: 200, headers: Vec::new() }
     }
 
     /// Spend the granted credit: emit up to `credit.credit` more chunks, then
@@ -128,26 +150,7 @@ impl WasmActor for StreamingHttpHandler {
     /// in response.
     #[handler::manual]
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
-        // ADR-0133: capture the stream handle from the first credit grant —
-        // the counterparty that dispatched it, so chunks flow back to
-        // whoever paced the stream rather than a hard-coded cap singleton.
-        let stream = match self.stream {
-            Some(stream) => stream,
-            None => match ResponseStream::from_credit(ctx, &credit) {
-                Some(stream) => *self.stream.insert(stream),
-                None => return,
-            },
-        };
-        let mut budget = credit.credit;
-        while budget > 0 && self.next_index < STREAM_CHUNK_COUNT {
-            stream.chunk(ctx, format!("chunk-{}\n", self.next_index).into_bytes());
-            self.next_index += 1;
-            budget -= 1;
-        }
-        if self.next_index >= STREAM_CHUNK_COUNT && !self.ended {
-            stream.end(ctx);
-            self.ended = true;
-        }
+        spend_credit(&mut self.stream, &mut self.next_index, &mut self.ended, ctx, &credit);
     }
 }
 
@@ -178,9 +181,7 @@ impl WasmActor for WebSocketHandler {
     const NAMESPACE: &'static str = "test.web_socket";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(WebSocketHandler {
-            connections: BTreeMap::new(),
-        })
+        Ok(WebSocketHandler { connections: BTreeMap::new() })
     }
 
     /// Accept every upgrade the cap routes here (the cap has already validated
@@ -192,10 +193,7 @@ impl WasmActor for WebSocketHandler {
     /// completes the handshake, `HttpServerResponse` declines it.
     #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> WebSocketAccept {
-        WebSocketAccept {
-            subprotocol: None,
-            headers: Vec::new(),
-        }
+        WebSocketAccept { subprotocol: None, headers: Vec::new() }
     }
 
     /// Echo one inbound message back to the peer by its `stream_id`
@@ -217,10 +215,8 @@ impl WasmActor for WebSocketHandler {
             // Echo to a deliberately wrong stream id on the same
             // counterparty — the cap must drop an unknown-stream send
             // without tearing the connection down.
-            let misrouted = WebSocketStream {
-                counterparty: stream.counterparty,
-                stream_id: msg.stream_id.wrapping_add(1000),
-            };
+            let misrouted =
+                WebSocketStream { counterparty: stream.counterparty, stream_id: msg.stream_id.wrapping_add(1000) };
             misrouted.message(ctx, msg.binary, msg.data);
             return;
         }
@@ -299,11 +295,7 @@ impl WasmActor for RoutedHttpHandler {
     /// `/routed` prefix this actor claims (the `#[http::route]` macro
     /// injects the registration into `wire`).
     #[http::route(any, "/routed")]
-    fn on_routed(
-        &mut self,
-        ctx: http::Ctx<'_, WasmCtx<'_>>,
-        req: HttpServerRequest,
-    ) -> HttpServerResponse {
+    fn on_routed(&mut self, ctx: http::Ctx<'_, WasmCtx<'_>>, req: HttpServerRequest) -> HttpServerResponse {
         if req.path == "/routed/drop" {
             let target = String::from_utf8_lossy(&req.body).trim().parse::<u64>();
             let Ok(raw_id) = target else {
@@ -313,21 +305,10 @@ impl WasmActor for RoutedHttpHandler {
                     body: b"body must be a decimal mailbox id".to_vec(),
                 };
             };
-            ctx.actor::<ComponentHostCapability>()
-                .send_detached(&DropComponent {
-                    mailbox_id: MailboxId(raw_id),
-                });
-            return HttpServerResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: b"dropping".to_vec(),
-            };
+            ctx.actor::<ComponentHostCapability>().send_detached(&DropComponent { mailbox_id: MailboxId(raw_id) });
+            return HttpServerResponse { status: 200, headers: Vec::new(), body: b"dropping".to_vec() };
         }
-        HttpServerResponse {
-            status: 200,
-            headers: Vec::new(),
-            body: b"routed handler".to_vec(),
-        }
+        HttpServerResponse { status: 200, headers: Vec::new(), body: b"routed handler".to_vec() }
     }
 }
 
@@ -359,11 +340,7 @@ impl WasmActor for RoutedStreamingHttpHandler {
     const NAMESPACE: &'static str = "test.web_stream_routed";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(RoutedStreamingHttpHandler {
-            stream: None,
-            next_index: 0,
-            ended: false,
-        })
+        Ok(RoutedStreamingHttpHandler { stream: None, next_index: 0, ended: false })
     }
 
     /// Claim `/routed-stream` for this actor's own mailbox through the raw
@@ -372,13 +349,12 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// cap by type, so the send reads exactly as the `#[http::route]` macro's
     /// injected registration does.
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
-        ctx.actor::<HttpServerCapability>()
-            .send(&RegisterRouteSelf {
-                prefix: "/routed-stream".to_string(),
-                method: None,
-                kind: <HttpServerRequest as Kind>::ID,
-                shared: false,
-            });
+        ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+            prefix: "/routed-stream".to_string(),
+            method: None,
+            kind: <HttpServerRequest as Kind>::ID,
+            shared: false,
+        });
     }
 
     /// Open a streamed `200` response. Dispatched here through the registered
@@ -389,17 +365,10 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// request matching the `/routed-stream` route this actor claimed in
     /// `wire`.
     #[handler::single]
-    fn on_request(
-        &mut self,
-        _ctx: &mut WasmCtx<'_>,
-        _req: HttpServerRequest,
-    ) -> HttpResponseStreamOpen {
+    fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
         self.next_index = 0;
         self.ended = false;
-        HttpResponseStreamOpen {
-            status: 200,
-            headers: Vec::new(),
-        }
+        HttpResponseStreamOpen { status: 200, headers: Vec::new() }
     }
 
     /// Spend the granted credit exactly as [`StreamingHttpHandler`] does. On
@@ -411,22 +380,6 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// window slot.
     #[handler::manual]
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
-        let stream = match self.stream {
-            Some(stream) => stream,
-            None => match ResponseStream::from_credit(ctx, &credit) {
-                Some(stream) => *self.stream.insert(stream),
-                None => return,
-            },
-        };
-        let mut budget = credit.credit;
-        while budget > 0 && self.next_index < STREAM_CHUNK_COUNT {
-            stream.chunk(ctx, format!("chunk-{}\n", self.next_index).into_bytes());
-            self.next_index += 1;
-            budget -= 1;
-        }
-        if self.next_index >= STREAM_CHUNK_COUNT && !self.ended {
-            stream.end(ctx);
-            self.ended = true;
-        }
+        spend_credit(&mut self.stream, &mut self.next_index, &mut self.ended, ctx, &credit);
     }
 }

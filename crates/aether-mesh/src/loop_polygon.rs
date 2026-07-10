@@ -4,11 +4,7 @@
 // rounding division is bounded by the ±2^24 fixed-coord budget; the
 // `i128 → u128` sign-loss casts feed the absolute-value magnitude
 // comparison used to pick the dominant axis.
-#![allow(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
+#![allow(clippy::cast_lossless, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 //! Convex polygon over integer-grid vertices, plus the split-against-plane
 //! routine that drives BSP construction and clipping.
@@ -44,11 +40,7 @@ impl Polygon {
         if plane.is_degenerate() {
             return None;
         }
-        Some(Self {
-            vertices: vec![v0, v1, v2],
-            plane,
-            color,
-        })
+        Some(Self { vertices: vec![v0, v1, v2], plane, color })
     }
 
     /// Reverse winding and flip the cached plane.
@@ -62,12 +54,7 @@ impl Polygon {
     /// `self.plane`'s. Used at both the plane-identity short-circuit
     /// and the COPLANAR match arm in [`Self::split`] — extracted so
     /// the orientation-dispatch logic lives in exactly one place.
-    fn push_to_coplanar_bucket(
-        &self,
-        partitioner: &Plane3,
-        front: &mut Vec<Self>,
-        back: &mut Vec<Self>,
-    ) {
+    fn push_to_coplanar_bucket(&self, partitioner: &Plane3, front: &mut Vec<Self>, back: &mut Vec<Self>) {
         if partitioner.normal_dot_sign(&self.plane) > 0 {
             front.push(self.clone());
         } else {
@@ -165,18 +152,10 @@ impl Polygon {
                     }
                 }
                 if f.len() >= 3 {
-                    front.push(Self {
-                        vertices: f,
-                        plane: self.plane,
-                        color: self.color,
-                    });
+                    front.push(Self { vertices: f, plane: self.plane, color: self.color });
                 }
                 if b.len() >= 3 {
-                    back.push(Self {
-                        vertices: b,
-                        plane: self.plane,
-                        color: self.color,
-                    });
+                    back.push(Self { vertices: b, plane: self.plane, color: self.color });
                 }
             }
         }
@@ -203,11 +182,7 @@ fn compute_intersection(p0: Point3, p1: Point3, plane: &Plane3) -> Point3 {
         round_div(numer, denom) as i32
     };
 
-    Point3 {
-        x: intersect_axis(p0.x, p1.x),
-        y: intersect_axis(p0.y, p1.y),
-        z: intersect_axis(p0.z, p1.z),
-    }
+    Point3 { x: intersect_axis(p0.x, p1.x), y: intersect_axis(p0.y, p1.y), z: intersect_axis(p0.z, p1.z) }
 }
 
 /// Integer division rounded to nearest, ties away from zero.
@@ -229,17 +204,13 @@ mod tests {
     #[test]
     fn degenerate_triangle_returns_none() {
         // Collinear points along x-axis.
-        assert!(
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(2.0, 0.0, 0.0), 0)
-                .is_none()
-        );
+        assert!(Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(2.0, 0.0, 0.0), 0).is_none());
     }
 
     #[test]
     fn invert_reverses_winding_and_plane() {
-        let mut poly =
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 0)
-                .expect("test setup: non-degenerate triangle");
+        let mut poly = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 0)
+            .expect("test setup: non-degenerate triangle");
         let original_plane_z = poly.plane.n_z;
         poly.invert();
         assert_eq!(poly.vertices[0], pt(0.0, 1.0, 0.0));
@@ -249,11 +220,9 @@ mod tests {
     #[test]
     fn polygon_entirely_in_front_routes_to_front() {
         // Triangle at z=1, partitioner at z=0 (xy plane).
-        let poly =
-            Polygon::from_triangle(pt(0.0, 0.0, 1.0), pt(1.0, 0.0, 1.0), pt(0.0, 1.0, 1.0), 0)
-                .expect("test setup: non-degenerate triangle");
-        let partitioner =
-            Plane3::from_points(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0));
+        let poly = Polygon::from_triangle(pt(0.0, 0.0, 1.0), pt(1.0, 0.0, 1.0), pt(0.0, 1.0, 1.0), 0)
+            .expect("test setup: non-degenerate triangle");
+        let partitioner = Plane3::from_points(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0));
         let mut cof = vec![];
         let mut cob = vec![];
         let mut f = vec![];
@@ -265,15 +234,9 @@ mod tests {
 
     #[test]
     fn polygon_entirely_behind_routes_to_back() {
-        let poly = Polygon::from_triangle(
-            pt(0.0, 0.0, -1.0),
-            pt(1.0, 0.0, -1.0),
-            pt(0.0, 1.0, -1.0),
-            0,
-        )
-        .expect("test setup: non-degenerate triangle");
-        let partitioner =
-            Plane3::from_points(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0));
+        let poly = Polygon::from_triangle(pt(0.0, 0.0, -1.0), pt(1.0, 0.0, -1.0), pt(0.0, 1.0, -1.0), 0)
+            .expect("test setup: non-degenerate triangle");
+        let partitioner = Plane3::from_points(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0));
         let mut cof = vec![];
         let mut cob = vec![];
         let mut f = vec![];
@@ -285,9 +248,8 @@ mod tests {
 
     #[test]
     fn coplanar_aligned_normal_routes_to_coplanar_front() {
-        let poly =
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 0)
-                .expect("test setup: non-degenerate triangle");
+        let poly = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 0)
+            .expect("test setup: non-degenerate triangle");
         let partitioner = poly.plane;
         let mut cof = vec![];
         let mut cob = vec![];
@@ -300,9 +262,8 @@ mod tests {
 
     #[test]
     fn coplanar_opposed_normal_routes_to_coplanar_back() {
-        let poly =
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 0)
-                .expect("test setup: non-degenerate triangle");
+        let poly = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 0)
+            .expect("test setup: non-degenerate triangle");
         let partitioner = poly.plane.invert();
         let mut cof = vec![];
         let mut cob = vec![];
@@ -316,15 +277,9 @@ mod tests {
     #[test]
     fn spanning_triangle_splits_into_front_and_back() {
         // Triangle straddling z = 0.
-        let poly = Polygon::from_triangle(
-            pt(-1.0, 0.0, -1.0),
-            pt(1.0, 0.0, -1.0),
-            pt(0.0, 0.0, 1.0),
-            0,
-        )
-        .expect("test setup: non-degenerate triangle");
-        let partitioner =
-            Plane3::from_points(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0));
+        let poly = Polygon::from_triangle(pt(-1.0, 0.0, -1.0), pt(1.0, 0.0, -1.0), pt(0.0, 0.0, 1.0), 0)
+            .expect("test setup: non-degenerate triangle");
+        let partitioner = Plane3::from_points(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0));
         let mut cof = vec![];
         let mut cob = vec![];
         let mut f = vec![];
@@ -341,15 +296,9 @@ mod tests {
 
     #[test]
     fn split_preserves_color() {
-        let poly = Polygon::from_triangle(
-            pt(-1.0, 0.0, -1.0),
-            pt(1.0, 0.0, -1.0),
-            pt(0.0, 0.0, 1.0),
-            42,
-        )
-        .expect("test setup: non-degenerate triangle");
-        let partitioner =
-            Plane3::from_points(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0));
+        let poly = Polygon::from_triangle(pt(-1.0, 0.0, -1.0), pt(1.0, 0.0, -1.0), pt(0.0, 0.0, 1.0), 42)
+            .expect("test setup: non-degenerate triangle");
+        let partitioner = Plane3::from_points(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0));
         let mut cof = vec![];
         let mut cob = vec![];
         let mut f = vec![];
@@ -395,9 +344,8 @@ mod tests {
 
     #[test]
     fn from_triangle_preserves_color() {
-        let poly =
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 7)
-                .expect("test setup: non-degenerate triangle");
+        let poly = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 7)
+            .expect("test setup: non-degenerate triangle");
         assert_eq!(poly.color, 7);
     }
 
@@ -409,16 +357,14 @@ mod tests {
         let v0 = pt(1.0, 2.0, 3.0);
         let v1 = pt(4.0, -1.0, 0.5);
         let v2 = pt(-2.0, 0.0, 1.5);
-        let poly =
-            Polygon::from_triangle(v0, v1, v2, 0).expect("test setup: non-degenerate triangle");
+        let poly = Polygon::from_triangle(v0, v1, v2, 0).expect("test setup: non-degenerate triangle");
         assert_eq!(poly.vertices, vec![v0, v1, v2]);
     }
 
     #[test]
     fn invert_is_involution_for_polygon() {
-        let original =
-            Polygon::from_triangle(pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(0.0, 0.0, 1.0), 3)
-                .expect("test setup: non-degenerate triangle");
+        let original = Polygon::from_triangle(pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(0.0, 0.0, 1.0), 3)
+            .expect("test setup: non-degenerate triangle");
         let mut twice = original.clone();
         twice.invert();
         twice.invert();
@@ -432,9 +378,8 @@ mod tests {
 
     #[test]
     fn invert_does_not_change_color() {
-        let mut poly =
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 42)
-                .expect("test setup: non-degenerate triangle");
+        let mut poly = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 42)
+            .expect("test setup: non-degenerate triangle");
         poly.invert();
         assert_eq!(poly.color, 42);
     }
@@ -444,9 +389,8 @@ mod tests {
         // Triangle with one vertex on the xy-plane (z = 0) and two at
         // z > 0. The on-plane vertex is COPLANAR; the polygon as a
         // whole is FRONT (0 | FRONT | FRONT == FRONT).
-        let poly =
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 1.0), pt(0.0, 1.0, 1.0), 0)
-                .expect("test setup: non-degenerate triangle");
+        let poly = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 1.0), pt(0.0, 1.0, 1.0), 0)
+            .expect("test setup: non-degenerate triangle");
         let (cof, cob, f, b) = split_into_buckets(&poly, &xy_partitioner());
         assert_eq!(f.len(), 1);
         assert!(cof.is_empty() && cob.is_empty() && b.is_empty());
@@ -465,8 +409,7 @@ mod tests {
         let near = pi(0, 0, 1); // one fixed ULP above z=0
         let above0 = pt(1.0, 0.0, 1.0);
         let above1 = pt(0.0, 1.0, 1.0);
-        let poly = Polygon::from_triangle(near, above0, above1, 0)
-            .expect("test setup: non-degenerate triangle");
+        let poly = Polygon::from_triangle(near, above0, above1, 0).expect("test setup: non-degenerate triangle");
         let (cof, cob, f, b) = split_into_buckets(&poly, &xy_partitioner());
         assert_eq!(f.len(), 1, "should route to FRONT, not split");
         assert!(cof.is_empty() && cob.is_empty() && b.is_empty());
@@ -481,8 +424,7 @@ mod tests {
         let below = pi(0, 0, -2);
         let above0 = pt(1.0, 0.0, 1.0);
         let above1 = pt(0.0, 1.0, 1.0);
-        let poly = Polygon::from_triangle(below, above0, above1, 0)
-            .expect("test setup: non-degenerate triangle");
+        let poly = Polygon::from_triangle(below, above0, above1, 0).expect("test setup: non-degenerate triangle");
         let (cof, cob, f, b) = split_into_buckets(&poly, &xy_partitioner());
         assert!(cof.is_empty() && cob.is_empty());
         assert_eq!(f.len(), 1, "should produce a front fragment");
@@ -494,18 +436,10 @@ mod tests {
         // For a triangle (n=3) split into a clean front+back, the two
         // fragments together hold n + 2 vertices: each split point
         // appears in both the front and back fragment.
-        let poly = Polygon::from_triangle(
-            pt(-1.0, 0.0, -1.0),
-            pt(1.0, 0.0, -1.0),
-            pt(0.0, 0.0, 1.0),
-            0,
-        )
-        .expect("test setup: non-degenerate triangle");
+        let poly = Polygon::from_triangle(pt(-1.0, 0.0, -1.0), pt(1.0, 0.0, -1.0), pt(0.0, 0.0, 1.0), 0)
+            .expect("test setup: non-degenerate triangle");
         let (_cof, _cob, f, b) = split_into_buckets(&poly, &xy_partitioner());
-        assert_eq!(
-            f[0].vertices.len() + b[0].vertices.len(),
-            poly.vertices.len() + 2 + 2
-        );
+        assert_eq!(f[0].vertices.len() + b[0].vertices.len(), poly.vertices.len() + 2 + 2);
         // The "+ 2 + 2" decomposition: 2 split points in f, 2 in b. Plus
         // each original vertex in exactly one fragment → 3 + 4 = 7 total.
     }
@@ -518,8 +452,7 @@ mod tests {
         let on_plane = pi(0, 0, 0);
         let below0 = pt(1.0, 0.0, -1.0);
         let below1 = pt(0.0, 1.0, -1.0);
-        let poly = Polygon::from_triangle(on_plane, below0, below1, 0)
-            .expect("test setup: non-degenerate triangle");
+        let poly = Polygon::from_triangle(on_plane, below0, below1, 0).expect("test setup: non-degenerate triangle");
         let (cof, cob, f, b) = split_into_buckets(&poly, &xy_partitioner());
         assert!(cof.is_empty() && cob.is_empty() && f.is_empty());
         assert_eq!(b.len(), 1);
@@ -548,8 +481,7 @@ mod tests {
         //   normal = (2^32, 2^32, 2^32), d = 2^48.
         //   L1 threshold (pre-fix) = 3·2^32.
         //   L2 threshold (post-fix) = floor(2^32 · sqrt(3)) ≈ 1.732·2^32.
-        let partitioner =
-            Plane3::from_points(pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(0.0, 0.0, 1.0));
+        let partitioner = Plane3::from_points(pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(0.0, 0.0, 1.0));
         // Three non-collinear points engineered so v0 and v2 sit in the
         // window (L2 < |side| < L1) — pre-fix all three are COPLANAR
         // (BUG), post-fix v0 is FRONT and v2 is BACK (correct SPANNING).
@@ -559,13 +491,10 @@ mod tests {
         assert_eq!(partitioner.side(v0), 2 * (1i128 << 32));
         assert_eq!(partitioner.side(v1), 1i128 << 32);
         assert_eq!(partitioner.side(v2), -2 * (1i128 << 32));
-        let poly = Polygon::from_triangle(v0, v1, v2, 0)
-            .expect("test setup: engineered non-degenerate spanning triangle");
+        let poly =
+            Polygon::from_triangle(v0, v1, v2, 0).expect("test setup: engineered non-degenerate spanning triangle");
         let (cof, cob, f, b) = split_into_buckets(&poly, &partitioner);
-        assert!(
-            !f.is_empty() && !b.is_empty(),
-            "spanning polygon must produce front AND back fragments"
-        );
+        assert!(!f.is_empty() && !b.is_empty(), "spanning polygon must produce front AND back fragments");
         assert!(cof.is_empty() && cob.is_empty());
     }
 
@@ -598,10 +527,7 @@ mod tests {
             let drift = partitioner.side(result).unsigned_abs();
             // Each axis contributes at most n_axis * 1-ULP drift; for
             // an axis-aligned partitioner only n_z matters.
-            assert!(
-                drift <= n_z_abs as u128,
-                "snap drift {drift} > n_z magnitude {n_z_abs}"
-            );
+            assert!(drift <= n_z_abs as u128, "snap drift {drift} > n_z magnitude {n_z_abs}");
         }
     }
 

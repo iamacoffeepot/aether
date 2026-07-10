@@ -89,10 +89,7 @@ impl<R: Kind> Pending<R> {
     /// `Pending`, which is what makes the `-> Pending<R>` contract
     /// non-forgeable (ADR-0109 §3).
     pub(crate) fn new(dispatch_id: DispatchId) -> Self {
-        Self {
-            dispatch_id,
-            _reply: PhantomData,
-        }
+        Self { dispatch_id, _reply: PhantomData }
     }
 
     /// The [`DispatchId`] of the armed dispatch, for *optional*
@@ -183,10 +180,7 @@ pub(crate) struct InflightTable {
 
 impl InflightTable {
     pub(crate) fn new() -> Self {
-        Self {
-            next_id: 0,
-            entries: HashMap::new(),
-        }
+        Self { next_id: 0, entries: HashMap::new() }
     }
 
     /// Mint the next monotonic [`DispatchId`]. Called on the actor
@@ -254,9 +248,7 @@ impl<O, C> TaskDone<O, C> {
     /// `MailId::NONE` once the hold is taken (post-`release`) or for a
     /// `NONE`-root dispatch.
     fn hold_root(&self) -> MailId {
-        self.hold
-            .as_ref()
-            .map_or(MailId::NONE, SettlementHold::root)
+        self.hold.as_ref().map_or(MailId::NONE, SettlementHold::root)
     }
 
     /// Re-reply the carried `output` through the carried `reply_to`,
@@ -348,22 +340,9 @@ impl InflightTable {
     /// return its [`DispatchId`]. The actor thread calls this (under the
     /// table lock) right after acquiring the hold, before spawning the
     /// worker.
-    fn insert(
-        &mut self,
-        hold: SettlementHold,
-        reply_to: Source,
-        context: Box<dyn Any + Send>,
-    ) -> DispatchId {
+    fn insert(&mut self, hold: SettlementHold, reply_to: Source, context: Box<dyn Any + Send>) -> DispatchId {
         let id = self.mint_id();
-        self.entries.insert(
-            id,
-            InflightEntry {
-                hold,
-                reply_to,
-                context,
-                output: None,
-            },
-        );
+        self.entries.insert(id, InflightEntry { hold, reply_to, context, output: None });
         id
     }
 
@@ -416,21 +395,10 @@ impl InflightTable {
         }
         // Both probes passed — safe to remove and rebuild.
         let entry = self.entries.remove(&id)?;
-        let InflightEntry {
-            hold,
-            reply_to,
-            context,
-            output,
-        } = entry;
+        let InflightEntry { hold, reply_to, context, output } = entry;
         let output = output?.downcast::<O>().ok()?;
         let context = context.downcast::<C>().ok()?;
-        Some(TaskDone {
-            output: *output,
-            context: *context,
-            hold: Some(hold),
-            reply_to,
-            resolved: false,
-        })
+        Some(TaskDone { output: *output, context: *context, hold: Some(hold), reply_to, resolved: false })
     }
 
     /// Non-consuming peek-then-take (ADR-0093 §3, peek variant). Look the
@@ -480,10 +448,7 @@ impl InflightTable {
         self.fill_output(id, output);
     }
 
-    pub(crate) fn dispatch_take<O: 'static, C: 'static>(
-        &mut self,
-        id: DispatchId,
-    ) -> Option<TaskDone<O, C>> {
+    pub(crate) fn dispatch_take<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
         self.take(id)
     }
 
@@ -491,10 +456,7 @@ impl InflightTable {
         self.abandon(id)
     }
 
-    pub(crate) fn dispatch_try_take<O: 'static, C: 'static>(
-        &mut self,
-        id: DispatchId,
-    ) -> Option<TaskDone<O, C>> {
+    pub(crate) fn dispatch_try_take<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
         self.try_take(id)
     }
 }
@@ -509,10 +471,7 @@ pub(crate) type InflightLedger = Mutex<InflightTable>;
 // worker's wake push routes to a registered inbox — fixture id derivation,
 // not sibling-cap addressing.
 #[allow(clippy::disallowed_methods)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test-setup unwraps: fixture construction panic on failure is the assertion"
-)]
+#[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 mod tests {
     use super::*;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -532,15 +491,7 @@ mod tests {
     /// payload is exactly the worker's output.
     #[repr(C)]
     #[derive(
-        Copy,
-        Clone,
-        Debug,
-        PartialEq,
-        Eq,
-        bytemuck::Pod,
-        bytemuck::Zeroable,
-        serde::Serialize,
-        serde::Deserialize,
+        Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize,
     )]
     struct Answer {
         value: u64,
@@ -568,10 +519,7 @@ mod tests {
     /// `ctx.in_flight_root()` — distinct so the hold accounting is
     /// isolated.
     fn root_id(cid: u64) -> MailId {
-        MailId {
-            sender: MailboxId(0xAB),
-            correlation_id: cid,
-        }
+        MailId { sender: MailboxId(0xAB), correlation_id: cid }
     }
 
     /// Block until the worker's [`TaskCompletionWake`] lands on the
@@ -580,16 +528,9 @@ mod tests {
     /// pushing the wake, so by the time the wake is observable
     /// `take_task_done` will find the output.
     fn await_wake(wake_rx: &mpsc::Receiver<OwnedDispatch>) -> DispatchId {
-        let env = wake_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("completion wake never landed");
-        assert_eq!(
-            env.kind,
-            TaskCompletionWake::ID,
-            "only the wake is expected"
-        );
-        let wake =
-            TaskCompletionWake::decode_from_bytes(env.payload.bytes()).expect("wake decodes");
+        let env = wake_rx.recv_timeout(Duration::from_secs(2)).expect("completion wake never landed");
+        assert_eq!(env.kind, TaskCompletionWake::ID, "only the wake is expected");
+        let wake = TaskCompletionWake::decode_from_bytes(env.payload.bytes()).expect("wake decodes");
         DispatchId(wake.dispatch_id)
     }
 
@@ -611,10 +552,7 @@ mod tests {
         // push (recipient = self_mailbox) routes to a registered inbox we
         // observe, rather than warn-dropping.
         let actor_mailbox = mailbox_id_from_name("test.dispatch_blocking.actor");
-        let binding = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            actor_mailbox,
-        ));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
         let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
         registry.register_inbox("test.dispatch_blocking.actor", forward_to(wake_tx));
 
@@ -632,54 +570,31 @@ mod tests {
 
         // The handler returned but the chain is held: settlement is
         // gated until the reply lands.
-        assert_eq!(
-            counter.held_open(root),
-            1,
-            "the chain stays held after the dispatching handler returns"
-        );
+        assert_eq!(counter.held_open(root), 1, "the chain stays held after the dispatching handler returns");
 
         // The worker ran, filled the ledger, and pushed the wake.
         let id = await_wake(&wake_rx);
-        assert_eq!(
-            counter.held_open(root),
-            1,
-            "the worker finishing does not release the chain"
-        );
+        assert_eq!(counter.held_open(root), 1, "the worker finishing does not release the chain");
 
         // The completion handler runs: rebuild the TaskDone and resolve.
         {
             let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-            let done = ctx
-                .take_task_done::<Answer, ()>(id)
-                .expect("the dispatch is in the ledger");
+            let done = ctx.take_task_done::<Answer, ()>(id).expect("the dispatch is in the ledger");
             assert_eq!(*done.output(), Answer { value: 42 });
             done.resolve(&mut ctx);
         }
 
         // The reply reached the original caller.
-        let reply = reply_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("the re-reply lands on the caller's mailbox");
-        assert_eq!(
-            reply.kind,
-            Answer::ID,
-            "reply carries the worker's output kind"
-        );
+        let reply = reply_rx.recv_timeout(Duration::from_secs(2)).expect("the re-reply lands on the caller's mailbox");
+        assert_eq!(reply.kind, Answer::ID, "reply carries the worker's output kind");
         // A Component-targeted reply is encoded through the kind codec by
         // `Mailer::send_reply` (not cast), so decode it the same way.
         let answer = Answer::decode_from_bytes(reply.payload.bytes()).expect("reply decodes");
         assert_eq!(answer, Answer { value: 42 });
-        assert_eq!(
-            reply.sender.correlation_id, 77,
-            "the caller's correlation is echoed onto the reply"
-        );
+        assert_eq!(reply.sender.correlation_id, 77, "the caller's correlation is echoed onto the reply");
 
         // Hold released after the reply — chain may settle.
-        assert_eq!(
-            counter.held_open(root),
-            0,
-            "resolve releases the hold after re-replying"
-        );
+        assert_eq!(counter.held_open(root), 0, "resolve releases the hold after re-replying");
     }
 
     /// The resumed entry uses the *supplied* `(hold, reply_to)`, not the
@@ -698,10 +613,7 @@ mod tests {
         let caller = registry.register_inbox("test.dispatch_resumed.caller", forward_to(reply_tx));
 
         let actor_mailbox = mailbox_id_from_name("test.dispatch_resumed.actor");
-        let binding = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            actor_mailbox,
-        ));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
         let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
         registry.register_inbox("test.dispatch_resumed.actor", forward_to(wake_tx));
 
@@ -714,26 +626,16 @@ mod tests {
             let ctx = NativeCtx::new(&binding, caller_reply_to, MailId::NONE, accept_root);
             ctx.acquire_settlement_hold()
         };
-        assert_eq!(
-            counter.held_open(accept_root),
-            1,
-            "the accept-time hold keeps the chain open while buffered"
-        );
+        assert_eq!(counter.held_open(accept_root), 1, "the accept-time hold keeps the chain open while buffered");
 
         // "Drain": dispatch the buffered work from a *different* handler
         // turn — a ctx with a different root and reply target — passing the
         // captured `(hold, reply_to)` explicitly.
         let other_root = root_id(2);
         let id = {
-            let mut ctx = NativeCtx::new(
-                &binding,
-                Source::with_correlation(SourceAddr::None, 99),
-                MailId::NONE,
-                other_root,
-            );
-            ctx.dispatch_blocking_resumed(buffered_hold, caller_reply_to, move || Answer {
-                value: 7,
-            })
+            let mut ctx =
+                NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 99), MailId::NONE, other_root);
+            ctx.dispatch_blocking_resumed(buffered_hold, caller_reply_to, move || Answer { value: 7 })
         };
 
         // The held chain is the accept root, not the drain ctx's root.
@@ -742,20 +644,14 @@ mod tests {
             1,
             "the supplied hold keeps the accept chain open across the resumed dispatch"
         );
-        assert_eq!(
-            counter.held_open(other_root),
-            0,
-            "the drain ctx's own chain is never held"
-        );
+        assert_eq!(counter.held_open(other_root), 0, "the drain ctx's own chain is never held");
 
         let landed = await_wake(&wake_rx);
         assert_eq!(landed, id);
 
         {
             let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-            let done = ctx
-                .take_task_done::<Answer, ()>(id)
-                .expect("the resumed dispatch is in the ledger");
+            let done = ctx.take_task_done::<Answer, ()>(id).expect("the resumed dispatch is in the ledger");
             assert_eq!(*done.output(), Answer { value: 7 });
             done.resolve(&mut ctx);
         }
@@ -768,11 +664,7 @@ mod tests {
             reply.sender.correlation_id, 77,
             "the resumed dispatch replies to the captured caller, not the drain ctx"
         );
-        assert_eq!(
-            counter.held_open(accept_root),
-            0,
-            "resolve releases the captured hold"
-        );
+        assert_eq!(counter.held_open(accept_root), 0, "resolve releases the captured hold");
     }
 
     /// `dispatch_blocking_with` carries an opt-in context the completion
@@ -783,14 +675,10 @@ mod tests {
         let (registry, mailer) = bare_substrate();
 
         let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-        let caller =
-            registry.register_inbox("test.dispatch_blocking.caller2", forward_to(reply_tx));
+        let caller = registry.register_inbox("test.dispatch_blocking.caller2", forward_to(reply_tx));
 
         let actor_mailbox = mailbox_id_from_name("test.dispatch_blocking.actor2");
-        let binding = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            actor_mailbox,
-        ));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
         let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
         registry.register_inbox("test.dispatch_blocking.actor2", forward_to(wake_tx));
 
@@ -807,25 +695,17 @@ mod tests {
         let id = await_wake(&wake_rx);
         {
             let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-            let done = ctx
-                .take_task_done::<u64, u64>(id)
-                .expect("the dispatch is in the ledger");
+            let done = ctx.take_task_done::<u64, u64>(id).expect("the dispatch is in the ledger");
             assert_eq!(*done.output(), 7);
             assert_eq!(*done.context(), 100);
             done.resolve_with(&mut ctx, |output, cx| Answer { value: output + cx });
         }
 
-        let reply = reply_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("the mapped re-reply lands");
+        let reply = reply_rx.recv_timeout(Duration::from_secs(2)).expect("the mapped re-reply lands");
         // A Component-targeted reply is encoded through the kind codec by
         // `Mailer::send_reply` (not cast), so decode it the same way.
         let answer = Answer::decode_from_bytes(reply.payload.bytes()).expect("reply decodes");
-        assert_eq!(
-            answer,
-            Answer { value: 107 },
-            "resolve_with folds output + context"
-        );
+        assert_eq!(answer, Answer { value: 107 }, "resolve_with folds output + context");
     }
 
     /// Dropping a `TaskDone` without resolving releases the hold (so
@@ -844,13 +724,8 @@ mod tests {
         let hold = mailer.acquire_settlement_hold(root);
         assert_eq!(counter.held_open(root), 1, "hold acquired");
 
-        let done: TaskDone<u64, ()> = TaskDone {
-            output: 1,
-            context: (),
-            hold: Some(hold),
-            reply_to: Source::NONE,
-            resolved: false,
-        };
+        let done: TaskDone<u64, ()> =
+            TaskDone { output: 1, context: (), hold: Some(hold), reply_to: Source::NONE, resolved: false };
         // The drop releases the hold (verified indirectly: the chain
         // returns to 0 even as the assertion unwinds) then debug_asserts.
         drop(done);
@@ -869,23 +744,14 @@ mod tests {
         assert_eq!(counter.held_open(root), 1);
 
         let result = catch_unwind(AssertUnwindSafe(|| {
-            let done: TaskDone<u64, ()> = TaskDone {
-                output: 1,
-                context: (),
-                hold: Some(hold),
-                reply_to: Source::NONE,
-                resolved: false,
-            };
+            let done: TaskDone<u64, ()> =
+                TaskDone { output: 1, context: (), hold: Some(hold), reply_to: Source::NONE, resolved: false };
             drop(done);
         }));
         // In debug the drop asserts (unwinds); in release it doesn't.
         // Either way the hold released.
         let _ = result;
-        assert_eq!(
-            counter.held_open(root),
-            0,
-            "an unresolved TaskDone releases its hold on drop"
-        );
+        assert_eq!(counter.held_open(root), 0, "an unresolved TaskDone releases its hold on drop");
     }
 
     /// The Site-1 release mechanism: `abandon` removes the entry and hands
@@ -907,15 +773,8 @@ mod tests {
         let abandoned = table.dispatch_abandon(id);
         assert!(abandoned.is_some(), "abandon hands back the parked hold");
         drop(abandoned);
-        assert!(
-            !table.entries.contains_key(&id),
-            "abandon removes the entry"
-        );
-        assert_eq!(
-            counter.held_open(root),
-            0,
-            "dropping the abandoned hold releases the chain"
-        );
+        assert!(!table.entries.contains_key(&id), "abandon removes the entry");
+        assert_eq!(counter.held_open(root), 0, "dropping the abandoned hold releases the chain");
     }
 
     /// An unfilled entry is left intact by `take` — no bare drop of the
@@ -931,10 +790,7 @@ mod tests {
         let id = table.dispatch_insert(hold, Source::NONE, Box::new(()));
         // Output was never filled: take returns None and retains the entry.
         assert!(table.dispatch_take::<Answer, ()>(id).is_none());
-        assert!(
-            table.entries.contains_key(&id),
-            "an unfilled entry stays parked for a later wake"
-        );
+        assert!(table.entries.contains_key(&id), "an unfilled entry stays parked for a later wake");
     }
 
     /// Tripwire: a downcast *mismatch* against a filled output is a genuine
@@ -954,18 +810,9 @@ mod tests {
 
         let outcome = catch_unwind(AssertUnwindSafe(|| table.dispatch_take::<Answer, ()>(id)));
         #[cfg(debug_assertions)]
-        assert!(
-            outcome.is_err(),
-            "a type mismatch debug_asserts, distinct from the benign unfilled None"
-        );
+        assert!(outcome.is_err(), "a type mismatch debug_asserts, distinct from the benign unfilled None");
         #[cfg(not(debug_assertions))]
-        assert!(
-            matches!(outcome, Ok(None)),
-            "a type mismatch returns None in release"
-        );
-        assert!(
-            table.entries.contains_key(&id),
-            "a mismatched entry is retained, never bare-dropped"
-        );
+        assert!(matches!(outcome, Ok(None)), "a type mismatch returns None in release");
+        assert!(table.entries.contains_key(&id), "a mismatched entry is retained, never bare-dropped");
     }
 }

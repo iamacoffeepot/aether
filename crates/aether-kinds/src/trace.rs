@@ -35,18 +35,7 @@ pub const TRACE_MAILBOX_NAME: &str = "aether.trace";
 /// concern. Process-global / system-wide clock source means cross-
 /// actor events are directly comparable without skew correction.
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Hash,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    aether_data::Schema,
+    Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, aether_data::Schema,
 )]
 pub struct Nanos(pub u64);
 
@@ -172,19 +161,11 @@ pub enum TraceEvent {
 /// Not routed as mail post-3c — the central observer that used to reply
 /// with it retired. Kept as the walk's output struct (still a `Kind` so
 /// the MCP layer can name/decode it uniformly).
-#[derive(
-    Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.trace.describe_tree_result")]
 pub enum DescribeTreeResult {
-    Ok {
-        root: MailId,
-        in_flight: u32,
-        mails: Vec<MailNodeWire>,
-    },
-    Err {
-        not_found: MailId,
-    },
+    Ok { root: MailId, in_flight: u32, mails: Vec<MailNodeWire> },
+    Err { not_found: MailId },
 }
 
 /// One node in a [`DescribeTreeResult`]: a single mail folded from its
@@ -287,14 +268,8 @@ pub struct TraceTail {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.trace.tail_result")]
 pub enum TraceTailResult {
-    Ok {
-        entries: Vec<TraceRingEntry>,
-        next_since: u64,
-        truncated_before: Option<u64>,
-    },
-    Err {
-        error: String,
-    },
+    Ok { entries: Vec<TraceRingEntry>, next_since: u64, truncated_before: Option<u64> },
+    Err { error: String },
 }
 
 /// ADR-0080 §6 settlement notification. Post-ADR-0086 Phase 2 it is
@@ -314,17 +289,7 @@ pub enum TraceTailResult {
 /// "settles eventually," not "settles only once every dependency is
 /// provably done."
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    aether_data::Kind,
-    aether_data::Schema,
+    Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
 )]
 #[kind(name = "aether.trace.settled")]
 pub struct Settled {

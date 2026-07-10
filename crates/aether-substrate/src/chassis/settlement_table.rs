@@ -232,13 +232,9 @@ impl SettlementTable {
              decrement tombstoned a live root (concurrent re-open; see module Contract)"
         );
         slot.sender.store(root.sender.0, Ordering::Relaxed);
-        slot.correlation
-            .store(root.correlation_id, Ordering::Relaxed);
+        slot.correlation.store(root.correlation_id, Ordering::Relaxed);
         slot.cell.reset();
-        slot.sv.store(
-            (claiming_sv & !STATE_MASK) | STATE_OCCUPIED,
-            Ordering::Release,
-        );
+        slot.sv.store((claiming_sv & !STATE_MASK) | STATE_OCCUPIED, Ordering::Release);
     }
 
     /// Find the cell for `root`, inserting it if absent. Never returns a
@@ -308,11 +304,7 @@ impl SettlementTable {
             return false;
         }
         let claiming = with_state(cur, STATE_CLAIMING);
-        if slot
-            .sv
-            .compare_exchange(cur, claiming, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
+        if slot.sv.compare_exchange(cur, claiming, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
             Self::publish(slot, claiming, root);
             true
         } else {
@@ -345,8 +337,7 @@ impl SettlementTable {
     #[inline]
     fn tombstone(slot: &Slot) {
         let cur = slot.sv.load(Ordering::Acquire);
-        slot.sv
-            .store(with_state(cur, STATE_TOMBSTONE), Ordering::Release);
+        slot.sv.store(with_state(cur, STATE_TOMBSTONE), Ordering::Release);
         // Early warning (debug-only, best-effort): the settling decrement
         // observed `(0,0)`; a non-zero cell now means a `record_sent`
         // re-opened the root in the window before this tombstone. The
@@ -370,8 +361,7 @@ impl SettlementTable {
     fn force_tombstone_live_for_test(&self, root: MailId) {
         let slot = self.find_slot(root).expect("root must be live");
         let cur = slot.sv.load(Ordering::Acquire);
-        slot.sv
-            .store(with_state(cur, STATE_TOMBSTONE), Ordering::Release);
+        slot.sv.store(with_state(cur, STATE_TOMBSTONE), Ordering::Release);
     }
 
     /// Record a `Sent` for `root` (`in_flight += 1`). Inserts the slot on
@@ -419,10 +409,7 @@ impl SettlementTable {
     /// concurrent snapshot, exact only at quiescence.
     #[must_use]
     pub fn live_roots(&self) -> usize {
-        self.slots
-            .iter()
-            .filter(|s| s.sv.load(Ordering::Acquire) & STATE_MASK == STATE_OCCUPIED)
-            .count()
+        self.slots.iter().filter(|s| s.sv.load(Ordering::Acquire) & STATE_MASK == STATE_OCCUPIED).count()
     }
 
     /// Current `held_open` count for `root` (0 if no live slot).
@@ -458,14 +445,7 @@ impl SettlementTable {
             .filter_map(|slot| {
                 let (sender, correlation) = Self::read_key(slot)?;
                 let (in_flight, held_open) = slot.cell.load();
-                Some((
-                    MailId {
-                        sender: MailboxId(sender),
-                        correlation_id: correlation,
-                    },
-                    in_flight,
-                    held_open,
-                ))
+                Some((MailId { sender: MailboxId(sender), correlation_id: correlation }, in_flight, held_open))
             })
             .collect()
     }
@@ -493,10 +473,7 @@ mod tests {
     use std::thread;
 
     fn root(sender: u64, cid: u64) -> MailId {
-        MailId {
-            sender: MailboxId(sender),
-            correlation_id: cid,
-        }
+        MailId { sender: MailboxId(sender), correlation_id: cid }
     }
 
     /// Spawn `n` threads each running `body(tid)`, join all. Shared via an
@@ -566,10 +543,7 @@ mod tests {
         assert!(t.record_finished(a)); // (0,0)
         assert!(!t.record_finished(b)); // (0,1)
         assert!(t.record_release(b)); // (0,0)
-        assert!(
-            t.pending_roots().is_empty(),
-            "settled roots leave no pending entries"
-        );
+        assert!(t.pending_roots().is_empty(), "settled roots leave no pending entries");
     }
 
     /// Orphan `Finished`/`Release` (no live slot) is a no-op returning

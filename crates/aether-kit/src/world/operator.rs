@@ -15,9 +15,8 @@ use core::cmp::Ordering;
 use crate::mark::MarkRef;
 
 use super::{
-    AutomatonRule, BrushParameters, CHUNK_BITS, ChunkPos, MAX_STAMP_VERTICES, Material,
-    OperatorBudget, OperatorCell, OperatorChunk, OperatorError, OperatorResult, OperatorStats,
-    SUBCELLS_PER_CELL, World, WorldPoint, mesher, raster,
+    AutomatonRule, BrushParameters, CHUNK_BITS, ChunkPos, MAX_STAMP_VERTICES, Material, OperatorBudget, OperatorCell,
+    OperatorChunk, OperatorError, OperatorResult, OperatorStats, SUBCELLS_PER_CELL, World, WorldPoint, mesher, raster,
 };
 use crate::OCTIMETERS_PER_TILE;
 
@@ -37,12 +36,7 @@ struct ExecutionState {
 
 impl ExecutionState {
     fn new(budget: OperatorBudget) -> Self {
-        Self {
-            budget,
-            steps_run: 0,
-            subcells_written: 0,
-            touched: BTreeSet::new(),
-        }
+        Self { budget, steps_run: 0, subcells_written: 0, touched: BTreeSet::new() }
     }
 
     fn charge_step(&mut self) -> Result<(), OperatorError> {
@@ -74,25 +68,13 @@ impl ExecutionState {
         let stats = OperatorStats {
             steps_run: self.steps_run,
             subcells_written: self.subcells_written,
-            touched_chunks: self
-                .touched
-                .iter()
-                .copied()
-                .map(OperatorChunk::from)
-                .collect(),
+            touched_chunks: self.touched.iter().copied().map(OperatorChunk::from).collect(),
         };
         let result = match error {
-            Some(error) => OperatorResult::Failed {
-                source,
-                error,
-                stats,
-            },
+            Some(error) => OperatorResult::Failed { source, error, stats },
             None => OperatorResult::Applied { source, stats },
         };
-        OperatorExecution {
-            result,
-            touched: self.touched,
-        }
+        OperatorExecution { result, touched: self.touched }
     }
 }
 
@@ -157,14 +139,10 @@ fn validate_brush(path: &[WorldPoint], brush: BrushParameters) -> Result<(), Ope
         return Err(invalid_parameters("brush spacing must be non-zero"));
     }
     if Material::from_u8_or_void(brush.material) == Material::Void {
-        return Err(invalid_parameters(
-            "brush material must be a known non-Void material byte",
-        ));
+        return Err(invalid_parameters("brush material must be a known non-Void material byte"));
     }
     let Ok(radius) = i32::try_from(brush.radius_octimeters) else {
-        return Err(invalid_parameters(
-            "brush radius exceeds the coordinate range",
-        ));
+        return Err(invalid_parameters("brush radius exceeds the coordinate range"));
     };
     let mut min_x = i32::MAX;
     let mut min_z = i32::MAX;
@@ -177,9 +155,7 @@ fn validate_brush(path: &[WorldPoint], brush: BrushParameters) -> Result<(), Ope
             point.z_octimeters.checked_sub(radius),
             point.z_octimeters.checked_add(radius),
         ) else {
-            return Err(invalid_parameters(
-                "brush radius extends outside the world coordinate range",
-            ));
+            return Err(invalid_parameters("brush radius extends outside the world coordinate range"));
         };
         min_x = min_x.min(point_min_x);
         min_z = min_z.min(point_min_z);
@@ -197,9 +173,7 @@ fn validate_brush(path: &[WorldPoint], brush: BrushParameters) -> Result<(), Ope
 }
 
 fn invalid_parameters(reason: impl Into<String>) -> OperatorError {
-    OperatorError::InvalidParameters {
-        reason: reason.into(),
-    }
+    OperatorError::InvalidParameters { reason: reason.into() }
 }
 
 fn validate_remesh_extent(
@@ -209,30 +183,17 @@ fn validate_remesh_extent(
     max_cell_z: i64,
     operator: &str,
 ) -> Result<(), OperatorError> {
-    let (Ok(min_cell_x), Ok(max_cell_x), Ok(min_cell_z), Ok(max_cell_z)) = (
-        i32::try_from(min_cell_x),
-        i32::try_from(max_cell_x),
-        i32::try_from(min_cell_z),
-        i32::try_from(max_cell_z),
-    ) else {
-        return Err(invalid_parameters(format!(
-            "{operator} extent exceeds the cell coordinate range"
-        )));
+    let (Ok(min_cell_x), Ok(max_cell_x), Ok(min_cell_z), Ok(max_cell_z)) =
+        (i32::try_from(min_cell_x), i32::try_from(max_cell_x), i32::try_from(min_cell_z), i32::try_from(max_cell_z))
+    else {
+        return Err(invalid_parameters(format!("{operator} extent exceeds the cell coordinate range")));
     };
-    let min_chunk = ChunkPos {
-        x: min_cell_x >> CHUNK_BITS,
-        z: min_cell_z >> CHUNK_BITS,
-    };
-    let max_chunk = ChunkPos {
-        x: max_cell_x >> CHUNK_BITS,
-        z: max_cell_z >> CHUNK_BITS,
-    };
+    let min_chunk = ChunkPos { x: min_cell_x >> CHUNK_BITS, z: min_cell_z >> CHUNK_BITS };
+    let max_chunk = ChunkPos { x: max_cell_x >> CHUNK_BITS, z: max_cell_z >> CHUNK_BITS };
     if !mesher::chunk_remesh_extent_is_coordinate_safe(min_chunk)
         || !mesher::chunk_remesh_extent_is_coordinate_safe(max_chunk)
     {
-        return Err(invalid_parameters(format!(
-            "{operator} extent exceeds the mesher's apron-safe coordinate range"
-        )));
+        return Err(invalid_parameters(format!("{operator} extent exceeds the mesher's apron-safe coordinate range")));
     }
     Ok(())
 }
@@ -273,17 +234,10 @@ pub(super) fn run_automaton(
     rule: AutomatonRule,
     budget: OperatorBudget,
 ) -> OperatorExecution {
-    let AutomatonRule::Grow {
-        material,
-        generations,
-    } = rule;
+    let AutomatonRule::Grow { material, generations } = rule;
     if Material::from_u8_or_void(material) == Material::Void {
-        return ExecutionState::new(budget).finish(
-            source,
-            Some(invalid_parameters(
-                "automaton material must be a known non-Void material byte",
-            )),
-        );
+        return ExecutionState::new(budget)
+            .finish(source, Some(invalid_parameters("automaton material must be a known non-Void material byte")));
     }
     let generation_radius = i64::from(generations);
     if let Err(error) = validate_remesh_extent(
@@ -297,10 +251,7 @@ pub(super) fn run_automaton(
     }
 
     let mut state = ExecutionState::new(budget);
-    let mut frontier = VecDeque::from([FrontierCell {
-        cell: seed,
-        generation: 0,
-    }]);
+    let mut frontier = VecDeque::from([FrontierCell { cell: seed, generation: 0 }]);
     let mut visited = BTreeSet::from([seed]);
     let points = vec![material; SUBCELLS_PER_CELL];
 
@@ -372,10 +323,7 @@ mod tests {
     use crate::world::CellPos;
 
     fn source() -> MarkRef {
-        MarkRef {
-            id: MarkId::new(7),
-            revision: 3,
-        }
+        MarkRef { id: MarkId::new(7), revision: 3 }
     }
 
     fn stats(result: &OperatorResult) -> (&OperatorStats, Option<&OperatorError>) {
@@ -392,15 +340,8 @@ mod tests {
             &mut world,
             source(),
             &[WorldPoint::new(8, 8)],
-            BrushParameters {
-                radius_octimeters: 8,
-                spacing_octimeters: 16,
-                material: Material::Stone.to_u8(),
-            },
-            OperatorBudget {
-                max_steps: 1,
-                max_subcells: 0,
-            },
+            BrushParameters { radius_octimeters: 8, spacing_octimeters: 16, material: Material::Stone.to_u8() },
+            OperatorBudget { max_steps: 1, max_subcells: 0 },
         );
 
         let (stats, error) = stats(&execution.result);
@@ -417,20 +358,9 @@ mod tests {
         let execution = apply_brush(
             &mut world,
             source(),
-            &[
-                WorldPoint::new(576, 1088),
-                WorldPoint::new(832, 1088),
-                WorldPoint::new(1088, 1088),
-            ],
-            BrushParameters {
-                radius_octimeters: 64,
-                spacing_octimeters: 256,
-                material: Material::Stone.to_u8(),
-            },
-            OperatorBudget {
-                max_steps: 3,
-                max_subcells: 1_000,
-            },
+            &[WorldPoint::new(576, 1088), WorldPoint::new(832, 1088), WorldPoint::new(1088, 1088)],
+            BrushParameters { radius_octimeters: 64, spacing_octimeters: 256, material: Material::Stone.to_u8() },
+            OperatorBudget { max_steps: 3, max_subcells: 1_000 },
         );
 
         let (stats, error) = stats(&execution.result);
@@ -446,15 +376,8 @@ mod tests {
             &mut world,
             source(),
             &[WorldPoint::new(576, 1088), WorldPoint::new(832, 1088)],
-            BrushParameters {
-                radius_octimeters: 64,
-                spacing_octimeters: 256,
-                material: Material::Stone.to_u8(),
-            },
-            OperatorBudget {
-                max_steps: 1,
-                max_subcells: 1_000,
-            },
+            BrushParameters { radius_octimeters: 64, spacing_octimeters: 256, material: Material::Stone.to_u8() },
+            OperatorBudget { max_steps: 1, max_subcells: 1_000 },
         );
 
         let (stats, error) = stats(&execution.result);
@@ -476,15 +399,8 @@ mod tests {
             &mut world,
             source(),
             &[WorldPoint::new(i32::MAX - 16, 128)],
-            BrushParameters {
-                radius_octimeters: 16,
-                spacing_octimeters: 16,
-                material: Material::Stone.to_u8(),
-            },
-            OperatorBudget {
-                max_steps: 1,
-                max_subcells: 1_000,
-            },
+            BrushParameters { radius_octimeters: 16, spacing_octimeters: 16, material: Material::Stone.to_u8() },
+            OperatorBudget { max_steps: 1, max_subcells: 1_000 },
         );
 
         let (stats, error) = stats(&execution.result);
@@ -505,31 +421,16 @@ mod tests {
         let execution = run_automaton(
             &mut world,
             source(),
-            OperatorCell {
-                cell_x: 4,
-                cell_z: 4,
-            },
-            AutomatonRule::Grow {
-                material: Material::Grass.to_u8(),
-                generations: 1,
-            },
-            OperatorBudget {
-                max_steps: 5,
-                max_subcells: 5 * SUBCELLS_PER_CELL as u32,
-            },
+            OperatorCell { cell_x: 4, cell_z: 4 },
+            AutomatonRule::Grow { material: Material::Grass.to_u8(), generations: 1 },
+            OperatorBudget { max_steps: 5, max_subcells: 5 * SUBCELLS_PER_CELL as u32 },
         );
 
         let (stats, error) = stats(&execution.result);
         assert_eq!(error, None);
         assert_eq!(stats.steps_run, 5);
         assert_eq!(stats.subcells_written, 5 * SUBCELLS_PER_CELL as u32);
-        assert_eq!(
-            stats.touched_chunks,
-            vec![OperatorChunk {
-                chunk_x: 0,
-                chunk_z: 0
-            }]
-        );
+        assert_eq!(stats.touched_chunks, vec![OperatorChunk { chunk_x: 0, chunk_z: 0 }]);
         for cell in [
             CellPos { x: 4, z: 4 },
             CellPos { x: 5, z: 4 },
@@ -544,22 +445,13 @@ mod tests {
     #[test]
     fn huge_automaton_seed_is_rejected_before_mutation() {
         let mut world = World::new();
-        let seed = OperatorCell {
-            cell_x: 10_000_000,
-            cell_z: 0,
-        };
+        let seed = OperatorCell { cell_x: 10_000_000, cell_z: 0 };
         let execution = run_automaton(
             &mut world,
             source(),
             seed,
-            AutomatonRule::Grow {
-                material: Material::Grass.to_u8(),
-                generations: 0,
-            },
-            OperatorBudget {
-                max_steps: 1,
-                max_subcells: SUBCELLS_PER_CELL as u32,
-            },
+            AutomatonRule::Grow { material: Material::Grass.to_u8(), generations: 0 },
+            OperatorBudget { max_steps: 1, max_subcells: SUBCELLS_PER_CELL as u32 },
         );
 
         let (stats, error) = stats(&execution.result);
@@ -580,18 +472,9 @@ mod tests {
         let execution = run_automaton(
             &mut world,
             source(),
-            OperatorCell {
-                cell_x: 4,
-                cell_z: 4,
-            },
-            AutomatonRule::Grow {
-                material: Material::Sand.to_u8(),
-                generations: 1,
-            },
-            OperatorBudget {
-                max_steps: 5,
-                max_subcells: 4 * SUBCELLS_PER_CELL as u32,
-            },
+            OperatorCell { cell_x: 4, cell_z: 4 },
+            AutomatonRule::Grow { material: Material::Sand.to_u8(), generations: 1 },
+            OperatorBudget { max_steps: 5, max_subcells: 4 * SUBCELLS_PER_CELL as u32 },
         );
 
         let (stats, error) = stats(&execution.result);
@@ -611,18 +494,9 @@ mod tests {
         let execution = run_automaton(
             &mut world,
             source(),
-            OperatorCell {
-                cell_x: 0,
-                cell_z: 0,
-            },
-            AutomatonRule::Grow {
-                material: Material::Dirt.to_u8(),
-                generations: 1,
-            },
-            OperatorBudget {
-                max_steps: 2,
-                max_subcells: 5 * SUBCELLS_PER_CELL as u32,
-            },
+            OperatorCell { cell_x: 0, cell_z: 0 },
+            AutomatonRule::Grow { material: Material::Dirt.to_u8(), generations: 1 },
+            OperatorBudget { max_steps: 2, max_subcells: 5 * SUBCELLS_PER_CELL as u32 },
         );
 
         let (stats, error) = stats(&execution.result);

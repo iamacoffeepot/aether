@@ -2,11 +2,7 @@
 // (today: the stress-test payload fixtures below) are bounded by
 // construction, so the cast lints are blanket-allowed module-wide
 // rather than annotated per site.
-#![allow(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap
-)]
+#![allow(clippy::cast_lossless, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 // `ReplyTable` Mutex guards are intentionally held across the
 // register/lookup/dispatch sequence — early-drop opens a TOCTOU
 // window where a sibling thread mutates the pending-reply map between
@@ -122,12 +118,7 @@ struct OutboundBuffer {
 
 impl OutboundBuffer {
     fn new() -> Self {
-        Self {
-            ring: None,
-            blob_open: false,
-            construct_start: None,
-            mails: Vec::new(),
-        }
+        Self { ring: None, blob_open: false, construct_start: None, mails: Vec::new() }
     }
 }
 
@@ -308,13 +299,7 @@ impl NativeBinding {
     pub fn new_for_test(mailer: Arc<Mailer>, self_mailbox: MailboxId) -> Self {
         // Test bindings never spawn children; seed the carry at the
         // depth-1 fixed point so `self_mailbox` and the carry agree.
-        Self::new(
-            mailer,
-            self_mailbox,
-            self_mailbox.0,
-            Arc::new(PanicAborter),
-            None,
-        )
+        Self::new(mailer, self_mailbox, self_mailbox.0, Arc::new(PanicAborter), None)
     }
 
     /// Install the receiver half of the actor's inbox so the
@@ -334,9 +319,7 @@ impl NativeBinding {
             Arc::clone(&self.mailer),
             self.reply_lineage.clone(),
         );
-        self.inbox
-            .set(Mutex::new(settling))
-            .unwrap_or_else(|_| panic!("NativeBinding::install_inbox called twice"));
+        self.inbox.set(Mutex::new(settling)).unwrap_or_else(|_| panic!("NativeBinding::install_inbox called twice"));
     }
 
     /// The mailbox id the substrate routes inbound mail through to
@@ -440,10 +423,7 @@ impl NativeBinding {
         // The mutex guard stays held across the blocking recv. Dispatcher
         // threads are single-tasked while parked here; nothing else
         // on this thread contends.
-        inbox
-            .lock()
-            .expect("inbox mutex poisoned; fail-fast per ADR-0063")
-            .recv_blocking()
+        inbox.lock().expect("inbox mutex poisoned; fail-fast per ADR-0063").recv_blocking()
     }
 
     /// Non-blocking variant of [`Self::recv_blocking`]. Returns
@@ -457,10 +437,7 @@ impl NativeBinding {
     /// guard, which is itself a substrate-level invariant violation.
     pub fn try_recv(&self) -> Option<Envelope> {
         let inbox = self.inbox.get()?;
-        inbox
-            .lock()
-            .expect("inbox mutex poisoned; fail-fast per ADR-0063")
-            .try_recv()
+        inbox.lock().expect("inbox mutex poisoned; fail-fast per ADR-0063").try_recv()
     }
 
     /// Reply path for native actors (ADR-0080 §5 / #1695). Mints the
@@ -480,19 +457,13 @@ impl NativeBinding {
     /// `SettlementHold`'s root. Issue 665 retired the FFI-shaped
     /// `reply_mail` stub the prior `MailTransport` impl carried; this
     /// typed entry is the only reply API native actors reach for.
-    pub fn send_reply_for_handler<K>(
-        &self,
-        sender: Source,
-        payload: &K,
-        root: MailId,
-        parent: Option<MailId>,
-    ) where
+    pub fn send_reply_for_handler<K>(&self, sender: Source, payload: &K, root: MailId, parent: Option<MailId>)
+    where
         K: Kind,
     {
         let correlation = self.reply_lineage.mint();
         let reply_id = MailId::new(self.self_mailbox, correlation);
-        self.mailer
-            .send_reply(sender, payload, reply_id, root, parent);
+        self.mailer.send_reply(sender, payload, reply_id, root, parent);
     }
 
     /// Store request context for a just-minted outbound request.
@@ -511,10 +482,7 @@ impl NativeBinding {
     /// # Panics
     /// Panics if the request-context mutex is poisoned.
     pub fn take_request_context<C: Kind>(&self, request: RequestId) -> Option<C> {
-        self.request_contexts
-            .lock()
-            .expect("request context table poisoned; fail-fast per ADR-0063")
-            .take(request)
+        self.request_contexts.lock().expect("request context table poisoned; fail-fast per ADR-0063").take(request)
     }
 }
 
@@ -564,14 +532,7 @@ impl NativeBinding {
         parent_mail: Option<MailId>,
         inherited_root: Option<MailId>,
     ) -> u32 {
-        let _ = self.push_envelope_returning_root(
-            recipient,
-            kind,
-            bytes,
-            count,
-            parent_mail,
-            inherited_root,
-        );
+        let _ = self.push_envelope_returning_root(recipient, kind, bytes, count, parent_mail, inherited_root);
         0
     }
 
@@ -600,25 +561,19 @@ impl NativeBinding {
     ) -> MailId {
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
         let recipient_id = MailboxId(recipient);
-        let reply_to =
-            Source::with_correlation(SourceAddr::Component(self.self_mailbox), correlation);
+        let reply_to = Source::with_correlation(SourceAddr::Component(self.self_mailbox), correlation);
         let mail_id = MailId::new(self.self_mailbox, correlation);
         let root = inherited_root.unwrap_or(mail_id);
         // ADR-0080 §2 producer hook: emit `Sent` before pushing the
         // mail. Every `Mailer` carries a trace handle by default
         // (per-chassis post iamacoffeepot/aether#953), so producer
         // calls are unconditional; the drainer is the optional piece.
-        self.mailer.record_sent(
+        self.mailer.record_sent(mail_id, root, parent_mail, self.self_mailbox, recipient_id, KindId(kind));
+        let mail = Mail::new(recipient_id, KindId(kind), bytes.to_vec(), count).with_reply_to(reply_to).with_lineage(
             mail_id,
             root,
             parent_mail,
-            self.self_mailbox,
-            recipient_id,
-            KindId(kind),
         );
-        let mail = Mail::new(recipient_id, KindId(kind), bytes.to_vec(), count)
-            .with_reply_to(reply_to)
-            .with_lineage(mail_id, root, parent_mail);
         self.mailer.push(mail);
         mail_id
     }
@@ -655,15 +610,7 @@ impl NativeBinding {
         parent_mail: Option<MailId>,
         inherited_root: Option<MailId>,
     ) -> MailId {
-        self.push_envelope_buffered_with_reply_to(
-            recipient,
-            kind,
-            bytes,
-            count,
-            parent_mail,
-            inherited_root,
-            None,
-        )
+        self.push_envelope_buffered_with_reply_to(recipient, kind, bytes, count, parent_mail, inherited_root, None)
     }
 
     /// Re-dispatcher variant of [`Self::push_envelope_buffered`] that
@@ -703,9 +650,8 @@ impl NativeBinding {
         reply_to_override: Option<Source>,
     ) -> MailId {
         let correlation = self.correlation.fetch_add(1, Ordering::AcqRel) + 1;
-        let reply_to = reply_to_override.unwrap_or_else(|| {
-            Source::with_correlation(SourceAddr::Component(self.self_mailbox), correlation)
-        });
+        let reply_to = reply_to_override
+            .unwrap_or_else(|| Source::with_correlation(SourceAddr::Component(self.self_mailbox), correlation));
         let mail_id = MailId::new(self.self_mailbox, correlation);
         let root = inherited_root.unwrap_or(mail_id);
         // iamacoffeepot/aether#1150: only the settlement increment is
@@ -714,24 +660,15 @@ impl NativeBinding {
         // id, kind, and lineage ride the `PendingMail` to flush, where the
         // deferred `Sent` is built from the routed `Mail`.
         self.mailer.record_sent_inflight(root);
-        let mut buf = self
-            .outbound
-            .lock()
-            .expect("outbound buffer poisoned; fail-fast per ADR-0063");
+        let mut buf = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
         // Write the payload into the ring in place. Open the blob lazily
         // on the first send of this flush window; on `RingFull` (full ring
         // or oversized payload) copy out to `Owned` — the never-block
         // valve. The open blob is left intact on `RingFull`, so a later
         // send (after a consumer frees space) can still extend it.
         let payload = {
-            let OutboundBuffer {
-                ring,
-                blob_open,
-                construct_start,
-                ..
-            } = &mut *buf;
-            let ring =
-                ring.get_or_insert_with(|| Arc::new(MailRing::with_capacity(ACTOR_RING_BYTES)));
+            let OutboundBuffer { ring, blob_open, construct_start, .. } = &mut *buf;
+            let ring = ring.get_or_insert_with(|| Arc::new(MailRing::with_capacity(ACTOR_RING_BYTES)));
             if !*blob_open {
                 ring.open_blob();
                 *blob_open = true;
@@ -747,16 +684,7 @@ impl NativeBinding {
                 Err(RingFull) => PendingPayload::Owned(bytes.to_vec()),
             }
         };
-        buf.mails.push(PendingMail {
-            recipient,
-            kind,
-            payload,
-            count,
-            reply_to,
-            mail_id,
-            root,
-            parent_mail,
-        });
+        buf.mails.push(PendingMail { recipient, kind, payload, count, reply_to, mail_id, root, parent_mail });
         mail_id
     }
 
@@ -821,10 +749,7 @@ impl NativeBinding {
         // a wire hole.
         let construct_start;
         let routed: Vec<Mail> = {
-            let mut buf = self
-                .outbound
-                .lock()
-                .expect("outbound buffer poisoned; fail-fast per ADR-0063");
+            let mut buf = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
             // Seal the open blob first (publishes the in-ring locks), so a
             // `MailRef::InRing` minted below reads a finalized header.
             if buf.blob_open {
@@ -847,10 +772,9 @@ impl NativeBinding {
                 .drain(..)
                 .map(|p| {
                     let payload = match p.payload {
-                        PendingPayload::InRing(loc) => MailRef::in_ring(
-                            Arc::clone(ring.expect("ring exists once an InRing mail was minted")),
-                            loc,
-                        ),
+                        PendingPayload::InRing(loc) => {
+                            MailRef::in_ring(Arc::clone(ring.expect("ring exists once an InRing mail was minted")), loc)
+                        }
                         PendingPayload::Owned(bytes) => MailRef::from(bytes),
                     };
                     Mail::new(MailboxId(p.recipient), KindId(p.kind), payload, p.count)
@@ -884,17 +808,9 @@ impl NativeBinding {
         // when a pool sink is wired. Otherwise route per mail (a test
         // binding with no `Spawner`).
         if self.spawner.is_some() {
-            let mut guard = self
-                .blob_producer
-                .lock()
-                .expect("blob_producer poisoned; fail-fast per ADR-0063");
+            let mut guard = self.blob_producer.lock().expect("blob_producer poisoned; fail-fast per ADR-0063");
             let producer = guard.get_or_insert_with(|| {
-                let sink = self
-                    .spawner
-                    .as_ref()
-                    .expect("spawner present in this branch")
-                    .wake_sink()
-                    .clone();
+                let sink = self.spawner.as_ref().expect("spawner present in this branch").wake_sink().clone();
                 super::blob_work::BlobProducer::new(Arc::clone(&self.mailer), sink)
             });
             producer.flush(routed);
@@ -950,11 +866,7 @@ impl NativeBinding {
     /// # Panics
     /// Panics if the in-flight ledger mutex is poisoned — fail-fast per
     /// ADR-0063.
-    pub(crate) fn dispatch_fill_output(
-        &self,
-        id: super::dispatch_blocking::DispatchId,
-        output: Box<dyn Any + Send>,
-    ) {
+    pub(crate) fn dispatch_fill_output(&self, id: super::dispatch_blocking::DispatchId, output: Box<dyn Any + Send>) {
         self.inflight
             .lock()
             .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
@@ -972,10 +884,7 @@ impl NativeBinding {
         &self,
         id: super::dispatch_blocking::DispatchId,
     ) -> Option<super::dispatch_blocking::TaskDone<O, C>> {
-        self.inflight
-            .lock()
-            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_take(id)
+        self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_take(id)
     }
 
     /// Remove the named dispatch entry and hand back its parked
@@ -991,10 +900,7 @@ impl NativeBinding {
         &self,
         id: super::dispatch_blocking::DispatchId,
     ) -> Option<(SettlementHold, Source)> {
-        self.inflight
-            .lock()
-            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_abandon(id)
+        self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_abandon(id)
     }
 
     /// Non-consuming peek-then-take of the named dispatch entry: probe its
@@ -1011,18 +917,12 @@ impl NativeBinding {
         &self,
         id: super::dispatch_blocking::DispatchId,
     ) -> Option<super::dispatch_blocking::TaskDone<O, C>> {
-        self.inflight
-            .lock()
-            .expect("in-flight ledger poisoned; fail-fast per ADR-0063")
-            .dispatch_try_take(id)
+        self.inflight.lock().expect("in-flight ledger poisoned; fail-fast per ADR-0063").dispatch_try_take(id)
     }
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test-setup unwraps: fixture construction panic on failure is the assertion"
-)]
+#[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 #[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     use super::*;
@@ -1090,16 +990,10 @@ mod tests {
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
         let (reply_tx, reply_rx) = mpsc::channel::<Envelope>();
-        let caller = registry.register_inbox(
-            "test.reply_chain.caller",
-            forward_to_envelope_sender(reply_tx),
-        );
+        let caller = registry.register_inbox("test.reply_chain.caller", forward_to_envelope_sender(reply_tx));
 
         let actor_mailbox = MailboxId(0x00BE_EF01);
-        let binding = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            actor_mailbox,
-        ));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
 
         let root = MailId::new(MailboxId(0xC0), 1);
         let request = MailId::new(MailboxId(0xC0), 1);
@@ -1114,30 +1008,15 @@ mod tests {
 
         let reply = reply_rx.try_recv().expect("reply routed to the caller");
         assert_eq!(reply.root, root, "reply inherits the caller's root");
-        assert_eq!(
-            reply.parent_mail,
-            Some(request),
-            "reply's parent is the handled request"
-        );
+        assert_eq!(reply.parent_mail, Some(request), "reply's parent is the handled request");
         assert_ne!(reply.mail_id, MailId::NONE, "reply carries a real mail id");
-        assert_eq!(
-            reply.mail_id.sender, actor_mailbox,
-            "reply id is minted in the replier's id space"
-        );
+        assert_eq!(reply.mail_id.sender, actor_mailbox, "reply id is minted in the replier's id space");
 
         // The reply's Sent keeps the caller root live (the bare forwarding
         // sink records no Finished); the matching Finished reclaims it.
-        assert_eq!(
-            counter.live_roots(),
-            1,
-            "the reply's Sent holds the caller chain open"
-        );
+        assert_eq!(counter.live_roots(), 1, "the reply's Sent holds the caller chain open");
         mailer.record_finished(reply.mail_id, root);
-        assert_eq!(
-            counter.live_roots(),
-            0,
-            "the reply's Finished balances its Sent exactly"
-        );
+        assert_eq!(counter.live_roots(), 0, "the reply's Finished balances its Sent exactly");
     }
 
     /// #1695: minting a reply's lineage id draws from the disjoint
@@ -1152,10 +1031,7 @@ mod tests {
 
         let (registry, mailer) = bare_substrate();
         let (reply_tx, _reply_rx) = mpsc::channel::<Envelope>();
-        let caller = registry.register_inbox(
-            "test.reply_corr.caller",
-            forward_to_envelope_sender(reply_tx),
-        );
+        let caller = registry.register_inbox("test.reply_corr.caller", forward_to_envelope_sender(reply_tx));
 
         let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF02)));
         assert_eq!(binding.prev_correlation(), 0);
@@ -1167,11 +1043,7 @@ mod tests {
             OutboundReply::reply(&mut ctx, &Tick);
             OutboundReply::reply(&mut ctx, &Tick);
         }
-        assert_eq!(
-            binding.prev_correlation(),
-            0,
-            "replies must not advance the send correlation counter"
-        );
+        assert_eq!(binding.prev_correlation(), 0, "replies must not advance the send correlation counter");
     }
 
     // ADR-0119: the per-impl `Singleton::resolve` override (the
@@ -1214,28 +1086,17 @@ mod tests {
 
         let resolved = <Child as Addressable>::resolve(parent_carry, ());
         let flat = mailbox_id_from_name("test.send_fold.child");
-        assert_ne!(
-            resolved, flat,
-            "fixture: the carry-derived id must differ from the flat hash"
-        );
+        assert_ne!(resolved, flat, "fixture: the carry-derived id must differ from the flat hash");
 
         // Capture at both candidate recipients: the carry-derived id the
         // send must target, and the flat depth-1 hash the pre-fix path used.
         let (resolved_tx, resolved_rx) = mpsc::channel::<Envelope>();
         let (flat_tx, flat_rx) = mpsc::channel::<Envelope>();
         registry
-            .try_register_inbox_with_id(
-                resolved,
-                "test.send_fold.resolved",
-                forward_to_envelope_sender(resolved_tx),
-            )
+            .try_register_inbox_with_id(resolved, "test.send_fold.resolved", forward_to_envelope_sender(resolved_tx))
             .expect("register resolved sink");
         registry
-            .try_register_inbox_with_id(
-                flat,
-                "test.send_fold.flat",
-                forward_to_envelope_sender(flat_tx),
-            )
+            .try_register_inbox_with_id(flat, "test.send_fold.flat", forward_to_envelope_sender(flat_tx))
             .expect("register flat sink");
 
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(parent_carry)));
@@ -1245,14 +1106,8 @@ mod tests {
             // ctx drops here → `flush_outbound` routes the buffered send.
         }
 
-        assert!(
-            resolved_rx.try_recv().is_ok(),
-            "send must route to Child::resolve(carry), the carry-derived id"
-        );
-        assert!(
-            flat_rx.try_recv().is_err(),
-            "send must NOT route to the flat hash(NAMESPACE)"
-        );
+        assert!(resolved_rx.try_recv().is_ok(), "send must route to Child::resolve(carry), the carry-derived id");
+        assert!(flat_rx.try_recv().is_err(), "send must NOT route to the flat hash(NAMESPACE)");
     }
 
     /// `install_inbox` is single-claim — a second install panics.
@@ -1279,9 +1134,7 @@ mod tests {
         let (_registry, mailer) = bare_substrate();
         let settlement = Arc::new(SettlementRegistry::new());
         mailer.install_settlement_registry(Arc::clone(&settlement));
-        mailer
-            .trace_handle()
-            .install_settlement_registry(Arc::clone(&settlement));
+        mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
 
         let id = MailboxId(0x1756);
         let (tx, rx) = mpsc::channel::<Envelope>();
@@ -1313,9 +1166,7 @@ mod tests {
 
         // Drop the transport; the SettlingInbox inside settles the queued mail.
         drop(transport);
-        settle
-            .recv()
-            .expect("binding teardown settles queued armed mail (#1716)");
+        settle.recv().expect("binding teardown settles queued armed mail (#1716)");
     }
 
     /// Step 3: reply ids minted via `send_reply_for_handler` still sit in
@@ -1329,10 +1180,7 @@ mod tests {
 
         let (registry, mailer) = bare_substrate();
         let (reply_tx, reply_rx) = mpsc::channel::<Envelope>();
-        let caller = registry.register_inbox(
-            "test.binding.reply_space.caller",
-            forward_to_envelope_sender(reply_tx),
-        );
+        let caller = registry.register_inbox("test.binding.reply_space.caller", forward_to_envelope_sender(reply_tx));
 
         let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF03)));
         assert_eq!(binding.prev_correlation(), 0);
@@ -1349,11 +1197,7 @@ mod tests {
             reply_env.mail_id.correlation_id >= ReplyLineage::BASE,
             "reply id sits in the disjoint reply-lineage space",
         );
-        assert_eq!(
-            binding.prev_correlation(),
-            0,
-            "minting a reply must not advance the send correlation counter"
-        );
+        assert_eq!(binding.prev_correlation(), 0, "minting a reply must not advance the send correlation counter");
         reply_env.discharge();
     }
 
@@ -1370,10 +1214,7 @@ mod tests {
 
         transport.push_envelope_buffered(recipient.0, 7, &[1, 2, 3], 1, None, None);
         transport.push_envelope_buffered(recipient.0, 9, &[4, 5], 1, None, None);
-        assert!(
-            rx.try_recv().is_err(),
-            "buffered sends must not route before flush"
-        );
+        assert!(rx.try_recv().is_err(), "buffered sends must not route before flush");
 
         transport.flush_outbound();
         let a = rx.try_recv().expect("first mail delivered after flush");
@@ -1403,9 +1244,7 @@ mod tests {
         transport.push_envelope_buffered(recipient.0, 3, &big, 1, None, None);
         transport.flush_outbound();
 
-        let env = rx
-            .try_recv()
-            .expect("oversized mail still delivered via copy-out");
+        let env = rx.try_recv().expect("oversized mail still delivered via copy-out");
         assert_eq!(env.payload.len(), big.len());
         assert_eq!(env.payload.bytes(), &big[..]);
     }
@@ -1492,10 +1331,6 @@ mod tests {
         for h in consumers {
             h.join().expect("consumer thread joins");
         }
-        assert_eq!(
-            consumed.load(Ordering::Acquire),
-            sent,
-            "every flushed mail must be consumed"
-        );
+        assert_eq!(consumed.load(Ordering::Acquire), sent, "every flushed mail must be consumed");
     }
 }

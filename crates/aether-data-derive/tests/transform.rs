@@ -24,16 +24,7 @@ fn ui() {
 }
 
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.det_scalar")]
 struct DetScalar {
     value: u32,
@@ -44,9 +35,7 @@ struct DetScalar {
 /// same output bytes.
 #[transform]
 fn det_double(x: DetScalar) -> DetScalar {
-    DetScalar {
-        value: x.value.wrapping_mul(2),
-    }
+    DetScalar { value: x.value.wrapping_mul(2) }
 }
 
 /// ADR-0048 §"Determinism": calling the generated `invoke` twice on

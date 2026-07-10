@@ -38,11 +38,7 @@ pub const CHASSIS_PACKAGE: &str = "aether-substrate-bundle";
 
 /// Chassis (host-target) binaries packaged into `dist/bin/`. Each name is
 /// both the `--bin` selector and the output filename.
-pub const CHASSIS_BINS: &[&str] = &[
-    "aether-substrate",
-    "aether-substrate-headless",
-    "aether-substrate-hub",
-];
+pub const CHASSIS_BINS: &[&str] = &["aether-substrate", "aether-substrate-headless", "aether-substrate-hub"];
 
 /// One discovered wasm component artifact.
 #[derive(Debug, Clone)]
@@ -159,18 +155,10 @@ pub fn discover_behavior_variants(metadata: &Metadata) -> Vec<BehaviorVariant> {
         if features.is_empty() {
             continue;
         }
-        let Some(target) = package
-            .targets
-            .iter()
-            .find(|t| t.crate_types.contains(&CrateType::CDyLib))
-        else {
+        let Some(target) = package.targets.iter().find(|t| t.crate_types.contains(&CrateType::CDyLib)) else {
             continue;
         };
-        variants.push(BehaviorVariant {
-            package: package.name.to_string(),
-            stem: target.name.clone(),
-            features,
-        });
+        variants.push(BehaviorVariant { package: package.name.to_string(), stem: target.name.clone(), features });
     }
     variants
 }
@@ -216,11 +204,7 @@ fn behavior_features(package: &Package) -> Vec<String> {
     let mut features: Vec<String> = package
         .features
         .iter()
-        .filter(|(_, enables)| {
-            enables
-                .iter()
-                .any(|enable| enable == BEHAVIOR_FEATURE_TOKEN)
-        })
+        .filter(|(_, enables)| enables.iter().any(|enable| enable == BEHAVIOR_FEATURE_TOKEN))
         .map(|(name, _)| name.clone())
         .collect();
     features.sort();
@@ -257,11 +241,8 @@ pub fn build_plans(components: &[Component]) -> Vec<BuildPlan> {
 pub fn behavior_build_plans(behaviors: &[Behavior]) -> Vec<BuildPlan> {
     let mut plans: Vec<BuildPlan> = Vec::new();
     for behavior in behaviors {
-        let plan = BuildPlan {
-            package: behavior.package.clone(),
-            examples: behavior.from_example,
-            features: Vec::new(),
-        };
+        let plan =
+            BuildPlan { package: behavior.package.clone(), examples: behavior.from_example, features: Vec::new() };
         if !plans.contains(&plan) {
             plans.push(plan);
         }

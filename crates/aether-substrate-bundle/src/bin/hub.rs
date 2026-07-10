@@ -25,17 +25,11 @@ fn main() -> anyhow::Result<()> {
     // chassis kind, linked caps, build provenance — as JSON, then exit
     // before boot.
     if cli.describe {
-        println!(
-            "{}",
-            serde_json::to_string(&HubChassis::describe_manifest())?
-        );
+        println!("{}", serde_json::to_string(&HubChassis::describe_manifest())?);
         return Ok(());
     }
     let chassis = HubChassis::build(HubEnv::from_env_with_argv(&cli)?)?;
-    eprintln!(
-        "aether-substrate-bundle: hub chassis initialised (profile={})",
-        HubChassis::PROFILE,
-    );
+    eprintln!("aether-substrate-bundle: hub chassis initialised (profile={})", HubChassis::PROFILE);
     chassis.run()?;
     Ok(())
 }

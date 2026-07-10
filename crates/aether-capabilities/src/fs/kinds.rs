@@ -57,16 +57,8 @@ pub struct Read {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.read_result")]
 pub enum ReadResult {
-    Ok {
-        namespace: String,
-        path: String,
-        bytes: Vec<u8>,
-    },
-    Err {
-        namespace: String,
-        path: String,
-        error: FsError,
-    },
+    Ok { namespace: String, path: String, bytes: Vec<u8> },
+    Err { namespace: String, path: String, error: FsError },
 }
 
 /// `aether.fs.write` — request the substrate write `bytes` to
@@ -92,15 +84,8 @@ pub struct Write {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.write_result")]
 pub enum WriteResult {
-    Ok {
-        namespace: String,
-        path: String,
-    },
-    Err {
-        namespace: String,
-        path: String,
-        error: FsError,
-    },
+    Ok { namespace: String, path: String },
+    Err { namespace: String, path: String, error: FsError },
 }
 
 /// Destination address for `aether.fs.copy`: a logical namespace
@@ -142,15 +127,8 @@ pub struct Copy {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.copy_result")]
 pub enum CopyResult {
-    Ok {
-        from: String,
-        to: NamespaceAddr,
-    },
-    Err {
-        from: String,
-        to: NamespaceAddr,
-        error: FsError,
-    },
+    Ok { from: String, to: NamespaceAddr },
+    Err { from: String, to: NamespaceAddr, error: FsError },
 }
 
 /// `aether.fs.delete` — request the substrate remove a file.
@@ -172,15 +150,8 @@ pub struct Delete {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.delete_result")]
 pub enum DeleteResult {
-    Ok {
-        namespace: String,
-        path: String,
-    },
-    Err {
-        namespace: String,
-        path: String,
-        error: FsError,
-    },
+    Ok { namespace: String, path: String },
+    Err { namespace: String, path: String, error: FsError },
 }
 
 /// `aether.fs.list` — enumerate entries under `prefix` in
@@ -206,16 +177,8 @@ pub struct List {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.fs.list_result")]
 pub enum ListResult {
-    Ok {
-        namespace: String,
-        prefix: String,
-        entries: Vec<String>,
-    },
-    Err {
-        namespace: String,
-        prefix: String,
-        error: FsError,
-    },
+    Ok { namespace: String, prefix: String, entries: Vec<String> },
+    Err { namespace: String, prefix: String, error: FsError },
 }
 
 // `aether.fs.fetch` — the fs actor's transform-pipeline verb (issue
@@ -251,11 +214,7 @@ pub enum FsFoldError {
     NonLinearArity { at_index: u64, arity: u64 },
     /// The output kind of the transform at `at_index - 1` does not
     /// match the input kind of the transform at `at_index`.
-    KindMismatch {
-        at_index: u64,
-        expected: KindId,
-        found: KindId,
-    },
+    KindMismatch { at_index: u64, expected: KindId, found: KindId },
 }
 
 /// Structured runtime-invocation error for a single transform stage

@@ -45,8 +45,8 @@ fn known_kind_bad_payload_reports_unknown_kind_not_handled() {
     // `type_tag = None` instantiates the module's entry actor — `Probe`, the
     // strict (no-`#[fallback]`) receiver (export!(Probe, ProbeWithConfig) makes
     // the first-listed `Probe` the entry).
-    let mut component = Component::instantiate(&engine, &linker, &module, ctx, &[], None)
-        .expect("instantiate Probe fixture");
+    let mut component =
+        Component::instantiate(&engine, &linker, &module, ctx, &[], None).expect("instantiate Probe fixture");
 
     // `SetRender` is a `#[repr(C)]` 4-byte cast-shape kind; a 2-byte payload
     // fails `decode_cast`'s `len() == size_of` check, so the matched dispatch

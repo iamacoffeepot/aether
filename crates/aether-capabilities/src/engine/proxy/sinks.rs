@@ -43,20 +43,12 @@ impl NativeActor for EngineCapSink {
 
     #[handler::single]
     fn on_alive(&mut self, _ctx: &mut NativeCtx<'_>, mail: EngineAlive) {
-        self.cells
-            .alive
-            .lock()
-            .expect("test setup: alive cell mutex poisoned")
-            .push(mail.engine_id);
+        self.cells.alive.lock().expect("test setup: alive cell mutex poisoned").push(mail.engine_id);
     }
 
     #[handler::single]
     fn on_died(&mut self, _ctx: &mut NativeCtx<'_>, mail: EngineDied) {
-        self.cells
-            .died
-            .lock()
-            .expect("test setup: died cell mutex poisoned")
-            .push(mail);
+        self.cells.died.lock().expect("test setup: died cell mutex poisoned").push(mail);
     }
 }
 
@@ -73,18 +65,12 @@ impl NativeActor for ProxyReplySink {
     type Config = Arc<Mutex<Option<u64>>>;
     const NAMESPACE: &'static str = "aether.engine.test.reply_sink";
 
-    fn init(
-        recorded: Arc<Mutex<Option<u64>>>,
-        _ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<Self, BootError> {
+    fn init(recorded: Arc<Mutex<Option<u64>>>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { recorded })
     }
 
     #[handler::single]
     fn on_reply(&mut self, _ctx: &mut NativeCtx<'_>, reply: TestEchoReply) {
-        *self
-            .recorded
-            .lock()
-            .expect("test setup: recorded mutex poisoned") = Some(reply.value);
+        *self.recorded.lock().expect("test setup: recorded mutex poisoned") = Some(reply.value);
     }
 }

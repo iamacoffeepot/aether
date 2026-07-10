@@ -146,10 +146,7 @@ pub fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>, FrameError> {
     let body = wire::to_vec(msg).expect("wire encode to Vec is infallible");
     let max = max_frame_size();
     if body.len() > max {
-        return Err(FrameError::EncodeTooLarge {
-            size: body.len(),
-            max,
-        });
+        return Err(FrameError::EncodeTooLarge { size: body.len(), max });
     }
     let mut out = Vec::with_capacity(4 + body.len());
     // 4-byte LE length prefix is the wire format; bodies above 4 GiB
@@ -209,10 +206,7 @@ mod tests {
 
     #[test]
     fn roundtrip_struct_variant() {
-        let msg = Msg::Note {
-            id: 7,
-            text: "hi".into(),
-        };
+        let msg = Msg::Note { id: 7, text: "hi".into() };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).expect("test setup: write struct frame");
         let back: Msg = read_frame(&mut Cursor::new(buf)).expect("test setup: read struct frame");
@@ -223,26 +217,14 @@ mod tests {
     fn unit_variant_is_eight_bytes() {
         // 4 byte prefix + 4 byte wire body (the variant index u32; the
         // image is unversioned, ADR-0118 §Envelope).
-        assert_eq!(
-            encode_frame(&Msg::Tick)
-                .expect("test setup: encode unit variant")
-                .len(),
-            8,
-        );
+        assert_eq!(encode_frame(&Msg::Tick).expect("test setup: encode unit variant").len(), 8,);
     }
 
     #[test]
     fn multiple_frames_back_to_back() {
         let mut buf = Vec::new();
         write_frame(&mut buf, &Msg::Tick).expect("test setup: write first tick");
-        write_frame(
-            &mut buf,
-            &Msg::Note {
-                id: 1,
-                text: "a".into(),
-            },
-        )
-        .expect("test setup: write note frame");
+        write_frame(&mut buf, &Msg::Note { id: 1, text: "a".into() }).expect("test setup: write note frame");
         write_frame(&mut buf, &Msg::Tick).expect("test setup: write second tick");
 
         let mut r = Cursor::new(buf);
@@ -255,8 +237,7 @@ mod tests {
     fn frame_too_large_rejected() {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(100 * 1024 * 1024u32).to_le_bytes());
-        let err =
-            read_frame::<_, Msg>(&mut Cursor::new(buf)).expect_err("oversized frame must reject");
+        let err = read_frame::<_, Msg>(&mut Cursor::new(buf)).expect_err("oversized frame must reject");
         assert!(matches!(err, FrameError::FrameTooLarge { .. }));
     }
 
@@ -265,8 +246,7 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&100u32.to_le_bytes());
         buf.extend_from_slice(&[0u8; 10]);
-        let err = read_frame::<_, Msg>(&mut Cursor::new(buf))
-            .expect_err("truncated body must surface io error");
+        let err = read_frame::<_, Msg>(&mut Cursor::new(buf)).expect_err("truncated body must surface io error");
         assert!(matches!(err, FrameError::Io(_)));
     }
 
@@ -275,8 +255,7 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&1u32.to_le_bytes());
         buf.push(0xff);
-        let err = read_frame::<_, Msg>(&mut Cursor::new(buf))
-            .expect_err("malformed body must surface wire error");
+        let err = read_frame::<_, Msg>(&mut Cursor::new(buf)).expect_err("malformed body must surface wire error");
         assert!(matches!(err, FrameError::Wire(_)));
     }
 
@@ -288,10 +267,7 @@ mod tests {
         // The encode-side check sees the wire-encoded body length
         // and bails before allocating the framed `Vec`.
         let oversize_text = "x".repeat(max_frame_size() + 16);
-        let msg = Msg::Note {
-            id: 1,
-            text: oversize_text,
-        };
+        let msg = Msg::Note { id: 1, text: oversize_text };
         let err = encode_frame(&msg).expect_err("oversize body must reject on encode");
         let max = max_frame_size();
         match err {
@@ -308,18 +284,11 @@ mod tests {
     #[test]
     fn write_frame_propagates_encode_too_large() {
         let oversize_text = "x".repeat(max_frame_size() + 16);
-        let msg = Msg::Note {
-            id: 1,
-            text: oversize_text,
-        };
+        let msg = Msg::Note { id: 1, text: oversize_text };
         let mut sink: Vec<u8> = Vec::new();
         let err = write_frame(&mut sink, &msg).expect_err("oversize write must reject");
         assert!(matches!(err, FrameError::EncodeTooLarge { .. }));
-        assert!(
-            sink.is_empty(),
-            "oversize encode must not write partial bytes; got {} bytes",
-            sink.len(),
-        );
+        assert!(sink.is_empty(), "oversize encode must not write partial bytes; got {} bytes", sink.len());
     }
 
     /// The `AETHER_MAX_FRAME_SIZE` env-var override goes through
@@ -331,24 +300,15 @@ mod tests {
         // Unset / empty / garbage → default.
         assert_eq!(resolve_max_frame_size(None), MAX_FRAME_SIZE);
         assert_eq!(resolve_max_frame_size(Some(String::new())), MAX_FRAME_SIZE);
-        assert_eq!(
-            resolve_max_frame_size(Some("not-a-number".into())),
-            MAX_FRAME_SIZE,
-        );
+        assert_eq!(resolve_max_frame_size(Some("not-a-number".into())), MAX_FRAME_SIZE,);
         assert_eq!(resolve_max_frame_size(Some("0".into())), MAX_FRAME_SIZE);
         // Valid override.
         let override_val: usize = 32 * 1024 * 1024;
-        assert_eq!(
-            resolve_max_frame_size(Some(override_val.to_string())),
-            override_val,
-        );
+        assert_eq!(resolve_max_frame_size(Some(override_val.to_string())), override_val,);
         // Whitespace tolerated.
         assert_eq!(resolve_max_frame_size(Some("  4096  ".into())), 4096);
         // Above ceiling → clamps.
         let above_ceiling: usize = MAX_FRAME_SIZE_CEILING * 4;
-        assert_eq!(
-            resolve_max_frame_size(Some(above_ceiling.to_string())),
-            MAX_FRAME_SIZE_CEILING,
-        );
+        assert_eq!(resolve_max_frame_size(Some(above_ceiling.to_string())), MAX_FRAME_SIZE_CEILING,);
     }
 }

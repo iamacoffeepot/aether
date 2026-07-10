@@ -33,11 +33,7 @@ fn run_headless_capture(args: &[&str], wait: Duration) -> Vec<String> {
 /// Like [`run_headless_capture`] but layers extra `(key, value)` env
 /// pairs onto the child (issue 1990: set `AETHER_ACTOR_TRACE_RING_SIZE`
 /// to observe the chassis-main resolution reaching the boot line).
-fn run_headless_capture_with_env(
-    args: &[&str],
-    extra_env: &[(&str, &str)],
-    wait: Duration,
-) -> Vec<String> {
+fn run_headless_capture_with_env(args: &[&str], extra_env: &[(&str, &str)], wait: Duration) -> Vec<String> {
     let bin = env!("CARGO_BIN_EXE_aether-substrate-headless");
     let mut cmd = Command::new(bin);
     cmd.args(args)
@@ -153,16 +149,14 @@ fn argv_tick_hz_30_reaches_child() {
     // and the boot tracing line lands as soon as the chassis builder
     // finishes, well before the first tick fires.
     let lines = run_headless_capture(&["--tick-hz", "30"], Duration::from_secs(2));
-    let hz = find_tick_hz(&lines)
-        .unwrap_or_else(|| panic!("no tick_hz tracing line observed; stderr was:\n{lines:?}"));
+    let hz = find_tick_hz(&lines).unwrap_or_else(|| panic!("no tick_hz tracing line observed; stderr was:\n{lines:?}"));
     assert_eq!(hz, 30, "--tick-hz 30 must reach the child's chassis env");
 }
 
 #[test]
 fn argv_tick_hz_120_reaches_child() {
     let lines = run_headless_capture(&["--tick-hz", "120"], Duration::from_secs(2));
-    let hz = find_tick_hz(&lines)
-        .unwrap_or_else(|| panic!("no tick_hz tracing line observed; stderr was:\n{lines:?}"));
+    let hz = find_tick_hz(&lines).unwrap_or_else(|| panic!("no tick_hz tracing line observed; stderr was:\n{lines:?}"));
     assert_eq!(hz, 120, "--tick-hz 120 must reach the child's chassis env");
 }
 
@@ -173,8 +167,7 @@ fn empty_argv_falls_through_to_env_default() {
     // unset (the env mutator above clears it), the chassis lands on
     // the env-only `DEFAULT_TICK_HZ` (60 Hz).
     let lines = run_headless_capture(&[], Duration::from_secs(2));
-    let hz = find_tick_hz(&lines)
-        .unwrap_or_else(|| panic!("no tick_hz tracing line observed; stderr was:\n{lines:?}"));
+    let hz = find_tick_hz(&lines).unwrap_or_else(|| panic!("no tick_hz tracing line observed; stderr was:\n{lines:?}"));
     assert_eq!(hz, 60, "empty argv must fall through to default tick rate");
 }
 
@@ -187,18 +180,10 @@ fn actor_trace_ring_size_env_reaches_chassis_boot() {
     // chassis actors seed their trace rings at this cap (the in-process
     // `TestBench` tests assert the ring-level eviction behaviour); this
     // test guards the env → chassis-main → builder edge.
-    let lines = run_headless_capture_with_env(
-        &[],
-        &[("AETHER_ACTOR_TRACE_RING_SIZE", "8191")],
-        Duration::from_secs(2),
-    );
-    let cap = find_numeric_field(&lines, "trace_ring_capacity").unwrap_or_else(|| {
-        panic!("no trace_ring_capacity tracing line observed; stderr was:\n{lines:?}")
-    });
-    assert_eq!(
-        cap, 8191,
-        "AETHER_ACTOR_TRACE_RING_SIZE must reach the chassis boot",
-    );
+    let lines = run_headless_capture_with_env(&[], &[("AETHER_ACTOR_TRACE_RING_SIZE", "8191")], Duration::from_secs(2));
+    let cap = find_numeric_field(&lines, "trace_ring_capacity")
+        .unwrap_or_else(|| panic!("no trace_ring_capacity tracing line observed; stderr was:\n{lines:?}"));
+    assert_eq!(cap, 8191, "AETHER_ACTOR_TRACE_RING_SIZE must reach the chassis boot");
 }
 
 #[test]
@@ -209,19 +194,12 @@ fn actor_trace_ring_max_size_env_reaches_chassis_boot() {
     // the same `aether_substrate::boot` tracing line as the floor. The
     // in-process `TestBench` / `aether-actor` tests assert the ring-level
     // growth behaviour; this guards the env → chassis-main → builder edge.
-    let lines = run_headless_capture_with_env(
-        &[],
-        &[("AETHER_ACTOR_TRACE_RING_MAX_SIZE", "131072")],
-        Duration::from_secs(2),
-    );
+    let lines =
+        run_headless_capture_with_env(&[], &[("AETHER_ACTOR_TRACE_RING_MAX_SIZE", "131072")], Duration::from_secs(2));
     // The floor field (`trace_ring_capacity=`) is not a substring of the
     // ceiling field (`trace_ring_max_capacity=`), so the search is
     // unambiguous despite both landing on the same line.
-    let max = find_numeric_field(&lines, "trace_ring_max_capacity").unwrap_or_else(|| {
-        panic!("no trace_ring_max_capacity tracing line observed; stderr was:\n{lines:?}")
-    });
-    assert_eq!(
-        max, 131_072,
-        "AETHER_ACTOR_TRACE_RING_MAX_SIZE must reach the chassis boot",
-    );
+    let max = find_numeric_field(&lines, "trace_ring_max_capacity")
+        .unwrap_or_else(|| panic!("no trace_ring_max_capacity tracing line observed; stderr was:\n{lines:?}"));
+    assert_eq!(max, 131_072, "AETHER_ACTOR_TRACE_RING_MAX_SIZE must reach the chassis boot");
 }

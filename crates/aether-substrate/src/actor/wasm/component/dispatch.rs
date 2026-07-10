@@ -28,9 +28,7 @@ impl Component {
         let mailbox_id = self.self_mailbox_id;
         let rc = wire_fn.call(&mut self.store, mailbox_id)?;
         if rc != 0 {
-            return Err(wasmtime::Error::msg(format!(
-                "guest wire returned non-zero rc {rc}"
-            )));
+            return Err(wasmtime::Error::msg(format!("guest wire returned non-zero rc {rc}")));
         }
         Ok(())
     }
@@ -70,22 +68,12 @@ impl Component {
         // a correlation carries 0 — fine, echo of 0 is a no-op.
         let correlation = mail.reply_to.correlation_id;
         let entry = match &mail.reply_to.addr {
-            SourceAddr::Session(token) => {
-                Some(ReplyEntry::new(SourceAddr::Session(*token), correlation))
-            }
-            SourceAddr::EngineMailbox {
-                engine_id,
-                mailbox_id,
-            } => Some(ReplyEntry::new(
-                SourceAddr::EngineMailbox {
-                    engine_id: *engine_id,
-                    mailbox_id: *mailbox_id,
-                },
+            SourceAddr::Session(token) => Some(ReplyEntry::new(SourceAddr::Session(*token), correlation)),
+            SourceAddr::EngineMailbox { engine_id, mailbox_id } => Some(ReplyEntry::new(
+                SourceAddr::EngineMailbox { engine_id: *engine_id, mailbox_id: *mailbox_id },
                 correlation,
             )),
-            SourceAddr::Component(m) => {
-                Some(ReplyEntry::new(SourceAddr::Component(*m), correlation))
-            }
+            SourceAddr::Component(m) => Some(ReplyEntry::new(SourceAddr::Component(*m), correlation)),
             SourceAddr::None => None,
         };
         let handle = match entry {
@@ -114,25 +102,16 @@ impl Component {
         )? {
             Placement::At(ptr) => ptr,
             Placement::Oversize => {
-                self.log_dropped_oversize(
-                    mail,
-                    payload_len,
-                    "exceeds the absolute mail-size bound",
-                );
+                self.log_dropped_oversize(mail, payload_len, "exceeds the absolute mail-size bound");
                 return Ok(DISPATCH_DROPPED_OVERSIZE);
             }
             Placement::NoAllocator => {
-                self.log_dropped_oversize(
-                    mail,
-                    payload_len,
-                    "guest exports no realloc_p32 allocator (raw-FFI guest)",
-                );
+                self.log_dropped_oversize(mail, payload_len, "guest exports no realloc_p32 allocator (raw-FFI guest)");
                 return Ok(DISPATCH_DROPPED_OVERSIZE);
             }
         };
 
-        self.memory
-            .write(&mut self.store, mail_ptr as usize, mail.payload.bytes())?;
+        self.memory.write(&mut self.store, mail_ptr as usize, mail.payload.bytes())?;
         // ADR-0080 §5 (issue iamacoffeepot/aether#722): publish the
         // inbound's lineage on `ComponentCtx` so any guest-triggered
         // `send_mail_p32` / `reply_mail_p32` host fn — both routed
@@ -156,18 +135,9 @@ impl Component {
         // as `source_of_p32` did — a peer-component origin yields its
         // `MailboxId`, every other origin yields `MailboxId::NONE`.
         let source = Self::resolve_inbound_source(&mail.reply_to.addr);
-        let result = self.receive.call(
-            &mut self.store,
-            (
-                mail.kind.0,
-                mail_ptr,
-                byte_len,
-                mail.count,
-                handle,
-                mail.recipient.0,
-                source,
-            ),
-        );
+        let result = self
+            .receive
+            .call(&mut self.store, (mail.kind.0, mail_ptr, byte_len, mail.count, handle, mail.recipient.0, source));
         self.store.data().clear_in_flight();
         result
     }
@@ -176,12 +146,7 @@ impl Component {
     /// could not be delivered safely (iamacoffeepot/aether#1337). The mail is
     /// dropped, not written; the caller settles via the native dispatcher.
     fn log_dropped_oversize(&self, mail: &Mail, payload_len: usize, reason: &str) {
-        let kind_name = self
-            .store
-            .data()
-            .registry
-            .kind_name(mail.kind)
-            .unwrap_or_default();
+        let kind_name = self.store.data().registry.kind_name(mail.kind).unwrap_or_default();
         tracing::error!(
             target: "aether_substrate::component",
             kind = %kind_name,

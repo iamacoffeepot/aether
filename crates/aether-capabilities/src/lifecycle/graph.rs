@@ -50,12 +50,7 @@ impl LifecycleGraphData {
     #[must_use]
     pub fn builder() -> LifecycleGraphBuilder<NoOpen> {
         LifecycleGraphBuilder {
-            inner: GraphInner {
-                states: Vec::new(),
-                terminals: Vec::new(),
-                start: None,
-                pending: None,
-            },
+            inner: GraphInner { states: Vec::new(), terminals: Vec::new(), start: None, pending: None },
             _state: PhantomData,
         }
     }
@@ -134,11 +129,7 @@ impl GraphInner {
             "lifecycle builder bug: commit_pending invoked without a next edge set; \
              type-state should prevent this",
         );
-        self.states.push(LifecycleStateData {
-            kind: pending.kind,
-            next,
-            quit: pending.quit,
-        });
+        self.states.push(LifecycleStateData { kind: pending.kind, next, quit: pending.quit });
     }
 }
 
@@ -146,15 +137,8 @@ impl LifecycleGraphBuilder<NoOpen> {
     /// Register a new state. The stage's broadcast kind id is `K::ID`.
     #[must_use]
     pub fn state<K: Kind>(mut self) -> LifecycleGraphBuilder<OpenNoNext> {
-        self.inner.pending = Some(PendingState {
-            kind: <K as Kind>::ID,
-            next: None,
-            quit: None,
-        });
-        LifecycleGraphBuilder {
-            inner: self.inner,
-            _state: PhantomData,
-        }
+        self.inner.pending = Some(PendingState { kind: <K as Kind>::ID, next: None, quit: None });
+        LifecycleGraphBuilder { inner: self.inner, _state: PhantomData }
     }
 
     /// Register a terminal state. Terminals have no outgoing edges;
@@ -187,10 +171,7 @@ impl LifecycleGraphBuilder<OpenNoNext> {
         if let Some(pending) = self.inner.pending.as_mut() {
             pending.next = Some(<K as Kind>::ID);
         }
-        LifecycleGraphBuilder {
-            inner: self.inner,
-            _state: PhantomData,
-        }
+        LifecycleGraphBuilder { inner: self.inner, _state: PhantomData }
     }
 
     /// Set the pending state's optional `quit` escape edge. Stays in
@@ -214,15 +195,8 @@ impl LifecycleGraphBuilder<OpenWithNext> {
     #[must_use]
     pub fn state<K: Kind>(mut self) -> LifecycleGraphBuilder<OpenNoNext> {
         self.inner.commit_pending();
-        self.inner.pending = Some(PendingState {
-            kind: <K as Kind>::ID,
-            next: None,
-            quit: None,
-        });
-        LifecycleGraphBuilder {
-            inner: self.inner,
-            _state: PhantomData,
-        }
+        self.inner.pending = Some(PendingState { kind: <K as Kind>::ID, next: None, quit: None });
+        LifecycleGraphBuilder { inner: self.inner, _state: PhantomData }
     }
 
     /// Commit the pending state and add a terminal.
@@ -230,10 +204,7 @@ impl LifecycleGraphBuilder<OpenWithNext> {
     pub fn terminal<K: Kind>(mut self) -> LifecycleGraphBuilder<NoOpen> {
         self.inner.commit_pending();
         self.inner.terminals.push(<K as Kind>::ID);
-        LifecycleGraphBuilder {
-            inner: self.inner,
-            _state: PhantomData,
-        }
+        LifecycleGraphBuilder { inner: self.inner, _state: PhantomData }
     }
 
     /// Commit the pending state and set the start.
@@ -241,10 +212,7 @@ impl LifecycleGraphBuilder<OpenWithNext> {
     pub fn start<K: Kind>(mut self) -> LifecycleGraphBuilder<NoOpen> {
         self.inner.commit_pending();
         self.inner.start = Some(<K as Kind>::ID);
-        LifecycleGraphBuilder {
-            inner: self.inner,
-            _state: PhantomData,
-        }
+        LifecycleGraphBuilder { inner: self.inner, _state: PhantomData }
     }
 
     /// Commit the pending state and finalize.
@@ -277,21 +245,16 @@ impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingStart => f.write_str("no .start::<K>() was called before .build()"),
-            Self::StartNotRegistered { start } => write!(
-                f,
-                "start kind {start:?} is not registered as a state or terminal"
-            ),
-            Self::NextNotRegistered { state, next } => write!(
-                f,
-                "state {state:?}: next target {next:?} is not registered as a state or terminal"
-            ),
-            Self::QuitNotRegistered { state, quit } => write!(
-                f,
-                "state {state:?}: quit target {quit:?} is not registered as a state or terminal"
-            ),
-            Self::NoTerminals => {
-                f.write_str("graph has no terminal states; the lifecycle has no completion path")
+            Self::StartNotRegistered { start } => {
+                write!(f, "start kind {start:?} is not registered as a state or terminal")
             }
+            Self::NextNotRegistered { state, next } => {
+                write!(f, "state {state:?}: next target {next:?} is not registered as a state or terminal")
+            }
+            Self::QuitNotRegistered { state, quit } => {
+                write!(f, "state {state:?}: quit target {quit:?} is not registered as a state or terminal")
+            }
+            Self::NoTerminals => f.write_str("graph has no terminal states; the lifecycle has no completion path"),
             Self::DuplicateKind { kind } => write!(
                 f,
                 "kind {kind:?} is registered more than once (appears as both a state and \
@@ -304,21 +267,13 @@ impl fmt::Display for BuildError {
 impl Error for BuildError {}
 
 fn finalize(inner: GraphInner) -> Result<LifecycleGraphData, BuildError> {
-    let GraphInner {
-        states,
-        terminals,
-        start,
-        pending: _,
-    } = inner;
+    let GraphInner { states, terminals, start, pending: _ } = inner;
 
     let start = start.ok_or(BuildError::MissingStart)?;
 
     // Duplicate-kind check across the union of states + terminals.
     let mut seen: Vec<KindId> = Vec::with_capacity(states.len() + terminals.len());
-    let all_kinds = states
-        .iter()
-        .map(|s| s.kind)
-        .chain(terminals.iter().copied());
+    let all_kinds = states.iter().map(|s| s.kind).chain(terminals.iter().copied());
     for kind in all_kinds {
         if seen.contains(&kind) {
             return Err(BuildError::DuplicateKind { kind });
@@ -333,18 +288,12 @@ fn finalize(inner: GraphInner) -> Result<LifecycleGraphData, BuildError> {
 
     for s in &states {
         if !known(s.next) {
-            return Err(BuildError::NextNotRegistered {
-                state: s.kind,
-                next: s.next,
-            });
+            return Err(BuildError::NextNotRegistered { state: s.kind, next: s.next });
         }
         if let Some(q) = s.quit
             && !known(q)
         {
-            return Err(BuildError::QuitNotRegistered {
-                state: s.kind,
-                quit: q,
-            });
+            return Err(BuildError::QuitNotRegistered { state: s.kind, quit: q });
         }
     }
 
@@ -352,11 +301,7 @@ fn finalize(inner: GraphInner) -> Result<LifecycleGraphData, BuildError> {
         return Err(BuildError::NoTerminals);
     }
 
-    Ok(LifecycleGraphData {
-        states,
-        terminals,
-        start,
-    })
+    Ok(LifecycleGraphData { states, terminals, start })
 }
 
 #[cfg(test)]
@@ -365,18 +310,12 @@ mod tests {
     use aether_kinds::{InitCaps, InitComponents, Quit, Shutdown, Tick};
 
     fn init_to_shutdown_builder() -> LifecycleGraphBuilder<NoOpen> {
-        LifecycleGraphData::builder()
-            .state::<InitCaps>()
-            .next::<Shutdown>()
-            .terminal::<Shutdown>()
+        LifecycleGraphData::builder().state::<InitCaps>().next::<Shutdown>().terminal::<Shutdown>()
     }
 
     #[test]
     fn minimal_graph_init_to_terminal_builds() {
-        let graph = init_to_shutdown_builder()
-            .start::<InitCaps>()
-            .build()
-            .expect("test setup: minimal graph builds");
+        let graph = init_to_shutdown_builder().start::<InitCaps>().build().expect("test setup: minimal graph builds");
         assert_eq!(graph.start(), <InitCaps as Kind>::ID);
         assert!(graph.is_terminal(<Shutdown as Kind>::ID));
         assert!(!graph.is_terminal(<InitCaps as Kind>::ID));
@@ -385,9 +324,7 @@ mod tests {
 
     #[test]
     fn build_rejects_missing_start() {
-        let err = init_to_shutdown_builder()
-            .build()
-            .expect_err("missing start should fail");
+        let err = init_to_shutdown_builder().build().expect_err("missing start should fail");
         assert!(matches!(err, BuildError::MissingStart));
     }
 

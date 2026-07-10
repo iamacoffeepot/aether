@@ -154,11 +154,7 @@ fn static_map() -> &'static BTreeMap<u64, String> {
 /// back to rendering the ADR-0064 tagged-id string yourself."
 #[must_use]
 pub fn resolve_runtime(id: u64) -> Option<String> {
-    registry()
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&id)
-        .map(ToString::to_string)
+    registry().read().unwrap_or_else(PoisonError::into_inner).get(&id).map(ToString::to_string)
 }
 
 /// Resolve a tagged id back to its origin name, walking the full
@@ -266,9 +262,7 @@ mod tests {
     /// nothing.
     #[test]
     fn anonymous_thread_resolves_to_none() {
-        let resolved = thread::spawn(current_thread_id)
-            .join()
-            .expect("join anonymous thread");
+        let resolved = thread::spawn(current_thread_id).join().expect("join anonymous thread");
         assert_eq!(resolved, None);
     }
 
@@ -310,10 +304,7 @@ mod tests {
     fn resolve_hits_static_map_for_bounded_worker_template() {
         let id = ThreadId::from_name("aether-worker-3");
         // The prehashed template instantiation is in the static map.
-        assert_eq!(
-            static_map().get(&id.0).map(String::as_str),
-            Some("aether-worker-3"),
-        );
+        assert_eq!(static_map().get(&id.0).map(String::as_str), Some("aether-worker-3"),);
         // And the full chain reverses it to the real name.
         assert_eq!(resolve(id.0).as_deref(), Some("aether-worker-3"));
     }

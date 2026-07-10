@@ -119,14 +119,8 @@ impl EngineProxyState {
     /// an external event causally unrelated to whatever inbound
     /// mail woke the handler.
     pub fn report_alive(&self, ctx: &NativeCtx<'_>) {
-        let alive = EngineAlive {
-            engine_id: self.engine_id.0.to_string(),
-        };
-        let _ = ctx.send_envelope_detached(
-            engine_cap_mailbox(),
-            <EngineAlive as Kind>::ID,
-            &alive.encode_into_bytes(),
-        );
+        let alive = EngineAlive { engine_id: self.engine_id.0.to_string() };
+        let _ = ctx.send_envelope_detached(engine_cap_mailbox(), <EngineAlive as Kind>::ID, &alive.encode_into_bytes());
     }
 
     /// Report this engine's death to the engines cap so it drops the
@@ -138,15 +132,8 @@ impl EngineProxyState {
     /// engine is a no-op. Sent as a fresh root for the same reason as
     /// [`Self::report_alive`].
     pub fn report_died(&self, ctx: &NativeCtx<'_>, reason: DeathReason) {
-        let died = EngineDied {
-            engine_id: self.engine_id.0.to_string(),
-            reason,
-        };
-        let _ = ctx.send_envelope_detached(
-            engine_cap_mailbox(),
-            <EngineDied as Kind>::ID,
-            &died.encode_into_bytes(),
-        );
+        let died = EngineDied { engine_id: self.engine_id.0.to_string(), reason };
+        let _ = ctx.send_envelope_detached(engine_cap_mailbox(), <EngineDied as Kind>::ID, &died.encode_into_bytes());
     }
 
     /// Route a `ReplyEvent`'s envelope back to whoever sent the
@@ -173,9 +160,8 @@ impl EngineProxyState {
             return;
         };
         self.mailer.push(
-            Mail::new(target, envelope.kind, envelope.payload, 1).with_reply_to(
-                Source::with_correlation(SourceAddr::None, reply_to.correlation_id),
-            ),
+            Mail::new(target, envelope.kind, envelope.payload, 1)
+                .with_reply_to(Source::with_correlation(SourceAddr::None, reply_to.correlation_id)),
         );
     }
 
@@ -202,21 +188,11 @@ impl EngineProxyState {
         };
         let settled = match result {
             Ok(()) => CallSettled::Ok,
-            Err(e) => CallSettled::Err {
-                error: format!("{e:?}"),
-            },
+            Err(e) => CallSettled::Err { error: format!("{e:?}") },
         };
         self.mailer.push(
-            Mail::new(
-                target,
-                <CallSettled as Kind>::ID,
-                settled.encode_into_bytes(),
-                1,
-            )
-            .with_reply_to(Source::with_correlation(
-                SourceAddr::None,
-                reply_to.correlation_id,
-            )),
+            Mail::new(target, <CallSettled as Kind>::ID, settled.encode_into_bytes(), 1)
+                .with_reply_to(Source::with_correlation(SourceAddr::None, reply_to.correlation_id)),
         );
     }
 }
@@ -230,10 +206,7 @@ impl NativeActor for EngineProxy {
     type Config = EngineProxyConfig;
     const NAMESPACE: &'static str = "aether.engine.proxy";
 
-    fn init(
-        mut config: EngineProxyConfig,
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<EngineProxyState, BootError> {
+    fn init(mut config: EngineProxyConfig, ctx: &mut NativeInitCtx<'_>) -> Result<EngineProxyState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
         let wake_kind = KindId(<RpcInboundReady as Kind>::ID.0);
@@ -421,11 +394,7 @@ impl NativeActor for EngineProxy {
     /// to the engines cap and self-shuts-down (its `Drop` SIGKILLs
     /// the wedged child). Otherwise it sends a fresh `Ping`.
     #[handler::single]
-    fn on_heartbeat_tick(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        _mail: EngineHeartbeatTick,
-    ) {
+    fn on_heartbeat_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: EngineHeartbeatTick) {
         state.heartbeat_seq += 1;
         // A write failure means the socket is already broken — the
         // reader sidecar will surface a `Bye` and `on_inbound_ready`
@@ -452,10 +421,7 @@ impl NativeActor for EngineProxy {
             state.report_died(
                 ctx,
                 DeathReason::Evicted {
-                    detail: format!(
-                        "heartbeat miss limit {} of {}",
-                        state.missed_heartbeats, state.miss_limit
-                    ),
+                    detail: format!("heartbeat miss limit {} of {}", state.missed_heartbeats, state.miss_limit),
                 },
             );
             ctx.shutdown();

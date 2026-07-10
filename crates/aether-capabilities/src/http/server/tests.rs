@@ -17,10 +17,9 @@ use std::time::{Duration, Instant};
 
 use test_handlers::{
     ApiRouteHandler, ApiV2Handler, EchoHttpHandler, ExclusiveMacroPoolHandler, ExtractRouteHandler,
-    FixedBodyHttpHandler, FloodHttpHandler, MethodAnyHandler, MethodPostHandler,
-    STREAM_CHUNK_COUNT, SharedAlphaHandler, SharedBetaHandler, SharedMacroPoolHandler,
-    SilentHttpHandler, StreamHttpHandler, StreamingUploadHandler, TmpRouteHandler,
-    WiredRouteHandler, stream_chunk_body,
+    FixedBodyHttpHandler, FloodHttpHandler, MethodAnyHandler, MethodPostHandler, STREAM_CHUNK_COUNT,
+    SharedAlphaHandler, SharedBetaHandler, SharedMacroPoolHandler, SilentHttpHandler, StreamHttpHandler,
+    StreamingUploadHandler, TmpRouteHandler, WiredRouteHandler, stream_chunk_body,
 };
 
 mod test_handlers {
@@ -45,9 +44,8 @@ mod test_handlers {
 
     use crate::http;
     use crate::http::kinds::{
-        HttpHeader, HttpRequestChunk, HttpRequestStreamEnd, HttpRequestStreamOpen,
-        HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse, HttpStreamCredit,
-        RegisterRouteSelf, UnregisterRouteSelf,
+        HttpHeader, HttpRequestChunk, HttpRequestStreamEnd, HttpRequestStreamOpen, HttpResponseStreamOpen,
+        HttpServerRequest, HttpServerResponse, HttpStreamCredit, RegisterRouteSelf, UnregisterRouteSelf,
     };
     use crate::http::server::HttpServerCapability;
 
@@ -73,10 +71,7 @@ mod test_handlers {
 
         /// Echo the decoded request path back under `/api`.
         #[http::route(any, "/api")]
-        fn on_api(
-            _state: &mut ApiRouteHandlerState,
-            ctx: http::Ctx<'_, NativeCtx<'_>>,
-        ) -> HttpServerResponse {
+        fn on_api(_state: &mut ApiRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_>>) -> HttpServerResponse {
             HttpServerResponse {
                 status: 200,
                 headers: Vec::new(),
@@ -97,11 +92,7 @@ mod test_handlers {
                     return Ok(Self(value.to_string()));
                 }
             }
-            Err(HttpServerResponse {
-                status: 400,
-                headers: Vec::new(),
-                body: b"missing name query parameter".to_vec(),
-            })
+            Err(HttpServerResponse { status: 400, headers: Vec::new(), body: b"missing name query parameter".to_vec() })
         }
     }
 
@@ -119,10 +110,7 @@ mod test_handlers {
         type Config = ();
         const NAMESPACE: &'static str = "aether.http.test_route_extract";
 
-        fn init(
-            (): (),
-            _ctx: &mut NativeInitCtx<'_>,
-        ) -> Result<ExtractRouteHandlerState, BootError> {
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<ExtractRouteHandlerState, BootError> {
             Ok(ExtractRouteHandlerState)
         }
 
@@ -134,11 +122,7 @@ mod test_handlers {
             _ctx: http::Ctx<'_, NativeCtx<'_>>,
             name: QueryName,
         ) -> HttpServerResponse {
-            HttpServerResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: format!("hello:{}", name.0).into_bytes(),
-            }
+            HttpServerResponse { status: 200, headers: Vec::new(), body: format!("hello:{}", name.0).into_bytes() }
         }
     }
 
@@ -164,20 +148,9 @@ mod test_handlers {
 
         /// Release `/tmp`, then reply the `tmp` tag.
         #[http::route(any, "/tmp")]
-        fn on_tmp(
-            _state: &mut TmpRouteHandlerState,
-            ctx: http::Ctx<'_, NativeCtx<'_>>,
-        ) -> HttpServerResponse {
-            ctx.actor::<HttpServerCapability>()
-                .send(&UnregisterRouteSelf {
-                    prefix: "/tmp".to_string(),
-                    method: None,
-                });
-            HttpServerResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: b"tmp".to_vec(),
-            }
+        fn on_tmp(_state: &mut TmpRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_>>) -> HttpServerResponse {
+            ctx.actor::<HttpServerCapability>().send(&UnregisterRouteSelf { prefix: "/tmp".to_string(), method: None });
+            HttpServerResponse { status: 200, headers: Vec::new(), body: b"tmp".to_vec() }
         }
     }
 
@@ -201,13 +174,12 @@ mod test_handlers {
         }
 
         fn wire(_state: &mut WiredRouteHandlerState, ctx: &mut NativeCtx<'_>) {
-            ctx.actor::<HttpServerCapability>()
-                .send(&RegisterRouteSelf {
-                    prefix: "/wired-extra".to_string(),
-                    method: None,
-                    kind: <HttpServerRequest as Kind>::ID,
-                    shared: false,
-                });
+            ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+                prefix: "/wired-extra".to_string(),
+                method: None,
+                kind: <HttpServerRequest as Kind>::ID,
+                shared: false,
+            });
         }
 
         /// Generic-kind dispatch for the hand-registered `/wired-extra`.
@@ -217,24 +189,13 @@ mod test_handlers {
             _ctx: &mut NativeCtx<'_>,
             _request: HttpServerRequest,
         ) -> HttpServerResponse {
-            HttpServerResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: b"wired-raw".to_vec(),
-            }
+            HttpServerResponse { status: 200, headers: Vec::new(), body: b"wired-raw".to_vec() }
         }
 
         /// The macro route whose registration is appended to `wire`.
         #[http::route(any, "/wired")]
-        fn on_wired(
-            _state: &mut WiredRouteHandlerState,
-            _ctx: http::Ctx<'_, NativeCtx<'_>>,
-        ) -> HttpServerResponse {
-            HttpServerResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: b"wired-macro".to_vec(),
-            }
+        fn on_wired(_state: &mut WiredRouteHandlerState, _ctx: http::Ctx<'_, NativeCtx<'_>>) -> HttpServerResponse {
+            HttpServerResponse { status: 200, headers: Vec::new(), body: b"wired-macro".to_vec() }
         }
     }
 
@@ -260,44 +221,16 @@ mod test_handlers {
                 }
 
                 #[http::route($method, $prefix)]
-                fn on_route(
-                    _state: &mut $state,
-                    _ctx: http::Ctx<'_, NativeCtx<'_>>,
-                ) -> HttpServerResponse {
-                    HttpServerResponse {
-                        status: 200,
-                        headers: Vec::new(),
-                        body: $tag.to_vec(),
-                    }
+                fn on_route(_state: &mut $state, _ctx: http::Ctx<'_, NativeCtx<'_>>) -> HttpServerResponse {
+                    HttpServerResponse { status: 200, headers: Vec::new(), body: $tag.to_vec() }
                 }
             }
         };
     }
 
-    routed_handler!(
-        ApiV2Handler,
-        ApiV2HandlerState,
-        "aether.http.test_route_api_v2",
-        b"api-v2",
-        any,
-        "/api/v2"
-    );
-    routed_handler!(
-        MethodPostHandler,
-        MethodPostHandlerState,
-        "aether.http.test_route_post_m",
-        b"post-m",
-        Post,
-        "/m"
-    );
-    routed_handler!(
-        MethodAnyHandler,
-        MethodAnyHandlerState,
-        "aether.http.test_route_any_m",
-        b"any-m",
-        any,
-        "/m"
-    );
+    routed_handler!(ApiV2Handler, ApiV2HandlerState, "aether.http.test_route_api_v2", b"api-v2", any, "/api/v2");
+    routed_handler!(MethodPostHandler, MethodPostHandlerState, "aether.http.test_route_post_m", b"post-m", Post, "/m");
+    routed_handler!(MethodAnyHandler, MethodAnyHandlerState, "aether.http.test_route_any_m", b"any-m", any, "/m");
 
     /// A routed handler whose `wire` registers each claim `shared: true`
     /// with the given dispatch kind (ADR-0136) — the member-set opt-in
@@ -391,10 +324,7 @@ mod test_handlers {
         type Config = &'static [u8];
         const NAMESPACE: &'static str = "aether.http.test_route_shared_macro_pool";
 
-        fn init(
-            tag: &'static [u8],
-            _ctx: &mut NativeInitCtx<'_>,
-        ) -> Result<SharedMacroPoolHandlerState, BootError> {
+        fn init(tag: &'static [u8], _ctx: &mut NativeInitCtx<'_>) -> Result<SharedMacroPoolHandlerState, BootError> {
             Ok(SharedMacroPoolHandlerState { tag })
         }
 
@@ -415,15 +345,8 @@ mod test_handlers {
         }
 
         #[http::route(any, "/macro-pool")]
-        fn on_route(
-            state: &mut SharedMacroPoolHandlerState,
-            _ctx: http::Ctx<'_, NativeCtx<'_>>,
-        ) -> HttpServerResponse {
-            HttpServerResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: state.tag.to_vec(),
-            }
+        fn on_route(state: &mut SharedMacroPoolHandlerState, _ctx: http::Ctx<'_, NativeCtx<'_>>) -> HttpServerResponse {
+            HttpServerResponse { status: 200, headers: Vec::new(), body: state.tag.to_vec() }
         }
     }
 
@@ -445,10 +368,7 @@ mod test_handlers {
         type Config = &'static [u8];
         const NAMESPACE: &'static str = "aether.http.test_route_excl_macro_pool";
 
-        fn init(
-            tag: &'static [u8],
-            _ctx: &mut NativeInitCtx<'_>,
-        ) -> Result<ExclusiveMacroPoolHandlerState, BootError> {
+        fn init(tag: &'static [u8], _ctx: &mut NativeInitCtx<'_>) -> Result<ExclusiveMacroPoolHandlerState, BootError> {
             Ok(ExclusiveMacroPoolHandlerState { tag })
         }
 
@@ -462,11 +382,7 @@ mod test_handlers {
             state: &mut ExclusiveMacroPoolHandlerState,
             _ctx: http::Ctx<'_, NativeCtx<'_>>,
         ) -> HttpServerResponse {
-            HttpServerResponse {
-                status: 200,
-                headers: Vec::new(),
-                body: state.tag.to_vec(),
-            }
+            HttpServerResponse { status: 200, headers: Vec::new(), body: state.tag.to_vec() }
         }
     }
 
@@ -496,32 +412,13 @@ mod test_handlers {
             request: HttpServerRequest,
         ) -> HttpServerResponse {
             let headers = vec![
-                HttpHeader {
-                    name: "x-aether-method".to_string(),
-                    value: format!("{:?}", request.method),
-                },
-                HttpHeader {
-                    name: "x-aether-path".to_string(),
-                    value: request.path.clone(),
-                },
-                HttpHeader {
-                    name: "x-aether-query".to_string(),
-                    value: request.query.clone(),
-                },
-                HttpHeader {
-                    name: "x-aether-peer-addr".to_string(),
-                    value: request.peer_addr.clone(),
-                },
-                HttpHeader {
-                    name: "content-type".to_string(),
-                    value: "text/plain".to_string(),
-                },
+                HttpHeader { name: "x-aether-method".to_string(), value: format!("{:?}", request.method) },
+                HttpHeader { name: "x-aether-path".to_string(), value: request.path.clone() },
+                HttpHeader { name: "x-aether-query".to_string(), value: request.query.clone() },
+                HttpHeader { name: "x-aether-peer-addr".to_string(), value: request.peer_addr.clone() },
+                HttpHeader { name: "content-type".to_string(), value: "text/plain".to_string() },
             ];
-            HttpServerResponse {
-                status: 200,
-                headers,
-                body: request.body,
-            }
+            HttpServerResponse { status: 200, headers, body: request.body }
         }
     }
 
@@ -540,10 +437,7 @@ mod test_handlers {
         type Config = ();
         const NAMESPACE: &'static str = "aether.http.test_fixed_body_handler";
 
-        fn init(
-            (): (),
-            _ctx: &mut NativeInitCtx<'_>,
-        ) -> Result<FixedBodyHttpHandlerState, BootError> {
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<FixedBodyHttpHandlerState, BootError> {
             Ok(FixedBodyHttpHandlerState)
         }
 
@@ -555,10 +449,7 @@ mod test_handlers {
         ) -> HttpServerResponse {
             HttpServerResponse {
                 status: 200,
-                headers: vec![HttpHeader {
-                    name: "content-type".to_string(),
-                    value: "text/plain".to_string(),
-                }],
+                headers: vec![HttpHeader { name: "content-type".to_string(), value: "text/plain".to_string() }],
                 body: b"fixed body".to_vec(),
             }
         }
@@ -582,11 +473,7 @@ mod test_handlers {
         }
 
         #[handler::single]
-        fn on_request(
-            _state: &mut Self::State,
-            _ctx: &mut NativeCtx<'_>,
-            _request: HttpServerRequest,
-        ) {
+        fn on_request(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: HttpServerRequest) {
             // Intentionally drops the request without replying.
         }
     }
@@ -622,10 +509,7 @@ mod test_handlers {
         const NAMESPACE: &'static str = "aether.http.test_stream_handler";
 
         fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<StreamHttpHandlerState, BootError> {
-            Ok(StreamHttpHandlerState {
-                next_index: 0,
-                ended: false,
-            })
+            Ok(StreamHttpHandlerState { next_index: 0, ended: false })
         }
 
         #[handler::single]
@@ -638,10 +522,7 @@ mod test_handlers {
             state.ended = false;
             HttpResponseStreamOpen {
                 status: 200,
-                headers: vec![HttpHeader {
-                    name: "content-type".to_string(),
-                    value: "text/plain".to_string(),
-                }],
+                headers: vec![HttpHeader { name: "content-type".to_string(), value: "text/plain".to_string() }],
             }
         }
 
@@ -651,11 +532,7 @@ mod test_handlers {
         /// data phase goes to whichever dispatch shard granted the credit,
         /// never to the supervisor by type (ADR-0135).
         #[handler::manual]
-        fn on_credit(
-            state: &mut Self::State,
-            ctx: &mut NativeCtx<'_, Manual>,
-            credit: HttpStreamCredit,
-        ) {
+        fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, credit: HttpStreamCredit) {
             let Some(stream) = ResponseStream::from_credit(ctx, &credit) else {
                 return;
             };
@@ -704,18 +581,11 @@ mod test_handlers {
             _ctx: &mut NativeCtx<'_>,
             _request: HttpServerRequest,
         ) -> HttpResponseStreamOpen {
-            HttpResponseStreamOpen {
-                status: 200,
-                headers: Vec::new(),
-            }
+            HttpResponseStreamOpen { status: 200, headers: Vec::new() }
         }
 
         #[handler::manual]
-        fn on_credit(
-            state: &mut Self::State,
-            ctx: &mut NativeCtx<'_, Manual>,
-            credit: HttpStreamCredit,
-        ) {
+        fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, credit: HttpStreamCredit) {
             if state.flooded {
                 return;
             }
@@ -754,22 +624,12 @@ mod test_handlers {
         type Config = ();
         const NAMESPACE: &'static str = "aether.http.test_upload_handler";
 
-        fn init(
-            (): (),
-            _ctx: &mut NativeInitCtx<'_>,
-        ) -> Result<StreamingUploadHandlerState, BootError> {
-            Ok(StreamingUploadHandlerState {
-                received: 0,
-                stream: None,
-            })
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<StreamingUploadHandlerState, BootError> {
+            Ok(StreamingUploadHandlerState { received: 0, stream: None })
         }
 
         #[handler::manual]
-        fn on_stream_open(
-            state: &mut Self::State,
-            ctx: &mut NativeCtx<'_, Manual>,
-            open: HttpRequestStreamOpen,
-        ) {
+        fn on_stream_open(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, open: HttpRequestStreamOpen) {
             state.received = 0;
             state.stream = RequestStream::from_open(ctx, &open);
         }
@@ -849,10 +709,7 @@ fn boot_request_stream<H>(window: u32) -> PassiveChassis<TestChassis>
 where
     H: NativeActor<Config = ()>,
 {
-    boot_chassis::<H>(request_stream_config_for(
-        <H as Addressable>::NAMESPACE,
-        window,
-    ))
+    boot_chassis::<H>(request_stream_config_for(<H as Addressable>::NAMESPACE, window))
 }
 
 /// Server config for the streaming tests (ADR-0128): a small credit window
@@ -899,10 +756,7 @@ fn dechunk(body: &str) -> String {
 }
 
 fn port_of(chassis: &PassiveChassis<TestChassis>) -> u16 {
-    chassis
-        .handle::<HttpServerHandle>()
-        .expect("HttpServerHandle published")
-        .local_port
+    chassis.handle::<HttpServerHandle>().expect("HttpServerHandle published").local_port
 }
 
 /// Insert `Connection: close` as the last header of a complete request's
@@ -913,10 +767,7 @@ fn port_of(chassis: &PassiveChassis<TestChassis>) -> u16 {
 /// sockets and do not go through this helper.
 fn with_connection_close(request: &[u8]) -> Vec<u8> {
     let terminator = b"\r\n\r\n";
-    let Some(pos) = request
-        .windows(terminator.len())
-        .position(|window| window == terminator)
-    else {
+    let Some(pos) = request.windows(terminator.len()).position(|window| window == terminator) else {
         return request.to_vec();
     };
     let mut out = Vec::with_capacity(request.len() + 19);
@@ -932,11 +783,8 @@ fn with_connection_close(request: &[u8]) -> Vec<u8> {
 /// the read terminates at EOF).
 fn round_trip(port: u16, request: &[u8]) -> String {
     let request = with_connection_close(request);
-    let mut stream =
-        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("set_read_timeout");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
     stream.write_all(&request).expect("write request");
     stream.flush().expect("flush request");
 
@@ -946,9 +794,7 @@ fn round_trip(port: u16, request: &[u8]) -> String {
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => response.extend_from_slice(&chunk[..n]),
-            Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
-            {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
                 break;
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -980,26 +826,11 @@ fn body_of(response: &str) -> &str {
 fn get_round_trips_to_handler() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
-    let response = round_trip(
-        port_of(&chassis),
-        b"GET /hello?name=ada HTTP/1.1\r\nHost: localhost\r\n\r\n",
-    );
-    assert!(
-        response.starts_with("HTTP/1.1 200 OK\r\n"),
-        "expected 200 status line, got: {response:?}",
-    );
-    assert!(
-        response.contains("x-aether-method: Get\r\n"),
-        "{response:?}"
-    );
-    assert!(
-        response.contains("x-aether-path: /hello\r\n"),
-        "{response:?}"
-    );
-    assert!(
-        response.contains("x-aether-query: name=ada\r\n"),
-        "{response:?}",
-    );
+    let response = round_trip(port_of(&chassis), b"GET /hello?name=ada HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200 status line, got: {response:?}");
+    assert!(response.contains("x-aether-method: Get\r\n"), "{response:?}");
+    assert!(response.contains("x-aether-path: /hello\r\n"), "{response:?}");
+    assert!(response.contains("x-aether-query: name=ada\r\n"), "{response:?}");
     let peer_addr_header = response
         .lines()
         .find_map(|line| line.strip_prefix("x-aether-peer-addr: "))
@@ -1019,18 +850,10 @@ fn get_round_trips_to_handler() {
 fn post_round_trips_body() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
-    let response = round_trip(
-        port_of(&chassis),
-        b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
-    );
-    assert!(
-        response.starts_with("HTTP/1.1 200 OK\r\n"),
-        "expected 200, got: {response:?}",
-    );
-    assert!(
-        response.contains("x-aether-method: Post\r\n"),
-        "{response:?}"
-    );
+    let response =
+        round_trip(port_of(&chassis), b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello");
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {response:?}");
+    assert!(response.contains("x-aether-method: Post\r\n"), "{response:?}");
     assert_eq!(body_of(&response), "hello", "body echoed verbatim");
 }
 
@@ -1040,14 +863,9 @@ fn post_round_trips_body() {
 fn oversize_body_is_413() {
     let chassis = boot_buffered::<EchoHttpHandler>(8);
 
-    let response = round_trip(
-        port_of(&chassis),
-        b"POST /big HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n",
-    );
-    assert!(
-        response.starts_with("HTTP/1.1 413 "),
-        "expected 413, got: {response:?}",
-    );
+    let response =
+        round_trip(port_of(&chassis), b"POST /big HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n");
+    assert!(response.starts_with("HTTP/1.1 413 "), "expected 413, got: {response:?}");
 }
 
 /// A websocket-upgrade request that also declares an oversized
@@ -1069,10 +887,7 @@ fn oversize_body_on_ws_upgrade_is_413() {
           Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
           Content-Length: 100\r\n\r\n",
     );
-    assert!(
-        response.starts_with("HTTP/1.1 413 "),
-        "expected 413, got: {response:?}",
-    );
+    assert!(response.starts_with("HTTP/1.1 413 "), "expected 413, got: {response:?}");
 }
 
 /// A websocket-upgrade request that also carries the request-smuggling
@@ -1098,10 +913,7 @@ fn smuggling_on_ws_upgrade_is_411() {
           Content-Length: 5\r\n\
           Transfer-Encoding: chunked\r\n\r\nhello",
     );
-    assert!(
-        response.starts_with("HTTP/1.1 411 "),
-        "expected 411, got: {response:?}",
-    );
+    assert!(response.starts_with("HTTP/1.1 411 "), "expected 411, got: {response:?}");
 }
 
 /// A non-enumerated method is answered `501` before any dispatch.
@@ -1109,14 +921,8 @@ fn smuggling_on_ws_upgrade_is_411() {
 fn unknown_method_is_501() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
-    let response = round_trip(
-        port_of(&chassis),
-        b"FROB /x HTTP/1.1\r\nHost: localhost\r\n\r\n",
-    );
-    assert!(
-        response.starts_with("HTTP/1.1 501 "),
-        "expected 501, got: {response:?}",
-    );
+    let response = round_trip(port_of(&chassis), b"FROB /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(response.starts_with("HTTP/1.1 501 "), "expected 501, got: {response:?}");
 }
 
 /// A request whose configured handler resolves to nothing is
@@ -1130,14 +936,8 @@ fn no_handler_is_503() {
         .build_passive()
         .expect("server boots");
 
-    let response = round_trip(
-        port_of(&chassis),
-        b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
-    );
-    assert!(
-        response.starts_with("HTTP/1.1 503 "),
-        "expected 503, got: {response:?}",
-    );
+    let response = round_trip(port_of(&chassis), b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(response.starts_with("HTTP/1.1 503 "), "expected 503, got: {response:?}");
 }
 
 /// A handler that receives the request but never replies settles
@@ -1151,21 +951,12 @@ fn response_less_chain_is_502() {
         // the server's settlement subscription never wakes.
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<SilentHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(
-            <SilentHttpHandler as Addressable>::NAMESPACE,
-            1024,
-        ))
+        .with_actor::<HttpServerCapability>(config_for(<SilentHttpHandler as Addressable>::NAMESPACE, 1024))
         .build_passive()
         .expect("caps boot");
 
-    let response = round_trip(
-        port_of(&chassis),
-        b"GET /drop HTTP/1.1\r\nHost: localhost\r\n\r\n",
-    );
-    assert!(
-        response.starts_with("HTTP/1.1 502 "),
-        "expected 502, got: {response:?}",
-    );
+    let response = round_trip(port_of(&chassis), b"GET /drop HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(response.starts_with("HTTP/1.1 502 "), "expected 502, got: {response:?}");
 }
 
 /// A percent-encoded path is decoded before it reaches the handler
@@ -1175,18 +966,9 @@ fn response_less_chain_is_502() {
 fn percent_encoded_path_is_decoded() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
-    let response = round_trip(
-        port_of(&chassis),
-        b"GET /hello%20world?x=1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
-    );
-    assert!(
-        response.starts_with("HTTP/1.1 200 OK\r\n"),
-        "expected 200, got: {response:?}",
-    );
-    assert!(
-        response.contains("x-aether-path: /hello world\r\n"),
-        "{response:?}",
-    );
+    let response = round_trip(port_of(&chassis), b"GET /hello%20world?x=1 HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {response:?}");
+    assert!(response.contains("x-aether-path: /hello world\r\n"), "{response:?}");
     assert!(response.contains("x-aether-query: x=1\r\n"), "{response:?}");
 }
 
@@ -1202,10 +984,7 @@ fn transfer_encoding_is_411() {
         port_of(&chassis),
         b"POST /chunked HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
     );
-    assert!(
-        response.starts_with("HTTP/1.1 411 "),
-        "expected 411, got: {response:?}",
-    );
+    assert!(response.starts_with("HTTP/1.1 411 "), "expected 411, got: {response:?}");
 }
 
 /// A request carrying `Expect: 100-continue` receives the interim `100
@@ -1218,14 +997,8 @@ fn expect_continue_gets_100_continue() {
         port_of(&chassis),
         b"POST /submit HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello",
     );
-    assert!(
-        response.starts_with("HTTP/1.1 100 Continue\r\n\r\n"),
-        "expected interim 100 Continue, got: {response:?}",
-    );
-    assert!(
-        response.contains("HTTP/1.1 200 OK\r\n"),
-        "expected final 200 after the interim, got: {response:?}",
-    );
+    assert!(response.starts_with("HTTP/1.1 100 Continue\r\n\r\n"), "expected interim 100 Continue, got: {response:?}");
+    assert!(response.contains("HTTP/1.1 200 OK\r\n"), "expected final 200 after the interim, got: {response:?}");
 }
 
 /// A HEAD response carries the handler's headers — including the
@@ -1237,19 +1010,9 @@ fn head_response_suppresses_body() {
     let port = port_of(&chassis);
 
     let head_response = round_trip(port, b"HEAD /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert!(
-        head_response.starts_with("HTTP/1.1 200 OK\r\n"),
-        "expected 200, got: {head_response:?}",
-    );
-    assert!(
-        head_response.contains("Content-Length: 10\r\n"),
-        "{head_response:?}",
-    );
-    assert_eq!(
-        body_of(&head_response),
-        "",
-        "HEAD must not carry a message body",
-    );
+    assert!(head_response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {head_response:?}");
+    assert!(head_response.contains("Content-Length: 10\r\n"), "{head_response:?}");
+    assert_eq!(body_of(&head_response), "", "HEAD must not carry a message body");
 
     let get_response = round_trip(port, b"GET /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(body_of(&get_response), "fixed body");
@@ -1286,11 +1049,8 @@ fn over_capacity_connection_is_503() {
     // waiting for more bytes and its `ConnState` stays resident.
     let mut held = Vec::new();
     for _ in 0..max_connections {
-        let mut stream =
-            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-        stream
-            .write_all(b"GET / HTTP/1.1\r\n")
-            .expect("write partial request head");
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+        stream.write_all(b"GET / HTTP/1.1\r\n").expect("write partial request head");
         stream.flush().expect("flush partial request head");
         held.push(stream);
     }
@@ -1300,10 +1060,7 @@ fn over_capacity_connection_is_503() {
     thread::sleep(Duration::from_millis(200));
 
     let response = round_trip(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert!(
-        response.starts_with("HTTP/1.1 503 "),
-        "expected 503, got: {response:?}",
-    );
+    assert!(response.starts_with("HTTP/1.1 503 "), "expected 503, got: {response:?}");
 
     drop(held);
 }
@@ -1334,11 +1091,8 @@ fn connections_distribute_across_shards() {
 
     let mut streams: Vec<(TcpStream, Vec<u8>)> = (0..4)
         .map(|_| {
-            let stream =
-                TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .expect("set_read_timeout");
+            let stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+            stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
             (stream, Vec::new())
         })
         .collect();
@@ -1348,8 +1102,7 @@ fn connections_distribute_across_shards() {
         // every response — so all four connections are in flight across
         // both shards at once, not serialized one connection at a time.
         for (index, (stream, _)) in streams.iter_mut().enumerate() {
-            let request =
-                format!("GET /conn{index}/round{round} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            let request = format!("GET /conn{index}/round{round} HTTP/1.1\r\nHost: localhost\r\n\r\n");
             stream.write_all(request.as_bytes()).expect("write request");
             stream.flush().expect("flush request");
         }
@@ -1376,23 +1129,12 @@ fn streamed_response_reassembles_across_credit_window() {
     // Window well below the chunk count so credit must replenish.
     let chassis = boot_response_stream::<StreamHttpHandler>(8);
 
-    let response = round_trip(
-        port_of(&chassis),
-        b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n",
-    );
+    let response = round_trip(port_of(&chassis), b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
-    assert!(
-        response.contains("Transfer-Encoding: chunked\r\n"),
-        "streamed response is chunked: {response:?}",
-    );
-    assert!(
-        !response.contains("Content-Length:"),
-        "streamed response omits Content-Length: {response:?}",
-    );
+    assert!(response.contains("Transfer-Encoding: chunked\r\n"), "streamed response is chunked: {response:?}");
+    assert!(!response.contains("Content-Length:"), "streamed response omits Content-Length: {response:?}");
 
-    let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT)
-        .flat_map(stream_chunk_body)
-        .collect();
+    let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT).flat_map(stream_chunk_body).collect();
     assert_eq!(
         dechunk(body_of(&response)).into_bytes(),
         expected,
@@ -1410,19 +1152,13 @@ fn over_window_flood_tears_the_stream_down() {
     // Tiny window so the flood overruns credit within a few chunks.
     let chassis = boot_response_stream::<FloodHttpHandler>(2);
 
-    let response = round_trip(
-        port_of(&chassis),
-        b"GET /flood HTTP/1.1\r\nHost: localhost\r\n\r\n",
-    );
+    let response = round_trip(port_of(&chassis), b"GET /flood HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
     assert!(
         response.contains("Transfer-Encoding: chunked\r\n"),
         "flood stream head is chunked before teardown: {response:?}",
     );
-    assert!(
-        !response.contains("0\r\n\r\n"),
-        "flood stream is torn down before the terminator: {response:?}",
-    );
+    assert!(!response.contains("0\r\n\r\n"), "flood stream is torn down before the terminator: {response:?}");
 }
 
 /// Server config for the request-streaming tests (ADR-0128): a small inbound
@@ -1453,17 +1189,12 @@ fn large_upload_streams_past_the_buffered_cap() {
     // `413` this; the streaming handler takes it incrementally.
     let body_len = 2 * 1024 * 1024 + 7;
     let mut request =
-        format!("POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: {body_len}\r\n\r\n")
-            .into_bytes();
+        format!("POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: {body_len}\r\n\r\n").into_bytes();
     request.resize(request.len() + body_len, b'a');
 
     let response = round_trip(port, &request);
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
-    assert_eq!(
-        body_of(&response),
-        format!("received:{body_len}"),
-        "the streamed byte count round-trips",
-    );
+    assert_eq!(body_of(&response), format!("received:{body_len}"), "the streamed byte count round-trips");
 }
 
 /// A `Transfer-Encoding: chunked` upload to a streaming handler is accepted and
@@ -1480,15 +1211,8 @@ fn chunked_upload_streams_to_streaming_handler() {
         b"POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n\
           5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
     );
-    assert!(
-        response.starts_with("HTTP/1.1 200 OK\r\n"),
-        "chunked upload accepted, not 411: {response:?}",
-    );
-    assert_eq!(
-        body_of(&response),
-        "received:11",
-        "the two chunks decoded to 11 body bytes",
-    );
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "chunked upload accepted, not 411: {response:?}");
+    assert_eq!(body_of(&response), "received:11", "the two chunks decoded to 11 body bytes");
 }
 
 /// A request carrying both `Content-Length` and `Transfer-Encoding` (the
@@ -1535,10 +1259,7 @@ fn chunked_on_ws_upgrade_is_411() {
           Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
           Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
     );
-    assert!(
-        response.starts_with("HTTP/1.1 411 "),
-        "expected 411, got: {response:?}",
-    );
+    assert!(response.starts_with("HTTP/1.1 411 "), "expected 411, got: {response:?}");
 }
 
 /// A buffered handler (no `HttpRequestStreamOpen` in its accept-set) keeps the
@@ -1552,10 +1273,7 @@ fn buffered_handler_keeps_the_unstreamed_path() {
     let chassis = boot_request_stream::<EchoHttpHandler>(4);
     let port = port_of(&chassis);
 
-    let response = round_trip(
-        port,
-        b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
-    );
+    let response = round_trip(port, b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
     assert_eq!(body_of(&response), "hello", "buffered body echoed verbatim");
 }
@@ -1591,10 +1309,7 @@ fn poll_body(port: u16, request: &[u8], expected: &str) {
         if body_of(&response) == expected {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "expected body {expected:?} within 10s; last response: {response:?}",
-        );
+        assert!(Instant::now() < deadline, "expected body {expected:?} within 10s; last response: {response:?}");
         thread::sleep(Duration::from_millis(25));
     }
 }
@@ -1608,18 +1323,10 @@ fn routed_prefix_dispatches_as_registered_kind() {
     let chassis = routed_chassis!(ApiRouteHandler);
     let port = port_of(&chassis);
 
-    poll_body(
-        port,
-        b"GET /api/widgets HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        "api:/api/widgets",
-    );
+    poll_body(port, b"GET /api/widgets HTTP/1.1\r\nHost: localhost\r\n\r\n", "api:/api/widgets");
 
     let unrouted = round_trip(port, b"GET /other HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert_eq!(
-        body_of(&unrouted),
-        "fixed body",
-        "unrouted path falls back to handler_mailbox",
-    );
+    assert_eq!(body_of(&unrouted), "fixed body", "unrouted path falls back to handler_mailbox");
 }
 
 /// A macro-authored route with a real `FromRequest` extractor dispatches
@@ -1632,24 +1339,13 @@ fn routed_extractor_success_and_failure() {
     let port = port_of(&chassis);
 
     // Success: the extracted `name` reaches the handler and is echoed.
-    poll_body(
-        port,
-        b"GET /extract?name=ada HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        "hello:ada",
-    );
+    poll_body(port, b"GET /extract?name=ada HTTP/1.1\r\nHost: localhost\r\n\r\n", "hello:ada");
 
     // Failure: with the route proven live, a request missing `name`
     // short-circuits to the extractor's 400 response body.
     let missing = round_trip(port, b"GET /extract HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert!(
-        missing.starts_with("HTTP/1.1 400 "),
-        "extractor Err becomes the reply status: {missing:?}",
-    );
-    assert_eq!(
-        body_of(&missing),
-        "missing name query parameter",
-        "extractor Err body is replied verbatim",
-    );
+    assert!(missing.starts_with("HTTP/1.1 400 "), "extractor Err becomes the reply status: {missing:?}");
+    assert_eq!(body_of(&missing), "missing name query parameter", "extractor Err body is replied verbatim");
 }
 
 /// Longest prefix wins among overlapping routes, matching stops at
@@ -1661,26 +1357,14 @@ fn longest_prefix_wins_on_segment_boundaries() {
     let port = port_of(&chassis);
 
     // Prove both routes live before the precedence assertions.
-    poll_body(
-        port,
-        b"GET /api/other HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        "api:/api/other",
-    );
-    poll_body(
-        port,
-        b"GET /api/v2/x HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        "api-v2",
-    );
+    poll_body(port, b"GET /api/other HTTP/1.1\r\nHost: localhost\r\n\r\n", "api:/api/other");
+    poll_body(port, b"GET /api/v2/x HTTP/1.1\r\nHost: localhost\r\n\r\n", "api-v2");
 
     let exact = round_trip(port, b"GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(body_of(&exact), "api:/api", "exact prefix hit routes");
 
     let boundary = round_trip(port, b"GET /apiary HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert_eq!(
-        body_of(&boundary),
-        "fixed body",
-        "/apiary is not under /api — segment-boundary match",
-    );
+    assert_eq!(body_of(&boundary), "fixed body", "/apiary is not under /api — segment-boundary match");
 }
 
 /// A method-specific route beats a method-agnostic one at equal
@@ -1692,22 +1376,11 @@ fn method_specific_route_beats_agnostic() {
 
     // Each route's first positive assertion polls it live; together
     // they then pin the precedence (POST → specific, GET → agnostic).
-    poll_body(
-        port,
-        b"POST /m HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
-        "post-m",
-    );
+    poll_body(port, b"POST /m HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n", "post-m");
     poll_body(port, b"GET /m HTTP/1.1\r\nHost: localhost\r\n\r\n", "any-m");
 
-    let specific = round_trip(
-        port,
-        b"POST /m HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
-    );
-    assert_eq!(
-        body_of(&specific),
-        "post-m",
-        "POST takes the method-specific route with both routes live",
-    );
+    let specific = round_trip(port, b"POST /m HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+    assert_eq!(body_of(&specific), "post-m", "POST takes the method-specific route with both routes live");
 }
 
 /// A bare `#[http::router]` impl still registers exclusive (issue 2625
@@ -1746,10 +1419,7 @@ fn bare_router_stays_exclusive_second_claim_rejected() {
         match body_of(&contested) {
             "excl-macro-alpha" | "excl-macro-beta" => break body_of(&contested).to_string(),
             _ => {
-                assert!(
-                    Instant::now() < deadline,
-                    "expected /macro-excl to become live within 10s",
-                );
+                assert!(Instant::now() < deadline, "expected /macro-excl to become live within 10s");
                 thread::sleep(Duration::from_millis(25));
             }
         }
@@ -1758,10 +1428,7 @@ fn bare_router_stays_exclusive_second_claim_rejected() {
     for _ in 0..24 {
         let contested = round_trip(port, b"GET /macro-excl HTTP/1.1\r\nHost: localhost\r\n\r\n");
         let body = body_of(&contested);
-        assert_eq!(
-            body, owner,
-            "bare #[http::router] must stay exclusive; observed a second route member",
-        );
+        assert_eq!(body, owner, "bare #[http::router] must stay exclusive; observed a second route member");
         thread::sleep(Duration::from_millis(10));
     }
 }
@@ -1798,10 +1465,7 @@ fn macro_router_shared_opt_in_joins_a_member_set() {
         .spawn_actor::<SharedMacroPoolHandler>(Subname::Named("alpha"), b"macro-alpha")
         .finish()
         .expect("spawn alpha");
-    chassis
-        .spawn_actor::<SharedMacroPoolHandler>(Subname::Named("beta"), b"macro-beta")
-        .finish()
-        .expect("spawn beta");
+    chassis.spawn_actor::<SharedMacroPoolHandler>(Subname::Named("beta"), b"macro-beta").finish().expect("spawn beta");
     let port = port_of(&chassis);
 
     // Wait until both registrations are live: with the set complete a
@@ -1833,11 +1497,7 @@ fn macro_router_shared_opt_in_joins_a_member_set() {
             other => panic!("unexpected /macro-pool body {other:?}"),
         }
     }
-    assert_eq!(
-        (alpha, beta),
-        (3, 3),
-        "round-robin alternation over 6 requests"
-    );
+    assert_eq!((alpha, beta), (3, 3), "round-robin alternation over 6 requests");
 }
 
 /// A peer that stalls its receive window blocks only its own reader
@@ -1867,11 +1527,9 @@ fn stalled_peer_does_not_block_sibling_connections() {
     // reads — far past loopback socket buffering, so the reader's
     // write_all parks against A's receive window.
     let body_len = 16 * 1024 * 1024;
-    let mut stalled =
-        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect stalled peer");
+    let mut stalled = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect stalled peer");
     let mut request =
-        format!("POST /stall HTTP/1.1\r\nHost: localhost\r\nContent-Length: {body_len}\r\n\r\n")
-            .into_bytes();
+        format!("POST /stall HTTP/1.1\r\nHost: localhost\r\nContent-Length: {body_len}\r\n\r\n").into_bytes();
     request.resize(request.len() + body_len, b'a');
     stalled.write_all(&request).expect("write stalled request");
     stalled.flush().expect("flush stalled request");
@@ -1904,39 +1562,25 @@ fn route_registered_mid_connection_serves_next_request() {
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<EchoHttpHandler>(())
         .with_actor::<FixedBodyHttpHandler>(())
-        .with_actor::<HttpServerCapability>(keep_alive_config_for(
-            <EchoHttpHandler as Addressable>::NAMESPACE,
-            5_000,
-        ))
+        .with_actor::<HttpServerCapability>(keep_alive_config_for(<EchoHttpHandler as Addressable>::NAMESPACE, 5_000))
         .build_passive()
         .expect("caps boot");
     let port = port_of(&chassis);
 
-    let mut stream =
-        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("set_read_timeout");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
     let mut carry = Vec::new();
 
     // Pre-registration: /late falls back to the echo handler.
-    stream
-        .write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .expect("write request");
+    stream.write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write request");
     let first = read_one_response(&mut stream, &mut carry);
-    assert!(
-        first.contains("x-aether-path: /late"),
-        "pre-registration request falls back to echo: {first:?}",
-    );
+    assert!(first.contains("x-aether-path: /late"), "pre-registration request falls back to echo: {first:?}");
 
     // Register /late at the fixed-body handler while the connection is
     // parked between keep-alive requests.
-    let supervisor = registry
-        .lookup(<HttpServerCapability as Addressable>::NAMESPACE)
-        .expect("http server registered");
-    let target = registry
-        .lookup(<FixedBodyHttpHandler as Addressable>::NAMESPACE)
-        .expect("fixed-body handler registered");
+    let supervisor = registry.lookup(<HttpServerCapability as Addressable>::NAMESPACE).expect("http server registered");
+    let target =
+        registry.lookup(<FixedBodyHttpHandler as Addressable>::NAMESPACE).expect("fixed-body handler registered");
     let payload = RegisterRoute {
         prefix: "/late".to_string(),
         method: None,
@@ -1945,19 +1589,12 @@ fn route_registered_mid_connection_serves_next_request() {
         shared: false,
     }
     .encode_into_bytes();
-    mailer.push(Mail::new(
-        supervisor,
-        KindId(<RegisterRoute as KindTrait>::ID.0),
-        payload,
-        1,
-    ));
+    mailer.push(Mail::new(supervisor, KindId(<RegisterRoute as KindTrait>::ID.0), payload, 1));
 
     // The registration lands asynchronously; poll on the SAME socket.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        stream
-            .write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .expect("write request");
+        stream.write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write request");
         let response = read_one_response(&mut stream, &mut carry);
         if body_of(&response) == "fixed body" {
             break;
@@ -2007,10 +1644,7 @@ fn shared_route_spreads_across_members() {
         if pair.contains(&"alpha".to_string()) && pair.contains(&"beta".to_string()) {
             break;
         }
-        assert!(
-            Instant::now() < deadline,
-            "expected alpha+beta across a request pair within 10s; got {pair:?}",
-        );
+        assert!(Instant::now() < deadline, "expected alpha+beta across a request pair within 10s; got {pair:?}");
         thread::sleep(Duration::from_millis(25));
     }
 
@@ -2026,11 +1660,7 @@ fn shared_route_spreads_across_members() {
             other => panic!("unexpected /pool body {other:?}"),
         }
     }
-    assert_eq!(
-        (alpha, beta),
-        (3, 3),
-        "round-robin alternation over 6 requests"
-    );
+    assert_eq!((alpha, beta), (3, 3), "round-robin alternation over 6 requests");
 }
 
 /// A macro route composes with a hand-written `wire`: the macro appends
@@ -2043,17 +1673,9 @@ fn hand_written_wire_and_macro_route_compose() {
     let port = port_of(&chassis);
 
     // The macro-appended registration reaches the cap.
-    poll_body(
-        port,
-        b"GET /wired HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        "wired-macro",
-    );
+    poll_body(port, b"GET /wired HTTP/1.1\r\nHost: localhost\r\n\r\n", "wired-macro");
     // The author's own `wire` registration survived the append.
-    poll_body(
-        port,
-        b"GET /wired-extra HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        "wired-raw",
-    );
+    poll_body(port, b"GET /wired-extra HTTP/1.1\r\nHost: localhost\r\n\r\n", "wired-raw");
 }
 
 /// `unregister_route_self` releases the sender's route: the first
@@ -2073,11 +1695,7 @@ fn self_unregister_releases_route() {
 
     // The release is a separate mail racing the reply, so the fallback
     // is asserted with the same bounded poll.
-    poll_body(
-        port,
-        b"GET /tmp HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        "fixed body",
-    );
+    poll_body(port, b"GET /tmp HTTP/1.1\r\nHost: localhost\r\n\r\n", "fixed body");
 }
 
 /// Server config with a short idle (keep-alive) timeout, for the
@@ -2106,11 +1724,7 @@ fn read_response_head(stream: &mut TcpStream, carry: &mut Vec<u8>, chunk: &mut [
             return pos + 4;
         }
         let n = stream.read(chunk).expect("read response head");
-        assert!(
-            n > 0,
-            "eof before response head; buffered: {:?}",
-            String::from_utf8_lossy(carry),
-        );
+        assert!(n > 0, "eof before response head; buffered: {:?}", String::from_utf8_lossy(carry));
         carry.extend_from_slice(&chunk[..n]);
     }
 }
@@ -2155,10 +1769,7 @@ fn read_one_chunked_response(stream: &mut TcpStream, carry: &mut Vec<u8>) -> Str
     let head_end = read_response_head(stream, carry, &mut chunk);
     let terminator = b"0\r\n\r\n";
     let body_end = loop {
-        if let Some(pos) = carry[head_end..]
-            .windows(terminator.len())
-            .position(|window| window == terminator)
-        {
+        if let Some(pos) = carry[head_end..].windows(terminator.len()).position(|window| window == terminator) {
             break head_end + pos + terminator.len();
         }
         let n = stream.read(&mut chunk).expect("read chunked response body");
@@ -2176,10 +1787,7 @@ fn read_one_chunked_response(stream: &mut TcpStream, carry: &mut Vec<u8>) -> Str
 fn assert_closed(stream: &mut TcpStream) {
     let mut tail = [0u8; 64];
     let read = stream.read(&mut tail);
-    assert!(
-        matches!(read, Ok(0)),
-        "expected the server to close the connection, got: {read:?}",
-    );
+    assert!(matches!(read, Ok(0)), "expected the server to close the connection, got: {read:?}");
 }
 
 /// Two requests round-trip in order on one kept-alive socket (HTTP/1.1
@@ -2193,11 +1801,8 @@ fn keep_alive_serves_sequential_requests_on_one_socket() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
     let port = port_of(&chassis);
 
-    let mut stream =
-        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("set_read_timeout");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
     let mut carry: Vec<u8> = Vec::new();
 
     // Pipeline both requests, then read both responses in order.
@@ -2210,28 +1815,13 @@ fn keep_alive_serves_sequential_requests_on_one_socket() {
     stream.flush().expect("flush");
 
     let first = read_one_response(&mut stream, &mut carry);
-    assert!(
-        first.starts_with("HTTP/1.1 200 OK\r\n"),
-        "first response 200: {first:?}",
-    );
-    assert!(
-        first.contains("x-aether-path: /one\r\n"),
-        "first response is /one: {first:?}",
-    );
-    assert!(
-        first.contains("Connection: keep-alive\r\n"),
-        "first response keeps alive: {first:?}",
-    );
+    assert!(first.starts_with("HTTP/1.1 200 OK\r\n"), "first response 200: {first:?}");
+    assert!(first.contains("x-aether-path: /one\r\n"), "first response is /one: {first:?}");
+    assert!(first.contains("Connection: keep-alive\r\n"), "first response keeps alive: {first:?}");
 
     let second = read_one_response(&mut stream, &mut carry);
-    assert!(
-        second.contains("x-aether-path: /two\r\n"),
-        "second response is /two, in order: {second:?}",
-    );
-    assert!(
-        second.contains("Connection: keep-alive\r\n"),
-        "second response keeps alive: {second:?}",
-    );
+    assert!(second.contains("x-aether-path: /two\r\n"), "second response is /two, in order: {second:?}");
+    assert!(second.contains("Connection: keep-alive\r\n"), "second response keeps alive: {second:?}");
 
     // A final `Connection: close` request terminates the connection.
     stream
@@ -2239,14 +1829,8 @@ fn keep_alive_serves_sequential_requests_on_one_socket() {
         .expect("write closing request");
     stream.flush().expect("flush");
     let third = read_one_response(&mut stream, &mut carry);
-    assert!(
-        third.contains("x-aether-path: /three\r\n"),
-        "third response is /three: {third:?}",
-    );
-    assert!(
-        third.contains("Connection: close\r\n"),
-        "third response closes: {third:?}",
-    );
+    assert!(third.contains("x-aether-path: /three\r\n"), "third response is /three: {third:?}");
+    assert!(third.contains("Connection: close\r\n"), "third response closes: {third:?}");
     assert_closed(&mut stream);
 }
 
@@ -2262,51 +1846,28 @@ fn keep_alive_reuses_socket_after_streamed_response() {
     let chassis = boot_response_stream::<StreamHttpHandler>(8);
     let port = port_of(&chassis);
 
-    let mut stream =
-        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("set_read_timeout");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
     let mut carry: Vec<u8> = Vec::new();
 
-    let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT)
-        .flat_map(stream_chunk_body)
-        .collect();
+    let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT).flat_map(stream_chunk_body).collect();
 
     // First streamed request, HTTP/1.1 default (no `Connection: close`).
-    stream
-        .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .expect("write first request");
+    stream.write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write first request");
     stream.flush().expect("flush");
     let first = read_one_chunked_response(&mut stream, &mut carry);
     assert!(first.starts_with("HTTP/1.1 200 OK\r\n"), "{first:?}");
-    assert!(
-        first.contains("Connection: keep-alive\r\n"),
-        "streamed response keeps alive: {first:?}",
-    );
-    assert_eq!(
-        dechunk(body_of(&first)).into_bytes(),
-        expected,
-        "first stream reassembles in order",
-    );
+    assert!(first.contains("Connection: keep-alive\r\n"), "streamed response keeps alive: {first:?}");
+    assert_eq!(dechunk(body_of(&first)).into_bytes(), expected, "first stream reassembles in order");
 
     // The reuse invariant: a second request on the same socket after the
     // stream ended gets served rather than the socket being closed.
-    stream
-        .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .expect("write second request");
+    stream.write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write second request");
     stream.flush().expect("flush");
     let second = read_one_chunked_response(&mut stream, &mut carry);
     assert!(second.starts_with("HTTP/1.1 200 OK\r\n"), "{second:?}");
-    assert!(
-        second.contains("Connection: keep-alive\r\n"),
-        "second streamed response keeps alive too: {second:?}",
-    );
-    assert_eq!(
-        dechunk(body_of(&second)).into_bytes(),
-        expected,
-        "second stream reassembles in order",
-    );
+    assert!(second.contains("Connection: keep-alive\r\n"), "second streamed response keeps alive too: {second:?}");
+    assert_eq!(dechunk(body_of(&second)).into_bytes(), expected, "second stream reassembles in order");
 }
 
 /// Pins the negative alongside the reuse tripwire above: a streamed request
@@ -2317,23 +1878,15 @@ fn streamed_response_honors_explicit_connection_close() {
     let chassis = boot_response_stream::<StreamHttpHandler>(8);
     let port = port_of(&chassis);
 
-    let mut stream =
-        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("set_read_timeout");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
     let mut carry: Vec<u8> = Vec::new();
 
-    stream
-        .write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .expect("write request");
+    stream.write_all(b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").expect("write request");
     stream.flush().expect("flush");
     let response = read_one_chunked_response(&mut stream, &mut carry);
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
-    assert!(
-        response.contains("Connection: close\r\n"),
-        "streamed response honors explicit close: {response:?}",
-    );
+    assert!(response.contains("Connection: close\r\n"), "streamed response honors explicit close: {response:?}");
     assert_closed(&mut stream);
 }
 
@@ -2344,26 +1897,15 @@ fn http_1_0_defaults_to_close() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
     let port = port_of(&chassis);
 
-    let mut stream =
-        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("set_read_timeout");
-    stream
-        .write_all(b"GET /ten HTTP/1.0\r\nHost: localhost\r\n\r\n")
-        .expect("write request");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
+    stream.write_all(b"GET /ten HTTP/1.0\r\nHost: localhost\r\n\r\n").expect("write request");
     stream.flush().expect("flush");
 
     let mut carry: Vec<u8> = Vec::new();
     let response = read_one_response(&mut stream, &mut carry);
-    assert!(
-        response.starts_with("HTTP/1.1 200 OK\r\n"),
-        "expected 200, got: {response:?}",
-    );
-    assert!(
-        response.contains("Connection: close\r\n"),
-        "HTTP/1.0 defaults to close: {response:?}",
-    );
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {response:?}");
+    assert!(response.contains("Connection: close\r\n"), "HTTP/1.0 defaults to close: {response:?}");
     assert_closed(&mut stream);
 }
 
@@ -2372,28 +1914,18 @@ fn http_1_0_defaults_to_close() {
 /// pinning the reader thread for the full request timeout.
 #[test]
 fn idle_kept_alive_connection_closes_after_timeout() {
-    let chassis = boot_chassis::<EchoHttpHandler>(keep_alive_config_for(
-        <EchoHttpHandler as Addressable>::NAMESPACE,
-        300,
-    ));
+    let chassis =
+        boot_chassis::<EchoHttpHandler>(keep_alive_config_for(<EchoHttpHandler as Addressable>::NAMESPACE, 300));
     let port = port_of(&chassis);
 
-    let mut stream =
-        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("set_read_timeout");
-    stream
-        .write_all(b"GET /keep HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .expect("write request");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
+    stream.write_all(b"GET /keep HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write request");
     stream.flush().expect("flush");
 
     let mut carry: Vec<u8> = Vec::new();
     let response = read_one_response(&mut stream, &mut carry);
-    assert!(
-        response.contains("Connection: keep-alive\r\n"),
-        "kept-alive response: {response:?}",
-    );
+    assert!(response.contains("Connection: keep-alive\r\n"), "kept-alive response: {response:?}");
 
     // Now idle. The 300 ms idle timeout closes the connection well before the
     // 5 s request timeout / read timeout would — the elapsed bound is the

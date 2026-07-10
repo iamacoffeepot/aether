@@ -44,9 +44,7 @@ use crate::actor::native::local as actor_local;
 use crate::mail::registry::MailDispatch;
 use crate::runtime::log_install;
 use crate::runtime::panic_hook;
-use crate::{
-    AETHER_DIAGNOSTICS, ComponentCtx, HubOutbound, Mailer, Registry, actor::wasm::host_fns,
-};
+use crate::{AETHER_DIAGNOSTICS, ComponentCtx, HubOutbound, Mailer, Registry, actor::wasm::host_fns};
 use aether_kinds::descriptors;
 
 /// Everything a chassis needs after shared boot setup. Fields are
@@ -135,9 +133,7 @@ impl SubstrateBootBuilder<'_> {
 
         let boot_descriptors = descriptors::all();
         for d in &boot_descriptors {
-            registry
-                .register_kind_with_descriptor(d.clone())
-                .expect("duplicate kind in substrate init");
+            registry.register_kind_with_descriptor(d.clone()).expect("duplicate kind in substrate init");
         }
 
         // Diagnostic sink for hub → originating-engine typo reports
@@ -161,8 +157,7 @@ impl SubstrateBootBuilder<'_> {
                 let kind_name = dispatch.kind_name;
                 let bytes = dispatch.payload;
                 if kind_name == <aether_kinds::UnresolvedMail as aether_data::Kind>::NAME
-                    && let Ok(record) =
-                        bytemuck::try_from_bytes::<aether_kinds::UnresolvedMail>(bytes)
+                    && let Ok(record) = bytemuck::try_from_bytes::<aether_kinds::UnresolvedMail>(bytes)
                 {
                     tracing::warn!(
                         target: "aether_substrate::diagnostics",
@@ -181,8 +176,7 @@ impl SubstrateBootBuilder<'_> {
             }),
         );
 
-        let queue =
-            Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
+        let queue = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
 
         let mut linker: Linker<ComponentCtx> = Linker::new(&engine);
         host_fns::register(&mut linker)?;
@@ -223,8 +217,7 @@ mod tests {
             .expect("build must succeed without dialling the hub");
         // The boot is alive; chassis sinks can be registered without
         // racing a hub-driven load.
-        boot.registry
-            .register_inbox("test_chassis_sink", Arc::new(|_dispatch| {}));
+        boot.registry.register_inbox("test_chassis_sink", Arc::new(|_dispatch| {}));
         // No backend attached → `is_connected()` is false. Chassis
         // crates that want a hub bridge wire `HubClientCapability`
         // themselves through their `Builder`.

@@ -160,12 +160,7 @@ impl ComponentCtx {
     /// the private fields (`reply_table`, `saved_state`,
     /// `save_state_error`) internal to the wiring — callers should
     /// never set them directly.
-    pub fn new(
-        sender: MailboxId,
-        registry: Arc<Registry>,
-        queue: Arc<Mailer>,
-        outbound: Arc<HubOutbound>,
-    ) -> Self {
+    pub fn new(sender: MailboxId, registry: Arc<Registry>, queue: Arc<Mailer>, outbound: Arc<HubOutbound>) -> Self {
         Self {
             sender,
             registry,
@@ -231,11 +226,7 @@ impl ComponentCtx {
     /// stamp the child's address; for a normally-addressed actor it is the
     /// component's own id, so the stamp is unchanged.
     fn dispatch_identity(&self, from: MailboxId) -> MailboxId {
-        if from == MailboxId::NONE {
-            self.sender
-        } else {
-            from
-        }
+        if from == MailboxId::NONE { self.sender } else { from }
     }
 
     /// Return the correlation id used by the most recent
@@ -261,14 +252,7 @@ impl ComponentCtx {
     /// routes to the component's inbox, warn-drops dropped/unknown
     /// mailboxes, or bubbles unknown ids up to the hub-substrate when
     /// a `HubOutbound` is wired (ADR-0037).
-    pub fn send(
-        &self,
-        recipient: MailboxId,
-        kind: MailKind,
-        payload: Vec<u8>,
-        count: u32,
-        from: MailboxId,
-    ) {
+    pub fn send(&self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32, from: MailboxId) {
         // ADR-0042: mint a fresh correlation_id for this send and
         // stash it on `last_correlation` so `prev_correlation_p32`
         // can return it to the guest. The minted id rides on the
@@ -288,9 +272,7 @@ impl ComponentCtx {
         // reply routing — symmetric with `NativeBinding::send_mail_with_lineage`,
         // which uses one counter for both.
         let mail_id = MailId::new(identity, correlation);
-        self.send_routed(
-            recipient, kind, payload, count, reply_to, mail_id, false, identity,
-        );
+        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false, identity);
     }
 
     /// ADR-0080 §7 fire-and-forget escape hatch: the detached
@@ -301,21 +283,12 @@ impl ComponentCtx {
     /// send_detached`). Correlation / reply-routing are identical to
     /// `send` — only the trace lineage differs. `from` (issue 1987) is the
     /// guest-carried dispatch identity, resolved the same way as in `send`.
-    pub fn send_detached(
-        &self,
-        recipient: MailboxId,
-        kind: MailKind,
-        payload: Vec<u8>,
-        count: u32,
-        from: MailboxId,
-    ) {
+    pub fn send_detached(&self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32, from: MailboxId) {
         let correlation = self.mint_correlation();
         let identity = self.dispatch_identity(from);
         let reply_to = Source::with_correlation(SourceAddr::Component(identity), correlation);
         let mail_id = MailId::new(identity, correlation);
-        self.send_routed(
-            recipient, kind, payload, count, reply_to, mail_id, true, identity,
-        );
+        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, true, identity);
     }
 
     /// Issue iamacoffeepot/aether#1465: correlation-preserving sibling
@@ -354,9 +327,7 @@ impl ComponentCtx {
         // back to `self.sender`.
         let identity = self.dispatch_identity(from);
         let mail_id = MailId::new(identity, self.next_reply_lineage());
-        self.send_routed(
-            recipient, kind, payload, count, reply_to, mail_id, false, identity,
-        );
+        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false, identity);
     }
 
     /// Shared routing body of [`Self::send`] and [`Self::reply`]: stamp
@@ -412,8 +383,7 @@ impl ComponentCtx {
         // read the dispatch `identity` the caller resolved from the guest's
         // `from`, so an inline child's mail is attributed to the child's
         // address; a normally-addressed actor's is its own id.
-        self.queue
-            .record_sent(mail_id, root, parent_mail, identity, recipient, kind);
+        self.queue.record_sent(mail_id, root, parent_mail, identity, recipient, kind);
 
         // Closure-bound (actor-enqueue) and Sink-bound (synchronous
         // handler) recipients dispatch inline here, bypassing the
@@ -499,11 +469,11 @@ impl ComponentCtx {
         //   `MailToHubSubstrate`; the `source_mailbox_id` it carries is
         //   recovered from `reply_to.addr` when it's a Component
         //   variant (warn-drops otherwise).
-        self.queue.push(
-            Mail::new(recipient, kind, payload, count)
-                .with_reply_to(reply_to)
-                .with_lineage(mail_id, root, parent_mail),
-        );
+        self.queue.push(Mail::new(recipient, kind, payload, count).with_reply_to(reply_to).with_lineage(
+            mail_id,
+            root,
+            parent_mail,
+        ));
     }
 
     /// Set the in-flight `(mail_id, root)` context the next
@@ -523,8 +493,7 @@ impl ComponentCtx {
     /// requester's id space and must not be surfaced to the recipient as its
     /// own pending-key space.
     pub(crate) fn set_reply_correlation(&self, source: Source) {
-        let correlation = if matches!(source.addr, SourceAddr::None)
-            && source.correlation_id != Source::NO_CORRELATION
+        let correlation = if matches!(source.addr, SourceAddr::None) && source.correlation_id != Source::NO_CORRELATION
         {
             source.correlation_id
         } else {

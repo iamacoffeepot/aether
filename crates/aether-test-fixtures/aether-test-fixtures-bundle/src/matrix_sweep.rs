@@ -35,14 +35,10 @@
 
 use core::cell::UnsafeCell;
 
-use aether_actor::{
-    ActorInitError, MailboxId, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx,
-    actor,
-};
+use aether_actor::{ActorInitError, MailboxId, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{
-    CollectMatrix, MATRIX_CELL_CHILD_TO_PARENT, MATRIX_CELL_CHILD_TO_SELF,
-    MATRIX_CELL_CHILD_TO_SIBLING, MATRIX_CELL_PARENT_TO_CHILD, MatrixPing, MatrixReport, RunMatrix,
-    SourceQuery,
+    CollectMatrix, MATRIX_CELL_CHILD_TO_PARENT, MATRIX_CELL_CHILD_TO_SELF, MATRIX_CELL_CHILD_TO_SIBLING,
+    MATRIX_CELL_PARENT_TO_CHILD, MatrixPing, MatrixReport, RunMatrix, SourceQuery,
 };
 
 /// One cell's recorded observation: whether the mail arrived and the raw
@@ -78,14 +74,7 @@ struct LogSlot {
 unsafe impl Sync for LogSlot {}
 
 static MATRIX_LOG: LogSlot = LogSlot {
-    inner: UnsafeCell::new(MatrixLog {
-        cells: [Cell {
-            arrived: false,
-            source: 0,
-        }; 5],
-        parent_id: 0,
-        child_a_id: 0,
-    }),
+    inner: UnsafeCell::new(MatrixLog { cells: [Cell { arrived: false, source: 0 }; 5], parent_id: 0, child_a_id: 0 }),
 };
 
 /// Record `(arrived, source)` for `cell` (a `MATRIX_CELL_*` marker) into the
@@ -212,31 +201,19 @@ impl WasmActor for MatrixChild {
 
         // child[a] → parent (in place): the parent records its own cell.
         if let Some(parent) = ctx.parent() {
-            parent.send(&MatrixPing {
-                cell: MATRIX_CELL_CHILD_TO_PARENT,
-                fan_out: 0,
-                observer_mailbox: 0,
-            });
+            parent.send(&MatrixPing { cell: MATRIX_CELL_CHILD_TO_PARENT, fan_out: 0, observer_mailbox: 0 });
         }
 
         // child[a] → sibling child[b] (in place): the sibling records its cell.
         if let Some(sibling) = ctx.sibling("b") {
-            sibling.send(&MatrixPing {
-                cell: MATRIX_CELL_CHILD_TO_SIBLING,
-                fan_out: 0,
-                observer_mailbox: 0,
-            });
+            sibling.send(&MatrixPing { cell: MATRIX_CELL_CHILD_TO_SIBLING, fan_out: 0, observer_mailbox: 0 });
         }
 
         // child[a] → self (in place): a child resolves itself as the child
         // of its own parent named with its own subname (`a`), routed in place
         // back to its own alias.
         if let Some(self_handle) = ctx.sibling("a").or_else(|| ctx.child("a")) {
-            self_handle.send(&MatrixPing {
-                cell: MATRIX_CELL_CHILD_TO_SELF,
-                fan_out: 0,
-                observer_mailbox: 0,
-            });
+            self_handle.send(&MatrixPing { cell: MATRIX_CELL_CHILD_TO_SELF, fan_out: 0, observer_mailbox: 0 });
         }
 
         // Cross-cluster send *during the in-place drain*: addressed by the

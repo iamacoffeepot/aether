@@ -61,10 +61,7 @@ fn lathe_face_normals_point_outward() {
         let cent_x = (a.x + b.x + c.x) / 3.0;
         let cent_z = (a.z + b.z + c.z) / 3.0;
         let radial_dot = normal.x.mul_add(cent_x, normal.z * cent_z);
-        assert!(
-            radial_dot > 0.0,
-            "lathe face normal points inward for triangle {tri:?}"
-        );
+        assert!(radial_dot > 0.0, "lathe face normal points inward for triangle {tri:?}");
     }
 }
 
@@ -75,10 +72,7 @@ fn lathe_with_translate_offsets_all_vertices() {
     let tris = mesh(&ast).expect("test setup: lathe meshes");
     for tri in &tris {
         for v in tri.vertices {
-            assert!(
-                v.x >= 4.0 && v.x <= 6.0,
-                "translated cylinder x out of range: {v:?}"
-            );
+            assert!(v.x >= 4.0 && v.x <= 6.0, "translated cylinder x out of range: {v:?}");
         }
     }
 }
@@ -88,9 +82,5 @@ fn fewer_than_three_segments_produces_no_geometry() {
     let text = "(lathe ((1 0) (1 1)) 2 :color 0)";
     let ast = parse(text).expect("test setup: lathe DSL parses");
     let tris = mesh(&ast).expect("test setup: lathe meshes");
-    assert_eq!(
-        tris.len(),
-        0,
-        "segments < 3 is degenerate, should emit nothing"
-    );
+    assert_eq!(tris.len(), 0, "segments < 3 is degenerate, should emit nothing");
 }

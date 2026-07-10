@@ -173,10 +173,7 @@ impl HttpSupervisorState {
                 next_stream_id: Arc::clone(&self.next_stream_id),
             };
             let subname = format!("shard-{index}");
-            match ctx
-                .spawn_child::<HttpDispatchShard>(Subname::Named(&subname), seed)
-                .finish()
-            {
+            match ctx.spawn_child::<HttpDispatchShard>(Subname::Named(&subname), seed).finish() {
                 Ok(mailbox) => self.shards.push(WakeSink {
                     inbound_tx,
                     mailer: Arc::clone(&self.mailer),
@@ -370,19 +367,9 @@ impl HttpShardState {
         // inbound mail in; no inbound chain to inherit, no settlement
         // umbrella.
         #[allow(clippy::disallowed_methods)]
-        let thread = match thread::Builder::new()
-            .name(format!("aether-http-reader-{conn_id}"))
-            .spawn(move || {
-                run_reader_loop(
-                    read_half,
-                    conn_id,
-                    &shutdown_for_thread,
-                    &sink,
-                    &control_rx,
-                    tuning,
-                    &shared,
-                );
-            }) {
+        let thread = match thread::Builder::new().name(format!("aether-http-reader-{conn_id}")).spawn(move || {
+            run_reader_loop(read_half, conn_id, &shutdown_for_thread, &sink, &control_rx, tuning, &shared);
+        }) {
             Ok(thread) => thread,
             Err(e) => {
                 tracing::warn!(
@@ -453,15 +440,7 @@ impl HttpShardState {
                 Arc::clone(&self.mailer),
             );
         }
-        self.in_flight.insert(
-            mail_id.correlation_id,
-            PendingRequest {
-                conn_id,
-                method,
-                keep_alive,
-                handler,
-            },
-        );
+        self.in_flight.insert(mail_id.correlation_id, PendingRequest { conn_id, method, keep_alive, handler });
     }
 
     /// Open the inbound request stream for a reader-posted head bound
@@ -490,10 +469,7 @@ impl HttpShardState {
     /// Send a control message to a connection's parked reader; a send failure
     /// means the reader already exited, so the connection is closed.
     pub fn signal_reader(&mut self, conn_id: ConnId, control: ReaderControl) {
-        let sent = self
-            .connections
-            .get(&conn_id)
-            .is_some_and(|conn| conn.control_tx.send(control).is_ok());
+        let sent = self.connections.get(&conn_id).is_some_and(|conn| conn.control_tx.send(control).is_ok());
         if !sent {
             self.close_connection(conn_id, "reader gone");
         }
@@ -529,11 +505,7 @@ impl HttpShardState {
         let Some(conn) = self.connections.get_mut(&conn_id) else {
             return;
         };
-        if let Err(e) = conn
-            .write_half
-            .write_all(bytes)
-            .and_then(|()| conn.write_half.flush())
-        {
+        if let Err(e) = conn.write_half.write_all(bytes).and_then(|()| conn.write_half.flush()) {
             tracing::debug!(
                 target: "aether_substrate::http_server",
                 conn = conn_id,
@@ -557,12 +529,8 @@ impl HttpShardState {
         // Tear down any response stream bound to this connection (ADR-0128).
         // The socket shutdown above unblocks a write-blocked writer; dropping
         // the sender (in `teardown_stream`) unblocks a recv-blocked one.
-        let stream_ids: Vec<u64> = self
-            .streams
-            .iter()
-            .filter(|(_, stream)| stream.conn_id == conn_id)
-            .map(|(id, _)| *id)
-            .collect();
+        let stream_ids: Vec<u64> =
+            self.streams.iter().filter(|(_, stream)| stream.conn_id == conn_id).map(|(id, _)| *id).collect();
         for stream_id in stream_ids {
             self.teardown_stream(stream_id);
         }
@@ -570,12 +538,10 @@ impl HttpShardState {
         // the reader (parked on the control channel or blocked mid-read) is
         // already unblocked by the dropped `ConnState` sender / socket
         // shutdown above.
-        self.request_streams
-            .retain(|_, stream| stream.conn_id != conn_id);
+        self.request_streams.retain(|_, stream| stream.conn_id != conn_id);
         // Drop any in-flight entry pinned to this connection so we don't
         // write to a dead socket.
-        self.in_flight
-            .retain(|_, pending| pending.conn_id != conn_id);
+        self.in_flight.retain(|_, pending| pending.conn_id != conn_id);
         tracing::debug!(
             target: "aether_substrate::http_server",
             conn = conn_id,

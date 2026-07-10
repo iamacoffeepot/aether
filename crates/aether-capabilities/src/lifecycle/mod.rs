@@ -39,8 +39,8 @@
 
 use aether_kinds::trace::Settled;
 use aether_kinds::{
-    LifecycleAdvance, LifecycleSubscribe, LifecycleSubscribeSelf, LifecycleUnsubscribe,
-    LifecycleUnsubscribeAll, LifecycleUnsubscribeSelf, Quit,
+    LifecycleAdvance, LifecycleSubscribe, LifecycleSubscribeSelf, LifecycleUnsubscribe, LifecycleUnsubscribeAll,
+    LifecycleUnsubscribeSelf, Quit,
 };
 // `LifecycleSubscribeResult` rides the native gate (not `runtime`): the
 // `#[actor]` macro's ADR-0109 `HandlerEntry` inventory submission —
@@ -60,9 +60,7 @@ mod graph;
 // which rides the `runtime` gate, so the re-export does too.
 #[cfg(feature = "runtime")]
 use graph::LifecycleStateData;
-pub use graph::{
-    BuildError, LifecycleGraphBuilder, LifecycleGraphData, NoOpen, OpenNoNext, OpenWithNext,
-};
+pub use graph::{BuildError, LifecycleGraphBuilder, LifecycleGraphData, NoOpen, OpenNoNext, OpenWithNext};
 
 mod subscribers;
 pub use subscribers::LifecycleMailboxExt;

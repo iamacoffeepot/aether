@@ -69,9 +69,7 @@ impl fmt::Display for Error {
             Self::Utf8 => f.write_str("aether wire: string is not valid UTF-8"),
             Self::InvalidChar(c) => write!(f, "aether wire: invalid char code point {c}"),
             Self::TrailingBytes => f.write_str("aether wire: trailing bytes after value"),
-            Self::NotSelfDescribing => {
-                f.write_str("aether wire: format is not self-describing (deserialize_any)")
-            }
+            Self::NotSelfDescribing => f.write_str("aether wire: format is not self-describing (deserialize_any)"),
             Self::Message(m) => f.write_str(m),
         }
     }
@@ -105,11 +103,7 @@ pub fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, Error> {
 pub fn from_bytes<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, Error> {
     let mut deserializer = de::Deserializer::new(bytes);
     let value = T::deserialize(&mut deserializer)?;
-    if deserializer.is_empty() {
-        Ok(value)
-    } else {
-        Err(Error::TrailingBytes)
-    }
+    if deserializer.is_empty() { Ok(value) } else { Err(Error::TrailingBytes) }
 }
 
 /// Decode a value from the front of a wire payload, returning the value and the

@@ -32,22 +32,14 @@ use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
 use aether_substrate::mail::{MailId, MailRef};
 use aether_substrate::testing::{TestChassis, bare_substrate};
 use aether_substrate::{
-    Addressable, BootError, Builder, Dispatch, Manual, NativeActor, NativeBinding, NativeCtx,
-    NativeInitCtx, PassiveChassis, Registry, mail::MailboxId,
+    Addressable, BootError, Builder, Dispatch, Manual, NativeActor, NativeBinding, NativeCtx, NativeInitCtx,
+    PassiveChassis, Registry, mail::MailboxId,
 };
 use std::thread;
 
 /// Structured-shape kind via the derive — exercises the
 /// `decode_from_bytes` structured path the macro's dispatch arm uses.
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    ::aether_data::Kind,
-    ::aether_data::Schema,
-)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
 #[kind(name = "test.macro_native_actor.greet")]
 struct Greet {
     tag: u32,
@@ -57,14 +49,7 @@ struct Greet {
 /// through one cap.
 #[repr(C)]
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    ::aether_data::Kind,
-    ::aether_data::Schema,
+    Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ::aether_data::Kind, ::aether_data::Schema,
 )]
 #[kind(name = "test.macro_native_actor.ping")]
 struct Ping {
@@ -91,10 +76,7 @@ impl NativeActor for MacroProbeCap {
     const NAMESPACE: &'static str = "test.macro_native_actor.probe";
 
     fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self {
-            greet_total: config.greet_total,
-            ping_total: config.ping_total,
-        })
+        Ok(Self { greet_total: config.greet_total, ping_total: config.ping_total })
     }
 
     /// Handles structured-shape `Greet` mail.
@@ -147,14 +129,13 @@ fn macro_emitted_cap_routes_structured_kind_through_dispatch() {
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
 
-    let chassis: PassiveChassis<TestChassis> =
-        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<MacroProbeCap>(ProbeConfig {
-                greet_total: Arc::clone(&greet_total),
-                ping_total: Arc::clone(&ping_total),
-            })
-            .build_passive()
-            .expect("macro-emitted cap boots");
+    let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<MacroProbeCap>(ProbeConfig {
+            greet_total: Arc::clone(&greet_total),
+            ping_total: Arc::clone(&ping_total),
+        })
+        .build_passive()
+        .expect("macro-emitted cap boots");
 
     push_envelope(&registry, MacroProbeCap::NAMESPACE, &Greet { tag: 7 });
     assert!(
@@ -181,18 +162,15 @@ fn seize_and_run_dispatches_seed_in_place() {
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
 
-    let chassis: PassiveChassis<TestChassis> =
-        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<MacroProbeCap>(ProbeConfig {
-                greet_total: Arc::clone(&greet_total),
-                ping_total: Arc::clone(&ping_total),
-            })
-            .build_passive()
-            .expect("macro-emitted cap boots");
+    let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<MacroProbeCap>(ProbeConfig {
+            greet_total: Arc::clone(&greet_total),
+            ping_total: Arc::clone(&ping_total),
+        })
+        .build_passive()
+        .expect("macro-emitted cap boots");
 
-    let id = registry
-        .lookup(MacroProbeCap::NAMESPACE)
-        .expect("cap mailbox registered");
+    let id = registry.lookup(MacroProbeCap::NAMESPACE).expect("cap mailbox registered");
 
     // The cap boots with no pre-load mail, so its slot quiesces to `Idle`.
     // Resolve the seize handle off the `Inbox` entry's deferred cell (the
@@ -207,10 +185,7 @@ fn seize_and_run_dispatches_seed_in_place() {
         if let Some(slot) = seize.try_seize() {
             break slot;
         }
-        assert!(
-            Instant::now() < deadline,
-            "Pooled slot should quiesce to Idle and become seizable"
-        );
+        assert!(Instant::now() < deadline, "Pooled slot should quiesce to Idle and become seizable");
         thread::sleep(Duration::from_millis(5));
     };
     // The seize put the slot in `Running`.
@@ -236,17 +211,9 @@ fn seize_and_run_dispatches_seed_in_place() {
     slot.seize_and_run(seed, BatchBudget::standard());
 
     // Handler ran exactly once; the slot drained empty back to `Idle`.
-    assert_eq!(
-        greet_total.load(AtomicOrdering::SeqCst),
-        11,
-        "the seed dispatched through on_greet in place"
-    );
+    assert_eq!(greet_total.load(AtomicOrdering::SeqCst), 11, "the seed dispatched through on_greet in place");
     assert_eq!(ping_total.load(AtomicOrdering::SeqCst), 0);
-    assert_eq!(
-        seize.state().current(),
-        SlotStateLabel::Idle,
-        "the slot drained empty and returned to Idle"
-    );
+    assert_eq!(seize.state().current(), SlotStateLabel::Idle, "the slot drained empty and returned to Idle");
 
     drop(chassis);
 }
@@ -257,14 +224,13 @@ fn macro_emitted_cap_routes_cast_kind_through_dispatch() {
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
 
-    let chassis: PassiveChassis<TestChassis> =
-        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<MacroProbeCap>(ProbeConfig {
-                greet_total: Arc::clone(&greet_total),
-                ping_total: Arc::clone(&ping_total),
-            })
-            .build_passive()
-            .expect("macro-emitted cap boots");
+    let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<MacroProbeCap>(ProbeConfig {
+            greet_total: Arc::clone(&greet_total),
+            ping_total: Arc::clone(&ping_total),
+        })
+        .build_passive()
+        .expect("macro-emitted cap boots");
 
     push_envelope(&registry, MacroProbeCap::NAMESPACE, &Ping { seq: 42 });
     assert!(
@@ -287,11 +253,10 @@ fn macro_routes_task_completions_by_output_type() {
         b_calls: Arc::new(AtomicU32::new(0)),
     };
 
-    let chassis: PassiveChassis<TestChassis> =
-        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<TaskRouteCap>(obs.clone())
-            .build_passive()
-            .expect("task-routing cap boots");
+    let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<TaskRouteCap>(obs.clone())
+        .build_passive()
+        .expect("task-routing cap boots");
 
     // Kick off both dispatches. Each handler spawns a worker that fills
     // the ledger and pushes a `TaskCompletionWake` back to this actor's
@@ -301,27 +266,13 @@ fn macro_routes_task_completions_by_output_type() {
     push_envelope(&registry, TaskRouteCap::NAMESPACE, &KickA { seed: 7 });
     push_envelope(&registry, TaskRouteCap::NAMESPACE, &KickB { seed: 9 });
 
-    assert!(
-        wait_for(1, &obs.a_calls, Duration::from_secs(2)),
-        "the ResultA completion routed to on_result_a"
-    );
-    assert!(
-        wait_for(1, &obs.b_calls, Duration::from_secs(2)),
-        "the ResultB completion routed to on_result_b"
-    );
+    assert!(wait_for(1, &obs.a_calls, Duration::from_secs(2)), "the ResultA completion routed to on_result_a");
+    assert!(wait_for(1, &obs.b_calls, Duration::from_secs(2)), "the ResultB completion routed to on_result_b");
 
     // Each completion landed on the correct handler with the correct
     // payload — output-type routing, not a kind id.
-    assert_eq!(
-        obs.a_value.load(AtomicOrdering::SeqCst),
-        7,
-        "on_result_a saw its own dispatch's value"
-    );
-    assert_eq!(
-        obs.b_tag.load(AtomicOrdering::SeqCst),
-        9,
-        "on_result_b saw its own dispatch's tag"
-    );
+    assert_eq!(obs.a_value.load(AtomicOrdering::SeqCst), 7, "on_result_a saw its own dispatch's value");
+    assert_eq!(obs.b_tag.load(AtomicOrdering::SeqCst), 9, "on_result_b saw its own dispatch's tag");
 
     // Neither completion was mis-delivered to the other-typed handler:
     // each task handler fired exactly once. A wrong-type probe in the
@@ -333,16 +284,8 @@ fn macro_routes_task_completions_by_output_type() {
         1,
         "on_result_a fired exactly once (no mis-routed extra completion)"
     );
-    assert_eq!(
-        obs.b_calls.load(AtomicOrdering::SeqCst),
-        1,
-        "on_result_b fired exactly once"
-    );
-    assert_eq!(
-        obs.dispatched.load(AtomicOrdering::SeqCst),
-        2,
-        "both kick handlers dispatched a worker"
-    );
+    assert_eq!(obs.b_calls.load(AtomicOrdering::SeqCst), 1, "on_result_b fired exactly once");
+    assert_eq!(obs.dispatched.load(AtomicOrdering::SeqCst), 2, "both kick handlers dispatched a worker");
 
     drop(chassis);
 }
@@ -358,49 +301,24 @@ fn macro_pending_request_borrow_completion_replies_once() {
     let obs = DeferredObs::new();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-    let caller = registry.register_inbox(
-        "test.macro_native_actor.deferred_caller",
-        forward_to(reply_tx),
-    );
+    let caller = registry.register_inbox("test.macro_native_actor.deferred_caller", forward_to(reply_tx));
 
-    let chassis: PassiveChassis<TestChassis> =
-        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<DeferredReplyCap>(obs.clone())
-            .build_passive()
-            .expect("deferred-reply cap boots");
+    let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<DeferredReplyCap>(obs.clone())
+        .build_passive()
+        .expect("deferred-reply cap boots");
 
     // The inbound names the caller as its reply target, so the deferred
     // reply routes back there.
     let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 55);
-    push_envelope_replying_to(
-        &registry,
-        DeferredReplyCap::NAMESPACE,
-        &KickP { seed: 21 },
-        caller_reply_to,
-    );
+    push_envelope_replying_to(&registry, DeferredReplyCap::NAMESPACE, &KickP { seed: 21 }, caller_reply_to);
 
-    let reply = reply_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("the deferred reply lands on the caller");
-    assert_eq!(
-        reply.kind,
-        <EchoReply as Kind>::ID,
-        "the completion's `-> EchoReply` return routed back as the reply"
-    );
+    let reply = reply_rx.recv_timeout(Duration::from_secs(2)).expect("the deferred reply lands on the caller");
+    assert_eq!(reply.kind, <EchoReply as Kind>::ID, "the completion's `-> EchoReply` return routed back as the reply");
     let echoed = EchoReply::decode_from_bytes(reply.payload.bytes()).expect("the reply decodes");
-    assert_eq!(
-        echoed.value, 21,
-        "resolve_value sent the value the completion handler returned"
-    );
-    assert_eq!(
-        reply.sender.correlation_id, 55,
-        "the caller's correlation is echoed onto the reply"
-    );
-    assert_eq!(
-        obs.echo_calls.load(AtomicOrdering::SeqCst),
-        1,
-        "the borrow-form completion handler fired once"
-    );
+    assert_eq!(echoed.value, 21, "resolve_value sent the value the completion handler returned");
+    assert_eq!(reply.sender.correlation_id, 55, "the caller's correlation is echoed onto the reply");
+    assert_eq!(obs.echo_calls.load(AtomicOrdering::SeqCst), 1, "the borrow-form completion handler fired once");
 
     // Exactly one reply settles — the macro must not also drop the
     // TaskDone (which would re-release) or double-send.
@@ -422,34 +340,21 @@ fn macro_borrow_task_no_reply_releases_without_replying() {
     let obs = DeferredObs::new();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-    let caller = registry.register_inbox(
-        "test.macro_native_actor.deferred_silent_caller",
-        forward_to(reply_tx),
-    );
+    let caller = registry.register_inbox("test.macro_native_actor.deferred_silent_caller", forward_to(reply_tx));
 
-    let chassis: PassiveChassis<TestChassis> =
-        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<DeferredReplyCap>(obs.clone())
-            .build_passive()
-            .expect("deferred-reply cap boots");
+    let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<DeferredReplyCap>(obs.clone())
+        .build_passive()
+        .expect("deferred-reply cap boots");
 
     let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 9);
-    push_envelope_replying_to(
-        &registry,
-        DeferredReplyCap::NAMESPACE,
-        &KickS { seed: 88 },
-        caller_reply_to,
-    );
+    push_envelope_replying_to(&registry, DeferredReplyCap::NAMESPACE, &KickS { seed: 88 }, caller_reply_to);
 
     assert!(
         wait_for(1, &obs.silent_calls, Duration::from_secs(2)),
         "the no-reply completion ran (release_no_reply, no lost-reply panic)"
     );
-    assert_eq!(
-        obs.silent_value.load(AtomicOrdering::SeqCst),
-        88,
-        "the no-reply completion saw its own worker output"
-    );
+    assert_eq!(obs.silent_value.load(AtomicOrdering::SeqCst), 88, "the no-reply completion saw its own worker output");
 
     // No reply was sent — release_no_reply discharges without replying.
     assert!(
@@ -478,14 +383,7 @@ fn macro_emits_handles_kind_per_handler() {
 /// alongside the legacy facade.
 #[repr(C)]
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    ::aether_data::Kind,
-    ::aether_data::Schema,
+    Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ::aether_data::Kind, ::aether_data::Schema,
 )]
 #[kind(name = "test.macro_native_actor.unknown")]
 struct Unknown {
@@ -498,20 +396,15 @@ fn macro_emitted_cap_drops_unknown_kind_via_dispatch() {
     let greet_total = Arc::new(AtomicU32::new(0));
     let ping_total = Arc::new(AtomicU32::new(0));
 
-    let chassis: PassiveChassis<TestChassis> =
-        Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<MacroProbeCap>(ProbeConfig {
-                greet_total: Arc::clone(&greet_total),
-                ping_total: Arc::clone(&ping_total),
-            })
-            .build_passive()
-            .expect("macro-emitted cap boots");
+    let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<MacroProbeCap>(ProbeConfig {
+            greet_total: Arc::clone(&greet_total),
+            ping_total: Arc::clone(&ping_total),
+        })
+        .build_passive()
+        .expect("macro-emitted cap boots");
 
-    push_envelope(
-        &registry,
-        MacroProbeCap::NAMESPACE,
-        &Unknown { payload: 99 },
-    );
+    push_envelope(&registry, MacroProbeCap::NAMESPACE, &Unknown { payload: 99 });
 
     // Settle: give the dispatcher time to observe + drop the envelope.
     // The macro-emitted dispatch returns None; the chassis-side
@@ -532,15 +425,7 @@ fn macro_emitted_cap_drops_unknown_kind_via_dispatch() {
 
 /// First completion output type. Distinct from `ResultB` so the macro's
 /// output-type routing has two arms to discriminate.
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    ::aether_data::Kind,
-    ::aether_data::Schema,
-)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
 #[kind(name = "test.macro_native_actor.result_a")]
 struct ResultA {
     value: u64,
@@ -548,15 +433,7 @@ struct ResultA {
 
 /// Second completion output type — a structurally different shape so a
 /// mis-route to the `ResultA` handler couldn't accidentally type-check.
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    ::aether_data::Kind,
-    ::aether_data::Schema,
-)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
 #[kind(name = "test.macro_native_actor.result_b")]
 struct ResultB {
     tag: u32,
@@ -565,14 +442,7 @@ struct ResultB {
 /// Trigger that makes the cap dispatch a `ResultA`-producing worker.
 #[repr(C)]
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    ::aether_data::Kind,
-    ::aether_data::Schema,
+    Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ::aether_data::Kind, ::aether_data::Schema,
 )]
 #[kind(name = "test.macro_native_actor.kick_a")]
 struct KickA {
@@ -582,14 +452,7 @@ struct KickA {
 /// Trigger that makes the cap dispatch a `ResultB`-producing worker.
 #[repr(C)]
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    ::aether_data::Kind,
-    ::aether_data::Schema,
+    Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ::aether_data::Kind, ::aether_data::Schema,
 )]
 #[kind(name = "test.macro_native_actor.kick_b")]
 struct KickB {
@@ -651,9 +514,7 @@ impl NativeActor for TaskRouteCap {
     /// test can confirm only the `ResultA` dispatch reached it.
     #[aether_actor::handler(task)]
     fn on_result_a(&self, ctx: &mut NativeCtx<'_>, done: TaskDone<ResultA>) {
-        self.obs
-            .a_value
-            .store(done.output().value, AtomicOrdering::SeqCst);
+        self.obs.a_value.store(done.output().value, AtomicOrdering::SeqCst);
         self.obs.a_calls.fetch_add(1, AtomicOrdering::SeqCst);
         // No caller behind these test dispatches (Source::NONE), so the
         // re-reply is a no-op; resolve still consumes the TaskDone and
@@ -664,9 +525,7 @@ impl NativeActor for TaskRouteCap {
     /// `ResultB` completion handler.
     #[aether_actor::handler(task)]
     fn on_result_b(&self, ctx: &mut NativeCtx<'_>, done: TaskDone<ResultB>) {
-        self.obs
-            .b_tag
-            .store(done.output().tag, AtomicOrdering::SeqCst);
+        self.obs.b_tag.store(done.output().tag, AtomicOrdering::SeqCst);
         self.obs.b_calls.fetch_add(1, AtomicOrdering::SeqCst);
         done.resolve(ctx);
     }
@@ -680,15 +539,7 @@ impl NativeActor for TaskRouteCap {
 // query projects it onto the wire.
 
 /// Reply kind for the link-time native-handler-manifest macro test.
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    ::aether_data::Kind,
-    ::aether_data::Schema,
-)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
 #[kind(name = "test.macro_native_actor.pong")]
 struct Pong {
     echoed: u32,
@@ -733,11 +584,7 @@ fn macro_emits_native_handler_reply_manifest() {
     let entry = handler_entries()
         .find(|e| e.namespace == ReplyMacroCap::NAMESPACE && e.id == <Greet as Kind>::ID)
         .expect("the macro should submit a HandlerEntry for the Greet -> Pong handler");
-    assert_eq!(
-        entry.name,
-        <Greet as Kind>::NAME,
-        "input kind name round-trips"
-    );
+    assert_eq!(entry.name, <Greet as Kind>::NAME, "input kind name round-trips");
     assert_eq!(
         entry.reply,
         Some(<Pong as Kind>::ID),
@@ -766,12 +613,7 @@ fn forward_to(tx: mpsc::Sender<OwnedDispatch>) -> Arc<dyn InboxHandler> {
 /// Like [`push_envelope`] but stamps an explicit `reply_to` [`Source`] so
 /// the handler's deferred reply has somewhere to route — a registered
 /// caller inbox the test reads back.
-fn push_envelope_replying_to<K: Kind>(
-    registry: &Registry,
-    recipient: &str,
-    payload: &K,
-    reply_to: Source,
-) {
+fn push_envelope_replying_to<K: Kind>(registry: &Registry, recipient: &str, payload: &K, reply_to: Source) {
     use aether_substrate::mail::registry::MailboxEntry;
     let id: MailboxId = registry.lookup(recipient).expect("mailbox registered");
     let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry exists") else {
@@ -798,14 +640,7 @@ fn push_envelope_replying_to<K: Kind>(
 /// worker behind a `-> Pending<EchoReply>` request handler.
 #[repr(C)]
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    ::aether_data::Kind,
-    ::aether_data::Schema,
+    Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ::aether_data::Kind, ::aether_data::Schema,
 )]
 #[kind(name = "test.macro_native_actor.kick_p")]
 struct KickP {
@@ -816,14 +651,7 @@ struct KickP {
 /// worker whose completion releases the hold without replying.
 #[repr(C)]
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    ::aether_data::Kind,
-    ::aether_data::Schema,
+    Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable, ::aether_data::Kind, ::aether_data::Schema,
 )]
 #[kind(name = "test.macro_native_actor.kick_s")]
 struct KickS {
@@ -834,15 +662,7 @@ struct KickS {
 /// returns and the macro sends via `resolve_value`. Structured-shape so the
 /// reply (wire-encoded by `Mailer::send_reply`) round-trips through
 /// `EchoReply::decode_from_bytes`.
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    ::aether_data::Kind,
-    ::aether_data::Schema,
-)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
 #[kind(name = "test.macro_native_actor.echo_reply")]
 struct EchoReply {
     value: u64,
@@ -851,15 +671,7 @@ struct EchoReply {
 /// The no-reply path's worker output — a distinct output type from
 /// `EchoReply` so the two task handlers route by output type. Never
 /// replied; the completion records it and releases.
-#[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    ::aether_data::Kind,
-    ::aether_data::Schema,
-)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::aether_data::Kind, ::aether_data::Schema)]
 #[kind(name = "test.macro_native_actor.silent")]
 struct Silent {
     value: u64,
@@ -915,9 +727,7 @@ impl NativeActor for DeferredReplyCap {
     #[aether_actor::handler(task)]
     fn on_echo_done(&self, _ctx: &mut NativeCtx<'_>, done: &TaskDone<EchoReply>) -> EchoReply {
         self.obs.echo_calls.fetch_add(1, AtomicOrdering::SeqCst);
-        EchoReply {
-            value: done.output().value,
-        }
+        EchoReply { value: done.output().value }
     }
 
     /// No-reply path: returns `()`, so it dispatches via
@@ -933,9 +743,7 @@ impl NativeActor for DeferredReplyCap {
     /// `release_no_reply` — the hold releases with no reply sent.
     #[aether_actor::handler(task)]
     fn on_silent_done(&self, _ctx: &mut NativeCtx<'_>, done: &TaskDone<Silent>) {
-        self.obs
-            .silent_value
-            .store(done.output().value, AtomicOrdering::SeqCst);
+        self.obs.silent_value.store(done.output().value, AtomicOrdering::SeqCst);
         self.obs.silent_calls.fetch_add(1, AtomicOrdering::SeqCst);
     }
 }
@@ -943,15 +751,7 @@ impl NativeActor for DeferredReplyCap {
 /// ADR-0112 manual reply class: input kind for the manual handler.
 #[repr(C)]
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
+    Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema,
 )]
 #[kind(name = "test.macro_native_actor.manual_ping")]
 struct ManualPing {
@@ -961,15 +761,7 @@ struct ManualPing {
 /// ADR-0112 manual reply class: the kind the manual handler replies with.
 #[repr(C)]
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
+    Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema,
 )]
 #[kind(name = "test.macro_native_actor.manual_ack")]
 struct ManualAck {
@@ -1006,23 +798,16 @@ fn manual_handler_replies_through_ctx() {
     let (registry, mailer) = bare_substrate();
 
     let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-    let caller = registry.register_inbox(
-        "test.macro_native_actor.manual_caller",
-        forward_to(reply_tx),
-    );
+    let caller = registry.register_inbox("test.macro_native_actor.manual_caller", forward_to(reply_tx));
 
-    let binding = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0x1850_0001),
-    ));
+    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x1850_0001)));
     let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 91);
 
     let mut cap = ManualReplyCap;
     {
         // ADR-0112: the dispatch seam carries the `Manual` ctx — build it
         // via `new_dispatching`.
-        let mut ctx =
-            NativeCtx::new_dispatching(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_dispatching(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
         let handled = <ManualReplyCap as Dispatch<ManualReplyCap>>::dispatch(
             &mut cap,
             &mut ctx,
@@ -1036,19 +821,8 @@ fn manual_handler_replies_through_ctx() {
     let reply = reply_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("the manual handler replied to the inbound sender via ctx.reply");
-    assert_eq!(
-        reply.kind,
-        ManualAck::ID,
-        "the reply carries the manual handler's ack kind",
-    );
-    assert_eq!(
-        reply.sender.correlation_id, 91,
-        "the caller's correlation is echoed onto the manual reply",
-    );
+    assert_eq!(reply.kind, ManualAck::ID, "the reply carries the manual handler's ack kind");
+    assert_eq!(reply.sender.correlation_id, 91, "the caller's correlation is echoed onto the manual reply");
     let ack = ManualAck::decode_from_bytes(reply.payload.bytes()).expect("the reply decodes");
-    assert_eq!(
-        ack,
-        ManualAck { seq: 9 },
-        "the manual reply carries the ping seq"
-    );
+    assert_eq!(ack, ManualAck { seq: 9 }, "the manual reply carries the ping seq");
 }

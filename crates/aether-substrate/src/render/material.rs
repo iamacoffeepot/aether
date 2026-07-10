@@ -53,34 +53,20 @@ pub fn build_material_pipelines(
         source: wgpu::ShaderSource::Wgsl(MATERIAL_SHADER_WGSL.into()),
     });
 
-    let textured_params_layout = material_params_layout(
-        device,
-        "material textured params bind group layout",
-        MATERIAL_PARAMS_BYTES as u64,
-    );
-    let coverage_params_layout = material_params_layout(
-        device,
-        "material coverage params bind group layout",
-        MATERIAL_PARAMS_BYTES as u64,
-    );
+    let textured_params_layout =
+        material_params_layout(device, "material textured params bind group layout", MATERIAL_PARAMS_BYTES as u64);
+    let coverage_params_layout =
+        material_params_layout(device, "material coverage params bind group layout", MATERIAL_PARAMS_BYTES as u64);
 
     let vertex_layout = material_vertex_layout();
     let textured_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("aether textured material pipeline layout"),
-        bind_group_layouts: &[
-            Some(camera_layout),
-            Some(&texture_bindings.layout),
-            Some(&textured_params_layout),
-        ],
+        bind_group_layouts: &[Some(camera_layout), Some(&texture_bindings.layout), Some(&textured_params_layout)],
         immediate_size: 0,
     });
     let coverage_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("aether coverage material pipeline layout"),
-        bind_group_layouts: &[
-            Some(camera_layout),
-            Some(&texture_bindings.layout),
-            Some(&coverage_params_layout),
-        ],
+        bind_group_layouts: &[Some(camera_layout), Some(&texture_bindings.layout), Some(&coverage_params_layout)],
         immediate_size: 0,
     });
 
@@ -137,11 +123,7 @@ pub fn build_material_pipelines(
     }
 }
 
-fn material_params_layout(
-    device: &wgpu::Device,
-    label: &'static str,
-    min_binding_size: u64,
-) -> wgpu::BindGroupLayout {
+fn material_params_layout(device: &wgpu::Device, label: &'static str, min_binding_size: u64) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some(label),
         entries: &[wgpu::BindGroupLayoutEntry {
@@ -192,16 +174,8 @@ fn material_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
         array_stride: MATERIAL_VERTEX_STRIDE,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
-            wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x3,
-            },
-            wgpu::VertexAttribute {
-                offset: 12,
-                shader_location: 1,
-                format: wgpu::VertexFormat::Float32x2,
-            },
+            wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+            wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
         ],
     }
 }
@@ -257,9 +231,7 @@ fn material_pipeline(
 }
 
 pub fn material_params_offset(index: usize) -> Option<u32> {
-    index
-        .checked_mul(PARAMS_ALIGN)
-        .and_then(|offset| u32::try_from(offset).ok())
+    index.checked_mul(PARAMS_ALIGN).and_then(|offset| u32::try_from(offset).ok())
 }
 
 pub fn push_material_rect_vertices(out: &mut Vec<u8>, rect: [f32; 5], uv: [f32; 4]) {
@@ -300,9 +272,7 @@ pub fn push_coverage_params(
     let offset = material_params_offset(out.len() / PARAMS_ALIGN)?;
     out.extend_from_slice(bytemuck::cast_slice(&body_color));
     out.extend_from_slice(bytemuck::cast_slice(&rim_color));
-    out.extend_from_slice(bytemuck::cast_slice(&[
-        rim_width, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-    ]));
+    out.extend_from_slice(bytemuck::cast_slice(&[rim_width, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
     pad_params(out);
     Some(offset)
 }
@@ -370,21 +340,10 @@ pub fn record_material_pass(encoder: &mut wgpu::CommandEncoder, record: Material
 
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("aether material pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: targets.color_view(),
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        })],
+        color_attachments: &[Some(super::load_color_attachment(targets.color_view()))],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: &targets.depth.view,
-            depth_ops: Some(wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            }),
+            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
             stencil_ops: None,
         }),
         timestamp_writes: None,
@@ -398,28 +357,14 @@ pub fn record_material_pass(encoder: &mut wgpu::CommandEncoder, record: Material
             MaterialPassDraw::Textured(draw) => {
                 pass.set_pipeline(&pipeline.textured);
                 pass.set_bind_group(1, draw.bind_group, &[]);
-                pass.set_bind_group(
-                    2,
-                    &pipeline.textured_params_bind_group,
-                    &[draw.params_offset],
-                );
-                pass.draw(
-                    draw.first_vertex..draw.first_vertex + draw.vertex_count,
-                    0..1,
-                );
+                pass.set_bind_group(2, &pipeline.textured_params_bind_group, &[draw.params_offset]);
+                pass.draw(draw.first_vertex..draw.first_vertex + draw.vertex_count, 0..1);
             }
             MaterialPassDraw::Coverage(draw) => {
                 pass.set_pipeline(&pipeline.coverage);
                 pass.set_bind_group(1, draw.bind_group, &[]);
-                pass.set_bind_group(
-                    2,
-                    &pipeline.coverage_params_bind_group,
-                    &[draw.params_offset],
-                );
-                pass.draw(
-                    draw.first_vertex..draw.first_vertex + draw.vertex_count,
-                    0..1,
-                );
+                pass.set_bind_group(2, &pipeline.coverage_params_bind_group, &[draw.params_offset]);
+                pass.draw(draw.first_vertex..draw.first_vertex + draw.vertex_count, 0..1);
             }
         }
     }
@@ -433,8 +378,7 @@ mod tests {
     fn material_rect_vertices_have_expected_stride_and_corners() {
         let mut bytes = Vec::new();
         push_material_rect_vertices(&mut bytes, [1.0, 2.0, 3.0, 4.0, 0.5], [0.1, 0.2, 0.8, 0.9]);
-        let vertex_stride =
-            usize::try_from(MATERIAL_VERTEX_STRIDE).expect("material vertex stride fits usize");
+        let vertex_stride = usize::try_from(MATERIAL_VERTEX_STRIDE).expect("material vertex stride fits usize");
         assert_eq!(bytes.len(), MATERIAL_VERTICES_PER_RECT * vertex_stride);
         let floats: &[f32] = bytemuck::cast_slice(&bytes);
         assert_eq!(&floats[0..5], &[1.0, 2.0, 0.5, 0.1, 0.2]);
@@ -446,10 +390,8 @@ mod tests {
     #[test]
     fn material_params_are_aligned_for_dynamic_uniform_offsets() {
         let mut bytes = Vec::new();
-        let first = push_textured_params(&mut bytes, [1.0, 0.0, 0.0, 1.0])
-            .expect("first textured params offset");
-        let second = push_textured_params(&mut bytes, [0.0, 1.0, 0.0, 1.0])
-            .expect("second textured params offset");
+        let first = push_textured_params(&mut bytes, [1.0, 0.0, 0.0, 1.0]).expect("first textured params offset");
+        let second = push_textured_params(&mut bytes, [0.0, 1.0, 0.0, 1.0]).expect("second textured params offset");
         let params_align = u32::try_from(PARAMS_ALIGN).expect("material params alignment fits u32");
         assert_eq!(first, 0);
         assert_eq!(second, params_align);

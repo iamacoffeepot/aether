@@ -9,10 +9,7 @@ pub fn extract_agent_doc(attrs: &[Attribute]) -> Option<String> {
         let Meta::NameValue(nv) = &attr.meta else {
             continue;
         };
-        let Expr::Lit(ExprLit {
-            lit: Lit::Str(s), ..
-        }) = &nv.value
-        else {
+        let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = &nv.value else {
             continue;
         };
         lines.push(s.value());

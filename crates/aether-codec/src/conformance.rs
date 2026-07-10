@@ -42,22 +42,13 @@ where
 {
     let adapter = wire::to_vec(value).expect("wire adapter encode");
     let walker = encode_schema(json, schema).expect("schema walker encode");
-    assert_eq!(
-        adapter, walker,
-        "adapter vs walker encode bytes diverge for {json}"
-    );
+    assert_eq!(adapter, walker, "adapter vs walker encode bytes diverge for {json}");
 
     let decoded_json = decode_schema(&adapter, schema).expect("walker decode of adapter bytes");
-    assert_eq!(
-        &decoded_json, json,
-        "walker decode of adapter bytes diverges for {json}"
-    );
+    assert_eq!(&decoded_json, json, "walker decode of adapter bytes diverges for {json}");
 
     let decoded_value: T = wire::from_bytes(&walker).expect("adapter decode of walker bytes");
-    assert_eq!(
-        &decoded_value, value,
-        "adapter decode of walker bytes diverges"
-    );
+    assert_eq!(&decoded_value, value, "adapter decode of walker bytes diverges");
 }
 
 #[derive(Serialize, serde::Deserialize, PartialEq, Debug)]
@@ -143,30 +134,12 @@ struct Collections {
 
 fn collections_schema() -> SchemaType {
     structured_struct(vec![
-        named(
-            "tags",
-            SchemaType::Vec(SchemaCell::owned(SchemaType::String)),
-        ),
-        named(
-            "maybe_some",
-            SchemaType::Option(SchemaCell::owned(SchemaType::Scalar(Primitive::U64))),
-        ),
-        named(
-            "maybe_none",
-            SchemaType::Option(SchemaCell::owned(SchemaType::Scalar(Primitive::U64))),
-        ),
-        named(
-            "triple",
-            SchemaType::Array {
-                element: SchemaCell::owned(SchemaType::Scalar(Primitive::U32)),
-                len: 3,
-            },
-        ),
+        named("tags", SchemaType::Vec(SchemaCell::owned(SchemaType::String))),
+        named("maybe_some", SchemaType::Option(SchemaCell::owned(SchemaType::Scalar(Primitive::U64)))),
+        named("maybe_none", SchemaType::Option(SchemaCell::owned(SchemaType::Scalar(Primitive::U64)))),
+        named("triple", SchemaType::Array { element: SchemaCell::owned(SchemaType::Scalar(Primitive::U32)), len: 3 }),
         named("blob", SchemaType::Bytes),
-        named(
-            "nested",
-            structured_struct(vec![scalar("seq", Primitive::U32)]),
-        ),
+        named("nested", structured_struct(vec![scalar("seq", Primitive::U32)])),
     ])
 }
 
@@ -203,10 +176,7 @@ fn sum_schema() -> SchemaType {
     use aether_data::EnumVariant;
     SchemaType::Enum {
         variants: vec![
-            EnumVariant::Unit {
-                name: "Pending".into(),
-                discriminant: 0,
-            },
+            EnumVariant::Unit { name: "Pending".into(), discriminant: 0 },
             EnumVariant::Tuple {
                 name: "Ok".into(),
                 discriminant: 1,
@@ -215,11 +185,7 @@ fn sum_schema() -> SchemaType {
             EnumVariant::Tuple {
                 name: "Pair".into(),
                 discriminant: 2,
-                fields: vec![
-                    SchemaType::Scalar(Primitive::U32),
-                    SchemaType::Scalar(Primitive::I16),
-                ]
-                .into(),
+                fields: vec![SchemaType::Scalar(Primitive::U32), SchemaType::Scalar(Primitive::I16)].into(),
             },
             EnumVariant::Struct {
                 name: "Err".into(),
@@ -234,23 +200,9 @@ fn sum_schema() -> SchemaType {
 #[test]
 fn enum_variants_conform() {
     check(&Sum::Pending, &sum_schema(), &json!("Pending"));
-    check(
-        &Sum::Ok(0x0102_0304),
-        &sum_schema(),
-        &json!({ "Ok": 0x0102_0304u64 }),
-    );
-    check(
-        &Sum::Pair(7, -3),
-        &sum_schema(),
-        &json!({ "Pair": [7u32, -3i16] }),
-    );
-    check(
-        &Sum::Err {
-            reason: "boom".into(),
-        },
-        &sum_schema(),
-        &json!({ "Err": { "reason": "boom" } }),
-    );
+    check(&Sum::Ok(0x0102_0304), &sum_schema(), &json!({ "Ok": 0x0102_0304u64 }));
+    check(&Sum::Pair(7, -3), &sum_schema(), &json!({ "Pair": [7u32, -3i16] }));
+    check(&Sum::Err { reason: "boom".into() }, &sum_schema(), &json!({ "Err": { "reason": "boom" } }));
 }
 
 #[test]

@@ -12,20 +12,19 @@ use alloc::{string::String, vec, vec::Vec};
 use core::mem::take;
 
 use aether_actor::{
-    ActorInitError, Manual, OutboundReply, ReplyHandle, RequestId, WasmActor, WasmCtx, WasmInitCtx,
-    actor,
+    ActorInitError, Manual, OutboundReply, ReplyHandle, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::MailboxId;
 use serde::{Deserialize, Serialize};
 
 use crate::mark::{
-    Mark, MarkCreate, MarkCreateResult, MarkDelete, MarkDeleteResult, MarkGet, MarkGetResult,
-    MarkRef, MarkUpdate, MarkUpdateResult,
+    Mark, MarkCreate, MarkCreateResult, MarkDelete, MarkDeleteResult, MarkGet, MarkGetResult, MarkRef, MarkUpdate,
+    MarkUpdateResult,
 };
 
 use self::selection::{
-    BatchProgress, PlannedDelete, PlannedUpdate, Selection, plan_delete, plan_move, plan_relabel,
-    validate_batch_marks, validate_mark,
+    BatchProgress, PlannedDelete, PlannedUpdate, Selection, plan_delete, plan_move, plan_relabel, validate_batch_marks,
+    validate_mark,
 };
 
 /// Selection-and-command facade over a standalone terrain mark book.
@@ -87,17 +86,7 @@ enum MarkRequestStage {
     Delete,
 }
 
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    Serialize,
-    Deserialize,
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[kind(name = "aether.kit.terrain_editor.mark_request_context")]
 struct MarkRequestContext {
     stage: MarkRequestStage,
@@ -133,40 +122,20 @@ impl PendingCommand {
 
     fn expected_context(&self) -> MarkRequestContext {
         match self {
-            Self::SetSelection { index, .. } => MarkRequestContext {
-                stage: MarkRequestStage::ValidateSelection,
-                index: index_u32(*index),
-            },
-            Self::ToggleSelection { .. } => MarkRequestContext {
-                stage: MarkRequestStage::ValidateSelection,
-                index: 0,
-            },
-            Self::Create { .. } => MarkRequestContext {
-                stage: MarkRequestStage::Create,
-                index: 0,
-            },
-            Self::Batch {
-                plan: Some(BatchPlan::Updates(_)),
-                index,
-                ..
-            } => MarkRequestContext {
-                stage: MarkRequestStage::Update,
-                index: index_u32(*index),
-            },
-            Self::Batch {
-                plan: Some(BatchPlan::Deletes(_)),
-                index,
-                ..
-            } => MarkRequestContext {
-                stage: MarkRequestStage::Delete,
-                index: index_u32(*index),
-            },
+            Self::SetSelection { index, .. } => {
+                MarkRequestContext { stage: MarkRequestStage::ValidateSelection, index: index_u32(*index) }
+            }
+            Self::ToggleSelection { .. } => MarkRequestContext { stage: MarkRequestStage::ValidateSelection, index: 0 },
+            Self::Create { .. } => MarkRequestContext { stage: MarkRequestStage::Create, index: 0 },
+            Self::Batch { plan: Some(BatchPlan::Updates(_)), index, .. } => {
+                MarkRequestContext { stage: MarkRequestStage::Update, index: index_u32(*index) }
+            }
+            Self::Batch { plan: Some(BatchPlan::Deletes(_)), index, .. } => {
+                MarkRequestContext { stage: MarkRequestStage::Delete, index: index_u32(*index) }
+            }
             Self::Batch { marks, plan, .. } => {
                 debug_assert!(plan.is_none());
-                MarkRequestContext {
-                    stage: MarkRequestStage::Preflight,
-                    index: index_u32(marks.len()),
-                }
+                MarkRequestContext { stage: MarkRequestStage::Preflight, index: index_u32(marks.len()) }
             }
         }
     }
@@ -174,20 +143,12 @@ impl PendingCommand {
     fn next_request(&self) -> OutboundMarkRequest {
         let context = self.expected_context();
         let payload = match self {
-            Self::SetSelection {
-                requested, index, ..
-            } => PendingMarkRequest::Get(MarkGet {
-                id: requested[*index].id,
-            }),
-            Self::ToggleSelection { requested, .. } => {
-                PendingMarkRequest::Get(MarkGet { id: requested.id })
+            Self::SetSelection { requested, index, .. } => {
+                PendingMarkRequest::Get(MarkGet { id: requested[*index].id })
             }
+            Self::ToggleSelection { requested, .. } => PendingMarkRequest::Get(MarkGet { id: requested.id }),
             Self::Create { request, .. } => PendingMarkRequest::Create(request.clone()),
-            Self::Batch {
-                plan: Some(BatchPlan::Updates(updates)),
-                index,
-                ..
-            } => {
+            Self::Batch { plan: Some(BatchPlan::Updates(updates)), index, .. } => {
                 let update = &updates[*index];
                 PendingMarkRequest::Update(MarkUpdate {
                     id: update.requested.id,
@@ -195,23 +156,12 @@ impl PendingCommand {
                     label: update.label.clone(),
                 })
             }
-            Self::Batch {
-                plan: Some(BatchPlan::Deletes(deletes)),
-                index,
-                ..
-            } => PendingMarkRequest::Delete(MarkDelete {
-                id: deletes[*index].requested.id,
-            }),
-            Self::Batch {
-                requested,
-                marks,
-                plan,
-                ..
-            } => {
+            Self::Batch { plan: Some(BatchPlan::Deletes(deletes)), index, .. } => {
+                PendingMarkRequest::Delete(MarkDelete { id: deletes[*index].requested.id })
+            }
+            Self::Batch { requested, marks, plan, .. } => {
                 debug_assert!(plan.is_none());
-                PendingMarkRequest::Get(MarkGet {
-                    id: requested[marks.len()].id,
-                })
+                PendingMarkRequest::Get(MarkGet { id: requested[marks.len()].id })
             }
         };
         OutboundMarkRequest { payload, context }
@@ -228,33 +178,19 @@ impl TerrainEditor {
     }
 
     fn query_result(&self) -> TerrainEditorQueryResult {
-        TerrainEditorQueryResult {
-            selection: self.selection.snapshot(),
-            busy: self.busy(),
-        }
+        TerrainEditorQueryResult { selection: self.selection.snapshot(), busy: self.busy() }
     }
 
     fn rejection(&self, error: TerrainEditorError) -> TerrainCommandResult {
-        TerrainCommandResult::Rejected {
-            selection: self.selection.snapshot(),
-            error,
-        }
+        TerrainCommandResult::Rejected { selection: self.selection.snapshot(), error }
     }
 
     fn applied_without_mark_mutation(&self) -> TerrainCommandResult {
-        TerrainCommandResult::Applied {
-            selection: self.selection.snapshot(),
-            changed: Vec::new(),
-            deleted: Vec::new(),
-        }
+        TerrainCommandResult::Applied { selection: self.selection.snapshot(), changed: Vec::new(), deleted: Vec::new() }
     }
 
     fn require_idle(&self) -> Result<(), TerrainEditorError> {
-        if self.busy() {
-            Err(TerrainEditorError::Busy)
-        } else {
-            Ok(())
-        }
+        if self.busy() { Err(TerrainEditorError::Busy) } else { Ok(()) }
     }
 
     fn require_mark_book(&self) -> Result<(), TerrainEditorError> {
@@ -281,35 +217,20 @@ impl TerrainEditor {
     }
 
     fn issue_next(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
-        let request = self
-            .pending
-            .as_ref()
-            .expect("pending command exists before issuing mark request")
-            .next_request();
+        let request = self.pending.as_ref().expect("pending command exists before issuing mark request").next_request();
         let mailbox = self.config.mark_book_mailbox;
         let request_id = match request.payload {
-            PendingMarkRequest::Get(payload) => {
-                ctx.send_to_with_context(mailbox, &payload, &request.context)
-            }
-            PendingMarkRequest::Create(payload) => {
-                ctx.send_to_with_context(mailbox, &payload, &request.context)
-            }
-            PendingMarkRequest::Update(payload) => {
-                ctx.send_to_with_context(mailbox, &payload, &request.context)
-            }
-            PendingMarkRequest::Delete(payload) => {
-                ctx.send_to_with_context(mailbox, &payload, &request.context)
-            }
+            PendingMarkRequest::Get(payload) => ctx.send_to_with_context(mailbox, &payload, &request.context),
+            PendingMarkRequest::Create(payload) => ctx.send_to_with_context(mailbox, &payload, &request.context),
+            PendingMarkRequest::Update(payload) => ctx.send_to_with_context(mailbox, &payload, &request.context),
+            PendingMarkRequest::Delete(payload) => ctx.send_to_with_context(mailbox, &payload, &request.context),
         };
         self.pending_request = Some(request_id);
     }
 
     fn accepts_envelope(&self, envelope: &ReplyEnvelope) -> bool {
         self.pending_request == Some(envelope.request)
-            && self
-                .pending
-                .as_ref()
-                .is_some_and(|pending| pending.expected_context() == envelope.context)
+            && self.pending.as_ref().is_some_and(|pending| pending.expected_context() == envelope.context)
     }
 
     fn reply_source_allowed(source: Option<MailboxId>) -> bool {
@@ -377,9 +298,7 @@ impl TerrainEditor {
 
     fn finish_error(&mut self, ctx: &mut WasmCtx<'_, Manual>, error: TerrainEditorError) {
         let result = match self.pending.as_mut() {
-            Some(PendingCommand::Batch { progress, .. }) => {
-                take(progress).finish(&self.selection, Some(error))
-            }
+            Some(PendingCommand::Batch { progress, .. }) => take(progress).finish(&self.selection, Some(error)),
             _ => self.rejection(error),
         };
         self.finish(ctx, &result);
@@ -410,15 +329,10 @@ impl TerrainEditor {
 
     fn complete_preflight(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
         let plan = {
-            let Some(PendingCommand::Batch {
-                operation, marks, ..
-            }) = self.pending.as_ref()
-            else {
+            let Some(PendingCommand::Batch { operation, marks, .. }) = self.pending.as_ref() else {
                 self.finish_error(
                     ctx,
-                    TerrainEditorError::MarkProtocol {
-                        reason: String::from("preflight completed outside a batch"),
-                    },
+                    TerrainEditorError::MarkProtocol { reason: String::from("preflight completed outside a batch") },
                 );
                 return;
             };
@@ -427,9 +341,7 @@ impl TerrainEditor {
             } else {
                 match operation {
                     BatchOperation::Move(delta) => plan_move(marks, *delta).map(BatchPlan::Updates),
-                    BatchOperation::Relabel(label) => {
-                        plan_relabel(marks, label).map(BatchPlan::Updates)
-                    }
+                    BatchOperation::Relabel(label) => plan_relabel(marks, label).map(BatchPlan::Updates),
                     BatchOperation::Delete => Ok(BatchPlan::Deletes(plan_delete(marks))),
                 }
             }
@@ -441,48 +353,28 @@ impl TerrainEditor {
                 return;
             }
         };
-        if let Some(PendingCommand::Batch {
-            plan: pending_plan,
-            index,
-            ..
-        }) = self.pending.as_mut()
-        {
+        if let Some(PendingCommand::Batch { plan: pending_plan, index, .. }) = self.pending.as_mut() {
             *pending_plan = Some(plan);
             *index = 0;
         }
         self.issue_next(ctx);
     }
 
-    fn apply_update_result(
-        &mut self,
-        requested: MarkRef,
-        result: MarkUpdateResult,
-    ) -> Option<TerrainEditorError> {
+    fn apply_update_result(&mut self, requested: MarkRef, result: MarkUpdateResult) -> Option<TerrainEditorError> {
         match result {
-            MarkUpdateResult::Updated {
-                reference: observed,
-            } => {
+            MarkUpdateResult::Updated { reference: observed } => {
                 let expected = MarkRef {
                     id: requested.id,
-                    revision: requested
-                        .revision
-                        .checked_add(1)
-                        .expect("revision exhaustion rejected during preflight"),
+                    revision: requested.revision.checked_add(1).expect("revision exhaustion rejected during preflight"),
                 };
                 if let Some(PendingCommand::Batch { progress, .. }) = self.pending.as_mut() {
                     progress.record_update(&mut self.selection, observed);
                 }
-                (observed != expected)
-                    .then_some(TerrainEditorError::RevisionRace { expected, observed })
+                (observed != expected).then_some(TerrainEditorError::RevisionRace { expected, observed })
             }
-            MarkUpdateResult::NotFound { .. } => {
-                Some(TerrainEditorError::MarkMissing { requested })
-            }
+            MarkUpdateResult::NotFound { .. } => Some(TerrainEditorError::MarkMissing { requested }),
             MarkUpdateResult::Rejected { error } => {
-                Some(TerrainEditorError::MarkMutationRejected {
-                    requested: Some(requested),
-                    error,
-                })
+                Some(TerrainEditorError::MarkMutationRejected { requested: Some(requested), error })
             }
         }
     }
@@ -498,35 +390,21 @@ impl TerrainEditor {
                 }
             }
             MarkCreateResult::Rejected { error } => {
-                self.rejection(TerrainEditorError::MarkMutationRejected {
-                    requested: None,
-                    error,
-                })
+                self.rejection(TerrainEditorError::MarkMutationRejected { requested: None, error })
             }
         }
     }
 
-    fn apply_delete_result(
-        &mut self,
-        requested: MarkRef,
-        result: &MarkDeleteResult,
-    ) -> Option<TerrainEditorError> {
+    fn apply_delete_result(&mut self, requested: MarkRef, result: &MarkDeleteResult) -> Option<TerrainEditorError> {
         match result {
-            MarkDeleteResult::Deleted {
-                reference: observed,
-            } => {
+            MarkDeleteResult::Deleted { reference: observed } => {
                 let observed = *observed;
                 if let Some(PendingCommand::Batch { progress, .. }) = self.pending.as_mut() {
                     progress.record_delete(&mut self.selection, observed);
                 }
-                (observed != requested).then_some(TerrainEditorError::RevisionRace {
-                    expected: requested,
-                    observed,
-                })
+                (observed != requested).then_some(TerrainEditorError::RevisionRace { expected: requested, observed })
             }
-            MarkDeleteResult::NotFound { .. } => {
-                Some(TerrainEditorError::MarkMissing { requested })
-            }
+            MarkDeleteResult::NotFound { .. } => Some(TerrainEditorError::MarkMissing { requested }),
         }
     }
 
@@ -536,9 +414,7 @@ impl TerrainEditor {
             return;
         }
         let result = match self.pending.as_mut() {
-            Some(PendingCommand::Batch { progress, .. }) => {
-                take(progress).finish(&self.selection, None)
-            }
+            Some(PendingCommand::Batch { progress, .. }) => take(progress).finish(&self.selection, None),
             _ => unreachable!("batch remains pending"),
         };
         self.finish(ctx, &result);
@@ -550,16 +426,8 @@ impl WasmActor for TerrainEditor {
     type Config = TerrainEditorConfig;
     const NAMESPACE: &'static str = "aether.kit.terrain_editor";
 
-    fn init(
-        config: TerrainEditorConfig,
-        _ctx: &mut WasmInitCtx<'_>,
-    ) -> Result<Self, ActorInitError> {
-        Ok(Self {
-            config,
-            selection: Selection::default(),
-            pending: None,
-            pending_request: None,
-        })
+    fn init(config: TerrainEditorConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self { config, selection: Selection::default(), pending: None, pending_request: None })
     }
 
     #[handler::manual]
@@ -583,38 +451,20 @@ impl WasmActor for TerrainEditor {
         }
         self.begin(
             ctx,
-            PendingCommand::SetSelection {
-                reply: ctx.reply_target(),
-                requested: command.references,
-                index: 0,
-            },
+            PendingCommand::SetSelection { reply: ctx.reply_target(), requested: command.references, index: 0 },
         );
     }
 
     #[handler::manual]
-    fn on_toggle_selection(
-        &mut self,
-        ctx: &mut WasmCtx<'_, Manual>,
-        command: ToggleTerrainSelection,
-    ) {
+    fn on_toggle_selection(&mut self, ctx: &mut WasmCtx<'_, Manual>, command: ToggleTerrainSelection) {
         if !self.mark_book_command_ready(ctx) {
             return;
         }
-        self.begin(
-            ctx,
-            PendingCommand::ToggleSelection {
-                reply: ctx.reply_target(),
-                requested: command.reference,
-            },
-        );
+        self.begin(ctx, PendingCommand::ToggleSelection { reply: ctx.reply_target(), requested: command.reference });
     }
 
     #[handler::manual]
-    fn on_clear_selection(
-        &mut self,
-        ctx: &mut WasmCtx<'_, Manual>,
-        _command: ClearTerrainSelection,
-    ) {
+    fn on_clear_selection(&mut self, ctx: &mut WasmCtx<'_, Manual>, _command: ClearTerrainSelection) {
         if let Err(error) = self.require_idle() {
             ctx.reply(&self.rejection(error));
             return;
@@ -632,10 +482,7 @@ impl WasmActor for TerrainEditor {
             ctx,
             PendingCommand::Create {
                 reply: ctx.reply_target(),
-                request: MarkCreate {
-                    geometry: command.geometry,
-                    label: command.label,
-                },
+                request: MarkCreate { geometry: command.geometry, label: command.label },
             },
         );
     }
@@ -646,20 +493,12 @@ impl WasmActor for TerrainEditor {
     }
 
     #[handler::manual]
-    fn on_relabel_selection(
-        &mut self,
-        ctx: &mut WasmCtx<'_, Manual>,
-        command: RelabelTerrainSelection,
-    ) {
+    fn on_relabel_selection(&mut self, ctx: &mut WasmCtx<'_, Manual>, command: RelabelTerrainSelection) {
         self.start_batch(ctx, BatchOperation::Relabel(command.label));
     }
 
     #[handler::manual]
-    fn on_delete_selection(
-        &mut self,
-        ctx: &mut WasmCtx<'_, Manual>,
-        _command: DeleteTerrainSelection,
-    ) {
+    fn on_delete_selection(&mut self, ctx: &mut WasmCtx<'_, Manual>, _command: DeleteTerrainSelection) {
         self.start_batch(ctx, BatchOperation::Delete);
     }
 
@@ -675,9 +514,7 @@ impl WasmActor for TerrainEditor {
         }
 
         match self.pending.as_mut() {
-            Some(PendingCommand::SetSelection {
-                requested, index, ..
-            }) => {
+            Some(PendingCommand::SetSelection { requested, index, .. }) => {
                 let reference = requested[*index];
                 if let Err(error) = validate_mark(reference, result.mark.as_ref()) {
                     self.finish_error(ctx, error);
@@ -702,9 +539,7 @@ impl WasmActor for TerrainEditor {
                 let reply = self.applied_without_mark_mutation();
                 self.finish(ctx, &reply);
             }
-            Some(PendingCommand::Batch {
-                requested, marks, ..
-            }) => {
+            Some(PendingCommand::Batch { requested, marks, .. }) => {
                 let reference = requested[marks.len()];
                 if let Err(error) = validate_mark(reference, result.mark.as_ref()) {
                     self.finish_error(ctx, error);
@@ -719,9 +554,7 @@ impl WasmActor for TerrainEditor {
             }
             _ => self.finish_error(
                 ctx,
-                TerrainEditorError::MarkProtocol {
-                    reason: String::from("MarkGetResult arrived for a non-get stage"),
-                },
+                TerrainEditorError::MarkProtocol { reason: String::from("MarkGetResult arrived for a non-get stage") },
             ),
         }
     }
@@ -749,11 +582,8 @@ impl WasmActor for TerrainEditor {
         if self.take_reply_envelope(ctx).is_none() {
             return;
         }
-        let requested = if let Some(PendingCommand::Batch {
-            plan: Some(BatchPlan::Updates(updates)),
-            index,
-            ..
-        }) = self.pending.as_ref()
+        let requested = if let Some(PendingCommand::Batch { plan: Some(BatchPlan::Updates(updates)), index, .. }) =
+            self.pending.as_ref()
         {
             updates[*index].requested
         } else {
@@ -770,11 +600,7 @@ impl WasmActor for TerrainEditor {
             return;
         }
         let complete = match self.pending.as_mut() {
-            Some(PendingCommand::Batch {
-                plan: Some(BatchPlan::Updates(updates)),
-                index,
-                ..
-            }) => {
+            Some(PendingCommand::Batch { plan: Some(BatchPlan::Updates(updates)), index, .. }) => {
                 *index += 1;
                 *index == updates.len()
             }
@@ -789,11 +615,8 @@ impl WasmActor for TerrainEditor {
         if self.take_reply_envelope(ctx).is_none() {
             return;
         }
-        let requested = if let Some(PendingCommand::Batch {
-            plan: Some(BatchPlan::Deletes(deletes)),
-            index,
-            ..
-        }) = self.pending.as_ref()
+        let requested = if let Some(PendingCommand::Batch { plan: Some(BatchPlan::Deletes(deletes)), index, .. }) =
+            self.pending.as_ref()
         {
             deletes[*index].requested
         } else {
@@ -810,11 +633,7 @@ impl WasmActor for TerrainEditor {
             return;
         }
         let complete = match self.pending.as_mut() {
-            Some(PendingCommand::Batch {
-                plan: Some(BatchPlan::Deletes(deletes)),
-                index,
-                ..
-            }) => {
+            Some(PendingCommand::Batch { plan: Some(BatchPlan::Deletes(deletes)), index, .. }) => {
                 *index += 1;
                 *index == deletes.len()
             }
@@ -832,17 +651,12 @@ mod tests {
     use crate::mark::{MarkId, MarkMutationError};
 
     fn reference(id: u32, revision: u32) -> MarkRef {
-        MarkRef {
-            id: MarkId::new(id),
-            revision,
-        }
+        MarkRef { id: MarkId::new(id), revision }
     }
 
     fn editor() -> TerrainEditor {
         TerrainEditor {
-            config: TerrainEditorConfig {
-                mark_book_mailbox: MailboxId(44),
-            },
+            config: TerrainEditorConfig { mark_book_mailbox: MailboxId(44) },
             selection: Selection::default(),
             pending: None,
             pending_request: None,
@@ -857,17 +671,8 @@ mod tests {
     fn query_is_available_and_reports_busy_from_pending_state() {
         let mut editor = editor();
         editor.selection.replace(vec![reference(2, 1)]);
-        assert_eq!(
-            editor.query_result(),
-            TerrainEditorQueryResult {
-                selection: vec![reference(2, 1)],
-                busy: false,
-            }
-        );
-        editor.pending = Some(PendingCommand::ToggleSelection {
-            reply: None,
-            requested: reference(3, 1),
-        });
+        assert_eq!(editor.query_result(), TerrainEditorQueryResult { selection: vec![reference(2, 1)], busy: false });
+        editor.pending = Some(PendingCommand::ToggleSelection { reply: None, requested: reference(3, 1) });
         assert!(editor.busy());
         assert_eq!(editor.require_idle(), Err(TerrainEditorError::Busy));
         assert!(editor.query_result().busy);
@@ -877,25 +682,13 @@ mod tests {
     fn mismatched_and_stale_reply_envelopes_do_not_advance_or_drop_reply() {
         let mut editor = editor();
         let retained = reply_handle(91);
-        editor.pending = Some(PendingCommand::ToggleSelection {
-            reply: Some(retained),
-            requested: reference(3, 1),
-        });
+        editor.pending = Some(PendingCommand::ToggleSelection { reply: Some(retained), requested: reference(3, 1) });
         editor.pending_request = Some(RequestId(12));
-        let expected = MarkRequestContext {
-            stage: MarkRequestStage::ValidateSelection,
-            index: 0,
-        };
-        let stale_request = ReplyEnvelope {
-            request: RequestId(11),
-            context: expected,
-        };
+        let expected = MarkRequestContext { stage: MarkRequestStage::ValidateSelection, index: 0 };
+        let stale_request = ReplyEnvelope { request: RequestId(11), context: expected };
         let wrong_stage = ReplyEnvelope {
             request: RequestId(12),
-            context: MarkRequestContext {
-                stage: MarkRequestStage::Update,
-                index: 0,
-            },
+            context: MarkRequestContext { stage: MarkRequestStage::Update, index: 0 },
         };
         assert!(TerrainEditor::reply_source_allowed(None));
         assert!(!TerrainEditor::reply_source_allowed(Some(MailboxId(44))));
@@ -917,24 +710,15 @@ mod tests {
         editor.selection.replace(vec![previous]);
         assert_eq!(
             editor.apply_create_result(MarkCreateResult::Created { reference: created }),
-            TerrainCommandResult::Applied {
-                selection: vec![created],
-                changed: vec![created],
-                deleted: Vec::new(),
-            }
+            TerrainCommandResult::Applied { selection: vec![created], changed: vec![created], deleted: Vec::new() }
         );
 
         let error = MarkMutationError::IdExhausted;
         assert_eq!(
-            editor.apply_create_result(MarkCreateResult::Rejected {
-                error: error.clone(),
-            }),
+            editor.apply_create_result(MarkCreateResult::Rejected { error: error.clone() }),
             TerrainCommandResult::Rejected {
                 selection: vec![created],
-                error: TerrainEditorError::MarkMutationRejected {
-                    requested: None,
-                    error,
-                },
+                error: TerrainEditorError::MarkMutationRejected { requested: None, error },
             }
         );
         assert_eq!(editor.selection.snapshot(), vec![created]);
@@ -960,24 +744,13 @@ mod tests {
             progress: BatchProgress::default(),
         });
         assert_eq!(
-            editor.apply_update_result(
-                old,
-                MarkUpdateResult::Updated {
-                    reference: observed,
-                }
-            ),
-            Some(TerrainEditorError::RevisionRace {
-                expected: reference(1, 5),
-                observed,
-            })
+            editor.apply_update_result(old, MarkUpdateResult::Updated { reference: observed }),
+            Some(TerrainEditorError::RevisionRace { expected: reference(1, 5), observed })
         );
         let result = match editor.pending.as_mut() {
             Some(PendingCommand::Batch { progress, .. }) => take(progress).finish(
                 &editor.selection,
-                Some(TerrainEditorError::RevisionRace {
-                    expected: reference(1, 5),
-                    observed,
-                }),
+                Some(TerrainEditorError::RevisionRace { expected: reference(1, 5), observed }),
             ),
             _ => panic!("batch pending"),
         };
@@ -987,10 +760,7 @@ mod tests {
                 selection: vec![observed],
                 changed: vec![observed],
                 deleted: Vec::new(),
-                error: TerrainEditorError::RevisionRace {
-                    expected: reference(1, 5),
-                    observed,
-                },
+                error: TerrainEditorError::RevisionRace { expected: reference(1, 5), observed },
             }
         );
     }
@@ -1007,19 +777,12 @@ mod tests {
             operation: BatchOperation::Delete,
             requested: vec![expected, other],
             marks: Vec::new(),
-            plan: Some(BatchPlan::Deletes(vec![PlannedDelete {
-                requested: expected,
-            }])),
+            plan: Some(BatchPlan::Deletes(vec![PlannedDelete { requested: expected }])),
             index: 0,
             progress: BatchProgress::default(),
         });
         assert_eq!(
-            editor.apply_delete_result(
-                expected,
-                &MarkDeleteResult::Deleted {
-                    reference: observed,
-                }
-            ),
+            editor.apply_delete_result(expected, &MarkDeleteResult::Deleted { reference: observed }),
             Some(TerrainEditorError::RevisionRace { expected, observed })
         );
         assert_eq!(editor.selection.snapshot(), vec![other]);
@@ -1032,40 +795,22 @@ mod tests {
         editor.selection.replace(vec![selected]);
         editor.pending = Some(PendingCommand::Batch {
             reply: None,
-            operation: BatchOperation::Move(WorldDelta {
-                x_octimeters: 1,
-                z_octimeters: 0,
-            }),
+            operation: BatchOperation::Move(WorldDelta { x_octimeters: 1, z_octimeters: 0 }),
             requested: vec![selected],
             marks: Vec::new(),
-            plan: Some(BatchPlan::Updates(vec![PlannedUpdate {
-                requested: selected,
-                geometry: None,
-                label: None,
-            }])),
+            plan: Some(BatchPlan::Updates(vec![PlannedUpdate { requested: selected, geometry: None, label: None }])),
             index: 0,
             progress: BatchProgress::default(),
         });
         let error = MarkMutationError::EmptyUpdate;
         assert_eq!(
-            editor.apply_update_result(
-                selected,
-                MarkUpdateResult::Rejected {
-                    error: error.clone(),
-                }
-            ),
-            Some(TerrainEditorError::MarkMutationRejected {
-                requested: Some(selected),
-                error: error.clone(),
-            })
+            editor.apply_update_result(selected, MarkUpdateResult::Rejected { error: error.clone() }),
+            Some(TerrainEditorError::MarkMutationRejected { requested: Some(selected), error: error.clone() })
         );
         let result = match editor.pending.as_mut() {
             Some(PendingCommand::Batch { progress, .. }) => take(progress).finish(
                 &editor.selection,
-                Some(TerrainEditorError::MarkMutationRejected {
-                    requested: Some(selected),
-                    error,
-                }),
+                Some(TerrainEditorError::MarkMutationRejected { requested: Some(selected), error }),
             ),
             _ => panic!("batch pending"),
         };

@@ -44,15 +44,8 @@ fn load_fs_demux(bench: &mut TestBench, wasm: Vec<u8>, name: &str) -> (MailboxId
         )])
         .expect("load fs_demux");
 
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
-        LoadResult::Ok {
-            mailbox_id,
-            name: full_name,
-            ..
-        } => (mailbox_id, full_name),
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { mailbox_id, name: full_name, .. } => (mailbox_id, full_name),
         LoadResult::Err { error } => panic!("load_component {name}: {error}"),
     }
 }
@@ -64,11 +57,7 @@ fn same_payload_fs_replies_demux_by_request_id() {
     };
 
     let sandbox = init_save_sandbox("reply-correlation");
-    let mut bench = match TestBench::builder()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-    {
+    let mut bench = match TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build() {
         Ok(b) => b,
         Err(e) => {
             eprintln!("skipping: TestBench boot failed (likely no wgpu adapter): {e}");
@@ -84,13 +73,7 @@ fn same_payload_fs_replies_demux_by_request_id() {
     bench
         .execute(vec![(
             "trigger",
-            BenchOp::send_mail(
-                &fixture_addr,
-                &RunFsDemux {
-                    namespace: "save".to_owned(),
-                    path,
-                },
-            ),
+            BenchOp::send_mail(&fixture_addr, &RunFsDemux { namespace: "save".to_owned(), path }),
         )])
         .expect("RunFsDemux to fixture");
 

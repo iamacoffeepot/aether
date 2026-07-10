@@ -68,9 +68,7 @@ mod tests {
     use super::*;
 
     fn cfg(s: Option<&str>) -> RenderSizeConfig {
-        RenderSizeConfig {
-            size: s.map(str::to_owned),
-        }
+        RenderSizeConfig { size: s.map(str::to_owned) }
     }
 
     #[test]
@@ -99,9 +97,6 @@ mod tests {
     fn to_size_zero_dimension_falls_back() {
         // Tripwire: a zero width or height must fall back (not produce a
         // zero-sized surface that crashes the GPU init).
-        assert_eq!(
-            cfg(Some("0x480")).to_size(),
-            (DEFAULT_WIDTH, DEFAULT_HEIGHT)
-        );
+        assert_eq!(cfg(Some("0x480")).to_size(), (DEFAULT_WIDTH, DEFAULT_HEIGHT));
     }
 }

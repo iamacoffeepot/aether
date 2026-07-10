@@ -61,8 +61,7 @@ static TEST_SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// scenarios in `aether-substrate-bundle`'s own test-bench tests).
 #[must_use]
 pub fn has_wgpu_adapter() -> bool {
-    let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::default(),
         compatible_surface: None,
@@ -102,8 +101,7 @@ pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
         .parent()
         .and_then(|p| p.parent())
         .expect("workspace root reachable from CARGO_MANIFEST_DIR");
-    let target_root =
-        env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
+    let target_root = env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
     for profile in ["release", "debug"] {
         let base = target_root.join("wasm32-unknown-unknown").join(profile);
         // Top-level cdylib crates land directly under the profile dir.
@@ -147,10 +145,7 @@ pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
 pub fn require_runtime(crate_name: &str) -> Option<PathBuf> {
     let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
     if !has_wgpu_adapter() {
-        assert!(
-            !strict,
-            "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",
-        );
+        assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
         eprintln!("skipping: no wgpu adapter available");
         return None;
     }
@@ -207,11 +202,7 @@ pub fn init_save_sandbox(label: &str) -> &'static Path {
 /// `init_save_sandbox`-sets-`AETHER_SAVE_DIR` pattern.
 #[must_use]
 pub fn test_namespace_roots(save_dir: &Path) -> NamespaceRoots {
-    NamespaceRoots {
-        save: save_dir.to_path_buf(),
-        assets: save_dir.to_path_buf(),
-        config: save_dir.to_path_buf(),
-    }
+    NamespaceRoots { save: save_dir.to_path_buf(), assets: save_dir.to_path_buf(), config: save_dir.to_path_buf() }
 }
 
 /// Write `bytes` into the sandbox at filename `name`, returning the
@@ -226,9 +217,7 @@ pub fn test_namespace_roots(save_dir: &Path) -> NamespaceRoots {
 /// `init_save_sandbox` populates, and a failed fixture write means
 /// the test can't proceed.
 pub fn write_fixture(name: &str, bytes: &[u8]) -> String {
-    let dir = TEST_SAVE_DIR
-        .get()
-        .expect("init_save_sandbox must run before write_fixture");
+    let dir = TEST_SAVE_DIR.get().expect("init_save_sandbox must run before write_fixture");
     fs::write(dir.join(name), bytes).expect("write fixture");
     name.to_owned()
 }

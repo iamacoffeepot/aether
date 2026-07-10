@@ -21,8 +21,8 @@ use crate::widget::set::{push_control_outlines, quad, reply_if_hidden, text_orig
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
-    Collect, FocusGained, FocusLost, HoverGained, HoverLost, RadioConfig, RadioSelected,
-    SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, FocusGained, FocusLost, HoverGained, HoverLost, RadioConfig, RadioSelected, SetWidgetState,
+    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 /// A radio group. Holds the option labels, the selected index, and the cached
@@ -86,12 +86,7 @@ impl WasmActor for RadioGroupWidget {
             selected,
             theme: config.theme,
             state: InteractionState::new(config.state),
-            frame: WidgetFrame {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                height: 0.0,
-            },
+            frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
             pressed: false,
         })
     }
@@ -203,48 +198,26 @@ impl WasmActor for RadioGroupWidget {
             #[allow(clippy::cast_precision_loss)]
             let row_y = i as f32 * row_height;
             let marker_y = (row_height - marker).mul_add(0.5, row_y);
-            let base = if i == self.selected {
-                self.theme.accent
-            } else {
-                self.theme.surface_raised
-            };
+            let base = if i == self.selected { self.theme.accent } else { self.theme.surface_raised };
             let marker_state = if i == self.selected {
                 self.state.theme_state(self.pressed)
             } else {
                 self.state.supporting_theme_state(false)
             };
-            items.push(quad(
-                pad,
-                marker_y,
-                marker,
-                marker,
-                self.theme.fill(base, marker_state),
-            ));
+            items.push(quad(pad, marker_y, marker, marker, self.theme.fill(base, marker_state)));
             items.push(WidgetDrawItem::Text {
                 x: pad.mul_add(2.0, marker),
                 y: text_origin_y(row_y, row_height, size),
                 font_id: self.theme.font_id,
                 text: option.clone(),
                 size_pixels: size,
-                color: self.theme.fill(
-                    self.theme.text_primary,
-                    self.state.supporting_theme_state(false),
-                ),
+                color: self.theme.fill(self.theme.text_primary, self.state.supporting_theme_state(false)),
                 clip: None,
             });
         }
-        push_control_outlines(
-            &mut items,
-            self.frame.width,
-            self.frame.height,
-            &self.state,
-            &self.theme,
-        );
+        push_control_outlines(&mut items, self.frame.width, self.frame.height, &self.state, &self.theme);
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                intrinsic: None,
-                items,
-            });
+            parent.send(&WidgetDrawList { intrinsic: None, items });
         }
     }
 }
@@ -252,11 +225,7 @@ impl WasmActor for RadioGroupWidget {
 /// Clamp a 1-past-the-end initial index down to the last option (or `0` for an
 /// empty group).
 fn clamp_index(index: u32, len: usize) -> usize {
-    if len == 0 {
-        0
-    } else {
-        (index as usize).min(len - 1)
-    }
+    if len == 0 { 0 } else { (index as usize).min(len - 1) }
 }
 
 #[cfg(test)]
@@ -271,12 +240,7 @@ mod tests {
             selected,
             theme: Theme::DEFAULT, // row_height = 24
             state: InteractionState::new(WidgetControlState::default()),
-            frame: WidgetFrame {
-                x: 0.0,
-                y: 10.0,
-                width: 100.0,
-                height: 72.0,
-            },
+            frame: WidgetFrame { x: 0.0, y: 10.0, width: 100.0, height: 72.0 },
             pressed: false,
         }
     }
@@ -287,22 +251,14 @@ mod tests {
         assert_eq!(g.row_at_local_y(0.0), Some(0));
         assert_eq!(g.row_at_local_y(30.0), Some(1)); // 30 / 24 = 1
         assert_eq!(g.row_at_local_y(60.0), Some(2)); // 60 / 24 = 2
-        assert_eq!(
-            g.row_at_local_y(72.0),
-            None,
-            "past the third row hits nothing"
-        );
+        assert_eq!(g.row_at_local_y(72.0), None, "past the third row hits nothing");
         assert_eq!(g.row_at_local_y(-1.0), None, "above the group hits nothing");
     }
 
     #[test]
     fn clamp_index_pins_an_over_range_initial() {
         assert_eq!(clamp_index(0, 3), 0);
-        assert_eq!(
-            clamp_index(5, 3),
-            2,
-            "past the end clamps to the last option"
-        );
+        assert_eq!(clamp_index(5, 3), 2, "past the end clamps to the last option");
         assert_eq!(clamp_index(1, 0), 0, "an empty group clamps to 0");
     }
 
@@ -312,11 +268,7 @@ mod tests {
         let g = group(&["a", "b", "c"], 0);
         assert_eq!(g.selected.saturating_sub(1), 0, "up at the top stays");
         let g = group(&["a", "b", "c"], 2);
-        assert_eq!(
-            (g.selected + 1).min(g.options.len() - 1),
-            2,
-            "down at the bottom stays"
-        );
+        assert_eq!((g.selected + 1).min(g.options.len() - 1), 2, "down at the bottom stays");
         let g = group(&["a", "b", "c"], 1);
         assert_eq!((g.selected + 1).min(g.options.len() - 1), 2);
         assert_eq!(g.selected.saturating_sub(1), 0);

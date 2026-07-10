@@ -91,10 +91,7 @@ struct HandoffEwma {
 
 impl HandoffEwma {
     const fn new() -> Self {
-        Self {
-            mean: AtomicU64::new(0),
-            samples: AtomicU64::new(0),
-        }
+        Self { mean: AtomicU64::new(0), samples: AtomicU64::new(0) }
     }
 
     /// Seed the estimate from the boot probe (or the env override). Sets
@@ -114,10 +111,7 @@ impl HandoffEwma {
         let mut mean = self.mean.load(Ordering::Relaxed);
         loop {
             let next = ewma_step(mean, sample, EWMA_SHIFT);
-            match self
-                .mean
-                .compare_exchange_weak(mean, next, Ordering::Relaxed, Ordering::Relaxed)
-            {
+            match self.mean.compare_exchange_weak(mean, next, Ordering::Relaxed, Ordering::Relaxed) {
                 Ok(_) => break,
                 Err(observed) => mean = observed,
             }
@@ -213,8 +207,7 @@ pub fn handoff_samples() -> u64 {
 /// landed where intended. Called once at chassis boot.
 pub fn log_handoff_calibration() {
     let cost_nanos = handoff_cost_nanos();
-    let budget_nanos =
-        u64::try_from(super::worker_deque::time_budget().as_nanos()).unwrap_or(u64::MAX);
+    let budget_nanos = u64::try_from(super::worker_deque::time_budget().as_nanos()).unwrap_or(u64::MAX);
     // Realized handoffs-per-budget on this box: `BUDGET_HANDOFF_MULTIPLIER`
     // in the common case, or off it when a rail / env override bound the
     // budget — a one-glance check that the wiring landed as intended.
@@ -286,9 +279,7 @@ fn measure_handoff_cost_nanos() -> u64 {
             samples.push(per_handoff);
         }
     }
-    worker
-        .join()
-        .expect("join handoff calibration probe thread");
+    worker.join().expect("join handoff calibration probe thread");
 
     median_nanos(&mut samples).max(1)
 }
@@ -301,11 +292,7 @@ fn median_nanos(samples: &mut [u64]) -> u64 {
     }
     samples.sort_unstable();
     let mid = samples.len() / 2;
-    if samples.len().is_multiple_of(2) {
-        u64::midpoint(samples[mid - 1], samples[mid])
-    } else {
-        samples[mid]
-    }
+    if samples.len().is_multiple_of(2) { u64::midpoint(samples[mid - 1], samples[mid]) } else { samples[mid] }
 }
 
 #[cfg(test)]
@@ -322,10 +309,7 @@ mod tests {
         // measuring per-box.
         let cost = measure_handoff_cost_nanos();
         assert!(cost >= 1, "handoff cost must be a positive floor");
-        assert!(
-            cost < 10_000_000,
-            "handoff cost {cost}ns implausibly large (> 10ms) — probe likely broken",
-        );
+        assert!(cost < 10_000_000, "handoff cost {cost}ns implausibly large (> 10ms) — probe likely broken");
     }
 
     #[test]
@@ -343,13 +327,9 @@ mod tests {
         let nanos = handoff_cost_nanos();
         assert_eq!(
             nanos,
-            u64::try_from(handoff_cost().as_nanos())
-                .expect("handoff_cost nanos fit u64 by construction")
+            u64::try_from(handoff_cost().as_nanos()).expect("handoff_cost nanos fit u64 by construction")
         );
-        assert!(
-            nanos >= 1,
-            "the 1 ns floor in handoff_cost must carry through"
-        );
+        assert!(nanos >= 1, "the 1 ns floor in handoff_cost must carry through");
     }
 
     #[test]
@@ -377,11 +357,7 @@ mod tests {
         for _ in 0..200 {
             cell.fold(5_000);
         }
-        assert!(
-            5_000 - cell.mean() < granularity,
-            "live folds converge toward the operating cost: {}",
-            cell.mean(),
-        );
+        assert!(5_000 - cell.mean() < granularity, "live folds converge toward the operating cost: {}", cell.mean());
         assert_eq!(cell.samples(), 201, "every live fold counted");
     }
 
@@ -411,11 +387,7 @@ mod tests {
             w.join().expect("fold worker panicked");
         }
 
-        assert_eq!(
-            cell.mean(),
-            1_000,
-            "folding the seed value leaves the mean fixed under any interleaving",
-        );
+        assert_eq!(cell.mean(), 1_000, "folding the seed value leaves the mean fixed under any interleaving");
         assert_eq!(
             cell.samples(),
             1 + THREADS as u64 * PER_THREAD,

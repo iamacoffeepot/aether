@@ -64,8 +64,7 @@ impl Error for DecodeError {}
 /// or a malformed header surfaces as a [`DecodeError`] the cap relays.
 pub fn decode_wav_to_mono(bytes: &[u8], target_rate: u32) -> Result<Vec<f32>, DecodeError> {
     let cursor = Cursor::new(bytes);
-    let mut reader =
-        hound::WavReader::new(cursor).map_err(|e| DecodeError::Malformed(e.to_string()))?;
+    let mut reader = hound::WavReader::new(cursor).map_err(|e| DecodeError::Malformed(e.to_string()))?;
     let spec = reader.spec();
     let channels = usize::from(spec.channels.max(1));
     let source_rate = spec.sample_rate;
@@ -82,14 +81,11 @@ pub fn decode_wav_to_mono(bytes: &[u8], target_rate: u32) -> Result<Vec<f32>, De
             .map(|s| s.map(|v| f32::from(v) / 32_768.0))
             .collect::<Result<_, _>>()
             .map_err(|e| DecodeError::Malformed(e.to_string()))?,
-        (hound::SampleFormat::Float, 32) => reader
-            .samples::<f32>()
-            .collect::<Result<_, _>>()
-            .map_err(|e| DecodeError::Malformed(e.to_string()))?,
+        (hound::SampleFormat::Float, 32) => {
+            reader.samples::<f32>().collect::<Result<_, _>>().map_err(|e| DecodeError::Malformed(e.to_string()))?
+        }
         (format, bits) => {
-            return Err(DecodeError::UnsupportedFormat(format!(
-                "{format:?} {bits}-bit"
-            )));
+            return Err(DecodeError::UnsupportedFormat(format!("{format:?} {bits}-bit")));
         }
     };
 
@@ -115,10 +111,7 @@ fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
     // enough for an average; the cast can't lose meaningful precision.
     #[allow(clippy::cast_precision_loss)]
     let inv = 1.0 / channels as f32;
-    interleaved
-        .chunks_exact(channels)
-        .map(|frame| frame.iter().sum::<f32>() * inv)
-        .collect()
+    interleaved.chunks_exact(channels).map(|frame| frame.iter().sum::<f32>() * inv).collect()
 }
 
 /// Read a WAV asset's source sample rate from its header (ADR-0103 §6).
@@ -147,11 +140,7 @@ fn resample_linear(mono: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32>
     let ratio = f64::from(target_rate) / f64::from(source_rate);
     // Sample counts and rates are bounded well below 2^53 — the f64 math
     // is exact, and the rounded length is non-negative.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let out_len = (mono.len() as f64 * ratio).round() as usize;
     let last = mono.len() - 1;
     let mut out = Vec::with_capacity(out_len);
@@ -175,17 +164,10 @@ fn resample_linear(mono: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32>
 /// handler tests both synthesize WAV assets this way rather than shipping
 /// a binary fixture.
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test-setup unwrap: in-memory WAV fixtures never fail to encode"
-)]
+#[allow(clippy::unwrap_used, reason = "test-setup unwrap: in-memory WAV fixtures never fail to encode")]
 pub fn wav_int16_mono(samples: &[f32], rate: u32) -> Vec<u8> {
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
+    let spec =
+        hound::WavSpec { channels: 1, sample_rate: rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
     let mut buf = Vec::new();
     {
         let cursor = Cursor::new(&mut buf);
@@ -276,17 +258,11 @@ mod tests {
     #[test]
     fn malformed_header_is_an_error_not_a_panic() {
         let garbage = vec![0u8, 1, 2, 3, 4, 5, 6, 7];
-        assert!(matches!(
-            decode_wav_to_mono(&garbage, 48_000),
-            Err(DecodeError::Malformed(_))
-        ));
+        assert!(matches!(decode_wav_to_mono(&garbage, 48_000), Err(DecodeError::Malformed(_))));
     }
 
     #[test]
     fn empty_byte_stream_is_malformed() {
-        assert!(matches!(
-            decode_wav_to_mono(&[], 48_000),
-            Err(DecodeError::Malformed(_))
-        ));
+        assert!(matches!(decode_wav_to_mono(&[], 48_000), Err(DecodeError::Malformed(_))));
     }
 }

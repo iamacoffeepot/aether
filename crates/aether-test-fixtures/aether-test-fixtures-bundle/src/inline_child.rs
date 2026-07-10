@@ -82,23 +82,20 @@
 #![allow(clippy::unused_self, clippy::needless_pass_by_value)]
 
 use aether_actor::{
-    ActorInitError, ActorTypeTag, Mail, Manual, OutboundReply, SpawnError, Subname, WasmActor,
-    WasmCtx, WasmInitCtx, actor,
+    ActorInitError, ActorTypeTag, Mail, Manual, OutboundReply, SpawnError, Subname, WasmActor, WasmCtx, WasmInitCtx,
+    actor,
 };
 use aether_data::MailboxId;
 use aether_test_fixtures_kinds::{
-    Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD,
-    INLINE_WHO_PARENT, InlineConfiguredChildConfig, InlineEcho, InlineProbe, TagSpawnQuery,
-    TagSpawnReport,
+    Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT,
+    InlineConfiguredChildConfig, InlineEcho, InlineProbe, TagSpawnQuery, TagSpawnReport,
 };
 
 /// Durable state the `InlineStatefulChild` carries across `replace_component`.
 /// Uses the `aether.test_fixtures.inline_counter_state` shape so the macro
 /// frames it via `save_state_kind` on dehydrate and recovers it via
 /// `decode_kind` on rehydrate.
-#[derive(
-    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[kind(name = "aether.test_fixtures.inline_counter_state")]
 pub struct InlineCounterState {
     pub count: u32,
@@ -262,9 +259,7 @@ impl WasmActor for InlineDespawnParent {
     /// `widget` and store the returned alias so the `DespawnChild` handler
     /// can tear it down.
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
-        if let Ok(alias) =
-            ctx.spawn_inline_child::<InlineDespawnChild>(Subname::Named("widget"), &())
-        {
+        if let Ok(alias) = ctx.spawn_inline_child::<InlineDespawnChild>(Subname::Named("widget"), &()) {
             self.child = Some(alias);
         }
     }
@@ -338,9 +333,7 @@ impl WasmActor for InlineConfiguredParent {
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         let _ = ctx.spawn_inline_child::<InlineConfiguredChild>(
             Subname::Named("widget"),
-            &InlineConfiguredChildConfig {
-                initial: CONFIGURED_CHILD_INITIAL,
-            },
+            &InlineConfiguredChildConfig { initial: CONFIGURED_CHILD_INITIAL },
         );
     }
 
@@ -372,13 +365,8 @@ impl WasmActor for InlineConfiguredChild {
     /// composite migration bundle (ADR-0114 §5).
     type State = InlineCounterState;
 
-    fn init(
-        config: InlineConfiguredChildConfig,
-        _ctx: &mut WasmInitCtx<'_>,
-    ) -> Result<Self, ActorInitError> {
-        Ok(InlineConfiguredChild {
-            count: config.initial,
-        })
+    fn init(config: InlineConfiguredChildConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(InlineConfiguredChild { count: config.initial })
     }
 
     /// Save-side accessor: snapshot the live counter for the composite.
@@ -428,10 +416,7 @@ impl WasmActor for InlineTagParent {
     const NAMESPACE: &'static str = "test.inline.tag_parent";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(InlineTagParent {
-            child: None,
-            unknown_tag_rejected: false,
-        })
+        Ok(InlineTagParent { child: None, unknown_tag_rejected: false })
     }
 
     /// Issue 2692: spawn `InlineStatefulChild` **by tag** — the tag resolves
@@ -440,11 +425,9 @@ impl WasmActor for InlineTagParent {
     /// deliberately-bogus tag and record that the generated resolver rejects
     /// it with `UnknownActorTag` rather than spawning or panicking.
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
-        if let Ok(alias) = ctx.spawn_inline_child_by_tag(
-            ActorTypeTag::of::<InlineStatefulChild>(),
-            Subname::Named("tagged"),
-            &[],
-        ) {
+        if let Ok(alias) =
+            ctx.spawn_inline_child_by_tag(ActorTypeTag::of::<InlineStatefulChild>(), Subname::Named("tagged"), &[])
+        {
             self.child = Some(alias);
         }
         let bogus = ActorTypeTag(0xFFFF_FFFF_FFFF_FFFF);
@@ -460,9 +443,7 @@ impl WasmActor for InlineTagParent {
     #[handler::manual]
     fn on_tag_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: TagSpawnQuery) {
         if ctx.reply_target().is_some() {
-            ctx.reply(&TagSpawnReport {
-                unknown_tag_rejected: self.unknown_tag_rejected,
-            });
+            ctx.reply(&TagSpawnReport { unknown_tag_rejected: self.unknown_tag_rejected });
         }
     }
 

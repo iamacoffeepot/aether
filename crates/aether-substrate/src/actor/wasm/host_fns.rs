@@ -9,9 +9,7 @@ use std::sync::Arc;
 
 use wasmtime::{Caller, Linker};
 
-use crate::actor::wasm::component::{
-    ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE,
-};
+use crate::actor::wasm::component::{ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE};
 use crate::mail::registry::MailboxEntry;
 use crate::mail::{KindId, MailboxId, SourceAddr};
 use crate::runtime::log_install;
@@ -65,10 +63,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          detached: u32,
          from: u64|
          -> u32 {
-            let Some(memory) = caller
-                .get_export("memory")
-                .and_then(wasmtime::Extern::into_memory)
-            else {
+            let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                 return 1; // guest exports no memory
             };
 
@@ -353,15 +348,11 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         "save_state_p32",
         |mut caller: Caller<'_, ComponentCtx>, version: u32, ptr: u32, len: u32| -> u32 {
             if len as usize > MAX_STATE_BUNDLE_BYTES {
-                caller.data_mut().save_state_error = Some(format!(
-                    "save_state: bundle size {len} exceeds {MAX_STATE_BUNDLE_BYTES} byte cap"
-                ));
+                caller.data_mut().save_state_error =
+                    Some(format!("save_state: bundle size {len} exceeds {MAX_STATE_BUNDLE_BYTES} byte cap"));
                 return SAVE_STATE_TOO_LARGE;
             }
-            let Some(memory) = caller
-                .get_export("memory")
-                .and_then(wasmtime::Extern::into_memory)
-            else {
+            let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                 return SAVE_STATE_NO_MEMORY;
             };
             let data = memory.data(&caller);
@@ -398,10 +389,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          count: u32,
          from: u64|
          -> u32 {
-            let Some(memory) = caller
-                .get_export("memory")
-                .and_then(wasmtime::Extern::into_memory)
-            else {
+            let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                 return REPLY_OOB;
             };
             let data = memory.data(&caller);
@@ -432,8 +420,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                         return REPLY_KIND_NOT_FOUND;
                     };
                     let origin = ctx.registry.mailbox_name(ctx.sender);
-                    ctx.outbound
-                        .egress_to_session(token, &kind_name, payload, origin, correlation);
+                    ctx.outbound.egress_to_session(token, &kind_name, payload, origin, correlation);
                 }
                 SourceAddr::Component(mbox) => {
                     // Validate the kind id cheaply — the guest might
@@ -458,10 +445,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     let identity = resolve_dispatch_identity(ctx, MailboxId(from));
                     ctx.reply(mbox, kind, payload, count, correlation, identity);
                 }
-                SourceAddr::EngineMailbox {
-                    engine_id,
-                    mailbox_id,
-                } => {
+                SourceAddr::EngineMailbox { engine_id, mailbox_id } => {
                     // ADR-0037 Phase 2: reply to a component on
                     // another engine. Validate the kind exists
                     // locally so we surface a meaningful status
@@ -472,14 +456,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     if ctx.registry.kind_name(kind).is_none() {
                         return REPLY_KIND_NOT_FOUND;
                     }
-                    ctx.outbound.egress_to_engine_mailbox(
-                        engine_id,
-                        mailbox_id,
-                        kind,
-                        payload,
-                        count,
-                        correlation,
-                    );
+                    ctx.outbound.egress_to_engine_mailbox(engine_id, mailbox_id, kind, payload, count, correlation);
                 }
                 SourceAddr::None => {
                     // Shouldn't happen — `ReplyEntry`s only get
@@ -502,17 +479,13 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // inbound reply's correlation to pick its own reply out of any
     // prior async-request replies that share the same kind. Returns
     // `0` (the `NO_CORRELATION` sentinel) before any send has been made.
-    linker.func_wrap(
-        "aether",
-        "prev_correlation_p32",
-        |caller: Caller<'_, ComponentCtx>| -> u64 { caller.data().prev_correlation() },
-    )?;
+    linker.func_wrap("aether", "prev_correlation_p32", |caller: Caller<'_, ComponentCtx>| -> u64 {
+        caller.data().prev_correlation()
+    })?;
 
-    linker.func_wrap(
-        "aether",
-        "reply_correlation_p32",
-        |caller: Caller<'_, ComponentCtx>| -> u64 { caller.data().reply_correlation() },
-    )?;
+    linker.func_wrap("aether", "reply_correlation_p32", |caller: Caller<'_, ComponentCtx>| -> u64 {
+        caller.data().reply_correlation()
+    })?;
 
     // HOST_FN_OK: ADR-0002 / issue 531. The ActorInitError plumbing
     // can't ride a mail sink because mail is not dispatched until
@@ -530,26 +503,19 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // still triggers the failure path, just without a message
     // (`Component::instantiate` falls back to a generic "init
     // returned <rc> without staging an error" diagnostic).
-    linker.func_wrap(
-        "aether",
-        "init_failed_p32",
-        |mut caller: Caller<'_, ComponentCtx>, ptr: u32, len: u32| {
-            let Some(memory) = caller
-                .get_export("memory")
-                .and_then(wasmtime::Extern::into_memory)
-            else {
-                return;
-            };
-            let data = memory.data(&caller);
-            let start = ptr as usize;
-            let end = match start.checked_add(len as usize) {
-                Some(e) if e <= data.len() => e,
-                _ => return,
-            };
-            let msg = String::from_utf8_lossy(&data[start..end]).into_owned();
-            caller.data_mut().init_failure = Some(msg);
-        },
-    )?;
+    linker.func_wrap("aether", "init_failed_p32", |mut caller: Caller<'_, ComponentCtx>, ptr: u32, len: u32| {
+        let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
+            return;
+        };
+        let data = memory.data(&caller);
+        let start = ptr as usize;
+        let end = match start.checked_add(len as usize) {
+            Some(e) if e <= data.len() => e,
+            _ => return,
+        };
+        let msg = String::from_utf8_lossy(&data[start..end]).into_owned();
+        caller.data_mut().init_failure = Some(msg);
+    })?;
 
     // ADR-0081 §7: `log_event_p32` re-fires a guest `tracing::*` event
     // on the host side. `ForwardingSubscriber::event` calls this (via the
@@ -579,10 +545,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          target_len: u32,
          message_ptr: u32,
          message_len: u32| {
-            let Some(memory) = caller
-                .get_export("memory")
-                .and_then(wasmtime::Extern::into_memory)
-            else {
+            let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                 return;
             };
             let data = memory.data(&caller);
@@ -616,11 +579,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
 /// guest cannot spoof a foreign id. This is the in-cluster check that the
 /// retired `set_dispatch_source_p32` host fn used to gate the ambient cell.
 fn resolve_dispatch_identity(ctx: &ComponentCtx, from: MailboxId) -> MailboxId {
-    if from != MailboxId::NONE && (from == ctx.sender || is_own_cluster_alias(ctx, from)) {
-        from
-    } else {
-        ctx.sender
-    }
+    if from != MailboxId::NONE && (from == ctx.sender || is_own_cluster_alias(ctx, from)) { from } else { ctx.sender }
 }
 
 /// Whether `candidate` is a registered inline-child alias of *this* component
@@ -632,13 +591,8 @@ fn resolve_dispatch_identity(ctx: &ComponentCtx, from: MailboxId) -> MailboxId {
 /// `Inbox` handlers and compare with `Arc::ptr_eq`. A non-`Inbox` entry, a
 /// missing entry, or a handler from a different component is `false`.
 fn is_own_cluster_alias(ctx: &ComponentCtx, candidate: MailboxId) -> bool {
-    let (
-        Some(MailboxEntry::Inbox { handler: own, .. }),
-        Some(MailboxEntry::Inbox { handler: alias, .. }),
-    ) = (
-        ctx.registry.entry(ctx.sender),
-        ctx.registry.entry(candidate),
-    )
+    let (Some(MailboxEntry::Inbox { handler: own, .. }), Some(MailboxEntry::Inbox { handler: alias, .. })) =
+        (ctx.registry.entry(ctx.sender), ctx.registry.entry(candidate))
     else {
         return false;
     };

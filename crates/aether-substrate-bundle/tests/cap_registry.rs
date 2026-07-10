@@ -29,10 +29,7 @@ use aether_actor::Addressable;
 use aether_capabilities::fs::Write;
 use aether_capabilities::{ComponentHostCapability, FsCapability};
 use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
-use aether_kinds::{
-    DropComponent, DropResult, LoadComponent, LoadResult, Ping, ReplaceComponent, ReplaceResult,
-    Tick,
-};
+use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, Ping, ReplaceComponent, ReplaceResult, Tick};
 use aether_kit::camera::CameraCreate;
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
@@ -54,19 +51,11 @@ fn load_named(bench: &mut TestBench, wasm_path: &Path, name: &str) -> MailboxId 
             "load",
             BenchOp::send_and_await(
                 ComponentHostCapability::NAMESPACE,
-                &LoadComponent {
-                    wasm,
-                    name: Some(name.to_owned()),
-                    config: Vec::new(),
-                    export: None,
-                },
+                &LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None },
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
         LoadResult::Err { error } => panic!("load_component({name}): {error}"),
     }
@@ -80,10 +69,7 @@ fn require_wgpu_only() -> bool {
         return true;
     }
     let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-    assert!(
-        !strict,
-        "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",
-    );
+    assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available");
     eprintln!("skipping: no wgpu adapter available");
     false
 }
@@ -100,18 +86,9 @@ fn cap_registry_reports_accepted_kinds() {
     let mbox = load_named(&mut bench, &wasm_path, "probe");
     let caps = bench.capability_registry();
 
-    assert!(
-        caps.accepts(mbox, Tick::ID),
-        "probe should accept its declared Tick handler",
-    );
-    assert!(
-        caps.accepts(mbox, SetRender::ID),
-        "probe should accept its declared SetRender handler",
-    );
-    assert!(
-        !caps.accepts(mbox, Ping::ID),
-        "probe has no Ping handler and no fallback — must reject Ping",
-    );
+    assert!(caps.accepts(mbox, Tick::ID), "probe should accept its declared Tick handler");
+    assert!(caps.accepts(mbox, SetRender::ID), "probe should accept its declared SetRender handler");
+    assert!(!caps.accepts(mbox, Ping::ID), "probe has no Ping handler and no fallback — must reject Ping");
 }
 
 /// The probe is a strict receiver — no `#[fallback]`. Its trampoline
@@ -127,10 +104,7 @@ fn cap_registry_reports_fallback() {
     let mbox = load_named(&mut bench, &wasm_path, "strict");
     let caps = bench.capability_registry();
 
-    assert!(
-        !caps.has_fallback(mbox),
-        "probe is a strict receiver; has_fallback must be false",
-    );
+    assert!(!caps.has_fallback(mbox), "probe is a strict receiver; has_fallback must be false");
     // No fallback ⇒ unknown kinds are rejected, not swallowed.
     assert!(!caps.accepts(mbox, Ping::ID));
 }
@@ -179,10 +153,7 @@ fn cap_registry_updates_on_replace() {
             ),
         )])
         .expect("replace sequence");
-    match swapped
-        .reply::<ReplaceResult>("swap")
-        .expect("decode ReplaceResult")
-    {
+    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
         ReplaceResult::Ok { .. } => {}
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
@@ -210,33 +181,21 @@ fn cap_registry_clears_on_drop() {
     };
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let mbox = load_named(&mut bench, &wasm_path, "victim");
-    assert!(
-        bench.capability_registry().accepts(mbox, Tick::ID),
-        "sanity: loaded probe accepts Tick before drop",
-    );
+    assert!(bench.capability_registry().accepts(mbox, Tick::ID), "sanity: loaded probe accepts Tick before drop");
 
     let dropped = bench
         .execute(vec![(
             "drop",
-            BenchOp::send_and_await(
-                ComponentHostCapability::NAMESPACE,
-                &DropComponent { mailbox_id: mbox },
-            ),
+            BenchOp::send_and_await(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id: mbox }),
         )])
         .expect("drop sequence");
-    match dropped
-        .reply::<DropResult>("drop")
-        .expect("decode DropResult")
-    {
+    match dropped.reply::<DropResult>("drop").expect("decode DropResult") {
         DropResult::Ok => {}
         DropResult::Err { error } => panic!("drop_component: {error}"),
     }
 
     let caps = bench.capability_registry();
-    assert!(
-        !caps.accepts(mbox, Tick::ID),
-        "dropped component's mailbox must accept nothing",
-    );
+    assert!(!caps.accepts(mbox, Tick::ID), "dropped component's mailbox must accept nothing");
     assert!(!caps.has_fallback(mbox));
 }
 
@@ -249,18 +208,11 @@ fn cap_registry_covers_native_cap() {
         return;
     }
     let sandbox = init_save_sandbox("cap-registry-fs");
-    let bench = TestBench::builder()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let bench = TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
 
     let fs_mbox = mailbox_id_from_name(FsCapability::NAMESPACE);
     let caps = bench.capability_registry();
-    assert!(
-        caps.accepts(fs_mbox, Write::ID),
-        "the native aether.fs cap should accept its declared Write handler",
-    );
+    assert!(caps.accepts(fs_mbox, Write::ID), "the native aether.fs cap should accept its declared Write handler");
     // A native cap with no `#[fallback]` rejects undeclared kinds.
     assert!(
         !caps.accepts(fs_mbox, KindId(0xDEAD_BEEF)),

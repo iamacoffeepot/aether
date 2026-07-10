@@ -33,14 +33,8 @@ mod tests {
         let mut found = None;
         poll_until(|| {
             let reply = bench.log_tail(engine, &addr, None);
-            if let LogTailResult::Ok {
-                entries,
-                next_since,
-                ..
-            } = &reply
-                && let Some(entry) = entries
-                    .iter()
-                    .find(|e| e.message == "typed_send_alive" && e.level == LEVEL_INFO)
+            if let LogTailResult::Ok { entries, next_since, .. } = &reply
+                && let Some(entry) = entries.iter().find(|e| e.message == "typed_send_alive" && e.level == LEVEL_INFO)
             {
                 found = Some((entry.clone(), *next_since));
                 true
@@ -58,11 +52,7 @@ mod tests {
         });
 
         // The ring's per-actor sequence starts at 1 (ADR-0081).
-        assert!(
-            entry.sequence >= 1,
-            "a buffered entry should carry a 1-based ring sequence, got {}",
-            entry.sequence,
-        );
+        assert!(entry.sequence >= 1, "a buffered entry should carry a 1-based ring sequence, got {}", entry.sequence);
 
         // Walk the cursor: a re-query past `next_since` must not
         // re-yield the entry we already consumed.

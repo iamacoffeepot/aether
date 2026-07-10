@@ -100,11 +100,7 @@ pub struct Decomposed {
 /// no-regression guard). With at least one child the framed layout is
 /// emitted under [`COMPOSITE_VERSION`].
 #[must_use]
-pub fn compose(
-    parent_version: u32,
-    parent_bytes: &[u8],
-    children: &[ChildEntry],
-) -> (u32, Vec<u8>) {
+pub fn compose(parent_version: u32, parent_bytes: &[u8], children: &[ChildEntry]) -> (u32, Vec<u8>) {
     if children.is_empty() {
         return (parent_version, parent_bytes.to_vec());
     }
@@ -150,13 +146,7 @@ pub fn decompose(version: u32, bytes: &[u8]) -> Decomposed {
 /// A bundle that is not a framed composite — the parent's bytes verbatim,
 /// no children.
 fn raw_passthrough(version: u32, bytes: &[u8]) -> Decomposed {
-    Decomposed {
-        parent: ParentState {
-            version,
-            bytes: bytes.to_vec(),
-        },
-        children: Vec::new(),
-    }
+    Decomposed { parent: ParentState { version, bytes: bytes.to_vec() }, children: Vec::new() }
 }
 
 /// Parse the framed-composite layout. Returns `None` on any malformed
@@ -193,13 +183,7 @@ fn parse_framed(bytes: &[u8]) -> Option<Decomposed> {
             config_bytes,
         });
     }
-    Some(Decomposed {
-        parent: ParentState {
-            version: parent_version,
-            bytes: parent_bytes,
-        },
-        children,
-    })
+    Some(Decomposed { parent: ParentState { version: parent_version, bytes: parent_bytes }, children })
 }
 
 /// Narrow a `usize` length to the `u32` the frame stores. A bundle that
@@ -275,24 +259,14 @@ mod tests {
         let parent_version = 7;
 
         let (version, bytes) = compose(parent_version, parent_bytes, &[]);
-        assert_eq!(
-            version, parent_version,
-            "zero-child compose passes the parent version through unchanged",
-        );
-        assert_eq!(
-            bytes,
-            parent_bytes.to_vec(),
-            "zero-child compose is byte-identical to the raw parent blob",
-        );
+        assert_eq!(version, parent_version, "zero-child compose passes the parent version through unchanged");
+        assert_eq!(bytes, parent_bytes.to_vec(), "zero-child compose is byte-identical to the raw parent blob");
 
         let decomposed = decompose(version, &bytes);
         assert_eq!(
             decomposed,
             Decomposed {
-                parent: ParentState {
-                    version: parent_version,
-                    bytes: parent_bytes.to_vec(),
-                },
+                parent: ParentState { version: parent_version, bytes: parent_bytes.to_vec() },
                 children: Vec::new(),
             },
             "the raw parent blob round-trips with no children",
@@ -306,31 +280,19 @@ mod tests {
         let parent_bytes: &[u8] = &[1, 2, 3];
         let children = vec![
             child(0x1111, 0xAAAA, "widget", &[9, 8, 7]),
-            ChildEntry {
-                is_counter: true,
-                ..child(0x2222, 0xBBBB, "0", &[])
-            },
+            ChildEntry { is_counter: true, ..child(0x2222, 0xBBBB, "0", &[]) },
         ];
 
         let (version, bytes) = compose(5, parent_bytes, &children);
-        assert_eq!(
-            version, COMPOSITE_VERSION,
-            "a children-present bundle is tagged with the composite version",
-        );
+        assert_eq!(version, COMPOSITE_VERSION, "a children-present bundle is tagged with the composite version");
 
         let decomposed = decompose(version, &bytes);
         assert_eq!(
             decomposed.parent,
-            ParentState {
-                version: 5,
-                bytes: parent_bytes.to_vec(),
-            },
+            ParentState { version: 5, bytes: parent_bytes.to_vec() },
             "the parent state survives the composite round-trip",
         );
-        assert_eq!(
-            decomposed.children, children,
-            "every child entry survives the composite round-trip",
-        );
+        assert_eq!(decomposed.children, children, "every child entry survives the composite round-trip");
     }
 
     /// Step 2 tripwire: a child's non-empty `config_bytes` survive the
@@ -348,11 +310,7 @@ mod tests {
         let (version, bytes) = compose(1, &[], slice::from_ref(&entry));
         let decomposed = decompose(version, &bytes);
 
-        assert_eq!(
-            decomposed.children.len(),
-            1,
-            "exactly the one entry round-trips",
-        );
+        assert_eq!(decomposed.children.len(), 1, "exactly the one entry round-trips");
         assert_eq!(
             decomposed.children[0].config_bytes, entry.config_bytes,
             "the child's config bytes survive the composite round-trip \
@@ -371,9 +329,6 @@ mod tests {
         let (version, mut bytes) = compose(0, &[1, 2], &[child(0x33, 0x44, "c", &[5])]);
         bytes.truncate(6);
         let decomposed = decompose(version, &bytes);
-        assert!(
-            decomposed.children.is_empty(),
-            "a truncated frame yields no children (raw fallback)",
-        );
+        assert!(decomposed.children.is_empty(), "a truncated frame yields no children (raw fallback)");
     }
 }

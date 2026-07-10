@@ -30,20 +30,15 @@ use std::thread::{self, available_parallelism};
 use std::time::{Duration, Instant};
 
 use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
-use aether_kinds::trace::{
-    DescribeTreeResult, MailNodeWire, TraceEvent, TraceRingEntry, TraceTail, TraceTailResult,
-};
-use aether_substrate::chassis::settlement::{
-    TerminalDisposition, WaitOutcome, await_internal_signal,
-};
+use aether_kinds::trace::{DescribeTreeResult, MailNodeWire, TraceEvent, TraceRingEntry, TraceTail, TraceTailResult};
+use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, Subname};
 
 use super::TestBench;
 use crate::perf::harness::{
-    CellResult, Drive, Ping, Relay, RelayConfig, Stats, SweepConfig, Tier, Topology,
-    default_topologies, depth_chain, fanout, fanout_heavy, heavy_work_iters_from_env,
-    pace_hz_from_env, relay_id, run_sweep, summarize, tiers_from_env, two_level_tree,
-    wide_fanout_widths_from_env,
+    CellResult, Drive, Ping, Relay, RelayConfig, Stats, SweepConfig, Tier, Topology, default_topologies, depth_chain,
+    fanout, fanout_heavy, heavy_work_iters_from_env, pace_hz_from_env, relay_id, run_sweep, summarize, tiers_from_env,
+    two_level_tree, wide_fanout_widths_from_env,
 };
 
 /// Self-sustaining ring actor for the multi-worker saturation profile.
@@ -165,15 +160,9 @@ fn hold_id() -> MailboxId {
 /// each relay's downstream ids. Shared by the settlement guards.
 fn spawn_topology(tb: &TestBench, topo: &Topology) {
     for i in 0..topo.downstreams.len() {
-        let downstreams: Arc<[MailboxId]> =
-            topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
-        let config = RelayConfig {
-            downstreams,
-            work_iters: topo.work_iters[i],
-        };
-        tb.spawn_actor::<Relay>(Subname::Named(&i.to_string()), config)
-            .finish()
-            .expect("spawn relay");
+        let downstreams: Arc<[MailboxId]> = topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
+        let config = RelayConfig { downstreams, work_iters: topo.work_iters[i] };
+        tb.spawn_actor::<Relay>(Subname::Named(&i.to_string()), config).finish().expect("spawn relay");
     }
 }
 
@@ -191,13 +180,7 @@ const SETTLE_CAP: Duration = Duration::from_secs(50);
 /// a genuine wedge instead of a downstream assertion. `Panic` diverges
 /// inside the helper, so a return means the chain settled.
 fn assert_settled(rx: &crossbeam_channel::Receiver<()>, gate: &str) {
-    match await_internal_signal(
-        rx,
-        gate,
-        SETTLE_TIMEOUT,
-        SETTLE_CAP,
-        TerminalDisposition::Panic,
-    ) {
+    match await_internal_signal(rx, gate, SETTLE_TIMEOUT, SETTLE_CAP, TerminalDisposition::Panic) {
         WaitOutcome::Settled => {}
         WaitOutcome::Wedged(_) => unreachable!("Panic disposition diverges on a wedge"),
     }
@@ -230,11 +213,7 @@ fn mail_saturation_profile() {
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&w| w >= 1)
         .unwrap_or_else(|| available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1)));
-    let Ok(tb) = TestBench::builder()
-        .with_workers(Some(workers))
-        .size(16, 16)
-        .build()
-    else {
+    let Ok(tb) = TestBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
         eprintln!("skipping mail_saturation_profile: TestBench boot failed (no wgpu adapter)");
         return;
     };
@@ -243,31 +222,20 @@ fn mail_saturation_profile() {
     for i in 0..n {
         let next = ring_id((i + 1) % n);
         let sub = i.to_string();
-        tb.spawn_actor::<RingRelay>(Subname::Named(&sub), next)
-            .finish()
-            .expect("spawn ring relay");
+        tb.spawn_actor::<RingRelay>(Subname::Named(&sub), next).finish().expect("spawn ring relay");
     }
 
-    let m: usize = env::var("TOKENS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(6000);
+    let m: usize = env::var("TOKENS").ok().and_then(|s| s.parse().ok()).unwrap_or(6000);
     let ttl = 100_000_000u32;
     for k in 0..m {
         let entry = ring_id(k % n);
         let _ = tb.inject_root(entry, Ping::ID, Ping { seq: ttl }.encode_into_bytes());
     }
 
-    let secs: u64 = env::var("PROFILE_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8);
+    let secs: u64 = env::var("PROFILE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
     let start = Instant::now();
     thread::sleep(Duration::from_secs(secs));
-    eprintln!(
-        "mail_saturation_profile: {workers}w, ring n={n}, m={m} tokens, slept {:?}",
-        start.elapsed()
-    );
+    eprintln!("mail_saturation_profile: {workers}w, ring n={n}, m={m} tokens, slept {:?}", start.elapsed());
 }
 
 /// Settlement regression guard over a depth chain
@@ -286,11 +254,7 @@ fn mail_saturation_profile() {
 #[allow(clippy::print_stderr)]
 fn depth_chain_settles_every_root() {
     let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
-    let Ok(tb) = TestBench::builder()
-        .with_workers(Some(workers))
-        .size(16, 16)
-        .build()
-    else {
+    let Ok(tb) = TestBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
         eprintln!("skipping depth_chain_settles_every_root: TestBench boot failed (no wgpu)");
         return;
     };
@@ -327,11 +291,7 @@ fn depth_chain_settles_every_root() {
 #[allow(clippy::print_stderr)]
 fn emit_settlement_settles_every_root(topo: &Topology) {
     let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
-    let Ok(tb) = TestBench::builder()
-        .with_workers(Some(workers))
-        .size(16, 16)
-        .build()
-    else {
+    let Ok(tb) = TestBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
         eprintln!("skipping emit_settlement_settles_every_root: no wgpu adapter");
         return;
     };
@@ -376,17 +336,11 @@ fn emit_settlement_settles_wide_fanout() {
 #[allow(clippy::print_stderr)]
 fn emit_settlement_settles_with_holds() {
     let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
-    let Ok(tb) = TestBench::builder()
-        .with_workers(Some(workers))
-        .size(16, 16)
-        .build()
-    else {
+    let Ok(tb) = TestBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
         eprintln!("skipping emit_settlement_settles_with_holds: no wgpu adapter");
         return;
     };
-    tb.spawn_actor::<HoldRelay>(Subname::Named("0"), ())
-        .finish()
-        .expect("spawn hold relay");
+    tb.spawn_actor::<HoldRelay>(Subname::Named("0"), ()).finish().expect("spawn hold relay");
     let entry = hold_id();
 
     let roots = 50u32;
@@ -402,15 +356,8 @@ fn emit_settlement_settles_with_holds() {
 /// Query one actor's per-actor trace ring over the mail wire
 /// (`aether.trace.tail`), filtered to `root`. Returns the ring slice.
 fn trace_tail(tb: &mut TestBench, mailbox_name: &str, root: MailId) -> Vec<TraceRingEntry> {
-    let req = TraceTail {
-        max: 0,
-        since: None,
-        root: Some(root),
-    }
-    .encode_into_bytes();
-    let reply = tb
-        .send_bytes_and_await(mailbox_name, TraceTail::ID, req)
-        .expect("aether.trace.tail reply");
+    let req = TraceTail { max: 0, since: None, root: Some(root) }.encode_into_bytes();
+    let reply = tb.send_bytes_and_await(mailbox_name, TraceTail::ID, req).expect("aether.trace.tail reply");
     match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
         TraceTailResult::Ok { entries, .. } => entries,
         TraceTailResult::Err { error } => panic!("trace.tail error: {error}"),
@@ -430,11 +377,7 @@ fn trace_tail(tb: &mut TestBench, mailbox_name: &str, root: MailId) -> Vec<Trace
 #[test]
 #[allow(clippy::print_stderr)]
 fn trace_ring_dual_write_routes_events_to_owning_rings() {
-    let Ok(mut tb) = TestBench::builder()
-        .with_workers(Some(2))
-        .size(16, 16)
-        .build()
-    else {
+    let Ok(mut tb) = TestBench::builder().with_workers(Some(2)).size(16, 16).build() else {
         eprintln!("skipping trace_ring_dual_write_routes_events_to_owning_rings: no wgpu adapter");
         return;
     };
@@ -446,15 +389,11 @@ fn trace_ring_dual_write_routes_events_to_owning_rings() {
     // The recipient relay's own ring holds the mail's Received + Finished.
     let relay = trace_tail(&mut tb, "mlat.relay:0", root);
     assert!(
-        relay
-            .iter()
-            .any(|e| matches!(e.event, TraceEvent::Received { .. })),
+        relay.iter().any(|e| matches!(e.event, TraceEvent::Received { .. })),
         "relay ring missing Received; got {relay:?}"
     );
     assert!(
-        relay
-            .iter()
-            .any(|e| matches!(e.event, TraceEvent::Finished { .. })),
+        relay.iter().any(|e| matches!(e.event, TraceEvent::Finished { .. })),
         "relay ring missing Finished; got {relay:?}"
     );
     assert!(
@@ -463,17 +402,12 @@ fn trace_ring_dual_write_routes_events_to_owning_rings() {
     );
 
     // The off-actor injected Sent landed in the chassis-host ring.
-    let host = match tb.chassis_host_trace_tail(&TraceTail {
-        max: 0,
-        since: None,
-        root: Some(root),
-    }) {
+    let host = match tb.chassis_host_trace_tail(&TraceTail { max: 0, since: None, root: Some(root) }) {
         TraceTailResult::Ok { entries, .. } => entries,
         TraceTailResult::Err { error } => panic!("chassis-host trace.tail error: {error}"),
     };
     assert!(
-        host.iter()
-            .any(|e| matches!(e.event, TraceEvent::Sent { .. }) && e.root == root),
+        host.iter().any(|e| matches!(e.event, TraceEvent::Sent { .. }) && e.root == root),
         "chassis-host ring missing the injected Sent; got {host:?}"
     );
 }
@@ -490,12 +424,7 @@ fn trace_ring_dual_write_routes_events_to_owning_rings() {
 fn small_trace_ring_cap_laps_chassis_host_ring() {
     const CAP: usize = 4;
     const INJECTS: usize = CAP + 6;
-    let Ok(tb) = TestBench::builder()
-        .with_workers(Some(2))
-        .trace_ring_capacity(Some(CAP))
-        .size(16, 16)
-        .build()
-    else {
+    let Ok(tb) = TestBench::builder().with_workers(Some(2)).trace_ring_capacity(Some(CAP)).size(16, 16).build() else {
         eprintln!("skipping small_trace_ring_cap_laps_chassis_host_ring: no wgpu adapter");
         return;
     };
@@ -506,36 +435,18 @@ fn small_trace_ring_cap_laps_chassis_host_ring() {
     // recipient; we don't await settlement.
     let orphan = relay_id(0);
     for seq in 0..INJECTS {
-        let _ = tb.inject_root(
-            orphan,
-            Ping::ID,
-            Ping {
-                seq: u32::try_from(seq).unwrap_or(u32::MAX),
-            }
-            .encode_into_bytes(),
-        );
+        let _ =
+            tb.inject_root(orphan, Ping::ID, Ping { seq: u32::try_from(seq).unwrap_or(u32::MAX) }.encode_into_bytes());
     }
 
     // Unfiltered tail from the start cursor: the ring holds at most CAP
     // entries, so the earliest surviving sequence is past `since + 1` and
     // `truncated_before` flags the evicted prefix.
-    let (entries, truncated_before) = match tb.chassis_host_trace_tail(&TraceTail {
-        max: 0,
-        since: None,
-        root: None,
-    }) {
-        TraceTailResult::Ok {
-            entries,
-            truncated_before,
-            ..
-        } => (entries, truncated_before),
+    let (entries, truncated_before) = match tb.chassis_host_trace_tail(&TraceTail { max: 0, since: None, root: None }) {
+        TraceTailResult::Ok { entries, truncated_before, .. } => (entries, truncated_before),
         TraceTailResult::Err { error } => panic!("chassis-host trace.tail error: {error}"),
     };
-    assert!(
-        entries.len() <= CAP,
-        "ring retained more than its {CAP}-entry cap: {} entries",
-        entries.len()
-    );
+    assert!(entries.len() <= CAP, "ring retained more than its {CAP}-entry cap: {} entries", entries.len());
     assert!(
         truncated_before.is_some(),
         "expected a truncated_before gap after lapping a {CAP}-cap ring with {INJECTS} \
@@ -569,9 +480,7 @@ fn settled_chains_reclaim_without_growing_per_actor_ring() {
         .size(16, 16)
         .build()
     else {
-        eprintln!(
-            "skipping settled_chains_reclaim_without_growing_per_actor_ring: no wgpu adapter"
-        );
+        eprintln!("skipping settled_chains_reclaim_without_growing_per_actor_ring: no wgpu adapter");
         return;
     };
 
@@ -582,43 +491,23 @@ fn settled_chains_reclaim_without_growing_per_actor_ring() {
         let (_root, rx) = tb.inject_root(
             relay_id(0),
             Ping::ID,
-            Ping {
-                seq: u32::try_from(seq).unwrap_or(u32::MAX),
-            }
-            .encode_into_bytes(),
+            Ping { seq: u32::try_from(seq).unwrap_or(u32::MAX) }.encode_into_bytes(),
         );
         // Settle before the next inject, so the oldest entry's chain is
         // tombstoned (is_live == false) by the time the ring is full.
-        assert_settled(
-            &rx,
-            "mlat.settled_chains_reclaim_without_growing_per_actor_ring",
-        );
+        assert_settled(&rx, "mlat.settled_chains_reclaim_without_growing_per_actor_ring");
     }
 
-    let req = TraceTail {
-        max: 0,
-        since: None,
-        root: None,
-    }
-    .encode_into_bytes();
-    let reply = tb
-        .send_bytes_and_await("mlat.relay:0", TraceTail::ID, req)
-        .expect("aether.trace.tail reply");
+    let req = TraceTail { max: 0, since: None, root: None }.encode_into_bytes();
+    let reply = tb.send_bytes_and_await("mlat.relay:0", TraceTail::ID, req).expect("aether.trace.tail reply");
     match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
-        TraceTailResult::Ok {
-            entries,
-            truncated_before,
-            ..
-        } => {
+        TraceTailResult::Ok { entries, truncated_before, .. } => {
             assert!(
                 entries.len() <= FLOOR,
                 "settled chains must reclaim, not grow: ring holds {} entries, floor is {FLOOR}",
                 entries.len()
             );
-            assert!(
-                truncated_before.is_some(),
-                "reclaiming a settled prefix must signal truncated_before",
-            );
+            assert!(truncated_before.is_some(), "reclaiming a settled prefix must signal truncated_before");
         }
         TraceTailResult::Err { error } => panic!("trace.tail error: {error}"),
     }
@@ -638,11 +527,7 @@ fn small_trace_ring_cap_laps_per_actor_ring() {
     // enough roots to comfortably overrun CAP. Each is settled before the
     // next so the ring fills deterministically.
     const INJECTS: usize = CAP * 3;
-    let Ok(mut tb) = TestBench::builder()
-        .with_workers(Some(2))
-        .trace_ring_capacity(Some(CAP))
-        .size(16, 16)
-        .build()
+    let Ok(mut tb) = TestBench::builder().with_workers(Some(2)).trace_ring_capacity(Some(CAP)).size(16, 16).build()
     else {
         eprintln!("skipping small_trace_ring_cap_laps_per_actor_ring: no wgpu adapter");
         return;
@@ -656,10 +541,7 @@ fn small_trace_ring_cap_laps_per_actor_ring() {
         let (_root, rx) = tb.inject_root(
             relay_id(0),
             Ping::ID,
-            Ping {
-                seq: u32::try_from(seq).unwrap_or(u32::MAX),
-            }
-            .encode_into_bytes(),
+            Ping { seq: u32::try_from(seq).unwrap_or(u32::MAX) }.encode_into_bytes(),
         );
         assert_settled(&rx, "mlat.small_trace_ring_cap_laps_per_actor_ring");
     }
@@ -669,35 +551,20 @@ fn small_trace_ring_cap_laps_per_actor_ring() {
     // flags the evicted prefix. Query without a root filter (it would
     // also drop the trace-query mail's own Received/Finished, but the gap
     // cursor is computed over the whole ring regardless of the filter).
-    let req = TraceTail {
-        max: 0,
-        since: None,
-        root: None,
-    }
-    .encode_into_bytes();
-    let reply = tb
-        .send_bytes_and_await("mlat.relay:0", TraceTail::ID, req)
-        .expect("aether.trace.tail reply");
-    let truncated_before =
-        match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
-            TraceTailResult::Ok {
-                entries,
-                truncated_before,
-                ..
-            } => {
-                assert!(
-                    entries.len() <= CAP,
-                    "per-actor ring retained more than its {CAP}-entry cap: {} entries",
-                    entries.len()
-                );
-                truncated_before
-            }
-            TraceTailResult::Err { error } => panic!("trace.tail error: {error}"),
-        };
-    assert!(
-        truncated_before.is_some(),
-        "expected a truncated_before gap after lapping a {CAP}-cap per-actor ring",
-    );
+    let req = TraceTail { max: 0, since: None, root: None }.encode_into_bytes();
+    let reply = tb.send_bytes_and_await("mlat.relay:0", TraceTail::ID, req).expect("aether.trace.tail reply");
+    let truncated_before = match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
+        TraceTailResult::Ok { entries, truncated_before, .. } => {
+            assert!(
+                entries.len() <= CAP,
+                "per-actor ring retained more than its {CAP}-entry cap: {} entries",
+                entries.len()
+            );
+            truncated_before
+        }
+        TraceTailResult::Err { error } => panic!("trace.tail error: {error}"),
+    };
+    assert!(truncated_before.is_some(), "expected a truncated_before gap after lapping a {CAP}-cap per-actor ring");
 }
 
 /// ADR-0086 Phase 3: the decentralized guided walk reconstructs a
@@ -716,11 +583,7 @@ fn small_trace_ring_cap_laps_per_actor_ring() {
 #[test]
 #[allow(clippy::print_stderr)]
 fn guided_walk_reconstructs_causal_tree() {
-    let Ok(mut tb) = TestBench::builder()
-        .with_workers(Some(2))
-        .size(16, 16)
-        .build()
-    else {
+    let Ok(mut tb) = TestBench::builder().with_workers(Some(2)).size(16, 16).build() else {
         eprintln!("skipping guided_walk_reconstructs_causal_tree: no wgpu adapter");
         return;
     };
@@ -767,23 +630,9 @@ fn assert_causal_order(mails: &[MailNodeWire]) {
             // `Received` event, so it must be present whenever a node is
             // received, and must fall between send and receive (monotonic
             // process clock; deposit happens-after send, before pickup).
-            let enq = n
-                .t_enqueue
-                .expect("a received node must carry t_enqueue (#1134)");
-            assert!(
-                n.t_sent.0 <= enq.0,
-                "node {:?}: t_sent {} > t_enqueue {}",
-                n.mail_id,
-                n.t_sent.0,
-                enq.0
-            );
-            assert!(
-                enq.0 <= received.0,
-                "node {:?}: t_enqueue {} > t_received {}",
-                n.mail_id,
-                enq.0,
-                received.0
-            );
+            let enq = n.t_enqueue.expect("a received node must carry t_enqueue (#1134)");
+            assert!(n.t_sent.0 <= enq.0, "node {:?}: t_sent {} > t_enqueue {}", n.mail_id, n.t_sent.0, enq.0);
+            assert!(enq.0 <= received.0, "node {:?}: t_enqueue {} > t_received {}", n.mail_id, enq.0, received.0);
             if let Some(finished) = n.t_finished {
                 assert!(
                     received.0 <= finished.0,
@@ -795,9 +644,8 @@ fn assert_causal_order(mails: &[MailNodeWire]) {
             }
         }
         if let Some(parent_id) = n.parent {
-            let parent = by_id
-                .get(&parent_id)
-                .unwrap_or_else(|| panic!("parent {parent_id:?} of {:?} absent", n.mail_id));
+            let parent =
+                by_id.get(&parent_id).unwrap_or_else(|| panic!("parent {parent_id:?} of {:?} absent", n.mail_id));
             if let Some(parent_received) = parent.t_received {
                 assert!(
                     parent_received.0 <= n.t_sent.0,
@@ -842,11 +690,7 @@ const OBSERVE_FRAMES: u32 = 1000;
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 fn lifecycle_latency_observe() {
     let max_workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
-    let worker_set: Vec<usize> = [1usize, 2, 4, max_workers]
-        .into_iter()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let worker_set: Vec<usize> = [1usize, 2, 4, max_workers].into_iter().collect::<BTreeSet<_>>().into_iter().collect();
 
     let pace_hz = pace_hz_from_env();
 
@@ -870,12 +714,8 @@ fn lifecycle_latency_observe() {
         topologies.push(fanout(w));
     }
 
-    let cfg = SweepConfig {
-        workers: worker_set,
-        topologies,
-        frames: OBSERVE_FRAMES,
-        drive: Drive::Latency { pace_hz },
-    };
+    let cfg =
+        SweepConfig { workers: worker_set, topologies, frames: OBSERVE_FRAMES, drive: Drive::Latency { pace_hz } };
     let rows = run_sweep(&cfg);
     if rows.is_empty() {
         eprintln!("skipping lifecycle_latency_observe: no cells measured (likely no wgpu adapter)");
@@ -915,18 +755,10 @@ fn lifecycle_latency_observe() {
 /// ```
 #[test]
 #[ignore = "measurement harness — run on demand with --ignored --nocapture --release"]
-#[allow(
-    clippy::print_stdout,
-    clippy::print_stderr,
-    clippy::cast_precision_loss
-)]
+#[allow(clippy::print_stdout, clippy::print_stderr, clippy::cast_precision_loss)]
 fn settlement_detection_latency() {
     let workers = available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1));
-    let Ok(tb) = TestBench::builder()
-        .with_workers(Some(workers))
-        .size(16, 16)
-        .build()
-    else {
+    let Ok(tb) = TestBench::builder().with_workers(Some(workers)).size(16, 16).build() else {
         eprintln!("skipping settlement_detection_latency: TestBench boot failed (no wgpu adapter)");
         return;
     };
@@ -935,19 +767,11 @@ fn settlement_detection_latency() {
     // nothing, returns. Its whole causal tree is the one injected mail,
     // so settlement fires on that mail's `Finished` alone.
     let topo = depth_chain(1);
-    let config = RelayConfig {
-        downstreams: topo.downstreams[0].iter().map(|&j| relay_id(j)).collect(),
-        work_iters: 0,
-    };
-    tb.spawn_actor::<Relay>(Subname::Named("0"), config)
-        .finish()
-        .expect("spawn leaf relay");
+    let config = RelayConfig { downstreams: topo.downstreams[0].iter().map(|&j| relay_id(j)).collect(), work_iters: 0 };
+    tb.spawn_actor::<Relay>(Subname::Named("0"), config).finish().expect("spawn leaf relay");
     let entry = relay_id(0);
 
-    let samples: usize = env::var("SETTLE_SAMPLES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1000);
+    let samples: usize = env::var("SETTLE_SAMPLES").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
 
     // Cheap xorshift for the decorrelating jitter (no rand dependency).
     let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -972,22 +796,11 @@ fn settlement_detection_latency() {
     let us = |ns: u64| ns as f64 / 1000.0;
     println!();
     println!("=== settlement-detection latency (inject → Settled), trivial single-mail root ===");
-    println!(
-        "{workers}w, {} samples, jittered injection (decorrelated from the drainer cycle)",
-        s.n
-    );
+    println!("{workers}w, {} samples, jittered injection (decorrelated from the drainer cycle)", s.n);
     println!("Phase 2 (this branch): emit-time counter fires Settled synchronously on the");
     println!("producing thread — one atomic + the registry → driver notice hop. Compare against");
-    println!(
-        "main (the drained path: drainer park + observer fold + Settled mail hop, ~0.9ms p50)."
-    );
-    println!(
-        "  p50 {:.1}µs  p90 {:.1}µs  p99 {:.1}µs  max {:.1}µs",
-        us(s.p50),
-        us(s.p90),
-        us(s.p99),
-        us(s.max)
-    );
+    println!("main (the drained path: drainer park + observer fold + Settled mail hop, ~0.9ms p50).");
+    println!("  p50 {:.1}µs  p90 {:.1}µs  p99 {:.1}µs  max {:.1}µs", us(s.p50), us(s.p90), us(s.p99), us(s.max));
 }
 
 /// Print the lifecycle-harness HOP + HANDLER tables.
@@ -999,9 +812,7 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
     println!();
     println!("=== lifecycle-driven mail latency (all values µs; n = sample count) ===");
     println!("driven by `advance` (real Tick fan-out → source → relay chain); harvested from the");
-    println!(
-        "per-actor trace rings (aether.trace.tail per relay) — no injector, no per-root block."
-    );
+    println!("per-actor trace rings (aether.trace.tail per relay) — no injector, no per-root block.");
     if let Some(hz) = pace_hz {
         println!("paced @ {hz} Hz — workers park between frames (realistic frame loop)");
     } else {
@@ -1009,9 +820,7 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
     }
     if tiers_from_env().contains(&Tier::Heavy) {
         let heavy = heavy_work_iters_from_env();
-        println!(
-            "heavy leaves: {heavy} spin-iters/handler (*-heavy rows; read HANDLER DUR for actual µs)"
-        );
+        println!("heavy leaves: {heavy} spin-iters/handler (*-heavy rows; read HANDLER DUR for actual µs)");
     }
     let wide = wide_fanout_widths_from_env();
     if !wide.is_empty() {
@@ -1028,22 +837,10 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
     // span; each measures one thing (blob build vs wakeup vs in-blob
     // serialization vs handler work).
     for (label, pick) in [
-        (
-            "CONSTRUCT    (t_sent - t_construct_start: blob open → flush-begin = producer builds the blob)",
-            0usize,
-        ),
-        (
-            "QUEUED       (t_enqueue - t_sent: flush-begin → worker picks up the blob = wakeup/schedule)",
-            1,
-        ),
-        (
-            "DRAIN        (t_received - t_enqueue: pickup → handler entry = where in the blob's drain it landed)",
-            2,
-        ),
-        (
-            "HANDLER DUR  (t_finished - t_received: relay forward work)",
-            3,
-        ),
+        ("CONSTRUCT    (t_sent - t_construct_start: blob open → flush-begin = producer builds the blob)", 0usize),
+        ("QUEUED       (t_enqueue - t_sent: flush-begin → worker picks up the blob = wakeup/schedule)", 1),
+        ("DRAIN        (t_received - t_enqueue: pickup → handler entry = where in the blob's drain it landed)", 2),
+        ("HANDLER DUR  (t_finished - t_received: relay forward work)", 3),
     ] {
         println!("-- {label} --");
         println!(
@@ -1076,9 +873,7 @@ fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
     // ready-queue len at deposit), printed raw — not µs. p50 ≈ 0 means
     // `queued` is wakeup-dominated (empty queue); a rising tail is
     // wait-behind-N offered load (the fan-out queueing signal).
-    println!(
-        "-- ENQUEUE DEPTH (scheduler ready-queue len at deposit; counts, not µs: 0 = wakeup, n = behind-n) --"
-    );
+    println!("-- ENQUEUE DEPTH (scheduler ready-queue len at deposit; counts, not µs: 0 = wakeup, n = behind-n) --");
     println!(
         "{:>3}w  {:<16} {:<5} {:>9} {:>9} {:>9} {:>9} {:>7}",
         "", "topology", "cond", "p50", "p90", "p99", "max", "n"

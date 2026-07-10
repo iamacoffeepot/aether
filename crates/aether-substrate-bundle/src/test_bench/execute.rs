@@ -46,21 +46,13 @@ pub enum BenchOp {
     Advance { ticks: u32 },
     /// Fire-and-settle a mail; no reply is awaited. Build with the
     /// typed [`BenchOp::send_mail`].
-    SendMail {
-        recipient: String,
-        kind: KindId,
-        payload: Vec<u8>,
-    },
+    SendMail { recipient: String, kind: KindId, payload: Vec<u8> },
     /// Send a mail and block until a reply arrives, stashing the raw
     /// reply bytes. Build with the typed [`BenchOp::send_and_await`].
     /// Covers component load / replace / drop and the `aether.fs`
     /// read / write / delete / list round trips uniformly — decode
     /// the stored bytes downstream with [`ExecutionResult::reply`].
-    SendAndAwait {
-        recipient: String,
-        kind: KindId,
-        payload: Vec<u8>,
-    },
+    SendAndAwait { recipient: String, kind: KindId, payload: Vec<u8> },
     /// Capture the current frame as PNG bytes. Build with
     /// [`BenchOp::capture`]. Does not dispatch a tick — sequence a
     /// [`BenchOp::Advance`] before it if the world must move first.
@@ -73,10 +65,7 @@ pub enum BenchOp {
     /// decomposing into separate `SendMail` + `Capture` ops when the
     /// pre-mail's geometry must land in the same frame as the
     /// readback.
-    CaptureWithMails {
-        pre: Vec<NamedMail>,
-        after: Vec<NamedMail>,
-    },
+    CaptureWithMails { pre: Vec<NamedMail>, after: Vec<NamedMail> },
 }
 
 impl BenchOp {
@@ -104,11 +93,7 @@ impl BenchOp {
     /// structured kinds.
     #[must_use]
     pub fn send_mail<K: Kind>(recipient: impl Into<String>, mail: &K) -> Self {
-        Self::SendMail {
-            recipient: recipient.into(),
-            kind: K::ID,
-            payload: mail.encode_into_bytes(),
-        }
+        Self::SendMail { recipient: recipient.into(), kind: K::ID, payload: mail.encode_into_bytes() }
     }
 
     /// Send a typed mail and block until a reply arrives. Decode the
@@ -116,11 +101,7 @@ impl BenchOp {
     /// `mail` via [`Kind::encode_into_bytes`].
     #[must_use]
     pub fn send_and_await<K: Kind>(recipient: impl Into<String>, mail: &K) -> Self {
-        Self::SendAndAwait {
-            recipient: recipient.into(),
-            kind: K::ID,
-            payload: mail.encode_into_bytes(),
-        }
+        Self::SendAndAwait { recipient: recipient.into(), kind: K::ID, payload: mail.encode_into_bytes() }
     }
 }
 
@@ -198,10 +179,7 @@ pub enum ExecutionError {
     /// The op at `label` failed mid-sequence; `error` is the
     /// underlying [`TestBenchError`] (settlement timeout, decode
     /// failure, unknown mailbox, …). Aborts the sequence.
-    OpFailed {
-        label: String,
-        error: TestBenchError,
-    },
+    OpFailed { label: String, error: TestBenchError },
     /// [`ExecutionResult::reply`] was asked for a label that didn't
     /// run a [`BenchOp::SendAndAwait`] (or didn't run at all).
     NoSuchReply(String),
@@ -246,10 +224,7 @@ impl TestBench {
     /// `execute` composes over the per-op primitives — it does not
     /// replace them. Tests that assert intermediate state between ops
     /// stay imperative, or split into multiple `execute` calls.
-    pub fn execute(
-        &mut self,
-        steps: Vec<(&str, BenchOp)>,
-    ) -> Result<ExecutionResult, ExecutionError> {
+    pub fn execute(&mut self, steps: Vec<(&str, BenchOp)>) -> Result<ExecutionResult, ExecutionError> {
         let mut out = ExecutionResult::default();
         for (label, op) in steps {
             if out.contains(label) {
@@ -257,34 +232,23 @@ impl TestBench {
             }
             let result = match op {
                 BenchOp::Advance { ticks } => self.advance(ticks).map(|_| BenchOutput::Advanced),
-                BenchOp::SendMail {
-                    recipient,
-                    kind,
-                    payload,
-                } => self
-                    .send_bytes(&recipient, kind, payload)
-                    .map(|()| BenchOutput::Mailed),
-                BenchOp::SendAndAwait {
-                    recipient,
-                    kind,
-                    payload,
-                } => self
-                    .send_bytes_and_await(&recipient, kind, payload)
-                    .map(BenchOutput::Replied),
+                BenchOp::SendMail { recipient, kind, payload } => {
+                    self.send_bytes(&recipient, kind, payload).map(|()| BenchOutput::Mailed)
+                }
+                BenchOp::SendAndAwait { recipient, kind, payload } => {
+                    self.send_bytes_and_await(&recipient, kind, payload).map(BenchOutput::Replied)
+                }
                 BenchOp::Capture => self.capture().map(BenchOutput::Captured),
-                BenchOp::CaptureWithMails { pre, after } => self
-                    .capture_with_mails(pre, after)
-                    .map(BenchOutput::Captured),
+                BenchOp::CaptureWithMails { pre, after } => {
+                    self.capture_with_mails(pre, after).map(BenchOutput::Captured)
+                }
             };
             match result {
                 Ok(output) => {
                     out.inner.insert(label.to_owned(), output);
                 }
                 Err(error) => {
-                    return Err(ExecutionError::OpFailed {
-                        label: label.to_owned(),
-                        error,
-                    });
+                    return Err(ExecutionError::OpFailed { label: label.to_owned(), error });
                 }
             }
         }
@@ -325,17 +289,11 @@ mod tests {
     /// structured decode would have misread the raw cast image.
     #[test]
     fn execution_result_reply_decodes_cast_kind() {
-        let reply = CastReply {
-            code: 0x0A0B_0C0D,
-            flag: 0x1234,
-            _pad: 0,
-        };
+        let reply = CastReply { code: 0x0A0B_0C0D, flag: 0x1234, _pad: 0 };
         // The substrate reply path encodes via `Kind::encode_into_bytes`
         // (ADR-0100), so the recorded bytes are the cast image.
         let bytes = reply.encode_into_bytes();
-        let result = ExecutionResult {
-            inner: HashMap::from([("reply".to_owned(), BenchOutput::Replied(bytes))]),
-        };
+        let result = ExecutionResult { inner: HashMap::from([("reply".to_owned(), BenchOutput::Replied(bytes))]) };
 
         let decoded: CastReply = result.reply("reply").expect("cast reply decodes");
         assert_eq!(decoded, reply);

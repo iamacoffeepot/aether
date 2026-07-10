@@ -69,9 +69,7 @@ impl CounterCell {
     /// A fresh cell at `(in_flight = 0, held_open = 0)`.
     #[must_use]
     pub const fn zero() -> Self {
-        Self {
-            packed: AtomicU64::new(0),
-        }
+        Self { packed: AtomicU64::new(0) }
     }
 
     /// Force the cell back to `(0, 0)`. Only sound when the caller holds
@@ -131,10 +129,7 @@ impl CounterCell {
     #[must_use]
     pub fn sub_held_open(&self) -> bool {
         let prev = self.packed.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(
-            prev & 0xFFFF_FFFF != 0,
-            "settlement counter held_open underflow"
-        );
+        debug_assert!(prev & 0xFFFF_FFFF != 0, "settlement counter held_open underflow");
         prev == 1
     }
 
@@ -171,10 +166,7 @@ impl SettlementCounter {
     /// Allocate `STRIPE_COUNT` empty stripes.
     #[must_use]
     pub fn new() -> Self {
-        let stripes = (0..STRIPE_COUNT)
-            .map(|_| Mutex::new(HashMap::new()))
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+        let stripes = (0..STRIPE_COUNT).map(|_| Mutex::new(HashMap::new())).collect::<Vec<_>>().into_boxed_slice();
         Self {
             stripes,
             #[allow(clippy::cast_possible_truncation)]
@@ -197,9 +189,7 @@ impl SettlementCounter {
     /// mutex (fail-fast per ADR-0063); all the `record_*` methods inherit
     /// that contract through this helper.
     fn lock_stripe(&self, root: MailId) -> MutexGuard<'_, HashMap<MailId, CounterCell>> {
-        self.stripe(root)
-            .lock()
-            .expect("settlement counter stripe mutex poisoned; fail-fast per ADR-0063")
+        self.stripe(root).lock().expect("settlement counter stripe mutex poisoned; fail-fast per ADR-0063")
     }
 
     /// Record a `Sent` for `root` (`in_flight += 1`). Inserts the cell
@@ -207,19 +197,13 @@ impl SettlementCounter {
     /// dropped when it previously settled.
     pub fn record_sent(&self, root: MailId) {
         let mut stripe = self.lock_stripe(root);
-        stripe
-            .entry(root)
-            .or_insert_with(CounterCell::zero)
-            .add_in_flight();
+        stripe.entry(root).or_insert_with(CounterCell::zero).add_in_flight();
     }
 
     /// Record a settlement `HoldOpen` for `root` (`held_open += 1`).
     pub fn record_hold_open(&self, root: MailId) {
         let mut stripe = self.lock_stripe(root);
-        stripe
-            .entry(root)
-            .or_insert_with(CounterCell::zero)
-            .add_held_open();
+        stripe.entry(root).or_insert_with(CounterCell::zero).add_held_open();
     }
 
     /// Record a `Finished` for `root` (`in_flight -= 1`). Returns `true`
@@ -268,14 +252,7 @@ impl SettlementCounter {
     /// Panics on a poisoned stripe mutex (fail-fast per ADR-0063).
     #[must_use]
     pub fn live_roots(&self) -> usize {
-        self.stripes
-            .iter()
-            .map(|s| {
-                s.lock()
-                    .expect("settlement counter stripe mutex poisoned")
-                    .len()
-            })
-            .sum()
+        self.stripes.iter().map(|s| s.lock().expect("settlement counter stripe mutex poisoned").len()).sum()
     }
 
     /// Current `held_open` count for `root` (0 if no live cell). For
@@ -289,9 +266,7 @@ impl SettlementCounter {
     /// Panics on a poisoned stripe mutex (fail-fast per ADR-0063).
     #[must_use]
     pub fn held_open(&self, root: MailId) -> u32 {
-        self.lock_stripe(root)
-            .get(&root)
-            .map_or(0, |cell| cell.load().1)
+        self.lock_stripe(root).get(&root).map_or(0, |cell| cell.load().1)
     }
 }
 
@@ -317,10 +292,7 @@ mod tests {
     use std::thread;
 
     fn root(sender: u64, cid: u64) -> MailId {
-        MailId {
-            sender: MailboxId(sender),
-            correlation_id: cid,
-        }
+        MailId { sender: MailboxId(sender), correlation_id: cid }
     }
 
     #[test]
@@ -587,16 +559,9 @@ mod tests {
             h.join().unwrap();
         }
 
-        assert_eq!(
-            counter.live_roots(),
-            0,
-            "every balanced root must settle and reclaim its cell"
-        );
+        assert_eq!(counter.live_roots(), 0, "every balanced root must settle and reclaim its cell");
         for (i, f) in fires.iter().enumerate() {
-            assert!(
-                f.load(Ordering::Relaxed) >= 1,
-                "root {i} balanced but never fired Settled"
-            );
+            assert!(f.load(Ordering::Relaxed) >= 1, "root {i} balanced but never fired Settled");
         }
     }
 }

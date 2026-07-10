@@ -183,29 +183,17 @@ mod tests {
         // Tripwire: Hover blends hover_overlay over base as src-over —
         // each RGB channel lerps toward the overlay by the overlay's
         // alpha, and base's own alpha survives untouched.
-        let theme = Theme {
-            hover_overlay: Rgba::new(1.0, 0.0, 0.0, 0.5),
-            ..Theme::DEFAULT
-        };
+        let theme = Theme { hover_overlay: Rgba::new(1.0, 0.0, 0.0, 0.5), ..Theme::DEFAULT };
         let base = Rgba::new(0.0, 1.0, 0.0, 1.0);
-        assert_eq!(
-            theme.fill(base, ThemeState::Hover),
-            Rgba::new(0.5, 0.5, 0.0, 1.0)
-        );
+        assert_eq!(theme.fill(base, ThemeState::Hover), Rgba::new(0.5, 0.5, 0.0, 1.0));
     }
 
     #[test]
     fn fill_disabled_scales_only_alpha() {
         // Tripwire: Disabled must scale the alpha channel by
         // disabled_alpha and leave RGB untouched.
-        let theme = Theme {
-            disabled_alpha: 0.4,
-            ..Theme::DEFAULT
-        };
+        let theme = Theme { disabled_alpha: 0.4, ..Theme::DEFAULT };
         let base = Rgba::new(0.1, 0.2, 0.3, 1.0);
-        assert_eq!(
-            theme.fill(base, ThemeState::Disabled),
-            Rgba::new(0.1, 0.2, 0.3, 0.4)
-        );
+        assert_eq!(theme.fill(base, ThemeState::Disabled), Rgba::new(0.1, 0.2, 0.3, 0.4));
     }
 }

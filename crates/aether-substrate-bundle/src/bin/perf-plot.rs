@@ -13,11 +13,7 @@
 // Binning + axis math: latency samples and bin counts are small positive
 // values, so the f64 <-> integer casts are benign. Matches the same
 // allow on `perf/harness.rs` / `perf/report.rs`.
-#![allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
+#![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 use std::env;
 use std::error::Error;
@@ -51,10 +47,7 @@ const CONSTRUCT: RGBColor = RGBColor(255, 140, 0);
 // main — not a capability, no config layer in scope.
 #[allow(clippy::disallowed_methods)]
 fn main() -> ExitCode {
-    let frames: u32 = env::var("AETHER_PERF_FRAMES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(200);
+    let frames: u32 = env::var("AETHER_PERF_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(200);
     let dir = env::var("AETHER_PERF_PLOT_DIR").unwrap_or_else(|_| "perf-plots".to_owned());
     // Register the embedded font under "sans-serif" so every FontDesc the
     // chart builds (caption, mesh labels, legend) resolves to it.
@@ -62,12 +55,7 @@ fn main() -> ExitCode {
         eprintln!("perf-plot: failed to parse the embedded font");
         return ExitCode::from(1);
     }
-    let cfg = SweepConfig {
-        workers: parse_workers(),
-        topologies: parse_topologies(),
-        frames,
-        drive: drive_from_env(),
-    };
+    let cfg = SweepConfig { workers: parse_workers(), topologies: parse_topologies(), frames, drive: drive_from_env() };
 
     let cells = run_sweep_samples(&cfg);
     if cells.is_empty() {
@@ -157,13 +145,7 @@ fn render_cell(path: &Path, c: &CellSamples) -> Result<(), Box<dyn Error>> {
     // Combined positive range across the spans, in microseconds. A span
     // sample can be 0ns (sub-resolution); clamp to 1ns so the log axis
     // stays defined.
-    let positive = || {
-        spans
-            .iter()
-            .flat_map(|(_, s, _)| s.iter())
-            .copied()
-            .filter(|&v| v > 0)
-    };
+    let positive = || spans.iter().flat_map(|(_, s, _)| s.iter()).copied().filter(|&v| v > 0);
     let lo_nanos = positive().min().unwrap_or(1);
     let hi_nanos = positive().max().unwrap_or(1).max(lo_nanos + 1);
     let xmin = (lo_nanos as f64 / 1000.0).max(0.001);
@@ -175,13 +157,8 @@ fn render_cell(path: &Path, c: &CellSamples) -> Result<(), Box<dyn Error>> {
         ((frac * NBINS as f64).floor() as usize).min(NBINS - 1)
     };
     // Geometric bin centres (µs) — the x of each step point.
-    let centres: Vec<f64> = (0..NBINS)
-        .map(|i| {
-            ((i as f64 + 0.5) / NBINS as f64)
-                .mul_add(lmax - lmin, lmin)
-                .exp()
-        })
-        .collect();
+    let centres: Vec<f64> =
+        (0..NBINS).map(|i| ((i as f64 + 0.5) / NBINS as f64).mul_add(lmax - lmin, lmin).exp()).collect();
 
     let mut series: Vec<(&str, RGBColor, Vec<u32>, f64)> = Vec::new();
     let mut ymax = 1u32;
@@ -203,39 +180,20 @@ fn render_cell(path: &Path, c: &CellSamples) -> Result<(), Box<dyn Error>> {
         let root = BitMapBackend::with_buffer(&mut buf, (WIDTH, HEIGHT)).into_drawing_area();
         root.fill(&WHITE)?;
         let mut chart = ChartBuilder::on(&root)
-            .caption(
-                format!("{} @ {}w — per-mail span distribution", c.topo, c.workers),
-                ("sans-serif", 22),
-            )
+            .caption(format!("{} @ {}w — per-mail span distribution", c.topo, c.workers), ("sans-serif", 22))
             .margin(14)
             .x_label_area_size(44)
             .y_label_area_size(52)
             .build_cartesian_2d((xmin..xmax).log_scale(), 0u32..ymax)?;
-        chart
-            .configure_mesh()
-            .x_desc("latency (µs, log)")
-            .y_desc("samples")
-            .draw()?;
+        chart.configure_mesh().x_desc("latency (µs, log)").y_desc("samples").draw()?;
         for (label, color, counts, p50) in &series {
             let color = *color;
             chart
-                .draw_series(LineSeries::new(
-                    centres.iter().zip(counts).map(|(&x, &n)| (x, n)),
-                    color.stroke_width(2),
-                ))?
-                .label(format!(
-                    "{label}  (p50 {p50:.2}µs, n={})",
-                    counts.iter().sum::<u32>()
-                ))
-                .legend(move |(x, y)| {
-                    PathElement::new(vec![(x, y), (x + 18, y)], color.stroke_width(2))
-                });
+                .draw_series(LineSeries::new(centres.iter().zip(counts).map(|(&x, &n)| (x, n)), color.stroke_width(2)))?
+                .label(format!("{label}  (p50 {p50:.2}µs, n={})", counts.iter().sum::<u32>()))
+                .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 18, y)], color.stroke_width(2)));
         }
-        chart
-            .configure_series_labels()
-            .border_style(BLACK)
-            .background_style(WHITE.mix(0.85))
-            .draw()?;
+        chart.configure_series_labels().border_style(BLACK).background_style(WHITE.mix(0.85)).draw()?;
         root.present()?;
     }
 
@@ -293,11 +251,7 @@ fn render_cell_percentiles(path: &Path, c: &CellSamples) -> Result<(), Box<dyn E
             y_floor = y_floor.min(p.lo);
             y_ceil = y_ceil.max(p.hi);
         }
-        series.push(PctSeries {
-            label,
-            color,
-            points,
-        });
+        series.push(PctSeries { label, color, points });
     }
     if series.is_empty() {
         return Ok(());
@@ -310,49 +264,25 @@ fn render_cell_percentiles(path: &Path, c: &CellSamples) -> Result<(), Box<dyn E
         let root = BitMapBackend::with_buffer(&mut buf, (WIDTH, HEIGHT)).into_drawing_area();
         root.fill(&WHITE)?;
         let mut chart = ChartBuilder::on(&root)
-            .caption(
-                format!("{} @ {}w — latency by percentile", c.topo, c.workers),
-                ("sans-serif", 22),
-            )
+            .caption(format!("{} @ {}w — latency by percentile", c.topo, c.workers), ("sans-serif", 22))
             .margin(14)
             .x_label_area_size(44)
             .y_label_area_size(56)
             .build_cartesian_2d(0f64..100f64, (y_floor..y_ceil).log_scale())?;
-        chart
-            .configure_mesh()
-            .x_desc("percentile")
-            .y_desc("latency (µs, log)")
-            .draw()?;
+        chart.configure_mesh().x_desc("percentile").y_desc("latency (µs, log)").draw()?;
         for s in &series {
             let color = s.color;
             // Quantile curve through the dots — carries the legend entry.
             chart
-                .draw_series(LineSeries::new(
-                    s.points.iter().map(|p| (p.pct, p.mid)),
-                    color,
-                ))?
+                .draw_series(LineSeries::new(s.points.iter().map(|p| (p.pct, p.mid)), color))?
                 .label(s.label)
-                .legend(move |(x, y)| {
-                    PathElement::new(vec![(x, y), (x + 18, y)], color.stroke_width(2))
-                });
+                .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 18, y)], color.stroke_width(2)));
             // Vertical ±2.5%-band error bars.
-            chart.draw_series(
-                s.points
-                    .iter()
-                    .map(|p| PathElement::new(vec![(p.pct, p.lo), (p.pct, p.hi)], color)),
-            )?;
+            chart.draw_series(s.points.iter().map(|p| PathElement::new(vec![(p.pct, p.lo), (p.pct, p.hi)], color)))?;
             // Dots at the quantile value.
-            chart.draw_series(
-                s.points
-                    .iter()
-                    .map(|p| Circle::new((p.pct, p.mid), 3, color.filled())),
-            )?;
+            chart.draw_series(s.points.iter().map(|p| Circle::new((p.pct, p.mid), 3, color.filled())))?;
         }
-        chart
-            .configure_series_labels()
-            .border_style(BLACK)
-            .background_style(WHITE.mix(0.85))
-            .draw()?;
+        chart.configure_series_labels().border_style(BLACK).background_style(WHITE.mix(0.85)).draw()?;
         root.present()?;
     }
 

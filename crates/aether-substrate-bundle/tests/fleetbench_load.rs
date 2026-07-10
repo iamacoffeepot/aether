@@ -32,10 +32,7 @@ mod tests {
         let addr = bench.load(engine, "aether_test_fixtures_bundle");
 
         let expected = format!("aether.component/{}:test.probe", WasmTrampoline::NAMESPACE);
-        assert_eq!(
-            addr, expected,
-            "LoadResult.name should be the ADR-0099 lineage address",
-        );
+        assert_eq!(addr, expected, "LoadResult.name should be the ADR-0099 lineage address");
 
         // The recorded trace captures the load as a first-class
         // CallRecord: a LoadComponent call to a forked engine that
@@ -45,11 +42,7 @@ mod tests {
             .iter()
             .find(|record| record.request_kind == <LoadComponent as Kind>::ID)
             .expect("the load round-trip is recorded as a CallRecord");
-        assert_eq!(
-            load_record.engine,
-            Some(engine),
-            "the load call is routed to the forked engine",
-        );
+        assert_eq!(load_record.engine, Some(engine), "the load call is routed to the forked engine");
         assert_eq!(
             load_record.reply_kinds,
             vec![<LoadResult as Kind>::ID],

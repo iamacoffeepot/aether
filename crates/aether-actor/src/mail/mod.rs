@@ -81,9 +81,7 @@ impl serde::Serialize for ReplyHandle {
 
 impl<'de> serde::Deserialize<'de> for ReplyHandle {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(Self {
-            raw: <u32 as serde::Deserialize>::deserialize(deserializer)?,
-        })
+        Ok(Self { raw: <u32 as serde::Deserialize>::deserialize(deserializer)? })
     }
 }
 
@@ -137,23 +135,8 @@ impl Mail<'_> {
     /// delivers `ptr` as a wasm32 offset (`u32`); this widens it.
     #[doc(hidden)]
     #[must_use]
-    pub unsafe fn __from_raw(
-        kind: u64,
-        ptr: u32,
-        byte_len: u32,
-        count: u32,
-        sender: u32,
-        recipient: u64,
-    ) -> Self {
-        Mail {
-            kind,
-            ptr: ptr as usize,
-            byte_len,
-            count,
-            sender,
-            recipient,
-            _borrow: PhantomData,
-        }
+    pub unsafe fn __from_raw(kind: u64, ptr: u32, byte_len: u32, count: u32, sender: u32, recipient: u64) -> Self {
+        Mail { kind, ptr: ptr as usize, byte_len, count, sender, recipient, _borrow: PhantomData }
     }
 
     /// Not part of the public API; native callers (and the SDK's own
@@ -162,23 +145,8 @@ impl Mail<'_> {
     /// the wider address.
     #[doc(hidden)]
     #[must_use]
-    pub unsafe fn __from_ptr(
-        kind: u64,
-        ptr: usize,
-        byte_len: u32,
-        count: u32,
-        sender: u32,
-        recipient: u64,
-    ) -> Self {
-        Mail {
-            kind,
-            ptr,
-            byte_len,
-            count,
-            sender,
-            recipient,
-            _borrow: PhantomData,
-        }
+    pub unsafe fn __from_ptr(kind: u64, ptr: usize, byte_len: u32, count: u32, sender: u32, recipient: u64) -> Self {
+        Mail { kind, ptr, byte_len, count, sender, recipient, _borrow: PhantomData }
     }
 
     /// Kind id the substrate routed this mail under. The canonical
@@ -215,11 +183,7 @@ impl Mail<'_> {
     /// is answerable via `Ctx::reply`).
     #[must_use]
     pub fn reply_handle(&self) -> Option<ReplyHandle> {
-        if self.sender == NO_REPLY_HANDLE {
-            None
-        } else {
-            Some(ReplyHandle { raw: self.sender })
-        }
+        if self.sender == NO_REPLY_HANDLE { None } else { Some(ReplyHandle { raw: self.sender }) }
     }
 
     /// Mailbox this mail was routed to (ADR-0114 decision #1). The
@@ -307,12 +271,7 @@ impl<'a> PriorState<'a> {
     #[doc(hidden)]
     #[must_use]
     pub unsafe fn __from_raw(version: u32, ptr: u32, len: u32) -> Self {
-        PriorState {
-            version,
-            ptr: ptr as usize,
-            len: len as usize,
-            _borrow: PhantomData,
-        }
+        PriorState { version, ptr: ptr as usize, len: len as usize, _borrow: PhantomData }
     }
 
     /// Not part of the public API; mirrors `Mail::__from_ptr` for the
@@ -321,12 +280,7 @@ impl<'a> PriorState<'a> {
     #[doc(hidden)]
     #[must_use]
     pub unsafe fn __from_ptr(version: u32, ptr: usize, len: usize) -> Self {
-        PriorState {
-            version,
-            ptr,
-            len,
-            _borrow: PhantomData,
-        }
+        PriorState { version, ptr, len, _borrow: PhantomData }
     }
 
     /// Component-defined schema version. The substrate does not
@@ -406,9 +360,7 @@ mod tests {
     }
 
     /// Structured-shape kind for the schema-driven `decode_kind` path.
-    #[derive(
-        ::aether_data::Kind, ::aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
-    )]
+    #[derive(::aether_data::Kind, ::aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
     #[kind(name = "test.fake_structured")]
     struct FakeStructured {
         tag: String,
@@ -439,18 +391,15 @@ mod tests {
     fn mail_sender_some_for_real_handle() {
         // SAFETY: no pointer is dereferenced; we only inspect `sender`.
         let mail = unsafe { Mail::__from_ptr(0, 0, 0, 0, 42, 0) };
-        let s = mail
-            .reply_handle()
-            .expect("non-sentinel handle yields Some");
+        let s = mail.reply_handle().expect("non-sentinel handle yields Some");
         assert_eq!(s.raw(), 42);
     }
 
     #[test]
     fn reply_handle_wire_shape_is_raw_u32() {
         // SAFETY: no pointer is dereferenced; we only inspect `sender`.
-        let handle = unsafe { Mail::__from_ptr(0, 0, 0, 0, 42, 0) }
-            .reply_handle()
-            .expect("non-sentinel handle yields Some");
+        let handle =
+            unsafe { Mail::__from_ptr(0, 0, 0, 0, 42, 0) }.reply_handle().expect("non-sentinel handle yields Some");
 
         assert_eq!(
             <ReplyHandle as Schema>::SCHEMA,
@@ -489,22 +438,12 @@ mod tests {
 
     #[test]
     fn mail_decode_kind_structured_roundtrip() {
-        let value = FakeStructured {
-            tag: String::from("greet"),
-            ids: alloc::vec![1, 2, 3, 4],
-        };
+        let value = FakeStructured { tag: String::from("greet"), ids: alloc::vec![1, 2, 3, 4] };
         let bytes = value.encode_into_bytes();
         // SAFETY: `bytes` (a `Vec<u8>` from the kind encoder) outlives
         // `mail`; its `(addr, len)` pair is valid for the rest of the body.
         let mail = unsafe {
-            Mail::__from_ptr(
-                FakeStructured::ID.0,
-                bytes.as_ptr().addr(),
-                bytes.len() as u32,
-                1,
-                NO_REPLY_HANDLE,
-                0,
-            )
+            Mail::__from_ptr(FakeStructured::ID.0, bytes.as_ptr().addr(), bytes.len() as u32, 1, NO_REPLY_HANDLE, 0)
         };
         let out = mail.decode_kind::<FakeStructured>().expect("decode");
         assert_eq!(out, value);
@@ -512,54 +451,31 @@ mod tests {
 
     #[test]
     fn mail_decode_kind_wrong_kind_returns_none() {
-        let value = FakeStructured {
-            tag: String::from("x"),
-            ids: alloc::vec![],
-        };
+        let value = FakeStructured { tag: String::from("x"), ids: alloc::vec![] };
         let bytes = value.encode_into_bytes();
         // SAFETY: `bytes` outlives `mail`; the `(addr, len)` pair is
         // valid for `bytes.len()` bytes for the rest of the body.
         let mail = unsafe {
-            Mail::__from_ptr(
-                FakeKind::ID.0,
-                bytes.as_ptr().addr(),
-                bytes.len() as u32,
-                1,
-                NO_REPLY_HANDLE,
-                0,
-            )
+            Mail::__from_ptr(FakeKind::ID.0, bytes.as_ptr().addr(), bytes.len() as u32, 1, NO_REPLY_HANDLE, 0)
         };
         assert!(mail.decode_kind::<FakeStructured>().is_none());
     }
 
     #[test]
     fn mail_decode_kind_wrong_count_returns_none() {
-        let value = FakeStructured {
-            tag: String::from("x"),
-            ids: alloc::vec![],
-        };
+        let value = FakeStructured { tag: String::from("x"), ids: alloc::vec![] };
         let bytes = value.encode_into_bytes();
         // SAFETY: `bytes` outlives `mail`; the `(addr, len)` pair is
         // valid for `bytes.len()` bytes for the rest of the body.
         let mail = unsafe {
-            Mail::__from_ptr(
-                FakeStructured::ID.0,
-                bytes.as_ptr().addr(),
-                bytes.len() as u32,
-                2,
-                NO_REPLY_HANDLE,
-                0,
-            )
+            Mail::__from_ptr(FakeStructured::ID.0, bytes.as_ptr().addr(), bytes.len() as u32, 2, NO_REPLY_HANDLE, 0)
         };
         assert!(mail.decode_kind::<FakeStructured>().is_none());
     }
 
     #[test]
     fn mail_decode_kind_truncated_bytes_returns_none() {
-        let value = FakeStructured {
-            tag: String::from("longer"),
-            ids: alloc::vec![1, 2, 3],
-        };
+        let value = FakeStructured { tag: String::from("longer"), ids: alloc::vec![1, 2, 3] };
         let bytes = value.encode_into_bytes();
         // Pretend the substrate only wrote the first 2 bytes —
         // `decode_from_bytes` gets the truncated slice and surfaces the
@@ -567,16 +483,7 @@ mod tests {
         // SAFETY: `bytes` outlives `mail`; the declared `byte_len=2`
         // is within the actual allocation so the bounded read is
         // valid even though it's deliberately a truncation.
-        let mail = unsafe {
-            Mail::__from_ptr(
-                FakeStructured::ID.0,
-                bytes.as_ptr().addr(),
-                2,
-                1,
-                NO_REPLY_HANDLE,
-                0,
-            )
-        };
+        let mail = unsafe { Mail::__from_ptr(FakeStructured::ID.0, bytes.as_ptr().addr(), 2, 1, NO_REPLY_HANDLE, 0) };
         assert!(mail.decode_kind::<FakeStructured>().is_none());
     }
 
@@ -591,16 +498,7 @@ mod tests {
         // SAFETY: `buf` outlives `mail`; the `(addr, 0)` pair points
         // into the live `buf` allocation, satisfying the validity
         // contract trivially for the zero-byte read.
-        let mail = unsafe {
-            Mail::__from_ptr(
-                FakeKind::ID.0,
-                buf.as_ptr().addr(),
-                0,
-                1,
-                NO_REPLY_HANDLE,
-                0,
-            )
-        };
+        let mail = unsafe { Mail::__from_ptr(FakeKind::ID.0, buf.as_ptr().addr(), 0, 1, NO_REPLY_HANDLE, 0) };
         assert!(mail.decode_kind::<FakeKind>().is_none());
     }
 
@@ -613,9 +511,7 @@ mod tests {
     // mismatch between framing and decode surfaces here before either
     // diverges from the ADR's wire shape.
 
-    #[derive(
-        ::aether_data::Kind, ::aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
-    )]
+    #[derive(::aether_data::Kind, ::aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
     #[kind(name = "test.state.struct")]
     struct StateStruct {
         tag: u32,
@@ -623,9 +519,7 @@ mod tests {
         items: Vec<u32>,
     }
 
-    #[derive(
-        ::aether_data::Kind, ::aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
-    )]
+    #[derive(::aether_data::Kind, ::aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
     #[kind(name = "test.state.other")]
     struct OtherState {
         flag: bool,
@@ -648,16 +542,11 @@ mod tests {
 
     #[test]
     fn decode_kind_roundtrip() {
-        let value = StateStruct {
-            tag: 11,
-            label: String::from("phase-2"),
-            items: alloc::vec![1, 2, 3],
-        };
+        let value = StateStruct { tag: 11, label: String::from("phase-2"), items: alloc::vec![1, 2, 3] };
         let buf = frame_bundle(&value);
         let prior = prior_from(&buf, 0);
-        let decoded = prior
-            .decode_kind::<StateStruct>()
-            .expect("test setup: round-trip frame decodes back to StateStruct");
+        let decoded =
+            prior.decode_kind::<StateStruct>().expect("test setup: round-trip frame decodes back to StateStruct");
         assert_eq!(decoded, value);
     }
 

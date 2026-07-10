@@ -33,14 +33,8 @@ impl NativeActor for HttpDispatchShard {
 
     const NAMESPACE: &'static str = "aether.http.server.shard";
 
-    fn init(
-        mut seed: HttpShardSeed,
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<HttpShardState, BootError> {
-        let inbound_rx = seed
-            .inbound_rx
-            .take()
-            .expect("HttpShardSeed::inbound_rx consumed exactly once");
+    fn init(mut seed: HttpShardSeed, ctx: &mut NativeInitCtx<'_>) -> Result<HttpShardState, BootError> {
+        let inbound_rx = seed.inbound_rx.take().expect("HttpShardSeed::inbound_rx consumed exactly once");
         Ok(HttpShardState {
             handler_mailbox: seed.handler_mailbox,
             routes: seed.routes,
@@ -105,25 +99,11 @@ impl NativeActor for HttpDispatchShard {
                 InboundEvent::PeerAccepted { stream, peer } => {
                     state.spawn_reader_for_peer(stream, peer);
                 }
-                InboundEvent::RequestHeadParsed {
-                    conn_id,
-                    head,
-                    handler,
-                } => {
+                InboundEvent::RequestHeadParsed { conn_id, head, handler } => {
                     state.open_requested_stream(ctx, conn_id, head, handler);
                 }
-                InboundEvent::RequestParsed {
-                    conn_id,
-                    payload,
-                    handler,
-                    kind,
-                    method,
-                    keep_alive,
-                    ws_key,
-                } => {
-                    state.dispatch_prepared(
-                        ctx, conn_id, &payload, handler, kind, method, keep_alive, ws_key,
-                    );
+                InboundEvent::RequestParsed { conn_id, payload, handler, kind, method, keep_alive, ws_key } => {
+                    state.dispatch_prepared(ctx, conn_id, &payload, handler, kind, method, keep_alive, ws_key);
                 }
                 InboundEvent::RequestBodyChunk { conn_id, body } => {
                     state.forward_request_chunk(ctx, conn_id, body);
@@ -153,21 +133,13 @@ impl NativeActor for HttpDispatchShard {
                 InboundEvent::StreamFinished { stream_id } => {
                     state.finish_stream(stream_id);
                 }
-                InboundEvent::WebSocketMessage {
-                    conn_id,
-                    binary,
-                    data,
-                } => {
+                InboundEvent::WebSocketMessage { conn_id, binary, data } => {
                     state.dispatch_ws_message(ctx, conn_id, binary, data);
                 }
                 InboundEvent::WebSocketPing { conn_id, payload } => {
                     state.send_ws_pong(conn_id, &payload);
                 }
-                InboundEvent::WebSocketClose {
-                    conn_id,
-                    code,
-                    reason,
-                } => {
+                InboundEvent::WebSocketClose { conn_id, code, reason } => {
                     // Report the close to the handler on its own root, echo the
                     // close frame on the writer (its final write finishes the
                     // stream, tearing the connection down, ADR-0129 §5).
@@ -188,11 +160,7 @@ impl NativeActor for HttpDispatchShard {
     /// [`HttpResponseStreamOpen`], paced by the cap's
     /// [`HttpStreamCredit`](crate::http::kinds::HttpStreamCredit) grants.
     #[handler::single]
-    fn on_response_chunk(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        chunk: HttpResponseChunk,
-    ) {
+    fn on_response_chunk(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, chunk: HttpResponseChunk) {
         state.push_chunk(chunk.stream_id, chunk.body);
     }
 
@@ -203,11 +171,7 @@ impl NativeActor for HttpDispatchShard {
     /// Not user-callable — a streaming handler sends this once after its
     /// final [`HttpResponseChunk`] to close the stream.
     #[handler::single]
-    fn on_response_stream_end(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        end: HttpResponseStreamEnd,
-    ) {
+    fn on_response_stream_end(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, end: HttpResponseStreamEnd) {
         state.end_stream(end.stream_id);
     }
 
@@ -225,11 +189,7 @@ impl NativeActor for HttpDispatchShard {
     ///
     /// [`HttpStreamCredit`]: crate::http::kinds::HttpStreamCredit
     #[handler::single]
-    fn on_request_credit(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        credit: HttpRequestCredit,
-    ) {
+    fn on_request_credit(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, credit: HttpRequestCredit) {
         state.replenish_reader_credit(credit.stream_id, credit.credit);
     }
 
@@ -246,11 +206,7 @@ impl NativeActor for HttpDispatchShard {
             // Already answered (the reply landed first) or never ours.
             return;
         };
-        state.respond_and_finish(
-            pending.conn_id,
-            render_status_response(502, "no response from handler"),
-            false,
-        );
+        state.respond_and_finish(pending.conn_id, render_status_response(502, "no response from handler"), false);
     }
 
     /// An outbound websocket message from the handler (ADR-0129 §3), routed by
@@ -264,11 +220,7 @@ impl NativeActor for HttpDispatchShard {
     /// speak to the peer; the cap frames it and drains it under the credit
     /// window.
     #[handler::single]
-    fn on_websocket_message(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        msg: WebSocketMessage,
-    ) {
+    fn on_websocket_message(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, msg: WebSocketMessage) {
         if let Some(conn_id) = state.streams.get(&msg.stream_id).map(|s| s.conn_id) {
             state.send_ws_message(conn_id, msg.binary, &msg.data);
         } else {
@@ -289,11 +241,7 @@ impl NativeActor for HttpDispatchShard {
     /// Not user-callable — an upgraded connection's handler sends this to close
     /// the socket.
     #[handler::single]
-    fn on_websocket_close(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        close: WebSocketClose,
-    ) {
+    fn on_websocket_close(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, close: WebSocketClose) {
         if let Some(conn_id) = state.streams.get(&close.stream_id).map(|s| s.conn_id) {
             state.send_ws_close(conn_id, close.code, &close.reason);
         } else {
@@ -350,11 +298,7 @@ impl NativeActor for HttpDispatchShard {
                 state.open_stream(ctx, correlation, pending.conn_id, &open);
             } else {
                 state.in_flight.remove(&correlation);
-                state.respond_and_finish(
-                    pending.conn_id,
-                    render_status_response(502, "malformed stream open"),
-                    false,
-                );
+                state.respond_and_finish(pending.conn_id, render_status_response(502, "malformed stream open"), false);
             }
             return;
         }
@@ -377,11 +321,7 @@ impl NativeActor for HttpDispatchShard {
             // `Connection: close`), which keeps the keep-alive path scoped to
             // the normal success round-trip.
             state.in_flight.remove(&correlation);
-            state.respond_and_finish(
-                pending.conn_id,
-                render_status_response(502, "malformed handler response"),
-                false,
-            );
+            state.respond_and_finish(pending.conn_id, render_status_response(502, "malformed handler response"), false);
         }
     }
 }

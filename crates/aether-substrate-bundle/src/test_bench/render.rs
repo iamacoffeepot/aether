@@ -53,8 +53,7 @@ impl Gpu {
     /// runner layer per ADR-0067).
     #[must_use]
     pub fn new(width: u32, height: u32, render_handles: RenderHandles) -> Self {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
             compatible_surface: None,
@@ -85,11 +84,7 @@ impl Gpu {
             render_handles.vertex_buffer_bytes,
         ));
 
-        Self {
-            adapter_info,
-            limits,
-            render_handles,
-        }
+        Self { adapter_info, limits, render_handles }
     }
 
     /// Resize the offscreen target. Test-bench has no surface, so a
@@ -120,9 +115,8 @@ impl Gpu {
     pub fn render(&mut self) {
         let device = self.render_handles.device();
         let queue = self.render_handles.queue();
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("frame encoder"),
-        });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame encoder") });
         // Advance path: commit-current (false). Empty live clears
         // the cache so a producer that stopped emitting flushes
         // cleanly to the next capture.
@@ -132,8 +126,7 @@ impl Gpu {
         }
         // ADR-0140 material pass, recorded after the world pass and
         // before the screen overlay.
-        self.render_handles
-            .record_material_pass(&mut encoder, false);
+        self.render_handles.record_material_pass(&mut encoder, false);
         // ADR-0105 textured-quad overlay, recorded after world/material.
         self.render_handles.record_overlay_pass(&mut encoder, false);
         queue.submit(iter::once(encoder.finish()));
@@ -161,9 +154,8 @@ impl Gpu {
     ) -> CaptureOutcome {
         let device = self.render_handles.device();
         let queue = self.render_handles.queue();
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("frame encoder"),
-        });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame encoder") });
         // Capture path: replay-cache (true). Empty live → render
         // whatever the last advance committed.
         match self.render_handles.record_frame(&mut encoder, &[], true) {
@@ -187,10 +179,8 @@ impl Gpu {
         let png = encode_png(&rgba, meta.width, meta.height)?;
         // Score the similarity check before `run_checks` consumes `rgba`
         // (iamacoffeepot/aether#1780). `score_similarity` clones internally.
-        let (similarity_score, similarity_pass) =
-            visual::score_similarity(&rgba, meta.width, meta.height, reference)?;
-        let verdict =
-            (!checks.is_empty()).then(|| visual::run_checks(rgba, meta.width, meta.height, checks));
+        let (similarity_score, similarity_pass) = visual::score_similarity(&rgba, meta.width, meta.height, reference)?;
+        let verdict = (!checks.is_empty()).then(|| visual::run_checks(rgba, meta.width, meta.height, checks));
         Ok((png, verdict, similarity_score, similarity_pass))
     }
 }

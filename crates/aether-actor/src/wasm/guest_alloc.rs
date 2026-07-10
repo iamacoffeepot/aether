@@ -60,10 +60,8 @@ struct Scratch {
 // `Sync`. On the host unit-test build the static is reached from one test.
 unsafe impl Sync for Scratch {}
 
-static SCRATCH: Scratch = Scratch {
-    bytes: UnsafeCell::new([0u8; SCRATCH_REGION_BYTES]),
-    claimed: UnsafeCell::new(false),
-};
+static SCRATCH: Scratch =
+    Scratch { bytes: UnsafeCell::new([0u8; SCRATCH_REGION_BYTES]), claimed: UnsafeCell::new(false) };
 
 /// `cabi_realloc`-shaped reallocation.
 ///
@@ -81,12 +79,7 @@ static SCRATCH: Scratch = Scratch {
 /// prior call (or `0` / `0` for a fresh allocation), and `align` must be a
 /// nonzero power of two. The guest is single-threaded, so there is no
 /// aliasing.
-pub unsafe fn realloc_bytes(
-    old_ptr: *mut u8,
-    old_size: usize,
-    align: usize,
-    new_size: usize,
-) -> *mut u8 {
+pub unsafe fn realloc_bytes(old_ptr: *mut u8, old_size: usize, align: usize, new_size: usize) -> *mut u8 {
     let scratch_base = SCRATCH.bytes.get().cast::<u8>();
     if new_size == 0 {
         if !old_ptr.is_null() && old_ptr != scratch_base {
@@ -178,10 +171,7 @@ mod tests {
             // First eligible small alloc (the host's instantiate-time small
             // region) → served from the scratch.
             let first = realloc_bytes(null, 0, SCRATCH_ALIGN, SCRATCH_REGION_BYTES);
-            assert_eq!(
-                first, base,
-                "first eligible small alloc returns the scratch base"
-            );
+            assert_eq!(first, base, "first eligible small alloc returns the scratch base");
 
             // Single-shot: the next eligible alloc falls through to global.
             let second = realloc_bytes(null, 0, SCRATCH_ALIGN, 64);

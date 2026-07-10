@@ -61,17 +61,10 @@ pub trait DrainSink {
 /// ignored and only its effects drain.
 pub fn run_drain(output: FilterOutput, forward_kind: Option<KindId>, sink: &mut impl DrainSink) {
     if let (Some(kind), Verdict::Forward(bytes)) = (forward_kind, output.verdict) {
-        sink.record(DrainEvent::Forward {
-            kind_id: kind.0,
-            bytes,
-        });
+        sink.record(DrainEvent::Forward { kind_id: kind.0, bytes });
     }
     for effect in output.effects {
-        sink.record(DrainEvent::Effect {
-            target: effect.target,
-            kind_id: effect.kind_id,
-            bytes: effect.bytes,
-        });
+        sink.record(DrainEvent::Effect { target: effect.target, kind_id: effect.kind_id, bytes: effect.bytes });
     }
 }
 
@@ -146,11 +139,7 @@ mod tests {
     }
 
     fn effect(target: EffectTarget, kind_id: u64) -> Effect {
-        Effect {
-            target,
-            kind_id,
-            bytes: vec![kind_id as u8],
-        }
+        Effect { target, kind_id, bytes: vec![kind_id as u8] }
     }
 
     // Tripwire: the in-flight forward is recorded before any effect — the
@@ -161,30 +150,16 @@ mod tests {
     fn forward_precedes_effects_in_order() {
         let output = FilterOutput {
             verdict: Verdict::Forward(vec![9]),
-            effects: vec![
-                effect(EffectTarget::Widget, 1),
-                effect(EffectTarget::Panel, 2),
-            ],
+            effects: vec![effect(EffectTarget::Widget, 1), effect(EffectTarget::Panel, 2)],
         };
         let mut sink = RecordingSink::default();
         run_drain(output, Some(KindId(0x55)), &mut sink);
         assert_eq!(
             sink.events,
             vec![
-                DrainEvent::Forward {
-                    kind_id: 0x55,
-                    bytes: vec![9]
-                },
-                DrainEvent::Effect {
-                    target: EffectTarget::Widget,
-                    kind_id: 1,
-                    bytes: vec![1]
-                },
-                DrainEvent::Effect {
-                    target: EffectTarget::Panel,
-                    kind_id: 2,
-                    bytes: vec![2]
-                },
+                DrainEvent::Forward { kind_id: 0x55, bytes: vec![9] },
+                DrainEvent::Effect { target: EffectTarget::Widget, kind_id: 1, bytes: vec![1] },
+                DrainEvent::Effect { target: EffectTarget::Panel, kind_id: 2, bytes: vec![2] },
             ]
         );
     }
@@ -193,19 +168,13 @@ mod tests {
     // effects — consume-plus-emit substitutes for a forward.
     #[test]
     fn consume_drains_effects_without_forward() {
-        let output = FilterOutput {
-            verdict: Verdict::Consume,
-            effects: vec![effect(EffectTarget::Child("slider".into()), 7)],
-        };
+        let output =
+            FilterOutput { verdict: Verdict::Consume, effects: vec![effect(EffectTarget::Child("slider".into()), 7)] };
         let mut sink = RecordingSink::default();
         run_drain(output, Some(KindId(0x55)), &mut sink);
         assert_eq!(
             sink.events,
-            vec![DrainEvent::Effect {
-                target: EffectTarget::Child("slider".into()),
-                kind_id: 7,
-                bytes: vec![7],
-            }]
+            vec![DrainEvent::Effect { target: EffectTarget::Child("slider".into()), kind_id: 7, bytes: vec![7] }]
         );
     }
 
@@ -214,20 +183,11 @@ mod tests {
     // mail, so a stray `Forward(empty)` must not leak out as real mail.
     #[test]
     fn sentinel_offer_drains_effects_without_forward() {
-        let output = FilterOutput {
-            verdict: Verdict::Forward(Vec::new()),
-            effects: vec![effect(EffectTarget::Widget, 5)],
-        };
+        let output =
+            FilterOutput { verdict: Verdict::Forward(Vec::new()), effects: vec![effect(EffectTarget::Widget, 5)] };
         let mut sink = RecordingSink::default();
         run_drain(output, None, &mut sink);
-        assert_eq!(
-            sink.events,
-            vec![DrainEvent::Effect {
-                target: EffectTarget::Widget,
-                kind_id: 5,
-                bytes: vec![5]
-            }]
-        );
+        assert_eq!(sink.events, vec![DrainEvent::Effect { target: EffectTarget::Widget, kind_id: 5, bytes: vec![5] }]);
     }
 
     // Tripwire: a script whose effect targets its own widget/child arms that
@@ -240,17 +200,9 @@ mod tests {
         let output = FilterOutput {
             verdict: Verdict::Forward(vec![0]),
             effects: vec![
-                Effect {
-                    target: EffectTarget::Widget,
-                    kind_id: 42,
-                    bytes: vec![1, 2, 3],
-                },
+                Effect { target: EffectTarget::Widget, kind_id: 42, bytes: vec![1, 2, 3] },
                 effect(EffectTarget::Child("slider".into()), 7),
-                Effect {
-                    target: EffectTarget::Widget,
-                    kind_id: 42,
-                    bytes: vec![1, 2, 3],
-                },
+                Effect { target: EffectTarget::Widget, kind_id: 42, bytes: vec![1, 2, 3] },
                 effect(EffectTarget::Panel, 99),
             ],
         };

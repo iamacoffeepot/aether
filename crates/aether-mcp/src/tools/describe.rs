@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 
 use aether_data::{EngineId, Kind, KindDescriptor, Uuid, mailbox_id_from_path, tagged_id};
 use aether_kinds::{
-    DescribeComponent, DescribeComponentResult, HandlersResult, ListEngines, ListEnginesResult,
-    ListHandlers, descriptors,
+    DescribeComponent, DescribeComponentResult, HandlersResult, ListEngines, ListEnginesResult, ListHandlers,
+    descriptors,
 };
 use rmcp::ErrorData as McpError;
 
 use crate::args::{
-    DescribeComponentArgs, DescribeHandlersArgs, DescribeHandlersResponse, DescribeKindsArgs,
-    KindSummary, NativeCapHandlers, NativeHandlerJson, TransformListing,
+    DescribeComponentArgs, DescribeHandlersArgs, DescribeHandlersResponse, DescribeKindsArgs, KindSummary,
+    NativeCapHandlers, NativeHandlerJson, TransformListing,
 };
 
 use super::envelope::{engine_envelope, local_envelope};
@@ -25,21 +25,13 @@ pub(super) async fn describe_kinds(mcp: &Mcp, args: DescribeKindsArgs) -> Result
     let engine = if let Some(id) = &args.engine_id {
         Some(parse_engine_id(id)?)
     } else {
-        let reply = mcp
-            .session
-            .call_one(local_envelope(ENGINE_CAP, &ListEngines {}))
-            .await
-            .map_err(internal)?;
+        let reply = mcp.session.call_one(local_envelope(ENGINE_CAP, &ListEngines {})).await.map_err(internal)?;
         let result = ListEnginesResult::decode_from_bytes(&reply.payload)
             .ok_or_else(|| internal_msg("undecodable ListEnginesResult"))?;
         // Auto-resolve only when exactly one engine is supervised;
         // zero or many is ambiguous — degrade to the static baseline.
         if result.engines.len() == 1 {
-            result
-                .engines
-                .into_iter()
-                .next()
-                .map(|e| EngineId(Uuid::parse_str(&e.engine_id).unwrap_or_default()))
+            result.engines.into_iter().next().map(|e| EngineId(Uuid::parse_str(&e.engine_id).unwrap_or_default()))
         } else {
             None
         }
@@ -59,23 +51,15 @@ pub(super) async fn describe_kinds(mcp: &Mcp, args: DescribeKindsArgs) -> Result
     };
 
     let filtered: Vec<_> = if let Some(prefix) = &args.prefix {
-        descriptors
-            .into_iter()
-            .filter(|d| d.name.starts_with(prefix.as_str()))
-            .collect()
+        descriptors.into_iter().filter(|d| d.name.starts_with(prefix.as_str())).collect()
     } else {
         descriptors
     };
     if args.full {
         json(&filtered)
     } else {
-        let summary: Vec<KindSummary> = filtered
-            .iter()
-            .map(|d| KindSummary {
-                name: d.name.clone(),
-                shape: render_shape(&d.schema),
-            })
-            .collect();
+        let summary: Vec<KindSummary> =
+            filtered.iter().map(|d| KindSummary { name: d.name.clone(), shape: render_shape(&d.schema) }).collect();
         json(&summary)
     }
 }
@@ -92,10 +76,7 @@ pub(super) fn describe_transforms() -> Result<String, McpError> {
     json(&listing)
 }
 
-pub(super) async fn describe_component(
-    mcp: &Mcp,
-    args: DescribeComponentArgs,
-) -> Result<String, McpError> {
+pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -> Result<String, McpError> {
     let engine = parse_engine_id(&args.engine_id)?;
     // Resolve the input to a cache key (and, when it is a lineage name,
     // the forwardable name). A `mbx-` id parses directly; anything else
@@ -105,20 +86,13 @@ pub(super) async fn describe_component(
     let (mailbox_id, forward_name) = if args.component.starts_with("mbx-") {
         (parse_mailbox_id(&args.component)?, None)
     } else {
-        (
-            mailbox_id_from_path(&args.component),
-            Some(args.component.clone()),
-        )
+        (mailbox_id_from_path(&args.component), Some(args.component.clone()))
     };
 
     // Cache fast-path: populated by load_component / replace_component or
     // a prior name-resolved describe.
-    let cached = mcp
-        .components
-        .lock()
-        .expect("component cache mutex is never poisoned")
-        .get(&(engine, mailbox_id))
-        .cloned();
+    let cached =
+        mcp.components.lock().expect("component cache mutex is never poisoned").get(&(engine, mailbox_id)).cloned();
     if let Some(caps) = cached {
         return json(&caps);
     }
@@ -140,11 +114,7 @@ pub(super) async fn describe_component(
     };
     let reply = mcp
         .session
-        .call_one(engine_envelope(
-            engine,
-            COMPONENT_CAP,
-            &DescribeComponent { name: name.clone() },
-        ))
+        .call_one(engine_envelope(engine, COMPONENT_CAP, &DescribeComponent { name: name.clone() }))
         .await
         .map_err(internal)?;
     match DescribeComponentResult::decode_from_bytes(&reply.payload) {
@@ -160,18 +130,11 @@ pub(super) async fn describe_component(
     }
 }
 
-pub(super) async fn describe_handlers(
-    mcp: &Mcp,
-    args: DescribeHandlersArgs,
-) -> Result<String, McpError> {
+pub(super) async fn describe_handlers(mcp: &Mcp, args: DescribeHandlersArgs) -> Result<String, McpError> {
     let engine = parse_engine_id(&args.engine_id)?;
-    let reply = mcp
-        .session
-        .call_one(engine_envelope(engine, INVENTORY_CAP, &ListHandlers {}))
-        .await
-        .map_err(internal)?;
-    let Some(HandlersResult { handlers }) = HandlersResult::decode_from_bytes(&reply.payload)
-    else {
+    let reply =
+        mcp.session.call_one(engine_envelope(engine, INVENTORY_CAP, &ListHandlers {})).await.map_err(internal)?;
+    let Some(HandlersResult { handlers }) = HandlersResult::decode_from_bytes(&reply.payload) else {
         return Err(internal_msg("undecodable HandlersResult"));
     };
     // Fold the flat per-handler manifest per owning namespace so each
@@ -179,34 +142,19 @@ pub(super) async fn describe_handlers(
     // BTreeMap keeps the caps (and their handlers) in a stable order.
     let mut folded: BTreeMap<String, Vec<NativeHandlerJson>> = BTreeMap::new();
     for entry in handlers {
-        folded
-            .entry(entry.namespace)
-            .or_default()
-            .push(NativeHandlerJson {
-                // Input kind id rendered as the ADR-0064 tagged string,
-                // falling back to a hex literal on an unencodable id.
-                input_id: tagged_id::encode(entry.id.0)
-                    .unwrap_or_else(|| format!("{:#x}", entry.id.0)),
-                input_name: entry.name,
-                // The reply kind id is the contract; resolve its name
-                // best-effort from the static substrate vocabulary so
-                // the In -> Out reads without a second lookup. A
-                // component-defined reply kind stays `None`.
-                reply_id: entry
-                    .reply
-                    .map(|id| tagged_id::encode(id.0).unwrap_or_else(|| format!("{:#x}", id.0))),
-                reply_name: entry.reply.and_then(static_kind_name),
-            });
+        folded.entry(entry.namespace).or_default().push(NativeHandlerJson {
+            // Input kind id rendered as the ADR-0064 tagged string,
+            // falling back to a hex literal on an unencodable id.
+            input_id: tagged_id::encode(entry.id.0).unwrap_or_else(|| format!("{:#x}", entry.id.0)),
+            input_name: entry.name,
+            // The reply kind id is the contract; resolve its name
+            // best-effort from the static substrate vocabulary so
+            // the In -> Out reads without a second lookup. A
+            // component-defined reply kind stays `None`.
+            reply_id: entry.reply.map(|id| tagged_id::encode(id.0).unwrap_or_else(|| format!("{:#x}", id.0))),
+            reply_name: entry.reply.and_then(static_kind_name),
+        });
     }
-    let caps = folded
-        .into_iter()
-        .map(|(namespace, handlers)| NativeCapHandlers {
-            namespace,
-            handlers,
-        })
-        .collect();
-    json(&DescribeHandlersResponse {
-        engine_id: args.engine_id,
-        caps,
-    })
+    let caps = folded.into_iter().map(|(namespace, handlers)| NativeCapHandlers { namespace, handlers }).collect();
+    json(&DescribeHandlersResponse { engine_id: args.engine_id, caps })
 }

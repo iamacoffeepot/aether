@@ -61,18 +61,14 @@ pub(super) const fn cow_label_nodes<'a>(c: &'a Cow<'static, [LabelNode]>) -> &'a
     }
 }
 
-pub(super) const fn cow_variant_labels<'a>(
-    c: &'a Cow<'static, [VariantLabel]>,
-) -> &'a [VariantLabel] {
+pub(super) const fn cow_variant_labels<'a>(c: &'a Cow<'static, [VariantLabel]>) -> &'a [VariantLabel] {
     match c {
         Cow::Borrowed(s) => s,
         Cow::Owned(_) => panic!("canonical: Owned Cow<[VariantLabel]> not supported in const"),
     }
 }
 
-pub(super) const fn cow_strs<'a>(
-    c: &'a Cow<'static, [Cow<'static, str>]>,
-) -> &'a [Cow<'static, str>] {
+pub(super) const fn cow_strs<'a>(c: &'a Cow<'static, [Cow<'static, str>]>) -> &'a [Cow<'static, str>] {
     match c {
         Cow::Borrowed(s) => s,
         Cow::Owned(_) => panic!("canonical: Owned Cow<[Cow<str>]> not supported in const"),
@@ -130,10 +126,7 @@ pub(super) const fn write_u64_le(val: u64, out: &mut [u8], cursor: usize) -> usi
 /// bounded `const` structures whose lengths fit in `u32` by construction,
 /// so an overflow indicates a bug in the caller.
 pub(super) const fn write_count(val: usize, out: &mut [u8], cursor: usize) -> usize {
-    assert!(
-        val <= u32::MAX as usize,
-        "canonical: count exceeds u32::MAX"
-    );
+    assert!(val <= u32::MAX as usize, "canonical: count exceeds u32::MAX");
     write_u32_le(val as u32, out, cursor)
 }
 
@@ -172,11 +165,7 @@ pub(super) const fn option_str_len(s: &Option<Cow<'static, str>>) -> usize {
 }
 
 #[allow(clippy::ref_option)]
-pub(super) const fn write_option_str(
-    s: &Option<Cow<'static, str>>,
-    out: &mut [u8],
-    cursor: usize,
-) -> usize {
+pub(super) const fn write_option_str(s: &Option<Cow<'static, str>>, out: &mut [u8], cursor: usize) -> usize {
     let mut pos = cursor;
     match s {
         None => {
@@ -202,11 +191,7 @@ pub(super) const fn option_borrowed_str_len(doc: Option<&str>) -> usize {
     }
 }
 
-pub(super) const fn write_option_borrowed_str(
-    doc: Option<&str>,
-    out: &mut [u8],
-    cursor: usize,
-) -> usize {
+pub(super) const fn write_option_borrowed_str(doc: Option<&str>, out: &mut [u8], cursor: usize) -> usize {
     match doc {
         None => {
             out[cursor] = 0;

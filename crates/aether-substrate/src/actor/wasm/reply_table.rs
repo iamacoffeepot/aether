@@ -51,10 +51,7 @@ impl ReplyEntry {
     /// Short constructor: `addr` + `correlation_id`.
     #[must_use]
     pub fn new(addr: SourceAddr, correlation_id: u64) -> Self {
-        Self {
-            addr,
-            correlation_id,
-        }
+        Self { addr, correlation_id }
     }
 
     /// Back-compat shim for call sites that used the pre-correlation
@@ -141,10 +138,7 @@ mod tests {
         let h_comp = t.allocate(ReplyEntry::component(MailboxId(42)));
         assert_ne!(h_sess, h_comp);
         assert_eq!(t.resolve(h_sess), Some(ReplyEntry::session(token(1))));
-        assert_eq!(
-            t.resolve(h_comp),
-            Some(ReplyEntry::component(MailboxId(42)))
-        );
+        assert_eq!(t.resolve(h_comp), Some(ReplyEntry::component(MailboxId(42))));
     }
 
     #[test]

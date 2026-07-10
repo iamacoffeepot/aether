@@ -7,14 +7,8 @@ use super::super::kinds::{MaterialCoverageRect, MaterialTexturedRect, TextureFor
 
 #[derive(Clone)]
 pub enum MaterialBatch {
-    Textured {
-        texture_id: u32,
-        rects: Vec<MaterialTexturedRect>,
-    },
-    Coverage {
-        texture_id: u32,
-        rects: Vec<MaterialCoverageRect>,
-    },
+    Textured { texture_id: u32, rects: Vec<MaterialTexturedRect> },
+    Coverage { texture_id: u32, rects: Vec<MaterialCoverageRect> },
 }
 
 #[must_use]

@@ -51,24 +51,16 @@ fn typed_config_guest_without_config_bytes_uses_default() {
             (
                 "echo",
                 BenchOp::send_and_await(
-                    format!(
-                        "aether.component/{}:probe_with_config",
-                        aether_capabilities::WasmTrampoline::NAMESPACE
-                    ),
+                    format!("aether.component/{}:probe_with_config", aether_capabilities::WasmTrampoline::NAMESPACE),
                     &ConfigQuery,
                 ),
             ),
         ])
         .expect("load sequence");
 
-    match report
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    match report.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { capabilities, .. } => {
-            let cfg = capabilities
-                .config
-                .expect("typed-config component advertises its config kind");
+            let cfg = capabilities.config.expect("typed-config component advertises its config kind");
             assert_eq!(cfg.id, <ProbeConfig as Kind>::ID);
             assert_eq!(cfg.name, <ProbeConfig as Kind>::NAME);
         }
@@ -77,9 +69,7 @@ fn typed_config_guest_without_config_bytes_uses_default() {
         }
     }
 
-    let echo = report
-        .reply::<ConfigEcho>("echo")
-        .expect("decode ConfigEcho");
+    let echo = report.reply::<ConfigEcho>("echo").expect("decode ConfigEcho");
     let expected = ProbeConfig::default();
     assert_eq!(echo.seed, expected.seed, "default seed reaches init");
     assert_eq!(echo.label, expected.label, "default label reaches init");
@@ -103,10 +93,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read::<&Path>(wasm_path.as_ref()).expect("read fixture wasm");
 
-    let config = ProbeConfig {
-        seed: 0xABCD_1234,
-        label: "c2-round-trip".to_owned(),
-    };
+    let config = ProbeConfig { seed: 0xABCD_1234, label: "c2-round-trip".to_owned() };
     let config_bytes = config.encode_into_bytes();
 
     let report = bench
@@ -126,24 +113,16 @@ fn typed_config_guest_with_config_bytes_round_trips() {
             (
                 "echo",
                 BenchOp::send_and_await(
-                    format!(
-                        "aether.component/{}:probe_with_config",
-                        aether_capabilities::WasmTrampoline::NAMESPACE
-                    ),
+                    format!("aether.component/{}:probe_with_config", aether_capabilities::WasmTrampoline::NAMESPACE),
                     &ConfigQuery,
                 ),
             ),
         ])
         .expect("load + query sequence");
 
-    match report
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    match report.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { capabilities, .. } => {
-            let cfg = capabilities
-                .config
-                .expect("typed-config component advertises its config kind");
+            let cfg = capabilities.config.expect("typed-config component advertises its config kind");
             assert_eq!(cfg.id, <ProbeConfig as Kind>::ID);
             assert_eq!(cfg.name, <ProbeConfig as Kind>::NAME);
         }
@@ -152,12 +131,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
         }
     }
 
-    let echo = report
-        .reply::<ConfigEcho>("echo")
-        .expect("decode ConfigEcho");
+    let echo = report.reply::<ConfigEcho>("echo").expect("decode ConfigEcho");
     assert_eq!(echo.seed, 0xABCD_1234, "seed round-trips through init");
-    assert_eq!(
-        echo.label, "c2-round-trip",
-        "label round-trips through init"
-    );
+    assert_eq!(echo.label, "c2-round-trip", "label round-trips through init");
 }

@@ -185,8 +185,7 @@ pub(crate) enum ChainMode {
 /// spawning actor, not the cluster root, so relative addressing
 /// (`ctx.child` / `ctx.parent`) resolves it. The typed
 /// [`WasmCtx::spawn_inline_child`] path passes the same `self.mailbox`.
-pub type SpawnByTagFn =
-    fn(&Registry, u64, ActorTypeTag, bool, &str, &[u8]) -> Result<MailboxId, SpawnError>;
+pub type SpawnByTagFn = fn(&Registry, u64, ActorTypeTag, bool, &str, &[u8]) -> Result<MailboxId, SpawnError>;
 
 /// The per-component inline-child registry (ADR-0114 decision #3), keyed
 /// by each child's alias [`MailboxId`]. The [`crate::export!`] macro emits
@@ -341,17 +340,7 @@ impl Registry {
         // live borrow of the cell (the `Sync` argument). The borrow is
         // released before this returns, so it never spans a dispatch.
         let map = unsafe { &mut *self.inner.get() };
-        map.insert(
-            id,
-            InlineSlot {
-                type_tag,
-                full_subname,
-                is_counter,
-                parent,
-                config_bytes,
-                actor: Some(actor),
-            },
-        );
+        map.insert(id, InlineSlot { type_tag, full_subname, is_counter, parent, config_bytes, actor: Some(actor) });
     }
 
     /// Take the child out for dispatch, leaving its slot (and its
@@ -433,11 +422,7 @@ impl Registry {
     /// compose to drive each child's `erased_on_dehydrate` in place. The
     /// borrow drops before this returns, so it never spans a dispatch.
     /// O(log n).
-    pub(crate) fn with_child_mut<R>(
-        &self,
-        id: MailboxId,
-        f: impl FnOnce(&mut dyn ErasedWasmActor) -> R,
-    ) -> Option<R> {
+    pub(crate) fn with_child_mut<R>(&self, id: MailboxId, f: impl FnOnce(&mut dyn ErasedWasmActor) -> R) -> Option<R> {
         // SAFETY: see [`Self::insert_child`].
         let map = unsafe { &mut *self.inner.get() };
         map.get_mut(&id).and_then(|s| s.actor.as_deref_mut()).map(f)
@@ -464,9 +449,7 @@ impl Registry {
     pub(crate) fn child_of(&self, parent: MailboxId, subname: &str) -> Option<MailboxId> {
         // SAFETY: see [`Self::insert_child`].
         let map = unsafe { &*self.inner.get() };
-        map.iter()
-            .find(|(_, slot)| slot.parent == parent.0 && slot.full_subname == subname)
-            .map(|(key, _)| *key)
+        map.iter().find(|(_, slot)| slot.parent == parent.0 && slot.full_subname == subname).map(|(key, _)| *key)
     }
 
     /// The sibling of the inline child registered under `id` whose resolved
@@ -490,11 +473,7 @@ impl Registry {
         }
         // SAFETY: see [`Self::insert_child`].
         let map = unsafe { &*self.inner.get() };
-        if map.contains_key(&MailboxId(recipient)) {
-            RouteDecision::Local
-        } else {
-            RouteDecision::Remote
-        }
+        if map.contains_key(&MailboxId(recipient)) { RouteDecision::Local } else { RouteDecision::Remote }
     }
 
     /// Route an outbound send. If `recipient` is a cluster member (the
@@ -539,23 +518,10 @@ impl Registry {
                 // taken fresh and released before return, never spanning a
                 // dispatch (the drain re-borrows per item).
                 let queue = unsafe { &mut *self.queue.get() };
-                queue.push_back(QueuedMail {
-                    recipient,
-                    kind,
-                    bytes: bytes.to_vec(),
-                    count,
-                    sender,
-                });
+                queue.push_back(QueuedMail { recipient, kind, bytes: bytes.to_vec(), count, sender });
             }
             RouteDecision::Remote => {
-                mail::send_mail(
-                    recipient,
-                    kind,
-                    bytes,
-                    count,
-                    matches!(mode, ChainMode::Detached),
-                    sender,
-                );
+                mail::send_mail(recipient, kind, bytes, count, matches!(mode, ChainMode::Detached), sender);
             }
         }
     }
@@ -756,10 +722,7 @@ mod tests {
             let dispatches = Rc::new(Cell::new(0));
             let observed_source = Rc::new(Cell::new(None));
             (
-                Self {
-                    dispatches: Rc::clone(&dispatches),
-                    observed_source: Rc::clone(&observed_source),
-                },
+                Self { dispatches: Rc::clone(&dispatches), observed_source: Rc::clone(&observed_source) },
                 dispatches,
                 observed_source,
             )
@@ -770,11 +733,7 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.recording_child"
         }
-        fn erased_dispatch(
-            &mut self,
-            ctx: &mut WasmCtx<'_, crate::Manual>,
-            _mail: Mail<'_>,
-        ) -> u32 {
+        fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>, _mail: Mail<'_>) -> u32 {
             self.dispatches.set(self.dispatches.get() + 1);
             self.observed_source.set(ctx.source_mailbox());
             CHILD_CODE
@@ -782,12 +741,7 @@ mod tests {
         fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
         fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
-        fn erased_on_rehydrate(
-            &mut self,
-            _ctx: &mut WasmCtx<'_, crate::Manual>,
-            _prior: PriorState<'_>,
-        ) {
-        }
+        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>, _prior: PriorState<'_>) {}
     }
 
     /// A child that despawns *itself* during its own dispatch — through the
@@ -811,11 +765,7 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.self_despawning_child"
         }
-        fn erased_dispatch(
-            &mut self,
-            ctx: &mut WasmCtx<'_, crate::Manual>,
-            _mail: Mail<'_>,
-        ) -> u32 {
+        fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>, _mail: Mail<'_>) -> u32 {
             // Self-despawn mid-dispatch through the threaded registry: this
             // box is currently taken out (held on the membrane's stack), so
             // the ctx's despawn clears the empty slot and the membrane's
@@ -826,12 +776,7 @@ mod tests {
         fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
         fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
-        fn erased_on_rehydrate(
-            &mut self,
-            _ctx: &mut WasmCtx<'_, crate::Manual>,
-            _prior: PriorState<'_>,
-        ) {
-        }
+        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>, _prior: PriorState<'_>) {}
     }
 
     /// Build a host-side `Mail` with the given routed recipient; the
@@ -852,27 +797,11 @@ mod tests {
         let id = MailboxId(0x1111);
 
         assert!(registry.take(id).is_none(), "empty registry has no child");
-        registry.insert_child(
-            id,
-            0,
-            String::from("widget"),
-            false,
-            0,
-            Vec::new(),
-            Box::new(RecordingChild::new().0),
-        );
-        let taken = registry
-            .take(id)
-            .expect("insert then take returns the child");
-        assert!(
-            registry.take(id).is_none(),
-            "a taken-out slot is empty until reinsert",
-        );
+        registry.insert_child(id, 0, String::from("widget"), false, 0, Vec::new(), Box::new(RecordingChild::new().0));
+        let taken = registry.take(id).expect("insert then take returns the child");
+        assert!(registry.take(id).is_none(), "a taken-out slot is empty until reinsert");
         registry.reinsert(id, taken);
-        assert!(
-            registry.take(id).is_some(),
-            "reinsert refills the slot for the next dispatch",
-        );
+        assert!(registry.take(id).is_some(), "reinsert refills the slot for the next dispatch");
     }
 
     /// Step 1 coverage: a spawned child's slot carries its actor-type tag
@@ -883,20 +812,10 @@ mod tests {
         let registry = Registry::new();
         let id = MailboxId(0x7777);
         let tag = 0xABCD_u64;
-        registry.insert_child(
-            id,
-            tag,
-            String::from("widget"),
-            false,
-            0,
-            Vec::new(),
-            Box::new(RecordingChild::new().0),
-        );
+        registry.insert_child(id, tag, String::from("widget"), false, 0, Vec::new(), Box::new(RecordingChild::new().0));
 
         let metas = registry.child_metas();
-        let [meta] = metas.as_slice() else {
-            panic!("expected exactly one child meta, got {}", metas.len())
-        };
+        let [meta] = metas.as_slice() else { panic!("expected exactly one child meta, got {}", metas.len()) };
         assert_eq!(meta.id, id, "the meta carries the alias id");
         assert_eq!(meta.type_tag, tag, "the meta carries the actor-type tag");
         assert_eq!(meta.full_subname, "widget", "the meta carries the subname");
@@ -909,9 +828,7 @@ mod tests {
     fn membrane_routes_own_recipient_to_parent() {
         let registry = Registry::new();
         let own = 0x2000_u64;
-        let rc = membrane_dispatch(own, mail_to(own), &registry, MailboxId::NONE.0, |_mail| {
-            OWN_CODE
-        });
+        let rc = membrane_dispatch(own, mail_to(own), &registry, MailboxId::NONE.0, |_mail| OWN_CODE);
         assert_eq!(rc, OWN_CODE, "own-id recipient runs the parent dispatch");
     }
 
@@ -924,15 +841,7 @@ mod tests {
         let own = 0x3000_u64;
         let child = 0x3001_u64;
         let (recording, dispatches) = RecordingChild::new();
-        registry.insert_child(
-            MailboxId(child),
-            0,
-            String::from("widget"),
-            false,
-            0,
-            Vec::new(),
-            Box::new(recording),
-        );
+        registry.insert_child(MailboxId(child), 0, String::from("widget"), false, 0, Vec::new(), Box::new(recording));
 
         let rc = membrane_dispatch(own, mail_to(child), &registry, MailboxId::NONE.0, |_mail| {
             panic!("own dispatch must not run for a child recipient")
@@ -954,13 +863,8 @@ mod tests {
         let registry = Registry::new();
         let own = 0x4000_u64;
         let stray = 0x4999_u64;
-        let rc = membrane_dispatch(own, mail_to(stray), &registry, MailboxId::NONE.0, |_mail| {
-            OWN_CODE
-        });
-        assert_eq!(
-            rc, OWN_CODE,
-            "an unknown recipient falls back to the parent's unmatched path",
-        );
+        let rc = membrane_dispatch(own, mail_to(stray), &registry, MailboxId::NONE.0, |_mail| OWN_CODE);
+        assert_eq!(rc, OWN_CODE, "an unknown recipient falls back to the parent's unmatched path");
     }
 
     /// Step 3 coverage: a child that despawns itself mid-dispatch drops
@@ -984,10 +888,7 @@ mod tests {
             false,
             0,
             Vec::new(),
-            Box::new(SelfDespawningChild {
-                id: MailboxId(child),
-                drops: Rc::clone(&drops),
-            }),
+            Box::new(SelfDespawningChild { id: MailboxId(child), drops: Rc::clone(&drops) }),
         );
 
         // Dispatch the child; it despawns its own slot mid-dispatch.
@@ -995,21 +896,12 @@ mod tests {
             panic!("own dispatch must not run while the child is resident")
         });
         assert_eq!(rc, CHILD_CODE, "the child handled the despawning dispatch");
-        assert_eq!(
-            drops.get(),
-            1,
-            "the self-despawned box dropped at end of dispatch, not reinserted",
-        );
+        assert_eq!(drops.get(), 1, "the self-despawned box dropped at end of dispatch, not reinserted");
 
         // The alias is gone: a second send falls through to the parent's
         // unmatched path rather than re-dispatching a dropped child.
-        let rc2 = membrane_dispatch(own, mail_to(child), &registry, MailboxId::NONE.0, |_mail| {
-            OWN_CODE
-        });
-        assert_eq!(
-            rc2, OWN_CODE,
-            "the torn-down alias falls through to the parent",
-        );
+        let rc2 = membrane_dispatch(own, mail_to(child), &registry, MailboxId::NONE.0, |_mail| OWN_CODE);
+        assert_eq!(rc2, OWN_CODE, "the torn-down alias falls through to the parent");
     }
 
     /// Install a recording child under `id` with `parent`, returning the
@@ -1043,24 +935,8 @@ mod tests {
         let bar = MailboxId(0x1001);
         let baz = MailboxId(0x1002);
         let button = MailboxId(0x1003);
-        registry.insert_child(
-            bar,
-            0,
-            String::from("bar"),
-            false,
-            root,
-            Vec::new(),
-            Box::new(RecordingChild::new().0),
-        );
-        registry.insert_child(
-            baz,
-            0,
-            String::from("baz"),
-            false,
-            root,
-            Vec::new(),
-            Box::new(RecordingChild::new().0),
-        );
+        registry.insert_child(bar, 0, String::from("bar"), false, root, Vec::new(), Box::new(RecordingChild::new().0));
+        registry.insert_child(baz, 0, String::from("baz"), false, root, Vec::new(), Box::new(RecordingChild::new().0));
         registry.insert_child(
             button,
             0,
@@ -1080,21 +956,13 @@ mod tests {
             None,
             "the cluster root has no registry parent (its parent is cross-cluster)",
         );
-        assert_eq!(
-            registry.parent_of(MailboxId(0xDEAD)),
-            None,
-            "a stray id resolves to no parent",
-        );
+        assert_eq!(registry.parent_of(MailboxId(0xDEAD)), None, "a stray id resolves to no parent");
 
         // child_of: the root's child named "bar"/"baz"; bar's child "button".
         assert_eq!(registry.child_of(MailboxId(root), "bar"), Some(bar));
         assert_eq!(registry.child_of(MailboxId(root), "baz"), Some(baz));
         assert_eq!(registry.child_of(bar, "button"), Some(button));
-        assert_eq!(
-            registry.child_of(MailboxId(root), "missing"),
-            None,
-            "no child named 'missing' resides",
-        );
+        assert_eq!(registry.child_of(MailboxId(root), "missing"), None, "no child named 'missing' resides");
         assert_eq!(
             registry.child_of(MailboxId(root), "button"),
             None,
@@ -1104,11 +972,7 @@ mod tests {
         // sibling_of: bar and baz are siblings under the root.
         assert_eq!(registry.sibling_of(bar, "baz"), Some(baz));
         assert_eq!(registry.sibling_of(baz, "bar"), Some(bar));
-        assert_eq!(
-            registry.sibling_of(button, "bar"),
-            None,
-            "button's parent (bar) has no child named 'bar'",
-        );
+        assert_eq!(registry.sibling_of(button, "bar"), None, "button's parent (bar) has no child named 'bar'");
     }
 
     /// Addressing amendment: `route_decision` classifies the cluster's own
@@ -1124,16 +988,8 @@ mod tests {
         registry.set_self_id(root);
         install_recording(&registry, child, root);
 
-        assert_eq!(
-            registry.route_decision(root),
-            RouteDecision::Local,
-            "the cluster's own id is local",
-        );
-        assert_eq!(
-            registry.route_decision(child),
-            RouteDecision::Local,
-            "a resident inline-child alias is local",
-        );
+        assert_eq!(registry.route_decision(root), RouteDecision::Local, "the cluster's own id is local");
+        assert_eq!(registry.route_decision(child), RouteDecision::Local, "a resident inline-child alias is local");
         assert_eq!(
             registry.route_decision(0x9999),
             RouteDecision::Remote,
@@ -1154,17 +1010,9 @@ mod tests {
 
         assert_eq!(registry.queued_len(), 0, "the queue starts empty");
         registry.route_or_enqueue(root, 7, &[1, 2, 3], 1, ChainMode::Inherit, root);
-        assert_eq!(
-            registry.queued_len(),
-            1,
-            "an own-id send enqueues locally, no host call",
-        );
+        assert_eq!(registry.queued_len(), 1, "an own-id send enqueues locally, no host call");
         registry.route_or_enqueue(child, 8, &[4], 1, ChainMode::Inherit, root);
-        assert_eq!(
-            registry.queued_len(),
-            2,
-            "a child-alias send enqueues locally too",
-        );
+        assert_eq!(registry.queued_len(), 2, "a child-alias send enqueues locally too");
     }
 
     /// Addressing amendment: a seeded local item drains through the membrane
@@ -1191,21 +1039,9 @@ mod tests {
             }
         });
 
-        assert_eq!(
-            dispatches.get(),
-            1,
-            "the child-addressed item dispatched the child once",
-        );
-        assert_eq!(
-            own_dispatches.get(),
-            0,
-            "a child-addressed item never ran the parent dispatch",
-        );
-        assert_eq!(
-            registry.queued_len(),
-            0,
-            "the queue is empty after the drain",
-        );
+        assert_eq!(dispatches.get(), 1, "the child-addressed item dispatched the child once");
+        assert_eq!(own_dispatches.get(), 0, "a child-addressed item never ran the parent dispatch");
+        assert_eq!(registry.queued_len(), 0, "the queue is empty after the drain");
     }
 
     /// Addressing amendment: a cascade — a drained item whose dispatch
@@ -1245,14 +1081,7 @@ mod tests {
                     if !own_ran_inner.get() {
                         own_ran_inner.set(true);
                         // Cascade: enqueue a follow-up to the child mid-drain.
-                        registry_ref.route_or_enqueue(
-                            child,
-                            2,
-                            &[0x02],
-                            1,
-                            ChainMode::Inherit,
-                            root,
-                        );
+                        registry_ref.route_or_enqueue(child, 2, &[0x02], 1, ChainMode::Inherit, root);
                     }
                 }
                 OWN_CODE
@@ -1260,31 +1089,19 @@ mod tests {
         });
 
         assert!(own_ran.get(), "the seeded own item dispatched");
-        assert_eq!(
-            child_dispatches.get(),
-            1,
-            "the cascaded follow-up reached the child in the same drain call",
-        );
+        assert_eq!(child_dispatches.get(), 1, "the cascaded follow-up reached the child in the same drain call");
         assert_eq!(
             order.borrow().as_slice(),
             ["own"],
             "exactly one own dispatch ran (the seed); the cascade went to the child",
         );
-        assert_eq!(
-            registry.queued_len(),
-            0,
-            "the cascade drained fully — queue empty",
-        );
+        assert_eq!(registry.queued_len(), 0, "the cascade drained fully — queue empty");
     }
 
     /// Install a recording child under `id` with `parent`, returning both the
     /// shared dispatch counter and the shared observed-source cell, so a test
     /// can assert the in-place "from" half a drained dispatch reads.
-    fn install_recording_with_source(
-        registry: &Registry,
-        id: u64,
-        parent: u64,
-    ) -> (Rc<Cell<u32>>, SourceCell) {
+    fn install_recording_with_source(registry: &Registry, id: u64, parent: u64) -> (Rc<Cell<u32>>, SourceCell) {
         let (recording, dispatches, source) = RecordingChild::new_with_source();
         registry.insert_child(
             MailboxId(id),
@@ -1346,10 +1163,6 @@ mod tests {
         });
         assert_eq!(rc, CHILD_CODE, "the child handled the direct dispatch");
         assert_eq!(dispatches.get(), 1, "the child was dispatched once");
-        assert_eq!(
-            observed.get(),
-            None,
-            "a top-level dispatch reads no in-place source (NONE source on the ctx)",
-        );
+        assert_eq!(observed.get(), None, "a top-level dispatch reads no in-place source (NONE source on the ctx)");
     }
 }

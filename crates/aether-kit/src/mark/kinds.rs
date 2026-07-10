@@ -10,19 +10,7 @@ use crate::world::WorldPoint;
 ///
 /// The scalar stays wrapped so a mark id cannot be confused with a revision
 /// or an unrelated counter at API boundaries.
-#[derive(
-    aether_data::Schema,
-    Serialize,
-    Deserialize,
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MarkId(u32);
 
 impl MarkId {
@@ -40,9 +28,7 @@ impl MarkId {
 }
 
 /// A stable mark identity paired with the revision observed by the caller.
-#[derive(
-    aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
-)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MarkRef {
     pub id: MarkId,
     pub revision: u32,
@@ -69,10 +55,7 @@ impl Mark {
     /// Return the mark's identity and current revision as one named value.
     #[must_use]
     pub const fn reference(&self) -> MarkRef {
-        MarkRef {
-            id: self.id,
-            revision: self.revision,
-        }
+        MarkRef { id: self.id, revision: self.revision }
     }
 }
 
@@ -94,9 +77,7 @@ pub struct MarkCreate {
 }
 
 /// Reply to [`MarkCreate`].
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.kit.mark.create_result")]
 pub enum MarkCreateResult {
     Created { reference: MarkRef },
@@ -113,9 +94,7 @@ pub struct MarkUpdate {
 }
 
 /// Reply to [`MarkUpdate`].
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.kit.mark.update_result")]
 pub enum MarkUpdateResult {
     Updated { reference: MarkRef },
@@ -131,9 +110,7 @@ pub struct MarkDelete {
 }
 
 /// Reply to [`MarkDelete`].
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.kit.mark.delete_result")]
 pub enum MarkDeleteResult {
     Deleted { reference: MarkRef },
@@ -148,34 +125,26 @@ pub struct MarkGet {
 }
 
 /// Reply to [`MarkGet`].
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.kit.mark.get_result")]
 pub struct MarkGetResult {
     pub mark: Option<Mark>,
 }
 
 /// `aether.kit.mark.list` — fetch every mark in ascending id order.
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, Default,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, Default)]
 #[kind(name = "aether.kit.mark.list")]
 pub struct MarkList;
 
 /// Reply to [`MarkList`].
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.kit.mark.list_result")]
 pub struct MarkListResult {
     pub marks: Vec<Mark>,
 }
 
 /// Hot-swap snapshot for [`super::MarkBook`](super::MarkBook).
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.kit.mark.saved_state")]
 pub struct SavedMarks {
     pub marks: Vec<Mark>,

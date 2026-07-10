@@ -28,10 +28,7 @@ pub struct EngineId(pub Uuid);
 
 impl Schema for EngineId {
     const SCHEMA: SchemaType = SchemaType::Struct {
-        fields: Cow::Borrowed(&[NamedField {
-            name: Cow::Borrowed("uuid"),
-            ty: SchemaType::Bytes,
-        }]),
+        fields: Cow::Borrowed(&[NamedField { name: Cow::Borrowed("uuid"), ty: SchemaType::Bytes }]),
         repr_c: false,
     };
     const LABEL: Option<&'static str> = Some("aether.engine_id");
@@ -48,10 +45,7 @@ pub struct SessionToken(pub Uuid);
 
 impl Schema for SessionToken {
     const SCHEMA: SchemaType = SchemaType::Struct {
-        fields: Cow::Borrowed(&[NamedField {
-            name: Cow::Borrowed("uuid"),
-            ty: SchemaType::Bytes,
-        }]),
+        fields: Cow::Borrowed(&[NamedField { name: Cow::Borrowed("uuid"), ty: SchemaType::Bytes }]),
         repr_c: false,
     };
     const LABEL: Option<&'static str> = Some("aether.session_token");

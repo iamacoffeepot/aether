@@ -20,17 +20,9 @@ fn is_cap_owned_header(name: &str) -> bool {
 /// message with no message body). `keep_alive` renders `Connection:
 /// keep-alive` (the connection is held for the next request) vs
 /// `Connection: close`.
-pub fn render_handler_response(
-    response: &HttpServerResponse,
-    is_head: bool,
-    keep_alive: bool,
-) -> Vec<u8> {
+pub fn render_handler_response(response: &HttpServerResponse, is_head: bool, keep_alive: bool) -> Vec<u8> {
     use std::fmt::Write as _;
-    let mut head = format!(
-        "HTTP/1.1 {} {}\r\n",
-        response.status,
-        reason_phrase(response.status)
-    );
+    let mut head = format!("HTTP/1.1 {} {}\r\n", response.status, reason_phrase(response.status));
     for header in &response.headers {
         if is_cap_owned_header(&header.name) {
             continue;
@@ -73,11 +65,7 @@ pub fn render_status_response(status: u16, message: &str) -> Vec<u8> {
 /// like [`render_handler_response`]'s buffered decision.
 pub fn render_stream_head(open: &HttpResponseStreamOpen, keep_alive: bool) -> Vec<u8> {
     use std::fmt::Write as _;
-    let mut head = format!(
-        "HTTP/1.1 {} {}\r\n",
-        open.status,
-        reason_phrase(open.status)
-    );
+    let mut head = format!("HTTP/1.1 {} {}\r\n", open.status, reason_phrase(open.status));
     for header in &open.headers {
         if is_cap_owned_header(&header.name) {
             continue;
@@ -234,9 +222,7 @@ pub fn reason_phrase(status: u16) -> &'static str {
 /// (Howard Hinnant's civil-from-days) — no date crate.
 pub fn http_date(now: SystemTime) -> String {
     const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     let secs = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let total = i64::try_from(secs).unwrap_or(i64::MAX);
     let days = total.div_euclid(86_400);

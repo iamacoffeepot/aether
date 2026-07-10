@@ -38,10 +38,7 @@ const MAX_TJUNCTION_ITERATIONS: usize = 256;
 
 impl IndexedMesh {
     pub(super) fn repair_tjunctions(self) -> Self {
-        let Self {
-            vertices,
-            mut polygons,
-        } = self;
+        let Self { vertices, mut polygons } = self;
 
         for _ in 0..MAX_TJUNCTION_ITERATIONS {
             let mut edges: HashSet<(VertexId, VertexId)> = HashSet::new();
@@ -113,11 +110,7 @@ impl IndexedMesh {
                     }
                 }
                 for verts in normalize_loop(&new_verts) {
-                    next_polygons.push(IndexedPolygon {
-                        vertices: verts,
-                        plane: poly.plane,
-                        color: poly.color,
-                    });
+                    next_polygons.push(IndexedPolygon { vertices: verts, plane: poly.plane, color: poly.color });
                 }
             }
             polygons = next_polygons;
@@ -197,20 +190,11 @@ mod tests {
     use std::collections::BTreeSet;
 
     fn xy_plane() -> Plane3 {
-        Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1,
-            d: 0,
-        }
+        Plane3 { n_x: 0, n_y: 0, n_z: 1, d: 0 }
     }
 
     fn poly(vertices: Vec<VertexId>, plane: Plane3, color: u32) -> IndexedPolygon {
-        IndexedPolygon {
-            vertices,
-            plane,
-            color,
-        }
+        IndexedPolygon { vertices, plane, color }
     }
 
     #[test]
@@ -280,13 +264,8 @@ mod tests {
     fn t_junction_inserts_into_polygon_walking_edge_in_reverse() {
         // Polygon 1 has edge B→A (reverse of polygon 2's A→B).
         let plane = xy_plane();
-        let vertices = vec![
-            pt(0.0, 0.0, 0.0),
-            pt(2.0, 0.0, 0.0),
-            pt(1.0, 1.0, 0.0),
-            pt(1.0, 0.0, 0.0),
-            pt(1.0, -1.0, 0.0),
-        ];
+        let vertices =
+            vec![pt(0.0, 0.0, 0.0), pt(2.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, -1.0, 0.0)];
         let polygons = vec![
             poly(vec![1, 0, 2], plane, 0), // walks B → A → C
             poly(vec![0, 3, 4], plane, 0),
@@ -348,10 +327,7 @@ mod tests {
             *counts.entry(v).or_insert(0) += 1;
         }
         for (&v, &c) in &counts {
-            assert_eq!(
-                c, 1,
-                "vertex {v} appears {c} times in repaired polygon {target:?} — spike emitted"
-            );
+            assert_eq!(c, 1, "vertex {v} appears {c} times in repaired polygon {target:?} — spike emitted");
         }
     }
 
@@ -382,18 +358,10 @@ mod tests {
     #[test]
     fn tjunction_repair_is_deterministic() {
         let plane = xy_plane();
-        let vertices = vec![
-            pt(0.0, 0.0, 0.0),
-            pt(2.0, 0.0, 0.0),
-            pt(1.0, 1.0, 0.0),
-            pt(1.0, 0.0, 0.0),
-            pt(1.0, -1.0, 0.0),
-        ];
+        let vertices =
+            vec![pt(0.0, 0.0, 0.0), pt(2.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, -1.0, 0.0)];
         let polygons = vec![poly(vec![0, 1, 2], plane, 0), poly(vec![0, 3, 4], plane, 0)];
-        let m1 = IndexedMesh {
-            vertices: vertices.clone(),
-            polygons: polygons.clone(),
-        };
+        let m1 = IndexedMesh { vertices: vertices.clone(), polygons: polygons.clone() };
         let m2 = IndexedMesh { vertices, polygons };
         let r1 = m1.repair_tjunctions();
         let r2 = m2.repair_tjunctions();
@@ -415,14 +383,8 @@ mod tests {
         let off = pt(1.0, 1.0, 0.0);
         let beyond = pt(5.0, 0.0, 0.0);
         assert_eq!(is_strictly_between(m, a, b), is_strictly_between(m, b, a));
-        assert_eq!(
-            is_strictly_between(off, a, b),
-            is_strictly_between(off, b, a)
-        );
-        assert_eq!(
-            is_strictly_between(beyond, a, b),
-            is_strictly_between(beyond, b, a)
-        );
+        assert_eq!(is_strictly_between(off, a, b), is_strictly_between(off, b, a));
+        assert_eq!(is_strictly_between(beyond, a, b), is_strictly_between(beyond, b, a));
     }
 
     #[test]
@@ -495,21 +457,9 @@ mod tests {
         // case: vertex at (-0.0961, -0.75, -0.7010), edge endpoints
         // (-0.1824, -0.75, -0.7009) → (0, -0.75, -0.7010). Snapped
         // to 16:16 fixed:
-        let a = Point3 {
-            x: -11951,
-            y: -49152,
-            z: -45936,
-        };
-        let b = Point3 {
-            x: 0,
-            y: -49152,
-            z: -45938,
-        };
-        let v = Point3 {
-            x: -6299,
-            y: -49152,
-            z: -45939,
-        };
+        let a = Point3 { x: -11951, y: -49152, z: -45936 };
+        let b = Point3 { x: 0, y: -49152, z: -45938 };
+        let v = Point3 { x: -6299, y: -49152, z: -45939 };
         // Perpendicular distance: ~2.05 fixed units, within the
         // post-fix collinearity tolerance.
         assert!(
@@ -558,11 +508,7 @@ mod tests {
         for p in &repaired.polygons {
             let mut seen = HashSet::new();
             for &v in &p.vertices {
-                assert!(
-                    seen.insert(v),
-                    "polygon {:?} contains repeated vertex {v}",
-                    p.vertices
-                );
+                assert!(seen.insert(v), "polygon {:?} contains repeated vertex {v}", p.vertices);
             }
         }
 
@@ -570,16 +516,10 @@ mod tests {
         // simple loops sharing w. Compare loops as multisets to
         // tolerate rotation / order-of-emission differences.
         assert_eq!(repaired.polygons.len(), 3);
-        let actual_loops: BTreeSet<BTreeSet<VertexId>> = repaired
-            .polygons
-            .iter()
-            .map(|p| p.vertices.iter().copied().collect())
-            .collect();
+        let actual_loops: BTreeSet<BTreeSet<VertexId>> =
+            repaired.polygons.iter().map(|p| p.vertices.iter().copied().collect()).collect();
         let expected_loops: BTreeSet<BTreeSet<VertexId>> =
-            [vec![0, 3, 4], vec![0, 3, 4, 5, 6], vec![3, 1, 2]]
-                .into_iter()
-                .map(|v| v.into_iter().collect())
-                .collect();
+            [vec![0, 3, 4], vec![0, 3, 4, 5, 6], vec![3, 1, 2]].into_iter().map(|v| v.into_iter().collect()).collect();
         assert_eq!(actual_loops, expected_loops);
     }
 

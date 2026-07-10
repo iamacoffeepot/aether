@@ -26,9 +26,6 @@ pub struct ContentGenConfig {
     /// Override root generated artifacts stage under. `env` pins the
     /// unprefixed `AETHER_GEN_DIR` key; `None` (unset / empty) tracks the
     /// resolved `save`-namespace root at chassis boot.
-    #[cfg_attr(
-        feature = "runtime",
-        config(env = "AETHER_GEN_DIR", cli_long = "gen-dir")
-    )]
+    #[cfg_attr(feature = "runtime", config(env = "AETHER_GEN_DIR", cli_long = "gen-dir"))]
     pub gen_dir: Option<PathBuf>,
 }

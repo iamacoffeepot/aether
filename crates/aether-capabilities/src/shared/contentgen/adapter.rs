@@ -236,9 +236,7 @@ pub struct StubAnthropicAdapter {
 
 impl Default for StubAnthropicAdapter {
     fn default() -> Self {
-        Self {
-            canned_text: String::from("stub completion"),
-        }
+        Self { canned_text: String::from("stub completion") }
     }
 }
 
@@ -247,12 +245,7 @@ impl AnthropicAdapter for StubAnthropicAdapter {
         Ok(AnthropicResponse {
             text: self.canned_text.clone(),
             model_used: req.model,
-            usage: AdapterUsage {
-                input_tokens: 1,
-                output_tokens: 1,
-                wall_clock_millis: 0,
-                cost_micros: Some(0),
-            },
+            usage: AdapterUsage { input_tokens: 1, output_tokens: 1, wall_clock_millis: 0, cost_micros: Some(0) },
         })
     }
 
@@ -260,12 +253,7 @@ impl AnthropicAdapter for StubAnthropicAdapter {
         Ok(AnthropicResponse {
             text: self.canned_text.clone(),
             model_used: req.model,
-            usage: AdapterUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-                wall_clock_millis: 0,
-                cost_micros: None,
-            },
+            usage: AdapterUsage { input_tokens: 0, output_tokens: 0, wall_clock_millis: 0, cost_micros: None },
         })
     }
 }
@@ -278,10 +266,7 @@ pub struct StubGeminiAdapter;
 impl GeminiAdapter for StubGeminiAdapter {
     fn nanobanana_generate(&self, req: GeminiImageRequest) -> Result<GeminiResponse, String> {
         Ok(GeminiResponse {
-            artifacts: vec![GeminiArtifact {
-                bytes: STUB_PNG.to_vec(),
-                ext: String::from("png"),
-            }],
+            artifacts: vec![GeminiArtifact { bytes: STUB_PNG.to_vec(), ext: String::from("png") }],
             model_used: req.model,
             usage: AdapterUsage::default(),
             thought_signature: None,
@@ -291,12 +276,8 @@ impl GeminiAdapter for StubGeminiAdapter {
 
     fn lyria_generate(&self, req: GeminiMusicRequest) -> Result<GeminiResponse, String> {
         let count = req.sample_count.max(1) as usize;
-        let artifacts = (0..count)
-            .map(|_| GeminiArtifact {
-                bytes: STUB_WAV.to_vec(),
-                ext: String::from("wav"),
-            })
-            .collect();
+        let artifacts =
+            (0..count).map(|_| GeminiArtifact { bytes: STUB_WAV.to_vec(), ext: String::from("wav") }).collect();
         Ok(GeminiResponse {
             artifacts,
             model_used: req.model,

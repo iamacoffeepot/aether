@@ -69,13 +69,7 @@ impl TrackVoice {
 
     /// True when this event's key matches the track's
     /// `(sender_mailbox, lane, namespace, path)`.
-    pub fn matches(
-        &self,
-        sender_mailbox: MailboxId,
-        lane: Option<&String>,
-        namespace: &str,
-        path: &str,
-    ) -> bool {
+    pub fn matches(&self, sender_mailbox: MailboxId, lane: Option<&String>, namespace: &str, path: &str) -> bool {
         self.sender_mailbox == sender_mailbox
             && self.lane.as_ref() == lane
             && self.namespace == namespace
@@ -87,10 +81,7 @@ impl TrackVoice {
     pub fn stop(&mut self, fade_samples: u32) {
         if matches!(self.fade, TrackFade::Playing) {
             let total = fade_samples.max(1);
-            self.fade = TrackFade::FadingOut {
-                remaining: total,
-                total,
-            };
+            self.fade = TrackFade::FadingOut { remaining: total, total };
         }
     }
 

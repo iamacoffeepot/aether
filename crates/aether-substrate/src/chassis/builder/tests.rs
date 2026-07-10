@@ -107,9 +107,7 @@ macro_rules! close_observed_state {
             type Ctx<'a> = NativeCtx<'a>;
 
             fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-                Ok(Self {
-                    close_observed: config,
-                })
+                Ok(Self { close_observed: config })
             }
 
             fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
@@ -282,9 +280,7 @@ fn driver_build_runs_driver_and_tears_down_passives() {
 
     let chassis = Builder::<DrivenTestChassis<RanDriver>>::new(registry, mailer)
         .with_actor::<StubLog>(())
-        .driver(RanDriver {
-            ran: Arc::clone(&ran),
-        })
+        .driver(RanDriver { ran: Arc::clone(&ran) })
         .build()
         .expect("build succeeds");
 
@@ -330,9 +326,7 @@ fn failed_singleton_init_releases_namespace_and_sink() {
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
         fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Err(BootError::Other(Box::new(io::Error::other(
-                "intentional init failure for Phase 7 cleanup test",
-            ))))
+            Err(BootError::Other(Box::new(io::Error::other("intentional init failure for Phase 7 cleanup test"))))
         }
     }
     impl NativeActor for FailingCap {
@@ -355,10 +349,7 @@ fn failed_singleton_init_releases_namespace_and_sink() {
         .build_passive()
         .expect_err("init failure must propagate");
     // The error wraps init's std::io::Error message.
-    assert!(
-        format!("{err:?}").contains("intentional init failure"),
-        "expected init error to propagate, got {err:?}",
-    );
+    assert!(format!("{err:?}").contains("intentional init failure"), "expected init error to propagate, got {err:?}");
 
     // Sink at the cap's namespace must be gone — Registry::lookup
     // returns None for absent entries.
@@ -385,11 +376,7 @@ fn with_actor_boots_dispatches_and_tears_down() {
 
     // Fixture kind: a 4-byte cast-shape payload so encode_into_bytes
     // lands on the bytemuck path.
-    pod_kind!(
-        Ping { tag: u32 },
-        "test.with_actor.ping",
-        0xA1B2_C3D4_E5F6_0001
-    );
+    pod_kind!(Ping { tag: u32 }, "test.with_actor.ping", 0xA1B2_C3D4_E5F6_0001);
 
     // Fixture cap. State behind interior mutability so `&self`
     // dispatch can mutate it (the post-552 norm).
@@ -450,22 +437,14 @@ fn with_actor_boots_dispatches_and_tears_down() {
     // Push one envelope at the cap's mailbox via the registry's
     // sink handler. The dispatcher thread pulls from its inbox
     // and routes through __aether_dispatch_envelope → on_ping.
-    let mailbox_id = registry
-        .lookup(<ProbeCap as Addressable>::NAMESPACE)
-        .expect("with_actor claimed the mailbox");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(mailbox_id).expect("sink registered")
-    else {
+    let mailbox_id = registry.lookup(<ProbeCap as Addressable>::NAMESPACE).expect("with_actor claimed the mailbox");
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(mailbox_id).expect("sink registered") else {
         panic!("ProbeCap claim must be a sink entry");
     };
 
     let payload = Ping { tag: 0xDEAD_BEEF };
     let bytes = payload.encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(
-        <Ping as Kind>::ID,
-        Ping::NAME,
-        &bytes,
-        1,
-    ));
+    handler.enqueue(registry::test_owned_dispatch(<Ping as Kind>::ID, Ping::NAME, &bytes, 1));
 
     // Wait briefly for the dispatcher thread to dispatch.
     let deadline = Instant::now() + Duration::from_millis(500);
@@ -561,11 +540,8 @@ fn with_actor_stamps_local_for_init_and_handler() {
         .build_passive()
         .expect("LocalProbe boots");
 
-    let mailbox_id = registry
-        .lookup(<LocalProbe as Addressable>::NAMESPACE)
-        .expect("with_actor claimed the mailbox");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(mailbox_id).expect("sink registered")
-    else {
+    let mailbox_id = registry.lookup(<LocalProbe as Addressable>::NAMESPACE).expect("with_actor claimed the mailbox");
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(mailbox_id).expect("sink registered") else {
         panic!("LocalProbe claim must be a sink entry");
     };
 
@@ -576,12 +552,7 @@ fn with_actor_stamps_local_for_init_and_handler() {
     for seq in 0..3 {
         let payload = Tick { seq };
         let bytes = payload.encode_into_bytes();
-        handler.enqueue(registry::test_owned_dispatch(
-            <Tick as Kind>::ID,
-            Tick::NAME,
-            &bytes,
-            1,
-        ));
+        handler.enqueue(registry::test_owned_dispatch(<Tick as Kind>::ID, Tick::NAME, &bytes, 1));
     }
 
     let deadline = Instant::now() + Duration::from_millis(500);
@@ -611,17 +582,9 @@ fn ctx_spawn_child_routes_through_handler() {
     use aether_data::Kind;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
-    pod_kind!(
-        Hatch { tag: u32 },
-        "test.spawn_child.hatch",
-        0xC0C1_C2C3_C4C5_C6C7
-    );
+    pod_kind!(Hatch { tag: u32 }, "test.spawn_child.hatch", 0xC0C1_C2C3_C4C5_C6C7);
 
-    pod_kind!(
-        Ping { tag: u32 },
-        "test.spawn_child.ping",
-        0xD0D1_D2D3_D4D5_D6D7
-    );
+    pod_kind!(Ping { tag: u32 }, "test.spawn_child.ping", 0xD0D1_D2D3_D4D5_D6D7);
 
     count_on_kind_actor!(ChildCap, "test.spawn_child.child", Ping, received);
 
@@ -639,14 +602,8 @@ fn ctx_spawn_child_routes_through_handler() {
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
-        fn init(
-            (spawn_count, child_received): Self::Config,
-            _ctx: &mut NativeInitCtx<'_>,
-        ) -> Result<Self, BootError> {
-            Ok(Self {
-                spawn_count,
-                child_received,
-            })
+        fn init((spawn_count, child_received): Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self { spawn_count, child_received })
         }
     }
     impl NativeActor for ParentCap {
@@ -685,29 +642,18 @@ fn ctx_spawn_child_routes_through_handler() {
     // Push Hatch at the parent's mailbox; the parent's handler
     // calls `ctx.spawn_child::<ChildCap>` which in turn pushes a
     // Ping at the new child via the after_init bootstrap.
-    let parent_id = registry
-        .lookup(<ParentCap as Addressable>::NAMESPACE)
-        .expect("ParentCap claimed");
+    let parent_id = registry.lookup(<ParentCap as Addressable>::NAMESPACE).expect("ParentCap claimed");
     let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("sink") else {
         panic!("expected mailbox entry");
     };
     let bytes = (Hatch { tag: 1 }).encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(
-        <Hatch as Kind>::ID,
-        Hatch::NAME,
-        &bytes,
-        1,
-    ));
+    handler.enqueue(registry::test_owned_dispatch(<Hatch as Kind>::ID, Hatch::NAME, &bytes, 1));
 
     let deadline = Instant::now() + Duration::from_millis(500);
     while child_received.load(AtomicOrdering::SeqCst) < 1 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(
-        spawn_count.load(AtomicOrdering::SeqCst),
-        1,
-        "parent's handler ran spawn_child exactly once"
-    );
+    assert_eq!(spawn_count.load(AtomicOrdering::SeqCst), 1, "parent's handler ran spawn_child exactly once");
     assert_eq!(
         child_received.load(AtomicOrdering::SeqCst),
         1,
@@ -720,10 +666,7 @@ fn ctx_spawn_child_routes_through_handler() {
     // onto the parent's id — not the flat `hash(NAMESPACE:subname)`.
     let child_id = MailboxId(aether_data::with_tag(
         aether_data::Tag::Mailbox,
-        aether_data::fold_lineage(
-            parent_id.0,
-            aether_data::ActorId::instanced("test.spawn_child.child", "0"),
-        ),
+        aether_data::fold_lineage(parent_id.0, aether_data::ActorId::instanced("test.spawn_child.child", "0")),
     ));
     assert!(
         chassis.actor_registry().is_live(child_id),
@@ -746,11 +689,7 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
     use aether_data::Kind;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
-    pod_kind!(
-        Quit { tag: u32 },
-        "test.shutdown.quit",
-        0xE0E1_E2E3_E4E5_E6E7
-    );
+    pod_kind!(Quit { tag: u32 }, "test.shutdown.quit", 0xE0E1_E2E3_E4E5_E6E7);
 
     shutdown_on_kind_actor!(Closer, "test.shutdown.closer", Quit);
 
@@ -773,12 +712,7 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
         panic!("expected mailbox entry for instanced actor");
     };
     let bytes = (Quit { tag: 1 }).encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(
-        <Quit as Kind>::ID,
-        Quit::NAME,
-        &bytes,
-        1,
-    ));
+    handler.enqueue(registry::test_owned_dispatch(<Quit as Kind>::ID, Quit::NAME, &bytes, 1));
 
     // Wait for unwire to run + the registry slot to flip Dead.
     let deadline = Instant::now() + Duration::from_millis(500);
@@ -798,14 +732,8 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
     while chassis.actor_registry().is_live(id) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    assert!(
-        !chassis.actor_registry().is_live(id),
-        "registry slot should transition Live → Dead after unwire runs"
-    );
-    assert!(
-        chassis.actor_registry().is_tombstoned(id),
-        "tombstone insertion forbids reuse of the retired full name"
-    );
+    assert!(!chassis.actor_registry().is_live(id), "registry slot should transition Live → Dead after unwire runs");
+    assert!(chassis.actor_registry().is_tombstoned(id), "tombstone insertion forbids reuse of the retired full name");
 
     // Spawning again under the same `Subname::Counter` would
     // increment the per-Spawner counter (so it'd target a fresh
@@ -815,10 +743,7 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
         .spawn_actor::<Closer>(Subname::Named("0"), Arc::clone(&close_observed))
         .finish()
         .expect_err("retired subname must reject");
-    assert!(
-        matches!(err, SpawnError::SubnameRetired { .. }),
-        "expected SubnameRetired, got {err:?}"
-    );
+    assert!(matches!(err, SpawnError::SubnameRetired { .. }), "expected SubnameRetired, got {err:?}");
 
     drop(chassis);
 }
@@ -906,11 +831,7 @@ fn chassis_teardown_runs_unwire_for_many_pooled_actors() {
     drop(chassis);
 
     for (i, counter) in counters.iter().enumerate() {
-        assert_eq!(
-            counter.load(AtomicOrdering::SeqCst),
-            1,
-            "actor {i} must have run unwire exactly once",
-        );
+        assert_eq!(counter.load(AtomicOrdering::SeqCst), 1, "actor {i} must have run unwire exactly once");
     }
 }
 
@@ -984,10 +905,7 @@ fn resolve_actor_returns_none_on_type_mismatch() {
         .build_passive()
         .expect("empty chassis boots");
 
-    let _ = chassis
-        .spawn_actor::<Foo>(Subname::Named("only"), ())
-        .finish()
-        .expect("spawn foo");
+    let _ = chassis.spawn_actor::<Foo>(Subname::Named("only"), ()).finish().expect("spawn foo");
 
     // Resolving with the same subname but the wrong type returns
     // None — the namespaces differ so the hashed full names differ
@@ -1021,19 +939,11 @@ fn ctx_monitor_fires_notice_at_target_close() {
     use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 
     // Self-shutdown trigger for the target.
-    pod_kind!(
-        Quit { tag: u32 },
-        "test.monitor.quit",
-        0xC0DE_C0DE_4B4B_4B4B
-    );
+    pod_kind!(Quit { tag: u32 }, "test.monitor.quit", 0xC0DE_C0DE_4B4B_4B4B);
 
     // Tells the watcher which target to monitor. The watcher's
     // handler reads `target_id` and calls `ctx.monitor`.
-    pod_kind!(
-        WatchOrder { target_id: u64 },
-        "test.monitor.watch_order",
-        0x4B4B_C0DE_C0DE_C0DE
-    );
+    pod_kind!(WatchOrder { target_id: u64 }, "test.monitor.watch_order", 0x4B4B_C0DE_C0DE_C0DE);
 
     // Target — handles Quit by self-shutting.
     unit_shutdown_actor!(Target, "test.monitor.target", Quit);
@@ -1058,11 +968,7 @@ fn ctx_monitor_fires_notice_at_target_close() {
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
         fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self {
-                notice_count: config.0,
-                last_target: config.1,
-                handle: Mutex::new(None),
-            })
+            Ok(Self { notice_count: config.0, last_target: config.1, handle: Mutex::new(None) })
         }
     }
     impl NativeActor for Watcher {
@@ -1078,17 +984,13 @@ fn ctx_monitor_fires_notice_at_target_close() {
             if kind.0 == WatchOrder::ID.0 {
                 let order = WatchOrder::decode_from_bytes(payload)?;
                 let target = MailboxId(order.target_id);
-                let h = ctx
-                    .monitor(target)
-                    .expect("target must be Live at order time");
+                let h = ctx.monitor(target).expect("target must be Live at order time");
                 *state.handle.lock().unwrap() = Some(h);
                 return Some(());
             }
             if kind.0 == <aether_kinds::MonitorNotice as Kind>::ID.0 {
                 let notice = <aether_kinds::MonitorNotice as Kind>::decode_from_bytes(payload)?;
-                state
-                    .last_target
-                    .store(notice.target.0, AtomicOrdering::SeqCst);
+                state.last_target.store(notice.target.0, AtomicOrdering::SeqCst);
                 state.notice_count.fetch_add(1, AtomicOrdering::SeqCst);
                 return Some(());
             }
@@ -1103,34 +1005,24 @@ fn ctx_monitor_fires_notice_at_target_close() {
 
     // Spawn target first so the watcher can register against a
     // Live id.
-    let target_id = chassis
-        .spawn_actor::<Target>(Subname::Counter, ())
-        .finish()
-        .expect("spawn target");
+    let target_id = chassis.spawn_actor::<Target>(Subname::Counter, ()).finish().expect("spawn target");
 
     let notice_count = Arc::new(AtomicU32::new(0));
     let last_target = Arc::new(AtomicU64::new(0));
     let watcher_id = chassis
-        .spawn_actor::<Watcher>(
-            Subname::Counter,
-            (Arc::clone(&notice_count), Arc::clone(&last_target)),
-        )
+        .spawn_actor::<Watcher>(Subname::Counter, (Arc::clone(&notice_count), Arc::clone(&last_target)))
         .finish()
         .expect("spawn watcher");
 
     // Drive the watcher to register the monitor by pushing a
     // WatchOrder through its sink handler. After this returns
     // the watcher's handle is stored in `self.handle`.
-    let MailboxEntry::Inbox {
-        handler: watcher_handler,
-        ..
-    } = registry.entry(watcher_id).expect("watcher sink registered")
+    let MailboxEntry::Inbox { handler: watcher_handler, .. } =
+        registry.entry(watcher_id).expect("watcher sink registered")
     else {
         panic!("expected mailbox entry for watcher");
     };
-    let order = WatchOrder {
-        target_id: target_id.0,
-    };
+    let order = WatchOrder { target_id: target_id.0 };
     watcher_handler.enqueue(registry::test_owned_dispatch(
         <WatchOrder as Kind>::ID,
         WatchOrder::NAME,
@@ -1148,19 +1040,13 @@ fn ctx_monitor_fires_notice_at_target_close() {
         1,
         "watcher's monitor should be registered against target",
     );
-    assert_eq!(
-        chassis.actor_registry().monitoring_count(watcher_id),
-        1,
-        "watcher should appear in the reverse index",
-    );
+    assert_eq!(chassis.actor_registry().monitoring_count(watcher_id), 1, "watcher should appear in the reverse index");
 
     // Fire Quit at the target — its handler self-shuts; the
     // dispatcher's close path runs `close_actor`, which fans out
     // a MonitorNotice mail to watcher_id.
-    let MailboxEntry::Inbox {
-        handler: target_handler,
-        ..
-    } = registry.entry(target_id).expect("target sink registered")
+    let MailboxEntry::Inbox { handler: target_handler, .. } =
+        registry.entry(target_id).expect("target sink registered")
     else {
         panic!("expected mailbox entry for target");
     };
@@ -1176,11 +1062,7 @@ fn ctx_monitor_fires_notice_at_target_close() {
     while notice_count.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(
-        notice_count.load(AtomicOrdering::SeqCst),
-        1,
-        "watcher should have received exactly one MonitorNotice",
-    );
+    assert_eq!(notice_count.load(AtomicOrdering::SeqCst), 1, "watcher should have received exactly one MonitorNotice");
     assert_eq!(
         last_target.load(AtomicOrdering::SeqCst),
         target_id.0,
@@ -1197,16 +1079,9 @@ fn ctx_monitor_fires_notice_at_target_close() {
         !chassis.actor_registry().is_live(target_id),
         "target slot should transition Live → Dead after close fan-out",
     );
-    assert!(
-        chassis.actor_registry().is_tombstoned(target_id),
-        "target id should be tombstoned",
-    );
+    assert!(chassis.actor_registry().is_tombstoned(target_id), "target id should be tombstoned");
     // Forward index for target was drained.
-    assert_eq!(
-        chassis.actor_registry().monitor_count(target_id),
-        0,
-        "monitors_of[target] must drain after fan-out",
-    );
+    assert_eq!(chassis.actor_registry().monitor_count(target_id), 0, "monitors_of[target] must drain after fan-out");
 
     drop(chassis);
 }
@@ -1225,16 +1100,8 @@ fn watcher_close_prunes_targets_forward_index() {
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
     // Re-use Quit + WatchOrder shape inline (test isolation).
-    pod_kind!(
-        Quit { tag: u32 },
-        "test.monitor.quit2",
-        0xCAFE_BABE_DEAD_BEEF
-    );
-    pod_kind!(
-        WatchOrder { target_id: u64 },
-        "test.monitor.watch_order2",
-        0xBEEF_DEAD_BABE_CAFE
-    );
+    pod_kind!(Quit { tag: u32 }, "test.monitor.quit2", 0xCAFE_BABE_DEAD_BEEF);
+    pod_kind!(WatchOrder { target_id: u64 }, "test.monitor.watch_order2", 0xBEEF_DEAD_BABE_CAFE);
 
     struct Target;
     impl Addressable for Target {
@@ -1280,10 +1147,7 @@ fn watcher_close_prunes_targets_forward_index() {
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
         fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self {
-                handle: Mutex::new(None),
-                close_observed: config,
-            })
+            Ok(Self { handle: Mutex::new(None), close_observed: config })
         }
         fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
             state.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
@@ -1320,27 +1184,18 @@ fn watcher_close_prunes_targets_forward_index() {
         .build_passive()
         .expect("empty chassis boots");
 
-    let target_id = chassis
-        .spawn_actor::<Target>(Subname::Counter, ())
-        .finish()
-        .expect("spawn target");
+    let target_id = chassis.spawn_actor::<Target>(Subname::Counter, ()).finish().expect("spawn target");
     let close_observed = Arc::new(AtomicU32::new(0));
-    let watcher_id = chassis
-        .spawn_actor::<Watcher>(Subname::Counter, Arc::clone(&close_observed))
-        .finish()
-        .expect("spawn watcher");
+    let watcher_id =
+        chassis.spawn_actor::<Watcher>(Subname::Counter, Arc::clone(&close_observed)).finish().expect("spawn watcher");
 
     // Watcher registers monitor against target.
-    let MailboxEntry::Inbox {
-        handler: watcher_handler,
-        ..
-    } = registry.entry(watcher_id).expect("watcher sink registered")
+    let MailboxEntry::Inbox { handler: watcher_handler, .. } =
+        registry.entry(watcher_id).expect("watcher sink registered")
     else {
         panic!("expected mailbox entry for watcher");
     };
-    let order = WatchOrder {
-        target_id: target_id.0,
-    };
+    let order = WatchOrder { target_id: target_id.0 };
     watcher_handler.enqueue(registry::test_owned_dispatch(
         <WatchOrder as Kind>::ID,
         WatchOrder::NAME,
@@ -1368,11 +1223,7 @@ fn watcher_close_prunes_targets_forward_index() {
     while close_observed.load(AtomicOrdering::SeqCst) == 0 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(
-        close_observed.load(AtomicOrdering::SeqCst),
-        1,
-        "watcher's unwire fired exactly once",
-    );
+    assert_eq!(close_observed.load(AtomicOrdering::SeqCst), 1, "watcher's unwire fired exactly once");
 
     // Watcher slot tombstones; target slot still Live; target's
     // forward index drained of the dead watcher.
@@ -1380,14 +1231,8 @@ fn watcher_close_prunes_targets_forward_index() {
     while chassis.actor_registry().is_live(watcher_id) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    assert!(
-        chassis.actor_registry().is_tombstoned(watcher_id),
-        "watcher tombstoned",
-    );
-    assert!(
-        chassis.actor_registry().is_live(target_id),
-        "target should still be Live (watcher closed, not target)",
-    );
+    assert!(chassis.actor_registry().is_tombstoned(watcher_id), "watcher tombstoned");
+    assert!(chassis.actor_registry().is_live(target_id), "target should still be Live (watcher closed, not target)");
     assert_eq!(
         chassis.actor_registry().monitor_count(target_id),
         0,
@@ -1413,11 +1258,7 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
     use aether_data::Kind;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
-    pod_kind!(
-        Quit { tag: u32 },
-        "test.resolve.quit",
-        0xF00D_F00D_F00D_F00D
-    );
+    pod_kind!(Quit { tag: u32 }, "test.resolve.quit", 0xF00D_F00D_F00D_F00D);
 
     // The `tag` field is set at init from the per-instance config
     // and would be read by handler code; Phase A's resolve_actor
@@ -1466,18 +1307,9 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
         .build_passive()
         .expect("empty chassis boots");
 
-    let id_a = chassis
-        .spawn_actor::<Member>(Subname::Named("a"), 1)
-        .finish()
-        .expect("spawn a");
-    let _id_b = chassis
-        .spawn_actor::<Member>(Subname::Named("b"), 2)
-        .finish()
-        .expect("spawn b");
-    let id_c = chassis
-        .spawn_actor::<Member>(Subname::Named("c"), 3)
-        .finish()
-        .expect("spawn c");
+    let id_a = chassis.spawn_actor::<Member>(Subname::Named("a"), 1).finish().expect("spawn a");
+    let _id_b = chassis.spawn_actor::<Member>(Subname::Named("b"), 2).finish().expect("spawn b");
+    let id_c = chassis.spawn_actor::<Member>(Subname::Named("c"), 3).finish().expect("spawn c");
 
     // Issue 629 / Phase A: resolve_actor returns the address
     // (`MailboxId`), not `Arc<A>`. Verify the address resolves and
@@ -1486,21 +1318,14 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
     assert_eq!(a_id, id_a, "resolve_actor returns the matching MailboxId");
 
     // Missing subname → None.
-    assert!(
-        chassis.resolve_actor::<Member>("missing").is_none(),
-        "unknown subname should return None",
-    );
+    assert!(chassis.resolve_actor::<Member>("missing").is_none(), "unknown subname should return None");
 
     // resolve_actors enumerates all three. Order is registry-defined
     // (HashMap iteration), so collect into a sorted subname vec for
     // assertions. The Member's per-instance tag is dispatcher-thread
     // owned (Phase A) and not externally observable here; the
     // subname uniquely identifies the instance.
-    let mut all: Vec<String> = chassis
-        .resolve_actors::<Member>()
-        .into_iter()
-        .map(|(name, _id)| name)
-        .collect();
+    let mut all: Vec<String> = chassis.resolve_actors::<Member>().into_iter().map(|(name, _id)| name).collect();
     all.sort();
     assert_eq!(
         all,
@@ -1511,8 +1336,7 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
     // Close c — Quit it through the sink handler. After close,
     // resolve_actors drops to two and resolve_actor::<Member>("c")
     // returns None.
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(id_c).expect("c sink registered")
-    else {
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(id_c).expect("c sink registered") else {
         panic!("expected mailbox entry for c");
     };
     handler.enqueue(registry::test_owned_dispatch(
@@ -1528,21 +1352,10 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
         thread::sleep(Duration::from_millis(5));
     }
 
-    assert!(
-        chassis.resolve_actor::<Member>("c").is_none(),
-        "closed instance should disappear from resolve_actor",
-    );
-    let mut after: Vec<String> = chassis
-        .resolve_actors::<Member>()
-        .into_iter()
-        .map(|(name, _id)| name)
-        .collect();
+    assert!(chassis.resolve_actor::<Member>("c").is_none(), "closed instance should disappear from resolve_actor");
+    let mut after: Vec<String> = chassis.resolve_actors::<Member>().into_iter().map(|(name, _id)| name).collect();
     after.sort();
-    assert_eq!(
-        after,
-        vec!["a".to_owned(), "b".to_owned()],
-        "resolve_actors should drop the closed instance",
-    );
+    assert_eq!(after, vec!["a".to_owned(), "b".to_owned()], "resolve_actors should drop the closed instance");
 
     // Counter for unused warning. (`_id_a` / `_id_b` retain their
     // names elsewhere; this guard keeps the compiler happy.)
@@ -1577,25 +1390,13 @@ fn instanced_can_spawn_grandchild() {
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
     // Trigger to make the parent spawn its grandchild.
-    pod_kind!(
-        Hatch { tag: u32 },
-        "test.recursive.hatch",
-        0xA00A_A00A_A00A_A00A
-    );
+    pod_kind!(Hatch { tag: u32 }, "test.recursive.hatch", 0xA00A_A00A_A00A_A00A);
 
     // Pre-loaded onto the grandchild via after_init.
-    pod_kind!(
-        Ping { tag: u32 },
-        "test.recursive.ping",
-        0xB00B_B00B_B00B_B00B
-    );
+    pod_kind!(Ping { tag: u32 }, "test.recursive.ping", 0xB00B_B00B_B00B_B00B);
 
     // Self-shutdown trigger for the parent.
-    pod_kind!(
-        Quit { tag: u32 },
-        "test.recursive.quit",
-        0xC00C_C00C_C00C_C00C
-    );
+    pod_kind!(Quit { tag: u32 }, "test.recursive.quit", 0xC00C_C00C_C00C_C00C);
 
     struct Grandchild {
         received: Arc<AtomicU32>,
@@ -1648,9 +1449,7 @@ fn instanced_can_spawn_grandchild() {
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
         fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self {
-                grandchild_received: config,
-            })
+            Ok(Self { grandchild_received: config })
         }
     }
     impl NativeActor for Parent {
@@ -1670,10 +1469,7 @@ fn instanced_can_spawn_grandchild() {
                 // first envelope dispatches without an external
                 // mail step.
                 let _id = ctx
-                    .spawn_child::<Grandchild>(
-                        Subname::Named("only"),
-                        Arc::clone(&state.grandchild_received),
-                    )
+                    .spawn_child::<Grandchild>(Subname::Named("only"), Arc::clone(&state.grandchild_received))
                     .after_init(Ping { tag: 0xCAFE })
                     .finish()
                     .expect("recursive spawn must succeed");
@@ -1700,10 +1496,8 @@ fn instanced_can_spawn_grandchild() {
         .expect("spawn parent");
 
     // Trigger parent → grandchild spawn.
-    let MailboxEntry::Inbox {
-        handler: parent_handler,
-        ..
-    } = registry.entry(parent_id).expect("parent sink registered")
+    let MailboxEntry::Inbox { handler: parent_handler, .. } =
+        registry.entry(parent_id).expect("parent sink registered")
     else {
         panic!("expected mailbox entry for parent");
     };
@@ -1733,10 +1527,7 @@ fn instanced_can_spawn_grandchild() {
     // parent's id — not the flat `hash(NAMESPACE:subname)`.
     let grandchild_id = MailboxId(aether_data::with_tag(
         aether_data::Tag::Mailbox,
-        aether_data::fold_lineage(
-            parent_id.0,
-            aether_data::ActorId::instanced("test.recursive.grandchild", "only"),
-        ),
+        aether_data::fold_lineage(parent_id.0, aether_data::ActorId::instanced("test.recursive.grandchild", "only")),
     ));
     assert!(
         chassis.actor_registry().is_live(grandchild_id),
@@ -1745,13 +1536,8 @@ fn instanced_can_spawn_grandchild() {
 
     // Issue 629 / Phase A: resolve_actor returns the address.
     // Verify it resolves and matches the registry id.
-    let resolved = chassis
-        .resolve_actor::<Grandchild>("only")
-        .expect("resolve_actor must find the grandchild");
-    assert_eq!(
-        resolved, grandchild_id,
-        "resolve_actor returns the matching MailboxId",
-    );
+    let resolved = chassis.resolve_actor::<Grandchild>("only").expect("resolve_actor must find the grandchild");
+    assert_eq!(resolved, grandchild_id, "resolve_actor returns the matching MailboxId");
     // The grandchild is alive (verifies the dispatcher's Arc<AtomicU32>
     // is the same one passed in via config — the test's `received`
     // counter sees handler dispatches against the live instance).
@@ -1772,10 +1558,7 @@ fn instanced_can_spawn_grandchild() {
     while chassis.actor_registry().is_live(parent_id) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    assert!(
-        chassis.actor_registry().is_tombstoned(parent_id),
-        "parent should have tombstoned",
-    );
+    assert!(chassis.actor_registry().is_tombstoned(parent_id), "parent should have tombstoned");
     // Grandchild survives — no cascade.
     assert!(
         chassis.actor_registry().is_live(grandchild_id),
@@ -1866,11 +1649,7 @@ fn spawn_actor_runs_wire_once_after_init() {
         .finish()
         .expect("spawn instanced actor");
 
-    assert_eq!(
-        wire_count.load(AtomicOrdering::SeqCst),
-        1,
-        "wire must fire exactly once on Spawner::spawn_actor",
-    );
+    assert_eq!(wire_count.load(AtomicOrdering::SeqCst), 1, "wire must fire exactly once on Spawner::spawn_actor");
 
     drop(chassis);
     let _ = id;
@@ -1937,11 +1716,7 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
     use aether_data::Kind;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
-    pod_kind!(
-        WireBarrierPing { tag: u32 },
-        "test.barrier.wire_ping",
-        0xB0B1_B2B3_B4B5_B6B7
-    );
+    pod_kind!(WireBarrierPing { tag: u32 }, "test.barrier.wire_ping", 0xB0B1_B2B3_B4B5_B6B7);
 
     struct Pinger {
         wire_ran: Arc<AtomicU32>,
@@ -2019,21 +1794,13 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
 
     let builder = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer));
     let builder = if pinger_first {
-        builder
-            .with_actor::<Pinger>(Arc::clone(&wire_ran))
-            .with_actor::<Ponger>(Arc::clone(&received))
+        builder.with_actor::<Pinger>(Arc::clone(&wire_ran)).with_actor::<Ponger>(Arc::clone(&received))
     } else {
-        builder
-            .with_actor::<Ponger>(Arc::clone(&received))
-            .with_actor::<Pinger>(Arc::clone(&wire_ran))
+        builder.with_actor::<Ponger>(Arc::clone(&received)).with_actor::<Pinger>(Arc::clone(&wire_ran))
     };
     let chassis = builder.build_passive().expect("multi-pass boot succeeds");
 
-    assert_eq!(
-        wire_ran.load(AtomicOrdering::SeqCst),
-        1,
-        "pinger's wire must have run during the wire pass",
-    );
+    assert_eq!(wire_ran.load(AtomicOrdering::SeqCst), 1, "pinger's wire must have run during the wire pass");
 
     // Wait for Ponger's dispatcher to drain the wire-emitted ping.
     let deadline = Instant::now() + Duration::from_millis(500);
@@ -2067,8 +1834,6 @@ fn with_workers_survives_driver_transition() {
     let ran = Arc::new(AtomicBool::new(false));
     let builder = Builder::<DrivenTestChassis<RanDriver>>::new(registry, mailer)
         .with_workers(Some(3))
-        .driver(RanDriver {
-            ran: Arc::clone(&ran),
-        });
+        .driver(RanDriver { ran: Arc::clone(&ran) });
     assert_eq!(builder.workers, Some(3));
 }

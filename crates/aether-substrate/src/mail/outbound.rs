@@ -292,9 +292,7 @@ impl HubOutbound {
     /// composition time (the `HubClientCapability` boot, today).
     #[must_use]
     pub fn disconnected() -> Arc<Self> {
-        Arc::new(Self {
-            backend: OnceLock::new(),
-        })
+        Arc::new(Self { backend: OnceLock::new() })
     }
 
     /// Wire a backend. Called once by `HubClientCapability::boot` after
@@ -341,14 +339,7 @@ impl HubOutbound {
         correlation_id: u64,
     ) {
         if let Some(b) = self.backend.get() {
-            b.egress_to_engine_mailbox(
-                engine_id,
-                mailbox_id,
-                kind_id,
-                payload,
-                count,
-                correlation_id,
-            );
+            b.egress_to_engine_mailbox(engine_id, mailbox_id, kind_id, payload, count, correlation_id);
         }
     }
 
@@ -363,14 +354,7 @@ impl HubOutbound {
         correlation_id: u64,
     ) {
         if let Some(b) = self.backend.get() {
-            b.egress_unresolved_mail(
-                recipient_mailbox_id,
-                kind_id,
-                payload,
-                count,
-                source_mailbox_id,
-                correlation_id,
-            );
+            b.egress_unresolved_mail(recipient_mailbox_id, kind_id, payload, count, source_mailbox_id, correlation_id);
         }
     }
 
@@ -422,18 +406,8 @@ impl HubOutbound {
                 self.egress_to_session(token, K::NAME, payload, None, sender.correlation_id);
                 true
             }
-            SourceAddr::EngineMailbox {
-                engine_id,
-                mailbox_id,
-            } => {
-                self.egress_to_engine_mailbox(
-                    engine_id,
-                    mailbox_id,
-                    K::ID,
-                    payload,
-                    1,
-                    sender.correlation_id,
-                );
+            SourceAddr::EngineMailbox { engine_id, mailbox_id } => {
+                self.egress_to_engine_mailbox(engine_id, mailbox_id, K::ID, payload, 1, sender.correlation_id);
                 true
             }
             SourceAddr::None | SourceAddr::Component(_) => false,

@@ -41,9 +41,7 @@ impl ClipboardMailboxExt for WasmActorMailbox<'_, ClipboardCapability> {
     }
 
     fn set_text(&self, text: &str) {
-        self.send(&SetClipboardText {
-            text: text.to_owned(),
-        });
+        self.send(&SetClipboardText { text: text.to_owned() });
     }
 }
 
@@ -54,9 +52,7 @@ impl ClipboardMailboxExt for NativeActorMailbox<'_, ClipboardCapability> {
     }
 
     fn set_text(&self, text: &str) {
-        self.send(&SetClipboardText {
-            text: text.to_owned(),
-        });
+        self.send(&SetClipboardText { text: text.to_owned() });
     }
 }
 

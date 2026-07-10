@@ -92,21 +92,13 @@ impl Cube {
         let ppp = corner(1.0, 1.0, 1.0);
 
         // One vertex with a face color baked in.
-        let vert = |position: (f32, f32, f32), color: Rgb| Vertex {
-            x: position.0,
-            y: position.1,
-            z: position.2,
-            color,
-        };
+        let vert =
+            |position: (f32, f32, f32), color: Rgb| Vertex { x: position.0, y: position.1, z: position.2, color };
         // A quad as two triangles, all six vertices sharing `color`.
         let quad = |a, b, c, d, color: Rgb| {
             [
-                DrawTriangle {
-                    verts: [vert(a, color), vert(b, color), vert(c, color)],
-                },
-                DrawTriangle {
-                    verts: [vert(a, color), vert(c, color), vert(d, color)],
-                },
+                DrawTriangle { verts: [vert(a, color), vert(b, color), vert(c, color)] },
+                DrawTriangle { verts: [vert(a, color), vert(c, color), vert(d, color)] },
             ]
         };
 
@@ -117,10 +109,7 @@ impl Cube {
         let [top_0, top_1] = quad(npp, ppp, ppn, npn, Rgb::new(0.80, 0.45, 0.85)); // +Y
         let [bottom_0, bottom_1] = quad(nnn, pnn, pnp, nnp, Rgb::new(0.30, 0.80, 0.80)); // -Y
 
-        [
-            front_0, front_1, back_0, back_1, right_0, right_1, left_0, left_1, top_0, top_1,
-            bottom_0, bottom_1,
-        ]
+        [front_0, front_1, back_0, back_1, right_0, right_1, left_0, left_1, top_0, top_1, bottom_0, bottom_1]
     }
 }
 
@@ -129,9 +118,7 @@ impl WasmActor for Cube {
     const NAMESPACE: &'static str = "test.cube";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Cube {
-            view_proj: Cube::framing_view_proj(),
-        })
+        Ok(Cube { view_proj: Cube::framing_view_proj() })
     }
 
     /// Subscribe `Tick` so the chassis tick fanout drives `on_tick`.
@@ -152,9 +139,7 @@ impl WasmActor for Cube {
     /// silhouette.
     #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
-        ctx.actor::<RenderCapability>().send(&ViewProjection {
-            view_proj: self.view_proj,
-        });
+        ctx.actor::<RenderCapability>().send(&ViewProjection { view_proj: self.view_proj });
         for triangle in Cube::triangles() {
             ctx.actor::<RenderCapability>().send(&triangle);
         }

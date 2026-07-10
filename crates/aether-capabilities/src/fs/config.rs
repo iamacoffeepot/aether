@@ -27,10 +27,7 @@ use std::fmt;
 /// the unprefixed `AETHER_*_DIR` env keys.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "runtime", derive(aether_substrate::Config))]
-#[cfg_attr(
-    feature = "runtime",
-    config(env_prefix = "AETHER", cli_prefix = "", skip_from_layer)
-)]
+#[cfg_attr(feature = "runtime", config(env_prefix = "AETHER", cli_prefix = "", skip_from_layer))]
 pub struct NamespaceRoots {
     #[cfg_attr(
         feature = "runtime",
@@ -92,26 +89,16 @@ impl aether_substrate::FromArgvThenEnv for NamespaceRoots {
         use std::env;
         use std::path::Path;
         Self {
-            save: layer.save.unwrap_or_else(|| {
-                dirs::data_dir()
-                    .unwrap_or_else(env::temp_dir)
-                    .join("aether")
-                    .join("save")
-            }),
+            save: layer
+                .save
+                .unwrap_or_else(|| dirs::data_dir().unwrap_or_else(env::temp_dir).join("aether").join("save")),
             assets: layer.assets.unwrap_or_else(|| {
                 env::current_exe()
                     .ok()
                     .and_then(|p| p.parent().map(Path::to_path_buf))
-                    .map_or_else(
-                        || env::temp_dir().join("aether").join("assets"),
-                        |p| p.join("assets"),
-                    )
+                    .map_or_else(|| env::temp_dir().join("aether").join("assets"), |p| p.join("assets"))
             }),
-            config: layer.config.unwrap_or_else(|| {
-                dirs::config_dir()
-                    .unwrap_or_else(env::temp_dir)
-                    .join("aether")
-            }),
+            config: layer.config.unwrap_or_else(|| dirs::config_dir().unwrap_or_else(env::temp_dir).join("aether")),
         }
     }
 }
@@ -121,11 +108,7 @@ impl aether_substrate::FromArgvThenEnv for NamespaceRoots {
 /// `Ok(s) if !s.is_empty()` guard); any non-empty value is a path.
 #[cfg(feature = "runtime")]
 fn parse_dir(s: &str) -> Result<PathBuf, EmptyDir> {
-    if s.is_empty() {
-        Err(EmptyDir)
-    } else {
-        Ok(PathBuf::from(s))
-    }
+    if s.is_empty() { Err(EmptyDir) } else { Ok(PathBuf::from(s)) }
 }
 
 /// Sentinel error: an empty `AETHER_*_DIR` value, treated as unset by

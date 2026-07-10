@@ -2,9 +2,7 @@
 
 use super::*;
 pub(super) use crate::args::*;
-pub(super) use aether_capabilities::rpc::{
-    PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle,
-};
+pub(super) use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle};
 pub(super) use aether_capabilities::trace::TraceDispatchCapability;
 pub(super) use aether_capabilities::{EngineConfig, EngineServer};
 pub(super) use aether_data::{mailbox_id_from_name, mailbox_id_from_path, with_tag};
@@ -93,13 +91,8 @@ impl NativeActor for RouteInventorySink {
         // ReplyEvent: the canned live vocabulary. The server matches it to
         // the in-flight wire call by the preserved correlation.
         self.mailer.push(
-            Mail::new(
-                target,
-                <ListKindsResult as Kind>::ID,
-                self.reply.encode_into_bytes(),
-                1,
-            )
-            .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
+            Mail::new(target, <ListKindsResult as Kind>::ID, self.reply.encode_into_bytes(), 1)
+                .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
         );
         // ReplyEnd: a forwarded call has no local chain to settle, so the
         // server's `engine = Some` path waits on this explicit terminal
@@ -107,13 +100,8 @@ impl NativeActor for RouteInventorySink {
         // it). Pushed after the reply so the server writes the ReplyEvent
         // frame first, then closes on the CallSettled.
         self.mailer.push(
-            Mail::new(
-                target,
-                <CallSettled as Kind>::ID,
-                CallSettled::Ok.encode_into_bytes(),
-                1,
-            )
-            .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
+            Mail::new(target, <CallSettled as Kind>::ID, CallSettled::Ok.encode_into_bytes(), 1)
+                .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
         );
     }
 }
@@ -122,13 +110,8 @@ impl NativeActor for RouteInventorySink {
 /// The `std_env` / `std_fs` aliases avoid shadowing the module's
 /// `tokio::fs`.
 pub(super) fn stage_blob_file(tag: &str, bytes: &[u8]) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let path = std_env::temp_dir().join(format!(
-        "aether-mcp-blob-{tag}-{}-{nanos}.bin",
-        process::id()
-    ));
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let path = std_env::temp_dir().join(format!("aether-mcp-blob-{tag}-{}-{nanos}.bin", process::id()));
     std_fs::write(&path, bytes).expect("stage blob temp file");
     path
 }
@@ -158,10 +141,7 @@ pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
         })
         .build_passive()
         .expect("hub caps boot");
-    let port = chassis
-        .handle::<RpcServerHandle>()
-        .expect("RpcServerHandle published")
-        .local_port;
+    let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
     (chassis, port)
 }
 
@@ -185,9 +165,7 @@ pub(super) fn connect_mcp(port: u16) -> Mcp {
 /// `descriptors::all()`. Used by ADR-0091's end-to-end check that
 /// the MCP encode path picks the registered kind up via
 /// `aether.inventory.kinds`.
-pub(super) fn boot_hub_with_inventory(
-    extras: &[KindDescriptor],
-) -> (PassiveChassis<TestChassis>, u16) {
+pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChassis<TestChassis>, u16) {
     use aether_capabilities::InventoryCapability;
 
     let registry = Arc::new(Registry::new());
@@ -222,10 +200,7 @@ pub(super) fn boot_hub_with_inventory(
         })
         .build_passive()
         .expect("hub caps boot");
-    let port = chassis
-        .handle::<RpcServerHandle>()
-        .expect("RpcServerHandle published")
-        .local_port;
+    let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
     (chassis, port)
 }
 
@@ -262,9 +237,6 @@ pub(super) fn boot_hub_with_route_loopback(
         })
         .build_passive()
         .expect("hub caps boot");
-    let port = chassis
-        .handle::<RpcServerHandle>()
-        .expect("RpcServerHandle published")
-        .local_port;
+    let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
     (chassis, port)
 }

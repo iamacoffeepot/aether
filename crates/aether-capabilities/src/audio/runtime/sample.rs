@@ -72,9 +72,7 @@ impl SampleBank {
     /// `(pitch, velocity)`, or `None` when the note falls in a gap the
     /// bank doesn't cover (the `note_on` then drops).
     pub fn select(&self, pitch: u8, velocity: u8) -> Option<&SampleRegion> {
-        self.regions.iter().find(|r| {
-            (r.lokey..=r.hikey).contains(&pitch) && (r.lovel..=r.hivel).contains(&velocity)
-        })
+        self.regions.iter().find(|r| (r.lokey..=r.hikey).contains(&pitch) && (r.lovel..=r.hivel).contains(&velocity))
     }
 }
 
@@ -122,9 +120,7 @@ impl SampleVoice {
         let v = f32::from(velocity) / 127.0;
         // Drop a loop whose bounds collapsed (defensive — assembly only
         // emits `start < end`): a non-positive span has no cycle.
-        let loop_region = region
-            .loop_region
-            .filter(|lp| lp.end > lp.start && lp.start >= 0.0);
+        let loop_region = region.loop_region.filter(|lp| lp.end > lp.start && lp.start >= 0.0);
         Self {
             pcm: Arc::clone(&region.pcm),
             pos: 0.0,
@@ -193,11 +189,7 @@ impl SampleVoice {
 
     /// The unlooped read: linear interpolation over the PCM, ending the
     /// voice once the read position walks off the end (ADR-0103 §6).
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn next_unlooped(&mut self, len: usize, ramp: f32) -> f32 {
         let i = self.pos.floor() as usize;
         if i >= len {
@@ -222,11 +214,7 @@ impl SampleVoice {
     /// produces no discontinuity beyond interpolation error. The voice
     /// never ends from exhaustion here — only the release ramp retires
     /// it (the loop keeps cycling beneath the fade).
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn next_looped(&mut self, lp: SampleLoop, len: usize, ramp: f32) -> f32 {
         // `pos < loop_end <= len` holds going in, so `i` is in range.
         let i = (self.pos.floor() as usize).min(len - 1);
@@ -234,11 +222,7 @@ impl SampleVoice {
         // The interpolation neighbour is the next frame — but if that
         // frame reaches or crosses `loop_end`, the loop wraps, so read
         // `loop_start` instead (the seam neighbour).
-        let next_index = if (i + 1) as f32 >= lp.end {
-            (lp.start.floor() as usize).min(len - 1)
-        } else {
-            i + 1
-        };
+        let next_index = if (i + 1) as f32 >= lp.end { (lp.start.floor() as usize).min(len - 1) } else { i + 1 };
         let b = self.pcm[next_index];
         let frac = self.pos - i as f32;
         let s = (b - a).mul_add(frac, a) * self.amplitude * ramp;
@@ -322,8 +306,7 @@ pub fn assemble_bank(
     let mut decoded: Vec<(String, Arc<[f32]>, u32)> = Vec::with_capacity(sample_bytes.len());
     let mut resident_bytes = 0usize;
     for (rel, bytes) in sample_bytes {
-        let pcm =
-            decode_wav_to_mono(bytes, target_rate).map_err(|e| format!("sample {rel}: {e}"))?;
+        let pcm = decode_wav_to_mono(bytes, target_rate).map_err(|e| format!("sample {rel}: {e}"))?;
         let source_rate = wav_source_rate(bytes).map_err(|e| format!("sample {rel}: {e}"))?;
         resident_bytes += pcm.len() * size_of::<f32>();
         decoded.push((rel.clone(), Arc::from(pcm.as_slice()), source_rate));
@@ -336,9 +319,7 @@ pub fn assemble_bank(
             .find(|(rel, _, _)| rel == &region.sample)
             .map(|(_, pcm, source_rate)| (Arc::clone(pcm), *source_rate))
             .ok_or_else(|| format!("region references unfetched sample {}", region.sample))?;
-        let loop_region = region
-            .loop_spec
-            .and_then(|lp| scale_loop(lp, source_rate, target_rate, pcm.len()));
+        let loop_region = region.loop_spec.and_then(|lp| scale_loop(lp, source_rate, target_rate, pcm.len()));
         bank_regions.push(SampleRegion {
             lokey: region.lokey,
             hikey: region.hikey,
@@ -350,11 +331,7 @@ pub fn assemble_bank(
         });
     }
 
-    Ok(Arc::new(SampleBank {
-        name,
-        regions: bank_regions,
-        resident_bytes,
-    }))
+    Ok(Arc::new(SampleBank { name, regions: bank_regions, resident_bytes }))
 }
 
 /// Scale a region's source-frame loop bounds into device-rate fractional
@@ -364,12 +341,7 @@ pub fn assemble_bank(
 /// `None` when the resampled region is too short to loop or the bounds
 /// collapse after clamping, degrading the region to unlooped.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-fn scale_loop(
-    lp: SfzLoop,
-    source_rate: u32,
-    target_rate: u32,
-    resampled_len: usize,
-) -> Option<SampleLoop> {
+fn scale_loop(lp: SfzLoop, source_rate: u32, target_rate: u32, resampled_len: usize) -> Option<SampleLoop> {
     if resampled_len < 2 || source_rate == 0 {
         return None;
     }
@@ -379,10 +351,7 @@ fn scale_loop(
     if start + 1.0 >= end {
         return None;
     }
-    Some(SampleLoop {
-        start: start as f32,
-        end: end as f32,
-    })
+    Some(SampleLoop { start: start as f32, end: end as f32 })
 }
 
 /// The directory portion of an fs path (everything before the last
@@ -395,11 +364,7 @@ pub fn sfz_dir(path: &str) -> &str {
 /// Join a sample path onto the `.sfz`'s directory. An empty directory
 /// leaves the sample as-is.
 pub fn join_fs(dir: &str, rel: &str) -> String {
-    if dir.is_empty() {
-        rel.to_owned()
-    } else {
-        format!("{dir}/{rel}")
-    }
+    if dir.is_empty() { rel.to_owned() } else { format!("{dir}/{rel}") }
 }
 
 /// Derive a bank name from the `.sfz` filename stem (the last path
@@ -408,9 +373,5 @@ pub fn join_fs(dir: &str, rel: &str) -> String {
 pub fn bank_name_from_path(path: &str) -> String {
     let file = path.rsplit('/').next().unwrap_or(path);
     let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
-    if stem.is_empty() {
-        "instrument".to_owned()
-    } else {
-        stem.to_owned()
-    }
+    if stem.is_empty() { "instrument".to_owned() } else { stem.to_owned() }
 }

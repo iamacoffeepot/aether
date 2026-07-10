@@ -66,11 +66,6 @@ pub struct RenderConfig {
 
 impl Default for RenderConfig {
     fn default() -> Self {
-        Self {
-            vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
-            observed_kinds: None,
-            capture_backend: None,
-            assets_dir: None,
-        }
+        Self { vertex_buffer_bytes: VERTEX_BUFFER_BYTES, observed_kinds: None, capture_backend: None, assets_dir: None }
     }
 }

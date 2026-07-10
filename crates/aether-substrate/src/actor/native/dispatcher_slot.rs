@@ -97,8 +97,7 @@ use crate::actor::registry::ActorRegistry;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId, Source};
 use crate::scheduler::{
-    BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState, burst_note_mail,
-    time_budget,
+    BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, Drainable, SeizeSeed, SlotState, burst_note_mail, time_budget,
 };
 
 /// Worker-pool-side wrapper for a native actor. One instance per
@@ -197,11 +196,7 @@ where
     /// first send; subsequent calls (idempotent — there should never be
     /// any) are no-ops. Done outside the actor mutex.
     fn fire_close_done(&self) {
-        let tx = self
-            .close_done_tx
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        let tx = self.close_done_tx.lock().unwrap_or_else(PoisonError::into_inner).take();
         if let Some(tx) = tx {
             // Receiver may have hung up if the wait already timed out.
             // Either way, the channel goes away after this call.
@@ -290,12 +285,7 @@ where
             // docs in `dispatch`.
             if !super::dispatch::dispatch_log_tail_if_matching(&mut ctx, kind, payload)
                 && !super::dispatch::dispatch_trace_tail_if_matching(&mut ctx, kind, payload)
-                && !super::dispatch::dispatch_cost_tail_if_matching(
-                    &self.binding,
-                    &mut ctx,
-                    kind,
-                    payload,
-                )
+                && !super::dispatch::dispatch_cost_tail_if_matching(&self.binding, &mut ctx, kind, payload)
             {
                 super::dispatch::typed_then_fallback_or_warn::<A>(actor, &mut ctx, kind, payload);
             }
@@ -309,13 +299,7 @@ where
             // its parent's `Finished`.
             drop(ctx);
             let t_finished = th.now_nanos();
-            th.push_trace_ring(
-                root,
-                TraceEvent::Finished {
-                    mail_id,
-                    t: t_finished,
-                },
-            );
+            th.push_trace_ring(root, TraceEvent::Finished { mail_id, t: t_finished });
             // iamacoffeepot/aether#1128: fold this handler's execution
             // time into its per-handler EWMA (lock-free through the
             // per-actor cache; framework / fallback kinds skipped).
@@ -342,12 +326,8 @@ where
     /// the close hook resolves to this actor's slots.
     fn run_close_hook(&self, actor: &mut Box<A::State>) {
         local::with_stamped(&self.slots, || {
-            let mut close_ctx = NativeCtx::new(
-                &self.binding,
-                Source::NONE,
-                aether_data::MailId::NONE,
-                aether_data::MailId::NONE,
-            );
+            let mut close_ctx =
+                NativeCtx::new(&self.binding, Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
             A::unwire(actor.as_mut(), &mut close_ctx);
         });
     }
@@ -358,15 +338,11 @@ where
     fn finalize_registry(&self) {
         let watchers = self.actor_registry.close_actor(self.self_id);
         if !watchers.is_empty() {
-            let notice = aether_kinds::MonitorNotice {
-                target: self.self_id,
-            };
-            let payload =
-                <aether_kinds::MonitorNotice as aether_data::Kind>::encode_into_bytes(&notice);
+            let notice = aether_kinds::MonitorNotice { target: self.self_id };
+            let payload = <aether_kinds::MonitorNotice as aether_data::Kind>::encode_into_bytes(&notice);
             let kind = KindId(<aether_kinds::MonitorNotice as aether_data::Kind>::ID.0);
             for watcher in watchers {
-                self.mailer
-                    .push(Mail::new(watcher, kind, payload.clone(), 1));
+                self.mailer.push(Mail::new(watcher, kind, payload.clone(), 1));
             }
         }
     }
@@ -393,9 +369,7 @@ where
             // its settlement chain still drains (ADR-0080 §2 — the same
             // bracket `route_mail`'s `Dropped` arm records), then drop it.
             if let Some(seed) = seed {
-                self.binding
-                    .mailer()
-                    .record_finished(seed.mail_id, seed.root);
+                self.binding.mailer().record_finished(seed.mail_id, seed.root);
                 // ADR-0094: discharge beside the finalized-slot seed's
                 // `record_finished` — the seed is consumed (dropped)
                 // here, never run.
@@ -504,11 +478,7 @@ where
         match self.binding.try_recv() {
             Some(env) => {
                 self.dispatch_one(actor, env);
-                if self.state.try_self_requeue() {
-                    CycleResult::Requeue
-                } else {
-                    CycleResult::Idle
-                }
+                if self.state.try_self_requeue() { CycleResult::Requeue } else { CycleResult::Idle }
             }
             None => CycleResult::Idle,
         }
@@ -584,11 +554,7 @@ where
             let _ = tx.try_send(());
             return;
         }
-        let prior = self
-            .close_done_tx
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .replace(tx);
+        let prior = self.close_done_tx.lock().unwrap_or_else(PoisonError::into_inner).replace(tx);
         // Defensive: if a prior sender was installed (shouldn't happen
         // — `shutdown_instanced` runs once per chassis), drop it. The
         // bounded(1) channel goes away with it; that waiter will see

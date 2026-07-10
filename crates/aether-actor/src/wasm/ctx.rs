@@ -24,8 +24,7 @@ use crate::model::ctx::outbound_reply::OutboundReply;
 use crate::model::ctx::persistence::Persistence;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
 use crate::model::{
-    Addressable, HandlesKind, Instanced, NamespaceError, Singleton, Subname,
-    validate_namespace_segment,
+    Addressable, HandlesKind, Instanced, NamespaceError, Singleton, Subname, validate_namespace_segment,
 };
 use crate::wasm::bridge::{mail, persist};
 use crate::wasm::inline::{ChainMode, Registry, RouteDecision};
@@ -50,10 +49,7 @@ impl WasmInitCtx<'_> {
     #[doc(hidden)]
     #[must_use]
     pub fn __new(mailbox: u64) -> Self {
-        Self {
-            mailbox,
-            _borrow: PhantomData,
-        }
+        Self { mailbox, _borrow: PhantomData }
     }
 
     /// The component's own mailbox id — the value the substrate uses to
@@ -125,11 +121,7 @@ impl RelativeMailbox<'_> {
     #[must_use]
     pub fn child(&self, name: &str) -> Option<Self> {
         let id = self.inline.child_of(self.id, name)?;
-        Some(RelativeMailbox {
-            id,
-            sender: self.sender,
-            inline: self.inline,
-        })
+        Some(RelativeMailbox { id, sender: self.sender, inline: self.inline })
     }
 
     /// Send `payload` to this relative, routed in place through the cluster
@@ -139,14 +131,7 @@ impl RelativeMailbox<'_> {
     /// send.
     pub fn send<K: Kind>(&self, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(
-            self.id.0,
-            K::ID.0,
-            &bytes,
-            1,
-            ChainMode::Inherit,
-            self.sender,
-        );
+        self.inline.route_or_enqueue(self.id.0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.sender);
     }
 
     /// Forward pre-encoded `bytes` of kind `kind` to this relative — the
@@ -157,8 +142,7 @@ impl RelativeMailbox<'_> {
     /// the handler's causal chain — so the interposer stays transparent to
     /// settlement. `count` is fixed at 1: a forward carries one inbound mail.
     pub fn send_bytes(&self, kind: aether_data::KindId, bytes: &[u8]) {
-        self.inline
-            .route_or_enqueue(self.id.0, kind.0, bytes, 1, ChainMode::Inherit, self.sender);
+        self.inline.route_or_enqueue(self.id.0, kind.0, bytes, 1, ChainMode::Inherit, self.sender);
     }
 
     /// Fire-and-forget send to this relative (ADR-0080 §7 detach signal).
@@ -167,14 +151,7 @@ impl RelativeMailbox<'_> {
     /// resolved relative never takes.
     pub fn send_detached<K: Kind>(&self, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(
-            self.id.0,
-            K::ID.0,
-            &bytes,
-            1,
-            ChainMode::Detached,
-            self.sender,
-        );
+        self.inline.route_or_enqueue(self.id.0, K::ID.0, &bytes, 1, ChainMode::Detached, self.sender);
     }
 }
 
@@ -302,15 +279,7 @@ impl<'a> WasmCtx<'a, Manual> {
     #[doc(hidden)]
     #[must_use]
     pub fn __new(mailbox: u64, inline: &'a Registry, source: u64) -> Self {
-        Self {
-            mailbox,
-            sender: None,
-            source,
-            host_dispatch: true,
-            inline,
-            _borrow: PhantomData,
-            _mode: PhantomData,
-        }
+        Self { mailbox, sender: None, source, host_dispatch: true, inline, _borrow: PhantomData, _mode: PhantomData }
     }
 
     /// Not part of the public API; inline-cluster drains build ctxs through
@@ -319,15 +288,7 @@ impl<'a> WasmCtx<'a, Manual> {
     #[doc(hidden)]
     #[must_use]
     pub fn __new_local_dispatch(mailbox: u64, inline: &'a Registry, source: u64) -> Self {
-        Self {
-            mailbox,
-            sender: None,
-            source,
-            host_dispatch: false,
-            inline,
-            _borrow: PhantomData,
-            _mode: PhantomData,
-        }
+        Self { mailbox, sender: None, source, host_dispatch: false, inline, _borrow: PhantomData, _mode: PhantomData }
     }
 
     /// ADR-0112 downgrade-only coercion: view this [`Manual`] ctx as a
@@ -480,11 +441,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// returning `Err`) is logged on the trampoline and does not come
     /// back through this `Result` (ADR-0097 §4). The spawned sibling's
     /// `Source` is this actor's mailbox, so its replies route here.
-    pub fn spawn_child<A>(
-        &self,
-        subname: Subname<'_>,
-        config: &A::Config,
-    ) -> Result<MailboxId, SpawnError>
+    pub fn spawn_child<A>(&self, subname: Subname<'_>, config: &A::Config) -> Result<MailboxId, SpawnError>
     where
         A: Instanced + WasmActor,
     {
@@ -527,11 +484,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     /// `ctx.child(name)`) resolves over the registry. Per-parent subname
     /// scoping (the nested-alias fold, ADR-0117) is a follow-up needing a
     /// substrate change.
-    pub fn spawn_inline_child<A>(
-        &self,
-        subname: Subname<'_>,
-        config: &A::Config,
-    ) -> Result<MailboxId, SpawnError>
+    pub fn spawn_inline_child<A>(&self, subname: Subname<'_>, config: &A::Config) -> Result<MailboxId, SpawnError>
     where
         // `ErasedWasmActor` is the boxing seam every `#[actor]` type emits
         // (ADR-0096) — the registry stores the child as `dyn
@@ -550,9 +503,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         // it sidesteps a `Clone` bound the detached verb also lacks.
         let bytes = config.encode_into_bytes();
         let Some(owned) = <A::Config as Kind>::decode_from_bytes(&bytes) else {
-            return Err(SpawnError::InitFailed(ActorInitError::new(
-                "spawn_inline_child: Config round-trip failed",
-            )));
+            return Err(SpawnError::InitFailed(ActorInitError::new("spawn_inline_child: Config round-trip failed")));
         };
         // The actor-type tag the rehydrate reconstruct matches against the
         // module's exported types (ADR-0114 §5) — the same `hash(NAMESPACE)`
@@ -566,16 +517,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         // the instance carry (the substrate's current `spawn_inline_child`),
         // so subnames are cluster-unique; per-parent subname scoping (the
         // nested-alias fold) is a follow-up needing a substrate change.
-        install_inline_child::<A>(
-            self.inline,
-            alias,
-            type_tag,
-            full_subname,
-            is_counter,
-            self.mailbox,
-            bytes,
-            owned,
-        )
+        install_inline_child::<A>(self.inline, alias, type_tag, full_subname, is_counter, self.mailbox, bytes, owned)
     }
 
     /// ADR-0114 / issue 2692: spawn an **inline child** whose type is
@@ -619,14 +561,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         let Some(resolver) = self.inline.spawn_resolver() else {
             return Err(SpawnError::UnknownActorTag(tag));
         };
-        resolver(
-            self.inline,
-            self.mailbox,
-            tag,
-            is_counter,
-            &full_subname,
-            config_bytes,
-        )
+        resolver(self.inline, self.mailbox, tag, is_counter, &full_subname, config_bytes)
     }
 
     /// ADR-0114: tear down an **inline child** spawned by
@@ -677,8 +612,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         // takes `None`, so `unwire` is skipped and the slot removal stays a
         // clean no-op-then-`false`/`true` per the existing contract.
         if let Some(mut taken) = self.inline.take(child) {
-            let mut unwire_ctx: WasmCtx<'_, Manual> =
-                WasmCtx::__new(child.0, self.inline, NO_INBOUND_SOURCE);
+            let mut unwire_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(child.0, self.inline, NO_INBOUND_SOURCE);
             taken.erased_unwire(&mut unwire_ctx);
         }
         self.inline.remove(child)
@@ -699,11 +633,7 @@ impl<'a, M: ReplyMode> WasmCtx<'a, M> {
     #[must_use]
     pub fn parent(&self) -> Option<RelativeMailbox<'a>> {
         let id = self.inline.parent_of(MailboxId(self.mailbox))?;
-        Some(RelativeMailbox {
-            id,
-            sender: self.mailbox,
-            inline: self.inline,
-        })
+        Some(RelativeMailbox { id, sender: self.mailbox, inline: self.inline })
     }
 
     /// ADR-0114 addressing amendment: a sendable handle to this actor's
@@ -712,11 +642,7 @@ impl<'a, M: ReplyMode> WasmCtx<'a, M> {
     #[must_use]
     pub fn child(&self, name: &str) -> Option<RelativeMailbox<'a>> {
         let id = self.inline.child_of(MailboxId(self.mailbox), name)?;
-        Some(RelativeMailbox {
-            id,
-            sender: self.mailbox,
-            inline: self.inline,
-        })
+        Some(RelativeMailbox { id, sender: self.mailbox, inline: self.inline })
     }
 
     /// ADR-0114 addressing amendment: a sendable handle to this actor's
@@ -726,11 +652,7 @@ impl<'a, M: ReplyMode> WasmCtx<'a, M> {
     #[must_use]
     pub fn sibling(&self, name: &str) -> Option<RelativeMailbox<'a>> {
         let id = self.inline.sibling_of(MailboxId(self.mailbox), name)?;
-        Some(RelativeMailbox {
-            id,
-            sender: self.mailbox,
-            inline: self.inline,
-        })
+        Some(RelativeMailbox { id, sender: self.mailbox, inline: self.inline })
     }
 
     /// Issue 1987: send `payload` through a stored [`Mailbox<K>`] addressing
@@ -744,25 +666,13 @@ impl<'a, M: ReplyMode> WasmCtx<'a, M> {
     /// handler's in-flight causal chain (ADR-0080 §7).
     pub fn send<K: Kind>(&mut self, mailbox: Mailbox<K>, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(
-            mailbox.mailbox(),
-            K::ID.0,
-            &bytes,
-            1,
-            ChainMode::Inherit,
-            self.mailbox,
-        );
+        self.inline.route_or_enqueue(mailbox.mailbox(), K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
     }
 
     /// Send through a stored mailbox token and store a typed context for the
     /// reply correlation id.
     #[must_use]
-    pub fn send_with_context<K: Kind, C: Kind>(
-        &mut self,
-        mailbox: Mailbox<K>,
-        payload: &K,
-        context: &C,
-    ) -> RequestId {
+    pub fn send_with_context<K: Kind, C: Kind>(&mut self, mailbox: Mailbox<K>, payload: &K, context: &C) -> RequestId {
         match self.inline.route_decision(mailbox.mailbox()) {
             RouteDecision::Local => {
                 tracing::warn!(
@@ -795,19 +705,13 @@ impl<'a, M: ReplyMode> WasmCtx<'a, M> {
     /// ctx send.
     pub fn send_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.inline
-            .route_or_enqueue(id.0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
+        self.inline.route_or_enqueue(id.0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
     }
 
     /// Send to a raw mailbox id and store a typed context for the reply
     /// correlation id.
     #[must_use]
-    pub fn send_to_with_context<K: Kind, C: Kind>(
-        &mut self,
-        id: MailboxId,
-        payload: &K,
-        context: &C,
-    ) -> RequestId {
+    pub fn send_to_with_context<K: Kind, C: Kind>(&mut self, id: MailboxId, payload: &K, context: &C) -> RequestId {
         match self.inline.route_decision(id.0) {
             RouteDecision::Local => {
                 tracing::warn!(
@@ -899,15 +803,7 @@ where
 {
     let mut ctx = WasmInitCtx::__new(alias.0);
     let child = A::init(config, &mut ctx).map_err(SpawnError::InitFailed)?;
-    registry.insert_child(
-        alias,
-        type_tag,
-        full_subname,
-        is_counter,
-        parent,
-        config_bytes,
-        Box::new(child),
-    );
+    registry.insert_child(alias, type_tag, full_subname, is_counter, parent, config_bytes, Box::new(child));
     // Run the fresh child's `wire` (issue 2746). Take it back onto the stack
     // so its slot is empty for the duration — a `wire` that spawns a nested
     // inline child then re-enters the registry (a different slot) with no
@@ -916,8 +812,7 @@ where
     // yields `Some` here (the box was just inserted); the `if let` is a
     // defensive no-op rather than an `expect`.
     if let Some(mut fresh) = registry.take(alias) {
-        let mut wire_ctx: WasmCtx<'_, Manual> =
-            WasmCtx::__new(alias.0, registry, NO_INBOUND_SOURCE);
+        let mut wire_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(alias.0, registry, NO_INBOUND_SOURCE);
         fresh.erased_wire(&mut wire_ctx);
         registry.reinsert(alias, fresh);
     }
@@ -1022,8 +917,7 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
     // By-id detached send: the inherent `send_to` with `ChainMode::Detached`.
     fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.inline
-            .route_or_enqueue(id.0, K::ID.0, &bytes, 1, ChainMode::Detached, self.mailbox);
+        self.inline.route_or_enqueue(id.0, K::ID.0, &bytes, 1, ChainMode::Detached, self.mailbox);
     }
 }
 
@@ -1077,14 +971,7 @@ impl<K: Kind> Emit<K> for WasmCtx<'_, Multi<K>> {
             return;
         }
         let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(
-            self.source,
-            K::ID.0,
-            &bytes,
-            1,
-            ChainMode::Detached,
-            self.mailbox,
-        );
+        self.inline.route_or_enqueue(self.source, K::ID.0, &bytes, 1, ChainMode::Detached, self.mailbox);
     }
 }
 
@@ -1133,11 +1020,7 @@ impl<'a> WasmDropCtx<'a> {
     #[doc(hidden)]
     #[must_use]
     pub fn __new(mailbox: u64) -> Self {
-        Self {
-            mailbox,
-            capture: None,
-            _borrow: PhantomData,
-        }
+        Self { mailbox, capture: None, _borrow: PhantomData }
     }
 
     /// Not part of the public API; called only by the dehydrate compose
@@ -1147,11 +1030,7 @@ impl<'a> WasmDropCtx<'a> {
     #[doc(hidden)]
     #[must_use]
     pub(crate) fn __new_capturing(mailbox: u64, capture: &'a mut CapturedState) -> Self {
-        Self {
-            mailbox,
-            capture: Some(capture),
-            _borrow: PhantomData,
-        }
+        Self { mailbox, capture: Some(capture), _borrow: PhantomData }
     }
 
     /// Deposit a migration bundle. Mirrors [`Persistence::save_state`].
@@ -1169,10 +1048,7 @@ impl<'a> WasmDropCtx<'a> {
             return;
         }
         let status = persist::save_state(version, bytes);
-        assert_eq!(
-            status, 0,
-            "aether-actor: save_state failed (status {status})"
-        );
+        assert_eq!(status, 0, "aether-actor: save_state failed (status {status})");
     }
 
     /// Persist a typed kind value. Mirrors
@@ -1193,14 +1069,7 @@ impl MailSender for WasmDropCtx<'_> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(
-            R::resolve(self.mailbox, ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            false,
-            self.mailbox,
-        );
+        mail::send_mail(R::resolve(self.mailbox, ()).0, K::ID.0, &bytes, 1, false, self.mailbox);
     }
 
     //noinspection DuplicatedCode
@@ -1210,14 +1079,7 @@ impl MailSender for WasmDropCtx<'_> {
         K: Kind + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        mail::send_mail(
-            R::resolve(self.mailbox, ()).0,
-            K::ID.0,
-            bytes,
-            payloads.len() as u32,
-            false,
-            self.mailbox,
-        );
+        mail::send_mail(R::resolve(self.mailbox, ()).0, K::ID.0, bytes, payloads.len() as u32, false, self.mailbox);
     }
 
     //noinspection DuplicatedCode
@@ -1226,14 +1088,7 @@ impl MailSender for WasmDropCtx<'_> {
     #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(
-            mailbox_id_from_name(name).0,
-            K::ID.0,
-            &bytes,
-            1,
-            false,
-            self.mailbox,
-        );
+        mail::send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, false, self.mailbox);
     }
 
     fn prev_correlation(&self) -> u64 {
@@ -1247,14 +1102,7 @@ impl MailSender for WasmDropCtx<'_> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(
-            R::resolve(self.mailbox, ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            true,
-            self.mailbox,
-        );
+        mail::send_mail(R::resolve(self.mailbox, ()).0, K::ID.0, &bytes, 1, true, self.mailbox);
     }
 
     //noinspection DuplicatedCode
@@ -1262,14 +1110,7 @@ impl MailSender for WasmDropCtx<'_> {
     #[allow(clippy::disallowed_methods)]
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        mail::send_mail(
-            mailbox_id_from_name(name).0,
-            K::ID.0,
-            &bytes,
-            1,
-            true,
-            self.mailbox,
-        );
+        mail::send_mail(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, true, self.mailbox);
     }
 
     //noinspection DuplicatedCode
@@ -1293,15 +1134,13 @@ impl Persistence for WasmDropCtx<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActorTypeTag, Emit, Manual, Multi, NO_INBOUND_SOURCE, Registry, Single, SpawnError,
-        WasmCtx, install_inline_child,
+        ActorTypeTag, Emit, Manual, Multi, NO_INBOUND_SOURCE, Registry, Single, SpawnError, WasmCtx,
+        install_inline_child,
     };
     use crate::mail::{Mail, PriorState};
     use crate::model::Subname;
     use crate::wasm::inline::RouteDecision;
-    use crate::wasm::inline::compose::{
-        InlineChildToReconstruct, reconstruct_one_child, spawn_one_child,
-    };
+    use crate::wasm::inline::compose::{InlineChildToReconstruct, reconstruct_one_child, spawn_one_child};
     use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmDropCtx, WasmInitCtx};
     use crate::{Addressable, HandlesKind, WasmActorMailbox};
     use aether_data::{Kind, MailboxId, Source};
@@ -1415,30 +1254,17 @@ mod tests {
 
         let source = MailboxId(0x9999_0000_1234_5678);
         let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, source.0);
-        assert_eq!(
-            ctx.source_mailbox(),
-            Some(source),
-            "a non-NONE threaded source must surface verbatim",
-        );
+        assert_eq!(ctx.source_mailbox(), Some(source), "a non-NONE threaded source must surface verbatim");
 
         let none_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
-        assert_eq!(
-            none_ctx.source_mailbox(),
-            None,
-            "MailboxId::NONE means no peer-component origin",
-        );
+        assert_eq!(none_ctx.source_mailbox(), None, "MailboxId::NONE means no peer-component origin");
     }
 
     #[test]
     fn local_dispatch_ctx_never_reads_host_reply_correlation() {
         let registry = Registry::new();
-        let ctx: WasmCtx<'_, Manual> =
-            WasmCtx::__new_local_dispatch(0x10, &registry, NO_INBOUND_SOURCE);
-        assert_eq!(
-            ctx.in_reply_to(),
-            None,
-            "cluster-drained dispatches carry no host correlation",
-        );
+        let ctx: WasmCtx<'_, Manual> = WasmCtx::__new_local_dispatch(0x10, &registry, NO_INBOUND_SOURCE);
+        assert_eq!(ctx.in_reply_to(), None, "cluster-drained dispatches carry no host correlation");
     }
 
     /// ADR-0134: `emit` on a `Multi<K>` ctx routes a detached mail at the
@@ -1458,22 +1284,13 @@ mod tests {
         // detached mail there and enqueues locally.
         let mut ctx: WasmCtx<'_, Manual> = WasmCtx::__new(source, &registry, source);
         Emit::<()>::emit(ctx.as_multi::<()>(), &());
-        assert_eq!(
-            registry.queued_len(),
-            1,
-            "emit routes a detached mail at the threaded source",
-        );
+        assert_eq!(registry.queued_len(), 1, "emit routes a detached mail at the threaded source");
 
         // A sourceless dispatch (NONE) has no routable target — the emit
         // drops rather than enqueuing.
-        let mut none_ctx: WasmCtx<'_, Manual> =
-            WasmCtx::__new(source, &registry, NO_INBOUND_SOURCE);
+        let mut none_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(source, &registry, NO_INBOUND_SOURCE);
         Emit::<()>::emit(none_ctx.as_multi::<()>(), &());
-        assert_eq!(
-            registry.queued_len(),
-            1,
-            "a sourceless emit drops — no additional mail enqueued",
-        );
+        assert_eq!(registry.queued_len(), 1, "a sourceless emit drops — no additional mail enqueued");
     }
 
     /// ADR-0134: the multi mode marker is layout-neutral — a `Multi<K>`
@@ -1481,14 +1298,8 @@ mod tests {
     /// This is the invariant the `as_multi` pointer reborrow rests on.
     #[test]
     fn ffi_ctx_layout_identical_for_multi_mode() {
-        assert_eq!(
-            size_of::<WasmCtx<'static, Single>>(),
-            size_of::<WasmCtx<'static, Multi<u32>>>(),
-        );
-        assert_eq!(
-            align_of::<WasmCtx<'static, Single>>(),
-            align_of::<WasmCtx<'static, Multi<u32>>>(),
-        );
+        assert_eq!(size_of::<WasmCtx<'static, Single>>(), size_of::<WasmCtx<'static, Multi<u32>>>(),);
+        assert_eq!(align_of::<WasmCtx<'static, Single>>(), align_of::<WasmCtx<'static, Multi<u32>>>(),);
     }
 
     /// Test inline child whose `init` succeeds, so `install_inline_child`
@@ -1544,14 +1355,8 @@ mod tests {
     /// invariant the `as_single` pointer reborrow rests on.
     #[test]
     fn ffi_ctx_layout_identical_across_modes() {
-        assert_eq!(
-            size_of::<WasmCtx<'static, Single>>(),
-            size_of::<WasmCtx<'static, Manual>>(),
-        );
-        assert_eq!(
-            align_of::<WasmCtx<'static, Single>>(),
-            align_of::<WasmCtx<'static, Manual>>(),
-        );
+        assert_eq!(size_of::<WasmCtx<'static, Single>>(), size_of::<WasmCtx<'static, Manual>>(),);
+        assert_eq!(align_of::<WasmCtx<'static, Single>>(), align_of::<WasmCtx<'static, Manual>>(),);
     }
 
     /// ADR-0114 addressing amendment: a ctx self-identified as the cluster
@@ -1595,30 +1400,15 @@ mod tests {
         let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
 
         // The root has no registry parent entry — its parent is cross-cluster.
-        assert!(
-            ctx.parent().is_none(),
-            "the cluster root resolves no in-cluster parent",
-        );
+        assert!(ctx.parent().is_none(), "the cluster root resolves no in-cluster parent");
 
         // child(name) resolves the resident widget; a missing name is None.
         let child = ctx.child("widget").expect("the widget resolves by subname");
         assert_eq!(child.mailbox_id(), widget, "child resolves to the alias id");
-        assert!(
-            ctx.child("missing").is_none(),
-            "a missing subname resolves to None",
-        );
-        let grandchild = child
-            .child("label")
-            .expect("the grandchild resolves relative to the child handle");
-        assert_eq!(
-            grandchild.mailbox_id(),
-            label,
-            "handle-relative child walk reaches the grandchild",
-        );
-        assert!(
-            child.child("missing").is_none(),
-            "a missing grandchild segment resolves to None",
-        );
+        assert!(ctx.child("missing").is_none(), "a missing subname resolves to None");
+        let grandchild = child.child("label").expect("the grandchild resolves relative to the child handle");
+        assert_eq!(grandchild.mailbox_id(), label, "handle-relative child walk reaches the grandchild");
+        assert!(child.child("missing").is_none(), "a missing grandchild segment resolves to None");
 
         // The resolved relative is a cluster member, so a send routes in
         // place; the local path enqueues and makes no host call (the host
@@ -1631,11 +1421,7 @@ mod tests {
             "the resolved relative is classified as an in-cluster recipient",
         );
         child.send(&());
-        assert_eq!(
-            registry.queued_len(),
-            1,
-            "a send to a resolved relative enqueues locally — no scheduler hop",
-        );
+        assert_eq!(registry.queued_len(), 1, "a send to a resolved relative enqueues locally — no scheduler hop");
     }
 
     #[test]
@@ -1658,11 +1444,7 @@ mod tests {
 
         let mailbox = WasmActorMailbox::<SucceedingChild>::__new(child.0, root, &registry);
         let request = mailbox.send_tracked(&());
-        assert_eq!(
-            request.0,
-            Source::NO_CORRELATION,
-            "local inline sends have no host-minted request id",
-        );
+        assert_eq!(request.0, Source::NO_CORRELATION, "local inline sends have no host-minted request id");
     }
 
     // Issue 2692: the by-tag spawn host-unit fixtures. `thread_local` (not
@@ -1680,14 +1462,7 @@ mod tests {
     /// Config for [`StubChild`] carrying an observable `value`, so a by-tag
     /// spawn test proves `config_bytes` were decoded and handed to `init`
     /// (rather than dropped or replaced with an empty default).
-    #[derive(
-        ::aether_data::Kind,
-        ::aether_data::Schema,
-        serde::Serialize,
-        serde::Deserialize,
-        Debug,
-        Default,
-    )]
+    #[derive(::aether_data::Kind, ::aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Default)]
     #[kind(name = "test.inline.stub_config")]
     struct StubConfig {
         value: u32,
@@ -1797,17 +1572,10 @@ mod tests {
         let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
         let config_bytes = StubConfig { value: 0x1234_5678 }.encode_into_bytes();
         let alias = ctx
-            .spawn_inline_child_by_tag(
-                ActorTypeTag::of::<StubChild>(),
-                Subname::Named("tagged"),
-                &config_bytes,
-            )
+            .spawn_inline_child_by_tag(ActorTypeTag::of::<StubChild>(), Subname::Named("tagged"), &config_bytes)
             .expect("a known tag spawns its exported type");
 
-        assert!(
-            registry.take(alias).is_some(),
-            "the tagged child is resident under the resolver's alias",
-        );
+        assert!(registry.take(alias).is_some(), "the tagged child is resident under the resolver's alias");
         assert_eq!(
             STUB_INIT_CONFIG.get(),
             Some(0x1234_5678),
@@ -1862,10 +1630,7 @@ mod tests {
             matches!(result, Err(SpawnError::UnknownActorTag(t)) if t == unknown),
             "an unresolvable tag returns UnknownActorTag(tag), got {result:?}",
         );
-        assert!(
-            registry.child_metas().is_empty(),
-            "an unknown tag inserts no child",
-        );
+        assert!(registry.child_metas().is_empty(), "an unknown tag inserts no child");
     }
 
     /// Step 5(c): subname validation runs before the resolver — a
@@ -1878,11 +1643,7 @@ mod tests {
         registry.set_spawn_resolver(panicking_resolver);
 
         let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
-        let result = ctx.spawn_inline_child_by_tag(
-            ActorTypeTag::of::<StubChild>(),
-            Subname::Named("bad:name"),
-            &[],
-        );
+        let result = ctx.spawn_inline_child_by_tag(ActorTypeTag::of::<StubChild>(), Subname::Named("bad:name"), &[]);
         assert!(
             matches!(result, Err(SpawnError::SubnameInvalid(_))),
             "a separator-bearing subname is rejected before the resolver runs, got {result:?}",
@@ -1993,12 +1754,8 @@ mod tests {
         }
         fn erased_wire(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
             let config_bytes = StubConfig { value: 0x0BAD_CAFE }.encode_into_bytes();
-            ctx.spawn_inline_child_by_tag(
-                ActorTypeTag::of::<StubChild>(),
-                Subname::Named("nested"),
-                &config_bytes,
-            )
-            .expect("the nested by-tag spawn during wire succeeds");
+            ctx.spawn_inline_child_by_tag(ActorTypeTag::of::<StubChild>(), Subname::Named("nested"), &config_bytes)
+                .expect("the nested by-tag spawn during wire succeeds");
         }
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
         fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
@@ -2031,10 +1788,7 @@ mod tests {
         .expect("the nesting parent installs");
 
         // The parent's `wire` ran and it was reinserted into its slot.
-        assert!(
-            registry.take(parent).is_some(),
-            "the parent's wire ran and it was reinserted",
-        );
+        assert!(registry.take(parent).is_some(), "the parent's wire ran and it was reinserted");
         // The `wire` spawned a nested inline child mid-wire (the reentrant
         // install path) — resolved to the stub resolver's fixed alias.
         assert!(
@@ -2070,24 +1824,13 @@ mod tests {
             (),
         )
         .expect("the probe installs");
-        assert_eq!(
-            PROBE_WIRE_COUNT.get(),
-            1,
-            "a fresh inline spawn runs the child's wire exactly once",
-        );
+        assert_eq!(PROBE_WIRE_COUNT.get(), 1, "a fresh inline spawn runs the child's wire exactly once");
 
         let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x9200, &registry, NO_INBOUND_SOURCE);
         let removed = ctx.despawn_inline_child(probe);
         assert!(removed, "despawning a resident child returns true");
-        assert_eq!(
-            PROBE_UNWIRE_COUNT.get(),
-            1,
-            "despawn runs the child's unwire exactly once",
-        );
-        assert!(
-            registry.take(probe).is_none(),
-            "the despawned child's slot is gone",
-        );
+        assert_eq!(PROBE_UNWIRE_COUNT.get(), 1, "despawn runs the child's unwire exactly once");
+        assert!(registry.take(probe).is_none(), "the despawned child's slot is gone");
     }
 
     /// Issue 2746: a `replace_component` reconstruct runs `init` +
@@ -2112,14 +1855,7 @@ mod tests {
         };
         let ok = reconstruct_one_child::<LifecycleProbe>(&registry, &to_reconstruct);
         assert!(ok, "a ()-config probe reconstructs from empty bytes");
-        assert_eq!(
-            PROBE_WIRE_COUNT.get(),
-            0,
-            "a reconstruct runs init + on_rehydrate, never wire",
-        );
-        assert!(
-            registry.take(alias).is_some(),
-            "the reconstructed child is resident under its alias",
-        );
+        assert_eq!(PROBE_WIRE_COUNT.get(), 0, "a reconstruct runs init + on_rehydrate, never wire");
+        assert!(registry.take(alias).is_some(), "the reconstructed child is resident under its alias");
     }
 }

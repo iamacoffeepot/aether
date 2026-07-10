@@ -47,20 +47,12 @@ struct Comb {
 
 impl Comb {
     fn new(length: usize, feedback: f32, damping: f32) -> Self {
-        Self {
-            buffer: vec![0.0; length.max(1)],
-            index: 0,
-            feedback,
-            damping,
-            filterstore: 0.0,
-        }
+        Self { buffer: vec![0.0; length.max(1)], index: 0, feedback, damping, filterstore: 0.0 }
     }
 
     fn tick(&mut self, input: f32) -> f32 {
         let output = self.buffer[self.index];
-        self.filterstore = self
-            .filterstore
-            .mul_add(self.damping, output * (1.0 - self.damping));
+        self.filterstore = self.filterstore.mul_add(self.damping, output * (1.0 - self.damping));
         self.buffer[self.index] = self.filterstore.mul_add(self.feedback, input);
         self.index = (self.index + 1) % self.buffer.len();
         output
@@ -79,11 +71,7 @@ struct Allpass {
 
 impl Allpass {
     fn new(length: usize, feedback: f32) -> Self {
-        Self {
-            buffer: vec![0.0; length.max(1)],
-            index: 0,
-            feedback,
-        }
+        Self { buffer: vec![0.0; length.max(1)], index: 0, feedback }
     }
 
     fn tick(&mut self, input: f32) -> f32 {
@@ -113,22 +101,12 @@ impl Reverb {
             // Tunings are small (< 2000) and sample rates are bounded
             // well below 2^24, so the round-trip through f32 is exact
             // and the rounded product is a small non-negative integer.
-            #[allow(
-                clippy::cast_precision_loss,
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss
-            )]
+            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let scaled = ((tuning as f32) * sample_rate / REFERENCE_SAMPLE_RATE).round() as usize;
             scaled
         };
-        let combs = COMB_TUNINGS
-            .iter()
-            .map(|&t| Comb::new(scale(t), ROOM_SIZE, DAMPING))
-            .collect();
-        let allpasses = ALLPASS_TUNINGS
-            .iter()
-            .map(|&t| Allpass::new(scale(t), ALLPASS_FEEDBACK))
-            .collect();
+        let combs = COMB_TUNINGS.iter().map(|&t| Comb::new(scale(t), ROOM_SIZE, DAMPING)).collect();
+        let allpasses = ALLPASS_TUNINGS.iter().map(|&t| Allpass::new(scale(t), ALLPASS_FEEDBACK)).collect();
         Self { combs, allpasses }
     }
 
@@ -165,9 +143,6 @@ mod tests {
                 break;
             }
         }
-        assert!(
-            found_late_energy,
-            "expected nonzero reverb tail several hundred samples after the impulse",
-        );
+        assert!(found_late_energy, "expected nonzero reverb tail several hundred samples after the impulse");
     }
 }

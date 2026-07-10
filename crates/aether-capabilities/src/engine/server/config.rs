@@ -155,11 +155,9 @@ impl EngineConfig {
     /// when the heartbeat is disabled (`0` interval or miss limit).
     #[must_use]
     pub fn heartbeat_params(&self) -> Option<HeartbeatParams> {
-        (self.heartbeat_interval_secs != 0 && self.heartbeat_miss_limit != 0).then(|| {
-            HeartbeatParams {
-                interval: Duration::from_secs(self.heartbeat_interval_secs),
-                miss_limit: self.heartbeat_miss_limit,
-            }
+        (self.heartbeat_interval_secs != 0 && self.heartbeat_miss_limit != 0).then(|| HeartbeatParams {
+            interval: Duration::from_secs(self.heartbeat_interval_secs),
+            miss_limit: self.heartbeat_miss_limit,
         })
     }
 
@@ -168,8 +166,7 @@ impl EngineConfig {
     /// sentinel) means wait forever.
     #[must_use]
     pub fn connect_budget(&self) -> Option<Duration> {
-        (self.proxy_connect_budget_secs != 0)
-            .then(|| Duration::from_secs(self.proxy_connect_budget_secs))
+        (self.proxy_connect_budget_secs != 0).then(|| Duration::from_secs(self.proxy_connect_budget_secs))
     }
 
     /// The bounded re-fork attempt count for `on_spawn` (issue 2422),
@@ -188,15 +185,9 @@ mod config_tests {
     /// finite `Duration`, and `0` to the wait-forever sentinel `None`.
     #[test]
     fn connect_budget_maps_zero_to_wait_forever() {
-        let finite = EngineConfig {
-            proxy_connect_budget_secs: 12,
-            ..EngineConfig::default()
-        };
+        let finite = EngineConfig { proxy_connect_budget_secs: 12, ..EngineConfig::default() };
         assert_eq!(finite.connect_budget(), Some(Duration::from_secs(12)));
-        let forever = EngineConfig {
-            proxy_connect_budget_secs: 0,
-            ..EngineConfig::default()
-        };
+        let forever = EngineConfig { proxy_connect_budget_secs: 0, ..EngineConfig::default() };
         assert_eq!(forever.connect_budget(), None);
     }
 
@@ -206,13 +197,8 @@ mod config_tests {
     /// dead substrate still fails the spawn rather than hanging.
     #[test]
     fn default_connect_budget_is_generous_and_finite() {
-        let budget = EngineConfig::default()
-            .connect_budget()
-            .expect("default budget is finite, not wait-forever");
-        assert_eq!(
-            budget,
-            Duration::from_secs(DEFAULT_PROXY_CONNECT_BUDGET_SECS)
-        );
+        let budget = EngineConfig::default().connect_budget().expect("default budget is finite, not wait-forever");
+        assert_eq!(budget, Duration::from_secs(DEFAULT_PROXY_CONNECT_BUDGET_SECS));
         assert!(budget >= Duration::from_secs(30), "default stays generous");
     }
 }

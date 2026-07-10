@@ -222,20 +222,9 @@ pub struct NamedField {
 /// forward-compatible at the wire level.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EnumVariant {
-    Unit {
-        name: Cow<'static, str>,
-        discriminant: u32,
-    },
-    Tuple {
-        name: Cow<'static, str>,
-        discriminant: u32,
-        fields: Cow<'static, [SchemaType]>,
-    },
-    Struct {
-        name: Cow<'static, str>,
-        discriminant: u32,
-        fields: Cow<'static, [NamedField]>,
-    },
+    Unit { name: Cow<'static, str>, discriminant: u32 },
+    Tuple { name: Cow<'static, str>, discriminant: u32, fields: Cow<'static, [SchemaType]> },
+    Struct { name: Cow<'static, str>, discriminant: u32, fields: Cow<'static, [NamedField]> },
 }
 
 impl EnumVariant {
@@ -255,9 +244,9 @@ impl EnumVariant {
     #[must_use]
     pub fn discriminant(&self) -> u32 {
         match self {
-            Self::Unit { discriminant, .. }
-            | Self::Tuple { discriminant, .. }
-            | Self::Struct { discriminant, .. } => *discriminant,
+            Self::Unit { discriminant, .. } | Self::Tuple { discriminant, .. } | Self::Struct { discriminant, .. } => {
+                *discriminant
+            }
         }
     }
 }
@@ -328,17 +317,9 @@ pub enum SchemaShape {
 /// arms.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VariantShape {
-    Unit {
-        discriminant: u32,
-    },
-    Tuple {
-        discriminant: u32,
-        fields: Vec<SchemaShape>,
-    },
-    Struct {
-        discriminant: u32,
-        fields: Vec<SchemaShape>,
-    },
+    Unit { discriminant: u32 },
+    Tuple { discriminant: u32, fields: Vec<SchemaShape> },
+    Struct { discriminant: u32, fields: Vec<SchemaShape> },
 }
 
 /// Kind-level canonical record — the name-plus-positional-schema pair
@@ -479,26 +460,15 @@ impl Clone for LabelNode {
             Self::Option(c) => Self::Option(c.clone()),
             Self::Vec(c) => Self::Vec(c.clone()),
             Self::Array(c) => Self::Array(c.clone()),
-            Self::Struct {
-                type_label,
-                field_names,
-                fields,
-            } => Self::Struct {
+            Self::Struct { type_label, field_names, fields } => Self::Struct {
                 type_label: type_label.clone(),
                 field_names: field_names.clone(),
                 fields: fields.clone(),
             },
-            Self::Enum {
-                type_label,
-                variants,
-            } => Self::Enum {
-                type_label: type_label.clone(),
-                variants: variants.clone(),
-            },
-            Self::Map { key, value } => Self::Map {
-                key: key.clone(),
-                value: value.clone(),
-            },
+            Self::Enum { type_label, variants } => {
+                Self::Enum { type_label: type_label.clone(), variants: variants.clone() }
+            }
+            Self::Map { key, value } => Self::Map { key: key.clone(), value: value.clone() },
         }
     }
 }
@@ -507,34 +477,17 @@ impl PartialEq for LabelNode {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Anonymous, Self::Anonymous) => true,
-            (Self::Option(a), Self::Option(b))
-            | (Self::Vec(a), Self::Vec(b))
-            | (Self::Array(a), Self::Array(b)) => a == b,
-            (
-                Self::Struct {
-                    type_label: la,
-                    field_names: na,
-                    fields: fa,
-                },
-                Self::Struct {
-                    type_label: lb,
-                    field_names: nb,
-                    fields: fb,
-                },
-            ) => la == lb && na == nb && fa == fb,
-            (
-                Self::Enum {
-                    type_label: la,
-                    variants: va,
-                },
-                Self::Enum {
-                    type_label: lb,
-                    variants: vb,
-                },
-            ) => la == lb && va == vb,
-            (Self::Map { key: ka, value: va }, Self::Map { key: kb, value: vb }) => {
-                ka == kb && va == vb
+            (Self::Option(a), Self::Option(b)) | (Self::Vec(a), Self::Vec(b)) | (Self::Array(a), Self::Array(b)) => {
+                a == b
             }
+            (
+                Self::Struct { type_label: la, field_names: na, fields: fa },
+                Self::Struct { type_label: lb, field_names: nb, fields: fb },
+            ) => la == lb && na == nb && fa == fb,
+            (Self::Enum { type_label: la, variants: va }, Self::Enum { type_label: lb, variants: vb }) => {
+                la == lb && va == vb
+            }
+            (Self::Map { key: ka, value: va }, Self::Map { key: kb, value: vb }) => ka == kb && va == vb,
             _ => false,
         }
     }
@@ -566,21 +519,14 @@ impl Serialize for LabelNode {
                 s.serialize_field(cell)?;
                 s.end()
             }
-            Self::Struct {
-                type_label,
-                field_names,
-                fields,
-            } => {
+            Self::Struct { type_label, field_names, fields } => {
                 let mut s = serializer.serialize_struct_variant("LabelNode", 4, "Struct", 3)?;
                 s.serialize_field("type_label", type_label)?;
                 s.serialize_field("field_names", field_names)?;
                 s.serialize_field("fields", fields)?;
                 s.end()
             }
-            Self::Enum {
-                type_label,
-                variants,
-            } => {
+            Self::Enum { type_label, variants } => {
                 let mut s = serializer.serialize_struct_variant("LabelNode", 5, "Enum", 2)?;
                 s.serialize_field("type_label", type_label)?;
                 s.serialize_field("variants", variants)?;
@@ -625,22 +571,10 @@ impl<'de> Deserialize<'de> for LabelNode {
             LabelNodeDe::Option(c) => Ok(Self::Option(c)),
             LabelNodeDe::Vec(c) => Ok(Self::Vec(c)),
             LabelNodeDe::Array(c) => Ok(Self::Array(c)),
-            LabelNodeDe::Struct {
-                type_label,
-                field_names,
-                fields,
-            } => Ok(Self::Struct {
-                type_label,
-                field_names: Cow::Owned(field_names),
-                fields: Cow::Owned(fields),
-            }),
-            LabelNodeDe::Enum {
-                type_label,
-                variants,
-            } => Ok(Self::Enum {
-                type_label,
-                variants: Cow::Owned(variants),
-            }),
+            LabelNodeDe::Struct { type_label, field_names, fields } => {
+                Ok(Self::Struct { type_label, field_names: Cow::Owned(field_names), fields: Cow::Owned(fields) })
+            }
+            LabelNodeDe::Enum { type_label, variants } => Ok(Self::Enum { type_label, variants: Cow::Owned(variants) }),
             LabelNodeDe::Map { key, value } => Ok(Self::Map { key, value }),
         }
     }
@@ -650,19 +584,10 @@ impl Clone for VariantLabel {
     fn clone(&self) -> Self {
         match self {
             Self::Unit { name } => Self::Unit { name: name.clone() },
-            Self::Tuple { name, fields } => Self::Tuple {
-                name: name.clone(),
-                fields: fields.clone(),
-            },
-            Self::Struct {
-                name,
-                field_names,
-                fields,
-            } => Self::Struct {
-                name: name.clone(),
-                field_names: field_names.clone(),
-                fields: fields.clone(),
-            },
+            Self::Tuple { name, fields } => Self::Tuple { name: name.clone(), fields: fields.clone() },
+            Self::Struct { name, field_names, fields } => {
+                Self::Struct { name: name.clone(), field_names: field_names.clone(), fields: fields.clone() }
+            }
         }
     }
 }
@@ -671,27 +596,10 @@ impl PartialEq for VariantLabel {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Unit { name: a }, Self::Unit { name: b }) => a == b,
+            (Self::Tuple { name: na, fields: fa }, Self::Tuple { name: nb, fields: fb }) => na == nb && fa == fb,
             (
-                Self::Tuple {
-                    name: na,
-                    fields: fa,
-                },
-                Self::Tuple {
-                    name: nb,
-                    fields: fb,
-                },
-            ) => na == nb && fa == fb,
-            (
-                Self::Struct {
-                    name: na,
-                    field_names: fna,
-                    fields: fa,
-                },
-                Self::Struct {
-                    name: nb,
-                    field_names: fnb,
-                    fields: fb,
-                },
+                Self::Struct { name: na, field_names: fna, fields: fa },
+                Self::Struct { name: nb, field_names: fnb, fields: fb },
             ) => na == nb && fna == fnb && fa == fb,
             _ => false,
         }
@@ -715,11 +623,7 @@ impl Serialize for VariantLabel {
                 s.serialize_field("fields", fields)?;
                 s.end()
             }
-            Self::Struct {
-                name,
-                field_names,
-                fields,
-            } => {
+            Self::Struct { name, field_names, fields } => {
                 let mut s = serializer.serialize_struct_variant("VariantLabel", 2, "Struct", 3)?;
                 s.serialize_field("name", name)?;
                 s.serialize_field("field_names", field_names)?;
@@ -734,34 +638,16 @@ impl<'de> Deserialize<'de> for VariantLabel {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Serialize, Deserialize)]
         enum VariantLabelDe {
-            Unit {
-                name: Cow<'static, str>,
-            },
-            Tuple {
-                name: Cow<'static, str>,
-                fields: Vec<LabelNode>,
-            },
-            Struct {
-                name: Cow<'static, str>,
-                field_names: Vec<Cow<'static, str>>,
-                fields: Vec<LabelNode>,
-            },
+            Unit { name: Cow<'static, str> },
+            Tuple { name: Cow<'static, str>, fields: Vec<LabelNode> },
+            Struct { name: Cow<'static, str>, field_names: Vec<Cow<'static, str>>, fields: Vec<LabelNode> },
         }
         match VariantLabelDe::deserialize(deserializer)? {
             VariantLabelDe::Unit { name } => Ok(Self::Unit { name }),
-            VariantLabelDe::Tuple { name, fields } => Ok(Self::Tuple {
-                name,
-                fields: Cow::Owned(fields),
-            }),
-            VariantLabelDe::Struct {
-                name,
-                field_names,
-                fields,
-            } => Ok(Self::Struct {
-                name,
-                field_names: Cow::Owned(field_names),
-                fields: Cow::Owned(fields),
-            }),
+            VariantLabelDe::Tuple { name, fields } => Ok(Self::Tuple { name, fields: Cow::Owned(fields) }),
+            VariantLabelDe::Struct { name, field_names, fields } => {
+                Ok(Self::Struct { name, field_names: Cow::Owned(field_names), fields: Cow::Owned(fields) })
+            }
         }
     }
 }
@@ -819,10 +705,7 @@ pub enum ReplyContract {
 impl crate::Schema for ReplyContract {
     const SCHEMA: SchemaType = SchemaType::Enum {
         variants: Cow::Borrowed(&[
-            EnumVariant::Unit {
-                name: Cow::Borrowed("None"),
-                discriminant: 0,
-            },
+            EnumVariant::Unit { name: Cow::Borrowed("None"), discriminant: 0 },
             EnumVariant::Tuple {
                 name: Cow::Borrowed("One"),
                 discriminant: 1,
@@ -833,10 +716,7 @@ impl crate::Schema for ReplyContract {
                 discriminant: 2,
                 fields: Cow::Borrowed(&[SchemaType::TypeId(KindId::TYPE_ID)]),
             },
-            EnumVariant::Unit {
-                name: Cow::Borrowed("Manual"),
-                discriminant: 3,
-            },
+            EnumVariant::Unit { name: Cow::Borrowed("Manual"), discriminant: 3 },
         ]),
     };
 
@@ -849,20 +729,10 @@ impl crate::Schema for ReplyContract {
     const LABEL_NODE: LabelNode = LabelNode::Enum {
         type_label: Some(Cow::Borrowed("ReplyContract")),
         variants: Cow::Borrowed(&[
-            VariantLabel::Unit {
-                name: Cow::Borrowed("None"),
-            },
-            VariantLabel::Tuple {
-                name: Cow::Borrowed("One"),
-                fields: Cow::Borrowed(&[LabelNode::Anonymous]),
-            },
-            VariantLabel::Tuple {
-                name: Cow::Borrowed("Multi"),
-                fields: Cow::Borrowed(&[LabelNode::Anonymous]),
-            },
-            VariantLabel::Unit {
-                name: Cow::Borrowed("Manual"),
-            },
+            VariantLabel::Unit { name: Cow::Borrowed("None") },
+            VariantLabel::Tuple { name: Cow::Borrowed("One"), fields: Cow::Borrowed(&[LabelNode::Anonymous]) },
+            VariantLabel::Tuple { name: Cow::Borrowed("Multi"), fields: Cow::Borrowed(&[LabelNode::Anonymous]) },
+            VariantLabel::Unit { name: Cow::Borrowed("Manual") },
         ]),
     };
 }

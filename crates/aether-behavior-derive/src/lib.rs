@@ -62,12 +62,9 @@ struct LifecycleHook {
 #[proc_macro_attribute]
 pub fn behavior(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {
-        return syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "#[behavior] takes no arguments",
-        )
-        .to_compile_error()
-        .into();
+        return syn::Error::new(proc_macro2::Span::call_site(), "#[behavior] takes no arguments")
+            .to_compile_error()
+            .into();
     }
     let item = parse_macro_input!(item as ItemImpl);
     match expand_behavior(item) {
@@ -118,16 +115,10 @@ fn attr_is_on(attr: &Attribute) -> bool {
 #[allow(clippy::too_many_lines)]
 fn expand_behavior(item: ItemImpl) -> syn::Result<TokenStream2> {
     let self_ty = &item.self_ty;
-    let trait_ok = item
-        .trait_
-        .as_ref()
-        .and_then(|(_, path, _)| path.segments.last())
-        .is_some_and(|s| s.ident == "Behavior");
+    let trait_ok =
+        item.trait_.as_ref().and_then(|(_, path, _)| path.segments.last()).is_some_and(|s| s.ident == "Behavior");
     if !trait_ok {
-        return Err(syn::Error::new_spanned(
-            self_ty,
-            "#[behavior] expects `impl Behavior for X`",
-        ));
+        return Err(syn::Error::new_spanned(self_ty, "#[behavior] expects `impl Behavior for X`"));
     }
 
     let mut handlers: Vec<Handler> = Vec::new();
@@ -142,35 +133,22 @@ fn expand_behavior(item: ItemImpl) -> syn::Result<TokenStream2> {
 
     for impl_item in item.items {
         let ImplItem::Fn(mut method) = impl_item else {
-            return Err(syn::Error::new_spanned(
-                impl_item,
-                "#[behavior] impl blocks hold only fns",
-            ));
+            return Err(syn::Error::new_spanned(impl_item, "#[behavior] impl blocks hold only fns"));
         };
         let name = method.sig.ident.to_string();
         let on_idx = method.attrs.iter().position(attr_is_on);
-        let lifecycle_idx = method
-            .attrs
-            .iter()
-            .position(|a| Lifecycle::from_attr(a).is_some());
+        let lifecycle_idx = method.attrs.iter().position(|a| Lifecycle::from_attr(a).is_some());
 
         if let Some(idx) = on_idx {
             let (kind_ty, intercepts) = extract_handler_kind(&method.sig)?;
             method.attrs.remove(idx);
-            handlers.push(Handler {
-                method: method.sig.ident.clone(),
-                kind_ty,
-                intercepts,
-            });
+            handlers.push(Handler { method: method.sig.ident.clone(), kind_ty, intercepts });
             inherent_items.push(ImplItem::Fn(method));
         } else if let Some(idx) = lifecycle_idx {
             reject_async(&method.sig, "lifecycle hooks run synchronously")?;
             let hook = Lifecycle::from_attr(&method.attrs[idx]).expect("checked present");
             method.attrs.remove(idx);
-            lifecycle_hooks.push(LifecycleHook {
-                hook,
-                method: method.sig.ident.clone(),
-            });
+            lifecycle_hooks.push(LifecycleHook { hook, method: method.sig.ident.clone() });
             inherent_items.push(ImplItem::Fn(method));
         } else if matches!(name.as_str(), "on_attach" | "on_frame" | "on_detach") {
             // A directly-named lifecycle override stays in `impl Behavior`.
@@ -237,10 +215,7 @@ fn expand_behavior(item: ItemImpl) -> syn::Result<TokenStream2> {
 /// (intercept); the referenced type is the kind, the mutability is the
 /// intent.
 fn extract_handler_kind(sig: &syn::Signature) -> syn::Result<(Type, bool)> {
-    reject_async(
-        sig,
-        "#[on] handlers are synchronous - the dispatch table calls them as statements",
-    )?;
+    reject_async(sig, "#[on] handlers are synchronous - the dispatch table calls them as statements")?;
     if sig.inputs.len() != 3 {
         return Err(syn::Error::new_spanned(
             sig,
@@ -249,10 +224,7 @@ fn extract_handler_kind(sig: &syn::Signature) -> syn::Result<(Type, bool)> {
         ));
     }
     if !matches!(sig.inputs[0], FnArg::Receiver(_)) {
-        return Err(syn::Error::new_spanned(
-            &sig.inputs[0],
-            "#[on] handler's first parameter must be `&mut self`",
-        ));
+        return Err(syn::Error::new_spanned(&sig.inputs[0], "#[on] handler's first parameter must be `&mut self`"));
     }
     let FnArg::Typed(pat) = &sig.inputs[2] else {
         return Err(syn::Error::new_spanned(
@@ -272,10 +244,7 @@ fn extract_handler_kind(sig: &syn::Signature) -> syn::Result<(Type, bool)> {
 
 fn reject_async(sig: &syn::Signature, target: &str) -> syn::Result<()> {
     if let Some(asyncness) = &sig.asyncness {
-        return Err(syn::Error::new_spanned(
-            asyncness,
-            format!("#[behavior] {target} - remove `async`"),
-        ));
+        return Err(syn::Error::new_spanned(asyncness, format!("#[behavior] {target} - remove `async`")));
     }
     Ok(())
 }
@@ -520,10 +489,7 @@ fn reject_conflicts(handlers: &[Handler], lifecycle: &[LifecycleHook]) -> syn::R
     for (i, a) in handlers.iter().enumerate() {
         for b in &handlers[i + 1..] {
             if tokens_eq(&a.kind_ty, &b.kind_ty) {
-                return Err(syn::Error::new(
-                    b.method.span(),
-                    "two #[on] handlers cover the same kind",
-                ));
+                return Err(syn::Error::new(b.method.span(), "two #[on] handlers cover the same kind"));
             }
         }
     }

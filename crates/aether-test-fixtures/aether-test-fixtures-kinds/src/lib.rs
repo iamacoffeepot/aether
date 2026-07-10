@@ -26,9 +26,7 @@ pub const TEST_BENCH_OBSERVER_MAILBOX_NAME: &str = "aether.test_bench.observer";
 /// rides in the wasm's `aether.kinds` custom section, so the bench's
 /// loopback decoder can record the kind name without the test
 /// pre-registering anything.
-#[derive(
-    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[kind(name = "aether.test_fixture.tick_observed")]
 pub struct TickObserved {
     pub count: u64,
@@ -40,9 +38,7 @@ pub struct TickObserved {
 /// [`TickObserved`] counts lifecycle ticks — `Key` is a genuine input
 /// interrupt, so it exercises the `aether.input` subscribe / unsubscribe
 /// / drop-clears path that `Tick` no longer does (issue 1490).
-#[derive(
-    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[kind(name = "aether.test_fixture.key_observed")]
 pub struct KeyObserved {
     pub code: u32,
@@ -53,9 +49,7 @@ pub struct KeyObserved {
 /// scenario assert the `aether.input` cap fanned a `TextInput` out to a
 /// subscriber — the guard for the new text-stream fan-out handler being
 /// wired up, mirroring how [`KeyObserved`] guards the `Key` fan-out.
-#[derive(
-    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[kind(name = "aether.test_fixture.text_input_observed")]
 pub struct TextInputObserved {
     pub text: String,
@@ -81,15 +75,7 @@ pub struct SetRender {
 /// the actor stamps `seed` and `label` into its state and exposes
 /// them on demand via `ConfigEcho`.
 #[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq,
 )]
 #[kind(name = "aether.test_fixtures.probe_config")]
 pub struct ProbeConfig {
@@ -100,16 +86,7 @@ pub struct ProbeConfig {
 /// Reply kind for `ConfigQuery`: surfaces the `(seed, label)` the
 /// fixture cached from its `Config` at init-time. Lets a test
 /// assert the typed-config path round-tripped end-to-end.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.test_fixtures.config_echo")]
 pub struct ConfigEcho {
     pub seed: u32,
@@ -120,15 +97,7 @@ pub struct ConfigEcho {
 /// describing the cached config. Structured-shaped (unit struct) so the
 /// fixture exercises the full schema-driven dispatch path even on the
 /// no-payload query side.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Default,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.test_fixtures.config_query")]
 pub struct ConfigQuery;
 
@@ -138,44 +107,20 @@ pub struct ConfigQuery;
 /// downstream. Structured-shaped unit struct — the trigger carries no
 /// fields, so its `encode_into_bytes` is the descriptor `Source.payload`.
 /// `Default` lets the descriptor build that payload from one instance.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Default,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.test_fixtures.mat4_source_trigger")]
 pub struct Mat4SourceTrigger;
 
 /// Driver kind for the stateful multi-actor replace fixture (ADR-0101):
 /// each `Bump` increments the fixture's in-memory counter by one.
 /// Structured-shaped unit struct.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Default,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.test_fixtures.bump")]
 pub struct Bump;
 
 /// Query kind for the stateful replace fixture: request the live counter.
 /// The fixture replies with a `CountReport`. Structured-shaped unit struct.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Default,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.test_fixtures.count_query")]
 pub struct CountQuery;
 
@@ -183,16 +128,7 @@ pub struct CountQuery;
 /// fixture saves in `on_dehydrate` / restores in `on_rehydrate`. A test
 /// asserts this value survives a `replace_component` swap via the
 /// ADR-0101 hooks (now `WasmActor` defaults, no opt-in).
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.test_fixtures.count_report")]
 pub struct CountReport {
     pub count: u32,
@@ -209,15 +145,7 @@ pub struct CountReport {
 /// the measurement can scale the per-frame re-emit cost with widget
 /// visual complexity.
 #[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq,
 )]
 #[kind(name = "aether.test_fixtures.ui_widget_config")]
 pub struct UiWidgetConfig {
@@ -231,31 +159,14 @@ pub struct UiWidgetConfig {
 /// handled it, so the `FleetBench` scenario proves the membrane demuxed
 /// the mail to the child (not the parent) and a control to the parent's
 /// own address is unaffected. Structured-shaped unit struct.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Default,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.test_fixtures.inline_probe")]
 pub struct InlineProbe;
 
 /// Reply to [`InlineProbe`] — `who` names the actor that handled the
 /// query so the test can assert the demux landed on the child vs the
 /// parent. Structured-shaped.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.test_fixtures.inline_echo")]
 pub struct InlineEcho {
     pub who: u32,
@@ -274,15 +185,7 @@ pub const INLINE_WHO_CHILD: u32 = 2;
 /// or to the child's alias (which despawns itself mid-dispatch). Carries no
 /// payload — the recipient address selects which actor tears the child
 /// down. Structured-shaped unit struct.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Default,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.test_fixtures.despawn_child")]
 pub struct DespawnChild;
 
@@ -293,15 +196,7 @@ pub struct DespawnChild;
 /// re-inited every child from empty config bytes, so a typed (non-`()`)
 /// `Config` decoded `None` and the child was skipped, not just reset).
 #[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq, Eq,
 )]
 #[kind(name = "aether.test_fixtures.inline_configured_child_config")]
 pub struct InlineConfiguredChildConfig {
@@ -322,15 +217,7 @@ pub const CONFIGURED_CHILD_INITIAL: u32 = 100;
 /// of the deliberately-unknown-tag spawn it attempted in `wire`, so a
 /// scenario can assert the generated resolver returns `UnknownActorTag`
 /// rather than spawning or panicking. Structured-shaped unit struct.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Default,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.test_fixtures.tag_spawn_query")]
 pub struct TagSpawnQuery;
 
@@ -338,16 +225,7 @@ pub struct TagSpawnQuery;
 /// tag-parent's `wire`-time `spawn_inline_child_by_tag` with a bogus
 /// `ActorTypeTag` returned `SpawnError::UnknownActorTag` (the only correct
 /// outcome). Structured-shaped.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.test_fixtures.tag_spawn_report")]
 pub struct TagSpawnReport {
     pub unknown_tag_rejected: bool,
@@ -357,16 +235,7 @@ pub struct TagSpawnReport {
 /// it forward a `SourceQuery` to the named target mailbox. The fixture then
 /// sends `SourceQuery` to `MailboxId(to)`, making itself the component
 /// origin so the reader's `ctx.source_mailbox()` sees the sender's mailbox.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Copy,
-    Default,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Copy, Default)]
 #[kind(name = "aether.test_fixtures.send_source_query")]
 pub struct SendSourceQuery {
     /// Raw `MailboxId` of the component to forward `SourceQuery` to.
@@ -376,15 +245,7 @@ pub struct SendSourceQuery {
 /// Issue 1958: unit query sent to a `source_observer` fixture. Its
 /// `Manual`-class handler reads `ctx.source_mailbox()` and broadcasts a
 /// `SourceReport` to the test-bench observer mailbox.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Default,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.test_fixtures.source_query")]
 pub struct SourceQuery;
 
@@ -392,16 +253,7 @@ pub struct SourceQuery;
 /// reading `ctx.source_mailbox()`. `mailbox_id` is the raw `MailboxId`
 /// of the sender (`0` when the source was a Session / `EngineMailbox` /
 /// `None`, i.e. when `source_mailbox()` returned `None`).
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.test_fixtures.source_report")]
 pub struct SourceReport {
     pub mailbox_id: u64,
@@ -410,15 +262,7 @@ pub struct SourceReport {
 /// Issue 2791: trigger for the request-correlation fixture. The fixture
 /// sends two `aether.fs.read` requests for this same namespace/path and
 /// demuxes the indistinguishable replies by `ctx.in_reply_to()`.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Default,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.test_fixtures.run_fs_demux")]
 pub struct RunFsDemux {
     pub namespace: String,
@@ -427,16 +271,7 @@ pub struct RunFsDemux {
 
 /// Issue 2791: report emitted once both same-path fs replies were matched by
 /// request id rather than by echoed payload fields.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.test_fixtures.fs_demux_report")]
 pub struct FsDemuxReport {
     pub first_matched: bool,
@@ -453,16 +288,7 @@ pub struct FsDemuxReport {
 /// to *during the in-place drain* — the recipient's observed source reflects
 /// the documented Task 2 boundary (the cluster's inbound identity, not the
 /// in-place child's id). `0` skips the cross-cluster cell.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Copy,
-    Default,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Copy, Default)]
 #[kind(name = "aether.test_fixtures.run_matrix")]
 pub struct RunMatrix {
     /// Raw `MailboxId` of the cross-cluster observer component, or `0` to
@@ -475,16 +301,7 @@ pub struct RunMatrix {
 /// markers); `fan_out` (set only on the parent → child a ping) instructs the
 /// receiving child to drive the child-origin cells (child → parent, child →
 /// sibling, child → self) and the cross-cluster send. Structured-shaped.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Copy,
-    Default,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Copy, Default)]
 #[kind(name = "aether.test_fixtures.matrix_ping")]
 pub struct MatrixPing {
     /// Which matrix cell the recipient records (a `MATRIX_CELL_*` marker).
@@ -502,15 +319,7 @@ pub struct MatrixPing {
 /// parent over the wire *after* `RunMatrix` settles; the parent reads the
 /// cluster's shared observation log and replies a [`MatrixReport`].
 /// Structured-shaped unit struct.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    Default,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.test_fixtures.collect_matrix")]
 pub struct CollectMatrix;
 
@@ -522,15 +331,7 @@ pub struct CollectMatrix;
 /// separate observer component (read via `log_tail`), so it carries no field
 /// here. Structured-shaped.
 #[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Default,
+    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq, Default,
 )]
 #[kind(name = "aether.test_fixtures.matrix_report")]
 pub struct MatrixReport {

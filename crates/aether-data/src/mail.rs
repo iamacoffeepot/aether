@@ -32,9 +32,7 @@ use crate::{EngineId, MailboxId, Schema, SessionToken};
 /// can carry `MailId` when a trace ring is queried over the wire. The
 /// substrate's host-side `Envelope` and `Mail` types do not serialize,
 /// so the field additions on those remain wire-free.
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MailId {
     pub sender: MailboxId,
     pub correlation_id: u64,
@@ -48,14 +46,8 @@ pub struct MailId {
 impl Schema for MailId {
     const SCHEMA: SchemaType = SchemaType::Struct {
         fields: Cow::Borrowed(&[
-            NamedField {
-                name: Cow::Borrowed("sender"),
-                ty: SchemaType::TypeId(MailboxId::TYPE_ID),
-            },
-            NamedField {
-                name: Cow::Borrowed("correlation_id"),
-                ty: SchemaType::Scalar(Primitive::U64),
-            },
+            NamedField { name: Cow::Borrowed("sender"), ty: SchemaType::TypeId(MailboxId::TYPE_ID) },
+            NamedField { name: Cow::Borrowed("correlation_id"), ty: SchemaType::Scalar(Primitive::U64) },
         ]),
         repr_c: false,
     };
@@ -67,10 +59,7 @@ impl MailId {
     /// Sentinel for "not yet stamped" / "chassis root". Equivalent to
     /// `MailId::default()`. The PR 2 dispatch path treats this value
     /// as the chassis-as-originator marker.
-    pub const NONE: Self = Self {
-        sender: MailboxId::NONE,
-        correlation_id: 0,
-    };
+    pub const NONE: Self = Self { sender: MailboxId::NONE, correlation_id: 0 };
 
     /// Construct a `MailId` from a sender mailbox and correlation id.
     /// Producer paths (`NativeBinding::send_mail`, plus the future
@@ -78,10 +67,7 @@ impl MailId {
     /// fetching the next correlation from the per-actor counter.
     #[must_use]
     pub const fn new(sender: MailboxId, correlation_id: u64) -> Self {
-        Self {
-            sender,
-            correlation_id,
-        }
+        Self { sender, correlation_id }
     }
 }
 
@@ -107,20 +93,14 @@ impl MailId {
 pub enum SourceAddr {
     None,
     Session(SessionToken),
-    EngineMailbox {
-        engine_id: EngineId,
-        mailbox_id: MailboxId,
-    },
+    EngineMailbox { engine_id: EngineId, mailbox_id: MailboxId },
     Component(MailboxId),
 }
 
 impl Schema for SourceAddr {
     const SCHEMA: SchemaType = SchemaType::Enum {
         variants: Cow::Borrowed(&[
-            EnumVariant::Unit {
-                name: Cow::Borrowed("None"),
-                discriminant: 0,
-            },
+            EnumVariant::Unit { name: Cow::Borrowed("None"), discriminant: 0 },
             EnumVariant::Tuple {
                 name: Cow::Borrowed("Session"),
                 discriminant: 1,
@@ -130,14 +110,8 @@ impl Schema for SourceAddr {
                 name: Cow::Borrowed("EngineMailbox"),
                 discriminant: 2,
                 fields: Cow::Borrowed(&[
-                    NamedField {
-                        name: Cow::Borrowed("engine_id"),
-                        ty: EngineId::SCHEMA,
-                    },
-                    NamedField {
-                        name: Cow::Borrowed("mailbox_id"),
-                        ty: SchemaType::TypeId(MailboxId::TYPE_ID),
-                    },
+                    NamedField { name: Cow::Borrowed("engine_id"), ty: EngineId::SCHEMA },
+                    NamedField { name: Cow::Borrowed("mailbox_id"), ty: SchemaType::TypeId(MailboxId::TYPE_ID) },
                 ]),
             },
             EnumVariant::Tuple {
@@ -177,14 +151,8 @@ pub struct Source {
 impl Schema for Source {
     const SCHEMA: SchemaType = SchemaType::Struct {
         fields: Cow::Borrowed(&[
-            NamedField {
-                name: Cow::Borrowed("addr"),
-                ty: SourceAddr::SCHEMA,
-            },
-            NamedField {
-                name: Cow::Borrowed("correlation_id"),
-                ty: SchemaType::Scalar(Primitive::U64),
-            },
+            NamedField { name: Cow::Borrowed("addr"), ty: SourceAddr::SCHEMA },
+            NamedField { name: Cow::Borrowed("correlation_id"), ty: SchemaType::Scalar(Primitive::U64) },
         ]),
         repr_c: false,
     };
@@ -199,10 +167,7 @@ impl Source {
     pub const NO_CORRELATION: u64 = 0;
 
     /// `Source` with no addr and no correlation.
-    pub const NONE: Self = Self {
-        addr: SourceAddr::None,
-        correlation_id: Self::NO_CORRELATION,
-    };
+    pub const NONE: Self = Self { addr: SourceAddr::None, correlation_id: Self::NO_CORRELATION };
 
     /// Sender addr alone, no correlation. Short form for mail paths
     /// that want to address a reply but don't participate in the
@@ -211,19 +176,13 @@ impl Source {
     /// when the MCP `send_mail` tool grows to expose it).
     #[must_use]
     pub fn to(addr: SourceAddr) -> Self {
-        Self {
-            addr,
-            correlation_id: Self::NO_CORRELATION,
-        }
+        Self { addr, correlation_id: Self::NO_CORRELATION }
     }
 
     /// Addr + correlation. The common sync-wrapper shape.
     #[must_use]
     pub fn with_correlation(addr: SourceAddr, correlation_id: u64) -> Self {
-        Self {
-            addr,
-            correlation_id,
-        }
+        Self { addr, correlation_id }
     }
 
     /// Whether the sender addr is `None`. Callers that would otherwise

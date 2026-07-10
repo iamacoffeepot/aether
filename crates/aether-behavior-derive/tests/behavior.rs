@@ -112,11 +112,7 @@ fn observe_forwards_the_original_bytes() {
     let Verdict::Forward(bytes) = verdict else {
         panic!("an observe handler forwards");
     };
-    assert_eq!(
-        bytes,
-        inbound.encode_into_bytes(),
-        "observe forwards the inbound encoding verbatim",
-    );
+    assert_eq!(bytes, inbound.encode_into_bytes(), "observe forwards the inbound encoding verbatim");
     assert_eq!(limiter.hits, 1);
 }
 
@@ -125,10 +121,7 @@ fn observe_forwards_the_original_bytes() {
 fn consume_drops_the_in_flight_mail() {
     let mut limiter = Limiter { cap: 100, hits: 0 };
     let verdict = dispatch(&mut limiter, &Blur { hard: true });
-    assert!(
-        matches!(verdict, Verdict::Consume),
-        "a consumed mail must not forward",
-    );
+    assert!(matches!(verdict, Verdict::Consume), "a consumed mail must not forward");
 }
 
 #[test]
@@ -141,10 +134,7 @@ fn consume_wins_over_the_intercept_re_encode() {
     let verdict = ctx.__into_output().verdict;
     // Tripwire: the macro's unconditional __forward_mutated after an
     // intercept handler must not override a consume() verdict.
-    assert!(
-        matches!(verdict, Verdict::Consume),
-        "consume must win over the intercept re-encode path",
-    );
+    assert!(matches!(verdict, Verdict::Consume), "consume must win over the intercept re-encode path");
     assert_eq!(gate.sealed, 1, "the intercept handler body ran");
 }
 
@@ -188,8 +178,7 @@ fn declared_kind_decode_failure_faults_the_context() {
 /// sentinels and must not appear.
 #[test]
 fn exports_manifest_lists_exactly_the_handled_kind_ids() {
-    let mut listed: Vec<KindId> =
-        decode_exports_manifest(&Limiter::__AETHER_BEHAVIOR_EXPORTS).collect();
+    let mut listed: Vec<KindId> = decode_exports_manifest(&Limiter::__AETHER_BEHAVIOR_EXPORTS).collect();
     let mut expected = vec![Gauge::ID, Blur::ID];
     listed.sort();
     expected.sort();

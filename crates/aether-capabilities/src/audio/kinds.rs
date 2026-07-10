@@ -29,18 +29,7 @@ use serde::{Deserialize, Serialize};
 /// property of the voice, not part of the voice key, so a `NoteOff`
 /// carries none. Fire-and-forget; no reply.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.audio.note_on")]
 pub struct NoteOn {
     pub pitch: u8,
@@ -60,18 +49,7 @@ pub struct NoteOn {
 /// between envelope release and late note-offs). Fire-and-forget; no
 /// reply.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.audio.note_off")]
 pub struct NoteOff {
     pub pitch: u8,
@@ -86,9 +64,7 @@ pub struct NoteOff {
 /// Desktop-only: headless and hub chassis reply with an
 /// `unsupported on <chassis>` error. Fire-and-forget in the happy path.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.audio.set_master_gain")]
 pub struct SetMasterGain {
     pub gain: f32,
@@ -116,9 +92,7 @@ pub enum SetMasterGainResult {
 /// Desktop-only: headless and hub chassis reply with an
 /// `unsupported on <chassis>` error. Fire-and-forget in the happy path.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.audio.set_reverb_send")]
 pub struct SetReverbSend {
     pub send: f32,
@@ -146,9 +120,7 @@ pub enum SetReverbSendResult {
 /// already-sounding voices on the next render block, mirroring
 /// `set_master_gain`. Desktop-only: headless and hub chassis reply `Err`.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.audio.set_sender_gain")]
 pub struct SetSenderGain {
     pub gain: f32,
@@ -182,16 +154,8 @@ pub enum SetSenderGainResult {
 /// the voice key.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ScheduledNote {
-    On {
-        pitch: u8,
-        velocity: u8,
-        instrument_id: u8,
-        pan: i8,
-    },
-    Off {
-        pitch: u8,
-        instrument_id: u8,
-    },
+    On { pitch: u8, velocity: u8, instrument_id: u8, pan: i8 },
+    Off { pitch: u8, instrument_id: u8 },
 }
 
 /// A timed entry in an `aether.audio.schedule` batch (ADR-0104).
@@ -283,17 +247,8 @@ pub struct PlayTrack {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.audio.play_track_result")]
 pub enum PlayTrackResult {
-    Ok {
-        namespace: String,
-        path: String,
-        lane: Option<String>,
-    },
-    Err {
-        namespace: String,
-        path: String,
-        lane: Option<String>,
-        error: String,
-    },
+    Ok { namespace: String, path: String, lane: Option<String> },
+    Err { namespace: String, path: String, lane: Option<String>, error: String },
 }
 
 /// `aether.audio.stop_track` — fade out and retire a track started by
@@ -350,14 +305,6 @@ pub struct LoadInstrument {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.audio.load_instrument_result")]
 pub enum LoadInstrumentResult {
-    Ok {
-        instrument_id: u8,
-        name: String,
-        resident_bytes: u64,
-    },
-    Err {
-        namespace: String,
-        path: String,
-        error: String,
-    },
+    Ok { instrument_id: u8, name: String, resident_bytes: u64 },
+    Err { namespace: String, path: String, error: String },
 }

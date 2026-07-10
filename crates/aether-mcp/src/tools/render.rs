@@ -36,10 +36,8 @@ pub(super) fn render_shape(ty: &SchemaType) -> String {
                 format!("[{}; {}]", render(element, depth + 1), len)
             }
             SchemaType::Struct { fields, .. } => {
-                let parts: Vec<String> = fields
-                    .iter()
-                    .map(|f| format!("{}: {}", f.name, render(&f.ty, depth + 1)))
-                    .collect();
+                let parts: Vec<String> =
+                    fields.iter().map(|f| format!("{}: {}", f.name, render(&f.ty, depth + 1))).collect();
                 format!("{{ {} }}", parts.join(", "))
             }
             SchemaType::Enum { variants } => {
@@ -48,15 +46,12 @@ pub(super) fn render_shape(ty: &SchemaType) -> String {
                     .map(|v| match v {
                         EnumVariant::Unit { name, .. } => name.to_string(),
                         EnumVariant::Tuple { name, fields, .. } => {
-                            let inner: Vec<String> =
-                                fields.iter().map(|f| render(f, depth + 1)).collect();
+                            let inner: Vec<String> = fields.iter().map(|f| render(f, depth + 1)).collect();
                             format!("{}({})", name, inner.join(", "))
                         }
                         EnumVariant::Struct { name, fields, .. } => {
-                            let inner: Vec<String> = fields
-                                .iter()
-                                .map(|f| format!("{}: {}", f.name, render(&f.ty, depth + 1)))
-                                .collect();
+                            let inner: Vec<String> =
+                                fields.iter().map(|f| format!("{}: {}", f.name, render(&f.ty, depth + 1))).collect();
                             format!("{} {{ {} }}", name, inner.join(", "))
                         }
                     })
@@ -64,11 +59,7 @@ pub(super) fn render_shape(ty: &SchemaType) -> String {
                 parts.join(" | ")
             }
             SchemaType::Map { key, value } => {
-                format!(
-                    "Map<{}, {}>",
-                    render(key, depth + 1),
-                    render(value, depth + 1)
-                )
+                format!("Map<{}, {}>", render(key, depth + 1), render(value, depth + 1))
             }
             SchemaType::TypeId(id) => {
                 if *id == MailboxId::TYPE_ID {

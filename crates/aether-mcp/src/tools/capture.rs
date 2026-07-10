@@ -2,8 +2,7 @@ use std::path::{Path, PathBuf};
 
 use aether_data::{EngineId, Kind};
 use aether_kinds::{
-    CaptureFrame, CaptureFrameResult, FrameCheck, FrameRect, FrameReduction, NamedMail,
-    SimilarityCheck,
+    CaptureFrame, CaptureFrameResult, FrameCheck, FrameRect, FrameReduction, NamedMail, SimilarityCheck,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -65,8 +64,7 @@ pub(super) fn capture_check(spec: &CaptureCheckSpec) -> Result<FrameCheck, McpEr
 pub(super) fn save_capture_png(path: &Path, bytes: &[u8]) -> Result<(PathBuf, usize), String> {
     use std::fs as std_fs;
     if let Some(parent) = path.parent() {
-        std_fs::create_dir_all(parent)
-            .map_err(|e| format!("create_dir_all {}: {e}", parent.display()))?;
+        std_fs::create_dir_all(parent).map_err(|e| format!("create_dir_all {}: {e}", parent.display()))?;
     }
     std_fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok((path.to_path_buf(), bytes.len()))
@@ -110,10 +108,7 @@ impl Mcp {
     }
 }
 
-pub(super) async fn capture_frame(
-    mcp: &Mcp,
-    args: CaptureFrameArgs,
-) -> Result<CallToolResult, McpError> {
+pub(super) async fn capture_frame(mcp: &Mcp, args: CaptureFrameArgs) -> Result<CallToolResult, McpError> {
     let engine = parse_engine_id(&args.engine_id)?;
     // A relative save_path is invalid-params before anything else runs
     // (iamacoffeepot/aether#2962) — mirrors the bad-bundle abort
@@ -139,16 +134,10 @@ pub(super) async fn capture_frame(
     let after_mails = mcp
         .encode_capture_bundle(engine, &args.after_mails)
         .await
-        .map_err(|e| {
-            McpError::invalid_params(format!("capture_frame after_mails bundle: {e}"), None)
-        })?;
+        .map_err(|e| McpError::invalid_params(format!("capture_frame after_mails bundle: {e}"), None))?;
     // Map the verdict request: an unknown reduction name is a clean
     // invalid-params error before the capture touches the wire.
-    let checks = args
-        .checks
-        .iter()
-        .map(capture_check)
-        .collect::<Result<Vec<FrameCheck>, McpError>>()?;
+    let checks = args.checks.iter().map(capture_check).collect::<Result<Vec<FrameCheck>, McpError>>()?;
     // Map the optional reference-image similarity check
     // (iamacoffeepot/aether#1780); the render thread loads the
     // reference and scores the captured RGBA against it.
@@ -159,25 +148,11 @@ pub(super) async fn capture_frame(
     });
     let reply = mcp
         .session
-        .call_one(engine_envelope(
-            engine,
-            RENDER_CAP,
-            &CaptureFrame {
-                mails,
-                after_mails,
-                checks,
-                similarity,
-            },
-        ))
+        .call_one(engine_envelope(engine, RENDER_CAP, &CaptureFrame { mails, after_mails, checks, similarity }))
         .await
         .map_err(internal)?;
     match CaptureFrameResult::decode_from_bytes(&reply.payload) {
-        Some(CaptureFrameResult::Ok {
-            png,
-            verdict,
-            similarity_score,
-            similarity_pass,
-        }) => {
+        Some(CaptureFrameResult::Ok { png, verdict, similarity_score, similarity_pass }) => {
             let encoded = STANDARD.encode(&png);
             let mut content = vec![Content::image(encoded, "image/png")];
             // Surface the verdict as a JSON text block so the caller
@@ -185,8 +160,8 @@ pub(super) async fn capture_frame(
             // (iamacoffeepot/aether#1777). Absent when no `checks`
             // were requested.
             if let Some(verdict) = verdict {
-                let json = serde_json::to_string(&verdict)
-                    .map_err(|e| internal_msg(&format!("verdict serialize: {e}")))?;
+                let json =
+                    serde_json::to_string(&verdict).map_err(|e| internal_msg(&format!("verdict serialize: {e}")))?;
                 content.push(Content::text(json));
             }
             // Surface the similarity verdict as its own JSON block
@@ -211,8 +186,7 @@ pub(super) async fn capture_frame(
                     }),
                     Err(error) => serde_json::json!({"saved": {"error": error}}),
                 };
-                let json = serde_json::to_string(&saved)
-                    .map_err(|e| internal_msg(&format!("saved serialize: {e}")))?;
+                let json = serde_json::to_string(&saved).map_err(|e| internal_msg(&format!("saved serialize: {e}")))?;
                 content.push(Content::text(json));
             }
             Ok(CallToolResult::success(content))

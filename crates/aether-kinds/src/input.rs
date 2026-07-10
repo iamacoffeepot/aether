@@ -9,18 +9,7 @@ use bytemuck::{Pod, Zeroable};
 /// arrive as `KeyRelease`. Unmapped winit keys (any `KeyCode` variant
 /// the substrate doesn't translate) produce no mail.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.key")]
 pub struct Key {
     pub code: u32,
@@ -31,18 +20,7 @@ pub struct Key {
 /// hold-to-act semantics (e.g. WASD movement) pair subscription to
 /// both kinds so they can clear state on release.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.key_release")]
 pub struct KeyRelease {
     pub code: u32,
@@ -55,9 +33,7 @@ pub struct KeyRelease {
 /// self-contained and needs no external cursor correlation. Omits `Eq`
 /// because the `f32` fields make it non-`Eq`, same as `MouseMove`.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.mouse_button")]
 pub struct MouseButton {
     pub button: u32,
@@ -70,9 +46,7 @@ pub struct MouseButton {
 /// cursor position at release time. Components tracking press-move-release
 /// drag pair subscription to both kinds so they can commit on release.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.mouse_button_release")]
 pub struct MouseButtonRelease {
     pub button: u32,
@@ -85,9 +59,7 @@ pub struct MouseButtonRelease {
 /// cursor position at scroll time in window coordinates, so wheel-zoom-at-
 /// cursor needs no external cursor correlation.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.mouse_wheel")]
 pub struct MouseWheel {
     pub delta_x: f32,
@@ -98,9 +70,7 @@ pub struct MouseWheel {
 
 /// Cursor position in window coordinates, as logical pixels cast to f32.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.mouse_move")]
 pub struct MouseMove {
     pub x: f32,
@@ -116,18 +86,7 @@ pub struct MouseMove {
 /// value; the initial value arrives right after the component's
 /// auto-subscribe fires, without any request/reply dance.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.window_size")]
 pub struct WindowSize {
     pub width: u32,
@@ -154,15 +113,7 @@ pub struct WindowSize {
 /// (`Kind::encode_into_bytes` → `encode_wire`), not the `#[repr(C)]`
 /// cast path `Key` / `KeyRelease` use.
 #[derive(
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
+    Clone, Debug, Default, PartialEq, Eq, aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize,
 )]
 #[kind(name = "aether.text_input")]
 pub struct TextInput {
@@ -178,15 +129,7 @@ pub struct TextInput {
 /// cleared — the widget drops any preedit it was showing. Published by
 /// the desktop chassis only. Rides the structured wire path.
 #[derive(
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    aether_data::Kind,
-    aether_data::Schema,
-    serde::Serialize,
-    serde::Deserialize,
+    Clone, Debug, Default, PartialEq, Eq, aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize,
 )]
 #[kind(name = "aether.ime_preedit")]
 pub struct ImePreedit {

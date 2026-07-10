@@ -15,9 +15,7 @@ pub struct Slot<C> {
 impl<C> Slot<C> {
     /// Build an empty slot. `const` so it can live in a `static`.
     pub const fn new() -> Self {
-        Self {
-            inner: UnsafeCell::new(None),
-        }
+        Self { inner: UnsafeCell::new(None) }
     }
 
     /// # Safety

@@ -19,15 +19,13 @@ use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult, NamedMail, Render};
 use aether_kit::mark::{MarkId, MarkRef};
 use aether_kit::world::{
-    ApplyBrush, AutomatonRule, BrushParameters, CELLS_PER_CHUNK_AREA, Material, OperatorBudget,
-    OperatorCell, OperatorChunk, OperatorError, OperatorResult, OperatorStats, RunAutomaton,
-    SetChunk, StampHexagon, WorldPoint,
+    ApplyBrush, AutomatonRule, BrushParameters, CELLS_PER_CHUNK_AREA, Material, OperatorBudget, OperatorCell,
+    OperatorChunk, OperatorError, OperatorResult, OperatorStats, RunAutomaton, SetChunk, StampHexagon, WorldPoint,
 };
 use aether_math::{Mat4, Vec3};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{
-    Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png,
-    target_color_stats,
+    Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
 };
 
 const COMPONENT_NAME: &str = "world";
@@ -55,19 +53,12 @@ fn unsafe_extent_rejection(source: MarkRef, operator: &str) -> OperatorResult {
         error: OperatorError::InvalidParameters {
             reason: format!("{operator} extent exceeds the mesher's apron-safe coordinate range"),
         },
-        stats: OperatorStats {
-            steps_run: 0,
-            subcells_written: 0,
-            touched_chunks: Vec::new(),
-        },
+        stats: OperatorStats { steps_run: 0, subcells_written: 0, touched_chunks: Vec::new() },
     }
 }
 
 fn component_address() -> String {
-    format!(
-        "aether.component/{}:{COMPONENT_NAME}",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    )
+    format!("aether.component/{}:{COMPONENT_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE)
 }
 
 fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
@@ -95,10 +86,7 @@ fn load_world(bench: &mut TestBench, wasm_path: &Path) {
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name, .. } => assert_eq!(name, component_address()),
         LoadResult::Err { error } => panic!("load world: {error}"),
     }
@@ -109,9 +97,7 @@ fn top_down_view_projection(center_x: f32, center_z: f32, extent: f32) -> ViewPr
     let target = Vec3::new(center_x, 0.0, center_z);
     let view = Mat4::look_at_rh(eye, target, Vec3::new(0.0, 0.0, -1.0));
     let projection = Mat4::orthographic_rh(-extent, extent, -extent, extent, 0.1, 100.0);
-    ViewProjection {
-        view_proj: (projection * view).to_cols_array(),
-    }
+    ViewProjection { view_proj: (projection * view).to_cols_array() }
 }
 
 fn oblique_view_projection() -> (ViewProjection, Mat4) {
@@ -120,12 +106,7 @@ fn oblique_view_projection() -> (ViewProjection, Mat4) {
     let view = Mat4::look_at_rh(eye, target, Vec3::new(0.0, 1.0, 0.0));
     let projection = Mat4::orthographic_rh(-5.0, 5.0, -5.0, 5.0, 0.1, 100.0);
     let matrix = projection * view;
-    (
-        ViewProjection {
-            view_proj: matrix.to_cols_array(),
-        },
-        matrix,
-    )
+    (ViewProjection { view_proj: matrix.to_cols_array() }, matrix)
 }
 
 fn projected_pixel(matrix: Mat4, point: Vec3) -> (i32, i32) {
@@ -142,10 +123,7 @@ fn pixel_differs(image: &Image, background: [u8; 3], x: i32, y: i32) -> bool {
         return false;
     }
     let offset = ((y.cast_unsigned() * image.width + x.cast_unsigned()) * 4) as usize;
-    image.rgba[offset..offset + 3]
-        .iter()
-        .zip(background)
-        .any(|(actual, clear)| actual.abs_diff(clear) > 5)
+    image.rgba[offset..offset + 3].iter().zip(background).any(|(actual, clear)| actual.abs_diff(clear) > 5)
 }
 
 #[test]
@@ -186,8 +164,7 @@ fn stamp_hexagon_renders_a_smooth_centered_silhouette() {
             ),
         )])
         .expect("capture stamped world");
-    let image = decode_png(captured.captured("capture").expect("capture bytes"))
-        .expect("decode capture png");
+    let image = decode_png(captured.captured("capture").expect("capture bytes")).expect("decode capture png");
     let background = background_top_left(&image);
     let fraction = coverage(&image, background, 5);
     assert!(
@@ -203,14 +180,10 @@ fn stamp_hexagon_renders_a_smooth_centered_silhouette() {
     let bounds = bounding_box(&image, background, 5).expect("hexagon bounds");
     let is_lit = |x: u32, y: u32| {
         let offset = ((y * image.width + x) * 4) as usize;
-        image.rgba[offset..offset + 3]
-            .iter()
-            .zip(background)
-            .any(|(actual, clear)| actual.abs_diff(clear) > 5)
+        image.rgba[offset..offset + 3].iter().zip(background).any(|(actual, clear)| actual.abs_diff(clear) > 5)
     };
-    let left_edges: Vec<_> = (bounds.min_y..=bounds.max_y)
-        .filter_map(|y| (bounds.min_x..=bounds.max_x).find(|&x| is_lit(x, y)))
-        .collect();
+    let left_edges: Vec<_> =
+        (bounds.min_y..=bounds.max_y).filter_map(|y| (bounds.min_x..=bounds.max_x).find(|&x| is_lit(x, y))).collect();
     let mut longest_flat_run = 1usize;
     let mut flat_run = 1usize;
     for pair in left_edges.windows(2) {
@@ -244,14 +217,8 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
     let mut bench = TestBench::start_with_size(WIDTH, HEIGHT).expect("boot");
     load_world(&mut bench, &wasm_path);
     let world = component_address();
-    let edge_brush_source = MarkRef {
-        id: MarkId::new(14),
-        revision: 1,
-    };
-    let huge_automaton_source = MarkRef {
-        id: MarkId::new(15),
-        revision: 1,
-    };
+    let edge_brush_source = MarkRef { id: MarkId::new(14), revision: 1 };
+    let huge_automaton_source = MarkRef { id: MarkId::new(15), revision: 1 };
     let rejected = bench
         .execute(vec![
             (
@@ -266,10 +233,7 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
                             spacing_octimeters: 16,
                             material: Material::Stone.to_u8(),
                         },
-                        budget: OperatorBudget {
-                            max_steps: 1,
-                            max_subcells: 1_000,
-                        },
+                        budget: OperatorBudget { max_steps: 1, max_subcells: 1_000 },
                     },
                 ),
             ),
@@ -279,43 +243,27 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
                     world.as_str(),
                     &RunAutomaton {
                         source: huge_automaton_source,
-                        seed: OperatorCell {
-                            cell_x: 10_000_000,
-                            cell_z: 0,
-                        },
-                        rule: AutomatonRule::Grow {
-                            material: Material::Grass.to_u8(),
-                            generations: 0,
-                        },
-                        budget: OperatorBudget {
-                            max_steps: 1,
-                            max_subcells: 256,
-                        },
+                        seed: OperatorCell { cell_x: 10_000_000, cell_z: 0 },
+                        rule: AutomatonRule::Grow { material: Material::Grass.to_u8(), generations: 0 },
+                        budget: OperatorBudget { max_steps: 1, max_subcells: 256 },
                     },
                 ),
             ),
         ])
         .expect("reject unsafe operator extents without trapping");
     assert_eq!(
-        rejected
-            .reply::<OperatorResult>("edge_brush")
-            .expect("decode edge brush rejection"),
+        rejected.reply::<OperatorResult>("edge_brush").expect("decode edge brush rejection"),
         unsafe_extent_rejection(edge_brush_source, "brush"),
     );
     assert_eq!(
-        rejected
-            .reply::<OperatorResult>("huge_automaton")
-            .expect("decode huge automaton rejection"),
+        rejected.reply::<OperatorResult>("huge_automaton").expect("decode huge automaton rejection"),
         unsafe_extent_rejection(huge_automaton_source, "automaton"),
     );
 
     // A valid awaited request on the same actor proves both invalid handlers
     // returned normally; its exact fresh-world stats and render prove neither
     // rejection leaked mutation into the usable coordinate domain.
-    let brush_source = MarkRef {
-        id: MarkId::new(11),
-        revision: 4,
-    };
+    let brush_source = MarkRef { id: MarkId::new(11), revision: 4 };
 
     let brushed = bench
         .execute(vec![(
@@ -330,27 +278,19 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
                         spacing_octimeters: 256,
                         material: Material::Stone.to_u8(),
                     },
-                    budget: OperatorBudget {
-                        max_steps: 3,
-                        max_subcells: 180,
-                    },
+                    budget: OperatorBudget { max_steps: 3, max_subcells: 180 },
                 },
             ),
         )])
         .expect("apply reference brush");
     assert_eq!(
-        brushed
-            .reply::<OperatorResult>("brush")
-            .expect("decode brush result"),
+        brushed.reply::<OperatorResult>("brush").expect("decode brush result"),
         OperatorResult::Applied {
             source: brush_source,
             stats: OperatorStats {
                 steps_run: 3,
                 subcells_written: 180,
-                touched_chunks: vec![OperatorChunk {
-                    chunk_x: 0,
-                    chunk_z: 0,
-                }],
+                touched_chunks: vec![OperatorChunk { chunk_x: 0, chunk_z: 0 }],
             },
         },
     );
@@ -367,26 +307,19 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
             ),
         )])
         .expect("capture brushed world");
-    let brush_image = decode_png(
-        brush_capture
-            .captured("brush_capture")
-            .expect("brush capture bytes"),
-    )
-    .expect("decode brush capture");
+    let brush_image = decode_png(brush_capture.captured("brush_capture").expect("brush capture bytes"))
+        .expect("decode brush capture");
     let brush_background = background_top_left(&brush_image);
     let brush_fraction = coverage(&brush_image, brush_background, 5);
     assert!(
         (0.03..0.15).contains(&brush_fraction),
         "three bounded brush discs should render as a visible path; got {brush_fraction}",
     );
-    let brush_bounds = bounding_box(&brush_image, brush_background, 5)
-        .expect("brush rendered bounds for material-color check");
+    let brush_bounds =
+        bounding_box(&brush_image, brush_background, 5).expect("brush rendered bounds for material-color check");
     assert_material_color(&brush_image, brush_bounds, STONE_SRGB, "stone brush");
 
-    let automaton_source = MarkRef {
-        id: MarkId::new(12),
-        revision: 2,
-    };
+    let automaton_source = MarkRef { id: MarkId::new(12), revision: 2 };
     let grown = bench
         .execute(vec![(
             "automaton",
@@ -394,35 +327,21 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
                 world.as_str(),
                 &RunAutomaton {
                     source: automaton_source,
-                    seed: OperatorCell {
-                        cell_x: 8,
-                        cell_z: 8,
-                    },
-                    rule: AutomatonRule::Grow {
-                        material: Material::Grass.to_u8(),
-                        generations: 1,
-                    },
-                    budget: OperatorBudget {
-                        max_steps: 5,
-                        max_subcells: 1_280,
-                    },
+                    seed: OperatorCell { cell_x: 8, cell_z: 8 },
+                    rule: AutomatonRule::Grow { material: Material::Grass.to_u8(), generations: 1 },
+                    budget: OperatorBudget { max_steps: 5, max_subcells: 1_280 },
                 },
             ),
         )])
         .expect("run reference automaton");
     assert_eq!(
-        grown
-            .reply::<OperatorResult>("automaton")
-            .expect("decode automaton result"),
+        grown.reply::<OperatorResult>("automaton").expect("decode automaton result"),
         OperatorResult::Applied {
             source: automaton_source,
             stats: OperatorStats {
                 steps_run: 5,
                 subcells_written: 1_280,
-                touched_chunks: vec![OperatorChunk {
-                    chunk_x: 0,
-                    chunk_z: 0,
-                }],
+                touched_chunks: vec![OperatorChunk { chunk_x: 0, chunk_z: 0 }],
             },
         },
     );
@@ -439,12 +358,8 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
             ),
         )])
         .expect("capture automaton world");
-    let automaton_image = decode_png(
-        automaton_capture
-            .captured("automaton_capture")
-            .expect("automaton capture bytes"),
-    )
-    .expect("decode automaton capture");
+    let automaton_image = decode_png(automaton_capture.captured("automaton_capture").expect("automaton capture bytes"))
+        .expect("decode automaton capture");
     let automaton_background = background_top_left(&automaton_image);
     let automaton_fraction = coverage(&automaton_image, automaton_background, 5);
     assert!(
@@ -453,17 +368,9 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
     );
     let automaton_bounds = bounding_box(&automaton_image, automaton_background, 5)
         .expect("automaton rendered bounds for material-color check");
-    assert_material_color(
-        &automaton_image,
-        automaton_bounds,
-        GRASS_SRGB,
-        "grass automaton",
-    );
+    assert_material_color(&automaton_image, automaton_bounds, GRASS_SRGB, "grass automaton");
 
-    let limited_source = MarkRef {
-        id: MarkId::new(13),
-        revision: 9,
-    };
+    let limited_source = MarkRef { id: MarkId::new(13), revision: 9 };
     let limited = bench
         .execute(vec![(
             "limited",
@@ -471,36 +378,22 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
                 world.as_str(),
                 &RunAutomaton {
                     source: limited_source,
-                    seed: OperatorCell {
-                        cell_x: 12,
-                        cell_z: 8,
-                    },
-                    rule: AutomatonRule::Grow {
-                        material: Material::Sand.to_u8(),
-                        generations: 1,
-                    },
-                    budget: OperatorBudget {
-                        max_steps: 5,
-                        max_subcells: 512,
-                    },
+                    seed: OperatorCell { cell_x: 12, cell_z: 8 },
+                    rule: AutomatonRule::Grow { material: Material::Sand.to_u8(), generations: 1 },
+                    budget: OperatorBudget { max_steps: 5, max_subcells: 512 },
                 },
             ),
         )])
         .expect("run budget-limited automaton");
     assert_eq!(
-        limited
-            .reply::<OperatorResult>("limited")
-            .expect("decode limited result"),
+        limited.reply::<OperatorResult>("limited").expect("decode limited result"),
         OperatorResult::Failed {
             source: limited_source,
             error: OperatorError::SubcellBudgetExhausted,
             stats: OperatorStats {
                 steps_run: 2,
                 subcells_written: 512,
-                touched_chunks: vec![OperatorChunk {
-                    chunk_x: 0,
-                    chunk_z: 0,
-                }],
+                touched_chunks: vec![OperatorChunk { chunk_x: 0, chunk_z: 0 }],
             },
         },
     );
@@ -517,26 +410,17 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
             ),
         )])
         .expect("capture limited automaton world");
-    let limited_image = decode_png(
-        limited_capture
-            .captured("limited_capture")
-            .expect("limited capture bytes"),
-    )
-    .expect("decode limited capture");
+    let limited_image = decode_png(limited_capture.captured("limited_capture").expect("limited capture bytes"))
+        .expect("decode limited capture");
     let limited_background = background_top_left(&limited_image);
     let limited_fraction = coverage(&limited_image, limited_background, 5);
     assert!(
         (0.04..0.30).contains(&limited_fraction),
         "the two accepted cells should render while the third stays absent; got {limited_fraction}",
     );
-    let limited_bounds = bounding_box(&limited_image, limited_background, 5)
-        .expect("limited automaton rendered bounds");
-    assert_material_color(
-        &limited_image,
-        limited_bounds,
-        SAND_SRGB,
-        "sand partial automaton",
-    );
+    let limited_bounds =
+        bounding_box(&limited_image, limited_background, 5).expect("limited automaton rendered bounds");
+    assert_material_color(&limited_image, limited_bounds, SAND_SRGB, "sand partial automaton");
     let limited_width = limited_bounds.max_x - limited_bounds.min_x + 1;
     let limited_height = limited_bounds.max_y - limited_bounds.min_y + 1;
     assert!(
@@ -601,28 +485,18 @@ fn rounded_cliff_renders_without_a_convex_corner_seam() {
         .execute(vec![(
             "capture",
             BenchOp::capture_with_mails(
-                vec![
-                    envelope("aether.render", &view_projection),
-                    envelope(world.as_str(), &Render),
-                ],
+                vec![envelope("aether.render", &view_projection), envelope(world.as_str(), &Render)],
                 Vec::new(),
             ),
         )])
         .expect("capture cliff");
-    let image =
-        decode_png(captured.captured("capture").expect("capture bytes")).expect("decode cliff png");
+    let image = decode_png(captured.captured("capture").expect("capture bytes")).expect("decode cliff png");
     let background = background_top_left(&image);
 
     let cap = projected_pixel(matrix, Vec3::new(8.0, 1.0, 8.0));
-    assert!(
-        pixel_differs(&image, background, cap.0, cap.1),
-        "high-cap control sample must render",
-    );
+    assert!(pixel_differs(&image, background, cap.0, cap.1), "high-cap control sample must render");
     let clear = projected_pixel(matrix, Vec3::new(3.0, 0.0, 3.0));
-    assert!(
-        !pixel_differs(&image, background, clear.0, clear.1),
-        "off-terrain control sample must remain clear",
-    );
+    assert!(!pixel_differs(&image, background, clear.0, clear.1), "off-terrain control sample must remain clear");
 
     // The southeast convex corner was where independent cap/chamfer/sliver
     // passes left a clear pinhole. The new chord is within half a subcell of

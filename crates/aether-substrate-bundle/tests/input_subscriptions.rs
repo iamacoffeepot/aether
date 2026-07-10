@@ -36,19 +36,11 @@ fn load_probe_named(bench: &mut TestBench, wasm_path: &Path, name: &str) -> Mail
             "load",
             BenchOp::send_and_await(
                 ComponentHostCapability::NAMESPACE,
-                &LoadComponent {
-                    wasm,
-                    name: Some(name.to_owned()),
-                    config: Vec::new(),
-                    export: None,
-                },
+                &LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None },
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
         LoadResult::Err { error } => panic!("load_component({name}): {error}"),
     }
@@ -61,12 +53,7 @@ fn send_keys(bench: &mut TestBench, count: usize) {
     let labels: Vec<String> = (0..count).map(|i| format!("key{i}")).collect();
     let steps: Vec<(&str, BenchOp)> = labels
         .iter()
-        .map(|label| {
-            (
-                label.as_str(),
-                BenchOp::send_mail("aether.input", &Key { code: KEY_CODE }),
-            )
-        })
+        .map(|label| (label.as_str(), BenchOp::send_mail("aether.input", &Key { code: KEY_CODE })))
         .collect();
     bench.execute(steps).expect("key send sequence");
 }
@@ -75,16 +62,10 @@ fn unsubscribe(bench: &mut TestBench, kind: KindId, mailbox: MailboxId) {
     let result = bench
         .execute(vec![(
             "unsub",
-            BenchOp::send_and_await(
-                InputCapability::NAMESPACE,
-                &UnsubscribeInput { kind, mailbox },
-            ),
+            BenchOp::send_and_await(InputCapability::NAMESPACE, &UnsubscribeInput { kind, mailbox }),
         )])
         .expect("unsubscribe sequence");
-    match result
-        .reply::<SubscribeInputResult>("unsub")
-        .expect("decode SubscribeInputResult")
-    {
+    match result.reply::<SubscribeInputResult>("unsub").expect("decode SubscribeInputResult") {
         SubscribeInputResult::Ok => {}
         SubscribeInputResult::Err { error } => panic!("unsubscribe failed: {error}"),
     }
@@ -94,16 +75,10 @@ fn drop_component(bench: &mut TestBench, mailbox_id: MailboxId) {
     let result = bench
         .execute(vec![(
             "drop",
-            BenchOp::send_and_await(
-                ComponentHostCapability::NAMESPACE,
-                &DropComponent { mailbox_id },
-            ),
+            BenchOp::send_and_await(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id }),
         )])
         .expect("drop sequence");
-    match result
-        .reply::<DropResult>("drop")
-        .expect("decode DropResult")
-    {
+    match result.reply::<DropResult>("drop").expect("decode DropResult") {
         DropResult::Ok => {}
         DropResult::Err { error } => panic!("drop failed: {error}"),
     }
@@ -143,24 +118,11 @@ fn subscribed_component_receives_published_text_input() {
     let baseline = bench.count_observed(TextInputObserved::NAME);
 
     bench
-        .execute(vec![(
-            "text",
-            BenchOp::send_mail(
-                "aether.input",
-                &TextInput {
-                    text: "hi".to_owned(),
-                },
-            ),
-        )])
+        .execute(vec![("text", BenchOp::send_mail("aether.input", &TextInput { text: "hi".to_owned() }))])
         .expect("text send sequence");
 
     let delta = bench.count_observed(TextInputObserved::NAME) - baseline;
-    assert_eq!(
-        delta,
-        1,
-        "expected 1 text_input_observed broadcast; observed kinds: {:?}",
-        bench.observed_kinds(),
-    );
+    assert_eq!(delta, 1, "expected 1 text_input_observed broadcast; observed kinds: {:?}", bench.observed_kinds());
 }
 
 /// One subscribed probe broadcasts once per injected key.
@@ -175,12 +137,7 @@ fn subscribed_component_receives_published_keys() {
 
     send_keys(&mut bench, 3);
     let delta = bench.count_observed(KeyObserved::NAME) - baseline;
-    assert_eq!(
-        delta,
-        3,
-        "expected 3 key_observed broadcasts; observed kinds: {:?}",
-        bench.observed_kinds(),
-    );
+    assert_eq!(delta, 3, "expected 3 key_observed broadcasts; observed kinds: {:?}", bench.observed_kinds());
 }
 
 /// Two independently-loaded probes each subscribe their own mailbox

@@ -54,20 +54,18 @@ pub mod transform;
 pub mod wire;
 pub mod wire_id;
 pub use hash::{
-    KIND_DOMAIN, MAILBOX_DOMAIN, MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH, ScopePathError,
-    THREAD_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN, fnv1a_64_bytes, fnv1a_64_prefixed, fold_lineage,
-    mailbox_id_from_name, mailbox_id_from_name_pair, mailbox_id_from_path, thread_id_from_name,
-    validate_scope_path,
+    KIND_DOMAIN, MAILBOX_DOMAIN, MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH, ScopePathError, THREAD_DOMAIN,
+    TRANSFORM_DOMAIN, TYPE_DOMAIN, fnv1a_64_bytes, fnv1a_64_prefixed, fold_lineage, mailbox_id_from_name,
+    mailbox_id_from_name_pair, mailbox_id_from_path, thread_id_from_name, validate_scope_path,
 };
 pub use ids::{
-    ActorId, DagId, KindId, MailboxId, RequestId, ThreadId, TransformId, tag_for_type_id,
-    type_name_for_type_id,
+    ActorId, DagId, KindId, MailboxId, RequestId, ThreadId, TransformId, tag_for_type_id, type_name_for_type_id,
 };
 pub use mail::{MailId, Source, SourceAddr};
 #[cfg(not(target_arch = "wasm32"))]
 pub use name_inventory::{
-    NameEntry, ParamKind, TemplateEntry, build_static_reverse_map, fill_template, id_for_name,
-    name_entries, template_entries,
+    NameEntry, ParamKind, TemplateEntry, build_static_reverse_map, fill_template, id_for_name, name_entries,
+    template_entries,
 };
 pub use schema::*;
 pub use tagged_id::{Tag, with_tag};
@@ -187,10 +185,7 @@ macro_rules! pod_kind_codec {
 /// the `Kind` derive, which this hand-rolled impl bypasses).
 impl Kind for () {
     const NAME: &'static str = "aether.unit";
-    const ID: KindId = KindId(with_tag(
-        Tag::Kind,
-        fnv1a_64_prefixed(KIND_DOMAIN, Self::NAME.as_bytes()),
-    ));
+    const ID: KindId = KindId(with_tag(Tag::Kind, fnv1a_64_prefixed(KIND_DOMAIN, Self::NAME.as_bytes())));
 
     fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.is_empty() { Some(()) } else { None }
@@ -424,15 +419,11 @@ mod schema_impls {
     // (mail-derive) because its iteration order is platform-
     // dependent and would diverge canonical bytes across builds.
     impl<K: Schema + Ord + 'static, V: Schema + 'static> Schema for BTreeMap<K, V> {
-        const SCHEMA: SchemaType = SchemaType::Map {
-            key: SchemaCell::Static(&K::SCHEMA),
-            value: SchemaCell::Static(&V::SCHEMA),
-        };
+        const SCHEMA: SchemaType =
+            SchemaType::Map { key: SchemaCell::Static(&K::SCHEMA), value: SchemaCell::Static(&V::SCHEMA) };
         const LABEL: Option<&'static str> = None;
-        const LABEL_NODE: LabelNode = LabelNode::Map {
-            key: LabelCell::Static(&K::LABEL_NODE),
-            value: LabelCell::Static(&V::LABEL_NODE),
-        };
+        const LABEL_NODE: LabelNode =
+            LabelNode::Map { key: LabelCell::Static(&K::LABEL_NODE), value: LabelCell::Static(&V::LABEL_NODE) };
     }
 }
 
@@ -480,9 +471,7 @@ pub mod __inventory {
 #[doc(hidden)]
 pub mod __derive_runtime {
     pub use crate::canonical;
-    pub use crate::schema::{
-        EnumVariant, KindLabels, LabelCell, LabelNode, NamedField, SchemaType, VariantLabel,
-    };
+    pub use crate::schema::{EnumVariant, KindLabels, LabelCell, LabelNode, NamedField, SchemaType, VariantLabel};
     pub use alloc::borrow::Cow;
     pub use alloc::vec::Vec;
     use serde::de::DeserializeOwned;
@@ -563,10 +552,7 @@ impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SizeMismatch { expected, actual } => {
-                write!(
-                    f,
-                    "data payload size mismatch: expected {expected}, got {actual}"
-                )
+                write!(f, "data payload size mismatch: expected {expected}, got {actual}")
             }
             Self::Alignment => f.write_str("data payload alignment mismatch"),
             Self::Wire(e) => write!(f, "wire decode failed: {e}"),
@@ -577,14 +563,10 @@ impl fmt::Display for DecodeError {
 impl From<bytemuck::PodCastError> for DecodeError {
     fn from(err: bytemuck::PodCastError) -> Self {
         use bytemuck::PodCastError::{
-            AlignmentMismatch, OutputSliceWouldHaveSlop, SizeMismatch,
-            TargetAlignmentGreaterAndInputNotAligned,
+            AlignmentMismatch, OutputSliceWouldHaveSlop, SizeMismatch, TargetAlignmentGreaterAndInputNotAligned,
         };
         match err {
-            SizeMismatch | OutputSliceWouldHaveSlop => Self::SizeMismatch {
-                expected: 0,
-                actual: 0,
-            },
+            SizeMismatch | OutputSliceWouldHaveSlop => Self::SizeMismatch { expected: 0, actual: 0 },
             TargetAlignmentGreaterAndInputNotAligned | AlignmentMismatch => Self::Alignment,
         }
     }
@@ -611,10 +593,7 @@ pub fn encode_slice<T: Kind + bytemuck::NoUninit>(items: &[T]) -> Vec<u8> {
 /// exactly and meet `T`'s alignment requirement.
 pub fn decode<T: Kind + bytemuck::AnyBitPattern + Copy>(bytes: &[u8]) -> Result<T, DecodeError> {
     if bytes.len() != size_of::<T>() {
-        return Err(DecodeError::SizeMismatch {
-            expected: size_of::<T>(),
-            actual: bytes.len(),
-        });
+        return Err(DecodeError::SizeMismatch { expected: size_of::<T>(), actual: bytes.len() });
     }
     // `pod_read_unaligned` sidesteps the alignment requirement, which is
     // the common shape on wire buffers pulled out of a Vec<u8>.
@@ -689,23 +668,15 @@ mod tests {
         let verts = [Vertex { x: 0.0, y: 0.5 }, Vertex { x: 1.0, y: -0.5 }];
         let bytes = encode_slice(&verts);
         assert_eq!(bytes.len(), 16);
-        let decoded: &[Vertex] =
-            decode_slice(&bytes).expect("test setup: aligned slice decodes zero-copy");
+        let decoded: &[Vertex] = decode_slice(&bytes).expect("test setup: aligned slice decodes zero-copy");
         assert_eq!(decoded, &verts);
     }
 
     #[test]
     fn pod_decode_size_mismatch_rejected() {
         let bytes = [0u8; 7]; // TestPod is 8 bytes
-        let err =
-            decode::<TestPod>(&bytes).expect_err("test setup: short buffer must fail size check");
-        assert!(matches!(
-            err,
-            DecodeError::SizeMismatch {
-                expected: 8,
-                actual: 7
-            }
-        ));
+        let err = decode::<TestPod>(&bytes).expect_err("test setup: short buffer must fail size check");
+        assert!(matches!(err, DecodeError::SizeMismatch { expected: 8, actual: 7 }));
     }
 
     // Exercises the name→id primitive directly — it is the unit under test,
@@ -720,10 +691,7 @@ mod tests {
         assert_ne!(a, c);
         assert_eq!(
             mailbox_id_from_name(""),
-            MailboxId(with_tag(
-                Tag::Mailbox,
-                fnv1a_64_prefixed(MAILBOX_DOMAIN, &[]),
-            )),
+            MailboxId(with_tag(Tag::Mailbox, fnv1a_64_prefixed(MAILBOX_DOMAIN, &[]),)),
         );
         assert_eq!(tagged_id::tag_of(a.0), Some(Tag::Mailbox));
         assert_ne!(mailbox_id_from_name(""), MailboxId(0xcbf2_9ce4_8422_2325));

@@ -78,11 +78,7 @@ impl Rgb {
     #[inline]
     #[must_use]
     pub const fn from_srgb8(r: u8, g: u8, b: u8) -> Self {
-        Self::new(
-            srgb8_channel_to_linear(r),
-            srgb8_channel_to_linear(g),
-            srgb8_channel_to_linear(b),
-        )
+        Self::new(srgb8_channel_to_linear(r), srgb8_channel_to_linear(g), srgb8_channel_to_linear(b))
     }
 
     #[inline]
@@ -106,11 +102,7 @@ impl Rgb {
     #[inline]
     #[must_use]
     pub fn lerp(self, other: Self, t: f32) -> Self {
-        Self::new(
-            self.r + (other.r - self.r) * t,
-            self.g + (other.g - self.g) * t,
-            self.b + (other.b - self.b) * t,
-        )
+        Self::new(self.r + (other.r - self.r) * t, self.g + (other.g - self.g) * t, self.b + (other.b - self.b) * t)
     }
 }
 
@@ -244,10 +236,7 @@ mod tests {
     #[test]
     fn srgb8_to_linear_preserves_approximate_transfer() {
         // Tripwire: RGB keeps the current approximate `(channel / 255)^2` transfer.
-        assert_eq!(
-            Rgba::from_srgb8(255, 128, 0, 255),
-            Rgba::new(1.0, 0.251_964_66, 0.0, 1.0)
-        );
+        assert_eq!(Rgba::from_srgb8(255, 128, 0, 255), Rgba::new(1.0, 0.251_964_66, 0.0, 1.0));
     }
 
     #[test]
@@ -281,9 +270,6 @@ mod tests {
         let color = Rgba::new(0.1, 0.2, 0.3, 0.4);
         let json = serde_json::to_string(&color).expect("serialize rgba");
         assert_eq!(json, r#"{"r":0.1,"g":0.2,"b":0.3,"a":0.4}"#);
-        assert_eq!(
-            serde_json::from_str::<Rgba>(&json).expect("deserialize rgba"),
-            color
-        );
+        assert_eq!(serde_json::from_str::<Rgba>(&json).expect("deserialize rgba"), color);
     }
 }

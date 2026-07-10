@@ -51,64 +51,48 @@ impl ComponentHostCapabilityState {
             Ok(a) => a,
             Err(error) => return LoadResult::Err { error },
         };
-        let (capabilities, type_tag, selected_namespace): (
-            ComponentCapabilities,
-            Option<u64>,
-            Option<String>,
-        ) = if let Some(requested) = &payload.export {
-            let Some(group) = actors
-                .iter()
-                .find(|a| a.namespace.as_deref() == Some(requested.as_str()))
-            else {
-                let available: Vec<&str> = actors
-                    .iter()
-                    .filter_map(|a| a.namespace.as_deref())
-                    .collect();
+        let (capabilities, type_tag, selected_namespace): (ComponentCapabilities, Option<u64>, Option<String>) =
+            if let Some(requested) = &payload.export {
+                let Some(group) = actors.iter().find(|a| a.namespace.as_deref() == Some(requested.as_str())) else {
+                    let available: Vec<&str> = actors.iter().filter_map(|a| a.namespace.as_deref()).collect();
+                    return LoadResult::Err {
+                        error: format!("export {requested:?} not found in module; exported types: {available:?}"),
+                    };
+                };
+                (
+                    group.capabilities.clone(),
+                    // Runtime-name routing: `requested` is the export namespace
+                    // from the wire load request, resolved to its actor-type tag.
+                    #[allow(clippy::disallowed_methods)]
+                    Some(aether_data::mailbox_id_from_name(requested).0),
+                    Some(requested.clone()),
+                )
+            } else if kind_manifest::read_no_entry_marker(&payload.wasm) {
+                // ADR-0138: a defaultless multi-actor module (built with a bare
+                // `export!(A, B, …)`) carries no bare-load entry. An unselected
+                // load is a hard error that names the exports so the caller can
+                // pick one, rather than instantiating an actor by list position.
+                let available: Vec<&str> = actors.iter().filter_map(|a| a.namespace.as_deref()).collect();
                 return LoadResult::Err {
                     error: format!(
-                        "export {requested:?} not found in module; exported types: {available:?}"
+                        "module has no default entry (ADR-0138): load one of its exports \
+                     by name via the export selector; exported types: {available:?}"
                     ),
                 };
+            } else {
+                let entry = actors.first();
+                (
+                    entry.map(|a| a.capabilities.clone()).unwrap_or_default(),
+                    None,
+                    entry.and_then(|a| a.namespace.clone()),
+                )
             };
-            (
-                group.capabilities.clone(),
-                // Runtime-name routing: `requested` is the export namespace
-                // from the wire load request, resolved to its actor-type tag.
-                #[allow(clippy::disallowed_methods)]
-                Some(aether_data::mailbox_id_from_name(requested).0),
-                Some(requested.clone()),
-            )
-        } else if kind_manifest::read_no_entry_marker(&payload.wasm) {
-            // ADR-0138: a defaultless multi-actor module (built with a bare
-            // `export!(A, B, …)`) carries no bare-load entry. An unselected
-            // load is a hard error that names the exports so the caller can
-            // pick one, rather than instantiating an actor by list position.
-            let available: Vec<&str> = actors
-                .iter()
-                .filter_map(|a| a.namespace.as_deref())
-                .collect();
-            return LoadResult::Err {
-                error: format!(
-                    "module has no default entry (ADR-0138): load one of its exports \
-                     by name via the export selector; exported types: {available:?}"
-                ),
-            };
-        } else {
-            let entry = actors.first();
-            (
-                entry.map(|a| a.capabilities.clone()).unwrap_or_default(),
-                None,
-                entry.and_then(|a| a.namespace.clone()),
-            )
-        };
 
         // 3. Compile module.
         let module = match Module::new(&self.engine, &payload.wasm) {
             Ok(m) => m,
             Err(e) => {
-                return LoadResult::Err {
-                    error: format!("invalid wasm module: {e}"),
-                };
+                return LoadResult::Err { error: format!("invalid wasm module: {e}") };
             }
         };
 
@@ -158,15 +142,10 @@ impl ComponentHostCapabilityState {
             // sibling's own handler set (looked up by actor-type tag).
             actor_caps: actors,
         };
-        let mailbox_id = match ctx
-            .spawn_child::<WasmTrampoline>(Subname::Named(&name), trampoline_config)
-            .finish()
-        {
+        let mailbox_id = match ctx.spawn_child::<WasmTrampoline>(Subname::Named(&name), trampoline_config).finish() {
             Ok(id) => id,
             Err(e) => {
-                return LoadResult::Err {
-                    error: format!("trampoline spawn failed: {e:?}"),
-                };
+                return LoadResult::Err { error: format!("trampoline spawn failed: {e:?}") };
             }
         };
 
@@ -178,9 +157,7 @@ impl ComponentHostCapabilityState {
         // both transport flavours. `aether.component.replace`
         // re-registers (same mailbox id); `aether.component.drop`
         // clears.
-        self.mailer
-            .capability_registry()
-            .register(mailbox_id, &capabilities);
+        self.mailer.capability_registry().register(mailbox_id, &capabilities);
 
         // iamacoffeepot/aether#1128: the per-handler cost cells are
         // seeded inside `WasmTrampoline::init` (run just above, under
@@ -202,10 +179,8 @@ impl ComponentHostCapabilityState {
         // exactly one trampoline mailbox at
         // `aether.embedded:NAME`, and the snapshot
         // gives the hub the freshly-published name + category.
-        self.outbound
-            .egress_kinds_changed(self.registry.list_kind_descriptors());
-        self.outbound
-            .egress_mailboxes_changed(self.registry.list_mailbox_descriptors());
+        self.outbound.egress_kinds_changed(self.registry.list_kind_descriptors());
+        self.outbound.egress_mailboxes_changed(self.registry.list_mailbox_descriptors());
 
         LoadResult::Ok {
             mailbox_id,

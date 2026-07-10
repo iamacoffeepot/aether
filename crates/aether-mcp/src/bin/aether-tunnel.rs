@@ -131,8 +131,7 @@ impl ChildSpec {
                 Ok(())
             });
         }
-        cmd.spawn()
-            .with_context(|| format!("failed to fork {} ({})", self.kind.as_str(), self.program))
+        cmd.spawn().with_context(|| format!("failed to fork {} ({})", self.kind.as_str(), self.program))
     }
 }
 
@@ -218,10 +217,7 @@ impl Tunnel {
     /// Fork a fresh child for `kind` from its spec and install it.
     /// Replaces any existing entry (the caller has already terminated it).
     async fn fork(&self, kind: ChildKind) -> anyhow::Result<()> {
-        let spec = self
-            .specs
-            .get(&kind)
-            .with_context(|| format!("no spec registered for {}", kind.as_str()))?;
+        let spec = self.specs.get(&kind).with_context(|| format!("no spec registered for {}", kind.as_str()))?;
         let child = spec.spawn()?;
         tracing::info!(
             target: "aether_tunnel",
@@ -229,10 +225,7 @@ impl Tunnel {
             pid = child.id(),
             "forked child",
         );
-        self.children
-            .lock()
-            .await
-            .insert(kind, Supervised { child });
+        self.children.lock().await.insert(kind, Supervised { child });
         Ok(())
     }
 
@@ -268,19 +261,13 @@ impl Drop for Tunnel {
 // command lines) — top-level process wiring, not a capability reading its config.
 #[allow(clippy::disallowed_methods)]
 fn resolve_specs(ports: Ports) -> anyhow::Result<(ChildSpec, ChildSpec)> {
-    let exe_dir = env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf));
+    let exe_dir = env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
 
     let default_bin = |name: &str| -> String {
-        exe_dir.as_ref().map_or_else(
-            || name.to_owned(),
-            |d| d.join(name).to_string_lossy().into_owned(),
-        )
+        exe_dir.as_ref().map_or_else(|| name.to_owned(), |d| d.join(name).to_string_lossy().into_owned())
     };
 
-    let hub_cmd =
-        env::var("AETHER_TUNNEL_HUB_CMD").unwrap_or_else(|_| default_bin("aether-substrate-hub"));
+    let hub_cmd = env::var("AETHER_TUNNEL_HUB_CMD").unwrap_or_else(|_| default_bin("aether-substrate-hub"));
     let mcp_cmd = env::var("AETHER_TUNNEL_MCP_CMD").unwrap_or_else(|_| default_bin("aether-mcp"));
 
     let (hub_program, hub_args) = split_cmd(&hub_cmd)?;
@@ -298,10 +285,7 @@ fn resolve_specs(ports: Ports) -> anyhow::Result<(ChildSpec, ChildSpec)> {
         args: mcp_args,
         env: vec![
             ("AETHER_MCP_PORT".to_owned(), ports.mcp.to_string()),
-            (
-                "AETHER_HUB_RPC_ADDR".to_owned(),
-                format!("127.0.0.1:{}", ports.hub),
-            ),
+            ("AETHER_HUB_RPC_ADDR".to_owned(), format!("127.0.0.1:{}", ports.hub)),
         ],
     };
     Ok((hub, mcp))
@@ -320,10 +304,7 @@ fn split_cmd(cmd: &str) -> anyhow::Result<(String, Vec<String>)> {
 // ports) — top-level process wiring, not a capability reading its config.
 #[allow(clippy::disallowed_methods)]
 fn read_port(var: &str, default: u16) -> u16 {
-    env::var(var)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
+    env::var(var).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
 #[tokio::main]
@@ -404,10 +385,7 @@ async fn supervise(tunnel: Arc<Tunnel>) {
         }
         let dead: Vec<ChildKind> = {
             let mut children = tunnel.children.lock().await;
-            children
-                .iter_mut()
-                .filter_map(|(kind, sup)| (!sup.poll_alive()).then_some(*kind))
-                .collect()
+            children.iter_mut().filter_map(|(kind, sup)| (!sup.poll_alive()).then_some(*kind)).collect()
         };
         for kind in dead {
             // Reap the exited slot, then re-fork after a backoff.
@@ -471,16 +449,10 @@ fn router(tunnel: Arc<Tunnel>) -> Router {
 /// `bytes_stream()` → `Body::from_stream`, with no response timeout.
 async fn proxy_mcp(State(tunnel): State<Arc<Tunnel>>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
-    forward(&tunnel, parts.method, parts.uri, parts.headers, body)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(target: "aether_tunnel", error = %e, "proxy forward failed");
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("tunnel: upstream error: {e}"),
-            )
-                .into_response()
-        })
+    forward(&tunnel, parts.method, parts.uri, parts.headers, body).await.unwrap_or_else(|e| {
+        tracing::warn!(target: "aether_tunnel", error = %e, "proxy forward failed");
+        (StatusCode::BAD_GATEWAY, format!("tunnel: upstream error: {e}")).into_response()
+    })
 }
 
 /// The forward itself, factored out so the error path is one `?` chain.
@@ -493,9 +465,7 @@ async fn forward(
 ) -> anyhow::Result<Response> {
     // Preserve the path+query exactly (the rmcp transport is mounted at
     // `/mcp`; there is no sub-path today, but forward what we got).
-    let path_and_query = uri
-        .path_and_query()
-        .map_or_else(|| "/mcp".to_owned(), ToString::to_string);
+    let path_and_query = uri.path_and_query().map_or_else(|| "/mcp".to_owned(), ToString::to_string);
     let url = format!("{}{}", tunnel.upstream_base, path_and_query);
 
     // Forward every request header verbatim — `mcp-session-id`, `accept`,
@@ -529,9 +499,7 @@ async fn forward(
     if let Some(h) = out.headers_mut() {
         *h = resp_headers;
     }
-    let resp = out
-        .body(Body::from_stream(stream))
-        .context("building proxied response")?;
+    let resp = out.body(Body::from_stream(stream)).context("building proxied response")?;
     Ok(resp)
 }
 
@@ -579,10 +547,7 @@ async fn admin_restart_hub(State(tunnel): State<Arc<Tunnel>>) -> Response {
     }
     match tunnel.fork(ChildKind::Hub).await {
         Ok(()) => axum::Json(json!({ "ok": true, "restarted": "hub" })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({ "ok": false, "error": e.to_string() })),
-        )
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({ "ok": false, "error": e.to_string() })))
             .into_response(),
     }
 }
@@ -628,10 +593,7 @@ mod tests {
     /// buffering to EOF). Returns the bound port.
     async fn start_stub_upstream() -> u16 {
         async fn mcp_post(headers: HeaderMap) -> Response {
-            let sid = headers
-                .get("mcp-session-id")
-                .cloned()
-                .unwrap_or_else(|| "none".parse().expect("static header"));
+            let sid = headers.get("mcp-session-id").cloned().unwrap_or_else(|| "none".parse().expect("static header"));
             let mut resp = (StatusCode::OK, "pong").into_response();
             resp.headers_mut().insert("mcp-session-id", sid);
             resp
@@ -654,12 +616,8 @@ mod tests {
             Sse::new(s).keep_alive(KeepAlive::default()).into_response()
         }
 
-        let app = Router::new()
-            .route("/mcp", post(mcp_post).get(mcp_get))
-            .route("/mcp/", post(mcp_post).get(mcp_get));
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind stub upstream");
+        let app = Router::new().route("/mcp", post(mcp_post).get(mcp_get)).route("/mcp/", post(mcp_post).get(mcp_get));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind stub upstream");
         let port = listener.local_addr().expect("stub local addr").port();
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -670,21 +628,9 @@ mod tests {
     /// Boot the tunnel itself against a given upstream port, with a
     /// stub hub child command so `restart-hub` has something to cycle.
     /// Returns `(tunnel_port, Arc<Tunnel>)`; the serve loop runs detached.
-    async fn start_tunnel_with_upstream(
-        upstream_port: u16,
-        hub_spec: ChildSpec,
-    ) -> (u16, Arc<Tunnel>) {
-        let ports = Ports {
-            tunnel: 0,
-            mcp: upstream_port,
-            hub: DEFAULT_HUB_RPC_PORT,
-        };
-        let mcp_spec = ChildSpec {
-            kind: ChildKind::Mcp,
-            program: "true".to_owned(),
-            args: vec![],
-            env: vec![],
-        };
+    async fn start_tunnel_with_upstream(upstream_port: u16, hub_spec: ChildSpec) -> (u16, Arc<Tunnel>) {
+        let ports = Ports { tunnel: 0, mcp: upstream_port, hub: DEFAULT_HUB_RPC_PORT };
+        let mcp_spec = ChildSpec { kind: ChildKind::Mcp, program: "true".to_owned(), args: vec![], env: vec![] };
         let tunnel = Arc::new(build_tunnel(ports, hub_spec, mcp_spec).expect("build tunnel"));
         // Fork only the hub child for the restart test (don't fork a real
         // aether-mcp — the stub upstream stands in for it). The spec is
@@ -693,9 +639,7 @@ mod tests {
 
         let app = router(Arc::clone(&tunnel));
 
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("bind tunnel");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind tunnel");
         let port = listener.local_addr().expect("tunnel local addr").port();
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -706,12 +650,7 @@ mod tests {
     /// A stub hub command: a long-lived `sleep` so the supervised child
     /// is genuinely alive until terminated. Spawned in its own group.
     fn sleep_hub_spec() -> ChildSpec {
-        ChildSpec {
-            kind: ChildKind::Hub,
-            program: "sleep".to_owned(),
-            args: vec!["300".to_owned()],
-            env: vec![],
-        }
+        ChildSpec { kind: ChildKind::Hub, program: "sleep".to_owned(), args: vec!["300".to_owned()], env: vec![] }
     }
 
     #[tokio::test]
@@ -731,9 +670,7 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
-            resp.headers()
-                .get("mcp-session-id")
-                .and_then(|v| v.to_str().ok()),
+            resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()),
             Some("sess-abc-123"),
             "the tunnel must forward mcp-session-id verbatim in both directions",
         );
@@ -834,11 +771,7 @@ mod tests {
         assert!(sup.poll_alive(), "re-forked hub must be alive");
         let pid_after = sup.child.id();
         drop(children);
-        assert_ne!(
-            pid_before,
-            Some(pid_after),
-            "restart-hub must fork a new child, not reuse the old pid",
-        );
+        assert_ne!(pid_before, Some(pid_after), "restart-hub must fork a new child, not reuse the old pid");
 
         // Clean up the still-running sleep child.
         tunnel.terminate_all().await;
@@ -850,11 +783,8 @@ mod tests {
         let (tunnel_port, tunnel) = start_tunnel_with_upstream(upstream, sleep_hub_spec()).await;
 
         let client = reqwest::Client::new();
-        let resp = client
-            .get(format!("http://127.0.0.1:{tunnel_port}/admin/status"))
-            .send()
-            .await
-            .expect("status call");
+        let resp =
+            client.get(format!("http://127.0.0.1:{tunnel_port}/admin/status")).send().await.expect("status call");
         assert_eq!(resp.status(), StatusCode::OK);
         let body = parse_json(resp).await;
         assert_eq!(body["children"]["hub"]["alive"], json!(true));

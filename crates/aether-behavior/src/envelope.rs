@@ -80,8 +80,7 @@ pub struct FilterOutput {
 /// unreachable for a well-formed filter output at any realistic effect count.
 #[must_use]
 pub fn encode(output: &FilterOutput) -> Vec<u8> {
-    let body =
-        wire::to_vec(output).expect("wire encode of FilterOutput fails only past the u32 ceiling");
+    let body = wire::to_vec(output).expect("wire encode of FilterOutput fails only past the u32 ceiling");
     let mut out = Vec::with_capacity(1 + body.len());
     out.push(ENVELOPE_VERSION);
     out.extend_from_slice(&body);

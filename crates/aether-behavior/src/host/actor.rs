@@ -19,8 +19,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, ActorTypeTag, Mail, MailboxId, Manual, OutboundReply, PriorState, ReplyHandle,
-    SpawnError, Subname, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
+    ActorInitError, ActorTypeTag, Mail, MailboxId, Manual, OutboundReply, PriorState, ReplyHandle, SpawnError, Subname,
+    WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
 };
 use aether_capabilities::FsCapability;
 use aether_capabilities::fs::{Read, ReadResult};
@@ -57,9 +57,7 @@ pub struct BehaviorHost {
 
 /// Whether an in-flight script fetch originated from boot wiring or a runtime
 /// `load_script` control message.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, aether_data::Schema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, aether_data::Schema)]
 enum ScriptLoadOrigin {
     Boot,
     Runtime,
@@ -133,18 +131,13 @@ impl WasmActor for BehaviorHost {
         }
 
         if let ScriptSource::FsRef { namespace, path } = self.script_source.clone() {
-            let read = Read {
-                namespace: namespace.clone(),
-                path: path.clone(),
-            };
+            let read = Read { namespace: namespace.clone(), path: path.clone() };
             let context = ScriptLoadContext {
                 reply: None,
                 origin: ScriptLoadOrigin::Boot,
                 source: ScriptSource::FsRef { namespace, path },
             };
-            let _ = ctx
-                .actor::<FsCapability>()
-                .send_with_context(&read, &context);
+            let _ = ctx.actor::<FsCapability>().send_with_context(&read, &context);
         }
 
         if self.slot.is_some() {
@@ -163,15 +156,8 @@ impl WasmActor for BehaviorHost {
     /// blob + wrapped-child id) into the host's own parent state. The wrapped
     /// child persists itself through the composite walk (#2694).
     fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
-        let script_bytes = self
-            .slot
-            .as_ref()
-            .map(|s| s.bytes().to_vec())
-            .unwrap_or_default();
-        let script_state = self
-            .slot
-            .as_mut()
-            .map_or_else(Vec::new, ScriptSlot::save_state);
+        let script_bytes = self.slot.as_ref().map(|s| s.bytes().to_vec()).unwrap_or_default();
+        let script_state = self.slot.as_mut().map_or_else(Vec::new, ScriptSlot::save_state);
         let bundle = HostPersist {
             script_source: self.script_source.clone(),
             script_bytes,
@@ -202,21 +188,13 @@ impl WasmActor for BehaviorHost {
     #[allow(clippy::needless_pass_by_value)]
     #[handler::manual]
     fn on_load_script(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: LoadScript) {
-        let read = Read {
-            namespace: msg.namespace.clone(),
-            path: msg.path.clone(),
-        };
+        let read = Read { namespace: msg.namespace.clone(), path: msg.path.clone() };
         let context = ScriptLoadContext {
             reply: ctx.reply_target(),
             origin: ScriptLoadOrigin::Runtime,
-            source: ScriptSource::FsRef {
-                namespace: msg.namespace,
-                path: msg.path,
-            },
+            source: ScriptSource::FsRef { namespace: msg.namespace, path: msg.path },
         };
-        let _ = ctx
-            .actor::<FsCapability>()
-            .send_with_context(&read, &context);
+        let _ = ctx.actor::<FsCapability>().send_with_context(&read, &context);
     }
 
     /// The fs read reply for a `load_script` (or the boot `FsRef` fetch). Swaps
@@ -311,11 +289,7 @@ impl BehaviorHost {
             ReadResult::Ok { bytes, .. } => Ok(bytes),
             ReadResult::Err { error, .. } => Err(alloc::format!("read failed: {error:?}")),
         };
-        let ScriptLoadContext {
-            reply,
-            origin: _origin,
-            source,
-        } = context;
+        let ScriptLoadContext { reply, origin: _origin, source } = context;
         let result = match read {
             Ok(bytes) => self.swap_script(&bytes),
             Err(error) => Err(error),
@@ -336,11 +310,7 @@ impl BehaviorHost {
         (result, reply)
     }
 
-    fn apply_set_script(
-        &mut self,
-        msg: SetScript,
-        mut offer_attach: impl FnMut(&mut Self),
-    ) -> LoadScriptResult {
+    fn apply_set_script(&mut self, msg: SetScript, mut offer_attach: impl FnMut(&mut Self)) -> LoadScriptResult {
         let result = self.swap_script(&msg.bytes);
         if result.is_ok() {
             self.script_source = ScriptSource::Inline(msg.bytes);
@@ -355,11 +325,7 @@ impl BehaviorHost {
         load_result(result)
     }
 
-    fn apply_rehydrate_with_attach(
-        &mut self,
-        prior_bytes: &[u8],
-        mut offer_attach: impl FnMut(&mut Self),
-    ) {
+    fn apply_rehydrate_with_attach(&mut self, prior_bytes: &[u8], mut offer_attach: impl FnMut(&mut Self)) {
         self.apply_rehydrate(prior_bytes);
         if self.slot.is_some() {
             offer_attach(self);
@@ -373,9 +339,9 @@ impl BehaviorHost {
     }
 
     fn offers_kind_to_script(&self, kind: KindId) -> bool {
-        self.slot.as_ref().is_some_and(|slot| {
-            !slot.is_disabled() && (slot.handles(kind) || self.config.is_mirror_kind(kind))
-        })
+        self.slot
+            .as_ref()
+            .is_some_and(|slot| !slot.is_disabled() && (slot.handles(kind) || self.config.is_mirror_kind(kind)))
     }
 
     /// Compile + instantiate `bytes`, carrying the prior script's `state_save`
@@ -410,8 +376,7 @@ impl BehaviorHost {
             return;
         };
         self.script_source = bundle.script_source;
-        self.wrapped_child =
-            (bundle.wrapped_child_id != 0).then_some(MailboxId(bundle.wrapped_child_id));
+        self.wrapped_child = (bundle.wrapped_child_id != 0).then_some(MailboxId(bundle.wrapped_child_id));
         if !bundle.script_bytes.is_empty() {
             match ScriptSlot::instantiate(
                 &self.engine,
@@ -460,11 +425,7 @@ impl BehaviorHost {
         bytes: &[u8],
     ) -> bool {
         let subname = self.config.child.subname.clone();
-        let mut sink = LaneSink {
-            ctx,
-            wrapped_subname: &subname,
-            is_up,
-        };
+        let mut sink = LaneSink { ctx, wrapped_subname: &subname, is_up };
         self.run_filter_and_drain_to_sink(&mut sink, forward_kind, offer_kind, bytes)
     }
 
@@ -491,11 +452,7 @@ impl BehaviorHost {
     /// Forward the in-flight mail raw (no interpreter call) along its lane —
     /// up to the parent, or down to the wrapped child.
     fn forward_raw(&self, ctx: &WasmCtx<'_>, is_up: bool, kind: KindId, bytes: &[u8]) {
-        let relative = if is_up {
-            ctx.parent()
-        } else {
-            ctx.child(&self.config.child.subname)
-        };
+        let relative = if is_up { ctx.parent() } else { ctx.child(&self.config.child.subname) };
         if let Some(target) = relative {
             target.send_bytes(kind, bytes);
         } else {
@@ -525,13 +482,7 @@ fn try_instantiate(
     prior_state: Option<&[u8]>,
     config: &HostConfig,
 ) -> Option<ScriptSlot> {
-    match ScriptSlot::instantiate(
-        engine,
-        bytes,
-        prior_state,
-        config.fuel_per_call,
-        config.disable_after_traps,
-    ) {
+    match ScriptSlot::instantiate(engine, bytes, prior_state, config.fuel_per_call, config.disable_after_traps) {
         Ok(slot) => Some(slot),
         Err(detail) => {
             tracing::warn!(
@@ -557,18 +508,10 @@ impl DrainSink for LaneSink<'_, '_> {
     fn record(&mut self, event: DrainEvent) {
         let (relative, kind_id, bytes) = match event {
             DrainEvent::Forward { kind_id, bytes } => {
-                let relative = if self.is_up {
-                    self.ctx.parent()
-                } else {
-                    self.ctx.child(self.wrapped_subname)
-                };
+                let relative = if self.is_up { self.ctx.parent() } else { self.ctx.child(self.wrapped_subname) };
                 (relative, kind_id, bytes)
             }
-            DrainEvent::Effect {
-                target,
-                kind_id,
-                bytes,
-            } => {
+            DrainEvent::Effect { target, kind_id, bytes } => {
                 let relative = match target {
                     EffectTarget::Widget => self.ctx.child(self.wrapped_subname),
                     EffectTarget::Child(path) => resolve_child_path(self.ctx, &path),
@@ -589,19 +532,15 @@ impl DrainSink for LaneSink<'_, '_> {
     }
 }
 
-fn resolve_child_path<'a>(
-    ctx: &WasmCtx<'a>,
-    path: &str,
-) -> Option<aether_actor::RelativeMailbox<'a>> {
+fn resolve_child_path<'a>(ctx: &WasmCtx<'a>, path: &str) -> Option<aether_actor::RelativeMailbox<'a>> {
     let mut segments = path.split('/');
     let first = segments.next().filter(|segment| !segment.is_empty())?;
-    segments.try_fold(ctx.child(first)?, |relative, segment| {
-        if segment.is_empty() {
-            None
-        } else {
-            relative.child(segment)
-        }
-    })
+    segments.try_fold(
+        ctx.child(first)?,
+        |relative, segment| {
+            if segment.is_empty() { None } else { relative.child(segment) }
+        },
+    )
 }
 
 #[cfg(test)]
@@ -629,11 +568,7 @@ mod tests {
 
     fn config(script: ScriptSource) -> HostConfig {
         HostConfig {
-            child: ChildSpec {
-                type_tag: 0xAAAA,
-                subname: "widget".to_string(),
-                config: Vec::new(),
-            },
+            child: ChildSpec { type_tag: 0xAAAA, subname: "widget".to_string(), config: Vec::new() },
             script,
             fuel_per_call: HostConfig::DEFAULT_FUEL_PER_CALL,
             disable_after_traps: HostConfig::DEFAULT_DISABLE_AFTER_TRAPS,
@@ -648,11 +583,7 @@ mod tests {
     }
 
     fn load_context(origin: ScriptLoadOrigin, namespace: &str, path: &str) -> ScriptLoadContext {
-        ScriptLoadContext {
-            reply: None,
-            origin,
-            source: fs_ref(namespace, path),
-        }
+        ScriptLoadContext { reply: None, origin, source: fs_ref(namespace, path) }
     }
 
     fn reply_handle(raw: u32) -> ReplyHandle {
@@ -665,11 +596,7 @@ mod tests {
             sentinel::ATTACH,
             &FilterOutput {
                 verdict: Verdict::Consume,
-                effects: vec![Effect {
-                    target: EffectTarget::Widget,
-                    kind_id: 0xA77A,
-                    bytes: b"attached".to_vec(),
-                }],
+                effects: vec![Effect { target: EffectTarget::Widget, kind_id: 0xA77A, bytes: b"attached".to_vec() }],
             },
         )
     }
@@ -677,11 +604,7 @@ mod tests {
     fn assert_attach_offered(sink: &RecordingSink) {
         assert_eq!(
             sink.events,
-            vec![DrainEvent::Effect {
-                target: EffectTarget::Widget,
-                kind_id: 0xA77A,
-                bytes: b"attached".to_vec(),
-            }],
+            vec![DrainEvent::Effect { target: EffectTarget::Widget, kind_id: 0xA77A, bytes: b"attached".to_vec() }],
         );
     }
 
@@ -690,10 +613,7 @@ mod tests {
     }
 
     fn fs_ref(namespace: &str, path: &str) -> ScriptSource {
-        ScriptSource::FsRef {
-            namespace: namespace.to_string(),
-            path: path.to_string(),
-        }
+        ScriptSource::FsRef { namespace: namespace.to_string(), path: path.to_string() }
     }
 
     // Tripwire: the fallback's lane direction — an inbound source equal to the
@@ -730,13 +650,7 @@ mod tests {
         let registry = Registry::new();
         let mut ctx = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
         assert!(
-            host.run_filter_and_drain(
-                ctx.as_single(),
-                false,
-                Some(mirror_kind),
-                mirror_kind,
-                b"mirror",
-            ),
+            host.run_filter_and_drain(ctx.as_single(), false, Some(mirror_kind), mirror_kind, b"mirror",),
             "the undeclared mirror kind should reach guest dispatch"
         );
     }
@@ -749,10 +663,7 @@ mod tests {
         let kind = KindId(0x1234);
         let good = fixed_output_wasm(kind, &forward_output(b"ok"));
         let mut host = host(ScriptSource::Inline(good));
-        assert!(
-            host.slot.is_some(),
-            "the inline boot script should be resident"
-        );
+        assert!(host.slot.is_some(), "the inline boot script should be resident");
 
         let before = host.slot.as_ref().map(|s| s.bytes().to_vec());
         let result = host.swap_script(b"not wasm");
@@ -800,11 +711,7 @@ mod tests {
         let mut sink = RecordingSink::default();
 
         let (result, reply) = host.apply_read_result(
-            ReadResult::Ok {
-                namespace: "assets".to_string(),
-                path: "echoed.wasm".to_string(),
-                bytes: attach_script(),
-            },
+            ReadResult::Ok { namespace: "assets".to_string(), path: "echoed.wasm".to_string(), bytes: attach_script() },
             load_context(ScriptLoadOrigin::Runtime, "scripts", "actual.wasm"),
             |host| host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH),
         );
@@ -825,15 +732,10 @@ mod tests {
         let mut sink = RecordingSink::default();
         let mut reports = 0;
 
-        let result = host.apply_set_script(
-            SetScript {
-                bytes: attach_script(),
-            },
-            |host| {
-                drain_prime(host, &mut reports);
-                host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH);
-            },
-        );
+        let result = host.apply_set_script(SetScript { bytes: attach_script() }, |host| {
+            drain_prime(host, &mut reports);
+            host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH);
+        });
 
         assert!(matches!(result, LoadScriptResult::Ok { .. }));
         assert!(host.slot.is_some());
@@ -867,15 +769,9 @@ mod tests {
         host.apply_rehydrate(&bundle.encode());
 
         assert_eq!(host.wrapped_child, Some(MailboxId(0x1234_5678)));
-        assert!(
-            host.slot.is_some(),
-            "the resident script re-instantiates on reload"
-        );
+        assert!(host.slot.is_some(), "the resident script re-instantiates on reload");
         assert!(matches!(host.script_source, ScriptSource::Inline(_)));
-        assert!(
-            host.prime_pending,
-            "rehydrate arms mirror priming for the first resident lane frame"
-        );
+        assert!(host.prime_pending, "rehydrate arms mirror priming for the first resident lane frame");
     }
 
     // Tripwire: a rehydrate that restores a resident script offers ATTACH
@@ -902,10 +798,7 @@ mod tests {
         assert_attach_offered(&sink);
 
         host.prime_if_ready(false, || reports += 1);
-        assert_eq!(
-            reports, 0,
-            "rehydrate waits until the wrapped child is resident"
-        );
+        assert_eq!(reports, 0, "rehydrate waits until the wrapped child is resident");
         assert!(host.prime_pending);
 
         host.prime_if_ready(true, || reports += 1);
@@ -930,19 +823,9 @@ mod tests {
         host.apply_rehydrate(b"garbage blob");
         let after = host.slot.as_ref().map(|slot| slot.bytes().to_vec());
 
-        assert_eq!(
-            after, before,
-            "garbage rehydrate must keep the resident slot"
-        );
-        assert_eq!(
-            host.wrapped_child,
-            Some(MailboxId(0xBEEF)),
-            "garbage rehydrate must not clobber the wrapped child",
-        );
-        assert_eq!(
-            host.script_source, before_source,
-            "garbage rehydrate must keep the init-time script source",
-        );
+        assert_eq!(after, before, "garbage rehydrate must keep the resident slot");
+        assert_eq!(host.wrapped_child, Some(MailboxId(0xBEEF)), "garbage rehydrate must not clobber the wrapped child",);
+        assert_eq!(host.script_source, before_source, "garbage rehydrate must keep the init-time script source",);
     }
 
     // Tripwire: scriptless or undecodable rehydrate offers no ATTACH because
@@ -967,8 +850,7 @@ mod tests {
     #[test]
     fn boot_and_runtime_same_path_loads_resolve_to_their_own_contexts() {
         let mut host = host(fs_ref("assets", "behavior.wasm"));
-        let mut runtime_context =
-            load_context(ScriptLoadOrigin::Runtime, "assets", "behavior.wasm");
+        let mut runtime_context = load_context(ScriptLoadOrigin::Runtime, "assets", "behavior.wasm");
         runtime_context.reply = Some(reply_handle(77));
         let boot_context = load_context(ScriptLoadOrigin::Boot, "assets", "behavior.wasm");
 

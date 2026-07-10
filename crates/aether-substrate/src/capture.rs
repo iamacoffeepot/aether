@@ -114,10 +114,7 @@ impl CaptureQueue {
     /// a poisoned mutex means a prior holder panicked under the guard.
     #[must_use = "a rejected request still owns its inbound guard; reply through it before it drops"]
     pub fn request(&self, pending: PendingCapture) -> Result<(), Box<PendingCapture>> {
-        let mut slot = self
-            .slot
-            .lock()
-            .expect("capture slot mutex poisoned; fail-fast per ADR-0063");
+        let mut slot = self.slot.lock().expect("capture slot mutex poisoned; fail-fast per ADR-0063");
         if slot.is_some() {
             return Err(Box::new(pending));
         }
@@ -138,10 +135,7 @@ impl CaptureQueue {
     /// a poisoned mutex means a prior holder panicked under the guard.
     #[must_use]
     pub fn take(&self) -> Option<PendingCapture> {
-        self.slot
-            .lock()
-            .expect("capture slot mutex poisoned; fail-fast per ADR-0063")
-            .take()
+        self.slot.lock().expect("capture slot mutex poisoned; fail-fast per ADR-0063").take()
     }
 }
 
@@ -197,10 +191,7 @@ mod tests {
     fn second_request_rejected_while_pending() {
         let q = CaptureQueue::new();
         assert!(q.request(pending()).is_ok());
-        assert!(
-            q.request(pending()).is_err(),
-            "a second request is rejected (and handed back) while one is pending",
-        );
+        assert!(q.request(pending()).is_err(), "a second request is rejected (and handed back) while one is pending");
     }
 
     #[test]

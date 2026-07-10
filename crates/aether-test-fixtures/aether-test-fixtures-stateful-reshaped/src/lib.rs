@@ -17,9 +17,7 @@ use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 /// Reshaped durable state — the added `generation` field changes the
 /// schema and therefore `Kind::ID`, which is what drives the decode-miss
 /// when this fixture replaces `stateful_replace_typed`.
-#[derive(
-    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[kind(name = "aether.test_fixtures.counter_state")]
 pub struct CounterState {
     pub count: u32,
@@ -42,17 +40,11 @@ impl WasmActor for Counter {
     type State = CounterState;
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Counter {
-            count: 0,
-            generation: 0,
-        })
+        Ok(Counter { count: 0, generation: 0 })
     }
 
     fn dehydrate(&self) -> CounterState {
-        CounterState {
-            count: self.count,
-            generation: self.generation,
-        }
+        CounterState { count: self.count, generation: self.generation }
     }
 
     fn rehydrate(&mut self, state: CounterState) {

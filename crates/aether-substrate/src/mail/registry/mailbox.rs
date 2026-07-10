@@ -5,8 +5,7 @@ use rustc_hash::FxHashMap;
 
 use aether_data::canonical::{canonical_kind_bytes, kind_id_from_parts};
 use aether_data::{
-    KindDescriptor, MailboxCategory, MailboxDescriptor, SchemaType, mailbox_id_from_path,
-    validate_scope_path,
+    KindDescriptor, MailboxCategory, MailboxDescriptor, SchemaType, mailbox_id_from_path, validate_scope_path,
 };
 
 use crate::mail::registry::errors::{DropError, KindConflict, NameConflict};
@@ -76,10 +75,7 @@ pub enum MailboxEntry {
     /// exists so the blob demuxer can resolve recipient → slot and
     /// dispatch in place (ADR-0087 §4). Empty for closure-backed inboxes
     /// (no pool slot behind them).
-    Inbox {
-        handler: Arc<dyn InboxHandler>,
-        seize: SeizeCell,
-    },
+    Inbox { handler: Arc<dyn InboxHandler>, seize: SeizeCell },
     /// The handler body does its work inline on the pushing thread;
     /// there is no actor dispatch loop behind it. `Mailer::push`
     /// brackets this arm with `Received` and `Finished` so the
@@ -172,10 +168,7 @@ struct Inner {
 impl Registry {
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            inner: RwLock::new(Inner::default()),
-            on_mailbox_change: RwLock::new(None),
-        }
+        Self { inner: RwLock::new(Inner::default()), on_mailbox_change: RwLock::new(None) }
     }
 
     /// Issue iamacoffeepot/aether#742: install the post-registration
@@ -191,10 +184,7 @@ impl Registry {
     /// fail-fast per ADR-0063: a poisoned lock means a prior holder
     /// panicked under the guard.
     pub fn set_on_mailbox_change(&self, hook: MailboxChangeHook) {
-        *self
-            .on_mailbox_change
-            .write()
-            .expect("on_mailbox_change lock poisoned; fail-fast per ADR-0063") = Some(hook);
+        *self.on_mailbox_change.write().expect("on_mailbox_change lock poisoned; fail-fast per ADR-0063") = Some(hook);
     }
 
     /// Snapshot the inventory and invoke the hook (if installed).
@@ -204,11 +194,8 @@ impl Registry {
     /// released — so a concurrent registration sees a consistent
     /// (post-this-insert) view rather than a torn one.
     fn notify_mailbox_change(&self) {
-        let hook = self
-            .on_mailbox_change
-            .read()
-            .expect("on_mailbox_change lock poisoned; fail-fast per ADR-0063")
-            .clone();
+        let hook =
+            self.on_mailbox_change.read().expect("on_mailbox_change lock poisoned; fail-fast per ADR-0063").clone();
         if let Some(hook) = hook {
             hook(self.list_mailbox_descriptors());
         }
@@ -231,12 +218,7 @@ impl Registry {
     /// `ActorId`s — so the spawn path passes the folded id here instead
     /// of letting the name derive it. [`Self::insert`] is the depth-1
     /// case where the two coincide.
-    fn insert_with_id(
-        &self,
-        id: MailboxId,
-        name: String,
-        entry: MailboxEntry,
-    ) -> Result<MailboxId, NameConflict> {
+    fn insert_with_id(&self, id: MailboxId, name: String, entry: MailboxEntry) -> Result<MailboxId, NameConflict> {
         if id == MailboxId::NONE || id == MailboxId::CHASSIS_MAILBOX_ID {
             // Sentinel collisions are reserved: NONE shadows the
             // "absent/uninit" id (Option<MailboxId> semantics break if
@@ -249,10 +231,7 @@ impl Registry {
             // literally registering "aether.chassis".
             return Err(NameConflict { name });
         }
-        let mut inner = self
-            .inner
-            .write()
-            .expect("registry lock poisoned; fail-fast per ADR-0063");
+        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
         match inner.mailboxes.get_mut(&id) {
             Some(slot) if matches!(slot.entry, MailboxEntry::Dropped) && slot.name == name => {
                 slot.entry = entry;
@@ -284,10 +263,7 @@ impl Registry {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn drop_mailbox(&self, id: MailboxId) -> Result<String, DropError> {
-        let mut inner = self
-            .inner
-            .write()
-            .expect("registry lock poisoned; fail-fast per ADR-0063");
+        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
         let Some(slot) = inner.mailboxes.get_mut(&id) else {
             return Err(DropError::UnknownId(id));
         };
@@ -333,18 +309,8 @@ impl Registry {
     /// registrations should never collide; use
     /// [`Self::try_register_inbox`] when a collision is a recoverable
     /// outcome rather than a bug.
-    pub fn register_inbox(
-        &self,
-        name: impl Into<String>,
-        handler: Arc<dyn InboxHandler>,
-    ) -> MailboxId {
-        match self.insert(
-            name.into(),
-            MailboxEntry::Inbox {
-                handler,
-                seize: SeizeCell::default(),
-            },
-        ) {
+    pub fn register_inbox(&self, name: impl Into<String>, handler: Arc<dyn InboxHandler>) -> MailboxId {
+        match self.insert(name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() }) {
             Ok(id) => {
                 self.notify_mailbox_change();
                 id
@@ -372,13 +338,7 @@ impl Registry {
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
     ) -> Result<MailboxId, NameConflict> {
-        let result = self.insert(
-            name.into(),
-            MailboxEntry::Inbox {
-                handler,
-                seize: SeizeCell::default(),
-            },
-        );
+        let result = self.insert(name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() });
         if result.is_ok() {
             self.notify_mailbox_change();
         }
@@ -396,14 +356,7 @@ impl Registry {
         name: impl Into<String>,
         handler: Arc<dyn InboxHandler>,
     ) -> Result<MailboxId, NameConflict> {
-        let result = self.insert_with_id(
-            id,
-            name.into(),
-            MailboxEntry::Inbox {
-                handler,
-                seize: SeizeCell::default(),
-            },
-        );
+        let result = self.insert_with_id(id, name.into(), MailboxEntry::Inbox { handler, seize: SeizeCell::default() });
         if result.is_ok() {
             self.notify_mailbox_change();
         }
@@ -440,11 +393,7 @@ impl Registry {
     /// registrations should never collide; use
     /// [`Self::try_register_inline`] when a collision is a recoverable
     /// outcome rather than a bug.
-    pub fn register_inline(
-        &self,
-        name: impl Into<String>,
-        handler: Arc<dyn InlineHandler>,
-    ) -> MailboxId {
+    pub fn register_inline(&self, name: impl Into<String>, handler: Arc<dyn InlineHandler>) -> MailboxId {
         match self.insert(name.into(), MailboxEntry::Inline(handler)) {
             Ok(id) => {
                 self.notify_mailbox_change();
@@ -488,17 +437,9 @@ impl Registry {
     /// a drop, chassis-bound mailboxes are torn down on cap
     /// teardown and the id can be freshly recreated.
     pub(crate) fn remove_closure(&self, id: MailboxId) -> bool {
-        let mut inner = self
-            .inner
-            .write()
-            .expect("registry lock poisoned; fail-fast per ADR-0063");
+        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
         match inner.mailboxes.get(&id) {
-            Some(slot)
-                if matches!(
-                    slot.entry,
-                    MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)
-                ) =>
-            {
+            Some(slot) if matches!(slot.entry, MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => {
                 inner.mailboxes.remove(&id);
                 true
             }
@@ -531,14 +472,9 @@ impl Registry {
         // would miss it. The depth-1 case (every root cap) folds to the
         // same id `hash(name)` gives.
         let id = mailbox_id_from_path(name);
-        let inner = self
-            .inner
-            .read()
-            .expect("registry lock poisoned; fail-fast per ADR-0063");
+        let inner = self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063");
         match inner.mailboxes.get(&id) {
-            Some(slot) if slot.name == name && !matches!(slot.entry, MailboxEntry::Dropped) => {
-                Some(id)
-            }
+            Some(slot) if slot.name == name && !matches!(slot.entry, MailboxEntry::Dropped) => Some(id),
             _ => None,
         }
     }
@@ -575,12 +511,8 @@ impl Registry {
     /// Panics if the inner `RwLock` is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn install_seize_handle(&self, id: MailboxId, handle: SeizeHandle) -> bool {
-        let inner = self
-            .inner
-            .read()
-            .expect("registry lock poisoned; fail-fast per ADR-0063");
-        let Some(MailboxEntry::Inbox { seize, .. }) = inner.mailboxes.get(&id).map(|m| &m.entry)
-        else {
+        let inner = self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063");
+        let Some(MailboxEntry::Inbox { seize, .. }) = inner.mailboxes.get(&id).map(|m| &m.entry) else {
             return false;
         };
         seize.set(handle).is_ok()
@@ -599,10 +531,7 @@ impl Registry {
     /// Panics if the inner `RwLock` is poisoned — fail-fast per
     /// ADR-0063.
     pub(crate) fn route_lookup(&self, kind: KindId, recipient: MailboxId) -> RouteLookup {
-        let inner = self
-            .inner
-            .read()
-            .expect("registry lock poisoned; fail-fast per ADR-0063");
+        let inner = self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063");
         let kind_slot = inner.kinds.get(&kind);
         let kind_name = kind_slot.map(|s| s.name.clone()).unwrap_or_default();
         let entry = inner.mailboxes.get(&recipient).map(|m| m.entry.clone());
@@ -614,11 +543,7 @@ impl Registry {
             MailboxEntry::Inbox { seize, .. } => seize.get().cloned(),
             MailboxEntry::Inline(_) | MailboxEntry::Dropped => None,
         });
-        RouteLookup {
-            entry,
-            kind_name,
-            seize,
-        }
+        RouteLookup { entry, kind_name, seize }
     }
 
     /// Reverse of `lookup`: name for a given mailbox id, or `None` if
@@ -655,10 +580,7 @@ impl Registry {
     /// the guard. The internal `expect("Bytes default cannot produce a
     /// conflict")` is unreachable by construction.
     pub fn register_kind(&self, name: impl Into<String>) -> KindId {
-        let descriptor = KindDescriptor {
-            name: name.into(),
-            schema: SchemaType::Bytes,
-        };
+        let descriptor = KindDescriptor { name: name.into(), schema: SchemaType::Bytes };
         // A fresh `Bytes` descriptor can only conflict with a prior
         // `Bytes` registration under the same name — in which case the
         // schemas match and the call is idempotent. Not reachable.
@@ -684,10 +606,7 @@ impl Registry {
     /// Panics if the inner `RwLock` is poisoned — fail-fast per
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
-    pub fn register_kind_with_descriptor(
-        &self,
-        descriptor: KindDescriptor,
-    ) -> Result<KindId, KindConflict> {
+    pub fn register_kind_with_descriptor(&self, descriptor: KindDescriptor) -> Result<KindId, KindConflict> {
         self.register_kind_internal(descriptor, /*reject_conflict=*/ true)
     }
 
@@ -697,10 +616,7 @@ impl Registry {
         reject_conflict: bool,
     ) -> Result<KindId, KindConflict> {
         let id = KindId(kind_id_from_parts(&descriptor.name, &descriptor.schema));
-        let mut inner = self
-            .inner
-            .write()
-            .expect("registry lock poisoned; fail-fast per ADR-0063");
+        let mut inner = self.inner.write().expect("registry lock poisoned; fail-fast per ADR-0063");
         if let Some(slot) = inner.kinds.get(&id) {
             if reject_conflict
                 && canonical_kind_bytes(&slot.descriptor.name, &slot.descriptor.schema)
@@ -722,13 +638,7 @@ impl Registry {
             return Ok(id);
         }
         inner.name_index.insert(descriptor.name.clone(), id);
-        inner.kinds.insert(
-            id,
-            KindSlot {
-                name: descriptor.name.clone(),
-                descriptor,
-            },
-        );
+        inner.kinds.insert(id, KindSlot { name: descriptor.name.clone(), descriptor });
         Ok(id)
     }
 
@@ -744,12 +654,7 @@ impl Registry {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn kind_id(&self, name: &str) -> Option<KindId> {
-        self.inner
-            .read()
-            .expect("registry lock poisoned; fail-fast per ADR-0063")
-            .name_index
-            .get(name)
-            .copied()
+        self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063").name_index.get(name).copied()
     }
 
     /// Reverse of `kind_id`: name for a given id, or `None` if the id
@@ -858,11 +763,7 @@ impl Registry {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn len(&self) -> usize {
-        self.inner
-            .read()
-            .expect("registry lock poisoned; fail-fast per ADR-0063")
-            .mailboxes
-            .len()
+        self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063").mailboxes.len()
     }
 
     /// `true` when no mailbox has ever been registered.
@@ -872,11 +773,7 @@ impl Registry {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn is_empty(&self) -> bool {
-        self.inner
-            .read()
-            .expect("registry lock poisoned; fail-fast per ADR-0063")
-            .mailboxes
-            .is_empty()
+        self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063").mailboxes.is_empty()
     }
 }
 

@@ -35,8 +35,7 @@ use aether_substrate_bundle::Chassis as _;
 use aether_substrate_bundle::autoload::AutoloadComponent;
 use aether_substrate_bundle::capabilities::http::HttpConfig;
 use aether_substrate_bundle::capabilities::{
-    AnthropicConfig, ContentGenConfig, GeminiConfig, HttpServerConfig, HttpServerHandle,
-    WasmTrampoline,
+    AnthropicConfig, ContentGenConfig, GeminiConfig, HttpServerConfig, HttpServerHandle, WasmTrampoline,
 };
 use aether_substrate_bundle::headless::{HeadlessChassis, HeadlessEnv};
 use aether_substrate_bundle::test_bench::test_helpers::{
@@ -88,10 +87,7 @@ const WS_TEST_KEY_2: &str = "AQIDBAUGBwgJCgsMDQ4PEA==";
 
 /// Slice of `response` after the HTTP head's blank line, or empty if absent.
 fn body_after_head(response: &[u8]) -> &[u8] {
-    response
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map_or(&[][..], |i| &response[i + 4..])
+    response.windows(4).position(|w| w == b"\r\n\r\n").map_or(&[][..], |i| &response[i + 4..])
 }
 
 /// Reassemble a chunked transfer-encoding body into its payload, stopping at
@@ -100,15 +96,10 @@ fn dechunk(body: &[u8]) -> Vec<u8> {
     let mut pos = 0;
     let mut out = Vec::new();
     while pos < body.len() {
-        let Some(crlf) =
-            (pos..body.len().saturating_sub(1)).find(|&i| body[i] == b'\r' && body[i + 1] == b'\n')
-        else {
+        let Some(crlf) = (pos..body.len().saturating_sub(1)).find(|&i| body[i] == b'\r' && body[i + 1] == b'\n') else {
             break;
         };
-        let size = from_utf8(&body[pos..crlf])
-            .ok()
-            .and_then(|s| usize::from_str_radix(s.trim(), 16).ok())
-            .unwrap_or(0);
+        let size = from_utf8(&body[pos..crlf]).ok().and_then(|s| usize::from_str_radix(s.trim(), 16).ok()).unwrap_or(0);
         pos = crlf + 2;
         if size == 0 || pos + size > body.len() {
             break;
@@ -123,11 +114,8 @@ fn dechunk(body: &[u8]) -> Vec<u8> {
 /// EOF (the cap sends `Connection: close`), and return the raw response
 /// bytes. Mirrors the helper used in the `http_server.rs` cap unit tests.
 fn round_trip(port: u16, request: &[u8]) -> Vec<u8> {
-    let mut stream =
-        TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .expect("set_read_timeout");
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+    stream.set_read_timeout(Some(Duration::from_secs(10))).expect("set_read_timeout");
     stream.write_all(request).expect("write request");
     stream.flush().expect("flush request");
 
@@ -137,9 +125,7 @@ fn round_trip(port: u16, request: &[u8]) -> Vec<u8> {
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => response.extend_from_slice(&chunk[..n]),
-            Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
-            {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
                 break;
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -191,11 +177,7 @@ fn read_exact_n(stream: &mut TcpStream, n: usize) -> Vec<u8> {
 fn read_server_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
     let header = read_exact_n(stream, 2);
     let opcode = header[0] & 0x0F;
-    assert_eq!(
-        header[1] & 0x80,
-        0,
-        "a server→client frame must be unmasked"
-    );
+    assert_eq!(header[1] & 0x80, 0, "a server→client frame must be unmasked");
     let len = match header[1] & 0x7F {
         126 => {
             let ext = read_exact_n(stream, 2);
@@ -303,10 +285,7 @@ mod tests {
         // Wait for the wasm handler trampoline to come up.
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if built
-                .resolve_actor::<WasmTrampoline>(HANDLER_NAMESPACE)
-                .is_some()
-            {
+            if built.resolve_actor::<WasmTrampoline>(HANDLER_NAMESPACE).is_some() {
                 break;
             }
             assert!(
@@ -319,22 +298,14 @@ mod tests {
         }
 
         // Retrieve the OS-assigned port from the published handle.
-        let port = built
-            .handle::<HttpServerHandle>()
-            .expect("HttpServerHandle published by HttpServerCapability")
-            .local_port;
+        let port =
+            built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
         // GET / → 200 with body "hello from aether"
-        let root_response = round_trip(
-            port,
-            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-        );
+        let root_response = round_trip(port, b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         let root_str = String::from_utf8_lossy(&root_response);
-        assert!(
-            root_str.starts_with("HTTP/1.1 200 "),
-            "GET / should reply 200, got: {root_str:?}",
-        );
+        assert!(root_str.starts_with("HTTP/1.1 200 "), "GET / should reply 200, got: {root_str:?}");
         assert!(
             root_str.contains("hello from aether"),
             "GET / body should contain 'hello from aether', got: {root_str:?}",
@@ -342,19 +313,10 @@ mod tests {
 
         // GET /missing → 200, echoing the path (a non-root path serves
         // success, not a 404 trap).
-        let miss_response = round_trip(
-            port,
-            b"GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-        );
+        let miss_response = round_trip(port, b"GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         let miss_str = String::from_utf8_lossy(&miss_response);
-        assert!(
-            miss_str.starts_with("HTTP/1.1 200 "),
-            "GET /missing should reply 200, got: {miss_str:?}",
-        );
-        assert!(
-            miss_str.contains("/missing"),
-            "GET /missing body should echo the request path, got: {miss_str:?}",
-        );
+        assert!(miss_str.starts_with("HTTP/1.1 200 "), "GET /missing should reply 200, got: {miss_str:?}");
+        assert!(miss_str.contains("/missing"), "GET /missing body should echo the request path, got: {miss_str:?}");
     }
 
     /// Boot a headless chassis with `HttpServerCapability` bound and the
@@ -424,10 +386,7 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if built
-                .resolve_actor::<WasmTrampoline>(STREAM_HANDLER_NAMESPACE)
-                .is_some()
-            {
+            if built.resolve_actor::<WasmTrampoline>(STREAM_HANDLER_NAMESPACE).is_some() {
                 break;
             }
             assert!(
@@ -439,36 +398,18 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
         }
 
-        let port = built
-            .handle::<HttpServerHandle>()
-            .expect("HttpServerHandle published by HttpServerCapability")
-            .local_port;
+        let port =
+            built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
-        let response = round_trip(
-            port,
-            b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-        );
+        let response = round_trip(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         let head = String::from_utf8_lossy(&response);
-        assert!(
-            head.starts_with("HTTP/1.1 200 "),
-            "GET /stream should reply 200, got: {head:?}",
-        );
-        assert!(
-            head.contains("Transfer-Encoding: chunked"),
-            "streamed response should be chunked, got: {head:?}",
-        );
+        assert!(head.starts_with("HTTP/1.1 200 "), "GET /stream should reply 200, got: {head:?}");
+        assert!(head.contains("Transfer-Encoding: chunked"), "streamed response should be chunked, got: {head:?}");
 
         let reassembled = dechunk(body_after_head(&response));
-        let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT)
-            .flat_map(|i| format!("chunk-{i}\n").into_bytes())
-            .collect();
-        assert_eq!(
-            reassembled,
-            expected,
-            "reassembled stream body: {:?}",
-            String::from_utf8_lossy(&reassembled),
-        );
+        let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT).flat_map(|i| format!("chunk-{i}\n").into_bytes()).collect();
+        assert_eq!(reassembled, expected, "reassembled stream body: {:?}", String::from_utf8_lossy(&reassembled));
     }
 
     /// Regression for issue 2600: a response-streaming handler reached
@@ -549,10 +490,7 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if built
-                .resolve_actor::<WasmTrampoline>(ROUTED_STREAM_HANDLER_NAMESPACE)
-                .is_some()
-            {
+            if built.resolve_actor::<WasmTrampoline>(ROUTED_STREAM_HANDLER_NAMESPACE).is_some() {
                 break;
             }
             assert!(
@@ -564,19 +502,14 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
         }
 
-        let port = built
-            .handle::<HttpServerHandle>()
-            .expect("HttpServerHandle published by HttpServerCapability")
-            .local_port;
+        let port =
+            built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
         // Route registration is async mail — poll until the streamed body
         // reassembles rather than racing the `register_route_self`.
-        let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT)
-            .flat_map(|i| format!("chunk-{i}\n").into_bytes())
-            .collect();
-        let request =
-            b"GET /routed-stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let expected: Vec<u8> = (0..STREAM_CHUNK_COUNT).flat_map(|i| format!("chunk-{i}\n").into_bytes()).collect();
+        let request = b"GET /routed-stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let response = round_trip(port, request);
@@ -670,10 +603,7 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if built
-                .resolve_actor::<WasmTrampoline>(WS_HANDLER_NAMESPACE)
-                .is_some()
-            {
+            if built.resolve_actor::<WasmTrampoline>(WS_HANDLER_NAMESPACE).is_some() {
                 break;
             }
             assert!(
@@ -685,17 +615,12 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
         }
 
-        let port = built
-            .handle::<HttpServerHandle>()
-            .expect("HttpServerHandle published by HttpServerCapability")
-            .local_port;
+        let port =
+            built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
-        let mut stream =
-            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .expect("set_read_timeout");
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+        stream.set_read_timeout(Some(Duration::from_secs(10))).expect("set_read_timeout");
 
         // Handshake.
         let handshake = format!(
@@ -703,16 +628,11 @@ mod tests {
              Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
              Sec-WebSocket-Key: {WS_TEST_KEY}\r\n\r\n"
         );
-        stream
-            .write_all(handshake.as_bytes())
-            .expect("write handshake");
+        stream.write_all(handshake.as_bytes()).expect("write handshake");
         stream.flush().expect("flush handshake");
 
         let head = read_http_head(&mut stream);
-        assert!(
-            head.starts_with("HTTP/1.1 101 "),
-            "upgrade should reply 101, got: {head:?}",
-        );
+        assert!(head.starts_with("HTTP/1.1 101 "), "upgrade should reply 101, got: {head:?}");
         assert!(
             head.contains(&format!("Sec-WebSocket-Accept: {WS_TEST_ACCEPT}")),
             "101 should echo the computed accept key, got: {head:?}",
@@ -723,123 +643,73 @@ mod tests {
         // routing holds with no inbound websocket message in flight.
         let (opcode, payload) = read_server_frame(&mut stream);
         assert_eq!(opcode, WS_OPCODE_TEXT, "greeting should be a text frame");
-        assert_eq!(
-            payload, b"server greeting",
-            "the fixture's unsolicited push should arrive before any client frame",
-        );
+        assert_eq!(payload, b"server greeting", "the fixture's unsolicited push should arrive before any client frame");
 
         // Concurrent second connection: the fixture keys its greeting +
         // captured stream per connection (`stream_id`), not per actor, so a
         // second concurrent client must get its own greeting and its own
         // echoes with no cross-talk against the first connection (issue
         // 2603 finding 1).
-        let mut stream2 =
-            TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect second ws client");
-        stream2
-            .set_read_timeout(Some(Duration::from_secs(10)))
-            .expect("set_read_timeout for second connection");
+        let mut stream2 = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect second ws client");
+        stream2.set_read_timeout(Some(Duration::from_secs(10))).expect("set_read_timeout for second connection");
         let handshake2 = format!(
             "GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
              Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
              Sec-WebSocket-Key: {WS_TEST_KEY_2}\r\n\r\n"
         );
-        stream2
-            .write_all(handshake2.as_bytes())
-            .expect("write second handshake");
+        stream2.write_all(handshake2.as_bytes()).expect("write second handshake");
         stream2.flush().expect("flush second handshake");
 
         let head2 = read_http_head(&mut stream2);
-        assert!(
-            head2.starts_with("HTTP/1.1 101 "),
-            "second connection's upgrade should reply 101, got: {head2:?}",
-        );
+        assert!(head2.starts_with("HTTP/1.1 101 "), "second connection's upgrade should reply 101, got: {head2:?}");
 
         // Its own accept-time greeting, distinct from the first
         // connection's — proves the greet-once behavior is per connection.
         let (opcode, payload) = read_server_frame(&mut stream2);
-        assert_eq!(
-            opcode, WS_OPCODE_TEXT,
-            "second connection's greeting should be a text frame"
-        );
-        assert_eq!(
-            payload, b"server greeting",
-            "the second connection should get its own greeting",
-        );
+        assert_eq!(opcode, WS_OPCODE_TEXT, "second connection's greeting should be a text frame");
+        assert_eq!(payload, b"server greeting", "the second connection should get its own greeting");
 
         // Interleave a send on each connection, then read the echoes back
         // in reverse order: if the fixture still tracked a single captured
         // stream instead of a per-connection map, one of these echoes
         // would either go missing or land on the wrong socket.
-        stream
-            .write_all(&ws_client_frame(WS_OPCODE_TEXT, b"hello from conn1", true))
-            .expect("write conn1 frame");
+        stream.write_all(&ws_client_frame(WS_OPCODE_TEXT, b"hello from conn1", true)).expect("write conn1 frame");
         stream.flush().expect("flush conn1 frame");
-        stream2
-            .write_all(&ws_client_frame(WS_OPCODE_TEXT, b"hello from conn2", true))
-            .expect("write conn2 frame");
+        stream2.write_all(&ws_client_frame(WS_OPCODE_TEXT, b"hello from conn2", true)).expect("write conn2 frame");
         stream2.flush().expect("flush conn2 frame");
 
         let (opcode2, payload2) = read_server_frame(&mut stream2);
-        assert_eq!(
-            opcode2, WS_OPCODE_TEXT,
-            "conn2's echo should be a text frame"
-        );
-        assert_eq!(
-            payload2, b"hello from conn2",
-            "conn2's echo must not cross-talk with conn1",
-        );
+        assert_eq!(opcode2, WS_OPCODE_TEXT, "conn2's echo should be a text frame");
+        assert_eq!(payload2, b"hello from conn2", "conn2's echo must not cross-talk with conn1");
 
         let (opcode1, payload1) = read_server_frame(&mut stream);
-        assert_eq!(
-            opcode1, WS_OPCODE_TEXT,
-            "conn1's echo should be a text frame"
-        );
-        assert_eq!(
-            payload1, b"hello from conn1",
-            "conn1's echo must not cross-talk with conn2",
-        );
+        assert_eq!(opcode1, WS_OPCODE_TEXT, "conn1's echo should be a text frame");
+        assert_eq!(payload1, b"hello from conn1", "conn1's echo must not cross-talk with conn2");
 
         // Close the second connection cleanly so it doesn't linger for the
         // rest of the single-connection assertions below.
         let mut close_payload2 = Vec::new();
         close_payload2.extend_from_slice(&1000u16.to_be_bytes());
-        stream2
-            .write_all(&ws_client_frame(WS_OPCODE_CLOSE, &close_payload2, true))
-            .expect("write second close frame");
+        stream2.write_all(&ws_client_frame(WS_OPCODE_CLOSE, &close_payload2, true)).expect("write second close frame");
         stream2.flush().expect("flush second close frame");
         let (opcode, _payload) = read_server_frame(&mut stream2);
-        assert_eq!(
-            opcode, WS_OPCODE_CLOSE,
-            "the cap should echo a close frame for the second connection",
-        );
+        assert_eq!(opcode, WS_OPCODE_CLOSE, "the cap should echo a close frame for the second connection");
 
         // A single-frame message echoes back verbatim.
-        stream
-            .write_all(&ws_client_frame(WS_OPCODE_TEXT, b"hello websocket", true))
-            .expect("write text frame");
+        stream.write_all(&ws_client_frame(WS_OPCODE_TEXT, b"hello websocket", true)).expect("write text frame");
         stream.flush().expect("flush text frame");
         let (opcode, payload) = read_server_frame(&mut stream);
         assert_eq!(opcode, WS_OPCODE_TEXT, "echo should be a text frame");
-        assert_eq!(
-            payload, b"hello websocket",
-            "echo should match what was sent"
-        );
+        assert_eq!(payload, b"hello websocket", "echo should match what was sent");
 
         // A fragmented message (two frames) reassembles into one echoed message
         // — the cap reassembles inbound continuation frames before dispatch.
-        stream
-            .write_all(&ws_client_frame(WS_OPCODE_TEXT, b"frag-", false))
-            .expect("write fragment 1");
-        stream
-            .write_all(&ws_client_frame(WS_OPCODE_CONTINUATION, b"ment", true))
-            .expect("write fragment 2");
+        stream.write_all(&ws_client_frame(WS_OPCODE_TEXT, b"frag-", false)).expect("write fragment 1");
+        stream.write_all(&ws_client_frame(WS_OPCODE_CONTINUATION, b"ment", true)).expect("write fragment 2");
         stream.flush().expect("flush fragments");
         let (opcode, payload) = read_server_frame(&mut stream);
         assert_eq!(opcode, WS_OPCODE_TEXT, "reassembled echo is a text frame");
-        assert_eq!(
-            payload, b"frag-ment",
-            "the cap should reassemble the fragmented message before dispatch",
-        );
+        assert_eq!(payload, b"frag-ment", "the cap should reassemble the fragmented message before dispatch");
 
         // An outbound send naming an unknown stream id is dropped without
         // tearing the connection down (ADR-0132): the fixture echoes
@@ -848,26 +718,17 @@ mod tests {
         // writes are ordered, so reading the second echo first proves the
         // misrouted frame never reached the socket, and reading it at all
         // proves the connection survived the drop.
-        stream
-            .write_all(&ws_client_frame(WS_OPCODE_TEXT, b"misroute", true))
-            .expect("write misroute frame");
-        stream
-            .write_all(&ws_client_frame(WS_OPCODE_TEXT, b"after misroute", true))
-            .expect("write post-misroute frame");
+        stream.write_all(&ws_client_frame(WS_OPCODE_TEXT, b"misroute", true)).expect("write misroute frame");
+        stream.write_all(&ws_client_frame(WS_OPCODE_TEXT, b"after misroute", true)).expect("write post-misroute frame");
         stream.flush().expect("flush misroute frames");
         let (opcode, payload) = read_server_frame(&mut stream);
         assert_eq!(opcode, WS_OPCODE_TEXT, "post-misroute echo is a text frame");
-        assert_eq!(
-            payload, b"after misroute",
-            "the misrouted echo must be dropped and the connection must survive",
-        );
+        assert_eq!(payload, b"after misroute", "the misrouted echo must be dropped and the connection must survive");
 
         // Clean close: send a close frame, read the cap's echoed close.
         let mut close_payload = Vec::new();
         close_payload.extend_from_slice(&1000u16.to_be_bytes());
-        stream
-            .write_all(&ws_client_frame(WS_OPCODE_CLOSE, &close_payload, true))
-            .expect("write close frame");
+        stream.write_all(&ws_client_frame(WS_OPCODE_CLOSE, &close_payload, true)).expect("write close frame");
         stream.flush().expect("flush close frame");
         let (opcode, _payload) = read_server_frame(&mut stream);
         assert_eq!(opcode, WS_OPCODE_CLOSE, "the cap should echo a close frame");
@@ -881,16 +742,10 @@ mod tests {
         loop {
             let response = round_trip(port, request);
             let text = String::from_utf8_lossy(&response);
-            if text
-                .split_once("\r\n\r\n")
-                .is_some_and(|(_, body)| body.contains(expected))
-            {
+            if text.split_once("\r\n\r\n").is_some_and(|(_, body)| body.contains(expected)) {
                 return;
             }
-            assert!(
-                Instant::now() < deadline,
-                "expected body containing {expected:?} within 30s; last: {text:?}",
-            );
+            assert!(Instant::now() < deadline, "expected body containing {expected:?} within 30s; last: {text:?}");
             thread::sleep(Duration::from_millis(25));
         }
     }
@@ -975,9 +830,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(30);
         let routed_mailbox = loop {
             if let Some(routed) = built.resolve_actor::<WasmTrampoline>(ROUTED_NAMESPACE)
-                && built
-                    .resolve_actor::<WasmTrampoline>(HANDLER_NAMESPACE)
-                    .is_some()
+                && built.resolve_actor::<WasmTrampoline>(HANDLER_NAMESPACE).is_some()
             {
                 break routed;
             }
@@ -989,10 +842,8 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
         };
 
-        let port = built
-            .handle::<HttpServerHandle>()
-            .expect("HttpServerHandle published by HttpServerCapability")
-            .local_port;
+        let port =
+            built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
 
         // Route live (registration is async mail — poll, don't race).
         poll_body_contains(

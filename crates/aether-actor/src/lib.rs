@@ -59,14 +59,11 @@ pub mod trace;
 pub mod wasm;
 
 pub use local::Local;
-pub use model::ctx::{
-    Emit, MailSender, Manual, Multi, OutboundReply, Persistence, ReplyMode, Single,
-};
+pub use model::ctx::{Emit, MailSender, Manual, Multi, OutboundReply, Persistence, ReplyMode, Single};
 pub use model::slot::Slot;
 pub use model::{
-    Actor, Addressable, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle,
-    Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Resolve, Singleton, Subname,
-    validate_namespace_segment,
+    Actor, Addressable, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle, Many,
+    NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Resolve, Singleton, Subname, validate_namespace_segment,
 };
 pub use request_context::{
     REQUEST_CONTEXT_CAPACITY, RequestContextTable, compose_state_envelope, split_state_envelope,
@@ -84,8 +81,8 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, ReplyHandle};
 // `aether_actor::WasmCtx<'_>` / `aether_actor::WasmActor` / etc. without
 // an extra `wasm::` segment.
 pub use wasm::{
-    ActorInitError, ActorTypeTag, ErasedWasmActor, RelativeMailbox, SpawnError, WasmActor,
-    WasmActorMailbox, WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx,
+    ActorInitError, ActorTypeTag, ErasedWasmActor, RelativeMailbox, SpawnError, WasmActor, WasmActorMailbox, WasmCtx,
+    WasmDispatch, WasmDropCtx, WasmInitCtx,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`

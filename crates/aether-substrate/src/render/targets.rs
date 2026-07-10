@@ -48,12 +48,7 @@ impl Targets {
     /// height are clamped to a minimum of 1 — wgpu rejects zero
     /// dimensions.
     #[must_use]
-    pub fn new(
-        device: &wgpu::Device,
-        color_format: wgpu::TextureFormat,
-        width: u32,
-        height: u32,
-    ) -> Self {
+    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat, width: u32, height: u32) -> Self {
         let width = width.max(1);
         let height = height.max(1);
         Self {
@@ -115,19 +110,10 @@ pub(super) fn align_up(value: u32, alignment: u32) -> u32 {
     value.div_ceil(alignment) * alignment
 }
 
-fn create_offscreen(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-    width: u32,
-    height: u32,
-) -> OffscreenTarget {
+fn create_offscreen(device: &wgpu::Device, format: wgpu::TextureFormat, width: u32, height: u32) -> OffscreenTarget {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen color target"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -139,22 +125,13 @@ fn create_offscreen(
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    OffscreenTarget {
-        texture,
-        view,
-        width,
-        height,
-    }
+    OffscreenTarget { texture, view, width, height }
 }
 
 fn create_depth(device: &wgpu::Device, width: u32, height: u32) -> DepthTarget {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth target"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,

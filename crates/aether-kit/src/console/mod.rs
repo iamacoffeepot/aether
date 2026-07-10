@@ -15,15 +15,13 @@ use aether_capabilities::input::{InputCapability, InputMailboxExt};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawSolidQuads, SolidQuad};
 use aether_capabilities::text::{
-    DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontBytes,
-    LoadFontResult, MEMORY_FONT_NAMESPACE,
+    DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontBytes, LoadFontResult,
+    MEMORY_FONT_NAMESPACE,
 };
 use aether_capabilities::{LifecycleCapability, RenderCapability, TextCapability};
 use aether_data::MailboxId;
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
-use aether_kinds::{
-    CachedFontMetrics, Key, KeyRelease, MouseWheel, QuadSpace, Quit, TextInput, Tick, WindowSize,
-};
+use aether_kinds::{CachedFontMetrics, Key, KeyRelease, MouseWheel, QuadSpace, Quit, TextInput, Tick, WindowSize};
 use aether_math::Rgba;
 use serde::{Deserialize, Serialize};
 
@@ -66,9 +64,7 @@ pub struct ConsoleOverlay {
 
 impl ConsoleOverlay {
     fn visible_rows(&self) -> usize {
-        let available =
-            (self.input_y() - HISTORY_INPUT_GAP - self.history_top_y() - self.config.font_size)
-                .max(0.0);
+        let available = (self.input_y() - HISTORY_INPUT_GAP - self.history_top_y() - self.config.font_size).max(0.0);
         f32_floor_to_usize(available / self.row_height()) + usize::from(available > 0.0)
     }
 
@@ -81,10 +77,7 @@ impl ConsoleOverlay {
     }
 
     fn input_y(&self) -> f32 {
-        let panel_height = self
-            .config
-            .panel_height
-            .min(bounded_u32_to_f32(self.window_size[1]));
+        let panel_height = self.config.panel_height.min(bounded_u32_to_f32(self.window_size[1]));
         (panel_height - BOTTOM_PADDING - self.config.font_size).max(TOP_PADDING)
     }
 
@@ -100,19 +93,10 @@ impl ConsoleOverlay {
 
         let visible_rows = self.visible_rows();
         self.state.clamp_scroll(visible_rows);
-        let panel_height = self
-            .config
-            .panel_height
-            .min(bounded_u32_to_f32(self.window_size[1]));
+        let panel_height = self.config.panel_height.min(bounded_u32_to_f32(self.window_size[1]));
         let history = self.state.visible_markdown_history(visible_rows);
         let mut quads = vec![
-            SolidQuad {
-                x: 0.0,
-                y: 0.0,
-                width,
-                height: panel_height,
-                color: self.config.theme.background_color,
-            },
+            SolidQuad { x: 0.0, y: 0.0, width, height: panel_height, color: self.config.theme.background_color },
             SolidQuad {
                 x: 0.0,
                 y: panel_height - SEPARATOR_HEIGHT,
@@ -144,11 +128,7 @@ impl ConsoleOverlay {
             y += self.row_height();
         }
 
-        ctx.actor::<RenderCapability>().send(&DrawSolidQuads {
-            space: QuadSpace::Screen,
-            clip: None,
-            quads,
-        });
+        ctx.actor::<RenderCapability>().send(&DrawSolidQuads { space: QuadSpace::Screen, clip: None, quads });
 
         let Some(font_id) = self.font_id else {
             return;
@@ -177,22 +157,13 @@ impl ConsoleOverlay {
             text: self.state.input.clone(),
             size_pixels: self.config.font_size,
             color: self.config.theme.input_color,
-            origin: [
-                HORIZONTAL_PADDING + self.measure(&self.config.prompt),
-                input_y,
-            ],
+            origin: [HORIZONTAL_PADDING + self.measure(&self.config.prompt), input_y],
             space: QuadSpace::Screen,
             clip: None,
         });
     }
 
-    fn push_markdown_quads(
-        &self,
-        quads: &mut Vec<SolidQuad>,
-        line: &MarkdownLine,
-        y: f32,
-        width: f32,
-    ) {
+    fn push_markdown_quads(&self, quads: &mut Vec<SolidQuad>, line: &MarkdownLine, y: f32, width: f32) {
         let padding = self.config.theme.markdown.code_padding_pixels.max(0.0);
         if line.thematic_break {
             quads.push(SolidQuad {
@@ -231,13 +202,7 @@ impl ConsoleOverlay {
         }
     }
 
-    fn draw_markdown_line(
-        &self,
-        ctx: &mut WasmCtx<'_, Manual>,
-        font_id: u32,
-        line: &MarkdownLine,
-        y: f32,
-    ) {
+    fn draw_markdown_line(&self, ctx: &mut WasmCtx<'_, Manual>, font_id: u32, line: &MarkdownLine, y: f32) {
         let mut x = HORIZONTAL_PADDING;
         for run in &line.runs {
             if run.text.is_empty() || run.tone == MarkdownTone::ThematicBreak {
@@ -259,10 +224,7 @@ impl ConsoleOverlay {
                     text: run.text.clone(),
                     size_pixels: self.config.font_size,
                     color,
-                    origin: [
-                        x + self.config.theme.markdown.strong_offset_pixels.max(0.0),
-                        y,
-                    ],
+                    origin: [x + self.config.theme.markdown.strong_offset_pixels.max(0.0), y],
                     space: QuadSpace::Screen,
                     clip: None,
                 });
@@ -329,12 +291,7 @@ impl ConsoleOverlay {
     }
 
     fn cursor_width(&self) -> f32 {
-        self.metrics
-            .as_ref()
-            .map_or(CURSOR_WIDTH, |metrics| {
-                metrics.measure("M", self.config.font_size)
-            })
-            .max(2.0)
+        self.metrics.as_ref().map_or(CURSOR_WIDTH, |metrics| metrics.measure("M", self.config.font_size)).max(2.0)
     }
 
     fn is_activation_text(text: &str, activation_key_code: u32) -> bool {
@@ -371,12 +328,7 @@ impl ConsoleOverlay {
     }
 
     fn request_configured_font<M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, M>) {
-        Self::request_font(
-            ctx,
-            self.config.font_namespace.as_str(),
-            self.config.font_path.as_str(),
-            false,
-        );
+        Self::request_font(ctx, self.config.font_namespace.as_str(), self.config.font_path.as_str(), false);
     }
 
     fn request_embedded_font<M: ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, M>) {
@@ -384,37 +336,18 @@ impl ConsoleOverlay {
             return;
         }
         self.embedded_font_requested = true;
-        let load = LoadFontBytes {
-            name: EMBEDDED_FONT_NAME.into(),
-            bytes: EMBEDDED_FONT_BYTES.to_vec(),
-        };
-        let _ = ctx
-            .actor::<TextCapability>()
-            .send_with_context(&load, &ConsoleFontLoadContext { embedded: true });
+        let load = LoadFontBytes { name: EMBEDDED_FONT_NAME.into(), bytes: EMBEDDED_FONT_BYTES.to_vec() };
+        let _ = ctx.actor::<TextCapability>().send_with_context(&load, &ConsoleFontLoadContext { embedded: true });
     }
 
-    fn request_font<M: ReplyMode>(
-        ctx: &mut WasmCtx<'_, M>,
-        namespace: &str,
-        path: &str,
-        embedded: bool,
-    ) {
-        let load = LoadFont {
-            namespace: namespace.into(),
-            path: path.into(),
-        };
-        let _ = ctx
-            .actor::<TextCapability>()
-            .send_with_context(&load, &ConsoleFontLoadContext { embedded });
+    fn request_font<M: ReplyMode>(ctx: &mut WasmCtx<'_, M>, namespace: &str, path: &str, embedded: bool) {
+        let load = LoadFont { namespace: namespace.into(), path: path.into() };
+        let _ = ctx.actor::<TextCapability>().send_with_context(&load, &ConsoleFontLoadContext { embedded });
     }
 
     fn request_font_metrics(ctx: &mut WasmCtx<'_, Manual>, font_id: u32) {
-        let request = FontMetricsRequest {
-            font: FontRef::Id(font_id),
-        };
-        let _ = ctx
-            .actor::<TextCapability>()
-            .send_with_context(&request, &ConsoleFontMetricsContext { font_id });
+        let request = FontMetricsRequest { font: FontRef::Id(font_id) };
+        let _ = ctx.actor::<TextCapability>().send_with_context(&request, &ConsoleFontMetricsContext { font_id });
     }
 
     fn is_embedded_font_ref(namespace: &str, path: &str) -> bool {
@@ -424,8 +357,7 @@ impl ConsoleOverlay {
     fn handle_override_font_failure(&mut self, ctx: &mut WasmCtx<'_, Manual>, error: String) {
         if !self.override_font_failed {
             self.override_font_failed = true;
-            self.state
-                .push_error(format!("font override failed: {error}"));
+            self.state.push_error(format!("font override failed: {error}"));
         }
         self.request_embedded_font(ctx);
     }
@@ -437,14 +369,10 @@ impl ConsoleOverlay {
             mail.mailbox
         };
         if mailbox == MailboxId::NONE {
-            self.state.push_error(format!(
-                "cannot register command without mailbox: {}",
-                mail.name
-            ));
+            self.state.push_error(format!("cannot register command without mailbox: {}", mail.name));
             return;
         }
-        self.state
-            .register_external(mail.name, mail.description, mailbox);
+        self.state.register_external(mail.name, mail.description, mailbox);
     }
 
     fn press_backspace(&mut self) {
@@ -467,9 +395,7 @@ impl ConsoleOverlay {
         if self.backspace_ticks < BACKSPACE_INITIAL_DELAY_TICKS {
             return;
         }
-        if (self.backspace_ticks - BACKSPACE_INITIAL_DELAY_TICKS)
-            .is_multiple_of(BACKSPACE_REPEAT_INTERVAL_TICKS)
-        {
+        if (self.backspace_ticks - BACKSPACE_INITIAL_DELAY_TICKS).is_multiple_of(BACKSPACE_REPEAT_INTERVAL_TICKS) {
             self.state.backspace();
         }
     }
@@ -588,14 +514,9 @@ impl WasmActor for ConsoleOverlay {
                 self.font_id = Some(font_id);
                 Self::request_font_metrics(ctx, font_id);
             }
-            LoadFontResult::Err {
-                namespace,
-                path,
-                error,
-            } => {
+            LoadFontResult::Err { namespace, path, error } => {
                 if context.embedded || Self::is_embedded_font_ref(&namespace, &path) {
-                    self.state
-                        .push_error(format!("embedded font load failed: {error}"));
+                    self.state.push_error(format!("embedded font load failed: {error}"));
                 } else {
                     self.handle_override_font_failure(ctx, error);
                 }
@@ -613,8 +534,7 @@ impl WasmActor for ConsoleOverlay {
                 self.metrics = Some(CachedFontMetrics::new(&metrics));
             }
             FontMetricsResult::Err { error } => {
-                self.state
-                    .push_error(format!("font metrics failed: {error}"));
+                self.state.push_error(format!("font metrics failed: {error}"));
             }
         }
     }
@@ -625,11 +545,7 @@ impl WasmActor for ConsoleOverlay {
     }
 
     #[handler::manual]
-    fn on_unregister_command(
-        &mut self,
-        _ctx: &mut WasmCtx<'_, Manual>,
-        mail: UnregisterConsoleCommand,
-    ) {
+    fn on_unregister_command(&mut self, _ctx: &mut WasmCtx<'_, Manual>, mail: UnregisterConsoleCommand) {
         self.state.unregister_external(&mail.name);
     }
 
@@ -666,11 +582,7 @@ mod tests {
     #[test]
     fn visible_rows_reserve_input_band() {
         let overlay = ConsoleOverlay {
-            config: ConsoleConfig {
-                panel_height: 100.0,
-                font_size: 10.0,
-                ..ConsoleConfig::default()
-            },
+            config: ConsoleConfig { panel_height: 100.0, font_size: 10.0, ..ConsoleConfig::default() },
             state: ConsoleState::new(&ConsoleConfig::default()),
             window_size: [100, 100],
             font_id: None,
@@ -691,10 +603,7 @@ mod tests {
 
     #[test]
     fn default_activation_key_is_backquote_codepoint() {
-        assert_eq!(
-            ConsoleConfig::default().activation_key_code,
-            u32::from(b'`')
-        );
+        assert_eq!(ConsoleConfig::default().activation_key_code, u32::from(b'`'));
     }
 
     #[test]
@@ -711,18 +620,9 @@ mod tests {
             backspace_ticks: 0,
         };
 
-        assert!(ConsoleOverlay::is_activation_text(
-            "`",
-            overlay.config.activation_key_code
-        ));
-        assert!(!ConsoleOverlay::is_activation_text(
-            "``",
-            overlay.config.activation_key_code
-        ));
-        assert!(!ConsoleOverlay::is_activation_text(
-            "a",
-            overlay.config.activation_key_code
-        ));
+        assert!(ConsoleOverlay::is_activation_text("`", overlay.config.activation_key_code));
+        assert!(!ConsoleOverlay::is_activation_text("``", overlay.config.activation_key_code));
+        assert!(!ConsoleOverlay::is_activation_text("a", overlay.config.activation_key_code));
     }
 
     #[test]
@@ -769,70 +669,25 @@ mod tests {
         };
         let markdown = overlay.config.theme.markdown;
 
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::Heading),
-            markdown.heading_color
-        );
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::Emphasis),
-            markdown.emphasis_color
-        );
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::Strong),
-            markdown.strong_color
-        );
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::InlineCode),
-            markdown.inline_code_color
-        );
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::FencedCode),
-            markdown.fenced_code_color
-        );
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::Link),
-            markdown.link_color
-        );
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::Image),
-            markdown.image_color
-        );
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::QuoteMarker),
-            markdown.quote_marker_color
-        );
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::QuoteText),
-            markdown.quote_text_color
-        );
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::ListMarker),
-            markdown.list_marker_color
-        );
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::TaskMarker),
-            markdown.task_marker_color
-        );
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::TableBorder),
-            markdown.table_border_color
-        );
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::TableHeader),
-            markdown.table_header_color
-        );
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::TableText),
-            markdown.table_text_color
-        );
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::Heading), markdown.heading_color);
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::Emphasis), markdown.emphasis_color);
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::Strong), markdown.strong_color);
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::InlineCode), markdown.inline_code_color);
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::FencedCode), markdown.fenced_code_color);
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::Link), markdown.link_color);
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::Image), markdown.image_color);
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::QuoteMarker), markdown.quote_marker_color);
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::QuoteText), markdown.quote_text_color);
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::ListMarker), markdown.list_marker_color);
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::TaskMarker), markdown.task_marker_color);
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::TableBorder), markdown.table_border_color);
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::TableHeader), markdown.table_header_color);
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::TableText), markdown.table_text_color);
         assert_eq!(
             overlay.markdown_color(LineStyle::Output, MarkdownTone::ThematicBreak),
             markdown.thematic_break_color
         );
-        assert_eq!(
-            overlay.markdown_color(LineStyle::Output, MarkdownTone::MutedMarker),
-            markdown.muted_marker_color
-        );
+        assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::MutedMarker), markdown.muted_marker_color);
         assert_eq!(
             overlay.markdown_color(LineStyle::Output, MarkdownTone::EscapedMarker),
             markdown.escaped_marker_color

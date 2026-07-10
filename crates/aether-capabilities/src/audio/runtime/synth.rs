@@ -121,30 +121,13 @@ impl Synth {
     /// notes from one sender each sound independently. A miss on both
     /// kernel sources (unknown id, or a bank with no region covering the
     /// note) warn-drops without touching the pool (ADR-0103 §6).
-    pub fn trigger_note_on(
-        &mut self,
-        sender_mailbox: MailboxId,
-        pitch: u8,
-        velocity: u8,
-        instrument_id: u8,
-        pan: i8,
-    ) {
+    pub fn trigger_note_on(&mut self, sender_mailbox: MailboxId, pitch: u8, velocity: u8, instrument_id: u8, pan: i8) {
         let kernel = instrument_by_id(instrument_id)
-            .map(|def| {
-                build_builtin_kernel(
-                    sender_mailbox,
-                    instrument_id,
-                    pitch,
-                    velocity,
-                    def,
-                    self.sample_rate,
-                )
-            })
+            .map(|def| build_builtin_kernel(sender_mailbox, instrument_id, pitch, velocity, def, self.sample_rate))
             .or_else(|| {
                 self.bank_for(instrument_id).and_then(|bank| {
-                    bank.select(pitch, velocity).map(|region| {
-                        VoiceKernel::Sample(SampleVoice::new(pitch, velocity, region))
-                    })
+                    bank.select(pitch, velocity)
+                        .map(|region| VoiceKernel::Sample(SampleVoice::new(pitch, velocity, region)))
                 })
             });
         let Some(kernel) = kernel else {
@@ -171,11 +154,7 @@ impl Synth {
                 .voices
                 .iter()
                 .enumerate()
-                .min_by(|(_, a), (_, b)| {
-                    a.current_level()
-                        .partial_cmp(&b.current_level())
-                        .unwrap_or(Ordering::Equal)
-                })
+                .min_by(|(_, a), (_, b)| a.current_level().partial_cmp(&b.current_level()).unwrap_or(Ordering::Equal))
                 .map(|(i, _)| i)
             {
                 let mut victim = self.voices.swap_remove(quietest_idx);
@@ -189,11 +168,7 @@ impl Synth {
         // block-stable table `fill` refreshes from, so a voice added
         // mid-block by a scheduled event starts at the right level
         // (ADR-0127).
-        let sender_gain = self
-            .sender_gains
-            .get(&sender_mailbox)
-            .copied()
-            .unwrap_or(1.0);
+        let sender_gain = self.sender_gains.get(&sender_mailbox).copied().unwrap_or(1.0);
         self.voices.push(Voice {
             sender_mailbox,
             instrument_id,
@@ -238,66 +213,40 @@ impl Synth {
     /// immediate mail would take (ADR-0104).
     pub fn fire_scheduled(&mut self, sender_mailbox: MailboxId, note: &ScheduledNote) {
         match *note {
-            ScheduledNote::On {
-                pitch,
-                velocity,
-                instrument_id,
-                pan,
-            } => self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id, pan),
-            ScheduledNote::Off {
-                pitch,
-                instrument_id,
-            } => self.trigger_note_off(sender_mailbox, pitch, instrument_id),
+            ScheduledNote::On { pitch, velocity, instrument_id, pan } => {
+                self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id, pan);
+            }
+            ScheduledNote::Off { pitch, instrument_id } => self.trigger_note_off(sender_mailbox, pitch, instrument_id),
         }
     }
 
     pub fn drain_events(&mut self) {
         while let Some(ev) = self.events.pop() {
             match ev {
-                AudioEvent::NoteOn {
-                    sender_mailbox,
-                    pitch,
-                    velocity,
-                    instrument_id,
-                    pan,
-                } => self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id, pan),
-                AudioEvent::NoteOff {
-                    sender_mailbox,
-                    pitch,
-                    instrument_id,
-                } => self.trigger_note_off(sender_mailbox, pitch, instrument_id),
+                AudioEvent::NoteOn { sender_mailbox, pitch, velocity, instrument_id, pan } => {
+                    self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id, pan);
+                }
+                AudioEvent::NoteOff { sender_mailbox, pitch, instrument_id } => {
+                    self.trigger_note_off(sender_mailbox, pitch, instrument_id);
+                }
                 AudioEvent::SetMasterGain { gain } => {
                     self.master_gain = gain.clamp(0.0, 1.0);
                 }
                 AudioEvent::SetReverbSend { send } => {
                     self.reverb_send = send.clamp(0.0, 1.0);
                 }
-                AudioEvent::SetSenderGain {
-                    sender_mailbox,
-                    gain,
-                } => {
+                AudioEvent::SetSenderGain { sender_mailbox, gain } => {
                     // The handler already clamped to 0.0..=4.0; store the
                     // trim (absent = unity 1.0). `fill` resolves it onto
                     // sounding voices on the next block (ADR-0127).
                     self.sender_gains.insert(sender_mailbox, gain);
                 }
-                AudioEvent::TrackStart {
-                    sender_mailbox,
-                    lane,
-                    namespace,
-                    path,
-                    pcm,
-                    gain,
-                    looping,
-                } => {
+                AudioEvent::TrackStart { sender_mailbox, lane, namespace, path, pcm, gain, looping } => {
                     self.start_track(sender_mailbox, lane, namespace, path, pcm, gain, looping);
                 }
-                AudioEvent::TrackStop {
-                    sender_mailbox,
-                    lane,
-                    namespace,
-                    path,
-                } => self.stop_track(sender_mailbox, lane.as_ref(), &namespace, &path),
+                AudioEvent::TrackStop { sender_mailbox, lane, namespace, path } => {
+                    self.stop_track(sender_mailbox, lane.as_ref(), &namespace, &path);
+                }
                 AudioEvent::RegisterInstrument { id, bank } => {
                     // Banks arrive in load order on this single-producer
                     // FIFO, and the cap assigns ids from `BUILTINS.len()`
@@ -316,17 +265,13 @@ impl Synth {
                     }
                     self.banks.push(bank);
                 }
-                AudioEvent::Schedule {
-                    sender_mailbox,
-                    events,
-                } => {
+                AudioEvent::Schedule { sender_mailbox, events } => {
                     // Offsets are relative to receipt at the callback —
                     // the current frame clock (this drain runs at block
                     // start). Every event in the batch shares this
                     // anchor, so simultaneous events stay simultaneous.
                     for event in events {
-                        let due_frame =
-                            self.frame_clock + millis_to_frames(event.at_millis, self.sample_rate);
+                        let due_frame = self.frame_clock + millis_to_frames(event.at_millis, self.sample_rate);
                         let seq = self.next_schedule_seq;
                         self.next_schedule_seq += 1;
                         self.scheduled.push(Reverse(ScheduledEntry {
@@ -355,38 +300,16 @@ impl Synth {
         gain: f32,
         looping: bool,
     ) {
-        if let Some(i) = self
-            .tracks
-            .iter()
-            .position(|t| t.matches(sender_mailbox, lane.as_ref(), &namespace, &path))
-        {
+        if let Some(i) = self.tracks.iter().position(|t| t.matches(sender_mailbox, lane.as_ref(), &namespace, &path)) {
             self.tracks.swap_remove(i);
         }
-        self.tracks.push(TrackVoice::new(
-            sender_mailbox,
-            lane,
-            namespace,
-            path,
-            pcm,
-            gain,
-            looping,
-        ));
+        self.tracks.push(TrackVoice::new(sender_mailbox, lane, namespace, path, pcm, gain, looping));
     }
 
     /// Arm the fade-out on the track at this key, if one is playing.
-    pub fn stop_track(
-        &mut self,
-        sender_mailbox: MailboxId,
-        lane: Option<&String>,
-        namespace: &str,
-        path: &str,
-    ) {
+    pub fn stop_track(&mut self, sender_mailbox: MailboxId, lane: Option<&String>, namespace: &str, path: &str) {
         let fade = self.fade_samples();
-        if let Some(t) = self
-            .tracks
-            .iter_mut()
-            .find(|t| t.matches(sender_mailbox, lane, namespace, path))
-        {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.matches(sender_mailbox, lane, namespace, path)) {
             t.stop(fade);
         }
     }
@@ -399,11 +322,7 @@ impl Synth {
         // Voices allocated mid-block by a scheduled event resolve their
         // own trim in `trigger_note_on` from the same block-stable table.
         for voice in &mut self.voices {
-            voice.sender_gain = self
-                .sender_gains
-                .get(&voice.sender_mailbox)
-                .copied()
-                .unwrap_or(1.0);
+            voice.sender_gain = self.sender_gains.get(&voice.sender_mailbox).copied().unwrap_or(1.0);
         }
         let dt = 1.0 / self.sample_rate;
         let frames = buffer.len() / channels.max(1);
@@ -413,15 +332,8 @@ impl Synth {
             // for the sample it falls on — sample-accurate by
             // construction (ADR-0104).
             let absolute = self.frame_clock + frame as u64;
-            while self
-                .scheduled
-                .peek()
-                .is_some_and(|Reverse(top)| top.due_frame <= absolute)
-            {
-                let Reverse(entry) = self
-                    .scheduled
-                    .pop()
-                    .expect("peeked entry is present this iteration");
+            while self.scheduled.peek().is_some_and(|Reverse(top)| top.due_frame <= absolute) {
+                let Reverse(entry) = self.scheduled.pop().expect("peeked entry is present this iteration");
                 self.fire_scheduled(entry.sender_mailbox, &entry.note);
             }
             // Per-voice stereo placement (ADR-0127): the mono kernel

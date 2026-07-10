@@ -298,25 +298,11 @@ pub fn parse_sfz(text: &str) -> Result<BankSpec, SfzError> {
                     value.push_str(peek);
                     tail = after_peek;
                 }
-                apply_opcode(
-                    section,
-                    &mut default_path,
-                    &mut group,
-                    &mut current,
-                    key,
-                    &value,
-                );
+                apply_opcode(section, &mut default_path, &mut group, &mut current, key, &value);
                 rest = tail;
                 continue;
             }
-            apply_opcode(
-                section,
-                &mut default_path,
-                &mut group,
-                &mut current,
-                key,
-                first_value,
-            );
+            apply_opcode(section, &mut default_path, &mut group, &mut current, key, first_value);
             rest = after_token;
         }
     }
@@ -343,8 +329,7 @@ fn strip_comment(line: &str) -> &str {
 /// Split off the next whitespace-delimited token and the remainder after
 /// it (already trimmed of leading whitespace).
 fn next_token(rest: &str) -> (&str, &str) {
-    rest.find(char::is_whitespace)
-        .map_or((rest, ""), |i| (&rest[..i], rest[i..].trim_start()))
+    rest.find(char::is_whitespace).map_or((rest, ""), |i| (&rest[..i], rest[i..].trim_start()))
 }
 
 /// Apply one `key=value` opcode to the current section's state. Unknown
@@ -510,11 +495,7 @@ sample=soft_e.wav lokey=64 hikey=64 pitch_keycenter=64
         let spec = parse_sfz(sfz).expect("parses");
         assert_eq!(spec.regions.len(), 2);
         for r in &spec.regions {
-            assert_eq!(
-                (r.lovel, r.hivel),
-                (64, 127),
-                "group velocity not inherited"
-            );
+            assert_eq!((r.lovel, r.hivel), (64, 127), "group velocity not inherited");
         }
         assert_eq!(spec.regions[0].pitch_keycenter, 60);
         assert_eq!(spec.regions[1].pitch_keycenter, 64);
@@ -582,14 +563,7 @@ offset=0
         let spec = parse_sfz(sfz).expect("parses past unknown opcodes");
         assert_eq!(spec.regions.len(), 1);
         assert_eq!(spec.regions[0].sample, "organ.wav");
-        assert_eq!(
-            spec.regions[0].loop_spec,
-            Some(SfzLoop {
-                start: 128,
-                end: 4096,
-                mode: LoopMode::Continuous,
-            }),
-        );
+        assert_eq!(spec.regions[0].loop_spec, Some(SfzLoop { start: 128, end: 4096, mode: LoopMode::Continuous }),);
     }
 
     #[test]
@@ -602,14 +576,7 @@ offset=0
     fn loop_sustain_mode_carries_through() {
         let sfz = "<region>\nsample=strings.wav loop_mode=loop_sustain loop_start=0 loop_end=512\n";
         let spec = parse_sfz(sfz).expect("parses");
-        assert_eq!(
-            spec.regions[0].loop_spec,
-            Some(SfzLoop {
-                start: 0,
-                end: 512,
-                mode: LoopMode::Sustain,
-            }),
-        );
+        assert_eq!(spec.regions[0].loop_spec, Some(SfzLoop { start: 0, end: 512, mode: LoopMode::Sustain }),);
     }
 
     #[test]
@@ -645,11 +612,7 @@ sample=b.wav lokey=62 hikey=62
         for r in &spec.regions {
             assert_eq!(
                 r.loop_spec,
-                Some(SfzLoop {
-                    start: 64,
-                    end: 1024,
-                    mode: LoopMode::Continuous,
-                }),
+                Some(SfzLoop { start: 64, end: 1024, mode: LoopMode::Continuous }),
                 "group loop not inherited by {}",
                 r.sample,
             );
@@ -667,11 +630,7 @@ sample=a.wav loop_end=2048
         let spec = parse_sfz(sfz).expect("parses");
         assert_eq!(
             spec.regions[0].loop_spec,
-            Some(SfzLoop {
-                start: 64,
-                end: 2048,
-                mode: LoopMode::Continuous,
-            }),
+            Some(SfzLoop { start: 64, end: 2048, mode: LoopMode::Continuous }),
             "region loop_end should override the inherited group value",
         );
     }
@@ -679,8 +638,7 @@ sample=a.wav loop_end=2048
     #[test]
     fn degenerate_loop_points_degrade_to_unlooped() {
         // start >= end is malformed: warn and emit no loop.
-        let sfz =
-            "<region>\nsample=a.wav loop_mode=loop_continuous loop_start=2048 loop_end=1024\n";
+        let sfz = "<region>\nsample=a.wav loop_mode=loop_continuous loop_start=2048 loop_end=1024\n";
         let spec = parse_sfz(sfz).expect("parses");
         assert_eq!(spec.regions[0].loop_spec, None);
     }
@@ -716,10 +674,7 @@ sample=a.wav lokey=60 hikey=60 // middle C only
 
     #[test]
     fn no_regions_is_an_error() {
-        assert_eq!(
-            parse_sfz("<control>\ndefault_path=x/\n"),
-            Err(SfzError::NoRegions)
-        );
+        assert_eq!(parse_sfz("<control>\ndefault_path=x/\n"), Err(SfzError::NoRegions));
         assert_eq!(parse_sfz(""), Err(SfzError::NoRegions));
     }
 
@@ -749,9 +704,6 @@ sample=a.wav lovel=64 hivel=127
 sample=b.wav
 ";
         let spec = parse_sfz(sfz).expect("parses");
-        assert_eq!(
-            spec.sample_paths(),
-            vec!["a.wav".to_owned(), "b.wav".to_owned()]
-        );
+        assert_eq!(spec.sample_paths(), vec!["a.wav".to_owned(), "b.wav".to_owned()]);
     }
 }

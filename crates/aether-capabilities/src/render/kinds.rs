@@ -36,9 +36,7 @@ pub struct Vertex {
 /// `count` field is the number of triangles in the payload when
 /// sent as a slice.
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.draw_triangle")]
 pub struct DrawTriangle {
     pub verts: [Vertex; 3],
@@ -62,9 +60,7 @@ pub const DRAW_TRIANGLE_BYTES: usize = size_of::<DrawTriangle>();
 /// `ViewProjection` arrives, the uniform holds identity and vertices render
 /// in clip-space 1:1 (the pre-camera behaviour).
 #[repr(C)]
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.view_projection")]
 pub struct ViewProjection {
     pub view_proj: [f32; 16],
@@ -293,20 +289,11 @@ mod tests {
 
     #[test]
     fn draw_triangle_slice_size() {
-        let v = Vertex {
-            x: 0.0,
-            y: 0.5,
-            z: 0.0,
-            color: Rgb::new(1.0, 0.0, 0.0),
-        };
-        let tris = [
-            DrawTriangle { verts: [v, v, v] },
-            DrawTriangle { verts: [v, v, v] },
-        ];
+        let v = Vertex { x: 0.0, y: 0.5, z: 0.0, color: Rgb::new(1.0, 0.0, 0.0) };
+        let tris = [DrawTriangle { verts: [v, v, v] }, DrawTriangle { verts: [v, v, v] }];
         let bytes = encode_slice(&tris);
         assert_eq!(bytes.len(), 2 * 72);
-        let back: &[DrawTriangle] =
-            decode_slice(&bytes).expect("test setup: DrawTriangle slice decodes zero-copy");
+        let back: &[DrawTriangle] = decode_slice(&bytes).expect("test setup: DrawTriangle slice decodes zero-copy");
         assert_eq!(back, &tris);
     }
 }

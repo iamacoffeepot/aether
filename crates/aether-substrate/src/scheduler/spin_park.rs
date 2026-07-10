@@ -283,10 +283,7 @@ impl SpinPark {
             // publish our handle + stamp cell together.
             let me = thread::current();
             stamp.store(0, Ordering::Relaxed);
-            self.idle().push(Parked {
-                thread: me.clone(),
-                stamp: Arc::clone(&stamp),
-            });
+            self.idle().push(Parked { thread: me.clone(), stamp: Arc::clone(&stamp) });
             self.spinning.fetch_sub(1, Ordering::Relaxed);
             // StoreLoad barrier mirroring the producer's: our `spinning`
             // store is before this fence, the recheck scan is after it.
@@ -375,10 +372,7 @@ impl Default for SpinPark {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test-setup unwraps: a failed recv/join is the assertion"
-)]
+#[allow(clippy::unwrap_used, reason = "test-setup unwraps: a failed recv/join is the assertion")]
 #[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     use super::*;
@@ -390,10 +384,7 @@ mod tests {
     /// wake cell — what `acquire`'s park-commit pushes, minus the stamp
     /// plumbing the unit tests don't exercise.
     fn parked_self() -> Parked {
-        Parked {
-            thread: thread::current(),
-            stamp: Arc::new(AtomicU64::new(0)),
-        }
+        Parked { thread: thread::current(), stamp: Arc::new(AtomicU64::new(0)) }
     }
 
     /// Poll `cond` up to `timeout`, sleeping between checks. Returns the
@@ -448,11 +439,7 @@ mod tests {
         }
 
         coord.wake_workers(3);
-        assert_eq!(
-            coord.idle().len(),
-            0,
-            "wake_workers must unpark all n parked despite the spinner"
-        );
+        assert_eq!(coord.idle().len(), 0, "wake_workers must unpark all n parked despite the spinner");
 
         // n beyond the parked count is a no-op tail (no panic / underflow).
         coord.wake_workers(5);
@@ -471,8 +458,7 @@ mod tests {
     fn acquire_resolves_shutdown() {
         let coord = Arc::new(SpinPark::with_spin_window(Duration::from_micros(50)));
         let c2 = Arc::clone(&coord);
-        let worker =
-            thread::spawn(move || matches!(c2.acquire(|| None::<u32>), Acquired::Shutdown));
+        let worker = thread::spawn(move || matches!(c2.acquire(|| None::<u32>), Acquired::Shutdown));
         // Let it cycle into the park, then signal + unpark.
         thread::sleep(Duration::from_millis(20));
         coord.set_shutdown();
@@ -493,8 +479,7 @@ mod tests {
         let c2 = Arc::clone(&coord);
         // The worker parks (scan never yields), folds on the notify wake,
         // re-spins, and exits on shutdown.
-        let worker =
-            thread::spawn(move || matches!(c2.acquire(|| None::<u32>), Acquired::Shutdown));
+        let worker = thread::spawn(move || matches!(c2.acquire(|| None::<u32>), Acquired::Shutdown));
 
         // Wait until the worker has committed to the idle list and has
         // stopped counting as a spinner — so the `notify` below hits the
@@ -509,9 +494,7 @@ mod tests {
         coord.notify(); // stamp + unpark → the worker folds notify→wake
         // Give the woken worker time to fold before tearing down.
         assert!(
-            wait_until(Duration::from_secs(2), || {
-                calibrate::handoff_samples() > before
-            }),
+            wait_until(Duration::from_secs(2), || { calibrate::handoff_samples() > before }),
             "a live parked-worker wake must fold a handoff sample",
         );
 

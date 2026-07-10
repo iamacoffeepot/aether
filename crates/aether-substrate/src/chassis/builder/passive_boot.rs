@@ -55,11 +55,7 @@ pub(super) trait PassiveBoot: Send {
 
     /// Phase 2 — construct the actor instance via `A::init`. Default
     /// no-op for non-actor passives (e.g., the fallback router).
-    fn init(
-        &mut self,
-        ctx: &mut ChassisCtx<'_>,
-        handles: &mut ExportedHandles,
-    ) -> Result<(), BootError> {
+    fn init(&mut self, ctx: &mut ChassisCtx<'_>, handles: &mut ExportedHandles) -> Result<(), BootError> {
         let _ = ctx;
         let _ = handles;
         Ok(())
@@ -92,25 +88,17 @@ pub(super) struct FallbackRouterBoot {
 
 impl FallbackRouterBoot {
     pub(super) fn new(handler: FallbackRouter) -> Self {
-        Self {
-            handler: Some(handler),
-        }
+        Self { handler: Some(handler) }
     }
 }
 
 impl PassiveBoot for FallbackRouterBoot {
     fn claim(&mut self, ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
-        let handler = self
-            .handler
-            .take()
-            .expect("FallbackRouterBoot::claim called twice");
+        let handler = self.handler.take().expect("FallbackRouterBoot::claim called twice");
         ctx.claim_fallback_router(handler)
     }
 
-    fn spawn(
-        self: Box<Self>,
-        _ctx: &mut ChassisCtx<'_>,
-    ) -> Result<Box<dyn DynShutdown>, BootError> {
+    fn spawn(self: Box<Self>, _ctx: &mut ChassisCtx<'_>) -> Result<Box<dyn DynShutdown>, BootError> {
         Ok(Box::new(FallbackShutdown))
     }
 

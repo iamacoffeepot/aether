@@ -54,16 +54,8 @@ pub struct LoadFontBytes {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.text.load_font_result")]
 pub enum LoadFontResult {
-    Ok {
-        font_id: u32,
-        name: String,
-        resident_bytes: u64,
-    },
-    Err {
-        namespace: String,
-        path: String,
-        error: String,
-    },
+    Ok { font_id: u32, name: String, resident_bytes: u64 },
+    Err { namespace: String, path: String, error: String },
 }
 
 /// `aether.text.draw` — lay out and draw `text` in the font named by

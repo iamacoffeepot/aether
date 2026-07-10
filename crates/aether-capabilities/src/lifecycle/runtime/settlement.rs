@@ -92,17 +92,11 @@ impl LifecycleCapabilityState {
         // down moves are handled separately so the whole thing stays
         // in u128 (no signed casts): next = prev ± α·|sample − prev|.
         let alpha = u128::from(SETTLE_EWMA_ALPHA_PERMILLE);
-        let next_nanos = self
-            .settlement_latency_ewma
-            .map_or(latency.as_nanos(), |prev| {
-                let prev = prev.as_nanos();
-                let sample = latency.as_nanos();
-                if sample >= prev {
-                    prev + (sample - prev) * alpha / 1000
-                } else {
-                    prev - (prev - sample) * alpha / 1000
-                }
-            });
+        let next_nanos = self.settlement_latency_ewma.map_or(latency.as_nanos(), |prev| {
+            let prev = prev.as_nanos();
+            let sample = latency.as_nanos();
+            if sample >= prev { prev + (sample - prev) * alpha / 1000 } else { prev - (prev - sample) * alpha / 1000 }
+        });
         let ewma = Duration::from_nanos(u64::try_from(next_nanos).unwrap_or(u64::MAX));
         self.settlement_latency_ewma = Some(ewma);
 
@@ -110,10 +104,7 @@ impl LifecycleCapabilityState {
         if latency < threshold {
             return;
         }
-        if self
-            .last_slow_warn
-            .is_some_and(|t| t.elapsed() < SLOW_SETTLE_WARN_COOLDOWN)
-        {
+        if self.last_slow_warn.is_some_and(|t| t.elapsed() < SLOW_SETTLE_WARN_COOLDOWN) {
             return;
         }
         self.last_slow_warn = Some(Instant::now());
@@ -133,9 +124,7 @@ impl LifecycleCapabilityState {
     /// [`Self::advance_timeout`](super) without settling
     /// (iamacoffeepot/aether#1048). `false` when nothing is pending.
     pub fn pending_timed_out(&self) -> bool {
-        self.pending
-            .as_ref()
-            .is_some_and(|p| p.started.elapsed() >= self.advance_timeout)
+        self.pending.as_ref().is_some_and(|p| p.started.elapsed() >= self.advance_timeout)
     }
 
     /// Force-complete a pending advance whose [`Settled`](aether_kinds::trace::Settled)
@@ -162,10 +151,7 @@ impl LifecycleCapabilityState {
         }
         ctx.reply_to(
             pending.reply_to,
-            &LifecycleAdvanceComplete {
-                completed: pending.completed_kind.0,
-                next: pending.next_kind.0,
-            },
+            &LifecycleAdvanceComplete { completed: pending.completed_kind.0, next: pending.next_kind.0 },
         );
     }
 }
@@ -195,11 +181,7 @@ mod tests {
     use aether_kinds::{Present, Render};
 
     fn state_with_quit(kind_id: u64, next: u64, quit: Option<u64>) -> LifecycleStateData {
-        LifecycleStateData {
-            kind: KindId(kind_id),
-            next: KindId(next),
-            quit: quit.map(KindId),
-        }
+        LifecycleStateData { kind: KindId(kind_id), next: KindId(next), quit: quit.map(KindId) }
     }
 
     #[test]
@@ -271,10 +253,6 @@ mod tests {
 
         // A second slow settle inside the cooldown does not re-arm.
         cap.record_settlement_latency(Duration::from_millis(300), MailId::NONE);
-        assert_eq!(
-            cap.last_slow_warn.expect("still armed"),
-            armed_at,
-            "cooldown should suppress the second warn"
-        );
+        assert_eq!(cap.last_slow_warn.expect("still armed"), armed_at, "cooldown should suppress the second warn");
     }
 }

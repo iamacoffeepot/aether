@@ -38,15 +38,8 @@ pub struct BindListener {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.tcp.bind_listener_result")]
 pub enum BindListenerResult {
-    Ok {
-        listener_name: String,
-        listener_id: aether_data::MailboxId,
-        local_port: u16,
-    },
-    Err {
-        addr: String,
-        reason: String,
-    },
+    Ok { listener_name: String, listener_id: aether_data::MailboxId, local_port: u16 },
+    Err { addr: String, reason: String },
 }
 
 /// `aether.tcp.unbind_listener` — request the singleton
@@ -70,13 +63,8 @@ pub struct UnbindListener {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.tcp.unbind_listener_result")]
 pub enum UnbindListenerResult {
-    Ok {
-        listener_name: String,
-    },
-    Err {
-        listener_name: String,
-        reason: String,
-    },
+    Ok { listener_name: String },
+    Err { listener_name: String, reason: String },
 }
 
 /// `aether.tcp.list_listeners` — enumerate every live listener

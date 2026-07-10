@@ -10,8 +10,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::shared::contentgen::adapter::{
-    AdapterUsage, GeminiAdapter, GeminiArtifact, GeminiImageRequest, GeminiMusicRequest,
-    GeminiResponse,
+    AdapterUsage, GeminiAdapter, GeminiArtifact, GeminiImageRequest, GeminiMusicRequest, GeminiResponse,
 };
 use crate::shared::contentgen::transport;
 
@@ -47,11 +46,7 @@ impl UreqGeminiAdapter {
     /// Build the adapter with a resolved key + timeout.
     #[must_use]
     pub fn new(api_key: String, timeout: Duration) -> Self {
-        Self {
-            agent: transport::agent(),
-            api_key,
-            timeout,
-        }
+        Self { agent: transport::agent(), api_key, timeout }
     }
 }
 
@@ -74,12 +69,9 @@ impl UreqGeminiAdapter {
             .header("content-type", "application/json")
             .body(body_bytes)
             .map_err(|e| format!("build request: {e}"))?;
-        let (status, retry_after_millis, text) =
-            transport::run_request(&self.agent, http_req, self.timeout)?;
+        let (status, retry_after_millis, text) = transport::run_request(&self.agent, http_req, self.timeout)?;
         if !(200..300).contains(&status) {
-            return Err(format!(
-                "status={status} retry_after_millis={retry_after_millis:?} body={text}"
-            ));
+            return Err(format!("status={status} retry_after_millis={retry_after_millis:?} body={text}"));
         }
         Ok(text)
     }
@@ -130,14 +122,8 @@ fn build_nanobanana_body(req: &GeminiImageRequest) -> Value {
     }
 
     let mut body = Map::new();
-    body.insert(
-        "contents".to_string(),
-        json!([{ "role": "user", "parts": parts }]),
-    );
-    body.insert(
-        "generationConfig".to_string(),
-        Value::Object(generation_config),
-    );
+    body.insert("contents".to_string(), json!([{ "role": "user", "parts": parts }]));
+    body.insert("generationConfig".to_string(), Value::Object(generation_config));
     if req.use_grounding {
         body.insert("tools".to_string(), json!([{ "google_search": {} }]));
     }
@@ -152,10 +138,7 @@ impl GeminiAdapter for UreqGeminiAdapter {
 
         let parsed = nanobanana::parse_image_response(&text)?;
         Ok(GeminiResponse {
-            artifacts: vec![GeminiArtifact {
-                bytes: parsed.bytes,
-                ext: "png".to_string(),
-            }],
+            artifacts: vec![GeminiArtifact { bytes: parsed.bytes, ext: "png".to_string() }],
             model_used: req.model,
             usage: AdapterUsage::default(),
             thought_signature: parsed.thought_signature,
@@ -173,13 +156,7 @@ impl GeminiAdapter for UreqGeminiAdapter {
         let text = self.post_json(&req.model, "predict", &body)?;
 
         let clips = lyria::parse_clip_response(&text)?;
-        let artifacts = clips
-            .into_iter()
-            .map(|bytes| GeminiArtifact {
-                bytes,
-                ext: "wav".to_string(),
-            })
-            .collect();
+        let artifacts = clips.into_iter().map(|bytes| GeminiArtifact { bytes, ext: "wav".to_string() }).collect();
         Ok(GeminiResponse {
             artifacts,
             model_used: req.model,
@@ -202,16 +179,8 @@ fn base64_encode(bytes: &[u8]) -> String {
         let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(ALPHABET[((n >> 18) & 0x3F) as usize] as char);
         out.push(ALPHABET[((n >> 12) & 0x3F) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHABET[((n >> 6) & 0x3F) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[(n & 0x3F) as usize] as char
-        } else {
-            '='
-        });
+        out.push(if chunk.len() > 1 { ALPHABET[((n >> 6) & 0x3F) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { ALPHABET[(n & 0x3F) as usize] as char } else { '=' });
     }
     out
 }

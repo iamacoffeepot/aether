@@ -85,16 +85,12 @@ pub(super) fn resolve_bytes_params<'a>(
                 Value::Object(map) => resolve_named_fields(map, fields, max_file_bytes).await,
                 other => Ok(other),
             },
-            SchemaType::Map {
-                value: value_schema,
-                ..
-            } => match value {
+            SchemaType::Map { value: value_schema, .. } => match value {
                 Value::Object(mut map) => {
                     let keys: Vec<String> = map.keys().cloned().collect();
                     for key in keys {
                         if let Some(slot) = map.remove(&key) {
-                            let resolved =
-                                resolve_bytes_params(slot, value_schema, max_file_bytes).await?;
+                            let resolved = resolve_bytes_params(slot, value_schema, max_file_bytes).await?;
                             map.insert(key, resolved);
                         }
                     }
@@ -114,17 +110,12 @@ pub(super) fn resolve_bytes_params<'a>(
                     let resolved = match variant {
                         None | Some(EnumVariant::Unit { .. }) => payload,
                         Some(EnumVariant::Tuple { fields, .. }) => match fields.as_ref() {
-                            [single] => {
-                                resolve_bytes_params(payload, single, max_file_bytes).await?
-                            }
+                            [single] => resolve_bytes_params(payload, single, max_file_bytes).await?,
                             _ => match payload {
                                 Value::Array(items) => {
                                     let mut out = Vec::with_capacity(items.len());
                                     for (item, field) in items.into_iter().zip(fields.iter()) {
-                                        out.push(
-                                            resolve_bytes_params(item, field, max_file_bytes)
-                                                .await?,
-                                        );
+                                        out.push(resolve_bytes_params(item, field, max_file_bytes).await?);
                                     }
                                     Value::Array(out)
                                 }
@@ -132,9 +123,7 @@ pub(super) fn resolve_bytes_params<'a>(
                             },
                         },
                         Some(EnumVariant::Struct { fields, .. }) => match payload {
-                            Value::Object(inner) => {
-                                resolve_named_fields(inner, fields, max_file_bytes).await?
-                            }
+                            Value::Object(inner) => resolve_named_fields(inner, fields, max_file_bytes).await?,
                             other => other,
                         },
                     };
@@ -180,12 +169,8 @@ pub(super) async fn resolve_bytes_embed(
     let (key, body) = obj.into_iter().next().expect("len == 1");
     let bytes: Vec<u8> = match key.as_str() {
         "$file" => {
-            let path = body
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("$file value must be a string path"))?;
-            let bytes = fs::read(path)
-                .await
-                .map_err(|e| anyhow::anyhow!("$file: reading {path:?}: {e}"))?;
+            let path = body.as_str().ok_or_else(|| anyhow::anyhow!("$file value must be a string path"))?;
+            let bytes = fs::read(path).await.map_err(|e| anyhow::anyhow!("$file: reading {path:?}: {e}"))?;
             if bytes.len() > max_file_bytes {
                 anyhow::bail!(
                     "$file {path:?} is {} bytes, over the {max_file_bytes}-byte RPC frame cap; a \
@@ -197,17 +182,11 @@ pub(super) async fn resolve_bytes_embed(
             bytes
         }
         "$base64" => {
-            let s = body
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("$base64 value must be a string"))?;
-            STANDARD
-                .decode(s)
-                .map_err(|e| anyhow::anyhow!("$base64: invalid base64: {e}"))?
+            let s = body.as_str().ok_or_else(|| anyhow::anyhow!("$base64 value must be a string"))?;
+            STANDARD.decode(s).map_err(|e| anyhow::anyhow!("$base64: invalid base64: {e}"))?
         }
         "$text" => {
-            let s = body
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("$text value must be a string"))?;
+            let s = body.as_str().ok_or_else(|| anyhow::anyhow!("$text value must be a string"))?;
             s.as_bytes().to_vec()
         }
         other => anyhow::bail!(
@@ -239,22 +218,16 @@ pub(super) fn render_bytes_reply(
             }
         }
         SchemaType::Vec(inner) | SchemaType::Array { element: inner, .. } => match value {
-            Value::Array(items) => Value::Array(
-                items
-                    .into_iter()
-                    .map(|v| render_bytes_reply(v, inner, inline_max))
-                    .collect(),
-            ),
+            Value::Array(items) => {
+                Value::Array(items.into_iter().map(|v| render_bytes_reply(v, inner, inline_max)).collect())
+            }
             other => other,
         },
         SchemaType::Struct { fields, .. } => match value {
             Value::Object(map) => render_named_fields(map, fields, inline_max),
             other => other,
         },
-        SchemaType::Map {
-            value: value_schema,
-            ..
-        } => match value {
+        SchemaType::Map { value: value_schema, .. } => match value {
             Value::Object(mut map) => {
                 for slot in map.values_mut() {
                     let taken = mem::take(slot);
@@ -317,8 +290,7 @@ pub(super) fn reply_inline_max_bytes() -> usize {
     // way `main.rs` reads `AETHER_MCP_PORT`.
     #[allow(clippy::disallowed_methods)]
     let raw = env::var("AETHER_MCP_REPLY_INLINE_MAX_BYTES").ok();
-    raw.and_then(|s| s.trim().parse::<usize>().ok())
-        .unwrap_or(DEFAULT_REPLY_INLINE_MAX_BYTES)
+    raw.and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(DEFAULT_REPLY_INLINE_MAX_BYTES)
 }
 
 /// Stage `bytes` to a unique harness-host temp file under `dir` and return its
@@ -346,11 +318,7 @@ pub(super) fn render_bytes_leaf(value: serde_json::Value, inline_max: usize) -> 
 
 /// `render_bytes_leaf` with an explicit spill directory — the seam the unit
 /// tests drive so spills land under a scratch dir rather than the real temp dir.
-pub(super) fn render_bytes_leaf_in(
-    value: serde_json::Value,
-    inline_max: usize,
-    spill_dir: &Path,
-) -> serde_json::Value {
+pub(super) fn render_bytes_leaf_in(value: serde_json::Value, inline_max: usize, spill_dir: &Path) -> serde_json::Value {
     use serde_json::Value;
     let Value::Array(items) = &value else {
         return value;
@@ -370,10 +338,7 @@ pub(super) fn render_bytes_leaf_in(
         && let Ok(path) = spill_reply_bytes(spill_dir, &bytes)
     {
         let mut obj = serde_json::Map::new();
-        obj.insert(
-            "file".to_owned(),
-            Value::String(path.to_string_lossy().into_owned()),
-        );
+        obj.insert("file".to_owned(), Value::String(path.to_string_lossy().into_owned()));
         return Value::Object(obj);
     }
     str::from_utf8(&bytes).map_or_else(

@@ -18,14 +18,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use aether_kinds::{QuadScale, QuadSpace};
 use aether_substrate::render::{
-    CaptureMeta, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw,
-    MaterialPassDraw, MaterialPassRecord, MaterialPipelines, OverlayDraw, Pipeline,
-    QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD, QuadPipeline,
-    RenderError, Targets, TextureBindings, build_main_pipeline, build_material_pipelines,
-    build_quad_pipeline, build_texture_bindings, finish_capture, map_capture_rgba,
-    prepare_capture_copy, push_coverage_params, push_material_rect_vertices,
-    push_screen_quad_vertices, push_textured_params, push_world_quad_vertices, record_main_pass,
-    record_material_pass, record_quad_overlay_pass,
+    CaptureMeta, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw, MaterialPassDraw,
+    MaterialPassRecord, MaterialPipelines, OverlayDraw, Pipeline, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE,
+    QUAD_VERTICES_PER_QUAD, QuadPipeline, RenderError, Targets, TextureBindings, build_main_pipeline,
+    build_material_pipelines, build_quad_pipeline, build_texture_bindings, finish_capture, map_capture_rgba,
+    prepare_capture_copy, push_coverage_params, push_material_rect_vertices, push_screen_quad_vertices,
+    push_textured_params, push_world_quad_vertices, record_main_pass, record_material_pass, record_quad_overlay_pass,
 };
 
 use super::material::{MaterialBatch, accepts_coverage_texture};
@@ -175,10 +173,7 @@ impl RenderHandles {
     /// ready and stable for the chassis lifetime; a double install
     /// indicates a chassis-wiring bug.
     pub fn install_gpu(&self, gpu: RenderGpu) {
-        self.gpu
-            .set(gpu)
-            .ok()
-            .expect("RenderHandles::install_gpu called twice");
+        self.gpu.set(gpu).ok().expect("RenderHandles::install_gpu called twice");
     }
 
     /// Returns the installed [`RenderGpu`], or `None` if `install_gpu`
@@ -211,12 +206,7 @@ impl RenderHandles {
     pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
         self.quad_observation
             .get()
-            .map_or_else(Vec::new, |observed| {
-                observed
-                    .lock()
-                    .expect("mutex poisoned; fail-fast per ADR-0063")
-                    .clone()
-            })
+            .map_or_else(Vec::new, |observed| observed.lock().expect("mutex poisoned; fail-fast per ADR-0063").clone())
     }
 
     fn expect_gpu(&self) -> &RenderGpu {
@@ -274,32 +264,11 @@ impl RenderHandles {
         replay_cache_when_idle: bool,
     ) -> Result<(), RenderError> {
         let gpu = self.expect_gpu();
-        commit_or_replay(
-            &self.frame_vertices,
-            &self.last_submitted,
-            replay_cache_when_idle,
-        );
-        let view_proj = *self
-            .camera_state
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
-        let last = self
-            .last_submitted
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
-        let targets = gpu
-            .targets
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
-        record_main_pass(
-            &gpu.queue,
-            encoder,
-            &gpu.pipeline,
-            &targets,
-            &last,
-            &view_proj,
-            extra_pipelines,
-        )
+        commit_or_replay(&self.frame_vertices, &self.last_submitted, replay_cache_when_idle);
+        let view_proj = *self.camera_state.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+        let last = self.last_submitted.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+        let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+        record_main_pass(&gpu.queue, encoder, &gpu.pipeline, &targets, &last, &view_proj, extra_pipelines)
     }
 
     /// Record the textured-quad overlay pass (ADR-0105) into `encoder`
@@ -328,48 +297,24 @@ impl RenderHandles {
     // helpers; the line count reflects the World/Screen branching
     // added in #1699.
     #[allow(clippy::too_many_lines)]
-    pub fn record_overlay_pass(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        replay_cache_when_idle: bool,
-    ) {
+    pub fn record_overlay_pass(&self, encoder: &mut wgpu::CommandEncoder, replay_cache_when_idle: bool) {
         let gpu = self.expect_gpu();
-        commit_or_replay(
-            &self.quad_frame,
-            &self.quad_last_submitted,
-            replay_cache_when_idle,
-        );
-        let batches = self
-            .quad_last_submitted
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063")
-            .clone();
+        commit_or_replay(&self.quad_frame, &self.quad_last_submitted, replay_cache_when_idle);
+        let batches = self.quad_last_submitted.lock().expect("mutex poisoned; fail-fast per ADR-0063").clone();
         if batches.is_empty() {
             if let Some(observed) = self.quad_observation.get() {
-                observed
-                    .lock()
-                    .expect("mutex poisoned; fail-fast per ADR-0063")
-                    .clear();
+                observed.lock().expect("mutex poisoned; fail-fast per ADR-0063").clear();
             }
             return;
         }
 
-        let targets = gpu
-            .targets
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
         #[allow(clippy::cast_precision_loss)]
         let viewport = [targets.width() as f32, targets.height() as f32];
 
-        let view_proj = *self
-            .camera_state
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let view_proj = *self.camera_state.lock().expect("mutex poisoned; fail-fast per ADR-0063");
 
-        let mut registry = self
-            .textures
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let mut registry = self.textures.lock().expect("mutex poisoned; fail-fast per ADR-0063");
 
         // First pass: realize / re-upload every texture the frame
         // references (Screen and World batches share the same atlas),
@@ -440,10 +385,7 @@ impl RenderHandles {
                 bind_group: realized.bind_group(),
                 first_vertex,
                 vertex_count,
-                clip: batch
-                    .clip
-                    .as_ref()
-                    .map(|clip| [clip.x, clip.y, clip.width, clip.height]),
+                clip: batch.clip.as_ref().map(|clip| [clip.x, clip.y, clip.width, clip.height]),
             });
         }
 
@@ -462,24 +404,17 @@ impl RenderHandles {
             let mut recorded = Vec::new();
             if vertex_bytes.len() <= QUAD_VERTEX_BUFFER_BYTES {
                 for batch in &batches {
-                    let clip = batch
-                        .clip
-                        .as_ref()
-                        .map(|clip| [clip.x, clip.y, clip.width, clip.height]);
-                    let is_recorded = registry
-                        .entries
-                        .get(&batch.texture_id)
-                        .is_some_and(|entry| entry.realized.is_some())
-                        && !batch.quads.is_empty()
-                        && overlay_clip_is_visible(clip, targets.width(), targets.height());
+                    let clip = batch.clip.as_ref().map(|clip| [clip.x, clip.y, clip.width, clip.height]);
+                    let is_recorded =
+                        registry.entries.get(&batch.texture_id).is_some_and(|entry| entry.realized.is_some())
+                            && !batch.quads.is_empty()
+                            && overlay_clip_is_visible(clip, targets.width(), targets.height());
                     if is_recorded {
                         recorded.push(observed_batch(batch));
                     }
                 }
             }
-            *observed
-                .lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063") = recorded;
+            *observed.lock().expect("mutex poisoned; fail-fast per ADR-0063") = recorded;
         }
     }
 
@@ -492,39 +427,20 @@ impl RenderHandles {
     /// Panics if `install_gpu` hasn't been called, or if any internal
     /// mutex is poisoned — fail-fast per ADR-0063.
     #[allow(clippy::too_many_lines)]
-    pub fn record_material_pass(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        replay_cache_when_idle: bool,
-    ) {
+    pub fn record_material_pass(&self, encoder: &mut wgpu::CommandEncoder, replay_cache_when_idle: bool) {
         let gpu = self.expect_gpu();
-        commit_or_replay(
-            &self.material_frame,
-            &self.material_last_submitted,
-            replay_cache_when_idle,
-        );
-        let batches = self
-            .material_last_submitted
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063")
-            .clone();
+        commit_or_replay(&self.material_frame, &self.material_last_submitted, replay_cache_when_idle);
+        let batches = self.material_last_submitted.lock().expect("mutex poisoned; fail-fast per ADR-0063").clone();
         if batches.is_empty() {
             return;
         }
 
-        let targets = gpu
-            .targets
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
-        let mut registry = self
-            .textures
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+        let mut registry = self.textures.lock().expect("mutex poisoned; fail-fast per ADR-0063");
 
         for batch in &batches {
             let texture_id = match batch {
-                MaterialBatch::Textured { texture_id, .. }
-                | MaterialBatch::Coverage { texture_id, .. } => *texture_id,
+                MaterialBatch::Textured { texture_id, .. } | MaterialBatch::Coverage { texture_id, .. } => *texture_id,
             };
             if let Some(entry) = registry.entries.get_mut(&texture_id) {
                 entry.ensure_realized(&gpu.device, &gpu.queue, &gpu.texture_bindings);
@@ -541,8 +457,7 @@ impl RenderHandles {
         let mut textured_params = Vec::new();
         let mut coverage_params = Vec::new();
         let mut draws = Vec::new();
-        let vertex_count =
-            u32::try_from(MATERIAL_VERTICES_PER_RECT).expect("material rect vertex count fits u32");
+        let vertex_count = u32::try_from(MATERIAL_VERTICES_PER_RECT).expect("material rect vertex count fits u32");
         for batch in &batches {
             match batch {
                 MaterialBatch::Textured { texture_id, rects } => {
@@ -553,8 +468,7 @@ impl RenderHandles {
                         continue;
                     };
                     for rect in rects {
-                        let Some(params_offset) =
-                            push_textured_params(&mut textured_params, rect.tint.to_array())
+                        let Some(params_offset) = push_textured_params(&mut textured_params, rect.tint.to_array())
                         else {
                             tracing::warn!(
                                 target: "aether_capabilities::render",
@@ -564,17 +478,10 @@ impl RenderHandles {
                             continue;
                         };
                         #[allow(clippy::cast_possible_truncation)]
-                        let first_vertex =
-                            (vertex_bytes.len() / MATERIAL_VERTEX_STRIDE as usize) as u32;
+                        let first_vertex = (vertex_bytes.len() / MATERIAL_VERTEX_STRIDE as usize) as u32;
                         push_material_rect_vertices(
                             &mut vertex_bytes,
-                            [
-                                rect.rect.x,
-                                rect.rect.y,
-                                rect.rect.width,
-                                rect.rect.height,
-                                rect.rect.z,
-                            ],
+                            [rect.rect.x, rect.rect.y, rect.rect.width, rect.rect.height, rect.rect.z],
                             [rect.u0, rect.v0, rect.u1, rect.v1],
                         );
                         draws.push(MaterialPassDraw::Textured(MaterialDraw {
@@ -616,17 +523,10 @@ impl RenderHandles {
                             continue;
                         };
                         #[allow(clippy::cast_possible_truncation)]
-                        let first_vertex =
-                            (vertex_bytes.len() / MATERIAL_VERTEX_STRIDE as usize) as u32;
+                        let first_vertex = (vertex_bytes.len() / MATERIAL_VERTEX_STRIDE as usize) as u32;
                         push_material_rect_vertices(
                             &mut vertex_bytes,
-                            [
-                                rect.rect.x,
-                                rect.rect.y,
-                                rect.rect.width,
-                                rect.rect.height,
-                                rect.rect.z,
-                            ],
+                            [rect.rect.x, rect.rect.y, rect.rect.width, rect.rect.height, rect.rect.z],
                             [0.0, 0.0, 1.0, 1.0],
                         );
                         draws.push(MaterialPassDraw::Coverage(MaterialDraw {
@@ -666,10 +566,7 @@ impl RenderHandles {
     /// mutex is poisoned — fail-fast per ADR-0063.
     pub fn record_capture_copy(&self, encoder: &mut wgpu::CommandEncoder) -> CaptureMeta {
         let gpu = self.expect_gpu();
-        let mut targets = gpu
-            .targets
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let mut targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
         prepare_capture_copy(&gpu.device, &mut targets, encoder)
     }
 
@@ -682,10 +579,7 @@ impl RenderHandles {
     /// mutex is poisoned — fail-fast per ADR-0063.
     pub fn finish_capture(&self, meta: &CaptureMeta) -> Result<Vec<u8>, String> {
         let gpu = self.expect_gpu();
-        let targets = gpu
-            .targets
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
         finish_capture(&gpu.device, &targets, meta)
     }
 
@@ -702,10 +596,7 @@ impl RenderHandles {
     /// mutex is poisoned — fail-fast per ADR-0063.
     pub fn map_capture_rgba(&self, meta: &CaptureMeta) -> Result<Vec<u8>, String> {
         let gpu = self.expect_gpu();
-        let targets = gpu
-            .targets
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
         map_capture_rgba(&gpu.device, &targets, meta)
     }
 
@@ -717,10 +608,7 @@ impl RenderHandles {
     /// mutex is poisoned — fail-fast per ADR-0063.
     pub fn resize(&self, width: u32, height: u32) {
         let gpu = self.expect_gpu();
-        let mut targets = gpu
-            .targets
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let mut targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
         targets.resize(&gpu.device, width, height);
     }
 
@@ -758,11 +646,7 @@ impl RenderHandles {
     /// mutex is poisoned — fail-fast per ADR-0063.
     #[must_use]
     pub fn color_size(&self) -> (u32, u32) {
-        let targets = self
-            .expect_gpu()
-            .targets
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let targets = self.expect_gpu().targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
         (targets.width(), targets.height())
     }
 
@@ -780,10 +664,7 @@ impl RenderHandles {
         F: FnOnce(&wgpu::Texture) -> R,
     {
         let gpu = self.expect_gpu();
-        let targets = gpu
-            .targets
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let targets = gpu.targets.lock().expect("mutex poisoned; fail-fast per ADR-0063");
         f(targets.color_texture())
     }
 }
@@ -834,21 +715,11 @@ impl RenderGpu {
         polygon_mode: wgpu::PolygonMode,
         vertex_buffer_bytes: usize,
     ) -> Self {
-        let pipeline = build_main_pipeline(
-            &device,
-            &queue,
-            color_format,
-            polygon_mode,
-            vertex_buffer_bytes,
-        );
+        let pipeline = build_main_pipeline(&device, &queue, color_format, polygon_mode, vertex_buffer_bytes);
         let texture_bindings = build_texture_bindings(&device);
         let quad_pipeline = build_quad_pipeline(&device, color_format, &texture_bindings);
-        let material_pipelines = build_material_pipelines(
-            &device,
-            color_format,
-            &pipeline.camera_bind_group_layout,
-            &texture_bindings,
-        );
+        let material_pipelines =
+            build_material_pipelines(&device, color_format, &pipeline.camera_bind_group_layout, &texture_bindings);
         let targets = Targets::new(&device, color_format, width, height);
         Self {
             device,
@@ -874,9 +745,7 @@ mod tests {
     fn handles_with_committed_overlays(batches: Vec<QuadBatch>) -> RenderHandles {
         let recorded = batches.iter().map(observed_batch).collect();
         let observation = Arc::new(OnceLock::new());
-        observation
-            .set(Arc::new(Mutex::new(recorded)))
-            .expect("test: observation is installed once");
+        observation.set(Arc::new(Mutex::new(recorded))).expect("test: observation is installed once");
         RenderHandles {
             frame_vertices: Arc::new(Mutex::new(Vec::new())),
             last_submitted: Arc::new(Mutex::new(Vec::new())),
@@ -894,17 +763,7 @@ mod tests {
     }
 
     fn textured_quad(x: f32, tint: Rgba) -> TexturedQuad {
-        TexturedQuad {
-            x,
-            y: x + 1.0,
-            width: x + 2.0,
-            height: x + 3.0,
-            u0: 0.1,
-            v0: 0.2,
-            u1: 0.7,
-            v1: 0.8,
-            tint,
-        }
+        TexturedQuad { x, y: x + 1.0, width: x + 2.0, height: x + 3.0, u0: 0.1, v0: 0.2, u1: 0.7, v1: 0.8, tint }
     }
 
     /// An uncommitted render starts with no overlay observations rather
@@ -936,45 +795,20 @@ mod tests {
     #[test]
     fn overlay_observation_rejects_non_drawing_clips() {
         assert!(overlay_clip_is_visible(None, 64, 48));
-        assert!(overlay_clip_is_visible(
-            Some([-1.0, -1.0, 2.0, 2.0]),
-            64,
-            48
-        ));
-        assert!(overlay_clip_is_visible(
-            Some([63.5, 47.5, 1.0, 1.0]),
-            64,
-            48
-        ));
-        assert!(!overlay_clip_is_visible(
-            Some([64.0, 0.0, 1.0, 1.0]),
-            64,
-            48
-        ));
+        assert!(overlay_clip_is_visible(Some([-1.0, -1.0, 2.0, 2.0]), 64, 48));
+        assert!(overlay_clip_is_visible(Some([63.5, 47.5, 1.0, 1.0]), 64, 48));
+        assert!(!overlay_clip_is_visible(Some([64.0, 0.0, 1.0, 1.0]), 64, 48));
         assert!(!overlay_clip_is_visible(Some([0.0, 0.0, 0.0, 1.0]), 64, 48));
-        assert!(!overlay_clip_is_visible(
-            Some([f32::NAN, 0.0, 1.0, 1.0]),
-            64,
-            48
-        ));
+        assert!(!overlay_clip_is_visible(Some([f32::NAN, 0.0, 1.0, 1.0]), 64, 48));
     }
 
     /// Converting the private cache to public draw values preserves every
     /// field and the mixed-space painter's order consumed by the GPU pass.
     #[test]
     fn committed_overlay_snapshot_preserves_order_and_fields() {
-        let screen_clip = ClipRect {
-            x: 2.0,
-            y: 3.0,
-            width: 40.0,
-            height: 30.0,
-        };
-        let world_space = QuadSpace::World {
-            anchor: [1.0, 2.0, 3.0],
-            scale: QuadScale::Distance {
-                reference_distance: 9.0,
-            },
-        };
+        let screen_clip = ClipRect { x: 2.0, y: 3.0, width: 40.0, height: 30.0 };
+        let world_space =
+            QuadSpace::World { anchor: [1.0, 2.0, 3.0], scale: QuadScale::Distance { reference_distance: 9.0 } };
         let handles = handles_with_committed_overlays(vec![
             QuadBatch {
                 texture_id: 17,
@@ -996,17 +830,11 @@ mod tests {
         assert_eq!(snapshot[0].texture_id, 17);
         assert_eq!(snapshot[0].space, QuadSpace::Screen);
         assert_eq!(snapshot[0].clip, Some(screen_clip));
-        assert_eq!(
-            snapshot[0].quads,
-            vec![textured_quad(4.0, Rgba::new(1.0, 0.5, 0.25, 0.75))]
-        );
+        assert_eq!(snapshot[0].quads, vec![textured_quad(4.0, Rgba::new(1.0, 0.5, 0.25, 0.75))]);
         assert_eq!(snapshot[1].texture_id, 23);
         assert_eq!(snapshot[1].space, world_space);
         assert_eq!(snapshot[1].clip, None);
-        assert_eq!(
-            snapshot[1].quads,
-            vec![textured_quad(8.0, Rgba::new(0.2, 0.4, 0.6, 0.8))]
-        );
+        assert_eq!(snapshot[1].quads, vec![textured_quad(8.0, Rgba::new(0.2, 0.4, 0.6, 0.8))]);
     }
 
     /// A snapshot owns its values, so a later commit can reuse and mutate

@@ -29,11 +29,7 @@ pub enum FoldError {
     NonLinearArity { at_index: usize, arity: usize },
     /// The output kind of transform `at_index - 1` does not match the
     /// input kind of transform `at_index`.
-    KindMismatch {
-        at_index: usize,
-        expected: KindId,
-        found: KindId,
-    },
+    KindMismatch { at_index: usize, expected: KindId, found: KindId },
 }
 
 /// A registered native transform's static metadata + invocation thunk
@@ -77,15 +73,10 @@ impl TransformRegistry {
     /// tests and any chassis that doesn't host the executor.
     #[must_use]
     pub fn empty() -> Self {
-        Self {
-            by_id: HashMap::new(),
-        }
+        Self { by_id: HashMap::new() }
     }
 
-    fn insert_entry(
-        by_id: &mut HashMap<TransformId, RegisteredTransform>,
-        entry: &'static TransformEntry,
-    ) {
+    fn insert_entry(by_id: &mut HashMap<TransformId, RegisteredTransform>, entry: &'static TransformEntry) {
         let registered = RegisteredTransform {
             input_kind_ids: entry.input_kind_ids,
             output_kind_id: entry.output_kind_id,
@@ -151,19 +142,12 @@ impl TransformRegistry {
         for (i, &id) in chain.iter().enumerate() {
             let t = self.lookup(id).ok_or(FoldError::UnknownTransform(id))?;
             if t.input_kind_ids.len() != 1 {
-                return Err(FoldError::NonLinearArity {
-                    at_index: i,
-                    arity: t.input_kind_ids.len(),
-                });
+                return Err(FoldError::NonLinearArity { at_index: i, arity: t.input_kind_ids.len() });
             }
             if let Some(expected) = prev_output {
                 let found = t.input_kind_ids[0];
                 if expected != found {
-                    return Err(FoldError::KindMismatch {
-                        at_index: i,
-                        expected,
-                        found,
-                    });
+                    return Err(FoldError::KindMismatch { at_index: i, expected, found });
                 }
             }
             prev_output = Some(t.output_kind_id);
@@ -240,22 +224,13 @@ mod tests {
     fn unknown_id_returns_error() {
         let reg = TransformRegistry::empty();
         let bogus = TransformId(0xDEAD_DEAD_DEAD_DEAD);
-        assert_eq!(
-            reg.validate_fold(&[bogus]),
-            Err(FoldError::UnknownTransform(bogus)),
-        );
+        assert_eq!(reg.validate_fold(&[bogus]), Err(FoldError::UnknownTransform(bogus)),);
     }
 
     #[test]
     fn arity_gt_one_returns_non_linear_arity() {
         let reg = make_registry(&[(MULTI_ID, MULTI_INPUTS, K3)]);
-        assert_eq!(
-            reg.validate_fold(&[MULTI_ID]),
-            Err(FoldError::NonLinearArity {
-                at_index: 0,
-                arity: 2
-            }),
-        );
+        assert_eq!(reg.validate_fold(&[MULTI_ID]), Err(FoldError::NonLinearArity { at_index: 0, arity: 2 }),);
     }
 
     #[test]
@@ -265,11 +240,7 @@ mod tests {
         let reg = make_registry(&[(A_ID, A_INPUTS, K2), (B_ID, B_WRONG_INPUTS, K3)]);
         assert_eq!(
             reg.validate_fold(&[A_ID, B_ID]),
-            Err(FoldError::KindMismatch {
-                at_index: 1,
-                expected: K2,
-                found: K3,
-            }),
+            Err(FoldError::KindMismatch { at_index: 1, expected: K2, found: K3 }),
         );
     }
 }

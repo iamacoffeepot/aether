@@ -3,9 +3,9 @@
 //! `with_actor::<HttpServerCapability>(config)`.
 
 use super::{
-    DEFAULT_BIND_ADDR, DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS, DEFAULT_MAX_CONNECTIONS,
-    DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_STREAM_WINDOW,
-    DEFAULT_REQUEST_TIMEOUT_MILLIS, DEFAULT_RESPONSE_STREAM_WINDOW, DEFAULT_WS_IDLE_TIMEOUT_MILLIS,
+    DEFAULT_BIND_ADDR, DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_HEADER_BYTES,
+    DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_STREAM_WINDOW, DEFAULT_REQUEST_TIMEOUT_MILLIS,
+    DEFAULT_RESPONSE_STREAM_WINDOW, DEFAULT_WS_IDLE_TIMEOUT_MILLIS,
 };
 
 /// Init config for [`HttpServerCapability`](super::HttpServerCapability) (ADR-0108).
@@ -27,10 +27,7 @@ use super::{
 /// struct.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "runtime", derive(aether_substrate::Config))]
-#[cfg_attr(
-    feature = "runtime",
-    config(env_prefix = "AETHER_HTTP_SERVER", cli_prefix = "http-server")
-)]
+#[cfg_attr(feature = "runtime", config(env_prefix = "AETHER_HTTP_SERVER", cli_prefix = "http-server"))]
 pub struct HttpServerConfig {
     /// Whether to bind the listening socket at all. Default `false` —
     /// the HTTP server is opt-in, so an unconfigured chassis binds no

@@ -30,24 +30,9 @@ use aether_math::Rgb;
 
 static TRIANGLE: DrawTriangle = DrawTriangle {
     verts: [
-        Vertex {
-            x: 0.0,
-            y: 0.5,
-            z: 0.0,
-            color: Rgb::new(1.0, 0.0, 0.0),
-        },
-        Vertex {
-            x: -0.5,
-            y: -0.5,
-            z: 0.0,
-            color: Rgb::new(0.0, 1.0, 0.0),
-        },
-        Vertex {
-            x: 0.5,
-            y: -0.5,
-            z: 0.0,
-            color: Rgb::new(0.0, 0.0, 1.0),
-        },
+        Vertex { x: 0.0, y: 0.5, z: 0.0, color: Rgb::new(1.0, 0.0, 0.0) },
+        Vertex { x: -0.5, y: -0.5, z: 0.0, color: Rgb::new(0.0, 1.0, 0.0) },
+        Vertex { x: 0.5, y: -0.5, z: 0.0, color: Rgb::new(0.0, 0.0, 1.0) },
     ],
 };
 

@@ -97,12 +97,7 @@ pub fn build_static_reverse_map(manifest: &ManifestResult) -> HashMap<u64, Strin
 /// Instantiate a `Declared` template over every [`NameEntryWire`] whose
 /// `domain` matches `domain`, inserting each into `map`. Factored out of
 /// [`build_static_reverse_map`] to keep the match arms flat.
-fn expand_declared(
-    map: &mut HashMap<u64, String>,
-    tmpl: &TemplateEntryWire,
-    domain: &[u8],
-    names: &[NameEntryWire],
-) {
+fn expand_declared(map: &mut HashMap<u64, String>, tmpl: &TemplateEntryWire, domain: &[u8], names: &[NameEntryWire]) {
     for entry in names {
         if entry.domain != domain {
             continue;
@@ -140,10 +135,7 @@ impl EngineNames {
     /// cache starts empty and fills on demand from `resolve` replies.
     #[must_use]
     pub fn from_manifest(manifest: &ManifestResult) -> Self {
-        Self {
-            static_map: build_static_reverse_map(manifest),
-            dynamic: HashMap::new(),
-        }
+        Self { static_map: build_static_reverse_map(manifest), dynamic: HashMap::new() }
     }
 
     /// Look up `id` in the static + template map (step 1) and then the
@@ -206,14 +198,8 @@ mod tests {
     fn synthetic_manifest() -> ManifestResult {
         ManifestResult {
             names: vec![
-                NameEntryWire {
-                    domain: MAILBOX_DOMAIN.to_vec(),
-                    name: "aether.audio".to_string(),
-                },
-                NameEntryWire {
-                    domain: KIND_DOMAIN.to_vec(),
-                    name: "aether.fs.read".to_string(),
-                },
+                NameEntryWire { domain: MAILBOX_DOMAIN.to_vec(), name: "aether.audio".to_string() },
+                NameEntryWire { domain: KIND_DOMAIN.to_vec(), name: "aether.fs.read".to_string() },
             ],
             templates: vec![
                 TemplateEntryWire {
@@ -224,9 +210,7 @@ mod tests {
                 TemplateEntryWire {
                     domain: THREAD_DOMAIN.to_vec(),
                     template: "aether-test-root-{NAMESPACE}".to_string(),
-                    param: ParamKindWire::Declared {
-                        domain: MAILBOX_DOMAIN.to_vec(),
-                    },
+                    param: ParamKindWire::Declared { domain: MAILBOX_DOMAIN.to_vec() },
                 },
             ],
         }
@@ -253,11 +237,7 @@ mod tests {
         for n in 0..=3 {
             let name = format!("aether-test-worker-{n}");
             let id = thread_id_from_name(&name);
-            assert_eq!(
-                names.render(id.0),
-                name,
-                "bounded template instance {name} should reverse",
-            );
+            assert_eq!(names.render(id.0), name, "bounded template instance {name} should reverse");
         }
     }
 
@@ -293,10 +273,7 @@ mod tests {
         assert_eq!(names.render(id.0), tag);
 
         names.cache_resolved(id.0, Some("aether-instanced-player:42".to_string()));
-        assert!(
-            !names.needs_resolve(id.0),
-            "a resolved id no longer needs a query",
-        );
+        assert!(!names.needs_resolve(id.0), "a resolved id no longer needs a query");
         assert_eq!(names.render(id.0), "aether-instanced-player:42");
     }
 
@@ -305,10 +282,7 @@ mod tests {
         let mut names = EngineNames::from_manifest(&synthetic_manifest());
         let id = thread_id_from_name("aether-instanced-gone:1");
         names.cache_resolved(id.0, None);
-        assert!(
-            !names.needs_resolve(id.0),
-            "a confirmed miss is cached, not re-queried",
-        );
+        assert!(!names.needs_resolve(id.0), "a confirmed miss is cached, not re-queried");
         // Still renders the hex tag — the miss didn't manufacture a name.
         let tag = tagged_id::encode(id.0).expect("thread id is taggable");
         assert_eq!(names.render(id.0), tag);
@@ -316,17 +290,10 @@ mod tests {
 
     #[test]
     fn empty_manifest_falls_back_to_hex() {
-        let empty = ManifestResult {
-            names: vec![],
-            templates: vec![],
-        };
+        let empty = ManifestResult { names: vec![], templates: vec![] };
         let names = EngineNames::from_manifest(&empty);
         let id = mailbox_id_from_name("aether.audio");
         let tag = tagged_id::encode(id.0).expect("mailbox id is taggable");
-        assert_eq!(
-            names.render(id.0),
-            tag,
-            "with no manifest folded, every id renders the hex tag",
-        );
+        assert_eq!(names.render(id.0), tag, "with no manifest folded, every id renders the hex tag");
     }
 }

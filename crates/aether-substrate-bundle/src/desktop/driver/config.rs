@@ -43,21 +43,18 @@ impl WindowConfig {
     /// behaviour for `AETHER_WINDOW_MODE`.
     #[must_use]
     pub fn to_boot_mode(&self) -> (WindowMode, Option<(u32, u32)>) {
-        self.mode.as_ref().map_or(
-            (WindowMode::Windowed, None),
-            |s| match parse_window_mode_env(s) {
-                Ok(parsed) => parsed,
-                Err(e) => {
-                    tracing::warn!(
-                        target: "aether_substrate::boot",
-                        value = %s,
-                        error = %e,
-                        "AETHER_WINDOW_MODE unparseable — falling back to Windowed",
-                    );
-                    (WindowMode::Windowed, None)
-                }
-            },
-        )
+        self.mode.as_ref().map_or((WindowMode::Windowed, None), |s| match parse_window_mode_env(s) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                tracing::warn!(
+                    target: "aether_substrate::boot",
+                    value = %s,
+                    error = %e,
+                    "AETHER_WINDOW_MODE unparseable — falling back to Windowed",
+                );
+                (WindowMode::Windowed, None)
+            }
+        })
     }
 
     /// Lower `title` to the boot title string. `None` (unset or empty —
@@ -90,31 +87,18 @@ pub fn parse_window_mode_env(s: &str) -> Result<(WindowMode, Option<(u32, u32)>)
         return Ok((WindowMode::FullscreenBorderless, None));
     }
     if let Some(rest) = s.strip_prefix("exclusive:") {
-        let (dim, hz) = rest
-            .split_once('@')
-            .ok_or_else(|| format!("exclusive mode missing @HZ in {s:?}"))?;
+        let (dim, hz) = rest.split_once('@').ok_or_else(|| format!("exclusive mode missing @HZ in {s:?}"))?;
         let (width, height) = parse_wxh(dim)?;
         let hz: u32 = hz.parse().map_err(|e| format!("invalid Hz {hz:?}: {e}"))?;
-        return Ok((
-            WindowMode::FullscreenExclusive {
-                width,
-                height,
-                refresh_mhz: hz.saturating_mul(1000),
-            },
-            None,
-        ));
+        return Ok((WindowMode::FullscreenExclusive { width, height, refresh_mhz: hz.saturating_mul(1000) }, None));
     }
     Err(format!("unrecognised AETHER_WINDOW_MODE value {s:?}"))
 }
 
 fn parse_wxh(s: &str) -> Result<(u32, u32), String> {
-    let (w, h) = s
-        .split_once('x')
-        .ok_or_else(|| format!("expected WxH, got {s:?}"))?;
+    let (w, h) = s.split_once('x').ok_or_else(|| format!("expected WxH, got {s:?}"))?;
     let w: u32 = w.parse().map_err(|e| format!("invalid width {w:?}: {e}"))?;
-    let h: u32 = h
-        .parse()
-        .map_err(|e| format!("invalid height {h:?}: {e}"))?;
+    let h: u32 = h.parse().map_err(|e| format!("invalid height {h:?}: {e}"))?;
     Ok((w, h))
 }
 
@@ -122,17 +106,10 @@ fn parse_wxh(s: &str) -> Result<(u32, u32), String> {
 /// refresh exactly. Returns `None` if no match — the caller surfaces
 /// this as `SetWindowModeResult::Err` rather than falling back
 /// silently to something close.
-fn find_exclusive_mode(
-    monitor: &MonitorHandle,
-    width: u32,
-    height: u32,
-    refresh_mhz: u32,
-) -> Option<VideoModeHandle> {
-    monitor.video_modes().find(|m| {
-        m.size().width == width
-            && m.size().height == height
-            && m.refresh_rate_millihertz() == refresh_mhz
-    })
+fn find_exclusive_mode(monitor: &MonitorHandle, width: u32, height: u32, refresh_mhz: u32) -> Option<VideoModeHandle> {
+    monitor
+        .video_modes()
+        .find(|m| m.size().width == width && m.size().height == height && m.refresh_rate_millihertz() == refresh_mhz)
 }
 
 /// Build winit's `Option<Fullscreen>` for the requested mode.
@@ -146,21 +123,12 @@ pub(super) fn resolve_fullscreen(
     match mode {
         WindowMode::Windowed => Ok(None),
         WindowMode::FullscreenBorderless => Ok(Some(Fullscreen::Borderless(None))),
-        WindowMode::FullscreenExclusive {
-            width,
-            height,
-            refresh_mhz,
-        } => {
-            let monitor = monitor_for_exclusive.ok_or_else(|| {
-                "fullscreen-exclusive requested but no monitor available".to_owned()
+        WindowMode::FullscreenExclusive { width, height, refresh_mhz } => {
+            let monitor = monitor_for_exclusive
+                .ok_or_else(|| "fullscreen-exclusive requested but no monitor available".to_owned())?;
+            let handle = find_exclusive_mode(monitor, *width, *height, *refresh_mhz).ok_or_else(|| {
+                format!("no video mode matches {width}x{height}@{refresh_mhz}mhz on monitor {:?}", monitor.name())
             })?;
-            let handle =
-                find_exclusive_mode(monitor, *width, *height, *refresh_mhz).ok_or_else(|| {
-                    format!(
-                        "no video mode matches {width}x{height}@{refresh_mhz}mhz on monitor {:?}",
-                        monitor.name()
-                    )
-                })?;
             Ok(Some(Fullscreen::Exclusive(handle)))
         }
     }
@@ -179,26 +147,20 @@ mod tests {
     #[test]
     fn to_boot_title_some_returns_value() {
         // Provided title passes through verbatim.
-        let cfg = WindowConfig {
-            mode: None,
-            title: Some("my game".to_owned()),
-            wireframe: None,
-        };
+        let cfg = WindowConfig { mode: None, title: Some("my game".to_owned()), wireframe: None };
         assert_eq!(cfg.to_boot_title(), "my game");
     }
 
     #[test]
     fn parse_windowed_defaults() {
-        let (m, s) =
-            parse_window_mode_env("windowed").expect("test setup: \"windowed\" is a valid spec");
+        let (m, s) = parse_window_mode_env("windowed").expect("test setup: \"windowed\" is a valid spec");
         assert!(matches!(m, WindowMode::Windowed));
         assert_eq!(s, None);
     }
 
     #[test]
     fn parse_windowed_with_size() {
-        let (m, s) = parse_window_mode_env("windowed:1280x720")
-            .expect("test setup: \"windowed:WxH\" is a valid spec");
+        let (m, s) = parse_window_mode_env("windowed:1280x720").expect("test setup: \"windowed:WxH\" is a valid spec");
         assert!(matches!(m, WindowMode::Windowed));
         assert_eq!(s, Some((1280, 720)));
     }
@@ -213,14 +175,9 @@ mod tests {
 
     #[test]
     fn parse_exclusive_converts_hz_to_mhz() {
-        let (m, s) = parse_window_mode_env("exclusive:1920x1080@60")
-            .expect("test setup: \"exclusive:WxH@HZ\" is a valid spec");
-        let WindowMode::FullscreenExclusive {
-            width,
-            height,
-            refresh_mhz,
-        } = m
-        else {
+        let (m, s) =
+            parse_window_mode_env("exclusive:1920x1080@60").expect("test setup: \"exclusive:WxH@HZ\" is a valid spec");
+        let WindowMode::FullscreenExclusive { width, height, refresh_mhz } = m else {
             panic!("expected exclusive");
         };
         assert_eq!((width, height, refresh_mhz), (1920, 1080, 60_000));
@@ -236,8 +193,7 @@ mod tests {
 
     #[test]
     fn parse_ignores_whitespace() {
-        let (m, _) = parse_window_mode_env("  windowed  ")
-            .expect("test setup: surrounding whitespace is trimmed");
+        let (m, _) = parse_window_mode_env("  windowed  ").expect("test setup: surrounding whitespace is trimmed");
         assert!(matches!(m, WindowMode::Windowed));
     }
 }

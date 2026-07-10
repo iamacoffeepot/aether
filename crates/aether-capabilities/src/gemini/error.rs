@@ -61,31 +61,18 @@ mod tests {
 
     #[test]
     fn rate_limit_threads_retry_after() {
-        assert_eq!(
-            status_to_error(429, Some(2000), ""),
-            GeminiError::RateLimited {
-                retry_after_millis: Some(2000)
-            }
-        );
+        assert_eq!(status_to_error(429, Some(2000), ""), GeminiError::RateLimited { retry_after_millis: Some(2000) });
     }
 
     #[test]
     fn unauthorized_sentinel_maps_to_unauthorized() {
-        assert_eq!(
-            adapter_error_to_typed(super::UNAUTHORIZED_SENTINEL),
-            GeminiError::Unauthorized
-        );
+        assert_eq!(adapter_error_to_typed(super::UNAUTHORIZED_SENTINEL), GeminiError::Unauthorized);
     }
 
     #[test]
     fn status_prefix_round_trips_through_typed() {
         let raw = "status=429 retry_after_millis=Some(1500) body=slow down";
-        assert_eq!(
-            adapter_error_to_typed(raw),
-            GeminiError::RateLimited {
-                retry_after_millis: Some(1500)
-            }
-        );
+        assert_eq!(adapter_error_to_typed(raw), GeminiError::RateLimited { retry_after_millis: Some(1500) });
     }
 
     #[test]

@@ -44,8 +44,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_capabilities::rpc::{
-    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig,
-    RpcServerHandle, WIRE_VERSION, WireFrame,
+    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle,
+    WIRE_VERSION, WireFrame,
 };
 use aether_capabilities::trace::TraceDispatchCapability;
 use aether_capabilities::{EngineConfig, EngineServer};
@@ -55,13 +55,12 @@ use aether_kinds::NamedMail;
 use aether_kinds::descriptors;
 use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
 use aether_kinds::{
-    BinaryEntry, BinarySelector, ComponentCapabilities, ComponentEntry, ComponentSelector,
-    DeadEngineDescriptor, EngineDescriptor, ListComponentBinaries, ListComponentBinariesResult,
-    ListComponents, ListComponentsResult, ListEngineBinaries, ListEngineBinariesResult,
-    ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail, LogTailResult,
-    ReplaceComponent, ReplaceResult, ResolveComponent, ResolveComponentResult, SpawnEngine,
-    SpawnEngineResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult,
-    UploadComponent, UploadComponentResult,
+    BinaryEntry, BinarySelector, ComponentCapabilities, ComponentEntry, ComponentSelector, DeadEngineDescriptor,
+    EngineDescriptor, ListComponentBinaries, ListComponentBinariesResult, ListComponents, ListComponentsResult,
+    ListEngineBinaries, ListEngineBinariesResult, ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail,
+    LogTailResult, ReplaceComponent, ReplaceResult, ResolveComponent, ResolveComponentResult, SpawnEngine,
+    SpawnEngineResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent,
+    UploadComponentResult,
 };
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;
@@ -103,30 +102,20 @@ const DEFAULT_REPLY_CAP_SECS: u64 = 300;
 /// stays the live heartbeat). Mirrors #2062's `AETHER_SETTLEMENT_CAP_SECS`
 /// sentinel.
 pub fn cap_from_secs(secs: u64) -> Duration {
-    if secs == 0 {
-        Duration::MAX
-    } else {
-        Duration::from_secs(secs)
-    }
+    if secs == 0 { Duration::MAX } else { Duration::from_secs(secs) }
 }
 
 /// Resolve the steady-state reply backstop from
 /// `AETHER_FLEETBENCH_REPLY_CAP_SECS` (default [`DEFAULT_REPLY_CAP_SECS`];
 /// `0` → wait forever).
 fn reply_cap() -> Duration {
-    cap_from_secs(env_secs(
-        "AETHER_FLEETBENCH_REPLY_CAP_SECS",
-        DEFAULT_REPLY_CAP_SECS,
-    ))
+    cap_from_secs(env_secs("AETHER_FLEETBENCH_REPLY_CAP_SECS", DEFAULT_REPLY_CAP_SECS))
 }
 
 /// Resolve the cold-start backstop from `AETHER_FLEETBENCH_SPAWN_CAP_SECS`
 /// (default [`DEFAULT_SPAWN_CAP_SECS`]; `0` → wait forever).
 fn spawn_cap() -> Duration {
-    cap_from_secs(env_secs(
-        "AETHER_FLEETBENCH_SPAWN_CAP_SECS",
-        DEFAULT_SPAWN_CAP_SECS,
-    ))
+    cap_from_secs(env_secs("AETHER_FLEETBENCH_SPAWN_CAP_SECS", DEFAULT_SPAWN_CAP_SECS))
 }
 
 /// Interval between [`poll_until`] attempts — short enough to settle
@@ -176,10 +165,7 @@ pub fn poll_until(mut predicate: impl FnMut() -> bool) -> bool {
 /// `default` when unset or unparseable — a test harness tolerates a
 /// typo'd override rather than aborting the run.
 fn env_secs(key: &str, default: u64) -> u64 {
-    env::var(key)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(default)
+    env::var(key).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(default)
 }
 
 /// Whether a `read_frame` error is a socket read-timeout — the re-arm
@@ -292,14 +278,8 @@ impl FleetBench {
             .set_read_timeout(Some(READ_REARM))
             .expect("test setup: setting a read timeout on a connected stream succeeds");
 
-        let mut bench = Self {
-            _chassis: chassis,
-            stream,
-            next_cid: 1,
-            spawned: Vec::new(),
-            calls: Vec::new(),
-            store_root,
-        };
+        let mut bench =
+            Self { _chassis: chassis, stream, next_cid: 1, spawned: Vec::new(), calls: Vec::new(), store_root };
         bench.handshake();
         bench
     }
@@ -346,12 +326,7 @@ impl FleetBench {
             None,
             "aether.engine",
             &SpawnEngine {
-                selector: BinarySelector {
-                    query: Some(hash),
-                    chassis: None,
-                    caps: vec![],
-                    target: None,
-                },
+                selector: BinarySelector { query: Some(hash), chassis: None, caps: vec![], target: None },
                 args: vec![],
                 boot_manifest,
             },
@@ -403,10 +378,7 @@ impl FleetBench {
         let replies = self.call(
             None,
             "aether.engine",
-            &UploadBinary {
-                staged_path: staged_path.to_owned(),
-                name: name.map(str::to_owned),
-            },
+            &UploadBinary { staged_path: staged_path.to_owned(), name: name.map(str::to_owned) },
         );
         let payload = single_reply(&replies, "UploadBinary");
         UploadBinaryResult::decode_from_bytes(&payload).expect("undecodable UploadBinaryResult")
@@ -429,31 +401,20 @@ impl FleetBench {
     /// Hub-local — addressed at `aether.engine` with no engine route. The
     /// hub reads the path, sha256s it, parses its manifest from the wasm,
     /// and stores both; returns the decoded [`UploadComponentResult`].
-    pub fn upload_component(
-        &mut self,
-        staged_path: &str,
-        name: Option<&str>,
-    ) -> UploadComponentResult {
+    pub fn upload_component(&mut self, staged_path: &str, name: Option<&str>) -> UploadComponentResult {
         let replies = self.call(
             None,
             "aether.engine",
-            &UploadComponent {
-                staged_path: staged_path.to_owned(),
-                name: name.map(str::to_owned),
-            },
+            &UploadComponent { staged_path: staged_path.to_owned(), name: name.map(str::to_owned) },
         );
         let payload = single_reply(&replies, "UploadComponent");
-        UploadComponentResult::decode_from_bytes(&payload)
-            .expect("undecodable UploadComponentResult")
+        UploadComponentResult::decode_from_bytes(&payload).expect("undecodable UploadComponentResult")
     }
 
     /// Enumerate the hub's stored component binaries (ADR-0116, issue 1956)
     /// under the given filter. Hub-local — addressed at `aether.engine` with
     /// no engine route.
-    pub fn list_component_binaries(
-        &mut self,
-        filter: &ListComponentBinaries,
-    ) -> Vec<ComponentEntry> {
+    pub fn list_component_binaries(&mut self, filter: &ListComponentBinaries) -> Vec<ComponentEntry> {
         let replies = self.call(None, "aether.engine", filter);
         let payload = single_reply(&replies, "ListComponentBinaries");
         match ListComponentBinariesResult::decode_from_bytes(&payload) {
@@ -485,8 +446,7 @@ impl FleetBench {
     pub fn resolve_component(&mut self, selector: ComponentSelector) -> ResolveComponentResult {
         let replies = self.call(None, "aether.engine", &ResolveComponent { selector });
         let payload = single_reply(&replies, "ResolveComponent");
-        ResolveComponentResult::decode_from_bytes(&payload)
-            .expect("undecodable ResolveComponentResult")
+        ResolveComponentResult::decode_from_bytes(&payload).expect("undecodable ResolveComponentResult")
     }
 
     /// Load a component into `engine` by registry selector (ADR-0116, issue
@@ -510,24 +470,11 @@ impl FleetBench {
         let replies = self.call(
             Some(engine),
             "aether.component",
-            &LoadComponent {
-                wasm,
-                name: None,
-                config: Vec::new(),
-                export,
-            },
+            &LoadComponent { wasm, name: None, config: Vec::new(), export },
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok {
-                mailbox_id,
-                name,
-                capabilities,
-            }) => Loaded {
-                mailbox_id,
-                addr: name,
-                capabilities,
-            },
+            Some(LoadResult::Ok { mailbox_id, name, capabilities }) => Loaded { mailbox_id, addr: name, capabilities },
             Some(LoadResult::Err { error }) => {
                 panic!("load by selector {selector:?} failed: {error}")
             }
@@ -603,24 +550,11 @@ impl FleetBench {
         let replies = self.call(
             Some(engine),
             "aether.component",
-            &LoadComponent {
-                wasm,
-                name: None,
-                config: Vec::new(),
-                export: None,
-            },
+            &LoadComponent { wasm, name: None, config: Vec::new(), export: None },
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok {
-                mailbox_id,
-                name,
-                capabilities,
-            }) => Loaded {
-                mailbox_id,
-                addr: name,
-                capabilities,
-            },
+            Some(LoadResult::Ok { mailbox_id, name, capabilities }) => Loaded { mailbox_id, addr: name, capabilities },
             Some(LoadResult::Err { error }) => panic!("load of {stem:?} failed: {error}"),
             None => panic!("undecodable LoadResult"),
         }
@@ -635,24 +569,11 @@ impl FleetBench {
         let replies = self.call(
             Some(engine),
             "aether.component",
-            &LoadComponent {
-                wasm,
-                name: None,
-                config: Vec::new(),
-                export: Some(export.to_owned()),
-            },
+            &LoadComponent { wasm, name: None, config: Vec::new(), export: Some(export.to_owned()) },
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok {
-                mailbox_id,
-                name,
-                capabilities,
-            }) => Loaded {
-                mailbox_id,
-                addr: name,
-                capabilities,
-            },
+            Some(LoadResult::Ok { mailbox_id, name, capabilities }) => Loaded { mailbox_id, addr: name, capabilities },
             Some(LoadResult::Err { error }) => {
                 panic!("load of {stem:?}@{export:?} failed: {error}")
             }
@@ -669,13 +590,7 @@ impl FleetBench {
     /// eviction with no heartbeat-eviction wait. Drops `engine` from the
     /// teardown set so `Drop` doesn't double-terminate it.
     pub fn terminate(&mut self, engine: EngineId) {
-        let replies = self.call(
-            None,
-            "aether.engine",
-            &TerminateEngine {
-                engine_id: engine.0.to_string(),
-            },
-        );
+        let replies = self.call(None, "aether.engine", &TerminateEngine { engine_id: engine.0.to_string() });
         let payload = single_reply(&replies, "TerminateEngine");
         match TerminateEngineResult::decode_from_bytes(&payload) {
             Some(TerminateEngineResult::Ok) => {}
@@ -692,12 +607,7 @@ impl FleetBench {
     /// binary's advertised capabilities. The trampoline keeps its
     /// load-time name across replace, so targeting the captured
     /// `mailbox_id` rebinds the same lineage address to the new instance.
-    pub fn replace(
-        &mut self,
-        engine: EngineId,
-        mailbox_id: MailboxId,
-        stem: &str,
-    ) -> ComponentCapabilities {
+    pub fn replace(&mut self, engine: EngineId, mailbox_id: MailboxId, stem: &str) -> ComponentCapabilities {
         let wasm = read_component_wasm(stem);
         let replies = self.call(
             Some(engine),
@@ -761,21 +671,8 @@ impl FleetBench {
     /// cursor). `max: 0` resolves to the substrate-default cap. The
     /// framework dispatch loop answers `LogTail` for every native actor
     /// and wasm trampoline, so `recipient` is any live mailbox path.
-    pub fn log_tail(
-        &mut self,
-        engine: EngineId,
-        recipient: &str,
-        since: Option<u64>,
-    ) -> LogTailResult {
-        let replies = self.call(
-            Some(engine),
-            recipient,
-            &LogTail {
-                max: 0,
-                min_level: None,
-                since,
-            },
-        );
+    pub fn log_tail(&mut self, engine: EngineId, recipient: &str, since: Option<u64>) -> LogTailResult {
+        let replies = self.call(Some(engine), recipient, &LogTail { max: 0, min_level: None, since });
         let payload = single_reply(&replies, "LogTail");
         LogTailResult::decode_from_bytes(&payload).expect("undecodable LogTailResult")
     }
@@ -836,17 +733,11 @@ impl FleetBench {
         let start = Instant::now();
         loop {
             match read_frame(&mut self.stream) {
-                Ok(WireFrame::ReplyEvent {
-                    cid: got_cid,
-                    envelope,
-                }) => {
+                Ok(WireFrame::ReplyEvent { cid: got_cid, envelope }) => {
                     assert_eq!(got_cid, cid, "ReplyEvent cid mismatch");
                     events.push(envelope);
                 }
-                Ok(WireFrame::ReplyEnd {
-                    cid: got_cid,
-                    result,
-                }) => {
+                Ok(WireFrame::ReplyEnd { cid: got_cid, result }) => {
                     assert_eq!(got_cid, cid, "ReplyEnd cid mismatch");
                     result.unwrap_or_else(|e| panic!("call {cid} ended with error: {e:?}"));
                     self.calls.push(CallRecord {
@@ -870,9 +761,7 @@ impl FleetBench {
                          within the {budget:?} backstop — a healthy chain never reaches this cap, \
                          so this is a genuine deadlock/livelock",
                     );
-                    eprintln!(
-                        "fleetbench: {gate} call {cid} to {mailbox:?} slow: waited {waited:?}, extending",
-                    );
+                    eprintln!("fleetbench: {gate} call {cid} to {mailbox:?} slow: waited {waited:?}, extending");
                 }
                 // Any other read error is a real failure (connection closed,
                 // decode), not a slow chain.
@@ -886,10 +775,7 @@ impl FleetBench {
             &mut self.stream,
             &WireFrame::Hello(Hello {
                 wire_version: WIRE_VERSION,
-                peer: PeerKind::Client {
-                    client_name: "fleetbench".into(),
-                    client_version: "0.0.1".into(),
-                },
+                peer: PeerKind::Client { client_name: "fleetbench".into(), client_version: "0.0.1".into() },
             }),
         )
         .expect("test setup: writing the client Hello succeeds");
@@ -918,10 +804,7 @@ impl FleetBench {
             &WireFrame::Call {
                 cid: Some(cid),
                 envelope: MailEnvelope {
-                    to: MailboxAddress {
-                        engine,
-                        mailbox: mailbox_id_from_path(mailbox),
-                    },
+                    to: MailboxAddress { engine, mailbox: mailbox_id_from_path(mailbox) },
                     from: None,
                     kind,
                     correlation_id: None,
@@ -937,14 +820,8 @@ impl FleetBench {
     fn terminate_quietly(&mut self, engine: EngineId) {
         let cid = self.next_cid;
         self.next_cid += 1;
-        let payload = TerminateEngine {
-            engine_id: engine.0.to_string(),
-        }
-        .encode_into_bytes();
-        if self
-            .write_call(cid, None, "aether.engine", TerminateEngine::ID, payload)
-            .is_err()
-        {
+        let payload = TerminateEngine { engine_id: engine.0.to_string() }.encode_into_bytes();
+        if self.write_call(cid, None, "aether.engine", TerminateEngine::ID, payload).is_err() {
             return;
         }
         // Drain to this call's ReplyEnd so the next Drop iteration reads
@@ -972,12 +849,7 @@ impl FleetBench {
         let replies = self.call(
             Some(engine),
             "aether.component",
-            &LoadComponent {
-                wasm,
-                name: None,
-                config: config.encode_into_bytes(),
-                export: None,
-            },
+            &LoadComponent { wasm, name: None, config: config.encode_into_bytes(), export: None },
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
@@ -992,13 +864,7 @@ impl FleetBench {
     /// issue 1994). The `export` string is the actor's `NAMESPACE` const —
     /// `LoadComponent.export` routes the host to that type instead of the
     /// module's entry type. Returns the registered ADR-0099 lineage address.
-    pub fn load_with_config_export<C>(
-        &mut self,
-        engine: EngineId,
-        stem: &str,
-        config: &C,
-        export: &str,
-    ) -> String
+    pub fn load_with_config_export<C>(&mut self, engine: EngineId, stem: &str, config: &C, export: &str) -> String
     where
         C: Kind + Serialize,
     {
@@ -1006,12 +872,7 @@ impl FleetBench {
         let replies = self.call(
             Some(engine),
             "aether.component",
-            &LoadComponent {
-                wasm,
-                name: None,
-                config: config.encode_into_bytes(),
-                export: Some(export.to_owned()),
-            },
+            &LoadComponent { wasm, name: None, config: config.encode_into_bytes(), export: Some(export.to_owned()) },
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
@@ -1039,12 +900,7 @@ impl FleetBench {
     /// split off and decoded for the `root`, and the trailing events are
     /// the dispatched mail's correlated replies. Panics on an
     /// `Err`/undecodable ack, mirroring [`single_reply`].
-    pub fn send_traced<K>(
-        &mut self,
-        engine: EngineId,
-        recipient: &str,
-        mail: &K,
-    ) -> (MailId, Vec<MailEnvelope>)
+    pub fn send_traced<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> (MailId, Vec<MailEnvelope>)
     where
         K: Kind + Serialize,
     {
@@ -1057,10 +913,7 @@ impl FleetBench {
             }],
         };
         let mut events = self.call(Some(engine), TRACE_MAILBOX_NAME, &batch);
-        assert!(
-            !events.is_empty(),
-            "send_traced expected a DispatchTracedAck reply event, got none"
-        );
+        assert!(!events.is_empty(), "send_traced expected a DispatchTracedAck reply event, got none");
         let ack = events.remove(0);
         let root = match DispatchTracedAck::decode_from_bytes(&ack.payload) {
             Some(DispatchTracedAck::Ok { root }) => root,
@@ -1124,10 +977,7 @@ pub fn allocate_store_root_for_test() -> PathBuf {
 /// `engine_store_root` isolates the per-engine spawn-dir parent (issue
 /// 1274) per-bench — both via `EngineConfig` (ADR-0090); the heartbeat
 /// stays disabled (the `Default`).
-fn boot_hub(
-    binary_store_dir: &Path,
-    engine_store_root: &Path,
-) -> (PassiveChassis<TestChassis>, u16) {
+fn boot_hub(binary_store_dir: &Path, engine_store_root: &Path) -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(d);
@@ -1151,10 +1001,7 @@ fn boot_hub(
         })
         .build_passive()
         .expect("test setup: hub caps boot");
-    let port = chassis
-        .handle::<RpcServerHandle>()
-        .expect("test setup: RpcServerHandle published")
-        .local_port;
+    let port = chassis.handle::<RpcServerHandle>().expect("test setup: RpcServerHandle published").local_port;
     (chassis, port)
 }
 
@@ -1163,10 +1010,7 @@ fn boot_hub(
 fn single_reply(replies: &[MailEnvelope], label: &str) -> Vec<u8> {
     match replies {
         [one] => one.payload.clone(),
-        other => panic!(
-            "{label} expected exactly one reply event, got {}",
-            other.len()
-        ),
+        other => panic!("{label} expected exactly one reply event, got {}", other.len()),
     }
 }
 
@@ -1182,13 +1026,9 @@ pub fn classify_dist_manifest(raw: &str, stem: &str) -> DistManifestClassificati
         Ok(manifest) => manifest,
         Err(_) => return DistManifestClassification::Unparseable,
     };
-    manifest
-        .components
-        .get(stem)
-        .cloned()
-        .map_or(DistManifestClassification::MissingStem, |relative_path| {
-            DistManifestClassification::Available { relative_path }
-        })
+    manifest.components.get(stem).cloned().map_or(DistManifestClassification::MissingStem, |relative_path| {
+        DistManifestClassification::Available { relative_path }
+    })
 }
 
 fn dist_component_message(stem: &str, manifest_path: &Path, detail: &str) -> String {
@@ -1240,9 +1080,9 @@ fn dist_component_requirement(stem: &str) -> DistComponentRequirement {
             DistComponentRequirement::Available(dist.join(relative_path))
         }
         DistManifestClassification::MissingStem => DistComponentRequirement::StemMissing,
-        DistManifestClassification::Unparseable => DistComponentRequirement::ManifestUnreadable(
-            "manifest does not parse as dist metadata".to_owned(),
-        ),
+        DistManifestClassification::Unparseable => {
+            DistComponentRequirement::ManifestUnreadable("manifest does not parse as dist metadata".to_owned())
+        }
     }
 }
 
@@ -1264,12 +1104,9 @@ fn dist_component_guard_for_requirement(
         DistComponentRequirement::Available(_) => DistComponentGuardOutcome::Available,
         DistComponentRequirement::ManifestAbsent => unavailable("manifest is absent"),
         DistComponentRequirement::ManifestUnreadable(detail) => unavailable(&detail),
-        DistComponentRequirement::StemMissing => dist_component_guard_outcome(
-            stem,
-            manifest_path,
-            &DistManifestClassification::MissingStem,
-            require_runtime,
-        ),
+        DistComponentRequirement::StemMissing => {
+            dist_component_guard_outcome(stem, manifest_path, &DistManifestClassification::MissingStem, require_runtime)
+        }
     }
 }
 
@@ -1277,19 +1114,15 @@ fn component_wasm_path_result(stem: &str) -> Result<PathBuf, String> {
     let manifest_path = dist_dir().join("manifest.json");
     match dist_component_requirement(stem) {
         DistComponentRequirement::Available(path) => Ok(path),
-        DistComponentRequirement::ManifestAbsent => Err(dist_component_message(
-            stem,
-            &manifest_path,
-            "manifest is absent",
-        )),
+        DistComponentRequirement::ManifestAbsent => {
+            Err(dist_component_message(stem, &manifest_path, "manifest is absent"))
+        }
         DistComponentRequirement::ManifestUnreadable(detail) => {
             Err(dist_component_message(stem, &manifest_path, &detail))
         }
-        DistComponentRequirement::StemMissing => Err(dist_component_message(
-            stem,
-            &manifest_path,
-            "stem is missing from the manifest",
-        )),
+        DistComponentRequirement::StemMissing => {
+            Err(dist_component_message(stem, &manifest_path, "stem is missing from the manifest"))
+        }
     }
 }
 
@@ -1324,8 +1157,7 @@ pub fn dist_component_available(stem: &str) -> bool {
 /// missing manifest or stale stem skips rather than reaching this panic.
 pub fn read_component_wasm(stem: &str) -> Vec<u8> {
     let wasm_path = component_wasm_path(stem);
-    fs::read(&wasm_path)
-        .unwrap_or_else(|e| panic!("reading component wasm {} ({e})", wasm_path.display()))
+    fs::read(&wasm_path).unwrap_or_else(|e| panic!("reading component wasm {} ({e})", wasm_path.display()))
 }
 
 /// The absolute on-disk path of a component wasm by stem, resolved through

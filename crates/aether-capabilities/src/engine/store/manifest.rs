@@ -5,8 +5,7 @@ use std::path::PathBuf;
 
 use aether_data::{canonical::kind_id_from_parts, wire};
 use aether_kinds::{
-    BinaryManifest, ComponentActor, ComponentManifest, KindDescriptorWire, ListComponentBinaries,
-    ListEngineBinaries,
+    BinaryManifest, ComponentActor, ComponentManifest, KindDescriptorWire, ListComponentBinaries, ListEngineBinaries,
 };
 use serde::{Deserialize, Serialize};
 
@@ -96,10 +95,7 @@ pub fn matches_binary_filter(manifest: &BinaryManifest, filter: &ListEngineBinar
 /// (ADR-0116): the optional `namespace` must be one of the exported actor
 /// namespaces, and the optional `handled_kind` must be in the manifest's
 /// handled-kind union. Each absent field is "no constraint".
-pub fn matches_component_filter(
-    manifest: &ComponentManifest,
-    filter: &ListComponentBinaries,
-) -> bool {
+pub fn matches_component_filter(manifest: &ComponentManifest, filter: &ListComponentBinaries) -> bool {
     if let Some(namespace) = &filter.namespace
         && !manifest.namespaces.iter().any(|n| n == namespace)
     {
@@ -144,28 +140,16 @@ pub fn component_manifest(wasm: &[u8]) -> Result<ComponentManifest, String> {
     // marker and omits `aether.namespace`, so it has no bare-load entry.
     // Otherwise the entry is the module's `aether.namespace` value (the
     // single-actor namespace or the `export!(entry = …)` opt-in).
-    let default_entry = if kind_manifest::read_no_entry_marker(wasm) {
-        None
-    } else {
-        module_namespace.clone()
-    };
+    let default_entry = if kind_manifest::read_no_entry_marker(wasm) { None } else { module_namespace.clone() };
 
     let mut actors: Vec<ComponentActor> = Vec::with_capacity(groups.len());
     for group in groups {
         // A boundary-named group carries its own `Addressable::NAMESPACE`; a
         // single-actor module's implicit group (`None`) resolves its name
         // from the `aether.namespace` section, falling back to empty.
-        let namespace = group
-            .namespace
-            .or_else(|| module_namespace.clone())
-            .unwrap_or_default();
-        let handled_kinds: Vec<aether_data::KindId> =
-            group.capabilities.handlers.iter().map(|h| h.id).collect();
-        actors.push(ComponentActor {
-            namespace,
-            handled_kinds,
-            fallback: group.capabilities.fallback.is_some(),
-        });
+        let namespace = group.namespace.or_else(|| module_namespace.clone()).unwrap_or_default();
+        let handled_kinds: Vec<aether_data::KindId> = group.capabilities.handlers.iter().map(|h| h.id).collect();
+        actors.push(ComponentActor { namespace, handled_kinds, fallback: group.capabilities.fallback.is_some() });
     }
 
     let namespaces: Vec<String> = actors.iter().map(|a| a.namespace.clone()).collect();
@@ -182,24 +166,14 @@ pub fn component_manifest(wasm: &[u8]) -> Result<ComponentManifest, String> {
     }
     let fallback = actors.iter().any(|a| a.fallback);
 
-    Ok(ComponentManifest {
-        namespaces,
-        actors,
-        handled_kinds,
-        fallback,
-        provenance,
-        default_entry,
-    })
+    Ok(ComponentManifest { namespaces, actors, handled_kinds, fallback, provenance, default_entry })
 }
 
 /// Read the component's typed init-config descriptor from its wasm bytes.
 /// The persisted [`ComponentManifest`] intentionally stores only ids/names;
 /// resolve computes this full descriptor from the same wasm bytes the store
 /// already holds so aether-mcp can JSON-encode config before load/boot.
-pub fn config_descriptor(
-    wasm: &[u8],
-    export: Option<&str>,
-) -> Result<Option<KindDescriptorWire>, String> {
+pub fn config_descriptor(wasm: &[u8], export: Option<&str>) -> Result<Option<KindDescriptorWire>, String> {
     use aether_substrate::actor::wasm::kind_manifest;
 
     let capabilities = match export {
@@ -225,13 +199,9 @@ pub fn config_descriptor(
         ));
     };
 
-    let schema_wire = wire::to_vec(&descriptor.schema)
-        .map_err(|e| format!("encoding config schema for {}: {e}", descriptor.name))?;
-    Ok(Some(KindDescriptorWire {
-        id: config.id,
-        name: descriptor.name,
-        schema_wire,
-    }))
+    let schema_wire =
+        wire::to_vec(&descriptor.schema).map_err(|e| format!("encoding config schema for {}: {e}", descriptor.name))?;
+    Ok(Some(KindDescriptorWire { id: config.id, name: descriptor.name, schema_wire }))
 }
 
 #[cfg(test)]
@@ -247,8 +217,7 @@ mod tests {
         for b in section {
             write!(&mut escaped, "\\{b:02x}").expect("write to String");
         }
-        let wat =
-            format!(r#"(module (@custom "{section_name}" "{escaped}") (func (export "noop")))"#);
+        let wat = format!(r#"(module (@custom "{section_name}" "{escaped}") (func (export "noop")))"#);
         wat::parse_str(wat).expect("valid wat")
     }
 
@@ -260,20 +229,9 @@ mod tests {
         // `aether.no_entry` marker (and omits `aether.namespace`), so it
         // has no bare-load entry.
         let entry = wasm_with_section("aether.namespace", b"aether.probe");
-        assert_eq!(
-            component_manifest(&entry)
-                .expect("manifest reads")
-                .default_entry
-                .as_deref(),
-            Some("aether.probe"),
-        );
+        assert_eq!(component_manifest(&entry).expect("manifest reads").default_entry.as_deref(), Some("aether.probe"),);
 
         let defaultless = wasm_with_section("aether.no_entry", &[1u8]);
-        assert_eq!(
-            component_manifest(&defaultless)
-                .expect("manifest reads")
-                .default_entry,
-            None,
-        );
+        assert_eq!(component_manifest(&defaultless).expect("manifest reads").default_entry, None,);
     }
 }

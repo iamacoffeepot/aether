@@ -13,20 +13,12 @@ pub struct Point3 {
 
 impl Point3 {
     pub fn from_f32(p: Vec3) -> Result<Self, FixedError> {
-        Ok(Self {
-            x: f32_to_fixed(p.x)?,
-            y: f32_to_fixed(p.y)?,
-            z: f32_to_fixed(p.z)?,
-        })
+        Ok(Self { x: f32_to_fixed(p.x)?, y: f32_to_fixed(p.y)?, z: f32_to_fixed(p.z)? })
     }
 
     #[must_use]
     pub fn to_f32(self) -> Vec3 {
-        Vec3::new(
-            fixed_to_f32(self.x),
-            fixed_to_f32(self.y),
-            fixed_to_f32(self.z),
-        )
+        Vec3::new(fixed_to_f32(self.x), fixed_to_f32(self.y), fixed_to_f32(self.z))
     }
 }
 
@@ -56,8 +48,7 @@ mod tests {
             Vec3::new(0.5, 0.75, -0.125),
         ];
         for input in inputs {
-            let p =
-                Point3::from_f32(input).expect("test setup: input is grid-aligned and in range");
+            let p = Point3::from_f32(input).expect("test setup: input is grid-aligned and in range");
             assert_eq!(p.to_f32(), input, "round-trip mismatch for {input:?}");
         }
     }
@@ -67,8 +58,7 @@ mod tests {
         // Catches a refactor that crosses x/y/z wires: e.g., setting
         // y from p.x. Distinct values per axis would slip past tests
         // that use Vec3::new(0, 0, 0)-style symmetric inputs.
-        let p = Point3::from_f32(Vec3::new(1.0, 2.0, 3.0))
-            .expect("test setup: (1, 2, 3) is grid-aligned and in range");
+        let p = Point3::from_f32(Vec3::new(1.0, 2.0, 3.0)).expect("test setup: (1, 2, 3) is grid-aligned and in range");
         let back = p.to_f32();
         assert_eq!(back, Vec3::new(1.0, 2.0, 3.0));
         // Also verify the underlying integer fields directly.
@@ -85,21 +75,14 @@ mod tests {
         // we get phantom seams in the output mesh.
         let inputs = [
             (Vec3::new(0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0)),
-            (
-                Vec3::new(0.123, -0.456, 0.789),
-                Vec3::new(0.123, -0.456, 0.789),
-            ),
+            (Vec3::new(0.123, -0.456, 0.789), Vec3::new(0.123, -0.456, 0.789)),
             (Vec3::new(1.0, 1.0, 1.0), Vec3::new(1.0, 1.0, 1.0)),
         ];
         for (a_in, b_in) in inputs {
             let a = Point3::from_f32(a_in).expect("test setup: input is in range");
             let b = Point3::from_f32(b_in).expect("test setup: input is in range");
             assert_eq!(a, b, "grid-equivalent points should compare equal");
-            assert_eq!(
-                hash_of(&a),
-                hash_of(&b),
-                "grid-equivalent points must hash equal — weld depends on this"
-            );
+            assert_eq!(hash_of(&a), hash_of(&b), "grid-equivalent points must hash equal — weld depends on this");
         }
     }
 
@@ -108,8 +91,7 @@ mod tests {
         // Pin the welding-relevant case from
         // `fixed::negative_zero_collapses_to_zero` at the Point3
         // type — every component variant must collapse independently.
-        let canonical =
-            Point3::from_f32(Vec3::new(0.0, 0.0, 0.0)).expect("test setup: origin is in range");
+        let canonical = Point3::from_f32(Vec3::new(0.0, 0.0, 0.0)).expect("test setup: origin is in range");
         let variants = [
             Vec3::new(-0.0, 0.0, 0.0),
             Vec3::new(0.0, -0.0, 0.0),
@@ -119,11 +101,7 @@ mod tests {
         for v in variants {
             let p = Point3::from_f32(v).expect("test setup: ±0 variants are in range");
             assert_eq!(p, canonical, "variant {v:?} did not collapse");
-            assert_eq!(
-                hash_of(&p),
-                hash_of(&canonical),
-                "variant {v:?} hashed differently from origin"
-            );
+            assert_eq!(hash_of(&p), hash_of(&canonical), "variant {v:?} hashed differently from origin");
         }
     }
 
@@ -135,13 +113,8 @@ mod tests {
         // SCALE = 2^16; trivially exact in f32 (mantissa fits 24 bits).
         #[allow(clippy::cast_possible_truncation)]
         let one_ulp = 1.0 / SCALE as f32;
-        let origin =
-            Point3::from_f32(Vec3::new(0.0, 0.0, 0.0)).expect("test setup: origin is in range");
-        let nudges = [
-            Vec3::new(one_ulp, 0.0, 0.0),
-            Vec3::new(0.0, one_ulp, 0.0),
-            Vec3::new(0.0, 0.0, one_ulp),
-        ];
+        let origin = Point3::from_f32(Vec3::new(0.0, 0.0, 0.0)).expect("test setup: origin is in range");
+        let nudges = [Vec3::new(one_ulp, 0.0, 0.0), Vec3::new(0.0, one_ulp, 0.0), Vec3::new(0.0, 0.0, one_ulp)];
         for n in nudges {
             let p = Point3::from_f32(n).expect("test setup: one-ULP nudge stays in range");
             assert_ne!(p, origin, "{n:?} should sit in a different grid cell");
@@ -168,22 +141,19 @@ mod tests {
 
     #[test]
     fn bad_x_is_reported() {
-        let err = Point3::from_f32(Vec3::new(f32::NAN, 0.0, 0.0))
-            .expect_err("test setup: NaN in x must Err");
+        let err = Point3::from_f32(Vec3::new(f32::NAN, 0.0, 0.0)).expect_err("test setup: NaN in x must Err");
         assert!(matches!(err, FixedError::NotFinite { .. }));
     }
 
     #[test]
     fn bad_y_is_reported() {
-        let err = Point3::from_f32(Vec3::new(0.0, 1e9, 0.0))
-            .expect_err("test setup: 1e9 in y exceeds boundary");
+        let err = Point3::from_f32(Vec3::new(0.0, 1e9, 0.0)).expect_err("test setup: 1e9 in y exceeds boundary");
         assert!(matches!(err, FixedError::OutOfRange { value } if value == 1e9));
     }
 
     #[test]
     fn bad_z_is_reported() {
-        let err = Point3::from_f32(Vec3::new(0.0, 0.0, f32::INFINITY))
-            .expect_err("test setup: Inf in z must Err");
+        let err = Point3::from_f32(Vec3::new(0.0, 0.0, f32::INFINITY)).expect_err("test setup: Inf in z must Err");
         match err {
             FixedError::NotFinite { value } => assert_eq!(value, f32::INFINITY),
             other @ FixedError::OutOfRange { .. } => {
@@ -199,29 +169,20 @@ mod tests {
         // that relies on x-major scan order.
         let small_x = Point3::from_f32(Vec3::new(0.0, 999.0, 999.0)).unwrap_or_else(|_| {
             // 999 > MAX; fall back to in-range stand-in for the asymmetry.
-            Point3::from_f32(Vec3::new(0.0, 100.0, 100.0))
-                .expect("test setup: in-range fallback is valid")
+            Point3::from_f32(Vec3::new(0.0, 100.0, 100.0)).expect("test setup: in-range fallback is valid")
         });
-        let big_x =
-            Point3::from_f32(Vec3::new(1.0, 0.0, 0.0)).expect("test setup: (1, 0, 0) is in range");
+        let big_x = Point3::from_f32(Vec3::new(1.0, 0.0, 0.0)).expect("test setup: (1, 0, 0) is in range");
         assert!(big_x > small_x, "x must dominate y/z in ordering");
 
         let small_y = Point3::from_f32(Vec3::new(5.0, 0.0, 999.0)).unwrap_or_else(|_| {
-            Point3::from_f32(Vec3::new(5.0, 0.0, 100.0))
-                .expect("test setup: in-range fallback is valid")
+            Point3::from_f32(Vec3::new(5.0, 0.0, 100.0)).expect("test setup: in-range fallback is valid")
         });
-        let big_y =
-            Point3::from_f32(Vec3::new(5.0, 1.0, 0.0)).expect("test setup: (5, 1, 0) is in range");
+        let big_y = Point3::from_f32(Vec3::new(5.0, 1.0, 0.0)).expect("test setup: (5, 1, 0) is in range");
         assert!(big_y > small_y, "y must dominate z when x is equal");
 
-        let small_z =
-            Point3::from_f32(Vec3::new(5.0, 5.0, 0.0)).expect("test setup: (5, 5, 0) is in range");
-        let big_z =
-            Point3::from_f32(Vec3::new(5.0, 5.0, 1.0)).expect("test setup: (5, 5, 1) is in range");
-        assert!(
-            big_z > small_z,
-            "z is the tiebreaker when x and y are equal"
-        );
+        let small_z = Point3::from_f32(Vec3::new(5.0, 5.0, 0.0)).expect("test setup: (5, 5, 0) is in range");
+        let big_z = Point3::from_f32(Vec3::new(5.0, 5.0, 1.0)).expect("test setup: (5, 5, 1) is in range");
+        assert!(big_z > small_z, "z is the tiebreaker when x and y are equal");
     }
 
     #[test]
@@ -231,10 +192,7 @@ mod tests {
         let input = Vec3::new(0.123, -0.456, 0.789);
         let first = Point3::from_f32(input).expect("test setup: input is in range");
         for _ in 0..16 {
-            assert_eq!(
-                Point3::from_f32(input).expect("test setup: input is in range"),
-                first
-            );
+            assert_eq!(Point3::from_f32(input).expect("test setup: input is in range"), first);
         }
     }
 }

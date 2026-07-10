@@ -123,12 +123,7 @@ impl ActorTraceRing {
     pub fn with_growth(floor: usize, max: usize) -> Self {
         let floor = floor.max(1);
         let max_cap = max.max(floor);
-        Self {
-            ring: VecDeque::with_capacity(floor),
-            cap: floor,
-            max_cap,
-            sequence: 1,
-        }
+        Self { ring: VecDeque::with_capacity(floor), cap: floor, max_cap, sequence: 1 }
     }
 
     /// Push one trace event tagged with its causal `root`, stamping the
@@ -152,28 +147,18 @@ impl ActorTraceRing {
     /// ceiling costs only ~`log2(max_cap/floor)` reallocations. The
     /// predicate is invoked at most once per push, and only on a
     /// growable full ring.
-    pub fn push(
-        &mut self,
-        root: MailId,
-        event: TraceEvent,
-        front_still_live: impl FnOnce(MailId) -> bool,
-    ) {
+    pub fn push(&mut self, root: MailId, event: TraceEvent, front_still_live: impl FnOnce(MailId) -> bool) {
         let sequence = self.sequence;
         self.sequence += 1;
         if self.ring.len() == self.cap {
-            let grow = self.cap < self.max_cap
-                && self.ring.front().is_some_and(|e| front_still_live(e.root));
+            let grow = self.cap < self.max_cap && self.ring.front().is_some_and(|e| front_still_live(e.root));
             if grow {
                 self.cap = self.cap.saturating_mul(2).min(self.max_cap);
             } else {
                 self.ring.pop_front();
             }
         }
-        self.ring.push_back(TraceRingEntry {
-            sequence,
-            root,
-            event,
-        });
+        self.ring.push_back(TraceRingEntry { sequence, root, event });
     }
 
     /// Pure read-side: filter on `since` (and `root`, when set), cap at
@@ -202,11 +187,7 @@ impl ActorTraceRing {
 
         let next_since = entries.last().map_or(since, |e| e.sequence);
 
-        TraceTailResult::Ok {
-            entries,
-            next_since,
-            truncated_before,
-        }
+        TraceTailResult::Ok { entries, next_since, truncated_before }
     }
 
     /// Snapshot every entry currently in the ring, oldest-to-newest, no
@@ -232,11 +213,7 @@ impl ActorTraceRing {
 /// Clamp `max == 0` to [`DEFAULT_TAIL_MAX`] and any value over
 /// [`MAX_TAIL_MAX`] down to the ceiling.
 fn resolve_max(max: u32) -> u32 {
-    if max == 0 {
-        DEFAULT_TAIL_MAX
-    } else {
-        max.min(MAX_TAIL_MAX)
-    }
+    if max == 0 { DEFAULT_TAIL_MAX } else { max.min(MAX_TAIL_MAX) }
 }
 
 #[cfg(test)]
@@ -246,10 +223,7 @@ mod tests {
     use aether_kinds::trace::Nanos;
 
     fn mid(sender: u64, cid: u64) -> MailId {
-        MailId {
-            sender: MailboxId(sender),
-            correlation_id: cid,
-        }
+        MailId { sender: MailboxId(sender), correlation_id: cid }
     }
 
     fn sent(root: MailId) -> TraceEvent {
@@ -266,29 +240,18 @@ mod tests {
     }
 
     fn finished(mail_id: MailId) -> TraceEvent {
-        TraceEvent::Finished {
-            mail_id,
-            t: Nanos(0),
-        }
+        TraceEvent::Finished { mail_id, t: Nanos(0) }
     }
 
     fn ok(result: TraceTailResult) -> (Vec<TraceRingEntry>, u64, Option<u64>) {
         match result {
-            TraceTailResult::Ok {
-                entries,
-                next_since,
-                truncated_before,
-            } => (entries, next_since, truncated_before),
+            TraceTailResult::Ok { entries, next_since, truncated_before } => (entries, next_since, truncated_before),
             TraceTailResult::Err { error } => panic!("expected Ok, got Err: {error}"),
         }
     }
 
     fn unfiltered() -> TraceTail {
-        TraceTail {
-            max: 0,
-            since: None,
-            root: None,
-        }
+        TraceTail { max: 0, since: None, root: None }
     }
 
     #[test]
@@ -313,11 +276,7 @@ mod tests {
         ring.push(a, sent(a), |_| false);
         ring.push(b, sent(b), |_| false);
         ring.push(a, finished(a), |_| false);
-        let (entries, ..) = ok(ring.tail(&TraceTail {
-            max: 0,
-            since: None,
-            root: Some(a),
-        }));
+        let (entries, ..) = ok(ring.tail(&TraceTail { max: 0, since: None, root: Some(a) }));
         assert_eq!(entries.len(), 2, "only root a's two events");
         assert!(entries.iter().all(|e| e.root == a));
     }
@@ -329,20 +288,12 @@ mod tests {
         for _ in 0..5 {
             ring.push(r, sent(r), |_| false);
         }
-        let (entries, next_since, _) = ok(ring.tail(&TraceTail {
-            max: 0,
-            since: Some(2),
-            root: None,
-        }));
+        let (entries, next_since, _) = ok(ring.tail(&TraceTail { max: 0, since: Some(2), root: None }));
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].sequence, 3);
         assert_eq!(next_since, 5);
 
-        let (entries, next_since, _) = ok(ring.tail(&TraceTail {
-            max: 0,
-            since: Some(next_since),
-            root: None,
-        }));
+        let (entries, next_since, _) = ok(ring.tail(&TraceTail { max: 0, since: Some(next_since), root: None }));
         assert!(entries.is_empty());
         assert_eq!(next_since, 5);
     }
@@ -354,11 +305,7 @@ mod tests {
         for _ in 0..5 {
             ring.push(r, sent(r), |_| false);
         }
-        let (entries, next_since, _) = ok(ring.tail(&TraceTail {
-            max: 2,
-            since: None,
-            root: None,
-        }));
+        let (entries, next_since, _) = ok(ring.tail(&TraceTail { max: 2, since: None, root: None }));
         assert_eq!(entries.len(), 2);
         assert_eq!(next_since, 2);
     }

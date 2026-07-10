@@ -157,10 +157,7 @@ pub enum ManifestError {
     /// The manifest JSON file could not be read off disk.
     ReadManifest { path: PathBuf, source: io::Error },
     /// The manifest JSON did not parse into a [`BundleManifest`].
-    ParseManifest {
-        path: PathBuf,
-        source: serde_json::Error,
-    },
+    ParseManifest { path: PathBuf, source: serde_json::Error },
     /// A component's wasm artifact could not be read.
     ReadWasm { path: PathBuf, source: io::Error },
     /// A component's init-config file could not be read.
@@ -189,9 +186,9 @@ impl fmt::Display for ManifestError {
 impl Error for ManifestError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::ReadManifest { source, .. }
-            | Self::ReadWasm { source, .. }
-            | Self::ReadConfig { source, .. } => Some(source),
+            Self::ReadManifest { source, .. } | Self::ReadWasm { source, .. } | Self::ReadConfig { source, .. } => {
+                Some(source)
+            }
             Self::ParseManifest { source, .. } => Some(source),
         }
     }
@@ -207,14 +204,10 @@ impl Error for ManifestError {
 /// Returns [`ManifestError::ReadManifest`] / [`ManifestError::ParseManifest`]
 /// when the file is unreadable or its JSON doesn't match the schema.
 pub fn read_manifest(manifest_path: &Path) -> Result<BundleManifest, ManifestError> {
-    let json = fs::read_to_string(manifest_path).map_err(|source| ManifestError::ReadManifest {
-        path: manifest_path.to_path_buf(),
-        source,
-    })?;
-    serde_json::from_str(&json).map_err(|source| ManifestError::ParseManifest {
-        path: manifest_path.to_path_buf(),
-        source,
-    })
+    let json = fs::read_to_string(manifest_path)
+        .map_err(|source| ManifestError::ReadManifest { path: manifest_path.to_path_buf(), source })?;
+    serde_json::from_str(&json)
+        .map_err(|source| ManifestError::ParseManifest { path: manifest_path.to_path_buf(), source })
 }
 
 /// Read the manifest at `manifest_path` plus every wasm / config file it
@@ -233,15 +226,10 @@ pub fn pack_from_manifest(manifest_path: &Path) -> Result<Pack, ManifestError> {
     let manifest = read_manifest(manifest_path)?;
     let mut components = Vec::with_capacity(manifest.components.len());
     for entry in manifest.components {
-        let wasm = fs::read(&entry.wasm).map_err(|source| ManifestError::ReadWasm {
-            path: entry.wasm.clone(),
-            source,
-        })?;
+        let wasm =
+            fs::read(&entry.wasm).map_err(|source| ManifestError::ReadWasm { path: entry.wasm.clone(), source })?;
         let config = match entry.config.as_ref() {
-            Some(path) => fs::read(path).map_err(|source| ManifestError::ReadConfig {
-                path: path.clone(),
-                source,
-            })?,
+            Some(path) => fs::read(path).map_err(|source| ManifestError::ReadConfig { path: path.clone(), source })?,
             None => Vec::new(),
         };
         components.push(PackedComponent {
@@ -400,22 +388,9 @@ pub fn decode_pack(bytes: &[u8]) -> Result<Pack, PackError> {
             let raw = cursor.take(4)?;
             Some(u32::from_le_bytes(raw.try_into().expect("4-byte slice")))
         };
-        components.push(PackedComponent {
-            wasm,
-            config,
-            name,
-            export,
-            replicas,
-        });
+        components.push(PackedComponent { wasm, config, name, export, replicas });
     }
-    Ok(Pack {
-        chassis: ChassisSettings {
-            title,
-            window_mode,
-            tick_hz,
-        },
-        components,
-    })
+    Ok(Pack { chassis: ChassisSettings { title, window_mode, tick_hz }, components })
 }
 
 #[cfg(test)]
@@ -478,10 +453,7 @@ mod tests {
         // where the cut can land mid-UTF-8 — either way it's an Err).
         let bytes = encode_pack(&sample_pack());
         for len in 0..bytes.len() {
-            assert!(
-                decode_pack(&bytes[..len]).is_err(),
-                "decode of {len}-byte prefix unexpectedly succeeded",
-            );
+            assert!(decode_pack(&bytes[..len]).is_err(), "decode of {len}-byte prefix unexpectedly succeeded");
         }
     }
 
@@ -544,11 +516,8 @@ mod tests {
                 {"wasm": wasm_b, "export": "alt"},
             ],
         });
-        fs::write(
-            &manifest_path,
-            serde_json::to_vec(&manifest_json).expect("serialize manifest"),
-        )
-        .expect("write manifest");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest_json).expect("serialize manifest"))
+            .expect("write manifest");
 
         let pack = pack_from_manifest(&manifest_path).expect("read pack");
         assert_eq!(pack.chassis.tick_hz, Some(30));
@@ -584,11 +553,8 @@ mod tests {
         let manifest_json = serde_json::json!({
             "components": [{"wasm": dir.join("nope.wasm")}],
         });
-        fs::write(
-            &manifest_path,
-            serde_json::to_vec(&manifest_json).expect("serialize manifest"),
-        )
-        .expect("write manifest");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest_json).expect("serialize manifest"))
+            .expect("write manifest");
 
         let err = pack_from_manifest(&manifest_path).expect_err("missing wasm errors");
         assert!(matches!(err, ManifestError::ReadWasm { .. }), "{err:?}");

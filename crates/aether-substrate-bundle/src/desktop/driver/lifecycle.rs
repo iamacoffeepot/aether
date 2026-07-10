@@ -3,8 +3,7 @@ use std::sync::Arc;
 use aether_data::Kind;
 use aether_kinds::LifecycleAdvanceComplete;
 use aether_substrate::actor::native::{
-    dispatch_cost_tail_if_matching_free, dispatch_log_tail_if_matching_free,
-    dispatch_trace_tail_if_matching_free,
+    dispatch_cost_tail_if_matching_free, dispatch_log_tail_if_matching_free, dispatch_trace_tail_if_matching_free,
 };
 use aether_substrate::mail::MailboxId;
 use aether_substrate::{InboundMail, Mailer};
@@ -27,11 +26,7 @@ use aether_substrate::{InboundMail, Mailer};
 /// so the log / trace arms reach the driver's per-actor ring. Factored
 /// out of `App::dispatch_window_envelope` so the unit test directly
 /// drives the routing shape without standing up a winit `App`.
-pub(super) fn try_framework_dispatch(
-    mailer: &Arc<Mailer>,
-    self_mailbox: MailboxId,
-    mail: &InboundMail,
-) -> bool {
+pub(super) fn try_framework_dispatch(mailer: &Arc<Mailer>, self_mailbox: MailboxId, mail: &InboundMail) -> bool {
     let env = mail.envelope();
     if let Some(result) = dispatch_log_tail_if_matching_free(env) {
         mail.reply(&result);
@@ -82,8 +77,7 @@ pub(super) enum LifecycleReplyOutcome {
 pub(super) fn consume_lifecycle_reply(mail: InboundMail) -> LifecycleReplyOutcome {
     if mail.kind() == <LifecycleAdvanceComplete as Kind>::ID {
         LifecycleReplyOutcome::Complete(
-            LifecycleAdvanceComplete::decode_from_bytes(mail.payload())
-                .map(|complete| complete.next),
+            LifecycleAdvanceComplete::decode_from_bytes(mail.payload()).map(|complete| complete.next),
         )
     } else {
         LifecycleReplyOutcome::Unexpected
@@ -141,9 +135,7 @@ mod tests {
         // does both installs at boot) so an armed Call drains cleanly.
         let settlement = Arc::new(SettlementRegistry::new());
         mailer.install_settlement_registry(Arc::clone(&settlement));
-        mailer
-            .trace_handle()
-            .install_settlement_registry(Arc::clone(&settlement));
+        mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
 
         // A `Component` caller inbox captures the reply so the test reads
         // its delivered `root`.
@@ -158,9 +150,8 @@ mod tests {
 
         // The window inbox forwards armed envelopes onto the
         // `SettlingInbox`'s channel, exactly as `claim_mailbox` does.
-        let window_mailbox = mailbox_id_from_name(
-            <aether_capabilities::HeadlessWindowCapability as Addressable>::NAMESPACE,
-        );
+        let window_mailbox =
+            mailbox_id_from_name(<aether_capabilities::HeadlessWindowCapability as Addressable>::NAMESPACE);
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
             let _ = tx.send(d);
@@ -176,12 +167,7 @@ mod tests {
         let mail_id = MailId::new(window_mailbox, 2);
         mailer.record_sent_inflight(root);
         let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 0x99);
-        let bytes = LogTail {
-            max: 8,
-            min_level: None,
-            since: None,
-        }
-        .encode_into_bytes();
+        let bytes = LogTail { max: 8, min_level: None, since: None }.encode_into_bytes();
         mailer.push(
             Mail::new(window_mailbox, <LogTail as Kind>::ID, bytes, 1)
                 .with_reply_to(caller_source)
@@ -190,26 +176,13 @@ mod tests {
         let mail = inbox.try_next().expect("the armed LogTail Call is queued");
 
         let slots = ActorSlots::new();
-        let matched = with_stamped(&slots, || {
-            try_framework_dispatch(&mailer, window_mailbox, &mail)
-        });
-        assert!(
-            matched,
-            "framework dispatch arm must match a LogTail Call at aether.window",
-        );
+        let matched = with_stamped(&slots, || try_framework_dispatch(&mailer, window_mailbox, &mail));
+        assert!(matched, "framework dispatch arm must match a LogTail Call at aether.window");
 
-        let dispatch = reply_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("framework arm routed a reply to the caller inbox");
-        assert_eq!(
-            dispatch.kind_name,
-            <LogTailResult as Kind>::NAME,
-            "the reply is a LogTailResult",
-        );
-        assert_eq!(
-            dispatch.root, root,
-            "the framework-arm reply joins the inbound's causal chain (#1710)",
-        );
+        let dispatch =
+            reply_rx.recv_timeout(Duration::from_secs(2)).expect("framework arm routed a reply to the caller inbox");
+        assert_eq!(dispatch.kind_name, <LogTailResult as Kind>::NAME, "the reply is a LogTailResult");
+        assert_eq!(dispatch.root, root, "the framework-arm reply joins the inbound's causal chain (#1710)");
 
         // Drop the guard last so its `Finished` records after the reply's
         // `Sent` (ADR-0080 §6) — settlement bookkeeping stays balanced.
@@ -239,9 +212,8 @@ mod tests {
         }
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
 
-        let window_mailbox = mailbox_id_from_name(
-            <aether_capabilities::HeadlessWindowCapability as Addressable>::NAMESPACE,
-        );
+        let window_mailbox =
+            mailbox_id_from_name(<aether_capabilities::HeadlessWindowCapability as Addressable>::NAMESPACE);
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
             let _ = tx.send(d);
@@ -253,23 +225,16 @@ mod tests {
 
         // A `MailId::NONE` push keeps the drained guard disarmed (no armed
         // Call to settle) — the test pins only the skip verdict.
-        let payload = SetWindowTitle {
-            title: "ignored".to_owned(),
-        }
-        .encode_into_bytes();
-        mailer.push(
-            Mail::new(window_mailbox, <SetWindowTitle as Kind>::ID, payload, 1).with_lineage(
-                MailId::NONE,
-                MailId::NONE,
-                None,
-            ),
-        );
+        let payload = SetWindowTitle { title: "ignored".to_owned() }.encode_into_bytes();
+        mailer.push(Mail::new(window_mailbox, <SetWindowTitle as Kind>::ID, payload, 1).with_lineage(
+            MailId::NONE,
+            MailId::NONE,
+            None,
+        ));
         let mail = inbox.try_next().expect("the SetWindowTitle push is queued");
 
         let slots = ActorSlots::new();
-        let matched = with_stamped(&slots, || {
-            try_framework_dispatch(&mailer, window_mailbox, &mail)
-        });
+        let matched = with_stamped(&slots, || try_framework_dispatch(&mailer, window_mailbox, &mail));
         assert!(!matched, "SetWindowTitle is a driver-specific kind");
     }
 
@@ -294,10 +259,7 @@ mod tests {
         use aether_substrate::mail::registry::{InboxHandler, Registry};
 
         fn title_payload() -> Vec<u8> {
-            SetWindowTitle {
-                title: "ignored".to_owned(),
-            }
-            .encode_into_bytes()
+            SetWindowTitle { title: "ignored".to_owned() }.encode_into_bytes()
         }
 
         let registry = Arc::new(Registry::new());
@@ -311,15 +273,12 @@ mod tests {
         // emit-time counter's zero-transition can `fire_settled`.
         let settlement = Arc::new(SettlementRegistry::new());
         mailer.install_settlement_registry(Arc::clone(&settlement));
-        mailer
-            .trace_handle()
-            .install_settlement_registry(Arc::clone(&settlement));
+        mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
 
         // Register the window mailbox forwarding armed envelopes onto the
         // `SettlingInbox`'s channel, exactly as `claim_mailbox` does.
-        let window_mailbox = mailbox_id_from_name(
-            <aether_capabilities::HeadlessWindowCapability as Addressable>::NAMESPACE,
-        );
+        let window_mailbox =
+            mailbox_id_from_name(<aether_capabilities::HeadlessWindowCapability as Addressable>::NAMESPACE);
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
             let _ = tx.send(d);
@@ -338,38 +297,24 @@ mod tests {
         mailer.record_sent_inflight(root);
         let settle = settlement.subscribe_settlement(root);
         mailer.push(
-            Mail::new(
-                window_mailbox,
-                <SetWindowTitle as Kind>::ID,
-                title_payload(),
-                1,
-            )
-            .with_lineage(mail_id, root, None),
+            Mail::new(window_mailbox, <SetWindowTitle as Kind>::ID, title_payload(), 1)
+                .with_lineage(mail_id, root, None),
         );
         drop(inbox.try_next().expect("the armed Call is queued"));
-        settle
-            .recv()
-            .expect("window root settles when the drained mail's guard drops");
+        settle.recv().expect("window root settles when the drained mail's guard drops");
 
         // A `MailId::NONE` push (window-size / frame-stats) settles
         // nothing — the guard mints disarmed and `record_finished` no-ops.
         let guard_root = MailId::new(window_mailbox, 3);
         mailer.record_sent_inflight(guard_root);
         let guard_rx = settlement.subscribe_settlement(guard_root);
-        mailer.push(
-            Mail::new(
-                window_mailbox,
-                <SetWindowTitle as Kind>::ID,
-                title_payload(),
-                1,
-            )
-            .with_lineage(MailId::NONE, guard_root, None),
-        );
+        mailer.push(Mail::new(window_mailbox, <SetWindowTitle as Kind>::ID, title_payload(), 1).with_lineage(
+            MailId::NONE,
+            guard_root,
+            None,
+        ));
         drop(inbox.try_next().expect("the NONE push is queued"));
-        assert!(
-            guard_rx.try_recv().is_err(),
-            "a NONE inbound discharges no root",
-        );
+        assert!(guard_rx.try_recv().is_err(), "a NONE inbound discharges no root");
     }
 
     /// iamacoffeepot/aether#1704: the lifecycle reply inbox is a
@@ -402,9 +347,7 @@ mod tests {
         // `fire_settled`.
         let settlement = Arc::new(SettlementRegistry::new());
         mailer.install_settlement_registry(Arc::clone(&settlement));
-        mailer
-            .trace_handle()
-            .install_settlement_registry(Arc::clone(&settlement));
+        mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
 
         // Register the reply inbox exactly as `claim_mailbox` does: forward
         // the obligation-armed envelope onto the `SettlingInbox`'s channel,
@@ -414,14 +357,11 @@ mod tests {
         let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: Envelope| {
             let _ = tx.send(dispatch);
         });
-        let reply_mailbox = registry
-            .try_register_inbox("aether.lifecycle.advance_reply", handler)
-            .expect("register the reply inbox");
+        let reply_mailbox =
+            registry.try_register_inbox("aether.lifecycle.advance_reply", handler).expect("register the reply inbox");
         let inbox = SettlingInbox::new(reply_mailbox, rx, Arc::clone(&mailer));
 
-        let cap_mailbox = mailbox_id_from_name(
-            <aether_capabilities::LifecycleCapability as Addressable>::NAMESPACE,
-        );
+        let cap_mailbox = mailbox_id_from_name(<aether_capabilities::LifecycleCapability as Addressable>::NAMESPACE);
 
         // (1) Non-`NONE`-root reply (the degraded `on_advance` inline-reply
         // shape): the producer hook records the reply's `Sent` against
@@ -434,16 +374,7 @@ mod tests {
         let armed_reply_id = MailId::new(cap_mailbox, 1 << 63);
         let settle_rx = settlement.subscribe_settlement(root);
         let sender = Source::with_correlation(SourceAddr::Component(reply_mailbox), 7);
-        mailer.send_reply(
-            sender,
-            &LifecycleAdvanceComplete {
-                completed: 1,
-                next: 42,
-            },
-            armed_reply_id,
-            root,
-            None,
-        );
+        mailer.send_reply(sender, &LifecycleAdvanceComplete { completed: 1, next: 42 }, armed_reply_id, root, None);
         let mail = inbox.try_next().expect("armed reply routed to the inbox");
         match consume_lifecycle_reply(mail) {
             LifecycleReplyOutcome::Complete(next) => {
@@ -451,9 +382,7 @@ mod tests {
             }
             LifecycleReplyOutcome::Unexpected => panic!("expected the advance-complete arm"),
         }
-        settle_rx
-            .recv()
-            .expect("the guard's Finished balances the reply's Sent and settles the root");
+        settle_rx.recv().expect("the guard's Finished balances the reply's Sent and settles the root");
 
         // (2) `NONE`-root reply (the real per-frame deferred path, replying
         // to a bare lineage-less `Settled` notice): the producer's
@@ -465,17 +394,12 @@ mod tests {
         let sender_2 = Source::with_correlation(SourceAddr::Component(reply_mailbox), 8);
         mailer.send_reply(
             sender_2,
-            &LifecycleAdvanceComplete {
-                completed: 2,
-                next: 0,
-            },
+            &LifecycleAdvanceComplete { completed: 2, next: 0 },
             armed_reply_id_2,
             MailId::NONE,
             None,
         );
-        let mail_2 = inbox
-            .try_next()
-            .expect("second armed reply routed to the inbox");
+        let mail_2 = inbox.try_next().expect("second armed reply routed to the inbox");
         match consume_lifecycle_reply(mail_2) {
             LifecycleReplyOutcome::Complete(next) => {
                 assert_eq!(next, Some(0), "the terminal reply decodes `next == 0`");

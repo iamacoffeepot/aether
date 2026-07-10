@@ -58,11 +58,7 @@ use std::any::Any;
 /// future Phase 7 alignment may revisit).
 #[derive(Clone)]
 pub enum ActorEntry {
-    Live {
-        sender: Arc<Sender<Envelope>>,
-        type_id: TypeId,
-        subname: String,
-    },
+    Live { sender: Arc<Sender<Envelope>>, type_id: TypeId, subname: String },
     Dead,
 }
 
@@ -153,10 +149,7 @@ impl ActorRegistry {
     /// ADR-0063: a poisoned lock means a prior writer panicked under
     /// the guard, a substrate-level invariant violation.
     pub fn is_live(&self, id: MailboxId) -> bool {
-        let actors = self
-            .actors
-            .read()
-            .expect("actors lock poisoned; fail-fast per ADR-0063");
+        let actors = self.actors.read().expect("actors lock poisoned; fail-fast per ADR-0063");
         matches!(actors.get(&id), Some(ActorEntry::Live { .. }))
     }
 
@@ -170,10 +163,7 @@ impl ActorRegistry {
     /// ADR-0063: a poisoned lock means a prior writer panicked under
     /// the guard, a substrate-level invariant violation.
     pub fn live_sender(&self, id: MailboxId) -> Option<Sender<Envelope>> {
-        let actors = self
-            .actors
-            .read()
-            .expect("actors lock poisoned; fail-fast per ADR-0063");
+        let actors = self.actors.read().expect("actors lock poisoned; fail-fast per ADR-0063");
         match actors.get(&id) {
             Some(ActorEntry::Live { sender, .. }) => Some((**sender).clone()),
             _ => None,
@@ -189,10 +179,7 @@ impl ActorRegistry {
     /// ADR-0063: a poisoned lock means a prior writer panicked under
     /// the guard, a substrate-level invariant violation.
     pub fn type_id_at(&self, id: MailboxId) -> Option<TypeId> {
-        let actors = self
-            .actors
-            .read()
-            .expect("actors lock poisoned; fail-fast per ADR-0063");
+        let actors = self.actors.read().expect("actors lock poisoned; fail-fast per ADR-0063");
         match actors.get(&id) {
             Some(ActorEntry::Live { type_id, .. }) => Some(*type_id),
             _ => None,
@@ -207,10 +194,7 @@ impl ActorRegistry {
     /// ADR-0063: a poisoned lock means a prior writer panicked under
     /// the guard, a substrate-level invariant violation.
     pub fn is_tombstoned(&self, id: MailboxId) -> bool {
-        self.tombstones
-            .read()
-            .expect("tombstones lock poisoned; fail-fast per ADR-0063")
-            .contains(&id)
+        self.tombstones.read().expect("tombstones lock poisoned; fail-fast per ADR-0063").contains(&id)
     }
 
     /// `TypeId` that owns the given namespace, if any. Populated at
@@ -221,11 +205,7 @@ impl ActorRegistry {
     /// ADR-0063: a poisoned lock means a prior writer panicked under
     /// the guard, a substrate-level invariant violation.
     pub fn namespace_owner(&self, namespace: &'static str) -> Option<TypeId> {
-        self.name_owners
-            .read()
-            .expect("name_owners lock poisoned; fail-fast per ADR-0063")
-            .get(namespace)
-            .copied()
+        self.name_owners.read().expect("name_owners lock poisoned; fail-fast per ADR-0063").get(namespace).copied()
     }
 
     /// Claim ownership of `namespace` for `type_id`. Returns `Ok(())` on
@@ -234,15 +214,8 @@ impl ActorRegistry {
     /// type share one namespace). Returns `Err(other_type_id)` when a
     /// different type already owns the namespace — the ADR-0079 guard
     /// against Singleton/Instanced or Instanced/Instanced collisions.
-    pub(crate) fn try_claim_namespace(
-        &self,
-        namespace: &'static str,
-        type_id: TypeId,
-    ) -> Result<(), TypeId> {
-        let mut owners = self
-            .name_owners
-            .write()
-            .expect("name_owners lock poisoned; fail-fast per ADR-0063");
+    pub(crate) fn try_claim_namespace(&self, namespace: &'static str, type_id: TypeId) -> Result<(), TypeId> {
+        let mut owners = self.name_owners.write().expect("name_owners lock poisoned; fail-fast per ADR-0063");
         match owners.get(namespace) {
             Some(&existing) if existing == type_id => Ok(()),
             Some(&existing) => Err(existing),
@@ -266,10 +239,7 @@ impl ActorRegistry {
     /// Crate-private — only the boot-failure paths in
     /// [`crate::chassis::ctx`] / [`crate::chassis::builder`] call this.
     pub(crate) fn release_namespace(&self, namespace: &'static str, type_id: TypeId) -> bool {
-        let mut owners = self
-            .name_owners
-            .write()
-            .expect("name_owners lock poisoned; fail-fast per ADR-0063");
+        let mut owners = self.name_owners.write().expect("name_owners lock poisoned; fail-fast per ADR-0063");
         match owners.get(namespace) {
             Some(&existing) if existing == type_id => {
                 owners.remove(namespace);
@@ -296,24 +266,14 @@ impl ActorRegistry {
         type_id: TypeId,
         subname: String,
     ) -> Result<(), ()> {
-        let mut actors = self
-            .actors
-            .write()
-            .expect("actors lock poisoned; fail-fast per ADR-0063");
+        let mut actors = self.actors.write().expect("actors lock poisoned; fail-fast per ADR-0063");
         if let Some(ActorEntry::Live { .. }) = actors.get(&id) {
             Err(())
         } else {
             // `Dead` slot or empty: install the live entry. Phase 4
             // populates `Dead` on close, but Phase 3 only ever sees
             // empty slots.
-            actors.insert(
-                id,
-                ActorEntry::Live {
-                    sender,
-                    type_id,
-                    subname,
-                },
-            );
+            actors.insert(id, ActorEntry::Live { sender, type_id, subname });
             Ok(())
         }
     }
@@ -343,17 +303,12 @@ impl ActorRegistry {
     where
         T: Any + 'static,
     {
-        let actors = self
-            .actors
-            .read()
-            .expect("actors lock poisoned; fail-fast per ADR-0063");
+        let actors = self.actors.read().expect("actors lock poisoned; fail-fast per ADR-0063");
         let target = TypeId::of::<T>();
         actors
             .iter()
             .filter_map(|(id, entry)| match entry {
-                ActorEntry::Live {
-                    type_id, subname, ..
-                } if *type_id == target => Some((subname.clone(), *id)),
+                ActorEntry::Live { type_id, subname, .. } if *type_id == target => Some((subname.clone(), *id)),
                 _ => None,
             })
             .collect()
@@ -367,16 +322,10 @@ impl ActorRegistry {
     /// an already-`Dead` slot leaves it `Dead` and doesn't double-
     /// insert into `tombstones`.
     pub(crate) fn mark_dead(&self, id: MailboxId) {
-        let mut actors = self
-            .actors
-            .write()
-            .expect("actors lock poisoned; fail-fast per ADR-0063");
+        let mut actors = self.actors.write().expect("actors lock poisoned; fail-fast per ADR-0063");
         actors.insert(id, ActorEntry::Dead);
         drop(actors);
-        let mut tombstones = self
-            .tombstones
-            .write()
-            .expect("tombstones lock poisoned; fail-fast per ADR-0063");
+        let mut tombstones = self.tombstones.write().expect("tombstones lock poisoned; fail-fast per ADR-0063");
         tombstones.insert(id);
     }
 
@@ -396,11 +345,7 @@ impl ActorRegistry {
     /// `TargetTombstoned` (takes priority over `TargetNotFound` when
     /// both apply, so a closed actor surfaces as tombstoned rather
     /// than not-found).
-    pub(crate) fn register_monitor(
-        &self,
-        watcher: MailboxId,
-        target: MailboxId,
-    ) -> Result<(), MonitorError> {
+    pub(crate) fn register_monitor(&self, watcher: MailboxId, target: MailboxId) -> Result<(), MonitorError> {
         // Cheap fast-path: refuse an already-tombstoned target before
         // taking the insert lock. The load-bearing liveness check is the
         // re-check under the `monitors_of` write guard below.
@@ -422,10 +367,7 @@ impl ActorRegistry {
         // waiting on `monitors_of`), so no deadlock is introduced. An early
         // return here inserts *neither* index.
         {
-            let mut forward = self
-                .monitors_of
-                .write()
-                .expect("monitors_of lock poisoned; fail-fast per ADR-0063");
+            let mut forward = self.monitors_of.write().expect("monitors_of lock poisoned; fail-fast per ADR-0063");
             if self.is_tombstoned(target) {
                 return Err(MonitorError::TargetTombstoned);
             }
@@ -437,10 +379,7 @@ impl ActorRegistry {
             // lifts the boot path to insert `Live`); callers who reach for
             // monitor before that lift see `TargetNotFound`, which matches
             // the wire contract for "this id has no live actor."
-            let actors = self
-                .actors
-                .read()
-                .expect("actors lock poisoned; fail-fast per ADR-0063");
+            let actors = self.actors.read().expect("actors lock poisoned; fail-fast per ADR-0063");
             if !matches!(actors.get(&target), Some(ActorEntry::Live { .. })) {
                 return Err(MonitorError::TargetNotFound);
             }
@@ -466,19 +405,13 @@ impl ActorRegistry {
     /// forward index) is a no-op. Called by [`crate::actor::monitor::MonitorHandle::Drop`]
     /// when the handle goes out of scope.
     pub(crate) fn deregister_monitor(&self, watcher: MailboxId, target: MailboxId) {
-        if let Some(entries) = self
-            .monitors_of
-            .write()
-            .expect("monitors_of lock poisoned; fail-fast per ADR-0063")
-            .get_mut(&target)
+        if let Some(entries) =
+            self.monitors_of.write().expect("monitors_of lock poisoned; fail-fast per ADR-0063").get_mut(&target)
         {
             entries.retain(|e| e.watcher != watcher);
         }
-        if let Some(targets) = self
-            .monitoring
-            .write()
-            .expect("monitoring lock poisoned; fail-fast per ADR-0063")
-            .get_mut(&watcher)
+        if let Some(targets) =
+            self.monitoring.write().expect("monitoring lock poisoned; fail-fast per ADR-0063").get_mut(&watcher)
         {
             targets.retain(|t| *t != target);
         }
@@ -524,16 +457,10 @@ impl ActorRegistry {
         // Reverse index: walk each target the closing actor was
         // monitoring and remove it from that target's forward list.
         // Mirrors `deregister_monitor` per-target, but in bulk.
-        let monitoring_targets = self
-            .monitoring
-            .write()
-            .expect("monitoring lock poisoned; fail-fast per ADR-0063")
-            .remove(&id);
+        let monitoring_targets =
+            self.monitoring.write().expect("monitoring lock poisoned; fail-fast per ADR-0063").remove(&id);
         if let Some(targets) = monitoring_targets {
-            let mut forward = self
-                .monitors_of
-                .write()
-                .expect("monitors_of lock poisoned; fail-fast per ADR-0063");
+            let mut forward = self.monitors_of.write().expect("monitors_of lock poisoned; fail-fast per ADR-0063");
             for target in targets {
                 if let Some(entries) = forward.get_mut(&target) {
                     entries.retain(|e| e.watcher != id);
@@ -567,10 +494,7 @@ impl ActorRegistry {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test-setup unwraps: fixture construction panic on failure is the assertion"
-)]
+#[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 mod tests {
     use super::*;
     use std::sync::mpsc;
@@ -593,8 +517,7 @@ mod tests {
     fn insert_live_stub(r: &ActorRegistry, id: MailboxId) {
         struct Stub;
         let (tx, _rx) = mpsc::channel::<Envelope>();
-        r.insert_live(id, Arc::new(tx), TypeId::of::<Stub>(), String::new())
-            .expect("fresh slot");
+        r.insert_live(id, Arc::new(tx), TypeId::of::<Stub>(), String::new()).expect("fresh slot");
     }
 
     #[test]
@@ -602,10 +525,7 @@ mod tests {
         let r = ActorRegistry::new();
         let watcher = MailboxId(1);
         let target = MailboxId(2);
-        assert_eq!(
-            r.register_monitor(watcher, target),
-            Err(MonitorError::TargetNotFound),
-        );
+        assert_eq!(r.register_monitor(watcher, target), Err(MonitorError::TargetNotFound),);
     }
 
     #[test]
@@ -617,10 +537,7 @@ mod tests {
         // close_actor flips the slot Dead and tombstones the id.
         let _ = r.close_actor(target);
         assert!(r.is_tombstoned(target));
-        assert_eq!(
-            r.register_monitor(watcher, target),
-            Err(MonitorError::TargetTombstoned),
-        );
+        assert_eq!(r.register_monitor(watcher, target), Err(MonitorError::TargetTombstoned),);
     }
 
     #[test]
@@ -683,11 +600,7 @@ mod tests {
         r.register_monitor(a, b).unwrap();
         assert_eq!(r.monitor_count(b), 1);
         let _ = r.close_actor(a);
-        assert_eq!(
-            r.monitor_count(b),
-            0,
-            "dead watcher should be pruned from b's monitors_of",
-        );
+        assert_eq!(r.monitor_count(b), 0, "dead watcher should be pruned from b's monitors_of");
     }
 
     #[test]
@@ -752,10 +665,7 @@ mod tests {
             t_reg.join().expect("register thread joins");
             t_close.join().expect("close thread joins");
 
-            assert!(
-                r.is_tombstoned(target),
-                "close_actor always tombstones the target",
-            );
+            assert!(r.is_tombstoned(target), "close_actor always tombstones the target");
             assert_eq!(
                 r.monitor_count(target),
                 0,

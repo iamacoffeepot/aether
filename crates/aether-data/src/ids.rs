@@ -19,8 +19,7 @@ use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::hash::{
-    TYPE_DOMAIN, fnv1a_64_prefixed, mailbox_id_from_name, mailbox_id_from_name_pair,
-    thread_id_from_name,
+    TYPE_DOMAIN, fnv1a_64_prefixed, mailbox_id_from_name, mailbox_id_from_name_pair, thread_id_from_name,
 };
 use crate::tagged_id::{self, Tag};
 
@@ -67,11 +66,7 @@ fn deserialize_id<'de, D: Deserializer<'de>>(d: D, expected: Tag) -> Result<u64,
         type Value = u64;
 
         fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(
-                f,
-                "tagged id string ({}-XXXX-XXXX-XXXX) or u64 number",
-                self.expected.prefix()
-            )
+            write!(f, "tagged id string ({}-XXXX-XXXX-XXXX) or u64 number", self.expected.prefix())
         }
 
         fn visit_i64<E: de::Error>(self, v: i64) -> Result<u64, E> {
@@ -87,11 +82,7 @@ fn deserialize_id<'de, D: Deserializer<'de>>(d: D, expected: Tag) -> Result<u64,
         }
     }
 
-    if d.is_human_readable() {
-        d.deserialize_any(IdVisitor { expected })
-    } else {
-        u64::deserialize(d)
-    }
+    if d.is_human_readable() { d.deserialize_any(IdVisitor { expected }) } else { u64::deserialize(d) }
 }
 
 /// Resolve a `SchemaType::TypeId(id)` payload to the `Tag` the
@@ -452,12 +443,8 @@ mod tests {
     fn chassis_mailbox_id_is_tagged_and_distinct_from_none() {
         assert_ne!(MailboxId::CHASSIS_MAILBOX_ID, MailboxId::NONE);
         assert_ne!(MailboxId::CHASSIS_MAILBOX_ID.0, 0);
-        assert_eq!(
-            tagged_id::tag_of(MailboxId::CHASSIS_MAILBOX_ID.0),
-            Some(Tag::Mailbox),
-        );
-        let encoded = tagged_id::encode(MailboxId::CHASSIS_MAILBOX_ID.0)
-            .expect("CHASSIS_MAILBOX_ID must tag-encode");
+        assert_eq!(tagged_id::tag_of(MailboxId::CHASSIS_MAILBOX_ID.0), Some(Tag::Mailbox),);
+        let encoded = tagged_id::encode(MailboxId::CHASSIS_MAILBOX_ID.0).expect("CHASSIS_MAILBOX_ID must tag-encode");
         assert!(encoded.starts_with("mbx-"), "expected tagged: {encoded}");
         let decoded = tagged_id::decode_with_tag(&encoded, Tag::Mailbox)
             .expect("CHASSIS_MAILBOX_ID must round-trip via decode_with_tag");
@@ -485,8 +472,7 @@ mod tests {
         let id = tagged_id::with_tag(Tag::Dag, 0x42);
         let encoded = tagged_id::encode(id).expect("DagId tag-encodes");
         assert!(encoded.starts_with("dag-"), "expected tagged: {encoded}");
-        let decoded =
-            tagged_id::decode_with_tag(&encoded, Tag::Dag).expect("DagId round-trips via decode");
+        let decoded = tagged_id::decode_with_tag(&encoded, Tag::Dag).expect("DagId round-trips via decode");
         assert_eq!(decoded, id);
     }
 
@@ -498,8 +484,7 @@ mod tests {
         let id = tagged_id::with_tag(Tag::Transform, 0x99);
         let encoded = tagged_id::encode(id).expect("TransformId tag-encodes");
         assert!(encoded.starts_with("trn-"), "expected tagged: {encoded}");
-        let decoded = tagged_id::decode_with_tag(&encoded, Tag::Transform)
-            .expect("TransformId round-trips via decode");
+        let decoded = tagged_id::decode_with_tag(&encoded, Tag::Transform).expect("TransformId round-trips via decode");
         assert_eq!(decoded, id);
     }
 
@@ -510,15 +495,11 @@ mod tests {
     #[test]
     fn thread_id_is_tagged_and_resolves_codec_arm() {
         assert_eq!(tag_for_type_id(ThreadId::TYPE_ID), Some(Tag::Thread));
-        assert_eq!(
-            type_name_for_type_id(ThreadId::TYPE_ID),
-            Some("aether.thread_id")
-        );
+        assert_eq!(type_name_for_type_id(ThreadId::TYPE_ID), Some("aether.thread_id"));
         let id = tagged_id::with_tag(Tag::Thread, 0x77);
         let encoded = tagged_id::encode(id).expect("ThreadId tag-encodes");
         assert!(encoded.starts_with("thr-"), "expected tagged: {encoded}");
-        let decoded = tagged_id::decode_with_tag(&encoded, Tag::Thread)
-            .expect("ThreadId round-trips via decode");
+        let decoded = tagged_id::decode_with_tag(&encoded, Tag::Thread).expect("ThreadId round-trips via decode");
         assert_eq!(decoded, id);
 
         let a = ThreadId::from_name("aether-worker-0");

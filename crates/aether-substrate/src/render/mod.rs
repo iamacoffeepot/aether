@@ -22,20 +22,18 @@ mod pipeline;
 mod quad;
 mod targets;
 
-pub use capture::{
-    CaptureMeta, encode_png, finish_capture, map_capture_rgba, prepare_capture_copy,
-};
+pub use capture::{CaptureMeta, encode_png, finish_capture, map_capture_rgba, prepare_capture_copy};
 pub use material::{
-    MATERIAL_VERTEX_BUFFER_BYTES, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw,
-    MaterialPassDraw, MaterialPassRecord, MaterialPipelines, build_material_pipelines,
-    push_coverage_params, push_material_rect_vertices, push_textured_params, record_material_pass,
+    MATERIAL_VERTEX_BUFFER_BYTES, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw, MaterialPassDraw,
+    MaterialPassRecord, MaterialPipelines, build_material_pipelines, push_coverage_params, push_material_rect_vertices,
+    push_textured_params, record_material_pass,
 };
 pub use pipeline::{Pipeline, RenderError, build_main_pipeline, record_main_pass};
 pub use quad::{
-    OverlayDraw, QUAD_UNIFORM_BYTES, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE,
-    QUAD_VERTICES_PER_QUAD, QuadPipeline, RealizedTexture, TextureBindings, build_quad_pipeline,
-    build_texture_bindings, push_screen_quad_vertices, push_world_quad_vertices, realize_texture,
-    record_quad_overlay_pass, upload_texture_full,
+    OverlayDraw, QUAD_UNIFORM_BYTES, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD,
+    QuadPipeline, RealizedTexture, TextureBindings, build_quad_pipeline, build_texture_bindings,
+    push_screen_quad_vertices, push_world_quad_vertices, realize_texture, record_quad_overlay_pass,
+    upload_texture_full,
 };
 pub use targets::Targets;
 
@@ -90,17 +88,39 @@ pub fn vertex_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
         array_stride: VERTEX_STRIDE,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
-            wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x3,
-            },
-            wgpu::VertexAttribute {
-                offset: 12,
-                shader_location: 1,
-                format: wgpu::VertexFormat::Float32x3,
-            },
+            wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+            wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
         ],
+    }
+}
+
+/// Single-entry vertex-stage uniform-buffer bind group layout — the
+/// shape the camera and quad-viewport uniforms share.
+fn uniform_bind_group_layout(device: &wgpu::Device, label: &str, bytes: u64) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(bytes),
+            },
+            count: None,
+        }],
+    })
+}
+
+/// Load-preserving color attachment over the frame's color target —
+/// how the material and quad-overlay passes draw over the main pass
+/// output without clearing it.
+fn load_color_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttachment<'_> {
+    wgpu::RenderPassColorAttachment {
+        view,
+        resolve_target: None,
+        depth_slice: None,
+        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
     }
 }
 

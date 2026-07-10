@@ -33,13 +33,13 @@ pub use text_metrics::{CachedFontMetrics, scale_units};
 
 pub use diagnostics::{MonitorNotice, UnresolvedMail};
 pub use input::{
-    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
-    TextInput, WindowSize,
+    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
+    WindowSize,
 };
 pub use lifecycle::{
-    InitCaps, InitComponents, LifecycleAdvance, LifecycleAdvanceComplete, LifecycleSubscribe,
-    LifecycleSubscribeResult, LifecycleSubscribeSelf, LifecycleUnsubscribe,
-    LifecycleUnsubscribeAll, LifecycleUnsubscribeSelf, Present, Quit, Render, Shutdown, Tick,
+    InitCaps, InitComponents, LifecycleAdvance, LifecycleAdvanceComplete, LifecycleSubscribe, LifecycleSubscribeResult,
+    LifecycleSubscribeSelf, LifecycleUnsubscribe, LifecycleUnsubscribeAll, LifecycleUnsubscribeSelf, Present, Quit,
+    Render, Shutdown, Tick,
 };
 pub use math::Mat4Apply;
 pub use utility::{Ping, Pong};
@@ -83,9 +83,7 @@ mod engine {
     /// `aether.engine.list` — ask the engines cap (`aether.engine`) to
     /// enumerate every engine it currently supervises. Fieldless
     /// request; the reply is a [`ListEnginesResult`]. Issue 763 P4.
-    #[derive(
-        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
-    )]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
     #[kind(name = "aether.engine.list")]
     pub struct ListEngines {}
 
@@ -239,14 +237,8 @@ mod engine {
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.engine.spawn_result")]
     pub enum SpawnEngineResult {
-        Ok {
-            engine_id: String,
-            rpc_port: u16,
-        },
-        Err {
-            engine_id: Option<String>,
-            error: String,
-        },
+        Ok { engine_id: String, rpc_port: u16 },
+        Err { engine_id: Option<String>, error: String },
     }
 
     /// `aether.engine.terminate` — ask the engines cap to shut down a
@@ -344,9 +336,7 @@ mod engine {
     /// `manifest.caps` is a superset of every listed cap, `target` keeps
     /// only entries whose `manifest.target` matches. Reply:
     /// [`ListEngineBinariesResult`].
-    #[derive(
-        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
-    )]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
     #[kind(name = "aether.engine.list_binaries")]
     pub struct ListEngineBinaries {
         pub chassis: Option<String>,
@@ -527,9 +517,7 @@ mod engine {
     /// only entries exporting that actor namespace, `handled_kind` keeps
     /// only entries handling that `KindId`. Reply:
     /// [`ListComponentBinariesResult`].
-    #[derive(
-        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
-    )]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
     #[kind(name = "aether.engine.list_components")]
     pub struct ListComponentBinaries {
         pub namespace: Option<String>,
@@ -595,14 +583,8 @@ mod control_plane {
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.component.load_result")]
     pub enum LoadResult {
-        Ok {
-            mailbox_id: aether_data::MailboxId,
-            name: String,
-            capabilities: ComponentCapabilities,
-        },
-        Err {
-            error: String,
-        },
+        Ok { mailbox_id: aether_data::MailboxId, name: String, capabilities: ComponentCapabilities },
+        Err { error: String },
     }
 
     /// ADR-0033 receive-side capability surface for a component. Built
@@ -738,9 +720,7 @@ mod control_plane {
     /// (ADR-0116) polls this to learn deterministically when a requested
     /// component is loaded and registered at its lineage address, instead
     /// of inferring liveness by proxy. Reply: `ListComponentsResult`.
-    #[derive(
-        aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default,
-    )]
+    #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
     #[kind(name = "aether.component.list")]
     pub struct ListComponents {}
 
@@ -902,19 +882,12 @@ mod control_plane {
     /// request carried no `checks`; `similarity_score` / `similarity_pass`
     /// are `None` when no `similarity` was requested
     /// (iamacoffeepot/aether#1780).
-    impl From<Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Option<bool>), String>>
-        for CaptureFrameResult
-    {
-        fn from(
-            result: Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Option<bool>), String>,
-        ) -> Self {
+    impl From<Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Option<bool>), String>> for CaptureFrameResult {
+        fn from(result: Result<(Vec<u8>, Option<FrameVerdict>, Option<f32>, Option<bool>), String>) -> Self {
             match result {
-                Ok((png, verdict, similarity_score, similarity_pass)) => Self::Ok {
-                    png,
-                    verdict,
-                    similarity_score,
-                    similarity_pass,
-                },
+                Ok((png, verdict, similarity_score, similarity_pass)) => {
+                    Self::Ok { png, verdict, similarity_score, similarity_pass }
+                }
                 Err(error) => Self::Err { error },
             }
         }
@@ -983,26 +956,11 @@ mod control_plane {
     /// mask was empty).
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
     pub enum FrameCheckResult {
-        NotAllBlack {
-            passed: bool,
-            detail: Option<String>,
-        },
-        DiffersFromBackground {
-            passed: bool,
-            detail: Option<String>,
-        },
-        Coverage {
-            background: [u8; 3],
-            fraction: f32,
-        },
-        Centroid {
-            background: [u8; 3],
-            centroid: Option<[f32; 2]>,
-        },
-        BoundingBox {
-            background: [u8; 3],
-            rect: Option<FrameRect>,
-        },
+        NotAllBlack { passed: bool, detail: Option<String> },
+        DiffersFromBackground { passed: bool, detail: Option<String> },
+        Coverage { background: [u8; 3], fraction: f32 },
+        Centroid { background: [u8; 3], centroid: Option<[f32; 2]> },
+        BoundingBox { background: [u8; 3], rect: Option<FrameRect> },
     }
 
     /// Inclusive axis-aligned pixel extent of a lit region — the wire
@@ -1132,11 +1090,7 @@ mod control_plane {
     pub enum WindowMode {
         Windowed,
         FullscreenBorderless,
-        FullscreenExclusive {
-            width: u32,
-            height: u32,
-            refresh_mhz: u32,
-        },
+        FullscreenExclusive { width: u32, height: u32, refresh_mhz: u32 },
     }
 
     /// `aether.window.set_mode` — switch the substrate's
@@ -1165,14 +1119,8 @@ mod control_plane {
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.window.set_mode_result")]
     pub enum SetWindowModeResult {
-        Ok {
-            mode: WindowMode,
-            width: u32,
-            height: u32,
-        },
-        Err {
-            error: String,
-        },
+        Ok { mode: WindowMode, width: u32, height: u32 },
+        Err { error: String },
     }
 
     /// `aether.window.set_title` — update the substrate
@@ -1594,14 +1542,8 @@ mod control_plane {
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.log.tail_result")]
     pub enum LogTailResult {
-        Ok {
-            entries: Vec<LogEntry>,
-            next_since: u64,
-            truncated_before: Option<u64>,
-        },
-        Err {
-            error: String,
-        },
+        Ok { entries: Vec<LogEntry>, next_since: u64, truncated_before: Option<u64> },
+        Err { error: String },
     }
 
     // iamacoffeepot/aether#1128 per-handler execution-cost EWMA dump.
@@ -1776,13 +1718,8 @@ mod control_plane {
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.process.terminate_result")]
     pub enum TerminateResult {
-        Ok {
-            exit_code: Option<i32>,
-            sigkilled: bool,
-        },
-        Err {
-            error: String,
-        },
+        Ok { exit_code: Option<i32>, sigkilled: bool },
+        Err { error: String },
     }
 
     /// `aether.process.exited` — broadcast emitted by the hub's

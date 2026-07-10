@@ -22,10 +22,9 @@ use aether_capabilities::LifecycleCapability;
 use aether_capabilities::audio::{SetMasterGain, SetMasterGainResult};
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
-    AnthropicConfig, ComponentHostConfig, ContentGenConfig, GeminiConfig,
-    HeadlessClipboardCapability, HeadlessRenderCapability, HeadlessWindowCapability,
-    HttpServerConfig, InputConfig, UnsupportedTestBenchCapability, fs::NamespaceRoots,
-    http::HttpConfig as HttpConf,
+    AnthropicConfig, ComponentHostConfig, ContentGenConfig, GeminiConfig, HeadlessClipboardCapability,
+    HeadlessRenderCapability, HeadlessWindowCapability, HttpServerConfig, InputConfig, UnsupportedTestBenchCapability,
+    fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
 use aether_data::Kind;
 use aether_kinds::BinaryManifest;
@@ -37,10 +36,9 @@ use aether_substrate::{Chassis, SubstrateBoot};
 use super::driver::{HeadlessTimerDriverCapability, TickConfig};
 use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
-    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys,
-    load_chassis_config, maybe_with_http_server, maybe_with_rpc_server, resolve_env_with_file,
-    resolve_teardown_cap_with_file, resolve_with_file, tick_only_lifecycle_config,
-    with_common_caps,
+    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys, load_chassis_config,
+    maybe_with_http_server, maybe_with_rpc_server, resolve_env_with_file, resolve_teardown_cap_with_file,
+    resolve_with_file, tick_only_lifecycle_config, with_common_caps,
 };
 use crate::cli::{CommonOverlay, HeadlessCli};
 use crate::hub;
@@ -195,13 +193,9 @@ impl HeadlessEnv {
             rpc_port: cli_rpc_port,
         } = common;
 
-        let chassis_boot = resolve_with_file::<ChassisBootConfig>(
-            chassis_boot_overlay.into_layer(),
-            config_file,
-            "chassis",
-        )?;
-        let tick_config =
-            resolve_with_file::<TickConfig>(tick_overlay.into_layer(), config_file, "tick")?;
+        let chassis_boot =
+            resolve_with_file::<ChassisBootConfig>(chassis_boot_overlay.into_layer(), config_file, "chassis")?;
+        let tick_config = resolve_with_file::<TickConfig>(tick_overlay.into_layer(), config_file, "tick")?;
 
         // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved
         // through `ChassisBootConfig`). When set, the listed components'
@@ -213,44 +207,32 @@ impl HeadlessEnv {
             None => Vec::new(),
         };
         let http = resolve_with_file::<HttpConf>(http.into_layer(), config_file, "http")?;
-        let anthropic =
-            resolve_with_file::<AnthropicConfig>(anthropic.into_layer(), config_file, "anthropic")?;
+        let anthropic = resolve_with_file::<AnthropicConfig>(anthropic.into_layer(), config_file, "anthropic")?;
         let gemini = resolve_with_file::<GeminiConfig>(gemini.into_layer(), config_file, "gemini")?;
-        let contentgen = resolve_with_file::<ContentGenConfig>(
-            contentgen.into_layer(),
-            config_file,
-            "contentgen",
-        )?;
-        let namespace_roots =
-            resolve_with_file::<NamespaceRoots>(fs.into_layer(), config_file, "fs")?;
+        let contentgen = resolve_with_file::<ContentGenConfig>(contentgen.into_layer(), config_file, "contentgen")?;
+        let namespace_roots = resolve_with_file::<NamespaceRoots>(fs.into_layer(), config_file, "fs")?;
         // The HTTP server is opt-in: resolve its config and boot the cap
         // only when `enabled` is set (ADR-0108 / issue 1761). Default-off,
         // so an unconfigured chassis binds no HTTP port.
-        let http_server_config = resolve_with_file::<HttpServerConfig>(
-            http_server_overlay.into_layer(),
-            config_file,
-            "http-server",
-        )?;
+        let http_server_config =
+            resolve_with_file::<HttpServerConfig>(http_server_overlay.into_layer(), config_file, "http-server")?;
         let http_server = http_server_config.enabled.then_some(http_server_config);
         // Tick cadence: resolved through `TickConfig` (argv > env > default).
         // `nonzero` maps 0 to the default (60 Hz); a garbage value hard-errors.
         let tick_period = tick_config.to_tick_period();
-        let rpc_addr = cli_rpc_port
-            .or_else(hub::rpc_port_from_env)
-            .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
+        let rpc_addr =
+            cli_rpc_port.or_else(hub::rpc_port_from_env).map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p));
         let workers = chassis_boot.to_workers();
         let lifecycle_advance_timeout_millis = chassis_boot.lifecycle_advance_timeout_millis;
         // Issue 1990: resolve the per-actor ring capacities from
         // `AETHER_ACTOR_{LOG,TRACE}_RING_SIZE` (ADR-0090 §4 hard-error on
         // an unparseable known value, surfaced as `ConfigError`).
-        let ring_caps =
-            resolve_env_with_file::<ActorRingConfig>(config_file, "actor")?.to_ring_capacities();
+        let ring_caps = resolve_env_with_file::<ActorRingConfig>(config_file, "actor")?.to_ring_capacities();
         // Issue 2485: resolve the scheduler hot-path tuning (ADR-0090 §4
         // hard-error on an unparseable known value, surfaced as
         // `ConfigError`).
         let scheduler_tuning =
-            resolve_env_with_file::<SchedulerTuningConfig>(config_file, "scheduler")?
-                .to_scheduler_tuning();
+            resolve_env_with_file::<SchedulerTuningConfig>(config_file, "scheduler")?.to_scheduler_tuning();
         let teardown_cap = resolve_teardown_cap_with_file(config_file)?;
         Ok(Self {
             namespace_roots,
@@ -319,10 +301,7 @@ impl HeadlessChassis {
         // any chain that mails `aether.audio` from the headless
         // chassis leaks `in_flight` and never settles. Same shape
         // as the AETHER_DIAGNOSTICS sink in `boot.rs::register_inline`.
-        let kind_set_master_gain = boot
-            .registry
-            .kind_id(SetMasterGain::NAME)
-            .expect("SetMasterGain registered");
+        let kind_set_master_gain = boot.registry.kind_id(SetMasterGain::NAME).expect("SetMasterGain registered");
         let outbound_for_audio_sink = Arc::clone(&boot.outbound);
         boot.registry.register_inline(
             "aether.audio",
@@ -357,14 +336,9 @@ impl HeadlessChassis {
         // ADR-0063: production chassis configures the fatal-abort
         // aborter so a wasm guest trap exits the substrate via
         // `lifecycle::fatal_abort` instead of unwinding.
-        let aborter: Arc<dyn FatalAborter> =
-            Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
+        let aborter: Arc<dyn FatalAborter> = Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
 
-        let driver = HeadlessTimerDriverCapability {
-            boot,
-            kind_tick,
-            tick_period,
-        };
+        let driver = HeadlessTimerDriverCapability { boot, kind_tick, tick_period };
 
         // ADR-0071 phase B: io / http / log compose through the
         // chassis_builder `.with()` chain. Boot order is declaration
@@ -396,9 +370,7 @@ impl HeadlessChassis {
             .with_actor::<HeadlessClipboardCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedTestBenchCapability>(())
-            .with_actor::<LifecycleCapability>(tick_only_lifecycle_config(
-                lifecycle_advance_timeout_millis,
-            ));
+            .with_actor::<LifecycleCapability>(tick_only_lifecycle_config(lifecycle_advance_timeout_millis));
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-headless");
         let builder = maybe_with_http_server(builder, http_server);
         let built = builder.driver(driver).build()?;

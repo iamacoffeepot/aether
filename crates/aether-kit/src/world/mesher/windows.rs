@@ -41,10 +41,7 @@ pub(super) fn emit_partition_windows(
     let origin_oct = place.origin_oct;
     // A pending run of uniform windows: (label, owner cell, start wi).
     let mut run: Option<(u8, CellPos, usize)> = None;
-    let flush = |run: &mut Option<(u8, CellPos, usize)>,
-                 end_wi: usize,
-                 wj: usize,
-                 tris: &mut Vec<DrawTriangle>| {
+    let flush = |run: &mut Option<(u8, CellPos, usize)>, end_wi: usize, wj: usize, tris: &mut Vec<DrawTriangle>| {
         let Some((label, owner, start_wi)) = run.take() else {
             return;
         };
@@ -73,10 +70,7 @@ pub(super) fn emit_partition_windows(
                 flush(&mut run, wi, wj, tris);
                 continue;
             }
-            let center = WindowCenter {
-                x_octimeters: x_lo + step_oct / 2,
-                z_octimeters: z_lo + step_oct / 2,
-            };
+            let center = WindowCenter { x_octimeters: x_lo + step_oct / 2, z_octimeters: z_lo + step_oct / 2 };
             let has_cliff = cliffs.has_window_at(center);
             // The world cells this window's square overlaps.
             let cx0 = x_lo.div_euclid(256);
@@ -105,10 +99,7 @@ pub(super) fn emit_partition_windows(
                 display[(wj + 1) * gw + wi],
                 display[(wj + 1) * gw + wi + 1],
             ];
-            let owner = CellPos {
-                x: x_center_cell,
-                z: z_center_cell,
-            };
+            let owner = CellPos { x: x_center_cell, z: z_center_cell };
             // A uniform window joins (or starts) a strip run. A run's quad
             // takes position-pure corner heights, and its edges lie on
             // sample-lattice lines where the bilinear surface is linear —
@@ -129,9 +120,7 @@ pub(super) fn emit_partition_windows(
                 continue;
             }
             flush(&mut run, wi, wj, tris);
-            emit_mixed_window(
-                world, cliffs, display, gw, wi, wj, corners, owner, &place, styles, tris,
-            );
+            emit_mixed_window(world, cliffs, display, gw, wi, wj, corners, owner, &place, styles, tris);
         }
         flush(&mut run, windows, wj, tris);
     }
@@ -160,11 +149,7 @@ pub(super) fn label_case_is_connected(corners: [u8; 4], label: u8, case: u8) -> 
         return true;
     }
     // The other diagonal pair: [BR, TL] for case 5, [BL, TR] for case 10.
-    let (other_a, other_b) = if case == 5 {
-        (corners[1], corners[2])
-    } else {
-        (corners[0], corners[3])
-    };
+    let (other_a, other_b) = if case == 5 { (corners[1], corners[2]) } else { (corners[0], corners[3]) };
     other_a != other_b || label > other_a
 }
 
@@ -206,10 +191,7 @@ fn emit_mixed_window(
         [x_lo, z_lo + half],
     ]
     .map(|[px, pz]| [px as f32, pz as f32]);
-    let center = WindowCenter {
-        x_octimeters: x_lo + half,
-        z_octimeters: z_lo + half,
-    };
+    let center = WindowCenter { x_octimeters: x_lo + half, z_octimeters: z_lo + half };
     let has_cliff = cliffs.has_window_at(center);
     let mut cap_fragment_count = 0;
     for k in 0..4 {
@@ -225,12 +207,7 @@ fn emit_mixed_window(
             let wx = pos[0] / OCTIMETERS_PER_METER;
             let wz = pos[1] / OCTIMETERS_PER_METER;
             let y = fragment_lift(world, owner, sides, wx, wz);
-            Vertex {
-                x: wx,
-                y,
-                z: wz,
-                color,
-            }
+            Vertex { x: wx, y, z: wz, color }
         };
         for poly in label_window_polys(case, connected) {
             if poly.is_empty() {
@@ -238,20 +215,12 @@ fn emit_mixed_window(
             }
             let pts: Vec<[f32; 2]> = poly.iter().map(|&idx| points[idx as usize]).collect();
             if has_cliff {
-                let material_points: Vec<PlanarPoint> = pts
-                    .iter()
-                    .map(|point| PlanarPoint {
-                        x_oct: point[0],
-                        z_oct: point[1],
-                    })
-                    .collect();
+                let material_points: Vec<PlanarPoint> =
+                    pts.iter().map(|point| PlanarPoint { x_oct: point[0], z_oct: point[1] }).collect();
                 cliffs.emit_cap_polygon(
                     world,
                     center,
-                    MaterialCap {
-                        polygon: &material_points,
-                        material,
-                    },
+                    MaterialCap { polygon: &material_points, material },
                     &mut cap_fragment_count,
                     styles,
                     tris,

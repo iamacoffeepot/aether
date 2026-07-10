@@ -7,8 +7,7 @@ use crate::world::{CellPos, ChunkPos, Material, World};
 
 use super::cliffs::CliffPlan;
 use super::constants::{
-    CONTOUR_UPSAMPLE, EDGE, MAX_APRON_SUBCELLS, OCTIMETERS_PER_SUBCELL, SUB,
-    SUBCELLS_PER_CHUNK_EDGE,
+    CONTOUR_UPSAMPLE, EDGE, MAX_APRON_SUBCELLS, OCTIMETERS_PER_SUBCELL, SUB, SUBCELLS_PER_CHUNK_EDGE,
 };
 use super::contour::repartition;
 use super::geometry::emit_flat_quad;
@@ -62,10 +61,7 @@ pub(super) fn mesh_underlay(
     let mut interior = vec![false; cells_w * cells_w];
     for lz in lo..hi {
         for lx in lo..hi {
-            let cell = CellPos {
-                x: at.x * EDGE + lx,
-                z: at.z * EDGE + lz,
-            };
+            let cell = CellPos { x: at.x * EDGE + lx, z: at.z * EDGE + lz };
             let m = world.underlay(cell).to_u8();
             if m == 0 {
                 continue;
@@ -82,8 +78,7 @@ pub(super) fn mesh_underlay(
                         && display[gz as usize * gw + gx as usize] == m
                 })
             });
-            interior[(lz - lo) as usize * cells_w + (lx - lo) as usize] =
-                uniform && !cliffs.cell_has_cliff(cell);
+            interior[(lz - lo) as usize * cells_w + (lx - lo) as usize] = uniform && !cliffs.cell_has_cliff(cell);
         }
     }
 
@@ -93,10 +88,7 @@ pub(super) fn mesh_underlay(
             if !interior[(lz - lo) as usize * cells_w + (lx - lo) as usize] {
                 continue;
             }
-            let cell = CellPos {
-                x: at.x * EDGE + lx,
-                z: at.z * EDGE + lz,
-            };
+            let cell = CellPos { x: at.x * EDGE + lx, z: at.z * EDGE + lz };
             let material = world.underlay(cell);
             // Authored relief tessellates the cap to subcell resolution so
             // its per-point heights and breaks show; a flat cell keeps the
@@ -110,9 +102,7 @@ pub(super) fn mesh_underlay(
         }
     }
 
-    emit_partition_windows(
-        world, at, cliffs, &display, gw, apron, step_oct, &interior, lo, styles, tris,
-    );
+    emit_partition_windows(world, at, cliffs, &display, gw, apron, step_oct, &interior, lo, styles, tris);
 
     // The fill-over floor caps for enclosed Void joints — the flat groove
     // bottoms the plan's bounded Void ribbons drop to.
@@ -133,12 +123,7 @@ fn emit_underlay_cell(
     let surface = |wx: f32, wz: f32| patch.y(wx, wz);
     let x0 = cx * 256;
     let z0 = cz * 256;
-    emit_flat_quad(
-        [x0, z0, (cx + 1) * 256, (cz + 1) * 256],
-        color,
-        &surface,
-        tris,
-    );
+    emit_flat_quad([x0, z0, (cx + 1) * 256, (cz + 1) * 256], color, &surface, tris);
 }
 
 /// Emit a height-relief cell's cap as `SUB × SUB` subcell quads, each lifted
@@ -160,17 +145,7 @@ fn emit_underlay_cell_subdivided(
             let surface = |wx: f32, wz: f32| patch.y(wx, wz);
             let x0 = cell.x * 256 + si * OCTIMETERS_PER_SUBCELL;
             let z0 = cell.z * 256 + sj * OCTIMETERS_PER_SUBCELL;
-            emit_flat_quad(
-                [
-                    x0,
-                    z0,
-                    x0 + OCTIMETERS_PER_SUBCELL,
-                    z0 + OCTIMETERS_PER_SUBCELL,
-                ],
-                color,
-                &surface,
-                tris,
-            );
+            emit_flat_quad([x0, z0, x0 + OCTIMETERS_PER_SUBCELL, z0 + OCTIMETERS_PER_SUBCELL], color, &surface, tris);
         }
     }
 }

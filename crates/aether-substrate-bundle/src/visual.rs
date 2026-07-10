@@ -36,9 +36,7 @@ pub fn decode_png(bytes: &[u8]) -> Result<Image, ImageError> {
     // slice in a `Cursor` to satisfy both bounds (the slice itself is
     // already `Read` but neither `BufRead` nor `Seek`).
     let decoder = png::Decoder::new(Cursor::new(bytes));
-    let mut reader = decoder
-        .read_info()
-        .map_err(|e| ImageError::Decode(e.to_string()))?;
+    let mut reader = decoder.read_info().map_err(|e| ImageError::Decode(e.to_string()))?;
     let info = reader.info();
     let width = info.width;
     let height = info.height;
@@ -48,18 +46,11 @@ pub fn decode_png(bytes: &[u8]) -> Result<Image, ImageError> {
     }
     // png 0.18 returns `Option<usize>` here (None on size overflow);
     // surface it as a decode error rather than panicking.
-    let buf_size = reader
-        .output_buffer_size()
-        .ok_or_else(|| ImageError::Decode("output buffer size overflowed".to_string()))?;
+    let buf_size =
+        reader.output_buffer_size().ok_or_else(|| ImageError::Decode("output buffer size overflowed".to_string()))?;
     let mut buf = vec![0u8; buf_size];
-    reader
-        .next_frame(&mut buf)
-        .map_err(|e| ImageError::Decode(e.to_string()))?;
-    Ok(Image {
-        width,
-        height,
-        rgba: buf,
-    })
+    reader.next_frame(&mut buf).map_err(|e| ImageError::Decode(e.to_string()))?;
+    Ok(Image { width, height, rgba: buf })
 }
 
 /// Asserts at least one pixel has a non-zero RGB component. Alpha
@@ -71,10 +62,7 @@ pub fn not_all_black(image: &Image) -> Result<(), String> {
     if any_pixel_lit(image, None, [0, 0, 0], 0) == Some(true) {
         return Ok(());
     }
-    Err(format!(
-        "all {}x{} pixels are black (RGB=0,0,0)",
-        image.width, image.height
-    ))
+    Err(format!("all {}x{} pixels are black (RGB=0,0,0)", image.width, image.height))
 }
 
 /// A pixel is "lit" when at least one of its RGB channels diverges
@@ -117,24 +105,12 @@ fn clamp_region(region: Option<Rect>, width: u32, height: u32) -> Option<Rect> {
     }
     let (min_x, min_y, max_x, max_y) = region.map_or_else(
         || (0, 0, width - 1, height - 1),
-        |rect| {
-            (
-                rect.min_x,
-                rect.min_y,
-                rect.max_x.min(width - 1),
-                rect.max_y.min(height - 1),
-            )
-        },
+        |rect| (rect.min_x, rect.min_y, rect.max_x.min(width - 1), rect.max_y.min(height - 1)),
     );
     if min_x > max_x || min_y > max_y {
         return None;
     }
-    Some(Rect {
-        min_x,
-        min_y,
-        max_x,
-        max_y,
-    })
+    Some(Rect { min_x, min_y, max_x, max_y })
 }
 
 /// Pixel count of an already-clamped region rect (inclusive on both
@@ -177,10 +153,7 @@ fn any_pixel_lit(image: &Image, region: Option<Rect>, bg: [u8; 3], tol: u8) -> O
 /// reference color, suitable for `StepReport::Fail`.
 pub fn differs_from_background(image: &Image, tolerance: u8) -> Result<(), String> {
     if image.rgba.len() < 4 {
-        return Err(format!(
-            "image too small to sample background: {}x{}",
-            image.width, image.height
-        ));
+        return Err(format!("image too small to sample background: {}x{}", image.width, image.height));
     }
     let bg = [image.rgba[0], image.rgba[1], image.rgba[2]];
     if any_pixel_lit(image, None, bg, tolerance) == Some(true) {
@@ -206,23 +179,13 @@ pub struct Rect {
 
 impl From<FrameRect> for Rect {
     fn from(rect: FrameRect) -> Self {
-        Self {
-            min_x: rect.min_x,
-            min_y: rect.min_y,
-            max_x: rect.max_x,
-            max_y: rect.max_y,
-        }
+        Self { min_x: rect.min_x, min_y: rect.min_y, max_x: rect.max_x, max_y: rect.max_y }
     }
 }
 
 impl From<Rect> for FrameRect {
     fn from(rect: Rect) -> Self {
-        Self {
-            min_x: rect.min_x,
-            min_y: rect.min_y,
-            max_x: rect.max_x,
-            max_y: rect.max_y,
-        }
+        Self { min_x: rect.min_x, min_y: rect.min_y, max_x: rect.max_x, max_y: rect.max_y }
     }
 }
 
@@ -264,9 +227,7 @@ fn coverage_in_region(image: &Image, region: Option<Rect>, bg: [u8; 3], tol: u8)
         return 0.0;
     };
     let total = region_pixel_count(rect);
-    let lit = region_pixels(image, rect)
-        .filter(|(_, _, rgb)| is_lit(rgb, bg, tol))
-        .count();
+    let lit = region_pixels(image, rect).filter(|(_, _, rgb)| is_lit(rgb, bg, tol)).count();
     lit as f32 / total as f32
 }
 
@@ -289,12 +250,7 @@ pub fn coverage(image: &Image, bg: [u8; 3], tol: u8) -> f32 {
 /// in frame pixel coordinates (not region-relative) within the
 /// frame-clamped `region`. `region: None` scores the whole frame.
 #[allow(clippy::cast_precision_loss)]
-fn centroid_in_region(
-    image: &Image,
-    region: Option<Rect>,
-    bg: [u8; 3],
-    tol: u8,
-) -> Option<(f32, f32)> {
+fn centroid_in_region(image: &Image, region: Option<Rect>, bg: [u8; 3], tol: u8) -> Option<(f32, f32)> {
     let rect = clamp_region(region, image.width, image.height)?;
     let mut sum_x = 0u64;
     let mut sum_y = 0u64;
@@ -329,12 +285,7 @@ pub fn centroid(image: &Image, bg: [u8; 3], tol: u8) -> Option<(f32, f32)> {
 /// coordinates (not region-relative) within the frame-clamped `region`.
 /// `region: None` scores the whole frame.
 #[allow(clippy::cast_possible_truncation)]
-fn bounding_box_in_region(
-    image: &Image,
-    region: Option<Rect>,
-    bg: [u8; 3],
-    tol: u8,
-) -> Option<Rect> {
+fn bounding_box_in_region(image: &Image, region: Option<Rect>, bg: [u8; 3], tol: u8) -> Option<Rect> {
     let rect = clamp_region(region, image.width, image.height)?;
     let mut min_x = u32::MAX;
     let mut min_y = u32::MAX;
@@ -351,12 +302,7 @@ fn bounding_box_in_region(
         max_x = max_x.max(x);
         max_y = max_y.max(y);
     }
-    any_lit.then_some(Rect {
-        min_x,
-        min_y,
-        max_x,
-        max_y,
-    })
+    any_lit.then_some(Rect { min_x, min_y, max_x, max_y })
 }
 
 /// Inclusive axis-aligned bounding box of the lit region relative to
@@ -388,19 +334,8 @@ pub fn bounding_box(image: &Image, bg: [u8; 3], tol: u8) -> Option<Rect> {
 /// geometry.
 #[must_use]
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-pub fn target_color_stats(
-    image: &Image,
-    target: [u8; 3],
-    tolerance: u8,
-    region: Option<Rect>,
-) -> ColorRegionStats {
-    let empty = ColorRegionStats {
-        sampled: 0,
-        matching: 0,
-        fraction: 0.0,
-        centroid: None,
-        bounding_box: None,
-    };
+pub fn target_color_stats(image: &Image, target: [u8; 3], tolerance: u8, region: Option<Rect>) -> ColorRegionStats {
+    let empty = ColorRegionStats { sampled: 0, matching: 0, fraction: 0.0, centroid: None, bounding_box: None };
     let Some(rect) = clamp_region(region, image.width, image.height) else {
         return empty;
     };
@@ -431,16 +366,8 @@ pub fn target_color_stats(
         sampled,
         matching,
         fraction: matching as f32 / sampled as f32,
-        centroid: Some(FramePoint {
-            x: sum_x as f32 / matching as f32,
-            y: sum_y as f32 / matching as f32,
-        }),
-        bounding_box: Some(Rect {
-            min_x,
-            min_y,
-            max_x,
-            max_y,
-        }),
+        centroid: Some(FramePoint { x: sum_x as f32 / matching as f32, y: sum_y as f32 / matching as f32 }),
+        bounding_box: Some(Rect { min_x, min_y, max_x, max_y }),
     }
 }
 
@@ -502,9 +429,7 @@ pub fn mean_absolute_error(a: &Image, b: &Image) -> Result<f32, String> {
         .chunks_exact(4)
         .zip(b.rgba.chunks_exact(4))
         .map(|(ac, bc)| {
-            u64::from(ac[0].abs_diff(bc[0]))
-                + u64::from(ac[1].abs_diff(bc[1]))
-                + u64::from(ac[2].abs_diff(bc[2]))
+            u64::from(ac[0].abs_diff(bc[0])) + u64::from(ac[1].abs_diff(bc[1])) + u64::from(ac[2].abs_diff(bc[2]))
         })
         .sum();
     Ok(total as f32 / (pixel_count as f32 * 3.0 * 255.0))
@@ -524,15 +449,10 @@ pub fn score_similarity(
     let Some(ref_capture) = reference else {
         return Ok((None, None));
     };
-    let ref_image = decode_png(&ref_capture.png_bytes)
-        .map_err(|e| format!("similarity reference decode failed: {e}"))?;
-    let captured = Image {
-        width,
-        height,
-        rgba: rgba.to_vec(),
-    };
-    let score = mean_absolute_error(&captured, &ref_image)
-        .map_err(|e| format!("similarity comparison failed: {e}"))?;
+    let ref_image =
+        decode_png(&ref_capture.png_bytes).map_err(|e| format!("similarity reference decode failed: {e}"))?;
+    let captured = Image { width, height, rgba: rgba.to_vec() };
+    let score = mean_absolute_error(&captured, &ref_image).map_err(|e| format!("similarity comparison failed: {e}"))?;
     Ok((Some(score), Some(score <= ref_capture.threshold)))
 }
 
@@ -555,48 +475,29 @@ pub fn score_similarity(
 /// verdict runs without copying the buffer.
 #[must_use]
 pub fn run_checks(rgba: Vec<u8>, width: u32, height: u32, checks: &[FrameCheck]) -> FrameVerdict {
-    let image = Image {
-        width,
-        height,
-        rgba,
-    };
+    let image = Image { width, height, rgba };
     let results = checks
         .iter()
         .map(|check| {
-            let bg = check
-                .background
-                .unwrap_or_else(|| background_top_left(&image));
+            let bg = check.background.unwrap_or_else(|| background_top_left(&image));
             let region: Option<Rect> = check.region.map(Rect::from);
             match check.reduction {
                 FrameReduction::NotAllBlack => {
                     let (passed, detail) = match any_pixel_lit(&image, region, [0, 0, 0], 0) {
                         Some(true) => (true, None),
-                        Some(false) => (
-                            false,
-                            Some(
-                                "no pixel in the scored region has a non-zero RGB component"
-                                    .to_string(),
-                            ),
-                        ),
+                        Some(false) => {
+                            (false, Some("no pixel in the scored region has a non-zero RGB component".to_string()))
+                        }
                         None => (
                             false,
-                            Some(format!(
-                                "region clamps to zero pixels on a {}x{} frame",
-                                image.width, image.height
-                            )),
+                            Some(format!("region clamps to zero pixels on a {}x{} frame", image.width, image.height)),
                         ),
                     };
                     FrameCheckResult::NotAllBlack { passed, detail }
                 }
                 FrameReduction::DiffersFromBackground => {
                     let (passed, detail) = if image.rgba.len() < 4 {
-                        (
-                            false,
-                            Some(format!(
-                                "image too small to sample background: {}x{}",
-                                image.width, image.height
-                            )),
-                        )
+                        (false, Some(format!("image too small to sample background: {}x{}", image.width, image.height)))
                     } else {
                         let top_left = [image.rgba[0], image.rgba[1], image.rgba[2]];
                         match any_pixel_lit(&image, region, top_left, check.tolerance) {
@@ -626,22 +527,16 @@ pub fn run_checks(rgba: Vec<u8>, width: u32, height: u32, checks: &[FrameCheck])
                 },
                 FrameReduction::Centroid => FrameCheckResult::Centroid {
                     background: bg,
-                    centroid: centroid_in_region(&image, region, bg, check.tolerance)
-                        .map(<[f32; 2]>::from),
+                    centroid: centroid_in_region(&image, region, bg, check.tolerance).map(<[f32; 2]>::from),
                 },
                 FrameReduction::BoundingBox => FrameCheckResult::BoundingBox {
                     background: bg,
-                    rect: bounding_box_in_region(&image, region, bg, check.tolerance)
-                        .map(FrameRect::from),
+                    rect: bounding_box_in_region(&image, region, bg, check.tolerance).map(FrameRect::from),
                 },
             }
         })
         .collect();
-    FrameVerdict {
-        width,
-        height,
-        results,
-    }
+    FrameVerdict { width, height, results }
 }
 
 /// RGBA8 diagnostic mask for one `FrameCheck`, at the same dimensions
@@ -663,22 +558,15 @@ pub(crate) fn diagnostic_mask(image: &Image, check: &FrameCheck) -> Vec<u8> {
     let (bg, tolerance) = match check.reduction {
         FrameReduction::NotAllBlack => ([0, 0, 0], 0u8),
         FrameReduction::DiffersFromBackground => (background_top_left(image), check.tolerance),
-        FrameReduction::Coverage | FrameReduction::Centroid | FrameReduction::BoundingBox => (
-            check
-                .background
-                .unwrap_or_else(|| background_top_left(image)),
-            check.tolerance,
-        ),
+        FrameReduction::Coverage | FrameReduction::Centroid | FrameReduction::BoundingBox => {
+            (check.background.unwrap_or_else(|| background_top_left(image)), check.tolerance)
+        }
     };
     let mut mask = vec![0u8; image.rgba.len()];
     if let Some(rect) = clamp_region(region, image.width, image.height) {
         for (x, y, rgb) in region_pixels(image, rect) {
             let start = ((y * image.width + x) * 4) as usize;
-            let pixel = if is_lit(rgb, bg, tolerance) {
-                [255, 255, 255, 255]
-            } else {
-                [0, 0, 0, 255]
-            };
+            let pixel = if is_lit(rgb, bg, tolerance) { [255, 255, 255, 255] } else { [0, 0, 0, 255] };
             mask[start..start + 4].copy_from_slice(&pixel);
         }
     }
@@ -697,11 +585,7 @@ mod tests {
         for _ in 0..(width * height) {
             buf.extend_from_slice(&rgba);
         }
-        Image {
-            width,
-            height,
-            rgba: buf,
-        }
+        Image { width, height, rgba: buf }
     }
 
     /// Paint a single filled rectangle in `fill` over a solid `bg`
@@ -726,51 +610,27 @@ mod tests {
     fn coverage_matches_rect_area_fraction() {
         let bg = [69, 79, 105];
         // 4×4 lit rect (4..=7 × 6..=9) on a 16×16 frame: 16 of 256 px.
-        let rect = Rect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 9,
-        };
+        let rect = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
         let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
         let fraction = coverage(&img, bg, 5);
-        assert!(
-            (fraction - 16.0 / 256.0).abs() < 1e-6,
-            "coverage was {fraction}, expected 16/256",
-        );
+        assert!((fraction - 16.0 / 256.0).abs() < 1e-6, "coverage was {fraction}, expected 16/256");
     }
 
     #[test]
     fn centroid_lands_at_rect_center() {
         let bg = [69, 79, 105];
-        let rect = Rect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 9,
-        };
+        let rect = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
         let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
         let (center_x, center_y) = centroid(&img, bg, 5).expect("a lit mask has a centroid");
         // Mean of the inclusive spans 4..=7 and 6..=9.
-        assert!(
-            (center_x - 5.5).abs() < 1e-6,
-            "centroid x was {center_x}, expected 5.5",
-        );
-        assert!(
-            (center_y - 7.5).abs() < 1e-6,
-            "centroid y was {center_y}, expected 7.5",
-        );
+        assert!((center_x - 5.5).abs() < 1e-6, "centroid x was {center_x}, expected 5.5");
+        assert!((center_y - 7.5).abs() < 1e-6, "centroid y was {center_y}, expected 7.5");
     }
 
     #[test]
     fn bounding_box_recovers_rect_corners() {
         let bg = [69, 79, 105];
-        let rect = Rect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 9,
-        };
+        let rect = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
         let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
         assert_eq!(bounding_box(&img, bg, 5), Some(rect));
     }
@@ -779,37 +639,19 @@ mod tests {
     fn region_scoped_coverage_divides_by_clamped_region_area_not_frame_area() {
         let bg = [69, 79, 105];
         // 4×4 lit rect (4..=7 × 6..=9) on a 16×16 frame.
-        let rect = Rect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 9,
-        };
+        let rect = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
         let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
         // A region that fully contains the lit rect plus surrounding
         // background: 8×8 region (2..=9 × 4..=11), of which the same
         // 16 pixels are lit. Coverage is relative to the 64-pixel
         // region, not the 256-pixel frame.
-        let region = Rect {
-            min_x: 2,
-            min_y: 4,
-            max_x: 9,
-            max_y: 11,
-        };
+        let region = Rect { min_x: 2, min_y: 4, max_x: 9, max_y: 11 };
         let fraction = coverage_in_region(&img, Some(region), bg, 5);
-        assert!(
-            (fraction - 16.0 / 64.0).abs() < 1e-6,
-            "region coverage was {fraction}, expected 16/64",
-        );
+        assert!((fraction - 16.0 / 64.0).abs() < 1e-6, "region coverage was {fraction}, expected 16/64");
         // A region that excludes half the lit rect (only rows 6..=7 of
         // the lit rect's 6..=9) scores just the included lit pixels
         // over the smaller region's area.
-        let half_region = Rect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 7,
-        };
+        let half_region = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 7 };
         let half_fraction = coverage_in_region(&img, Some(half_region), bg, 5);
         assert!(
             (half_fraction - 8.0 / 8.0).abs() < 1e-6,
@@ -823,25 +665,9 @@ mod tests {
         // Two separate lit rects: one the region will include, one it
         // will exclude, so a region-scoped centroid/bbox that leaked
         // the excluded rect's pixels would fail these asserts.
-        let included_rect = Rect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 9,
-        };
-        let excluded_rect = Rect {
-            min_x: 12,
-            min_y: 12,
-            max_x: 14,
-            max_y: 14,
-        };
-        let mut img = solid_with_rect(
-            16,
-            16,
-            [bg[0], bg[1], bg[2], 255],
-            [200, 32, 32, 255],
-            included_rect,
-        );
+        let included_rect = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
+        let excluded_rect = Rect { min_x: 12, min_y: 12, max_x: 14, max_y: 14 };
+        let mut img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], included_rect);
         for y in excluded_rect.min_y..=excluded_rect.max_y {
             for x in excluded_rect.min_x..=excluded_rect.max_x {
                 let start = ((y * 16 + x) * 4) as usize;
@@ -850,86 +676,51 @@ mod tests {
         }
         // Region covers only `included_rect` (with some background
         // padding), excluding `excluded_rect` entirely.
-        let region = Rect {
-            min_x: 0,
-            min_y: 0,
-            max_x: 9,
-            max_y: 11,
-        };
-        let (center_x, center_y) =
-            centroid_in_region(&img, Some(region), bg, 5).expect("region has a lit sub-rect");
+        let region = Rect { min_x: 0, min_y: 0, max_x: 9, max_y: 11 };
+        let (center_x, center_y) = centroid_in_region(&img, Some(region), bg, 5).expect("region has a lit sub-rect");
         assert!(
             (center_x - 5.5).abs() < 1e-6 && (center_y - 7.5).abs() < 1e-6,
             "region centroid ({center_x}, {center_y}) should be the included rect's frame-\
              coordinate center (5.5, 7.5), not blended with the excluded rect",
         );
-        let bbox =
-            bounding_box_in_region(&img, Some(region), bg, 5).expect("region has a lit sub-rect");
-        assert_eq!(
-            bbox, included_rect,
-            "region bounding box should be the included rect's own frame coordinates",
-        );
+        let bbox = bounding_box_in_region(&img, Some(region), bg, 5).expect("region has a lit sub-rect");
+        assert_eq!(bbox, included_rect, "region bounding box should be the included rect's own frame coordinates");
     }
 
     #[test]
     fn region_scoped_reductions_clamp_an_overhanging_region_to_the_frame() {
         let bg = [69, 79, 105];
         // Lit rect touching the bottom-right corner of a 16×16 frame.
-        let rect = Rect {
-            min_x: 12,
-            min_y: 12,
-            max_x: 15,
-            max_y: 15,
-        };
+        let rect = Rect { min_x: 12, min_y: 12, max_x: 15, max_y: 15 };
         let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
         // Region overhangs the frame on both far edges; clamping should
         // restrict scoring to the in-frame intersection (12..=15 ×
         // 12..=15 — exactly the lit rect), an 16-pixel area.
-        let overhanging_region = Rect {
-            min_x: 12,
-            min_y: 12,
-            max_x: 100,
-            max_y: 100,
-        };
+        let overhanging_region = Rect { min_x: 12, min_y: 12, max_x: 100, max_y: 100 };
         let fraction = coverage_in_region(&img, Some(overhanging_region), bg, 5);
         assert!(
             (fraction - 16.0 / 16.0).abs() < 1e-6,
             "clamped-region coverage was {fraction}, expected 16/16 (fully lit clamped region)",
         );
-        let bbox = bounding_box_in_region(&img, Some(overhanging_region), bg, 5)
-            .expect("clamped region has a lit sub-rect");
+        let bbox =
+            bounding_box_in_region(&img, Some(overhanging_region), bg, 5).expect("clamped region has a lit sub-rect");
         assert_eq!(bbox, rect);
     }
 
     #[test]
     fn region_scoped_reductions_empty_mask_on_degenerate_or_out_of_bounds_region() {
         let bg = [69, 79, 105];
-        let rect = Rect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 9,
-        };
+        let rect = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
         let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
 
         // Fully out-of-bounds region (frame is 16×16).
-        let out_of_bounds = Rect {
-            min_x: 20,
-            min_y: 20,
-            max_x: 25,
-            max_y: 25,
-        };
+        let out_of_bounds = Rect { min_x: 20, min_y: 20, max_x: 25, max_y: 25 };
         assert_eq!(coverage_in_region(&img, Some(out_of_bounds), bg, 5), 0.0);
         assert!(centroid_in_region(&img, Some(out_of_bounds), bg, 5).is_none());
         assert!(bounding_box_in_region(&img, Some(out_of_bounds), bg, 5).is_none());
 
         // Degenerate region: min > max on both axes.
-        let degenerate = Rect {
-            min_x: 10,
-            min_y: 10,
-            max_x: 2,
-            max_y: 2,
-        };
+        let degenerate = Rect { min_x: 10, min_y: 10, max_x: 2, max_y: 2 };
         assert_eq!(coverage_in_region(&img, Some(degenerate), bg, 5), 0.0);
         assert!(centroid_in_region(&img, Some(degenerate), bg, 5).is_none());
         assert!(bounding_box_in_region(&img, Some(degenerate), bg, 5).is_none());
@@ -943,17 +734,11 @@ mod tests {
         let tolerance = 5;
         let on_boundary = solid(2, 2, [205, 37, 27, 255]);
         let stats = target_color_stats(&on_boundary, target, tolerance, None);
-        assert_eq!(
-            stats.matching, 4,
-            "a pixel exactly at the tolerance boundary must match"
-        );
+        assert_eq!(stats.matching, 4, "a pixel exactly at the tolerance boundary must match");
 
         let past_boundary = solid(2, 2, [206, 32, 32, 255]);
         let stats = target_color_stats(&past_boundary, target, tolerance, None);
-        assert_eq!(
-            stats.matching, 0,
-            "a pixel one unit past the tolerance boundary must not match"
-        );
+        assert_eq!(stats.matching, 0, "a pixel one unit past the tolerance boundary must not match");
         assert_eq!(stats.sampled, 4);
         assert_eq!(stats.fraction, 0.0);
         assert_eq!(stats.centroid, None);
@@ -971,10 +756,7 @@ mod tests {
         let opaque_stats = target_color_stats(&opaque, target, 0, None);
         let transparent_stats = target_color_stats(&transparent, target, 0, None);
         assert_eq!(opaque_stats.matching, 4);
-        assert_eq!(
-            transparent_stats.matching, 4,
-            "alpha must not affect the target-color match"
-        );
+        assert_eq!(transparent_stats.matching, 4, "alpha must not affect the target-color match");
     }
 
     #[test]
@@ -983,25 +765,10 @@ mod tests {
         let bg = [69, 79, 105];
         // Two separate target-colored rects: one the requested region
         // will include, one it will exclude entirely.
-        let included_rect = Rect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 9,
-        };
-        let excluded_rect = Rect {
-            min_x: 12,
-            min_y: 12,
-            max_x: 14,
-            max_y: 14,
-        };
-        let mut img = solid_with_rect(
-            16,
-            16,
-            [bg[0], bg[1], bg[2], 255],
-            [target[0], target[1], target[2], 255],
-            included_rect,
-        );
+        let included_rect = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
+        let excluded_rect = Rect { min_x: 12, min_y: 12, max_x: 14, max_y: 14 };
+        let mut img =
+            solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [target[0], target[1], target[2], 255], included_rect);
         for y in excluded_rect.min_y..=excluded_rect.max_y {
             for x in excluded_rect.min_x..=excluded_rect.max_x {
                 let start = ((y * 16 + x) * 4) as usize;
@@ -1009,36 +776,17 @@ mod tests {
             }
         }
         // Region covers only `included_rect` (with background padding).
-        let region = Rect {
-            min_x: 0,
-            min_y: 0,
-            max_x: 9,
-            max_y: 11,
-        };
+        let region = Rect { min_x: 0, min_y: 0, max_x: 9, max_y: 11 };
         let stats = target_color_stats(&img, target, 5, Some(region));
-        assert_eq!(
-            stats.matching, 16,
-            "only the 4x4 included rect should count, not the excluded rect too"
-        );
+        assert_eq!(stats.matching, 16, "only the 4x4 included rect should count, not the excluded rect too");
     }
 
     #[test]
     fn target_color_stats_reports_frame_coordinate_centroid_and_bounds() {
         let target = [200, 32, 32];
         let bg = [69, 79, 105];
-        let rect = Rect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 9,
-        };
-        let img = solid_with_rect(
-            16,
-            16,
-            [bg[0], bg[1], bg[2], 255],
-            [target[0], target[1], target[2], 255],
-            rect,
-        );
+        let rect = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
+        let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [target[0], target[1], target[2], 255], rect);
         let stats = target_color_stats(&img, target, 5, None);
         let center = stats.centroid.expect("a matched region has a centroid");
         assert!(
@@ -1060,27 +808,12 @@ mod tests {
         let target = [200, 32, 32];
         let bg = [69, 79, 105];
         // 4x4 target-colored rect on a 16x16 frame: 16 of 256 pixels.
-        let rect = Rect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 9,
-        };
-        let img = solid_with_rect(
-            16,
-            16,
-            [bg[0], bg[1], bg[2], 255],
-            [target[0], target[1], target[2], 255],
-            rect,
-        );
+        let rect = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
+        let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [target[0], target[1], target[2], 255], rect);
         let stats = target_color_stats(&img, target, 5, None);
         assert_eq!(stats.sampled, 256);
         assert_eq!(stats.matching, 16);
-        assert!(
-            (stats.fraction - 16.0 / 256.0).abs() < 1e-6,
-            "fraction was {}, expected 16/256",
-            stats.fraction,
-        );
+        assert!((stats.fraction - 16.0 / 256.0).abs() < 1e-6, "fraction was {}, expected 16/256", stats.fraction);
     }
 
     #[test]
@@ -1089,28 +822,12 @@ mod tests {
         let bg = [69, 79, 105];
         // Target-colored rect touching the bottom-right corner of a
         // 16x16 frame.
-        let rect = Rect {
-            min_x: 12,
-            min_y: 12,
-            max_x: 15,
-            max_y: 15,
-        };
-        let img = solid_with_rect(
-            16,
-            16,
-            [bg[0], bg[1], bg[2], 255],
-            [target[0], target[1], target[2], 255],
-            rect,
-        );
+        let rect = Rect { min_x: 12, min_y: 12, max_x: 15, max_y: 15 };
+        let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [target[0], target[1], target[2], 255], rect);
         // Region overhangs the frame on both far edges; clamping should
         // restrict sampling to the in-frame intersection (12..=15 x
         // 12..=15 — exactly the target rect), a 16-pixel area.
-        let overhanging_region = Rect {
-            min_x: 12,
-            min_y: 12,
-            max_x: 100,
-            max_y: 100,
-        };
+        let overhanging_region = Rect { min_x: 12, min_y: 12, max_x: 100, max_y: 100 };
         let stats = target_color_stats(&img, target, 5, Some(overhanging_region));
         assert_eq!(stats.sampled, 16);
         assert_eq!(stats.matching, 16);
@@ -1121,27 +838,11 @@ mod tests {
     fn target_color_stats_empty_on_degenerate_or_out_of_bounds_region() {
         let target = [200, 32, 32];
         let bg = [69, 79, 105];
-        let rect = Rect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 9,
-        };
-        let img = solid_with_rect(
-            16,
-            16,
-            [bg[0], bg[1], bg[2], 255],
-            [target[0], target[1], target[2], 255],
-            rect,
-        );
+        let rect = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
+        let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [target[0], target[1], target[2], 255], rect);
 
         // Fully out-of-bounds region (frame is 16x16).
-        let out_of_bounds = Rect {
-            min_x: 20,
-            min_y: 20,
-            max_x: 25,
-            max_y: 25,
-        };
+        let out_of_bounds = Rect { min_x: 20, min_y: 20, max_x: 25, max_y: 25 };
         let stats = target_color_stats(&img, target, 5, Some(out_of_bounds));
         assert_eq!(stats.sampled, 0);
         assert_eq!(stats.matching, 0);
@@ -1150,12 +851,7 @@ mod tests {
         assert!(stats.bounding_box.is_none());
 
         // Degenerate region: min > max on both axes.
-        let degenerate = Rect {
-            min_x: 10,
-            min_y: 10,
-            max_x: 2,
-            max_y: 2,
-        };
+        let degenerate = Rect { min_x: 10, min_y: 10, max_x: 2, max_y: 2 };
         let stats = target_color_stats(&img, target, 5, Some(degenerate));
         assert_eq!(stats.sampled, 0);
         assert_eq!(stats.matching, 0);
@@ -1181,11 +877,7 @@ mod tests {
         assert_eq!(background_top_left(&img), [69, 79, 105]);
         // An image with no first pixel falls back to black rather than
         // indexing out of bounds.
-        let empty = Image {
-            width: 0,
-            height: 0,
-            rgba: Vec::new(),
-        };
+        let empty = Image { width: 0, height: 0, rgba: Vec::new() };
         assert_eq!(background_top_left(&empty), [0, 0, 0]);
     }
 
@@ -1232,10 +924,7 @@ mod tests {
         let b = solid(2, 2, [0, 0, 0, 255]);
         let score = mean_absolute_error(&a, &b).expect("test setup: same dims");
         let expected = 1.0_f32 / 3.0;
-        assert!(
-            (score - expected).abs() < 1e-6,
-            "red vs black MAE was {score}, expected {expected}",
-        );
+        assert!((score - expected).abs() < 1e-6, "red vs black MAE was {score}, expected {expected}");
     }
 
     #[test]
@@ -1243,10 +932,7 @@ mod tests {
         let a = solid(4, 4, [0, 0, 0, 255]);
         let b = solid(8, 8, [0, 0, 0, 255]);
         let err = mean_absolute_error(&a, &b).expect_err("test setup: different dims must err");
-        assert!(
-            err.contains("dimension mismatch"),
-            "error message should describe the mismatch: {err}",
-        );
+        assert!(err.contains("dimension mismatch"), "error message should describe the mismatch: {err}");
     }
 
     #[test]
@@ -1261,8 +947,7 @@ mod tests {
     #[test]
     fn differs_from_background_fails_on_uniform_color() {
         let img = solid(8, 8, [69, 79, 105, 255]);
-        let err =
-            differs_from_background(&img, 5).expect_err("test setup: uniform background must fail");
+        let err = differs_from_background(&img, 5).expect_err("test setup: uniform background must fail");
         assert!(err.contains("69,79,105"));
         assert!(err.contains("8x8"));
     }
@@ -1287,53 +972,26 @@ mod tests {
 
     #[test]
     fn differs_from_background_handles_tiny_image() {
-        let img = Image {
-            width: 0,
-            height: 0,
-            rgba: Vec::new(),
-        };
-        let err = differs_from_background(&img, 5)
-            .expect_err("test setup: empty image must fail with \"too small\"");
+        let img = Image { width: 0, height: 0, rgba: Vec::new() };
+        let err = differs_from_background(&img, 5).expect_err("test setup: empty image must fail with \"too small\"");
         assert!(err.contains("too small"));
     }
 
     fn pixel_at(rgba: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
         let start = ((y * width + x) * 4) as usize;
-        [
-            rgba[start],
-            rgba[start + 1],
-            rgba[start + 2],
-            rgba[start + 3],
-        ]
+        [rgba[start], rgba[start + 1], rgba[start + 2], rgba[start + 3]]
     }
 
     #[test]
     fn diagnostic_mask_marks_lit_white_and_unlit_black() {
         let bg = [69, 79, 105];
-        let rect = Rect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 9,
-        };
+        let rect = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
         let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
-        let check = FrameCheck {
-            reduction: FrameReduction::Coverage,
-            tolerance: 5,
-            background: Some(bg),
-            region: None,
-        };
+        let check =
+            FrameCheck { reduction: FrameReduction::Coverage, tolerance: 5, background: Some(bg), region: None };
         let mask = diagnostic_mask(&img, &check);
-        assert_eq!(
-            pixel_at(&mask, 16, 5, 7),
-            [255, 255, 255, 255],
-            "a lit pixel should render opaque white",
-        );
-        assert_eq!(
-            pixel_at(&mask, 16, 0, 0),
-            [0, 0, 0, 255],
-            "an in-frame unlit pixel should render opaque black",
-        );
+        assert_eq!(pixel_at(&mask, 16, 5, 7), [255, 255, 255, 255], "a lit pixel should render opaque white");
+        assert_eq!(pixel_at(&mask, 16, 0, 0), [0, 0, 0, 255], "an in-frame unlit pixel should render opaque black");
     }
 
     #[test]
@@ -1359,28 +1017,15 @@ mod tests {
         );
 
         let verdict = run_checks(img.rgba, img.width, img.height, &[check]);
-        assert!(matches!(
-            verdict.results.as_slice(),
-            [FrameCheckResult::NotAllBlack { passed: true, .. }],
-        ));
+        assert!(matches!(verdict.results.as_slice(), [FrameCheckResult::NotAllBlack { passed: true, .. }],));
     }
 
     #[test]
     fn diagnostic_mask_clips_out_of_region_pixels_to_transparent() {
         let bg = [69, 79, 105];
-        let rect = Rect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 9,
-        };
+        let rect = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
         let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
-        let region = FrameRect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 9,
-        };
+        let region = FrameRect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
         let check = FrameCheck {
             reduction: FrameReduction::Coverage,
             tolerance: 5,
@@ -1405,12 +1050,7 @@ mod tests {
     fn diagnostic_mask_is_fully_transparent_on_empty_region() {
         let bg = [69, 79, 105];
         let img = solid(8, 8, [bg[0], bg[1], bg[2], 255]);
-        let out_of_bounds = FrameRect {
-            min_x: 20,
-            min_y: 20,
-            max_x: 25,
-            max_y: 25,
-        };
+        let out_of_bounds = FrameRect { min_x: 20, min_y: 20, max_x: 25, max_y: 25 };
         let check = FrameCheck {
             reduction: FrameReduction::Coverage,
             tolerance: 5,
@@ -1427,33 +1067,17 @@ mod tests {
     #[test]
     fn diagnostic_mask_lit_count_agrees_with_run_checks_coverage() {
         let bg = [69, 79, 105];
-        let rect = Rect {
-            min_x: 4,
-            min_y: 6,
-            max_x: 7,
-            max_y: 9,
-        };
+        let rect = Rect { min_x: 4, min_y: 6, max_x: 7, max_y: 9 };
         let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
-        let check = FrameCheck {
-            reduction: FrameReduction::Coverage,
-            tolerance: 5,
-            background: Some(bg),
-            region: None,
-        };
+        let check =
+            FrameCheck { reduction: FrameReduction::Coverage, tolerance: 5, background: Some(bg), region: None };
         let mask = diagnostic_mask(&img, &check);
-        let lit_count = mask
-            .chunks_exact(4)
-            .filter(|pixel| *pixel == [255, 255, 255, 255])
-            .count();
+        let lit_count = mask.chunks_exact(4).filter(|pixel| *pixel == [255, 255, 255, 255]).count();
         let verdict = run_checks(img.rgba.clone(), img.width, img.height, &[check]);
         let FrameCheckResult::Coverage { fraction, .. } = &verdict.results[0] else {
             panic!("expected a Coverage result");
         };
-        #[allow(
-            clippy::cast_precision_loss,
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss
-        )]
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let expected_lit = (fraction * (16 * 16) as f32).round() as usize;
         assert_eq!(
             lit_count, expected_lit,

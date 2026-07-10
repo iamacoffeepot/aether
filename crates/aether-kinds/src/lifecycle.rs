@@ -21,18 +21,7 @@ use bytemuck::{Pod, Zeroable};
 /// Zero-sized unit kinds like `Tick` trivially satisfy that through
 /// `Pod` + `Zeroable` — no padding, no uninitialized bits.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.tick")]
 pub struct Tick;
 
@@ -42,18 +31,7 @@ pub struct Tick;
 /// [`InitComponents`] fires. Capabilities that need to send mail to
 /// peers during boot subscribe to this stage.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.init_caps")]
 pub struct InitCaps;
 
@@ -62,18 +40,7 @@ pub struct InitCaps;
 /// begins. Component-category actors subscribe here when they need to
 /// reach already-wired capabilities during their boot logic.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.init_components")]
 pub struct InitComponents;
 
@@ -88,18 +55,7 @@ pub struct InitComponents;
 /// on a chassis that doesn't declare it rejects fail-fast at wire time
 /// per ADR-0082 §7.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.render")]
 pub struct Render;
 
@@ -108,18 +64,7 @@ pub struct Render;
 /// The default desktop graph routes the quit edge through this stage so
 /// the current frame finishes drawing before shutdown.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.present")]
 pub struct Present;
 
@@ -130,18 +75,7 @@ pub struct Present;
 /// runs each actor's `unwire` finaliser. Distinct from the actor
 /// framework's per-actor `unwire` hook — ADR-0082 §12.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.shutdown")]
 pub struct Shutdown;
 
@@ -152,18 +86,7 @@ pub struct Shutdown;
 /// `WindowEvent::CloseRequested`, future hub-shutdown mail) to this
 /// kind so three trigger sources converge on one consumption point.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.quit")]
 pub struct Quit;
 
@@ -176,18 +99,7 @@ pub struct Quit;
 /// vocabulary because it carries no semantic meaning to subscribers;
 /// it's the cadence input, not a stage broadcast.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.advance")]
 pub struct LifecycleAdvance;
 
@@ -225,18 +137,7 @@ pub struct LifecycleAdvanceComplete {
 /// graph doesn't declare a state at that kind, fail-fast at wire time
 /// per ADR-0082 §7.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.subscribe")]
 pub struct LifecycleSubscribe {
     pub stage: u64,
@@ -255,18 +156,7 @@ pub struct LifecycleSubscribe {
 /// [`KindId`](aether_data::KindId) as [`LifecycleSubscribe`]. Substrate
 /// replies with [`LifecycleSubscribeResult`].
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.subscribe_self")]
 pub struct LifecycleSubscribeSelf {
     pub stage: u64,
@@ -275,18 +165,7 @@ pub struct LifecycleSubscribeSelf {
 /// Unsubscribe counterpart of [`LifecycleSubscribe`]. Idempotent on
 /// "not currently subscribed."
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.unsubscribe")]
 pub struct LifecycleUnsubscribe {
     pub stage: u64,
@@ -300,18 +179,7 @@ pub struct LifecycleUnsubscribe {
 /// [`LifecycleSubscribeSelf`]. Idempotent on "not currently
 /// subscribed." Substrate replies with [`LifecycleSubscribeResult`].
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.unsubscribe_self")]
 pub struct LifecycleUnsubscribeSelf {
     pub stage: u64,
@@ -327,18 +195,7 @@ pub struct LifecycleUnsubscribeSelf {
 /// `mailbox` field, matching the sibling lifecycle kinds' raw-`u64`
 /// shape.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.lifecycle.unsubscribe_all")]
 pub struct LifecycleUnsubscribeAll {
     pub mailbox: u64,
@@ -348,9 +205,7 @@ pub struct LifecycleUnsubscribeAll {
 /// `Err` carries the stage kind id and a human-readable reason —
 /// fail-fast subscribe per ADR-0082 §7. Same shape and rationale as
 /// `SubscribeInputResult` for input subscriptions.
-#[derive(
-    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[kind(name = "aether.lifecycle.subscribe_result")]
 pub enum LifecycleSubscribeResult {
     Ok,

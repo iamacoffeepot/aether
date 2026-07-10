@@ -29,9 +29,7 @@ mod passive_boot;
 mod state;
 
 pub use built::{BuiltChassis, PassiveChassis};
-pub use driver::{
-    DriverCapability, DriverCtx, DriverRunning, NeverDriver, NeverDriverRunning, RunError,
-};
+pub use driver::{DriverCapability, DriverCtx, DriverRunning, NeverDriver, NeverDriverRunning, RunError};
 pub use state::{Builder, BuilderState, HasDriver, NoDriver};
 
 #[cfg(test)]

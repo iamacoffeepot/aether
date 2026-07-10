@@ -4,10 +4,10 @@ use syn::{FnArg, ImplItem, ItemImpl, Type};
 
 use crate::diagnostics::extract_agent_doc;
 use crate::handler_parse::{
-    FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback,
-    attr_is_handler, classify_handler_reply, extract_handler_kind_type, multi_kind_or_return_error,
-    parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds,
-    rename_lifecycle_hooks, validate_addressable_consts, validate_fallback_sig,
+    FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler,
+    classify_handler_reply, extract_handler_kind_type, multi_kind_or_return_error, parse_handler_class,
+    parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks, validate_addressable_consts,
+    validate_fallback_sig,
 };
 use crate::manifest::{build_inputs_manifest_consts, build_kinds_section_retention_statics};
 use crate::opts::{ActorCardinality, ActorOpts};
@@ -23,11 +23,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     let self_ty = &item.self_ty;
     let generics = &item.generics;
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
-    let trait_path = item
-        .trait_
-        .as_ref()
-        .map(|(_, p, _)| p)
-        .expect("trait_ checked above");
+    let trait_path = item.trait_.as_ref().map(|(_, p, _)| p).expect("trait_ checked above");
 
     let component_doc = extract_agent_doc(&item.attrs);
 
@@ -79,10 +75,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 let fallback_attr_idx = f.attrs.iter().position(attr_is_fallback);
 
                 if handler_attr_idx.is_some() && fallback_attr_idx.is_some() {
-                    return Err(syn::Error::new_spanned(
-                        &f,
-                        "method cannot be both #[handler] and #[fallback]",
-                    ));
+                    return Err(syn::Error::new_spanned(&f, "method cannot be both #[handler] and #[fallback]"));
                 }
 
                 if let Some(idx) = handler_attr_idx {
@@ -111,34 +104,18 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     // return value); `K` rides its `Multi<K>` ctx marker.
                     let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig)?;
                     f.attrs.remove(idx);
-                    handlers.push(HandlerFn {
-                        method: f,
-                        kind_ty,
-                        agent_doc,
-                        reply,
-                        class,
-                        multi_kind,
-                    });
+                    handlers.push(HandlerFn { method: f, kind_ty, agent_doc, reply, class, multi_kind });
                 } else if let Some(idx) = fallback_attr_idx {
                     if fallback.is_some() {
-                        return Err(syn::Error::new_spanned(
-                            &f,
-                            "at most one #[fallback] method per component",
-                        ));
+                        return Err(syn::Error::new_spanned(&f, "at most one #[fallback] method per component"));
                     }
                     validate_fallback_sig(&f.sig)?;
                     let agent_doc = extract_agent_doc(&f.attrs);
                     f.attrs.remove(idx);
-                    fallback = Some(FallbackFn {
-                        method: f,
-                        agent_doc,
-                    });
+                    fallback = Some(FallbackFn { method: f, agent_doc });
                 } else if name == "init" {
                     init_method = Some(f);
-                } else if matches!(
-                    name.as_str(),
-                    "wire" | "unwire" | "on_dehydrate" | "on_rehydrate"
-                ) {
+                } else if matches!(name.as_str(), "wire" | "unwire" | "on_dehydrate" | "on_rehydrate") {
                     lifecycle_methods.push(f);
                 } else if name == "receive" {
                     return Err(syn::Error::new_spanned(
@@ -198,12 +175,8 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // `on_dehydrate` / `on_rehydrate` hooks, so they are mutually
     // exclusive with hand-written hooks and require each other. Validate
     // the XOR at the offending span before synthesizing / generating.
-    let manual_state_hook = lifecycle_methods.iter().find(|m| {
-        matches!(
-            m.sig.ident.to_string().as_str(),
-            "on_dehydrate" | "on_rehydrate"
-        )
-    });
+    let manual_state_hook =
+        lifecycle_methods.iter().find(|m| matches!(m.sig.ident.to_string().as_str(), "on_dehydrate" | "on_rehydrate"));
     if let Some(state) = state_type.as_ref() {
         // (a) `type State` + a hand-written hook is contradictory — the
         // macro already generates the hook from the accessors.
@@ -308,14 +281,9 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // `config_type.is_some()` at macro time, NOT on `Config != ()` at
     // runtime, keeps `aether.unit` out of every component's capability).
     let config_kind_ty: Option<&Type> = config_type.as_ref().map(|it| &it.ty);
-    let inputs_manifest_consts = build_inputs_manifest_consts(
-        &handlers,
-        fallback.as_ref(),
-        component_doc.as_ref(),
-        config_kind_ty,
-    );
-    let kind_retention_statics =
-        build_kinds_section_retention_statics(self_ty, &handlers, config_kind_ty);
+    let inputs_manifest_consts =
+        build_inputs_manifest_consts(&handlers, fallback.as_ref(), component_doc.as_ref(), config_kind_ty);
+    let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers, config_kind_ty);
 
     // Issue 525 Phase 4: trait consts (today just NAMESPACE) live
     // on the `Addressable` super-trait, not `Component` / `WasmActor`. Route
@@ -437,9 +405,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // `impl WasmActor`. The per-target ctx GATs are pinned to the concrete
     // FFI ctx types here, so a `wire`/`init` body keeps its concrete ctx.
     let (mut boot_hooks, hotswap_hooks): (Vec<syn::ImplItemFn>, Vec<syn::ImplItemFn>) =
-        lifecycle_methods
-            .into_iter()
-            .partition(|m| matches!(m.sig.ident.to_string().as_str(), "wire" | "unwire"));
+        lifecycle_methods.into_iter().partition(|m| matches!(m.sig.ident.to_string().as_str(), "wire" | "unwire"));
 
     // iamacoffeepot/aether#2311: the shared `Lifecycle<S>` `wire`/`unwire`
     // take `(state: &mut S, ctx)`, not a `self` receiver, so a user's

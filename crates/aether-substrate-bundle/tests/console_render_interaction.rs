@@ -23,8 +23,8 @@ use aether_capabilities::fs::NamespaceRoots;
 use aether_data::Kind;
 use aether_kinds::keycode::KEY_BACKQUOTE;
 use aether_kinds::{
-    CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, Key,
-    LoadComponent, LoadResult, NamedMail, Tick, WindowSize,
+    CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, Key, LoadComponent,
+    LoadResult, NamedMail, Tick, WindowSize,
 };
 use aether_kit::{ConsoleCommandOutput, ConsoleConfig};
 use aether_substrate_bundle::test_bench::{
@@ -38,10 +38,7 @@ const CLEAR_SRGB: [u8; 3] = [63, 75, 97];
 const PARTITION_TOLERANCE: u8 = 8;
 
 fn console_address() -> String {
-    format!(
-        "aether.component/{}:console",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    )
+    format!("aether.component/{}:console", aether_capabilities::WasmTrampoline::NAMESPACE)
 }
 
 fn assets_dir() -> PathBuf {
@@ -61,16 +58,8 @@ fn build_bench_without_assets_root() -> TestBench {
 
 fn build_bench_with_assets(assets: PathBuf, sandbox_name: &str) -> TestBench {
     let sandbox = init_save_sandbox(sandbox_name);
-    let roots = NamespaceRoots {
-        save: sandbox.to_path_buf(),
-        assets,
-        config: sandbox.to_path_buf(),
-    };
-    TestBench::builder()
-        .size(WINDOW_WIDTH, WINDOW_HEIGHT)
-        .namespace_roots(roots)
-        .build()
-        .expect("boot")
+    let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets, config: sandbox.to_path_buf() };
+    TestBench::builder().size(WINDOW_WIDTH, WINDOW_HEIGHT).namespace_roots(roots).build().expect("boot")
 }
 
 fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
@@ -101,25 +90,16 @@ fn load_console_with_config(bench: &mut TestBench, wasm: &[u8], config: &Console
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
-        LoadResult::Ok { name, .. } => assert!(
-            name.ends_with(":console"),
-            "console should register under :console; got {name}",
-        ),
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { name, .. } => {
+            assert!(name.ends_with(":console"), "console should register under :console; got {name}");
+        }
         LoadResult::Err { error } => panic!("load console: {error}"),
     }
 }
 
 fn top_band() -> FrameRect {
-    FrameRect {
-        min_x: 0,
-        min_y: 0,
-        max_x: WINDOW_WIDTH - 1,
-        max_y: 96,
-    }
+    FrameRect { min_x: 0, min_y: 0, max_x: WINDOW_WIDTH - 1, max_y: 96 }
 }
 
 fn top_band_coverage(bench: &mut TestBench, label: &'static str) -> f32 {
@@ -127,20 +107,10 @@ fn top_band_coverage(bench: &mut TestBench, label: &'static str) -> f32 {
 }
 
 fn history_text_band() -> FrameRect {
-    FrameRect {
-        min_x: 8,
-        min_y: 20,
-        max_x: WINDOW_WIDTH - 8,
-        max_y: 72,
-    }
+    FrameRect { min_x: 8, min_y: 20, max_x: WINDOW_WIDTH - 8, max_y: 72 }
 }
 
-fn coverage_in_region(
-    bench: &mut TestBench,
-    label: &'static str,
-    region: FrameRect,
-    background: [u8; 3],
-) -> f32 {
+fn coverage_in_region(bench: &mut TestBench, label: &'static str, region: FrameRect, background: [u8; 3]) -> f32 {
     let captured = bench
         .execute(vec![(
             label,
@@ -160,17 +130,10 @@ fn coverage_in_region(
             ),
         )])
         .expect("capture sequence");
-    let result = match captured
-        .reply::<CaptureFrameResult>(label)
-        .expect("decode CaptureFrameResult")
-    {
+    let result = match captured.reply::<CaptureFrameResult>(label).expect("decode CaptureFrameResult") {
         CaptureFrameResult::Ok { verdict, .. } => {
             let verdict = verdict.expect("checks requested");
-            verdict
-                .results
-                .into_iter()
-                .next()
-                .expect("one check result")
+            verdict.results.into_iter().next().expect("one check result")
         }
         CaptureFrameResult::Err { error } => panic!("capture failed: {error}"),
     };
@@ -200,17 +163,10 @@ fn history_text_differs_from_panel(bench: &mut TestBench, label: &'static str) -
             ),
         )])
         .expect("capture sequence");
-    let result = match captured
-        .reply::<CaptureFrameResult>(label)
-        .expect("decode CaptureFrameResult")
-    {
+    let result = match captured.reply::<CaptureFrameResult>(label).expect("decode CaptureFrameResult") {
         CaptureFrameResult::Ok { verdict, .. } => {
             let verdict = verdict.expect("checks requested");
-            verdict
-                .results
-                .into_iter()
-                .next()
-                .expect("one check result")
+            verdict.results.into_iter().next().expect("one check result")
         }
         CaptureFrameResult::Err { error } => panic!("capture failed: {error}"),
     };
@@ -232,39 +188,19 @@ fn backquote_key_opens_console_overlay() {
     bench
         .execute(vec![(
             "size",
-            BenchOp::send_mail(
-                console_address(),
-                &WindowSize {
-                    width: WINDOW_WIDTH,
-                    height: WINDOW_HEIGHT,
-                },
-            ),
+            BenchOp::send_mail(console_address(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT }),
         )])
         .expect("window size");
 
     let closed = top_band_coverage(&mut bench, "closed");
-    assert!(
-        closed < 0.01,
-        "closed console should leave the top band at clear color; coverage={closed:.3}",
-    );
+    assert!(closed < 0.01, "closed console should leave the top band at clear color; coverage={closed:.3}");
 
     bench
-        .execute(vec![(
-            "toggle",
-            BenchOp::send_mail(
-                console_address(),
-                &Key {
-                    code: KEY_BACKQUOTE,
-                },
-            ),
-        )])
+        .execute(vec![("toggle", BenchOp::send_mail(console_address(), &Key { code: KEY_BACKQUOTE }))])
         .expect("toggle key");
 
     let open = top_band_coverage(&mut bench, "open");
-    assert!(
-        open > 0.90,
-        "backquote should open the console and cover the top band; coverage={open:.3}",
-    );
+    assert!(open > 0.90, "backquote should open the console and cover the top band; coverage={open:.3}");
 }
 
 #[test]
@@ -278,34 +214,14 @@ fn markdown_command_output_renders_into_history_band() {
 
     bench
         .execute(vec![
-            (
-                "size",
-                BenchOp::send_mail(
-                    console_address(),
-                    &WindowSize {
-                        width: WINDOW_WIDTH,
-                        height: WINDOW_HEIGHT,
-                    },
-                ),
-            ),
+            ("size", BenchOp::send_mail(console_address(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT })),
             ("settle", BenchOp::advance(8)),
-            (
-                "toggle",
-                BenchOp::send_mail(
-                    console_address(),
-                    &Key {
-                        code: KEY_BACKQUOTE,
-                    },
-                ),
-            ),
+            ("toggle", BenchOp::send_mail(console_address(), &Key { code: KEY_BACKQUOTE })),
         ])
         .expect("open console");
 
     let empty = history_text_differs_from_panel(&mut bench, "empty-history");
-    assert!(
-        !empty,
-        "empty history band should match the panel background"
-    );
+    assert!(!empty, "empty history band should match the panel background");
 
     bench
         .execute(vec![(
@@ -314,10 +230,7 @@ fn markdown_command_output_renders_into_history_band() {
                 console_address(),
                 &ConsoleCommandOutput {
                     command: String::from("diagnostics"),
-                    lines: vec![
-                        String::from("## Heading"),
-                        String::from("- [x] `code` [link](target)"),
-                    ],
+                    lines: vec![String::from("## Heading"), String::from("- [x] `code` [link](target)")],
                     error: false,
                 },
             ),
@@ -325,10 +238,7 @@ fn markdown_command_output_renders_into_history_band() {
         .expect("send markdown output");
 
     let rendered = history_text_differs_from_panel(&mut bench, "rendered-history");
-    assert!(
-        rendered,
-        "markdown output should add visible text/background pixels to the history band",
-    );
+    assert!(rendered, "markdown output should add visible text/background pixels to the history band");
 }
 
 #[test]
@@ -347,36 +257,16 @@ fn configured_font_override_renders_into_history_band() {
 
     bench
         .execute(vec![
-            (
-                "size",
-                BenchOp::send_mail(
-                    console_address(),
-                    &WindowSize {
-                        width: WINDOW_WIDTH,
-                        height: WINDOW_HEIGHT,
-                    },
-                ),
-            ),
+            ("size", BenchOp::send_mail(console_address(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT })),
             ("settle", BenchOp::advance(8)),
-            (
-                "toggle",
-                BenchOp::send_mail(
-                    console_address(),
-                    &Key {
-                        code: KEY_BACKQUOTE,
-                    },
-                ),
-            ),
+            ("toggle", BenchOp::send_mail(console_address(), &Key { code: KEY_BACKQUOTE })),
             (
                 "output",
                 BenchOp::send_mail(
                     console_address(),
                     &ConsoleCommandOutput {
                         command: String::from("override"),
-                        lines: vec![
-                            String::from("## Override"),
-                            String::from("- [x] `font` rendered"),
-                        ],
+                        lines: vec![String::from("## Override"), String::from("- [x] `font` rendered")],
                         error: false,
                     },
                 ),
@@ -385,8 +275,5 @@ fn configured_font_override_renders_into_history_band() {
         .expect("open console with configured font");
 
     let rendered = history_text_differs_from_panel(&mut bench, "override-rendered-history");
-    assert!(
-        rendered,
-        "configured font override should render visible text into the history band",
-    );
+    assert!(rendered, "configured font override should render visible text into the history band");
 }

@@ -56,9 +56,7 @@ use aether_capabilities::{ComponentHostCapability, InputCapability, LifecycleCap
 use aether_kinds::{Key, KeyRelease, Tick, keycode};
 use aether_math::{TAU, Vec2, Vec3};
 
-use crate::camera::{
-    CameraComponent, CameraOrbitSet, CameraTopdownSet, OrbitParams, TopdownParams,
-};
+use crate::camera::{CameraComponent, CameraOrbitSet, CameraTopdownSet, OrbitParams, TopdownParams};
 
 /// Load name of the camera component instance the controller drives — the
 /// `aether_kit@aether.kit.camera` export's default load name (ADR-0096), the
@@ -149,11 +147,7 @@ impl WasmActor for CameraController {
                 extent: SEED_EXTENT,
             }),
         };
-        Ok(Self {
-            config,
-            held: Held::default(),
-            shadow,
-        })
+        Ok(Self { config, held: Held::default(), shadow })
     }
 
     /// Subscribe the key streams and the tick stage, then seed the target
@@ -188,20 +182,14 @@ impl WasmActor for CameraController {
                 if let Some(params) = step_orbit(orbit, held, &self.config) {
                     ctx.actor::<ComponentHostCapability>()
                         .loaded::<CameraComponent>(CAMERA_COMPONENT)
-                        .send(&CameraOrbitSet {
-                            name: camera,
-                            params,
-                        });
+                        .send(&CameraOrbitSet { name: camera, params });
                 }
             }
             Shadow::Topdown(topdown) => {
                 if let Some(params) = step_topdown(topdown, held, &self.config) {
                     ctx.actor::<ComponentHostCapability>()
                         .loaded::<CameraComponent>(CAMERA_COMPONENT)
-                        .send(&CameraTopdownSet {
-                            name: camera,
-                            params,
-                        });
+                        .send(&CameraTopdownSet { name: camera, params });
                 }
             }
         }
@@ -215,9 +203,8 @@ impl CameraController {
         let camera = self.config.camera.clone();
         match &self.shadow {
             Shadow::Orbit(orbit) => {
-                ctx.actor::<ComponentHostCapability>()
-                    .loaded::<CameraComponent>(CAMERA_COMPONENT)
-                    .send(&CameraOrbitSet {
+                ctx.actor::<ComponentHostCapability>().loaded::<CameraComponent>(CAMERA_COMPONENT).send(
+                    &CameraOrbitSet {
                         name: camera,
                         params: OrbitParams {
                             distance: Some(orbit.distance),
@@ -227,18 +214,19 @@ impl CameraController {
                             fov_y_rad: Some(SEED_FOV),
                             target: Some([orbit.target.x, orbit.target.y, orbit.target.z]),
                         },
-                    });
+                    },
+                );
             }
             Shadow::Topdown(topdown) => {
-                ctx.actor::<ComponentHostCapability>()
-                    .loaded::<CameraComponent>(CAMERA_COMPONENT)
-                    .send(&CameraTopdownSet {
+                ctx.actor::<ComponentHostCapability>().loaded::<CameraComponent>(CAMERA_COMPONENT).send(
+                    &CameraTopdownSet {
                         name: camera,
                         params: TopdownParams {
                             center: Some([topdown.center.x, topdown.center.y]),
                             extent: Some(topdown.extent),
                         },
-                    });
+                    },
+                );
             }
         }
     }
@@ -274,11 +262,7 @@ fn zoom_factor(held: Held, config: &ControllerConfig) -> Option<f32> {
 /// Advance the orbit shadow one tick from the held keys and return the delta
 /// to send — `Some` carrying only the fields that changed this tick, or `None`
 /// when no mapped key produced motion (the zero-mail-idle invariant).
-fn step_orbit(
-    shadow: &mut OrbitShadow,
-    held: Held,
-    config: &ControllerConfig,
-) -> Option<OrbitParams> {
+fn step_orbit(shadow: &mut OrbitShadow, held: Held, config: &ControllerConfig) -> Option<OrbitParams> {
     let mut params = OrbitParams::default();
     let mut changed = false;
 
@@ -300,18 +284,15 @@ fn step_orbit(
 
     let yaw_dir = f32::from(held.yaw_pos) - f32::from(held.yaw_neg);
     if yaw_dir != 0.0 {
-        shadow.yaw = yaw_dir
-            .mul_add(config.yaw_speed, shadow.yaw)
-            .rem_euclid(TAU);
+        shadow.yaw = yaw_dir.mul_add(config.yaw_speed, shadow.yaw).rem_euclid(TAU);
         params.yaw = Some(shadow.yaw);
         changed = true;
     }
 
     let pitch_dir = f32::from(held.pitch_pos) - f32::from(held.pitch_neg);
     if pitch_dir != 0.0 {
-        shadow.pitch = pitch_dir
-            .mul_add(config.pitch_speed, shadow.pitch)
-            .clamp(-config.pitch_limit, config.pitch_limit);
+        shadow.pitch =
+            pitch_dir.mul_add(config.pitch_speed, shadow.pitch).clamp(-config.pitch_limit, config.pitch_limit);
         params.pitch = Some(shadow.pitch);
         changed = true;
     }
@@ -327,11 +308,7 @@ fn step_orbit(
 
 /// Advance the topdown shadow one tick: WASD pan the ortho center (normalized
 /// diagonals), Z/X scale the ortho extent. `None` when idle.
-fn step_topdown(
-    shadow: &mut TopdownShadow,
-    held: Held,
-    config: &ControllerConfig,
-) -> Option<TopdownParams> {
+fn step_topdown(shadow: &mut TopdownShadow, held: Held, config: &ControllerConfig) -> Option<TopdownParams> {
     let mut params = TopdownParams::default();
     let mut changed = false;
 
@@ -360,12 +337,7 @@ mod tests {
     use super::*;
 
     fn orbit(yaw: f32) -> OrbitShadow {
-        OrbitShadow {
-            target: Vec3::ZERO,
-            yaw,
-            pitch: 0.0,
-            distance: SEED_DISTANCE,
-        }
+        OrbitShadow { target: Vec3::ZERO, yaw, pitch: 0.0, distance: SEED_DISTANCE }
     }
 
     fn held_keys(codes: &[u32]) -> Held {
@@ -386,10 +358,7 @@ mod tests {
         // delta → the on_tick handler sends nothing.
         let mut s = orbit(0.0);
         assert!(step_orbit(&mut s, Held::default(), &ControllerConfig::default()).is_none());
-        let mut t = TopdownShadow {
-            center: Vec2::ZERO,
-            extent: SEED_EXTENT,
-        };
+        let mut t = TopdownShadow { center: Vec2::ZERO, extent: SEED_EXTENT };
         assert!(step_topdown(&mut t, Held::default(), &ControllerConfig::default()).is_none());
     }
 
@@ -400,17 +369,12 @@ mod tests {
         let config = ControllerConfig::default();
 
         let mut cardinal = orbit(0.0);
-        step_orbit(&mut cardinal, held_keys(&[keycode::KEY_W]), &config)
-            .expect("W held pans the target");
+        step_orbit(&mut cardinal, held_keys(&[keycode::KEY_W]), &config).expect("W held pans the target");
         let cardinal_mag = cardinal.target.length();
 
         let mut diagonal = orbit(0.0);
-        step_orbit(
-            &mut diagonal,
-            held_keys(&[keycode::KEY_W, keycode::KEY_D]),
-            &config,
-        )
-        .expect("W+D held pans the target");
+        step_orbit(&mut diagonal, held_keys(&[keycode::KEY_W, keycode::KEY_D]), &config)
+            .expect("W+D held pans the target");
         let diagonal_mag = diagonal.target.length();
 
         assert!(
@@ -431,14 +395,12 @@ mod tests {
         let config = ControllerConfig::default();
 
         let mut at_zero = orbit(0.0);
-        step_orbit(&mut at_zero, held_keys(&[keycode::KEY_W]), &config)
-            .expect("W held pans the target");
+        step_orbit(&mut at_zero, held_keys(&[keycode::KEY_W]), &config).expect("W held pans the target");
         assert!(at_zero.target.x.abs() < 1e-5, "yaw 0: no X drift");
         assert!(at_zero.target.z < 0.0, "yaw 0: W moves -Z");
 
         let mut at_quarter = orbit(FRAC_PI_2);
-        step_orbit(&mut at_quarter, held_keys(&[keycode::KEY_W]), &config)
-            .expect("W held pans the target");
+        step_orbit(&mut at_quarter, held_keys(&[keycode::KEY_W]), &config).expect("W held pans the target");
         assert!(at_quarter.target.z.abs() < 1e-5, "quarter turn: no Z drift");
         assert!(at_quarter.target.x < 0.0, "quarter turn: W moves -X");
     }
@@ -454,21 +416,13 @@ mod tests {
         for _ in 0..100_000 {
             step_orbit(&mut s, held_keys(&[keycode::KEY_UP]), &config);
         }
-        assert!(
-            (s.pitch - config.pitch_limit).abs() < 1e-4,
-            "pitch saturated at the limit; got {}",
-            s.pitch
-        );
+        assert!((s.pitch - config.pitch_limit).abs() < 1e-4, "pitch saturated at the limit; got {}", s.pitch);
 
         let mut s = orbit(0.0);
         for _ in 0..100_000 {
             step_orbit(&mut s, held_keys(&[keycode::KEY_Z]), &config);
         }
-        assert!(
-            (s.distance - config.distance_floor).abs() < 1e-4,
-            "distance floored; got {}",
-            s.distance
-        );
+        assert!((s.distance - config.distance_floor).abs() < 1e-4, "distance floored; got {}", s.distance);
     }
 
     #[test]
@@ -478,8 +432,7 @@ mod tests {
         // single kind without restating (and overwriting) the rest of the pose.
         let config = ControllerConfig::default();
         let mut s = orbit(0.0);
-        let params = step_orbit(&mut s, held_keys(&[keycode::KEY_W]), &config)
-            .expect("W held pans the target");
+        let params = step_orbit(&mut s, held_keys(&[keycode::KEY_W]), &config).expect("W held pans the target");
         assert!(params.target.is_some(), "pan sets target");
         assert!(params.yaw.is_none(), "yaw untouched");
         assert!(params.pitch.is_none(), "pitch untouched");

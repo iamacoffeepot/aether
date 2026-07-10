@@ -98,12 +98,7 @@ pub struct Mail {
 
 impl Mail {
     #[must_use]
-    pub fn new(
-        recipient: MailboxId,
-        kind: MailKind,
-        payload: impl Into<MailRef>,
-        count: u32,
-    ) -> Self {
+    pub fn new(recipient: MailboxId, kind: MailKind, payload: impl Into<MailRef>, count: u32) -> Self {
         Self {
             recipient,
             kind,
@@ -136,12 +131,7 @@ impl Mail {
     /// (#1695). Mail with no lineage stamped retains `MailId::NONE`
     /// defaults.
     #[must_use]
-    pub fn with_lineage(
-        mut self,
-        mail_id: MailId,
-        root: MailId,
-        parent_mail: Option<MailId>,
-    ) -> Self {
+    pub fn with_lineage(mut self, mail_id: MailId, root: MailId, parent_mail: Option<MailId>) -> Self {
         self.mail_id = mail_id;
         self.root = root;
         self.parent_mail = parent_mail;

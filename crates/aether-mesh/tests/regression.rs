@@ -14,12 +14,7 @@ fn assert_watertight(dsl: &str) {
     let ast = parse(dsl).expect("parse failed");
     let polys = mesh_polygons(&ast).expect("mesh failed");
     let violations = validate_manifold(&polys);
-    assert!(
-        violations.is_empty(),
-        "DSL `{}` produced a non-watertight mesh:\n\n{}",
-        dsl,
-        report(&polys)
-    );
+    assert!(violations.is_empty(), "DSL `{}` produced a non-watertight mesh:\n\n{}", dsl, report(&polys));
 }
 
 /// Stronger than `assert_watertight`: also requires planarity, polygon
@@ -28,12 +23,7 @@ fn assert_geometric(dsl: &str) {
     let ast = parse(dsl).expect("parse failed");
     let polys = mesh_polygons(&ast).expect("mesh failed");
     let (manifold, geom) = validate_geometry(&polys);
-    assert!(
-        manifold.is_empty() && geom.is_empty(),
-        "DSL `{}` produced an invalid mesh:\n\n{}",
-        dsl,
-        report(&polys)
-    );
+    assert!(manifold.is_empty() && geom.is_empty(), "DSL `{}` produced an invalid mesh:\n\n{}", dsl, report(&polys));
 }
 
 #[test]

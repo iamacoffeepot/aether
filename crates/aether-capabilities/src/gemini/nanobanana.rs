@@ -144,10 +144,7 @@ pub fn validate(shape: &ModelShape, inputs: &ValidationInputs) -> Result<(), Gem
     if inputs.object_ref_count > shape.max_object_refs {
         return Err(GeminiError::MissingRequiredField {
             model: shape.id.to_string(),
-            field: format!(
-                "object_reference_paths (max {}, got {})",
-                shape.max_object_refs, inputs.object_ref_count
-            ),
+            field: format!("object_reference_paths (max {}, got {})", shape.max_object_refs, inputs.object_ref_count),
         });
     }
     if inputs.character_ref_count > shape.max_character_refs {
@@ -211,18 +208,12 @@ pub fn parse_image_response(json: &str) -> Result<ParsedImage, String> {
 
     let bytes = base64_decode(b64).map_err(|e| format!("decode image base64: {e}"))?;
 
-    let thought_signature = parts
-        .iter()
-        .find_map(|p| p.get("thoughtSignature").and_then(Value::as_str))
-        .map(ToString::to_string);
+    let thought_signature =
+        parts.iter().find_map(|p| p.get("thoughtSignature").and_then(Value::as_str)).map(ToString::to_string);
 
     let grounding = parse_grounding(candidate);
 
-    Ok(ParsedImage {
-        bytes,
-        thought_signature,
-        grounding,
-    })
+    Ok(ParsedImage { bytes, thought_signature, grounding })
 }
 
 /// Pull the `groundingMetadata` block off a candidate, mapping
@@ -238,12 +229,7 @@ fn parse_grounding(candidate: &serde_json::Value) -> Option<(Vec<String>, Vec<St
     let search_queries = meta
         .get("webSearchQueries")
         .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(ToString::to_string)
-                .collect()
-        })
+        .map(|arr| arr.iter().filter_map(Value::as_str).map(ToString::to_string).collect())
         .unwrap_or_default();
 
     let source_urls = meta
@@ -322,9 +308,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ModelShape, ValidationInputs, base64_decode, lookup_model, parse_image_response, validate,
-    };
+    use super::{ModelShape, ValidationInputs, base64_decode, lookup_model, parse_image_response, validate};
     use crate::gemini::{AspectRatio, GeminiError, ImageSize};
 
     fn nb2() -> &'static ModelShape {
@@ -350,8 +334,8 @@ mod tests {
 
     #[test]
     fn extreme_aspect_ratio_rejected_on_nb1() {
-        let err = validate(nb1(), &inputs(AspectRatio::ASPECT_RATIO_8_1, None))
-            .expect_err("ASPECT_RATIO_8_1 is NB2-only");
+        let err =
+            validate(nb1(), &inputs(AspectRatio::ASPECT_RATIO_8_1, None)).expect_err("ASPECT_RATIO_8_1 is NB2-only");
         let GeminiError::AspectRatioNotSupportedByModel { supported, .. } = err else {
             panic!("expected AspectRatioNotSupportedByModel, got {err:?}");
         };
@@ -360,24 +344,15 @@ mod tests {
 
     #[test]
     fn extreme_aspect_ratio_accepted_on_nb2() {
-        validate(
-            nb2(),
-            &inputs(AspectRatio::ASPECT_RATIO_8_1, Some(ImageSize::S512)),
-        )
-        .expect("ASPECT_RATIO_8_1 + S512 is valid on NB2");
+        validate(nb2(), &inputs(AspectRatio::ASPECT_RATIO_8_1, Some(ImageSize::S512)))
+            .expect("ASPECT_RATIO_8_1 + S512 is valid on NB2");
     }
 
     #[test]
     fn image_size_rejected_when_unsupported_by_model() {
-        let err = validate(
-            nb1(),
-            &inputs(AspectRatio::ASPECT_RATIO_1_1, Some(ImageSize::S512)),
-        )
-        .expect_err("S512 is NB2-only");
-        assert!(matches!(
-            err,
-            GeminiError::ImageSizeNotSupportedByModel { .. }
-        ));
+        let err = validate(nb1(), &inputs(AspectRatio::ASPECT_RATIO_1_1, Some(ImageSize::S512)))
+            .expect_err("S512 is NB2-only");
+        assert!(matches!(err, GeminiError::ImageSizeNotSupportedByModel { .. }));
     }
 
     #[test]
@@ -434,18 +409,12 @@ mod tests {
     #[test]
     fn parses_grounded_fixture_response() {
         const FIXTURE: &str = include_str!("fixtures/nanobanana_grounded_response.json");
-        let parsed =
-            parse_image_response(FIXTURE).expect("grounded fixture is a valid NB response");
+        let parsed = parse_image_response(FIXTURE).expect("grounded fixture is a valid NB response");
         assert_eq!(parsed.bytes, b"Man");
-        let (search_queries, source_urls) = parsed
-            .grounding
-            .expect("groundingMetadata block is present");
+        let (search_queries, source_urls) = parsed.grounding.expect("groundingMetadata block is present");
         assert_eq!(
             search_queries,
-            vec![
-                "current eiffel tower height".to_string(),
-                "eiffel tower color 2026".to_string(),
-            ]
+            vec!["current eiffel tower height".to_string(), "eiffel tower color 2026".to_string(),]
         );
         assert_eq!(
             source_urls,

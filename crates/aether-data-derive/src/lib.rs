@@ -82,8 +82,8 @@ use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, Fields, FnArg, GenericArgument,
-    ItemFn, Lit, Meta, PathArguments, ReturnType, Type, parse_macro_input,
+    Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, Fields, FnArg, GenericArgument, ItemFn, Lit, Meta,
+    PathArguments, ReturnType, Type, parse_macro_input,
 };
 
 /// ADR-0048 §1 cap on input parameters.
@@ -116,10 +116,7 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let KindAttr { name: kind_name } = parse_kind_attr(&input.attrs)?;
     if let Data::Union(u) = &input.data {
-        return Err(syn::Error::new_spanned(
-            u.union_token,
-            "Kind derive does not support unions",
-        ));
+        return Err(syn::Error::new_spanned(u.union_token, "Kind derive does not support unions"));
     }
 
     // ADR-0033 wire-shape autodetect: `#[repr(C)]` on the type means
@@ -323,16 +320,9 @@ fn expand_schema(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 cast_eligible_expr_for_struct(has_repr_c, &fields),
             )
         }
-        Data::Enum(e) => (
-            expand_schema_enum(e)?,
-            expand_label_node_enum(&name_str, e),
-            quote! { false },
-        ),
+        Data::Enum(e) => (expand_schema_enum(e)?, expand_label_node_enum(&name_str, e), quote! { false }),
         Data::Union(u) => {
-            return Err(syn::Error::new_spanned(
-                u.union_token,
-                "Schema derive does not support unions",
-            ));
+            return Err(syn::Error::new_spanned(u.union_token, "Schema derive does not support unions"));
         }
     };
     Ok(quote! {
@@ -404,11 +394,7 @@ fn expand_label_node_enum(type_ident: &str, data: &DataEnum) -> TokenStream2 {
             }
             Fields::Named(named) => {
                 let field_name_entries = named.named.iter().map(|f| {
-                    let fname = f
-                        .ident
-                        .as_ref()
-                        .map(ToString::to_string)
-                        .unwrap_or_default();
+                    let fname = f.ident.as_ref().map(ToString::to_string).unwrap_or_default();
                     quote! { ::aether_data::__derive_runtime::Cow::Borrowed(#fname) }
                 });
                 let field_node_exprs = named.named.iter().map(|f| field_label_node_expr(&f.ty));
@@ -508,10 +494,7 @@ fn expand_schema_enum(data: &DataEnum) -> syn::Result<TokenStream2> {
                 }
             },
             Fields::Unnamed(unnamed) => {
-                let field_exprs = unnamed
-                    .unnamed
-                    .iter()
-                    .map(|f| field_type_schema_expr(&f.ty));
+                let field_exprs = unnamed.unnamed.iter().map(|f| field_type_schema_expr(&f.ty));
                 quote! {
                     ::aether_data::__derive_runtime::EnumVariant::Tuple {
                         name: ::aether_data::__derive_runtime::Cow::Borrowed(#name),
@@ -583,11 +566,7 @@ fn is_vec_u8(ty: &Type) -> bool {
     };
     // Match on the last segment so qualified spellings like
     // `core::primitive::u8` are recognized alongside bare `u8`.
-    inner
-        .path
-        .segments
-        .last()
-        .is_some_and(|seg| seg.ident == "u8")
+    inner.path.segments.last().is_some_and(|seg| seg.ident == "u8")
 }
 
 /// Walk a field-type syntactic tree and reject `HashMap` anywhere
@@ -685,9 +664,7 @@ fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
         }
     }
     Err(syn::Error::new(
-        attrs
-            .first()
-            .map_or_else(proc_macro2::Span::call_site, Spanned::span),
+        attrs.first().map_or_else(proc_macro2::Span::call_site, Spanned::span),
         "missing `#[kind(name = \"...\")]` attribute",
     ))
 }
@@ -719,22 +696,12 @@ fn struct_fields(input: &DeriveInput) -> syn::Result<Vec<FieldInfo>> {
         return Err(syn::Error::new_spanned(&input.ident, "expected struct"));
     };
     Ok(match fields {
-        Fields::Named(named) => named
-            .named
-            .iter()
-            .map(|f| FieldInfo {
-                ident: f.ident.clone(),
-                ty: f.ty.clone(),
-            })
-            .collect(),
-        Fields::Unnamed(unnamed) => unnamed
-            .unnamed
-            .iter()
-            .map(|f| FieldInfo {
-                ident: None,
-                ty: f.ty.clone(),
-            })
-            .collect(),
+        Fields::Named(named) => {
+            named.named.iter().map(|f| FieldInfo { ident: f.ident.clone(), ty: f.ty.clone() }).collect()
+        }
+        Fields::Unnamed(unnamed) => {
+            unnamed.unnamed.iter().map(|f| FieldInfo { ident: None, ty: f.ty.clone() }).collect()
+        }
         Fields::Unit => Vec::new(),
     })
 }
@@ -834,10 +801,7 @@ fn validate_signature(func: &ItemFn) -> syn::Result<(Vec<&Type>, &Type)> {
     let output_type: &Type = match &sig.output {
         ReturnType::Type(_, ty) => ty,
         ReturnType::Default => {
-            return Err(syn::Error::new(
-                sig.span(),
-                "transforms must return a single Kind value (ADR-0048 §1)",
-            ));
+            return Err(syn::Error::new(sig.span(), "transforms must return a single Kind value (ADR-0048 §1)"));
         }
     };
 
@@ -856,16 +820,13 @@ fn emit_inventory(func: &ItemFn, input_types: &[&Type], output_type: &Type) -> T
     // bounds at expansion time, so emit a `const _: fn() = || { <T as
     // Kind>::ID; };` per input + output. A build error fires if any type
     // doesn't impl `Kind` (ADR-0048 §1).
-    let bound_assertions = input_types
-        .iter()
-        .chain(iter::once(&output_type))
-        .map(|ty| {
-            quote! {
-                const _: fn() = || {
-                    let _ = <#ty as ::aether_data::transform::__transform_runtime::Kind>::ID;
-                };
-            }
-        });
+    let bound_assertions = input_types.iter().chain(iter::once(&output_type)).map(|ty| {
+        quote! {
+            const _: fn() = || {
+                let _ = <#ty as ::aether_data::transform::__transform_runtime::Kind>::ID;
+            };
+        }
+    });
 
     // Fully-qualified name string at the consumer's compile time:
     // `"{crate}::{module_path}::{fn}"`. `module_path!()` already begins
@@ -913,8 +874,7 @@ fn emit_inventory(func: &ItemFn, input_types: &[&Type], output_type: &Type) -> T
     // Static slices the inventory entry borrows. `inventory::submit!`
     // needs const-constructible borrows, so the input-kind-id list is a
     // file-scoped `static` array rather than an inline literal.
-    let input_kinds_static =
-        format_ident!("__AETHER_TRANSFORM_INPUTS_{}", fn_name_str.to_uppercase());
+    let input_kinds_static = format_ident!("__AETHER_TRANSFORM_INPUTS_{}", fn_name_str.to_uppercase());
     let input_kind_exprs = input_types.iter().map(|ty| {
         quote! {
             <#ty as ::aether_data::transform::__transform_runtime::Kind>::ID
@@ -1016,42 +976,20 @@ struct DeniedPath {
 const DENY_LIST: &[DeniedPath] = &[
     // Host fns — match the bare fn tail so both qualified and
     // use-shortened call sites are caught.
-    DeniedPath {
-        tail: &["send_mail_p32"],
-    },
-    DeniedPath {
-        tail: &["reply_mail_p32"],
-    },
-    DeniedPath {
-        tail: &["send_mail_traced_p32"],
-    },
-    DeniedPath {
-        tail: &["save_state_p32"],
-    },
-    DeniedPath {
-        tail: &["resolve_mailbox_p32"],
-    },
-    DeniedPath {
-        tail: &["resolve_kind_p32"],
-    },
+    DeniedPath { tail: &["send_mail_p32"] },
+    DeniedPath { tail: &["reply_mail_p32"] },
+    DeniedPath { tail: &["send_mail_traced_p32"] },
+    DeniedPath { tail: &["save_state_p32"] },
+    DeniedPath { tail: &["resolve_mailbox_p32"] },
+    DeniedPath { tail: &["resolve_kind_p32"] },
     // Handler-context types.
-    DeniedPath {
-        tail: &["aether_actor", "Ctx"],
-    },
-    DeniedPath {
-        tail: &["aether_actor", "OutboundReply"],
-    },
+    DeniedPath { tail: &["aether_actor", "Ctx"] },
+    DeniedPath { tail: &["aether_actor", "OutboundReply"] },
     // Nondeterminism sources, by two-segment prefix so any item under
     // them (`now`, `Instant`, `var`, etc.) is rejected.
-    DeniedPath {
-        tail: &["std", "env"],
-    },
-    DeniedPath {
-        tail: &["std", "time"],
-    },
-    DeniedPath {
-        tail: &["core", "time"],
-    },
+    DeniedPath { tail: &["std", "env"] },
+    DeniedPath { tail: &["std", "time"] },
+    DeniedPath { tail: &["core", "time"] },
 ];
 
 /// Body-path collector + matcher. Records the span of the first path
@@ -1120,23 +1058,14 @@ mod tests {
     // shape we expect the rejection to catch.
     fn err(ty: &str) -> String {
         let parsed: syn::Type = parse_str(ty).expect("test fixture parses");
-        reject_hashmap(&parsed)
-            .err()
-            .unwrap_or_else(|| panic!("expected reject_hashmap to error on {ty}"))
-            .to_string()
+        reject_hashmap(&parsed).err().unwrap_or_else(|| panic!("expected reject_hashmap to error on {ty}")).to_string()
     }
 
     #[test]
     fn rejects_direct_hashmap_field() {
         let msg = err("HashMap<String, String>");
-        assert!(
-            msg.contains("BTreeMap"),
-            "error must point to BTreeMap fix, got: {msg}"
-        );
-        assert!(
-            msg.contains("232"),
-            "error must reference issue 232, got: {msg}"
-        );
+        assert!(msg.contains("BTreeMap"), "error must point to BTreeMap fix, got: {msg}");
+        assert!(msg.contains("232"), "error must reference issue 232, got: {msg}");
     }
 
     #[test]
@@ -1188,37 +1117,26 @@ mod tests {
     #[test]
     fn rejects_hashset() {
         let msg = err("HashSet<u64>");
-        assert!(
-            msg.contains("Vec"),
-            "error must redirect to a sorted Vec, got: {msg}"
-        );
+        assert!(msg.contains("Vec"), "error must redirect to a sorted Vec, got: {msg}");
     }
 
     #[test]
     fn rejects_btreeset() {
         let msg = err("BTreeSet<u64>");
-        assert!(
-            msg.contains("Vec"),
-            "error must redirect to a sorted Vec, got: {msg}"
-        );
+        assert!(msg.contains("Vec"), "error must redirect to a sorted Vec, got: {msg}");
     }
 
     #[test]
     fn allows_btreemap_field() {
-        let parsed: syn::Type =
-            parse_str("BTreeMap<String, String>").expect("test setup: BTreeMap type parses");
+        let parsed: syn::Type = parse_str("BTreeMap<String, String>").expect("test setup: BTreeMap type parses");
         assert!(reject_hashmap(&parsed).is_ok());
     }
 
     #[test]
     fn allows_plain_types() {
         for ty in ["u32", "String", "Vec<u8>", "Option<String>"] {
-            let parsed: syn::Type =
-                parse_str(ty).expect("test setup: candidate type parses as syn::Type");
-            assert!(
-                reject_hashmap(&parsed).is_ok(),
-                "rejected {ty} unexpectedly"
-            );
+            let parsed: syn::Type = parse_str(ty).expect("test setup: candidate type parses as syn::Type");
+            assert!(reject_hashmap(&parsed).is_ok(), "rejected {ty} unexpectedly");
         }
     }
 }

@@ -6,8 +6,8 @@ use aether_data::{KindDescriptor, MailboxCategory, SchemaType};
 use aether_kinds::trace::Nanos;
 
 use crate::mail::registry::{
-    DropError, InboxHandler, InlineHandler, MailDispatch, MailboxEntry, OwnedDispatch, Registry,
-    noop_handler, test_dispatch, test_owned_dispatch,
+    DropError, InboxHandler, InlineHandler, MailDispatch, MailboxEntry, OwnedDispatch, Registry, noop_handler,
+    test_dispatch, test_owned_dispatch,
 };
 use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
 use crate::scheduler::SeizeHandle;
@@ -290,39 +290,23 @@ fn pooled_inbox_exposes_seize_handle_closure_does_not() {
 
     // Closure-backed inbox: no slot, so no seize handle ever resolves.
     let closure_id = r.register_inbox("closure", noop_handler());
-    assert!(
-        r.route_lookup(kind, closure_id).seize.is_none(),
-        "a closure-backed inbox exposes no seize handle"
-    );
+    assert!(r.route_lookup(kind, closure_id).seize.is_none(), "a closure-backed inbox exposes no seize handle");
 
     // A `Pooled`-shaped inbox: empty before the slot is wired, then a
     // live handle after `install_seize_handle`.
     let pooled_id = r.register_inbox("pooled", noop_handler());
-    assert!(
-        r.route_lookup(kind, pooled_id).seize.is_none(),
-        "the seize cell is empty until the Pooled slot is wired"
-    );
+    assert!(r.route_lookup(kind, pooled_id).seize.is_none(), "the seize cell is empty until the Pooled slot is wired");
 
-    let slot = Arc::new(StatefulSlot {
-        state: Arc::new(SlotState::new()),
-    });
+    let slot = Arc::new(StatefulSlot { state: Arc::new(SlotState::new()) });
     let slot_dyn: Arc<dyn Drainable> = slot.clone();
-    let installed = r.install_seize_handle(
-        pooled_id,
-        SeizeHandle::new(Arc::clone(&slot.state), Arc::downgrade(&slot_dyn)),
-    );
+    let installed =
+        r.install_seize_handle(pooled_id, SeizeHandle::new(Arc::clone(&slot.state), Arc::downgrade(&slot_dyn)));
     assert!(installed, "install lands on a live Inbox entry");
 
-    let resolved = r
-        .route_lookup(kind, pooled_id)
-        .seize
-        .expect("Pooled inbox now exposes a seize handle");
+    let resolved = r.route_lookup(kind, pooled_id).seize.expect("Pooled inbox now exposes a seize handle");
     // The handle is live: it wins the `Idle → Running` seize CAS and
     // upgrades to the same slot.
-    assert!(
-        resolved.try_seize().is_some(),
-        "the resolved handle seizes a live slot"
-    );
+    assert!(resolved.try_seize().is_some(), "the resolved handle seizes a live slot");
     let _ = slot_dyn;
 }
 
@@ -337,9 +321,7 @@ fn closure_handler_runs_on_call() {
             c2.fetch_add(dispatch.count, Ordering::SeqCst);
         }),
     );
-    let Some(MailboxEntry::Inbox { handler: h, .. }) = r.entry(id) else {
-        panic!("expected closure entry")
-    };
+    let Some(MailboxEntry::Inbox { handler: h, .. }) = r.entry(id) else { panic!("expected closure entry") };
     // Test-side id is irrelevant — the handler ignores it.
     h.enqueue(test_owned_dispatch(KindId(0), "aether.tick", &[], 7));
     h.enqueue(OwnedDispatch::disarmed(
@@ -394,10 +376,7 @@ fn lookup_missing_returns_none() {
 fn lookup_over_depth_scope_path_is_resolution_miss() {
     let r = Registry::new();
     // One segment past `MAX_SCOPE_PATH_DEPTH`: rejected before the fold.
-    let name = (0..=aether_data::MAX_SCOPE_PATH_DEPTH)
-        .map(|i| format!("seg{i}"))
-        .collect::<Vec<_>>()
-        .join("/");
+    let name = (0..=aether_data::MAX_SCOPE_PATH_DEPTH).map(|i| format!("seg{i}")).collect::<Vec<_>>().join("/");
     assert!(r.lookup(&name).is_none());
 }
 
@@ -432,10 +411,7 @@ fn kind_ids_are_derived_from_name_and_schema() {
     assert_ne!(a, b);
     assert_ne!(b, c);
     assert_ne!(a, c);
-    assert_eq!(
-        a,
-        KindId(kind_id_from_parts("aether.tick", &SchemaType::Bytes))
-    );
+    assert_eq!(a, KindId(kind_id_from_parts("aether.tick", &SchemaType::Bytes)));
 }
 
 #[test]
@@ -468,10 +444,7 @@ fn kind_name_reverse_lookup() {
 }
 
 fn unit_desc(name: &str) -> KindDescriptor {
-    KindDescriptor {
-        name: name.to_string(),
-        schema: SchemaType::Unit,
-    }
+    KindDescriptor { name: name.to_string(), schema: SchemaType::Unit }
 }
 
 fn cast_struct_desc(name: &str) -> KindDescriptor {
@@ -480,11 +453,7 @@ fn cast_struct_desc(name: &str) -> KindDescriptor {
         name: name.to_string(),
         schema: SchemaType::Struct {
             repr_c: true,
-            fields: vec![NamedField {
-                name: "x".into(),
-                ty: SchemaType::Scalar(Primitive::U32),
-            }]
-            .into(),
+            fields: vec![NamedField { name: "x".into(), ty: SchemaType::Scalar(Primitive::U32) }].into(),
         },
     }
 }
@@ -492,9 +461,7 @@ fn cast_struct_desc(name: &str) -> KindDescriptor {
 #[test]
 fn register_kind_with_descriptor_stores_schema() {
     let r = Registry::new();
-    let id = r
-        .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
-        .expect("fresh name");
+    let id = r.register_kind_with_descriptor(cast_struct_desc("aether.foo")).expect("fresh name");
     let stored = r.kind_descriptor(id).expect("descriptor present");
     assert_eq!(stored.schema, cast_struct_desc("aether.foo").schema);
 }
@@ -502,12 +469,8 @@ fn register_kind_with_descriptor_stores_schema() {
 #[test]
 fn register_kind_with_descriptor_is_idempotent_on_match() {
     let r = Registry::new();
-    let first = r
-        .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
-        .expect("first");
-    let second = r
-        .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
-        .expect("same schema should succeed");
+    let first = r.register_kind_with_descriptor(cast_struct_desc("aether.foo")).expect("first");
+    let second = r.register_kind_with_descriptor(cast_struct_desc("aether.foo")).expect("same schema should succeed");
     assert_eq!(first, second);
 }
 
@@ -523,24 +486,16 @@ fn register_kind_with_descriptor_is_idempotent_on_match() {
 fn register_kind_with_descriptor_accepts_nominal_only_differences() {
     use aether_data::{NamedField, Primitive};
     let r = Registry::new();
-    let named_id = r
-        .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
-        .expect("first");
+    let named_id = r.register_kind_with_descriptor(cast_struct_desc("aether.foo")).expect("first");
 
     let unnamed = KindDescriptor {
         name: "aether.foo".into(),
         schema: SchemaType::Struct {
             repr_c: true,
-            fields: vec![NamedField {
-                name: "".into(),
-                ty: SchemaType::Scalar(Primitive::U32),
-            }]
-            .into(),
+            fields: vec![NamedField { name: "".into(), ty: SchemaType::Scalar(Primitive::U32) }].into(),
         },
     };
-    let unnamed_id = r
-        .register_kind_with_descriptor(unnamed)
-        .expect("same canonical bytes = same id = idempotent");
+    let unnamed_id = r.register_kind_with_descriptor(unnamed).expect("same canonical bytes = same id = idempotent");
     assert_eq!(named_id, unnamed_id);
 
     // Named version stays in the stored slot — first writer wins.
@@ -562,18 +517,13 @@ fn register_kind_with_descriptor_distinct_schemas_take_distinct_ids() {
     // and let the conflict path stay exercised via the
     // `_is_idempotent_on_match` test (same-id reentry).
     let r = Registry::new();
-    let unit_id = r
-        .register_kind_with_descriptor(unit_desc("aether.foo"))
-        .expect("first");
+    let unit_id = r.register_kind_with_descriptor(unit_desc("aether.foo")).expect("first");
     let struct_id = r
         .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
         .expect("second — different schema, no conflict under hashed ids");
     assert_ne!(unit_id, struct_id);
     assert_eq!(r.kind_descriptor(unit_id).unwrap().schema, SchemaType::Unit);
-    assert!(matches!(
-        r.kind_descriptor(struct_id).unwrap().schema,
-        SchemaType::Struct { .. }
-    ));
+    assert!(matches!(r.kind_descriptor(struct_id).unwrap().schema, SchemaType::Struct { .. }));
 }
 
 #[test]
@@ -595,30 +545,18 @@ fn name_only_and_with_descriptor_resolve_to_distinct_ids() {
     // is a test-only hazard and production callers go through
     // `register_kind_with_descriptor` exclusively.
     let r = Registry::new();
-    let real = r
-        .register_kind_with_descriptor(cast_struct_desc("aether.foo"))
-        .expect("real schema");
+    let real = r.register_kind_with_descriptor(cast_struct_desc("aether.foo")).expect("real schema");
     let bytes = r.register_kind("aether.foo");
     assert_ne!(real, bytes);
-    assert!(matches!(
-        r.kind_descriptor(real).unwrap().schema,
-        SchemaType::Struct { .. }
-    ));
-    assert!(matches!(
-        r.kind_descriptor(bytes).unwrap().schema,
-        SchemaType::Bytes,
-    ));
+    assert!(matches!(r.kind_descriptor(real).unwrap().schema, SchemaType::Struct { .. }));
+    assert!(matches!(r.kind_descriptor(bytes).unwrap().schema, SchemaType::Bytes,));
 }
 
 #[test]
 fn try_register_inbox_is_non_panicking_on_collision() {
     let r = Registry::new();
-    let first = r
-        .try_register_inbox("loaded", noop_handler())
-        .expect("fresh name");
-    let err = r
-        .try_register_inbox("loaded", noop_handler())
-        .expect_err("collision must not panic");
+    let first = r.try_register_inbox("loaded", noop_handler()).expect("fresh name");
+    let err = r.try_register_inbox("loaded", noop_handler()).expect_err("collision must not panic");
     assert_eq!(err.name, "loaded");
     assert_eq!(r.lookup("loaded"), Some(first));
     // Entries count unchanged after the failed second attempt.
@@ -633,9 +571,7 @@ fn try_register_inbox_is_non_panicking_on_collision() {
 #[test]
 fn try_register_inbox_rejects_reserved_chassis_name() {
     let r = Registry::new();
-    let err = r
-        .try_register_inbox("aether.chassis", noop_handler())
-        .expect_err("reserved name must reject");
+    let err = r.try_register_inbox("aether.chassis", noop_handler()).expect_err("reserved name must reject");
     assert_eq!(err.name, "aether.chassis");
     assert_eq!(r.len(), 0);
 }
@@ -647,35 +583,23 @@ fn drop_mailbox_frees_name_and_marks_entry_dropped() {
     let name = r.drop_mailbox(id).expect("drop");
     assert_eq!(name, "loaded");
     assert!(r.lookup("loaded").is_none(), "name should be reusable");
-    assert!(
-        matches!(r.entry(id), Some(MailboxEntry::Dropped)),
-        "entry must mark id as dropped"
-    );
+    assert!(matches!(r.entry(id), Some(MailboxEntry::Dropped)), "entry must mark id as dropped");
     // Under ADR-0029 the id is a function of the name, so a
     // re-register produces the *same* id and flips the entry back
     // to `Component`.
     let reloaded = r.try_register_inbox("loaded", noop_handler()).unwrap();
     assert_eq!(reloaded, id);
     assert_eq!(r.lookup("loaded"), Some(reloaded));
-    assert!(matches!(
-        r.entry(reloaded),
-        Some(MailboxEntry::Inbox { .. })
-    ));
+    assert!(matches!(r.entry(reloaded), Some(MailboxEntry::Inbox { .. })));
 }
 
 #[test]
 fn drop_mailbox_rejects_unknown_and_repeat() {
     let r = Registry::new();
-    assert!(matches!(
-        r.drop_mailbox(MailboxId(999)),
-        Err(DropError::UnknownId(_))
-    ));
+    assert!(matches!(r.drop_mailbox(MailboxId(999)), Err(DropError::UnknownId(_))));
     let c = r.try_register_inbox("x", noop_handler()).unwrap();
     r.drop_mailbox(c).unwrap();
-    assert!(matches!(
-        r.drop_mailbox(c),
-        Err(DropError::AlreadyDropped(_))
-    ));
+    assert!(matches!(r.drop_mailbox(c), Err(DropError::AlreadyDropped(_))));
 }
 
 /// Issue iamacoffeepot/aether#730: `list_mailbox_descriptors`
@@ -702,10 +626,7 @@ fn list_mailbox_descriptors_snapshots_sorted_with_categories() {
 
     // Each name maps to the expected category.
     let cat = |n: &str| {
-        snap.iter()
-            .find(|d| d.name == n)
-            .and_then(|d| d.category)
-            .unwrap_or_else(|| panic!("missing entry for {n}"))
+        snap.iter().find(|d| d.name == n).and_then(|d| d.category).unwrap_or_else(|| panic!("missing entry for {n}"))
     };
     assert_eq!(cat("aether.chassis"), MailboxCategory::ChassisSentinel);
     assert_eq!(cat("aether.input"), MailboxCategory::Actor);
@@ -714,11 +635,7 @@ fn list_mailbox_descriptors_snapshots_sorted_with_categories() {
     // categories; the hub's downstream renderer treats them as
     // raw tagged ids without a type prefix.
     assert!(
-        snap.iter()
-            .find(|d| d.name == "user_thing")
-            .unwrap()
-            .category
-            .is_none(),
+        snap.iter().find(|d| d.name == "user_thing").unwrap().category.is_none(),
         "non-aether names categorise as None",
     );
 
@@ -735,11 +652,7 @@ fn list_mailbox_descriptors_snapshots_sorted_with_categories() {
 fn list_mailbox_descriptors_ids_match_name_hashes() {
     let r = Registry::new();
     let id = r.register_inbox("aether.audio", noop_handler());
-    let entry = r
-        .list_mailbox_descriptors()
-        .into_iter()
-        .find(|d| d.name == "aether.audio")
-        .expect("audio entry");
+    let entry = r.list_mailbox_descriptors().into_iter().find(|d| d.name == "aether.audio").expect("audio entry");
     assert_eq!(entry.id, id);
     assert_eq!(entry.id, MailboxId::from_name("aether.audio"));
 }
@@ -766,11 +679,7 @@ fn mailbox_change_hook_fires_on_register_inbox() {
     r.register_inbox("aether.render", noop_handler());
 
     let captured = snapshots.lock().unwrap();
-    assert_eq!(
-        captured.len(),
-        2,
-        "hook should fire once per successful register_inbox"
-    );
+    assert_eq!(captured.len(), 2, "hook should fire once per successful register_inbox");
     // Each snapshot is the FULL inventory at that moment (matches
     // the wire `MailboxesChanged` semantics — full replace, not
     // delta), so the second snapshot strictly contains the first.
@@ -792,13 +701,9 @@ fn mailbox_change_hook_fires_on_try_register_inbox_ok_only() {
         *count_for_hook.lock().unwrap() += 1;
     }));
 
-    let _ = r
-        .try_register_inbox("aether.input", noop_handler())
-        .expect("first register OK");
+    let _ = r.try_register_inbox("aether.input", noop_handler()).expect("first register OK");
     // Second registration with the same name conflicts.
-    let _ = r
-        .try_register_inbox("aether.input", noop_handler())
-        .expect_err("second register should NameConflict");
+    let _ = r.try_register_inbox("aether.input", noop_handler()).expect_err("second register should NameConflict");
 
     assert_eq!(*count.lock().unwrap(), 1, "hook fires once on Ok only");
 }
@@ -856,10 +761,7 @@ fn inbox_handler_blanket_impl_moves_owned_payload() {
     let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
         // Payload moves straight into the captured Vec — no clone
         // or `to_vec()` on a borrowed slice.
-        collected_for_handler
-            .lock()
-            .unwrap()
-            .push(dispatch.payload.into_vec());
+        collected_for_handler.lock().unwrap().push(dispatch.payload.into_vec());
     });
 
     handler.enqueue(OwnedDispatch::disarmed(
@@ -936,8 +838,5 @@ fn inbox_handler_hand_rolled_impl_dispatches_per_call() {
     assert_eq!(received.kind, KindId(42));
     assert_eq!(received.kind_name, "aether.fs.write");
     assert_eq!(received.payload.into_vec(), vec![0xAB, 0xCD]);
-    assert!(
-        rx.try_recv().is_err(),
-        "exactly one enqueue should send exactly one envelope",
-    );
+    assert!(rx.try_recv().is_err(), "exactly one enqueue should send exactly one envelope");
 }

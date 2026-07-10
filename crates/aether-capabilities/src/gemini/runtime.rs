@@ -8,13 +8,12 @@
 //! the parent.
 
 use super::adapter::{
-    DisabledGeminiAdapter, UreqGeminiAdapter, aspect_ratio_str, image_size_str, map_adapter_error,
-    thinking_level_str,
+    DisabledGeminiAdapter, UreqGeminiAdapter, aspect_ratio_str, image_size_str, map_adapter_error, thinking_level_str,
 };
 use super::config::GeminiConfig;
 use super::{
-    GeminiCapability, GeminiError, GroundingMetadata, LyriaGenerate, LyriaGenerateResult,
-    NanobananaGenerate, NanobananaGenerateResult, lyria, nanobanana,
+    GeminiCapability, GeminiError, GroundingMetadata, LyriaGenerate, LyriaGenerateResult, NanobananaGenerate,
+    NanobananaGenerateResult, lyria, nanobanana,
 };
 use crate::fs::{Access, FileAdapter, LocalFileAdapter};
 use crate::shared::contentgen::adapter::{
@@ -62,16 +61,8 @@ pub struct GeminiBoot {
 
 #[cfg(test)]
 impl GeminiCapabilityState {
-    fn from_parts(
-        adapter: Arc<dyn GeminiAdapter>,
-        max_in_flight: usize,
-        gen_root: PathBuf,
-    ) -> Self {
-        Self {
-            adapter,
-            tasks: TaskQueue::new(max_in_flight),
-            gen_root,
-        }
+    fn from_parts(adapter: Arc<dyn GeminiAdapter>, max_in_flight: usize, gen_root: PathBuf) -> Self {
+        Self { adapter, tasks: TaskQueue::new(max_in_flight), gen_root }
     }
 
     fn test_in_flight(&self) -> usize {
@@ -90,10 +81,7 @@ impl NativeActor for GeminiCapability {
     /// ADR-0050 + ADR-0074 Phase 5 chassis-owned mailbox.
     const NAMESPACE: &'static str = "aether.gemini";
 
-    fn init(
-        boot: GeminiBoot,
-        _ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<GeminiCapabilityState, BootError> {
+    fn init(boot: GeminiBoot, _ctx: &mut NativeInitCtx<'_>) -> Result<GeminiCapabilityState, BootError> {
         Ok(GeminiCapabilityState {
             adapter: build_adapter(&boot.config),
             tasks: TaskQueue::new(boot.config.max_in_flight),
@@ -110,11 +98,7 @@ impl NativeActor for GeminiCapability {
     /// rules synchronously (the matching `…NotSupportedByModel` /
     /// `UnknownModel` error on a miss) before any dispatch.
     #[handler::manual]
-    fn on_nanobanana_generate(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Manual>,
-        mail: NanobananaGenerate,
-    ) {
+    fn on_nanobanana_generate(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: NanobananaGenerate) {
         let request_id = mail.request_id;
         // Opt-in / default-off; cross-model, so never validated.
         let include_sig = mail.include_thought_signature.unwrap_or(false);
@@ -162,9 +146,7 @@ impl NativeActor for GeminiCapability {
             prompt: mail.prompt,
             aspect_ratio: aspect_ratio_str(mail.aspect_ratio).to_string(),
             image_size: mail.image_size.map(|s| image_size_str(s).to_string()),
-            thinking_level: mail
-                .thinking_level
-                .map(|l| thinking_level_str(l).to_string()),
+            thinking_level: mail.thinking_level.map(|l| thinking_level_str(l).to_string()),
             include_thoughts: mail.include_thoughts,
             use_grounding: mail.use_grounding.unwrap_or(false),
             reference_images,
@@ -188,39 +170,25 @@ impl NativeActor for GeminiCapability {
     /// model and a both-set `seed` + `sample_count` synchronously
     /// before any dispatch.
     #[handler::manual]
-    fn on_lyria_generate(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Manual>,
-        mail: LyriaGenerate,
-    ) {
+    fn on_lyria_generate(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LyriaGenerate) {
         let request_id = mail.request_id;
         if !lyria::is_supported(&mail.model) {
             OutboundReply::reply(
                 ctx,
                 &LyriaGenerateResult::Err {
                     request_id,
-                    error: GeminiError::UnknownModel {
-                        model: mail.model,
-                        supported: lyria::supported_model_ids(),
-                    },
+                    error: GeminiError::UnknownModel { model: mail.model, supported: lyria::supported_model_ids() },
                 },
             );
             return;
         }
-        if let Err(error) = lyria::validate(
-            &mail.model,
-            mail.seed.is_some(),
-            mail.sample_count.is_some(),
-        ) {
+        if let Err(error) = lyria::validate(&mail.model, mail.seed.is_some(), mail.sample_count.is_some()) {
             OutboundReply::reply(ctx, &LyriaGenerateResult::Err { request_id, error });
             return;
         }
 
-        let req = GeminiMusicRequest {
-            model: mail.model,
-            prompt: mail.prompt,
-            sample_count: mail.sample_count.unwrap_or(1),
-        };
+        let req =
+            GeminiMusicRequest { model: mail.model, prompt: mail.prompt, sample_count: mail.sample_count.unwrap_or(1) };
         let adapter = Arc::clone(&state.adapter);
         let gen_root = state.gen_root.clone();
         state.tasks.submit(ctx, move || {
@@ -235,22 +203,14 @@ impl NativeActor for GeminiCapability {
     /// hold), then free the in-flight slot (draining the next pending
     /// request).
     #[handler(task)]
-    fn on_nanobanana_done(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        done: TaskDone<NanobananaGenerateResult>,
-    ) {
+    fn on_nanobanana_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<NanobananaGenerateResult>) {
         done.resolve(ctx);
         state.tasks.on_complete(ctx);
     }
 
     /// ADR-0093 completion for a finished Lyria call.
     #[handler(task)]
-    fn on_lyria_done(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        done: TaskDone<LyriaGenerateResult>,
-    ) {
+    fn on_lyria_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<LyriaGenerateResult>) {
         done.resolve(ctx);
         state.tasks.on_complete(ctx);
     }
@@ -294,9 +254,7 @@ pub fn read_reference_images(root: &Path, paths: &[String]) -> Result<Vec<Vec<u8
         .map_err(|e| GeminiError::AdapterError(e.to_string()))?;
     let mut out = Vec::with_capacity(paths.len());
     for path in paths {
-        let bytes = adapter
-            .read(path)
-            .map_err(|e| GeminiError::AdapterError(format!("reference {path}: {e:?}")))?;
+        let bytes = adapter.read(path).map_err(|e| GeminiError::AdapterError(format!("reference {path}: {e:?}")))?;
         out.push(bytes);
     }
     Ok(out)
@@ -325,17 +283,9 @@ pub fn nanobanana_reply(
             // caller asked to retain it for a multi-turn continuation
             // (a signature can run to multiple MB and dominate the
             // reply). Parse stays unconditional; the gate is here.
-            let thought_signature = if include_sig {
-                resp.thought_signature
-            } else {
-                None
-            };
-            let grounding = resp
-                .grounding
-                .map(|(search_queries, source_urls)| GroundingMetadata {
-                    search_queries,
-                    source_urls,
-                });
+            let thought_signature = if include_sig { resp.thought_signature } else { None };
+            let grounding =
+                resp.grounding.map(|(search_queries, source_urls)| GroundingMetadata { search_queries, source_urls });
             let Some(artifact) = resp.artifacts.into_iter().next() else {
                 return NanobananaGenerateResult::Err {
                     request_id,
@@ -357,18 +307,11 @@ pub fn nanobanana_reply(
                 },
             }
         }
-        Err(raw) => NanobananaGenerateResult::Err {
-            request_id,
-            error: map_adapter_error(&raw),
-        },
+        Err(raw) => NanobananaGenerateResult::Err { request_id, error: map_adapter_error(&raw) },
     }
 }
 
-pub fn lyria_reply(
-    root: &Path,
-    request_id: u64,
-    result: Result<GeminiResponse, String>,
-) -> LyriaGenerateResult {
+pub fn lyria_reply(root: &Path, request_id: u64, result: Result<GeminiResponse, String>) -> LyriaGenerateResult {
     match result {
         Ok(resp) => {
             let mut output_paths = Vec::with_capacity(resp.artifacts.len());
@@ -390,10 +333,7 @@ pub fn lyria_reply(
                 usage: to_usage(resp.usage),
             }
         }
-        Err(raw) => LyriaGenerateResult::Err {
-            request_id,
-            error: map_adapter_error(&raw),
-        },
+        Err(raw) => LyriaGenerateResult::Err { request_id, error: map_adapter_error(&raw) },
     }
 }
 
@@ -403,8 +343,8 @@ mod tests {
     use crate::gemini::GeminiCapability;
     use crate::gemini::runtime::{GeminiCapabilityState, nanobanana_reply};
     use crate::gemini::{
-        AspectRatio, GeminiError, ImageSize, LyriaGenerate, LyriaGenerateResult,
-        NanobananaGenerate, NanobananaGenerateResult,
+        AspectRatio, GeminiError, ImageSize, LyriaGenerate, LyriaGenerateResult, NanobananaGenerate,
+        NanobananaGenerateResult,
     };
     use crate::shared::contentgen::adapter::STUB_PNG;
     use crate::shared::contentgen::adapter::StubGeminiAdapter;
@@ -458,12 +398,8 @@ mod tests {
 
         let (mailer, rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state =
-            GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            cap_mailbox,
-        ));
+        let mut state = GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
         let mut ctx = NativeCtx::new_dispatching(
             &transport,
             session_sender(),
@@ -473,10 +409,7 @@ mod tests {
         GeminiCapability::on_nanobanana_generate(
             &mut state,
             &mut ctx,
-            nb_request(
-                "gemini-3.1-flash-image-preview",
-                AspectRatio::ASPECT_RATIO_1_1,
-            ),
+            nb_request("gemini-3.1-flash-image-preview", AspectRatio::ASPECT_RATIO_1_1),
         );
         // The worker runs the stub call + staging and pushes the
         // completion wake; route it through the cap's task handler.
@@ -484,13 +417,9 @@ mod tests {
 
         match decode_reply::<NanobananaGenerateResult>(&rx) {
             NanobananaGenerateResult::Ok { output_path, .. } => {
-                assert!(
-                    output_path.starts_with("gen/"),
-                    "staged path was {output_path:?}"
-                );
+                assert!(output_path.starts_with("gen/"), "staged path was {output_path:?}");
                 assert_eq!(output_path.rsplit('.').next(), Some("png"));
-                let bytes =
-                    fs::read(scratch.join(&output_path)).expect("staged file exists on disk");
+                let bytes = fs::read(scratch.join(&output_path)).expect("staged file exists on disk");
                 assert_eq!(&bytes[..8], &STUB_PNG[..8]);
             }
             other @ NanobananaGenerateResult::Err { .. } => {
@@ -508,12 +437,8 @@ mod tests {
         let scratch = scratch_dir("aether-gemini-nb", "validation");
         let (mailer, rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state =
-            GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            cap_mailbox,
-        ));
+        let mut state = GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
         let mut ctx = NativeCtx::new_dispatching(
             &transport,
             session_sender(),
@@ -527,10 +452,7 @@ mod tests {
             nb_request("gemini-2.5-flash-image", AspectRatio::ASPECT_RATIO_8_1),
         );
         match decode_reply::<NanobananaGenerateResult>(&rx) {
-            NanobananaGenerateResult::Err {
-                error: GeminiError::AspectRatioNotSupportedByModel { .. },
-                ..
-            } => {}
+            NanobananaGenerateResult::Err { error: GeminiError::AspectRatioNotSupportedByModel { .. }, .. } => {}
             other => panic!("expected AspectRatioNotSupportedByModel, got {other:?}"),
         }
         // No dispatch happened — the synchronous validation error
@@ -542,10 +464,7 @@ mod tests {
         req.image_size = Some(ImageSize::S512);
         GeminiCapability::on_nanobanana_generate(&mut state, &mut ctx, req);
         match decode_reply::<NanobananaGenerateResult>(&rx) {
-            NanobananaGenerateResult::Err {
-                error: GeminiError::ImageSizeNotSupportedByModel { .. },
-                ..
-            } => {}
+            NanobananaGenerateResult::Err { error: GeminiError::ImageSizeNotSupportedByModel { .. }, .. } => {}
             other => panic!("expected ImageSizeNotSupportedByModel, got {other:?}"),
         }
         cleanup(&scratch);
@@ -556,12 +475,8 @@ mod tests {
         let scratch = scratch_dir("aether-gemini-nb", "unknown-model");
         let (mailer, rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state =
-            GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            cap_mailbox,
-        ));
+        let mut state = GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
         let mut ctx = NativeCtx::new_dispatching(
             &transport,
             session_sender(),
@@ -574,10 +489,7 @@ mod tests {
             nb_request("gemini-bogus", AspectRatio::ASPECT_RATIO_1_1),
         );
         match decode_reply::<NanobananaGenerateResult>(&rx) {
-            NanobananaGenerateResult::Err {
-                error: GeminiError::UnknownModel { model, supported },
-                ..
-            } => {
+            NanobananaGenerateResult::Err { error: GeminiError::UnknownModel { model, supported }, .. } => {
                 assert_eq!(model, "gemini-bogus");
                 assert!(supported.contains(&"gemini-3.1-flash-image-preview".to_string()));
             }
@@ -596,12 +508,8 @@ mod tests {
 
         let (mailer, rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state =
-            GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            cap_mailbox,
-        ));
+        let mut state = GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
         let mut ctx = NativeCtx::new_dispatching(
             &transport,
             session_sender(),
@@ -626,11 +534,7 @@ mod tests {
         match decode_reply::<LyriaGenerateResult>(&rx) {
             LyriaGenerateResult::Ok { output_paths, .. } => {
                 assert_eq!(output_paths.len(), 2);
-                assert!(
-                    output_paths
-                        .iter()
-                        .all(|p| p.starts_with("gen/") && p.rsplit('.').next() == Some("wav"))
-                );
+                assert!(output_paths.iter().all(|p| p.starts_with("gen/") && p.rsplit('.').next() == Some("wav")));
             }
             other @ LyriaGenerateResult::Err { .. } => panic!("expected Ok, got {other:?}"),
         }
@@ -643,12 +547,8 @@ mod tests {
         let scratch = scratch_dir("aether-gemini-nb", "disabled");
         let (mailer, rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state =
-            GeminiCapabilityState::from_parts(Arc::new(DisabledGeminiAdapter), 4, scratch.clone());
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            cap_mailbox,
-        ));
+        let mut state = GeminiCapabilityState::from_parts(Arc::new(DisabledGeminiAdapter), 4, scratch.clone());
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
         let mut ctx = NativeCtx::new_dispatching(
             &transport,
             session_sender(),
@@ -658,19 +558,13 @@ mod tests {
         GeminiCapability::on_nanobanana_generate(
             &mut state,
             &mut ctx,
-            nb_request(
-                "gemini-3.1-flash-image-preview",
-                AspectRatio::ASPECT_RATIO_1_1,
-            ),
+            nb_request("gemini-3.1-flash-image-preview", AspectRatio::ASPECT_RATIO_1_1),
         );
         // The disabled adapter returns the Unauthorized sentinel on the
         // worker; the completion re-replies the mapped error.
         drive_task_completion::<GeminiCapability>(&mut state, &transport, &rx);
         match decode_reply::<NanobananaGenerateResult>(&rx) {
-            NanobananaGenerateResult::Err {
-                error: GeminiError::Unauthorized,
-                ..
-            } => {}
+            NanobananaGenerateResult::Err { error: GeminiError::Unauthorized, .. } => {}
             other => panic!("expected Unauthorized, got {other:?}"),
         }
         cleanup(&scratch);
@@ -680,10 +574,7 @@ mod tests {
     /// `thought_signature`, the shape the cap's reply assembly sees.
     fn nb_response_with_signature(sig: &str) -> GeminiResponse {
         GeminiResponse {
-            artifacts: vec![GeminiArtifact {
-                bytes: STUB_PNG.to_vec(),
-                ext: "png".to_string(),
-            }],
+            artifacts: vec![GeminiArtifact { bytes: STUB_PNG.to_vec(), ext: "png".to_string() }],
             model_used: "gemini-3-pro-image-preview".to_string(),
             usage: AdapterUsage::default(),
             thought_signature: Some(sig.to_string()),
@@ -693,10 +584,7 @@ mod tests {
 
     /// Stage `nanobanana_reply` under a scratch staging root so the seam
     /// tests never touch the user's real save dir.
-    fn reply_under_scratch_gen_dir(
-        include_sig: bool,
-        resp: GeminiResponse,
-    ) -> NanobananaGenerateResult {
+    fn reply_under_scratch_gen_dir(include_sig: bool, resp: GeminiResponse) -> NanobananaGenerateResult {
         let scratch = scratch_dir("aether-gemini-sig", "reply");
         let reply = nanobanana_reply(&scratch, 1, include_sig, Ok(resp));
         cleanup(&scratch);
@@ -710,13 +598,8 @@ mod tests {
     fn thought_signature_cleared_when_flag_off() {
         let reply = reply_under_scratch_gen_dir(false, nb_response_with_signature("sig-abc"));
         match reply {
-            NanobananaGenerateResult::Ok {
-                thought_signature, ..
-            } => {
-                assert_eq!(
-                    thought_signature, None,
-                    "flag off clears the signature from the reply"
-                );
+            NanobananaGenerateResult::Ok { thought_signature, .. } => {
+                assert_eq!(thought_signature, None, "flag off clears the signature from the reply");
             }
             other @ NanobananaGenerateResult::Err { .. } => {
                 panic!("expected Ok, got {other:?}")
@@ -730,9 +613,7 @@ mod tests {
     fn thought_signature_retained_when_flag_on() {
         let reply = reply_under_scratch_gen_dir(true, nb_response_with_signature("sig-abc"));
         match reply {
-            NanobananaGenerateResult::Ok {
-                thought_signature, ..
-            } => {
+            NanobananaGenerateResult::Ok { thought_signature, .. } => {
                 assert_eq!(
                     thought_signature.as_deref(),
                     Some("sig-abc"),
@@ -761,12 +642,8 @@ mod tests {
         let scratch = scratch_dir("aether-gemini-nb", "sig-accepted");
         let (mailer, _rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state =
-            GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            cap_mailbox,
-        ));
+        let mut state = GeminiCapabilityState::from_parts(Arc::new(StubGeminiAdapter), 4, scratch.clone());
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
         let mut ctx = NativeCtx::new_dispatching(
             &transport,
             session_sender(),

@@ -15,9 +15,7 @@ use std::collections::{HashMap, HashSet};
 /// Collect surviving directed edges after twin-pair cancellation.
 /// For each canonical (smaller-id-first) edge, the surplus copies of
 /// the dominant direction are pushed in that direction.
-pub(super) fn surviving_directed_edges(
-    directed: &HashMap<(VertexId, VertexId), u32>,
-) -> Vec<(VertexId, VertexId)> {
+pub(super) fn surviving_directed_edges(directed: &HashMap<(VertexId, VertexId), u32>) -> Vec<(VertexId, VertexId)> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     let mut keys: Vec<(VertexId, VertexId)> = directed.keys().copied().collect();

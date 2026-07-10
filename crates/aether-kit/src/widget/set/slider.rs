@@ -22,8 +22,8 @@ use crate::widget::set::{push_control_outlines, quad, reply_if_hidden};
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
-    Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, SliderChanged,
-    SliderConfig, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, SliderChanged, SliderConfig,
+    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 /// A horizontal value slider. Local draw is a track with a fill from the left
@@ -72,31 +72,20 @@ impl SliderWidget {
     /// The nudge one arrow press applies: `step` when set, else a hundredth of
     /// the range so a continuous slider still moves.
     fn nudge_amount(&self) -> f32 {
-        if self.step > 0.0 {
-            self.step
-        } else {
-            (self.max - self.min) * 0.01
-        }
+        if self.step > 0.0 { self.step } else { (self.max - self.min) * 0.01 }
     }
 
     /// The value as a `0.0..=1.0` fraction of the range, for the fill width.
     fn fill_fraction(&self) -> f32 {
         let span = self.max - self.min;
-        if span > 0.0 {
-            ((self.value - self.min) / span).clamp(0.0, 1.0)
-        } else {
-            0.0
-        }
+        if span > 0.0 { ((self.value - self.min) / span).clamp(0.0, 1.0) } else { 0.0 }
     }
 
     /// Emit the current value up to the panel root, `committed` distinguishing
     /// a drag stream from a settled value.
     fn emit(&self, ctx: &WasmCtx<'_>, committed: bool) {
         if let Some(parent) = ctx.parent() {
-            parent.send(&SliderChanged {
-                value: self.value,
-                committed,
-            });
+            parent.send(&SliderChanged { value: self.value, committed });
         }
     }
 
@@ -129,12 +118,7 @@ impl WasmActor for SliderWidget {
             value: config.initial,
             theme: config.theme,
             state: InteractionState::new(config.state),
-            frame: WidgetFrame {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                height: 0.0,
-            },
+            frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
             dragging: false,
         };
         slider.value = slider.snapped(config.initial);
@@ -260,13 +244,7 @@ impl WasmActor for SliderWidget {
         let track_y = (height - track_height) * 0.5;
 
         let mut items: Vec<WidgetDrawItem> = Vec::new();
-        items.push(quad(
-            0.0,
-            track_y,
-            width,
-            track_height,
-            self.theme.fill(self.theme.surface_raised, track_state),
-        ));
+        items.push(quad(0.0, track_y, width, track_height, self.theme.fill(self.theme.surface_raised, track_state)));
         items.push(quad(
             0.0,
             track_y,
@@ -276,10 +254,7 @@ impl WasmActor for SliderWidget {
         ));
         push_control_outlines(&mut items, width, height, &self.state, &self.theme);
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                intrinsic: None,
-                items,
-            });
+            parent.send(&WidgetDrawList { intrinsic: None, items });
         }
     }
 }
@@ -297,12 +272,7 @@ mod tests {
             value: initial,
             theme: Theme::DEFAULT,
             state: InteractionState::new(WidgetControlState::default()),
-            frame: WidgetFrame {
-                x: 100.0,
-                y: 0.0,
-                width: 200.0,
-                height: 24.0,
-            },
+            frame: WidgetFrame { x: 100.0, y: 0.0, width: 200.0, height: 24.0 },
             dragging: false,
         }
     }
@@ -323,16 +293,8 @@ mod tests {
     #[test]
     fn pointer_past_the_edges_clamps_into_range() {
         let s = slider(-1.0, 1.0, 0.0, 0.0);
-        assert_eq!(
-            s.value_from_pointer_x(50.0),
-            -1.0,
-            "left of the track clamps to min"
-        );
-        assert_eq!(
-            s.value_from_pointer_x(500.0),
-            1.0,
-            "right of the track clamps to max"
-        );
+        assert_eq!(s.value_from_pointer_x(50.0), -1.0, "left of the track clamps to min");
+        assert_eq!(s.value_from_pointer_x(500.0), 1.0, "right of the track clamps to max");
     }
 
     #[test]
@@ -355,10 +317,6 @@ mod tests {
         s.value = 25.0;
         assert_eq!(s.fill_fraction(), 0.25);
         s.value = 200.0;
-        assert_eq!(
-            s.fill_fraction(),
-            1.0,
-            "an out-of-range value clamps the fill"
-        );
+        assert_eq!(s.fill_fraction(), 1.0, "an out-of-range value clamps the fill");
     }
 }

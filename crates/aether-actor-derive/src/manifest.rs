@@ -27,10 +27,7 @@ fn to_screaming_snake_case(s: &str) -> String {
 /// is what prevents the section from stacking when a `#[actor]`-
 /// using crate is pulled in as a wasm32 rlib by another cdylib (a
 /// rlib that doesn't call `export!()` contributes no section bytes).
-fn emit_inputs_copy_block(
-    rec_len_expr: &TokenStream2,
-    rec_bytes_expr: &TokenStream2,
-) -> TokenStream2 {
+fn emit_inputs_copy_block(rec_len_expr: &TokenStream2, rec_bytes_expr: &TokenStream2) -> TokenStream2 {
     quote! {
         {
             const REC_LEN: usize = #rec_len_expr;
@@ -73,19 +70,12 @@ pub fn build_inputs_manifest_consts(
         let (reply_tag_expr, reply_id_expr) = match (h.class, h.reply.manifest_kind()) {
             (HandlerClass::Manual, _) => (quote! { 3u8 }, quote! { 0u64 }),
             (HandlerClass::Multi, _) => {
-                let k = h
-                    .multi_kind
-                    .as_ref()
-                    .expect("a multi handler carries its `Multi<K>` emit kind");
-                (
-                    quote! { 2u8 },
-                    quote! { <#k as ::aether_actor::__macro_internals::Kind>::ID.0 },
-                )
+                let k = h.multi_kind.as_ref().expect("a multi handler carries its `Multi<K>` emit kind");
+                (quote! { 2u8 }, quote! { <#k as ::aether_actor::__macro_internals::Kind>::ID.0 })
             }
-            (HandlerClass::Single, Some(r)) => (
-                quote! { 1u8 },
-                quote! { <#r as ::aether_actor::__macro_internals::Kind>::ID.0 },
-            ),
+            (HandlerClass::Single, Some(r)) => {
+                (quote! { 1u8 }, quote! { <#r as ::aether_actor::__macro_internals::Kind>::ID.0 })
+            }
             (HandlerClass::Single, None) => (quote! { 0u8 }, quote! { 0u64 }),
         };
         // `inputs_handler_len` / `write_inputs_handler` take a raw `u64`
@@ -259,46 +249,15 @@ pub fn build_kinds_section_retention_statics(
         .collect();
 
     let statics = retained_kinds.iter().map(|(k, idx)| {
-        let schema_ident = quote::format_ident!(
-            "__AETHER_HANDLERS_KIND_SCHEMA_{}_{}",
-            self_ty_hint,
-            idx
-        );
-        let len_ident = quote::format_ident!(
-            "__AETHER_HANDLERS_KIND_CANONICAL_LEN_{}_{}",
-            self_ty_hint,
-            idx
-        );
-        let bytes_ident = quote::format_ident!(
-            "__AETHER_HANDLERS_KIND_CANONICAL_BYTES_{}_{}",
-            self_ty_hint,
-            idx
-        );
-        let section_ident = quote::format_ident!(
-            "__AETHER_HANDLERS_KIND_MANIFEST_{}_{}",
-            self_ty_hint,
-            idx
-        );
-        let labels_static_ident = quote::format_ident!(
-            "__AETHER_HANDLERS_KIND_LABELS_{}_{}",
-            self_ty_hint,
-            idx
-        );
-        let labels_len_ident = quote::format_ident!(
-            "__AETHER_HANDLERS_KIND_LABELS_LEN_{}_{}",
-            self_ty_hint,
-            idx
-        );
-        let labels_bytes_ident = quote::format_ident!(
-            "__AETHER_HANDLERS_KIND_LABELS_BYTES_{}_{}",
-            self_ty_hint,
-            idx
-        );
-        let labels_section_ident = quote::format_ident!(
-            "__AETHER_HANDLERS_KIND_LABELS_MANIFEST_{}_{}",
-            self_ty_hint,
-            idx
-        );
+        let schema_ident = quote::format_ident!("__AETHER_HANDLERS_KIND_SCHEMA_{}_{}", self_ty_hint, idx);
+        let len_ident = quote::format_ident!("__AETHER_HANDLERS_KIND_CANONICAL_LEN_{}_{}", self_ty_hint, idx);
+        let bytes_ident = quote::format_ident!("__AETHER_HANDLERS_KIND_CANONICAL_BYTES_{}_{}", self_ty_hint, idx);
+        let section_ident = quote::format_ident!("__AETHER_HANDLERS_KIND_MANIFEST_{}_{}", self_ty_hint, idx);
+        let labels_static_ident = quote::format_ident!("__AETHER_HANDLERS_KIND_LABELS_{}_{}", self_ty_hint, idx);
+        let labels_len_ident = quote::format_ident!("__AETHER_HANDLERS_KIND_LABELS_LEN_{}_{}", self_ty_hint, idx);
+        let labels_bytes_ident = quote::format_ident!("__AETHER_HANDLERS_KIND_LABELS_BYTES_{}_{}", self_ty_hint, idx);
+        let labels_section_ident =
+            quote::format_ident!("__AETHER_HANDLERS_KIND_LABELS_MANIFEST_{}_{}", self_ty_hint, idx);
         quote! {
             // Mirrors the intermediate-static pattern in the Kind derive
             // (`aether-data-derive`) so const-eval of the serializer
@@ -394,10 +353,7 @@ fn type_hint(ty: &Type) -> syn::Ident {
     if let Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last()
     {
-        return syn::Ident::new(
-            &to_screaming_snake_case(&seg.ident.to_string()),
-            seg.ident.span(),
-        );
+        return syn::Ident::new(&to_screaming_snake_case(&seg.ident.to_string()), seg.ident.span());
     }
     syn::Ident::new("COMPONENT", proc_macro2::Span::call_site())
 }

@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aether_data::{Kind, Source};
+use aether_data::{Kind, SessionToken, Source, SourceAddr, Uuid};
 use aether_kinds::descriptors;
 
 use crate::actor::native::binding::NativeBinding;
@@ -144,23 +144,17 @@ pub fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
 /// The driving `NativeCtx` carries no inbound reply target ([`Source::NONE`]):
 /// the completion's reply routes through the reply target captured at
 /// dispatch and parked in the framework's in-flight ledger, not this ctx.
-pub fn drive_task_completion<A>(
-    state: &mut A::State,
-    binding: &Arc<NativeBinding>,
-    rx: &Receiver<EgressEvent>,
-) where
+pub fn drive_task_completion<A>(state: &mut A::State, binding: &Arc<NativeBinding>, rx: &Receiver<EgressEvent>)
+where
     // Dispatch is a `NativeActor` assoc fn over `&mut Self::State` (ADR-0122
     // identity/runtime split). The param is the associated projection, so `A`
     // is not inferable from it — every call site names it via turbofish.
     A: NativeActor,
 {
     let payload = loop {
-        let event = rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("test: dispatch completion wake arrives within deadline");
-        if let EgressEvent::UnresolvedMail {
-            kind_id, payload, ..
-        } = event
+        let event =
+            rx.recv_timeout(Duration::from_secs(2)).expect("test: dispatch completion wake arrives within deadline");
+        if let EgressEvent::UnresolvedMail { kind_id, payload, .. } = event
             && kind_id == TaskCompletionWake::ID
         {
             break payload;
@@ -168,12 +162,8 @@ pub fn drive_task_completion<A>(
     };
     // ADR-0112: route through the macro dispatch seam, which carries the
     // `Manual` ctx — build it via `new_dispatching`, not `new`.
-    let mut ctx = NativeCtx::new_dispatching(
-        binding,
-        Source::NONE,
-        aether_data::MailId::NONE,
-        aether_data::MailId::NONE,
-    );
+    let mut ctx =
+        NativeCtx::new_dispatching(binding, Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
     A::dispatch(state, &mut ctx, TaskCompletionWake::ID, &payload)
         .expect("test: task completion routes to a #[handler(task)] arm");
 }
@@ -191,17 +181,64 @@ where
     K: Kind,
 {
     loop {
-        let event = rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("test: egress event arrives within deadline");
-        if let EgressEvent::ToSession {
-            kind_name, payload, ..
-        } = event
+        let event = rx.recv_timeout(Duration::from_secs(2)).expect("test: egress event arrives within deadline");
+        if let EgressEvent::ToSession { kind_name, payload, .. } = event
             && kind_name == K::NAME
         {
             return K::decode_from_bytes(&payload).expect("test: reply payload decodes");
         }
     }
+}
+
+/// Sibling of [`decode_session_reply`] that also returns which session
+/// the reply targeted, for cap tests that fan replies across sessions.
+pub fn decode_session_reply_with_session<K>(rx: &Receiver<EgressEvent>) -> (SessionToken, K)
+where
+    K: Kind,
+{
+    loop {
+        let event = rx.recv_timeout(Duration::from_secs(2)).expect("test: egress event arrives within deadline");
+        if let EgressEvent::ToSession { session, kind_name, payload, .. } = event
+            && kind_name == K::NAME
+        {
+            return (session, K::decode_from_bytes(&payload).expect("test: reply payload decodes"));
+        }
+    }
+}
+
+/// Flush the cap's buffered sends, then drain egress asserting the next
+/// `UnresolvedMail` carries kind `K`, returning its correlation id. The
+/// bare registry has no `aether.render` / `aether.fs`, so a forwarded
+/// send bubbles to the loopback outbound; `flush_outbound` is what
+/// `NativeCtx::Drop` would otherwise do at the end of a real dispatch
+/// turn.
+pub fn assert_next_send_kind<K: Kind>(binding: &NativeBinding, rx: &Receiver<EgressEvent>) -> u64 {
+    binding.flush_outbound();
+    loop {
+        let event = rx.recv_timeout(Duration::from_secs(2)).expect("test: egress event arrives within deadline");
+        if let EgressEvent::UnresolvedMail { kind_id, correlation_id, .. } = event {
+            assert_eq!(kind_id, K::ID, "unexpected bubbled kind");
+            return correlation_id;
+        }
+    }
+}
+
+/// `Source` for a session-origin dispatch (id 0) — the shape a cap sees
+/// when a session client sends it mail.
+pub fn session_sender() -> Source {
+    session_sender_with(0)
+}
+
+/// [`session_sender`] with an explicit session id, for tests that tell
+/// two sessions apart.
+pub fn session_sender_with(id: u128) -> Source {
+    Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(id))))
+}
+
+/// `Source` for a correlated no-address reply — the shape a task result
+/// (e.g. an `aether.fs` read) carries back into a cap's result handler.
+pub fn fs_reply_source(correlation_id: u64) -> Source {
+    Source::with_correlation(SourceAddr::None, correlation_id)
 }
 
 /// Decode the *next* egress as a `ToSession` reply of kind `K`. Strict
@@ -213,13 +250,8 @@ pub fn decode_reply<K>(rx: &Receiver<EgressEvent>) -> K
 where
     K: Kind,
 {
-    let event = rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("test: egress event arrives within 1s deadline");
-    let EgressEvent::ToSession {
-        kind_name, payload, ..
-    } = event
-    else {
+    let event = rx.recv_timeout(Duration::from_secs(1)).expect("test: egress event arrives within 1s deadline");
+    let EgressEvent::ToSession { kind_name, payload, .. } = event else {
         panic!("expected ToSession egress, got {event:?}");
     };
     assert_eq!(kind_name, K::NAME);

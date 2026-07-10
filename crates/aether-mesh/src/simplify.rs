@@ -44,21 +44,14 @@ pub fn simplify(node: &Node) -> Node {
         Node::Composition(children) => {
             let simplified: Vec<Node> = children.iter().map(simplify).collect();
             if simplified.len() == 1 {
-                return simplified
-                    .into_iter()
-                    .next()
-                    .expect("len() == 1 guarantees a single element");
+                return simplified.into_iter().next().expect("len() == 1 guarantees a single element");
             }
             Node::Composition(simplified)
         }
 
         Node::Translate { offset, child } => {
             let child = simplify(child);
-            let (offset, child) = if let Node::Translate {
-                offset: inner_offset,
-                child: inner_child,
-            } = child
-            {
+            let (offset, child) = if let Node::Translate { offset: inner_offset, child: inner_child } = child {
                 (*offset + inner_offset, *inner_child)
             } else {
                 (*offset, child)
@@ -66,53 +59,34 @@ pub fn simplify(node: &Node) -> Node {
             if offset == Vec3::ZERO {
                 return child;
             }
-            Node::Translate {
-                offset,
-                child: Box::new(child),
-            }
+            Node::Translate { offset, child: Box::new(child) }
         }
 
         Node::Rotate { axis, angle, child } => {
             let child = simplify(child);
-            let (angle, child) = if let Node::Rotate {
-                axis: inner_axis,
-                angle: inner_angle,
-                child: inner_child,
-            } = &child
-            {
-                // match arms read clearer than `.map_or(default, |sign| ...)`
-                // when the closure body and default both bind locals.
-                #[allow(clippy::option_if_let_else)]
-                match parallel_sign(*axis, *inner_axis) {
-                    Some(sign) => (*angle + sign * *inner_angle, (**inner_child).clone()),
-                    None => (*angle, child),
-                }
-            } else {
-                (*angle, child)
-            };
+            let (angle, child) =
+                if let Node::Rotate { axis: inner_axis, angle: inner_angle, child: inner_child } = &child {
+                    // match arms read clearer than `.map_or(default, |sign| ...)`
+                    // when the closure body and default both bind locals.
+                    #[allow(clippy::option_if_let_else)]
+                    match parallel_sign(*axis, *inner_axis) {
+                        Some(sign) => (*angle + sign * *inner_angle, (**inner_child).clone()),
+                        None => (*angle, child),
+                    }
+                } else {
+                    (*angle, child)
+                };
             if angle == 0.0 {
                 return child;
             }
-            Node::Rotate {
-                axis: *axis,
-                angle,
-                child: Box::new(child),
-            }
+            Node::Rotate { axis: *axis, angle, child: Box::new(child) }
         }
 
         Node::Scale { factor, child } => {
             let child = simplify(child);
-            let (factor, child) = if let Node::Scale {
-                factor: inner_factor,
-                child: inner_child,
-            } = child
-            {
+            let (factor, child) = if let Node::Scale { factor: inner_factor, child: inner_child } = child {
                 (
-                    Vec3::new(
-                        factor.x * inner_factor.x,
-                        factor.y * inner_factor.y,
-                        factor.z * inner_factor.z,
-                    ),
+                    Vec3::new(factor.x * inner_factor.x, factor.y * inner_factor.y, factor.z * inner_factor.z),
                     *inner_child,
                 )
             } else {
@@ -121,31 +95,17 @@ pub fn simplify(node: &Node) -> Node {
             if factor == Vec3::ONE {
                 return child;
             }
-            Node::Scale {
-                factor,
-                child: Box::new(child),
-            }
+            Node::Scale { factor, child: Box::new(child) }
         }
 
-        Node::Mirror { axis, child } => Node::Mirror {
-            axis: *axis,
-            child: Box::new(simplify(child)),
-        },
+        Node::Mirror { axis, child } => Node::Mirror { axis: *axis, child: Box::new(simplify(child)) },
 
-        Node::Array {
-            count,
-            spacing,
-            child,
-        } => {
+        Node::Array { count, spacing, child } => {
             let child = simplify(child);
             if *count == 1 {
                 return child;
             }
-            Node::Array {
-                count: *count,
-                spacing: *spacing,
-                child: Box::new(child),
-            }
+            Node::Array { count: *count, spacing: *spacing, child: Box::new(child) }
         }
     }
 }
@@ -173,20 +133,12 @@ mod tests {
     use super::*;
 
     fn box_node() -> Node {
-        Node::Box {
-            x: 1.0,
-            y: 1.0,
-            z: 1.0,
-            color: 0,
-        }
+        Node::Box { x: 1.0, y: 1.0, z: 1.0, color: 0 }
     }
 
     #[test]
     fn translate_zero_collapses() {
-        let n = Node::Translate {
-            offset: Vec3::ZERO,
-            child: Box::new(box_node()),
-        };
+        let n = Node::Translate { offset: Vec3::ZERO, child: Box::new(box_node()) };
         assert_eq!(simplify(&n), box_node());
     }
 
@@ -194,10 +146,7 @@ mod tests {
     fn nested_translate_folds() {
         let n = Node::Translate {
             offset: Vec3::new(1.0, 0.0, 0.0),
-            child: Box::new(Node::Translate {
-                offset: Vec3::new(0.0, 2.0, 0.0),
-                child: Box::new(box_node()),
-            }),
+            child: Box::new(Node::Translate { offset: Vec3::new(0.0, 2.0, 0.0), child: Box::new(box_node()) }),
         };
         let simplified = simplify(&n);
         match simplified {
@@ -211,11 +160,7 @@ mod tests {
 
     #[test]
     fn rotate_zero_collapses() {
-        let n = Node::Rotate {
-            axis: Vec3::Y,
-            angle: 0.0,
-            child: Box::new(box_node()),
-        };
+        let n = Node::Rotate { axis: Vec3::Y, angle: 0.0, child: Box::new(box_node()) };
         assert_eq!(simplify(&n), box_node());
     }
 
@@ -224,11 +169,7 @@ mod tests {
         let n = Node::Rotate {
             axis: Vec3::Y,
             angle: 0.5,
-            child: Box::new(Node::Rotate {
-                axis: Vec3::Y,
-                angle: 0.25,
-                child: Box::new(box_node()),
-            }),
+            child: Box::new(Node::Rotate { axis: Vec3::Y, angle: 0.25, child: Box::new(box_node()) }),
         };
         match simplify(&n) {
             Node::Rotate { angle, .. } => assert!((angle - 0.75).abs() < 1e-6),
@@ -238,20 +179,13 @@ mod tests {
 
     #[test]
     fn scale_one_collapses() {
-        let n = Node::Scale {
-            factor: Vec3::ONE,
-            child: Box::new(box_node()),
-        };
+        let n = Node::Scale { factor: Vec3::ONE, child: Box::new(box_node()) };
         assert_eq!(simplify(&n), box_node());
     }
 
     #[test]
     fn array_one_collapses() {
-        let n = Node::Array {
-            count: 1,
-            spacing: Vec3::new(1.0, 0.0, 0.0),
-            child: Box::new(box_node()),
-        };
+        let n = Node::Array { count: 1, spacing: Vec3::new(1.0, 0.0, 0.0), child: Box::new(box_node()) };
         assert_eq!(simplify(&n), box_node());
     }
 

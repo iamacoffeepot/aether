@@ -18,8 +18,8 @@ mod fleetbench;
 mod tests {
     use aether_data::Kind;
     use aether_test_fixtures_kinds::{
-        Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, INLINE_WHO_CHILD,
-        INLINE_WHO_PARENT, InlineEcho, InlineProbe,
+        Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
+        InlineProbe,
     };
 
     use crate::fleetbench::{FleetBench, dist_component_available};
@@ -38,9 +38,7 @@ mod tests {
         }
         let mut bench = FleetBench::start();
         let engine = bench.spawn_headless();
-        let parent_addr = bench
-            .load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.parent")
-            .addr;
+        let parent_addr = bench.load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.parent").addr;
 
         // The child's first-class lineage address: the parent's
         // rendered name plus the inline-child node (ADR-0114).
@@ -51,18 +49,10 @@ mod tests {
         let child_replies = bench.send(engine, &child_addr, &InlineProbe);
         let child_reply = match child_replies.as_slice() {
             [one] => one,
-            other => panic!(
-                "the inline child should reply exactly once, got {}",
-                other.len(),
-            ),
+            other => panic!("the inline child should reply exactly once, got {}", other.len()),
         };
-        assert_eq!(
-            child_reply.kind,
-            InlineEcho::ID,
-            "the child reply should be an InlineEcho",
-        );
-        let echo = InlineEcho::decode_from_bytes(&child_reply.payload)
-            .expect("the child reply decodes as InlineEcho");
+        assert_eq!(child_reply.kind, InlineEcho::ID, "the child reply should be an InlineEcho");
+        let echo = InlineEcho::decode_from_bytes(&child_reply.payload).expect("the child reply decodes as InlineEcho");
         assert_eq!(
             echo.who, INLINE_WHO_CHILD,
             "the inline child (not the parent) handled the mail to its lineage address",
@@ -76,13 +66,9 @@ mod tests {
             [one] => one,
             other => panic!("the parent should reply exactly once, got {}", other.len()),
         };
-        assert_eq!(
-            parent_reply.kind,
-            InlineEcho::ID,
-            "the parent reply should be an InlineEcho",
-        );
-        let parent_echo = InlineEcho::decode_from_bytes(&parent_reply.payload)
-            .expect("the parent reply decodes as InlineEcho");
+        assert_eq!(parent_reply.kind, InlineEcho::ID, "the parent reply should be an InlineEcho");
+        let parent_echo =
+            InlineEcho::decode_from_bytes(&parent_reply.payload).expect("the parent reply decodes as InlineEcho");
         assert_eq!(
             parent_echo.who, INLINE_WHO_PARENT,
             "a normally-addressed actor is unaffected by the inline-child membrane",
@@ -93,15 +79,9 @@ mod tests {
         let child_record = bench
             .calls()
             .iter()
-            .find(|record| {
-                record.request_kind == InlineProbe::ID && record.reply_kinds == vec![InlineEcho::ID]
-            })
+            .find(|record| record.request_kind == InlineProbe::ID && record.reply_kinds == vec![InlineEcho::ID])
             .expect("the InlineProbe round-trip is recorded as a CallRecord");
-        assert_eq!(
-            child_record.engine,
-            Some(engine),
-            "the InlineProbe is routed to the forked engine",
-        );
+        assert_eq!(child_record.engine, Some(engine), "the InlineProbe is routed to the forked engine");
     }
 
     /// Issue 2690 reload gate: a typed-config inline child's state
@@ -124,11 +104,7 @@ mod tests {
         }
         let mut bench = FleetBench::start();
         let engine = bench.spawn_headless();
-        let parent = bench.load_full_export(
-            engine,
-            "aether_test_fixtures_bundle",
-            "test.inline.configured_parent",
-        );
+        let parent = bench.load_full_export(engine, "aether_test_fixtures_bundle", "test.inline.configured_parent");
         let child_addr = format!("{}/aether.embedded:widget", parent.addr);
 
         // Baseline: the child's durable counter starts from the spawn
@@ -156,21 +132,13 @@ mod tests {
         // Same-stem in-place replace (ADR-0022): the common in-place
         // rebuild where both sides are the same SDK build (per issue
         // 2690's design notes on the composite bundle's transience).
-        bench.replace_export(
-            engine,
-            parent.mailbox_id,
-            "aether_test_fixtures_bundle",
-            "test.inline.configured_parent",
-        );
+        bench.replace_export(engine, parent.mailbox_id, "aether_test_fixtures_bundle", "test.inline.configured_parent");
 
         // The moved state — not the config default, not the spawn
         // config's initial value, not silently dropped — survives the
         // swap: the fix this issue makes.
         let after_replace = count(&mut bench, engine, &child_addr);
-        assert_eq!(
-            after_replace, expected_moved,
-            "the typed-config child's moved state survives replace_component",
-        );
+        assert_eq!(after_replace, expected_moved, "the typed-config child's moved state survives replace_component");
     }
 
     /// Send a `CountQuery` to `recipient` and decode the single
@@ -180,18 +148,9 @@ mod tests {
         let replies = bench.send(engine, recipient, &CountQuery);
         let reply = match replies.as_slice() {
             [one] => one,
-            other => panic!(
-                "CountQuery should get exactly one reply, got {}",
-                other.len()
-            ),
+            other => panic!("CountQuery should get exactly one reply, got {}", other.len()),
         };
-        assert_eq!(
-            reply.kind,
-            CountReport::ID,
-            "the reply should be a CountReport"
-        );
-        CountReport::decode_from_bytes(&reply.payload)
-            .expect("the CountReport reply decodes")
-            .count
+        assert_eq!(reply.kind, CountReport::ID, "the reply should be a CountReport");
+        CountReport::decode_from_bytes(&reply.payload).expect("the CountReport reply decodes").count
     }
 }

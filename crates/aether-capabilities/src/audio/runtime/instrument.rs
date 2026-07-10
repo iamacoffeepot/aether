@@ -133,12 +133,7 @@ pub const BUILTINS: &[InstrumentDef] = &[
         name: "sine_lead",
         voice: VoiceDef::Oscillator {
             wave: Wave::Sine,
-            adsr: Adsr {
-                attack_secs: 0.01,
-                decay_secs: 0.08,
-                sustain: 0.7,
-                release_secs: 0.18,
-            },
+            adsr: Adsr { attack_secs: 0.01, decay_secs: 0.08, sustain: 0.7, release_secs: 0.18 },
         },
         base_amp: 0.35,
         pitch_sweep: None,
@@ -147,12 +142,7 @@ pub const BUILTINS: &[InstrumentDef] = &[
         name: "square_bass",
         voice: VoiceDef::Oscillator {
             wave: Wave::Square,
-            adsr: Adsr {
-                attack_secs: 0.005,
-                decay_secs: 0.12,
-                sustain: 0.6,
-                release_secs: 0.12,
-            },
+            adsr: Adsr { attack_secs: 0.005, decay_secs: 0.12, sustain: 0.6, release_secs: 0.12 },
         },
         base_amp: 0.22,
         pitch_sweep: None,
@@ -161,12 +151,7 @@ pub const BUILTINS: &[InstrumentDef] = &[
         name: "triangle",
         voice: VoiceDef::Oscillator {
             wave: Wave::Triangle,
-            adsr: Adsr {
-                attack_secs: 0.02,
-                decay_secs: 0.1,
-                sustain: 0.7,
-                release_secs: 0.2,
-            },
+            adsr: Adsr { attack_secs: 0.02, decay_secs: 0.1, sustain: 0.7, release_secs: 0.2 },
         },
         base_amp: 0.32,
         pitch_sweep: None,
@@ -175,12 +160,7 @@ pub const BUILTINS: &[InstrumentDef] = &[
         name: "saw_lead",
         voice: VoiceDef::Oscillator {
             wave: Wave::Saw,
-            adsr: Adsr {
-                attack_secs: 0.01,
-                decay_secs: 0.15,
-                sustain: 0.55,
-                release_secs: 0.15,
-            },
+            adsr: Adsr { attack_secs: 0.01, decay_secs: 0.15, sustain: 0.55, release_secs: 0.15 },
         },
         base_amp: 0.2,
         pitch_sweep: None,
@@ -189,12 +169,7 @@ pub const BUILTINS: &[InstrumentDef] = &[
         name: "pluck",
         voice: VoiceDef::Oscillator {
             wave: Wave::Saw,
-            adsr: Adsr {
-                attack_secs: 0.002,
-                decay_secs: 0.35,
-                sustain: 0.0,
-                release_secs: 0.05,
-            },
+            adsr: Adsr { attack_secs: 0.002, decay_secs: 0.35, sustain: 0.0, release_secs: 0.05 },
         },
         base_amp: 0.3,
         pitch_sweep: None,
@@ -261,18 +236,10 @@ pub const BUILTINS: &[InstrumentDef] = &[
         name: "kick",
         voice: VoiceDef::Oscillator {
             wave: Wave::Sine,
-            adsr: Adsr {
-                attack_secs: 0.001,
-                decay_secs: 0.18,
-                sustain: 0.0,
-                release_secs: 0.02,
-            },
+            adsr: Adsr { attack_secs: 0.001, decay_secs: 0.18, sustain: 0.0, release_secs: 0.02 },
         },
         base_amp: 0.9,
-        pitch_sweep: Some(PitchSweep {
-            start_ratio: 4.0,
-            time_constant_secs: 0.03,
-        }),
+        pitch_sweep: Some(PitchSweep { start_ratio: 4.0, time_constant_secs: 0.03 }),
     },
     // id 9: hat. A short burst of bright (near-unfiltered) noise
     // through a fast no-sustain ADSR. `pitch` shifts the register so
@@ -280,16 +247,8 @@ pub const BUILTINS: &[InstrumentDef] = &[
     InstrumentDef {
         name: "hat",
         voice: VoiceDef::Oscillator {
-            wave: Wave::Noise {
-                lowpass: 0.9,
-                tone_mix: 0.0,
-            },
-            adsr: Adsr {
-                attack_secs: 0.001,
-                decay_secs: 0.04,
-                sustain: 0.0,
-                release_secs: 0.02,
-            },
+            wave: Wave::Noise { lowpass: 0.9, tone_mix: 0.0 },
+            adsr: Adsr { attack_secs: 0.001, decay_secs: 0.04, sustain: 0.0, release_secs: 0.02 },
         },
         base_amp: 0.4,
         pitch_sweep: None,
@@ -300,16 +259,8 @@ pub const BUILTINS: &[InstrumentDef] = &[
     InstrumentDef {
         name: "snare",
         voice: VoiceDef::Oscillator {
-            wave: Wave::Noise {
-                lowpass: 0.5,
-                tone_mix: 0.25,
-            },
-            adsr: Adsr {
-                attack_secs: 0.001,
-                decay_secs: 0.12,
-                sustain: 0.0,
-                release_secs: 0.03,
-            },
+            wave: Wave::Noise { lowpass: 0.5, tone_mix: 0.25 },
+            adsr: Adsr { attack_secs: 0.001, decay_secs: 0.12, sustain: 0.0, release_secs: 0.03 },
         },
         base_amp: 0.5,
         pitch_sweep: None,

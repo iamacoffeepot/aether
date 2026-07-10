@@ -54,10 +54,7 @@ impl MailboxCaps {
     /// `describe_component`'s concern, not the validator's.
     #[must_use]
     pub fn from_component_capabilities(caps: &ComponentCapabilities) -> Self {
-        Self {
-            handlers: caps.handlers.iter().map(|h| h.id).collect(),
-            has_fallback: caps.fallback.is_some(),
-        }
+        Self { handlers: caps.handlers.iter().map(|h| h.id).collect(), has_fallback: caps.fallback.is_some() }
     }
 }
 
@@ -84,10 +81,7 @@ impl CapabilityRegistry {
     /// via the [`Mailer`](crate::mail::mailer::Mailer).
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            caps: RwLock::new(HashMap::new()),
-            full: RwLock::new(HashMap::new()),
-        }
+        Self { caps: RwLock::new(HashMap::new()), full: RwLock::new(HashMap::new()) }
     }
 
     /// Does `mailbox` accept `kind`? True when `kind` is in the
@@ -102,9 +96,7 @@ impl CapabilityRegistry {
     #[must_use]
     pub fn accepts(&self, mailbox: MailboxId, kind: KindId) -> bool {
         let guard = self.caps.read().expect("capability registry lock poisoned");
-        guard
-            .get(&mailbox)
-            .is_some_and(|c| c.has_fallback || c.handlers.contains(&kind))
+        guard.get(&mailbox).is_some_and(|c| c.has_fallback || c.handlers.contains(&kind))
     }
 
     /// Does `mailbox` carry a `#[fallback]` catch-all? Unknown
@@ -130,16 +122,10 @@ impl CapabilityRegistry {
     pub fn register(&self, mailbox: MailboxId, caps: &ComponentCapabilities) {
         let projected = MailboxCaps::from_component_capabilities(caps);
         {
-            let mut guard = self
-                .caps
-                .write()
-                .expect("capability registry lock poisoned");
+            let mut guard = self.caps.write().expect("capability registry lock poisoned");
             guard.insert(mailbox, projected);
         }
-        let mut full = self
-            .full
-            .write()
-            .expect("capability registry lock poisoned");
+        let mut full = self.full.write().expect("capability registry lock poisoned");
         full.insert(mailbox, caps.clone());
     }
 
@@ -163,16 +149,10 @@ impl CapabilityRegistry {
     /// Panics if either internal lock is poisoned (see [`Self::accepts`]).
     pub fn remove(&self, mailbox: MailboxId) {
         {
-            let mut guard = self
-                .caps
-                .write()
-                .expect("capability registry lock poisoned");
+            let mut guard = self.caps.write().expect("capability registry lock poisoned");
             guard.remove(&mailbox);
         }
-        let mut full = self
-            .full
-            .write()
-            .expect("capability registry lock poisoned");
+        let mut full = self.full.write().expect("capability registry lock poisoned");
         full.remove(&mailbox);
     }
 }

@@ -23,11 +23,7 @@ mod tests {
         // `<binary> --describe`.
         let hash = match bench.upload_binary(headless, Some("headless")) {
             UploadBinaryResult::Ok { hash, name } => {
-                assert_eq!(
-                    name.as_deref(),
-                    Some("headless"),
-                    "the upload's name is echoed"
-                );
+                assert_eq!(name.as_deref(), Some("headless"), "the upload's name is echoed");
                 assert!(!hash.is_empty(), "the content hash is non-empty");
                 hash
             }
@@ -41,20 +37,13 @@ mod tests {
             .iter()
             .find(|e| e.hash == hash)
             .unwrap_or_else(|| panic!("uploaded binary {hash} should be listed: {all:?}"));
-        assert_eq!(
-            entry.manifest.chassis, "headless",
-            "the stored manifest reports the headless chassis",
-        );
+        assert_eq!(entry.manifest.chassis, "headless", "the stored manifest reports the headless chassis");
         assert!(
             !entry.manifest.caps.is_empty(),
             "the stored manifest carries a non-empty cap list, got {:?}",
             entry.manifest.caps,
         );
-        assert_eq!(
-            entry.name.as_deref(),
-            Some("headless"),
-            "the name points at the entry"
-        );
+        assert_eq!(entry.name.as_deref(), Some("headless"), "the name points at the entry");
 
         // A chassis filter that matches keeps it; one that doesn't drops it.
         let headless_filtered = bench.list_engine_binaries(&ListEngineBinaries {
@@ -62,28 +51,19 @@ mod tests {
             caps: vec![],
             target: None,
         });
-        assert!(
-            headless_filtered.iter().any(|e| e.hash == hash),
-            "a matching chassis filter keeps the entry",
-        );
+        assert!(headless_filtered.iter().any(|e| e.hash == hash), "a matching chassis filter keeps the entry");
         let desktop_filtered = bench.list_engine_binaries(&ListEngineBinaries {
             chassis: Some("desktop".to_owned()),
             caps: vec![],
             target: None,
         });
-        assert!(
-            !desktop_filtered.iter().any(|e| e.hash == hash),
-            "a non-matching chassis filter drops the entry",
-        );
+        assert!(!desktop_filtered.iter().any(|e| e.hash == hash), "a non-matching chassis filter drops the entry");
 
         // A second identical upload dedups to the same content hash.
         let again = match bench.upload_binary(headless, None) {
             UploadBinaryResult::Ok { hash, .. } => hash,
             UploadBinaryResult::Err { error } => panic!("re-upload failed: {error}"),
         };
-        assert_eq!(
-            again, hash,
-            "an identical re-upload dedups to the same hash"
-        );
+        assert_eq!(again, hash, "an identical re-upload dedups to the same hash");
     }
 }

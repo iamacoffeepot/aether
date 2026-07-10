@@ -55,9 +55,7 @@ use aether_substrate::atomic_write::atomic_write;
 use aether_substrate::pid_lock::LockGuard;
 use serde::{Deserialize, Serialize};
 
-pub use manifest::{
-    ArtifactKind, Selector, StoredArtifact, StoredManifest, component_manifest, config_descriptor,
-};
+pub use manifest::{ArtifactKind, Selector, StoredArtifact, StoredManifest, component_manifest, config_descriptor};
 use manifest::{matches_binary_filter, matches_component_filter};
 use persistence::{RestoredIndex, acquire_lock, ensure_root, hash_hex, restore, write_sidecar};
 
@@ -136,14 +134,9 @@ impl ArtifactStore {
     #[must_use]
     pub fn default_root() -> PathBuf {
         if let Some(data) = dirs::data_dir() {
-            return data
-                .join("aether")
-                .join("binaries")
-                .join(LAYOUT_VERSION_DIR);
+            return data.join("aether").join("binaries").join(LAYOUT_VERSION_DIR);
         }
-        env::temp_dir()
-            .join("aether-binaries")
-            .join(LAYOUT_VERSION_DIR)
+        env::temp_dir().join("aether-binaries").join(LAYOUT_VERSION_DIR)
     }
 
     /// Open (or create) the store at `root` with the given disk budget.
@@ -156,21 +149,8 @@ impl ArtifactStore {
     pub fn open(root: &Path, disk_budget_bytes: u64) -> Self {
         let root = ensure_root(root);
         let lock = acquire_lock(&root);
-        let RestoredIndex {
-            entries,
-            names,
-            total_bytes,
-            clock,
-        } = restore(&root);
-        Self {
-            root,
-            disk_budget_bytes,
-            entries,
-            names,
-            total_bytes,
-            clock,
-            _lock: lock,
-        }
+        let RestoredIndex { entries, names, total_bytes, clock } = restore(&root);
+        Self { root, disk_budget_bytes, entries, names, total_bytes, clock, _lock: lock }
     }
 
     /// The layout root this store resolved to (after any temp fallback).
@@ -205,10 +185,7 @@ impl ArtifactStore {
             // write failure leaves the entry out of the index, so the store
             // stays consistent — the next upload of the same bytes retries.
             let (bytes_path, manifest_path) = self.entry_paths(&hash);
-            let sidecar = StoredEntry {
-                kind,
-                manifest: manifest.clone(),
-            };
+            let sidecar = StoredEntry { kind, manifest: manifest.clone() };
             if let Err(e) = atomic_write(&bytes_path, bytes) {
                 tracing::warn!(target: TARGET, hash = %hash, error = %e, "binary store: writing entry bytes failed");
             } else if let Err(e) = write_sidecar(&manifest_path, &sidecar) {
@@ -216,16 +193,8 @@ impl ArtifactStore {
                 let _ = fs::remove_file(&bytes_path);
             } else {
                 let bytes_len = bytes.len() as u64;
-                self.entries.insert(
-                    hash.clone(),
-                    Entry {
-                        kind,
-                        manifest,
-                        bytes_len,
-                        pinned: false,
-                        last_access: clock,
-                    },
-                );
+                self.entries
+                    .insert(hash.clone(), Entry { kind, manifest, bytes_len, pinned: false, last_access: clock });
                 self.total_bytes = self.total_bytes.saturating_add(bytes_len);
             }
         }
@@ -316,13 +285,7 @@ impl ArtifactStore {
         let manifest = entry.manifest.clone();
         let name = self.name_for(&hash);
         let (path, _) = self.entry_paths(&hash);
-        Some(StoredArtifact {
-            hash,
-            path,
-            kind,
-            manifest,
-            name,
-        })
+        Some(StoredArtifact { hash, path, kind, manifest, name })
     }
 
     /// Number of stored entries.
@@ -348,10 +311,7 @@ impl ArtifactStore {
     /// The first name pointing at `hash`, for a [`BinaryEntry`] / a
     /// [`StoredArtifact`]. At most one name per hash in practice.
     fn name_for(&self, hash: &str) -> Option<String> {
-        self.names
-            .iter()
-            .find(|(_, h)| h.as_str() == hash)
-            .map(|(n, _)| n.clone())
+        self.names.iter().find(|(_, h)| h.as_str() == hash).map(|(n, _)| n.clone())
     }
 
     fn next_clock(&mut self) -> u64 {

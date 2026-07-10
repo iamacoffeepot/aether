@@ -4,8 +4,7 @@ use crate::world::{CellPos, ChunkPos, Material, World};
 
 use super::cliffs::{CliffPlan, WindowCenter};
 use super::constants::{
-    EDGE, MAX_APRON_SUBCELLS, OCTIMETERS_PER_METER, OCTIMETERS_PER_SUBCELL, SUB,
-    WALL_VOID_SKIRT_OCTIMETERS,
+    EDGE, MAX_APRON_SUBCELLS, OCTIMETERS_PER_METER, OCTIMETERS_PER_SUBCELL, SUB, WALL_VOID_SKIRT_OCTIMETERS,
 };
 use super::contour::push_quad;
 use super::style::{StyleTable, flat_color};
@@ -45,10 +44,7 @@ pub(super) struct EnclosedVoidFloor {
 }
 
 fn anchor_parts(anchor: VoidAnchor) -> (CellPos, i32, i32) {
-    let cell = CellPos {
-        x: anchor.x_octimeters.div_euclid(256),
-        z: anchor.z_octimeters.div_euclid(256),
-    };
+    let cell = CellPos { x: anchor.x_octimeters.div_euclid(256), z: anchor.z_octimeters.div_euclid(256) };
     let sub_x = anchor.x_octimeters.rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
     let sub_z = anchor.z_octimeters.rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
     (cell, sub_x, sub_z)
@@ -57,10 +53,7 @@ fn anchor_parts(anchor: VoidAnchor) -> (CellPos, i32, i32) {
 pub(super) fn enclosed_void_floor(world: &World, anchor: VoidAnchor) -> Option<EnclosedVoidFloor> {
     let (cell, sub_x, sub_z) = anchor_parts(anchor);
     let border = void_groove_floor(world, cell, sub_x, sub_z)?;
-    Some(EnclosedVoidFloor {
-        y: world.point_height(cell, sub_x, sub_z) as f32 / OCTIMETERS_PER_METER,
-        border,
-    })
+    Some(EnclosedVoidFloor { y: world.point_height(cell, sub_x, sub_z) as f32 / OCTIMETERS_PER_METER, border })
 }
 
 /// The base a Void low side closes to at a planned segment endpoint: the
@@ -92,12 +85,8 @@ fn void_fill_border(world: &World, gx0: i32, gz0: i32) -> Option<CellPos> {
         for step in 1..=MAX_APRON_SUBCELLS {
             let gx = gx0 + dx * step;
             let gz = gz0 + dz * step;
-            let cell = CellPos {
-                x: gx.div_euclid(SUB),
-                z: gz.div_euclid(SUB),
-            };
-            if world.underlay_point(cell, gx.rem_euclid(SUB), gz.rem_euclid(SUB)) != Material::Void
-            {
+            let cell = CellPos { x: gx.div_euclid(SUB), z: gz.div_euclid(SUB) };
+            if world.underlay_point(cell, gx.rem_euclid(SUB), gz.rem_euclid(SUB)) != Material::Void {
                 if nearest.is_none_or(|(d, _)| step < d) {
                     nearest = Some((step, cell));
                 }
@@ -129,10 +118,7 @@ pub(super) fn emit_void_floors(
 ) {
     for lz in 0..EDGE {
         for lx in 0..EDGE {
-            let cell = CellPos {
-                x: at.x * EDGE + lx,
-                z: at.z * EDGE + lz,
-            };
+            let cell = CellPos { x: at.x * EDGE + lx, z: at.z * EDGE + lz };
             for sj in 0..SUB {
                 for si in 0..SUB {
                     let Some(border) = void_groove_floor(world, cell, si, sj) else {
@@ -145,42 +131,21 @@ pub(super) fn emit_void_floors(
                     let lattice_x = (cell.x * SUB + si) * OCTIMETERS_PER_SUBCELL;
                     let lattice_z = (cell.z * SUB + sj) * OCTIMETERS_PER_SUBCELL;
                     let split_by_plan = [
-                        WindowCenter {
-                            x_octimeters: lattice_x,
-                            z_octimeters: lattice_z,
-                        },
-                        WindowCenter {
-                            x_octimeters: lattice_x + OCTIMETERS_PER_SUBCELL,
-                            z_octimeters: lattice_z,
-                        },
+                        WindowCenter { x_octimeters: lattice_x, z_octimeters: lattice_z },
+                        WindowCenter { x_octimeters: lattice_x + OCTIMETERS_PER_SUBCELL, z_octimeters: lattice_z },
                         WindowCenter {
                             x_octimeters: lattice_x + OCTIMETERS_PER_SUBCELL,
                             z_octimeters: lattice_z + OCTIMETERS_PER_SUBCELL,
                         },
-                        WindowCenter {
-                            x_octimeters: lattice_x,
-                            z_octimeters: lattice_z + OCTIMETERS_PER_SUBCELL,
-                        },
+                        WindowCenter { x_octimeters: lattice_x, z_octimeters: lattice_z + OCTIMETERS_PER_SUBCELL },
                     ]
                     .into_iter()
                     .any(|center| cliffs.has_window_at(center));
                     if split_by_plan {
                         continue; // the local material x height windows own this floor
                     }
-                    let vertex = |wx: f32, wz: f32| Vertex {
-                        x: wx,
-                        y,
-                        z: wz,
-                        color: rgb,
-                    };
-                    push_quad(
-                        tris,
-                        x0,
-                        z0,
-                        x0 + OCTIMETERS_PER_SUBCELL,
-                        z0 + OCTIMETERS_PER_SUBCELL,
-                        &vertex,
-                    );
+                    let vertex = |wx: f32, wz: f32| Vertex { x: wx, y, z: wz, color: rgb };
+                    push_quad(tris, x0, z0, x0 + OCTIMETERS_PER_SUBCELL, z0 + OCTIMETERS_PER_SUBCELL, &vertex);
                 }
             }
         }

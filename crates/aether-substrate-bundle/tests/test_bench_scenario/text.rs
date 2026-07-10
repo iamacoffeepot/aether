@@ -35,17 +35,11 @@ fn text_draws_a_screen_space_string() {
             "load",
             BenchOp::send_and_await(
                 "aether.text",
-                &LoadFont {
-                    namespace: "assets".to_owned(),
-                    path: "font.ttf".to_owned(),
-                },
+                &LoadFont { namespace: "assets".to_owned(), path: "font.ttf".to_owned() },
             ),
         )])
         .expect("load_font sequence");
-    let font_id = match loaded
-        .reply::<LoadFontResult>("load")
-        .expect("decode LoadFontResult")
-    {
+    let font_id = match loaded.reply::<LoadFontResult>("load").expect("decode LoadFontResult") {
         LoadFontResult::Ok { font_id, .. } => font_id,
         LoadFontResult::Err { error, .. } => panic!("load_font failed: {error}"),
     };
@@ -65,21 +59,13 @@ fn text_draws_a_screen_space_string() {
     // back into the text cap so its texture id is live; nothing is drawn
     // this turn.
     bench
-        .execute(vec![
-            (
-                "prime",
-                BenchOp::send_mail::<DrawText>("aether.text", &draw),
-            ),
-            ("settle", BenchOp::advance(2)),
-        ])
+        .execute(vec![("prime", BenchOp::send_mail::<DrawText>("aether.text", &draw)), ("settle", BenchOp::advance(2))])
         .expect("prime draw");
 
     // Now the glyphs rasterize and the quad batch reaches the renderer the
     // same tick the capture records.
     let pre = vec![envelope("aether.text", &draw)];
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
-        .expect("capture-with-mails");
+    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     let bg = background_top_left(&img);
@@ -128,27 +114,18 @@ fn text_draw_clip_bounds_glyph_pixels() {
     let sandbox = init_save_sandbox("test-bench-text-clip");
     fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
 
-    let mut bench = TestBench::builder()
-        .size(128, 64)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench =
+        TestBench::builder().size(128, 64).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
     let loaded = bench
         .execute(vec![(
             "load",
             BenchOp::send_and_await(
                 "aether.text",
-                &LoadFont {
-                    namespace: "assets".to_owned(),
-                    path: "font.ttf".to_owned(),
-                },
+                &LoadFont { namespace: "assets".to_owned(), path: "font.ttf".to_owned() },
             ),
         )])
         .expect("load_font sequence");
-    let font_id = match loaded
-        .reply::<LoadFontResult>("load")
-        .expect("decode LoadFontResult")
-    {
+    let font_id = match loaded.reply::<LoadFontResult>("load").expect("decode LoadFontResult") {
         LoadFontResult::Ok { font_id, .. } => font_id,
         LoadFontResult::Err { error, .. } => panic!("load_font failed: {error}"),
     };
@@ -164,23 +141,17 @@ fn text_draw_clip_bounds_glyph_pixels() {
     };
     bench
         .execute(vec![
-            (
-                "prime",
-                BenchOp::send_mail::<DrawText>("aether.text", &unclipped),
-            ),
+            ("prime", BenchOp::send_mail::<DrawText>("aether.text", &unclipped)),
             ("settle", BenchOp::advance(2)),
         ])
         .expect("prime draw");
 
     let outside_region = (58, 18, 18, 18);
     let baseline = bench
-        .execute(vec![(
-            "baseline",
-            BenchOp::capture_with_mails(vec![envelope("aether.text", &unclipped)], vec![]),
-        )])
+        .execute(vec![("baseline", BenchOp::capture_with_mails(vec![envelope("aether.text", &unclipped)], vec![]))])
         .expect("capture unclipped text");
-    let baseline_img = decode_png(baseline.captured("baseline").expect("baseline ran"))
-        .expect("decode unclipped text png");
+    let baseline_img =
+        decode_png(baseline.captured("baseline").expect("baseline ran")).expect("decode unclipped text png");
     let baseline_bg = background_top_left(&baseline_img);
     let tolerance = 5;
     let baseline_outside = lit_fraction_in_rect(
@@ -197,23 +168,11 @@ fn text_draw_clip_bounds_glyph_pixels() {
         "unclipped text should light the sampled outside region; coverage={baseline_outside}",
     );
 
-    let clipped = DrawText {
-        clip: Some(ClipRect {
-            x: 18.0,
-            y: 12.0,
-            width: 22.0,
-            height: 24.0,
-        }),
-        ..unclipped
-    };
+    let clipped = DrawText { clip: Some(ClipRect { x: 18.0, y: 12.0, width: 22.0, height: 24.0 }), ..unclipped };
     let captured = bench
-        .execute(vec![(
-            "clipped",
-            BenchOp::capture_with_mails(vec![envelope("aether.text", &clipped)], vec![]),
-        )])
+        .execute(vec![("clipped", BenchOp::capture_with_mails(vec![envelope("aether.text", &clipped)], vec![]))])
         .expect("capture clipped text");
-    let img =
-        decode_png(captured.captured("clipped").expect("clipped ran")).expect("decode text png");
+    let img = decode_png(captured.captured("clipped").expect("clipped ran")).expect("decode text png");
     let bg = background_top_left(&img);
     let inside = lit_fraction_in_rect(&img, 20, 18, 14, 14, bg, tolerance);
     let outside = lit_fraction_in_rect(
@@ -225,14 +184,8 @@ fn text_draw_clip_bounds_glyph_pixels() {
         bg,
         tolerance,
     );
-    assert!(
-        inside > 0.05,
-        "clipped text should still light pixels inside the clip; coverage={inside}",
-    );
-    assert_eq!(
-        outside, 0.0,
-        "glyph pixels outside the text clip should remain background",
-    );
+    assert!(inside > 0.05, "clipped text should still light pixels inside the clip; coverage={inside}");
+    assert_eq!(outside, 0.0, "glyph pixels outside the text clip should remain background");
 }
 
 /// ADR-0105 font-metrics grab end to end (issue 1854): grab a real
@@ -254,11 +207,8 @@ fn font_metrics_grab_measures_like_the_draw_path() {
     let sandbox = init_save_sandbox("test-bench-font-metrics");
     fs::write(sandbox.join("font.ttf"), TTF).expect("stage font asset");
 
-    let mut bench = TestBench::builder()
-        .size(64, 32)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench =
+        TestBench::builder().size(64, 32).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
 
     // Grab by path with no prior load — exercises load-on-miss.
     let grabbed = bench
@@ -267,18 +217,12 @@ fn font_metrics_grab_measures_like_the_draw_path() {
             BenchOp::send_and_await(
                 "aether.text",
                 &FontMetricsRequest {
-                    font: FontRef::Path {
-                        namespace: "assets".to_owned(),
-                        path: "font.ttf".to_owned(),
-                    },
+                    font: FontRef::Path { namespace: "assets".to_owned(), path: "font.ttf".to_owned() },
                 },
             ),
         )])
         .expect("font_metrics grab sequence");
-    let metrics = match grabbed
-        .reply::<FontMetricsResult>("grab")
-        .expect("decode FontMetricsResult")
-    {
+    let metrics = match grabbed.reply::<FontMetricsResult>("grab").expect("decode FontMetricsResult") {
         FontMetricsResult::Ok { metrics } => metrics,
         FontMetricsResult::Err { error } => panic!("font_metrics failed: {error}"),
     };
@@ -290,18 +234,14 @@ fn font_metrics_grab_measures_like_the_draw_path() {
     let local = cache.measure(text, size);
 
     // Ground truth: fontdue's draw-path pen walk over the same string.
-    let font = fontdue::Font::from_bytes(TTF, fontdue::FontSettings::default())
-        .expect("vendored Roboto Mono parses");
+    let font = fontdue::Font::from_bytes(TTF, fontdue::FontSettings::default()).expect("vendored Roboto Mono parses");
     let mut draw_pen = 0.0f32;
     for ch in text.chars() {
         draw_pen += font.metrics(ch, size).advance_width;
     }
 
     assert!(local > 0.0, "a non-empty run has positive extent");
-    assert_eq!(
-        local, draw_pen,
-        "local measure must equal the draw-path advance sum exactly",
-    );
+    assert_eq!(local, draw_pen, "local measure must equal the draw-path advance sum exactly");
 }
 
 /// ADR-0105 screen-space text origin (issue 1773): drawing `Screen` text
@@ -339,17 +279,11 @@ fn text_screen_origin_shifts_centroid() {
             "load",
             BenchOp::send_and_await(
                 "aether.text",
-                &LoadFont {
-                    namespace: "assets".to_owned(),
-                    path: "font.ttf".to_owned(),
-                },
+                &LoadFont { namespace: "assets".to_owned(), path: "font.ttf".to_owned() },
             ),
         )])
         .expect("load_font sequence");
-    let font_id = match loaded
-        .reply::<LoadFontResult>("load")
-        .expect("decode LoadFontResult")
-    {
+    let font_id = match loaded.reply::<LoadFontResult>("load").expect("decode LoadFontResult") {
         LoadFontResult::Ok { font_id, .. } => font_id,
         LoadFontResult::Err { error, .. } => panic!("load_font failed: {error}"),
     };
@@ -367,24 +301,16 @@ fn text_screen_origin_shifts_centroid() {
     // Prime pass: lazily creates the atlas texture; nothing draws yet.
     bench
         .execute(vec![
-            (
-                "prime",
-                BenchOp::send_mail::<DrawText>("aether.text", &draw_zero),
-            ),
+            ("prime", BenchOp::send_mail::<DrawText>("aether.text", &draw_zero)),
             ("settle", BenchOp::advance(2)),
         ])
         .expect("prime draw");
 
     // Capture at origin [0, 0].
     let pre_zero = vec![envelope("aether.text", &draw_zero)];
-    let snap_zero = bench
-        .execute(vec![(
-            "snap0",
-            BenchOp::capture_with_mails(pre_zero, vec![]),
-        )])
-        .expect("capture zero-origin");
-    let img_zero = decode_png(snap_zero.captured("snap0").expect("snap0 ran"))
-        .expect("decode zero-origin png");
+    let snap_zero =
+        bench.execute(vec![("snap0", BenchOp::capture_with_mails(pre_zero, vec![]))]).expect("capture zero-origin");
+    let img_zero = decode_png(snap_zero.captured("snap0").expect("snap0 ran")).expect("decode zero-origin png");
     let bg = background_top_left(&img_zero);
     let tolerance = 5;
     let base_center = centroid(&img_zero, bg, tolerance).expect("zero-origin frame has lit pixels");
@@ -392,21 +318,12 @@ fn text_screen_origin_shifts_centroid() {
     // Capture at a shifted origin — well inside the frame so glyphs render.
     let ox = (frame_width / 2) as f32;
     let oy = (frame_height / 2) as f32;
-    let draw_offset = DrawText {
-        origin: [ox, oy],
-        ..draw_zero
-    };
+    let draw_offset = DrawText { origin: [ox, oy], ..draw_zero };
     let pre_offset = vec![envelope("aether.text", &draw_offset)];
-    let snap_offset = bench
-        .execute(vec![(
-            "snap1",
-            BenchOp::capture_with_mails(pre_offset, vec![]),
-        )])
-        .expect("capture offset-origin");
-    let img_offset = decode_png(snap_offset.captured("snap1").expect("snap1 ran"))
-        .expect("decode offset-origin png");
-    let shifted_center =
-        centroid(&img_offset, bg, tolerance).expect("offset-origin frame has lit pixels");
+    let snap_offset =
+        bench.execute(vec![("snap1", BenchOp::capture_with_mails(pre_offset, vec![]))]).expect("capture offset-origin");
+    let img_offset = decode_png(snap_offset.captured("snap1").expect("snap1 ran")).expect("decode offset-origin png");
+    let shifted_center = centroid(&img_offset, bg, tolerance).expect("offset-origin frame has lit pixels");
 
     // The shifted centroid must sit at least half the applied offset further
     // right and down — a strict half-delta guard that would catch a no-op.
@@ -465,17 +382,11 @@ fn text_draws_world_space_label() {
             "load",
             BenchOp::send_and_await(
                 "aether.text",
-                &LoadFont {
-                    namespace: "assets".to_owned(),
-                    path: "font.ttf".to_owned(),
-                },
+                &LoadFont { namespace: "assets".to_owned(), path: "font.ttf".to_owned() },
             ),
         )])
         .expect("load_font sequence");
-    let font_id = match loaded
-        .reply::<LoadFontResult>("load")
-        .expect("decode LoadFontResult")
-    {
+    let font_id = match loaded.reply::<LoadFontResult>("load").expect("decode LoadFontResult") {
         LoadFontResult::Ok { font_id, .. } => font_id,
         LoadFontResult::Err { error, .. } => panic!("load_font failed: {error}"),
     };
@@ -503,12 +414,7 @@ fn text_draws_world_space_label() {
         size_pixels: 24.0,
         color: Rgba::new(1.0, 1.0, 1.0, 1.0),
         origin: [0.0, 0.0],
-        space: QuadSpace::World {
-            anchor,
-            scale: QuadScale::Distance {
-                reference_distance: 10.0,
-            },
-        },
+        space: QuadSpace::World { anchor, scale: QuadScale::Distance { reference_distance: 10.0 } },
         clip: None,
     };
     let draw_px = DrawText {
@@ -517,10 +423,7 @@ fn text_draws_world_space_label() {
         size_pixels: 24.0,
         color: Rgba::new(1.0, 1.0, 1.0, 1.0),
         origin: [0.0, 0.0],
-        space: QuadSpace::World {
-            anchor,
-            scale: QuadScale::Pixels,
-        },
+        space: QuadSpace::World { anchor, scale: QuadScale::Pixels },
         clip: None,
     };
 
@@ -529,17 +432,8 @@ fn text_draws_world_space_label() {
     // settle it so subsequent captures can render immediately.
     bench
         .execute(vec![
-            (
-                "cam",
-                BenchOp::send_mail::<ViewProjection>(
-                    "aether.render",
-                    &ViewProjection { view_proj: vp_near },
-                ),
-            ),
-            (
-                "prime",
-                BenchOp::send_mail::<DrawText>("aether.text", &draw_dist),
-            ),
+            ("cam", BenchOp::send_mail::<ViewProjection>("aether.render", &ViewProjection { view_proj: vp_near })),
+            ("prime", BenchOp::send_mail::<DrawText>("aether.text", &draw_dist)),
             ("settle", BenchOp::advance(2)),
         ])
         .expect("prime draw");
@@ -560,8 +454,7 @@ fn text_draws_world_space_label() {
         )])
         .expect("near capture");
     let img_near = decode_png(snap_near.captured("s").expect("s ran")).expect("decode near");
-    let bb_near = bounding_box(&img_near, background_top_left(&img_near), tol)
-        .expect("near frame has content");
+    let bb_near = bounding_box(&img_near, background_top_left(&img_near), tol).expect("near frame has content");
 
     let snap_far = bench
         .execute(vec![(
@@ -576,8 +469,7 @@ fn text_draws_world_space_label() {
         )])
         .expect("far capture");
     let img_far = decode_png(snap_far.captured("s").expect("s ran")).expect("decode far");
-    let bb_far =
-        bounding_box(&img_far, background_top_left(&img_far), tol).expect("far frame has content");
+    let bb_far = bounding_box(&img_far, background_top_left(&img_far), tol).expect("far frame has content");
 
     // Distance label at d=20 should be ~0.5x the width at d=10 because
     // k/clip.w = reference_distance/depth shrinks by half. Allow ±25%
@@ -604,10 +496,9 @@ fn text_draws_world_space_label() {
             ),
         )])
         .expect("pixels-near capture");
-    let img_px_near =
-        decode_png(snap_px_near.captured("s").expect("s ran")).expect("decode px-near");
-    let bb_px_near = bounding_box(&img_px_near, background_top_left(&img_px_near), tol)
-        .expect("px-near frame has content");
+    let img_px_near = decode_png(snap_px_near.captured("s").expect("s ran")).expect("decode px-near");
+    let bb_px_near =
+        bounding_box(&img_px_near, background_top_left(&img_px_near), tol).expect("px-near frame has content");
 
     let snap_px_far = bench
         .execute(vec![(
@@ -622,8 +513,7 @@ fn text_draws_world_space_label() {
         )])
         .expect("pixels-far capture");
     let img_px_far = decode_png(snap_px_far.captured("s").expect("s ran")).expect("decode px-far");
-    let bb_px_far = bounding_box(&img_px_far, background_top_left(&img_px_far), tol)
-        .expect("px-far frame has content");
+    let bb_px_far = bounding_box(&img_px_far, background_top_left(&img_px_far), tol).expect("px-far frame has content");
 
     let px_near_w = (bb_px_near.max_x - bb_px_near.min_x + 1) as f32;
     let px_far_w = (bb_px_far.max_x - bb_px_far.min_x + 1) as f32;
@@ -643,12 +533,7 @@ fn text_draws_world_space_label() {
             "s",
             BenchOp::capture_with_mails(
                 vec![
-                    envelope(
-                        "aether.render",
-                        &ViewProjection {
-                            view_proj: vp_orbit,
-                        },
-                    ),
+                    envelope("aether.render", &ViewProjection { view_proj: vp_orbit }),
                     envelope("aether.text", &draw_px),
                 ],
                 vec![],
@@ -656,8 +541,7 @@ fn text_draws_world_space_label() {
         )])
         .expect("orbit capture");
     let img_orbit = decode_png(snap_orbit.captured("s").expect("s ran")).expect("decode orbit");
-    let bb_orbit = bounding_box(&img_orbit, background_top_left(&img_orbit), tol)
-        .expect("orbit frame has content");
+    let bb_orbit = bounding_box(&img_orbit, background_top_left(&img_orbit), tol).expect("orbit frame has content");
 
     let orbit_w = (bb_orbit.max_x - bb_orbit.min_x + 1) as f32;
     let orbit_ratio = orbit_w / px_near_w;

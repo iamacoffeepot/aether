@@ -84,10 +84,7 @@ impl NativeActor for TcpCapability {
     const NAMESPACE: &'static str = "aether.tcp";
 
     fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<TcpCapabilityState, BootError> {
-        Ok(TcpCapabilityState {
-            listeners: HashMap::new(),
-            pending_unbinds: HashMap::new(),
-        })
+        Ok(TcpCapabilityState { listeners: HashMap::new(), pending_unbinds: HashMap::new() })
     }
 
     /// Spawn a fresh `TcpListenerActor` bound to `mail.addr`.
@@ -102,27 +99,17 @@ impl NativeActor for TcpCapability {
     /// Reply: `BindListenerResult`. `Ok` on successful bind +
     /// spawn; `Err` on addr parse / bind / spawn / monitor failure.
     #[handler::single]
-    fn on_bind(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: BindListener,
-    ) -> BindListenerResult {
+    fn on_bind(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: BindListener) -> BindListenerResult {
         let listener = match TcpListener::bind(&mail.addr) {
             Ok(l) => l,
             Err(e) => {
-                return BindListenerResult::Err {
-                    addr: mail.addr,
-                    reason: format!("bind failed: {e}"),
-                };
+                return BindListenerResult::Err { addr: mail.addr, reason: format!("bind failed: {e}") };
             }
         };
         let local_port = match listener.local_addr() {
             Ok(addr) => addr.port(),
             Err(e) => {
-                return BindListenerResult::Err {
-                    addr: mail.addr,
-                    reason: format!("local_addr failed: {e}"),
-                };
+                return BindListenerResult::Err { addr: mail.addr, reason: format!("local_addr failed: {e}") };
             }
         };
         let subname_str = mail.name.clone().unwrap_or_else(|| format!("{local_port}"));
@@ -130,20 +117,13 @@ impl NativeActor for TcpCapability {
         let listener_id = match ctx
             .spawn_child::<TcpListenerActor>(
                 Subname::Named(&subname_str),
-                TcpListenerConfig {
-                    listener: Some(listener),
-                    addr: mail.addr.clone(),
-                    port: local_port,
-                },
+                TcpListenerConfig { listener: Some(listener), addr: mail.addr.clone(), port: local_port },
             )
             .finish()
         {
             Ok(id) => id,
             Err(e) => {
-                return BindListenerResult::Err {
-                    addr: mail.addr,
-                    reason: format!("spawn failed: {e:?}"),
-                };
+                return BindListenerResult::Err { addr: mail.addr, reason: format!("spawn failed: {e:?}") };
             }
         };
 
@@ -157,10 +137,7 @@ impl NativeActor for TcpCapability {
                 // unlikely (listener was just inserted Live). Reply
                 // Err and let the listener live; chassis shutdown
                 // will reap it.
-                return BindListenerResult::Err {
-                    addr: mail.addr,
-                    reason: format!("monitor failed: {e:?}"),
-                };
+                return BindListenerResult::Err { addr: mail.addr, reason: format!("monitor failed: {e:?}") };
             }
         };
 
@@ -174,11 +151,7 @@ impl NativeActor for TcpCapability {
             },
         );
 
-        BindListenerResult::Ok {
-            listener_name: subname_str,
-            listener_id,
-            local_port,
-        }
+        BindListenerResult::Ok { listener_name: subname_str, listener_id, local_port }
     }
 
     /// Mail `Close` to the named listener and park the
@@ -194,11 +167,7 @@ impl NativeActor for TcpCapability {
         // Resolve listener_id from the cap-local supervisor map by
         // name. The cap is the source of truth for "what listeners
         // exist"; no registry walk needed.
-        let listener_id = state
-            .listeners
-            .iter()
-            .find(|(_, entry)| entry.name == mail.listener_name)
-            .map(|(id, _)| *id);
+        let listener_id = state.listeners.iter().find(|(_, entry)| entry.name == mail.listener_name).map(|(id, _)| *id);
         let Some(listener_id) = listener_id else {
             ctx.reply(&UnbindListenerResult::Err {
                 listener_name: mail.listener_name,
@@ -209,21 +178,16 @@ impl NativeActor for TcpCapability {
         // Park the reply target keyed on listener_id. The cap's
         // already-registered monitor (set at spawn time) fires
         // MonitorNotice on close, which drives the reply.
-        state.pending_unbinds.insert(
-            listener_id,
-            PendingUnbind {
-                sender: ctx.reply_target(),
-                listener_name: mail.listener_name,
-            },
-        );
+        state
+            .pending_unbinds
+            .insert(listener_id, PendingUnbind { sender: ctx.reply_target(), listener_name: mail.listener_name });
         // Mail Close to the listener by its stored id. ADR-0099 §3:
         // the listener is a spawned child, so its id is the lineage
         // fold, not `hash(NAMESPACE:name)` — re-resolving by name
         // would reach a flat id nothing is registered under. The cap
         // already holds the folded id from the spawn (the
         // `state.listeners` key), so address it directly.
-        ctx.actor_at::<TcpListenerActor>(listener_id)
-            .send(&Close::default());
+        ctx.actor_at::<TcpListenerActor>(listener_id).send(&Close::default());
     }
 
     /// Walk the cap-local listener map and report metadata.
@@ -231,19 +195,11 @@ impl NativeActor for TcpCapability {
     /// # Agent
     /// Reply: `ListListenersResult`.
     #[handler::single]
-    fn on_list(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: ListListeners,
-    ) -> ListListenersResult {
+    fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListListeners) -> ListListenersResult {
         let listeners: Vec<ListenerInfo> = state
             .listeners
             .values()
-            .map(|entry| ListenerInfo {
-                name: entry.name.clone(),
-                addr: entry.addr.clone(),
-                port: entry.port,
-            })
+            .map(|entry| ListenerInfo { name: entry.name.clone(), addr: entry.addr.clone(), port: entry.port })
             .collect();
         ListListenersResult { listeners }
     }
@@ -257,11 +213,7 @@ impl NativeActor for TcpCapability {
     /// unbind request, `pending_unbinds` has an entry with the
     /// originator to reply to.
     #[handler::manual]
-    fn on_monitor_notice(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Manual>,
-        notice: MonitorNotice,
-    ) {
+    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, notice: MonitorNotice) {
         // Drop the supervisor entry. The held MonitorHandle drops
         // here; deregister is idempotent with the close path's
         // forward-index drain.
@@ -269,12 +221,7 @@ impl NativeActor for TcpCapability {
         // Fire the parked unbind reply if one was waiting.
         let parked = state.pending_unbinds.remove(&notice.target);
         if let Some(parked) = parked {
-            ctx.reply_to(
-                parked.sender,
-                &UnbindListenerResult::Ok {
-                    listener_name: parked.listener_name,
-                },
-            );
+            ctx.reply_to(parked.sender, &UnbindListenerResult::Ok { listener_name: parked.listener_name });
         }
         // Else: notice came from a non-unbind close (chassis
         // shutdown, future trap). Nothing to reply to; the

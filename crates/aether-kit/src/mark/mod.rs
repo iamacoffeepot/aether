@@ -14,8 +14,7 @@ pub use kinds::*;
 use alloc::{collections::BTreeMap, string::String};
 
 use aether_actor::{
-    ActorInitError, Manual, OutboundReply, PriorState, WasmActor, WasmCtx, WasmDropCtx,
-    WasmInitCtx, actor,
+    ActorInitError, Manual, OutboundReply, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
 };
 
 use crate::world::MAX_STAMP_VERTICES;
@@ -32,10 +31,7 @@ struct MarkStore {
 
 impl Default for MarkStore {
     fn default() -> Self {
-        Self {
-            marks: BTreeMap::new(),
-            next_id: INITIAL_MARK_ID,
-        }
+        Self { marks: BTreeMap::new(), next_id: INITIAL_MARK_ID }
     }
 }
 
@@ -46,36 +42,22 @@ impl MarkStore {
         }
 
         let Some(next_id) = self.next_id.checked_add(1) else {
-            return MarkCreateResult::Rejected {
-                error: MarkMutationError::IdExhausted,
-            };
+            return MarkCreateResult::Rejected { error: MarkMutationError::IdExhausted };
         };
         let id = MarkId::new(self.next_id);
-        let mark = Mark {
-            id,
-            revision: INITIAL_REVISION,
-            geometry,
-            label,
-        };
+        let mark = Mark { id, revision: INITIAL_REVISION, geometry, label };
         let reference = mark.reference();
         self.marks.insert(id, mark);
         self.next_id = next_id;
         MarkCreateResult::Created { reference }
     }
 
-    fn update(
-        &mut self,
-        id: MarkId,
-        geometry: Option<MarkGeometry>,
-        label: Option<String>,
-    ) -> MarkUpdateResult {
+    fn update(&mut self, id: MarkId, geometry: Option<MarkGeometry>, label: Option<String>) -> MarkUpdateResult {
         let Some(mark) = self.marks.get(&id) else {
             return MarkUpdateResult::NotFound { id };
         };
         if geometry.is_none() && label.is_none() {
-            return MarkUpdateResult::Rejected {
-                error: MarkMutationError::EmptyUpdate,
-            };
+            return MarkUpdateResult::Rejected { error: MarkMutationError::EmptyUpdate };
         }
         if let Some(geometry) = &geometry
             && let Err(error) = validate_geometry(geometry)
@@ -83,15 +65,10 @@ impl MarkStore {
             return MarkUpdateResult::Rejected { error };
         }
         let Some(revision) = mark.revision.checked_add(1) else {
-            return MarkUpdateResult::Rejected {
-                error: MarkMutationError::RevisionExhausted,
-            };
+            return MarkUpdateResult::Rejected { error: MarkMutationError::RevisionExhausted };
         };
 
-        let mark = self
-            .marks
-            .get_mut(&id)
-            .expect("mark existence was established before validation");
+        let mark = self.marks.get_mut(&id).expect("mark existence was established before validation");
         if let Some(geometry) = geometry {
             mark.geometry = geometry;
         }
@@ -99,49 +76,29 @@ impl MarkStore {
             mark.label = label;
         }
         mark.revision = revision;
-        MarkUpdateResult::Updated {
-            reference: mark.reference(),
-        }
+        MarkUpdateResult::Updated { reference: mark.reference() }
     }
 
     fn delete(&mut self, id: MarkId) -> MarkDeleteResult {
         self.marks
             .remove(&id)
-            .map_or(MarkDeleteResult::NotFound { id }, |mark| {
-                MarkDeleteResult::Deleted {
-                    reference: mark.reference(),
-                }
-            })
+            .map_or(MarkDeleteResult::NotFound { id }, |mark| MarkDeleteResult::Deleted { reference: mark.reference() })
     }
 
     fn get(&self, id: MarkId) -> MarkGetResult {
-        MarkGetResult {
-            mark: self.marks.get(&id).cloned(),
-        }
+        MarkGetResult { mark: self.marks.get(&id).cloned() }
     }
 
     fn list(&self) -> MarkListResult {
-        MarkListResult {
-            marks: self.marks.values().cloned().collect(),
-        }
+        MarkListResult { marks: self.marks.values().cloned().collect() }
     }
 
     fn snapshot(&self) -> SavedMarks {
-        SavedMarks {
-            marks: self.marks.values().cloned().collect(),
-            next_id: self.next_id,
-        }
+        SavedMarks { marks: self.marks.values().cloned().collect(), next_id: self.next_id }
     }
 
     fn restore(saved: SavedMarks) -> Self {
-        Self {
-            marks: saved
-                .marks
-                .into_iter()
-                .map(|mark| (mark.id, mark))
-                .collect(),
-            next_id: saved.next_id,
-        }
+        Self { marks: saved.marks.into_iter().map(|mark| (mark.id, mark)).collect(), next_id: saved.next_id }
     }
 }
 
@@ -153,9 +110,7 @@ fn validate_geometry(geometry: &MarkGeometry) -> Result<(), MarkMutationError> {
     };
     if !(minimum..=MAX_STAMP_VERTICES).contains(&length) {
         return Err(MarkMutationError::InvalidGeometry {
-            reason: alloc::format!(
-                "{kind} requires {minimum}..={MAX_STAMP_VERTICES} world points; got {length}"
-            ),
+            reason: alloc::format!("{kind} requires {minimum}..={MAX_STAMP_VERTICES} world points; got {length}"),
         });
     }
     Ok(())
@@ -171,9 +126,7 @@ impl WasmActor for MarkBook {
     const NAMESPACE: &'static str = "aether.kit.mark";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Self {
-            store: MarkStore::default(),
-        })
+        Ok(Self { store: MarkStore::default() })
     }
 
     #[handler::manual]
@@ -186,9 +139,7 @@ impl WasmActor for MarkBook {
 
     #[handler::manual]
     fn on_update(&mut self, ctx: &mut WasmCtx<'_, Manual>, request: MarkUpdate) {
-        let result = self
-            .store
-            .update(request.id, request.geometry, request.label);
+        let result = self.store.update(request.id, request.geometry, request.label);
         if ctx.reply_target().is_some() {
             ctx.reply(&result);
         }
@@ -249,28 +200,18 @@ mod tests {
     fn geometry_boundaries_accept_only_scoped_vertex_counts() {
         for length in [0, 1, MAX_STAMP_VERTICES + 1] {
             let geometry = MarkGeometry::Path(vec![point(0, 0); length]);
-            assert!(matches!(
-                validate_geometry(&geometry),
-                Err(MarkMutationError::InvalidGeometry { .. })
-            ));
+            assert!(matches!(validate_geometry(&geometry), Err(MarkMutationError::InvalidGeometry { .. })));
         }
         for length in [0, 1, 2, MAX_STAMP_VERTICES + 1] {
             let geometry = MarkGeometry::Area(vec![point(0, 0); length]);
-            assert!(matches!(
-                validate_geometry(&geometry),
-                Err(MarkMutationError::InvalidGeometry { .. })
-            ));
+            assert!(matches!(validate_geometry(&geometry), Err(MarkMutationError::InvalidGeometry { .. })));
         }
 
         assert!(validate_geometry(&MarkGeometry::Point(point(0, 0))).is_ok());
         assert!(validate_geometry(&MarkGeometry::Path(vec![point(0, 0); 2])).is_ok());
-        assert!(
-            validate_geometry(&MarkGeometry::Path(vec![point(0, 0); MAX_STAMP_VERTICES])).is_ok()
-        );
+        assert!(validate_geometry(&MarkGeometry::Path(vec![point(0, 0); MAX_STAMP_VERTICES])).is_ok());
         assert!(validate_geometry(&MarkGeometry::Area(vec![point(0, 0); 3])).is_ok());
-        assert!(
-            validate_geometry(&MarkGeometry::Area(vec![point(0, 0); MAX_STAMP_VERTICES])).is_ok()
-        );
+        assert!(validate_geometry(&MarkGeometry::Area(vec![point(0, 0); MAX_STAMP_VERTICES])).is_ok());
     }
 
     #[test]
@@ -278,29 +219,12 @@ mod tests {
         let mut store = MarkStore::default();
         let first = create(&mut store, MarkGeometry::Point(point(1, 2)), "first");
         let second = create(&mut store, MarkGeometry::Point(point(3, 4)), "second");
-        assert_eq!(
-            first,
-            MarkRef {
-                id: MarkId::new(1),
-                revision: 1
-            }
-        );
-        assert_eq!(
-            second,
-            MarkRef {
-                id: MarkId::new(2),
-                revision: 1
-            }
-        );
+        assert_eq!(first, MarkRef { id: MarkId::new(1), revision: 1 });
+        assert_eq!(second, MarkRef { id: MarkId::new(2), revision: 1 });
 
         let before = store.clone();
         let rejected = store.create(MarkGeometry::Path(vec![point(0, 0)]), "bad".into());
-        assert!(matches!(
-            rejected,
-            MarkCreateResult::Rejected {
-                error: MarkMutationError::InvalidGeometry { .. }
-            }
-        ));
+        assert!(matches!(rejected, MarkCreateResult::Rejected { error: MarkMutationError::InvalidGeometry { .. } }));
         assert_eq!(store, before);
     }
 
@@ -310,26 +234,12 @@ mod tests {
         let created = create(&mut store, MarkGeometry::Point(point(1, 2)), "old");
         let updated_geometry = MarkGeometry::Path(vec![point(2, 3), point(4, 5)]);
         assert_eq!(
-            store.update(
-                created.id,
-                Some(updated_geometry.clone()),
-                Some("new".into()),
-            ),
-            MarkUpdateResult::Updated {
-                reference: MarkRef {
-                    id: created.id,
-                    revision: 2,
-                }
-            }
+            store.update(created.id, Some(updated_geometry.clone()), Some("new".into()),),
+            MarkUpdateResult::Updated { reference: MarkRef { id: created.id, revision: 2 } }
         );
         assert_eq!(
             store.get(created.id).mark,
-            Some(Mark {
-                id: created.id,
-                revision: 2,
-                geometry: updated_geometry,
-                label: "new".into(),
-            })
+            Some(Mark { id: created.id, revision: 2, geometry: updated_geometry, label: "new".into() })
         );
 
         for (geometry, label, expected) in [
@@ -337,25 +247,18 @@ mod tests {
             (
                 Some(MarkGeometry::Area(vec![point(0, 0), point(1, 1)])),
                 Some("ignored".into()),
-                MarkMutationError::InvalidGeometry {
-                    reason: "ignored".into(),
-                },
+                MarkMutationError::InvalidGeometry { reason: "ignored".into() },
             ),
         ] {
             let before = store.clone();
             let result = store.update(created.id, geometry, label);
             match expected {
-                MarkMutationError::EmptyUpdate => assert_eq!(
-                    result,
-                    MarkUpdateResult::Rejected {
-                        error: MarkMutationError::EmptyUpdate
-                    }
-                ),
+                MarkMutationError::EmptyUpdate => {
+                    assert_eq!(result, MarkUpdateResult::Rejected { error: MarkMutationError::EmptyUpdate });
+                }
                 MarkMutationError::InvalidGeometry { .. } => assert!(matches!(
                     result,
-                    MarkUpdateResult::Rejected {
-                        error: MarkMutationError::InvalidGeometry { .. }
-                    }
+                    MarkUpdateResult::Rejected { error: MarkMutationError::InvalidGeometry { .. } }
                 )),
                 _ => unreachable!(),
             }
@@ -368,14 +271,8 @@ mod tests {
         let mut store = MarkStore::default();
         let before = store.clone();
         let missing = MarkId::new(40);
-        assert_eq!(
-            store.update(missing, None, Some("new".into())),
-            MarkUpdateResult::NotFound { id: missing }
-        );
-        assert_eq!(
-            store.delete(missing),
-            MarkDeleteResult::NotFound { id: missing }
-        );
+        assert_eq!(store.update(missing, None, Some("new".into())), MarkUpdateResult::NotFound { id: missing });
+        assert_eq!(store.delete(missing), MarkDeleteResult::NotFound { id: missing });
         assert_eq!(store, before);
     }
 
@@ -385,21 +282,11 @@ mod tests {
         let first = create(&mut store, MarkGeometry::Point(point(0, 0)), "first");
         assert_eq!(
             store.update(first.id, None, Some("edited".into())),
-            MarkUpdateResult::Updated {
-                reference: MarkRef {
-                    id: first.id,
-                    revision: 2,
-                }
-            }
+            MarkUpdateResult::Updated { reference: MarkRef { id: first.id, revision: 2 } }
         );
         assert_eq!(
             store.delete(first.id),
-            MarkDeleteResult::Deleted {
-                reference: MarkRef {
-                    id: first.id,
-                    revision: 2,
-                }
-            }
+            MarkDeleteResult::Deleted { reference: MarkRef { id: first.id, revision: 2 } }
         );
         let second = create(&mut store, MarkGeometry::Point(point(1, 1)), "second");
         assert_eq!(second.id, MarkId::new(2));
@@ -412,47 +299,27 @@ mod tests {
             create(&mut store, MarkGeometry::Point(point(0, 0)), label);
         }
         store.delete(MarkId::new(2));
-        let ids: Vec<_> = store
-            .list()
-            .marks
-            .into_iter()
-            .map(|mark| mark.id.get())
-            .collect();
+        let ids: Vec<_> = store.list().marks.into_iter().map(|mark| mark.id.get()).collect();
         assert_eq!(ids, vec![1, 3]);
     }
 
     #[test]
     fn both_counters_reject_exhaustion_without_mutation() {
-        let mut id_exhausted = MarkStore {
-            marks: BTreeMap::new(),
-            next_id: u32::MAX,
-        };
+        let mut id_exhausted = MarkStore { marks: BTreeMap::new(), next_id: u32::MAX };
         let before = id_exhausted.clone();
         assert_eq!(
             id_exhausted.create(MarkGeometry::Point(point(0, 0)), "nope".into()),
-            MarkCreateResult::Rejected {
-                error: MarkMutationError::IdExhausted
-            }
+            MarkCreateResult::Rejected { error: MarkMutationError::IdExhausted }
         );
         assert_eq!(id_exhausted, before);
 
         let mut revision_exhausted = MarkStore::default();
-        let reference = create(
-            &mut revision_exhausted,
-            MarkGeometry::Point(point(0, 0)),
-            "max",
-        );
-        revision_exhausted
-            .marks
-            .get_mut(&reference.id)
-            .expect("created mark")
-            .revision = u32::MAX;
+        let reference = create(&mut revision_exhausted, MarkGeometry::Point(point(0, 0)), "max");
+        revision_exhausted.marks.get_mut(&reference.id).expect("created mark").revision = u32::MAX;
         let before = revision_exhausted.clone();
         assert_eq!(
             revision_exhausted.update(reference.id, None, Some("nope".into())),
-            MarkUpdateResult::Rejected {
-                error: MarkMutationError::RevisionExhausted
-            }
+            MarkUpdateResult::Rejected { error: MarkMutationError::RevisionExhausted }
         );
         assert_eq!(revision_exhausted, before);
     }

@@ -24,9 +24,7 @@ pub struct AdapterRegistry {
 impl AdapterRegistry {
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            adapters: HashMap::new(),
-        }
+        Self { adapters: HashMap::new() }
     }
 
     pub fn register(&mut self, namespace: impl Into<String>, adapter: Arc<dyn FileAdapter>) {
@@ -52,18 +50,9 @@ impl Default for AdapterRegistry {
 /// wired.
 pub fn build_registry(roots: NamespaceRoots) -> io::Result<(Arc<AdapterRegistry>, NamespaceRoots)> {
     let mut registry = AdapterRegistry::new();
-    let save = Arc::new(LocalFileAdapter::new(
-        roots.save.clone(),
-        Access::ReadWrite,
-    )?);
-    let assets = Arc::new(LocalFileAdapter::new(
-        roots.assets.clone(),
-        Access::ReadOnly,
-    )?);
-    let config = Arc::new(LocalFileAdapter::new(
-        roots.config.clone(),
-        Access::ReadWrite,
-    )?);
+    let save = Arc::new(LocalFileAdapter::new(roots.save.clone(), Access::ReadWrite)?);
+    let assets = Arc::new(LocalFileAdapter::new(roots.assets.clone(), Access::ReadOnly)?);
+    let config = Arc::new(LocalFileAdapter::new(roots.config.clone(), Access::ReadWrite)?);
     registry.register("save", save as Arc<dyn FileAdapter>);
     registry.register("assets", assets as Arc<dyn FileAdapter>);
     registry.register("config", config as Arc<dyn FileAdapter>);

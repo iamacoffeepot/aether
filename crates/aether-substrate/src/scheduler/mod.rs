@@ -43,8 +43,8 @@ mod worker_deque;
 pub use calibrate::{handoff_cost, handoff_cost_nanos, log_handoff_calibration};
 pub use pool::{Pool, PoolConfig, PoolHandle, PoolWorkerJoin};
 pub use slot::{
-    BATCH_MAX_MAILS, BATCH_MAX_USEC, BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, DrainOutcome,
-    Drainable, SeizeHandle, SeizeSeed, SlotState, SlotStateLabel, WakeHandle, WakeSink,
+    BATCH_MAX_MAILS, BATCH_MAX_USEC, BatchBudget, CLOCK_CHECK_STRIDE, CycleResult, DrainOutcome, Drainable,
+    SeizeHandle, SeizeSeed, SlotState, SlotStateLabel, WakeHandle, WakeSink,
 };
 pub use spin_park::{Acquired, SpinPark};
 pub use worker_deque::{burst_note_mail, pending_depth, time_budget};

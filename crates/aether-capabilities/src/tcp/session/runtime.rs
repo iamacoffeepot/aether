@@ -62,21 +62,13 @@ impl NativeActor for TcpSessionActor {
     type Config = TcpSessionConfig;
     const NAMESPACE: &'static str = "aether.tcp.session";
 
-    fn init(
-        mut config: TcpSessionConfig,
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<TcpSessionState, BootError> {
-        let stream = config
-            .stream
-            .take()
-            .expect("TcpSessionConfig::stream consumed exactly once");
+    fn init(mut config: TcpSessionConfig, ctx: &mut NativeInitCtx<'_>) -> Result<TcpSessionState, BootError> {
+        let stream = config.stream.take().expect("TcpSessionConfig::stream consumed exactly once");
         // Split read/write via try_clone — both halves point at
         // the same underlying socket, but each is independently
         // owned. Read sidecar uses one for blocking reads; the
         // dispatcher uses the other for writes + Shutdown.
-        let read_half = stream
-            .try_clone()
-            .map_err(|e| BootError::Other(Box::new(e)))?;
+        let read_half = stream.try_clone().map_err(|e| BootError::Other(Box::new(e)))?;
         let write_half = stream;
 
         let shutdown = Arc::new(AtomicBool::new(false));

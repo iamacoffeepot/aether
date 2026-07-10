@@ -43,8 +43,7 @@
 // reply interception) live on the dispatch shard identity in `shard`.
 use crate::http::kinds::HttpInboundReady;
 use crate::http::kinds::{
-    RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf,
-    UnregisterRoutesAll,
+    RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf, UnregisterRoutesAll,
 };
 
 // Default bind address. Loopback per ADR-0108 §6 — binding a public

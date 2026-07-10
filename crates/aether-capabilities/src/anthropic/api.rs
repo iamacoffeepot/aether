@@ -45,11 +45,7 @@ impl UreqAnthropicAdapter {
     /// resolves the key from `ANTHROPIC_API_KEY`; tests build directly.
     #[must_use]
     pub fn new(api_key: String, timeout: Duration) -> Self {
-        Self {
-            agent: transport::agent(),
-            api_key,
-            timeout,
-        }
+        Self { agent: transport::agent(), api_key, timeout }
     }
 
     /// Run a Messages completion. Returns the parsed response or a
@@ -69,16 +65,13 @@ impl UreqAnthropicAdapter {
             .body(body_bytes)
             .map_err(|e| format!("build request: {e}"))?;
 
-        let (status, retry_after_millis, text) =
-            transport::run_request(&self.agent, http_req, self.timeout)?;
+        let (status, retry_after_millis, text) = transport::run_request(&self.agent, http_req, self.timeout)?;
 
         if !(200..300).contains(&status) {
             // Encode the status + retry-after into the error string so
             // the cap's `error::status_to_error` mapping reconstructs
             // the typed variant. The cap parses the leading status.
-            return Err(format!(
-                "status={status} retry_after_millis={retry_after_millis:?} body={text}"
-            ));
+            return Err(format!("status={status} retry_after_millis={retry_after_millis:?} body={text}"));
         }
 
         let elapsed_millis = elapsed_millis(started);
@@ -126,21 +119,11 @@ pub fn parse_messages_response(
         })
         .ok_or_else(|| "response missing content array".to_string())?;
 
-    let model_used = parsed
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or(fallback_model)
-        .to_string();
+    let model_used = parsed.get("model").and_then(Value::as_str).unwrap_or(fallback_model).to_string();
 
     let usage = parsed.get("usage");
-    let input_tokens = usage
-        .and_then(|u| u.get("input_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let output_tokens = usage
-        .and_then(|u| u.get("output_tokens"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+    let input_tokens = usage.and_then(|u| u.get("input_tokens")).and_then(Value::as_u64).unwrap_or(0);
+    let output_tokens = usage.and_then(|u| u.get("output_tokens")).and_then(Value::as_u64).unwrap_or(0);
 
     Ok(AnthropicResponse {
         text,
@@ -174,8 +157,8 @@ mod tests {
 
     #[test]
     fn parses_fixture_response() {
-        let resp = parse_messages_response(FIXTURE, "fallback-model", 42)
-            .expect("fixture is a valid Messages-API response");
+        let resp =
+            parse_messages_response(FIXTURE, "fallback-model", 42).expect("fixture is a valid Messages-API response");
         assert_eq!(resp.text, "Hello! How can I help you today?");
         assert_eq!(resp.model_used, "claude-opus-4-7");
         assert_eq!(resp.usage.input_tokens, 12);
@@ -207,8 +190,7 @@ mod tests {
     #[test]
     fn missing_model_falls_back_to_requested() {
         let json = r#"{"content": [{"type": "text", "text": "x"}]}"#;
-        let resp = parse_messages_response(json, "requested-model", 0)
-            .expect("response without a model field parses");
+        let resp = parse_messages_response(json, "requested-model", 0).expect("response without a model field parses");
         assert_eq!(resp.model_used, "requested-model");
     }
 

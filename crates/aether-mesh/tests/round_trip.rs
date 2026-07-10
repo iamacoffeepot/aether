@@ -10,10 +10,7 @@ fn assert_round_trip(text: &str) {
     let ast = parse(text).expect("parse should succeed");
     let reserialized = serialize(&ast);
     let ast2 = parse(&reserialized).expect("re-parse should succeed");
-    assert_eq!(
-        ast, ast2,
-        "round-trip not equal — reserialized text:\n{reserialized}"
-    );
+    assert_eq!(ast, ast2, "round-trip not equal — reserialized text:\n{reserialized}");
 }
 
 #[test]
@@ -92,26 +89,17 @@ fn parse_errors_on_invalid_axis() {
 fn parse_errors_on_trailing_top_level_form() {
     let result = parse("(box 1 1 1 :color 0) (box 2 2 2 :color 1)");
     let err = result.expect_err("trailing top-level form should fail");
-    assert!(
-        matches!(err, aether_mesh::ParseError::TrailingInput { .. }),
-        "expected TrailingInput, got {err:?}"
-    );
+    assert!(matches!(err, aether_mesh::ParseError::TrailingInput { .. }), "expected TrailingInput, got {err:?}");
 }
 
 #[test]
 fn parse_allows_trailing_comment() {
     let result = parse("(box 1 1 1 :color 0)\n; trailing comment\n");
-    assert!(
-        result.is_ok(),
-        "trailing comment should not trigger TrailingInput, got {result:?}"
-    );
+    assert!(result.is_ok(), "trailing comment should not trigger TrailingInput, got {result:?}");
 }
 
 #[test]
 fn parse_allows_trailing_whitespace() {
     let result = parse("(box 1 1 1 :color 0)   ");
-    assert!(
-        result.is_ok(),
-        "trailing whitespace should be OK, got {result:?}"
-    );
+    assert!(result.is_ok(), "trailing whitespace should be OK, got {result:?}");
 }

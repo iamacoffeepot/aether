@@ -113,10 +113,7 @@ impl IndexedMesh {
             process_bucket(&vertices, &polygons, bucket, &global_directed, &mut merged);
         }
 
-        Self {
-            vertices,
-            polygons: merged,
-        }
+        Self { vertices, polygons: merged }
     }
 }
 
@@ -174,11 +171,7 @@ fn process_bucket(
     for loop_verts in loops {
         let loop_verts = collapse_unbacked_boundary_runs(&loop_verts, global_directed, &directed);
         for normalized in normalize_loop(&loop_verts) {
-            out.push(IndexedPolygon {
-                vertices: normalized,
-                plane,
-                color,
-            });
+            out.push(IndexedPolygon { vertices: normalized, plane, color });
         }
     }
 }
@@ -193,9 +186,7 @@ fn process_bucket(
 /// The naive boolean filter treats "both directions present" as
 /// cancelled, which over-cancels by one and tears the boundary open.
 /// Issue #350.
-fn boundary_edges_after_twin_cancellation(
-    directed: &HashMap<(VertexId, VertexId), u32>,
-) -> Vec<(VertexId, VertexId)> {
+fn boundary_edges_after_twin_cancellation(directed: &HashMap<(VertexId, VertexId), u32>) -> Vec<(VertexId, VertexId)> {
     super::twin_edges::surviving_directed_edges(directed)
 }
 
@@ -398,11 +389,7 @@ pub(super) fn normalize_loop(loop_verts: &[VertexId]) -> Vec<Vec<VertexId>> {
 /// has no incoming direction; it's chosen by the sort order of
 /// `boundary`. See module-level docs for why this is the right rule
 /// for BSP-generated X-junctions.
-fn extract_loops(
-    boundary: &[(VertexId, VertexId)],
-    vertices: &[Point3],
-    plane: &Plane3,
-) -> Option<Vec<Vec<VertexId>>> {
+fn extract_loops(boundary: &[(VertexId, VertexId)], vertices: &[Point3], plane: &Plane3) -> Option<Vec<Vec<VertexId>>> {
     let axes = drop_axis(plane);
 
     let mut outgoing: HashMap<VertexId, Vec<VertexId>> = HashMap::new();
@@ -465,11 +452,7 @@ fn pick_continuation(
     cur: VertexId,
 ) -> Option<VertexId> {
     let nexts = outgoing.get(&cur)?;
-    let unvisited: Vec<VertexId> = nexts
-        .iter()
-        .copied()
-        .filter(|&n| !visited.contains(&(cur, n)))
-        .collect();
+    let unvisited: Vec<VertexId> = nexts.iter().copied().filter(|&n| !visited.contains(&(cur, n))).collect();
     match unvisited.len() {
         0 => return None,
         1 => return Some(unvisited[0]),
@@ -567,11 +550,7 @@ fn cmp_turn(
 /// largest absolute normal component. Exact for axis-aligned planes,
 /// shears tilted ones (collinearity preserved).
 fn drop_axis(plane: &Plane3) -> (usize, usize) {
-    let abs_n = (
-        plane.n_x.unsigned_abs(),
-        plane.n_y.unsigned_abs(),
-        plane.n_z.unsigned_abs(),
-    );
+    let abs_n = (plane.n_x.unsigned_abs(), plane.n_y.unsigned_abs(), plane.n_z.unsigned_abs());
     if abs_n.0 >= abs_n.1 && abs_n.0 >= abs_n.2 {
         (1, 2)
     } else if abs_n.1 >= abs_n.2 {
@@ -594,9 +573,8 @@ mod tests {
 
     #[test]
     fn singleton_passes_through() {
-        let tri =
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 5)
-                .expect("test setup: non-degenerate triangle");
+        let tri = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 5)
+            .expect("test setup: non-degenerate triangle");
         let out = weld_then_merge(vec![tri]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].vertices.len(), 3);
@@ -616,14 +594,8 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].vertices.len(), 4);
         let covered: BTreeSet<Point3> = out[0].vertices.iter().copied().collect();
-        let expect: BTreeSet<Point3> = [
-            pt(0.0, 0.0, 0.0),
-            pt(1.0, 0.0, 0.0),
-            pt(1.0, 1.0, 0.0),
-            pt(0.0, 1.0, 0.0),
-        ]
-        .into_iter()
-        .collect();
+        let expect: BTreeSet<Point3> =
+            [pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(0.0, 1.0, 0.0)].into_iter().collect();
         assert_eq!(covered, expect);
     }
 
@@ -641,12 +613,10 @@ mod tests {
 
     #[test]
     fn triangles_in_different_planes_are_unaffected() {
-        let t_xy =
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 0)
-                .expect("test setup: non-degenerate triangle");
-        let t_yz =
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(0.0, 0.0, 1.0), 0)
-                .expect("test setup: non-degenerate triangle");
+        let t_xy = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 0)
+            .expect("test setup: non-degenerate triangle");
+        let t_yz = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(0.0, 0.0, 1.0), 0)
+            .expect("test setup: non-degenerate triangle");
         let out = weld_then_merge(vec![t_xy, t_yz]);
         assert_eq!(out.len(), 2);
     }
@@ -679,15 +649,7 @@ mod tests {
         let mid = pt(1.0, 1.0, 0.0);
         let top = pt(1.0, 2.0, 0.0);
         let tl = pt(0.0, 2.0, 0.0);
-        let polys = triangle_fan(
-            &[
-                (bl, br, inner),
-                (bl, inner, mid),
-                (bl, mid, top),
-                (bl, top, tl),
-            ],
-            0,
-        );
+        let polys = triangle_fan(&[(bl, br, inner), (bl, inner, mid), (bl, mid, top), (bl, top, tl)], 0);
         let out = weld_then_merge(polys);
         assert_eq!(out.len(), 3);
         let lens: BTreeSet<usize> = out.iter().map(|p| p.vertices.len()).collect();
@@ -717,12 +679,7 @@ mod tests {
     // demand prose names that bury the geometry.
     #[allow(clippy::similar_names)]
     fn annular_indexed_mesh() -> IndexedMesh {
-        let plane = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1,
-            d: 0,
-        };
+        let plane = Plane3 { n_x: 0, n_y: 0, n_z: 1, d: 0 };
         let color = 7;
         // 8 vertices: outer 2x2 quad (0..=3) and the 1x1 hole (4..=7)
         // centered inside it. Named locals rather than a literal pool
@@ -737,9 +694,7 @@ mod tests {
         let hole_br = pt(1.5, 0.5, 0.0);
         let hole_tr = pt(1.5, 1.5, 0.0);
         let hole_tl = pt(0.5, 1.5, 0.0);
-        let vertices = vec![
-            outer_bl, outer_br, outer_tr, outer_tl, hole_bl, hole_br, hole_tr, hole_tl,
-        ];
+        let vertices = vec![outer_bl, outer_br, outer_tr, outer_tl, hole_bl, hole_br, hole_tr, hole_tl];
         let polygon_indices: [Vec<VertexId>; 8] = [
             vec![0, 1, 4],
             vec![1, 5, 4],
@@ -769,20 +724,11 @@ mod tests {
     fn square_with_square_hole_emits_outer_and_hole_loops() {
         let vertices = annular_indexed_mesh().vertices;
         let merged = annular_indexed_mesh().merge_coplanar();
-        assert_eq!(
-            merged.polygons.len(),
-            2,
-            "expected 2 boundary loops (outer + hole), got {}",
-            merged.polygons.len()
-        );
+        assert_eq!(merged.polygons.len(), 2, "expected 2 boundary loops (outer + hole), got {}", merged.polygons.len());
         for poly in &merged.polygons {
             assert_eq!(poly.vertices.len(), 4);
         }
-        let signed_areas: Vec<i128> = merged
-            .polygons
-            .iter()
-            .map(|p| shoelace_2d(&vertices, &p.vertices))
-            .collect();
+        let signed_areas: Vec<i128> = merged.polygons.iter().map(|p| shoelace_2d(&vertices, &p.vertices)).collect();
         let positive = signed_areas.iter().filter(|&&a| a > 0).count();
         let negative = signed_areas.iter().filter(|&&a| a < 0).count();
         assert_eq!(positive, 1, "expected one CCW outer loop");
@@ -811,43 +757,16 @@ mod tests {
     /// different buckets per the documented limitation.
     #[test]
     fn proportional_planes_do_not_merge() {
-        let plane_small = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1 << 16,
-            d: 0,
-        };
-        let plane_large = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 4 << 16,
-            d: 0,
-        };
-        let p1 = IndexedPolygon {
-            vertices: vec![0, 1, 2],
-            plane: plane_small,
-            color: 0,
-        };
-        let p2 = IndexedPolygon {
-            vertices: vec![0, 2, 3],
-            plane: plane_large,
-            color: 0,
-        };
+        let plane_small = Plane3 { n_x: 0, n_y: 0, n_z: 1 << 16, d: 0 };
+        let plane_large = Plane3 { n_x: 0, n_y: 0, n_z: 4 << 16, d: 0 };
+        let p1 = IndexedPolygon { vertices: vec![0, 1, 2], plane: plane_small, color: 0 };
+        let p2 = IndexedPolygon { vertices: vec![0, 2, 3], plane: plane_large, color: 0 };
         let mesh = IndexedMesh {
-            vertices: vec![
-                pt(0.0, 0.0, 0.0),
-                pt(1.0, 0.0, 0.0),
-                pt(1.0, 1.0, 0.0),
-                pt(0.0, 1.0, 0.0),
-            ],
+            vertices: vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(0.0, 1.0, 0.0)],
             polygons: vec![p1, p2],
         };
         let merged = mesh.merge_coplanar();
-        assert_eq!(
-            merged.polygons.len(),
-            2,
-            "proportional Plane3 fields must NOT merge — documented limitation"
-        );
+        assert_eq!(merged.polygons.len(), 2, "proportional Plane3 fields must NOT merge — documented limitation");
     }
 
     /// Polygons that share a plane but have different colors stay
@@ -856,38 +775,16 @@ mod tests {
     /// coplanar surfaces of different colors meet.
     #[test]
     fn polygons_of_different_colors_do_not_merge() {
-        let plane = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1 << 16,
-            d: 0,
-        };
+        let plane = Plane3 { n_x: 0, n_y: 0, n_z: 1 << 16, d: 0 };
         let mesh = IndexedMesh {
-            vertices: vec![
-                pt(0.0, 0.0, 0.0),
-                pt(1.0, 0.0, 0.0),
-                pt(1.0, 1.0, 0.0),
-                pt(0.0, 1.0, 0.0),
-            ],
+            vertices: vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(0.0, 1.0, 0.0)],
             polygons: vec![
-                IndexedPolygon {
-                    vertices: vec![0, 1, 2],
-                    plane,
-                    color: 11,
-                },
-                IndexedPolygon {
-                    vertices: vec![0, 2, 3],
-                    plane,
-                    color: 22,
-                },
+                IndexedPolygon { vertices: vec![0, 1, 2], plane, color: 11 },
+                IndexedPolygon { vertices: vec![0, 2, 3], plane, color: 22 },
             ],
         };
         let merged = mesh.merge_coplanar();
-        assert_eq!(
-            merged.polygons.len(),
-            2,
-            "different colors must stay in separate buckets and not merge"
-        );
+        assert_eq!(merged.polygons.len(), 2, "different colors must stay in separate buckets and not merge");
         let colors: BTreeSet<u32> = merged.polygons.iter().map(|p| p.color).collect();
         assert_eq!(colors, [11, 22].into_iter().collect());
     }
@@ -897,12 +794,7 @@ mod tests {
         // Two completely disjoint quads — same plane, same color, no
         // shared edges. Bucket-wide cancellation leaves all 8 boundary
         // edges in place; extract_loops walks them as two loops.
-        let plane = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1 << 16,
-            d: 0,
-        };
+        let plane = Plane3 { n_x: 0, n_y: 0, n_z: 1 << 16, d: 0 };
         let mesh = IndexedMesh {
             vertices: vec![
                 pt(0.0, 0.0, 0.0),
@@ -915,34 +807,14 @@ mod tests {
                 pt(3.0, 1.0, 0.0),
             ],
             polygons: vec![
-                IndexedPolygon {
-                    vertices: vec![0, 1, 2],
-                    plane,
-                    color: 0,
-                },
-                IndexedPolygon {
-                    vertices: vec![0, 2, 3],
-                    plane,
-                    color: 0,
-                },
-                IndexedPolygon {
-                    vertices: vec![4, 5, 6],
-                    plane,
-                    color: 0,
-                },
-                IndexedPolygon {
-                    vertices: vec![4, 6, 7],
-                    plane,
-                    color: 0,
-                },
+                IndexedPolygon { vertices: vec![0, 1, 2], plane, color: 0 },
+                IndexedPolygon { vertices: vec![0, 2, 3], plane, color: 0 },
+                IndexedPolygon { vertices: vec![4, 5, 6], plane, color: 0 },
+                IndexedPolygon { vertices: vec![4, 6, 7], plane, color: 0 },
             ],
         };
         let merged = mesh.merge_coplanar();
-        assert_eq!(
-            merged.polygons.len(),
-            2,
-            "two disjoint regions in one bucket must emit as 2 separate polygons"
-        );
+        assert_eq!(merged.polygons.len(), 2, "two disjoint regions in one bucket must emit as 2 separate polygons");
         for p in &merged.polygons {
             assert_eq!(p.vertices.len(), 4);
         }
@@ -956,50 +828,21 @@ mod tests {
     #[allow(clippy::similar_names)]
     #[test]
     fn cross_plane_shared_edge_keeps_matching_vertex_ids() {
-        let xy = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1 << 16,
-            d: 0,
-        };
-        let xz = Plane3 {
-            n_x: 0,
-            n_y: -(1 << 16),
-            n_z: 0,
-            d: 0,
-        };
+        let xy = Plane3 { n_x: 0, n_y: 0, n_z: 1 << 16, d: 0 };
+        let xz = Plane3 { n_x: 0, n_y: -(1 << 16), n_z: 0, d: 0 };
         let mesh = IndexedMesh {
-            vertices: vec![
-                pt(0.0, 0.0, 0.0),
-                pt(1.0, 0.0, 0.0),
-                pt(0.0, 1.0, 0.0),
-                pt(0.0, 0.0, 1.0),
-            ],
+            vertices: vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(0.0, 0.0, 1.0)],
             polygons: vec![
-                IndexedPolygon {
-                    vertices: vec![0, 1, 2],
-                    plane: xy,
-                    color: 0,
-                },
-                IndexedPolygon {
-                    vertices: vec![0, 3, 1],
-                    plane: xz,
-                    color: 0,
-                },
+                IndexedPolygon { vertices: vec![0, 1, 2], plane: xy, color: 0 },
+                IndexedPolygon { vertices: vec![0, 3, 1], plane: xz, color: 0 },
             ],
         };
         let merged = mesh.merge_coplanar();
         assert_eq!(merged.polygons.len(), 2);
-        let xy_poly = merged
-            .polygons
-            .iter()
-            .find(|p| p.plane.n_z != 0)
-            .expect("test setup: xy polygon is present after merge");
-        let xz_poly = merged
-            .polygons
-            .iter()
-            .find(|p| p.plane.n_y != 0)
-            .expect("test setup: xz polygon is present after merge");
+        let xy_poly =
+            merged.polygons.iter().find(|p| p.plane.n_z != 0).expect("test setup: xy polygon is present after merge");
+        let xz_poly =
+            merged.polygons.iter().find(|p| p.plane.n_y != 0).expect("test setup: xz polygon is present after merge");
         assert!(xy_poly.vertices.contains(&0));
         assert!(xy_poly.vertices.contains(&1));
         assert!(xz_poly.vertices.contains(&0));
@@ -1107,12 +950,7 @@ mod tests {
         // This exercises angular continuation at an X-junction with
         // one collinear pair (A's rim) and verifies the sliver loop
         // doesn't get tangled into the rim loop.
-        let plane = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1 << 16,
-            d: 0,
-        };
+        let plane = Plane3 { n_x: 0, n_y: 0, n_z: 1 << 16, d: 0 };
         let mesh = IndexedMesh {
             vertices: vec![
                 pt(-2.0, -1.0, 0.0), // 0
@@ -1125,17 +963,9 @@ mod tests {
             ],
             polygons: vec![
                 // Region A: pentagon, J on its top edge.
-                IndexedPolygon {
-                    vertices: vec![0, 1, 2, 3, 4],
-                    plane,
-                    color: 0,
-                },
+                IndexedPolygon { vertices: vec![0, 1, 2, 3, 4], plane, color: 0 },
                 // Sliver T1: triangle touching J at its apex.
-                IndexedPolygon {
-                    vertices: vec![3, 5, 6],
-                    plane,
-                    color: 0,
-                },
+                IndexedPolygon { vertices: vec![3, 5, 6], plane, color: 0 },
             ],
         };
         let merged = mesh.merge_coplanar();
@@ -1143,30 +973,16 @@ mod tests {
         // No twin edges between them, so cancellation leaves both
         // boundaries intact; the angular rule at J keeps them on
         // their respective loops.
-        assert_eq!(
-            merged.polygons.len(),
-            2,
-            "X-junction at J must extract 2 loops, got {}",
-            merged.polygons.len()
-        );
+        assert_eq!(merged.polygons.len(), 2, "X-junction at J must extract 2 loops, got {}", merged.polygons.len());
         let lens: BTreeSet<usize> = merged.polygons.iter().map(|p| p.vertices.len()).collect();
-        assert_eq!(
-            lens,
-            [3, 5].into_iter().collect(),
-            "expected one 5-gon (A) and one 3-gon (T1)"
-        );
+        assert_eq!(lens, [3, 5].into_iter().collect(), "expected one 5-gon (A) and one 3-gon (T1)");
     }
 
     #[test]
     fn extract_loops_open_boundary_returns_none() {
         // Pass minimal vertex pool + dummy z=0 plane.
         let vertices = vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0)];
-        let plane = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1 << 16,
-            d: 0,
-        };
+        let plane = Plane3 { n_x: 0, n_y: 0, n_z: 1 << 16, d: 0 };
         let boundary = vec![(0_usize, 1_usize)];
         assert!(extract_loops(&boundary, &vertices, &plane).is_none());
     }
@@ -1174,12 +990,7 @@ mod tests {
     #[test]
     fn extract_loops_branching_boundary_returns_none() {
         let vertices = vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0)];
-        let plane = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1 << 16,
-            d: 0,
-        };
+        let plane = Plane3 { n_x: 0, n_y: 0, n_z: 1 << 16, d: 0 };
         let boundary = vec![(0_usize, 1_usize), (1, 0), (0, 2)];
         assert!(extract_loops(&boundary, &vertices, &plane).is_none());
     }
@@ -1194,15 +1005,9 @@ mod tests {
             pt(4.0, 0.0, 0.0),
             pt(3.0, 1.0, 0.0),
         ];
-        let plane = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1 << 16,
-            d: 0,
-        };
+        let plane = Plane3 { n_x: 0, n_y: 0, n_z: 1 << 16, d: 0 };
         let boundary = vec![(0_usize, 1_usize), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)];
-        let loops =
-            extract_loops(&boundary, &vertices, &plane).expect("two disjoint loops should extract");
+        let loops = extract_loops(&boundary, &vertices, &plane).expect("two disjoint loops should extract");
         assert_eq!(loops.len(), 2);
         assert_eq!(loops[0].len(), 3);
         assert_eq!(loops[1].len(), 3);
@@ -1211,15 +1016,9 @@ mod tests {
     #[test]
     fn extract_loops_empty_boundary_returns_some_empty() {
         let vertices: Vec<Point3> = vec![];
-        let plane = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1 << 16,
-            d: 0,
-        };
+        let plane = Plane3 { n_x: 0, n_y: 0, n_z: 1 << 16, d: 0 };
         let boundary: Vec<(VertexId, VertexId)> = vec![];
-        let loops = extract_loops(&boundary, &vertices, &plane)
-            .expect("empty boundary should be Some(empty)");
+        let loops = extract_loops(&boundary, &vertices, &plane).expect("empty boundary should be Some(empty)");
         assert!(loops.is_empty());
     }
 
@@ -1354,12 +1153,7 @@ mod tests {
     /// the fallback path otherwise has zero coverage.
     #[test]
     fn pathological_bucket_falls_back_to_originals() {
-        let plane = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1 << 16,
-            d: 0,
-        };
+        let plane = Plane3 { n_x: 0, n_y: 0, n_z: 1 << 16, d: 0 };
         let mesh = IndexedMesh {
             vertices: vec![
                 pt(0.0, 0.0, 0.0),
@@ -1369,28 +1163,13 @@ mod tests {
                 pt(2.0, 1.0, 0.0),
             ],
             polygons: vec![
-                IndexedPolygon {
-                    vertices: vec![0, 1, 2],
-                    plane,
-                    color: 0,
-                },
-                IndexedPolygon {
-                    vertices: vec![1, 3, 4],
-                    plane,
-                    color: 0,
-                },
-                IndexedPolygon {
-                    vertices: vec![0, 1, 3],
-                    plane,
-                    color: 0,
-                },
+                IndexedPolygon { vertices: vec![0, 1, 2], plane, color: 0 },
+                IndexedPolygon { vertices: vec![1, 3, 4], plane, color: 0 },
+                IndexedPolygon { vertices: vec![0, 1, 3], plane, color: 0 },
             ],
         };
         let merged = mesh.merge_coplanar();
-        assert!(
-            !merged.polygons.is_empty(),
-            "pathological bucket must not crash; fallback emits originals"
-        );
+        assert!(!merged.polygons.is_empty(), "pathological bucket must not crash; fallback emits originals");
     }
 
     #[test]

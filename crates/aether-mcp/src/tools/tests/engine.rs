@@ -35,10 +35,7 @@ async fn spawn_substrate_missing_binary_is_tool_error() {
             components: vec![],
         }))
         .await;
-    assert!(
-        result.is_err(),
-        "an unresolvable selector should be a tool error"
-    );
+    assert!(result.is_err(), "an unresolvable selector should be a tool error");
 }
 
 /// A `spawn_substrate` boot list whose component selector resolves to
@@ -67,10 +64,7 @@ async fn spawn_substrate_unresolvable_component_selector_is_tool_error() {
             }],
         }))
         .await;
-    assert!(
-        result.is_err(),
-        "an unresolvable component selector should abort the spawn as a tool error",
-    );
+    assert!(result.is_err(), "an unresolvable component selector should abort the spawn as a tool error");
 }
 
 /// `spawn_substrate` rejects `replicas: 0` on a boot-list component
@@ -98,10 +92,7 @@ async fn spawn_substrate_replicas_zero_is_tool_error() {
             }],
         }))
         .await;
-    assert!(
-        result.is_err(),
-        "replicas: 0 must be a tool error, not a silent no-op",
-    );
+    assert!(result.is_err(), "replicas: 0 must be a tool error, not a silent no-op");
 }
 
 /// `terminate_substrate` with a malformed `engine_id` surfaces the
@@ -110,13 +101,7 @@ async fn spawn_substrate_replicas_zero_is_tool_error() {
 async fn terminate_substrate_bad_engine_id_is_tool_error() {
     let (_chassis, port) = boot_hub();
     let mcp = connect_mcp(port);
-    let result = mcp
-        .terminate_substrate(Parameters(TerminateSubstrateArgs {
-            engine_id: "not-a-uuid".to_owned(),
-        }))
-        .await;
-    assert!(
-        result.is_err(),
-        "a malformed engine_id should be a tool error"
-    );
+    let result =
+        mcp.terminate_substrate(Parameters(TerminateSubstrateArgs { engine_id: "not-a-uuid".to_owned() })).await;
+    assert!(result.is_err(), "a malformed engine_id should be a tool error");
 }

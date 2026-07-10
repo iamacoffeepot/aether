@@ -22,12 +22,7 @@ pub fn emit_draw(
     clip: Option<ClipRect>,
     quads: Vec<TexturedQuad>,
 ) {
-    let draw = DrawTexturedQuads {
-        texture_id,
-        space,
-        clip,
-        quads,
-    };
+    let draw = DrawTexturedQuads { texture_id, space, clip, quads };
     ctx.actor::<RenderCapability>().send(&draw);
 }
 
@@ -79,10 +74,7 @@ pub fn quantize_size(size_pixels: f32) -> u32 {
 /// `fonts/RobotoMono.ttf` → `RobotoMono`), or the whole path when it
 /// has no stem.
 pub fn font_name_from_path(path: &str) -> String {
-    Path::new(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map_or_else(|| path.to_owned(), ToOwned::to_owned)
+    Path::new(path).file_stem().and_then(|s| s.to_str()).map_or_else(|| path.to_owned(), ToOwned::to_owned)
 }
 
 /// Walk a parsed font into its size-independent [`FontMetrics`] table
@@ -98,9 +90,7 @@ pub fn build_font_metrics(font: &fontdue::Font) -> FontMetrics {
     let units_per_em = font.units_per_em();
     let (ascent, descent, line_gap) = font
         .horizontal_line_metrics(units_per_em)
-        .map_or((0.0, 0.0, 0.0), |line| {
-            (line.ascent, line.descent, line.line_gap)
-        });
+        .map_or((0.0, 0.0, 0.0), |line| (line.ascent, line.descent, line.line_gap));
     // Glyph 0 is `.notdef` — the advance the draw path uses for a
     // codepoint the font has no glyph for.
     let default_advance = font.metrics_indexed(0, units_per_em).advance_width;
@@ -113,12 +103,5 @@ pub fn build_font_metrics(font: &fontdue::Font) -> FontMetrics {
         })
         .collect();
     advances.sort_unstable_by_key(|glyph| glyph.codepoint);
-    FontMetrics {
-        units_per_em,
-        ascent,
-        descent,
-        line_gap,
-        default_advance,
-        advances,
-    }
+    FontMetrics { units_per_em, ascent, descent, line_gap, default_advance, advances }
 }

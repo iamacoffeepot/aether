@@ -41,9 +41,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use aether_actor::{
-    ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
-};
+use aether_actor::{ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::text::{LoadFont, LoadFontResult};
@@ -52,25 +50,20 @@ use aether_data::{Kind, MailboxId};
 use aether_kinds::keycode::KEY_TAB;
 use aether_kinds::mouse_button;
 use aether_kinds::{
-    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
-    TextInput, Tick,
+    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput, Tick,
 };
 use aether_math::Vec2;
 
 use crate::widget::composite::Composite;
 use crate::widget::focus::{
-    AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition,
-    HoverTransition,
+    AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition, HoverTransition,
 };
-use crate::widget::set::{
-    ButtonWidget, LabelWidget, RadioGroupWidget, SliderWidget, TextFieldWidget, quad,
-};
+use crate::widget::set::{ButtonWidget, LabelWidget, RadioGroupWidget, SliderWidget, TextFieldWidget, quad};
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
-    ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost,
-    LabelConfig, PanelConfig, RadioConfig, RadioSelected, SliderChanged, SliderConfig,
-    TextCommitted, TextFieldConfig, WidgetChildSpec, WidgetClipRect, WidgetControlState,
-    WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
+    ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, LabelConfig, PanelConfig,
+    RadioConfig, RadioSelected, SliderChanged, SliderConfig, TextCommitted, TextFieldConfig, WidgetChildSpec,
+    WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
 };
 use crate::widget::{accept_child_list, emit, flush_membership};
 
@@ -129,18 +122,10 @@ impl WidgetPanel {
         let gap = self.theme.gap;
         let mut y = self.config.y;
 
-        let row_rect = |y: f32, height: f32| WidgetFrame {
-            x,
-            y,
-            width,
-            height,
-        };
+        let row_rect = |y: f32, height: f32| WidgetFrame { x, y, width, height };
 
-        let specs = if self.config.children.is_empty() {
-            reference_stack(&self.theme)
-        } else {
-            self.config.children.clone()
-        };
+        let specs =
+            if self.config.children.is_empty() { reference_stack(&self.theme) } else { self.config.children.clone() };
 
         let mut first = true;
         for spec in &specs {
@@ -159,12 +144,7 @@ impl WidgetPanel {
                 y += gap;
             }
             first = false;
-            self.place(
-                ctx,
-                &placed,
-                row_rect(y, placed.height),
-                spec.subname.clone(),
-            );
+            self.place(ctx, &placed, row_rect(y, placed.height), spec.subname.clone());
             y += placed.height;
         }
 
@@ -175,37 +155,18 @@ impl WidgetPanel {
     /// under its `name` subname and the spawned actor type `A`'s namespace) and
     /// the focus table (as its hit rect), send it its `WidgetFrame`, and
     /// remember it for value-up attribution.
-    fn place(
-        &mut self,
-        ctx: &mut WasmCtx<'_, Manual>,
-        child: &SpawnedChild,
-        frame: WidgetFrame,
-        name: String,
-    ) {
+    fn place(&mut self, ctx: &mut WasmCtx<'_, Manual>, child: &SpawnedChild, frame: WidgetFrame, name: String) {
         self.composite.register_slot(
             child.id,
             Vec2::new(frame.x, frame.y),
-            Some(WidgetClipRect {
-                x: frame.x,
-                y: frame.y,
-                width: frame.width,
-                height: frame.height,
-            }),
+            Some(WidgetClipRect { x: frame.x, y: frame.y, width: frame.width, height: frame.height }),
             &name,
             child.type_namespace,
         );
         self.focus.register(
             child.id,
-            FocusRect {
-                x: frame.x,
-                y: frame.y,
-                width: frame.width,
-                height: frame.height,
-            },
-            FocusEligibility {
-                pointer: child.pointer_eligible,
-                keyboard: child.focusable,
-            },
+            FocusRect { x: frame.x, y: frame.y, width: frame.width, height: frame.height },
+            FocusEligibility { pointer: child.pointer_eligible, keyboard: child.focusable },
             &child.state,
         );
         ctx.send_to(child.id, &frame);
@@ -222,12 +183,7 @@ impl WidgetPanel {
     /// Re-fan the live theme to every child (after a font stamp or a restyle).
     fn fan_theme(&self, ctx: &mut WasmCtx<'_>) {
         for child in &self.children {
-            ctx.send_to(
-                child.id,
-                &SetTheme {
-                    theme: self.theme.clone(),
-                },
-            );
+            ctx.send_to(child.id, &SetTheme { theme: self.theme.clone() });
         }
     }
 
@@ -243,11 +199,7 @@ impl WidgetPanel {
 /// Decode, spawn, and derive one panel child's static/dynamic routing profile.
 /// Keeping this dispatch out of `ensure_spawned` leaves the layout loop focused
 /// on ordering and placement.
-fn spawn_panel_child(
-    ctx: &mut WasmCtx<'_, Manual>,
-    spec: &WidgetChildSpec,
-    row: f32,
-) -> Option<SpawnedChild> {
+fn spawn_panel_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
     match spec.kind {
         WidgetKind::Label => decode_child::<LabelConfig>(spec).and_then(|config| {
             let state = config.state.clone();
@@ -355,12 +307,8 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
         spec(
             "label",
             WidgetKind::Label,
-            LabelConfig {
-                text: String::from("Controls"),
-                theme: theme.clone(),
-                state: WidgetControlState::default(),
-            }
-            .encode_into_bytes(),
+            LabelConfig { text: String::from("Controls"), theme: theme.clone(), state: WidgetControlState::default() }
+                .encode_into_bytes(),
         ),
         spec(
             "slider",
@@ -379,11 +327,7 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
             "radio",
             WidgetKind::Radio,
             RadioConfig {
-                options: vec![
-                    String::from("Low"),
-                    String::from("Medium"),
-                    String::from("High"),
-                ],
+                options: vec![String::from("Low"), String::from("Medium"), String::from("High")],
                 initial_index: 0,
                 theme: theme.clone(),
                 state: WidgetControlState::default(),
@@ -404,12 +348,8 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
         spec(
             "button",
             WidgetKind::Button,
-            ButtonConfig {
-                label: String::from("Apply"),
-                theme: theme.clone(),
-                state: WidgetControlState::default(),
-            }
-            .encode_into_bytes(),
+            ButtonConfig { label: String::from("Apply"), theme: theme.clone(), state: WidgetControlState::default() }
+                .encode_into_bytes(),
         ),
     ]
 }
@@ -438,10 +378,7 @@ fn apply_hover<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, transition:
     }
 }
 
-fn apply_availability<M: aether_actor::ReplyMode>(
-    ctx: &mut WasmCtx<'_, M>,
-    effects: AvailabilityEffects,
-) {
+fn apply_availability<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, effects: AvailabilityEffects) {
     if let Some(hover) = effects.hover {
         apply_hover(ctx, hover);
     }
@@ -480,11 +417,7 @@ where
 /// error. The panel's per-frame `Collect` is handed to the host as its FRAME
 /// trigger.
 #[cfg(feature = "behavior")]
-fn spawn_behavior_host(
-    ctx: &mut WasmCtx<'_, Manual>,
-    spec: &WidgetChildSpec,
-    row: f32,
-) -> Option<SpawnedChild> {
+fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
     use crate::widget::{BehaviorHostSpec, ScriptRef};
     use aether_actor::ActorTypeTag;
     use aether_behavior::HostConfig;
@@ -528,11 +461,8 @@ fn spawn_behavior_host(
         ScriptRef::Inline(bytes) => ScriptSource::Inline(bytes),
         ScriptRef::FsRef { namespace, path } => ScriptSource::FsRef { namespace, path },
     };
-    let fuel_per_call = if host_spec.fuel_per_call != 0 {
-        host_spec.fuel_per_call
-    } else {
-        HostConfig::DEFAULT_FUEL_PER_CALL
-    };
+    let fuel_per_call =
+        if host_spec.fuel_per_call != 0 { host_spec.fuel_per_call } else { HostConfig::DEFAULT_FUEL_PER_CALL };
     let disable_after_traps = if host_spec.disable_after_traps != 0 {
         host_spec.disable_after_traps
     } else {
@@ -601,11 +531,7 @@ fn spawn_behavior_host(
 /// The `behavior`-feature-off stub: a `WidgetKind::BehaviorHost` slot needs the
 /// host actor, which is only linked under the kit's `behavior` feature.
 #[cfg(not(feature = "behavior"))]
-fn spawn_behavior_host(
-    _ctx: &mut WasmCtx<'_, Manual>,
-    spec: &WidgetChildSpec,
-    _row: f32,
-) -> Option<SpawnedChild> {
+fn spawn_behavior_host(_ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, _row: f32) -> Option<SpawnedChild> {
     tracing::warn!(
         target: "aether_kit",
         subname = %spec.subname,
@@ -659,10 +585,8 @@ impl WasmActor for WidgetPanel {
         input.subscribe::<Modifiers>();
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
         if !self.config.font_path.is_empty() {
-            ctx.actor::<TextCapability>().send(&LoadFont {
-                namespace: self.config.font_namespace.clone(),
-                path: self.config.font_path.clone(),
-            });
+            ctx.actor::<TextCapability>()
+                .send(&LoadFont { namespace: self.config.font_namespace.clone(), path: self.config.font_path.clone() });
         }
     }
 
@@ -677,13 +601,7 @@ impl WasmActor for WidgetPanel {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
-        let background = quad(
-            self.config.x,
-            self.config.y,
-            self.config.width,
-            self.panel_height,
-            self.theme.surface,
-        );
+        let background = quad(self.config.x, self.config.y, self.config.width, self.panel_height, self.theme.surface);
         self.composite.extend_chrome([background]);
         for child in &self.children {
             ctx.send_to(child.id, &Collect);
@@ -763,11 +681,7 @@ impl WasmActor for WidgetPanel {
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if key.code == KEY_TAB {
-            let direction = if self.modifiers.shift {
-                FocusDirection::Backward
-            } else {
-                FocusDirection::Forward
-            };
+            let direction = if self.modifiers.shift { FocusDirection::Backward } else { FocusDirection::Forward };
             if let Some(transition) = self.focus.move_focus(direction) {
                 apply_focus(ctx, transition);
             }
@@ -816,11 +730,7 @@ impl WasmActor for WidgetPanel {
     /// Keep dynamic routing availability synchronized with the external state
     /// a child actually adopted. Source attribution identifies the panel slot.
     #[handler::manual]
-    fn on_widget_state_changed(
-        &mut self,
-        ctx: &mut WasmCtx<'_, Manual>,
-        changed: WidgetStateChanged,
-    ) {
+    fn on_widget_state_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: WidgetStateChanged) {
         let Some(source) = ctx.source_mailbox() else {
             return;
         };
@@ -922,26 +832,11 @@ mod behavior_tests {
     // under a host — silent until the pixels are wrong.
     #[test]
     fn wrapped_tag_maps_each_stock_widget_and_rejects_unwrappable() {
-        assert_eq!(
-            WidgetKind::Slider.type_tag(),
-            Some(ActorTypeTag::of::<SliderWidget>().0)
-        );
-        assert_eq!(
-            WidgetKind::Button.type_tag(),
-            Some(ActorTypeTag::of::<ButtonWidget>().0)
-        );
-        assert_eq!(
-            WidgetKind::Label.type_tag(),
-            Some(ActorTypeTag::of::<LabelWidget>().0)
-        );
-        assert_eq!(
-            WidgetKind::Radio.type_tag(),
-            Some(ActorTypeTag::of::<RadioGroupWidget>().0)
-        );
-        assert_eq!(
-            WidgetKind::TextField.type_tag(),
-            Some(ActorTypeTag::of::<TextFieldWidget>().0)
-        );
+        assert_eq!(WidgetKind::Slider.type_tag(), Some(ActorTypeTag::of::<SliderWidget>().0));
+        assert_eq!(WidgetKind::Button.type_tag(), Some(ActorTypeTag::of::<ButtonWidget>().0));
+        assert_eq!(WidgetKind::Label.type_tag(), Some(ActorTypeTag::of::<LabelWidget>().0));
+        assert_eq!(WidgetKind::Radio.type_tag(), Some(ActorTypeTag::of::<RadioGroupWidget>().0));
+        assert_eq!(WidgetKind::TextField.type_tag(), Some(ActorTypeTag::of::<TextFieldWidget>().0));
         assert_eq!(WidgetKind::Composite.type_tag(), None);
         assert_eq!(WidgetKind::BehaviorHost.type_tag(), None);
     }
@@ -954,10 +849,7 @@ mod behavior_tests {
         let spec = BehaviorHostSpec {
             wrapped: WidgetKind::Slider,
             wrapped_config: vec![1, 2, 3],
-            script: ScriptRef::FsRef {
-                namespace: String::from("assets"),
-                path: String::from("scripts/knob.wasm"),
-            },
+            script: ScriptRef::FsRef { namespace: String::from("assets"), path: String::from("scripts/knob.wasm") },
             fuel_per_call: 0,
             disable_after_traps: 0,
         };

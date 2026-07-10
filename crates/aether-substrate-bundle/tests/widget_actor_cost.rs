@@ -98,11 +98,7 @@ fn load_widgets(
     redraw_each_tick: bool,
     quad_count: u32,
 ) -> Vec<MailboxId> {
-    let config = UiWidgetConfig {
-        redraw_each_tick,
-        quad_count,
-    }
-    .encode_into_bytes();
+    let config = UiWidgetConfig { redraw_each_tick, quad_count }.encode_into_bytes();
     let mut ids = Vec::with_capacity(count);
     for i in 0..count {
         let report = bench
@@ -120,10 +116,7 @@ fn load_widgets(
                 ),
             )])
             .expect("load sequence");
-        match report
-            .reply::<LoadResult>("load")
-            .expect("decode LoadResult")
-        {
+        match report.reply::<LoadResult>("load").expect("decode LoadResult") {
             LoadResult::Ok { mailbox_id, .. } => ids.push(mailbox_id),
             LoadResult::Err { error } => panic!("load ui-widget-{i}: {error}"),
         }
@@ -135,13 +128,10 @@ fn load_widgets(
 /// nanoseconds — its per-frame cost. Zero if the cell is missing (it should
 /// always be seeded at load).
 fn tick_mean_nanos(bench: &TestBench, mbox: MailboxId) -> u64 {
-    let CostTailResult::Ok { rows } = bench.cost_table().tail(mbox, &CostTail { kind: None })
-    else {
+    let CostTailResult::Ok { rows } = bench.cost_table().tail(mbox, &CostTail { kind: None }) else {
         panic!("cost tail for widget mailbox");
     };
-    rows.iter()
-        .find(|r| r.kind_id == Tick::ID)
-        .map_or(0, |r| r.mean_nanos)
+    rows.iter().find(|r| r.kind_id == Tick::ID).map_or(0, |r| r.mean_nanos)
 }
 
 /// Mean per-widget `Tick` cost across a set of loaded widgets, in nanoseconds.
@@ -176,10 +166,7 @@ fn linear_fit(samples: &[(u32, u64)]) -> (f64, f64) {
 
 /// Parse a `u32` env override, falling back to `default`.
 fn env_or(key: &str, default: u32) -> u32 {
-    env::var(key)
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(default)
+    env::var(key).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
 }
 
 /// Parse a comma-separated count sweep from the env, dropping entries below
@@ -187,18 +174,9 @@ fn env_or(key: &str, default: u32) -> u32 {
 fn env_counts(key: &str, default: &[usize], min: usize) -> Vec<usize> {
     let parsed: Vec<usize> = env::var(key)
         .ok()
-        .map(|v| {
-            v.split(',')
-                .filter_map(|s| s.trim().parse::<usize>().ok())
-                .filter(|&n| n >= min)
-                .collect()
-        })
+        .map(|v| v.split(',').filter_map(|s| s.trim().parse::<usize>().ok()).filter(|&n| n >= min).collect())
         .unwrap_or_default();
-    if parsed.is_empty() {
-        default.to_vec()
-    } else {
-        parsed
-    }
+    if parsed.is_empty() { default.to_vec() } else { parsed }
 }
 
 #[test]
@@ -229,16 +207,12 @@ fn widget_actor_per_frame_cost() {
             let mut bench = TestBench::start_with_size(64, 48).expect("boot");
             let ids = load_widgets(&mut bench, &wasm, count, redraw_each_tick, quad_count);
             let start = Instant::now();
-            bench
-                .execute(vec![("advance", BenchOp::advance(ticks))])
-                .expect("advance");
+            bench.execute(vec![("advance", BenchOp::advance(ticks))]).expect("advance");
             let wall_millis = start.elapsed().as_secs_f64() * 1000.0;
 
             let per_widget = widget_mean_nanos(&bench, &ids);
             let aggregate = per_widget.saturating_mul(u64::try_from(ids.len()).unwrap_or(0));
-            let affordable = FRAME_BUDGET_NANOS
-                .checked_div(per_widget)
-                .unwrap_or(u64::MAX);
+            let affordable = FRAME_BUDGET_NANOS.checked_div(per_widget).unwrap_or(u64::MAX);
 
             eprintln!(
                 "{count:>8}  {profile:>8}  {per_widget:>16}  {aggregate:>18}  \
@@ -285,9 +259,7 @@ fn widget_cost_vs_draw_weight() {
         let quads = u32::try_from(weight).unwrap_or(u32::MAX);
         let mut bench = TestBench::start_with_size(64, 48).expect("boot");
         let ids = load_widgets(&mut bench, &wasm, FIT_WIDGET_COUNT, true, quads);
-        bench
-            .execute(vec![("advance", BenchOp::advance(ticks))])
-            .expect("advance");
+        bench.execute(vec![("advance", BenchOp::advance(ticks))]).expect("advance");
         let per_widget = widget_mean_nanos(&bench, &ids);
         samples.push((quads, per_widget));
         eprintln!("{quads:>12}  {per_widget:>16}");
@@ -311,19 +283,11 @@ fn widget_cost_vs_draw_weight() {
 /// `(wall_per_frame_nanos, per_widget_tick_ewma_nanos)`. Component load is
 /// outside the timed region, so the wall-clock is steady-state per-frame cost.
 #[allow(clippy::cast_precision_loss)] // elapsed nanos → f64 for a per-frame average; exactness is not load-bearing.
-fn measure_cell(
-    wasm: &[u8],
-    count: usize,
-    redraw_each_tick: bool,
-    quad_count: u32,
-    ticks: u32,
-) -> (f64, u64) {
+fn measure_cell(wasm: &[u8], count: usize, redraw_each_tick: bool, quad_count: u32, ticks: u32) -> (f64, u64) {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let ids = load_widgets(&mut bench, wasm, count, redraw_each_tick, quad_count);
     let start = Instant::now();
-    bench
-        .execute(vec![("advance", BenchOp::advance(ticks))])
-        .expect("advance");
+    bench.execute(vec![("advance", BenchOp::advance(ticks))]).expect("advance");
     let wall_per_frame = start.elapsed().as_nanos() as f64 / f64::from(ticks);
     (wall_per_frame, widget_mean_nanos(&bench, &ids))
 }
@@ -332,19 +296,13 @@ fn measure_cell(
 /// count over the measured `(count, wall_nanos)` points — would reach the
 /// 60fps frame budget. `None` for a flat/declining fit (no break-even) or too
 /// few points. Reuses [`linear_fit`].
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)] // measurement-aid arithmetic over small counts + nanos; exactness is not load-bearing.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)] // measurement-aid arithmetic over small counts + nanos; exactness is not load-bearing.
 fn budget_break_even(points: &[(usize, f64)]) -> Option<u64> {
     if points.len() < 2 {
         return None;
     }
-    let samples: Vec<(u32, u64)> = points
-        .iter()
-        .map(|&(c, w)| (u32::try_from(c).unwrap_or(u32::MAX), w as u64))
-        .collect();
+    let samples: Vec<(u32, u64)> =
+        points.iter().map(|&(c, w)| (u32::try_from(c).unwrap_or(u32::MAX), w as u64)).collect();
     let (intercept, slope) = linear_fit(&samples);
     if slope <= 0.0 {
         return None;

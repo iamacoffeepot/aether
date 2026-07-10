@@ -89,38 +89,27 @@ mod tests {
 
     #[test]
     fn one_round_trips() {
-        assert_eq!(
-            f32_to_fixed(1.0).expect("test setup: 1.0 is in range"),
-            ONE_FIXED
-        );
+        assert_eq!(f32_to_fixed(1.0).expect("test setup: 1.0 is in range"), ONE_FIXED);
         assert_eq!(fixed_to_f32(ONE_FIXED), 1.0);
     }
 
     #[test]
     fn smallest_step_round_trips() {
-        let fx = f32_to_fixed(SMALLEST_REPRESENTABLE)
-            .expect("test setup: smallest representable is in range");
+        let fx = f32_to_fixed(SMALLEST_REPRESENTABLE).expect("test setup: smallest representable is in range");
         assert_eq!(fx, 1);
         assert_eq!(fixed_to_f32(1), SMALLEST_REPRESENTABLE);
     }
 
     #[test]
     fn negative_round_trips() {
-        assert_eq!(
-            f32_to_fixed(-1.0).expect("test setup: -1.0 is in range"),
-            -ONE_FIXED
-        );
+        assert_eq!(f32_to_fixed(-1.0).expect("test setup: -1.0 is in range"), -ONE_FIXED);
         assert_eq!(fixed_to_f32(-ONE_FIXED), -1.0);
-        assert_eq!(
-            f32_to_fixed(-12.5).expect("test setup: -12.5 is in range"),
-            -12 * ONE_FIXED - ONE_FIXED / 2
-        );
+        assert_eq!(f32_to_fixed(-12.5).expect("test setup: -12.5 is in range"), -12 * ONE_FIXED - ONE_FIXED / 2);
     }
 
     #[test]
     fn positive_boundary_accepted() {
-        let fx = f32_to_fixed(MAX_INPUT_MAGNITUDE)
-            .expect("test setup: +MAX_INPUT_MAGNITUDE accepted at boundary");
+        let fx = f32_to_fixed(MAX_INPUT_MAGNITUDE).expect("test setup: +MAX_INPUT_MAGNITUDE accepted at boundary");
         assert_eq!(fx, 256 * ONE_FIXED);
         // Round-trip must be exact at the boundary — that's the entire
         // point of the ±256 cap.
@@ -129,8 +118,7 @@ mod tests {
 
     #[test]
     fn negative_boundary_accepted() {
-        let fx = f32_to_fixed(-MAX_INPUT_MAGNITUDE)
-            .expect("test setup: -MAX_INPUT_MAGNITUDE accepted at boundary");
+        let fx = f32_to_fixed(-MAX_INPUT_MAGNITUDE).expect("test setup: -MAX_INPUT_MAGNITUDE accepted at boundary");
         assert_eq!(fx, -256 * ONE_FIXED);
         assert_eq!(fixed_to_f32(fx), -MAX_INPUT_MAGNITUDE);
     }
@@ -162,31 +150,19 @@ mod tests {
     #[test]
     fn far_out_of_range_rejected() {
         for v in [1000.0_f32, -1000.0, 1.0e6, -1.0e6, 1.0e30, -1.0e30] {
-            assert!(matches!(
-                f32_to_fixed(v),
-                Err(FixedError::OutOfRange { .. })
-            ));
+            assert!(matches!(f32_to_fixed(v), Err(FixedError::OutOfRange { .. })));
         }
     }
 
     #[test]
     fn nan_rejected() {
-        assert!(matches!(
-            f32_to_fixed(f32::NAN),
-            Err(FixedError::NotFinite { .. })
-        ));
+        assert!(matches!(f32_to_fixed(f32::NAN), Err(FixedError::NotFinite { .. })));
     }
 
     #[test]
     fn infinity_rejected() {
-        assert!(matches!(
-            f32_to_fixed(f32::INFINITY),
-            Err(FixedError::NotFinite { .. })
-        ));
-        assert!(matches!(
-            f32_to_fixed(f32::NEG_INFINITY),
-            Err(FixedError::NotFinite { .. })
-        ));
+        assert!(matches!(f32_to_fixed(f32::INFINITY), Err(FixedError::NotFinite { .. })));
+        assert!(matches!(f32_to_fixed(f32::NEG_INFINITY), Err(FixedError::NotFinite { .. })));
     }
 
     #[test]
@@ -213,8 +189,8 @@ mod tests {
         // values farther apart than 1/65536 (the fixed-point step), and
         // never inverted.
         let step = 1.0 / 1024.0; // about 64 fixed units per step
-        let mut prev = f32_to_fixed(-MAX_INPUT_MAGNITUDE)
-            .expect("test setup: -MAX_INPUT_MAGNITUDE accepted at boundary");
+        let mut prev =
+            f32_to_fixed(-MAX_INPUT_MAGNITUDE).expect("test setup: -MAX_INPUT_MAGNITUDE accepted at boundary");
         let mut x = -MAX_INPUT_MAGNITUDE + step;
         // Stepping a float counter is the natural shape for sweeping the
         // input range; `step` is a power of two so accumulation drift is
@@ -235,14 +211,8 @@ mod tests {
         // direction every time across runs.
         let just_above_half = (1.0 / SCALE as f32) * 0.51;
         let just_below_half = (1.0 / SCALE as f32) * 0.49;
-        assert_eq!(
-            f32_to_fixed(just_above_half).expect("test setup: sub-LSB value is in range"),
-            1
-        );
-        assert_eq!(
-            f32_to_fixed(just_below_half).expect("test setup: sub-LSB value is in range"),
-            0
-        );
+        assert_eq!(f32_to_fixed(just_above_half).expect("test setup: sub-LSB value is in range"), 1);
+        assert_eq!(f32_to_fixed(just_below_half).expect("test setup: sub-LSB value is in range"), 0);
     }
 
     #[test]
@@ -255,26 +225,14 @@ mod tests {
         let half_lsb = 0.5 / SCALE;
         // Build the f64s exactly so the half-LSB rounds aren't lost to
         // f32 imprecision before reaching round().
-        assert_eq!(
-            f64_to_fixed_exact(half_lsb),
-            1,
-            "0.5 LSB should round away from zero"
-        );
-        assert_eq!(
-            f64_to_fixed_exact(1.5 * (1.0 / SCALE)),
-            2,
-            "1.5 LSB should round to 2 under away-from-zero"
-        );
+        assert_eq!(f64_to_fixed_exact(half_lsb), 1, "0.5 LSB should round away from zero");
+        assert_eq!(f64_to_fixed_exact(1.5 * (1.0 / SCALE)), 2, "1.5 LSB should round to 2 under away-from-zero");
         assert_eq!(
             f64_to_fixed_exact(2.5 * (1.0 / SCALE)),
             3,
             "2.5 LSB rounds to 3 under away-from-zero (banker's would yield 2)"
         );
-        assert_eq!(
-            f64_to_fixed_exact(-0.5 * (1.0 / SCALE)),
-            -1,
-            "-0.5 LSB rounds to -1 under away-from-zero"
-        );
+        assert_eq!(f64_to_fixed_exact(-0.5 * (1.0 / SCALE)), -1, "-0.5 LSB rounds to -1 under away-from-zero");
     }
 
     /// Mirrors `f32_to_fixed` against an exact f64 so halfway tests
@@ -311,10 +269,7 @@ mod tests {
         // the value that BSP-side classification will see if upstream
         // produces a marginally-too-large coordinate.
         let just_above = f32::from_bits(MAX_INPUT_MAGNITUDE.to_bits() + 1);
-        assert!(
-            just_above > MAX_INPUT_MAGNITUDE,
-            "test setup: just_above must exceed boundary"
-        );
+        assert!(just_above > MAX_INPUT_MAGNITUDE, "test setup: just_above must exceed boundary");
         match f32_to_fixed(just_above).expect_err("test setup: one ULP past +boundary must Err") {
             FixedError::OutOfRange { value } => assert_eq!(value, just_above),
             other @ FixedError::NotFinite { .. } => {
@@ -360,23 +315,11 @@ mod tests {
         // Same input → same output across N calls. Guards against a
         // future "clever" cache or thread-local state that breaks
         // referential transparency at this layer.
-        let samples = [
-            -MAX_INPUT_MAGNITUDE,
-            -1.0,
-            -0.5,
-            0.0,
-            0.001,
-            0.123_456_7,
-            42.5,
-            MAX_INPUT_MAGNITUDE,
-        ];
+        let samples = [-MAX_INPUT_MAGNITUDE, -1.0, -0.5, 0.0, 0.001, 0.123_456_7, 42.5, MAX_INPUT_MAGNITUDE];
         for v in samples {
             let first = f32_to_fixed(v).expect("test setup: sample is in range");
             for _ in 0..16 {
-                assert_eq!(
-                    f32_to_fixed(v).expect("test setup: sample is in range"),
-                    first
-                );
+                assert_eq!(f32_to_fixed(v).expect("test setup: sample is in range"), first);
             }
         }
     }
@@ -390,8 +333,7 @@ mod tests {
         for k in -1024..=1024 {
             let value = (k as f32) * 0.25;
             let once = f32_to_fixed(value).expect("test setup: 0.25 ladder stays in range");
-            let twice = f32_to_fixed(fixed_to_f32(once))
-                .expect("test setup: grid-aligned round-trip stays in range");
+            let twice = f32_to_fixed(fixed_to_f32(once)).expect("test setup: grid-aligned round-trip stays in range");
             assert_eq!(once, twice, "idempotence broke at value={value}");
         }
     }

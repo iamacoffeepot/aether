@@ -13,17 +13,12 @@ use crate::mail::MailboxId;
 macro_rules! chassis_accessors {
     () => {
         #[must_use]
-        pub fn resolve_actor<A: aether_actor::Instanced + NativeActor>(
-            &self,
-            subname: &str,
-        ) -> Option<MailboxId> {
+        pub fn resolve_actor<A: aether_actor::Instanced + NativeActor>(&self, subname: &str) -> Option<MailboxId> {
             resolve_actor::<A>(&self.booted, subname)
         }
 
         #[must_use]
-        pub fn resolve_actors<A: aether_actor::Instanced + NativeActor>(
-            &self,
-        ) -> Vec<(String, MailboxId)> {
+        pub fn resolve_actors<A: aether_actor::Instanced + NativeActor>(&self) -> Vec<(String, MailboxId)> {
             resolve_actors::<A>(&self.booted)
         }
 
@@ -139,15 +134,10 @@ fn resolve_actor<A: aether_actor::Instanced + NativeActor>(
     // walk the live instances of `A` and match the subname — rather
     // than recomputing a flat name-hash that only lands for a depth-1
     // (chassis-level) instance.
-    resolve_actors::<A>(booted)
-        .into_iter()
-        .find(|(sn, _)| sn == subname)
-        .map(|(_, id)| id)
+    resolve_actors::<A>(booted).into_iter().find(|(sn, _)| sn == subname).map(|(_, id)| id)
 }
 
-fn resolve_actors<A: aether_actor::Instanced + NativeActor>(
-    booted: &BootedPassives,
-) -> Vec<(String, MailboxId)> {
+fn resolve_actors<A: aether_actor::Instanced + NativeActor>(booted: &BootedPassives) -> Vec<(String, MailboxId)> {
     booted.actor_registry.live_subnames_of_type::<A>()
 }
 

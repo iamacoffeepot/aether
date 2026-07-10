@@ -87,10 +87,7 @@ impl HttpCapabilityState {
     /// generated `Lifecycle::init`; tests that drive the handler with a
     /// stub adapter hand it in directly.
     pub fn from_adapter(adapter: Arc<dyn HttpAdapter>, default_timeout: Duration) -> Self {
-        Self {
-            adapter,
-            default_timeout,
-        }
+        Self { adapter, default_timeout }
     }
 }
 
@@ -108,15 +105,9 @@ impl NativeActor for HttpCapability {
     /// Build the HTTP adapter from the resolved config. The adapter is
     /// built immediately so configuration errors surface at chassis-
     /// builder time, not at first fetch.
-    fn init(
-        config: HttpConfig,
-        _ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<HttpCapabilityState, BootError> {
+    fn init(config: HttpConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<HttpCapabilityState, BootError> {
         let default_timeout = config.default_timeout;
-        Ok(HttpCapabilityState {
-            adapter: build_http_adapter(config),
-            default_timeout,
-        })
+        Ok(HttpCapabilityState { adapter: build_http_adapter(config), default_timeout })
     }
 
     /// Run a fetch request and reply with the response.
@@ -126,26 +117,14 @@ impl NativeActor for HttpCapability {
     /// long-running fetches block other HTTP mail until they finish.
     #[handler::single]
     fn on_fetch(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Fetch) -> FetchResult {
-        let timeout = mail.timeout_ms.map_or(state.default_timeout, |ms| {
-            Duration::from_millis(u64::from(ms))
-        });
+        let timeout = mail.timeout_ms.map_or(state.default_timeout, |ms| Duration::from_millis(u64::from(ms)));
 
         let url = mail.url.clone();
-        let adapter_req = FetchRequest {
-            url: mail.url,
-            method: mail.method,
-            headers: mail.headers,
-            body: mail.body,
-            timeout,
-        };
+        let adapter_req =
+            FetchRequest { url: mail.url, method: mail.method, headers: mail.headers, body: mail.body, timeout };
 
         match state.adapter.fetch(adapter_req) {
-            Ok(r) => FetchResult::Ok {
-                url,
-                status: r.status,
-                headers: r.headers,
-                body: r.body,
-            },
+            Ok(r) => FetchResult::Ok { url, status: r.status, headers: r.headers, body: r.body },
             Err(error) => FetchResult::Err { url, error },
         }
     }
@@ -170,24 +149,13 @@ impl UreqHttpAdapter {
     /// tests build adapters directly to avoid env contamination.
     #[must_use]
     pub fn new(allowlist: HashSet<String>, require_https: bool, max_body_bytes: usize) -> Self {
-        let config = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .build();
+        let config = ureq::Agent::config_builder().http_status_as_error(false).build();
         let agent = ureq::Agent::new_with_config(config);
-        Self {
-            agent,
-            allowlist,
-            require_https,
-            max_body_bytes,
-        }
+        Self { agent, allowlist, require_https, max_body_bytes }
     }
 
     fn check_allowlist(&self, host: &str) -> Result<(), HttpError> {
-        if self.allowlist.contains(host) {
-            Ok(())
-        } else {
-            Err(HttpError::AllowlistDenied)
-        }
+        if self.allowlist.contains(host) { Ok(()) } else { Err(HttpError::AllowlistDenied) }
     }
 }
 
@@ -195,27 +163,20 @@ impl HttpAdapter for UreqHttpAdapter {
     fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, HttpError> {
         use ureq::RequestExt;
 
-        let parsed =
-            url::Url::parse(&req.url).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
+        let parsed = url::Url::parse(&req.url).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
 
         if self.require_https && parsed.scheme() != "https" {
-            return Err(HttpError::InvalidUrl(
-                "http scheme not allowed (AETHER_HTTP_REQUIRE_HTTPS=1)".to_string(),
-            ));
+            return Err(HttpError::InvalidUrl("http scheme not allowed (AETHER_HTTP_REQUIRE_HTTPS=1)".to_string()));
         }
 
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| HttpError::InvalidUrl("no host in url".to_string()))?;
+        let host = parsed.host_str().ok_or_else(|| HttpError::InvalidUrl("no host in url".to_string()))?;
         self.check_allowlist(host)?;
 
         if req.body.len() > self.max_body_bytes {
             return Err(HttpError::BodyTooLarge);
         }
 
-        let mut builder = Request::builder()
-            .method(http_method_to_http_crate(req.method))
-            .uri(&req.url);
+        let mut builder = Request::builder().method(http_method_to_http_crate(req.method)).uri(&req.url);
 
         // Host header is derived from the URL by ureq; reject any
         // caller-set Host so it can't be used to bypass the
@@ -241,9 +202,7 @@ impl HttpAdapter for UreqHttpAdapter {
             builder = builder.header("User-Agent", concat!("aether/", env!("CARGO_PKG_VERSION")));
         }
 
-        let http_req = builder
-            .body(req.body)
-            .map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
+        let http_req = builder.body(req.body).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
 
         let mut response = http_req
             .with_agent(&self.agent)
@@ -261,29 +220,17 @@ impl HttpAdapter for UreqHttpAdapter {
             // cookies, broken servers). Skip rather than fail the
             // whole fetch.
             if let Ok(value_str) = value.to_str() {
-                headers.push(HttpHeader {
-                    name: name.as_str().to_string(),
-                    value: value_str.to_string(),
-                });
+                headers.push(HttpHeader { name: name.as_str().to_string(), value: value_str.to_string() });
             }
         }
 
-        let body = match response
-            .body_mut()
-            .with_config()
-            .limit(self.max_body_bytes as u64)
-            .read_to_vec()
-        {
+        let body = match response.body_mut().with_config().limit(self.max_body_bytes as u64).read_to_vec() {
             Ok(b) => b,
             Err(ureq::Error::BodyExceedsLimit(_)) => return Err(HttpError::BodyTooLarge),
             Err(e) => return Err(HttpError::AdapterError(format!("body read: {e}"))),
         };
 
-        Ok(FetchResponse {
-            status,
-            headers,
-            body,
-        })
+        Ok(FetchResponse { status, headers, body })
     }
 }
 
@@ -325,19 +272,12 @@ pub fn build_http_adapter(config: HttpConfig) -> Arc<dyn HttpAdapter> {
         "http adapter configured",
     );
 
-    Arc::new(UreqHttpAdapter::new(
-        config.allowlist,
-        config.require_https,
-        config.max_body_bytes,
-    ))
+    Arc::new(UreqHttpAdapter::new(config.allowlist, config.require_https, config.max_body_bytes))
 }
 
 #[cfg(all(test, feature = "runtime"))]
 mod tests {
-    use super::{
-        FetchRequest, FetchResponse, HttpAdapter, HttpCapabilityState, UreqHttpAdapter,
-        build_http_adapter,
-    };
+    use super::{FetchRequest, FetchResponse, HttpAdapter, HttpCapabilityState, UreqHttpAdapter, build_http_adapter};
     use crate::http::client::{DEFAULT_MAX_BODY_BYTES, HttpCapability, HttpConfig};
     use crate::http::kinds::{Fetch, FetchResult, HttpError, HttpHeader, HttpMethod};
     use aether_data::MailboxId;
@@ -361,19 +301,13 @@ mod tests {
 
     impl StubAdapter {
         fn with(response: Result<FetchResponse, HttpError>) -> Arc<Self> {
-            Arc::new(Self {
-                response: Mutex::new(Some(response)),
-                last_request: Mutex::new(None),
-            })
+            Arc::new(Self { response: Mutex::new(Some(response)), last_request: Mutex::new(None) })
         }
     }
 
     impl HttpAdapter for StubAdapter {
         fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, HttpError> {
-            *self
-                .last_request
-                .lock()
-                .expect("test stub: last_request mutex poisoned") = Some(FetchRequest {
+            *self.last_request.lock().expect("test stub: last_request mutex poisoned") = Some(FetchRequest {
                 url: req.url.clone(),
                 method: req.method,
                 headers: req.headers.clone(),
@@ -472,23 +406,14 @@ mod tests {
         let (mailer, _) = test_mailer_and_rx();
         let stub = StubAdapter::with(Ok(FetchResponse {
             status: 200,
-            headers: vec![HttpHeader {
-                name: "content-type".to_string(),
-                value: "application/json".to_string(),
-            }],
+            headers: vec![HttpHeader { name: "content-type".to_string(), value: "application/json".to_string() }],
             body: b"{}".to_vec(),
         }));
-        let mut state = HttpCapabilityState::from_adapter(
-            stub as Arc<dyn HttpAdapter>,
-            HttpConfig::default().default_timeout,
-        );
+        let mut state =
+            HttpCapabilityState::from_adapter(stub as Arc<dyn HttpAdapter>, HttpConfig::default().default_timeout);
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
-        let mut ctx = NativeCtx::new(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
+        let mut ctx =
+            NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
         match HttpCapability::on_fetch(
             &mut state,
             &mut ctx,
@@ -500,12 +425,7 @@ mod tests {
                 timeout_ms: Some(5000),
             },
         ) {
-            FetchResult::Ok {
-                url,
-                status,
-                headers,
-                body,
-            } => {
+            FetchResult::Ok { url, status, headers, body } => {
                 assert_eq!(url, "https://api.example.com/v1");
                 assert_eq!(status, 200);
                 assert_eq!(headers.len(), 1);
@@ -523,12 +443,8 @@ mod tests {
             HttpConfig::default().default_timeout,
         );
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
-        let mut ctx = NativeCtx::new(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
+        let mut ctx =
+            NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
         match HttpCapability::on_fetch(
             &mut state,
             &mut ctx,
@@ -551,23 +467,13 @@ mod tests {
     #[test]
     fn cap_uses_default_timeout_when_none_provided() {
         let (mailer, _rx) = test_mailer_and_rx();
-        let stub = StubAdapter::with(Ok(FetchResponse {
-            status: 200,
-            headers: vec![],
-            body: vec![],
-        }));
+        let stub = StubAdapter::with(Ok(FetchResponse { status: 200, headers: vec![], body: vec![] }));
         let stub_clone = Arc::clone(&stub);
-        let mut state = HttpCapabilityState::from_adapter(
-            stub as Arc<dyn HttpAdapter>,
-            HttpConfig::default().default_timeout,
-        );
+        let mut state =
+            HttpCapabilityState::from_adapter(stub as Arc<dyn HttpAdapter>, HttpConfig::default().default_timeout);
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
-        let mut ctx = NativeCtx::new(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
+        let mut ctx =
+            NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
         let _ = HttpCapability::on_fetch(
             &mut state,
             &mut ctx,
@@ -590,10 +496,7 @@ mod tests {
 
     #[test]
     fn build_http_adapter_with_disable_returns_disabled() {
-        let cfg = HttpConfig {
-            disabled: true,
-            ..HttpConfig::default()
-        };
+        let cfg = HttpConfig { disabled: true, ..HttpConfig::default() };
         let a = build_http_adapter(cfg);
         let resp = a.fetch(FetchRequest {
             url: "https://example.com/".to_string(),

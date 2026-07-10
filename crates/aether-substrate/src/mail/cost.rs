@@ -86,11 +86,9 @@ impl CostCell {
 
             let dev = sample.abs_diff(next_mean);
             let mad = self.mad.load(Ordering::Relaxed);
-            self.mad
-                .store(ewma_step(mad, dev, EWMA_SHIFT), Ordering::Relaxed);
+            self.mad.store(ewma_step(mad, dev, EWMA_SHIFT), Ordering::Relaxed);
         }
-        self.samples
-            .store(prior.saturating_add(1), Ordering::Relaxed);
+        self.samples.store(prior.saturating_add(1), Ordering::Relaxed);
     }
 
     /// Current EWMA mean (nanos). `0` before the first fold.
@@ -119,11 +117,7 @@ impl CostCell {
 /// scheduler's handoff calibration, which folds with its own shift.
 #[must_use]
 pub fn ewma_step(current: u64, sample: u64, shift: u32) -> u64 {
-    if sample >= current {
-        current + ((sample - current) >> shift)
-    } else {
-        current - ((current - sample) >> shift)
-    }
+    if sample >= current { current + ((sample - current) >> shift) } else { current - ((current - sample) >> shift) }
 }
 
 /// Per-actor cache mapping a handled `KindId` to its shared [`CostCell`].
@@ -202,9 +196,7 @@ impl CostTable {
     /// the [`Mailer`](super::mailer::Mailer).
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            cells: RwLock::new(HashMap::new()),
-        }
+        Self { cells: RwLock::new(HashMap::new()) }
     }
 
     /// Seed a neutral cell (`samples = 0`) for every kind in `kinds`
@@ -227,9 +219,7 @@ impl CostTable {
         kinds
             .iter()
             .map(|&kind| {
-                let cell = guard
-                    .entry((mailbox, kind))
-                    .or_insert_with(|| Arc::new(CostCell::new()));
+                let cell = guard.entry((mailbox, kind)).or_insert_with(|| Arc::new(CostCell::new()));
                 (kind, Arc::clone(cell))
             })
             .collect()
@@ -257,11 +247,7 @@ impl CostTable {
     #[must_use]
     pub fn cells_for(&self, mailbox: MailboxId) -> Vec<(KindId, Arc<CostCell>)> {
         let guard = self.cells.read().expect("cost table lock poisoned");
-        guard
-            .iter()
-            .filter(|((m, _), _)| *m == mailbox)
-            .map(|((_, k), c)| (*k, Arc::clone(c)))
-            .collect()
+        guard.iter().filter(|((m, _), _)| *m == mailbox).map(|((_, k), c)| (*k, Arc::clone(c))).collect()
     }
 
     /// Acquire one read-lock over the table and hand back a
@@ -280,9 +266,7 @@ impl CostTable {
     /// Panics if the internal lock is poisoned (see [`Self::seed`]).
     #[must_use]
     pub fn lookup(&self) -> CostLookup<'_> {
-        CostLookup {
-            cells: self.cells.read().expect("cost table lock poisoned"),
-        }
+        CostLookup { cells: self.cells.read().expect("cost table lock poisoned") }
     }
 
     /// Dump `mailbox`'s cost rows, filtered to `request.kind` when set.
@@ -406,10 +390,7 @@ mod tests {
         for _ in 0..5 {
             cell.fold(10_000);
         }
-        assert!(
-            cell.mad_nanos() > 0,
-            "MAD tracks the spread while the mean catches up"
-        );
+        assert!(cell.mad_nanos() > 0, "MAD tracks the spread while the mean catches up");
     }
 
     #[test]
@@ -426,10 +407,7 @@ mod tests {
         assert!(cells.get(KindId(10)).is_none(), "empty cache misses");
         let a = Arc::new(CostCell::new());
         let b = Arc::new(CostCell::new());
-        cells.seed(vec![
-            (KindId(10), Arc::clone(&a)),
-            (KindId(20), Arc::clone(&b)),
-        ]);
+        cells.seed(vec![(KindId(10), Arc::clone(&a)), (KindId(20), Arc::clone(&b))]);
         assert!(cells.get(KindId(10)).is_some());
         assert!(cells.get(KindId(20)).is_some());
         assert!(cells.get(KindId(30)).is_none());
@@ -464,12 +442,7 @@ mod tests {
         let handed = table.seed(mbx, &[KindId(10)]);
         handed[0].1.fold(2_000);
 
-        let CostTailResult::Ok { rows } = table.tail(
-            mbx,
-            &CostTail {
-                kind: Some(KindId(10)),
-            },
-        ) else {
+        let CostTailResult::Ok { rows } = table.tail(mbx, &CostTail { kind: Some(KindId(10)) }) else {
             panic!("expected Ok");
         };
         assert_eq!(rows.len(), 1);
@@ -496,12 +469,7 @@ mod tests {
         let table = CostTable::new();
         let mbx = MailboxId(7);
         table.seed(mbx, &[KindId(10), KindId(20)]);
-        let CostTailResult::Ok { rows } = table.tail(
-            mbx,
-            &CostTail {
-                kind: Some(KindId(10)),
-            },
-        ) else {
+        let CostTailResult::Ok { rows } = table.tail(mbx, &CostTail { kind: Some(KindId(10)) }) else {
             panic!("expected Ok");
         };
         assert_eq!(rows.len(), 1);
@@ -563,14 +531,8 @@ mod tests {
         assert_eq!(twenty.mean_nanos, 0, "neutral seed has no mean");
         assert_eq!(twenty.samples, 0, "neutral seed reports zero samples");
 
-        assert!(
-            lookup.get(mbx, KindId(30)).is_none(),
-            "an unseeded handler resolves to None"
-        );
-        assert!(
-            lookup.get(MailboxId(8), KindId(10)).is_none(),
-            "a different mailbox's same kind id misses"
-        );
+        assert!(lookup.get(mbx, KindId(30)).is_none(), "an unseeded handler resolves to None");
+        assert!(lookup.get(MailboxId(8), KindId(10)).is_none(), "a different mailbox's same kind id misses");
     }
 
     /// Two mails routed to the *same* handler resolve the same cost under

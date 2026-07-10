@@ -61,11 +61,7 @@ pub fn millis_to_frames(at_millis: u32, sample_rate: f32) -> u64 {
     // `at_millis` is bounded by `SCHEDULE_MAX_MILLIS` and the device
     // rate is a small positive integer, so the product is well within
     // u64 and non-negative.
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss
-    )]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
     let frames = (f64::from(at_millis) / 1000.0 * f64::from(sample_rate)) as u64;
     frames
 }

@@ -34,19 +34,11 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
             "load",
             BenchOp::send_and_await(
                 ComponentHostCapability::NAMESPACE,
-                &LoadComponent {
-                    wasm,
-                    name: Some(PROBE_NAME.to_owned()),
-                    config: Vec::new(),
-                    export: None,
-                },
+                &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
         LoadResult::Err { error } => panic!("load_component: {error}"),
     }
@@ -67,9 +59,7 @@ fn tick_roundtrip_component_to_sink() {
     let _mbox = load_probe(&mut bench, &wasm_path);
     let baseline = bench.count_observed(TickObserved::NAME);
 
-    bench
-        .execute(vec![("advance", BenchOp::advance(3))])
-        .expect("advance 3");
+    bench.execute(vec![("advance", BenchOp::advance(3))]).expect("advance 3");
     let delta = bench.count_observed(TickObserved::NAME) - baseline;
     assert_eq!(
         delta,
@@ -97,9 +87,7 @@ fn batched_ticks_preserve_per_mailbox_count() {
     let _mbox = load_probe(&mut bench, &wasm_path);
     let baseline = bench.count_observed(TickObserved::NAME);
 
-    bench
-        .execute(vec![("advance", BenchOp::advance(N))])
-        .expect("advance N");
+    bench.execute(vec![("advance", BenchOp::advance(N))]).expect("advance N");
     let delta = bench.count_observed(TickObserved::NAME) - baseline;
     assert_eq!(
         delta,

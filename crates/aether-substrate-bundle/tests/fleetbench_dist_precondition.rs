@@ -4,8 +4,7 @@ mod tests {
     use std::path::Path;
 
     use crate::fleetbench::{
-        DistComponentGuardOutcome, DistManifestClassification, classify_dist_manifest,
-        dist_component_guard_outcome,
+        DistComponentGuardOutcome, DistManifestClassification, classify_dist_manifest, dist_component_guard_outcome,
     };
 
     #[test]

@@ -29,9 +29,7 @@ mod cli;
 mod config;
 mod error;
 mod kinds;
-pub use kinds::{
-    AnthropicError, CliSend, CliSendResult, Message, MessagesSend, MessagesSendResult, Role,
-};
+pub use kinds::{AnthropicError, CliSend, CliSendResult, Message, MessagesSend, MessagesSendResult, Role};
 
 use std::time::Duration;
 
@@ -55,11 +53,7 @@ pub const DEFAULT_TIMEOUT_MILLIS: u32 = 120_000;
 /// passes the model through to `claude` and doesn't gate (the CLI
 /// validates). Pinned to the 2026-05 model lineup; bump as new models
 /// ship.
-const SUPPORTED_MESSAGES_MODELS: &[&str] = &[
-    "claude-opus-4-7",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5-20251001",
-];
+const SUPPORTED_MESSAGES_MODELS: &[&str] = &["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"];
 
 /// Adapter returned when `ANTHROPIC_API_KEY` is unset (or
 /// `AETHER_ANTHROPIC_DISABLE=1`). Messages requests reply
@@ -77,9 +71,7 @@ impl DisabledAnthropicAdapter {
     /// `DEFAULT_TIMEOUT_MILLIS`; production threads `config.timeout`.
     #[must_use]
     pub fn new(timeout: Duration) -> Self {
-        Self {
-            cli: ClaudeCliAdapter::new(String::from("claude"), timeout),
-        }
+        Self { cli: ClaudeCliAdapter::new(String::from("claude"), timeout) }
     }
 }
 
@@ -124,10 +116,7 @@ impl AnthropicAdapter for CombinedAnthropicAdapter {
     }
 
     fn supported_models(&self) -> Vec<String> {
-        SUPPORTED_MESSAGES_MODELS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect()
+        SUPPORTED_MESSAGES_MODELS.iter().map(|s| (*s).to_string()).collect()
     }
 }
 

@@ -84,8 +84,7 @@ pub use dispatch_blocking::{DispatchId, Pending, TaskCompletionWake, TaskDone};
 // arms so `actor_logs aether.window` reaches the log/trace/cost rings
 // the same way every standard-dispatcher-slot actor does.
 pub use dispatch::{
-    dispatch_cost_tail_if_matching_free, dispatch_log_tail_if_matching_free,
-    dispatch_trace_tail_if_matching_free,
+    dispatch_cost_tail_if_matching_free, dispatch_log_tail_if_matching_free, dispatch_trace_tail_if_matching_free,
 };
 pub use envelope::Envelope;
 pub use mailbox::NativeActorMailbox;
@@ -118,21 +117,12 @@ pub trait Dispatch<S> {
     // to `Single` per single-class handler.
     /// Route one inbound envelope to the matching `#[handler]` over the state.
     /// `Some(())` on a handled kind + decode success, `None` otherwise.
-    fn dispatch(
-        state: &mut S,
-        ctx: &mut NativeCtx<'_, crate::Manual>,
-        kind: KindId,
-        payload: &[u8],
-    ) -> Option<()>;
+    fn dispatch(state: &mut S, ctx: &mut NativeCtx<'_, crate::Manual>, kind: KindId, payload: &[u8]) -> Option<()>;
 
     /// Catch-all for envelopes no `#[handler]` matched (issue 576). Default
     /// returns `false` so the trampoline warn-logs the miss; the macro
     /// overrides it when a `#[fallback]` is present.
-    fn dispatch_fallback(
-        _state: &mut S,
-        _ctx: &mut NativeCtx<'_, crate::Manual>,
-        _envelope: &Envelope,
-    ) -> bool {
+    fn dispatch_fallback(_state: &mut S, _ctx: &mut NativeCtx<'_, crate::Manual>, _envelope: &Envelope) -> bool {
         false
     }
 
@@ -175,12 +165,8 @@ pub trait Dispatch<S> {
 /// composed traits: `<A as Lifecycle<_>>::init` / `<A as Dispatch<_>>::dispatch`.
 pub trait NativeActor:
     Addressable
-    + for<'a> Lifecycle<
-        Self::State,
-        InitError = BootError,
-        InitCtx<'a> = NativeInitCtx<'a>,
-        Ctx<'a> = NativeCtx<'a>,
-    > + Dispatch<Self::State>
+    + for<'a> Lifecycle<Self::State, InitError = BootError, InitCtx<'a> = NativeInitCtx<'a>, Ctx<'a> = NativeCtx<'a>>
+    + Dispatch<Self::State>
 {
     /// The runtime state this identity boots into — **plain data**, bounded
     /// only by `Send + 'static`.

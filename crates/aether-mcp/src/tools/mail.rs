@@ -2,14 +2,10 @@ use std::time::Duration;
 
 use aether_capabilities::trace::walk::TreeWalk;
 use aether_data::{EngineId, Kind, MailId, Uuid, mailbox_id_from_path};
-use aether_kinds::trace::{
-    DescribeTreeResult, DispatchTraced, TRACE_MAILBOX_NAME, TraceTail, TraceTailResult,
-};
+use aether_kinds::trace::{DescribeTreeResult, DispatchTraced, TRACE_MAILBOX_NAME, TraceTail, TraceTailResult};
 use rmcp::ErrorData as McpError;
 
-use crate::args::{
-    MailStatus, ReplyEventJson, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
-};
+use crate::args::{MailStatus, ReplyEventJson, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse};
 
 use super::envelope::{engine_envelope, engine_envelope_by_id};
 use super::ids::{mail_id_to_json, parse_engine_id};
@@ -36,10 +32,7 @@ pub(super) async fn send_mail(mcp: &Mcp, args: SendMailArgs) -> Result<String, M
             let engine = Uuid::parse_str(&spec.engine_id).ok().map(EngineId);
             let declared_reply = engine.and_then(|e| {
                 let mbx = mailbox_id_from_path(&spec.recipient_name);
-                let cache = mcp
-                    .components
-                    .lock()
-                    .expect("component cache mutex is never poisoned");
+                let cache = mcp.components.lock().expect("component cache mutex is never poisoned");
                 cache.get(&(e, mbx)).and_then(|caps| {
                     caps.handlers
                         .iter()
@@ -50,17 +43,14 @@ pub(super) async fn send_mail(mcp: &Mcp, args: SendMailArgs) -> Result<String, M
                         // decodes, so search the cache for either. A manual
                         // / silent handler yields no declared kind.
                         .and_then(|h| match h.reply {
-                            aether_data::ReplyContract::One(id)
-                            | aether_data::ReplyContract::Multi(id) => Some(id),
+                            aether_data::ReplyContract::One(id) | aether_data::ReplyContract::Multi(id) => Some(id),
                             _ => None,
                         })
                 })
             });
             match mcp.deliver_one(spec).await {
                 Ok((events, hit_timeout)) => {
-                    let engine_kinds = engine
-                        .map(|e| mcp.snapshot_engine_kinds(e))
-                        .unwrap_or_default();
+                    let engine_kinds = engine.map(|e| mcp.snapshot_engine_kinds(e)).unwrap_or_default();
                     replies = decode_reply_events(&events, &engine_kinds, declared_reply);
                     timed_out = hit_timeout;
                     if hit_timeout { "timeout" } else { "delivered" }.to_owned()
@@ -68,20 +58,12 @@ pub(super) async fn send_mail(mcp: &Mcp, args: SendMailArgs) -> Result<String, M
                 Err(e) => format!("error: {e}"),
             }
         };
-        statuses.push(MailStatus {
-            index,
-            status,
-            replies,
-            timed_out,
-        });
+        statuses.push(MailStatus { index, status, replies, timed_out });
     }
     json(&statuses)
 }
 
-pub(super) async fn send_mail_traced(
-    mcp: &Mcp,
-    args: SendMailTracedArgs,
-) -> Result<String, McpError> {
+pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Result<String, McpError> {
     let engine = parse_engine_id(&args.engine_id)?;
     // Encode the batch before sending — a bad spec produces a
     // clean invalid-params error and never touches the wire.
@@ -94,10 +76,7 @@ pub(super) async fn send_mail_traced(
         .encode_traced_bundle(engine, &args.mails)
         .await
         .map_err(|e| McpError::invalid_params(format!("send_mail_traced batch: {e}"), None))?;
-    let timeout_ms = args
-        .settlement_timeout_ms
-        .unwrap_or(AWAIT_TIMEOUT_DEFAULT_MS)
-        .min(AWAIT_TIMEOUT_CAP_MS);
+    let timeout_ms = args.settlement_timeout_ms.unwrap_or(AWAIT_TIMEOUT_DEFAULT_MS).min(AWAIT_TIMEOUT_CAP_MS);
     let dispatch_envelope = engine_envelope(engine, TRACE_MAILBOX_NAME, &DispatchTraced { mails });
 
     // Fire-and-forget: write the dispatch without awaiting the chain
@@ -108,10 +87,7 @@ pub(super) async fn send_mail_traced(
     if args.fire_and_forget {
         let (events, ack_timed_out) = mcp
             .session
-            .call_collecting(
-                dispatch_envelope,
-                Duration::from_millis(u64::from(timeout_ms)),
-            )
+            .call_collecting(dispatch_envelope, Duration::from_millis(u64::from(timeout_ms)))
             .await
             .map_err(internal)?;
         if ack_timed_out {
@@ -126,10 +102,7 @@ pub(super) async fn send_mail_traced(
         let root = decode_traced_ack(&events)?;
         let root_json = {
             mcp.ensure_names(engine).await;
-            let cache = mcp
-                .names
-                .lock()
-                .expect("reverse-name cache mutex is never poisoned");
+            let cache = mcp.names.lock().expect("reverse-name cache mutex is never poisoned");
             mail_id_to_json(root, cache.get(&engine))
         };
         return json(&SendMailTracedResponse {
@@ -147,10 +120,7 @@ pub(super) async fn send_mail_traced(
     // replies) instead of `call_one`'s single-event discard.
     let (events, ack_timed_out) = mcp
         .session
-        .call_collecting(
-            dispatch_envelope,
-            Duration::from_millis(u64::from(timeout_ms)),
-        )
+        .call_collecting(dispatch_envelope, Duration::from_millis(u64::from(timeout_ms)))
         .await
         .map_err(internal)?;
     if ack_timed_out {
@@ -187,11 +157,7 @@ async fn finish_traced_dispatch(
     // the walk completes from the rings that answer.
     let mut walk = TreeWalk::new(root);
     while let Some(mailbox) = walk.next_mailbox() {
-        let request = TraceTail {
-            max: 0,
-            since: None,
-            root: Some(root),
-        };
+        let request = TraceTail { max: 0, since: None, root: Some(root) };
         let entries = match mcp
             .session
             .call_one(engine_envelope_by_id(engine, mailbox, &request))
@@ -206,11 +172,7 @@ async fn finish_traced_dispatch(
     }
 
     match walk.finish() {
-        DescribeTreeResult::Ok {
-            root,
-            in_flight,
-            mails,
-        } => {
+        DescribeTreeResult::Ok { root, in_flight, mails } => {
             // Reverse mailbox / kind ids to real names through the
             // engine's inventory map (ADR-0088 §8). `render_mail_nodes`
             // builds + resolves the map; the root id then renders
@@ -218,10 +180,7 @@ async fn finish_traced_dispatch(
             // chassis mailbox — a static name).
             let mails = mcp.render_mail_nodes(engine, mails).await;
             let root = {
-                let cache = mcp
-                    .names
-                    .lock()
-                    .expect("reverse-name cache mutex is never poisoned");
+                let cache = mcp.names.lock().expect("reverse-name cache mutex is never poisoned");
                 mail_id_to_json(root, cache.get(&engine))
             };
             json(&SendMailTracedResponse {
@@ -232,8 +191,8 @@ async fn finish_traced_dispatch(
                 replies: Some(replies),
             })
         }
-        DescribeTreeResult::Err { not_found } => Err(internal_msg(&format!(
-            "describe_tree: root {not_found:?} not found"
-        ))),
+        DescribeTreeResult::Err { not_found } => {
+            Err(internal_msg(&format!("describe_tree: root {not_found:?} not found")))
+        }
     }
 }

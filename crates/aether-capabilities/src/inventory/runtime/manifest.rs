@@ -14,9 +14,7 @@ use aether_kinds::ParamKindWire;
 pub fn param_kind_wire(param: &ParamKind) -> ParamKindWire {
     match *param {
         ParamKind::Bounded { lo, hi } => ParamKindWire::Bounded { lo, hi },
-        ParamKind::Declared { domain } => ParamKindWire::Declared {
-            domain: domain.to_vec(),
-        },
+        ParamKind::Declared { domain } => ParamKindWire::Declared { domain: domain.to_vec() },
         ParamKind::Dynamic => ParamKindWire::Dynamic,
     }
 }

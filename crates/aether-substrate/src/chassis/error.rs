@@ -35,9 +35,7 @@ impl fmt::Display for BootError {
             Self::MailboxAlreadyClaimed { name } => {
                 write!(f, "mailbox {name:?} already claimed")
             }
-            Self::FallbackRouterAlreadyClaimed => {
-                f.write_str("fallback router slot already claimed")
-            }
+            Self::FallbackRouterAlreadyClaimed => f.write_str("fallback router slot already claimed"),
             Self::Other(e) => write!(f, "capability boot failed: {e}"),
         }
     }

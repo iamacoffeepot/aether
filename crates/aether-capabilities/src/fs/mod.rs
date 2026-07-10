@@ -98,39 +98,23 @@ pub trait FsMailboxExt {
 
 impl FsMailboxExt for WasmActorMailbox<'_, FsCapability> {
     fn read(&self, namespace: &str, path: &str) {
-        self.send(&Read {
-            namespace: namespace.into(),
-            path: path.into(),
-        });
+        self.send(&Read { namespace: namespace.into(), path: path.into() });
     }
     //noinspection DuplicatedCode
     fn write(&self, namespace: &str, path: &str, bytes: &[u8]) {
-        self.send(&Write {
-            namespace: namespace.into(),
-            path: path.into(),
-            bytes: bytes.to_vec(),
-        });
+        self.send(&Write { namespace: namespace.into(), path: path.into(), bytes: bytes.to_vec() });
     }
     fn delete(&self, namespace: &str, path: &str) {
-        self.send(&Delete {
-            namespace: namespace.into(),
-            path: path.into(),
-        });
+        self.send(&Delete { namespace: namespace.into(), path: path.into() });
     }
     fn list(&self, namespace: &str, prefix: &str) {
-        self.send(&List {
-            namespace: namespace.into(),
-            prefix: prefix.into(),
-        });
+        self.send(&List { namespace: namespace.into(), prefix: prefix.into() });
     }
     //noinspection DuplicatedCode
     fn copy(&self, from: &str, to_namespace: &str, to_path: &str) {
         self.send(&Copy {
             from: from.into(),
-            to: NamespaceAddr {
-                namespace: to_namespace.into(),
-                path: to_path.into(),
-            },
+            to: NamespaceAddr { namespace: to_namespace.into(), path: to_path.into() },
         });
     }
 }
@@ -138,39 +122,23 @@ impl FsMailboxExt for WasmActorMailbox<'_, FsCapability> {
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 impl FsMailboxExt for NativeActorMailbox<'_, FsCapability> {
     fn read(&self, namespace: &str, path: &str) {
-        self.send(&Read {
-            namespace: namespace.into(),
-            path: path.into(),
-        });
+        self.send(&Read { namespace: namespace.into(), path: path.into() });
     }
     //noinspection DuplicatedCode
     fn write(&self, namespace: &str, path: &str, bytes: &[u8]) {
-        self.send(&Write {
-            namespace: namespace.into(),
-            path: path.into(),
-            bytes: bytes.to_vec(),
-        });
+        self.send(&Write { namespace: namespace.into(), path: path.into(), bytes: bytes.to_vec() });
     }
     fn delete(&self, namespace: &str, path: &str) {
-        self.send(&Delete {
-            namespace: namespace.into(),
-            path: path.into(),
-        });
+        self.send(&Delete { namespace: namespace.into(), path: path.into() });
     }
     fn list(&self, namespace: &str, prefix: &str) {
-        self.send(&List {
-            namespace: namespace.into(),
-            prefix: prefix.into(),
-        });
+        self.send(&List { namespace: namespace.into(), prefix: prefix.into() });
     }
     //noinspection DuplicatedCode
     fn copy(&self, from: &str, to_namespace: &str, to_path: &str) {
         self.send(&Copy {
             from: from.into(),
-            to: NamespaceAddr {
-                namespace: to_namespace.into(),
-                path: to_path.into(),
-            },
+            to: NamespaceAddr { namespace: to_namespace.into(), path: to_path.into() },
         });
     }
 }

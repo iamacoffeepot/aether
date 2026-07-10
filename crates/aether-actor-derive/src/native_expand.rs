@@ -6,11 +6,10 @@ use quote::quote;
 use syn::{Expr, ImplItem, ItemImpl, ItemStruct, Type};
 
 use crate::handler_parse::{
-    HandlerClass, HandlerReply, HandlerVariant, NativeActorHandlerFn, NativeActorTaskHandlerFn,
-    NativeFallbackFn, TaskReplyMode, attr_is_fallback, attr_is_handler, classify_handler_reply,
-    classify_task_reply_mode, extract_native_actor_handler_kind, extract_task_handler_types,
-    multi_kind_or_return_error, parse_handler_class, parse_handler_variant,
-    reject_duplicate_handler_kinds, rename_lifecycle_hooks, rewrite_self_state_first_param,
+    HandlerClass, HandlerReply, HandlerVariant, NativeActorHandlerFn, NativeActorTaskHandlerFn, NativeFallbackFn,
+    TaskReplyMode, attr_is_fallback, attr_is_handler, classify_handler_reply, classify_task_reply_mode,
+    extract_native_actor_handler_kind, extract_task_handler_types, multi_kind_or_return_error, parse_handler_class,
+    parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks, rewrite_self_state_first_param,
     types_token_eq, validate_addressable_consts, validate_native_fallback_sig,
 };
 use crate::opts::{ActorCardinality, ActorOpts};
@@ -35,19 +34,11 @@ pub enum NativeEmit {
 // dispatch ABI plumbing. Splitting into helpers would force shared
 // per-handler context structs without saving readability.
 #[allow(clippy::too_many_lines)]
-pub fn expand_native_actor_trait(
-    item: ItemImpl,
-    opts: &ActorOpts,
-    emit: NativeEmit,
-) -> syn::Result<TokenStream2> {
+pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeEmit) -> syn::Result<TokenStream2> {
     let self_ty = &item.self_ty;
     let generics = &item.generics;
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
-    let trait_path = item
-        .trait_
-        .as_ref()
-        .map(|(_, p, _)| p)
-        .expect("trait_ checked above");
+    let trait_path = item.trait_.as_ref().map(|(_, p, _)| p).expect("trait_ checked above");
 
     // Spike: identity/runtime split. A pre-scan for an explicit
     // `type State = …`. When present and not `Self`, the macro divides
@@ -66,9 +57,7 @@ pub fn expand_native_actor_trait(
         }
         None
     });
-    let is_split = declared_state_ty
-        .as_ref()
-        .is_some_and(|t| quote!(#t).to_string() != "Self");
+    let is_split = declared_state_ty.as_ref().is_some_and(|t| quote!(#t).to_string() != "Self");
 
     let mut init_method: Option<syn::ImplItemFn> = None;
     let mut config_type: Option<syn::ImplItemType> = None;
@@ -117,10 +106,7 @@ pub fn expand_native_actor_trait(
                 let handler_attr_idx = f.attrs.iter().position(attr_is_handler);
                 let fallback_attr_idx = f.attrs.iter().position(attr_is_fallback);
                 if handler_attr_idx.is_some() && fallback_attr_idx.is_some() {
-                    return Err(syn::Error::new_spanned(
-                        &f,
-                        "method cannot be both #[handler] and #[fallback]",
-                    ));
+                    return Err(syn::Error::new_spanned(&f, "method cannot be both #[handler] and #[fallback]"));
                 }
                 if let Some(idx) = handler_attr_idx {
                     let variant = parse_handler_variant(&f.attrs[idx])?;
@@ -131,8 +117,7 @@ pub fn expand_native_actor_trait(
                     f.attrs.remove(idx);
                     match variant {
                         HandlerVariant::Mail => {
-                            let (kind_ty, is_slice) =
-                                extract_native_actor_handler_kind(&f.sig, is_split)?;
+                            let (kind_ty, is_slice) = extract_native_actor_handler_kind(&f.sig, is_split)?;
                             let reply = classify_handler_reply(&f.sig.output);
                             // ADR-0134: enforce the multi-class `-> ()` return
                             // and the required `Multi<K>` ctx marker (a pointed
@@ -140,13 +125,7 @@ pub fn expand_native_actor_trait(
                             // by inference off the signature, so the extracted
                             // kind itself is not retained here.
                             multi_kind_or_return_error(class, &reply, &f.sig)?;
-                            handlers.push(NativeActorHandlerFn {
-                                method: f,
-                                kind_ty,
-                                is_slice,
-                                reply,
-                                class,
-                            });
+                            handlers.push(NativeActorHandlerFn { method: f, kind_ty, is_slice, reply, class });
                         }
                         HandlerVariant::Task => {
                             // A task handler always dispatches with the `Single`
@@ -164,23 +143,14 @@ pub fn expand_native_actor_trait(
                                      (ADR-0112 / ADR-0134)",
                                 ));
                             }
-                            let (output_ty, context_ty, is_borrow) =
-                                extract_task_handler_types(&f.sig, is_split)?;
+                            let (output_ty, context_ty, is_borrow) = extract_task_handler_types(&f.sig, is_split)?;
                             let mode = classify_task_reply_mode(&f.sig, is_borrow)?;
-                            task_handlers.push(NativeActorTaskHandlerFn {
-                                method: f,
-                                output_ty,
-                                context_ty,
-                                mode,
-                            });
+                            task_handlers.push(NativeActorTaskHandlerFn { method: f, output_ty, context_ty, mode });
                         }
                     }
                 } else if let Some(idx) = fallback_attr_idx {
                     if fallback.is_some() {
-                        return Err(syn::Error::new_spanned(
-                            &f,
-                            "at most one #[fallback] method per native actor",
-                        ));
+                        return Err(syn::Error::new_spanned(&f, "at most one #[fallback] method per native actor"));
                     }
                     validate_native_fallback_sig(&f.sig, is_split)?;
                     f.attrs.remove(idx);
@@ -242,9 +212,8 @@ pub fn expand_native_actor_trait(
     // so a duplicate `O` would let the first-tried handler shadow the
     // second. Reject it at compile time, spanned at the later handler.
     for (i, later) in task_handlers.iter().enumerate() {
-        if let Some(earlier) = task_handlers[..i]
-            .iter()
-            .find(|earlier| types_token_eq(&earlier.output_ty, &later.output_ty))
+        if let Some(earlier) =
+            task_handlers[..i].iter().find(|earlier| types_token_eq(&earlier.output_ty, &later.output_ty))
         {
             let earlier_name = &earlier.method.sig.ident;
             return Err(syn::Error::new_spanned(
@@ -297,10 +266,8 @@ pub fn expand_native_actor_trait(
         NativeEmit::Full => {
             // Mail handlers only — task completions get no `HandlesKind` /
             // name-inventory entry (a completion is not inbound mail).
-            let handler_kinds: Vec<HandlerMarker> = handlers
-                .iter()
-                .map(|h| (h.kind_ty.clone(), h.reply.manifest_kind().cloned()))
-                .collect();
+            let handler_kinds: Vec<HandlerMarker> =
+                handlers.iter().map(|h| (h.kind_ty.clone(), h.reply.manifest_kind().cloned())).collect();
             emit_native_identity_markers(
                 self_ty,
                 generics,
@@ -493,8 +460,7 @@ pub fn expand_native_actor_trait(
     };
 
     let handler_methods: Vec<&syn::ImplItemFn> = handlers.iter().map(|h| &h.method).collect();
-    let task_handler_methods: Vec<&syn::ImplItemFn> =
-        task_handlers.iter().map(|t| &t.method).collect();
+    let task_handler_methods: Vec<&syn::ImplItemFn> = task_handlers.iter().map(|t| &t.method).collect();
     let fallback_method = fallback.as_ref().map(|f| &f.method);
     let helper_methods = helpers.iter();
 
@@ -867,10 +833,7 @@ fn emit_native_identity_markers(
 /// `#[runtime]`); none of the emitted markers name the runtime state or pull
 /// `aether_substrate`, so the identity survives a `--no-default-features` build
 /// where `mod runtime` is `#[cfg]`-stripped.
-pub fn expand_struct_hosted_actor(
-    item: &ItemStruct,
-    opts: &ActorOpts,
-) -> syn::Result<TokenStream2> {
+pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::Result<TokenStream2> {
     let ident = &item.ident;
     let (_impl_generics, ty_generics, _where_clause) = item.generics.split_for_impl();
     let self_ty: Type = syn::parse_quote!(#ident #ty_generics);
@@ -954,10 +917,7 @@ fn harvest_runtime_identity(
         )
     })?;
     let parsed = syn::parse_file(&src).map_err(|e| {
-        syn::Error::new(
-            module_span,
-            format!("#[actor]: parse error in runtime module `{module_name}`: {e}"),
-        )
+        syn::Error::new(module_span, format!("#[actor]: parse error in runtime module `{module_name}`: {e}"))
     })?;
 
     // ADR-0123 gap 3: the absolute path of the file just read, for the
@@ -965,10 +925,7 @@ fn harvest_runtime_identity(
     // above proved the file exists) so the emitted literal resolves independent
     // of `include_bytes!`'s span-relative base; fall back to `target` as-is on a
     // canonicalize failure.
-    let runtime_path = fs::canonicalize(&target)
-        .unwrap_or(target)
-        .to_string_lossy()
-        .into_owned();
+    let runtime_path = fs::canonicalize(&target).unwrap_or(target).to_string_lossy().into_owned();
 
     // ADR-0123 gap 1: select the runtime impl by trait, not by handler-presence
     // alone — mirror the dispatch-side last-segment match (`impl NativeActor for
@@ -1033,10 +990,7 @@ fn harvest_native_actor_impl(
     module_span: proc_macro2::Span,
 ) -> syn::Result<Option<(Expr, Vec<HandlerMarker>, bool)>> {
     let remap = |e: syn::Error| {
-        syn::Error::new(
-            module_span,
-            format!("#[actor]: harvesting runtime module `{module_name}`: {e}"),
-        )
+        syn::Error::new(module_span, format!("#[actor]: harvesting runtime module `{module_name}`: {e}"))
     };
 
     let mut handler_kinds: Vec<(Type, Option<Type>)> = Vec::new();
@@ -1055,17 +1009,11 @@ fn harvest_native_actor_impl(
         };
         saw_handler = true;
         // Task completions get no `HandlesKind` / inventory marker.
-        if matches!(
-            parse_handler_variant(handler_attr).map_err(remap)?,
-            HandlerVariant::Task
-        ) {
+        if matches!(parse_handler_variant(handler_attr).map_err(remap)?, HandlerVariant::Task) {
             continue;
         }
-        let (kind_ty, _is_slice) =
-            extract_native_actor_handler_kind(&f.sig, true).map_err(remap)?;
-        let reply = classify_handler_reply(&f.sig.output)
-            .manifest_kind()
-            .cloned();
+        let (kind_ty, _is_slice) = extract_native_actor_handler_kind(&f.sig, true).map_err(remap)?;
+        let reply = classify_handler_reply(&f.sig.output).manifest_kind().cloned();
         handler_kinds.push((kind_ty, reply));
     }
 

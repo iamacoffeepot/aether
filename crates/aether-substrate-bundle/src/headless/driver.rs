@@ -61,9 +61,7 @@ pub struct TickConfig {
 
 impl Default for TickConfig {
     fn default() -> Self {
-        Self {
-            hz: DEFAULT_TICK_HZ,
-        }
+        Self { hz: DEFAULT_TICK_HZ }
     }
 }
 
@@ -123,11 +121,7 @@ impl DriverCapability for HeadlessTimerDriverCapability {
     type Running = HeadlessTimerRunning;
 
     fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let Self {
-            boot,
-            kind_tick: _,
-            tick_period,
-        } = self;
+        let Self { boot, kind_tick: _, tick_period } = self;
 
         let shutdown = Arc::new(AtomicBool::new(false));
         install_shutdown_handler(&shutdown);
@@ -137,9 +131,7 @@ impl DriverCapability for HeadlessTimerDriverCapability {
             // Chassis route-freezing: the lifecycle cap's own id (its NAMESPACE),
             // ctx-less, no sibling resolver in scope.
             #[allow(clippy::disallowed_methods)]
-            lifecycle_mailbox: mailbox_id_from_name(
-                <LifecycleCapability as Addressable>::NAMESPACE,
-            ),
+            lifecycle_mailbox: mailbox_id_from_name(<LifecycleCapability as Addressable>::NAMESPACE),
             kind_lifecycle_advance: <LifecycleAdvance as Kind>::ID,
             tick_period,
             shutdown,
@@ -262,23 +254,14 @@ mod tests {
         // unset knob reproduces the const default.
         // Tripwire: drifts when `DEFAULT_TICK_HZ` or the derive literal changes.
         let layer = TickConfigLayer::builder().load().expect("defaults load");
-        assert_eq!(
-            layer.hz, DEFAULT_TICK_HZ,
-            "derive default must match DEFAULT_TICK_HZ",
-        );
+        assert_eq!(layer.hz, DEFAULT_TICK_HZ, "derive default must match DEFAULT_TICK_HZ");
         assert_eq!(TickConfig::default().hz, DEFAULT_TICK_HZ);
     }
 
     #[test]
     fn to_tick_period_maps_hz_to_duration() {
         // The only lowering logic this crate owns: hz → Duration.
-        assert_eq!(
-            TickConfig { hz: 60 }.to_tick_period(),
-            Duration::from_nanos(1_000_000_000 / 60),
-        );
-        assert_eq!(
-            TickConfig { hz: 120 }.to_tick_period(),
-            Duration::from_nanos(1_000_000_000 / 120),
-        );
+        assert_eq!(TickConfig { hz: 60 }.to_tick_period(), Duration::from_nanos(1_000_000_000 / 60),);
+        assert_eq!(TickConfig { hz: 120 }.to_tick_period(), Duration::from_nanos(1_000_000_000 / 120),);
     }
 }

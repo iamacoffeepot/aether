@@ -13,10 +13,9 @@ use std::time::Duration;
 
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::{
-    CaptureBackend, ClipboardCapability, ClipboardConfig, FsCapability,
-    HeadlessClipboardCapability, HeadlessWindowCapability, InputCapability, InputConfig,
-    RenderCapability, RenderConfig, RenderHandles, TcpCapability, TextCapability,
-    fs::NamespaceRoots, trace::TraceDispatchCapability,
+    CaptureBackend, ClipboardCapability, ClipboardConfig, FsCapability, HeadlessClipboardCapability,
+    HeadlessWindowCapability, InputCapability, InputConfig, RenderCapability, RenderConfig, RenderHandles,
+    TcpCapability, TextCapability, fs::NamespaceRoots, trace::TraceDispatchCapability,
 };
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_data::Kind;
@@ -25,8 +24,7 @@ use aether_kinds::Tick;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
-    Chassis, RingCapacities, SchedulerTuning, SubstrateBoot, capture::CaptureQueue,
-    render::VERTEX_BUFFER_BYTES,
+    Chassis, RingCapacities, SchedulerTuning, SubstrateBoot, capture::CaptureQueue, render::VERTEX_BUFFER_BYTES,
 };
 
 use super::cap::{TestBenchCapConfig, TestBenchCapability};
@@ -266,9 +264,7 @@ impl TestBenchChassis {
         // `aether.test_bench`. The cap pushes `ChassisEvent::Advance`
         // onto the embedder loop just like the retired
         // `chassis_handler` closure did.
-        let test_bench_cap_config = TestBenchCapConfig {
-            events: events_tx.clone(),
-        };
+        let test_bench_cap_config = TestBenchCapConfig { events: events_tx.clone() };
 
         let input_config = InputConfig::default();
 
@@ -350,16 +346,10 @@ impl TestBenchChassis {
             .with_actor::<TextCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<TestBenchCapability>(test_bench_cap_config)
-            .with_actor::<LifecycleCapability>(frame_lifecycle_config(
-                LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT,
-            ));
+            .with_actor::<LifecycleCapability>(frame_lifecycle_config(LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT));
         builder = match clipboard_mode {
-            TestBenchClipboardMode::InMemory => {
-                builder.with_actor::<ClipboardCapability>(ClipboardConfig::InMemory)
-            }
-            TestBenchClipboardMode::Unavailable => {
-                builder.with_actor::<HeadlessClipboardCapability>(())
-            }
+            TestBenchClipboardMode::InMemory => builder.with_actor::<ClipboardCapability>(ClipboardConfig::InMemory),
+            TestBenchClipboardMode::Unavailable => builder.with_actor::<HeadlessClipboardCapability>(()),
         };
         if let Some(roots) = io_roots {
             builder = builder.with_actor::<FsCapability>(roots);
@@ -382,11 +372,6 @@ impl TestBenchChassis {
         // sender is released.
         drop(events_tx);
 
-        Ok(TestBenchBuild {
-            passive,
-            boot,
-            render_handles,
-            kind_tick,
-        })
+        Ok(TestBenchBuild { passive, boot, render_handles, kind_tick })
     }
 }

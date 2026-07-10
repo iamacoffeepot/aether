@@ -1,7 +1,5 @@
 use quote::quote;
-use syn::{
-    Attribute, Expr, FnArg, GenericArgument, Meta, PathArguments, ReturnType, Signature, Type,
-};
+use syn::{Attribute, Expr, FnArg, GenericArgument, Meta, PathArguments, ReturnType, Signature, Type};
 
 pub struct HandlerFn {
     pub method: syn::ImplItemFn,
@@ -41,10 +39,7 @@ pub fn attr_is_handler(attr: &Attribute) -> bool {
     if last.ident == "handler" {
         return true;
     }
-    if matches!(
-        last.ident.to_string().as_str(),
-        "single" | "manual" | "multi"
-    ) {
+    if matches!(last.ident.to_string().as_str(), "single" | "manual" | "multi") {
         let len = segments.len();
         return len >= 2 && segments[len - 2].ident == "handler";
     }
@@ -53,10 +48,7 @@ pub fn attr_is_handler(attr: &Attribute) -> bool {
 
 /// Same logic for `#[fallback]`.
 pub fn attr_is_fallback(attr: &Attribute) -> bool {
-    attr.path()
-        .segments
-        .last()
-        .is_some_and(|s| s.ident == "fallback")
+    attr.path().segments.last().is_some_and(|s| s.ident == "fallback")
 }
 
 /// The category of a `#[handler]` method (ADR-0093 §3). Bare `#[handler]`
@@ -133,11 +125,7 @@ pub enum HandlerClass {
 /// `attr_is_handler` is the gate, so the path is known to end in one of
 /// these segments.
 pub fn parse_handler_class(attr: &Attribute, variant: HandlerVariant) -> syn::Result<HandlerClass> {
-    let last = attr
-        .path()
-        .segments
-        .last()
-        .expect("attr_is_handler guarantees a non-empty path");
+    let last = attr.path().segments.last().expect("attr_is_handler guarantees a non-empty path");
     let class = match last.ident.to_string().as_str() {
         "handler" => match variant {
             // The task variant has no reply class — its reply rides
@@ -201,11 +189,7 @@ fn extract_multi_emit_kind(sig: &Signature) -> syn::Result<Type> {
     };
     // The last segment is the ctx type (`WasmCtx` / `NativeCtx`); its final
     // angle-bracketed type argument is the `Multi<K>` marker.
-    let ctx_seg = ctx_path
-        .path
-        .segments
-        .last()
-        .ok_or_else(|| shape_err(&*pt.ty))?;
+    let ctx_seg = ctx_path.path.segments.last().ok_or_else(|| shape_err(&*pt.ty))?;
     let PathArguments::AngleBracketed(ctx_args) = &ctx_seg.arguments else {
         return Err(shape_err(&*pt.ty));
     };
@@ -221,11 +205,7 @@ fn extract_multi_emit_kind(sig: &Signature) -> syn::Result<Type> {
     let Type::Path(marker_path) = marker_ty else {
         return Err(shape_err(marker_ty));
     };
-    let marker_seg = marker_path
-        .path
-        .segments
-        .last()
-        .ok_or_else(|| shape_err(marker_ty))?;
+    let marker_seg = marker_path.path.segments.last().ok_or_else(|| shape_err(marker_ty))?;
     if marker_seg.ident != "Multi" {
         return Err(shape_err(marker_ty));
     }
@@ -274,10 +254,7 @@ pub fn multi_kind_or_return_error(
 /// are its generic arguments, not a kind. `is_borrow` is `true` when the
 /// parameter is `&TaskDone<…>` (the ADR-0109 opt-in for a macro-driven
 /// reply) versus the by-value `TaskDone<…>` self-resolve form.
-pub fn extract_task_handler_types(
-    sig: &Signature,
-    is_split: bool,
-) -> syn::Result<(Type, Type, bool)> {
+pub fn extract_task_handler_types(sig: &Signature, is_split: bool) -> syn::Result<(Type, Type, bool)> {
     if sig.inputs.len() != 3 {
         return Err(syn::Error::new_spanned(
             sig,
@@ -303,10 +280,7 @@ pub fn extract_task_handler_types(
             ));
         }
     } else if !matches!(first, FnArg::Receiver(_)) {
-        return Err(syn::Error::new_spanned(
-            first,
-            "#[handler(task)] first parameter must be `&self` or `&mut self`",
-        ));
+        return Err(syn::Error::new_spanned(first, "#[handler(task)] first parameter must be `&self` or `&mut self`"));
     }
     let third = &sig.inputs[2];
     let FnArg::Typed(pt) = third else {
@@ -329,12 +303,11 @@ pub fn extract_task_handler_types(
              (optionally behind `&`)",
         ));
     };
-    let last = type_path.path.segments.last().ok_or_else(|| {
-        syn::Error::new_spanned(
-            &pt.ty,
-            "#[handler(task)] third parameter must be `TaskDone<…>`",
-        )
-    })?;
+    let last = type_path
+        .path
+        .segments
+        .last()
+        .ok_or_else(|| syn::Error::new_spanned(&pt.ty, "#[handler(task)] third parameter must be `TaskDone<…>`"))?;
     if last.ident != "TaskDone" {
         return Err(syn::Error::new_spanned(
             &pt.ty,
@@ -367,9 +340,7 @@ pub fn extract_task_handler_types(
         }
     };
     // `C` defaults to `()` (a bare `TaskDone<O>` / `dispatch_blocking`).
-    let context = type_args
-        .get(1)
-        .map_or_else(|| syn::parse_quote!(()), |t| (*t).clone());
+    let context = type_args.get(1).map_or_else(|| syn::parse_quote!(()), |t| (*t).clone());
     if type_args.len() > 2 {
         return Err(syn::Error::new_spanned(
             last,
@@ -508,10 +479,7 @@ impl HasKindTy for NativeActorHandlerFn {
 /// by token equality (`types_token_eq`), not by resolved `KindId`.
 pub fn reject_duplicate_handler_kinds<H: HasKindTy>(handlers: &[H]) -> syn::Result<()> {
     for (i, later) in handlers.iter().enumerate() {
-        if let Some(earlier) = handlers[..i]
-            .iter()
-            .find(|earlier| types_token_eq(earlier.kind_ty(), later.kind_ty()))
-        {
+        if let Some(earlier) = handlers[..i].iter().find(|earlier| types_token_eq(earlier.kind_ty(), later.kind_ty())) {
             let earlier_name = earlier.method_ident();
             let kind_ty = later.kind_ty();
             return Err(syn::Error::new_spanned(
@@ -572,9 +540,7 @@ pub fn validate_addressable_consts<'a>(
     consts
         .iter()
         .find_map(|c| (c.ident == "NAMESPACE").then_some(&c.expr))
-        .ok_or_else(|| {
-            syn::Error::new_spanned(self_ty, "internal: NAMESPACE confirmed above but not found")
-        })
+        .ok_or_else(|| syn::Error::new_spanned(self_ty, "internal: NAMESPACE confirmed above but not found"))
 }
 
 /// Rename `wire` → `__aether_wire` and `unwire` → `__aether_unwire` in the
@@ -604,8 +570,7 @@ pub fn rename_lifecycle_hooks(methods: &mut [syn::ImplItemFn]) -> (bool, bool) {
         // `self`), so a stateless `wire`/`unwire` body trips
         // `clippy::unused_self` on the now-inherent method — the receiver is
         // the required ABI, so suppress it on the generated copy.
-        m.attrs
-            .push(syn::parse_quote!(#[allow(clippy::unused_self)]));
+        m.attrs.push(syn::parse_quote!(#[allow(clippy::unused_self)]));
     }
     (has_wire, has_unwire)
 }
@@ -658,17 +623,11 @@ pub fn validate_native_fallback_sig(sig: &Signature, is_split: bool) -> syn::Res
             ));
         }
     } else if !matches!(first, FnArg::Receiver(_)) {
-        return Err(syn::Error::new_spanned(
-            first,
-            "#[fallback] first parameter must be `&self` or `&mut self`",
-        ));
+        return Err(syn::Error::new_spanned(first, "#[fallback] first parameter must be `&self` or `&mut self`"));
     }
     let third = &sig.inputs[2];
     if !matches!(third, FnArg::Typed(_)) {
-        return Err(syn::Error::new_spanned(
-            third,
-            "#[fallback] third parameter must be `env: &Envelope`",
-        ));
+        return Err(syn::Error::new_spanned(third, "#[fallback] third parameter must be `env: &Envelope`"));
     }
     Ok(())
 }
@@ -725,10 +684,7 @@ pub fn rewrite_self_state_first_param(method: &mut syn::ImplItemFn, concrete: &T
     }
 }
 
-pub fn extract_native_actor_handler_kind(
-    sig: &Signature,
-    is_split: bool,
-) -> syn::Result<(Type, bool)> {
+pub fn extract_native_actor_handler_kind(sig: &Signature, is_split: bool) -> syn::Result<(Type, bool)> {
     if sig.inputs.len() != 3 {
         return Err(syn::Error::new_spanned(
             sig,
@@ -750,10 +706,7 @@ pub fn extract_native_actor_handler_kind(
             ));
         }
     } else if !matches!(first, FnArg::Receiver(_)) {
-        return Err(syn::Error::new_spanned(
-            first,
-            "#[handler] first parameter must be `&self` or `&mut self`",
-        ));
+        return Err(syn::Error::new_spanned(first, "#[handler] first parameter must be `&self` or `&mut self`"));
     }
     let third = &sig.inputs[2];
     let FnArg::Typed(pt) = third else {
@@ -787,17 +740,11 @@ pub fn extract_handler_kind_type(sig: &Signature) -> syn::Result<Type> {
     }
     let first = &sig.inputs[0];
     if !matches!(first, FnArg::Receiver(_)) {
-        return Err(syn::Error::new_spanned(
-            first,
-            "#[handler] first parameter must be `&self` or `&mut self`",
-        ));
+        return Err(syn::Error::new_spanned(first, "#[handler] first parameter must be `&self` or `&mut self`"));
     }
     let third = &sig.inputs[2];
     let FnArg::Typed(pt) = third else {
-        return Err(syn::Error::new_spanned(
-            third,
-            "#[handler] third parameter must be a typed `arg: K`",
-        ));
+        return Err(syn::Error::new_spanned(third, "#[handler] third parameter must be a typed `arg: K`"));
     };
     // `&[K]` slice/batch handlers are native-only: the wasm dispatcher
     // decodes a single `K` per mail, so an `impl HandlesKind<&[K]>` /
@@ -890,17 +837,11 @@ pub fn validate_fallback_sig(sig: &Signature) -> syn::Result<()> {
     }
     let first = &sig.inputs[0];
     if !matches!(first, FnArg::Receiver(_)) {
-        return Err(syn::Error::new_spanned(
-            first,
-            "#[fallback] first parameter must be `&self` or `&mut self`",
-        ));
+        return Err(syn::Error::new_spanned(first, "#[fallback] first parameter must be `&self` or `&mut self`"));
     }
     let third = &sig.inputs[2];
     if !matches!(third, FnArg::Typed(_)) {
-        return Err(syn::Error::new_spanned(
-            third,
-            "#[fallback] third parameter must be `mail: Mail<'_>`",
-        ));
+        return Err(syn::Error::new_spanned(third, "#[fallback] third parameter must be `mail: Mail<'_>`"));
     }
     Ok(())
 }

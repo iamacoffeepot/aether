@@ -33,9 +33,7 @@ impl Mat4 {
     #[inline]
     #[must_use]
     pub const fn from_cols(c0: Vec4, c1: Vec4, c2: Vec4, c3: Vec4) -> Self {
-        Self {
-            cols: [c0, c1, c2, c3],
-        }
+        Self { cols: [c0, c1, c2, c3] }
     }
 
     #[inline]
@@ -213,14 +211,7 @@ impl Mat4 {
     /// (depth in `[0, 1]`).
     #[inline]
     #[must_use]
-    pub fn orthographic_rh(
-        left: f32,
-        right: f32,
-        bottom: f32,
-        top: f32,
-        z_near: f32,
-        z_far: f32,
-    ) -> Self {
+    pub fn orthographic_rh(left: f32, right: f32, bottom: f32, top: f32, z_near: f32, z_far: f32) -> Self {
         let rl = right - left;
         let tb = top - bottom;
         let nf = z_near - z_far;
@@ -247,14 +238,7 @@ impl Mul for Mat4 {
     type Output = Self;
     #[inline]
     fn mul(self, rhs: Self) -> Self {
-        Self {
-            cols: [
-                self * rhs.cols[0],
-                self * rhs.cols[1],
-                self * rhs.cols[2],
-                self * rhs.cols[3],
-            ],
-        }
+        Self { cols: [self * rhs.cols[0], self * rhs.cols[1], self * rhs.cols[2], self * rhs.cols[3]] }
     }
 }
 
@@ -331,10 +315,7 @@ mod tests {
     fn look_at_places_camera() {
         let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO, Vec3::Y);
         let origin_in_view = view * Vec4::new(0.0, 0.0, 0.0, 1.0);
-        assert!(approx_eq_vec4(
-            origin_in_view,
-            Vec4::new(0.0, 0.0, -5.0, 1.0)
-        ));
+        assert!(approx_eq_vec4(origin_in_view, Vec4::new(0.0, 0.0, -5.0, 1.0)));
     }
 
     #[test]
@@ -342,16 +323,8 @@ mod tests {
         let proj = Mat4::perspective_rh(PI * 0.5, 1.0, 1.0, 10.0);
         let near = proj * Vec4::new(0.0, 0.0, -1.0, 1.0);
         let far = proj * Vec4::new(0.0, 0.0, -10.0, 1.0);
-        assert!(
-            (near.z / near.w - 0.0).abs() < EPS,
-            "near z_ndc = {}",
-            near.z / near.w
-        );
-        assert!(
-            (far.z / far.w - 1.0).abs() < EPS,
-            "far z_ndc = {}",
-            far.z / far.w
-        );
+        assert!((near.z / near.w - 0.0).abs() < EPS, "near z_ndc = {}", near.z / near.w);
+        assert!((far.z / far.w - 1.0).abs() < EPS, "far z_ndc = {}", far.z / far.w);
     }
 
     #[test]

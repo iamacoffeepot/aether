@@ -46,16 +46,10 @@ impl fmt::Display for TransformError {
                 write!(f, "transform input slot {slot} failed to decode")
             }
             Self::InputArity { expected, actual } => {
-                write!(
-                    f,
-                    "transform input arity mismatch: expected {expected}, got {actual}"
-                )
+                write!(f, "transform input arity mismatch: expected {expected}, got {actual}")
             }
             Self::OutputOverflow { limit, actual } => {
-                write!(
-                    f,
-                    "transform output exceeded {limit} bytes (encoded {actual})"
-                )
+                write!(f, "transform output exceeded {limit} bytes (encoded {actual})")
             }
         }
     }

@@ -129,20 +129,13 @@ fn make_hook(
         let timestamp_unix_ms = now_unix_millis();
         let thread = thread::current();
         let thread_name = thread.name().unwrap_or("<unnamed>").to_owned();
-        let location = info.location().map_or_else(
-            || "<unknown>".to_string(),
-            |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
-        );
+        let location = info
+            .location()
+            .map_or_else(|| "<unknown>".to_string(), |l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
         let payload = payload_string(info.payload());
         let backtrace = capture_backtrace();
 
-        write_crash_dump(
-            timestamp_unix_ms,
-            &thread_name,
-            &location,
-            &payload,
-            backtrace.as_ref(),
-        );
+        write_crash_dump(timestamp_unix_ms, &thread_name, &location, &payload, backtrace.as_ref());
         emit_event(&thread_name, &location, &payload, backtrace.as_ref());
         prev(info);
     })
@@ -201,11 +194,7 @@ fn write_crash_dump(
         // Stderr only — the panic itself is the load-bearing
         // signal; failure to write the forensic dump should not
         // obscure it with extra noise on the normal logging path.
-        let _ = writeln!(
-            io::stderr(),
-            "aether-substrate: failed to create crash dir {}: {e}",
-            dir.display(),
-        );
+        let _ = writeln!(io::stderr(), "aether-substrate: failed to create crash dir {}: {e}", dir.display());
         return;
     }
     let path = dir.join(format!("{}.jsonl", sanitize_filename(thread_name)));
@@ -227,11 +216,7 @@ fn write_crash_dump(
         backtrace_text.as_deref(),
         ring.as_deref(),
     ) {
-        let _ = writeln!(
-            io::stderr(),
-            "aether-substrate: failed to write crash dump {}: {e}",
-            path.display(),
-        );
+        let _ = writeln!(io::stderr(), "aether-substrate: failed to write crash dump {}: {e}", path.display());
     }
 }
 
@@ -261,11 +246,7 @@ fn resolve_crash_dir(timestamp_unix_ms: u64) -> Option<PathBuf> {
         PathBuf::from(xdg).join("aether").join("crash")
     } else {
         let home = env::var("HOME").ok()?;
-        PathBuf::from(home)
-            .join(".local")
-            .join("share")
-            .join("aether")
-            .join("crash")
+        PathBuf::from(home).join(".local").join("share").join("aether").join("crash")
     };
     Some(base.join(timestamp_unix_ms.to_string()))
 }
@@ -296,11 +277,7 @@ fn write_jsonl(
     backtrace: Option<&str>,
     ring: Option<&[LogEntry]>,
 ) -> io::Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path)?;
+    let mut file = fs::OpenOptions::new().create(true).truncate(true).write(true).open(path)?;
 
     // Header line — one JSON object capturing the panic context.
     let header = serde_json::json!({
@@ -404,10 +381,7 @@ mod tests {
     fn payload_string_handles_unknown_type() {
         let payload: Box<dyn Any + Send> = Box::new(42i32);
         let out = payload_string(payload.as_ref());
-        assert!(
-            out.starts_with("<non-string panic payload"),
-            "unexpected: {out}",
-        );
+        assert!(out.starts_with("<non-string panic payload"), "unexpected: {out}");
     }
 
     /// Forced branch returns a captured backtrace regardless of env.
@@ -415,10 +389,7 @@ mod tests {
     fn capture_backtrace_with_forced_returns_some() {
         let bt = capture_backtrace_with(true);
         assert!(bt.is_some(), "forced=true must always capture");
-        assert!(matches!(
-            bt.unwrap().status(),
-            BacktraceStatus::Captured | BacktraceStatus::Unsupported
-        ));
+        assert!(matches!(bt.unwrap().status(), BacktraceStatus::Captured | BacktraceStatus::Unsupported));
     }
 
     /// Unforced branch defers to `Backtrace::capture()` which respects
@@ -451,12 +422,11 @@ mod tests {
         let test_thread = thread::current().id();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_for_prev = Arc::clone(&counter);
-        let prev: Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static> =
-            Box::new(move |_info| {
-                if thread::current().id() == test_thread {
-                    counter_for_prev.fetch_add(1, Ordering::SeqCst);
-                }
-            });
+        let prev: Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static> = Box::new(move |_info| {
+            if thread::current().id() == test_thread {
+                counter_for_prev.fetch_add(1, Ordering::SeqCst);
+            }
+        });
         let hook = make_hook(prev);
 
         // Drive the hook with a real PanicHookInfo by triggering a
@@ -470,11 +440,7 @@ mod tests {
         let _ = panic::take_hook();
         panic::set_hook(saved);
 
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            1,
-            "previous hook must run exactly once per panic on this thread",
-        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "previous hook must run exactly once per panic on this thread");
     }
 
     /// End-to-end: installing the global hook, driving a panic,
@@ -487,9 +453,7 @@ mod tests {
         init_panic_hook();
 
         let captured: Arc<Mutex<Vec<CapturedEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = CapturingSubscriber {
-            events: Arc::clone(&captured),
-        };
+        let subscriber = CapturingSubscriber { events: Arc::clone(&captured) };
 
         subscriber::with_default(subscriber, || {
             let _ = panic::catch_unwind(|| {
@@ -498,32 +462,13 @@ mod tests {
         });
 
         let events = captured.lock().unwrap();
-        let panic_events: Vec<&CapturedEvent> = events
-            .iter()
-            .filter(|e| e.target == "aether_substrate::panic")
-            .collect();
-        assert!(
-            !panic_events.is_empty(),
-            "no panic event captured (got {} non-panic events)",
-            events.len(),
-        );
-        let merged: String = panic_events
-            .iter()
-            .map(|e| e.fields.as_str())
-            .collect::<Vec<_>>()
-            .join(" | ");
-        assert!(
-            merged.contains("e2e probe 8e3a"),
-            "panic payload missing from event: {merged}",
-        );
-        assert!(
-            merged.contains("location"),
-            "location field missing from event: {merged}",
-        );
-        assert!(
-            merged.contains("thread"),
-            "thread field missing from event: {merged}",
-        );
+        let panic_events: Vec<&CapturedEvent> =
+            events.iter().filter(|e| e.target == "aether_substrate::panic").collect();
+        assert!(!panic_events.is_empty(), "no panic event captured (got {} non-panic events)", events.len());
+        let merged: String = panic_events.iter().map(|e| e.fields.as_str()).collect::<Vec<_>>().join(" | ");
+        assert!(merged.contains("e2e probe 8e3a"), "panic payload missing from event: {merged}");
+        assert!(merged.contains("location"), "location field missing from event: {merged}");
+        assert!(merged.contains("thread"), "thread field missing from event: {merged}");
     }
 
     struct CapturedEvent {
@@ -551,10 +496,10 @@ mod tests {
             let mut buf = String::new();
             let mut visitor = StringVisit(&mut buf);
             event.record(&mut visitor);
-            self.events.lock().unwrap().push(CapturedEvent {
-                target: event.metadata().target().to_string(),
-                fields: buf,
-            });
+            self.events
+                .lock()
+                .unwrap()
+                .push(CapturedEvent { target: event.metadata().target().to_string(), fields: buf });
         }
         fn enter(&self, _: &Id) {}
         fn exit(&self, _: &Id) {}
@@ -587,11 +532,7 @@ mod tests {
 
     fn tempdir(suffix: &str) -> PathBuf {
         let mut dir = env::temp_dir();
-        dir.push(format!(
-            "aether-panic-hook-test-{}-{}",
-            suffix,
-            process::id(),
-        ));
+        dir.push(format!("aether-panic-hook-test-{}-{}", suffix, process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("tempdir creates");
         dir
@@ -614,10 +555,7 @@ mod tests {
     /// thread name today; the sanitiser keeps the file shape sane.
     #[test]
     fn sanitize_filename_rewrites_path_chars() {
-        assert_eq!(
-            sanitize_filename("aether.embedded:camera"),
-            "aether.embedded-camera",
-        );
+        assert_eq!(sanitize_filename("aether.embedded:camera"), "aether.embedded-camera",);
         assert_eq!(sanitize_filename("a/b\\c"), "a-b-c");
         assert_eq!(sanitize_filename("aether.audio"), "aether.audio");
     }
@@ -692,10 +630,7 @@ mod tests {
             assert_eq!(lines.len(), 1, "{label}: header only");
             let header: serde_json::Value = serde_json::from_str(lines[0]).expect("header is json");
             assert_eq!(header["ring_entries"], 0, "{label}: ring_entries 0");
-            assert!(
-                header["backtrace"].is_null(),
-                "{label}: no backtrace → null in the JSON",
-            );
+            assert!(header["backtrace"].is_null(), "{label}: no backtrace → null in the JSON");
         }
     }
 }

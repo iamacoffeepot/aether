@@ -44,22 +44,13 @@ impl fmt::Display for AudioBuildError {
     }
 }
 
-pub fn try_build_pipeline(
-    requested_sample_rate: Option<u32>,
-) -> Result<AudioPipeline, AudioBuildError> {
+pub fn try_build_pipeline(requested_sample_rate: Option<u32>) -> Result<AudioPipeline, AudioBuildError> {
     let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or(AudioBuildError::NoDevice)?;
+    let device = host.default_output_device().ok_or(AudioBuildError::NoDevice)?;
 
     let config = match requested_sample_rate {
-        Some(rate) => {
-            find_config_for_rate(&device, rate).ok_or(AudioBuildError::RateUnsupported(rate))?
-        }
-        None => device
-            .default_output_config()
-            .map_err(|e| AudioBuildError::ConfigQuery(e.to_string()))?
-            .config(),
+        Some(rate) => find_config_for_rate(&device, rate).ok_or(AudioBuildError::RateUnsupported(rate))?,
+        None => device.default_output_config().map_err(|e| AudioBuildError::ConfigQuery(e.to_string()))?.config(),
     };
 
     let sample_rate = config.sample_rate;
@@ -87,9 +78,7 @@ pub fn try_build_pipeline(
         )
         .map_err(|e| AudioBuildError::StreamBuild(e.to_string()))?;
 
-    stream
-        .play()
-        .map_err(|e| AudioBuildError::StreamPlay(e.to_string()))?;
+    stream.play().map_err(|e| AudioBuildError::StreamPlay(e.to_string()))?;
 
     tracing::info!(
         target: "aether_substrate::audio",
@@ -100,11 +89,7 @@ pub fn try_build_pipeline(
         "audio pipeline started",
     );
 
-    Ok(AudioPipeline {
-        sender,
-        sample_rate,
-        _stream: stream,
-    })
+    Ok(AudioPipeline { sender, sample_rate, _stream: stream })
 }
 
 pub fn find_config_for_rate(device: &cpal::Device, rate: u32) -> Option<cpal::StreamConfig> {

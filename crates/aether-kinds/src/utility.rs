@@ -7,18 +7,7 @@ use bytemuck::{Pod, Zeroable};
 /// carrying the same `seq`; the round trip proves that a Claude
 /// session → component → session reply actually works end-to-end.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.ping")]
 pub struct Ping {
     pub seq: u32,
@@ -28,18 +17,7 @@ pub struct Ping {
 /// `Ping.seq` echoed back so the caller can match requests against
 /// replies when multiple are in flight.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.pong")]
 pub struct Pong {
     pub seq: u32,

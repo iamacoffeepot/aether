@@ -19,9 +19,7 @@ use serde::{Deserialize, Serialize};
 /// target camera must already be in the matching mode (the camera
 /// component warn-drops a mode-mismatched delta), so this pairs with
 /// the camera's own mode rather than switching it.
-#[derive(
-    aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default,
-)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ControllerMode {
     /// Drive the orbit camera: WASD pans the orbit `target` across the
     /// ground plane, ←/→ yaw, ↑/↓ pitch, Z/X dolly the eye distance.

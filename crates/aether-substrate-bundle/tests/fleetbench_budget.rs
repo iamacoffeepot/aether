@@ -28,18 +28,10 @@ mod tests {
     #[test]
     fn rearm_timeout_classification() {
         // A timed-out blocking read re-arms; both platform spellings count.
-        assert!(is_rearm_timeout(&FrameError::Io(IoError::from(
-            ErrorKind::WouldBlock
-        ))));
-        assert!(is_rearm_timeout(&FrameError::Io(IoError::from(
-            ErrorKind::TimedOut
-        ))));
+        assert!(is_rearm_timeout(&FrameError::Io(IoError::from(ErrorKind::WouldBlock))));
+        assert!(is_rearm_timeout(&FrameError::Io(IoError::from(ErrorKind::TimedOut))));
         // A genuine failure does not re-arm — it propagates as an error.
-        assert!(!is_rearm_timeout(&FrameError::Io(IoError::from(
-            ErrorKind::UnexpectedEof
-        ))));
-        assert!(!is_rearm_timeout(&FrameError::Io(IoError::from(
-            ErrorKind::ConnectionReset
-        ))));
+        assert!(!is_rearm_timeout(&FrameError::Io(IoError::from(ErrorKind::UnexpectedEof))));
+        assert!(!is_rearm_timeout(&FrameError::Io(IoError::from(ErrorKind::ConnectionReset))));
     }
 }

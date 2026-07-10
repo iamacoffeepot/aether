@@ -55,19 +55,12 @@ impl<'ast> Visit<'ast> for InvariantVisitor {
             let form = if restricted.in_token.is_some() {
                 "pub(in …)".to_string()
             } else {
-                let seg = restricted
-                    .path
-                    .segments
-                    .last()
-                    .map(|s| s.ident.to_string())
-                    .unwrap_or_default();
+                let seg = restricted.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
                 format!("pub({seg})")
             };
             self.violations.push((
                 self.file.clone(),
-                format!(
-                    "scoped visibility `{form}` — use plain `pub` or privatize/restructure the module"
-                ),
+                format!("scoped visibility `{form}` — use plain `pub` or privatize/restructure the module"),
             ));
         }
         visit_visibility(self, vis);
@@ -85,29 +78,18 @@ fn capabilities_source_invariants_hold() {
     // `*.rs` under `src/`.
     let mut stack = vec![src_dir];
     while let Some(dir) = stack.pop() {
-        let entries =
-            fs::read_dir(&dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+        let entries = fs::read_dir(&dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
         for entry in entries {
             let entry = entry.expect("read a directory entry");
             let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .expect("resolve a directory entry's file type");
+            let file_type = entry.file_type().expect("resolve a directory entry's file type");
             if file_type.is_dir() {
                 stack.push(path);
             } else if path.extension().is_some_and(|ext| ext == "rs") {
-                let source = fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-                let ast = syn::parse_file(&source)
-                    .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
-                let rel = path
-                    .strip_prefix(&manifest_dir)
-                    .unwrap_or(&path)
-                    .to_path_buf();
-                let mut visitor = InvariantVisitor {
-                    file: rel,
-                    violations: Vec::new(),
-                };
+                let source = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                let ast = syn::parse_file(&source).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+                let rel = path.strip_prefix(&manifest_dir).unwrap_or(&path).to_path_buf();
+                let mut visitor = InvariantVisitor { file: rel, violations: Vec::new() };
                 visitor.visit_file(&ast);
                 violations.extend(visitor.violations);
             }

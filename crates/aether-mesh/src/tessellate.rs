@@ -4,11 +4,7 @@
 // fixed-point coordinates into the exact-arithmetic CDT predicates;
 // bounded `usize` vertex/triangle counts cast to `u32` for the wire
 // index buffers stay well below `u32::MAX`.
-#![allow(
-    clippy::cast_precision_loss,
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation
-)]
+#![allow(clippy::cast_precision_loss, clippy::cast_lossless, clippy::cast_possible_truncation)]
 
 //! Polygon → triangle conversion for the wire `Vec<Triangle>` path.
 //!
@@ -125,12 +121,7 @@ pub fn tessellate_polygon_integer(
     }
 
     let triangles = cdt::triangulate_loops(&vertices, &all_loops, &plane)?;
-    Some(
-        triangles
-            .into_iter()
-            .map(|tri| [vertices[tri[0]], vertices[tri[1]], vertices[tri[2]]])
-            .collect(),
-    )
+    Some(triangles.into_iter().map(|tri| [vertices[tri[0]], vertices[tri[1]], vertices[tri[2]]]).collect())
 }
 
 /// Quantize an `f32` plane normal to the integer `Plane3` shape CDT's
@@ -146,12 +137,7 @@ fn quantize_normal(n: Vec3) -> Option<Plane3> {
     if n_x == 0 && n_y == 0 && n_z == 0 {
         return None;
     }
-    Some(Plane3 {
-        n_x,
-        n_y,
-        n_z,
-        d: 0,
-    })
+    Some(Plane3 { n_x, n_y, n_z, d: 0 })
 }
 
 /// Triangulate the n-gon loops in an `IndexedMesh` per (plane, color)
@@ -163,10 +149,7 @@ fn triangulate_indexed(mesh: IndexedMesh) -> Vec<Polygon> {
 
     let mut groups: HashMap<PlaneColorKey, Vec<usize>> = HashMap::new();
     for (i, poly) in polygons.iter().enumerate() {
-        groups
-            .entry(plane_color_key(&poly.plane, poly.color))
-            .or_default()
-            .push(i);
+        groups.entry(plane_color_key(&poly.plane, poly.color)).or_default().push(i);
     }
     let mut sorted_keys: Vec<&PlaneColorKey> = groups.keys().collect();
     sorted_keys.sort();
@@ -176,17 +159,11 @@ fn triangulate_indexed(mesh: IndexedMesh) -> Vec<Polygon> {
         let group = &groups[key];
         let plane = polygons[group[0]].plane;
         let color = polygons[group[0]].color;
-        let loops: Vec<Vec<VertexId>> = group
-            .iter()
-            .map(|&pid| polygons[pid].vertices.clone())
-            .collect();
+        let loops: Vec<Vec<VertexId>> = group.iter().map(|&pid| polygons[pid].vertices.clone()).collect();
         // Snapshot the input bucket's non-degenerate poly count before
         // triangulating; we use it post-emit to flag the issue 337
         // tessellation invariant ("non-empty input ⇒ non-empty output").
-        let input_non_degenerate = group
-            .iter()
-            .filter(|&&pid| polygons[pid].vertices.len() >= 3)
-            .count();
+        let input_non_degenerate = group.iter().filter(|&&pid| polygons[pid].vertices.len() >= 3).count();
         let bucket_start = out.len();
 
         match cdt::triangulate_loops(&vertices, &loops, &plane) {
@@ -211,11 +188,7 @@ fn triangulate_indexed(mesh: IndexedMesh) -> Vec<Polygon> {
                     let v0 = vertices[poly.vertices[0]];
                     for i in 1..poly.vertices.len() - 1 {
                         out.push(Polygon {
-                            vertices: vec![
-                                v0,
-                                vertices[poly.vertices[i]],
-                                vertices[poly.vertices[i + 1]],
-                            ],
+                            vertices: vec![v0, vertices[poly.vertices[i]], vertices[poly.vertices[i + 1]]],
                             plane,
                             color,
                         });
@@ -249,28 +222,14 @@ mod tests {
     use crate::test_helpers::pt;
 
     fn xy_plane() -> Plane3 {
-        Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1,
-            d: 0,
-        }
+        Plane3 { n_x: 0, n_y: 0, n_z: 1, d: 0 }
     }
 
     #[test]
     fn triangulate_indexed_quad_emits_two_triangles() {
         let mesh = IndexedMesh {
-            vertices: vec![
-                pt(0.0, 0.0, 0.0),
-                pt(1.0, 0.0, 0.0),
-                pt(1.0, 1.0, 0.0),
-                pt(0.0, 1.0, 0.0),
-            ],
-            polygons: vec![IndexedPolygon {
-                vertices: vec![0, 1, 2, 3],
-                plane: xy_plane(),
-                color: 7,
-            }],
+            vertices: vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(0.0, 1.0, 0.0)],
+            polygons: vec![IndexedPolygon { vertices: vec![0, 1, 2, 3], plane: xy_plane(), color: 7 }],
         };
         let triangles = triangulate_indexed(mesh);
         assert_eq!(triangles.len(), 2);
@@ -285,12 +244,7 @@ mod tests {
         // Two polygons on the same plane (single CDT call) and one on
         // a different plane (separate CDT call). Three quads → six
         // triangles total.
-        let yz_plane = Plane3 {
-            n_x: 1,
-            n_y: 0,
-            n_z: 0,
-            d: 0,
-        };
+        let yz_plane = Plane3 { n_x: 1, n_y: 0, n_z: 0, d: 0 };
         let mesh = IndexedMesh {
             vertices: vec![
                 pt(0.0, 0.0, 0.0),
@@ -307,21 +261,9 @@ mod tests {
                 pt(0.0, 0.0, 1.0),
             ],
             polygons: vec![
-                IndexedPolygon {
-                    vertices: vec![0, 1, 2, 3],
-                    plane: xy_plane(),
-                    color: 0,
-                },
-                IndexedPolygon {
-                    vertices: vec![4, 5, 6, 7],
-                    plane: xy_plane(),
-                    color: 0,
-                },
-                IndexedPolygon {
-                    vertices: vec![8, 9, 10, 11],
-                    plane: yz_plane,
-                    color: 0,
-                },
+                IndexedPolygon { vertices: vec![0, 1, 2, 3], plane: xy_plane(), color: 0 },
+                IndexedPolygon { vertices: vec![4, 5, 6, 7], plane: xy_plane(), color: 0 },
+                IndexedPolygon { vertices: vec![8, 9, 10, 11], plane: yz_plane, color: 0 },
             ],
         };
         let triangles = triangulate_indexed(mesh);
@@ -339,28 +281,15 @@ mod tests {
     fn tessellate_polygon_integer_rejects_zero_normal() {
         let outer = vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0)];
         let result = tessellate_polygon_integer(&outer, &[], Vec3::ZERO);
-        assert!(
-            result.is_none(),
-            "effectively-zero normal must surface as None"
-        );
+        assert!(result.is_none(), "effectively-zero normal must surface as None");
     }
 
     #[test]
     fn tessellate_polygon_integer_happy_path_square_with_hole() {
-        let outer = vec![
-            pt(0.0, 0.0, 0.0),
-            pt(4.0, 0.0, 0.0),
-            pt(4.0, 4.0, 0.0),
-            pt(0.0, 4.0, 0.0),
-        ];
-        let hole = vec![
-            pt(1.0, 1.0, 0.0),
-            pt(1.0, 3.0, 0.0),
-            pt(3.0, 3.0, 0.0),
-            pt(3.0, 1.0, 0.0),
-        ];
-        let tris = tessellate_polygon_integer(&outer, &[hole], Vec3::new(0.0, 0.0, 1.0))
-            .expect("annular should triangulate");
+        let outer = vec![pt(0.0, 0.0, 0.0), pt(4.0, 0.0, 0.0), pt(4.0, 4.0, 0.0), pt(0.0, 4.0, 0.0)];
+        let hole = vec![pt(1.0, 1.0, 0.0), pt(1.0, 3.0, 0.0), pt(3.0, 3.0, 0.0), pt(3.0, 1.0, 0.0)];
+        let tris =
+            tessellate_polygon_integer(&outer, &[hole], Vec3::new(0.0, 0.0, 1.0)).expect("annular should triangulate");
         // Topological minimum for 8-vertex annular = 8 triangles.
         assert_eq!(tris.len(), 8);
         // Total area = outer (16) - hole (4) = 12 → doubled = 24. Use
@@ -379,10 +308,7 @@ mod tests {
         // SCALE² because we summed products of fixed-point differences.
         let scale_sq = (1u128 << 32) as f64;
         let signed_double_area = signed_double_area_fixed as f64 / scale_sq;
-        assert!(
-            (signed_double_area - 24.0).abs() < 0.01,
-            "annular doubled area mismatch: {signed_double_area}"
-        );
+        assert!((signed_double_area - 24.0).abs() < 0.01, "annular doubled area mismatch: {signed_double_area}");
     }
 
     /// Issue 335 regression: the cross-bored block's -Y cube face
@@ -395,123 +321,31 @@ mod tests {
     #[test]
     fn tessellate_annular_cube_minus_y_face_with_collinear_first_triple() {
         let outer = vec![
-            Point3 {
-                x: 43774,
-                y: -65536,
-                z: 65536,
-            },
-            Point3 {
-                x: -8654,
-                y: -65536,
-                z: 65536,
-            },
-            Point3 {
-                x: -65536,
-                y: -65536,
-                z: 65536,
-            },
-            Point3 {
-                x: -65536,
-                y: -65536,
-                z: -65536,
-            },
-            Point3 {
-                x: -43774,
-                y: -65536,
-                z: -65536,
-            },
-            Point3 {
-                x: 29727,
-                y: -65536,
-                z: -65536,
-            },
-            Point3 {
-                x: 65536,
-                y: -65536,
-                z: -65536,
-            },
-            Point3 {
-                x: 65536,
-                y: -65536,
-                z: -43774,
-            },
-            Point3 {
-                x: 65536,
-                y: -65536,
-                z: 29727,
-            },
-            Point3 {
-                x: 65536,
-                y: -65536,
-                z: 65536,
-            },
+            Point3 { x: 43774, y: -65536, z: 65536 },
+            Point3 { x: -8654, y: -65536, z: 65536 },
+            Point3 { x: -65536, y: -65536, z: 65536 },
+            Point3 { x: -65536, y: -65536, z: -65536 },
+            Point3 { x: -43774, y: -65536, z: -65536 },
+            Point3 { x: 29727, y: -65536, z: -65536 },
+            Point3 { x: 65536, y: -65536, z: -65536 },
+            Point3 { x: 65536, y: -65536, z: -43774 },
+            Point3 { x: 65536, y: -65536, z: 29727 },
+            Point3 { x: 65536, y: -65536, z: 65536 },
         ];
         let hole = vec![
-            Point3 {
-                x: -13107,
-                y: -65536,
-                z: 22702,
-            },
-            Point3 {
-                x: 1,
-                y: -65536,
-                z: 26214,
-            },
-            Point3 {
-                x: 13106,
-                y: -65536,
-                z: 22703,
-            },
-            Point3 {
-                x: 22702,
-                y: -65536,
-                z: 13107,
-            },
-            Point3 {
-                x: 26214,
-                y: -65536,
-                z: 0,
-            },
-            Point3 {
-                x: 22702,
-                y: -65536,
-                z: -13107,
-            },
-            Point3 {
-                x: 13107,
-                y: -65536,
-                z: -22702,
-            },
-            Point3 {
-                x: 8654,
-                y: -65536,
-                z: -23895,
-            },
-            Point3 {
-                x: -1,
-                y: -65536,
-                z: -26214,
-            },
-            Point3 {
-                x: -13106,
-                y: -65536,
-                z: -22703,
-            },
-            Point3 {
-                x: -22702,
-                y: -65536,
-                z: -13107,
-            },
-            Point3 {
-                x: -26214,
-                y: -65536,
-                z: -1,
-            },
-            Point3 {
-                x: -22702,
-                y: -65536,
-                z: 13107,
-            },
+            Point3 { x: -13107, y: -65536, z: 22702 },
+            Point3 { x: 1, y: -65536, z: 26214 },
+            Point3 { x: 13106, y: -65536, z: 22703 },
+            Point3 { x: 22702, y: -65536, z: 13107 },
+            Point3 { x: 26214, y: -65536, z: 0 },
+            Point3 { x: 22702, y: -65536, z: -13107 },
+            Point3 { x: 13107, y: -65536, z: -22702 },
+            Point3 { x: 8654, y: -65536, z: -23895 },
+            Point3 { x: -1, y: -65536, z: -26214 },
+            Point3 { x: -13106, y: -65536, z: -22703 },
+            Point3 { x: -22702, y: -65536, z: -13107 },
+            Point3 { x: -26214, y: -65536, z: -1 },
+            Point3 { x: -22702, y: -65536, z: 13107 },
         ];
         let tris = tessellate_polygon_integer(&outer, &[hole], Vec3::new(0.0, -1.0, 0.0))
             .expect("annular cube face must triangulate post-fix");
@@ -527,80 +361,24 @@ mod tests {
     #[test]
     fn tessellate_diagonal_cylinder_facet_with_near_collinear_first_triple() {
         let outer = vec![
-            Point3 {
-                x: 1,
-                y: 26214,
-                z: 65536,
-            },
-            Point3 {
-                x: -8654,
-                y: 23895,
-                z: 65536,
-            },
-            Point3 {
-                x: -13107,
-                y: 22702,
-                z: 65536,
-            },
-            Point3 {
-                x: -13107,
-                y: 22702,
-                z: 48916,
-            },
-            Point3 {
-                x: -13107,
-                y: 22702,
-                z: 29726,
-            },
-            Point3 {
-                x: -13107,
-                y: 22702,
-                z: 22702,
-            },
-            Point3 {
-                x: -13107,
-                y: 22702,
-                z: -22702,
-            },
-            Point3 {
-                x: -13107,
-                y: 22702,
-                z: -48916,
-            },
-            Point3 {
-                x: -13107,
-                y: 22702,
-                z: -65536,
-            },
-            Point3 {
-                x: 1,
-                y: 26214,
-                z: -65536,
-            },
-            Point3 {
-                x: 0,
-                y: 26214,
-                z: -35809,
-            },
-            Point3 {
-                x: 0,
-                y: 26214,
-                z: -26214,
-            },
-            Point3 {
-                x: 0,
-                y: 26214,
-                z: 26214,
-            },
-            Point3 {
-                x: 0,
-                y: 26214,
-                z: 35809,
-            },
+            Point3 { x: 1, y: 26214, z: 65536 },
+            Point3 { x: -8654, y: 23895, z: 65536 },
+            Point3 { x: -13107, y: 22702, z: 65536 },
+            Point3 { x: -13107, y: 22702, z: 48916 },
+            Point3 { x: -13107, y: 22702, z: 29726 },
+            Point3 { x: -13107, y: 22702, z: 22702 },
+            Point3 { x: -13107, y: 22702, z: -22702 },
+            Point3 { x: -13107, y: 22702, z: -48916 },
+            Point3 { x: -13107, y: 22702, z: -65536 },
+            Point3 { x: 1, y: 26214, z: -65536 },
+            Point3 { x: 0, y: 26214, z: -35809 },
+            Point3 { x: 0, y: 26214, z: -26214 },
+            Point3 { x: 0, y: 26214, z: 26214 },
+            Point3 { x: 0, y: 26214, z: 35809 },
         ];
         let normal = Vec3::new(0.258_818_36, -0.965_926, 0.0);
-        let tris = tessellate_polygon_integer(&outer, &[], normal)
-            .expect("diagonal cylinder facet must triangulate post-fix");
+        let tris =
+            tessellate_polygon_integer(&outer, &[], normal).expect("diagonal cylinder facet must triangulate post-fix");
         assert!(!tris.is_empty());
     }
 

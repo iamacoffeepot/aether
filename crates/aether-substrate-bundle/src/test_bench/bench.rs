@@ -42,12 +42,10 @@ use aether_kinds::{LogTail, LogTailResult, Tick};
 // `encode_empty` builds the zero-byte payload for unit lifecycle kinds.
 use aether_actor::Addressable;
 use aether_capabilities::{RenderCapability, fs::NamespaceRoots, render::DrawTexturedQuads};
-use aether_substrate::chassis::settlement::{
-    TerminalDisposition, WaitOutcome, await_internal_signal,
-};
+use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::{
-    EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, RingCapacities,
-    SchedulerTuning, Source, SourceAddr, SubstrateBoot,
+    EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, RingCapacities, SchedulerTuning, Source,
+    SourceAddr, SubstrateBoot,
     capture::CaptureQueue,
     mail::{CapabilityRegistry, CostTable, Mail, MailId, MailboxId},
 };
@@ -108,21 +106,13 @@ impl fmt::Display for TestBenchError {
         match self {
             Self::Boot(e) => write!(f, "substrate boot failed: {e}"),
             Self::Decode(e) => write!(f, "decode reply: {e}"),
-            Self::Timeout {
-                expected,
-                pumped_iterations,
-            } => write!(
-                f,
-                "expected {expected} reply, did not arrive within {pumped_iterations} pump iterations",
-            ),
+            Self::Timeout { expected, pumped_iterations } => {
+                write!(f, "expected {expected} reply, did not arrive within {pumped_iterations} pump iterations")
+            }
             Self::Advance(e) => write!(f, "advance failed: {e}"),
             Self::Capture(e) => write!(f, "capture failed: {e}"),
             Self::UnknownMailbox(name) => write!(f, "unknown mailbox: {name}"),
-            Self::SettlementTimeout {
-                recipient,
-                kind_name,
-                pending,
-            } => write!(
+            Self::SettlementTimeout { recipient, kind_name, pending } => write!(
                 f,
                 "send to {recipient:?} ({kind_name}) did not settle before the patience backstop — a genuine deadlock/livelock in the chain (a healthy chain never reaches this cap); pending roots: {pending}",
             ),
@@ -378,9 +368,7 @@ impl TestBenchBuilder {
             // via `ActorRingConfig`.)
             trace_max: self.trace_ring_max_capacity.unwrap_or(trace),
         };
-        let settlement_cap = self
-            .settlement_cap
-            .unwrap_or_else(|| SettlementConfig::from_env().to_cap());
+        let settlement_cap = self.settlement_cap.unwrap_or_else(|| SettlementConfig::from_env().to_cap());
         TestBench::start_inner(
             self.width,
             self.height,
@@ -458,13 +446,8 @@ impl TestBench {
             // loops the bench stores this value for.
             teardown_cap: settlement_cap,
         };
-        let TestBenchBuild {
-            passive,
-            boot,
-            render_handles,
-            kind_tick,
-        } = TestBenchChassis::build_passive(env)
-            .map_err(|e| TestBenchError::Boot(e.to_string()))?;
+        let TestBenchBuild { passive, boot, render_handles, kind_tick } =
+            TestBenchChassis::build_passive(env).map_err(|e| TestBenchError::Boot(e.to_string()))?;
 
         // Attach a `RecordingBackend` to the boot's outbound. Replies
         // the substrate emits via `outbound.send_reply` arrive here
@@ -482,9 +465,8 @@ impl TestBench {
         // the lifecycle cap's own id (its NAMESPACE) — ctx-less harness setup,
         // no sibling resolver in scope.
         #[allow(clippy::disallowed_methods)]
-        let lifecycle_mailbox = aether_data::mailbox_id_from_name(
-            <aether_capabilities::LifecycleCapability as Addressable>::NAMESPACE,
-        );
+        let lifecycle_mailbox =
+            aether_data::mailbox_id_from_name(<aether_capabilities::LifecycleCapability as Addressable>::NAMESPACE);
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
         let _ = kind_tick; // PR 3b retired direct Tick push; kept on the
         // build result for wire-compat with binaries that haven't migrated yet.
@@ -540,10 +522,7 @@ impl TestBench {
     /// per ADR-0063: a poisoned mutex means a prior holder panicked
     /// under the guard.
     pub fn observed_kinds(&self) -> Vec<String> {
-        self.observed_kinds
-            .lock()
-            .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
-            .clone()
+        self.observed_kinds.lock().expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)").clone()
     }
 
     /// Snapshot the ordered, typed overlay submissions from the latest
@@ -580,17 +559,12 @@ impl TestBench {
     /// matching the fail-fast disposition of [`Self::count_observed`] /
     /// [`Self::observed_kinds`].
     pub fn log_tail(&mut self, mailbox_name: &str, since: Option<u64>) -> LogTailResult {
-        let request = LogTail {
-            max: 0,
-            min_level: None,
-            since,
-        };
+        let request = LogTail { max: 0, min_level: None, since };
         let payload = self
             .send_bytes_and_await(mailbox_name, LogTail::ID, request.encode_into_bytes())
             .unwrap_or_else(|e| panic!("log_tail send to {mailbox_name:?} failed: {e}"));
-        LogTailResult::decode_from_bytes(&payload).unwrap_or_else(|| {
-            panic!("log_tail reply from {mailbox_name:?} did not decode as LogTailResult")
-        })
+        LogTailResult::decode_from_bytes(&payload)
+            .unwrap_or_else(|| panic!("log_tail reply from {mailbox_name:?} did not decode as LogTailResult"))
     }
 
     /// Borrow the substrate's queryable [`CapabilityRegistry`]
@@ -629,12 +603,7 @@ impl TestBench {
     /// spawned) to drain. By the time this returns, any subsequent
     /// observation is causally after the producer's full chain — no
     /// nudge_tick-style band-aids needed for render-flush races.
-    pub(crate) fn send_bytes(
-        &self,
-        recipient_name: &str,
-        kind: KindId,
-        bytes: Vec<u8>,
-    ) -> Result<(), TestBenchError> {
+    pub(crate) fn send_bytes(&self, recipient_name: &str, kind: KindId, bytes: Vec<u8>) -> Result<(), TestBenchError> {
         let mailbox = self
             .registry
             .lookup(recipient_name)
@@ -656,9 +625,7 @@ impl TestBench {
     ) -> Result<(), TestBenchError> {
         let cid = self.fresh_correlation_id();
         let registry = self.passive.settlement_registry();
-        let root = self
-            .queue
-            .push_chassis_root_mail(cid, mailbox, kind, payload, 1);
+        let root = self.queue.push_chassis_root_mail(cid, mailbox, kind, payload, 1);
         let rx = registry.subscribe_settlement(root);
         match await_internal_signal(
             &rx,
@@ -668,11 +635,9 @@ impl TestBench {
             TerminalDisposition::ReplyErr,
         ) {
             WaitOutcome::Settled => Ok(()),
-            WaitOutcome::Wedged(_) => Err(self.settlement_timeout(
-                recipient_name.to_owned(),
-                kind_name,
-                "test_bench.push_and_settle",
-            )),
+            WaitOutcome::Wedged(_) => {
+                Err(self.settlement_timeout(recipient_name.to_owned(), kind_name, "test_bench.push_and_settle"))
+            }
         }
     }
 
@@ -682,19 +647,8 @@ impl TestBench {
     /// deadlock/livelock, since the cap is a generous backstop a healthy
     /// chain never reaches — names the stuck root(s) and their
     /// `(in_flight, held_open)` counts instead of surfacing a bare timeout.
-    fn settlement_timeout(
-        &self,
-        recipient: String,
-        kind_name: &'static str,
-        gate: &str,
-    ) -> TestBenchError {
-        let pending = format_pending_roots(
-            &self
-                .queue
-                .trace_handle()
-                .settlement_counter()
-                .pending_roots(),
-        );
+    fn settlement_timeout(&self, recipient: String, kind_name: &'static str, gate: &str) -> TestBenchError {
+        let pending = format_pending_roots(&self.queue.trace_handle().settlement_counter().pending_roots());
         tracing::error!(
             target: "aether_substrate::test_bench",
             gate,
@@ -703,11 +657,7 @@ impl TestBench {
             pending = %pending,
             "settlement gate wedged: chain did not settle before the patience backstop",
         );
-        TestBenchError::SettlementTimeout {
-            recipient,
-            kind_name,
-            pending,
-        }
+        TestBenchError::SettlementTimeout { recipient, kind_name, pending }
     }
 
     /// Issue 607 Phase 3: spawn an instanced actor onto the bench's
@@ -755,9 +705,7 @@ impl TestBench {
     ) -> (MailId, crossbeam_channel::Receiver<()>) {
         let cid = self.fresh_correlation_id();
         let registry = self.passive.settlement_registry();
-        let root = self
-            .queue
-            .push_chassis_root_mail(cid, recipient, kind, payload, 1);
+        let root = self.queue.push_chassis_root_mail(cid, recipient, kind, payload, 1);
         let rx = registry.subscribe_settlement(root);
         (root, rx)
     }
@@ -785,8 +733,7 @@ impl TestBench {
     ) -> Result<Vec<u8>, TestBenchError> {
         let cid = self.fresh_correlation_id();
         let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
-        self.queue
-            .push(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to));
+        self.queue.push(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to));
         self.pump_until_reply_bytes(cid, "<await-reply bytes>")
     }
 
@@ -812,11 +759,7 @@ impl TestBench {
 
         let mut walk = TreeWalk::new(root);
         while let Some(mailbox) = walk.next_mailbox() {
-            let request = TraceTail {
-                max: 0,
-                since: None,
-                root: Some(root),
-            };
+            let request = TraceTail { max: 0, since: None, root: Some(root) };
             // A send error (no live actor at this id) or an undecodable
             // reply yields no entries; the walk still completes from the
             // rings that do answer.
@@ -824,11 +767,7 @@ impl TestBench {
                 .send_bytes_and_await_id(mailbox, TraceTail::ID, request.encode_into_bytes())
                 .ok()
                 .and_then(|reply| TraceTailResult::decode_from_bytes(&reply))
-                .unwrap_or(TraceTailResult::Ok {
-                    entries: Vec::new(),
-                    next_since: 0,
-                    truncated_before: None,
-                });
+                .unwrap_or(TraceTailResult::Ok { entries: Vec::new(), next_since: 0, truncated_before: None });
             if let TraceTailResult::Ok { entries, .. } = result {
                 walk.absorb(entries);
             }
@@ -858,8 +797,7 @@ impl TestBench {
             .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
         let cid = self.fresh_correlation_id();
         let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
-        self.queue
-            .push(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to));
+        self.queue.push(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to));
         self.pump_until_reply_bytes(cid, "<await-reply bytes>")
     }
 
@@ -868,11 +806,7 @@ impl TestBench {
     ///
     /// This is the asynchronous counterpart to `send_and_await` for tests that
     /// need several requests in flight at once to validate correlation.
-    pub fn send_deferred<K>(
-        &self,
-        recipient_name: &str,
-        mail: &K,
-    ) -> Result<PendingBenchReply, TestBenchError>
+    pub fn send_deferred<K>(&self, recipient_name: &str, mail: &K) -> Result<PendingBenchReply, TestBenchError>
     where
         K: Kind,
     {
@@ -882,12 +816,8 @@ impl TestBench {
             .ok_or_else(|| TestBenchError::UnknownMailbox(recipient_name.to_owned()))?;
         let cid = self.fresh_correlation_id();
         let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
-        self.queue
-            .push(Mail::new(mailbox, K::ID, mail.encode_into_bytes(), 1).with_reply_to(reply_to));
-        Ok(PendingBenchReply {
-            cid,
-            expected: K::NAME,
-        })
+        self.queue.push(Mail::new(mailbox, K::ID, mail.encode_into_bytes(), 1).with_reply_to(reply_to));
+        Ok(PendingBenchReply { cid, expected: K::NAME })
     }
 
     /// Pump until the reply for a request returned by [`Self::send_deferred`]
@@ -994,18 +924,13 @@ impl TestBench {
     {
         let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
         let payload = mail.encode_into_bytes();
-        self.queue
-            .push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
+        self.queue.push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
     }
 
     fn fresh_correlation_id(&self) -> u64 {
         // 0 is the "no correlation" sentinel so skip it.
         let id = self.next_correlation_id.fetch_add(1, Ordering::SeqCst);
-        if id == 0 {
-            self.next_correlation_id.fetch_add(1, Ordering::SeqCst)
-        } else {
-            id
-        }
+        if id == 0 { self.next_correlation_id.fetch_add(1, Ordering::SeqCst) } else { id }
     }
 
     /// Pump the event channel and the loopback receiver until a
@@ -1029,11 +954,7 @@ impl TestBench {
     /// reply payload bytes instead of decoding. Backs
     /// [`Self::send_bytes_and_await`] and the `SendAndAwait` op of
     /// [`Self::execute`], where the reply type is decoded on demand.
-    fn pump_until_reply_bytes(
-        &mut self,
-        cid: u64,
-        expected: &'static str,
-    ) -> Result<Vec<u8>, TestBenchError> {
+    fn pump_until_reply_bytes(&mut self, cid: u64, expected: &'static str) -> Result<Vec<u8>, TestBenchError> {
         let event = self.pump_until_event(cid, expected)?;
         Self::reply_payload(event, expected)
     }
@@ -1043,11 +964,7 @@ impl TestBench {
     /// [`EgressEvent`]. Shared loop body of [`Self::pump_until_reply`]
     /// (typed decode) and [`Self::pump_until_reply_bytes`] (raw
     /// bytes).
-    fn pump_until_event(
-        &mut self,
-        cid: u64,
-        expected: &'static str,
-    ) -> Result<EgressEvent, TestBenchError> {
+    fn pump_until_event(&mut self, cid: u64, expected: &'static str) -> Result<EgressEvent, TestBenchError> {
         // Adaptive backoff between quiet polls. A frame's settlement
         // round-trip (driver → pool → settlement registry → reply)
         // completes in ~1 ms, but a flat coarse sleep makes every tick
@@ -1124,10 +1041,7 @@ impl TestBench {
                 last_progress = Instant::now();
             } else {
                 if last_progress.elapsed() >= stall_deadline {
-                    return Err(TestBenchError::Timeout {
-                        expected,
-                        pumped_iterations: iterations,
-                    });
+                    return Err(TestBenchError::Timeout { expected, pumped_iterations: iterations });
                 }
                 thread::sleep(backoff);
                 backoff = (backoff * 2).min(BACKOFF_CAP);
@@ -1140,9 +1054,7 @@ impl TestBench {
         R: Kind,
     {
         match event {
-            EgressEvent::ToSession {
-                kind_name, payload, ..
-            } => {
+            EgressEvent::ToSession { kind_name, payload, .. } => {
                 // ADR-0100: decode through the kind's declared codec
                 // (cast or structured), not a hardcoded structured path.
                 R::decode_from_bytes(&payload).ok_or_else(|| {
@@ -1151,24 +1063,17 @@ impl TestBench {
                     ))
                 })
             }
-            other => Err(TestBenchError::Decode(format!(
-                "expected {expected} reply event, got {other:?}"
-            ))),
+            other => Err(TestBenchError::Decode(format!("expected {expected} reply event, got {other:?}"))),
         }
     }
 
     /// Extract the raw payload bytes from a session-targeted reply
     /// event. The bytes-level counterpart to [`Self::decode_reply`] —
     /// the caller decodes later via [`super::ExecutionResult::reply`].
-    fn reply_payload(
-        event: EgressEvent,
-        expected: &'static str,
-    ) -> Result<Vec<u8>, TestBenchError> {
+    fn reply_payload(event: EgressEvent, expected: &'static str) -> Result<Vec<u8>, TestBenchError> {
         match event {
             EgressEvent::ToSession { payload, .. } => Ok(payload),
-            other => Err(TestBenchError::Decode(format!(
-                "expected {expected} reply event, got {other:?}"
-            ))),
+            other => Err(TestBenchError::Decode(format!("expected {expected} reply event, got {other:?}"))),
         }
     }
 
@@ -1195,12 +1100,7 @@ impl TestBench {
                     self.frame += 1;
                     self.run_frame(/* dispatch_tick */ true)?;
                 }
-                self.outbound.send_reply(
-                    reply_to,
-                    &AdvanceResult::Ok {
-                        ticks_completed: ticks,
-                    },
-                );
+                self.outbound.send_reply(reply_to, &AdvanceResult::Ok { ticks_completed: ticks });
             }
             ChassisEvent::CaptureRequested => {
                 self.frame += 1;
@@ -1260,8 +1160,7 @@ impl TestBench {
                 // doesn't take a reply target, so the chassis-root push is
                 // open-coded here (mint id → record `Sent` → push with both
                 // lineage and reply-to), mirroring its three steps.
-                let advance_root =
-                    MailId::new(MailboxId::CHASSIS_MAILBOX_ID, self.fresh_correlation_id());
+                let advance_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, self.fresh_correlation_id());
                 self.queue.record_sent(
                     advance_root,
                     advance_root,
@@ -1286,10 +1185,8 @@ impl TestBench {
                 // settled (a genuine in_flight leak in some downstream cap)
                 // or the driver never replied — same fail-loud disposition
                 // the prior `SettlementTimeout` had.
-                let complete = self.pump_until_reply::<aether_kinds::LifecycleAdvanceComplete>(
-                    cid,
-                    "LifecycleAdvanceComplete",
-                )?;
+                let complete =
+                    self.pump_until_reply::<aether_kinds::LifecycleAdvanceComplete>(cid, "LifecycleAdvanceComplete")?;
                 if complete.next == <Tick as Kind>::ID.0 || complete.next == 0 {
                     break;
                 }
@@ -1328,10 +1225,7 @@ impl TestBench {
                         ));
                     }
                 }
-                let result = CaptureFrameResult::from(
-                    self.gpu
-                        .render_and_capture(&req.checks, req.reference.as_ref()),
-                );
+                let result = CaptureFrameResult::from(self.gpu.render_and_capture(&req.checks, req.reference.as_ref()));
                 for mail in req.after_mails {
                     self.queue.push(mail);
                 }
@@ -1368,9 +1262,7 @@ fn format_pending_roots(pending: &[(MailId, u32, u32)]) -> String {
     }
     pending
         .iter()
-        .map(|(root, in_flight, held_open)| {
-            format!("{root:?} → in_flight={in_flight} held_open={held_open}")
-        })
+        .map(|(root, in_flight, held_open)| format!("{root:?} → in_flight={in_flight} held_open={held_open}"))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -1403,10 +1295,7 @@ mod tests {
     /// 2062) — a pure-function check, no chassis boot needed.
     #[test]
     fn format_pending_roots_renders_counts() {
-        let a = MailId {
-            sender: MailboxId(1),
-            correlation_id: 2,
-        };
+        let a = MailId { sender: MailboxId(1), correlation_id: 2 };
         let rendered = format_pending_roots(&[(a, 3, 1)]);
         assert!(rendered.contains("in_flight=3"), "rendered: {rendered}");
         assert!(rendered.contains("held_open=1"), "rendered: {rendered}");
@@ -1442,28 +1331,16 @@ mod tests {
             }
         };
         // A synthetic root that never settles: one `Sent`, no `Finished`.
-        let stuck = MailId {
-            sender: MailboxId(0xDEAD),
-            correlation_id: 0xBEEF,
-        };
-        tb.queue
-            .trace_handle()
-            .settlement_counter()
-            .record_sent(stuck);
+        let stuck = MailId { sender: MailboxId(0xDEAD), correlation_id: 0xBEEF };
+        tb.queue.trace_handle().settlement_counter().record_sent(stuck);
 
         let err = tb.settlement_timeout("stuck.recipient".to_owned(), "StuckKind", "test.wedge");
         let TestBenchError::SettlementTimeout { pending, .. } = &err else {
             panic!("expected SettlementTimeout, got {err:?}");
         };
-        assert!(
-            pending.contains("in_flight=1"),
-            "dump should name the stuck root with in_flight=1: {pending}",
-        );
+        assert!(pending.contains("in_flight=1"), "dump should name the stuck root with in_flight=1: {pending}");
         // The rendered error string carries the dump too.
-        assert!(
-            err.to_string().contains("in_flight=1"),
-            "Display should surface the pending dump: {err}",
-        );
+        assert!(err.to_string().contains("in_flight=1"), "Display should surface the pending dump: {err}");
     }
 
     /// Boot, advance one tick, capture, sanity-check the PNG.
@@ -1486,12 +1363,8 @@ mod tests {
                 return;
             }
         };
-        let result = tb
-            .execute(vec![
-                ("tick", BenchOp::advance(1)),
-                ("snap", BenchOp::capture()),
-            ])
-            .expect("advance + capture");
+        let result =
+            tb.execute(vec![("tick", BenchOp::advance(1)), ("snap", BenchOp::capture())]).expect("advance + capture");
         let png = result.captured("snap").expect("snap step ran");
         assert!(
             png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
@@ -1539,15 +1412,10 @@ mod tests {
                 ),
             ])
             .expect("advance + send_and_await(CaptureFrame)");
-        let reply: CaptureFrameResult = result
-            .reply("capture")
-            .expect("capture step replied with CaptureFrameResult");
+        let reply: CaptureFrameResult = result.reply("capture").expect("capture step replied with CaptureFrameResult");
         match reply {
             CaptureFrameResult::Ok { png, verdict, .. } => {
-                assert!(
-                    verdict.is_none(),
-                    "no checks were requested, so the verdict must be absent",
-                );
+                assert!(verdict.is_none(), "no checks were requested, so the verdict must be absent");
                 assert!(
                     png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
                     "captured bytes are not a PNG: first 8 bytes={:?}",
@@ -1604,10 +1472,11 @@ mod tests {
         let subscriber_mbox = tb.registry.register_inline(
             "issue_723_test_subscriber",
             Arc::new(move |dispatch: MailDispatch<'_>| {
-                captured_for_handler
-                    .lock()
-                    .expect("test setup: captured mutex is never poisoned")
-                    .push((dispatch.mail_id, dispatch.root, dispatch.parent_mail));
+                captured_for_handler.lock().expect("test setup: captured mutex is never poisoned").push((
+                    dispatch.mail_id,
+                    dispatch.root,
+                    dispatch.parent_mail,
+                ));
             }),
         );
 
@@ -1624,34 +1493,22 @@ mod tests {
                 "subscribe",
                 BenchOp::send_mail(
                     "aether.lifecycle",
-                    &LifecycleSubscribe {
-                        stage: Tick::ID.0,
-                        mailbox: subscriber_mbox.0,
-                    },
+                    &LifecycleSubscribe { stage: Tick::ID.0, mailbox: subscriber_mbox.0 },
                 ),
             ),
             ("advance", BenchOp::advance(1)),
         ])
         .expect("subscribe + advance");
 
-        let captured = captured
-            .lock()
-            .expect("test setup: captured mutex is never poisoned");
-        assert!(
-            !captured.is_empty(),
-            "subscriber received no mail — fanout never reached it",
-        );
+        let captured = captured.lock().expect("test setup: captured mutex is never poisoned");
+        assert!(!captured.is_empty(), "subscriber received no mail — fanout never reached it");
         let (mail_id, root, parent) = captured[0];
         // Issue 723 fix: each fanned-out copy gets its own MailId, but
         // the root is inherited from the chassis-root tick and the
         // parent_mail points at it. Pre-fix both would be MailId::NONE
         // (orphaned: ctx.in_flight was NONE because the tick used
         // bare push, AND the fanout used bare push too).
-        assert_ne!(
-            root,
-            MailId::NONE,
-            "fanned-out copy should inherit a non-default root"
-        );
+        assert_ne!(root, MailId::NONE, "fanned-out copy should inherit a non-default root");
         assert!(
             parent.is_some_and(|p| p != MailId::NONE),
             "fanned-out copy should carry a non-default parent_mail (got {parent:?})",
@@ -1725,10 +1582,7 @@ mod tests {
                 "subscribe_shutdown",
                 BenchOp::send_mail(
                     "aether.lifecycle",
-                    &LifecycleSubscribe {
-                        stage: <Shutdown as DataKind>::ID.0,
-                        mailbox: observer_mailbox.0,
-                    },
+                    &LifecycleSubscribe { stage: <Shutdown as DataKind>::ID.0, mailbox: observer_mailbox.0 },
                 ),
             ),
             ("quit", BenchOp::send_mail("aether.lifecycle", &Quit {})),
@@ -1736,9 +1590,7 @@ mod tests {
         ])
         .expect("subscribe + quit + advance");
 
-        let observed = observed
-            .lock()
-            .expect("test setup: observed mutex is never poisoned");
+        let observed = observed.lock().expect("test setup: observed mutex is never poisoned");
         assert!(
             observed.contains(&<Shutdown as DataKind>::ID.0),
             "Shutdown broadcast never reached the subscriber — quit was not drained to the \
@@ -1756,9 +1608,7 @@ mod tests {
     fn spawn_instanced_actor_smoke() {
         use aether_actor::{Addressable as ActorTrait, HandlesKind};
         use aether_data::{Kind as DataKind, KindId as DataKindId, mailbox_id_from_name};
-        use aether_substrate::{
-            BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, SpawnError, Subname,
-        };
+        use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, SpawnError, Subname};
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
         #[repr(C)]
@@ -1832,24 +1682,16 @@ mod tests {
         );
 
         // Subname::Named — second instance, full name "test.spawn.child:alpha".
-        let id_b = tb
-            .spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received))
-            .finish()
-            .expect("named spawn");
-        assert_eq!(
-            id_b,
-            MailboxId(mailbox_id_from_name("test.spawn.child:alpha").0),
-        );
+        let id_b =
+            tb.spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received)).finish().expect("named spawn");
+        assert_eq!(id_b, MailboxId(mailbox_id_from_name("test.spawn.child:alpha").0),);
 
         // Reused subname → SubnameInUse.
         let err = tb
             .spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received))
             .finish()
             .expect_err("reused subname must fail");
-        assert!(
-            matches!(err, SpawnError::SubnameInUse { .. }),
-            "expected SubnameInUse, got {err:?}"
-        );
+        assert!(matches!(err, SpawnError::SubnameInUse { .. }), "expected SubnameInUse, got {err:?}");
 
         // Wait briefly for the two pre-loaded `Bump` mails to land in
         // the first instance's dispatcher.
@@ -1864,13 +1706,7 @@ mod tests {
         );
 
         // Live registry slots are populated by id.
-        assert!(
-            tb.actor_registry().is_live(id_a),
-            "first instance should be Live in the actor registry"
-        );
-        assert!(
-            tb.actor_registry().is_live(id_b),
-            "second instance should be Live in the actor registry"
-        );
+        assert!(tb.actor_registry().is_live(id_a), "first instance should be Live in the actor registry");
+        assert!(tb.actor_registry().is_live(id_b), "second instance should be Live in the actor registry");
     }
 }

@@ -9,10 +9,7 @@
 
 use core::str::from_utf8;
 
-use serde::de::{
-    self, DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, SeqAccess, VariantAccess,
-    Visitor,
-};
+use serde::de::{self, DeserializeSeed, EnumAccess, IntoDeserializer, MapAccess, SeqAccess, VariantAccess, Visitor};
 
 use super::Error;
 
@@ -155,36 +152,22 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     fn deserialize_unit<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
         visitor.visit_unit()
     }
-    fn deserialize_unit_struct<V: Visitor<'de>>(
-        self,
-        _name: &'static str,
-        visitor: V,
-    ) -> Result<V::Value, Error> {
+    fn deserialize_unit_struct<V: Visitor<'de>>(self, _name: &'static str, visitor: V) -> Result<V::Value, Error> {
         visitor.visit_unit()
     }
 
-    fn deserialize_newtype_struct<V: Visitor<'de>>(
-        self,
-        _name: &'static str,
-        visitor: V,
-    ) -> Result<V::Value, Error> {
+    fn deserialize_newtype_struct<V: Visitor<'de>>(self, _name: &'static str, visitor: V) -> Result<V::Value, Error> {
         visitor.visit_newtype_struct(self)
     }
 
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
         let remaining = self.read_count()?;
-        visitor.visit_seq(Counted {
-            de: self,
-            remaining,
-        })
+        visitor.visit_seq(Counted { de: self, remaining })
     }
 
     fn deserialize_tuple<V: Visitor<'de>>(self, len: usize, visitor: V) -> Result<V::Value, Error> {
         let remaining = u32::try_from(len).map_err(|_| Error::Length)?;
-        visitor.visit_seq(Counted {
-            de: self,
-            remaining,
-        })
+        visitor.visit_seq(Counted { de: self, remaining })
     }
 
     fn deserialize_tuple_struct<V: Visitor<'de>>(
@@ -194,18 +177,12 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         visitor: V,
     ) -> Result<V::Value, Error> {
         let remaining = u32::try_from(len).map_err(|_| Error::Length)?;
-        visitor.visit_seq(Counted {
-            de: self,
-            remaining,
-        })
+        visitor.visit_seq(Counted { de: self, remaining })
     }
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
         let remaining = self.read_count()?;
-        visitor.visit_map(Counted {
-            de: self,
-            remaining,
-        })
+        visitor.visit_map(Counted { de: self, remaining })
     }
 
     fn deserialize_struct<V: Visitor<'de>>(
@@ -215,10 +192,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
         visitor: V,
     ) -> Result<V::Value, Error> {
         let remaining = u32::try_from(fields.len()).map_err(|_| Error::Length)?;
-        visitor.visit_seq(Counted {
-            de: self,
-            remaining,
-        })
+        visitor.visit_seq(Counted { de: self, remaining })
     }
 
     fn deserialize_enum<V: Visitor<'de>>(
@@ -254,10 +228,7 @@ struct Counted<'a, 'de> {
 impl<'de> SeqAccess<'de> for Counted<'_, 'de> {
     type Error = Error;
 
-    fn next_element_seed<T: DeserializeSeed<'de>>(
-        &mut self,
-        seed: T,
-    ) -> Result<Option<T::Value>, Error> {
+    fn next_element_seed<T: DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>, Error> {
         if self.remaining == 0 {
             return Ok(None);
         }
@@ -273,10 +244,7 @@ impl<'de> SeqAccess<'de> for Counted<'_, 'de> {
 impl<'de> MapAccess<'de> for Counted<'_, 'de> {
     type Error = Error;
 
-    fn next_key_seed<K: DeserializeSeed<'de>>(
-        &mut self,
-        seed: K,
-    ) -> Result<Option<K::Value>, Error> {
+    fn next_key_seed<K: DeserializeSeed<'de>>(&mut self, seed: K) -> Result<Option<K::Value>, Error> {
         if self.remaining == 0 {
             return Ok(None);
         }
@@ -303,10 +271,7 @@ impl<'a, 'de> EnumAccess<'de> for Enum<'a, 'de> {
     type Error = Error;
     type Variant = Variant<'a, 'de>;
 
-    fn variant_seed<V: DeserializeSeed<'de>>(
-        self,
-        seed: V,
-    ) -> Result<(V::Value, Self::Variant), Error> {
+    fn variant_seed<V: DeserializeSeed<'de>>(self, seed: V) -> Result<(V::Value, Self::Variant), Error> {
         let index = u32::from_le_bytes(self.de.take_array::<4>()?);
         let value = seed.deserialize(index.into_deserializer())?;
         Ok((value, Variant { de: self.de }))
@@ -330,21 +295,11 @@ impl<'de> VariantAccess<'de> for Variant<'_, 'de> {
 
     fn tuple_variant<V: Visitor<'de>>(self, len: usize, visitor: V) -> Result<V::Value, Error> {
         let remaining = u32::try_from(len).map_err(|_| Error::Length)?;
-        visitor.visit_seq(Counted {
-            de: self.de,
-            remaining,
-        })
+        visitor.visit_seq(Counted { de: self.de, remaining })
     }
 
-    fn struct_variant<V: Visitor<'de>>(
-        self,
-        fields: &'static [&'static str],
-        visitor: V,
-    ) -> Result<V::Value, Error> {
+    fn struct_variant<V: Visitor<'de>>(self, fields: &'static [&'static str], visitor: V) -> Result<V::Value, Error> {
         let remaining = u32::try_from(fields.len()).map_err(|_| Error::Length)?;
-        visitor.visit_seq(Counted {
-            de: self.de,
-            remaining,
-        })
+        visitor.visit_seq(Counted { de: self.de, remaining })
     }
 }

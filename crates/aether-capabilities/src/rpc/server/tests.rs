@@ -12,11 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn test_peer_kind() -> PeerKind {
-    PeerKind::Substrate {
-        engine_name: "test".into(),
-        engine_version: "0.1.0".into(),
-        kinds: vec![],
-    }
+    PeerKind::Substrate { engine_name: "test".into(), engine_version: "0.1.0".into(), kinds: vec![] }
 }
 
 /// Boot a chassis hosting only `RpcServerCapability`, connect a
@@ -66,14 +62,9 @@ fn boot_with_deferred_echo(timeout: Duration) -> (PassiveChassis<TestChassis>, T
 /// `TcpStream`, set `read_timeout`. Shared by every test whose
 /// boot path is more elaborate than `boot_with_rpc_server_only`.
 fn connect_to_rpc_server(chassis: &PassiveChassis<TestChassis>, timeout: Duration) -> TcpStream {
-    let port = chassis
-        .handle::<RpcServerHandle>()
-        .expect("RpcServerHandle published")
-        .local_port;
+    let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
     let stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to rpc server");
-    stream
-        .set_read_timeout(Some(timeout))
-        .expect("test: set_read_timeout on TcpStream");
+    stream.set_read_timeout(Some(timeout)).expect("test: set_read_timeout on TcpStream");
     stream
 }
 
@@ -88,10 +79,7 @@ fn complete_handshake(stream: &mut TcpStream) {
         stream,
         &WireFrame::Hello(Hello {
             wire_version: WIRE_VERSION,
-            peer: PeerKind::Client {
-                client_name: "test-client".into(),
-                client_version: "0.0.1".into(),
-            },
+            peer: PeerKind::Client { client_name: "test-client".into(), client_version: "0.0.1".into() },
         }),
     )
     .expect("test: write_frame Hello to rpc server");
@@ -112,20 +100,14 @@ fn handshake_hello_to_hello_ack_roundtrip() {
         &mut stream,
         &WireFrame::Hello(Hello {
             wire_version: WIRE_VERSION,
-            peer: PeerKind::Client {
-                client_name: "test-client".into(),
-                client_version: "0.0.1".into(),
-            },
+            peer: PeerKind::Client { client_name: "test-client".into(), client_version: "0.0.1".into() },
         }),
     )
     .expect("write Hello");
 
     let reply: WireFrame = read_frame(&mut stream).expect("read HelloAck");
     match reply {
-        WireFrame::HelloAck(HelloAck {
-            wire_version,
-            server,
-        }) => {
+        WireFrame::HelloAck(HelloAck { wire_version, server }) => {
             assert_eq!(wire_version, WIRE_VERSION);
             match server {
                 PeerKind::Substrate { engine_name, .. } => {
@@ -259,12 +241,7 @@ fn call_headless_window_set_mode_err_reaches_component_reply() {
     let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(5));
     complete_handshake(&mut stream);
 
-    let payload = SetWindowMode {
-        mode: WindowMode::Windowed,
-        width: None,
-        height: None,
-    }
-    .encode_into_bytes();
+    let payload = SetWindowMode { mode: WindowMode::Windowed, width: None, height: None }.encode_into_bytes();
     let window_mailbox = mailbox_id_from_name(<HeadlessWindowCapability as Addressable>::NAMESPACE);
     write_frame(
         &mut stream,
@@ -292,12 +269,8 @@ fn call_headless_window_set_mode_err_reaches_component_reply() {
         other => panic!("expected ReplyEvent, got {other:?}"),
     };
     assert_eq!(envelope.kind, <SetWindowModeResult as Kind>::ID);
-    let decoded = SetWindowModeResult::decode_from_bytes(&envelope.payload)
-        .expect("decode SetWindowModeResult");
-    assert!(
-        matches!(decoded, SetWindowModeResult::Err { .. }),
-        "headless window cap replies Err, got {decoded:?}"
-    );
+    let decoded = SetWindowModeResult::decode_from_bytes(&envelope.payload).expect("decode SetWindowModeResult");
+    assert!(matches!(decoded, SetWindowModeResult::Err { .. }), "headless window cap replies Err, got {decoded:?}");
 
     let end: WireFrame = read_frame(&mut stream).expect("read ReplyEnd");
     match end {
@@ -321,9 +294,7 @@ fn call_headless_window_set_mode_err_reaches_component_reply() {
 /// `ReplyEnd`, then the late reply dropped).
 #[test]
 fn call_deferred_echo_settles_after_reply() {
-    use crate::rpc::server::test_echo::{
-        DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest,
-    };
+    use crate::rpc::server::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
     use crate::rpc::{MailEnvelope, MailboxAddress};
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
@@ -359,8 +330,7 @@ fn call_deferred_echo_settles_after_reply() {
         other => panic!("expected ReplyEvent for the deferred reply, got {other:?}"),
     };
     assert_eq!(envelope.kind, <DeferredEchoReply as Kind>::ID);
-    let decoded =
-        DeferredEchoReply::decode_from_bytes(&envelope.payload).expect("decode deferred reply");
+    let decoded = DeferredEchoReply::decode_from_bytes(&envelope.payload).expect("decode deferred reply");
     assert_eq!(decoded.value, 99);
 
     // ReplyEnd follows — settlement fired after the deferred reply,
@@ -398,9 +368,7 @@ fn call_deferred_echo_settles_after_reply() {
 /// behind 50ms sleeps); the test pairs by `value`.
 #[test]
 fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
-    use crate::rpc::server::test_echo::{
-        DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest,
-    };
+    use crate::rpc::server::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
     use crate::rpc::{MailEnvelope, MailboxAddress};
     use crate::trace::TraceDispatchCapability;
     use aether_actor::Addressable;
@@ -462,8 +430,8 @@ fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
             WireFrame::ReplyEvent { cid, envelope } => {
                 assert_eq!(cid, 0xbeef);
                 if envelope.kind == <DeferredEchoReply as Kind>::ID {
-                    let decoded = DeferredEchoReply::decode_from_bytes(&envelope.payload)
-                        .expect("decode deferred reply");
+                    let decoded =
+                        DeferredEchoReply::decode_from_bytes(&envelope.payload).expect("decode deferred reply");
                     deferred_values.push(decoded.value);
                 } else {
                     // Otherwise this is the DispatchTracedAck::Ok
@@ -482,16 +450,9 @@ fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
             other => panic!("expected ReplyEvent / ReplyEnd, got {other:?}"),
         }
     }
-    assert!(
-        saw_ack,
-        "expected DispatchTracedAck reply event before ReplyEnd",
-    );
+    assert!(saw_ack, "expected DispatchTracedAck reply event before ReplyEnd");
     deferred_values.sort_unstable();
-    assert_eq!(
-        deferred_values,
-        vec![11, 22],
-        "expected one DeferredEchoReply per request, sorted by value",
-    );
+    assert_eq!(deferred_values, vec![11, 22], "expected one DeferredEchoReply per request, sorted by value");
 }
 
 /// Fire-and-forget `Call { cid: None }` skips reply correlation
@@ -544,8 +505,7 @@ fn call_without_cid_is_fire_and_forget() {
     // Immediately Ping. If the fire-and-forget Call had leaked
     // reply correlation, a ReplyEvent / ReplyEnd would arrive
     // before the Pong. Asserting we see Pong first proves no leak.
-    write_frame(&mut stream, &WireFrame::Ping(0x00c0_ffee))
-        .expect("test: write_frame Ping to rpc server");
+    write_frame(&mut stream, &WireFrame::Ping(0x00c0_ffee)).expect("test: write_frame Ping to rpc server");
     let reply: WireFrame = read_frame(&mut stream).expect("read Pong");
     assert_eq!(reply, WireFrame::Pong(0x00c0_ffee));
 }
@@ -562,10 +522,7 @@ fn wire_version_mismatch_kicks_connection() {
         &mut stream,
         &WireFrame::Hello(Hello {
             wire_version: WIRE_VERSION + 1,
-            peer: PeerKind::Client {
-                client_name: "future-client".into(),
-                client_version: "9.9.9".into(),
-            },
+            peer: PeerKind::Client { client_name: "future-client".into(), client_version: "9.9.9".into() },
         }),
     )
     .expect("test: write_frame future-version Hello to rpc server");
@@ -573,10 +530,7 @@ fn wire_version_mismatch_kicks_connection() {
     let reply: WireFrame = read_frame(&mut stream).expect("read Bye");
     match reply {
         WireFrame::Bye { reason } => {
-            assert!(
-                reason.contains("wire_version"),
-                "Bye reason should mention wire_version: {reason}",
-            );
+            assert!(reason.contains("wire_version"), "Bye reason should mention wire_version: {reason}");
         }
         other => panic!("expected Bye, got {other:?}"),
     }
@@ -600,9 +554,7 @@ fn oversize_frame_replies_with_frame_too_large_and_session_survives() {
     // Set the read timeout high — the server has to read the full
     // oversize body off the wire before it can write the error
     // reply, so the read for the ReplyEnd is gated on that drain.
-    stream
-        .set_write_timeout(Some(Duration::from_secs(10)))
-        .expect("set_write_timeout");
+    stream.set_write_timeout(Some(Duration::from_secs(10))).expect("set_write_timeout");
 
     // Announce a body just over the cap, then push that many zero
     // bytes. The cap defaults to 64 MiB (MAX_FRAME_SIZE), and the
@@ -612,24 +564,17 @@ fn oversize_frame_replies_with_frame_too_large_and_session_survives() {
     let max = max_frame_size();
     assert!(max >= MAX_FRAME_SIZE, "cap accessor lifted below default");
     let oversize: usize = max + 1;
-    assert!(
-        oversize <= max.saturating_mul(2),
-        "test size must be inside the drain ceiling",
-    );
+    assert!(oversize <= max.saturating_mul(2), "test size must be inside the drain ceiling");
     #[allow(clippy::cast_possible_truncation)]
     let prefix = (oversize as u32).to_le_bytes();
-    stream
-        .write_all(&prefix)
-        .expect("write oversize length prefix");
+    stream.write_all(&prefix).expect("write oversize length prefix");
     // Write the body in chunks so a 64 MiB+ payload doesn't single-
     // syscall through.
     let chunk = vec![0u8; 1024 * 1024];
     let mut remaining = oversize;
     while remaining > 0 {
         let n = remaining.min(chunk.len());
-        stream
-            .write_all(&chunk[..n])
-            .expect("write oversize body chunk");
+        stream.write_all(&chunk[..n]).expect("write oversize body chunk");
         remaining -= n;
     }
 
@@ -658,10 +603,7 @@ fn oversize_frame_replies_with_frame_too_large_and_session_survives() {
 }
 
 fn client_peer_kind() -> PeerKind {
-    PeerKind::Client {
-        client_name: "rpc-client-test".into(),
-        client_version: "0.0.1".into(),
-    }
+    PeerKind::Client { client_name: "rpc-client-test".into(), client_version: "0.0.1".into() }
 }
 
 /// Full socket round-trip: boot `RpcServerCapability` + the echo
@@ -694,10 +636,7 @@ fn call_echo_round_trips_over_the_socket() {
         .build_passive()
         .expect("caps boot");
 
-    let port = chassis
-        .handle::<RpcServerHandle>()
-        .expect("RpcServerHandle published")
-        .local_port;
+    let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
 
     // No on_frame work needed — `recv_timeout` returning is the
     // observable signal we care about. iamacoffeepot/aether#835:
@@ -733,15 +672,9 @@ fn call_echo_round_trips_over_the_socket() {
     // First frame back: ReplyEvent carrying the echoed reply.
     // recv_timeout so a hung settlement fails the test instead of
     // blocking forever.
-    let event = conn
-        .inbound
-        .recv_timeout(Duration::from_secs(5))
-        .expect("ReplyEvent within 5s");
+    let event = conn.inbound.recv_timeout(Duration::from_secs(5)).expect("ReplyEvent within 5s");
     let envelope = match event {
-        WireFrame::ReplyEvent {
-            cid: ev_cid,
-            envelope,
-        } => {
+        WireFrame::ReplyEvent { cid: ev_cid, envelope } => {
             assert_eq!(ev_cid, cid);
             envelope
         }
@@ -752,15 +685,9 @@ fn call_echo_round_trips_over_the_socket() {
     assert_eq!(decoded.value, 42);
 
     // Then ReplyEnd closes the call.
-    let end = conn
-        .inbound
-        .recv_timeout(Duration::from_secs(5))
-        .expect("ReplyEnd within 5s");
+    let end = conn.inbound.recv_timeout(Duration::from_secs(5)).expect("ReplyEnd within 5s");
     match end {
-        WireFrame::ReplyEnd {
-            cid: end_cid,
-            result,
-        } => {
+        WireFrame::ReplyEnd { cid: end_cid, result } => {
             assert_eq!(end_cid, cid);
             result.expect("ReplyEnd result Ok");
         }

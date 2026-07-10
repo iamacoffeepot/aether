@@ -53,13 +53,9 @@ mod tests {
             loaded.capabilities.handlers,
         );
         let expected = format!("aether.component/{}:test.probe", WasmTrampoline::NAMESPACE);
-        assert_eq!(
-            loaded.addr, expected,
-            "probe should load at its ADR-0099 lineage address",
-        );
+        assert_eq!(loaded.addr, expected, "probe should load at its ADR-0099 lineage address");
 
-        let caps =
-            bench.replace_export(engine, loaded.mailbox_id, "aether_kit", "aether.kit.camera");
+        let caps = bench.replace_export(engine, loaded.mailbox_id, "aether_kit", "aether.kit.camera");
 
         // Post-replace: the camera handler set is active, the probe's
         // is gone, and Tick (declared by both) survives the swap.
@@ -83,10 +79,7 @@ mod tests {
         // LogTail routed to the rendered path is answered Ok, proving
         // the same mailbox was swapped in place.
         assert!(
-            matches!(
-                bench.log_tail(engine, &loaded.addr, None),
-                LogTailResult::Ok { .. },
-            ),
+            matches!(bench.log_tail(engine, &loaded.addr, None), LogTailResult::Ok { .. },),
             "the lineage address should still route to the live mailbox after replace",
         );
     }
@@ -119,11 +112,7 @@ mod tests {
         // Pre-replace: the entry is a strict receiver — it declares a
         // Ping handler and no fallback.
         assert!(
-            loaded
-                .capabilities
-                .handlers
-                .iter()
-                .any(|h| h.id == Ping::ID),
+            loaded.capabilities.handlers.iter().any(|h| h.id == Ping::ID),
             "the entry RootManager should declare a Ping handler: {:?}",
             loaded.capabilities.handlers,
         );
@@ -135,12 +124,7 @@ mod tests {
 
         // Replace into the non-entry export `test.ui.panel`, at the same
         // mailbox id, carrying the export over the wire.
-        let caps = bench.replace_export(
-            engine,
-            loaded.mailbox_id,
-            "aether_test_fixtures_bundle",
-            "test.ui.panel",
-        );
+        let caps = bench.replace_export(engine, loaded.mailbox_id, "aether_test_fixtures_bundle", "test.ui.panel");
 
         // Post-replace: Panel's capability group is active — still a
         // Ping handler, but now with a fallback, the observable
@@ -160,10 +144,7 @@ mod tests {
         // The lineage address still routes to the live mailbox: the
         // same trampoline was swapped in place, now hosting Panel.
         assert!(
-            matches!(
-                bench.log_tail(engine, &loaded.addr, None),
-                LogTailResult::Ok { .. },
-            ),
+            matches!(bench.log_tail(engine, &loaded.addr, None), LogTailResult::Ok { .. },),
             "the lineage address should still route to the live mailbox after an \
                  export-targeted replace",
         );

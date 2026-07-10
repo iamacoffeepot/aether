@@ -16,10 +16,7 @@ use std::time::Duration;
 /// domain struct.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "runtime", derive(aether_substrate::Config))]
-#[cfg_attr(
-    feature = "runtime",
-    config(env_prefix = "AETHER_GEMINI", cli_prefix = "gemini")
-)]
+#[cfg_attr(feature = "runtime", config(env_prefix = "AETHER_GEMINI", cli_prefix = "gemini"))]
 pub struct GeminiConfig {
     /// The Google API key. `None` (or `disabled`) wires the
     /// `DisabledGeminiAdapter`. `env` override pins the unprefixed
@@ -31,11 +28,7 @@ pub struct GeminiConfig {
     /// (no `D` suffix on `DISABLE`).
     #[cfg_attr(
         feature = "runtime",
-        config(
-            env = "AETHER_GEMINI_DISABLE",
-            cli_long = "gemini-disable",
-            default = false
-        )
+        config(env = "AETHER_GEMINI_DISABLE", cli_long = "gemini-disable", default = false)
     )]
     pub disabled: bool,
     /// Per-cap concurrency bound (doubles as rate-limit throttling). The
@@ -47,10 +40,7 @@ pub struct GeminiConfig {
     /// `ms_duration` hint + `layer_field = "timeout_ms"` pin the
     /// Layer / env / CLI shape to the pre-derive name
     /// (`AETHER_GEMINI_TIMEOUT_MS`, `--gemini-timeout-ms`).
-    #[cfg_attr(
-        feature = "runtime",
-        config(default = 180_000, ms_duration, layer_field = "timeout_ms")
-    )]
+    #[cfg_attr(feature = "runtime", config(default = 180_000, ms_duration, layer_field = "timeout_ms"))]
     pub timeout: Duration,
 }
 

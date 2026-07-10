@@ -114,10 +114,7 @@ impl Focus {
             child,
             rect,
             eligibility,
-            availability: Availability {
-                visible: state.visible,
-                enabled: state.enabled,
-            },
+            availability: Availability { visible: state.visible, enabled: state.enabled },
         });
     }
 
@@ -142,11 +139,7 @@ impl Focus {
     }
 
     pub fn begin_capture(&mut self, child: MailboxId) {
-        if self
-            .entries
-            .iter()
-            .any(|entry| entry.child == child && entry.pointer_live())
-        {
+        if self.entries.iter().any(|entry| entry.child == child && entry.pointer_live()) {
             self.capture = Some(child);
         }
     }
@@ -164,10 +157,7 @@ impl Focus {
 
     pub fn set_focus(&mut self, next: Option<MailboxId>) -> Option<FocusTransition> {
         if let Some(child) = next
-            && !self
-                .entries
-                .iter()
-                .any(|entry| entry.child == child && entry.focus_live())
+            && !self.entries.iter().any(|entry| entry.child == child && entry.focus_live())
         {
             return None;
         }
@@ -196,9 +186,7 @@ impl Focus {
         if count == 0 {
             return None;
         }
-        let current = self
-            .focused
-            .and_then(|child| self.entries.iter().position(|entry| entry.child == child));
+        let current = self.focused.and_then(|child| self.entries.iter().position(|entry| entry.child == child));
         for offset in 0..count {
             let index = match (direction, current) {
                 (FocusDirection::Forward, Some(index)) => (index + 1 + offset) % count,
@@ -229,18 +217,11 @@ impl Focus {
 
     /// Apply a source-attributed state change. If the child becomes unavailable,
     /// move focus forward and clear live hover/capture paths immediately.
-    pub fn update_availability(
-        &mut self,
-        child: MailboxId,
-        state: &WidgetControlState,
-    ) -> AvailabilityEffects {
+    pub fn update_availability(&mut self, child: MailboxId, state: &WidgetControlState) -> AvailabilityEffects {
         let Some(index) = self.entries.iter().position(|entry| entry.child == child) else {
             return AvailabilityEffects::default();
         };
-        self.entries[index].availability = Availability {
-            visible: state.visible,
-            enabled: state.enabled,
-        };
+        self.entries[index].availability = Availability { visible: state.visible, enabled: state.enabled };
         if state.visible && state.enabled {
             return AvailabilityEffects::default();
         }
@@ -250,17 +231,11 @@ impl Focus {
             self.focused = None;
             let next = self.next_live_from(index, FocusDirection::Forward);
             self.focused = next;
-            effects.focus = Some(FocusTransition {
-                previous: Some(child),
-                next,
-            });
+            effects.focus = Some(FocusTransition { previous: Some(child), next });
         }
         if self.hovered == Some(child) {
             self.hovered = None;
-            effects.hover = Some(HoverTransition {
-                previous: Some(child),
-                next: None,
-            });
+            effects.hover = Some(HoverTransition { previous: Some(child), next: None });
         }
         if self.capture == Some(child) {
             self.capture = None;
@@ -296,12 +271,7 @@ mod tests {
     fn register(focus: &mut Focus, child: u64, x: f32, y: f32, pointer: bool, keyboard: bool) {
         focus.register(
             MailboxId(child),
-            FocusRect {
-                x,
-                y,
-                width: 10.0,
-                height: 10.0,
-            },
+            FocusRect { x, y, width: 10.0, height: 10.0 },
             FocusEligibility { pointer, keyboard },
             &available(),
         );
@@ -320,30 +290,14 @@ mod tests {
         let mut focus = Focus::new();
         focus.register(
             MailboxId(1),
-            FocusRect {
-                x: 0.0,
-                y: 0.0,
-                width: 20.0,
-                height: 20.0,
-            },
-            FocusEligibility {
-                pointer: true,
-                keyboard: true,
-            },
+            FocusRect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
+            FocusEligibility { pointer: true, keyboard: true },
             &available(),
         );
         focus.register(
             MailboxId(2),
-            FocusRect {
-                x: 10.0,
-                y: 10.0,
-                width: 20.0,
-                height: 20.0,
-            },
-            FocusEligibility {
-                pointer: true,
-                keyboard: true,
-            },
+            FocusRect { x: 10.0, y: 10.0, width: 20.0, height: 20.0 },
+            FocusEligibility { pointer: true, keyboard: true },
             &available(),
         );
         assert_eq!(focus.hit_test(15.0, 15.0), Some(MailboxId(2)));
@@ -359,17 +313,11 @@ mod tests {
         let mut focus = focus_with_three();
         assert_eq!(
             focus.move_focus(FocusDirection::Forward),
-            Some(FocusTransition {
-                previous: None,
-                next: Some(MailboxId(1))
-            })
+            Some(FocusTransition { previous: None, next: Some(MailboxId(1)) })
         );
         assert_eq!(
             focus.move_focus(FocusDirection::Backward),
-            Some(FocusTransition {
-                previous: Some(MailboxId(1)),
-                next: Some(MailboxId(3)),
-            })
+            Some(FocusTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) })
         );
 
         let mut disabled = available();
@@ -381,36 +329,21 @@ mod tests {
         focus.update_availability(MailboxId(3), &available());
         assert_eq!(
             focus.move_focus(FocusDirection::Forward),
-            Some(FocusTransition {
-                previous: Some(MailboxId(1)),
-                next: Some(MailboxId(3)),
-            })
+            Some(FocusTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) })
         );
     }
 
     #[test]
     fn hover_reports_sibling_then_empty_edges() {
         let mut focus = focus_with_three();
-        assert_eq!(
-            focus.update_hover(5.0, 5.0),
-            Some(HoverTransition {
-                previous: None,
-                next: Some(MailboxId(1))
-            })
-        );
+        assert_eq!(focus.update_hover(5.0, 5.0), Some(HoverTransition { previous: None, next: Some(MailboxId(1)) }));
         assert_eq!(
             focus.update_hover(5.0, 45.0),
-            Some(HoverTransition {
-                previous: Some(MailboxId(1)),
-                next: Some(MailboxId(3)),
-            })
+            Some(HoverTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) })
         );
         assert_eq!(
             focus.update_hover(100.0, 100.0),
-            Some(HoverTransition {
-                previous: Some(MailboxId(3)),
-                next: None
-            })
+            Some(HoverTransition { previous: Some(MailboxId(3)), next: None })
         );
     }
 
@@ -426,14 +359,8 @@ mod tests {
         assert_eq!(
             focus.update_availability(MailboxId(1), &hidden),
             AvailabilityEffects {
-                focus: Some(FocusTransition {
-                    previous: Some(MailboxId(1)),
-                    next: Some(MailboxId(3)),
-                }),
-                hover: Some(HoverTransition {
-                    previous: Some(MailboxId(1)),
-                    next: None,
-                }),
+                focus: Some(FocusTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) }),
+                hover: Some(HoverTransition { previous: Some(MailboxId(1)), next: None }),
                 cleared_capture: Some(MailboxId(1)),
             }
         );
@@ -449,10 +376,7 @@ mod tests {
         assert_eq!(focus.pointer_target(5.0, 45.0), Some(MailboxId(1)));
         assert_eq!(
             focus.release_capture(5.0, 45.0),
-            Some(HoverTransition {
-                previous: Some(MailboxId(1)),
-                next: Some(MailboxId(3)),
-            })
+            Some(HoverTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) })
         );
         assert_eq!(focus.pointer_target(5.0, 45.0), Some(MailboxId(3)));
     }

@@ -48,10 +48,7 @@ pub fn prepare_capture_copy(
     let padded_row_bytes = align_up(unpadded_row_bytes, COPY_ROW_ALIGN);
     let buffer_size = u64::from(padded_row_bytes) * u64::from(height);
 
-    let needs_realloc = targets
-        .readback
-        .as_ref()
-        .is_none_or(|rb| rb.width != width || rb.height != height);
+    let needs_realloc = targets.readback.as_ref().is_none_or(|rb| rb.width != width || rb.height != height);
     if needs_realloc {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("capture readback"),
@@ -59,11 +56,7 @@ pub fn prepare_capture_copy(
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        targets.readback = Some(Readback {
-            buffer,
-            width,
-            height,
-        });
+        targets.readback = Some(Readback { buffer, width, height });
     }
 
     let readback = targets.readback.as_ref().expect("readback just set");
@@ -83,20 +76,10 @@ pub fn prepare_capture_copy(
                 rows_per_image: Some(height),
             },
         },
-        wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
     );
 
-    CaptureMeta {
-        width,
-        height,
-        padded_row_bytes,
-        unpadded_row_bytes,
-        format: targets.color_format(),
-    }
+    CaptureMeta { width, height, padded_row_bytes, unpadded_row_bytes, format: targets.color_format() }
 }
 
 /// Map the readback buffer (after the encoder's submit has run),
@@ -114,16 +97,8 @@ pub fn prepare_capture_copy(
 /// callers that can't tolerate the stall (the desktop render loop)
 /// should not call this on the hot path; capture is one frame per
 /// MCP request, not per frame.
-pub fn finish_capture(
-    device: &wgpu::Device,
-    targets: &Targets,
-    meta: &CaptureMeta,
-) -> Result<Vec<u8>, String> {
-    encode_png(
-        &map_capture_rgba(device, targets, meta)?,
-        meta.width,
-        meta.height,
-    )
+pub fn finish_capture(device: &wgpu::Device, targets: &Targets, meta: &CaptureMeta) -> Result<Vec<u8>, String> {
+    encode_png(&map_capture_rgba(device, targets, meta)?, meta.width, meta.height)
 }
 
 /// Map the readback buffer (after the encoder's submit has run), strip
@@ -138,34 +113,20 @@ pub fn finish_capture(
 /// callers that can't tolerate the stall (the desktop render loop)
 /// should not call this on the hot path; capture is one frame per
 /// MCP request, not per frame.
-pub fn map_capture_rgba(
-    device: &wgpu::Device,
-    targets: &Targets,
-    meta: &CaptureMeta,
-) -> Result<Vec<u8>, String> {
-    let readback = targets
-        .readback
-        .as_ref()
-        .ok_or_else(|| "readback buffer missing".to_owned())?;
+pub fn map_capture_rgba(device: &wgpu::Device, targets: &Targets, meta: &CaptureMeta) -> Result<Vec<u8>, String> {
+    let readback = targets.readback.as_ref().ok_or_else(|| "readback buffer missing".to_owned())?;
 
     let slice = readback.buffer.slice(..);
     let (tx, rx) = mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |res| {
         let _ = tx.send(res);
     });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|e| format!("device poll: {e:?}"))?;
-    rx.recv()
-        .map_err(|e| format!("map channel dropped: {e}"))?
-        .map_err(|e| format!("buffer map failed: {e:?}"))?;
+    device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| format!("device poll: {e:?}"))?;
+    rx.recv().map_err(|e| format!("map channel dropped: {e}"))?.map_err(|e| format!("buffer map failed: {e:?}"))?;
 
     let mapped = slice.get_mapped_range();
     let mut rgba = Vec::with_capacity((meta.unpadded_row_bytes as usize) * (meta.height as usize));
-    let swizzle_bgra = matches!(
-        meta.format,
-        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
-    );
+    let swizzle_bgra = matches!(meta.format, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
     for row in 0..meta.height {
         let start = (row * meta.padded_row_bytes) as usize;
         let end = start + meta.unpadded_row_bytes as usize;
@@ -194,12 +155,8 @@ pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Strin
         let mut encoder = png::Encoder::new(&mut out, width, height);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder
-            .write_header()
-            .map_err(|e| format!("png header: {e}"))?;
-        writer
-            .write_image_data(rgba)
-            .map_err(|e| format!("png write: {e}"))?;
+        let mut writer = encoder.write_header().map_err(|e| format!("png header: {e}"))?;
+        writer.write_image_data(rgba).map_err(|e| format!("png write: {e}"))?;
     }
     Ok(out)
 }

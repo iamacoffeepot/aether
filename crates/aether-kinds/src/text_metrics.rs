@@ -48,26 +48,15 @@ impl CachedFontMetrics {
     /// Build the cache from a grabbed [`FontMetrics`] table.
     #[must_use]
     pub fn new(metrics: &FontMetrics) -> Self {
-        let advances = metrics
-            .advances
-            .iter()
-            .map(|glyph| (glyph.codepoint, glyph.advance_units))
-            .collect();
-        Self {
-            units_per_em: metrics.units_per_em,
-            default_advance: metrics.default_advance,
-            advances,
-        }
+        let advances = metrics.advances.iter().map(|glyph| (glyph.codepoint, glyph.advance_units)).collect();
+        Self { units_per_em: metrics.units_per_em, default_advance: metrics.default_advance, advances }
     }
 
     /// A codepoint's advance in font units, falling back to the
     /// `.notdef` advance for a codepoint the font has no glyph for — the
     /// same fallback the draw path takes.
     fn advance_units(&self, ch: char) -> f32 {
-        self.advances
-            .get(&u32::from(ch))
-            .copied()
-            .unwrap_or(self.default_advance)
+        self.advances.get(&u32::from(ch)).copied().unwrap_or(self.default_advance)
     }
 
     /// The pixel width `text` occupies at `size_pixels` — the sum of its
@@ -112,18 +101,9 @@ mod cached_font_metrics_tests {
             line_gap: 0.0,
             default_advance: 600.0,
             advances: vec![
-                GlyphAdvance {
-                    codepoint: u32::from('a'),
-                    advance_units: 600.0,
-                },
-                GlyphAdvance {
-                    codepoint: u32::from('b'),
-                    advance_units: 600.0,
-                },
-                GlyphAdvance {
-                    codepoint: u32::from('c'),
-                    advance_units: 600.0,
-                },
+                GlyphAdvance { codepoint: u32::from('a'), advance_units: 600.0 },
+                GlyphAdvance { codepoint: u32::from('b'), advance_units: 600.0 },
+                GlyphAdvance { codepoint: u32::from('c'), advance_units: 600.0 },
             ],
         }
     }

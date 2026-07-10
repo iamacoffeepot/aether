@@ -21,11 +21,7 @@ pub(super) struct InteractionState {
 impl InteractionState {
     #[must_use]
     pub(super) fn new(control: WidgetControlState) -> Self {
-        Self {
-            control,
-            focused: false,
-            hovered: false,
-        }
+        Self { control, focused: false, hovered: false }
     }
 
     #[must_use]
@@ -124,9 +120,7 @@ impl InteractionState {
 
 pub(super) fn emit_state_changed(ctx: &WasmCtx<'_>, state: &InteractionState) {
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetStateChanged {
-            state: state.control().clone(),
-        });
+        parent.send(&WidgetStateChanged { state: state.control().clone() });
     }
 }
 
@@ -178,23 +172,13 @@ mod tests {
     fn validation_selects_named_theme_role() {
         let mut state = InteractionState::new(WidgetControlState::default());
         let mut warning = state.control().clone();
-        warning.validation = WidgetValidation::Warning {
-            message: String::from("check range"),
-        };
+        warning.validation = WidgetValidation::Warning { message: String::from("check range") };
         state.replace(warning);
-        assert_eq!(
-            state.validation_color(&Theme::DEFAULT),
-            Some(Theme::DEFAULT.warning)
-        );
+        assert_eq!(state.validation_color(&Theme::DEFAULT), Some(Theme::DEFAULT.warning));
 
         let mut error = state.control().clone();
-        error.validation = WidgetValidation::Error {
-            message: String::from("invalid"),
-        };
+        error.validation = WidgetValidation::Error { message: String::from("invalid") };
         state.replace(error);
-        assert_eq!(
-            state.validation_color(&Theme::DEFAULT),
-            Some(Theme::DEFAULT.error)
-        );
+        assert_eq!(state.validation_color(&Theme::DEFAULT), Some(Theme::DEFAULT.error));
     }
 }

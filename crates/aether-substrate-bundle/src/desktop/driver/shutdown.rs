@@ -24,10 +24,7 @@ use crate::desktop::chassis::UserEvent;
 /// run teardown. Best-effort: a failed install warn-logs and leaves
 /// shutdown to `WindowEvent::CloseRequested` only.
 #[cfg(unix)]
-pub(super) fn install_shutdown_handler(
-    shutdown: &Arc<AtomicBool>,
-    proxy: EventLoopProxy<UserEvent>,
-) {
+pub(super) fn install_shutdown_handler(shutdown: &Arc<AtomicBool>, proxy: EventLoopProxy<UserEvent>) {
     use std::thread;
 
     use signal_hook::consts::{SIGINT, SIGTERM};
@@ -52,17 +49,15 @@ pub(super) fn install_shutdown_handler(
     // path. A separate thread (not the single-threaded winit loop), so
     // it never freezes the loop.
     #[allow(clippy::disallowed_methods)]
-    let spawned = thread::Builder::new()
-        .name("aether-desktop-signal".into())
-        .spawn(move || {
-            // The first signal begins graceful shutdown; the iterator
-            // only ends if the underlying fd closes (it doesn't for the
-            // thread's lifetime), so a single `next()` is the whole job.
-            if signals.forever().next().is_some() {
-                shutdown.store(true, Ordering::SeqCst);
-                let _ = proxy.send_event(UserEvent::Quit);
-            }
-        });
+    let spawned = thread::Builder::new().name("aether-desktop-signal".into()).spawn(move || {
+        // The first signal begins graceful shutdown; the iterator
+        // only ends if the underlying fd closes (it doesn't for the
+        // thread's lifetime), so a single `next()` is the whole job.
+        if signals.forever().next().is_some() {
+            shutdown.store(true, Ordering::SeqCst);
+            let _ = proxy.send_event(UserEvent::Quit);
+        }
+    });
     if let Err(e) = spawned {
         tracing::error!(
             target: "aether_substrate::boot",
@@ -74,10 +69,7 @@ pub(super) fn install_shutdown_handler(
 }
 
 #[cfg(not(unix))]
-pub(super) fn install_shutdown_handler(
-    shutdown: &Arc<AtomicBool>,
-    proxy: EventLoopProxy<UserEvent>,
-) {
+pub(super) fn install_shutdown_handler(shutdown: &Arc<AtomicBool>, proxy: EventLoopProxy<UserEvent>) {
     let shutdown = Arc::clone(shutdown);
     if let Err(e) = ctrlc::set_handler(move || {
         shutdown.store(true, Ordering::SeqCst);

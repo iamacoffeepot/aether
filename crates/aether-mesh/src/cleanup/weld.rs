@@ -67,11 +67,7 @@ const BUCKET_SIZE: i32 = WELD_TOLERANCE_FIXED_UNITS * 2;
 type BucketKey = (i32, i32, i32);
 
 fn bucket_of(p: Point3) -> BucketKey {
-    (
-        p.x.div_euclid(BUCKET_SIZE),
-        p.y.div_euclid(BUCKET_SIZE),
-        p.z.div_euclid(BUCKET_SIZE),
-    )
+    (p.x.div_euclid(BUCKET_SIZE), p.y.div_euclid(BUCKET_SIZE), p.z.div_euclid(BUCKET_SIZE))
 }
 
 impl IndexedMesh {
@@ -94,28 +90,17 @@ impl IndexedMesh {
             if ids.len() < 3 {
                 continue;
             }
-            indexed.push(IndexedPolygon {
-                vertices: ids,
-                plane: poly.plane,
-                color: poly.color,
-            });
+            indexed.push(IndexedPolygon { vertices: ids, plane: poly.plane, color: poly.color });
         }
 
-        Self {
-            vertices: vertex_pool,
-            polygons: indexed,
-        }
+        Self { vertices: vertex_pool, polygons: indexed }
     }
 }
 
 /// Look up `v` against pool entries within tolerance (Chebyshev), via
 /// the 27 neighboring spatial buckets. Returns the existing entry's
 /// `VertexId` if any is within tolerance; otherwise inserts as new.
-fn lookup_or_insert(
-    pool: &mut Vec<Point3>,
-    buckets: &mut HashMap<BucketKey, Vec<VertexId>>,
-    v: Point3,
-) -> VertexId {
+fn lookup_or_insert(pool: &mut Vec<Point3>, buckets: &mut HashMap<BucketKey, Vec<VertexId>>, v: Point3) -> VertexId {
     let (bx, by, bz) = bucket_of(v);
     for dz in -1..=1 {
         for dy in -1..=1 {
@@ -156,9 +141,8 @@ mod tests {
 
     #[test]
     fn single_triangle_keeps_three_distinct_vertices() {
-        let tri =
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 5)
-                .expect("test setup: non-degenerate triangle");
+        let tri = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 5)
+            .expect("test setup: non-degenerate triangle");
         let mesh = IndexedMesh::weld(vec![tri]);
         assert_eq!(mesh.vertices.len(), 3);
         assert_eq!(mesh.polygons.len(), 1);
@@ -185,12 +169,7 @@ mod tests {
         // We can't go through `Polygon::from_triangle` (it rejects degenerate
         // planes), so build the polygon directly with a bogus plane — weld
         // doesn't inspect the plane, only the vertex list.
-        let bogus_plane = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1,
-            d: 0,
-        };
+        let bogus_plane = Plane3 { n_x: 0, n_y: 0, n_z: 1, d: 0 };
         let degenerate = Polygon {
             vertices: vec![pt(0.0, 0.0, 0.0), pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0)],
             plane: bogus_plane,
@@ -203,19 +182,9 @@ mod tests {
     #[test]
     fn explicit_closed_loop_is_unwound() {
         // Polygon expressed with a wraparound duplicate (last == first).
-        let bogus_plane = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1,
-            d: 0,
-        };
+        let bogus_plane = Plane3 { n_x: 0, n_y: 0, n_z: 1, d: 0 };
         let closed = Polygon {
-            vertices: vec![
-                pt(0.0, 0.0, 0.0),
-                pt(1.0, 0.0, 0.0),
-                pt(0.0, 1.0, 0.0),
-                pt(0.0, 0.0, 0.0),
-            ],
+            vertices: vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(0.0, 0.0, 0.0)],
             plane: bogus_plane,
             color: 0,
         };
@@ -226,12 +195,10 @@ mod tests {
 
     #[test]
     fn round_trip_preserves_vertex_coords_planes_and_colors() {
-        let tri_a =
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 7)
-                .expect("test setup: non-degenerate triangle");
-        let tri_b =
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(0.0, 0.0, 1.0), 9)
-                .expect("test setup: non-degenerate triangle");
+        let tri_a = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), 7)
+            .expect("test setup: non-degenerate triangle");
+        let tri_b = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(0.0, 1.0, 0.0), pt(0.0, 0.0, 1.0), 9)
+            .expect("test setup: non-degenerate triangle");
         let original = vec![tri_a, tri_b];
         let round_tripped = IndexedMesh::weld(original.clone()).into_polygons();
 
@@ -248,12 +215,10 @@ mod tests {
 
     #[test]
     fn welding_is_deterministic_across_runs() {
-        let tri_a =
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), 0)
-                .expect("test setup: non-degenerate triangle");
-        let tri_b =
-            Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(0.0, 1.0, 0.0), 0)
-                .expect("test setup: non-degenerate triangle");
+        let tri_a = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), 0)
+            .expect("test setup: non-degenerate triangle");
+        let tri_b = Polygon::from_triangle(pt(0.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(0.0, 1.0, 0.0), 0)
+            .expect("test setup: non-degenerate triangle");
         let m1 = IndexedMesh::weld(vec![tri_a.clone(), tri_b.clone()]);
         let m2 = IndexedMesh::weld(vec![tri_a, tri_b]);
         assert_eq!(m1.vertices, m2.vertices);
@@ -304,19 +269,9 @@ mod tests {
         // A quad has 4 distinct vertices and should weld to a 4-id
         // indexed polygon. Catches a refactor that special-cases the
         // 3-vertex (triangle) path.
-        let bogus_plane = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1,
-            d: 0,
-        };
+        let bogus_plane = Plane3 { n_x: 0, n_y: 0, n_z: 1, d: 0 };
         let quad = Polygon {
-            vertices: vec![
-                pt(0.0, 0.0, 0.0),
-                pt(1.0, 0.0, 0.0),
-                pt(1.0, 1.0, 0.0),
-                pt(0.0, 1.0, 0.0),
-            ],
+            vertices: vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(0.0, 1.0, 0.0)],
             plane: bogus_plane,
             color: 0,
         };
@@ -329,12 +284,7 @@ mod tests {
     fn mid_loop_adjacent_duplicate_is_collapsed() {
         // [A, A, B, C] should weld to [A, B, C]. The existing closed-
         // loop test only covers the wraparound case [A, B, C, A].
-        let bogus_plane = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1,
-            d: 0,
-        };
+        let bogus_plane = Plane3 { n_x: 0, n_y: 0, n_z: 1, d: 0 };
         let with_mid_dup = Polygon {
             vertices: vec![
                 pt(0.0, 0.0, 0.0),
@@ -353,12 +303,7 @@ mod tests {
     #[test]
     fn all_same_vertex_polygon_is_dropped() {
         // [A, A, A] collapses to [A] which has <3 distinct → dropped.
-        let bogus_plane = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1,
-            d: 0,
-        };
+        let bogus_plane = Plane3 { n_x: 0, n_y: 0, n_z: 1, d: 0 };
         let collapsed = Polygon {
             vertices: vec![pt(0.0, 0.0, 0.0), pt(0.0, 0.0, 0.0), pt(0.0, 0.0, 0.0)],
             plane: bogus_plane,

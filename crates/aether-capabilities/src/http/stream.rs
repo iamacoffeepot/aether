@@ -28,8 +28,8 @@ use aether_actor::{MailSender, OutboundReply};
 use aether_data::MailboxId;
 
 use super::kinds::{
-    HttpRequestCredit, HttpRequestStreamOpen, HttpResponseChunk, HttpResponseStreamEnd,
-    HttpStreamCredit, WebSocketClose, WebSocketMessage,
+    HttpRequestCredit, HttpRequestStreamOpen, HttpResponseChunk, HttpResponseStreamEnd, HttpStreamCredit,
+    WebSocketClose, WebSocketMessage,
 };
 
 /// A streamed response a handler is feeding (ADR-0128 / ADR-0133): the
@@ -54,33 +54,19 @@ impl ResponseStream {
     /// the first grant has armed it.
     #[must_use]
     pub fn from_credit(ctx: &impl OutboundReply, credit: &HttpStreamCredit) -> Option<Self> {
-        Some(Self {
-            counterparty: ctx.source_mailbox()?,
-            stream_id: credit.stream_id,
-        })
+        Some(Self { counterparty: ctx.source_mailbox()?, stream_id: credit.stream_id })
     }
 
     /// Emit one body chunk on this stream (ADR-0128 [`HttpResponseChunk`]),
     /// a detached root at the stored counterparty.
     pub fn chunk(&self, ctx: &mut impl MailSender, body: Vec<u8>) {
-        ctx.send_detached_to(
-            self.counterparty,
-            &HttpResponseChunk {
-                stream_id: self.stream_id,
-                body,
-            },
-        );
+        ctx.send_detached_to(self.counterparty, &HttpResponseChunk { stream_id: self.stream_id, body });
     }
 
     /// Terminate this stream (ADR-0128 [`HttpResponseStreamEnd`]). The cap
     /// writes the terminating zero-length chunk and closes the connection.
     pub fn end(&self, ctx: &mut impl MailSender) {
-        ctx.send_detached_to(
-            self.counterparty,
-            &HttpResponseStreamEnd {
-                stream_id: self.stream_id,
-            },
-        );
+        ctx.send_detached_to(self.counterparty, &HttpResponseStreamEnd { stream_id: self.stream_id });
     }
 }
 
@@ -104,23 +90,14 @@ impl RequestStream {
     /// (the same guard as [`ResponseStream::from_credit`]).
     #[must_use]
     pub fn from_open(ctx: &impl OutboundReply, open: &HttpRequestStreamOpen) -> Option<Self> {
-        Some(Self {
-            counterparty: ctx.source_mailbox()?,
-            stream_id: open.stream_id,
-        })
+        Some(Self { counterparty: ctx.source_mailbox()?, stream_id: open.stream_id })
     }
 
     /// Grant the cap credit to deliver up to `credit` more inbound chunks
     /// (ADR-0128 [`HttpRequestCredit`]), a detached root at the stored
     /// counterparty.
     pub fn credit(&self, ctx: &mut impl MailSender, credit: u32) {
-        ctx.send_detached_to(
-            self.counterparty,
-            &HttpRequestCredit {
-                stream_id: self.stream_id,
-                credit,
-            },
-        );
+        ctx.send_detached_to(self.counterparty, &HttpRequestCredit { stream_id: self.stream_id, credit });
     }
 }
 
@@ -144,37 +121,20 @@ impl WebSocketStream {
     /// `None` when the dispatch has no component source.
     #[must_use]
     pub fn from_credit(ctx: &impl OutboundReply, credit: &HttpStreamCredit) -> Option<Self> {
-        Some(Self {
-            counterparty: ctx.source_mailbox()?,
-            stream_id: credit.stream_id,
-        })
+        Some(Self { counterparty: ctx.source_mailbox()?, stream_id: credit.stream_id })
     }
 
     /// Push one application message to the peer (ADR-0132
     /// [`WebSocketMessage`]), a detached root at the stored counterparty.
     /// `binary` selects the RFC 6455 opcode.
     pub fn message(&self, ctx: &mut impl MailSender, binary: bool, data: Vec<u8>) {
-        ctx.send_detached_to(
-            self.counterparty,
-            &WebSocketMessage {
-                stream_id: self.stream_id,
-                binary,
-                data,
-            },
-        );
+        ctx.send_detached_to(self.counterparty, &WebSocketMessage { stream_id: self.stream_id, binary, data });
     }
 
     /// Initiate the close handshake (ADR-0129 [`WebSocketClose`]). `code` is
     /// the RFC 6455 close status; `reason` the optional UTF-8 phrase.
     pub fn close(&self, ctx: &mut impl MailSender, code: u16, reason: String) {
-        ctx.send_detached_to(
-            self.counterparty,
-            &WebSocketClose {
-                stream_id: self.stream_id,
-                code,
-                reason,
-            },
-        );
+        ctx.send_detached_to(self.counterparty, &WebSocketClose { stream_id: self.stream_id, code, reason });
     }
 }
 
@@ -262,18 +222,9 @@ mod tests {
 
     #[test]
     fn response_stream_captures_counterparty_and_stream_id() {
-        let ctx = RecordingCtx {
-            source: Some(CAP),
-            ..RecordingCtx::default()
-        };
-        let handle = ResponseStream::from_credit(
-            &ctx,
-            &HttpStreamCredit {
-                stream_id: 42,
-                credit: 8,
-            },
-        )
-        .expect("a component-source credit opens the stream");
+        let ctx = RecordingCtx { source: Some(CAP), ..RecordingCtx::default() };
+        let handle = ResponseStream::from_credit(&ctx, &HttpStreamCredit { stream_id: 42, credit: 8 })
+            .expect("a component-source credit opens the stream");
         assert_eq!(handle.counterparty, CAP);
         assert_eq!(handle.stream_id, 42);
     }
@@ -282,34 +233,15 @@ mod tests {
     fn from_credit_refuses_a_sourceless_dispatch() {
         let ctx = RecordingCtx::default();
         assert!(
-            ResponseStream::from_credit(
-                &ctx,
-                &HttpStreamCredit {
-                    stream_id: 1,
-                    credit: 1
-                }
-            )
-            .is_none(),
+            ResponseStream::from_credit(&ctx, &HttpStreamCredit { stream_id: 1, credit: 1 }).is_none(),
             "no component source → no handle"
         );
-        assert!(
-            WebSocketStream::from_credit(
-                &ctx,
-                &HttpStreamCredit {
-                    stream_id: 1,
-                    credit: 1
-                }
-            )
-            .is_none()
-        );
+        assert!(WebSocketStream::from_credit(&ctx, &HttpStreamCredit { stream_id: 1, credit: 1 }).is_none());
     }
 
     #[test]
     fn response_stream_chunk_and_end_target_the_counterparty() {
-        let handle = ResponseStream {
-            counterparty: CAP,
-            stream_id: 7,
-        };
+        let handle = ResponseStream { counterparty: CAP, stream_id: 7 };
 
         let mut ctx = RecordingCtx::default();
         handle.chunk(&mut ctx, b"body-piece".to_vec());
@@ -325,10 +257,7 @@ mod tests {
 
     #[test]
     fn request_stream_credit_targets_the_counterparty() {
-        let ctx = RecordingCtx {
-            source: Some(CAP),
-            ..RecordingCtx::default()
-        };
+        let ctx = RecordingCtx { source: Some(CAP), ..RecordingCtx::default() };
         let handle = RequestStream::from_open(
             &ctx,
             &HttpRequestStreamOpen {
@@ -350,10 +279,7 @@ mod tests {
 
     #[test]
     fn websocket_message_and_close_target_the_counterparty() {
-        let handle = WebSocketStream {
-            counterparty: CAP,
-            stream_id: 3,
-        };
+        let handle = WebSocketStream { counterparty: CAP, stream_id: 3 };
 
         let mut ctx = RecordingCtx::default();
         handle.message(&mut ctx, true, b"\x00\x01".to_vec());

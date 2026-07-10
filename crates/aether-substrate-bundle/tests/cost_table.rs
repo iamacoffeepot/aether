@@ -37,19 +37,11 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
             "load",
             BenchOp::send_and_await(
                 ComponentHostCapability::NAMESPACE,
-                &LoadComponent {
-                    wasm,
-                    name: Some("cost-probe".to_owned()),
-                    config: Vec::new(),
-                    export: None,
-                },
+                &LoadComponent { wasm, name: Some("cost-probe".to_owned()), config: Vec::new(), export: None },
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
         LoadResult::Err { error } => panic!("load_component: {error}"),
     }
@@ -74,19 +66,12 @@ fn init_seeds_cells_and_dispatch_folds() {
     // 0`) — the known-but-unrun state. If `init`'s seed had not run, the
     // table would hold no rows for this mailbox.
     {
-        let CostTailResult::Ok { rows } = bench.cost_table().tail(mbox, &CostTail { kind: None })
-        else {
+        let CostTailResult::Ok { rows } = bench.cost_table().tail(mbox, &CostTail { kind: None }) else {
             panic!("expected Ok");
         };
-        let tick = rows
-            .iter()
-            .find(|r| r.kind_id == Tick::ID)
-            .expect("Tick handler cell seeded at init");
+        let tick = rows.iter().find(|r| r.kind_id == Tick::ID).expect("Tick handler cell seeded at init");
         assert_eq!(tick.samples, 0, "neutral seed before any dispatch");
-        assert!(
-            rows.iter().any(|r| r.kind_id == SetRender::ID),
-            "SetRender handler cell seeded at init",
-        );
+        assert!(rows.iter().any(|r| r.kind_id == SetRender::ID), "SetRender handler cell seeded at init");
     }
 
     // Advance 3 ticks → the probe's on_tick dispatches 3× → 3 folds into
@@ -94,28 +79,13 @@ fn init_seeds_cells_and_dispatch_folds() {
     // stamped at construction (the redesign's load-bearing claim) and the
     // fold reached it. `SetRender` is never dispatched, so it stays at the
     // neutral seed.
-    bench
-        .execute(vec![("advance", BenchOp::advance(3))])
-        .expect("advance 3");
+    bench.execute(vec![("advance", BenchOp::advance(3))]).expect("advance 3");
 
-    let CostTailResult::Ok { rows } = bench.cost_table().tail(mbox, &CostTail { kind: None })
-    else {
+    let CostTailResult::Ok { rows } = bench.cost_table().tail(mbox, &CostTail { kind: None }) else {
         panic!("expected Ok");
     };
-    let tick = rows
-        .iter()
-        .find(|r| r.kind_id == Tick::ID)
-        .expect("Tick handler cell present");
-    assert_eq!(
-        tick.samples, 3,
-        "three Tick dispatches folded into the init-seeded cell",
-    );
-    let set_render = rows
-        .iter()
-        .find(|r| r.kind_id == SetRender::ID)
-        .expect("SetRender handler cell present");
-    assert_eq!(
-        set_render.samples, 0,
-        "an un-dispatched handler stays at the neutral seed",
-    );
+    let tick = rows.iter().find(|r| r.kind_id == Tick::ID).expect("Tick handler cell present");
+    assert_eq!(tick.samples, 3, "three Tick dispatches folded into the init-seeded cell");
+    let set_render = rows.iter().find(|r| r.kind_id == SetRender::ID).expect("SetRender handler cell present");
+    assert_eq!(set_render.samples, 0, "an un-dispatched handler stays at the neutral seed");
 }

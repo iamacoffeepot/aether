@@ -5,9 +5,7 @@
 //! intentionally indistinguishable by echoed fields; the fixture only reports
 //! success after both replies match via `ctx.in_reply_to()`.
 
-use aether_actor::{
-    ActorInitError, MailSender, Manual, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor,
-};
+use aether_actor::{ActorInitError, MailSender, Manual, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::fs::{FsCapability, Read, ReadResult};
 use aether_test_fixtures_kinds::{FsDemuxReport, RunFsDemux, TEST_BENCH_OBSERVER_MAILBOX_NAME};
 
@@ -35,10 +33,7 @@ impl WasmActor for FsDemux {
         self.second_matched = false;
 
         let fs = ctx.actor::<FsCapability>();
-        let read = Read {
-            namespace: msg.namespace,
-            path: msg.path,
-        };
+        let read = Read { namespace: msg.namespace, path: msg.path };
         self.first = Some(fs.send_tracked(&read));
         self.second = Some(fs.send_tracked(&read));
     }
@@ -69,10 +64,7 @@ impl WasmActor for FsDemux {
             );
             ctx.send_to_named::<FsDemuxReport>(
                 TEST_BENCH_OBSERVER_MAILBOX_NAME,
-                &FsDemuxReport {
-                    first_matched: true,
-                    second_matched: true,
-                },
+                &FsDemuxReport { first_matched: true, second_matched: true },
             );
         }
     }

@@ -16,23 +16,14 @@ use aether_kinds::BinaryManifest;
 #[test]
 fn headless_describe_emits_manifest() {
     let bin = env!("CARGO_BIN_EXE_aether-substrate-headless");
-    let output = Command::new(bin)
-        .arg("--describe")
-        .output()
-        .expect("test setup: running the headless binary with --describe");
-    assert!(
-        output.status.success(),
-        "--describe should exit 0; stderr: {}",
-        String::from_utf8_lossy(&output.stderr),
-    );
+    let output =
+        Command::new(bin).arg("--describe").output().expect("test setup: running the headless binary with --describe");
+    assert!(output.status.success(), "--describe should exit 0; stderr: {}", String::from_utf8_lossy(&output.stderr));
 
-    let manifest: BinaryManifest = serde_json::from_slice(&output.stdout)
-        .expect("test setup: --describe stdout is a BinaryManifest JSON");
+    let manifest: BinaryManifest =
+        serde_json::from_slice(&output.stdout).expect("test setup: --describe stdout is a BinaryManifest JSON");
     assert_eq!(manifest.chassis, "headless", "reports the headless profile");
-    assert!(
-        !manifest.caps.is_empty(),
-        "the headless chassis links a non-empty cap set",
-    );
+    assert!(!manifest.caps.is_empty(), "the headless chassis links a non-empty cap set");
     assert!(
         manifest.caps.iter().any(|c| c == "aether.fs"),
         "the headless chassis links the fs cap, got {:?}",

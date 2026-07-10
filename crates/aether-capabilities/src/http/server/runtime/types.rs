@@ -133,11 +133,7 @@ pub enum InboundEvent {
     /// and read its accept-set; the shard opens the inbound request
     /// stream and replies [`ReaderControl::Stream`] down the control
     /// channel. Buffered requests never take this round trip.
-    RequestHeadParsed {
-        conn_id: ConnId,
-        head: ParsedHead,
-        handler: MailboxId,
-    },
+    RequestHeadParsed { conn_id: ConnId, head: ParsedHead, handler: MailboxId },
     /// A complete, size-bounded buffered request, resolved and encoded
     /// at the reader (ADR-0135 §2): `payload` is the ready-to-send
     /// `HttpServerRequest` (or routed-kind) wire image; the shard's
@@ -181,11 +177,7 @@ pub enum InboundEvent {
     /// A websocket reader reassembled one complete application message
     /// (ADR-0129); the dispatcher delivers it to the handler as a
     /// [`WebSocketMessage`] on its own fresh causal root.
-    WebSocketMessage {
-        conn_id: ConnId,
-        binary: bool,
-        data: Vec<u8>,
-    },
+    WebSocketMessage { conn_id: ConnId, binary: bool, data: Vec<u8> },
     /// A websocket reader received a ping frame (ADR-0129); the dispatcher
     /// answers it with a pong on the writer thread, transparently — the ping
     /// never reaches the handler. Carries the ping payload the pong echoes.
@@ -194,11 +186,7 @@ pub enum InboundEvent {
     /// / oversize frame / idle timeout on the upgraded socket (ADR-0129). The
     /// dispatcher reports a [`WebSocketClose`] to the handler, echoes the close
     /// frame on the writer, and tears the connection down.
-    WebSocketClose {
-        conn_id: ConnId,
-        code: u16,
-        reason: String,
-    },
+    WebSocketClose { conn_id: ConnId, code: u16, reason: String },
 }
 
 /// One frame handed to a per-connection response-stream writer thread over

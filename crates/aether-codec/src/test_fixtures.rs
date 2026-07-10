@@ -19,29 +19,20 @@ pub fn scalar(name: &str, ty: Primitive) -> NamedField {
 /// that wrap a non-`Scalar` `SchemaType` (arrays, struct nests, refs).
 /// `scalar` is the common-case wrapper over this.
 pub fn named(name: &str, ty: SchemaType) -> NamedField {
-    NamedField {
-        name: name.to_string().into(),
-        ty,
-    }
+    NamedField { name: name.to_string().into(), ty }
 }
 
 /// `Struct { repr_c: true, fields }` — the cast-shape struct builder
 /// (`#[repr(C)]` byte layout, `bytemuck`-decodable on the substrate
 /// side).
 pub fn cast_struct(fields: Vec<NamedField>) -> SchemaType {
-    SchemaType::Struct {
-        fields: fields.into(),
-        repr_c: true,
-    }
+    SchemaType::Struct { fields: fields.into(), repr_c: true }
 }
 
 /// `Struct { repr_c: false, fields }` — the structured-shape struct
 /// builder, for the everything-else wire variant.
 pub fn structured_struct(fields: Vec<NamedField>) -> SchemaType {
-    SchemaType::Struct {
-        fields: fields.into(),
-        repr_c: false,
-    }
+    SchemaType::Struct { fields: fields.into(), repr_c: false }
 }
 
 /// The `Pending / Ok(u64) / Err { reason: String }` variant set
@@ -52,10 +43,7 @@ pub fn structured_struct(fields: Vec<NamedField>) -> SchemaType {
 /// builder method.
 pub fn pending_ok_err_variants() -> Vec<EnumVariant> {
     vec![
-        EnumVariant::Unit {
-            name: "Pending".into(),
-            discriminant: 0,
-        },
+        EnumVariant::Unit { name: "Pending".into(), discriminant: 0 },
         EnumVariant::Tuple {
             name: "Ok".into(),
             discriminant: 1,
@@ -64,11 +52,7 @@ pub fn pending_ok_err_variants() -> Vec<EnumVariant> {
         EnumVariant::Struct {
             name: "Err".into(),
             discriminant: 2,
-            fields: vec![NamedField {
-                name: "reason".into(),
-                ty: SchemaType::String,
-            }]
-            .into(),
+            fields: vec![NamedField { name: "reason".into(), ty: SchemaType::String }].into(),
         },
     ]
 }

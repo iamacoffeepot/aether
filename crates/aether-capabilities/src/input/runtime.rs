@@ -5,9 +5,8 @@
 //! single `use runtime::*` glob in the parent.
 
 use super::{
-    ImePreedit, InputCapability, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease,
-    MouseMove, MouseWheel, SubscribeInput, SubscribeInputSelf, TextInput, UnsubscribeAll,
-    UnsubscribeInput, UnsubscribeInputSelf, WindowSize,
+    ImePreedit, InputCapability, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
+    SubscribeInput, SubscribeInputSelf, TextInput, UnsubscribeAll, UnsubscribeInput, UnsubscribeInputSelf, WindowSize,
 };
 use aether_actor::runtime;
 
@@ -76,15 +75,9 @@ impl NativeActor for InputCapability {
     type Config = InputConfig;
     const NAMESPACE: &'static str = "aether.input";
 
-    fn init(
-        _config: InputConfig,
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<InputCapabilityState, BootError> {
+    fn init(_config: InputConfig, ctx: &mut NativeInitCtx<'_>) -> Result<InputCapabilityState, BootError> {
         let registry = Arc::clone(ctx.mailer().registry());
-        Ok(InputCapabilityState {
-            registry,
-            subscribers: HashMap::new(),
-        })
+        Ok(InputCapabilityState { registry, subscribers: HashMap::new() })
     }
 
     /// Subscribe a mailbox to an input stream (ADR-0021).
@@ -100,11 +93,7 @@ impl NativeActor for InputCapability {
     ) -> SubscribeInputResult {
         match validate_subscriber_mailbox(&state.registry, payload.mailbox) {
             Ok(()) => {
-                state
-                    .subscribers
-                    .entry(payload.kind)
-                    .or_default()
-                    .insert(payload.mailbox);
+                state.subscribers.entry(payload.kind).or_default().insert(payload.mailbox);
                 SubscribeInputResult::Ok
             }
             Err(error) => SubscribeInputResult::Err { error },
@@ -133,11 +122,7 @@ impl NativeActor for InputCapability {
     ) -> SubscribeInputResult {
         match ctx.source_mailbox() {
             Some(mailbox) => {
-                state
-                    .subscribers
-                    .entry(payload.kind)
-                    .or_default()
-                    .insert(mailbox);
+                state.subscribers.entry(payload.kind).or_default().insert(mailbox);
                 SubscribeInputResult::Ok
             }
             None => SubscribeInputResult::Err {
@@ -211,11 +196,7 @@ impl NativeActor for InputCapability {
     /// # Agent
     /// `UnsubscribeAll { mailbox }`. Idempotent.
     #[handler::single]
-    fn on_unsubscribe_all(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        payload: UnsubscribeAll,
-    ) {
+    fn on_unsubscribe_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, payload: UnsubscribeAll) {
         for set in state.subscribers.values_mut() {
             set.remove(&payload.mailbox);
         }
@@ -249,11 +230,7 @@ impl NativeActor for InputCapability {
     /// Mouse-release fan-out (paired with [`MouseButton`] for
     /// press-move-release drag).
     #[handler::single]
-    fn on_mouse_button_release(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        payload: MouseButtonRelease,
-    ) {
+    fn on_mouse_button_release(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: MouseButtonRelease) {
         state.fanout(ctx, &payload);
     }
 
@@ -296,10 +273,7 @@ mod tests {
     use aether_substrate::mail::{MailId, Source, SourceAddr};
 
     fn test_state() -> InputCapabilityState {
-        InputCapabilityState {
-            registry: Arc::new(Registry::new()),
-            subscribers: HashMap::new(),
-        }
+        InputCapabilityState { registry: Arc::new(Registry::new()), subscribers: HashMap::new() }
     }
 
     fn test_mailer() -> Arc<Mailer> {
@@ -321,10 +295,7 @@ mod tests {
         InputCapability::on_subscribe_self(&mut state, &mut ctx, SubscribeInputSelf { kind: key });
 
         assert!(
-            state
-                .subscribers
-                .get(&key)
-                .is_some_and(|s| s.contains(&sender)),
+            state.subscribers.get(&key).is_some_and(|s| s.contains(&sender)),
             "a Component-source subscribe_self lands that mailbox in the stream set"
         );
     }

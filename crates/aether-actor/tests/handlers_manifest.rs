@@ -100,13 +100,9 @@ fn parse_section(bytes: &[u8]) -> Vec<InputsRecord> {
     let mut out: Vec<InputsRecord> = Vec::new();
     let mut cursor = bytes;
     while !cursor.is_empty() {
-        assert_eq!(
-            cursor[0], INPUTS_SECTION_VERSION,
-            "every record must start with the section version byte"
-        );
+        assert_eq!(cursor[0], INPUTS_SECTION_VERSION, "every record must start with the section version byte");
         cursor = &cursor[1..];
-        let (rec, rest) = wire::take_from_bytes::<InputsRecord>(cursor)
-            .expect("wire decode of InputsRecord failed");
+        let (rec, rest) = wire::take_from_bytes::<InputsRecord>(cursor).expect("wire decode of InputsRecord failed");
         out.push(rec);
         cursor = rest;
     }
@@ -128,23 +124,14 @@ fn manifest_const_round_trips_to_expected_records() {
 
     for rec in &records {
         match rec {
-            InputsRecord::Handler {
-                id,
-                name,
-                doc,
-                reply,
-            } => {
+            InputsRecord::Handler { id, name, doc, reply } => {
                 handler_count += 1;
                 match name.as_ref() {
                     "test.tick" => {
                         assert_eq!(*id, <Tick as Kind>::ID);
                         tick_doc = doc.as_ref().map(ToString::to_string);
                         // ADR-0112: a single `-> ()` handler is `None`.
-                        assert_eq!(
-                            *reply,
-                            ReplyContract::None,
-                            "on_tick returns () — no reply kind"
-                        );
+                        assert_eq!(*reply, ReplyContract::None, "on_tick returns () — no reply kind");
                     }
                     "test.ping" => {
                         assert_eq!(*id, <Ping as Kind>::ID);

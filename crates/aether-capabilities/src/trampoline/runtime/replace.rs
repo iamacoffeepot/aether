@@ -36,10 +36,7 @@ impl WasmTrampolineState {
                 // namespace (from module metadata) to find the one whose
                 // tag the spawn requested — not a hardcoded sibling.
                 #[allow(clippy::disallowed_methods)]
-                actor
-                    .namespace
-                    .as_deref()
-                    .is_some_and(|ns| aether_data::mailbox_id_from_name(ns).0 == pending.tag)
+                actor.namespace.as_deref().is_some_and(|ns| aether_data::mailbox_id_from_name(ns).0 == pending.tag)
             })
             .map(|actor| actor.capabilities.clone())
             .unwrap_or_default();
@@ -54,10 +51,7 @@ impl WasmTrampolineState {
             type_tag: Some(pending.tag),
             actor_caps: self.actor_caps.clone(),
         };
-        if let Err(e) = ctx
-            .spawn_child::<WasmTrampoline>(Subname::Named(&pending.subname), config)
-            .finish()
-        {
+        if let Err(e) = ctx.spawn_child::<WasmTrampoline>(Subname::Named(&pending.subname), config).finish() {
             tracing::warn!(
                 target: "aether_capabilities::trampoline",
                 parent = %self.mailbox,
@@ -88,18 +82,10 @@ impl WasmTrampolineState {
         actors: &[ActorInputs],
     ) -> Result<(ComponentCapabilities, Option<u64>), String> {
         if let Some(requested) = export {
-            let group = actors
-                .iter()
-                .find(|a| a.namespace.as_deref() == Some(requested))
-                .ok_or_else(|| {
-                    let available: Vec<&str> = actors
-                        .iter()
-                        .filter_map(|a| a.namespace.as_deref())
-                        .collect();
-                    format!(
-                        "export {requested:?} not found in module; exported types: {available:?}"
-                    )
-                })?;
+            let group = actors.iter().find(|a| a.namespace.as_deref() == Some(requested)).ok_or_else(|| {
+                let available: Vec<&str> = actors.iter().filter_map(|a| a.namespace.as_deref()).collect();
+                format!("export {requested:?} not found in module; exported types: {available:?}")
+            })?;
             return Ok((
                 group.capabilities.clone(),
                 // Runtime-name routing: `requested` is the export
@@ -113,13 +99,7 @@ impl WasmTrampolineState {
         // currently hosts. With no tag yet (post-drop refill) that's the
         // entry actor — first in the export list — with a `None` tag.
         let Some(tag) = self.type_tag else {
-            return Ok((
-                actors
-                    .first()
-                    .map(|a| a.capabilities.clone())
-                    .unwrap_or_default(),
-                None,
-            ));
+            return Ok((actors.first().map(|a| a.capabilities.clone()).unwrap_or_default(), None));
         };
         actors
             .iter()
@@ -128,15 +108,11 @@ impl WasmTrampolineState {
                 // declared namespace to find the one whose tag was
                 // loaded — not a hardcoded sibling.
                 #[allow(clippy::disallowed_methods)]
-                a.namespace
-                    .as_deref()
-                    .is_some_and(|ns| aether_data::mailbox_id_from_name(ns).0 == tag)
+                a.namespace.as_deref().is_some_and(|ns| aether_data::mailbox_id_from_name(ns).0 == tag)
             })
             .map(|group| (group.capabilities.clone(), Some(tag)))
             .ok_or_else(|| {
-                format!(
-                    "replace: new module does not export the actor type (tag {tag:#x}) this trampoline loaded"
-                )
+                format!("replace: new module does not export the actor type (tag {tag:#x}) this trampoline loaded")
             })
     }
 
@@ -149,9 +125,7 @@ impl WasmTrampolineState {
         let module = match Module::new(&self.engine, &payload.wasm) {
             Ok(m) => m,
             Err(e) => {
-                return ReplaceResult::Err {
-                    error: format!("invalid wasm module: {e}"),
-                };
+                return ReplaceResult::Err { error: format!("invalid wasm module: {e}") };
             }
         };
 
@@ -168,11 +142,10 @@ impl WasmTrampolineState {
         // instantiates plus the capability group to advertise —
         // export-named, or the trampoline's current hosted type for a
         // bare replace. See [`Self::resolve_replace_target`].
-        let (capabilities, effective_tag) =
-            match self.resolve_replace_target(payload.export.as_deref(), &actors) {
-                Ok(resolved) => resolved,
-                Err(error) => return ReplaceResult::Err { error },
-            };
+        let (capabilities, effective_tag) = match self.resolve_replace_target(payload.export.as_deref(), &actors) {
+            Ok(resolved) => resolved,
+            Err(error) => return ReplaceResult::Err { error },
+        };
 
         // Run unwire then on_dehydrate on the old instance and lift
         // any saved-state bundle. If the trampoline is currently
@@ -224,9 +197,7 @@ impl WasmTrampolineState {
         ) {
             Ok(c) => c,
             Err(e) => {
-                return ReplaceResult::Err {
-                    error: format!("wasm instantiation failed: {e}"),
-                };
+                return ReplaceResult::Err { error: format!("wasm instantiation failed: {e}") };
             }
         };
 
@@ -249,9 +220,7 @@ impl WasmTrampolineState {
             && let Err(e) = new_component.call_on_rehydrate(&bundle)
         {
             self.component = Some(new_component);
-            return ReplaceResult::Err {
-                error: format!("on_rehydrate failed: {e}"),
-            };
+            return ReplaceResult::Err { error: format!("on_rehydrate failed: {e}") };
         }
 
         self.component = Some(new_component);
@@ -261,9 +230,7 @@ impl WasmTrampolineState {
         // mailbox id is stable across replace (ADR-0022 §4), so
         // `register` overwrites the prior entry — the validator
         // sees the new accept-set immediately.
-        self.mailer
-            .capability_registry()
-            .register(self.mailbox, &capabilities);
+        self.mailer.capability_registry().register(self.mailbox, &capabilities);
 
         // iamacoffeepot/aether#1128: re-seed the per-handler cost
         // cells against the post-replace handler set, into BOTH

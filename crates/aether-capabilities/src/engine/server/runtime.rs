@@ -10,20 +10,18 @@
 use super::{EngineConfig, EngineServer};
 pub use crate::engine::kinds::ForwardEnvelope;
 use crate::engine::kinds::{EngineAlive, EngineDied, RouteEnvelope};
-pub use crate::engine::proxy::{
-    EngineProxy, EngineProxyConfig, HeartbeatParams, is_reforkable_spawn_failure,
-};
+pub use crate::engine::proxy::{EngineProxy, EngineProxyConfig, HeartbeatParams, is_reforkable_spawn_failure};
 pub use crate::engine::store::{ArtifactStore, LAYOUT_VERSION_DIR};
 use aether_actor::runtime;
 pub use aether_data::{EngineId, Kind, MailboxId, Uuid};
 pub use aether_kinds::{
-    DeadEngineDescriptor, DeathReason, EngineDescriptor, ListComponentBinariesResult,
-    ListEngineBinariesResult, ListEnginesResult, ResolveComponentResult, SpawnEngineResult,
-    TerminateEngineResult, UploadBinaryResult, UploadComponentResult,
+    DeadEngineDescriptor, DeathReason, EngineDescriptor, ListComponentBinariesResult, ListEngineBinariesResult,
+    ListEnginesResult, ResolveComponentResult, SpawnEngineResult, TerminateEngineResult, UploadBinaryResult,
+    UploadComponentResult,
 };
 use aether_kinds::{
-    ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine,
-    TerminateEngine, UploadBinary, UploadComponent,
+    ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine, TerminateEngine,
+    UploadBinary, UploadComponent,
 };
 pub use aether_substrate::Mail;
 pub use aether_substrate::Subname;
@@ -43,8 +41,7 @@ pub use std::time::{Duration, Instant};
 // parent's `use runtime::*` glob reaches them alongside the rest of the
 // runtime half.
 pub use super::artifacts::{
-    bootstrap_ingest, ingest_binary, ingest_component, realize_executable, resolve_component,
-    resolve_selector,
+    bootstrap_ingest, ingest_binary, ingest_component, realize_executable, resolve_component, resolve_selector,
 };
 pub use super::fleet::{free_local_port, resolve_engine_store_root, settle_err};
 
@@ -145,12 +142,7 @@ impl EngineServerState {
         if self.recently_died.len() >= RECENTLY_DIED_CAP {
             self.recently_died.pop_front();
         }
-        self.recently_died.push_back(DeadRecord {
-            engine_id,
-            rpc_port,
-            reason,
-            died_at: Instant::now(),
-        });
+        self.recently_died.push_back(DeadRecord { engine_id, rpc_port, reason, died_at: Instant::now() });
     }
 
     /// Record a post-allocation spawn failure (issue 2423): write a
@@ -158,23 +150,9 @@ impl EngineServerState {
     /// and return the id-bearing `Err` so a caller can correlate and
     /// reap. For the failures after an `engine_id` has been minted but
     /// before the engine was ever registered alive.
-    fn fail_spawn(
-        &mut self,
-        engine_id: EngineId,
-        rpc_port: u16,
-        error: String,
-    ) -> SpawnEngineResult {
-        self.record_death(
-            engine_id.0.to_string(),
-            rpc_port,
-            DeathReason::SpawnFailed {
-                detail: error.clone(),
-            },
-        );
-        SpawnEngineResult::Err {
-            engine_id: Some(engine_id.0.to_string()),
-            error,
-        }
+    fn fail_spawn(&mut self, engine_id: EngineId, rpc_port: u16, error: String) -> SpawnEngineResult {
+        self.record_death(engine_id.0.to_string(), rpc_port, DeathReason::SpawnFailed { detail: error.clone() });
+        SpawnEngineResult::Err { engine_id: Some(engine_id.0.to_string()), error }
     }
 }
 
@@ -186,10 +164,7 @@ impl NativeActor for EngineServer {
     type Config = EngineConfig;
     const NAMESPACE: &'static str = "aether.engine";
 
-    fn init(
-        config: EngineConfig,
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<EngineServerState, BootError> {
+    fn init(config: EngineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<EngineServerState, BootError> {
         // Build the hub-scoped store from `EngineConfig` (ADR-0090): the
         // layout-dir override + disk budget ride config fields (their
         // `AETHER_BINARY_*` env keys are the config env layer), then
@@ -202,9 +177,7 @@ impl NativeActor for EngineServer {
             .binary_store_dir
             .as_deref()
             .filter(|d| !d.is_empty())
-            .map_or_else(ArtifactStore::default_root, |dir| {
-                PathBuf::from(dir).join(LAYOUT_VERSION_DIR)
-            });
+            .map_or_else(ArtifactStore::default_root, |dir| PathBuf::from(dir).join(LAYOUT_VERSION_DIR));
         let mut store = ArtifactStore::open(&store_dir, config.binary_disk_budget_bytes);
         bootstrap_ingest(&mut store, &config.binary_bootstrap);
         Ok(EngineServerState {
@@ -227,11 +200,7 @@ impl NativeActor for EngineServer {
     /// { engines: [{ engine_id, rpc_port, last_heartbeat_age_millis }],
     /// recently_died: [{ engine_id, rpc_port, reason, died_age_millis }] }`.
     #[handler::single]
-    fn on_list(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: ListEngines,
-    ) -> ListEnginesResult {
+    fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListEngines) -> ListEnginesResult {
         let now = Instant::now();
         let engines = state
             .engines
@@ -239,10 +208,8 @@ impl NativeActor for EngineServer {
             .map(|(id, entry)| EngineDescriptor {
                 engine_id: id.0.to_string(),
                 rpc_port: entry.rpc_port,
-                last_heartbeat_age_millis: u64::try_from(
-                    now.saturating_duration_since(entry.last_alive).as_millis(),
-                )
-                .unwrap_or(u64::MAX),
+                last_heartbeat_age_millis: u64::try_from(now.saturating_duration_since(entry.last_alive).as_millis())
+                    .unwrap_or(u64::MAX),
             })
             .collect();
         let recently_died = state
@@ -252,16 +219,11 @@ impl NativeActor for EngineServer {
                 engine_id: record.engine_id.clone(),
                 rpc_port: record.rpc_port,
                 reason: record.reason.clone(),
-                died_age_millis: u64::try_from(
-                    now.saturating_duration_since(record.died_at).as_millis(),
-                )
-                .unwrap_or(u64::MAX),
+                died_age_millis: u64::try_from(now.saturating_duration_since(record.died_at).as_millis())
+                    .unwrap_or(u64::MAX),
             })
             .collect();
-        ListEnginesResult {
-            engines,
-            recently_died,
-        }
+        ListEnginesResult { engines, recently_died }
     }
 
     /// Fork+exec a substrate binary and connect a proxy to it.
@@ -282,11 +244,7 @@ impl NativeActor for EngineServer {
     /// pre-allocation failure (selector miss, port allocation) carries
     /// `None`.
     #[handler::single]
-    fn on_spawn(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: SpawnEngine,
-    ) -> SpawnEngineResult {
+    fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SpawnEngine) -> SpawnEngineResult {
         // Resolve the registry selector to stored content bytes before
         // any side effect, so a miss returns without reserving a port
         // or burning an engine id (ADR-0115, #1954).
@@ -295,10 +253,7 @@ impl NativeActor for EngineServer {
             // is nothing to correlate or reap — `engine_id` is `None`.
             return SpawnEngineResult::Err {
                 engine_id: None,
-                error: format!(
-                    "no binary in the registry matched selector {:?}",
-                    mail.selector
-                ),
+                error: format!("no binary in the registry matched selector {:?}", mail.selector),
             };
         };
 
@@ -336,9 +291,7 @@ impl NativeActor for EngineServer {
             // hold its materialized executable.
             let engine_id = EngineId(Uuid::from_u128(state.next_engine_seq));
             state.next_engine_seq += 1;
-            let engine_store_dir = state
-                .engine_store_root
-                .join(engine_id.0.simple().to_string());
+            let engine_store_dir = state.engine_store_root.join(engine_id.0.simple().to_string());
 
             // Stored bytes are content-addressed and not directly
             // fork-exec'able, so materialize the resolved entry to an
@@ -350,19 +303,12 @@ impl NativeActor for EngineServer {
                 // Post-allocation failure: an id is minted but no engine
                 // was ever registered, so record a `SpawnFailed` death and
                 // carry the id back so a caller can correlate and reap.
-                let error = format!(
-                    "materializing binary {} to {}: {e}",
-                    artifact.hash,
-                    exec_path.display()
-                );
+                let error = format!("materializing binary {} to {}: {e}", artifact.hash, exec_path.display());
                 return state.fail_spawn(engine_id, rpc_port, error);
             }
 
             let mut command = Command::new(&exec_path);
-            command
-                .args(&mail.args)
-                .env("AETHER_RPC_PORT", rpc_port.to_string())
-                .stdin(Stdio::null());
+            command.args(&mail.args).env("AETHER_RPC_PORT", rpc_port.to_string()).stdin(Stdio::null());
             // A spawn carrying a component list rides in as a
             // boot-manifest path; inject it the same way as the RPC port
             // so the spawned chassis reads the listed wasm itself and
@@ -411,10 +357,7 @@ impl NativeActor for EngineServer {
                             last_alive: Instant::now(),
                         },
                     );
-                    return SpawnEngineResult::Ok {
-                        engine_id: engine_id.0.to_string(),
-                        rpc_port,
-                    };
+                    return SpawnEngineResult::Ok { engine_id: engine_id.0.to_string(), rpc_port };
                 }
                 Err(e) => {
                     last_error = format!("proxy failed to connect to the spawned substrate: {e:?}");
@@ -441,10 +384,7 @@ impl NativeActor for EngineServer {
         // Only reached if `attempts` is 0, which `spawn_attempts()`
         // clamps away — keep an honest terminal `Err` rather than an
         // unreachable panic.
-        SpawnEngineResult::Err {
-            engine_id: None,
-            error: last_error,
-        }
+        SpawnEngineResult::Err { engine_id: None, error: last_error }
     }
 
     /// Terminate a supervised engine.
@@ -458,11 +398,7 @@ impl NativeActor for EngineServer {
     /// for an `engine_id` that doesn't parse or names no
     /// supervised engine.
     #[handler::single]
-    fn on_terminate(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: TerminateEngine,
-    ) -> TerminateEngineResult {
+    fn on_terminate(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: TerminateEngine) -> TerminateEngineResult {
         let engine_id = match Uuid::parse_str(&mail.engine_id) {
             Ok(uuid) => EngineId(uuid),
             Err(e) => {
@@ -473,9 +409,7 @@ impl NativeActor for EngineServer {
         };
 
         let Some(entry) = state.engines.remove(&engine_id) else {
-            return TerminateEngineResult::Err {
-                error: format!("no supervised engine {}", mail.engine_id),
-            };
+            return TerminateEngineResult::Err { error: format!("no supervised engine {}", mail.engine_id) };
         };
 
         // Record the deliberate shutdown in the recently-died ring so
@@ -484,11 +418,7 @@ impl NativeActor for EngineServer {
         // the cap initiated it — so there is no second signal to
         // reconcile and this is the one record for this death.
         let proxy_mailbox = entry.proxy_mailbox;
-        state.record_death(
-            mail.engine_id.clone(),
-            entry.rpc_port,
-            DeathReason::Terminated,
-        );
+        state.record_death(mail.engine_id.clone(), entry.rpc_port, DeathReason::Terminated);
 
         // Forward to the proxy: it SIGKILLs its substrate and
         // self-shuts-down. Fire-and-forget — the proxy doesn't
@@ -542,12 +472,7 @@ impl NativeActor for EngineServer {
             }
         };
         let Some(entry) = state.engines.get(&engine_id) else {
-            settle_err(
-                &state.mailer,
-                reply_target,
-                correlation,
-                format!("no supervised engine {}", mail.engine_id),
-            );
+            settle_err(&state.mailer, reply_target, correlation, format!("no supervised engine {}", mail.engine_id));
             return;
         };
 
@@ -555,19 +480,10 @@ impl NativeActor for EngineServer {
         // inbound reply-to verbatim so the substrate's reply — and
         // the proxy's CallSettled — route straight back to the
         // originating RpcServerCapability.
-        let forward = ForwardEnvelope {
-            mailbox: mail.mailbox,
-            kind: mail.kind,
-            payload: mail.payload,
-        };
+        let forward = ForwardEnvelope { mailbox: mail.mailbox, kind: mail.kind, payload: mail.payload };
         state.mailer.push(
-            Mail::new(
-                entry.proxy_mailbox,
-                <ForwardEnvelope as Kind>::ID,
-                forward.encode_into_bytes(),
-                1,
-            )
-            .with_reply_to(reply_to),
+            Mail::new(entry.proxy_mailbox, <ForwardEnvelope as Kind>::ID, forward.encode_into_bytes(), 1)
+                .with_reply_to(reply_to),
         );
     }
 
@@ -636,16 +552,9 @@ impl NativeActor for EngineServer {
     /// `Err { error }` for an unreadable path or a `--describe` that
     /// failed or didn't yield a parseable manifest.
     #[handler::single]
-    fn on_upload_binary(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        mail: UploadBinary,
-    ) -> UploadBinaryResult {
+    fn on_upload_binary(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UploadBinary) -> UploadBinaryResult {
         match ingest_binary(&mut state.store, &mail.staged_path, mail.name.clone()) {
-            Ok(hash) => UploadBinaryResult::Ok {
-                hash,
-                name: mail.name,
-            },
+            Ok(hash) => UploadBinaryResult::Ok { hash, name: mail.name },
             Err(error) => UploadBinaryResult::Err { error },
         }
     }
@@ -663,9 +572,7 @@ impl NativeActor for EngineServer {
         _ctx: &mut NativeCtx<'_>,
         mail: ListEngineBinaries,
     ) -> ListEngineBinariesResult {
-        ListEngineBinariesResult {
-            binaries: state.store.list_binaries(&mail),
-        }
+        ListEngineBinariesResult { binaries: state.store.list_binaries(&mail) }
     }
 
     /// Ingest a component wasm into the hub's content-addressed store
@@ -686,10 +593,7 @@ impl NativeActor for EngineServer {
         mail: UploadComponent,
     ) -> UploadComponentResult {
         match ingest_component(&mut state.store, &mail.staged_path, mail.name.clone()) {
-            Ok(hash) => UploadComponentResult::Ok {
-                hash,
-                name: mail.name,
-            },
+            Ok(hash) => UploadComponentResult::Ok { hash, name: mail.name },
             Err(error) => UploadComponentResult::Err { error },
         }
     }
@@ -726,8 +630,6 @@ impl NativeActor for EngineServer {
         _ctx: &mut NativeCtx<'_>,
         mail: ListComponentBinaries,
     ) -> ListComponentBinariesResult {
-        ListComponentBinariesResult {
-            components: state.store.list_components(&mail),
-        }
+        ListComponentBinariesResult { components: state.store.list_components(&mail) }
     }
 }

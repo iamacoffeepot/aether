@@ -11,9 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 /// instead; an unparseable `bind_addr` falls back to IPv4 loopback.
 #[must_use]
 pub fn teardown_connect_addr(bind_addr: &str, listener_port: u16) -> SocketAddr {
-    let ip = bind_addr
-        .parse::<SocketAddr>()
-        .map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |addr| addr.ip());
+    let ip = bind_addr.parse::<SocketAddr>().map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |addr| addr.ip());
     let ip = match ip {
         IpAddr::V4(v4) if v4.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
         IpAddr::V6(v6) if v6.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
@@ -32,14 +30,8 @@ mod unit_tests {
     /// fix (issue #2631), not a mirror of the input.
     #[test]
     fn teardown_connect_addr_maps_wildcard_to_loopback() {
-        assert_eq!(
-            teardown_connect_addr("0.0.0.0:8080", 8080),
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080)
-        );
-        assert_eq!(
-            teardown_connect_addr("[::]:8080", 8080),
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080)
-        );
+        assert_eq!(teardown_connect_addr("0.0.0.0:8080", 8080), SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080));
+        assert_eq!(teardown_connect_addr("[::]:8080", 8080), SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080));
     }
 
     /// A specific bind IP (not wildcard) is preserved as-is, paired with the

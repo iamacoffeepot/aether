@@ -223,23 +223,13 @@ mod tests {
 
     #[test]
     fn round_trip_all_tags() {
-        for &tag in &[
-            Tag::Mailbox,
-            Tag::Kind,
-            Tag::Handle,
-            Tag::Dag,
-            Tag::Transform,
-            Tag::Thread,
-        ] {
+        for &tag in &[Tag::Mailbox, Tag::Kind, Tag::Handle, Tag::Dag, Tag::Transform, Tag::Thread] {
             for hash in [0u64, 0x1, 0x0FFF_FFFF_FFFF_FFFF, 0xDEAD_BEEF_CAFE_BABE] {
                 let id = with_tag(tag, hash);
                 assert_eq!(tag_of(id), Some(tag));
                 assert_eq!(body_of(id), hash & HASH_MASK);
                 let s = encode(id).expect("test setup: tagged id encodes (tag is non-zero)");
-                assert_eq!(
-                    decode(&s).expect("test setup: round-trip decode of encoded id"),
-                    id
-                );
+                assert_eq!(decode(&s).expect("test setup: round-trip decode of encoded id"), id);
             }
         }
     }
@@ -308,14 +298,8 @@ mod tests {
 
     #[test]
     fn decode_rejects_invalid_chars() {
-        assert_eq!(
-            decode("mbx-0aaa-aaaa-aaaa"),
-            Err(DecodeError::InvalidChar('0'))
-        );
-        assert_eq!(
-            decode("mbx-aaaa-1aaa-aaaa"),
-            Err(DecodeError::InvalidChar('1'))
-        );
+        assert_eq!(decode("mbx-0aaa-aaaa-aaaa"), Err(DecodeError::InvalidChar('0')));
+        assert_eq!(decode("mbx-aaaa-1aaa-aaaa"), Err(DecodeError::InvalidChar('1')));
     }
 
     #[test]
@@ -323,28 +307,15 @@ mod tests {
         let id = with_tag(Tag::Handle, 0x1234_5678_9abc_def0 & HASH_MASK);
         let lower = encode(id).expect("test setup: Handle id encodes (tag is non-zero)");
         let upper = lower.to_uppercase();
-        assert_eq!(
-            decode(&lower).expect("test setup: lowercase form decodes back to id"),
-            id
-        );
-        assert_eq!(
-            decode(&upper).expect("test setup: uppercase form decodes back to id"),
-            id
-        );
+        assert_eq!(decode(&lower).expect("test setup: lowercase form decodes back to id"), id);
+        assert_eq!(decode(&upper).expect("test setup: uppercase form decodes back to id"), id);
     }
 
     #[test]
     fn decode_with_tag_catches_mismatch() {
         let mailbox = encode(with_tag(Tag::Mailbox, 0x42)).expect("test setup: Mailbox id encodes");
-        let err = decode_with_tag(&mailbox, Tag::Kind)
-            .expect_err("test setup: Mailbox bytes must reject Kind tag");
-        assert_eq!(
-            err,
-            DecodeError::TagMismatch {
-                expected: Tag::Kind,
-                found: Tag::Mailbox,
-            }
-        );
+        let err = decode_with_tag(&mailbox, Tag::Kind).expect_err("test setup: Mailbox bytes must reject Kind tag");
+        assert_eq!(err, DecodeError::TagMismatch { expected: Tag::Kind, found: Tag::Mailbox });
     }
 
     #[test]

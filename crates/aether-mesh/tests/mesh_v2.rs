@@ -33,17 +33,10 @@ fn torus_face_normals_point_outward() {
         let tube_center = if radial_xz < 1e-6 {
             Vec3::ZERO
         } else {
-            Vec3::new(
-                cent.x / radial_xz * major_radius,
-                0.0,
-                cent.z / radial_xz * major_radius,
-            )
+            Vec3::new(cent.x / radial_xz * major_radius, 0.0, cent.z / radial_xz * major_radius)
         };
         let outward = cent - tube_center;
-        assert!(
-            normal.dot(outward) > 0.0,
-            "torus face normal points inward for triangle {tri:?}"
-        );
+        assert!(normal.dot(outward) > 0.0, "torus face normal points inward for triangle {tri:?}");
     }
 }
 
@@ -90,11 +83,7 @@ fn sweep_curved_path_keeps_profile_perpendicular() {
     assert_eq!(tris.len(), 16);
     // Sanity: every vertex should be within `radius * sqrt(2)` of a
     // waypoint (corners of the square profile). Conservative bound.
-    let path = [
-        Vec3::new(0.0, 0.0, 0.0),
-        Vec3::new(1.0, 0.0, 0.0),
-        Vec3::new(1.0, 1.0, 0.0),
-    ];
+    let path = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 0.0)];
     for tri in &tris {
         for v in tri.vertices {
             let mut min_dist = f32::MAX;
@@ -124,8 +113,7 @@ fn sweep_with_short_path_emits_nothing() {
 
 #[test]
 fn sweep_with_under_three_profile_points_emits_nothing() {
-    let ast = parse("(sweep ((-0.1 0) (0.1 0)) ((0 0 0) (1 0 0)) :color 0)")
-        .expect("test setup: sweep DSL parses");
+    let ast = parse("(sweep ((-0.1 0) (0.1 0)) ((0 0 0) (1 0 0)) :color 0)").expect("test setup: sweep DSL parses");
     assert_eq!(mesh(&ast).expect("test setup: sweep meshes").len(), 0);
 }
 
@@ -138,13 +126,7 @@ fn sweep_scales_length_must_equal_path_length() {
                        :color 0)";
     let err = parse(text).expect_err("test setup: scales/path length mismatch must Err");
     assert!(
-        matches!(
-            err,
-            ParseError::SweepScalesLengthMismatch {
-                scales_len: 2,
-                path_len: 3
-            }
-        ),
+        matches!(err, ParseError::SweepScalesLengthMismatch { scales_len: 2, path_len: 3 }),
         "expected SweepScalesLengthMismatch, got {err:?}"
     );
 }
