@@ -376,10 +376,16 @@ jobs:
       # failure rather than leaving the required context missing.
       #
       # Verdict table (first match wins):
+      #   review job did not succeed     -> failure  (infra/cancelled; re-run via dispatch)
       #   PR touches no Rust             -> success  (review not required)
-      #   review job failed (infra)      -> failure  (re-run via dispatch)
       #   Rust + review:unresolved set   -> failure  (points at the rollup)
       #   Rust + label absent            -> success
+      #
+      # The infra-failure check runs first so a review job that dies before
+      # computing touches_rust (leaving it empty) fails closed rather than
+      # falling through to the non-Rust success branch — an empty value must
+      # never read as "no Rust changes". Keyed on REVIEW_RESULT != "success"
+      # (not == "failure") so a cancelled run fails closed too.
       #
       # Wedge hazard (issue #2996 rollout is two-phase): branch protection
       # must NOT require this context until the poster is proven live on real
@@ -395,16 +401,20 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          # Non-Rust short-circuits first: such a PR is never required to pass
-          # the review, so it stays green even through a review-job hiccup.
-          if [ "$TOUCHES_RUST" != "true" ]; then
-            state="success"
-            description="no Rust changes — review not required"
-          elif [ "$REVIEW_RESULT" = "failure" ]; then
-            # Rust PR whose review job broke before a verdict — fail closed so
-            # the review can't be bypassed by an infra flake; re-run to clear.
+          # Infra-failure check first: a review job that dies before computing
+          # touches_rust leaves it empty, which must fail closed rather than
+          # fall through to the non-Rust success branch below. Keyed on
+          # != "success" (not == "failure") so a cancelled run fails closed
+          # too — the review can't be bypassed by an infra flake; re-run to
+          # clear.
+          if [ "$REVIEW_RESULT" != "success" ]; then
             state="failure"
             description="review run failed (infra). Re-run via workflow_dispatch."
+          elif [ "$TOUCHES_RUST" != "true" ]; then
+            # Non-Rust PR with a completed review job: never required to pass
+            # the review.
+            state="success"
+            description="no Rust changes — review not required"
           else
             # Rust PR with a verdict: mirror the LIVE label. Capture then match
             # with a here-string (not a pipe) so grep -q can't SIGPIPE gh.
