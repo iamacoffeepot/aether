@@ -71,13 +71,21 @@ jobs:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
     outputs:
       pr_number: ${{ steps.resolve.outputs.pr_number }}
+      # head_sha + touches_rust feed the `gate` job's per-SHA status post,
+      # so they are emitted the moment a PR resolves — even when the review
+      # session is skipped (marker present) — not only on the proceed path.
+      head_sha: ${{ steps.resolve.outputs.head_sha }}
+      touches_rust: ${{ steps.resolve.outputs.touches_rust }}
       rollup_produced: ${{ steps.rollup.outputs.produced }}
     steps:
       - uses: runs-on/action@v2
       # Resolve the PR and apply the run gates BEFORE any checkout — these
       # are pure GitHub API calls. Sets proceed=false (a clean no-op) when
       # there is no open PR or the once-only marker is already present.
-      # head_sha feeds the checkout.
+      # head_sha feeds the checkout. Once a PR resolves, pr_number, head_sha,
+      # and touches_rust are emitted immediately, ahead of the marker guard,
+      # so the `gate` job can post the required status on the head SHA even
+      # on the marker-present runs where the session itself is a no-op.
       - name: Resolve PR and apply gates
         id: resolve
         env:
@@ -101,11 +109,43 @@ jobs:
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          # Emit pr_number AND head_sha the moment a PR resolves, BEFORE the
+          # once-only marker guard below. The `gate` job posts the required
+          # `Review gate` status on this head SHA on EVERY trigger — including
+          # the marker-present runs that short-circuit the session — so it
+          # must have the SHA even when this step exits with proceed=false.
+          # That per-SHA re-post on each green push is the label-mirror that
+          # reconciles the run-once review with a per-SHA required check.
           echo "pr_number=$pr" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha')" >> "$GITHUB_OUTPUT"
+
+          # Rust-touch detection drives the gate verdict: only PRs that change
+          # Rust (`.rs`) or a manifest (`Cargo.toml` / `Cargo.lock`) — the
+          # surface the five pillars judge — are held to the review verdict;
+          # every other PR gets an automatic success. Capture the file list
+          # first, then match with a here-string (not a pipe) so a `grep -q`
+          # early exit can't SIGPIPE the paginated gh under `pipefail`.
+          files="$(gh api "repos/${REPO}/pulls/${pr}/files" --paginate --jq '.[].filename')"
+          if grep -qE '\.rs$|Cargo\.(toml|lock)$' <<<"$files"; then
+            echo "touches_rust=true" >> "$GITHUB_OUTPUT"
+          else
+            # No Rust in the diff → skip the review session entirely, not
+            # just the verdict: the /review skill refuses an empty .rs file
+            # set, so running it here would loud-fail on every docs/workflow
+            # PR. The gate job still posts its success-skip status from the
+            # touches_rust output above.
+            echo "touches_rust=false" >> "$GITHUB_OUTPUT"
+            echo "PR #$pr touches no Rust — review session skipped."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           # Once-only guard: the marker comment is the run-once state. A
           # manual dispatch bypasses it (deliberate re-review); the poster
-          # dedupes already-posted findings by fingerprint.
+          # dedupes already-posted findings by fingerprint. proceed=false
+          # here still lets the gate job post — it reads the outputs emitted
+          # above, not `proceed`.
           if [ "$EVENT" != "workflow_dispatch" ]; then
             if gh api "repos/${REPO}/issues/${pr}/comments" --paginate --jq '.[].body' \
               | grep -q '<!-- aether-review -->'; then
@@ -115,7 +155,6 @@ jobs:
             fi
           fi
 
-          echo "head_sha=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha')" >> "$GITHUB_OUTPUT"
           echo "proceed=true" >> "$GITHUB_OUTPUT"
 
       # Check out the PR head with full history so the /review skill's
@@ -309,3 +348,75 @@ jobs:
           ROLLUP_PATH: review-rollup.json
           FILES_PATH: pr-files.json
         run: node scripts/post-review-rollup.mjs
+
+  gate:
+    name: Review gate
+    needs: [review, post]
+    # Runs on EVERY trigger that resolved a PR — including the marker-present
+    # runs where the review session is skipped and `post` no-ops. `always()`
+    # so a skipped/failed upstream job never suppresses the status post; the
+    # pr_number guard drops the fork / no-open-PR cases where the review job
+    # never resolved a PR (and so emitted no outputs).
+    if: always() && needs.review.outputs.pr_number != ''
+    runs-on: ubuntu-latest
+    # Only scope needed: post a commit status. Never touches branch code.
+    permissions:
+      statuses: write
+    steps:
+      # Mirror the advisory `review:unresolved` label into a required
+      # `Review gate` commit status on the PR's head SHA. This status is the
+      # bridge between the run-once review trigger and a per-SHA required
+      # check: the review session runs once (first CI green, once-only), but
+      # this status is recomputed from the LIVE label on every green push, so
+      # branch protection can require `Review gate` without the session ever
+      # re-running per SHA. A non-Rust PR is never held to the verdict; a
+      # Rust PR mirrors its label; an infra failure in the review job posts
+      # failure rather than leaving the required context missing.
+      #
+      # Verdict table (first match wins):
+      #   PR touches no Rust             -> success  (review not required)
+      #   review job failed (infra)      -> failure  (re-run via dispatch)
+      #   Rust + review:unresolved set   -> failure  (points at the rollup)
+      #   Rust + label absent            -> success
+      #
+      # Wedge hazard (issue #2996 rollout is two-phase): branch protection
+      # must NOT require this context until the poster is proven live on real
+      # PRs — a required context that nothing posts wedges every open PR.
+      - name: Post the Review gate status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.review.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.review.outputs.head_sha }}
+          TOUCHES_RUST: ${{ needs.review.outputs.touches_rust }}
+          REVIEW_RESULT: ${{ needs.review.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Non-Rust short-circuits first: such a PR is never required to pass
+          # the review, so it stays green even through a review-job hiccup.
+          if [ "$TOUCHES_RUST" != "true" ]; then
+            state="success"
+            description="no Rust changes — review not required"
+          elif [ "$REVIEW_RESULT" = "failure" ]; then
+            # Rust PR whose review job broke before a verdict — fail closed so
+            # the review can't be bypassed by an infra flake; re-run to clear.
+            state="failure"
+            description="review run failed (infra). Re-run via workflow_dispatch."
+          else
+            # Rust PR with a verdict: mirror the LIVE label. Capture then match
+            # with a here-string (not a pipe) so grep -q can't SIGPIPE gh.
+            labels="$(gh api "repos/${REPO}/issues/${PR}/labels" --jq '.[].name')"
+            if grep -qx 'review:unresolved' <<<"$labels"; then
+              state="failure"
+              description="review unresolved; see the rollup comment. Clear via fix + workflow_dispatch re-run, or strip the label + dispatch."
+            else
+              state="success"
+              description="review verdict clear"
+            fi
+          fi
+          gh api -X POST "repos/${REPO}/statuses/${HEAD_SHA}" \
+            -f state="$state" \
+            -f context="Review gate" \
+            -f description="$description" \
+            -f target_url="$RUN_URL"
