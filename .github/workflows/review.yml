@@ -177,6 +177,11 @@ jobs:
           resolve the changed .rs files and their per-file diffs from git, and read the issue
           text this PR closes (use gh to find the PR's closing reference for issue #${PR_NUMBER}
           if needed). Let the skill run the review.js workflow in a single pass.
+          LOAD-BEARING: the Workflow tool runs in the BACKGROUND and re-invokes you when it
+          completes. Your run is NOT complete until review-rollup.json exists on disk. Never
+          produce a final reply while the workflow is still running — in headless mode your
+          final reply exits the process and KILLS the in-flight workflow. Wait for the
+          workflow's completion notification, however long it takes.
           When the workflow returns { rollup, files }, write the returned ROLLUP object as JSON
           verbatim to review-rollup.json in the repo root (the rollup, not the whole return).
           Do not edit any source. Print exactly REVIEW-DONE when the file is written." \
@@ -186,12 +191,23 @@ jobs:
 
       # Whether the run produced a rollup gates the `post` job. Kept as a
       # step so `post` can `needs`-read it without inspecting the artifact.
+      # A missing rollup after the review actually ran (gates passed, token
+      # present) is a FAILURE, not a quiet skip — the inaugural run
+      # (iamacoffeepot/aether#2979) skipped silently and reported success
+      # when the headless session exited with the workflow still in flight.
+      # The quiet-skip path exists only for the absent-secret case, which
+      # never reaches the else branch here.
       - name: Note whether a rollup was produced
         id: rollup
         if: always() && steps.resolve.outputs.proceed == 'true'
         run: |
           if [ -f review-rollup.json ]; then
             echo "produced=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+            echo "produced=false" >> "$GITHUB_OUTPUT"
+            echo "review ran but produced no rollup — failing loudly. Tail of the session log:"
+            tail -n 40 /tmp/review.log 2>/dev/null || echo "(no session log)"
+            exit 1
           else
             echo "produced=false" >> "$GITHUB_OUTPUT"
           fi
