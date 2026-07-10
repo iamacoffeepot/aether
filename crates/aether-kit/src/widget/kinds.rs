@@ -397,6 +397,10 @@ pub enum WidgetKind {
     /// The actor owns its offset and recursively routes wheel residuals.
     /// Appended to preserve every established wire discriminant above.
     Scroll,
+    /// A fixed-row virtual list — `config` decodes as [`VirtualListConfig`].
+    /// Appended after `Scroll` to preserve every established wire discriminant
+    /// above.
+    VirtualList,
 }
 
 impl WidgetKind {
@@ -424,6 +428,7 @@ impl WidgetKind {
             Self::TextField => aether_data::mailbox_id_from_name("aether.kit.widget.text_field").0,
             Self::TextArea => aether_data::mailbox_id_from_name("aether.kit.widget.text_area").0,
             Self::Button => aether_data::mailbox_id_from_name("aether.kit.widget.button").0,
+            Self::VirtualList => aether_data::mailbox_id_from_name("aether.kit.widget.virtual_list").0,
             Self::Composite | Self::Scroll | Self::BehaviorHost => return None,
         };
         Some(tag)
@@ -643,6 +648,20 @@ pub struct RadioConfig {
     pub state: WidgetControlState,
 }
 
+/// `aether.kit.widget.virtual_list.config` — a fixed-row viewport over a
+/// potentially large item vector. The panel fixes the viewport height from
+/// `visible_row_count`; the actor realizes only that bounded row window.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.kit.widget.virtual_list.config")]
+pub struct VirtualListConfig {
+    pub items: Vec<String>,
+    pub initial_selected_index: u32,
+    pub visible_row_count: u32,
+    pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
+}
+
 /// `aether.kit.widget.button.config` — a momentary push button showing
 /// `label`, firing [`ButtonClicked`] on a press-then-release-inside.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
@@ -741,6 +760,14 @@ pub struct RadioSelected {
     pub index: u32,
 }
 
+/// `aether.kit.widget.virtual_list.selected` — a virtual list's changed
+/// selection, attributed by the parent from the sending child's mailbox.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.virtual_list.selected")]
+pub struct VirtualListSelected {
+    pub selected_index: u32,
+}
+
 /// `aether.kit.widget.button.clicked` — a button's value-up event, fired once
 /// per completed press-then-release-inside. Fieldless: the click carries no
 /// data, and which button clicked is the root's `source_mailbox` attribution.
@@ -830,6 +857,27 @@ impl Default for PanelConfig {
 mod tests {
     use super::*;
     use aether_data::wire;
+
+    #[test]
+    fn virtual_list_wire_vocabulary_uses_named_records_not_positional_storage() {
+        let source = include_str!("kinds.rs");
+        assert!(source.contains("pub struct VirtualListConfig {"));
+        assert!(source.contains("pub struct VirtualListSelected {"));
+        assert!(!source.contains("pub struct VirtualListConfig("));
+        assert!(!source.contains("pub struct VirtualListSelected("));
+        assert!(!source.contains("pub type VirtualListConfig"));
+        assert!(!source.contains("pub type VirtualListSelected"));
+
+        let config = source
+            .split("pub struct VirtualListConfig {")
+            .nth(1)
+            .and_then(|rest| rest.split("pub struct ButtonConfig").next())
+            .expect("virtual-list config source section");
+        assert!(
+            !config.contains('['),
+            "virtual-list config must not smuggle semantic values through fixed arrays",
+        );
+    }
 
     #[test]
     fn scroll_wire_vocabulary_uses_named_semantic_records() {

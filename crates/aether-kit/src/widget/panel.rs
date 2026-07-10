@@ -33,9 +33,9 @@
 //!   up — and emits the whole panel as contiguous equal-clip solid batches
 //!   (plus text) from one root render sender.
 //! - **Value.** Each value-up event (`SliderChanged` / `TextCommitted` /
-//!   `RadioSelected` / `ButtonClicked`), attributed by `ctx.source_mailbox()`,
-//!   is the seam a real editor translates into world-knob driver mail; the
-//!   reference logs it.
+//!   `RadioSelected` / `VirtualListSelected` / `ButtonClicked`), attributed
+//!   by `ctx.source_mailbox()`, is the seam a real editor translates into
+//!   world-knob driver mail; the reference logs it.
 
 use alloc::string::String;
 use alloc::vec;
@@ -59,14 +59,16 @@ use crate::widget::focus::{
     AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition, HoverTransition,
 };
 use crate::widget::set::{
-    ButtonWidget, ImageWidget, LabelWidget, RadioGroupWidget, SliderWidget, TextAreaWidget, TextFieldWidget, quad,
+    ButtonWidget, ImageWidget, LabelWidget, RadioGroupWidget, SliderWidget, TextAreaWidget, TextFieldWidget,
+    VirtualListWidget, quad,
 };
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
     ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig,
     PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget,
-    SliderChanged, SliderConfig, TextAreaConfig, TextCommitted, TextFieldConfig, Widget, WidgetChildSpec,
-    WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
+    SliderChanged, SliderConfig, TextAreaConfig, TextCommitted, TextFieldConfig, VirtualListConfig,
+    VirtualListSelected, Widget, WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame,
+    WidgetKind, WidgetStateChanged,
 };
 use crate::widget::{FrameDischarge, decode_nested_widget_config};
 use crate::widget::{accept_child_list, emit, flush_membership};
@@ -110,6 +112,14 @@ pub struct SpawnedChild {
     pub state: WidgetControlState,
     pub type_namespace: &'static str,
     pub scroll_viewport: Option<ScrollExtent>,
+}
+
+#[cfg(feature = "behavior")]
+struct ChildProfile {
+    height: f32,
+    pointer_eligible: bool,
+    focusable: bool,
+    state: WidgetControlState,
 }
 
 /// The reference panel root. Loaded as a component with a [`PanelConfig`]; its
@@ -350,10 +360,42 @@ pub fn spawn_widget_child(
                 scroll_viewport: None,
             })
         }),
+        WidgetKind::VirtualList => decode_child::<VirtualListConfig>(spec).and_then(|config| {
+            let Some(height) = virtual_list_height(row, config.visible_row_count) else {
+                tracing::warn!(
+                    target: "aether_kit",
+                    subname = %spec.subname,
+                    row_height = row,
+                    visible_row_count = config.visible_row_count,
+                    "virtual-list viewport height is invalid; slot skipped",
+                );
+                return None;
+            };
+            let eligible = !config.items.is_empty() && config.visible_row_count > 0;
+            let state = config.state.clone();
+            spawn::<VirtualListWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                width_pixels: None,
+                height_pixels: height,
+                pointer_eligible: eligible,
+                focusable: eligible,
+                state,
+                type_namespace: <VirtualListWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
+            })
+        }),
         WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
         WidgetKind::Composite => spawn_composite_child(ctx, spec, layout, row),
         WidgetKind::Scroll => spawn_scroll_child(ctx, spec, layout),
     }
+}
+
+fn virtual_list_height(row_height: f32, visible_row_count: u32) -> Option<f32> {
+    if !row_height.is_finite() || row_height <= 0.0 {
+        return None;
+    }
+    let height = row_height * visible_row_count as f32;
+    (height.is_finite() && height >= 0.0).then_some(height)
 }
 
 fn spawn_composite_child(
@@ -567,10 +609,12 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         TextAreaConfig::ID.0,
         ButtonConfig::ID.0,
         RadioConfig::ID.0,
+        VirtualListConfig::ID.0,
         SliderChanged::ID.0,
         TextCommitted::ID.0,
         ButtonClicked::ID.0,
         RadioSelected::ID.0,
+        VirtualListSelected::ID.0,
         FocusGained::ID.0,
         FocusLost::ID.0,
         HoverGained::ID.0,
@@ -609,34 +653,59 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
         );
         return None;
     };
-    let (height, pointer_eligible, focusable, state) = match host_spec.wrapped {
+    let profile = match host_spec.wrapped {
         WidgetKind::Label => {
             let config = decode_named::<LabelConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            (row, false, false, config.state)
+            ChildProfile { height: row, pointer_eligible: false, focusable: false, state: config.state }
         }
         WidgetKind::Image => {
             let config = decode_named::<ImageConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            (row, false, false, config.state)
+            ChildProfile { height: row, pointer_eligible: false, focusable: false, state: config.state }
         }
         WidgetKind::Slider => {
             let config = decode_named::<SliderConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            (row, true, true, config.state)
+            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
         }
         WidgetKind::Radio => {
             let config = decode_named::<RadioConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            (row * config.options.len() as f32, true, true, config.state)
+            ChildProfile {
+                height: row * config.options.len() as f32,
+                pointer_eligible: true,
+                focusable: true,
+                state: config.state,
+            }
         }
         WidgetKind::TextField => {
             let config = decode_named::<TextFieldConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            (row, true, true, config.state)
+            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
         }
         WidgetKind::TextArea => {
             let config = decode_named::<TextAreaConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            (row * config.rows.max(1) as f32, true, true, config.state)
+            ChildProfile {
+                height: row * config.rows.max(1) as f32,
+                pointer_eligible: true,
+                focusable: true,
+                state: config.state,
+            }
         }
         WidgetKind::Button => {
             let config = decode_named::<ButtonConfig>(&spec.subname, &host_spec.wrapped_config)?;
-            (row, true, true, config.state)
+            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
+        }
+        WidgetKind::VirtualList => {
+            let config = decode_named::<VirtualListConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            let Some(height) = virtual_list_height(row, config.visible_row_count) else {
+                tracing::warn!(
+                    target: "aether_kit",
+                    subname = %spec.subname,
+                    row_height = row,
+                    visible_row_count = config.visible_row_count,
+                    "wrapped virtual-list viewport height is invalid; slot skipped",
+                );
+                return None;
+            };
+            let eligible = !config.items.is_empty() && config.visible_row_count > 0;
+            ChildProfile { height, pointer_eligible: eligible, focusable: eligible, state: config.state }
         }
         WidgetKind::Composite | WidgetKind::Scroll | WidgetKind::BehaviorHost => return None,
     };
@@ -678,10 +747,10 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
         Ok(id) => Some(SpawnedChild {
             id,
             width_pixels: None,
-            height_pixels: height,
-            pointer_eligible,
-            focusable,
-            state,
+            height_pixels: profile.height,
+            pointer_eligible: profile.pointer_eligible,
+            focusable: profile.focusable,
+            state: profile.state,
             type_namespace: <aether_behavior::BehaviorHost as Addressable>::NAMESPACE,
             scroll_viewport: None,
         }),
@@ -993,6 +1062,20 @@ impl WasmActor for WidgetPanel {
         );
     }
 
+    /// A virtual-list selection. The map-editor seam; the reference logs it.
+    ///
+    /// # Agent
+    /// A child's reply; not useful to send manually.
+    #[handler::manual]
+    fn on_virtual_list_selected(&mut self, ctx: &mut WasmCtx<'_, Manual>, selected: VirtualListSelected) {
+        tracing::info!(
+            target: "aether_kit",
+            widget = self.child_name(ctx.source_mailbox()),
+            selected_index = selected.selected_index,
+            "widget virtual list selected",
+        );
+    }
+
     /// A button click. The map-editor seam; the reference logs it.
     ///
     /// # Agent
@@ -1100,6 +1183,7 @@ mod behavior_tests {
         assert_eq!(WidgetKind::Radio.type_tag(), Some(ActorTypeTag::of::<RadioGroupWidget>().0));
         assert_eq!(WidgetKind::TextField.type_tag(), Some(ActorTypeTag::of::<TextFieldWidget>().0));
         assert_eq!(WidgetKind::TextArea.type_tag(), Some(ActorTypeTag::of::<TextAreaWidget>().0));
+        assert_eq!(WidgetKind::VirtualList.type_tag(), Some(ActorTypeTag::of::<VirtualListWidget>().0));
         assert_eq!(WidgetKind::Composite.type_tag(), None);
         assert_eq!(WidgetKind::Scroll.type_tag(), None);
         assert_eq!(WidgetKind::BehaviorHost.type_tag(), None);

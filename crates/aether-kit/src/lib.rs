@@ -90,8 +90,9 @@ pub use widget::{
     ButtonClicked, ButtonConfig, ChildrenChanged, Collect, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig,
     ImageFit, LabelConfig, MembershipEntry, PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollDelta,
     ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, SetWidgetState, SliderChanged, SliderConfig,
-    TextAreaConfig, TextCommitted, TextFieldConfig, WidgetChildSpec, WidgetClipRect, WidgetConfig, WidgetControlState,
-    WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged, WidgetValidation,
+    TextAreaConfig, TextCommitted, TextFieldConfig, VirtualListConfig, VirtualListSelected, WidgetChildSpec,
+    WidgetClipRect, WidgetConfig, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetKind,
+    WidgetStateChanged, WidgetValidation,
 };
 pub use world::{
     ApplyBrush, AutomatonRule, BrushParameters, CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk,
@@ -145,6 +146,7 @@ aether_actor::export!(
     widget::set::ButtonWidget,
     widget::set::LabelWidget,
     widget::set::ImageWidget,
+    widget::set::VirtualListWidget,
     widget::WidgetPanel
 );
 
@@ -167,6 +169,7 @@ aether_actor::export!(
     widget::set::ButtonWidget,
     widget::set::LabelWidget,
     widget::set::ImageWidget,
+    widget::set::VirtualListWidget,
     widget::WidgetPanel,
     aether_behavior::BehaviorHost
 );
