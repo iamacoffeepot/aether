@@ -34,6 +34,16 @@ struct ImagePlacement {
     uv_bottom: f32,
 }
 
+struct WideImageExtent {
+    width_pixels: f64,
+    height_pixels: f64,
+}
+
+struct WideUvCrop {
+    left: f64,
+    top: f64,
+}
+
 impl ImagePlacement {
     fn is_valid(self) -> bool {
         self.destination_x_pixels.is_finite()
@@ -106,9 +116,28 @@ impl ImageWidget {
         let placement = match self.fit {
             ImageFit::Fill => full(),
             ImageFit::Contain => {
-                let scale = (frame_width / natural_width).min(frame_height / natural_height);
-                let width = natural_width * scale;
-                let height = natural_height * scale;
+                // Compare cross-products and derive the unconstrained axis in
+                // f64. Every input is a finite f32, so both products and the
+                // resulting dimension fit in f64 even when the equivalent
+                // f32 fit ratios would overflow (for example 1e30 / 1e-30).
+                let frame_width_wide = f64::from(frame_width);
+                let frame_height_wide = f64::from(frame_height);
+                let natural_width_wide = f64::from(natural_width);
+                let natural_height_wide = f64::from(natural_height);
+                let source_is_wider = natural_width_wide * frame_height_wide > natural_height_wide * frame_width_wide;
+                let extent = if source_is_wider {
+                    WideImageExtent {
+                        width_pixels: frame_width_wide,
+                        height_pixels: frame_width_wide * natural_height_wide / natural_width_wide,
+                    }
+                } else {
+                    WideImageExtent {
+                        width_pixels: frame_height_wide * natural_width_wide / natural_height_wide,
+                        height_pixels: frame_height_wide,
+                    }
+                };
+                let width = positive_f32(extent.width_pixels)?;
+                let height = positive_f32(extent.height_pixels)?;
                 ImagePlacement {
                     destination_x_pixels: (frame_width - width) * 0.5,
                     destination_y_pixels: (frame_height - height) * 0.5,
@@ -118,11 +147,23 @@ impl ImageWidget {
                 }
             }
             ImageFit::Cover => {
-                let scale = (frame_width / natural_width).max(frame_height / natural_height);
-                let sampled_width = frame_width / scale;
-                let sampled_height = frame_height / scale;
-                let uv_left = 0.5 * (1.0 - sampled_width / natural_width);
-                let uv_top = 0.5 * (1.0 - sampled_height / natural_height);
+                // Work directly in normalized crop fractions. Cross-products
+                // in f64 avoid overflowing either f32 scale ratio, while a
+                // final narrowing that cannot represent distinct UV endpoints
+                // is rejected by `ImagePlacement::is_valid` below.
+                let frame_width_wide = f64::from(frame_width);
+                let frame_height_wide = f64::from(frame_height);
+                let natural_width_wide = f64::from(natural_width);
+                let natural_height_wide = f64::from(natural_height);
+                let source_cross = natural_width_wide * frame_height_wide;
+                let frame_cross = natural_height_wide * frame_width_wide;
+                let crop = if source_cross > frame_cross {
+                    WideUvCrop { left: 0.5 * (1.0 - frame_cross / source_cross), top: 0.0 }
+                } else {
+                    WideUvCrop { left: 0.0, top: 0.5 * (1.0 - source_cross / frame_cross) }
+                };
+                let uv_left = finite_f32(crop.left)?;
+                let uv_top = finite_f32(crop.top)?;
                 ImagePlacement { uv_left, uv_top, uv_right: 1.0 - uv_left, uv_bottom: 1.0 - uv_top, ..full() }
             }
             ImageFit::Natural => ImagePlacement {
@@ -172,6 +213,17 @@ impl ImageWidget {
         self.theme = config.theme;
         self.state.replace(config.state)
     }
+}
+
+fn positive_f32(value: f64) -> Option<f32> {
+    let value = finite_f32(value)?;
+    (value > 0.0).then_some(value)
+}
+
+fn finite_f32(value: f64) -> Option<f32> {
+    #[allow(clippy::cast_possible_truncation)]
+    let narrowed = value as f32;
+    narrowed.is_finite().then_some(narrowed)
 }
 
 /// A static image widget. Spawned inline by a panel root with an
@@ -314,6 +366,54 @@ mod tests {
                 uv_right: 1.0,
                 uv_bottom: 1.0,
             }
+        );
+    }
+
+    #[test]
+    fn contain_keeps_extreme_positive_finite_sizes_visible() {
+        let mut widget = image(ImageFit::Contain);
+        widget.natural_width_pixels = 1.0e-30;
+        widget.natural_height_pixels = 1.0e-30;
+        widget.frame.width = 1.0e30;
+        widget.frame.height = 5.0e29;
+
+        assert_eq!(
+            placement(&widget),
+            ImagePlacement {
+                destination_x_pixels: 2.5e29,
+                destination_y_pixels: 0.0,
+                destination_width_pixels: 5.0e29,
+                destination_height_pixels: 5.0e29,
+                uv_left: 0.0,
+                uv_top: 0.0,
+                uv_right: 1.0,
+                uv_bottom: 1.0,
+            },
+            "valid extreme ratios must not overflow to an absent image",
+        );
+    }
+
+    #[test]
+    fn cover_keeps_extreme_positive_finite_sizes_visible() {
+        let mut widget = image(ImageFit::Cover);
+        widget.natural_width_pixels = 1.0e-30;
+        widget.natural_height_pixels = 1.0e-30;
+        widget.frame.width = 1.0e30;
+        widget.frame.height = 5.0e29;
+
+        assert_eq!(
+            placement(&widget),
+            ImagePlacement {
+                destination_x_pixels: 0.0,
+                destination_y_pixels: 0.0,
+                destination_width_pixels: 1.0e30,
+                destination_height_pixels: 5.0e29,
+                uv_left: 0.0,
+                uv_top: 0.25,
+                uv_right: 1.0,
+                uv_bottom: 0.75,
+            },
+            "valid extreme ratios must retain a representable crop",
         );
     }
 
