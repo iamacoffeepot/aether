@@ -2,6 +2,7 @@ use super::{EnumVariant, SchemaType, Uuid};
 use aether_data::NamedField;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use serde::Serialize;
 use std::future::Future;
 use std::io;
 use std::mem;
@@ -291,6 +292,146 @@ pub(super) fn reply_inline_max_bytes() -> usize {
     #[allow(clippy::disallowed_methods)]
     let raw = env::var("AETHER_MCP_REPLY_INLINE_MAX_BYTES").ok();
     raw.and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(DEFAULT_REPLY_INLINE_MAX_BYTES)
+}
+
+const DEFAULT_RESPONSE_INLINE_MAX_BYTES: usize = 32 * 1024;
+const RESPONSE_SUMMARY_ITEMS: usize = 3;
+const RESPONSE_SUMMARY_PREVIEW_BYTES: usize = 256;
+pub(super) const RESPONSE_SUMMARY_MAX_BYTES: usize = 2 * 1024;
+
+/// Resolve the whole-response spill threshold
+/// (`AETHER_MCP_RESPONSE_INLINE_MAX_BYTES`, default 32 KiB). This is the
+/// projection-layer backstop for every text-returning MCP tool, distinct from
+/// the larger per-`Bytes`-leaf threshold above.
+pub(super) fn response_inline_max_bytes() -> usize {
+    use std::env;
+    #[allow(clippy::disallowed_methods)]
+    let raw = env::var("AETHER_MCP_RESPONSE_INLINE_MAX_BYTES").ok();
+    response_inline_max_bytes_from(raw.as_deref())
+}
+
+pub(super) fn response_inline_max_bytes_from(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok()).unwrap_or(DEFAULT_RESPONSE_INLINE_MAX_BYTES)
+}
+
+#[derive(Serialize)]
+struct ResponseSample {
+    bytes: usize,
+    preview: String,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ResponseSummary {
+    Array { count: usize, sample: Vec<ResponseSample> },
+    Object { count: usize, keys: Vec<String> },
+    Scalar,
+    Opaque,
+}
+
+#[derive(Serialize)]
+struct SpilledToolResponse {
+    file: String,
+    bytes: usize,
+    summary: serde_json::Value,
+}
+
+fn bounded_json_string(value: &str, max_serialized_bytes: usize) -> String {
+    if value.len() <= max_serialized_bytes.saturating_sub(2)
+        && serde_json::to_string(value).is_ok_and(|serialized| serialized.len() <= max_serialized_bytes)
+    {
+        return value.to_owned();
+    }
+
+    let mut preview = String::new();
+    for ch in value.chars() {
+        let mut candidate = preview.clone();
+        candidate.push(ch);
+        candidate.push('…');
+        if !serde_json::to_string(&candidate).is_ok_and(|serialized| serialized.len() <= max_serialized_bytes) {
+            break;
+        }
+        preview.push(ch);
+    }
+    preview.push('…');
+    preview
+}
+
+fn summarize_value(value: serde_json::Value) -> ResponseSummary {
+    use serde_json::Value;
+    match value {
+        Value::Array(items) => ResponseSummary::Array {
+            count: items.len(),
+            sample: items
+                .into_iter()
+                .take(RESPONSE_SUMMARY_ITEMS)
+                .map(|item| {
+                    let serialized = serde_json::to_string(&item).unwrap_or_else(|_| "<unserializable>".to_owned());
+                    ResponseSample {
+                        bytes: serialized.len(),
+                        preview: bounded_json_string(&serialized, RESPONSE_SUMMARY_PREVIEW_BYTES),
+                    }
+                })
+                .collect(),
+        },
+        Value::Object(object) => ResponseSummary::Object {
+            count: object.len(),
+            keys: object
+                .into_iter()
+                .map(|(key, _)| key)
+                .take(RESPONSE_SUMMARY_ITEMS)
+                .map(|key| bounded_json_string(&key, RESPONSE_SUMMARY_PREVIEW_BYTES))
+                .collect(),
+        },
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => ResponseSummary::Scalar,
+    }
+}
+
+/// Build a generic structural digest without allowing nested values or large
+/// object keys to recreate the oversized response inside `summary` itself.
+/// The final serialized-size check is the hard backstop; previews are bounded
+/// independently to preserve useful first-element context in normal cases.
+pub(super) fn summarize_response(body: &str) -> serde_json::Value {
+    let value = serde_json::to_value(serde_json::from_str(body).map_or(ResponseSummary::Opaque, summarize_value))
+        .unwrap_or_else(|_| serde_json::json!({ "kind": "opaque" }));
+    if serde_json::to_vec(&value).is_ok_and(|bytes| bytes.len() <= RESPONSE_SUMMARY_MAX_BYTES) {
+        value
+    } else {
+        serde_json::json!({ "kind": "opaque" })
+    }
+}
+
+/// Apply the process-level whole-response spill guard using the system temp
+/// directory. Tool methods call this only after their delegate succeeds.
+pub(super) fn spill_oversized_response(tool: &str, body: String) -> String {
+    use std::env;
+    spill_oversized_response_in(tool, body, response_inline_max_bytes(), &env::temp_dir())
+}
+
+/// Testable whole-response spill seam with an explicit threshold and staging
+/// directory. Spill failures are deliberately lossy only in observability: the
+/// original response is still returned inline, so tool data is never dropped.
+pub(super) fn spill_oversized_response_in(tool: &str, body: String, inline_max: usize, spill_dir: &Path) -> String {
+    if body.len() <= inline_max {
+        return body;
+    }
+
+    let body_bytes = body.len();
+    let path = match spill_reply_bytes(spill_dir, body.as_bytes()) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(tool, bytes = body_bytes, %error, "failed to spill oversized MCP tool response; inlining it");
+            return body;
+        }
+    };
+    tracing::warn!(tool, bytes = body_bytes, file = %path.display(), "spilled oversized MCP tool response to host file");
+
+    serde_json::to_string(&SpilledToolResponse {
+        file: path.to_string_lossy().into_owned(),
+        bytes: body_bytes,
+        summary: summarize_response(&body),
+    })
+    .unwrap_or(body)
 }
 
 /// Stage `bytes` to a unique harness-host temp file under `dir` and return its

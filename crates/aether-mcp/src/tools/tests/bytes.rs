@@ -237,6 +237,82 @@ fn render_bytes_reply_threads_threshold_to_leaf() {
     std_fs::remove_file(file).ok();
 }
 
+#[test]
+fn response_inline_threshold_defaults_and_parses_override() {
+    assert_eq!(response_inline_max_bytes_from(None), 32 * 1024);
+    assert_eq!(response_inline_max_bytes_from(Some(" 4096 ")), 4096);
+    assert_eq!(response_inline_max_bytes_from(Some("not-a-number")), 32 * 1024);
+}
+
+#[test]
+fn summarize_response_reports_array_sample_and_object_keys() {
+    let array = summarize_response(r#"[{"name":"first"},2,3,4]"#);
+    assert_eq!(array["kind"], "array");
+    assert_eq!(array["count"], 4);
+    assert_eq!(array["sample"].as_array().map(Vec::len), Some(3));
+    assert_eq!(array["sample"][0]["preview"], r#"{"name":"first"}"#);
+
+    let object = summarize_response(r#"{"alpha":1,"beta":2,"gamma":3,"omega":4}"#);
+    assert_eq!(object["kind"], "object");
+    assert_eq!(object["count"], 4);
+    assert_eq!(object["keys"], serde_json::json!(["alpha", "beta", "gamma"]));
+}
+
+#[test]
+fn summarize_response_is_bounded_for_huge_nested_values() {
+    let body = serde_json::json!([{
+        "payload": "\u{0000}\"\\".repeat(100_000),
+        "nested": { "also_large": "x".repeat(100_000) }
+    }])
+    .to_string();
+    let summary = summarize_response(&body);
+    let summary_bytes = serde_json::to_vec(&summary).expect("summary serializes");
+
+    assert_eq!(summary["kind"], "array");
+    assert_eq!(summary["count"], 1);
+    assert!(summary_bytes.len() <= RESPONSE_SUMMARY_MAX_BYTES, "summary was {} bytes", summary_bytes.len());
+    assert!(summary["sample"][0]["bytes"].as_u64().is_some_and(|bytes| bytes > 200_000));
+}
+
+#[test]
+fn oversized_response_spills_with_named_bounded_summary() {
+    let dir = reply_scratch_dir("response-over-threshold");
+    let body = serde_json::json!([{"payload": "x".repeat(100_000)}]).to_string();
+    let out = spill_oversized_response_in("describe_kinds", body.clone(), 1024, &dir);
+    let response: serde_json::Value = serde_json::from_str(&out).expect("spill envelope is JSON");
+    let file = response["file"].as_str().expect("named file field");
+
+    assert_eq!(response["bytes"], body.len());
+    assert_eq!(std_fs::read(file).expect("spilled response exists"), body.as_bytes());
+    assert_eq!(response["summary"]["kind"], "array");
+    assert!(serde_json::to_vec(&response["summary"]).expect("summary serializes").len() <= RESPONSE_SUMMARY_MAX_BYTES);
+
+    std_fs::remove_file(file).ok();
+    std_fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn response_at_threshold_is_unchanged_and_writes_nothing() {
+    let dir = reply_scratch_dir("response-at-threshold");
+    let body = r#"{"status":"ok"}"#.to_owned();
+    let out = spill_oversized_response_in("list_engines", body.clone(), body.len(), &dir);
+
+    assert_eq!(out, body);
+    assert!(std_fs::read_dir(&dir).expect("scratch dir").next().is_none());
+    std_fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn response_spill_io_failure_returns_original_body() {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
+    let missing = std_env::temp_dir().join(format!("aether-response-test-missing-{}-{nanos}", process::id()));
+    let body = serde_json::json!(["large", "response"]).to_string();
+    let out = spill_oversized_response_in("describe_kinds", body.clone(), 1, &missing);
+
+    assert_eq!(out, body);
+    assert!(!missing.exists(), "the fallback must not create the missing spill directory");
+}
+
 #[tokio::test]
 async fn resolve_bytes_nested_in_enum_struct_variant() {
     // A `$text` embed inside an enum struct variant resolves to a byte
