@@ -142,6 +142,7 @@ impl NativeActor for RenderCapability {
             camera_state: Arc::new(Mutex::new(IDENTITY_VIEW_PROJ)),
             quad_frame: Arc::new(Mutex::new(Vec::new())),
             quad_last_submitted: Arc::new(Mutex::new(Vec::new())),
+            quad_observation: Arc::new(OnceLock::new()),
             material_frame: Arc::new(Mutex::new(Vec::new())),
             material_last_submitted: Arc::new(Mutex::new(Vec::new())),
             textures: Arc::new(Mutex::new(TextureRegistry::new())),
@@ -457,7 +458,9 @@ impl NativeActor for RenderCapability {
     /// of a staged texture's pixels and dirties it so the next record
     /// re-uploads. Fire-and-forget: an unknown `texture_id`, an
     /// out-of-bounds rect, or a `pixels` length that doesn't match the
-    /// sub-rect logs and drops without touching the staging buffer.
+    /// sub-rect logs and drops without touching the staging buffer. The
+    /// reserved white texture used to normalize solid draws is not
+    /// caller-owned and cannot be updated.
     ///
     /// # Agent
     /// Mail `aether.render.update_texture { texture_id, x, y, width,
@@ -468,6 +471,14 @@ impl NativeActor for RenderCapability {
             obs.lock()
                 .expect("mutex poisoned; fail-fast per ADR-0063")
                 .push(<UpdateTexture as Kind>::NAME.into());
+        }
+        if mail.texture_id == WHITE_TEXTURE_ID {
+            tracing::warn!(
+                target: "aether_capabilities::render",
+                texture_id = mail.texture_id,
+                "update_texture for reserved internal texture id; dropping",
+            );
+            return;
         }
         let mut registry = state
             .handles

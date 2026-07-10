@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use aether_capabilities::{RenderGpu, RenderHandles};
+use aether_capabilities::{RenderGpu, RenderHandles, render::DrawTexturedQuads};
 use aether_kinds::{FrameCheck, FrameVerdict};
 use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::render::{RenderError, encode_png};
@@ -74,6 +74,7 @@ impl Gpu {
         }))
         .expect("request_device");
 
+        render_handles.enable_overlay_observation();
         render_handles.install_gpu(RenderGpu::new(
             Arc::new(device),
             Arc::new(queue),
@@ -97,6 +98,16 @@ impl Gpu {
     #[allow(dead_code)] // wired in PR2 alongside test_bench.advance kinds
     pub fn resize(&mut self, width: u32, height: u32) {
         self.render_handles.resize(width, height);
+    }
+
+    /// Snapshot the ordered, normalized overlay batches in the latest
+    /// frame committed by [`Self::render`] or [`Self::render_and_capture`].
+    /// A replay-cache capture keeps the prior committed values when no new
+    /// overlay mail arrived; a commit-current render with no overlays clears
+    /// them.
+    #[must_use]
+    pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
+        self.render_handles.committed_overlay_snapshot()
     }
 
     /// Draw the current accumulator's vertices into the offscreen

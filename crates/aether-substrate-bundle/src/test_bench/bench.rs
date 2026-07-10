@@ -41,7 +41,7 @@ use aether_kinds::{LogTail, LogTailResult, Tick};
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape);
 // `encode_empty` builds the zero-byte payload for unit lifecycle kinds.
 use aether_actor::Addressable;
-use aether_capabilities::{RenderCapability, fs::NamespaceRoots};
+use aether_capabilities::{RenderCapability, fs::NamespaceRoots, render::DrawTexturedQuads};
 use aether_substrate::chassis::settlement::{
     TerminalDisposition, WaitOutcome, await_internal_signal,
 };
@@ -528,6 +528,23 @@ impl TestBench {
             .lock()
             .expect("observed_kinds mutex is never poisoned (ADR-0063 fail-fast)")
             .clone()
+    }
+
+    /// Snapshot the ordered, typed overlay submissions from the latest
+    /// frame committed by [`Self::execute`]'s `advance` or `capture` op.
+    /// Solid submissions appear normalized as [`DrawTexturedQuads`] over
+    /// the renderer's reserved white texture. Batches rejected while
+    /// recording — for example a missing texture, invalid/empty clip, or
+    /// an overlay pass beyond the fixed vertex budget — are absent.
+    ///
+    /// Capture uses replay-cache semantics: if it receives no new overlay
+    /// mail, this snapshot remains the frame from the latest committed
+    /// advance or capture. An advance that commits an empty overlay frame
+    /// clears the snapshot. Returned values own their data and are isolated
+    /// from later frames.
+    #[must_use]
+    pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
+        self.gpu.committed_overlay_snapshot()
     }
 
     /// Tail `mailbox_name`'s per-actor log ring (ADR-0081). Mirrors
