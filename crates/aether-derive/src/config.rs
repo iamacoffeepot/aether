@@ -450,7 +450,11 @@ fn build_from_layer_expr(
             quote! {
                 #domain_ident: {
                     let resolved = layer.#layer_ident;
-                    if resolved == 0 { #default } else { resolved }
+                    if resolved == 0 {
+                        #default
+                    } else {
+                        resolved
+                    }
                 }
             }
         }

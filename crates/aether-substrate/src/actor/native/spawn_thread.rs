@@ -99,11 +99,19 @@ impl<A> InheritCtx<A> {
     }
 
     fn outbound_parent(&self) -> Option<MailId> {
-        if self.inherited_mail_id == MailId::NONE { None } else { Some(self.inherited_mail_id) }
+        if self.inherited_mail_id == MailId::NONE {
+            None
+        } else {
+            Some(self.inherited_mail_id)
+        }
     }
 
     fn outbound_root(&self) -> Option<MailId> {
-        if self.inherited_root == MailId::NONE { None } else { Some(self.inherited_root) }
+        if self.inherited_root == MailId::NONE {
+            None
+        } else {
+            Some(self.inherited_root)
+        }
     }
 }
 

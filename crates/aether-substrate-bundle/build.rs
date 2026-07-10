@@ -65,7 +65,11 @@ fn emit_provenance() {
         .filter(|out| out.status.success())
         .and_then(|out| String::from_utf8(out.stdout).ok())
         .map_or_else(|| "unknown".to_owned(), |s| s.trim().to_owned());
-    let git_sha = if git_sha.is_empty() { "unknown".to_owned() } else { git_sha };
+    let git_sha = if git_sha.is_empty() {
+        "unknown".to_owned()
+    } else {
+        git_sha
+    };
     println!("cargo:rustc-env=AETHER_GIT_SHA={git_sha}");
     let profile = env::var("PROFILE").unwrap_or_else(|_| "unknown".to_owned());
     println!("cargo:rustc-env=AETHER_BUILD_PROFILE={profile}");

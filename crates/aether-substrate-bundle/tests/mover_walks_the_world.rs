@@ -106,7 +106,11 @@ fn height_break_chunk() -> SetChunk {
     for z in 0..CHUNK_EDGE {
         for x in 0..CHUNK_EDGE {
             let index = z * CHUNK_EDGE + x;
-            height[index] = if z < HEIGHT_BREAK_ROW { CLIFF_HEIGHT_OCTIMETERS } else { 0 };
+            height[index] = if z < HEIGHT_BREAK_ROW {
+                CLIFF_HEIGHT_OCTIMETERS
+            } else {
+                0
+            };
             region[index] = REGION_ID;
         }
     }

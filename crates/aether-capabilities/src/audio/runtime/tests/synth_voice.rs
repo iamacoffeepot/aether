@@ -664,7 +664,11 @@ fn voice_steal_evicts_quietest_note() {
 
     for pitch in 0..MAX_VOICES {
         let pitch = u8::try_from(pitch).unwrap();
-        let velocity = if pitch == QUIET_PITCH { 1 } else { 127 };
+        let velocity = if pitch == QUIET_PITCH {
+            1
+        } else {
+            127
+        };
         sender
             .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch, velocity, instrument_id: 0, pan: 0 })
             .unwrap();

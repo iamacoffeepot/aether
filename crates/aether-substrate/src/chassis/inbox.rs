@@ -309,7 +309,11 @@ impl InboundMail {
         let reply_id = MailId::new(self.self_mailbox, correlation);
         // ADR-0080 §5: collapse a NONE parent to `None` (chassis-root /
         // lineage-less inbound), mirroring `NativeCtx::outbound_parent`.
-        let parent = if self.env.mail_id == MailId::NONE { None } else { Some(self.env.mail_id) };
+        let parent = if self.env.mail_id == MailId::NONE {
+            None
+        } else {
+            Some(self.env.mail_id)
+        };
         self.mailer.send_reply(self.env.sender, result, reply_id, self.env.root, parent)
     }
 }

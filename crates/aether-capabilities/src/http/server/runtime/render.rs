@@ -240,8 +240,16 @@ pub fn http_date(now: SystemTime) -> String {
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { year + 1 } else { year };
+    let month = if mp < 10 {
+        mp + 3
+    } else {
+        mp - 9
+    };
+    let year = if month <= 2 {
+        year + 1
+    } else {
+        year
+    };
     let weekday_name = WEEKDAYS[usize::try_from(weekday).unwrap_or(0)];
     let month_name = MONTHS[usize::try_from(month - 1).unwrap_or(0)];
     format!("{weekday_name}, {day:02} {month_name} {year:04} {hour:02}:{minute:02}:{second:02} GMT")

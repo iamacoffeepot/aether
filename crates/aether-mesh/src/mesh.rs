@@ -408,14 +408,26 @@ fn mesh_sweep(
 
     let mut tangents: Vec<Vec3> = Vec::with_capacity(path.len());
     for k in 0..path.len() {
-        let prev = if k == 0 { path[k] } else { path[k - 1] };
-        let next = if k == path.len() - 1 { path[k] } else { path[k + 1] };
+        let prev = if k == 0 {
+            path[k]
+        } else {
+            path[k - 1]
+        };
+        let next = if k == path.len() - 1 {
+            path[k]
+        } else {
+            path[k + 1]
+        };
         tangents.push((next - prev).normalize_or(Vec3::Z));
     }
 
     let mut rings: Vec<Vec<Vec3>> = Vec::with_capacity(path.len());
     let t0 = tangents[0];
-    let up_ref = if t0.y.abs() > 0.95 { Vec3::X } else { Vec3::Y };
+    let up_ref = if t0.y.abs() > 0.95 {
+        Vec3::X
+    } else {
+        Vec3::Y
+    };
     let mut r = up_ref.cross(t0).normalize_or(Vec3::X);
     let mut u = t0.cross(r);
     for (k, p) in path.iter().enumerate() {
@@ -448,18 +460,28 @@ fn mesh_sweep(
             let b = r1[i];
             let c = r0[j];
             let d = r1[j];
-            let quad: [Vec3; 4] = if profile_ccw { [a, c, d, b] } else { [a, b, d, c] };
+            let quad: [Vec3; 4] = if profile_ccw {
+                [a, c, d, b]
+            } else {
+                [a, b, d, c]
+            };
             push_polygon_from_f32(out, &quad, color)?;
         }
     }
 
     if !open {
         let last = rings.len() - 1;
-        let start_cap: Vec<Vec3> =
-            if profile_ccw { rings[0].iter().rev().copied().collect() } else { rings[0].clone() };
+        let start_cap: Vec<Vec3> = if profile_ccw {
+            rings[0].iter().rev().copied().collect()
+        } else {
+            rings[0].clone()
+        };
         push_polygon_from_f32(out, &start_cap, color)?;
-        let end_cap: Vec<Vec3> =
-            if profile_ccw { rings[last].clone() } else { rings[last].iter().rev().copied().collect() };
+        let end_cap: Vec<Vec3> = if profile_ccw {
+            rings[last].clone()
+        } else {
+            rings[last].iter().rev().copied().collect()
+        };
         push_polygon_from_f32(out, &end_cap, color)?;
     }
     Ok(())

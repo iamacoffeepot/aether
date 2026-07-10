@@ -501,7 +501,11 @@ impl App {
     /// The slot is taken only when occluded, so a visible-window wake never
     /// steals the entry `RedrawRequested` is about to service.
     fn fail_capture_if_occluded(&mut self) -> bool {
-        let pending = if self.occluded { self.capture_queue.take() } else { None };
+        let pending = if self.occluded {
+            self.capture_queue.take()
+        } else {
+            None
+        };
         match occluded_capture_disposition(self.occluded, pending) {
             OccludedCaptureDisposition::Redraw => false,
             OccludedCaptureDisposition::Empty => true,

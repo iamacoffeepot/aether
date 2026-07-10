@@ -293,7 +293,11 @@ mod tests {
             unsafe {
                 install_slots_provider(|| {
                     let p = TEST_CURRENT.get();
-                    if p.is_null() { None } else { Some(p) }
+                    if p.is_null() {
+                        None
+                    } else {
+                        Some(p)
+                    }
                 });
             }
         });

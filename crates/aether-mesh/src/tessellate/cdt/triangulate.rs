@@ -90,7 +90,11 @@ pub(in crate::tessellate) fn triangulate(
                 continue;
             }
             // Canonical (smaller first) for the dedup set.
-            let canon = if u < v { (u, v) } else { (v, u) };
+            let canon = if u < v {
+                (u, v)
+            } else {
+                (v, u)
+            };
             constraints.insert(canon);
             // Sequential enforcement: each call may flip many edges.
             mesh.enforce_constraint(u, v).ok()?;
@@ -190,7 +194,11 @@ fn point_in_polygon_3x(cx3: i128, cy3: i128, poly: &[Point2]) -> bool {
         let denom = piy3 - pjy3;
         let lhs = (cx3 - pjx3) * denom;
         let rhs = (pix3 - pjx3) * (cy3 - pjy3);
-        let crosses = if denom > 0 { lhs < rhs } else { lhs > rhs };
+        let crosses = if denom > 0 {
+            lhs < rhs
+        } else {
+            lhs > rhs
+        };
         if crosses {
             inside = !inside;
         }

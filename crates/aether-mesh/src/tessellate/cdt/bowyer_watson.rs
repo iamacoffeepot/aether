@@ -278,7 +278,11 @@ impl Mesh {
                     };
                     let a = tri.verts[(i + 1) % 3];
                     let b = tri.verts[(i + 2) % 3];
-                    let canon = if a < b { (a, b) } else { (b, a) };
+                    let canon = if a < b {
+                        (a, b)
+                    } else {
+                        (b, a)
+                    };
                     if constraints.contains(&canon) {
                         continue;
                     }
@@ -411,7 +415,9 @@ fn t2_neighbor_arriving(t2: &Triangle, vertex: VertId) -> Option<usize> {
 /// Retarget `neighbor`'s back-pointer from `old` to `new` if it currently
 /// points to `old`. No-op if `neighbor` is `None` or no slot matches.
 fn retarget_back_pointer(mesh: &mut Mesh, neighbor: Option<TriId>, old: TriId, new: TriId) {
-    let Some(n) = neighbor else { return };
+    let Some(n) = neighbor else {
+        return;
+    };
     if let Some(tri) = mesh.triangles[n].as_mut() {
         for i in 0..3 {
             if tri.neighbors[i] == Some(old) {
@@ -509,7 +515,9 @@ impl Mesh {
             // Iterate neighbor slots in fixed order for determinism.
             let neighbors: [Option<TriId>; 3] = tri.neighbors;
             for &maybe_n in &neighbors {
-                let Some(n) = maybe_n else { continue };
+                let Some(n) = maybe_n else {
+                    continue;
+                };
                 if visited[n] {
                     continue;
                 }

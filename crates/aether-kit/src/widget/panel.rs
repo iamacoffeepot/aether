@@ -171,8 +171,11 @@ impl WidgetPanel {
 
         let row_rect = |y: f32, width: f32, height: f32| WidgetFrame { x, y, width, height };
 
-        let specs =
-            if self.config.children.is_empty() { reference_stack(&self.theme) } else { self.config.children.clone() };
+        let specs = if self.config.children.is_empty() {
+            reference_stack(&self.theme)
+        } else {
+            self.config.children.clone()
+        };
 
         let mut first = true;
         for spec in &specs {
@@ -721,8 +724,11 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
         ScriptRef::Inline(bytes) => ScriptSource::Inline(bytes),
         ScriptRef::FsRef { namespace, path } => ScriptSource::FsRef { namespace, path },
     };
-    let fuel_per_call =
-        if host_spec.fuel_per_call != 0 { host_spec.fuel_per_call } else { HostConfig::DEFAULT_FUEL_PER_CALL };
+    let fuel_per_call = if host_spec.fuel_per_call != 0 {
+        host_spec.fuel_per_call
+    } else {
+        HostConfig::DEFAULT_FUEL_PER_CALL
+    };
     let disable_after_traps = if host_spec.disable_after_traps != 0 {
         host_spec.disable_after_traps
     } else {
@@ -934,7 +940,11 @@ impl WasmActor for WidgetPanel {
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if key.code == KEY_TAB {
-            let direction = if self.modifiers.shift { FocusDirection::Backward } else { FocusDirection::Forward };
+            let direction = if self.modifiers.shift {
+                FocusDirection::Backward
+            } else {
+                FocusDirection::Forward
+            };
             if let Some(transition) = self.focus.move_focus(direction) {
                 apply_focus(ctx, transition);
             }

@@ -213,7 +213,11 @@ impl ActorTraceRing {
 /// Clamp `max == 0` to [`DEFAULT_TAIL_MAX`] and any value over
 /// [`MAX_TAIL_MAX`] down to the ceiling.
 fn resolve_max(max: u32) -> u32 {
-    if max == 0 { DEFAULT_TAIL_MAX } else { max.min(MAX_TAIL_MAX) }
+    if max == 0 {
+        DEFAULT_TAIL_MAX
+    } else {
+        max.min(MAX_TAIL_MAX)
+    }
 }
 
 #[cfg(test)]

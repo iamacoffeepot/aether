@@ -258,7 +258,11 @@ impl Spawner {
         // `Abort` in release (the wedge is unrecoverable — route it
         // through the Spawner's aborter). The helper diverges itself on
         // `Panic`; on `Abort` it hands back the wedge for us to abort.
-        let disposition = if cfg!(debug_assertions) { TerminalDisposition::Panic } else { TerminalDisposition::Abort };
+        let disposition = if cfg!(debug_assertions) {
+            TerminalDisposition::Panic
+        } else {
+            TerminalDisposition::Abort
+        };
         for ((id, _entry), rx) in entries.iter().zip(&waiters) {
             // Issue #2509: name the wedged slot in the gate label so a
             // teardown wedge panic/abort points at the actor whose close

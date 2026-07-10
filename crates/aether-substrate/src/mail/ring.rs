@@ -371,7 +371,11 @@ impl MailRing {
         } else {
             size
         };
-        let new_write = if start + occupied == self.cap { 0 } else { start + occupied };
+        let new_write = if start + occupied == self.cap {
+            0
+        } else {
+            start + occupied
+        };
         self.write.store(new_write as u32, Ordering::Relaxed);
         self.live.fetch_add(occupied, Ordering::Relaxed);
         if start == 0 && write != 0 {
@@ -654,7 +658,11 @@ impl MailRing {
         }
         self.live.fetch_add(total, Ordering::Relaxed);
         let end = header_off + total;
-        let new_write = if end == self.cap { 0 } else { end };
+        let new_write = if end == self.cap {
+            0
+        } else {
+            end
+        };
         self.write.store(new_write as u32, Ordering::Relaxed);
     }
 
@@ -727,7 +735,11 @@ impl MailRing {
                 break;
             }
             let total = hdr.total_len as usize;
-            let new_front = if front + total == self.cap { 0 } else { front + total };
+            let new_front = if front + total == self.cap {
+                0
+            } else {
+                front + total
+            };
             self.front.store(new_front as u32, Ordering::Relaxed);
             self.live.fetch_sub(total, Ordering::Relaxed);
             reclaimed += total;
@@ -1134,7 +1146,9 @@ mod tests {
                             let guard = rx.lock().unwrap();
                             guard.recv()
                         };
-                        let Ok(r) = r else { break };
+                        let Ok(r) = r else {
+                            break;
+                        };
                         // SAFETY: we hold this ref's lock count until the
                         // `release` below, so the region is live for the read.
                         let bytes = unsafe { ring.payload(r.payload_off, r.len) };

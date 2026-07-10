@@ -228,8 +228,16 @@ impl WindowPlan {
                         continue;
                     };
                     let (a, b) = edge_corners(edge);
-                    let high = if self.levels[a] > self.levels[b] { a } else { b };
-                    let low = if high == a { b } else { a };
+                    let high = if self.levels[a] > self.levels[b] {
+                        a
+                    } else {
+                        b
+                    };
+                    let low = if high == a {
+                        b
+                    } else {
+                        a
+                    };
                     debug_assert_eq!(self.corners[high], crossing.high_anchor);
                     debug_assert_eq!(self.corners[low], crossing.low_anchor);
                     segments.push(WallSegment {
@@ -618,7 +626,11 @@ fn edge_corners(edge: usize) -> (usize, usize) {
 
 fn make_crossing(gx: i32, gz: i32, edge: usize, corners: [SampleAnchor; 4], levels: [i32; 4]) -> CliffCrossing {
     let (a, b) = edge_corners(edge);
-    let (high, low) = if levels[a] > levels[b] { (a, b) } else { (b, a) };
+    let (high, low) = if levels[a] > levels[b] {
+        (a, b)
+    } else {
+        (b, a)
+    };
     let point = corners[a].point().midpoint(corners[b].point());
     let key = match edge {
         0 => CanonicalEdgeKey { x_subcell: gx - 1, z_subcell: gz - 1, axis: EdgeAxis::East },
@@ -649,7 +661,11 @@ fn classify_case(gx: i32, gz: i32, crossings: [Option<CliffCrossing>; 4], levels
         }
         let high_of = |edge: usize| {
             let (a, b) = edge_corners(edge);
-            if levels[a] > levels[b] { a } else { b }
+            if levels[a] > levels[b] {
+                a
+            } else {
+                b
+            }
         };
         let first_high = high_of(edges[0]);
         let second_high = high_of(edges[1]);
@@ -686,8 +702,16 @@ fn clip_half_plane(polygon: &[PlanarPoint], a: PlanarPoint, b: PlanarPoint, keep
         let next = polygon[(index + 1) % polygon.len()];
         let current_side = cross(a, b, current);
         let next_side = cross(a, b, next);
-        let current_in = if keep_positive { current_side >= -0.01 } else { current_side <= 0.01 };
-        let next_in = if keep_positive { next_side >= -0.01 } else { next_side <= 0.01 };
+        let current_in = if keep_positive {
+            current_side >= -0.01
+        } else {
+            current_side <= 0.01
+        };
+        let next_in = if keep_positive {
+            next_side >= -0.01
+        } else {
+            next_side <= 0.01
+        };
         if current_in {
             out.push(current);
         }
@@ -826,7 +850,13 @@ mod tests {
     }
 
     fn binary_height_window(high_corners: u8) -> WindowPlan {
-        window_for_levels(from_fn(|corner| if high_corners & (1 << corner) != 0 { 200 } else { 0 }))
+        window_for_levels(from_fn(|corner| {
+            if high_corners & (1 << corner) != 0 {
+                200
+            } else {
+                0
+            }
+        }))
     }
 
     fn material_polygons(corners: [u8; 4]) -> Vec<Vec<PlanarPoint>> {
@@ -890,11 +920,19 @@ mod tests {
     fn legal_ramps_do_not_acquire_an_unrelated_cliff_contour() {
         let world = world_with_levels(|x, z| {
             let ramp = (x * 8).clamp(-64, 64);
-            if z >= 4 { ramp + 256 } else { ramp }
+            if z >= 4 {
+                ramp + 256
+            } else {
+                ramp
+            }
         });
         let shifted = world_with_levels(|x, z| {
             let ramp = (x * 8).clamp(-64, 64) + 10_000;
-            if z >= 4 { ramp + 256 } else { ramp }
+            if z >= 4 {
+                ramp + 256
+            } else {
+                ramp
+            }
         });
         let a = CliffPlan::build(&world, ChunkPos { x: 0, z: 0 });
         let b = CliffPlan::build(&shifted, ChunkPos { x: 0, z: 0 });
@@ -1015,7 +1053,14 @@ mod tests {
         // cliff is the north/south 256-octimeter offset at z=8, crossing the
         // x=16 chunk seam. A global numeric-threshold march would contour
         // through the ramp; canonical adjacency classification cannot.
-        let world = world_with_levels(|x, z| x * 4 + if z >= 8 { 256 } else { 0 });
+        let world = world_with_levels(|x, z| {
+            x * 4
+                + if z >= 8 {
+                    256
+                } else {
+                    0
+                }
+        });
         let west = CliffPlan::build(&world, ChunkPos { x: 0, z: 0 });
         let east = CliffPlan::build(&world, ChunkPos { x: 1, z: 0 });
         let west_edges = west.canonical_edges();

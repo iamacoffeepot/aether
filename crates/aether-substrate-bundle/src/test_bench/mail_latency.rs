@@ -807,7 +807,11 @@ fn settlement_detection_latency() {
 #[allow(clippy::print_stdout, clippy::cast_precision_loss)]
 fn print_observe_tables(rows: &[CellResult], pace_hz: Option<u64>) {
     let us = |ns: u64| -> String { format!("{:.2}", ns as f64 / 1000.0) };
-    let cond = if pace_hz.is_some() { "paced" } else { "warm" };
+    let cond = if pace_hz.is_some() {
+        "paced"
+    } else {
+        "warm"
+    };
 
     println!();
     println!("=== lifecycle-driven mail latency (all values µs; n = sample count) ===");

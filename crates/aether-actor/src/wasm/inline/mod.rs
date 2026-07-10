@@ -473,7 +473,11 @@ impl Registry {
         }
         // SAFETY: see [`Self::insert_child`].
         let map = unsafe { &*self.inner.get() };
-        if map.contains_key(&MailboxId(recipient)) { RouteDecision::Local } else { RouteDecision::Remote }
+        if map.contains_key(&MailboxId(recipient)) {
+            RouteDecision::Local
+        } else {
+            RouteDecision::Remote
+        }
     }
 
     /// Route an outbound send. If `recipient` is a cluster member (the
@@ -815,7 +819,9 @@ mod tests {
         registry.insert_child(id, tag, String::from("widget"), false, 0, Vec::new(), Box::new(RecordingChild::new().0));
 
         let metas = registry.child_metas();
-        let [meta] = metas.as_slice() else { panic!("expected exactly one child meta, got {}", metas.len()) };
+        let [meta] = metas.as_slice() else {
+            panic!("expected exactly one child meta, got {}", metas.len())
+        };
         assert_eq!(meta.id, id, "the meta carries the alias id");
         assert_eq!(meta.type_tag, tag, "the meta carries the actor-type tag");
         assert_eq!(meta.full_subname, "widget", "the meta carries the subname");

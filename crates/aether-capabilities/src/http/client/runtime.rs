@@ -155,7 +155,11 @@ impl UreqHttpAdapter {
     }
 
     fn check_allowlist(&self, host: &str) -> Result<(), HttpError> {
-        if self.allowlist.contains(host) { Ok(()) } else { Err(HttpError::AllowlistDenied) }
+        if self.allowlist.contains(host) {
+            Ok(())
+        } else {
+            Err(HttpError::AllowlistDenied)
+        }
     }
 }
 

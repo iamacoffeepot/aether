@@ -391,7 +391,11 @@ impl SettlementConfig {
     /// trips, so the wait blocks on the signal forever.
     #[must_use]
     pub fn to_cap(&self) -> Duration {
-        if self.cap_secs == 0 { Duration::MAX } else { Duration::from_secs(self.cap_secs) }
+        if self.cap_secs == 0 {
+            Duration::MAX
+        } else {
+            Duration::from_secs(self.cap_secs)
+        }
     }
 }
 

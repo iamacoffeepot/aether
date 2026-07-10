@@ -103,7 +103,11 @@ fn refine_crossing(
     if above_error > TERRAIN_PICK_EPSILON_METERS || below_error > TERRAIN_PICK_EPSILON_METERS {
         return None;
     }
-    Some(if above_error < below_error { above.into_hit() } else { below.into_hit() })
+    Some(if above_error < below_error {
+        above.into_hit()
+    } else {
+        below.into_hit()
+    })
 }
 
 /// Intersect a validated, bounded world ray with the first markable terrain

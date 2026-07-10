@@ -329,7 +329,11 @@ impl WorldMover {
     /// `WindowSize`.
     fn aspect(&self) -> f32 {
         let (w, h) = self.window;
-        if w == 0 || h == 0 { DEFAULT_ASPECT } else { w as f32 / h as f32 }
+        if w == 0 || h == 0 {
+            DEFAULT_ASPECT
+        } else {
+            w as f32 / h as f32
+        }
     }
 
     /// World-space eye and target for the follow camera: it looks at a point
@@ -425,7 +429,11 @@ fn step_toward(cur: (i32, i32), target: (i32, i32), speed: i32) -> (i32, i32) {
     // Round speed·d / dist to nearest, away from zero on a tie.
     let round_div = |num: i64| {
         let half = dist / 2;
-        if num >= 0 { (num + half) / dist } else { (num - half) / dist }
+        if num >= 0 {
+            (num + half) / dist
+        } else {
+            (num - half) / dist
+        }
     };
     // |speed·d / dist| ≤ speed, so the result fits an i32 axis step.
     (cur.0 + round_div(speed * dx) as i32, cur.1 + round_div(speed * dz) as i32)

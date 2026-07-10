@@ -164,8 +164,16 @@ fn emit_line(world: &World, builder: &mut OverlayBuilder, points: &[WorldPoint],
     if points.len() < 2 {
         return true;
     }
-    let color = if selected { MARK_SELECTED_COLOR } else { MARK_OVERLAY_COLOR };
-    let half_width_meters = if selected { MARK_SELECTED_HALF_WIDTH_METERS } else { MARK_PATH_HALF_WIDTH_METERS };
+    let color = if selected {
+        MARK_SELECTED_COLOR
+    } else {
+        MARK_OVERLAY_COLOR
+    };
+    let half_width_meters = if selected {
+        MARK_SELECTED_HALF_WIDTH_METERS
+    } else {
+        MARK_PATH_HALF_WIDTH_METERS
+    };
     for pair in points.windows(2) {
         if !emit_segment(world, builder, pair[0].into(), pair[1].into(), half_width_meters, color) {
             return false;
@@ -176,7 +184,11 @@ fn emit_line(world: &World, builder: &mut OverlayBuilder, points: &[WorldPoint],
     {
         return false;
     }
-    let join_radius = if selected { MARK_SELECTED_HANDLE_RADIUS_METERS } else { MARK_PATH_HALF_WIDTH_METERS };
+    let join_radius = if selected {
+        MARK_SELECTED_HANDLE_RADIUS_METERS
+    } else {
+        MARK_PATH_HALF_WIDTH_METERS
+    };
     for point in points {
         if !emit_disc(world, builder, (*point).into(), join_radius, color) {
             return false;
@@ -191,8 +203,16 @@ fn emit_mark(world: &World, builder: &mut OverlayBuilder, mark: &Mark, selected:
             world,
             builder,
             (*point).into(),
-            if selected { MARK_SELECTED_HANDLE_RADIUS_METERS } else { MARK_POINT_RADIUS_METERS },
-            if selected { MARK_SELECTED_COLOR } else { MARK_OVERLAY_COLOR },
+            if selected {
+                MARK_SELECTED_HANDLE_RADIUS_METERS
+            } else {
+                MARK_POINT_RADIUS_METERS
+            },
+            if selected {
+                MARK_SELECTED_COLOR
+            } else {
+                MARK_OVERLAY_COLOR
+            },
         ),
         MarkGeometry::Path(points) => emit_line(world, builder, points, false, selected),
         MarkGeometry::Area(points) => emit_line(world, builder, points, true, selected),

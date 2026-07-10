@@ -930,7 +930,11 @@ impl TestBench {
     fn fresh_correlation_id(&self) -> u64 {
         // 0 is the "no correlation" sentinel so skip it.
         let id = self.next_correlation_id.fetch_add(1, Ordering::SeqCst);
-        if id == 0 { self.next_correlation_id.fetch_add(1, Ordering::SeqCst) } else { id }
+        if id == 0 {
+            self.next_correlation_id.fetch_add(1, Ordering::SeqCst)
+        } else {
+            id
+        }
     }
 
     /// Pump the event channel and the loopback receiver until a

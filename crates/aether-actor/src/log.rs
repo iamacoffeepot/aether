@@ -190,7 +190,11 @@ impl ActorLogRing {
 /// function so the framework dispatch arm reads cleanly and unit
 /// tests can pin the boundaries without materialising a ring.
 fn resolve_max(max: u32) -> u32 {
-    if max == 0 { DEFAULT_TAIL_MAX } else { max.min(MAX_TAIL_MAX) }
+    if max == 0 {
+        DEFAULT_TAIL_MAX
+    } else {
+        max.min(MAX_TAIL_MAX)
+    }
 }
 
 pub(crate) fn level_to_u8(level: Level) -> u8 {

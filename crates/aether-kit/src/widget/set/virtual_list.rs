@@ -158,11 +158,22 @@ impl VirtualListWidget {
             let row_y = row_offset as f32 * row_height;
             let item_index = window.first_index + row_offset;
             let selected = self.selected_index == Some(item_index);
-            let base = if selected { self.theme.accent } else { self.theme.surface_raised };
-            let row_state =
-                if selected { self.state.theme_state(self.pressed) } else { self.state.supporting_theme_state(false) };
+            let base = if selected {
+                self.theme.accent
+            } else {
+                self.theme.surface_raised
+            };
+            let row_state = if selected {
+                self.state.theme_state(self.pressed)
+            } else {
+                self.state.supporting_theme_state(false)
+            };
             items.push(quad(0.0, row_y, self.frame.width, row_height, self.theme.fill(base, row_state)));
-            let text_base = if selected { self.theme.accent_text } else { self.theme.text_primary };
+            let text_base = if selected {
+                self.theme.accent_text
+            } else {
+                self.theme.text_primary
+            };
             items.push(WidgetDrawItem::Text {
                 x: self.theme.pad,
                 y: text_origin_y(row_y, row_height, self.theme.label_size_pixels),

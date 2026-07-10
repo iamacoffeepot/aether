@@ -239,7 +239,11 @@ fn point_in_polygon_2d(probe: (i64, i64), poly: &[(i64, i64)]) -> bool {
         let denom = iy - jy;
         let lhs = (px - jx) * denom;
         let rhs = (ix - jx) * (py - jy);
-        let crosses = if denom > 0 { lhs < rhs } else { lhs > rhs };
+        let crosses = if denom > 0 {
+            lhs < rhs
+        } else {
+            lhs > rhs
+        };
         if crosses {
             inside = !inside;
         }

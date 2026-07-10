@@ -12,5 +12,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// stays reserved as the `MailId::NONE` sentinel.
 pub fn next_chassis_correlation(counter: &AtomicU64) -> u64 {
     let id = counter.fetch_add(1, Ordering::Relaxed);
-    if id == 0 { counter.fetch_add(1, Ordering::Relaxed) } else { id }
+    if id == 0 {
+        counter.fetch_add(1, Ordering::Relaxed)
+    } else {
+        id
+    }
 }

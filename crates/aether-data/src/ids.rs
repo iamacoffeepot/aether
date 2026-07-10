@@ -82,7 +82,11 @@ fn deserialize_id<'de, D: Deserializer<'de>>(d: D, expected: Tag) -> Result<u64,
         }
     }
 
-    if d.is_human_readable() { d.deserialize_any(IdVisitor { expected }) } else { u64::deserialize(d) }
+    if d.is_human_readable() {
+        d.deserialize_any(IdVisitor { expected })
+    } else {
+        u64::deserialize(d)
+    }
 }
 
 /// Resolve a `SchemaType::TypeId(id)` payload to the `Tag` the

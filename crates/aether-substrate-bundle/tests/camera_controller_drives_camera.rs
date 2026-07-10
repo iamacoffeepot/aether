@@ -95,7 +95,11 @@ fn split_chunk() -> SetChunk {
     let mut underlay = vec![0u8; CHUNK_EDGE * CHUNK_EDGE];
     for z in 0..CHUNK_EDGE {
         for x in 0..CHUNK_EDGE {
-            let material = if x < CHUNK_EDGE / 2 { Material::Grass } else { Material::Stone };
+            let material = if x < CHUNK_EDGE / 2 {
+                Material::Grass
+            } else {
+                Material::Stone
+            };
             underlay[z * CHUNK_EDGE + x] = material.to_u8();
         }
     }

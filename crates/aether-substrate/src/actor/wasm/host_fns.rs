@@ -579,7 +579,11 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
 /// guest cannot spoof a foreign id. This is the in-cluster check that the
 /// retired `set_dispatch_source_p32` host fn used to gate the ambient cell.
 fn resolve_dispatch_identity(ctx: &ComponentCtx, from: MailboxId) -> MailboxId {
-    if from != MailboxId::NONE && (from == ctx.sender || is_own_cluster_alias(ctx, from)) { from } else { ctx.sender }
+    if from != MailboxId::NONE && (from == ctx.sender || is_own_cluster_alias(ctx, from)) {
+        from
+    } else {
+        ctx.sender
+    }
 }
 
 /// Whether `candidate` is a registered inline-child alias of *this* component

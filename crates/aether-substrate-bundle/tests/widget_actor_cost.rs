@@ -160,7 +160,11 @@ fn linear_fit(samples: &[(u32, u64)]) -> (f64, f64) {
         num = dx.mul_add(y - mean_y, num);
         den = dx.mul_add(dx, den);
     }
-    let slope = if den == 0.0 { 0.0 } else { num / den };
+    let slope = if den == 0.0 {
+        0.0
+    } else {
+        num / den
+    };
     (mean_y - slope * mean_x, slope)
 }
 
@@ -176,7 +180,11 @@ fn env_counts(key: &str, default: &[usize], min: usize) -> Vec<usize> {
         .ok()
         .map(|v| v.split(',').filter_map(|s| s.trim().parse::<usize>().ok()).filter(|&n| n >= min).collect())
         .unwrap_or_default();
-    if parsed.is_empty() { default.to_vec() } else { parsed }
+    if parsed.is_empty() {
+        default.to_vec()
+    } else {
+        parsed
+    }
 }
 
 #[test]
@@ -202,7 +210,11 @@ fn widget_actor_per_frame_cost() {
     );
 
     for redraw_each_tick in [true, false] {
-        let profile = if redraw_each_tick { "naive" } else { "cached" };
+        let profile = if redraw_each_tick {
+            "naive"
+        } else {
+            "cached"
+        };
         for &count in &counts {
             let mut bench = TestBench::start_with_size(64, 48).expect("boot");
             let ids = load_widgets(&mut bench, &wasm, count, redraw_each_tick, quad_count);

@@ -108,7 +108,11 @@ impl aether_substrate::FromArgvThenEnv for NamespaceRoots {
 /// `Ok(s) if !s.is_empty()` guard); any non-empty value is a path.
 #[cfg(feature = "runtime")]
 fn parse_dir(s: &str) -> Result<PathBuf, EmptyDir> {
-    if s.is_empty() { Err(EmptyDir) } else { Ok(PathBuf::from(s)) }
+    if s.is_empty() {
+        Err(EmptyDir)
+    } else {
+        Ok(PathBuf::from(s))
+    }
 }
 
 /// Sentinel error: an empty `AETHER_*_DIR` value, treated as unset by

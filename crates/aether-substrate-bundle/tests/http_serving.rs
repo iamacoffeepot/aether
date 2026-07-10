@@ -145,7 +145,11 @@ const WS_OPCODE_CLOSE: u8 = 0x8;
 fn ws_client_frame(opcode: u8, payload: &[u8], fin: bool) -> Vec<u8> {
     let mask = [0x12u8, 0x34, 0x56, 0x78];
     let mut out = Vec::with_capacity(payload.len() + 6);
-    let fin_bit = if fin { 0x80 } else { 0x00 };
+    let fin_bit = if fin {
+        0x80
+    } else {
+        0x00
+    };
     out.push(fin_bit | opcode);
     let len = payload.len();
     if len < 126 {

@@ -401,14 +401,22 @@ pub fn run_reader_loop(
                 }
                 HeadParse::NeedMore => {}
             }
-            let want_timeout = if buf.is_empty() { idle_timeout } else { request_timeout };
+            let want_timeout = if buf.is_empty() {
+                idle_timeout
+            } else {
+                request_timeout
+            };
             if !ensure_read_timeout(&mut stream, sink, conn_id, &mut current_timeout, want_timeout) {
                 return;
             }
             match read_more(&mut stream, &mut chunk) {
                 ReadStep::Filled(n) => buf.extend_from_slice(&chunk[..n]),
                 ReadStep::Eof => {
-                    let reason = if buf.is_empty() { "eof between requests" } else { "eof before request head" };
+                    let reason = if buf.is_empty() {
+                        "eof between requests"
+                    } else {
+                        "eof before request head"
+                    };
                     sink.post(InboundEvent::ReaderClosed { conn_id, reason: reason.to_string() });
                     return;
                 }
@@ -416,7 +424,11 @@ pub fn run_reader_loop(
                     // An idle-timeout expiry with no partial request buffered
                     // is a silent close of a kept-alive / fresh idle
                     // connection; a timeout mid-head is the slow-loris guard.
-                    let reason = if buf.is_empty() { "idle" } else { "read timeout (head)" };
+                    let reason = if buf.is_empty() {
+                        "idle"
+                    } else {
+                        "read timeout (head)"
+                    };
                     sink.post(InboundEvent::ReaderClosed { conn_id, reason: reason.to_string() });
                     return;
                 }

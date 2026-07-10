@@ -309,7 +309,11 @@ const fn write_schema(schema: &SchemaType, out: &mut [u8], cursor: usize) -> usi
                 pos = write_schema(&slice[i].ty, out, pos);
                 i += 1;
             }
-            out[pos] = if *repr_c { 1 } else { 0 };
+            out[pos] = if *repr_c {
+                1
+            } else {
+                0
+            };
             pos += 1;
         }
         SchemaType::Enum { variants } => {

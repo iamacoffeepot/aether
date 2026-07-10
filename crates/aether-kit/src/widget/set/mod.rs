@@ -58,7 +58,11 @@ use crate::widget::theme::{Theme, ThemeState};
 use crate::widget::{WidgetControlState, WidgetDrawItem, WidgetDrawList};
 
 fn text_control_theme_state(state: &InteractionState, dragging: bool) -> ThemeState {
-    if state.focused() { state.supporting_theme_state(dragging) } else { state.theme_state(dragging) }
+    if state.focused() {
+        state.supporting_theme_state(dragging)
+    } else {
+        state.theme_state(dragging)
+    }
 }
 
 fn apply_text_control_state(
@@ -164,7 +168,18 @@ pub(super) fn push_control_outlines(
         push_border(items, width, height, 2.0, color);
     }
     if state.focused() {
-        push_inset_border(items, width, height, if validation.is_some() { 2.0 } else { 0.0 }, 2.0, theme.accent);
+        push_inset_border(
+            items,
+            width,
+            height,
+            if validation.is_some() {
+                2.0
+            } else {
+                0.0
+            },
+            2.0,
+            theme.accent,
+        );
     }
 }
 

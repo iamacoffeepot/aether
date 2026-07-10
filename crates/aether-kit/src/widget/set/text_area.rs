@@ -192,7 +192,12 @@ impl TextAreaWidget {
         let local_y = event_y - self.frame.y;
         let row_height = self.theme.row_height.max(1.0);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let row = if local_y <= 0.0 { 0 } else { (local_y / row_height) as usize }.min(visible.saturating_sub(1));
+        let row = if local_y <= 0.0 {
+            0
+        } else {
+            (local_y / row_height) as usize
+        }
+        .min(visible.saturating_sub(1));
         let line_index = self.scroll_top.saturating_add(row).min(lines.len().saturating_sub(1));
         let line = lines[line_index];
         let local_x = event_x - self.frame.x - self.theme.pad;

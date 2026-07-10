@@ -67,7 +67,11 @@ fn max_offset(viewport_pixels: f32, content_pixels: f32) -> f32 {
 
 #[must_use]
 fn finite_or_zero(value: f32) -> f32 {
-    if value.is_finite() { value } else { 0.0 }
+    if value.is_finite() {
+        value
+    } else {
+        0.0
+    }
 }
 
 #[must_use]

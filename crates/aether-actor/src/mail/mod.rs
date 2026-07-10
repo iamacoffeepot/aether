@@ -183,7 +183,11 @@ impl Mail<'_> {
     /// is answerable via `Ctx::reply`).
     #[must_use]
     pub fn reply_handle(&self) -> Option<ReplyHandle> {
-        if self.sender == NO_REPLY_HANDLE { None } else { Some(ReplyHandle { raw: self.sender }) }
+        if self.sender == NO_REPLY_HANDLE {
+            None
+        } else {
+            Some(ReplyHandle { raw: self.sender })
+        }
     }
 
     /// Mailbox this mail was routed to (ADR-0114 decision #1). The

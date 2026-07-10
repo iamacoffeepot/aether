@@ -478,7 +478,11 @@ where
         match self.binding.try_recv() {
             Some(env) => {
                 self.dispatch_one(actor, env);
-                if self.state.try_self_requeue() { CycleResult::Requeue } else { CycleResult::Idle }
+                if self.state.try_self_requeue() {
+                    CycleResult::Requeue
+                } else {
+                    CycleResult::Idle
+                }
             }
             None => CycleResult::Idle,
         }

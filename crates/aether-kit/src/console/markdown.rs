@@ -78,7 +78,11 @@ impl MarkdownBlockState {
                 code_block: true,
                 thematic_break: false,
                 runs: vec![MarkdownRun {
-                    text: if was_open { String::from("```") } else { text.trim().to_string() },
+                    text: if was_open {
+                        String::from("```")
+                    } else {
+                        text.trim().to_string()
+                    },
                     tone: MarkdownTone::MutedMarker,
                 }],
             };
@@ -294,7 +298,11 @@ fn table_separator(text: &str) -> bool {
 }
 
 fn table_runs(text: &str, header: bool) -> Vec<MarkdownRun> {
-    let cell_tone = if header { MarkdownTone::TableHeader } else { MarkdownTone::TableText };
+    let cell_tone = if header {
+        MarkdownTone::TableHeader
+    } else {
+        MarkdownTone::TableText
+    };
     let mut runs = Vec::new();
     let mut cell = String::new();
     for ch in text.chars() {
@@ -364,7 +372,11 @@ fn image_at(text: &str) -> Option<(usize, String, MarkdownTone)> {
     let target_end = body.get(target_start..)?.find(')')? + target_start;
     let alt = sanitize_text(&body[..alt_end]);
     let target = sanitize_text(&body[target_start..target_end]);
-    let rendered = if target.is_empty() { format!("[image: {alt}]") } else { format!("[image: {alt}] ({target})") };
+    let rendered = if target.is_empty() {
+        format!("[image: {alt}]")
+    } else {
+        format!("[image: {alt}] ({target})")
+    };
     Some((2 + target_end + 1, rendered, MarkdownTone::Image))
 }
 
@@ -378,7 +390,11 @@ fn link_at(text: &str) -> Option<(usize, String, MarkdownTone)> {
         return None;
     }
     let target = sanitize_text(&body[target_start..target_end]);
-    let rendered = if target.is_empty() { label } else { format!("{label} ({target})") };
+    let rendered = if target.is_empty() {
+        label
+    } else {
+        format!("{label} ({target})")
+    };
     Some((1 + target_end + 1, rendered, MarkdownTone::Link))
 }
 

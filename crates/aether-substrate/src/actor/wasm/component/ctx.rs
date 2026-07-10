@@ -226,7 +226,11 @@ impl ComponentCtx {
     /// stamp the child's address; for a normally-addressed actor it is the
     /// component's own id, so the stamp is unchanged.
     fn dispatch_identity(&self, from: MailboxId) -> MailboxId {
-        if from == MailboxId::NONE { self.sender } else { from }
+        if from == MailboxId::NONE {
+            self.sender
+        } else {
+            from
+        }
     }
 
     /// Return the correlation id used by the most recent

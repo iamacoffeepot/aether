@@ -170,7 +170,11 @@ pub(super) fn fragment_lift(world: &World, owner: CellPos, sides: [Option<(i32, 
             let oct = w * OCTIMETERS_PER_METER;
             if (oct - line as f32).abs() < 0.5 {
                 let lattice = line / OCTIMETERS_PER_SUBCELL;
-                return if above { lattice } else { lattice - 1 };
+                return if above {
+                    lattice
+                } else {
+                    lattice - 1
+                };
             }
         }
         floor_to_i32(w * SUB as f32)
@@ -191,7 +195,11 @@ pub(super) fn fragment_lift(world: &World, owner: CellPos, sides: [Option<(i32, 
 /// negative world coordinates, so step down when it rounded up.
 pub(super) fn floor_to_i32(v: f32) -> i32 {
     let t = v as i32;
-    if (t as f32) > v { t - 1 } else { t }
+    if (t as f32) > v {
+        t - 1
+    } else {
+        t
+    }
 }
 
 /// The effective point surface level in octimeters at octimeter position

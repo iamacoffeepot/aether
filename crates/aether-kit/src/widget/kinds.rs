@@ -145,7 +145,11 @@ fn intersect_widget_clips(item: Option<WidgetClipRect>, slot: Option<WidgetClipR
             let right = (item.x + item.width).min(slot.x + slot.width);
             let bottom = (item.y + item.height).min(slot.y + slot.height);
             let rect = WidgetClipRect { x, y, width: right - x, height: bottom - y };
-            if rect.is_valid() { WidgetClipIntersection::Finite { rect } } else { WidgetClipIntersection::Empty }
+            if rect.is_valid() {
+                WidgetClipIntersection::Finite { rect }
+            } else {
+                WidgetClipIntersection::Empty
+            }
         }
     }
 }

@@ -72,13 +72,21 @@ impl SliderWidget {
     /// The nudge one arrow press applies: `step` when set, else a hundredth of
     /// the range so a continuous slider still moves.
     fn nudge_amount(&self) -> f32 {
-        if self.step > 0.0 { self.step } else { (self.max - self.min) * 0.01 }
+        if self.step > 0.0 {
+            self.step
+        } else {
+            (self.max - self.min) * 0.01
+        }
     }
 
     /// The value as a `0.0..=1.0` fraction of the range, for the fill width.
     fn fill_fraction(&self) -> f32 {
         let span = self.max - self.min;
-        if span > 0.0 { ((self.value - self.min) / span).clamp(0.0, 1.0) } else { 0.0 }
+        if span > 0.0 {
+            ((self.value - self.min) / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
     }
 
     /// Emit the current value up to the panel root, `committed` distinguishing

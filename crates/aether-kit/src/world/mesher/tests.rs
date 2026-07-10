@@ -352,7 +352,11 @@ mod coverage {
         let mut overlay_mask = vec![0u8; CELLS_PER_CHUNK_AREA * SUBCELLS_PER_CELL];
         for sz in 0..sub {
             for sx in 0..sub {
-                overlay_mask[cell_idx * SUBCELLS_PER_CELL + sz * sub + sx] = if sx < sub / 2 { 96 } else { 192 };
+                overlay_mask[cell_idx * SUBCELLS_PER_CELL + sz * sub + sx] = if sx < sub / 2 {
+                    96
+                } else {
+                    192
+                };
             }
         }
         let mut world = World::new();
@@ -496,7 +500,11 @@ mod walls {
                 for local_z in 0..EDGE {
                     for local_x in 0..EDGE {
                         let global_x = chunk_x * EDGE + local_x;
-                        chunk.height[(local_z * EDGE + local_x) as usize] = if global_x >= break_x { 256 } else { 0 };
+                        chunk.height[(local_z * EDGE + local_x) as usize] = if global_x >= break_x {
+                            256
+                        } else {
+                            0
+                        };
                     }
                 }
                 world.insert_chunk(ChunkPos { x: chunk_x, z: chunk_z }, chunk);
@@ -570,8 +578,16 @@ mod walls {
                         let global_x = chunk_x * EDGE + local_x;
                         let global_z = chunk_z * EDGE + local_z;
                         let index = (local_z * EDGE + local_x) as usize;
-                        chunk.height[index] = if global_x >= 8 { 256 } else { 0 };
-                        chunk.region[index] = if global_z < 8 { 1 } else { 2 };
+                        chunk.height[index] = if global_x >= 8 {
+                            256
+                        } else {
+                            0
+                        };
+                        chunk.region[index] = if global_z < 8 {
+                            1
+                        } else {
+                            2
+                        };
                     }
                 }
                 world.insert_chunk(ChunkPos { x: chunk_x, z: chunk_z }, chunk);
@@ -671,7 +687,11 @@ mod walls {
             chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
             for lz in 0..EDGE {
                 for lx in 0..EDGE {
-                    chunk.height[(lz * EDGE + lx) as usize] = if lz < 8 { 256 } else { 0 };
+                    chunk.height[(lz * EDGE + lx) as usize] = if lz < 8 {
+                        256
+                    } else {
+                        0
+                    };
                 }
             }
             world.insert_chunk(ChunkPos { x: cx, z: 0 }, chunk);
@@ -893,7 +913,11 @@ mod walls {
             for lz in 0..EDGE {
                 for lx in 0..EDGE {
                     let i = (lz * EDGE + lx) as usize;
-                    chunk.underlay[i] = if lz < 8 { Material::Stone } else { Material::Grass };
+                    chunk.underlay[i] = if lz < 8 {
+                        Material::Stone
+                    } else {
+                        Material::Grass
+                    };
                 }
             }
             world.insert_chunk(ChunkPos { x: cx, z: 0 }, chunk);
@@ -1031,7 +1055,11 @@ mod walls {
             .iter()
             .map(|t| {
                 let tops: Vec<&Vertex> = t.verts.iter().filter(|v| v.y > 0.5).collect();
-                if tops.len() == 2 { (tops[0].z - tops[1].z).abs() } else { 0.0 }
+                if tops.len() == 2 {
+                    (tops[0].z - tops[1].z).abs()
+                } else {
+                    0.0
+                }
             })
             .sum();
         assert!(
@@ -1375,7 +1403,11 @@ mod walls {
                         let foot = foot_x.contains(&gx) && foot_z.contains(&gz);
                         if arm || foot {
                             points[sz * sub + sx] = Material::Stone.to_u8();
-                            deltas[sz * sub + sx] = if arm { 128 } else { 256 };
+                            deltas[sz * sub + sx] = if arm {
+                                128
+                            } else {
+                                256
+                            };
                             any = true;
                         }
                     }
@@ -1407,7 +1439,11 @@ mod voids {
         for lz in 0..EDGE {
             for lx in 0..EDGE {
                 let i = (lz * EDGE + lx) as usize;
-                chunk.underlay[i] = if lx < 8 { Material::Grass } else { Material::Sand };
+                chunk.underlay[i] = if lx < 8 {
+                    Material::Grass
+                } else {
+                    Material::Sand
+                };
                 chunk.height[i] = 8 * lx; // gentle ramp, no cliffs
             }
         }

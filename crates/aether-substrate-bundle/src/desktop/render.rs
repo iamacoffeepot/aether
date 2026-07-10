@@ -209,8 +209,11 @@ impl Gpu {
         };
         surface.configure(&device, &config);
 
-        let polygon_mode =
-            if wireframe_mode == WireframeMode::Line { wgpu::PolygonMode::Line } else { wgpu::PolygonMode::Fill };
+        let polygon_mode = if wireframe_mode == WireframeMode::Line {
+            wgpu::PolygonMode::Line
+        } else {
+            wgpu::PolygonMode::Fill
+        };
         render_handles.install_gpu(RenderGpu::new(
             Arc::clone(&device),
             Arc::clone(&queue),
@@ -375,8 +378,11 @@ impl Gpu {
         // Capture path: the copy runs against the offscreen texture,
         // which is unaffected by whether a swapchain image is available
         // this frame. That decouples capture from window visibility.
-        let capture_meta =
-            if capture.is_some() { Some(self.render_handles.record_capture_copy(&mut encoder)) } else { None };
+        let capture_meta = if capture.is_some() {
+            Some(self.render_handles.record_capture_copy(&mut encoder))
+        } else {
+            None
+        };
 
         // Try to obtain a swapchain texture for presentation. If the
         // surface is occluded/lost/outdated we just skip the blit +

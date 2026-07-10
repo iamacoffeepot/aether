@@ -133,7 +133,11 @@ impl ConsoleState {
     }
 
     pub fn append_command_output(&mut self, lines: Vec<String>, error: bool) {
-        let style = if error { LineStyle::Error } else { LineStyle::Output };
+        let style = if error {
+            LineStyle::Error
+        } else {
+            LineStyle::Output
+        };
         for text in lines {
             self.push_line(ConsoleLine { text, style });
         }

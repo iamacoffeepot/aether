@@ -283,7 +283,11 @@ pub fn nanobanana_reply(
             // caller asked to retain it for a multi-turn continuation
             // (a signature can run to multiple MB and dominate the
             // reply). Parse stays unconditional; the gate is here.
-            let thought_signature = if include_sig { resp.thought_signature } else { None };
+            let thought_signature = if include_sig {
+                resp.thought_signature
+            } else {
+                None
+            };
             let grounding =
                 resp.grounding.map(|(search_queries, source_urls)| GroundingMetadata { search_queries, source_urls });
             let Some(artifact) = resp.artifacts.into_iter().next() else {
