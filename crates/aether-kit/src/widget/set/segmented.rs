@@ -289,7 +289,7 @@ mod tests {
 
     fn segmented(options: usize, selected: usize) -> SegmentedWidget {
         SegmentedWidget {
-            options: (0..options).map(|index| alloc::format!("option-{index}")).collect(),
+            options: (0..options).map(|index| format!("option-{index}")).collect(),
             selected,
             theme: Theme::DEFAULT,
             frame: WidgetFrame { x: 10.0, y: 0.0, width: 90.0, height: 24.0 },
