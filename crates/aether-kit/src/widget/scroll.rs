@@ -24,7 +24,7 @@ use crate::widget::{
     Collect, ScrollConfig, ScrollDelta, ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, WidgetChildSpec,
     WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame,
 };
-use crate::widget::{accept_child_list, flush_membership};
+use crate::widget::{FrameDischarge, accept_child_list, flush_membership};
 
 struct ScrollContent {
     id: MailboxId,
@@ -41,6 +41,7 @@ pub struct ScrollWidget {
     offset: ScrollOffset,
     frame: WidgetFrame,
     composite: Composite,
+    frame_discharge: FrameDischarge,
     scroll_focus: Focus,
     content: Option<ScrollContent>,
     spawned: bool,
@@ -233,6 +234,7 @@ impl ScrollWidget {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
+        self.frame_discharge.begin_frame();
         if let Some(content) = &self.content {
             ctx.send_to(content.id, &Collect);
         }
@@ -241,12 +243,19 @@ impl ScrollWidget {
         }
     }
 
-    fn finish(&self, ctx: &mut WasmCtx<'_, Manual>) {
+    fn finish(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+        if self.frame_discharge.is_closed() {
+            return;
+        }
         let list =
             self.composite.flatten(Some([self.viewport_extent.width_pixels, self.viewport_extent.height_pixels]));
         if let Some(parent) = ctx.parent() {
             parent.send(&list);
+        } else {
+            tracing::warn!(target: "aether_kit", "scroll widget finished without a parent; draw list dropped");
         }
+        let closed = self.frame_discharge.close_frame();
+        debug_assert!(closed, "an open scroll frame closes exactly once");
     }
 
     fn apply_delta(&mut self, ctx: &mut WasmCtx<'_, Manual>, delta: ScrollDelta) {
@@ -299,6 +308,7 @@ impl WasmActor for ScrollWidget {
                 height: config.viewport_extent.height_pixels,
             },
             composite: Composite::new(),
+            frame_discharge: FrameDischarge::default(),
             scroll_focus: Focus::new(),
             content: None,
             spawned: false,
@@ -318,6 +328,9 @@ impl WasmActor for ScrollWidget {
 
     #[handler::manual]
     fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Manual>, list: WidgetDrawList) {
+        if self.frame_discharge.is_closed() {
+            return;
+        }
         if accept_child_list(&mut self.composite, ctx, list) {
             self.finish(ctx);
         }
@@ -504,6 +517,7 @@ mod tests {
             offset: ScrollOffset { x_pixels: 3.0, y_pixels: 5.0 },
             frame: WidgetFrame { x: 100.0, y: 200.0, width: 40.0, height: 30.0 },
             composite: Composite::new(),
+            frame_discharge: FrameDischarge::default(),
             scroll_focus: Focus::new(),
             content: None,
             spawned: false,

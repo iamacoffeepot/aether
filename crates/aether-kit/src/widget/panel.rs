@@ -66,8 +66,9 @@ use crate::widget::{
     ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig,
     PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget,
     SliderChanged, SliderConfig, TextAreaConfig, TextCommitted, TextFieldConfig, Widget, WidgetChildSpec,
-    WidgetClipRect, WidgetConfig, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
+    WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
 };
+use crate::widget::{FrameDischarge, decode_nested_widget_config};
 use crate::widget::{accept_child_list, emit, flush_membership};
 
 /// One spawned child's alias plus the logical name the panel attributes its
@@ -119,6 +120,7 @@ pub struct WidgetPanel {
     /// the font loads. Fanned down to every child on change.
     theme: Theme,
     composite: Composite,
+    frame_discharge: FrameDischarge,
     focus: Focus,
     /// Wheel-only hit table. It intentionally excludes ordinary controls so
     /// drag capture in `focus` cannot steal a separate wheel gesture.
@@ -220,8 +222,13 @@ impl WidgetPanel {
     /// Discharge a closed frame: flatten the composite and emit it from the
     /// panel's single render + text sender.
     fn finish(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+        if self.frame_discharge.is_closed() {
+            return;
+        }
         let list = self.composite.flatten(None);
         emit(ctx, &list);
+        let closed = self.frame_discharge.close_frame();
+        debug_assert!(closed, "an open panel frame closes exactly once");
     }
 
     /// Re-fan the live theme to every child (after a font stamp or a restyle).
@@ -251,94 +258,94 @@ pub fn spawn_widget_child(
     let row = layout.row_height_pixels();
     match spec.kind {
         WidgetKind::Label => decode_child::<LabelConfig>(spec).and_then(|config| {
-            let state = config.state.clone();
-            spawn::<LabelWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            let id = spawn::<LabelWidget>(ctx, &spec.subname, &config)?;
+            Some(SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: false,
                 focusable: false,
-                state,
+                state: config.state,
                 type_namespace: <LabelWidget as Addressable>::NAMESPACE,
                 scroll_viewport: None,
             })
         }),
         WidgetKind::Image => decode_child::<ImageConfig>(spec).and_then(|config| {
-            let state = config.state.clone();
-            spawn::<ImageWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            let id = spawn::<ImageWidget>(ctx, &spec.subname, &config)?;
+            Some(SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: false,
                 focusable: false,
-                state,
+                state: config.state,
                 type_namespace: <ImageWidget as Addressable>::NAMESPACE,
                 scroll_viewport: None,
             })
         }),
         WidgetKind::Slider => decode_child::<SliderConfig>(spec).and_then(|config| {
-            let state = config.state.clone();
-            spawn::<SliderWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            let id = spawn::<SliderWidget>(ctx, &spec.subname, &config)?;
+            Some(SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: true,
                 focusable: true,
-                state,
+                state: config.state,
                 type_namespace: <SliderWidget as Addressable>::NAMESPACE,
                 scroll_viewport: None,
             })
         }),
         WidgetKind::Radio => decode_child::<RadioConfig>(spec).and_then(|config| {
             let height = row * config.options.len() as f32;
-            let state = config.state.clone();
-            spawn::<RadioGroupWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            let id = spawn::<RadioGroupWidget>(ctx, &spec.subname, &config)?;
+            Some(SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: height,
                 pointer_eligible: true,
                 focusable: true,
-                state,
+                state: config.state,
                 type_namespace: <RadioGroupWidget as Addressable>::NAMESPACE,
                 scroll_viewport: None,
             })
         }),
         WidgetKind::TextField => decode_child::<TextFieldConfig>(spec).and_then(|config| {
-            let state = config.state.clone();
-            spawn::<TextFieldWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            let id = spawn::<TextFieldWidget>(ctx, &spec.subname, &config)?;
+            Some(SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: true,
                 focusable: true,
-                state,
+                state: config.state,
                 type_namespace: <TextFieldWidget as Addressable>::NAMESPACE,
                 scroll_viewport: None,
             })
         }),
         WidgetKind::TextArea => decode_child::<TextAreaConfig>(spec).and_then(|config| {
             let height = row * config.rows.max(1) as f32;
-            let state = config.state.clone();
-            spawn::<TextAreaWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            let id = spawn::<TextAreaWidget>(ctx, &spec.subname, &config)?;
+            Some(SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: height,
                 pointer_eligible: true,
                 focusable: true,
-                state,
+                state: config.state,
                 type_namespace: <TextAreaWidget as Addressable>::NAMESPACE,
                 scroll_viewport: None,
             })
         }),
         WidgetKind::Button => decode_child::<ButtonConfig>(spec).and_then(|config| {
-            let state = config.state.clone();
-            spawn::<ButtonWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+            let id = spawn::<ButtonWidget>(ctx, &spec.subname, &config)?;
+            Some(SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: true,
                 focusable: true,
-                state,
+                state: config.state,
                 type_namespace: <ButtonWidget as Addressable>::NAMESPACE,
                 scroll_viewport: None,
             })
@@ -363,7 +370,7 @@ fn spawn_composite_child(
         );
         return None;
     }
-    decode_child::<WidgetConfig>(spec).and_then(|config| {
+    decode_nested_widget_config(spec).and_then(|config| {
         let intrinsic = config.intrinsic;
         spawn::<Widget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
             id,
@@ -724,6 +731,7 @@ impl WasmActor for WidgetPanel {
             theme: config.theme.clone(),
             config,
             composite: Composite::new(),
+            frame_discharge: FrameDischarge::default(),
             focus: Focus::new(),
             scroll_focus: Focus::new(),
             children: Vec::new(),
@@ -765,6 +773,7 @@ impl WasmActor for WidgetPanel {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
+        self.frame_discharge.begin_frame();
         let background = quad(self.config.x, self.config.y, self.config.width, self.panel_height, self.theme.surface);
         self.composite.extend_chrome([background]);
         for child in &self.children {
@@ -782,6 +791,9 @@ impl WasmActor for WidgetPanel {
     /// A child's reply; not useful to send manually.
     #[handler::manual]
     fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Manual>, list: WidgetDrawList) {
+        if self.frame_discharge.is_closed() {
+            return;
+        }
         if accept_child_list(&mut self.composite, ctx, list) {
             self.finish(ctx);
         }

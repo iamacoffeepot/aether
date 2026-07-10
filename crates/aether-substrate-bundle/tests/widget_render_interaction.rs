@@ -55,8 +55,7 @@ use aether_kinds::{
 use aether_kit::{
     ButtonConfig, LabelConfig, PanelConfig, ScrollConfig, ScrollExtent, ScrollOffset, SetTheme, SetWidgetState,
     SliderConfig, TextAreaConfig, Theme, ThemeState, WidgetChildSpec, WidgetConfig, WidgetControlState, WidgetDrawItem,
-    WidgetKind,
-    WidgetValidation,
+    WidgetKind, WidgetValidation,
 };
 use aether_math::Rgba;
 use aether_substrate_bundle::test_bench::{
