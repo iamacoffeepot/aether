@@ -601,8 +601,7 @@ impl BlobWork {
                     // SAFETY: slot `base + j` was just published (`len`
                     // advanced past it), so it is initialized; `work()` is a
                     // producer-side relaxed load on the slot we wrote.
-                    let group = unsafe { self.groups[base + j].get() };
-                    let w = group.work();
+                    let w = unsafe { self.groups[base + j].get() }.work();
                     total_work = total_work.saturating_add(w);
                     max_group_work = max_group_work.max(w);
                 }

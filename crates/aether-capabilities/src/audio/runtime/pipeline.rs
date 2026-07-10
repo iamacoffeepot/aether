@@ -45,8 +45,7 @@ impl fmt::Display for AudioBuildError {
 }
 
 pub fn try_build_pipeline(requested_sample_rate: Option<u32>) -> Result<AudioPipeline, AudioBuildError> {
-    let host = cpal::default_host();
-    let device = host.default_output_device().ok_or(AudioBuildError::NoDevice)?;
+    let device = cpal::default_host().default_output_device().ok_or(AudioBuildError::NoDevice)?;
 
     let config = match requested_sample_rate {
         Some(rate) => find_config_for_rate(&device, rate).ok_or(AudioBuildError::RateUnsupported(rate))?,

@@ -202,9 +202,12 @@ mod tests {
             textures.entries.insert(texture_id, test_staged_texture(vec![0xAB; 16]));
         }
 
-        let mail = DestroyTexture { texture_id };
-        let payload = mail.encode_into_bytes();
-        deliver(&registry, RenderCapability::NAMESPACE, <DestroyTexture as Kind>::ID, &payload);
+        deliver(
+            &registry,
+            RenderCapability::NAMESPACE,
+            <DestroyTexture as Kind>::ID,
+            &DestroyTexture { texture_id }.encode_into_bytes(),
+        );
 
         thread::sleep(Duration::from_millis(50));
 
@@ -239,9 +242,12 @@ mod tests {
         }
 
         for texture_id in [99, WHITE_TEXTURE_ID] {
-            let mail = DestroyTexture { texture_id };
-            let payload = mail.encode_into_bytes();
-            deliver(&registry, RenderCapability::NAMESPACE, <DestroyTexture as Kind>::ID, &payload);
+            deliver(
+                &registry,
+                RenderCapability::NAMESPACE,
+                <DestroyTexture as Kind>::ID,
+                &DestroyTexture { texture_id }.encode_into_bytes(),
+            );
         }
 
         thread::sleep(Duration::from_millis(50));

@@ -442,9 +442,12 @@ fn with_actor_boots_dispatches_and_tears_down() {
         panic!("ProbeCap claim must be a sink entry");
     };
 
-    let payload = Ping { tag: 0xDEAD_BEEF };
-    let bytes = payload.encode_into_bytes();
-    handler.enqueue(registry::test_owned_dispatch(<Ping as Kind>::ID, Ping::NAME, &bytes, 1));
+    handler.enqueue(registry::test_owned_dispatch(
+        <Ping as Kind>::ID,
+        Ping::NAME,
+        &Ping { tag: 0xDEAD_BEEF }.encode_into_bytes(),
+        1,
+    ));
 
     // Wait briefly for the dispatcher thread to dispatch.
     let deadline = Instant::now() + Duration::from_millis(500);
@@ -550,9 +553,12 @@ fn with_actor_stamps_local_for_init_and_handler() {
     // 101, 102, 103 in order. We assert the final 103 with a
     // wait budget to cover dispatcher-thread scheduling.
     for seq in 0..3 {
-        let payload = Tick { seq };
-        let bytes = payload.encode_into_bytes();
-        handler.enqueue(registry::test_owned_dispatch(<Tick as Kind>::ID, Tick::NAME, &bytes, 1));
+        handler.enqueue(registry::test_owned_dispatch(
+            <Tick as Kind>::ID,
+            Tick::NAME,
+            &Tick { seq }.encode_into_bytes(),
+            1,
+        ));
     }
 
     let deadline = Instant::now() + Duration::from_millis(500);

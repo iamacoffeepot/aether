@@ -347,13 +347,16 @@ fn expand_schema(input: &DeriveInput) -> syn::Result<TokenStream2> {
 /// the labels side reports `Anonymous` (no nominal info for a raw
 /// byte buffer).
 fn expand_label_node_struct(type_ident: &str, fields: &[FieldInfo]) -> TokenStream2 {
-    let field_names = fields.iter().enumerate().map(|(idx, f)| match &f.ident {
-        Some(id) => id.to_string(),
-        None => idx.to_string(),
-    });
-    let field_name_entries = field_names.map(|n| {
-        quote! { ::aether_data::__derive_runtime::Cow::Borrowed(#n) }
-    });
+    let field_name_entries = fields
+        .iter()
+        .enumerate()
+        .map(|(idx, f)| match &f.ident {
+            Some(id) => id.to_string(),
+            None => idx.to_string(),
+        })
+        .map(|n| {
+            quote! { ::aether_data::__derive_runtime::Cow::Borrowed(#n) }
+        });
     let field_node_exprs = fields.iter().map(|f| field_label_node_expr(&f.ty));
     quote! {
         ::aether_data::__derive_runtime::LabelNode::Struct {

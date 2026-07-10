@@ -423,8 +423,7 @@ pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
             if *v_key == *a_key || *v_key == *b_key {
                 continue;
             }
-            let av = *v - a;
-            let t = av.dot(ab) / ab_len_sq;
+            let t = (*v - a).dot(ab) / ab_len_sq;
             // Open interior — exclude endpoints by a small parametric margin
             // proportional to the snap tolerance vs. edge length.
             let margin = (tol::T_JUNCTION / ab_len_sq.sqrt()).min(0.5);
@@ -691,8 +690,10 @@ mod tests {
             quad([a, b, e, e], Vec3::new(0.0, 1.0, 1.0)),
         ];
         let violations = validate_manifold(&polys);
-        let singular = violations.iter().filter(|v| matches!(v, ManifoldViolation::SingularEdge { .. })).count();
-        assert!(singular >= 1, "expected at least one SingularEdge, got {violations:#?}");
+        assert!(
+            violations.iter().filter(|v| matches!(v, ManifoldViolation::SingularEdge { .. })).count() >= 1,
+            "expected at least one SingularEdge, got {violations:#?}"
+        );
     }
 
     #[test]

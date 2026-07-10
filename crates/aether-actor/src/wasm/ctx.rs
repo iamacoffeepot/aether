@@ -1442,8 +1442,7 @@ mod tests {
         )
         .expect("install inline child");
 
-        let mailbox = WasmActorMailbox::<SucceedingChild>::__new(child.0, root, &registry);
-        let request = mailbox.send_tracked(&());
+        let request = WasmActorMailbox::<SucceedingChild>::__new(child.0, root, &registry).send_tracked(&());
         assert_eq!(request.0, Source::NO_CORRELATION, "local inline sends have no host-minted request id");
     }
 

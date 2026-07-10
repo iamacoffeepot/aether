@@ -127,8 +127,7 @@ fn make_hook(
         // case-scenario; we never want to obscure the original
         // payload by panicking again here.
         let timestamp_unix_ms = now_unix_millis();
-        let thread = thread::current();
-        let thread_name = thread.name().unwrap_or("<unnamed>").to_owned();
+        let thread_name = thread::current().name().unwrap_or("<unnamed>").to_owned();
         let location = info
             .location()
             .map_or_else(|| "<unknown>".to_string(), |l| format!("{}:{}:{}", l.file(), l.line(), l.column()));
@@ -566,8 +565,7 @@ mod tests {
     /// this byte format.
     #[test]
     fn write_jsonl_emits_header_then_entries() {
-        let dir = tempdir("write_jsonl");
-        let path = dir.join("aether.audio.jsonl");
+        let path = tempdir("write_jsonl").join("aether.audio.jsonl");
         let ring = vec![entry(2, 1, "before crash a"), entry(3, 2, "before crash b")];
         write_jsonl(
             &path,
@@ -613,8 +611,7 @@ mod tests {
     fn write_jsonl_with_no_or_empty_ring_emits_header_only() {
         let empty: [LogEntry; 0] = [];
         for (label, ring) in [("none", None), ("empty", Some(&empty[..]))] {
-            let dir = tempdir(&format!("write_jsonl_{label}_ring"));
-            let path = dir.join("scheduler-thread.jsonl");
+            let path = tempdir(&format!("write_jsonl_{label}_ring")).join("scheduler-thread.jsonl");
             write_jsonl(
                 &path,
                 1_700_000_002_000,

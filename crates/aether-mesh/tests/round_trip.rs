@@ -87,8 +87,7 @@ fn parse_errors_on_invalid_axis() {
 
 #[test]
 fn parse_errors_on_trailing_top_level_form() {
-    let result = parse("(box 1 1 1 :color 0) (box 2 2 2 :color 1)");
-    let err = result.expect_err("trailing top-level form should fail");
+    let err = parse("(box 1 1 1 :color 0) (box 2 2 2 :color 1)").expect_err("trailing top-level form should fail");
     assert!(matches!(err, aether_mesh::ParseError::TrailingInput { .. }), "expected TrailingInput, got {err:?}");
 }
 

@@ -291,8 +291,7 @@ mod tests {
 
     #[test]
     fn corners_count_and_match_min_max() {
-        let a = Aabb::from_half_extents(1.0, 2.0, 3.0);
-        let cs = a.corners();
+        let cs = Aabb::from_half_extents(1.0, 2.0, 3.0).corners();
         assert_eq!(cs.len(), 8);
         assert!(cs.contains(&Vec3::new(-1.0, -2.0, -3.0)));
         assert!(cs.contains(&Vec3::new(1.0, 2.0, 3.0)));
@@ -364,16 +363,14 @@ mod tests {
 
     #[test]
     fn translate_shifts_both_bounds() {
-        let a = Aabb::from_half_extents(1.0, 1.0, 1.0);
-        let t = a.translate(Vec3::new(10.0, 0.0, -5.0));
+        let t = Aabb::from_half_extents(1.0, 1.0, 1.0).translate(Vec3::new(10.0, 0.0, -5.0));
         assert_eq!(t.min, Vec3::new(9.0, -1.0, -6.0));
         assert_eq!(t.max, Vec3::new(11.0, 1.0, -4.0));
     }
 
     #[test]
     fn scale_negative_factor_swaps_min_max() {
-        let a = Aabb::from_min_max(Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0));
-        let s = a.scale(Vec3::new(-1.0, 1.0, 1.0));
+        let s = Aabb::from_min_max(Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0)).scale(Vec3::new(-1.0, 1.0, 1.0));
         assert_eq!(s.min, Vec3::new(-4.0, 2.0, 3.0));
         assert_eq!(s.max, Vec3::new(-1.0, 5.0, 6.0));
     }
@@ -387,8 +384,7 @@ mod tests {
 
     #[test]
     fn rotate_offset_box_grows() {
-        let a = Aabb::from_min_max(Vec3::new(1.0, -0.5, -0.5), Vec3::new(2.0, 0.5, 0.5));
-        let r = a.rotate(Vec3::Y, PI * 0.5);
+        let r = Aabb::from_min_max(Vec3::new(1.0, -0.5, -0.5), Vec3::new(2.0, 0.5, 0.5)).rotate(Vec3::Y, PI * 0.5);
         assert!((r.extents().x - 1.0).abs() < EPS);
         assert!((r.extents().z - 1.0).abs() < EPS);
         assert!(approx_eq(r.min.x, -0.5));
@@ -407,8 +403,7 @@ mod tests {
 
     #[test]
     fn mirror_x_flips_x_bounds() {
-        let a = Aabb::from_min_max(Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0));
-        let m = a.mirror(Axis::X);
+        let m = Aabb::from_min_max(Vec3::new(1.0, 2.0, 3.0), Vec3::new(4.0, 5.0, 6.0)).mirror(Axis::X);
         assert_eq!(m.min, Vec3::new(-4.0, 2.0, 3.0));
         assert_eq!(m.max, Vec3::new(-1.0, 5.0, 6.0));
     }

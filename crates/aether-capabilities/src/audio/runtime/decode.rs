@@ -120,8 +120,7 @@ fn downmix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
 /// header but only returns the resampled PCM. Parses the header chunk
 /// only — the sample data is not read.
 pub fn wav_source_rate(bytes: &[u8]) -> Result<u32, String> {
-    let reader = hound::WavReader::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
-    let rate = reader.spec().sample_rate;
+    let rate = hound::WavReader::new(Cursor::new(bytes)).map_err(|e| e.to_string())?.spec().sample_rate;
     if rate == 0 {
         return Err("zero sample rate".to_owned());
     }

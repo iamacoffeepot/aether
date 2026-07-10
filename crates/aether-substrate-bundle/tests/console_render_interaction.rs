@@ -50,8 +50,7 @@ fn build_bench() -> TestBench {
 }
 
 fn build_bench_without_assets_root() -> TestBench {
-    let sandbox = init_save_sandbox("console-render-interaction-no-assets");
-    let assets = sandbox.join("empty-assets");
+    let assets = init_save_sandbox("console-render-interaction-no-assets").join("empty-assets");
     fs::create_dir_all(&assets).expect("create empty assets root");
     build_bench_with_assets(assets, "console-render-interaction-no-assets")
 }

@@ -155,8 +155,10 @@ impl GeminiAdapter for UreqGeminiAdapter {
         });
         let text = self.post_json(&req.model, "predict", &body)?;
 
-        let clips = lyria::parse_clip_response(&text)?;
-        let artifacts = clips.into_iter().map(|bytes| GeminiArtifact { bytes, ext: "wav".to_string() }).collect();
+        let artifacts = lyria::parse_clip_response(&text)?
+            .into_iter()
+            .map(|bytes| GeminiArtifact { bytes, ext: "wav".to_string() })
+            .collect();
         Ok(GeminiResponse {
             artifacts,
             model_used: req.model,

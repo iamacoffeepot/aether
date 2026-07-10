@@ -341,8 +341,7 @@ mod tests {
 
     #[test]
     fn to_cols_array_is_column_major() {
-        let m = Mat4::from_translation(Vec3::new(7.0, 8.0, 9.0));
-        let arr = m.to_cols_array();
+        let arr = Mat4::from_translation(Vec3::new(7.0, 8.0, 9.0)).to_cols_array();
         assert_eq!(&arr[0..4], &[1.0, 0.0, 0.0, 0.0]);
         assert_eq!(&arr[4..8], &[0.0, 1.0, 0.0, 0.0]);
         assert_eq!(&arr[8..12], &[0.0, 0.0, 1.0, 0.0]);

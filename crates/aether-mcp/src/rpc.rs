@@ -916,9 +916,7 @@ mod tests {
             .expect("connect task")
             .expect("connect");
 
-        let err = session.call_one(probe_envelope()).await.expect_err("zero-reply settle must be an error");
-
-        let msg = err.to_string();
+        let msg = session.call_one(probe_envelope()).await.expect_err("zero-reply settle must be an error").to_string();
         assert!(
             msg.contains("settled without a reply event"),
             "zero-reply error should mention the settled-without-reply condition, got: {msg:?}",
@@ -942,9 +940,8 @@ mod tests {
             .expect("connect task")
             .expect("connect");
 
-        let err = session.call_one(probe_envelope()).await.expect_err("multi-reply settle must be an error");
-
-        let msg = err.to_string();
+        let msg =
+            session.call_one(probe_envelope()).await.expect_err("multi-reply settle must be an error").to_string();
         assert!(
             msg.contains("exactly one reply event") && msg.contains("got 2"),
             "multi-reply error should mention the expected-one / got-N condition, got: {msg:?}",

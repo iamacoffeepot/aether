@@ -50,8 +50,7 @@ fn transform_determinism() {
         .find(|e| e.name.ends_with("det_double"))
         .expect("det_double transform registered in link-time inventory");
 
-    let input = DetScalar { value: 21 };
-    let input_bytes = input.encode_into_bytes();
+    let input_bytes = DetScalar { value: 21 }.encode_into_bytes();
     let slices: [&[u8]; 1] = [input_bytes.as_slice()];
 
     let out_a = (entry.invoke)(&slices).expect("first invoke succeeds");

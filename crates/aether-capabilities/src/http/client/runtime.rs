@@ -332,8 +332,7 @@ mod tests {
 
     #[test]
     fn allowlist_empty_rejects_every_host() {
-        let adapter = UreqHttpAdapter::new(HashSet::new(), false, DEFAULT_MAX_BODY_BYTES);
-        let resp = adapter.fetch(FetchRequest {
+        let resp = UreqHttpAdapter::new(HashSet::new(), false, DEFAULT_MAX_BODY_BYTES).fetch(FetchRequest {
             url: "https://api.example.com/".to_string(),
             method: HttpMethod::Get,
             headers: vec![],
@@ -347,8 +346,7 @@ mod tests {
     fn allowlist_miss_returns_denied_without_making_request() {
         let mut allowlist = HashSet::new();
         allowlist.insert("allowed.example.com".to_string());
-        let adapter = UreqHttpAdapter::new(allowlist, false, DEFAULT_MAX_BODY_BYTES);
-        let resp = adapter.fetch(FetchRequest {
+        let resp = UreqHttpAdapter::new(allowlist, false, DEFAULT_MAX_BODY_BYTES).fetch(FetchRequest {
             url: "https://denied.example.com/".to_string(),
             method: HttpMethod::Get,
             headers: vec![],
@@ -360,8 +358,7 @@ mod tests {
 
     #[test]
     fn invalid_url_returns_invalid_url_variant() {
-        let adapter = UreqHttpAdapter::new(HashSet::new(), false, DEFAULT_MAX_BODY_BYTES);
-        let resp = adapter.fetch(FetchRequest {
+        let resp = UreqHttpAdapter::new(HashSet::new(), false, DEFAULT_MAX_BODY_BYTES).fetch(FetchRequest {
             url: "not-a-url".to_string(),
             method: HttpMethod::Get,
             headers: vec![],
@@ -375,8 +372,7 @@ mod tests {
     fn require_https_rejects_http_scheme() {
         let mut allowlist = HashSet::new();
         allowlist.insert("example.com".to_string());
-        let adapter = UreqHttpAdapter::new(allowlist, true, DEFAULT_MAX_BODY_BYTES);
-        let resp = adapter.fetch(FetchRequest {
+        let resp = UreqHttpAdapter::new(allowlist, true, DEFAULT_MAX_BODY_BYTES).fetch(FetchRequest {
             url: "http://example.com/".to_string(),
             method: HttpMethod::Get,
             headers: vec![],
@@ -390,8 +386,7 @@ mod tests {
     fn oversize_request_body_returns_body_too_large() {
         let mut allowlist = HashSet::new();
         allowlist.insert("example.com".to_string());
-        let adapter = UreqHttpAdapter::new(allowlist, false, 10);
-        let resp = adapter.fetch(FetchRequest {
+        let resp = UreqHttpAdapter::new(allowlist, false, 10).fetch(FetchRequest {
             url: "https://example.com/".to_string(),
             method: HttpMethod::Post,
             headers: vec![],
@@ -496,9 +491,7 @@ mod tests {
 
     #[test]
     fn build_http_adapter_with_disable_returns_disabled() {
-        let cfg = HttpConfig { disabled: true, ..HttpConfig::default() };
-        let a = build_http_adapter(cfg);
-        let resp = a.fetch(FetchRequest {
+        let resp = build_http_adapter(HttpConfig { disabled: true, ..HttpConfig::default() }).fetch(FetchRequest {
             url: "https://example.com/".to_string(),
             method: HttpMethod::Get,
             headers: vec![],

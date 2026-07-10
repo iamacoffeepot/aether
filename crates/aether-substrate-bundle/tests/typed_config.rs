@@ -93,8 +93,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read::<&Path>(wasm_path.as_ref()).expect("read fixture wasm");
 
-    let config = ProbeConfig { seed: 0xABCD_1234, label: "c2-round-trip".to_owned() };
-    let config_bytes = config.encode_into_bytes();
+    let config_bytes = ProbeConfig { seed: 0xABCD_1234, label: "c2-round-trip".to_owned() }.encode_into_bytes();
 
     let report = bench
         .execute(vec![

@@ -54,6 +54,5 @@ fn main() {
         Clamp::__AETHER_BEHAVIOR_EXPORTS.len()
     );
 
-    let clamp = Clamp::default();
-    let _ = clamp.state_save();
+    let _ = Clamp::default().state_save();
 }

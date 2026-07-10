@@ -223,8 +223,7 @@ pub fn reason_phrase(status: u16) -> &'static str {
 pub fn http_date(now: SystemTime) -> String {
     const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    let secs = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let total = i64::try_from(secs).unwrap_or(i64::MAX);
+    let total = i64::try_from(now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())).unwrap_or(i64::MAX);
     let days = total.div_euclid(86_400);
     let rem = total.rem_euclid(86_400);
     let hour = rem / 3_600;

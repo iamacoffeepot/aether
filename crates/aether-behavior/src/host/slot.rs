@@ -95,8 +95,7 @@ impl ScriptSlot {
         let manifest = decode_manifest(&module);
 
         let mut store = Store::new(engine, ());
-        let linker: Linker<()> = Linker::new(engine);
-        let instance = linker
+        let instance = Linker::<()>::new(engine)
             .instantiate_and_start(&mut store, &module)
             .map_err(|error| alloc::format!("instantiate: {error}"))?;
 

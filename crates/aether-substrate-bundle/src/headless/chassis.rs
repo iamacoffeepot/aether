@@ -371,9 +371,9 @@ impl HeadlessChassis {
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedTestBenchCapability>(())
             .with_actor::<LifecycleCapability>(tick_only_lifecycle_config(lifecycle_advance_timeout_millis));
-        let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-headless");
-        let builder = maybe_with_http_server(builder, http_server);
-        let built = builder.driver(driver).build()?;
+        let built = maybe_with_http_server(maybe_with_rpc_server(builder, rpc_addr, "aether-headless"), http_server)
+            .driver(driver)
+            .build()?;
         // Auto-load any bundled components, in order, before the run loop
         // starts. Fire-and-forward: the component host dispatches each load
         // off the worker pool (already up after `build`), so the components

@@ -38,11 +38,14 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     // Priming advance subscribes the probe to ticks; the
     // capture-with-mails op then dispatches the pre bundle, reads
     // back, and dispatches the after bundle — all in one frame.
-    let captured = bench
-        .execute(vec![("prime", BenchOp::advance(1)), ("snap", BenchOp::capture_with_mails(pre, after))])
-        .expect("prime + capture-with-mails");
-    let png = captured.captured("snap").expect("snap step ran");
-    let img = decode_png(png).expect("decode capture png");
+    let img = decode_png(
+        bench
+            .execute(vec![("prime", BenchOp::advance(1)), ("snap", BenchOp::capture_with_mails(pre, after))])
+            .expect("prime + capture-with-mails")
+            .captured("snap")
+            .expect("snap step ran"),
+    )
+    .expect("decode capture png");
     let bg = background_top_left(&img);
     let tolerance = 5;
     // The probe draws one large triangle (NDC verts spanning ±0.9),
@@ -72,11 +75,14 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     // Cleanup ran: probe.render is now { visible: 0 }. Advance once
     // and capture again — the next tick won't emit DrawTriangle, so
     // the frame stays at clear color.
-    let cleaned = bench
-        .execute(vec![("cleanup_advance", BenchOp::advance(1)), ("snap2", BenchOp::capture())])
-        .expect("post-cleanup advance + capture");
-    let png2 = cleaned.captured("snap2").expect("snap2 step ran");
-    let img2 = decode_png(png2).expect("decode cleanup png");
+    let img2 = decode_png(
+        bench
+            .execute(vec![("cleanup_advance", BenchOp::advance(1)), ("snap2", BenchOp::capture())])
+            .expect("post-cleanup advance + capture")
+            .captured("snap2")
+            .expect("snap2 step ran"),
+    )
+    .expect("decode cleanup png");
     let cleaned_coverage = coverage(&img2, background_top_left(&img2), 5);
     assert!(
         cleaned_coverage < 0.01,
@@ -240,9 +246,14 @@ fn textured_quad_draws_screen_space_rect() {
         },
     )];
 
-    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
-    let png = captured.captured("snap").expect("snap step ran");
-    let img = decode_png(png).expect("decode capture png");
+    let img = decode_png(
+        bench
+            .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
+            .expect("capture-with-mails")
+            .captured("snap")
+            .expect("snap step ran"),
+    )
+    .expect("decode capture png");
     let bg = background_top_left(&img);
     let tolerance = 5;
 
@@ -270,11 +281,14 @@ fn textured_quad_draws_screen_space_rect() {
     // Immediate-mode contract: with no quad resent, an advance commits
     // the empty accumulator (clearing the cache) and the next capture is
     // back at clear color.
-    let cleared = bench
-        .execute(vec![("clear_advance", BenchOp::advance(1)), ("snap2", BenchOp::capture())])
-        .expect("advance + capture");
-    let png2 = cleared.captured("snap2").expect("snap2 step ran");
-    let img2 = decode_png(png2).expect("decode cleared png");
+    let img2 = decode_png(
+        bench
+            .execute(vec![("clear_advance", BenchOp::advance(1)), ("snap2", BenchOp::capture())])
+            .expect("advance + capture")
+            .captured("snap2")
+            .expect("snap2 step ran"),
+    )
+    .expect("decode cleared png");
     let cleared_coverage = coverage(&img2, background_top_left(&img2), tolerance);
     assert!(
         cleared_coverage < 0.01,
@@ -590,9 +604,14 @@ fn target_color_stats_distinguishes_quadrant_colors_on_real_capture() {
         },
     )];
 
-    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
-    let png = captured.captured("snap").expect("snap step ran");
-    let img = decode_png(png).expect("decode capture png");
+    let img = decode_png(
+        bench
+            .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
+            .expect("capture-with-mails")
+            .captured("snap")
+            .expect("snap step ran"),
+    )
+    .expect("decode capture png");
     let tolerance = 20;
 
     // Inset 8x4 probe rects, one per quadrant, each pulled at least 4px
@@ -670,11 +689,14 @@ fn destroyed_texture_draw_drops_from_frame() {
         )
     };
 
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(vec![draw()], vec![]))])
-        .expect("capture with live texture");
-    let png = captured.captured("snap").expect("snap step ran");
-    let img = decode_png(png).expect("decode capture png");
+    let img = decode_png(
+        bench
+            .execute(vec![("snap", BenchOp::capture_with_mails(vec![draw()], vec![]))])
+            .expect("capture with live texture")
+            .captured("snap")
+            .expect("snap step ran"),
+    )
+    .expect("decode capture png");
     let bg = background_top_left(&img);
     let drawn = coverage(&img, bg, 5);
     assert!((0.08..0.22).contains(&drawn), "live texture quad coverage {drawn} fell outside the expected band");
@@ -765,9 +787,14 @@ fn r8_texture_updates_and_draws_red_channel_only() {
         ),
     ];
 
-    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture r8 texture");
-    let png = captured.captured("snap").expect("snap step ran");
-    let img = decode_png(png).expect("decode capture png");
+    let img = decode_png(
+        bench
+            .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
+            .expect("capture r8 texture")
+            .captured("snap")
+            .expect("snap step ran"),
+    )
+    .expect("decode capture png");
     assert_eq!((img.width, img.height), (frame_width, frame_height));
 
     let sample = |x: u32, y: u32| -> [u8; 4] {
@@ -984,9 +1011,14 @@ fn solid_quad_draws_screen_space_rect() {
         },
     )];
 
-    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
-    let png = captured.captured("snap").expect("snap step ran");
-    let img = decode_png(png).expect("decode capture png");
+    let img = decode_png(
+        bench
+            .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
+            .expect("capture-with-mails")
+            .captured("snap")
+            .expect("snap step ran"),
+    )
+    .expect("decode capture png");
     let bg = background_top_left(&img);
     let tolerance = 5;
 
@@ -1008,11 +1040,14 @@ fn solid_quad_draws_screen_space_rect() {
     );
 
     // Immediate-mode clear: advance with no quad resent, next capture returns to clear color.
-    let cleared = bench
-        .execute(vec![("clear_advance", BenchOp::advance(1)), ("snap2", BenchOp::capture())])
-        .expect("advance + capture");
-    let png2 = cleared.captured("snap2").expect("snap2 step ran");
-    let img2 = decode_png(png2).expect("decode cleared png");
+    let img2 = decode_png(
+        bench
+            .execute(vec![("clear_advance", BenchOp::advance(1)), ("snap2", BenchOp::capture())])
+            .expect("advance + capture")
+            .captured("snap2")
+            .expect("snap2 step ran"),
+    )
+    .expect("decode cleared png");
     let cleared_coverage = coverage(&img2, background_top_left(&img2), tolerance);
     assert!(
         cleared_coverage < 0.01,

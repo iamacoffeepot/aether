@@ -65,9 +65,14 @@ fn text_draws_a_screen_space_string() {
     // Now the glyphs rasterize and the quad batch reaches the renderer the
     // same tick the capture records.
     let pre = vec![envelope("aether.text", &draw)];
-    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
-    let png = captured.captured("snap").expect("snap step ran");
-    let img = decode_png(png).expect("decode capture png");
+    let img = decode_png(
+        bench
+            .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
+            .expect("capture-with-mails")
+            .captured("snap")
+            .expect("snap step ran"),
+    )
+    .expect("decode capture png");
     let bg = background_top_left(&img);
     let tolerance = 5;
 

@@ -132,8 +132,7 @@ fn sha1_matches_the_rfc_3174_vector() {
     // Tripwire: RFC 3174 §7.3 worked example sha1("abc"). A computed digest
     // that drifts if the block schedule / padding / round logic breaks.
     use std::fmt::Write as _;
-    let digest = sha1(b"abc");
-    let hex = digest.iter().fold(String::new(), |mut acc, byte| {
+    let hex = sha1(b"abc").iter().fold(String::new(), |mut acc, byte| {
         let _ = write!(acc, "{byte:02x}");
         acc
     });

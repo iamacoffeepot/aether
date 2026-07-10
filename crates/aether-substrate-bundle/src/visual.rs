@@ -1071,8 +1071,8 @@ mod tests {
         let img = solid_with_rect(16, 16, [bg[0], bg[1], bg[2], 255], [200, 32, 32, 255], rect);
         let check =
             FrameCheck { reduction: FrameReduction::Coverage, tolerance: 5, background: Some(bg), region: None };
-        let mask = diagnostic_mask(&img, &check);
-        let lit_count = mask.chunks_exact(4).filter(|pixel| *pixel == [255, 255, 255, 255]).count();
+        let lit_count =
+            diagnostic_mask(&img, &check).chunks_exact(4).filter(|pixel| *pixel == [255, 255, 255, 255]).count();
         let verdict = run_checks(img.rgba.clone(), img.width, img.height, &[check]);
         let FrameCheckResult::Coverage { fraction, .. } = &verdict.results[0] else {
             panic!("expected a Coverage result");

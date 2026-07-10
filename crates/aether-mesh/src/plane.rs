@@ -498,8 +498,7 @@ mod tests {
         // construction should produce a plane that already has the same
         // key. We approximate this by reading the key, building a plane
         // with those fields directly, and re-keying.
-        let plane = Plane3::from_points(p(0.0, 0.0, 0.0), p(2.0, 0.0, 0.0), p(0.0, 3.0, 0.0));
-        let key = plane.canonical_key();
+        let key = Plane3::from_points(p(0.0, 0.0, 0.0), p(2.0, 0.0, 0.0), p(0.0, 3.0, 0.0)).canonical_key();
         let normalized = Plane3 { n_x: key.0, n_y: key.1, n_z: key.2, d: key.3 };
         assert_eq!(normalized.canonical_key(), key);
     }

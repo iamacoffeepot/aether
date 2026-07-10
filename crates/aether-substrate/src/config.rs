@@ -784,8 +784,7 @@ mod tests {
 
     #[test]
     fn config_error_display_names_key_and_value() {
-        let e = ConfigError::unparseable("AETHER_BOOT_MANIFEST", "lots", an_int_error());
-        let msg = e.to_string();
+        let msg = ConfigError::unparseable("AETHER_BOOT_MANIFEST", "lots", an_int_error()).to_string();
         assert!(msg.contains("AETHER_BOOT_MANIFEST"));
         assert!(msg.contains("lots"));
     }

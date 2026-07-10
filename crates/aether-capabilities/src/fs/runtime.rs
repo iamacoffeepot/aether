@@ -944,18 +944,16 @@ mod tests {
         let root = scratch_root("fetch-transform");
         let assets = root.join("assets");
         fs::create_dir_all(&assets).expect("test setup: assets dir creates");
-        let input = TestNumber { value: 7, tag: 0 };
-        let encoded = input.encode_into_bytes();
-        fs::write(assets.join("number.bin"), &encoded).expect("test setup: seed number.bin");
+        fs::write(assets.join("number.bin"), TestNumber { value: 7, tag: 0 }.encode_into_bytes())
+            .expect("test setup: seed number.bin");
 
         let reg = build_two_namespace_registry(&root, Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());
         let double_id = double_fs_transform_id();
 
-        let transform_reg = TransformRegistry::from_inventory();
-        let double_t = transform_reg.lookup(double_id).expect("double_fs registered");
-        let expected_output_kind = double_t.output_kind_id;
+        let expected_output_kind =
+            TransformRegistry::from_inventory().lookup(double_id).expect("double_fs registered").output_kind_id;
 
         let result = FsCapability::on_fetch(
             &mut fix.state,
@@ -1046,9 +1044,8 @@ mod tests {
         let root = scratch_root("fetch-panic");
         let assets = root.join("assets");
         fs::create_dir_all(&assets).expect("test setup: assets dir creates");
-        let input = TestNumber { value: 1, tag: 0 };
-        let encoded = input.encode_into_bytes();
-        fs::write(assets.join("number.bin"), &encoded).expect("test setup: seed number.bin");
+        fs::write(assets.join("number.bin"), TestNumber { value: 1, tag: 0 }.encode_into_bytes())
+            .expect("test setup: seed number.bin");
         let reg = build_two_namespace_registry(&root, Access::ReadWrite);
         let mut fix = TestFixture::new(reg);
         let mut ctx = make_ctx(&fix.transport, session_sender());

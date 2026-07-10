@@ -10,8 +10,7 @@ use super::super::*;
 #[tokio::test]
 async fn list_engines_on_empty_hub_is_empty() {
     let (_chassis, port) = boot_hub();
-    let mcp = connect_mcp(port);
-    let out = mcp.list_engines().await.expect("list_engines ok");
+    let out = connect_mcp(port).list_engines().await.expect("list_engines ok");
     assert_eq!(
         out, "{\"engines\":[],\"recently_died\":[]}",
         "fresh hub supervises no engines and has no recent deaths",

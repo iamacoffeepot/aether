@@ -532,8 +532,7 @@ impl Registry {
     /// ADR-0063.
     pub(crate) fn route_lookup(&self, kind: KindId, recipient: MailboxId) -> RouteLookup {
         let inner = self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063");
-        let kind_slot = inner.kinds.get(&kind);
-        let kind_name = kind_slot.map(|s| s.name.clone()).unwrap_or_default();
+        let kind_name = inner.kinds.get(&kind).map(|s| s.name.clone()).unwrap_or_default();
         let entry = inner.mailboxes.get(&recipient).map(|m| m.entry.clone());
         // iamacoffeepot/aether#1135: hand the demuxer the recipient's
         // seize handle under the same guard. Cloned out of the deferred

@@ -536,8 +536,7 @@ mod tests {
     fn reconstruct_one_child_reinits_typed_config_from_real_bytes() {
         let registry = Registry::new();
         let alias = MailboxId(0x9001);
-        let config = TypedConfig(0xDEAD_BEEF);
-        let config_bytes = config.encode_into_bytes();
+        let config_bytes = TypedConfig(0xDEAD_BEEF).encode_into_bytes();
         let to_reconstruct = InlineChildToReconstruct {
             alias,
             type_tag: 0x1234,

@@ -1310,9 +1310,8 @@ mod tests {
 
         let (_registry, mailer) = bare_substrate();
         let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF11)));
-        let mailbox = NativeActorMailbox::<'_, StubActor>::__new_in_flight(0x00FE_ED01, &binding, None, None);
-
-        let mail_id = mailbox.send_with_context(&CastOnly { code: 1 }, &NativeRequestContext { value: 13 });
+        let mail_id = NativeActorMailbox::<'_, StubActor>::__new_in_flight(0x00FE_ED01, &binding, None, None)
+            .send_with_context(&CastOnly { code: 1 }, &NativeRequestContext { value: 13 });
 
         assert_eq!(
             binding.take_request_context::<NativeRequestContext>(RequestId(mail_id.correlation_id)),

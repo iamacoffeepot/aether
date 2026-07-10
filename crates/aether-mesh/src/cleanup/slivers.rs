@@ -178,8 +178,7 @@ mod tests {
             p(5000, 8000, 0), // 3: C
         ];
         let polygons = vec![poly(vec![0, 1, 2, 3])];
-        let mesh = IndexedMesh { vertices, polygons };
-        let cleaned = mesh.remove_slivers();
+        let cleaned = IndexedMesh { vertices, polygons }.remove_slivers();
         assert_eq!(cleaned.polygons.len(), 1);
         // 2 (B') merged into 1 (B); polygon's loop collapses the
         // consecutive duplicate.
@@ -194,8 +193,7 @@ mod tests {
         // don't see a degenerate primitive.
         let vertices = vec![p(0, 0, 0), p(20, 0, 0), p(0, 20, 0)];
         let polygons = vec![poly(vec![0, 1, 2])];
-        let mesh = IndexedMesh { vertices, polygons };
-        let cleaned = mesh.remove_slivers();
+        let cleaned = IndexedMesh { vertices, polygons }.remove_slivers();
         assert!(cleaned.polygons.is_empty());
     }
 
@@ -205,8 +203,7 @@ mod tests {
         // through unchanged.
         let vertices = vec![p(0, 0, 0), p(10000, 0, 0), p(0, 10000, 0)];
         let polygons = vec![poly(vec![0, 1, 2])];
-        let mesh = IndexedMesh { vertices, polygons };
-        let cleaned = mesh.remove_slivers();
+        let cleaned = IndexedMesh { vertices, polygons }.remove_slivers();
         assert_eq!(cleaned.polygons.len(), 1);
         assert_eq!(cleaned.polygons[0].vertices, vec![0, 1, 2]);
     }
@@ -229,8 +226,7 @@ mod tests {
             poly(vec![0, 1, 2, 3, 4]), // top quad walks B → B'
             poly(vec![5, 6, 2, 1]),    // bottom quad walks B' → B
         ];
-        let mesh = IndexedMesh { vertices, polygons };
-        let cleaned = mesh.remove_slivers();
+        let cleaned = IndexedMesh { vertices, polygons }.remove_slivers();
         assert_eq!(cleaned.polygons.len(), 2);
         for poly in &cleaned.polygons {
             assert!(!poly.vertices.contains(&2));
@@ -253,8 +249,7 @@ mod tests {
             p(5000, 8000, 0), // 4: C
         ];
         let polygons = vec![poly(vec![0, 1, 2, 3, 4])];
-        let mesh = IndexedMesh { vertices, polygons };
-        let cleaned = mesh.remove_slivers();
+        let cleaned = IndexedMesh { vertices, polygons }.remove_slivers();
         assert_eq!(cleaned.polygons.len(), 1);
         assert_eq!(cleaned.polygons[0].vertices, vec![0, 1, 4]);
     }
@@ -271,8 +266,7 @@ mod tests {
 
     #[test]
     fn empty_mesh_passes_through_unchanged() {
-        let mesh = IndexedMesh { vertices: vec![], polygons: vec![] };
-        let cleaned = mesh.remove_slivers();
+        let cleaned = IndexedMesh { vertices: vec![], polygons: vec![] }.remove_slivers();
         assert!(cleaned.vertices.is_empty());
         assert!(cleaned.polygons.is_empty());
     }

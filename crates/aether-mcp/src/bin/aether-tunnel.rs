@@ -217,8 +217,8 @@ impl Tunnel {
     /// Fork a fresh child for `kind` from its spec and install it.
     /// Replaces any existing entry (the caller has already terminated it).
     async fn fork(&self, kind: ChildKind) -> anyhow::Result<()> {
-        let spec = self.specs.get(&kind).with_context(|| format!("no spec registered for {}", kind.as_str()))?;
-        let child = spec.spawn()?;
+        let child =
+            self.specs.get(&kind).with_context(|| format!("no spec registered for {}", kind.as_str()))?.spawn()?;
         tracing::info!(
             target: "aether_tunnel",
             child = kind.as_str(),

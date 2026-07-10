@@ -230,11 +230,14 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
     };
     load_panel(&mut bench, &wasm, &config);
 
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], vec![]))])
-        .expect("capture-with-mails");
-    let png = captured.captured("snap").expect("snap step ran");
-    let img = decode_png(png).expect("decode capture png");
+    let img = decode_png(
+        bench
+            .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], vec![]))])
+            .expect("capture-with-mails")
+            .captured("snap")
+            .expect("snap step ran"),
+    )
+    .expect("decode capture png");
 
     assert_eq!(
         bench.count_observed("aether.render.draw_solid_quads"),
@@ -329,11 +332,14 @@ fn nested_tree_draws_in_depth_first_order() {
     };
     load_panel(&mut bench, &wasm, &config);
 
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], vec![]))])
-        .expect("capture-with-mails");
-    let png = captured.captured("snap").expect("snap step ran");
-    let img = decode_png(png).expect("decode capture png");
+    let img = decode_png(
+        bench
+            .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], vec![]))])
+            .expect("capture-with-mails")
+            .captured("snap")
+            .expect("snap step ran"),
+    )
+    .expect("decode capture png");
 
     assert_eq!(
         bench.count_observed("aether.render.draw_solid_quads"),

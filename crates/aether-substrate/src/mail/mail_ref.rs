@@ -217,9 +217,7 @@ mod tests {
         let ring = Arc::new(MailRing::with_capacity(1024));
         let locs = ring.push_blob(&[OutMail { recipient: 9, kind: 9, payload: &[1, 2, 3, 4, 5] }]).unwrap();
         let live = ring.live_bytes();
-        let r = MailRef::in_ring(Arc::clone(&ring), locs[0]);
-        let v = r.into_vec();
-        assert_eq!(v, vec![1, 2, 3, 4, 5]);
+        assert_eq!(MailRef::in_ring(Arc::clone(&ring), locs[0]).into_vec(), vec![1, 2, 3, 4, 5]);
         // into_vec consumed the ref -> released -> reclaimable
         assert_eq!(ring.reclaim(), live);
     }

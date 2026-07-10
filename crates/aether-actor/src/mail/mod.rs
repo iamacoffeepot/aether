@@ -390,9 +390,9 @@ mod tests {
     #[test]
     fn mail_sender_some_for_real_handle() {
         // SAFETY: no pointer is dereferenced; we only inspect `sender`.
-        let mail = unsafe { Mail::__from_ptr(0, 0, 0, 0, 42, 0) };
-        let s = mail.reply_handle().expect("non-sentinel handle yields Some");
-        assert_eq!(s.raw(), 42);
+        let handle =
+            unsafe { Mail::__from_ptr(0, 0, 0, 0, 42, 0) }.reply_handle().expect("non-sentinel handle yields Some");
+        assert_eq!(handle.raw(), 42);
     }
 
     #[test]
@@ -451,8 +451,7 @@ mod tests {
 
     #[test]
     fn mail_decode_kind_wrong_kind_returns_none() {
-        let value = FakeStructured { tag: String::from("x"), ids: alloc::vec![] };
-        let bytes = value.encode_into_bytes();
+        let bytes = FakeStructured { tag: String::from("x"), ids: alloc::vec![] }.encode_into_bytes();
         // SAFETY: `bytes` outlives `mail`; the `(addr, len)` pair is
         // valid for `bytes.len()` bytes for the rest of the body.
         let mail = unsafe {
@@ -463,8 +462,7 @@ mod tests {
 
     #[test]
     fn mail_decode_kind_wrong_count_returns_none() {
-        let value = FakeStructured { tag: String::from("x"), ids: alloc::vec![] };
-        let bytes = value.encode_into_bytes();
+        let bytes = FakeStructured { tag: String::from("x"), ids: alloc::vec![] }.encode_into_bytes();
         // SAFETY: `bytes` outlives `mail`; the `(addr, len)` pair is
         // valid for `bytes.len()` bytes for the rest of the body.
         let mail = unsafe {
@@ -475,8 +473,7 @@ mod tests {
 
     #[test]
     fn mail_decode_kind_truncated_bytes_returns_none() {
-        let value = FakeStructured { tag: String::from("longer"), ids: alloc::vec![1, 2, 3] };
-        let bytes = value.encode_into_bytes();
+        let bytes = FakeStructured { tag: String::from("longer"), ids: alloc::vec![1, 2, 3] }.encode_into_bytes();
         // Pretend the substrate only wrote the first 2 bytes —
         // `decode_from_bytes` gets the truncated slice and surfaces the
         // parse error as `None`.

@@ -254,8 +254,7 @@ mod tests {
             pt(1.0, -1.0, 0.0), // 4: E
         ];
         let polygons = vec![poly(vec![0, 1, 2], plane, 0), poly(vec![0, 3, 4], plane, 0)];
-        let mesh = IndexedMesh { vertices, polygons };
-        let repaired = mesh.repair_tjunctions();
+        let repaired = IndexedMesh { vertices, polygons }.repair_tjunctions();
         assert_eq!(repaired.polygons[0].vertices, vec![0, 3, 1, 2]);
         assert_eq!(repaired.polygons[1].vertices, vec![0, 3, 4]);
     }
@@ -270,8 +269,7 @@ mod tests {
             poly(vec![1, 0, 2], plane, 0), // walks B → A → C
             poly(vec![0, 3, 4], plane, 0),
         ];
-        let mesh = IndexedMesh { vertices, polygons };
-        let repaired = mesh.repair_tjunctions();
+        let repaired = IndexedMesh { vertices, polygons }.repair_tjunctions();
         // Walking B → A, the subdivision D should slot between B and A.
         assert_eq!(repaired.polygons[0].vertices, vec![1, 3, 0, 2]);
     }
@@ -281,8 +279,7 @@ mod tests {
         let plane = xy_plane();
         let vertices = vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0)];
         let polygons = vec![poly(vec![0, 1, 2], plane, 0)];
-        let mesh = IndexedMesh { vertices, polygons };
-        let repaired = mesh.repair_tjunctions();
+        let repaired = IndexedMesh { vertices, polygons }.repair_tjunctions();
         assert_eq!(repaired.polygons.len(), 1);
         assert_eq!(repaired.polygons[0].vertices, vec![0, 1, 2]);
     }
@@ -319,8 +316,7 @@ mod tests {
             // twice — the spike pattern is the bug.
             poly(vec![0, 1, 2, 3], plane, 0),
         ];
-        let mesh = IndexedMesh { vertices, polygons };
-        let repaired = mesh.repair_tjunctions();
+        let repaired = IndexedMesh { vertices, polygons }.repair_tjunctions();
         let target = &repaired.polygons[1].vertices;
         let mut counts = HashMap::new();
         for &v in target {
@@ -349,8 +345,7 @@ mod tests {
             poly(vec![0, 3, 4], plane, 0), // hosts D₁
             poly(vec![1, 5, 6], plane, 0), // hosts D₂
         ];
-        let mesh = IndexedMesh { vertices, polygons };
-        let repaired = mesh.repair_tjunctions();
+        let repaired = IndexedMesh { vertices, polygons }.repair_tjunctions();
         // Polygon 0 has D₁ and D₂ inserted in order along A→B.
         assert_eq!(repaired.polygons[0].vertices, vec![0, 3, 5, 1, 2]);
     }
@@ -422,8 +417,7 @@ mod tests {
             pt(1.0, 0.0, 0.0), // 4: Q (midpoint AM)
         ];
         let polygons = vec![poly(vec![0, 1, 2], plane, 0)];
-        let mesh = IndexedMesh { vertices, polygons };
-        let repaired = mesh.repair_tjunctions();
+        let repaired = IndexedMesh { vertices, polygons }.repair_tjunctions();
         assert_eq!(repaired.polygons[0].vertices, vec![0, 4, 3, 1, 2]);
     }
 
@@ -440,8 +434,7 @@ mod tests {
             pt(1.0, 1.0, 0.0), // 4: N on B→C (midpoint of (2,0)-(0,2))
         ];
         let polygons = vec![poly(vec![0, 1, 2], plane, 0)];
-        let mesh = IndexedMesh { vertices, polygons };
-        let repaired = mesh.repair_tjunctions();
+        let repaired = IndexedMesh { vertices, polygons }.repair_tjunctions();
         assert_eq!(repaired.polygons[0].vertices, vec![0, 3, 1, 4, 2]);
     }
 
@@ -501,8 +494,7 @@ mod tests {
             // Polygon under test.
             poly(vec![0, 1, 2, 3, 4, 5, 6], plane, 0),
         ];
-        let mesh = IndexedMesh { vertices, polygons };
-        let repaired = mesh.repair_tjunctions();
+        let repaired = IndexedMesh { vertices, polygons }.repair_tjunctions();
 
         // Every emitted polygon must be simple (no repeated vertex).
         for p in &repaired.polygons {
@@ -545,8 +537,7 @@ mod tests {
             pt(1.0, 0.0, 0.0), // 3 — referenced by no polygon yet present in pool
         ];
         let polygons = vec![poly(vec![0, 1, 2], plane, 0)];
-        let mesh = IndexedMesh { vertices, polygons };
-        let repaired = mesh.repair_tjunctions();
+        let repaired = IndexedMesh { vertices, polygons }.repair_tjunctions();
         assert_eq!(repaired.polygons[0].vertices, vec![0, 3, 1, 2]);
     }
 }
