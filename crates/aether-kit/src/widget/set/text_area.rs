@@ -138,7 +138,7 @@ impl TextAreaWidget {
     }
 
     fn move_vertical(&mut self, direction: VerticalDirection, extend: bool) {
-        let target = {
+        let (target_byte, desired_x) = {
             let Some(metrics) = self.font_metrics.resolved() else {
                 return;
             };
@@ -167,11 +167,11 @@ impl TextAreaWidget {
         };
 
         if extend {
-            self.edit.extend_to(target.0);
+            self.edit.extend_to(target_byte);
         } else {
-            self.edit.place_caret(target.0);
+            self.edit.place_caret(target_byte);
         }
-        self.preferred_x_pixels = Some(target.1);
+        self.preferred_x_pixels = Some(desired_x);
         self.reconcile_scroll();
     }
 
@@ -486,10 +486,10 @@ impl WasmActor for TextAreaWidget {
         if !self.state.can_mutate() {
             return;
         }
-        let cursor = match (preedit.cursor_begin, preedit.cursor_end) {
-            (Some(begin), Some(end)) => Some(TextSpan::new(begin as usize, end as usize)),
-            _ => None,
-        };
+        let cursor = preedit
+            .cursor_begin
+            .zip(preedit.cursor_end)
+            .map(|(begin, end)| TextSpan::new(begin as usize, end as usize));
         self.edit.set_composition(preedit.text, cursor);
         self.preferred_x_pixels = None;
     }
