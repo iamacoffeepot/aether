@@ -175,6 +175,14 @@ jobs:
       # review-rollup.json. GH_TOKEN lets the skill resolve the closing
       # issue via gh. `|| true` so a review failure never fails the job —
       # a missing rollup file is the signal that no post happens.
+      #
+      # stream-json + the jq renderer make the session watchable LIVE in
+      # the Actions log (assistant text + tool names as they happen), and
+      # the tee'd JSONL is the durable session transcript, uploaded as an
+      # artifact below (iamacoffeepot/aether#2981). The wait contract is
+      # MECHANICAL, not prose: the prompt prescribes a concrete poll loop
+      # (sleep + check for the rollup file) because two live runs proved a
+      # session will end on a promise with the workflow still in flight.
       - name: Run the five-pillar review
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
         env:
@@ -187,17 +195,29 @@ jobs:
           resolve the changed .rs files and their per-file diffs from git, and read the issue
           text this PR closes (use gh to find the PR's closing reference for issue #${PR_NUMBER}
           if needed). Let the skill run the review.js workflow in a single pass.
-          LOAD-BEARING: the Workflow tool runs in the BACKGROUND and re-invokes you when it
-          completes. Your run is NOT complete until review-rollup.json exists on disk. Never
-          produce a final reply while the workflow is still running — in headless mode your
-          final reply exits the process and KILLS the in-flight workflow. Wait for the
-          workflow's completion notification, however long it takes.
+          THE WAIT CONTRACT (load-bearing — two prior runs died on this): the Workflow tool
+          runs in the BACKGROUND. In headless mode your final reply exits the process and
+          KILLS the in-flight workflow, so you may not produce a final reply until
+          review-rollup.json exists on disk. While the workflow runs, poll mechanically:
+          run the Bash command 'sleep 60; ls review-rollup.json 2>/dev/null || echo waiting'
+          again and again, as many turns as it takes — the completion notification or the
+          workflow result will reach you between polls. Polling turns are cheap; an early
+          final reply wastes the whole run.
           When the workflow returns { rollup, files }, write the returned ROLLUP object as JSON
           verbatim to review-rollup.json in the repo root (the rollup, not the whole return).
           Do not edit any source. Print exactly REVIEW-DONE when the file is written." \
             --dangerously-skip-permissions \
             --model claude-sonnet-5 \
-            --max-turns 80 | tee /tmp/review.log || true
+            --max-turns 80 \
+            --output-format stream-json --verbose \
+            | tee review-session.jsonl \
+            | jq -rj --unbuffered '
+                if .type == "assistant" then
+                  ([.message.content[]? | if .type == "text" then "\n■ " + .text + "\n"
+                    elif .type == "tool_use" then "▸ " + .name + "\n" else empty end] | join(""))
+                elif .type == "result" then "\n== result (\(.subtype)) ==\n" + (.result // "") + "\n"
+                else empty end' \
+            || true
 
       # Whether the run produced a rollup gates the `post` job. Kept as a
       # step so `post` can `needs`-read it without inspecting the artifact.
@@ -215,8 +235,8 @@ jobs:
             echo "produced=true" >> "$GITHUB_OUTPUT"
           elif [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
             echo "produced=false" >> "$GITHUB_OUTPUT"
-            echo "review ran but produced no rollup — failing loudly. Tail of the session log:"
-            tail -n 40 /tmp/review.log 2>/dev/null || echo "(no session log)"
+            echo "review ran but produced no rollup — failing loudly. Session's final events:"
+            tail -n 5 review-session.jsonl 2>/dev/null | cut -c1-2000 || echo "(no session transcript)"
             exit 1
           else
             echo "produced=false" >> "$GITHUB_OUTPUT"
@@ -227,6 +247,17 @@ jobs:
         with:
           name: review-rollup
           path: review-rollup.json
+          if-no-files-found: ignore
+
+      # The full session transcript (stream-json JSONL) — uploaded even on
+      # failure, since a dead run's transcript is exactly what diagnoses
+      # it. This is the same transcript.jsonl artifact the evidence design
+      # (#2967) wants long-term.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: review-session-transcript
+          path: review-session.jsonl
           if-no-files-found: ignore
 
   post:
