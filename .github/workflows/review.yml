@@ -41,7 +41,16 @@ concurrency:
 jobs:
   review:
     name: Five-pillar review
-    runs-on: ubuntu-latest
+    # Runs-On 8cpu, not ubuntu-latest: the Workflow tool caps concurrent
+    # agents at ~min(16, cores - 2), so the 4-core GitHub-hosted box
+    # squeezes the per-file finder fan-out to ~2-wide while every agent
+    # just waits on inference. 8 cores buys ~6-wide fan-out; the job's
+    # own compute stays trivial (no cargo build, no s3-cache needed).
+    runs-on: runs-on=${{ github.run_id }}/runner=8cpu-linux-x64
+    # Bring-up leash: a wedged in-flight workflow (the session now waits
+    # for it indefinitely, iamacoffeepot/aether#2979) must not idle an
+    # EC2 runner toward the 6h default.
+    timeout-minutes: 45
     # Read-only on the repo. This job checks out and executes PR-head code
     # (headless Claude Code drives the review over the branch's checkout),
     # so it must never hold a write scope — all posting is the `post` job's.
@@ -64,6 +73,7 @@ jobs:
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       rollup_produced: ${{ steps.rollup.outputs.produced }}
     steps:
+      - uses: runs-on/action@v2
       # Resolve the PR and apply the run gates BEFORE any checkout — these
       # are pure GitHub API calls. Sets proceed=false (a clean no-op) when
       # there is no open PR, the opt-in `review` label is absent, or the
