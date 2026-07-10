@@ -142,10 +142,9 @@ if [[ $WAIT_MODE -eq 1 ]]; then
     fi
     sha=$(gh api "repos/$REPO/pulls/$WAIT_PR" --jq '.head.sha')
     echo "[wave-status] waiting for CI pass on PR #$WAIT_PR (sha ${sha:0:8}…)"
-    # Deterministic checks: never flaky, never auto-retried to green (ci-retry
-    # only re-runs resource-exhaustion flakes in the heavy test jobs). A failure
-    # in this set already dooms `CI pass`, so the caller fixes and re-pushes now
-    # rather than waiting out the slow jobs — the new push supersedes the run.
+    # Deterministic checks: never flaky. A failure in this set already dooms
+    # `CI pass`, so the caller fixes and re-pushes now rather than waiting out
+    # the slow jobs — the new push supersedes the run.
     fast_fail_names='["Format","Clippy","Docs","Marker-only host build"]'
     while :; do
         runs=$(gh api "repos/$REPO/commits/$sha/check-runs" --paginate --jq '.check_runs' 2>/dev/null) || { sleep 20; continue; }
