@@ -49,7 +49,7 @@ use aether_kinds::{
     CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, DropComponent, DropResult,
     FrameCheck, FrameCheckResult, FrameRect, FrameReduction, ListComponents, ListComponentsResult,
     LoadComponent, LoadResult, NamedMail, Ping, QuadScale, QuadSpace, ReplaceComponent,
-    ReplaceResult,
+    ReplaceResult, SimilarityCheck,
 };
 use aether_math::{Mat4, Rgb, Rgba, Vec3};
 use aether_substrate::render::{
