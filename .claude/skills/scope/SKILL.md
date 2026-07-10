@@ -144,6 +144,29 @@ For each sub-phase: read inputs, write the corresponding body section, and recon
 
   Lift any "lands after #N" / "depends on #N" language out of plan prose and into `## Depends on` as `- #N — <why>` lines. `/approve` reads this section and refuses to advance the issue to `phase:ready` while any listed dependency is still open.
 
+  And a dogfood brief — the consumer-validation task this feature's surface will be trialed with, emitted on **every** scoped issue at Plan:
+
+  ```
+  ## Dogfood brief
+
+  - **medium**: drive | author | build-layer
+  - **prompt**: <the realistic "build Y that necessarily consumes X" task — concrete, accomplishable, and impossible to do without touching the surface under test>
+  - **surfaceUnderTest**: <the public surface this task grades — the mail kinds / MCP tools / SDK macros / infra API the consumer must lean on>
+  - **expectedArtifact**: <what a captured frame should show, specific enough for a vision judge to rule correct vs wrong — or `none` when nothing renders>
+  ```
+
+  The four fields mirror the `dogfood` workflow's task object verbatim — `.claude/workflows/dogfood.js` is the field vocabulary's source of truth (`medium` ∈ `drive|author|build-layer`, `prompt`, `surfaceUnderTest`, `expectedArtifact`), so a later `/dogfood` run consumes the brief directly instead of re-deriving it; keep the two in step. `medium` names what the consumer must write — `drive` (drive the running engine over MCP, no code), `author` (a guest wasm component against the SDK), `build-layer` (a new native cap / kind family / infra API). Derive the brief from artifacts already in hand: Define's success criteria (what "done" looks like observably) and Design's affected surfaces (the surface under test), so authoring cost stays low.
+
+  An issue that introduces no consumer runtime surface — a workflow / tooling change, a refactor, a test, or a docs-only edit — emits the section in an explicit `N/A — <reason>` form instead, so a later dogfood-selection step skips it by reading the brief rather than re-classifying the issue:
+
+  ```
+  ## Dogfood brief
+
+  N/A — <why this issue has no consumer runtime surface>
+  ```
+
+  This very change — a scope-skill edit — is one such case: skill text has no runtime surface a consumer can exercise, so an issue scoping it takes the `N/A` form.
+
 - **Multi-PR split** triggers when:
   - More than 3 logically-separable changes, *or*
   - More than 2 crates with logically-separable work
@@ -200,7 +223,7 @@ Don't pad the comment with summaries of work that completed — the body section
 A body edit replaces the entire body, so to avoid clobbering user-written content:
 
 1. Read the current body and capture the issue's `number`, `title`, and non-managed (user) prose as the scoped baseline — `gh api repos/iamacoffeepot/aether/issues/<n> --jq '{number, title, body}'`. Extract and hold the user prose (everything that is not a scope-managed H2 section) from the captured body as the baseline for the guard below. Also derive a set of distinctive **anchor tokens** from the `title`: strip the conventional-commit `type(scope):` prefix, lowercase, drop stopwords, and keep the remaining content words — held alongside the baseline for the topic-anchor assertion at step 4.
-2. Identify scope-managed sections by their H2 headers: `## Problem statement`, `## Design notes`, `## Implementation plan`, `## Sub-issues`, `## Depends on`, `## Side findings`. Everything else is user content; preserve verbatim.
+2. Identify scope-managed sections by their H2 headers: `## Problem statement`, `## Design notes`, `## Implementation plan`, `## Sub-issues`, `## Depends on`, `## Dogfood brief`, `## Side findings`. Everything else is user content; preserve verbatim.
 3. Insert or replace the managed sections, preserving user content above and below them.
 4. **Identity guard — assert before writing.** Re-read `{number, title}` for the same `<n>` — `gh api repos/iamacoffeepot/aether/issues/<n> --jq '{number, title}'`. Assert it equals the baseline captured at step 1; also assert the spliced body about to be written still contains the captured user prose. On any mismatch, abort the PATCH and surface the discrepancy instead of writing — a number or title mismatch means the wrong issue is targeted, and a prose mismatch means user content was accidentally removed during the splice. Then run the **topic-anchor assertion**: derive anchor tokens from the *freshly re-read* title (this re-read is authoritative for `<n>`, not the step-1 baseline, since a concurrent title edit would otherwise be missed) and assert the spliced body's `## Problem statement` section contains at least one of those tokens. On failure, abort the PATCH and surface the discrepancy — this is the signature of a full-body replacement whose managed content was authored for a sibling issue rather than this one. Degrade gracefully: if no distinctive token can be derived (a title that is entirely conventional-commit prefix and stopwords), note that and fall back to the number/title/user-prose asserts above rather than blocking the write — the anchor strengthens the guard, it never weakens the existing floor.
 5. Write back over REST — `gh issue edit --body` is GraphQL-backed, while `PATCH …/issues/<n>` is REST. Write the new body to a file first so its backticks / `$` aren't shell-expanded: `gh api -X PATCH repos/iamacoffeepot/aether/issues/<n> -F body=@/tmp/issue-<n>-body.md`.
