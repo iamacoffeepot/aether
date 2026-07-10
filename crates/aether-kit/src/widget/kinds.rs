@@ -107,7 +107,7 @@ impl WidgetClipRect {
     /// Whether this rectangle has finite coordinates and a positive finite
     /// extent. Invalid and empty explicit clips omit their item.
     #[must_use]
-    pub(super) fn is_valid(self) -> bool {
+    fn is_valid(self) -> bool {
         self.x.is_finite()
             && self.y.is_finite()
             && self.width.is_finite()
@@ -131,7 +131,7 @@ pub(super) enum WidgetClipIntersection {
 
 /// Intersect two clips expressed in the same widget composition space.
 #[must_use]
-pub(super) fn intersect_widget_clips(
+fn intersect_widget_clips(
     item: Option<WidgetClipRect>,
     slot: Option<WidgetClipRect>,
 ) -> WidgetClipIntersection {
@@ -665,7 +665,12 @@ mod tests {
             text: "hp".into(),
             size_pixels: 12.0,
             color: Rgba::WHITE,
-            clip: None,
+            clip: Some(WidgetClipRect {
+                x: 3.0,
+                y: 4.0,
+                width: 8.0,
+                height: 6.0,
+            }),
         };
         assert_eq!(
             item.offset(Vec2::new(10.0, 40.0)),
@@ -676,9 +681,14 @@ mod tests {
                 text: "hp".into(),
                 size_pixels: 12.0,
                 color: Rgba::WHITE,
-                clip: None,
+                clip: Some(WidgetClipRect {
+                    x: 13.0,
+                    y: 44.0,
+                    width: 8.0,
+                    height: 6.0,
+                }),
             },
-            "offset moves the baseline and preserves the glyph run",
+            "offset moves the baseline and item-local clip while preserving the glyph run",
         );
     }
 

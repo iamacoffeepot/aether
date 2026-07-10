@@ -1,8 +1,10 @@
 //! ADR-0117 widget-compositing end-to-end scenarios (issue 2659).
 //!
 //! A cluster of `aether-kit` `Widget` inline-child actors draws local and
-//! composites up so the whole subtree reaches `aether.render` as **one**
-//! ordered `DrawSolidQuads`. These are the gate that the protocol's own
+//! composites up so the whole subtree reaches `aether.render` through **one
+//! root sender**. Unclipped baselines remain one ordered `DrawSolidQuads`;
+//! distinct effective clips may require multiple ordered batches. These are
+//! the gate that the protocol's own
 //! logic — the filled-slot completion counter, `source_mailbox`
 //! attribution, and the depth-first flatten — holds end-to-end through the
 //! real inline-cluster FIFO drain, not just in the unit tests over the
@@ -10,10 +12,11 @@
 //!
 //! Two properties are pinned per frame:
 //!
-//! - **One render sender.** `count_observed("aether.render.draw_solid_quads")`
-//!   is exactly 1 after one frame, for a flat panel and for a two-level
-//!   tree alike — the #1852 fan-in fix (the whole cluster is one sender
-//!   regardless of widget count).
+//! - **Unclipped one-batch baseline.**
+//!   `count_observed("aether.render.draw_solid_quads")` is exactly 1 after one
+//!   frame for an unclipped flat panel and two-level tree alike. Clipped runs
+//!   may emit multiple mails, but every batch still comes from the one root
+//!   sender — the #1852 fan-in fix regardless of widget count.
 //! - **Structural draw order.** A background drawn as the root's own chrome
 //!   sits *under* its children, and a nested subtree draws its own chrome
 //!   under its own children — the depth-first order the tree structure
