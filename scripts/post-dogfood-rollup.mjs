@@ -9,6 +9,18 @@
 // (a separate skill-text change), not a CI failure here. A failed API
 // call logs and continues where the review poster does.
 //
+// The marker line carries the retry state the dogfood action's resolve
+// step reads back on the next green event (issue 2968): it is extended
+// from the bare `<!-- aether-dogfood -->` to
+// `<!-- aether-dogfood attempts=<N> verdict=<green|failed> -->`, where
+// `attempts` is this comment's attempt number (the ATTEMPT env, defaulting
+// to 1) and `verdict` is `green` when the trial is clean and `failed` when
+// the actionability predicate fires or the attempt did not succeed. A
+// `green` verdict is terminal (no more auto-runs); `attempts >= the cap`
+// is terminal-failed. The upsert lookup still matches on the bare
+// `<!-- aether-dogfood` prefix, so an old bare-marker comment migrates to
+// the extended form in place on the first post that carries the state.
+//
 // Inputs (env):
 //   GITHUB_TOKEN        least-privilege token (issues write)
 //   GITHUB_REPOSITORY   owner/repo
@@ -16,6 +28,8 @@
 //   PR                  the PR to carry the label (optional; defaults to ISSUE)
 //   RUN_REF             <issue>/<run-id> — the evidence-branch path segment
 //   ROLLUP_PATH         rollup.json (the workflow's returned rollup)
+//   ATTEMPT             this trial's attempt number, baked into the marker
+//                       (optional; defaults to 1)
 //   HAS_FRAME           "1"/"true" when the staged run dir held a frame.png
 //                       (falls back to rollup.artifact != null when unset)
 //
@@ -29,8 +43,13 @@ const ISSUE = Number(requireEnv('ISSUE'))
 const PR = process.env.PR ? Number(process.env.PR) : ISSUE
 const RUN_REF = requireEnv('RUN_REF')
 const ROLLUP_PATH = process.env.ROLLUP_PATH || 'rollup.json'
+const ATTEMPT = process.env.ATTEMPT ? Number(process.env.ATTEMPT) : 1
 
-const MARKER = '<!-- aether-dogfood -->'
+// The bare prefix is the upsert anchor — it matches both the old
+// `<!-- aether-dogfood -->` comment and the extended
+// `<!-- aether-dogfood attempts=… verdict=… -->` one, so a format change
+// migrates in place rather than stacking a second comment.
+const MARKER_PREFIX = '<!-- aether-dogfood'
 const LABEL = 'dogfood:unresolved'
 const API = 'https://api.github.com'
 const RAW_BASE = 'https://raw.githubusercontent.com/iamacoffeepot/aether/dogfood/evidence/evidence'
@@ -142,8 +161,20 @@ function softHoldLines(softHolds) {
   return lines
 }
 
+// The verdict baked into the marker mirrors the label decision: a trial
+// with anything actionable (a failed attempt, a wrong artifact, a
+// soft-hold, a blocker / missing-primitive finding) is `failed`, else
+// `green`. `green` is terminal for the auto-retry loop.
+function markerVerdict(rollup) {
+  return isActionable(rollup) || rollup.succeeded === false ? 'failed' : 'green'
+}
+
+function markerLine(rollup) {
+  return `${MARKER_PREFIX} attempts=${ATTEMPT} verdict=${markerVerdict(rollup)} -->`
+}
+
 function renderComment(rollup, hasFrame) {
-  const lines = [MARKER, '## Dogfood trial', '']
+  const lines = [markerLine(rollup), '## Dogfood trial', '']
   lines.push(...verdictLines(rollup))
   lines.push('', '### Friction')
   lines.push(...frictionLines(rollup.friction))
@@ -193,7 +224,7 @@ async function main() {
   // otherwise. The evidence branch keeps per-run history, so the comment
   // shows latest-state.
   const issueComments = await apiList(`repos/${REPO}/issues/${ISSUE}/comments`)
-  const existing = issueComments.find((c) => String(c.body || '').includes(MARKER))
+  const existing = issueComments.find((c) => String(c.body || '').includes(MARKER_PREFIX))
   if (existing) {
     const res = await api('PATCH', `repos/${REPO}/issues/comments/${existing.id}`, { body })
     if (!res.ok) console.error(`update comment failed: ${res.status} ${res.text}`)
