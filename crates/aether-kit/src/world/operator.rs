@@ -14,10 +14,11 @@ use core::cmp::Ordering;
 use crate::mark::MarkRef;
 
 use super::{
-    AutomatonRule, BrushParameters, ChunkPos, MAX_STAMP_VERTICES, Material, OperatorBudget,
-    OperatorCell, OperatorChunk, OperatorError, OperatorResult, OperatorStats, SUBCELLS_PER_CELL,
-    World, WorldPoint, raster,
+    AutomatonRule, BrushParameters, CHUNK_BITS, ChunkPos, MAX_STAMP_VERTICES, Material,
+    OperatorBudget, OperatorCell, OperatorChunk, OperatorError, OperatorResult, OperatorStats,
+    SUBCELLS_PER_CELL, World, WorldPoint, mesher, raster,
 };
+use crate::OCTIMETERS_PER_TILE;
 
 /// One operator run plus the internal chunk addresses the actor must remesh.
 pub(super) struct OperatorExecution {
@@ -164,23 +165,75 @@ fn validate_brush(path: &[WorldPoint], brush: BrushParameters) -> Result<(), Ope
             "brush radius exceeds the coordinate range",
         ));
     };
-    if path.iter().any(|point| {
-        point.x_octimeters.checked_sub(radius).is_none()
-            || point.x_octimeters.checked_add(radius).is_none()
-            || point.z_octimeters.checked_sub(radius).is_none()
-            || point.z_octimeters.checked_add(radius).is_none()
-    }) {
-        return Err(invalid_parameters(
-            "brush radius extends outside the world coordinate range",
-        ));
+    let mut min_x = i32::MAX;
+    let mut min_z = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut max_z = i32::MIN;
+    for point in path {
+        let (Some(point_min_x), Some(point_max_x), Some(point_min_z), Some(point_max_z)) = (
+            point.x_octimeters.checked_sub(radius),
+            point.x_octimeters.checked_add(radius),
+            point.z_octimeters.checked_sub(radius),
+            point.z_octimeters.checked_add(radius),
+        ) else {
+            return Err(invalid_parameters(
+                "brush radius extends outside the world coordinate range",
+            ));
+        };
+        min_x = min_x.min(point_min_x);
+        min_z = min_z.min(point_min_z);
+        max_x = max_x.max(point_max_x);
+        max_z = max_z.max(point_max_z);
     }
-    Ok(())
+    let octimeters_per_cell = i64::from(OCTIMETERS_PER_TILE);
+    validate_remesh_extent(
+        i64::from(min_x).div_euclid(octimeters_per_cell),
+        (i64::from(max_x) - 1).div_euclid(octimeters_per_cell),
+        i64::from(min_z).div_euclid(octimeters_per_cell),
+        (i64::from(max_z) - 1).div_euclid(octimeters_per_cell),
+        "brush",
+    )
 }
 
 fn invalid_parameters(reason: impl Into<String>) -> OperatorError {
     OperatorError::InvalidParameters {
         reason: reason.into(),
     }
+}
+
+fn validate_remesh_extent(
+    min_cell_x: i64,
+    max_cell_x: i64,
+    min_cell_z: i64,
+    max_cell_z: i64,
+    operator: &str,
+) -> Result<(), OperatorError> {
+    let (Ok(min_cell_x), Ok(max_cell_x), Ok(min_cell_z), Ok(max_cell_z)) = (
+        i32::try_from(min_cell_x),
+        i32::try_from(max_cell_x),
+        i32::try_from(min_cell_z),
+        i32::try_from(max_cell_z),
+    ) else {
+        return Err(invalid_parameters(alloc::format!(
+            "{operator} extent exceeds the cell coordinate range"
+        )));
+    };
+    let min_chunk = ChunkPos {
+        x: min_cell_x >> CHUNK_BITS,
+        z: min_cell_z >> CHUNK_BITS,
+    };
+    let max_chunk = ChunkPos {
+        x: max_cell_x >> CHUNK_BITS,
+        z: max_cell_z >> CHUNK_BITS,
+    };
+    if !mesher::chunk_remesh_extent_is_coordinate_safe(min_chunk)
+        || !mesher::chunk_remesh_extent_is_coordinate_safe(max_chunk)
+    {
+        return Err(invalid_parameters(alloc::format!(
+            "{operator} extent exceeds the mesher's apron-safe coordinate range"
+        )));
+    }
+    Ok(())
 }
 
 fn stamp_brush_point(
@@ -230,6 +283,16 @@ pub(super) fn run_automaton(
                 "automaton material must be a known non-Void material byte",
             )),
         );
+    }
+    let generation_radius = i64::from(generations);
+    if let Err(error) = validate_remesh_extent(
+        i64::from(seed.cell_x) - generation_radius,
+        i64::from(seed.cell_x) + generation_radius,
+        i64::from(seed.cell_z) - generation_radius,
+        i64::from(seed.cell_z) + generation_radius,
+        "automaton",
+    ) {
+        return ExecutionState::new(budget).finish(source, Some(error));
     }
 
     let mut state = ExecutionState::new(budget);
@@ -376,6 +439,66 @@ mod tests {
     }
 
     #[test]
+    fn brush_step_exhaustion_keeps_only_the_exact_accepted_prefix() {
+        let mut world = World::new();
+        let execution = apply_brush(
+            &mut world,
+            source(),
+            &[WorldPoint::new(576, 1088), WorldPoint::new(832, 1088)],
+            BrushParameters {
+                radius_octimeters: 64,
+                spacing_octimeters: 256,
+                material: Material::Stone.to_u8(),
+            },
+            OperatorBudget {
+                max_steps: 1,
+                max_subcells: 1_000,
+            },
+        );
+
+        let (stats, error) = stats(&execution.result);
+        assert_eq!(error, Some(&OperatorError::StepBudgetExhausted));
+        assert_eq!(stats.steps_run, 1);
+        assert_eq!(stats.subcells_written, 60);
+        assert_eq!(world.overlay(CellPos { x: 2, z: 4 }), Material::Stone);
+        assert_eq!(
+            world.overlay(CellPos { x: 3, z: 4 }),
+            Material::Void,
+            "the second placement is the rejected over-step write",
+        );
+    }
+
+    #[test]
+    fn edge_brush_is_rejected_before_mutating_an_unmeshable_chunk() {
+        let mut world = World::new();
+        let execution = apply_brush(
+            &mut world,
+            source(),
+            &[WorldPoint::new(i32::MAX - 16, 128)],
+            BrushParameters {
+                radius_octimeters: 16,
+                spacing_octimeters: 16,
+                material: Material::Stone.to_u8(),
+            },
+            OperatorBudget {
+                max_steps: 1,
+                max_subcells: 1_000,
+            },
+        );
+
+        let (stats, error) = stats(&execution.result);
+        assert!(matches!(
+            error,
+            Some(OperatorError::InvalidParameters { reason })
+                if reason.contains("apron-safe coordinate range")
+        ));
+        assert_eq!(stats.steps_run, 0);
+        assert_eq!(stats.subcells_written, 0);
+        assert!(stats.touched_chunks.is_empty());
+        assert_eq!(world.chunks().count(), 0, "rejection must precede mutation");
+    }
+
+    #[test]
     fn automaton_grows_a_known_five_cell_region() {
         let mut world = World::new();
         let execution = run_automaton(
@@ -415,6 +538,39 @@ mod tests {
         ] {
             assert_eq!(world.underlay_point(cell, 0, 0), Material::Grass);
         }
+    }
+
+    #[test]
+    fn huge_automaton_seed_is_rejected_before_mutation() {
+        let mut world = World::new();
+        let seed = OperatorCell {
+            cell_x: 10_000_000,
+            cell_z: 0,
+        };
+        let execution = run_automaton(
+            &mut world,
+            source(),
+            seed,
+            AutomatonRule::Grow {
+                material: Material::Grass.to_u8(),
+                generations: 0,
+            },
+            OperatorBudget {
+                max_steps: 1,
+                max_subcells: SUBCELLS_PER_CELL as u32,
+            },
+        );
+
+        let (stats, error) = stats(&execution.result);
+        assert!(matches!(
+            error,
+            Some(OperatorError::InvalidParameters { reason })
+                if reason.contains("apron-safe coordinate range")
+        ));
+        assert_eq!(stats.steps_run, 0);
+        assert_eq!(stats.subcells_written, 0);
+        assert!(stats.touched_chunks.is_empty());
+        assert_eq!(world.chunks().count(), 0, "rejection must precede mutation");
     }
 
     #[test]

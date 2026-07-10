@@ -23,13 +23,26 @@ use aether_kit::world::{
 use aether_math::{Mat4, Vec3};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{
-    background_top_left, bounding_box, centroid, coverage, decode_png,
+    Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png,
+    target_color_stats,
 };
 
 const COMPONENT_NAME: &str = "world";
 const WIDTH: u32 = 128;
 const HEIGHT: u32 = 128;
 const FRAME_CENTER: f32 = 64.0;
+const STONE_SRGB: [u8; 3] = [140, 140, 148];
+const GRASS_SRGB: [u8; 3] = [77, 140, 64];
+const SAND_SRGB: [u8; 3] = [217, 199, 140];
+const MATERIAL_COLOR_TOLERANCE: u8 = 20;
+
+fn assert_material_color(image: &Image, bounds: Rect, target: [u8; 3], label: &str) {
+    let stats = target_color_stats(image, target, MATERIAL_COLOR_TOLERANCE, Some(bounds));
+    assert!(
+        stats.matching >= 16 && stats.fraction > 0.10,
+        "{label} should contain a bounded region of its requested material color; got {stats:?}",
+    );
+}
 
 fn component_address() -> String {
     format!(
@@ -245,6 +258,9 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
         (0.03..0.15).contains(&brush_fraction),
         "three bounded brush discs should render as a visible path; got {brush_fraction}",
     );
+    let brush_bounds = bounding_box(&brush_image, brush_background, 5)
+        .expect("brush rendered bounds for material-color check");
+    assert_material_color(&brush_image, brush_bounds, STONE_SRGB, "stone brush");
 
     let automaton_source = MarkRef {
         id: MarkId::new(12),
@@ -313,6 +329,14 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
     assert!(
         (0.08..0.40).contains(&automaton_fraction),
         "the five-cell reference growth should occupy a bounded cross; got {automaton_fraction}",
+    );
+    let automaton_bounds = bounding_box(&automaton_image, automaton_background, 5)
+        .expect("automaton rendered bounds for material-color check");
+    assert_material_color(
+        &automaton_image,
+        automaton_bounds,
+        GRASS_SRGB,
+        "grass automaton",
     );
 
     let limited_source = MarkRef {
@@ -386,6 +410,12 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
     );
     let limited_bounds = bounding_box(&limited_image, limited_background, 5)
         .expect("limited automaton rendered bounds");
+    assert_material_color(
+        &limited_image,
+        limited_bounds,
+        SAND_SRGB,
+        "sand partial automaton",
+    );
     let limited_width = limited_bounds.max_x - limited_bounds.min_x + 1;
     let limited_height = limited_bounds.max_y - limited_bounds.min_y + 1;
     assert!(
