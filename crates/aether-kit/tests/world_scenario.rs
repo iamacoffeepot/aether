@@ -49,6 +49,20 @@ fn assert_material_color(image: &Image, bounds: Rect, target: [u8; 3], label: &s
     );
 }
 
+fn unsafe_extent_rejection(source: MarkRef, operator: &str) -> OperatorResult {
+    OperatorResult::Failed {
+        source,
+        error: OperatorError::InvalidParameters {
+            reason: format!("{operator} extent exceeds the mesher's apron-safe coordinate range"),
+        },
+        stats: OperatorStats {
+            steps_run: 0,
+            subcells_written: 0,
+            touched_chunks: Vec::new(),
+        },
+    }
+}
+
 fn component_address() -> String {
     format!(
         "aether.component/{}:{COMPONENT_NAME}",
@@ -230,6 +244,74 @@ fn bounded_terrain_operators_reply_with_the_rendered_partial_world() {
     let mut bench = TestBench::start_with_size(WIDTH, HEIGHT).expect("boot");
     load_world(&mut bench, &wasm_path);
     let world = component_address();
+    let edge_brush_source = MarkRef {
+        id: MarkId::new(14),
+        revision: 1,
+    };
+    let huge_automaton_source = MarkRef {
+        id: MarkId::new(15),
+        revision: 1,
+    };
+    let rejected = bench
+        .execute(vec![
+            (
+                "edge_brush",
+                BenchOp::send_and_await(
+                    world.as_str(),
+                    &ApplyBrush {
+                        source: edge_brush_source,
+                        path: vec![WorldPoint::new(i32::MAX - 16, 128)],
+                        brush: BrushParameters {
+                            radius_octimeters: 16,
+                            spacing_octimeters: 16,
+                            material: Material::Stone.to_u8(),
+                        },
+                        budget: OperatorBudget {
+                            max_steps: 1,
+                            max_subcells: 1_000,
+                        },
+                    },
+                ),
+            ),
+            (
+                "huge_automaton",
+                BenchOp::send_and_await(
+                    world.as_str(),
+                    &RunAutomaton {
+                        source: huge_automaton_source,
+                        seed: OperatorCell {
+                            cell_x: 10_000_000,
+                            cell_z: 0,
+                        },
+                        rule: AutomatonRule::Grow {
+                            material: Material::Grass.to_u8(),
+                            generations: 0,
+                        },
+                        budget: OperatorBudget {
+                            max_steps: 1,
+                            max_subcells: 256,
+                        },
+                    },
+                ),
+            ),
+        ])
+        .expect("reject unsafe operator extents without trapping");
+    assert_eq!(
+        rejected
+            .reply::<OperatorResult>("edge_brush")
+            .expect("decode edge brush rejection"),
+        unsafe_extent_rejection(edge_brush_source, "brush"),
+    );
+    assert_eq!(
+        rejected
+            .reply::<OperatorResult>("huge_automaton")
+            .expect("decode huge automaton rejection"),
+        unsafe_extent_rejection(huge_automaton_source, "automaton"),
+    );
+
+    // A valid awaited request on the same actor proves both invalid handlers
+    // returned normally; its exact fresh-world stats and render prove neither
+    // rejection leaked mutation into the usable coordinate domain.
     let brush_source = MarkRef {
         id: MarkId::new(11),
         revision: 4,
