@@ -140,55 +140,30 @@ pub(super) fn label_lift(world: &World, owner: CellPos, wx: f32, wz: f32) -> f32
     cell_or_relief_lift(world, cell, wx, wz)
 }
 
-/// The lift for a material-break crossing whose side is known as **data**:
-/// `anchor_oct` is the display-grid sample (a window corner) on the
-/// vertex's own side of the crossed edge, and over authored relief the
-/// vertex lifts through that sample's subcell patch — so the high flap
-/// holds its plate, the low flap holds the ground, and the marched wall
-/// closes the gap on the same anchors. The side is never inferred from the
-/// vertex position: a smoothing-displaced crossing sits off the subcell
-/// lattice, where positional inference reads whichever subcell the vertex
-/// floors into and collapses both flaps onto one plate. A crossing lies
-/// within half a sample of its anchor, so the anchored patch never
-/// extrapolates. The whole-cell lift resolves through the anchor sample's
-/// cell too — so a marched wall top or base on a material boundary with no
-/// subcell relief lands on the anchored side's committed plate, rather than
-/// collapsing onto the window-center `owner` wherever that owner falls on
-/// the low side of the boundary (the bug that left relief-free
-/// material-boundary cliffs with see-through faces). The relief owner-clamp
-/// branch is unchanged.
-pub(super) fn anchored_lift(
-    world: &World,
-    owner: CellPos,
-    anchor_oct: [i32; 2],
-    wx: f32,
-    wz: f32,
-) -> f32 {
-    let cell = cell_at(wx, wz);
-    // The cell owning the anchor sample — the vertex's own side of the
-    // crossed edge. The whole-cell lift resolves through it (not the
-    // window-center `owner`, nor the on-boundary midpoint `cell`), so a
-    // marched wall top/base lands on the anchored side's plate even with no
-    // subcell relief. A window-center-owned lift collapses the wall wherever
-    // the owner falls on the low side of the boundary.
+/// Evaluate the committed surface through one explicit sample-side anchor.
+/// The bounded cliff planner carries this anchor as data for both cap and
+/// wall vertices, so neither path re-infers a side from a contour position.
+/// The position stays within one half-sample of the anchor in every local
+/// case; the selected cell/subcell patch therefore clamps only at its own
+/// authored boundary.
+#[derive(Clone, Copy)]
+pub(super) struct SurfaceAnchor {
+    pub(super) x_octimeters: i32,
+    pub(super) z_octimeters: i32,
+}
+
+pub(super) fn side_anchor_lift(world: &World, anchor: SurfaceAnchor, wx: f32, wz: f32) -> f32 {
     let anchor_cell = CellPos {
-        x: anchor_oct[0].div_euclid(256),
-        z: anchor_oct[1].div_euclid(256),
+        x: anchor.x_octimeters.div_euclid(256),
+        z: anchor.z_octimeters.div_euclid(256),
     };
-    let sub_x = anchor_oct[0].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
-    let sub_z = anchor_oct[1].rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
-    side_resolved_lift(
-        world,
-        cell,
-        owner,
-        SideLiftSample {
-            cell: anchor_cell,
-            sub_x,
-            sub_z,
-        },
-        wx,
-        wz,
-    )
+    if world.cell_has_height_relief(anchor_cell) {
+        let sub_x = anchor.x_octimeters.rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
+        let sub_z = anchor.z_octimeters.rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
+        SubPatch::of(world, anchor_cell, sub_x, sub_z).y(wx, wz)
+    } else {
+        CellLift::of(world, anchor_cell).y(wx, wz)
+    }
 }
 
 /// The lift for a vertex of a clipped flap fragment: position-pure through

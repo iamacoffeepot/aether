@@ -5,13 +5,14 @@ use aether_capabilities::render::DrawTriangle;
 
 use crate::world::{CellPos, ChunkPos, Material, World};
 
+use super::cliffs::CliffPlan;
 use super::constants::{
     CONTOUR_UPSAMPLE, EDGE, MAX_APRON_SUBCELLS, OCTIMETERS_PER_SUBCELL, SUB,
     SUBCELLS_PER_CHUNK_EDGE,
 };
 use super::contour::repartition;
 use super::geometry::emit_flat_quad;
-use super::partition::{DisplayPartition, partition_inputs};
+use super::partition::partition_inputs;
 use super::style::{StyleTable, flat_color};
 use super::surface::{CellLift, SubPatch};
 use super::voids::emit_void_floors;
@@ -24,19 +25,22 @@ use super::windows::emit_partition_windows;
 /// material, and per-window marching polygons everywhere else, all at
 /// `y = 0` with no lifts. Every decision is a pure function of world
 /// coordinates, so two chunks emit identical geometry over their shared
-/// apron and the overlap is invisible. Returns the display grid (the plain
-/// material grid) so the wall pass lofts from the same samples; `None` when
-/// the whole chunk plus apron is Void (nothing to mesh).
+/// apron and the overlap is invisible. Windows carrying a physical cliff
+/// intersect these material polygons with the already-built [`CliffPlan`];
+/// the all-Void case emits nothing.
 #[allow(clippy::too_many_lines)] // one underlay pass: partition, tile interiors, march windows
 pub(super) fn mesh_underlay(
     world: &World,
     at: ChunkPos,
+    cliffs: &CliffPlan,
     styles: &StyleTable,
     tris: &mut Vec<DrawTriangle>,
-) -> Option<DisplayPartition> {
+) {
     let apron = MAX_APRON_SUBCELLS;
     let n = (SUBCELLS_PER_CHUNK_EDGE + 2 * apron) as usize;
-    let (ids, params, frozen) = partition_inputs(world, at, apron, n)?;
+    let Some((ids, params, frozen)) = partition_inputs(world, at, apron, n) else {
+        return;
+    };
 
     let upsample = CONTOUR_UPSAMPLE;
     let (grid, gw, _gh) = repartition(&ids, n, n, upsample, &params, &frozen);
@@ -78,7 +82,8 @@ pub(super) fn mesh_underlay(
                         && display[gz as usize * gw + gx as usize] == m
                 })
             });
-            interior[(lz - lo) as usize * cells_w + (lx - lo) as usize] = uniform;
+            interior[(lz - lo) as usize * cells_w + (lx - lo) as usize] =
+                uniform && !cliffs.cell_has_cliff(cell);
         }
     }
 
@@ -106,19 +111,12 @@ pub(super) fn mesh_underlay(
     }
 
     emit_partition_windows(
-        world, at, &display, gw, apron, step_oct, &interior, lo, styles, tris,
+        world, at, cliffs, &display, gw, apron, step_oct, &interior, lo, styles, tris,
     );
 
     // The fill-over floor caps for enclosed Void joints — the flat groove
-    // bottoms the marched closure's Void walls drop to.
-    emit_void_floors(world, at, styles, tris);
-
-    Some(DisplayPartition {
-        display,
-        gw,
-        apron,
-        step_oct,
-    })
+    // bottoms the plan's bounded Void ribbons drop to.
+    emit_void_floors(world, at, cliffs, styles, tris);
 }
 
 /// Emit one flat keyed cell: a single flat-colored quad spanning the cell

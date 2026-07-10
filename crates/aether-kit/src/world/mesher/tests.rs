@@ -3,9 +3,10 @@ use core::ops::Range;
 
 use aether_capabilities::render::{DrawTriangle, Vertex};
 
+use super::cliffs::WindowCenter;
 use super::constants::{COVERAGE_LIFT, EDGE, OCTIMETERS_PER_METER, SUB};
 use super::coverage::{overlay_materials, subcell_coverage};
-use super::style::StyleTable;
+use super::style::{StyleTable, flat_color};
 use super::*;
 use crate::world::{
     CELLS_PER_CHUNK_AREA, CellPos, Chunk, ChunkPos, Material, Region, STEP_MAX_OCTIMETERS,
@@ -533,6 +534,39 @@ mod partition_inputs {
 mod walls {
     use super::*;
 
+    fn cell_cliff_world(break_x: i32) -> World {
+        let mut world = World::new();
+        for chunk_z in -1..=1 {
+            for chunk_x in -1..=2 {
+                let mut chunk = Chunk::empty();
+                chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+                for local_z in 0..EDGE {
+                    for local_x in 0..EDGE {
+                        let global_x = chunk_x * EDGE + local_x;
+                        chunk.height[(local_z * EDGE + local_x) as usize] =
+                            if global_x >= break_x { 256 } else { 0 };
+                    }
+                }
+                world.insert_chunk(
+                    ChunkPos {
+                        x: chunk_x,
+                        z: chunk_z,
+                    },
+                    chunk,
+                );
+            }
+        }
+        world
+    }
+
+    fn cap_cover_count(meshes: &[&[DrawTriangle]], x: f32, z: f32) -> usize {
+        meshes
+            .iter()
+            .flat_map(|mesh| mesh.iter())
+            .filter(|triangle| xz_area_doubled(triangle) > 1e-6 && covers(triangle, x, z))
+            .count()
+    }
+
     /// The vertical span of a triangle — a wall face stands ~1 m tall while
     /// a cap or ground quad is near-flat, so the split filters walls from
     /// the surfaces they join.
@@ -540,6 +574,114 @@ mod walls {
         let max = t.verts.iter().map(|v| v.y).fold(f32::MIN, f32::max);
         let min = t.verts.iter().map(|v| v.y).fold(f32::MAX, f32::min);
         max - min
+    }
+
+    #[test]
+    fn cliff_windows_disable_every_overlapped_cell_and_emit_one_cap_layer() {
+        let internal = cell_cliff_world(8);
+        let internal_plan = CliffPlan::build(&internal, ChunkPos { x: 0, z: 0 });
+        assert!(internal_plan.cell_has_cliff(CellPos { x: 7, z: 8 }));
+        assert!(internal_plan.cell_has_cliff(CellPos { x: 8, z: 8 }));
+        let internal_mesh = mesh_chunk(&internal, ChunkPos { x: 0, z: 0 }, &StyleTable::default());
+        assert_eq!(
+            cap_cover_count(&[&internal_mesh], 7.981, 8.011),
+            1,
+            "the low half of an internal cliff window has one cap layer",
+        );
+
+        let seam = cell_cliff_world(16);
+        let west_plan = CliffPlan::build(&seam, ChunkPos { x: 0, z: 0 });
+        let east_plan = CliffPlan::build(&seam, ChunkPos { x: 1, z: 0 });
+        assert!(west_plan.cell_has_cliff(CellPos { x: 15, z: 8 }));
+        assert!(east_plan.cell_has_cliff(CellPos { x: 16, z: 8 }));
+        assert!(!west_plan.has_window_at(WindowCenter {
+            x_octimeters: 16 * 256,
+            z_octimeters: 8 * 256,
+        }));
+        let west = mesh_chunk(&seam, ChunkPos { x: 0, z: 0 }, &StyleTable::default());
+        let east = mesh_chunk(&seam, ChunkPos { x: 1, z: 0 }, &StyleTable::default());
+        assert_eq!(
+            cap_cover_count(&[&west, &east], 15.981, 8.011),
+            1,
+            "the neighbor-owned local-256 window has one fleet-wide cap layer",
+        );
+    }
+
+    #[test]
+    fn a_chord_uses_each_crossing_high_side_cliff_material() {
+        let mut world = World::new();
+        world.insert_region(
+            1,
+            Region {
+                name: "lower".into(),
+                default_material: Material::Grass,
+                cliff_material: Material::Stone,
+            },
+        );
+        world.insert_region(
+            2,
+            Region {
+                name: "upper".into(),
+                default_material: Material::Grass,
+                cliff_material: Material::Sand,
+            },
+        );
+        for chunk_z in -1..=1 {
+            for chunk_x in -1..=1 {
+                let mut chunk = Chunk::empty();
+                chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+                for local_z in 0..EDGE {
+                    for local_x in 0..EDGE {
+                        let global_x = chunk_x * EDGE + local_x;
+                        let global_z = chunk_z * EDGE + local_z;
+                        let index = (local_z * EDGE + local_x) as usize;
+                        chunk.height[index] = if global_x >= 8 { 256 } else { 0 };
+                        chunk.region[index] = if global_z < 8 { 1 } else { 2 };
+                    }
+                }
+                world.insert_chunk(
+                    ChunkPos {
+                        x: chunk_x,
+                        z: chunk_z,
+                    },
+                    chunk,
+                );
+            }
+        }
+
+        let styles = StyleTable::default();
+        let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, &styles);
+        let stone = flat_color(styles.get(Material::Stone));
+        let sand = flat_color(styles.get(Material::Sand));
+        let wall_half = |upper: bool| {
+            mesh.iter().filter(move |triangle| {
+                if xz_area_doubled(triangle) > 1e-6
+                    || y_span(triangle) < 0.5
+                    || !triangle
+                        .verts
+                        .iter()
+                        .all(|vertex| (vertex.x - 8.0).abs() < 1e-6)
+                {
+                    return false;
+                }
+                let center_z = triangle.verts.iter().map(|vertex| vertex.z).sum::<f32>() / 3.0;
+                let in_window = (center_z - 8.0).abs() < 1.0 / 32.0;
+                in_window && (center_z > 8.0) == upper
+            })
+        };
+        let lower: Vec<_> = wall_half(false).collect();
+        let upper: Vec<_> = wall_half(true).collect();
+        assert!(!lower.is_empty() && !upper.is_empty());
+        assert!(
+            lower
+                .iter()
+                .all(|triangle| { triangle.verts.iter().all(|vertex| vertex.color == stone) })
+        );
+        assert!(
+            upper
+                .iter()
+                .all(|triangle| { triangle.verts.iter().all(|vertex| vertex.color == sand) })
+        );
     }
 
     #[test]
@@ -598,7 +740,8 @@ mod walls {
         let at = ChunkPos { x: 0, z: 0 };
         let styles = StyleTable::default();
         let mut expected = Vec::new();
-        let _ = mesh_underlay(&world, at, &styles, &mut expected);
+        let cliffs = CliffPlan::build(&world, at);
+        mesh_underlay(&world, at, &cliffs, &styles, &mut expected);
         let full = mesh_chunk(&world, at, &styles);
         assert_eq!(full, expected, "the wall pass adds nothing to a flat world");
     }
@@ -622,25 +765,27 @@ mod walls {
             }
             world.insert_chunk(ChunkPos { x: cx, z: 0 }, chunk);
         }
-        let seam_verts = |at| {
+        let wall_verts = |at| {
             let mesh = mesh_chunk(&world, at, &StyleTable::default());
             let mut verts: Vec<(i64, i64, i64)> = mesh
                 .iter()
                 .filter(|t| y_span(t) > 0.5)
                 .flat_map(|t| t.verts.iter())
-                .filter(|v| (v.x - 16.0).abs() < 1e-4)
+                .filter(|v| (v.x - 16.0).abs() < 0.2)
                 .map(quantized_xyz)
                 .collect();
             verts.sort_unstable();
             verts.dedup();
             verts
         };
-        let west = seam_verts(ChunkPos { x: 0, z: 0 });
-        let east = seam_verts(ChunkPos { x: 1, z: 0 });
-        assert!(!west.is_empty(), "the seam carries a wall");
-        assert_eq!(
-            west, east,
-            "both chunks place the seam wall on identical vertices",
+        let west = wall_verts(ChunkPos { x: 0, z: 0 });
+        let east = wall_verts(ChunkPos { x: 1, z: 0 });
+        let shared: Vec<_> = west.iter().filter(|vertex| east.contains(vertex)).collect();
+        assert!(
+            shared
+                .iter()
+                .any(|vertex| (vertex.0 - 16 * 256).abs() <= 16),
+            "neighbor-owned windows meet on an identical contour endpoint near the chunk seam",
         );
     }
 
@@ -663,14 +808,23 @@ mod walls {
                 points[sub_z * sub + sub_x] = Material::Grass.to_u8();
             }
         }
-        // Surround the raised cell with lower grass ground so the blob is a
-        // genuine plateau; the cell itself is grass at 512 octimeters.
+        // Surround the authored points with lower grass ground. The grass
+        // core carries the 512-octimeter point lift while its explicit Void
+        // surround stays at the datum, so every silhouette crossing is a
+        // physical cliff adjacency (the bounded planner never invents a
+        // wall from material labels alone).
         let mut chunk = Chunk::empty();
         chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
-        chunk.height[(cell.z * EDGE + cell.x) as usize] = 512;
         let mut world = World::new();
         world.insert_chunk(at, chunk);
         world.set_cell_points(cell, &points);
+        let mut deltas = [0i16; SUBCELLS_PER_CELL];
+        for sub_z in sub / 4..3 * sub / 4 {
+            for sub_x in sub / 4..3 * sub / 4 {
+                deltas[sub_z * sub + sub_x] = 512;
+            }
+        }
+        world.set_cell_heights(cell, &deltas);
 
         let mesh = mesh_chunk(&world, at, &StyleTable::default());
         let walls: Vec<&DrawTriangle> = mesh.iter().filter(|t| y_span(t) > 0.5).collect();
@@ -954,18 +1108,22 @@ mod walls {
         let mesh = mesh_chunk(&world, at, &StyleTable::default());
         let walls: Vec<&DrawTriangle> = mesh.iter().filter(|t| y_span(t) > 0.5).collect();
         assert!(!walls.is_empty(), "the delta plateau wears walls");
-        // Every wall vertex lies on the block's perimeter lines — the
-        // authored break, nowhere else (no fused-interior or cell-edge wall).
+        // Every wall vertex stays inside one subcell of the authored
+        // perimeter. Two-crossing corner windows replace the old square
+        // lattice corner with a bounded chord, while straight runs remain on
+        // the authored lines.
         let lo = 7.5f32;
         let hi = 9.5f32;
         for v in walls.iter().flat_map(|t| t.verts.iter()) {
-            let on_x = ((v.x - lo).abs() < 1e-4 || (v.x - hi).abs() < 1e-4)
+            let on_x = ((v.x - lo).abs() <= 1.0 / SUB as f32
+                || (v.x - hi).abs() <= 1.0 / SUB as f32)
                 && (lo - 1e-4..=hi + 1e-4).contains(&v.z);
-            let on_z = ((v.z - lo).abs() < 1e-4 || (v.z - hi).abs() < 1e-4)
+            let on_z = ((v.z - lo).abs() <= 1.0 / SUB as f32
+                || (v.z - hi).abs() <= 1.0 / SUB as f32)
                 && (lo - 1e-4..=hi + 1e-4).contains(&v.x);
             assert!(
                 on_x || on_z,
-                "wall vertex ({}, {}) stands off the authored break lines",
+                "wall vertex ({}, {}) escaped the bounded local contour",
                 v.x,
                 v.z,
             );
@@ -1034,8 +1192,8 @@ mod walls {
             })
             .sum();
         assert!(
-            (top_length - 1.0).abs() < 1e-3,
-            "the shared edge is covered exactly once, got {top_length} m of top edge",
+            (0.9..=1.0).contains(&top_length),
+            "the shared edge is covered once with only bounded corner chords, got {top_length} m",
         );
     }
 
@@ -1531,6 +1689,70 @@ mod voids {
         assert!(
             has_rim_wall,
             "the void rim walls down to the floor, no open bottom",
+        );
+    }
+
+    #[test]
+    fn a_rounded_void_rim_clones_its_sloped_floor_vertices() {
+        // An enclosed full-cell groove slopes along z. A constant bottom
+        // ring would flatten every wall base; rebuilding the rounded chord
+        // independently would miss its cap pins. The planned Void fragments
+        // and ribbons instead select the same named floor anchors.
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+        let cell = CellPos { x: 7, z: 7 };
+        world.set_cell_points(cell, &[Material::Void.to_u8(); SUBCELLS_PER_CELL]);
+        let sub = SUB as usize;
+        let mut deltas = [0i16; SUBCELLS_PER_CELL];
+        for point_z in 0..sub {
+            for point_x in 0..sub {
+                deltas[point_z * sub + point_x] = -256 + point_z as i16 * 4;
+            }
+        }
+        world.set_cell_heights(cell, &deltas);
+
+        let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, &StyleTable::default());
+        let floor_vertices: Vec<_> = mesh
+            .iter()
+            .filter(|triangle| xz_area_doubled(triangle) > 1e-6)
+            .flat_map(|triangle| triangle.verts.iter())
+            .filter(|vertex| vertex.y < -0.2)
+            .collect();
+        let wall_bases: Vec<_> = mesh
+            .iter()
+            .filter(|triangle| {
+                xz_area_doubled(triangle) < 1e-6
+                    && triangle.verts.iter().any(|vertex| vertex.y > -0.1)
+            })
+            .flat_map(|triangle| triangle.verts.iter())
+            .filter(|vertex| vertex.y < -0.2)
+            .collect();
+        assert!(
+            !wall_bases.is_empty(),
+            "the sloped groove has a rounded rim"
+        );
+        for base in &wall_bases {
+            assert!(
+                floor_vertices
+                    .iter()
+                    .any(|floor| { floor.x == base.x && floor.y == base.y && floor.z == base.z }),
+                "wall base ({}, {}, {}) is not a byte-identical floor-cap vertex",
+                base.x,
+                base.y,
+                base.z,
+            );
+        }
+        let mut levels: Vec<_> = wall_bases
+            .iter()
+            .map(|vertex| (vertex.y * OCTIMETERS_PER_METER).round() as i32)
+            .collect();
+        levels.sort_unstable();
+        levels.dedup();
+        assert!(
+            levels.len() > 2,
+            "the wall bottom follows the sloped low cap instead of a constant ring: {levels:?}",
         );
     }
 }

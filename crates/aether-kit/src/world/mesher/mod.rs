@@ -46,31 +46,30 @@
 //! carries authored per-point relief (`World::cell_has_height_relief`) the
 //! pass resolves one stride down: the interior cap tessellates to
 //! `SUB × SUB` subcell quads over point patches (`SubPatch`) so a subcell
-//! break shows, the marched wall split reads point (not cell) levels so a
-//! silhouette raised by deltas alone closes its wall on the authored line,
-//! and same-material breaks close as subcell-lattice walls
-//! (`emit_lattice_closure`) standing exactly on the authored break lines. A
-//! relief-free cell keeps the whole-cell fast path, byte-identical to a
-//! world with no height points.
+//! break shows. A relief-free cell keeps the whole-cell fast path,
+//! byte-identical to a world with no height points.
 //!
-//! On the cell lattice the corner plates split exactly on cliff edges, and
-//! the wall pass closes that gap with a vertical face wearing the high
-//! cell's region cliff material as a flat color. The walls stitch from the
-//! same repartitioned sample grid the caps march, as the union of two
-//! segment classes over one pass: a material or Void boundary standing past
-//! the step ceiling lofts its marched contour down as a curtain — the
-//! wall's top vertices are the cap contour's own vertices lifted through
-//! the same owner-clamped patch, so the seam is watertight by construction
-//! — while a same-material cliff, which the material partition leaves no
-//! boundary to follow, lofts the cell-edge lattice line the owner-pinned
-//! patches already break on. Where the low side is a Void hole with no
-//! ground the curtain drops a fixed depth so the hole reads as thick ground
-//! rather than a paper lip. Boundary windows lift each vertex through its
-//! own (floor) cell — continuous wherever no cliff intervenes.
+//! One bounded `CliffPlan` classifies every canonical east/north
+//! sample adjacency in the fixed `320 × 320` apron exactly once. Only a
+//! level difference strictly past the step ceiling enters the plan. Each
+//! owned window connects those physical crossings with a finite local case:
+//! a consistent two-crossing plate takes a smoothing chord; one/three/four
+//! crossings pin at a stable world-coordinate junction. No unique-height or
+//! `(low, high)` inventory exists, so unrelated legal ramps cannot acquire a
+//! false iso-contour and authored level diversity cannot multiply work.
+//!
+//! Material polygons are intersected with that local height arrangement.
+//! Every contour position carries named high/low sample anchors; high and low
+//! cap fragments evaluate through those anchors, and the wall ribbon clones
+//! the same positions. Sealed rings are therefore byte-identical at both cap
+//! seams. Enclosed Void lows close to their authored floor; only an open
+//! silhouette keeps the fixed-depth skirt. The three predictive lattice,
+//! material-contour, and clip-gap closure passes no longer exist.
 
 pub mod contour;
 pub mod style;
 
+mod cliffs;
 mod constants;
 mod coverage;
 mod geometry;
@@ -89,6 +88,7 @@ use alloc::vec::Vec;
 use aether_capabilities::render::DrawTriangle;
 
 use crate::world::{ChunkPos, World};
+use cliffs::CliffPlan;
 use coverage::mesh_coverage;
 use style::StyleTable;
 use underlay::mesh_underlay;
@@ -101,8 +101,9 @@ use walls::emit_walls;
 #[must_use]
 pub fn mesh_chunk(world: &World, at: ChunkPos, styles: &StyleTable) -> Vec<DrawTriangle> {
     let mut tris = Vec::new();
-    let partition = mesh_underlay(world, at, styles, &mut tris);
+    let cliffs = CliffPlan::build(world, at);
+    mesh_underlay(world, at, &cliffs, styles, &mut tris);
     mesh_coverage(world, at, styles, &mut tris);
-    emit_walls(world, at, styles, partition.as_ref(), &mut tris);
+    emit_walls(world, styles, &cliffs, &mut tris);
     tris
 }
