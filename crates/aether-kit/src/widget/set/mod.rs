@@ -11,7 +11,7 @@
 //! - [`LabelWidget`] — static, non-interactive text.
 //!
 //! Each caches its assigned [`WidgetFrame`](crate::widget::WidgetFrame) rect
-//! and its [`Theme`](crate::widget::theme::Theme), answers every
+//! and its [`Theme`], answers every
 //! [`Collect`](crate::widget::Collect) with a
 //! [`WidgetDrawList`](crate::widget::WidgetDrawList) drawn in its own local
 //! coordinates (colors resolved through [`Theme::fill`](crate::widget::theme::Theme::fill)),
