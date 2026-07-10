@@ -706,6 +706,8 @@ if (PROFILE === 'pr' && !A.noChallenge && challengeLenses.length && scopeUnits(i
 // flag the refuter overturned, now including a refuted high-confidence correctness finding (issue
 // #3015 item 2 — the Opus refuter's verdict is consulted rather than discarded). gate = soft-hold
 // only for a high-severity finding on a soft-hold pillar (spec/correctness); everything else advisory.
+// Spec-fidelity findings never flow through rowOf/gateFor — they live in the separate Phase 0
+// `spec` channel — so a high-severity spec finding is routed into softHolds directly, below.
 const gateFor = (lens, severity) => (lens.gate === 'soft-hold' && severity === 'high') ? 'soft-hold' : 'advisory'
 const rowOf = (file, lens, fd, source) => ({
   file, pillar: fd.pillar || lens.key, source, category: fd.category, line: fd.line, symbol: fd.symbol,
@@ -785,7 +787,14 @@ const processedFiles = new Set()
 for (const e of clean) if (e.runs && e.runs.length) for (const fl of (e.files || [])) processedFiles.add(fl)
 totals.files = processedFiles.size
 totals.confirmed = deduped.length
-const softHolds = deduped.filter(r => r.gate === 'soft-hold')
+// A high-severity spec finding never enters confirmed/deduped (it would double-render alongside
+// rollup.spec.findings) but still counts as a hold — the poster already gives it label teeth.
+const specSoftHolds = ((spec && spec.findings) || []).filter(f => f.severity === 'high').map(f => ({
+  file: base(f.file), pillar: 'spec-fidelity', source: 'spec', category: f.category, line: null,
+  symbol: f.symbol, severity: f.severity, gate: 'soft-hold', recommendation: undefined,
+  suggested_form: f.description, direction: undefined, char_delta: undefined,
+}))
+const softHolds = [...deduped.filter(r => r.gate === 'soft-hold'), ...specSoftHolds]
 totals.softHolds = softHolds.length
 
 // grouped: by file then pillar, so the rollup drops straight into /sketch.
