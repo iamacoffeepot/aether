@@ -33,6 +33,9 @@
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
+use aether_capabilities::clipboard::{
+    GetClipboardText, GetClipboardTextResult, SetClipboardText, SetClipboardTextResult,
+};
 use aether_capabilities::fs::{
     Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult,
 };
@@ -252,6 +255,8 @@ fn require_wgpu_only() -> bool {
     false
 }
 
+#[path = "test_bench_scenario/clipboard.rs"]
+mod clipboard;
 #[path = "test_bench_scenario/component.rs"]
 mod component;
 #[path = "test_bench_scenario/fs.rs"]

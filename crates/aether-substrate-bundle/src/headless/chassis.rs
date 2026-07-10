@@ -22,9 +22,10 @@ use aether_capabilities::LifecycleCapability;
 use aether_capabilities::audio::{SetMasterGain, SetMasterGainResult};
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
-    AnthropicConfig, ComponentHostConfig, ContentGenConfig, GeminiConfig, HeadlessRenderCapability,
-    HeadlessWindowCapability, HttpServerConfig, InputConfig, UnsupportedTestBenchCapability,
-    fs::NamespaceRoots, http::HttpConfig as HttpConf,
+    AnthropicConfig, ComponentHostConfig, ContentGenConfig, GeminiConfig,
+    HeadlessClipboardCapability, HeadlessRenderCapability, HeadlessWindowCapability,
+    HttpServerConfig, InputConfig, UnsupportedTestBenchCapability, fs::NamespaceRoots,
+    http::HttpConfig as HttpConf,
 };
 use aether_data::Kind;
 use aether_kinds::BinaryManifest;
@@ -78,6 +79,7 @@ impl HeadlessChassis {
         let mut caps = crate::common_cap_namespaces();
         caps.extend([
             <HeadlessRenderCapability as Addressable>::NAMESPACE,
+            <HeadlessClipboardCapability as Addressable>::NAMESPACE,
             <HeadlessWindowCapability as Addressable>::NAMESPACE,
             <UnsupportedTestBenchCapability as Addressable>::NAMESPACE,
             <LifecycleCapability as Addressable>::NAMESPACE,
@@ -391,6 +393,7 @@ impl HeadlessChassis {
         // Tick to `aether.input` via the relay subscriber.
         let builder = with_common_caps(Builder::<Self>::new(registry, Arc::clone(&mailer)), common)
             .with_actor::<HeadlessRenderCapability>(())
+            .with_actor::<HeadlessClipboardCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedTestBenchCapability>(())
             .with_actor::<LifecycleCapability>(tick_only_lifecycle_config(

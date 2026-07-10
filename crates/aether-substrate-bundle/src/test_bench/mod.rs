@@ -29,5 +29,5 @@ pub use artifacts::ArtifactGuard;
 pub use bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH, TestBench, TestBenchBuilder, TestBenchError};
 pub use cap::{TestBenchCapConfig, TestBenchCapability};
 pub use chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
-pub use config::RenderSizeConfig;
+pub use config::{RenderSizeConfig, TestBenchClipboardMode};
 pub use execute::{BenchOp, BenchOutput, ExecutionError, ExecutionResult};
