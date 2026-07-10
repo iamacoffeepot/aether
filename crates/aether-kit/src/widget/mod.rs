@@ -41,12 +41,14 @@ pub use kinds::*;
 pub mod composite;
 pub mod focus;
 mod panel;
+mod scroll;
 pub mod set;
 mod state;
 pub mod text_edit;
 pub mod theme;
 
 pub use panel::WidgetPanel;
+pub use scroll::ScrollWidget;
 
 use aether_actor::{ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
@@ -66,7 +68,64 @@ use crate::widget::kinds::WidgetClipIntersection;
 pub struct Widget {
     config: WidgetConfig,
     composite: Composite,
+    frame_discharge: FrameDischarge,
     spawned: bool,
+}
+
+/// One-shot completion state shared by every composite owner. A frame starts
+/// open, then closes after its draw list has been emitted or replied upward.
+/// Late or duplicate child replies cannot discharge the same frame twice.
+#[derive(Debug)]
+struct FrameDischarge {
+    closed: bool,
+}
+
+impl Default for FrameDischarge {
+    fn default() -> Self {
+        Self { closed: true }
+    }
+}
+
+impl FrameDischarge {
+    fn begin_frame(&mut self) {
+        self.closed = false;
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed
+    }
+
+    fn close_frame(&mut self) -> bool {
+        if self.closed {
+            return false;
+        }
+        self.closed = true;
+        true
+    }
+}
+
+/// Decode a compositing child config and enforce the tree's single-root
+/// invariant. Nested widgets are always driven by their parent's `Collect`;
+/// allowing one to retain `root = true` would also subscribe it to `Tick` and
+/// create a second renderer for the same subtree.
+fn decode_nested_widget_config(spec: &WidgetChildSpec) -> Option<WidgetConfig> {
+    let Some(config) = WidgetConfig::decode_from_bytes(&spec.config) else {
+        tracing::warn!(
+            target: "aether_kit",
+            subname = %spec.subname,
+            "widget child config failed to decode; slot skipped",
+        );
+        return None;
+    };
+    if config.root {
+        tracing::warn!(
+            target: "aether_kit",
+            subname = %spec.subname,
+            "nested widget child cannot be a root; slot skipped",
+        );
+        return None;
+    }
+    Some(config)
 }
 
 impl Widget {
@@ -82,12 +141,7 @@ impl Widget {
         }
         self.spawned = true;
         for spec in &self.config.children {
-            let Some(child_config) = WidgetConfig::decode_from_bytes(&spec.config) else {
-                tracing::warn!(
-                    target: "aether_kit",
-                    subname = %spec.subname,
-                    "widget child config failed to decode; slot skipped",
-                );
+            let Some(child_config) = decode_nested_widget_config(spec) else {
                 continue;
             };
             match ctx.spawn_inline_child::<Self>(Subname::Named(&spec.subname), &child_config) {
@@ -116,6 +170,7 @@ impl Widget {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
+        self.frame_discharge.begin_frame();
         self.composite.extend_chrome(self.config.chrome.iter().cloned());
         for spec in &self.config.children {
             if let Some(child) = ctx.child(&spec.subname) {
@@ -130,12 +185,19 @@ impl Widget {
     /// Discharge the closed composite: the root emits it to the render /
     /// text caps; an interior or leaf node replies it up to its parent.
     fn finish(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+        if self.frame_discharge.is_closed() {
+            return;
+        }
         let list = self.composite.flatten(self.config.intrinsic);
         if self.config.root {
             emit(ctx, &list);
         } else if let Some(parent) = ctx.parent() {
             parent.send(&list);
+        } else {
+            tracing::warn!(target: "aether_kit", "non-root widget finished without a parent; draw list dropped");
         }
+        let closed = self.frame_discharge.close_frame();
+        debug_assert!(closed, "an open widget frame closes exactly once");
     }
 }
 
@@ -170,10 +232,33 @@ pub(crate) fn accept_child_list(
 
 /// One contiguous run of non-text widget draws with one render capability
 /// shape. Text is filtered before planning and remains on its later lane.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PreparedClip {
+    Unbounded,
+    Finite { rect: WidgetClipRect },
+}
+
+impl PreparedClip {
+    fn for_item(item: &WidgetDrawItem) -> Option<Self> {
+        match item.valid_clip() {
+            WidgetClipIntersection::Unbounded => Some(Self::Unbounded),
+            WidgetClipIntersection::Finite { rect } => Some(Self::Finite { rect }),
+            WidgetClipIntersection::Empty => None,
+        }
+    }
+
+    fn framebuffer(self) -> Option<ClipRect> {
+        match self {
+            Self::Unbounded => None,
+            Self::Finite { rect } => Some(framebuffer_clip(rect)),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 enum DirectRun {
-    Solid { clip: Option<WidgetClipRect>, quads: Vec<SolidQuad> },
-    Textured { texture_id: u32, clip: Option<WidgetClipRect>, quads: Vec<RenderTexturedQuad> },
+    Solid { clip: PreparedClip, quads: Vec<SolidQuad> },
+    Textured { texture_id: u32, clip: PreparedClip, quads: Vec<RenderTexturedQuad> },
 }
 
 /// Plan the filtered non-text subsequence in one pass. Adjacent solids
@@ -186,10 +271,8 @@ fn direct_runs(list: &WidgetDrawList) -> Vec<DirectRun> {
     for item in &list.items {
         match item {
             WidgetDrawItem::Quad { x, y, width, height, color, .. } => {
-                let clip = match item.valid_clip() {
-                    WidgetClipIntersection::Unbounded => None,
-                    WidgetClipIntersection::Finite { rect } => Some(rect),
-                    WidgetClipIntersection::Empty => continue,
+                let Some(clip) = PreparedClip::for_item(item) else {
+                    continue;
                 };
                 let quad = SolidQuad { x: *x, y: *y, width: *width, height: *height, color: *color };
                 if let Some(DirectRun::Solid { clip: run_clip, quads }) = runs.last_mut()
@@ -201,10 +284,8 @@ fn direct_runs(list: &WidgetDrawList) -> Vec<DirectRun> {
                 }
             }
             WidgetDrawItem::TexturedQuad { texture_id, x, y, width, height, u0, v0, u1, v1, tint, .. } => {
-                let clip = match item.valid_clip() {
-                    WidgetClipIntersection::Unbounded => None,
-                    WidgetClipIntersection::Finite { rect } => Some(rect),
-                    WidgetClipIntersection::Empty => continue,
+                let Some(clip) = PreparedClip::for_item(item) else {
+                    continue;
                 };
                 let quad = RenderTexturedQuad {
                     x: *x,
@@ -246,7 +327,7 @@ pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
             DirectRun::Solid { clip, quads } => {
                 ctx.actor::<RenderCapability>().send(&DrawSolidQuads {
                     space: QuadSpace::Screen,
-                    clip: clip.map(framebuffer_clip),
+                    clip: clip.framebuffer(),
                     quads,
                 });
             }
@@ -254,7 +335,7 @@ pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
                 ctx.actor::<RenderCapability>().send(&DrawTexturedQuads {
                     texture_id,
                     space: QuadSpace::Screen,
-                    clip: clip.map(framebuffer_clip),
+                    clip: clip.framebuffer(),
                     quads,
                 });
             }
@@ -262,10 +343,8 @@ pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
     }
     for item in &list.items {
         if let WidgetDrawItem::Text { x, y, font_id, text, size_pixels, color, .. } = item {
-            let clip = match item.valid_clip() {
-                WidgetClipIntersection::Unbounded => None,
-                WidgetClipIntersection::Finite { rect } => Some(framebuffer_clip(rect)),
-                WidgetClipIntersection::Empty => continue,
+            let Some(clip) = PreparedClip::for_item(item) else {
+                continue;
             };
             ctx.actor::<TextCapability>().send(&DrawText {
                 font_id: *font_id,
@@ -274,7 +353,7 @@ pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
                 color: *color,
                 origin: [*x, *y],
                 space: QuadSpace::Screen,
-                clip,
+                clip: clip.framebuffer(),
             });
         }
     }
@@ -341,7 +420,8 @@ mod tests {
         assert!(matches!(
             &runs[0],
             DirectRun::Solid { clip, quads }
-                if *clip == Some(a) && quads.iter().map(|quad| quad.x).eq([0.0])
+                if *clip == PreparedClip::Finite { rect: a }
+                    && quads.iter().map(|quad| quad.x).eq([0.0])
         ));
         assert!(
             matches!(
@@ -350,7 +430,7 @@ mod tests {
                     texture_id: 7,
                     clip,
                     quads,
-                } if *clip == Some(a)
+                } if *clip == PreparedClip::Finite { rect: a }
                     && quads.iter().map(|quad| quad.x).eq([1.0, 2.0])
             ),
             "text does not split a compatible textured run"
@@ -361,7 +441,8 @@ mod tests {
                 texture_id: 8,
                 clip,
                 quads,
-            } if *clip == Some(a) && quads.iter().map(|quad| quad.x).eq([3.0])
+            } if *clip == PreparedClip::Finite { rect: a }
+                && quads.iter().map(|quad| quad.x).eq([3.0])
         ));
         assert!(
             matches!(
@@ -370,7 +451,8 @@ mod tests {
                     texture_id: 7,
                     clip,
                     quads,
-                } if *clip == Some(a) && quads.iter().map(|quad| quad.x).eq([4.0])
+                } if *clip == PreparedClip::Finite { rect: a }
+                    && quads.iter().map(|quad| quad.x).eq([4.0])
             ),
             "a repeated texture key after a different texture must not reorder"
         );
@@ -380,12 +462,14 @@ mod tests {
                 texture_id: 7,
                 clip,
                 quads,
-            } if *clip == Some(b) && quads.iter().map(|quad| quad.x).eq([5.0])
+            } if *clip == PreparedClip::Finite { rect: b }
+                && quads.iter().map(|quad| quad.x).eq([5.0])
         ));
         assert!(matches!(
             &runs[5],
             DirectRun::Solid { clip, quads }
-                if *clip == Some(b) && quads.iter().map(|quad| quad.x).eq([6.0, 7.0])
+                if *clip == PreparedClip::Finite { rect: b }
+                    && quads.iter().map(|quad| quad.x).eq([6.0, 7.0])
         ));
     }
 
@@ -398,9 +482,41 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert!(matches!(
             &runs[0],
-            DirectRun::Solid { clip: None, quads }
+            DirectRun::Solid { clip: PreparedClip::Unbounded, quads }
                 if quads.iter().map(|quad| quad.x).eq([1.0, 3.0])
         ));
+    }
+
+    #[test]
+    fn nested_widget_config_rejects_a_second_root() {
+        let mut config = WidgetConfig { root: false, ..WidgetConfig::default() };
+        let spec = |config: &WidgetConfig| WidgetChildSpec {
+            subname: "nested".into(),
+            kind: WidgetKind::Composite,
+            origin: [0.0, 0.0],
+            clip: None,
+            config: config.encode_into_bytes(),
+        };
+
+        assert!(decode_nested_widget_config(&spec(&config)).is_some());
+        config.root = true;
+        assert!(decode_nested_widget_config(&spec(&config)).is_none());
+    }
+
+    #[test]
+    fn frame_discharge_is_idempotent_for_late_or_duplicate_replies() {
+        let mut discharge = FrameDischarge::default();
+        assert!(discharge.is_closed());
+
+        discharge.begin_frame();
+        assert!(!discharge.is_closed());
+        assert!(discharge.close_frame());
+        assert!(discharge.is_closed());
+        assert!(!discharge.close_frame(), "a duplicate or late reply cannot close the frame twice");
+        assert!(discharge.is_closed());
+
+        discharge.begin_frame();
+        assert!(!discharge.is_closed(), "the next frame reopens the one-shot discharge state");
     }
 }
 
@@ -420,7 +536,7 @@ impl WasmActor for Widget {
     const NAMESPACE: &'static str = "aether.kit.widget";
 
     fn init(config: WidgetConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Widget { config, composite: Composite::new(), spawned: false })
+        Ok(Widget { config, composite: Composite::new(), frame_discharge: FrameDischarge::default(), spawned: false })
     }
 
     /// The root subscribes the frame stage once (the root-subscribes-once
@@ -464,6 +580,9 @@ impl WasmActor for Widget {
     /// A child's reply; not useful to send manually.
     #[handler::manual]
     fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Manual>, list: WidgetDrawList) {
+        if self.frame_discharge.is_closed() {
+            return;
+        }
         if accept_child_list(&mut self.composite, ctx, list) {
             self.finish(ctx);
         }

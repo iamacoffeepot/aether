@@ -32,6 +32,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use aether_data::MailboxId;
 use aether_math::{Rgba, Vec2};
 use serde::{Deserialize, Serialize};
 
@@ -272,6 +273,87 @@ pub struct WidgetDrawList {
     pub items: Vec<WidgetDrawItem>,
 }
 
+/// The fixed size of a scroll viewport or its authored content, in logical
+/// window pixels. Named fields keep both axes and their units explicit at the
+/// schema boundary.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
+pub struct ScrollExtent {
+    pub width_pixels: f32,
+    pub height_pixels: f32,
+}
+
+/// A scroll container's retained content offset, in logical pixels from the
+/// content origin. Both axes are clamped independently to the authored
+/// [`ScrollExtent`] bounds.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
+pub struct ScrollOffset {
+    pub x_pixels: f32,
+    pub y_pixels: f32,
+}
+
+/// A requested content-space movement in logical pixels. A chassis wheel is
+/// converted to this sign convention exactly once: `x_pixels = -delta_x` and
+/// `y_pixels = -delta_y`.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
+pub struct ScrollDelta {
+    pub x_pixels: f32,
+    pub y_pixels: f32,
+}
+
+/// `aether.kit.widget.scroll.residual` — the already-converted part of a
+/// scroll request that one container could not consume. A parent applies
+/// these fields directly; it never reverses their sign a second time.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Default)]
+#[kind(name = "aether.kit.widget.scroll.residual")]
+pub struct ScrollResidual {
+    pub x_pixels: f32,
+    pub y_pixels: f32,
+}
+
+/// `aether.kit.widget.scroll.outcome` — one container's exact retained offset,
+/// consumed movement, and unconsumed residual after a request. `container`
+/// identifies the state-owning actor even when an ancestor transparently
+/// relays this event to the root.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[kind(name = "aether.kit.widget.scroll.outcome")]
+pub struct ScrollOutcome {
+    pub container: MailboxId,
+    pub offset: ScrollOffset,
+    pub consumed: ScrollDelta,
+    pub residual: ScrollResidual,
+}
+
+/// `aether.kit.widget.scroll.config` — the fixed layout contract for one
+/// stateful scroll actor. `viewport_extent` is what the parent places;
+/// `content_extent` is the sole clamp authority; `initial_offset` is clamped
+/// at init; and `content` is one opaque root spawned through the closed
+/// [`WidgetKind`] dispatcher.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[kind(name = "aether.kit.widget.scroll.config")]
+pub struct ScrollConfig {
+    pub viewport_extent: ScrollExtent,
+    pub content_extent: ScrollExtent,
+    pub initial_offset: ScrollOffset,
+    pub content: WidgetChildSpec,
+}
+
+impl Default for ScrollConfig {
+    fn default() -> Self {
+        Self {
+            viewport_extent: ScrollExtent::default(),
+            content_extent: ScrollExtent::default(),
+            initial_offset: ScrollOffset::default(),
+            content: WidgetChildSpec {
+                subname: String::from("content"),
+                kind: WidgetKind::Composite,
+                origin: [0.0, 0.0],
+                clip: None,
+                config: Vec::new(),
+            },
+        }
+    }
+}
+
 /// The kind of actor a [`WidgetChildSpec`] spawns, and the concrete config
 /// type its opaque [`WidgetChildSpec::config`] bytes decode as. It is the
 /// one tag that lets a single spec type serve both the homogeneous
@@ -307,18 +389,22 @@ pub enum WidgetKind {
     /// A static image — `config` decodes as [`ImageConfig`]. Not focusable.
     /// Appended to preserve the established wire discriminants above.
     Image,
-    /// A multiline text area — `config` decodes as [`TextAreaConfig`]. Kept at
-    /// the end so adding it does not renumber the landed image discriminant or
+    /// A multiline text area — `config` decodes as [`TextAreaConfig`]. Appended
+    /// after Image so adding it does not renumber that landed discriminant or
     /// any earlier wire discriminant.
     TextArea,
+    /// A stateful clipped viewport — `config` decodes as [`ScrollConfig`].
+    /// The actor owns its offset and recursively routes wheel residuals.
+    /// Appended to preserve every established wire discriminant above.
+    Scroll,
 }
 
 impl WidgetKind {
     /// This stock widget's actor type tag — `hash(NAMESPACE)` of the widget
     /// actor `self` spawns, the same value `ActorTypeTag::of::<W>().0` would
-    /// produce for the concrete actor type. `None` for the two unwrappable
-    /// variants (`Composite`, `BehaviorHost`), which have no single wrapped
-    /// actor. The trunk-reachable producer for
+    /// produce for the concrete actor type. `None` for container/host variants
+    /// (`Composite`, `Scroll`, `BehaviorHost`), which are not stock leaves a
+    /// behavior host can wrap. The trunk-reachable producer for
     /// `aether_behavior::host::ChildSpec::type_tag` when composing a
     /// `HostConfig` directly, outside the kit's `WidgetKind::BehaviorHost`
     /// spawn arm — the concrete widget actor types are `runtime`-gated and
@@ -338,7 +424,7 @@ impl WidgetKind {
             Self::TextField => aether_data::mailbox_id_from_name("aether.kit.widget.text_field").0,
             Self::TextArea => aether_data::mailbox_id_from_name("aether.kit.widget.text_area").0,
             Self::Button => aether_data::mailbox_id_from_name("aether.kit.widget.button").0,
-            Self::Composite | Self::BehaviorHost => return None,
+            Self::Composite | Self::Scroll | Self::BehaviorHost => return None,
         };
         Some(tag)
     }
@@ -711,8 +797,9 @@ pub struct HoverLost;
 /// what a panel contains. An empty `children` list falls back to the built-in
 /// reference stack (a label, a slider, a radio group, a text field, an apply
 /// button), the copy-paste starting point a real editor panel forks. A
-/// [`WidgetKind::Composite`] child (a nested container) is out of scope in v1
-/// and is rejected with a warn.
+/// [`WidgetKind::Scroll`] row takes its exact width and height from the decoded
+/// [`ScrollConfig::viewport_extent`]; other children keep their existing
+/// theme/intrinsic row sizing.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.widget.panel.config")]
 pub struct PanelConfig {
@@ -742,14 +829,43 @@ impl Default for PanelConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_data::wire::to_vec;
-    use alloc::vec;
+    use aether_data::wire;
 
     #[test]
-    fn text_area_appends_after_the_landed_image_wire_discriminant() {
-        assert_eq!(to_vec(&WidgetKind::BehaviorHost).expect("encode BehaviorHost"), vec![6, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::Image).expect("encode Image"), vec![7, 0, 0, 0]);
-        assert_eq!(to_vec(&WidgetKind::TextArea).expect("encode TextArea"), vec![8, 0, 0, 0]);
+    fn scroll_wire_vocabulary_uses_named_semantic_records() {
+        let ScrollExtent { width_pixels, height_pixels } = ScrollExtent { width_pixels: 32.0, height_pixels: 18.0 };
+        let ScrollOffset { x_pixels, y_pixels } = ScrollOffset { x_pixels: 4.0, y_pixels: 7.0 };
+        let ScrollDelta { x_pixels: horizontal_delta, y_pixels: vertical_delta } =
+            ScrollDelta { x_pixels: -2.0, y_pixels: 9.0 };
+        let ScrollResidual { x_pixels: horizontal_remainder, y_pixels: vertical_remainder } =
+            ScrollResidual { x_pixels: 0.0, y_pixels: 3.0 };
+
+        // Named-pattern destructuring is a compile-time tripwire: replacing
+        // any semantic record with a tuple, fixed array, or array alias makes
+        // this public-contract test stop compiling.
+        assert_eq!(width_pixels, 32.0);
+        assert_eq!(height_pixels, 18.0);
+        assert_eq!(x_pixels, 4.0);
+        assert_eq!(y_pixels, 7.0);
+        assert_eq!(horizontal_delta, -2.0);
+        assert_eq!(vertical_delta, 9.0);
+        assert_eq!(horizontal_remainder, 0.0);
+        assert_eq!(vertical_remainder, 3.0);
+    }
+
+    #[test]
+    fn widget_kind_preserves_established_wire_discriminants() {
+        // Tripwire: WidgetKind is nested in public configs and its encoded
+        // variant index is the wire contract. Add variants at the end; never
+        // re-bless this golden when inserting a new kind.
+        let behavior_host = wire::to_vec(&WidgetKind::BehaviorHost).expect("encode BehaviorHost");
+        let image = wire::to_vec(&WidgetKind::Image).expect("encode Image");
+        let text_area = wire::to_vec(&WidgetKind::TextArea).expect("encode TextArea");
+        let scroll = wire::to_vec(&WidgetKind::Scroll).expect("encode Scroll");
+        assert_eq!(behavior_host.as_slice(), 6_u32.to_le_bytes());
+        assert_eq!(image.as_slice(), 7_u32.to_le_bytes());
+        assert_eq!(text_area.as_slice(), 8_u32.to_le_bytes());
+        assert_eq!(scroll.as_slice(), 9_u32.to_le_bytes());
     }
 
     #[test]

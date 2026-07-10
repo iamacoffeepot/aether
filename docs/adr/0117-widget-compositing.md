@@ -45,6 +45,32 @@ Completion is a **structural** signal, not a temporal one. An intra-cluster send
 
 For the stock flat panel, the root also owns focus, hover, and pointer capture for the cluster. Every stock config carries defaulted `WidgetControlState`; `SetWidgetState` flows external state down and source-attributed `WidgetStateChanged` flows changes up so root routing stays synchronized. Explicit `HoverLost` then `HoverGained` edges prevent sticky sibling hover, and forward/reverse focus traversal skips hidden and disabled children. Hidden children retain their layout slot and still discharge the compositing contract by replying to every `Collect` with an empty `WidgetDrawList`; disabled children remain drawn but cannot receive input, while read-only value controls may focus without mutating. These are actor mail and plain root bookkeeping, not a widget trait or retained UI tree.
 
+A clipped scroll viewport is a dedicated stateful `ScrollWidget`, not a mode
+on the passive compositor. `ScrollConfig` is the fixed layout authority for
+its named `ScrollExtent` viewport and content extents; the actor alone owns its
+named `ScrollOffset`. It registers the content root at local
+`content_origin - offset` under a viewport-local `WidgetClipRect`, while the
+same state produces an absolute window-pixel `WidgetFrame` for input. A nested
+scroll viewport must exactly match the content extent its parent assigned it.
+That keeps config, rather than a child's optional `WidgetDrawList::intrinsic`,
+as the one clamp authority.
+
+Wheel ownership follows the actor tree. A panel and every scroll actor use
+`Focus::hit_test` over a wheel-only table, never the drag-capture-aware
+`pointer_target`, so an unrelated button drag cannot steal a wheel gesture.
+The deepest scroll child under the cursor receives the unchanged
+`MouseWheel`; only the actor that consumes locally converts it once into the
+content-space `ScrollDelta` sign. Each axis computes `next = clamp(old +
+requested, 0, max)`, `consumed = next - old`, and `residual = requested -
+consumed`. A typed `ScrollOutcome` reports the owning container and exact
+named fields; a non-zero `ScrollResidual` moves upward already converted.
+Ancestors apply that residual directly and relay any remainder, preserving
+partial overshoot and inner-before-outer event order.
+
+Container transparency also applies to live style: `SetTheme` follows the
+scroll actor tree to the retained content root, so a panel's resolved font id
+and later restyles reach stock widgets nested inside one or more viewports.
+
 ### Ordering escape hatch (deferred)
 
 Structural order cannot express a node that must draw outside its tree slot — a tooltip or modal floating above everything regardless of where it lives, or order between top-level roots. That needs an explicit ordering key or edge the compositor evaluates (lift a flagged subtree later in the order, or to a higher root). It is **named here but not built**: the common case is pure structural order, and the escape hatch earns its keep only when a real overlay needs it. It is forward-compatible — the absence of a key is what tree order means, so an opt-in key added later promotes only the nodes that request it and changes nothing else; the compositor collects-then-emits, so the later reorder is a localized change; and the postcard draw kinds can grow an optional field without breaking the wire. Order between independent top-level roots, when it lands, is the substrate's concern, sequenced where top-level surfaces are tracked — structural order governs everything inside a root.
@@ -61,6 +87,15 @@ Structural order cannot express a node that must draw outside its tree slot — 
 - Widget-local and parent-local clipping composes in O(N) without leaking framebuffer-coordinate types into the tree. Invalid or empty intersections disappear before submission, and the root is the sole conversion boundary to the render/text scissor type.
 - Textured widget items retain named local destination and UV fields through composition. Their session texture ids are borrowed lifecycle references: missing or expired textures keep the render capability's record-time warn/drop behavior.
 - One panel root owns its cluster's focus, hover, and capture. External state changes reconcile routing through source-attributed mail; unavailable children cannot retain live focus/hover/capture, and hidden children preserve structural completion with empty draw replies.
+- Each scroll viewport has one actor-owned offset and one config-owned content
+  extent. Recursive wheel hit testing gives the deepest viewport first claim;
+  only exact per-axis residual reaches an ancestor, independent of pointer
+  capture.
+- Scroll wire values use named, pixel-unit fields (`ScrollExtent`,
+  `ScrollOffset`, `ScrollDelta`, and `ScrollResidual`). The pre-existing
+  array-backed `WidgetChildSpec::origin` and `WidgetDrawList::intrinsic`
+  remain compatibility boundaries and are not copied into the scroll
+  protocol.
 
 ## Alternatives considered
 

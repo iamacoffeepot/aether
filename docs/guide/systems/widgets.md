@@ -136,6 +136,49 @@ caret visible. Plain Enter inserts a newline; Ctrl+Enter sends
 `TextCommitted` without changing the value. A multiline selection can cross
 newlines and renders one measured band in each covered visible row.
 
+## Scroll containers and wheel ownership
+
+`ScrollWidget` (`aether.kit.widget.scroll`) is the stateful container for an
+oversized widget subtree. A `WidgetKind::Scroll` child decodes `ScrollConfig`:
+its `viewport_extent` is the row the parent places, `content_extent` is the
+fixed clamp authority, `initial_offset` is clamped at startup, and `content`
+is one ordinary `WidgetChildSpec` root. All new coordinate vocabulary is
+field-named and unit-explicit:
+
+- `ScrollExtent { width_pixels, height_pixels }`
+- `ScrollOffset { x_pixels, y_pixels }`
+- `ScrollDelta { x_pixels, y_pixels }`
+- `ScrollResidual { x_pixels, y_pixels }`
+
+The scroll contract introduces no positional tuple or array wrapper. The old
+`WidgetChildSpec::origin` array is decoded immediately into local coordinates,
+and `WidgetDrawList::intrinsic` remains only the existing compositor
+compatibility channel; neither owns scroll bounds.
+
+Painting and input use the same retained state in different coordinate
+spaces. In local draw space, the content slot is placed at
+`content_origin - offset` and clipped by a viewport-local `WidgetClipRect`.
+In window input space, the child receives an absolute `WidgetFrame` at the
+parent frame origin plus that same translated content origin. A directly
+nested scroll viewport is hit-testable only where that frame intersects its
+ancestor viewport. A nested scroll config's viewport extent must exactly match
+the content extent its parent assigned it, or the slot is rejected.
+
+A wheel always targets the deepest scroll viewport under the cursor using
+`Focus::hit_test`; it never follows pointer capture. The consuming actor
+converts chassis deltas once (`x_pixels = -delta_x`, `y_pixels = -delta_y`),
+then clamps each axis independently. It emits
+`ScrollOutcome { container, offset, consumed, residual }`. If an axis
+overshoots a bound, only the exact `ScrollResidual` remainder moves to the
+parent, already in content-space; parents apply it directly without negating
+again. Intermediate scroll actors relay descendant outcomes unchanged, so a
+panel log preserves inner-before-outer ownership. A remainder that reaches the
+panel is logged as a terminal residual and dropped.
+
+`SetTheme` follows the same actor tree to the retained content root. This keeps
+live restyles and the panel's resolved session font id intact through nested
+scroll containers.
+
 ## The reference panel
 
 `WidgetPanel` (export `aether.kit.widget.panel`) is the worked example — the
@@ -150,7 +193,9 @@ initial state, and static eligibility derive from each child's decoded config.
 TextArea slots derive their height from `theme.row_height * rows.max(1)`.
 A `WidgetKind::BehaviorHost` derives the same metadata from both its `wrapped`
 discriminator and opaque `wrapped_config`; wrapping does not make every child
-focusable. The vertical order follows the declared order, so what a panel
+focusable. A `WidgetKind::Scroll` row takes its width and height from its named
+viewport extent and also enters the panel's separate wheel-only hit table.
+The vertical order follows the declared order, so what a panel
 contains is config data. Its
 value-up handlers are the seam: each attributes the event by
 `ctx.source_mailbox()` and is where a map editor translates a widget change

@@ -44,22 +44,25 @@ use aether_capabilities::RenderCapability;
 use aether_capabilities::fs::NamespaceRoots;
 use aether_capabilities::render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
 use aether_capabilities::text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
-use aether_data::Kind;
+use aether_data::{Kind, mailbox_id_from_path};
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_RIGHT, KEY_TAB, KEY_UP};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
     CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, FrameCheck, FrameCheckResult, FrameRect,
     FrameReduction, FrameVerdict, ImePreedit, Key, LoadComponent, LoadResult, LogTailResult, Modifiers, MouseButton,
-    MouseButtonRelease, MouseMove, NamedMail, TextInput, Tick,
+    MouseButtonRelease, MouseMove, MouseWheel, NamedMail, TextInput, Tick,
 };
 use aether_kit::{
-    ButtonConfig, PanelConfig, SetWidgetState, SliderConfig, TextAreaConfig, Theme, ThemeState, WidgetChildSpec,
-    WidgetControlState, WidgetKind, WidgetValidation,
+    ButtonConfig, LabelConfig, PanelConfig, ScrollConfig, ScrollExtent, ScrollOffset, SetTheme, SetWidgetState,
+    SliderConfig, TextAreaConfig, Theme, ThemeState, WidgetChildSpec, WidgetConfig, WidgetControlState, WidgetDrawItem,
+    WidgetKind, WidgetValidation,
 };
+use aether_math::Rgba;
 use aether_substrate_bundle::test_bench::{
     ArtifactGuard, BenchOp, TestBench,
     test_helpers::{init_save_sandbox, require_runtime},
 };
+use aether_substrate_bundle::visual::{Image, decode_png};
 
 /// Panel origin and stack width (widget-local `(0, 0)` maps to this window
 /// point), matching `widget_set` / `widget_text_alignment`.
@@ -296,6 +299,49 @@ fn text_area_child(subname: &str, rows: u32, font_id: u32) -> WidgetChildSpec {
     }
 }
 
+fn solid_leaf(subname: &str, width_pixels: f32, stripes: Vec<WidgetDrawItem>) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::Composite,
+        origin: [3.0, 2.0],
+        clip: None,
+        config: WidgetConfig {
+            root: false,
+            chrome: stripes,
+            intrinsic: Some([width_pixels, 90.0]),
+            children: Vec::new(),
+        }
+        .encode_into_bytes(),
+    }
+}
+
+fn solid_quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> WidgetDrawItem {
+    WidgetDrawItem::Quad { x, y, width, height, color, clip: None }
+}
+
+fn scroll_child(
+    subname: &str,
+    viewport_extent: ScrollExtent,
+    content_extent: ScrollExtent,
+    content_left_pixels: f32,
+    content_top_pixels: f32,
+    content: WidgetChildSpec,
+) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::Scroll,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: ScrollConfig {
+            viewport_extent,
+            content_extent,
+            initial_offset: ScrollOffset::default(),
+            content: WidgetChildSpec { origin: [content_left_pixels, content_top_pixels], ..content },
+        }
+        .encode_into_bytes(),
+    }
+}
+
 fn control_state_children() -> Vec<WidgetChildSpec> {
     let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
@@ -479,6 +525,23 @@ fn panel_log_messages(bench: &mut TestBench) -> Vec<String> {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|e| e.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }
+}
+
+fn log_f32(message: &str, field: &str) -> Option<f32> {
+    message.split_once(&format!("{field}="))?.1.split_whitespace().next()?.parse().ok()
+}
+
+fn log_u64(message: &str, field: &str) -> Option<u64> {
+    message.split_once(&format!("{field}="))?.1.split_whitespace().next()?.parse().ok()
+}
+
+fn image_rgb(image: &Image, x: u32, y: u32) -> [u8; 3] {
+    let index = ((y * image.width + x) * 4) as usize;
+    [image.rgba[index], image.rgba[index + 1], image.rgba[index + 2]]
+}
+
+fn reads_yellow(pixel: [u8; 3]) -> bool {
+    pixel[0] > 150 && pixel[1] > 150 && pixel[2] < 150
 }
 
 /// The window rect of stack row `index` (0 = label), height `rows` row-heights.
@@ -1501,4 +1564,239 @@ fn resident_label_glyphs_forward_the_exact_parent_row_clip() {
             "label glyph {quad:?} should lie inside its forwarded row clip {expected:?}",
         );
     }
+}
+
+#[test]
+fn nested_scroll_relays_live_font_theme_to_real_label_glyphs() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let label = WidgetChildSpec {
+        subname: "theme_label".to_owned(),
+        kind: WidgetKind::Label,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: LabelConfig {
+            text: "Nested scroll label".to_owned(),
+            theme: Theme { font_id: u32::MAX, ..Theme::DEFAULT },
+            state: WidgetControlState::default(),
+        }
+        .encode_into_bytes(),
+    };
+    let inner = scroll_child(
+        "theme_inner",
+        ScrollExtent { width_pixels: 100.0, height_pixels: ROW_HEIGHT },
+        ScrollExtent { width_pixels: 120.0, height_pixels: ROW_HEIGHT },
+        0.0,
+        0.0,
+        label,
+    );
+    let outer = scroll_child(
+        "theme_outer",
+        ScrollExtent { width_pixels: 80.0, height_pixels: ROW_HEIGHT },
+        ScrollExtent { width_pixels: 100.0, height_pixels: ROW_HEIGHT },
+        0.0,
+        0.0,
+        inner,
+    );
+
+    let mut bench = build_bench();
+    let font_id = load_font(&mut bench);
+    load_panel_with_children(&mut bench, &wasm, font_id, vec![outer]);
+    warm_panel(&mut bench);
+    let panel = panel_address();
+    bench
+        .execute(vec![
+            ("relay_theme", BenchOp::send_mail(&panel, &SetTheme { theme: Theme { font_id, ..Theme::DEFAULT } })),
+            ("prime_relayed_glyph", BenchOp::send_mail(&panel, &Tick)),
+            ("settle_relayed_glyph", BenchOp::advance(2)),
+            ("capture_relayed_glyph", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
+        ])
+        .expect("relay theme through both scroll actors and capture the nested label");
+
+    let expected = ClipRect { x: PANEL_X, y: PANEL_Y, width: 80.0, height: ROW_HEIGHT };
+    let snapshot = bench.committed_overlay_snapshot();
+    let glyph_batches: Vec<_> = snapshot
+        .iter()
+        .filter(|batch| batch.texture_id != WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(&expected))
+        .collect();
+    assert!(
+        !glyph_batches.is_empty(),
+        "the live font theme must traverse outer → inner → Label; snapshot: {snapshot:?}",
+    );
+    assert!(
+        glyph_batches.iter().any(|batch| !batch.quads.is_empty()),
+        "the relayed live font must produce resident glyph quads under the effective outer clip",
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one end-to-end nested ownership + clipping matrix
+fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let red = Rgba::new(0.90, 0.05, 0.05, 1.0);
+    let green = Rgba::new(0.05, 0.90, 0.05, 1.0);
+    let yellow = Rgba::new(0.90, 0.90, 0.05, 1.0);
+    let blue = Rgba::new(0.05, 0.05, 0.90, 1.0);
+
+    let leaf = solid_leaf(
+        "leaf",
+        80.0,
+        vec![
+            solid_quad(0.0, 0.0, 80.0, 30.0, red),
+            solid_quad(0.0, 30.0, 80.0, 30.0, green),
+            solid_quad(0.0, 60.0, 80.0, 30.0, yellow),
+        ],
+    );
+    let inner = scroll_child(
+        "inner",
+        ScrollExtent { width_pixels: 60.0, height_pixels: 50.0 },
+        ScrollExtent { width_pixels: 80.0, height_pixels: 90.0 },
+        3.0,
+        2.0,
+        leaf,
+    );
+    let outer = scroll_child(
+        "outer",
+        ScrollExtent { width_pixels: 40.0, height_pixels: 30.0 },
+        // Exact match with the nested child's viewport is the assigned-slot
+        // contract checked before the inner actor is spawned.
+        ScrollExtent { width_pixels: 60.0, height_pixels: 50.0 },
+        5.0,
+        4.0,
+        inner,
+    );
+    let side_leaf = solid_leaf("side_leaf", 40.0, vec![solid_quad(0.0, 0.0, 40.0, 40.0, blue)]);
+    let side = scroll_child(
+        "side",
+        ScrollExtent { width_pixels: 40.0, height_pixels: 20.0 },
+        ScrollExtent { width_pixels: 40.0, height_pixels: 40.0 },
+        0.0,
+        0.0,
+        side_leaf,
+    );
+    let button = button_child("captor", "Hold", WidgetControlState::default());
+
+    let mut bench = build_bench();
+    boot_panel_with_children(&mut bench, &wasm, vec![outer, button, side]);
+    let panel = panel_address();
+
+    // The button row is y=46..70. Hold its left-button capture, then wheel at
+    // y=20 over the outer viewport. Wheel ownership must use its independent
+    // hit table and reach inner-first despite the unrelated capture.
+    bench
+        .execute(vec![
+            ("capture_button", BenchOp::send_mail(&panel, &press(20.0, 55.0))),
+            ("inner_only", BenchOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -20.0, x: 20.0, y: 20.0 })),
+            (
+                "split_inner_outer",
+                BenchOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -30.0, x: 20.0, y: 20.0 }),
+            ),
+            (
+                "terminal_residual",
+                BenchOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -20.0, x: 20.0, y: 20.0 }),
+            ),
+        ])
+        .expect("nested wheel routing while button capture is held");
+
+    let outer_address = child_address("outer");
+    // Inline aliases currently fold flat on the component carry even though
+    // the guest registry records the logical parent for `ctx.parent()`.
+    let inner_address = child_address("inner");
+    let outer_id = mailbox_id_from_path(&outer_address).0;
+    let inner_id = mailbox_id_from_path(&inner_address).0;
+    let first_log = panel_log_messages(&mut bench);
+    let outcomes: Vec<_> = first_log.iter().filter(|message| message.contains("widget scroll outcome")).collect();
+    assert_eq!(outcomes.len(), 5, "inner-only, split, and pinned requests emit 1 + 2 + 2 typed outcomes: {outcomes:?}");
+    assert_eq!(log_u64(outcomes[0], "container"), Some(inner_id));
+    assert_eq!(log_f32(outcomes[0], "offset_y_pixels"), Some(20.0));
+    assert_eq!(log_f32(outcomes[0], "consumed_y_pixels"), Some(20.0));
+    assert_eq!(log_f32(outcomes[0], "residual_y_pixels"), Some(0.0));
+
+    assert_eq!(log_u64(outcomes[1], "container"), Some(inner_id));
+    assert_eq!(log_f32(outcomes[1], "offset_y_pixels"), Some(40.0));
+    assert_eq!(log_f32(outcomes[1], "consumed_y_pixels"), Some(20.0));
+    assert_eq!(log_f32(outcomes[1], "residual_y_pixels"), Some(10.0));
+    assert_eq!(log_u64(outcomes[2], "container"), Some(outer_id));
+    assert_eq!(log_f32(outcomes[2], "offset_y_pixels"), Some(10.0));
+    assert_eq!(log_f32(outcomes[2], "consumed_y_pixels"), Some(10.0));
+    assert_eq!(log_f32(outcomes[2], "residual_y_pixels"), Some(0.0));
+
+    assert_eq!(log_u64(outcomes[3], "container"), Some(inner_id));
+    assert_eq!(log_f32(outcomes[3], "consumed_y_pixels"), Some(0.0));
+    assert_eq!(log_f32(outcomes[3], "residual_y_pixels"), Some(20.0));
+    assert_eq!(log_u64(outcomes[4], "container"), Some(outer_id));
+    assert_eq!(log_f32(outcomes[4], "offset_y_pixels"), Some(20.0));
+    assert_eq!(log_f32(outcomes[4], "consumed_y_pixels"), Some(10.0));
+    assert_eq!(log_f32(outcomes[4], "residual_y_pixels"), Some(10.0));
+    let terminals: Vec<_> =
+        first_log.iter().filter(|message| message.contains("widget terminal scroll residual")).collect();
+    assert_eq!(terminals.len(), 1);
+    assert_eq!(log_f32(terminals[0], "residual_y_pixels"), Some(10.0));
+
+    // At the pinned y offsets, the yellow third stripe lands at framebuffer
+    // y=16 and is clipped to the outer 40×30 viewport at (10,10). Score the
+    // actual captured pixels on all four sides, not just retained geometry.
+    let captured = bench
+        .execute(vec![("pinned_pixels", BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new()))])
+        .expect("capture pinned nested scroll");
+    let image = decode_png(captured.captured("pinned_pixels").expect("pinned capture bytes"))
+        .expect("decode pinned nested scroll capture");
+    assert!(
+        reads_yellow(image_rgb(&image, 20, 20)),
+        "the offset third stripe should be visible inside the nested viewport",
+    );
+    for (x, y, side_name) in [(9, 20, "left"), (50, 20, "right"), (20, 9, "top"), (20, 40, "bottom")] {
+        assert!(
+            !reads_yellow(image_rgb(&image, x, y)),
+            "yellow content escaped the {side_name} viewport edge at ({x}, {y})",
+        );
+    }
+
+    // Reverse through both bounds, then exercise x independently and move the
+    // wheel cursor to a sibling viewport. Exact typed outcomes prove residuals
+    // are already in content-space and never negated a second time.
+    bench
+        .execute(vec![
+            ("reverse_both", BenchOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: 80.0, x: 20.0, y: 20.0 })),
+            (
+                "horizontal_independent",
+                BenchOp::send_mail(&panel, &MouseWheel { delta_x: -50.0, delta_y: 0.0, x: 20.0, y: 20.0 }),
+            ),
+            (
+                "sibling_viewport",
+                BenchOp::send_mail(&panel, &MouseWheel { delta_x: 0.0, delta_y: -12.0, x: 20.0, y: 80.0 }),
+            ),
+        ])
+        .expect("reverse, independent axis, and sibling scroll routing");
+
+    let final_log = panel_log_messages(&mut bench);
+    let final_outcomes: Vec<_> = final_log.iter().filter(|message| message.contains("widget scroll outcome")).collect();
+    assert_eq!(final_outcomes.len(), 10, "all outcome events remain observable");
+    assert_eq!(log_u64(final_outcomes[5], "container"), Some(inner_id));
+    assert_eq!(log_f32(final_outcomes[5], "consumed_y_pixels"), Some(-40.0));
+    assert_eq!(log_f32(final_outcomes[5], "residual_y_pixels"), Some(-40.0));
+    assert_eq!(log_u64(final_outcomes[6], "container"), Some(outer_id));
+    assert_eq!(log_f32(final_outcomes[6], "consumed_y_pixels"), Some(-20.0));
+    assert_eq!(log_f32(final_outcomes[6], "residual_y_pixels"), Some(-20.0));
+    assert_eq!(log_u64(final_outcomes[7], "container"), Some(inner_id));
+    assert_eq!(log_f32(final_outcomes[7], "consumed_x_pixels"), Some(20.0));
+    assert_eq!(log_f32(final_outcomes[7], "consumed_y_pixels"), Some(0.0));
+    assert_eq!(log_u64(final_outcomes[8], "container"), Some(outer_id));
+    assert_eq!(log_f32(final_outcomes[8], "consumed_x_pixels"), Some(20.0));
+    assert_eq!(log_f32(final_outcomes[8], "residual_x_pixels"), Some(10.0));
+
+    let side_id = mailbox_id_from_path(&child_address("side")).0;
+    assert_eq!(log_u64(final_outcomes[9], "container"), Some(side_id));
+    assert_eq!(log_f32(final_outcomes[9], "offset_y_pixels"), Some(12.0));
+    assert_eq!(log_f32(final_outcomes[9], "consumed_y_pixels"), Some(12.0));
+    let final_terminals: Vec<_> =
+        final_log.iter().filter(|message| message.contains("widget terminal scroll residual")).collect();
+    assert_eq!(final_terminals.len(), 3);
+    assert_eq!(log_f32(final_terminals[1], "residual_y_pixels"), Some(-20.0),);
+    assert_eq!(log_f32(final_terminals[2], "residual_x_pixels"), Some(10.0),);
 }

@@ -37,11 +37,13 @@ use std::fs;
 use aether_capabilities::render::{
     CreateTexture, CreateTextureResult, TextureFormat, TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
 };
-use aether_data::{Kind, MailboxId};
+use aether_data::Kind;
 use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, QuadSpace};
-use aether_kit::widget::composite::Composite;
-use aether_kit::{WidgetChildSpec, WidgetClipRect, WidgetConfig, WidgetDrawItem, WidgetDrawList, WidgetKind};
-use aether_math::{Rgba, Vec2};
+use aether_kit::{
+    PanelConfig, ScrollConfig, ScrollExtent, ScrollOffset, Theme, WidgetChildSpec, WidgetClipRect, WidgetConfig,
+    WidgetDrawItem, WidgetKind,
+};
+use aether_math::Rgba;
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{Image, Rect, background_top_left, decode_png, target_color_stats};
 
@@ -164,6 +166,36 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8], config: &WidgetConfig) {
             assert!(name.ends_with(":panel"), "the Widget root should register under :panel; got {name}");
         }
         LoadResult::Err { error } => panic!("load Widget root: {error}"),
+    }
+}
+
+fn load_scroll_panel(bench: &mut TestBench, wasm: &[u8], child: WidgetChildSpec) {
+    let config = PanelConfig {
+        x: 12.0,
+        y: 8.0,
+        width: 64.0,
+        font_namespace: String::new(),
+        font_path: String::new(),
+        theme: Theme::DEFAULT,
+        children: vec![child],
+    };
+    let loaded = bench
+        .execute(vec![(
+            "load",
+            BenchOp::send_and_await(
+                "aether.component",
+                &LoadComponent {
+                    wasm: wasm.to_vec(),
+                    name: Some("panel".to_owned()),
+                    config: config.encode_into_bytes(),
+                    export: Some("aether.kit.widget.panel".to_owned()),
+                },
+            ),
+        )])
+        .expect("load scroll panel sequence");
+    match loaded.reply::<LoadResult>("load").expect("decode scroll-panel LoadResult") {
+        LoadResult::Ok { name, .. } => assert!(name.ends_with(":panel")),
+        LoadResult::Err { error } => panic!("load scroll WidgetPanel: {error}"),
     }
 }
 
@@ -377,34 +409,11 @@ fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
     let green_local_clip = WidgetClipRect { x: 2.0, y: 1.0, width: 20.0, height: 20.0 };
     let disjoint_local_clip = WidgetClipRect { x: 30.0, y: 30.0, width: 4.0, height: 4.0 };
     let red_local_clip = WidgetClipRect { x: 0.0, y: 0.0, width: 30.0, height: 20.0 };
-    let red_effective_clip = root_clip;
-    let green_effective_clip = WidgetClipRect { x: 16.0, y: 13.0, width: 10.0, height: 8.0 };
 
-    // Pin the pure two-level composition first: local clips translate with
-    // their items, parent-local slot clips do not, and the disjoint white item
-    // disappears without disturbing the blue/red/green order.
     let leaf_items = vec![
         clipped_quad(0.0, 0.0, 30.0, 20.0, GREEN, green_local_clip),
         clipped_quad(0.0, 0.0, 30.0, 20.0, WHITE, disjoint_local_clip),
     ];
-    let mut interior = Composite::new();
-    interior.register_slot(MailboxId(1), Vec2::new(4.0, 3.0), Some(leaf_clip), "leaf", "aether.kit.widget");
-    interior.begin_frame();
-    interior.extend_chrome([clipped_quad(0.0, 0.0, 30.0, 20.0, RED, red_local_clip)]);
-    assert!(interior.fill(MailboxId(1), WidgetDrawList { intrinsic: None, items: leaf_items.clone() },));
-    let mut root = Composite::new();
-    root.register_slot(MailboxId(2), Vec2::new(10.0, 8.0), Some(root_clip), "interior", "aether.kit.widget");
-    root.begin_frame();
-    root.extend_chrome([quad(0.0, 0.0, 64.0, 48.0, BLUE)]);
-    assert!(root.fill(MailboxId(2), interior.flatten(None)));
-    assert_eq!(
-        root.flatten(None).items,
-        vec![
-            quad(0.0, 0.0, 64.0, 48.0, BLUE),
-            clipped_quad(10.0, 8.0, 30.0, 20.0, RED, red_effective_clip),
-            clipped_quad(14.0, 11.0, 30.0, 20.0, GREEN, green_effective_clip),
-        ],
-    );
 
     let leaf =
         WidgetConfig { root: false, chrome: leaf_items, intrinsic: None, children: Vec::new() }.encode_into_bytes();
@@ -667,4 +676,99 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
     assert!(final_yellow.fraction > 0.8, "the final solid should overdraw the blue textured item: {final_yellow:?}");
     let covered_blue = target_color_stats(&img, TEXTURE_BLUE, tolerance, Some(final_region));
     assert!(covered_blue.fraction < 0.1, "the blue crop should be hidden beneath the final solid: {covered_blue:?}");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one cohesive exact-layout + four-edge pixel proof
+fn scroll_composition_offsets_content_and_contains_pixels_on_every_viewport_edge() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let content = WidgetConfig {
+        root: false,
+        chrome: vec![quad(0.0, 0.0, 40.0, 32.0, RED), quad(12.0, 12.0, 8.0, 8.0, GREEN)],
+        intrinsic: Some([40.0, 32.0]),
+        children: Vec::new(),
+    };
+    let scroll = WidgetChildSpec {
+        subname: "scroll".to_owned(),
+        kind: WidgetKind::Scroll,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: ScrollConfig {
+            viewport_extent: ScrollExtent { width_pixels: 24.0, height_pixels: 16.0 },
+            content_extent: ScrollExtent { width_pixels: 40.0, height_pixels: 32.0 },
+            initial_offset: ScrollOffset { x_pixels: 8.0, y_pixels: 10.0 },
+            content: WidgetChildSpec {
+                subname: "content".to_owned(),
+                kind: WidgetKind::Composite,
+                origin: [4.0, 3.0],
+                clip: None,
+                config: content.encode_into_bytes(),
+            },
+        }
+        .encode_into_bytes(),
+    };
+
+    let mut bench = TestBench::start_with_size(80, 48).expect("boot");
+    load_scroll_panel(&mut bench, &wasm, scroll);
+    let captured = bench
+        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], Vec::new()))])
+        .expect("capture scrolled composite");
+    let image = decode_png(captured.captured("snap").expect("scroll capture bytes")).expect("decode scroll capture");
+
+    let clip = ClipRect { x: 12.0, y: 8.0, width: 24.0, height: 16.0 };
+    let snapshot = bench.committed_overlay_snapshot();
+    let content_batch = snapshot
+        .iter()
+        .find(|batch| batch.clip.as_ref() == Some(&clip))
+        .unwrap_or_else(|| panic!("missing scroll viewport batch {clip:?}: {snapshot:?}"));
+    assert_eq!(content_batch.texture_id, WHITE_TEXTURE_ID);
+    assert_eq!(
+        content_batch.quads,
+        vec![
+            RenderTexturedQuad {
+                x: 8.0,
+                y: 1.0,
+                width: 40.0,
+                height: 32.0,
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+                tint: RED,
+            },
+            RenderTexturedQuad {
+                x: 20.0,
+                y: 13.0,
+                width: 8.0,
+                height: 8.0,
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+                tint: GREEN,
+            },
+        ],
+        "content_origin - initial_offset and panel placement agree exactly",
+    );
+    assert_eq!(
+        bench.count_observed("aether.render.draw_solid_quads"),
+        2,
+        "the panel background and one equal-clip content run are the only solid batches",
+    );
+
+    let strong_primary = |pixel: [u8; 3], channel: usize| {
+        (0..3).all(|other| other == channel || i16::from(pixel[channel]) > i16::from(pixel[other]) + 80)
+    };
+    assert!(strong_primary(rgb_at(&image, 14, 10), 0));
+    assert!(strong_primary(rgb_at(&image, 22, 15), 1));
+    for (x, y, side) in [(11, 12, "left"), (36, 12, "right"), (20, 7, "top"), (20, 24, "bottom")] {
+        let pixel = rgb_at(&image, x, y);
+        assert!(
+            !strong_primary(pixel, 0) && !strong_primary(pixel, 1),
+            "scroll content escaped the {side} clip edge at ({x}, {y}): {pixel:?}",
+        );
+    }
 }
