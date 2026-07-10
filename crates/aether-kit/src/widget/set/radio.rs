@@ -15,13 +15,14 @@ use alloc::vec::Vec;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_DOWN, KEY_UP};
 use aether_kinds::mouse_button;
-use aether_kinds::{Key, MouseButton};
+use aether_kinds::{Key, MouseButton, MouseButtonRelease};
 
-use crate::widget::set::{push_border, quad, text_origin_y};
-use crate::widget::theme::{SetTheme, Theme, WidgetState};
+use crate::widget::set::{push_control_outlines, quad, text_origin_y};
+use crate::widget::state::{InteractionState, emit_state_changed};
+use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
-    Collect, FocusGained, FocusLost, RadioConfig, RadioSelected, WidgetDrawItem, WidgetDrawList,
-    WidgetFrame,
+    Collect, FocusGained, FocusLost, HoverGained, HoverLost, RadioConfig, RadioSelected,
+    SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 /// A radio group. Holds the option labels, the selected index, and the cached
@@ -31,7 +32,8 @@ pub struct RadioGroupWidget {
     selected: usize,
     theme: Theme,
     frame: WidgetFrame,
-    focused: bool,
+    state: InteractionState,
+    pressed: bool,
 }
 
 impl RadioGroupWidget {
@@ -74,22 +76,39 @@ impl WasmActor for RadioGroupWidget {
             options: config.options,
             selected,
             theme: config.theme,
+            state: InteractionState::new(config.state),
             frame: WidgetFrame {
                 x: 0.0,
                 y: 0.0,
                 width: 0.0,
                 height: 0.0,
             },
-            focused: false,
+            pressed: false,
         })
     }
 
     /// Replace the options / theme in place, re-clamping the selection.
     #[handler::single]
-    fn on_config(&mut self, _ctx: &mut WasmCtx<'_>, config: RadioConfig) {
+    fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: RadioConfig) {
         self.selected = clamp_index(config.initial_index, config.options.len());
         self.options = config.options;
         self.theme = config.theme;
+        if self.state.replace(config.state) {
+            if !self.state.can_mutate() {
+                self.pressed = false;
+            }
+            emit_state_changed(ctx, &self.state);
+        }
+    }
+
+    #[handler::single]
+    fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
+        if self.state.replace(set.state) {
+            if !self.state.can_mutate() {
+                self.pressed = false;
+            }
+            emit_state_changed(ctx, &self.state);
+        }
     }
 
     /// Restyle: adopt the fanned theme.
@@ -107,21 +126,33 @@ impl WasmActor for RadioGroupWidget {
     /// Take keyboard focus.
     #[handler::single]
     fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.focused = true;
+        self.state.gain_focus();
     }
 
     /// Release keyboard focus.
     #[handler::single]
     fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        self.focused = false;
+        self.state.lose_focus();
+        self.pressed = false;
+    }
+
+    #[handler::single]
+    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
+        self.state.set_hovered(true);
+    }
+
+    #[handler::single]
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
     }
 
     /// A left click selects the row under the cursor.
     #[handler::single]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
-        if press.button != mouse_button::LEFT {
+        if press.button != mouse_button::LEFT || !self.state.can_mutate() {
             return;
         }
+        self.pressed = true;
         if let Some(row) = self.row_at_local_y(press.y - self.frame.y)
             && row != self.selected
         {
@@ -130,10 +161,17 @@ impl WasmActor for RadioGroupWidget {
         }
     }
 
+    #[handler::single]
+    fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
+        if release.button == mouse_button::LEFT {
+            self.pressed = false;
+        }
+    }
+
     /// Up / Down move the selection while focused (clamped at the ends).
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
-        if self.options.is_empty() {
+        if self.options.is_empty() || !self.state.can_mutate() {
             return;
         }
         let next = match key.code {
@@ -154,11 +192,19 @@ impl WasmActor for RadioGroupWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
+        if !self.state.is_visible() {
+            if let Some(parent) = ctx.parent() {
+                parent.send(&WidgetDrawList {
+                    intrinsic: None,
+                    items: Vec::new(),
+                });
+            }
+            return;
+        }
         let row_height = self.theme.row_height.max(1.0);
         let marker = (row_height * 0.5).max(4.0);
         let pad = self.theme.pad;
         let size = self.theme.label_size_pixels;
-
         let mut items: Vec<WidgetDrawItem> = Vec::new();
         for (i, option) in self.options.iter().enumerate() {
             #[allow(clippy::cast_precision_loss)]
@@ -169,12 +215,17 @@ impl WasmActor for RadioGroupWidget {
             } else {
                 self.theme.surface_raised
             };
+            let marker_state = if i == self.selected {
+                self.state.theme_state(self.pressed)
+            } else {
+                self.state.supporting_theme_state(false)
+            };
             items.push(quad(
                 pad,
                 marker_y,
                 marker,
                 marker,
-                self.theme.fill(base, WidgetState::Normal),
+                self.theme.fill(base, marker_state),
             ));
             items.push(WidgetDrawItem::Text {
                 x: pad.mul_add(2.0, marker),
@@ -182,19 +233,20 @@ impl WasmActor for RadioGroupWidget {
                 font_id: self.theme.font_id,
                 text: option.clone(),
                 size_pixels: size,
-                color: self.theme.text_primary,
+                color: self.theme.fill(
+                    self.theme.text_primary,
+                    self.state.supporting_theme_state(false),
+                ),
                 clip: None,
             });
         }
-        if self.focused {
-            push_border(
-                &mut items,
-                self.frame.width,
-                self.frame.height,
-                2.0,
-                self.theme.accent,
-            );
-        }
+        push_control_outlines(
+            &mut items,
+            self.frame.width,
+            self.frame.height,
+            &self.state,
+            &self.theme,
+        );
         if let Some(parent) = ctx.parent() {
             parent.send(&WidgetDrawList {
                 intrinsic: None,
@@ -217,6 +269,7 @@ fn clamp_index(index: u32, len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widget::WidgetControlState;
     use alloc::vec;
 
     fn group(options: &[&str], selected: usize) -> RadioGroupWidget {
@@ -224,13 +277,14 @@ mod tests {
             options: options.iter().map(|s| String::from(*s)).collect(),
             selected,
             theme: Theme::DEFAULT, // row_height = 24
+            state: InteractionState::new(WidgetControlState::default()),
             frame: WidgetFrame {
                 x: 0.0,
                 y: 10.0,
                 width: 100.0,
                 height: 72.0,
             },
-            focused: false,
+            pressed: false,
         }
     }
 

@@ -14,14 +14,20 @@ use alloc::vec::Vec;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 
 use crate::widget::set::text_origin_y;
+use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme};
-use crate::widget::{Collect, LabelConfig, WidgetDrawItem, WidgetDrawList, WidgetFrame};
+use crate::widget::{
+    Collect, LabelConfig, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+};
 
 /// A static text label. Holds the text plus the cached theme / frame.
 pub struct LabelWidget {
     text: String,
     theme: Theme,
     frame: WidgetFrame,
+    /// Read-only and validation are inapplicable to a static label; visibility
+    /// and enabled still control absence and muted presentation consistently.
+    state: InteractionState,
 }
 
 /// A label widget. Spawned inline by a panel root with a [`LabelConfig`];
@@ -39,6 +45,7 @@ impl WasmActor for LabelWidget {
         Ok(LabelWidget {
             text: config.text,
             theme: config.theme,
+            state: InteractionState::new(config.state),
             frame: WidgetFrame {
                 x: 0.0,
                 y: 0.0,
@@ -50,9 +57,20 @@ impl WasmActor for LabelWidget {
 
     /// Change the text / theme in place from a re-sent config.
     #[handler::single]
-    fn on_config(&mut self, _ctx: &mut WasmCtx<'_>, config: LabelConfig) {
+    fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: LabelConfig) {
         self.text = config.text;
         self.theme = config.theme;
+        if self.state.replace(config.state) {
+            emit_state_changed(ctx, &self.state);
+        }
+    }
+
+    /// Update external availability without changing the label or theme.
+    #[handler::single]
+    fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
+        if self.state.replace(set.state) {
+            emit_state_changed(ctx, &self.state);
+        }
     }
 
     /// Restyle: adopt the fanned theme.
@@ -73,6 +91,15 @@ impl WasmActor for LabelWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
+        if !self.state.is_visible() {
+            if let Some(parent) = ctx.parent() {
+                parent.send(&WidgetDrawList {
+                    intrinsic: None,
+                    items: Vec::new(),
+                });
+            }
+            return;
+        }
         let size = self.theme.label_size_pixels;
         let mut items: Vec<WidgetDrawItem> = Vec::new();
         if !self.text.is_empty() {
@@ -82,7 +109,9 @@ impl WasmActor for LabelWidget {
                 font_id: self.theme.font_id,
                 text: self.text.clone(),
                 size_pixels: size,
-                color: self.theme.text_primary,
+                color: self
+                    .theme
+                    .fill(self.theme.text_primary, self.state.theme_state(false)),
                 clip: None,
             });
         }

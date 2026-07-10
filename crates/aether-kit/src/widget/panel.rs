@@ -58,15 +58,19 @@ use aether_kinds::{
 use aether_math::Vec2;
 
 use crate::widget::composite::Composite;
-use crate::widget::focus::{Focus, FocusTransition};
+use crate::widget::focus::{
+    AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition,
+    HoverTransition,
+};
 use crate::widget::set::{
     ButtonWidget, LabelWidget, RadioGroupWidget, SliderWidget, TextFieldWidget, quad,
 };
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
-    ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, LabelConfig, PanelConfig,
-    RadioConfig, RadioSelected, SliderChanged, SliderConfig, TextCommitted, TextFieldConfig,
-    WidgetChildSpec, WidgetClipRect, WidgetDrawList, WidgetFrame, WidgetKind,
+    ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost,
+    LabelConfig, PanelConfig, RadioConfig, RadioSelected, SliderChanged, SliderConfig,
+    TextCommitted, TextFieldConfig, WidgetChildSpec, WidgetClipRect, WidgetControlState,
+    WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
 };
 use crate::widget::{accept_child_list, emit, flush_membership};
 
@@ -76,6 +80,15 @@ use crate::widget::{accept_child_list, emit, flush_membership};
 struct ChildRef {
     id: MailboxId,
     name: String,
+}
+
+struct SpawnedChild {
+    id: MailboxId,
+    height: f32,
+    pointer_eligible: bool,
+    focusable: bool,
+    state: WidgetControlState,
+    type_namespace: &'static str,
 }
 
 /// The reference panel root. Loaded as a component with a [`PanelConfig`]; its
@@ -91,12 +104,14 @@ pub struct WidgetPanel {
     spawned: bool,
     /// The total stack height, for the background chrome; set at spawn.
     panel_height: f32,
+    /// Latest modifier state, used by panel-owned forward/reverse Tab routing.
+    modifiers: Modifiers,
 }
 
 impl WidgetPanel {
     /// Spawn the declared widget stack once (from the first frame — an inline
-    /// child gets no `wire` and `init` cannot spawn, so the root spawns from
-    /// its first send-capable handler). Each spec spawns its kind's actor from
+    /// `init` cannot spawn, so the root spawns from its first activation
+    /// handler). Each spec spawns its kind's actor from
     /// its decoded config; the row height and focusability derive from that
     /// config, and the vertical position derives from stack order (`origin` on
     /// the spec is ignored — the panel owns layout). Each widget gets its rect
@@ -136,42 +151,8 @@ impl WidgetPanel {
             // from any arm (an undecodable config, a spawn failure, or a
             // rejected container) skips the slot entirely so the stack
             // stays honest.
-            let placed = match spec.kind {
-                WidgetKind::Label => decode_child::<LabelConfig>(spec)
-                    .and_then(|config| spawn::<LabelWidget>(ctx, &spec.subname, &config))
-                    .map(|id| (id, row, false, <LabelWidget as Addressable>::NAMESPACE)),
-                WidgetKind::Slider => decode_child::<SliderConfig>(spec)
-                    .and_then(|config| spawn::<SliderWidget>(ctx, &spec.subname, &config))
-                    .map(|id| (id, row, true, <SliderWidget as Addressable>::NAMESPACE)),
-                WidgetKind::Radio => decode_child::<RadioConfig>(spec).and_then(|config| {
-                    let height = row * config.options.len() as f32;
-                    spawn::<RadioGroupWidget>(ctx, &spec.subname, &config).map(|id| {
-                        (
-                            id,
-                            height,
-                            true,
-                            <RadioGroupWidget as Addressable>::NAMESPACE,
-                        )
-                    })
-                }),
-                WidgetKind::TextField => decode_child::<TextFieldConfig>(spec)
-                    .and_then(|config| spawn::<TextFieldWidget>(ctx, &spec.subname, &config))
-                    .map(|id| (id, row, true, <TextFieldWidget as Addressable>::NAMESPACE)),
-                WidgetKind::Button => decode_child::<ButtonConfig>(spec)
-                    .and_then(|config| spawn::<ButtonWidget>(ctx, &spec.subname, &config))
-                    .map(|id| (id, row, true, <ButtonWidget as Addressable>::NAMESPACE)),
-                WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
-                WidgetKind::Composite => {
-                    tracing::warn!(
-                        target: "aether_kit",
-                        subname = %spec.subname,
-                        "a Composite child in a panel is not supported (nested \
-                         containers are out of scope in v1); slot skipped",
-                    );
-                    None
-                }
-            };
-            let Some((id, height, focusable, type_namespace)) = placed else {
+            let placed = spawn_panel_child(ctx, spec, row);
+            let Some(placed) = placed else {
                 continue;
             };
             if !first {
@@ -180,13 +161,11 @@ impl WidgetPanel {
             first = false;
             self.place(
                 ctx,
-                id,
-                row_rect(y, height),
-                focusable,
+                &placed,
+                row_rect(y, placed.height),
                 spec.subname.clone(),
-                type_namespace,
             );
-            y += height;
+            y += placed.height;
         }
 
         self.panel_height = y - self.config.y;
@@ -199,14 +178,12 @@ impl WidgetPanel {
     fn place(
         &mut self,
         ctx: &mut WasmCtx<'_, Manual>,
-        id: MailboxId,
+        child: &SpawnedChild,
         frame: WidgetFrame,
-        focusable: bool,
         name: String,
-        type_namespace: &'static str,
     ) {
         self.composite.register_slot(
-            id,
+            child.id,
             Vec2::new(frame.x, frame.y),
             Some(WidgetClipRect {
                 x: frame.x,
@@ -215,12 +192,24 @@ impl WidgetPanel {
                 height: frame.height,
             }),
             &name,
-            type_namespace,
+            child.type_namespace,
         );
-        self.focus
-            .register(id, frame.x, frame.y, frame.width, frame.height, focusable);
-        ctx.send_to(id, &frame);
-        self.children.push(ChildRef { id, name });
+        self.focus.register(
+            child.id,
+            FocusRect {
+                x: frame.x,
+                y: frame.y,
+                width: frame.width,
+                height: frame.height,
+            },
+            FocusEligibility {
+                pointer: child.pointer_eligible,
+                keyboard: child.focusable,
+            },
+            &child.state,
+        );
+        ctx.send_to(child.id, &frame);
+        self.children.push(ChildRef { id: child.id, name });
     }
 
     /// Discharge a closed frame: flatten the composite and emit it from the
@@ -251,15 +240,97 @@ impl WidgetPanel {
     }
 }
 
+/// Decode, spawn, and derive one panel child's static/dynamic routing profile.
+/// Keeping this dispatch out of `ensure_spawned` leaves the layout loop focused
+/// on ordering and placement.
+fn spawn_panel_child(
+    ctx: &mut WasmCtx<'_, Manual>,
+    spec: &WidgetChildSpec,
+    row: f32,
+) -> Option<SpawnedChild> {
+    match spec.kind {
+        WidgetKind::Label => decode_child::<LabelConfig>(spec).and_then(|config| {
+            let state = config.state.clone();
+            spawn::<LabelWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                height: row,
+                pointer_eligible: false,
+                focusable: false,
+                state,
+                type_namespace: <LabelWidget as Addressable>::NAMESPACE,
+            })
+        }),
+        WidgetKind::Slider => decode_child::<SliderConfig>(spec).and_then(|config| {
+            let state = config.state.clone();
+            spawn::<SliderWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                height: row,
+                pointer_eligible: true,
+                focusable: true,
+                state,
+                type_namespace: <SliderWidget as Addressable>::NAMESPACE,
+            })
+        }),
+        WidgetKind::Radio => decode_child::<RadioConfig>(spec).and_then(|config| {
+            let height = row * config.options.len() as f32;
+            let state = config.state.clone();
+            spawn::<RadioGroupWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                height,
+                pointer_eligible: true,
+                focusable: true,
+                state,
+                type_namespace: <RadioGroupWidget as Addressable>::NAMESPACE,
+            })
+        }),
+        WidgetKind::TextField => decode_child::<TextFieldConfig>(spec).and_then(|config| {
+            let state = config.state.clone();
+            spawn::<TextFieldWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                height: row,
+                pointer_eligible: true,
+                focusable: true,
+                state,
+                type_namespace: <TextFieldWidget as Addressable>::NAMESPACE,
+            })
+        }),
+        WidgetKind::Button => decode_child::<ButtonConfig>(spec).and_then(|config| {
+            let state = config.state.clone();
+            spawn::<ButtonWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                height: row,
+                pointer_eligible: true,
+                focusable: true,
+                state,
+                type_namespace: <ButtonWidget as Addressable>::NAMESPACE,
+            })
+        }),
+        WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
+        WidgetKind::Composite => {
+            tracing::warn!(
+                target: "aether_kit",
+                subname = %spec.subname,
+                "a Composite child in a panel is not supported (nested \
+                 containers are out of scope in v1); slot skipped",
+            );
+            None
+        }
+    }
+}
+
 /// Decode one child spec's opaque config bytes as the concrete config type
 /// `C` its [`WidgetKind`] selects, warning and yielding `None` on a decode
 /// failure so the caller skips the slot (mirroring `widget.rs`).
 fn decode_child<C: Kind>(spec: &WidgetChildSpec) -> Option<C> {
-    let config = C::decode_from_bytes(&spec.config);
+    decode_named(&spec.subname, &spec.config)
+}
+
+fn decode_named<C: Kind>(subname: &str, bytes: &[u8]) -> Option<C> {
+    let config = C::decode_from_bytes(bytes);
     if config.is_none() {
         tracing::warn!(
             target: "aether_kit",
-            subname = %spec.subname,
+            subname,
             "widget child config failed to decode; slot skipped",
         );
     }
@@ -287,6 +358,7 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
             LabelConfig {
                 text: String::from("Controls"),
                 theme: theme.clone(),
+                state: WidgetControlState::default(),
             }
             .encode_into_bytes(),
         ),
@@ -299,6 +371,7 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
                 step: 1.0,
                 initial: 40.0,
                 theme: theme.clone(),
+                state: WidgetControlState::default(),
             }
             .encode_into_bytes(),
         ),
@@ -313,6 +386,7 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
                 ],
                 initial_index: 0,
                 theme: theme.clone(),
+                state: WidgetControlState::default(),
             }
             .encode_into_bytes(),
         ),
@@ -323,6 +397,7 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
                 initial: String::new(),
                 max_chars: 32,
                 theme: theme.clone(),
+                state: WidgetControlState::default(),
             }
             .encode_into_bytes(),
         ),
@@ -332,6 +407,7 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
             ButtonConfig {
                 label: String::from("Apply"),
                 theme: theme.clone(),
+                state: WidgetControlState::default(),
             }
             .encode_into_bytes(),
         ),
@@ -340,12 +416,37 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
 
 /// Send a focus transition down: `FocusLost` to the child that lost focus,
 /// `FocusGained` to the one that gained it.
-fn apply_focus(ctx: &mut WasmCtx<'_>, (previous, next): FocusTransition) {
+fn apply_focus<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, transition: FocusTransition) {
+    let FocusTransition { previous, next } = transition;
     if let Some(prev) = previous {
         ctx.send_to(prev, &FocusLost);
     }
     if let Some(gained) = next {
         ctx.send_to(gained, &FocusGained);
+    }
+}
+
+/// Send hover edges lost-before-gained so sibling crossings cannot leave two
+/// controls hovered during the breadth-first drain.
+fn apply_hover<M: aether_actor::ReplyMode>(ctx: &mut WasmCtx<'_, M>, transition: HoverTransition) {
+    let HoverTransition { previous, next } = transition;
+    if let Some(previous) = previous {
+        ctx.send_to(previous, &HoverLost);
+    }
+    if let Some(next) = next {
+        ctx.send_to(next, &HoverGained);
+    }
+}
+
+fn apply_availability<M: aether_actor::ReplyMode>(
+    ctx: &mut WasmCtx<'_, M>,
+    effects: AvailabilityEffects,
+) {
+    if let Some(hover) = effects.hover {
+        apply_hover(ctx, hover);
+    }
+    if let Some(focus) = effects.focus {
+        apply_focus(ctx, focus);
     }
 }
 
@@ -383,7 +484,7 @@ fn spawn_behavior_host(
     ctx: &mut WasmCtx<'_, Manual>,
     spec: &WidgetChildSpec,
     row: f32,
-) -> Option<(MailboxId, f32, bool, &'static str)> {
+) -> Option<SpawnedChild> {
     use crate::widget::{BehaviorHostSpec, ScriptRef};
     use aether_actor::ActorTypeTag;
     use aether_behavior::HostConfig;
@@ -398,6 +499,29 @@ fn spawn_behavior_host(
             "BehaviorHost cannot wrap this widget kind (container or host); slot skipped",
         );
         return None;
+    };
+    let (height, pointer_eligible, focusable, state) = match host_spec.wrapped {
+        WidgetKind::Label => {
+            let config = decode_named::<LabelConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            (row, false, false, config.state)
+        }
+        WidgetKind::Slider => {
+            let config = decode_named::<SliderConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            (row, true, true, config.state)
+        }
+        WidgetKind::Radio => {
+            let config = decode_named::<RadioConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            (row * config.options.len() as f32, true, true, config.state)
+        }
+        WidgetKind::TextField => {
+            let config = decode_named::<TextFieldConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            (row, true, true, config.state)
+        }
+        WidgetKind::Button => {
+            let config = decode_named::<ButtonConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            (row, true, true, config.state)
+        }
+        WidgetKind::Composite | WidgetKind::BehaviorHost => return None,
     };
     let script = match host_spec.script {
         ScriptRef::None => ScriptSource::None,
@@ -441,6 +565,10 @@ fn spawn_behavior_host(
             RadioSelected::ID.0,
             FocusGained::ID.0,
             FocusLost::ID.0,
+            HoverGained::ID.0,
+            HoverLost::ID.0,
+            crate::widget::SetWidgetState::ID.0,
+            WidgetStateChanged::ID.0,
             crate::widget::ChildrenChanged::ID.0,
         ],
     };
@@ -450,12 +578,14 @@ fn spawn_behavior_host(
         Subname::Named(&spec.subname),
         &bytes,
     ) {
-        Ok(id) => Some((
+        Ok(id) => Some(SpawnedChild {
             id,
-            row,
-            true,
-            <aether_behavior::BehaviorHost as Addressable>::NAMESPACE,
-        )),
+            height,
+            pointer_eligible,
+            focusable,
+            state,
+            type_namespace: <aether_behavior::BehaviorHost as Addressable>::NAMESPACE,
+        }),
         Err(error) => {
             tracing::warn!(
                 target: "aether_kit",
@@ -475,7 +605,7 @@ fn spawn_behavior_host(
     _ctx: &mut WasmCtx<'_, Manual>,
     spec: &WidgetChildSpec,
     _row: f32,
-) -> Option<(MailboxId, f32, bool, &'static str)> {
+) -> Option<SpawnedChild> {
     tracing::warn!(
         target: "aether_kit",
         subname = %spec.subname,
@@ -509,6 +639,7 @@ impl WasmActor for WidgetPanel {
             children: Vec::new(),
             spawned: false,
             panel_height: 0.0,
+            modifiers: Modifiers::default(),
         })
     }
 
@@ -601,14 +732,19 @@ impl WasmActor for WidgetPanel {
         if let Some(child) = self.focus.pointer_target(release.x, release.y) {
             ctx.send_to(child, &release);
         }
-        if release.button == mouse_button::LEFT {
-            self.focus.clear_capture();
+        if release.button == mouse_button::LEFT
+            && let Some(transition) = self.focus.release_capture(release.x, release.y)
+        {
+            apply_hover(ctx, transition);
         }
     }
 
     /// A move forwards to the captured (dragged) or hit child.
     #[handler::single]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
+        if let Some(transition) = self.focus.update_hover(moved.x, moved.y) {
+            apply_hover(ctx, transition);
+        }
         if let Some(child) = self.focus.pointer_target(moved.x, moved.y) {
             ctx.send_to(child, &moved);
         }
@@ -627,7 +763,12 @@ impl WasmActor for WidgetPanel {
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         if key.code == KEY_TAB {
-            if let Some(transition) = self.focus.advance_focus() {
+            let direction = if self.modifiers.shift {
+                FocusDirection::Backward
+            } else {
+                FocusDirection::Forward
+            };
+            if let Some(transition) = self.focus.move_focus(direction) {
                 apply_focus(ctx, transition);
             }
             return;
@@ -637,14 +778,14 @@ impl WasmActor for WidgetPanel {
         }
     }
 
-    /// Reserved: no widget consumes key releases in v1, so the panel absorbs
-    /// them here (subscribed, but dropped) rather than forwarding an unhandled
-    /// kind to a child.
-    // Subscribing the stream needs a handler to sink it; there is no per-panel
-    // key-release state yet, so the handler is deliberately empty.
-    #[allow(clippy::unused_self)]
+    /// Key releases forward to the focused child (Button uses matching Space
+    /// release for exactly-once activation).
     #[handler::single]
-    fn on_key_release(&mut self, _ctx: &mut WasmCtx<'_>, _release: KeyRelease) {}
+    fn on_key_release(&mut self, ctx: &mut WasmCtx<'_>, release: KeyRelease) {
+        if let Some(child) = self.focus.keyboard_target() {
+            ctx.send_to(child, &release);
+        }
+    }
 
     /// Committed text forwards to the focused child.
     #[handler::single]
@@ -666,9 +807,25 @@ impl WasmActor for WidgetPanel {
     /// it).
     #[handler::single]
     fn on_modifiers(&mut self, ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
+        self.modifiers = modifiers;
         if let Some(child) = self.focus.keyboard_target() {
             ctx.send_to(child, &modifiers);
         }
+    }
+
+    /// Keep dynamic routing availability synchronized with the external state
+    /// a child actually adopted. Source attribution identifies the panel slot.
+    #[handler::manual]
+    fn on_widget_state_changed(
+        &mut self,
+        ctx: &mut WasmCtx<'_, Manual>,
+        changed: WidgetStateChanged,
+    ) {
+        let Some(source) = ctx.source_mailbox() else {
+            return;
+        };
+        let effects = self.focus.update_availability(source, &changed.state);
+        apply_availability(ctx, effects);
     }
 
     /// A slider value-up. The map-editor seam: translate to world-knob driver

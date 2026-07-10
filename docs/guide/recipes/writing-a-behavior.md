@@ -168,7 +168,14 @@ use aether_kit::theme::Theme;
 use aether_data::Kind;
 
 let script = std::fs::read(".../clamp_behavior.wasm")?;
-let slider = SliderConfig { min: 0.0, max: 1.0, step: 0.0, initial: 0.5, theme: Theme::DEFAULT };
+let slider = SliderConfig {
+    min: 0.0,
+    max: 1.0,
+    step: 0.0,
+    initial: 0.5,
+    theme: Theme::DEFAULT,
+    state: Default::default(),
+};
 let config = HostConfig {
     child: ChildSpec {
         type_tag: WidgetKind::Slider.type_tag().unwrap(),
@@ -202,7 +209,12 @@ In a widget panel you rarely build a `HostConfig` by hand: the panel's declarati
 child specs carry a
 `WidgetKind::BehaviorHost` slot whose config is a `BehaviorHostSpec` (the wrapped
 widget kind, its config, and the script), and the panel builds the `HostConfig`
-for you. The direct load above is the mechanism under that convenience.
+for you. Keep the wrapped config opaque but complete: encode the stock config's
+defaulted `WidgetControlState` alongside its value/theme fields. The panel
+decodes `BehaviorHostSpec.wrapped` plus `wrapped_config` to derive the same row
+height, pointer eligibility, focusability, and initial availability it would
+derive for an unwrapped child. The direct load above is the mechanism under that
+convenience.
 
 ## 5. Swap the script live
 

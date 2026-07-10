@@ -29,13 +29,16 @@ use std::fs;
 
 use aether_actor::Addressable;
 use aether_data::Kind;
-use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_TAB, KEY_UP};
+use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_SPACE, KEY_TAB, KEY_UP};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
-    Key, LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, MouseMove,
-    TextInput, Tick,
+    Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, Modifiers, MouseButton,
+    MouseButtonRelease, MouseMove, TextInput, Tick,
 };
-use aether_kit::{PanelConfig, SliderConfig, Theme, WidgetChildSpec, WidgetKind};
+use aether_kit::{
+    ButtonConfig, PanelConfig, SetWidgetState, SliderConfig, Theme, WidgetChildSpec,
+    WidgetControlState, WidgetKind,
+};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
@@ -43,6 +46,15 @@ fn panel_address() -> String {
     format!(
         "aether.component/{}:panel",
         aether_capabilities::WasmTrampoline::NAMESPACE,
+    )
+}
+
+fn child_address(subname: &str) -> String {
+    format!(
+        "{}/{}:{}",
+        panel_address(),
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+        subname,
     )
 }
 
@@ -223,6 +235,14 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
 /// A slider child spec for the declarative-children scenario: full `0..=255`
 /// range, unit step, seeded at `initial`, default theme.
 fn slider_spec(subname: &str, initial: f32) -> WidgetChildSpec {
+    slider_spec_with_state(subname, initial, WidgetControlState::default())
+}
+
+fn slider_spec_with_state(
+    subname: &str,
+    initial: f32,
+    state: WidgetControlState,
+) -> WidgetChildSpec {
     WidgetChildSpec {
         subname: subname.to_owned(),
         kind: WidgetKind::Slider,
@@ -234,6 +254,22 @@ fn slider_spec(subname: &str, initial: f32) -> WidgetChildSpec {
             step: 1.0,
             initial,
             theme: Theme::DEFAULT,
+            state,
+        }
+        .encode_into_bytes(),
+    }
+}
+
+fn button_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::Button,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: ButtonConfig {
+            label: "Run".to_owned(),
+            theme: Theme::DEFAULT,
+            state,
         }
         .encode_into_bytes(),
     }
@@ -351,5 +387,154 @@ fn panel_stacks_declared_children_in_order() {
         vec!["first".to_owned(), "second".to_owned()],
         "the declared child order must drive both the vertical stack and the Tab \
          focus cycle; committed slider events arrived as {order:?}; log was:\n{joined}",
+    );
+}
+
+fn drive_state_and_keyboard_session(bench: &mut TestBench) {
+    let panel = panel_address();
+    let value = child_address("value");
+    let run = child_address("run");
+    bench
+        .execute(vec![
+            ("spawn", BenchOp::send_mail(&panel, &Tick)),
+            // Forward Tab skips the disabled first slider and focuses the
+            // read-only value. Its arrow input must not mutate.
+            (
+                "tab_value",
+                BenchOp::send_mail(&panel, &Key { code: KEY_TAB }),
+            ),
+            (
+                "blocked_nudge",
+                BenchOp::send_mail(&panel, &Key { code: KEY_UP }),
+            ),
+            // Runtime state changes preserve the value while enabling mutation.
+            (
+                "make_mutable",
+                BenchOp::send_mail(
+                    &value,
+                    &SetWidgetState {
+                        state: WidgetControlState::default(),
+                    },
+                ),
+            ),
+            (
+                "allowed_nudge",
+                BenchOp::send_mail(&panel, &Key { code: KEY_UP }),
+            ),
+            // Shift+Tab wraps backward to the Button, skipping the disabled
+            // first entry. Space fires on release.
+            (
+                "shift",
+                BenchOp::send_mail(
+                    &panel,
+                    &Modifiers {
+                        shift: true,
+                        ..Modifiers::default()
+                    },
+                ),
+            ),
+            (
+                "reverse_tab",
+                BenchOp::send_mail(&panel, &Key { code: KEY_TAB }),
+            ),
+            (
+                "space",
+                BenchOp::send_mail(&panel, &Key { code: KEY_SPACE }),
+            ),
+            (
+                "space_release",
+                BenchOp::send_mail(&panel, &KeyRelease { code: KEY_SPACE }),
+            ),
+            // Enter fires immediately and suppresses repeated key-down mail
+            // until its matching release.
+            (
+                "enter",
+                BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }),
+            ),
+            (
+                "enter_repeat",
+                BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }),
+            ),
+            (
+                "enter_release",
+                BenchOp::send_mail(&panel, &KeyRelease { code: KEY_ENTER }),
+            ),
+            // Hiding the focused button moves focus forward to the live slider;
+            // no stale keyboard arm or focus remains on the button.
+            (
+                "hide_button",
+                BenchOp::send_mail(
+                    &run,
+                    &SetWidgetState {
+                        state: WidgetControlState {
+                            visible: false,
+                            ..WidgetControlState::default()
+                        },
+                    },
+                ),
+            ),
+            (
+                "nudge_after_hide",
+                BenchOp::send_mail(&panel, &Key { code: KEY_UP }),
+            ),
+        ])
+        .expect("state and keyboard session");
+}
+
+/// Initial and runtime control state must agree with panel routing: unavailable
+/// children leave their layout slot but exit the focus ring, read-only values
+/// focus without mutation, reverse Tab skips unavailable entries, and keyboard
+/// activation fires Button exactly once per key pair.
+#[test]
+fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = TestBench::start_with_size(240, 140).expect("boot");
+
+    let disabled = WidgetControlState {
+        enabled: false,
+        ..WidgetControlState::default()
+    };
+    let read_only = WidgetControlState {
+        read_only: true,
+        ..WidgetControlState::default()
+    };
+    load_panel_with(
+        &mut bench,
+        &wasm,
+        vec![
+            slider_spec_with_state("disabled", 40.0, disabled),
+            slider_spec_with_state("value", 40.0, read_only),
+            button_spec("run", WidgetControlState::default()),
+        ],
+    );
+
+    drive_state_and_keyboard_session(&mut bench);
+
+    let log = panel_log_messages(&mut bench);
+    let joined = log.join("\n");
+    let value_changes = log
+        .iter()
+        .filter(|message| {
+            message.contains("widget slider changed")
+                && message.contains("widget=value")
+                && message.contains("committed=true")
+        })
+        .count();
+    assert_eq!(
+        value_changes, 2,
+        "the read-only nudge is blocked, then mutable and post-hide nudges commit; log was:\n{joined}",
+    );
+    let clicks = log
+        .iter()
+        .filter(|message| {
+            message.contains("widget button clicked") && message.contains("widget=run")
+        })
+        .count();
+    assert_eq!(
+        clicks, 2,
+        "Space release and the first Enter press click exactly once each; log was:\n{joined}",
     );
 }

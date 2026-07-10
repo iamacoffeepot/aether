@@ -12,14 +12,15 @@ draw-compositing protocol (ADR-0117 — `Collect` down, `WidgetDrawList` up, the
 `Composite` helper, widget-local clipping, and the one-render-sender-per-cluster
 emit) and the theme
 (`Theme` tokens plus `Theme::fill`, carried on each widget's config). This page
-covers the layer above those: the four mail lanes every widget speaks and the
-focus-and-input model the root owns.
+covers the layer above those: the state and interaction mail every widget
+speaks and the focus/hover/input model the root owns.
 
-## Four lanes of mail
+## State and interaction mail
 
-A widget reacts to three data-down lanes and reports on one events-up lane. The
-value kinds carry **no widget-identity field** — the root attributes a reply by
-the sender's `MailboxId` (`ctx.source_mailbox()`) against the children it
+A widget reacts to config, style, layout, external state, and root-owned
+interaction data-down, then reports values and state changes events-up. The
+events-up kinds carry **no widget-identity field** — the root attributes a reply
+by the sender's `MailboxId` (`ctx.source_mailbox()`) against the children it
 recorded at spawn, so a widget's identity is its inline subname and nothing a
 widget sends can misreport it.
 
@@ -41,6 +42,20 @@ widget sends can misreport it.
   pointer input (through `Focus`). A generic `WidgetChildSpec.clip` is
   parent-local; the reference panel derives that slot clip from the assigned
   `WidgetFrame` so oversized child content cannot escape its row.
+- **State, down and up.** Every stock config carries a defaulted
+  `WidgetControlState { visible, enabled, read_only, validation }`.
+  `SetWidgetState` replaces that external state without resetting the widget's
+  value; a changed config or state mail emits source-attributed
+  `WidgetStateChanged` so panel routing cannot drift. Hidden widgets keep their
+  slot and answer `Collect` with an empty `WidgetDrawList`; disabled widgets
+  draw muted but leave input routing; read-only Slider, Radio, and TextField
+  remain focusable but reject mutation. Button and Label ignore read-only and
+  validation.
+- **Interaction, down.** The root sends `FocusGained` / `FocusLost` and
+  `HoverGained` / `HoverLost`. Hover comes from explicit edges, not from a child
+  inferring absence from raw motion. Pressed and hover select an exclusive fill
+  (Disabled → Pressed → Hover → Normal); focus and validation are separate
+  outlines, so both remain visible together.
 - **Value, up.** `SliderChanged { value, committed }`, `TextCommitted { text }`,
   `RadioSelected { index }`, and `ButtonClicked` flow to the parent through
   `ctx.parent()`. A slider streams `committed: false` values through a drag and
@@ -52,26 +67,32 @@ widget sends can misreport it.
 Widgets never subscribe to input. The panel root subscribes the pointer and
 keyboard streams once (the input cap) and the frame stage once (the lifecycle
 cap), then routes every event through a `Focus` helper it embeds — the
-input-side counterpart to `Composite`. `Focus` holds the child hit rects in
-layout order, the focused child, and the drag-captured child, and answers three
+input-side counterpart to `Composite`. `Focus` holds child hit rects in layout
+order, static pointer/focus eligibility, dynamic visible/enabled availability,
+the hovered and focused children, and the drag-captured child. It answers four
 questions:
 
 - **Where does a pointer event go?** To the drag-captured child if one holds
   capture — so a drag that leaves a widget's rect still reaches it — otherwise
   to the topmost child under the cursor.
 - **Where does a keyboard event go?** To the focused child.
-- **What moves focus?** A left press on a focusable child, or Tab (which cycles
-  focusable children in registration order, wrapping). Each move yields the
-  `(previous, next)` pair the root turns into a `FocusLost` down to the old
-  holder and a `FocusGained` down to the new one, and each widget draws its own
-  focus ring and caret from that — the root carries no per-widget-type visual
-  knowledge.
+- **Where does hover live?** Independent hit testing yields a named
+  `HoverTransition`; sibling crossings send lost before gained even while
+  capture routes raw drag motion elsewhere.
+- **What moves focus?** A left press on a focusable child, Tab forward, or
+  Shift+Tab backward. Traversal wraps and skips hidden/disabled/static entries.
+  A live availability change moves focus forward when its holder disappears
+  and clears hover/capture through named transition effects.
 
 Drag capture is the kit's own policy over the raw button vocabulary: a left
 press that hits a widget sets capture on that child, moves route to it while
 capture holds, and the matching release clears it. That is what lets a slider
 track the cursor past the end of its track and a button cancel when the release
 drifts off it.
+
+A focused Button activates once on Enter press (repeat presses are suppressed
+until release) and once on Space release after a matching Space press. Focus
+loss or unavailability cancels the keyboard arm.
 
 ## The reference panel
 
@@ -82,16 +103,19 @@ frame (each `WidgetChildSpec` names a `WidgetKind` and carries that widget's
 pre-encoded config; an empty child list falls back to the built-in reference
 stack of every widget), loads a font through `aether.text` and stamps the
 session `font_id` into its theme when `load_font_result` arrives, drives the
-collect/emit loop each frame, and routes input through `Focus`. Row height and
-focusability derive from each child's decoded config and the vertical order
-follows the declared order, so what a panel contains is config data. Its
+collect/emit loop each frame, and routes input through `Focus`. Row height,
+initial state, and static eligibility derive from each child's decoded config.
+A `WidgetKind::BehaviorHost` derives the same metadata from both its `wrapped`
+discriminator and opaque `wrapped_config`; wrapping does not make every child
+focusable. The vertical order follows the declared order, so what a panel
+contains is config data. Its
 value-up handlers are the seam: each attributes the event by
 `ctx.source_mailbox()` and is where a map editor translates a widget change
 into world-knob driver mail. Fork it by handing it your own `children` and
 filling in those handlers.
 
 To add a new widget — a dropdown, a checkbox, a color well — write one more
-`#[actor(instanced)]` type that speaks the same four lanes and answers `Collect`
+`#[actor(instanced)]` type that speaks the same state/interaction lanes and answers `Collect`
 with a `WidgetDrawList`, then spawn it into a panel's stack. The focus model and
 the draw protocol carry it with no new machinery.
 

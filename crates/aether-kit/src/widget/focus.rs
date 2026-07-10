@@ -1,183 +1,284 @@
-//! The focus-and-input routing a panel root embeds (issue 2660).
+//! Root-owned focus, hover, and pointer-capture routing for one widget panel.
 //!
-//! [`Focus`] is the plain state the root-owned focus model carries: an
-//! ordered set of child entries (each a hit rect plus whether it can take
-//! keyboard focus), the currently focused child, and the drag-captured child.
-//! It does no mail and holds no capability handle — the root drives it,
-//! mirroring how [`Composite`](crate::widget::composite::Composite) is the
-//! bookkeeping half of the draw protocol while the actor owns the sends.
-//!
-//! Widgets never subscribe to input themselves. The root subscribes the
-//! pointer and keyboard streams once, then asks [`Focus`] where each event
-//! goes: a pointer event to the drag-captured child if one holds capture, else
-//! to the topmost child under the cursor; a keyboard event to the focused
-//! child. Focus moves on a focusable hit or on Tab, and each move yields the
-//! `(previous, next)` pair the root turns into a `FocusLost` to the old holder
-//! and a `FocusGained` to the new one.
-//!
-//! Rects are window-pixel 2D, carried as a zero-depth [`Aabb`] (`z = 0`) so
-//! the hit test reuses `aether_math::Aabb::contains_point` rather than a
-//! hand-rolled bounds check.
+//! Static widget eligibility and dynamic external availability are distinct:
+//! labels never take focus or pointer input, while any stock control may become
+//! hidden or disabled at runtime without losing its layout slot. The helper
+//! owns no mail; it returns named transitions that the panel turns into mail.
 
 use alloc::vec::Vec;
 
 use aether_data::MailboxId;
 use aether_math::{Aabb, Vec3};
 
-/// The `(previous, next)` focus holders across a focus move: `previous` is the
-/// child that just lost focus (`None` if nothing was focused), `next` the one
-/// that just gained it (`None` if focus cleared). The root sends `FocusLost`
-/// to `previous` and `FocusGained` to `next`.
-pub type FocusTransition = (Option<MailboxId>, Option<MailboxId>);
+use crate::widget::WidgetControlState;
 
-/// One child's hit rect and focus eligibility. `rect` is the child's
-/// window-pixel bounds (zero-depth), the same rect the root assigned it as a
-/// `WidgetFrame`; `focusable` is `false` for a widget that takes no keyboard
-/// input (a label), which the Tab cycle and focus-on-hit both skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusDirection {
+    Forward,
+    Backward,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FocusTransition {
+    pub previous: Option<MailboxId>,
+    pub next: Option<MailboxId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HoverTransition {
+    pub previous: Option<MailboxId>,
+    pub next: Option<MailboxId>,
+}
+
+/// Cleanup caused by a live availability update. A focused child moves focus
+/// forward through the remaining ring; hover and capture clear immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AvailabilityEffects {
+    pub focus: Option<FocusTransition>,
+    pub hover: Option<HoverTransition>,
+    pub cleared_capture: Option<MailboxId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FocusRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FocusEligibility {
+    pub pointer: bool,
+    pub keyboard: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Availability {
+    visible: bool,
+    enabled: bool,
+}
+
 struct Entry {
     child: MailboxId,
     rect: Aabb,
-    focusable: bool,
+    eligibility: FocusEligibility,
+    availability: Availability,
 }
 
-/// The root's focus-and-input routing table: the child entries in registration
-/// (layout / Tab) order, plus the focused and drag-captured children. Rebuilt
-/// each spawn pass with [`Self::clear`] and [`Self::register`]; queried per
-/// input event.
+impl Entry {
+    fn pointer_live(&self) -> bool {
+        self.eligibility.pointer && self.availability.visible && self.availability.enabled
+    }
+
+    fn focus_live(&self) -> bool {
+        self.eligibility.keyboard && self.availability.visible && self.availability.enabled
+    }
+}
+
 #[derive(Default)]
 pub struct Focus {
     entries: Vec<Entry>,
     focused: Option<MailboxId>,
+    hovered: Option<MailboxId>,
     capture: Option<MailboxId>,
 }
 
 impl Focus {
-    /// An empty routing table — no children, nothing focused or captured.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Drop every entry and clear the focused / captured children — the reset
-    /// a root runs before it re-registers its layout (e.g. a respawn).
     pub fn clear(&mut self) {
         self.entries.clear();
         self.focused = None;
+        self.hovered = None;
         self.capture = None;
     }
 
-    /// Register a child's hit rect in layout order. `(x, y)` is the top-left
-    /// and `(width, height)` the size, in window pixels; `focusable` marks
-    /// whether Tab and focus-on-hit consider it. Registration order is Tab
-    /// order; draw / registration order is also the hit-test stack (a later
-    /// child sits on top of an earlier one where they overlap).
+    /// Register one fixed layout entry. Dynamic visibility/enabled state may be
+    /// updated later without rebuilding the table.
     pub fn register(
         &mut self,
         child: MailboxId,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        focusable: bool,
+        frame: FocusRect,
+        eligibility: FocusEligibility,
+        state: &WidgetControlState,
     ) {
-        let rect = Aabb::from_min_max(Vec3::new(x, y, 0.0), Vec3::new(x + width, y + height, 0.0));
+        let rect = Aabb::from_min_max(
+            Vec3::new(frame.x, frame.y, 0.0),
+            Vec3::new(frame.x + frame.width, frame.y + frame.height, 0.0),
+        );
         self.entries.push(Entry {
             child,
             rect,
-            focusable,
+            eligibility,
+            availability: Availability {
+                visible: state.visible,
+                enabled: state.enabled,
+            },
         });
     }
 
-    /// The topmost child whose rect contains `(x, y)`, or `None` if the point
-    /// is over no child. Topmost is the last-registered match, since a later
-    /// child draws over an earlier one.
     #[must_use]
     pub fn hit_test(&self, x: f32, y: f32) -> Option<MailboxId> {
         let point = Vec3::new(x, y, 0.0);
         self.entries
             .iter()
             .rev()
-            .find(|entry| entry.rect.contains_point(point))
+            .find(|entry| entry.pointer_live() && entry.rect.contains_point(point))
             .map(|entry| entry.child)
     }
 
-    /// Where a pointer event routes: the drag-captured child if one holds
-    /// capture (so a drag that leaves the widget's rect still reaches it),
-    /// else the topmost child under the cursor.
     #[must_use]
     pub fn pointer_target(&self, x: f32, y: f32) -> Option<MailboxId> {
         self.capture.or_else(|| self.hit_test(x, y))
     }
 
-    /// Where a keyboard event routes: the focused child, or `None` if nothing
-    /// is focused.
     #[must_use]
     pub fn keyboard_target(&self) -> Option<MailboxId> {
         self.focused
     }
 
-    /// Begin drag capture on `child` — set by the root on a left press that
-    /// hits a widget, so subsequent moves route to it until release.
     pub fn begin_capture(&mut self, child: MailboxId) {
-        self.capture = Some(child);
+        if self
+            .entries
+            .iter()
+            .any(|entry| entry.child == child && entry.pointer_live())
+        {
+            self.capture = Some(child);
+        }
     }
 
-    /// Clear drag capture — the root's response to the matching release.
-    pub fn clear_capture(&mut self) {
+    /// Clear capture and recompute hover at the release position.
+    pub fn release_capture(&mut self, x: f32, y: f32) -> Option<HoverTransition> {
         self.capture = None;
+        self.update_hover(x, y)
     }
 
-    /// The drag-captured child, if any.
     #[must_use]
     pub fn captured(&self) -> Option<MailboxId> {
         self.capture
     }
 
-    /// Set focus to `next`, returning the `(previous, next)` transition when
-    /// it actually changed, or `None` when `next` already held focus (so the
-    /// root sends no redundant `FocusLost` / `FocusGained`).
     pub fn set_focus(&mut self, next: Option<MailboxId>) -> Option<FocusTransition> {
+        if let Some(child) = next
+            && !self
+                .entries
+                .iter()
+                .any(|entry| entry.child == child && entry.focus_live())
+        {
+            return None;
+        }
         if self.focused == next {
             return None;
         }
         let previous = self.focused;
         self.focused = next;
-        Some((previous, next))
+        Some(FocusTransition { previous, next })
     }
 
-    /// Focus the topmost focusable child under `(x, y)`, returning the
-    /// transition when focus moved. A press over empty space or over a
-    /// non-focusable child (a label) leaves the current focus untouched.
     pub fn focus_hit(&mut self, x: f32, y: f32) -> Option<FocusTransition> {
         let point = Vec3::new(x, y, 0.0);
         let hit = self
             .entries
             .iter()
             .rev()
-            .find(|entry| entry.focusable && entry.rect.contains_point(point))
+            .find(|entry| entry.focus_live() && entry.rect.contains_point(point))
             .map(|entry| entry.child)?;
         self.set_focus(Some(hit))
     }
 
-    /// Advance focus to the next focusable child in registration order,
-    /// wrapping — the Tab cycle. From no focus (or a focused child no longer
-    /// registered) it lands on the first focusable child; returns the
-    /// transition, or `None` when there is no focusable child to move to.
-    pub fn advance_focus(&mut self) -> Option<FocusTransition> {
+    /// Move through the live focus ring in the requested direction, wrapping.
+    pub fn move_focus(&mut self, direction: FocusDirection) -> Option<FocusTransition> {
         let count = self.entries.len();
         if count == 0 {
             return None;
         }
-        // Start scanning just past the current holder (or before the first
-        // entry when nothing is focused), wrapping once around the ring.
-        let start = self
+        let current = self
             .focused
-            .and_then(|current| self.entries.iter().position(|entry| entry.child == current))
-            .map_or(0, |index| index + 1);
+            .and_then(|child| self.entries.iter().position(|entry| entry.child == child));
         for offset in 0..count {
-            let entry = &self.entries[(start + offset) % count];
-            if entry.focusable {
+            let index = match (direction, current) {
+                (FocusDirection::Forward, Some(index)) => (index + 1 + offset) % count,
+                (FocusDirection::Forward, None) => offset,
+                (FocusDirection::Backward, Some(index)) => (index + count - 1 - offset) % count,
+                (FocusDirection::Backward, None) => count - 1 - offset,
+            };
+            let entry = &self.entries[index];
+            if entry.focus_live() {
                 return self.set_focus(Some(entry.child));
+            }
+        }
+        None
+    }
+
+    /// Recompute the child under the pointer independently from capture. The
+    /// panel can therefore send hover edges while still routing raw motion to a
+    /// drag captor.
+    pub fn update_hover(&mut self, x: f32, y: f32) -> Option<HoverTransition> {
+        let next = self.hit_test(x, y);
+        if self.hovered == next {
+            return None;
+        }
+        let previous = self.hovered;
+        self.hovered = next;
+        Some(HoverTransition { previous, next })
+    }
+
+    /// Apply a source-attributed state change. If the child becomes unavailable,
+    /// move focus forward and clear live hover/capture paths immediately.
+    pub fn update_availability(
+        &mut self,
+        child: MailboxId,
+        state: &WidgetControlState,
+    ) -> AvailabilityEffects {
+        let Some(index) = self.entries.iter().position(|entry| entry.child == child) else {
+            return AvailabilityEffects::default();
+        };
+        self.entries[index].availability = Availability {
+            visible: state.visible,
+            enabled: state.enabled,
+        };
+        if state.visible && state.enabled {
+            return AvailabilityEffects::default();
+        }
+
+        let mut effects = AvailabilityEffects::default();
+        if self.focused == Some(child) {
+            self.focused = None;
+            let next = self.next_live_from(index, FocusDirection::Forward);
+            self.focused = next;
+            effects.focus = Some(FocusTransition {
+                previous: Some(child),
+                next,
+            });
+        }
+        if self.hovered == Some(child) {
+            self.hovered = None;
+            effects.hover = Some(HoverTransition {
+                previous: Some(child),
+                next: None,
+            });
+        }
+        if self.capture == Some(child) {
+            self.capture = None;
+            effects.cleared_capture = Some(child);
+        }
+        effects
+    }
+
+    fn next_live_from(&self, index: usize, direction: FocusDirection) -> Option<MailboxId> {
+        let count = self.entries.len();
+        for offset in 0..count {
+            let candidate = match direction {
+                FocusDirection::Forward => (index + 1 + offset) % count,
+                FocusDirection::Backward => (index + count - 1 - offset) % count,
+            };
+            let entry = &self.entries[candidate];
+            if entry.focus_live() {
+                return Some(entry.child);
             }
         }
         None
@@ -188,90 +289,186 @@ impl Focus {
 mod tests {
     use super::*;
 
+    fn available() -> WidgetControlState {
+        WidgetControlState::default()
+    }
+
+    fn register(focus: &mut Focus, child: u64, x: f32, y: f32, pointer: bool, keyboard: bool) {
+        focus.register(
+            MailboxId(child),
+            FocusRect {
+                x,
+                y,
+                width: 10.0,
+                height: 10.0,
+            },
+            FocusEligibility { pointer, keyboard },
+            &available(),
+        );
+    }
+
     fn focus_with_three() -> Focus {
         let mut focus = Focus::new();
-        // Two focusable widgets and one non-focusable label, in Tab order.
-        focus.register(MailboxId(1), 0.0, 0.0, 10.0, 10.0, true);
-        focus.register(MailboxId(2), 0.0, 20.0, 10.0, 10.0, false); // a label
-        focus.register(MailboxId(3), 0.0, 40.0, 10.0, 10.0, true);
+        register(&mut focus, 1, 0.0, 0.0, true, true);
+        register(&mut focus, 2, 0.0, 20.0, false, false);
+        register(&mut focus, 3, 0.0, 40.0, true, true);
         focus
     }
 
     #[test]
-    fn hit_test_picks_topmost_on_overlap() {
+    fn overlap_chooses_the_topmost_live_pointer_entry() {
         let mut focus = Focus::new();
-        // Two overlapping rects; the later registration draws on top, so it
-        // wins the hit where they overlap.
-        focus.register(MailboxId(1), 0.0, 0.0, 20.0, 20.0, true);
-        focus.register(MailboxId(2), 10.0, 10.0, 20.0, 20.0, true);
-        assert_eq!(
-            focus.hit_test(15.0, 15.0),
-            Some(MailboxId(2)),
-            "the later-registered (topmost) rect wins the overlap",
+        focus.register(
+            MailboxId(1),
+            FocusRect {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            },
+            FocusEligibility {
+                pointer: true,
+                keyboard: true,
+            },
+            &available(),
         );
-        assert_eq!(
-            focus.hit_test(2.0, 2.0),
-            Some(MailboxId(1)),
-            "outside the top rect, the lower one is hit",
+        focus.register(
+            MailboxId(2),
+            FocusRect {
+                x: 10.0,
+                y: 10.0,
+                width: 20.0,
+                height: 20.0,
+            },
+            FocusEligibility {
+                pointer: true,
+                keyboard: true,
+            },
+            &available(),
         );
-        assert_eq!(focus.hit_test(50.0, 50.0), None, "empty space hits nothing");
+        assert_eq!(focus.hit_test(15.0, 15.0), Some(MailboxId(2)));
+
+        let mut hidden = available();
+        hidden.visible = false;
+        focus.update_availability(MailboxId(2), &hidden);
+        assert_eq!(focus.hit_test(15.0, 15.0), Some(MailboxId(1)));
     }
 
     #[test]
-    fn tab_wraps_in_registration_order_skipping_non_focusable() {
+    fn forward_and_backward_wrap_skip_static_and_unavailable_entries() {
         let mut focus = focus_with_three();
-        // From nothing, Tab lands on the first focusable.
-        assert_eq!(focus.advance_focus(), Some((None, Some(MailboxId(1)))));
-        // Next Tab skips the non-focusable label (id 2) and lands on id 3.
         assert_eq!(
-            focus.advance_focus(),
-            Some((Some(MailboxId(1)), Some(MailboxId(3)))),
+            focus.move_focus(FocusDirection::Forward),
+            Some(FocusTransition {
+                previous: None,
+                next: Some(MailboxId(1))
+            })
         );
-        // Past the last focusable it wraps back to the first.
         assert_eq!(
-            focus.advance_focus(),
-            Some((Some(MailboxId(3)), Some(MailboxId(1)))),
+            focus.move_focus(FocusDirection::Backward),
+            Some(FocusTransition {
+                previous: Some(MailboxId(1)),
+                next: Some(MailboxId(3)),
+            })
+        );
+
+        let mut disabled = available();
+        disabled.enabled = false;
+        focus.update_availability(MailboxId(3), &disabled);
+        assert_eq!(focus.keyboard_target(), Some(MailboxId(1)));
+        assert_eq!(focus.move_focus(FocusDirection::Forward), None);
+
+        focus.update_availability(MailboxId(3), &available());
+        assert_eq!(
+            focus.move_focus(FocusDirection::Forward),
+            Some(FocusTransition {
+                previous: Some(MailboxId(1)),
+                next: Some(MailboxId(3)),
+            })
         );
     }
 
     #[test]
-    fn capture_overrides_hit_for_pointer_routing() {
+    fn hover_reports_sibling_then_empty_edges() {
         let mut focus = focus_with_three();
-        // With no capture, a pointer routes by hit test — a point over no
-        // child routes nowhere.
-        assert_eq!(focus.pointer_target(100.0, 100.0), None);
+        assert_eq!(
+            focus.update_hover(5.0, 5.0),
+            Some(HoverTransition {
+                previous: None,
+                next: Some(MailboxId(1))
+            })
+        );
+        assert_eq!(
+            focus.update_hover(5.0, 45.0),
+            Some(HoverTransition {
+                previous: Some(MailboxId(1)),
+                next: Some(MailboxId(3)),
+            })
+        );
+        assert_eq!(
+            focus.update_hover(100.0, 100.0),
+            Some(HoverTransition {
+                previous: Some(MailboxId(3)),
+                next: None
+            })
+        );
+    }
+
+    #[test]
+    fn unavailable_focused_hovered_captor_returns_all_cleanup_effects() {
+        let mut focus = focus_with_three();
+        focus.set_focus(Some(MailboxId(1)));
+        focus.update_hover(5.0, 5.0);
         focus.begin_capture(MailboxId(1));
-        // Captured: every pointer routes to the captor regardless of position.
-        assert_eq!(focus.pointer_target(100.0, 100.0), Some(MailboxId(1)));
+
+        let mut hidden = available();
+        hidden.visible = false;
+        assert_eq!(
+            focus.update_availability(MailboxId(1), &hidden),
+            AvailabilityEffects {
+                focus: Some(FocusTransition {
+                    previous: Some(MailboxId(1)),
+                    next: Some(MailboxId(3)),
+                }),
+                hover: Some(HoverTransition {
+                    previous: Some(MailboxId(1)),
+                    next: None,
+                }),
+                cleared_capture: Some(MailboxId(1)),
+            }
+        );
+        assert_eq!(focus.keyboard_target(), Some(MailboxId(3)));
+        assert_eq!(focus.captured(), None);
+    }
+
+    #[test]
+    fn release_clears_capture_and_recomputes_hover() {
+        let mut focus = focus_with_three();
+        focus.begin_capture(MailboxId(1));
+        focus.update_hover(5.0, 5.0);
         assert_eq!(focus.pointer_target(5.0, 45.0), Some(MailboxId(1)));
-        focus.clear_capture();
-        // Uncaptured: the point (5, 45) falls in id 3's rect (y 40..50).
+        assert_eq!(
+            focus.release_capture(5.0, 45.0),
+            Some(HoverTransition {
+                previous: Some(MailboxId(1)),
+                next: Some(MailboxId(3)),
+            })
+        );
         assert_eq!(focus.pointer_target(5.0, 45.0), Some(MailboxId(3)));
     }
 
     #[test]
-    fn focus_hit_ignores_non_focusable_and_reports_the_pair() {
-        let mut focus = focus_with_three();
-        // A hit on the focusable id 1 focuses it.
-        assert_eq!(focus.focus_hit(5.0, 5.0), Some((None, Some(MailboxId(1)))));
-        // A hit on the label (id 2) does not steal focus — no transition.
-        assert_eq!(focus.focus_hit(5.0, 25.0), None);
-        assert_eq!(focus.keyboard_target(), Some(MailboxId(1)));
-        // A hit on the other focusable moves focus, reporting prev + next.
-        assert_eq!(
-            focus.focus_hit(5.0, 45.0),
-            Some((Some(MailboxId(1)), Some(MailboxId(3)))),
-        );
-    }
+    fn empty_and_all_unavailable_tables_do_not_route() {
+        let mut empty = Focus::new();
+        assert_eq!(empty.move_focus(FocusDirection::Forward), None);
+        assert_eq!(empty.update_hover(1.0, 1.0), None);
 
-    #[test]
-    fn set_focus_to_current_holder_is_a_no_op() {
         let mut focus = focus_with_three();
-        focus.set_focus(Some(MailboxId(1)));
-        assert_eq!(
-            focus.set_focus(Some(MailboxId(1))),
-            None,
-            "re-focusing the current holder yields no transition",
-        );
+        let mut disabled = available();
+        disabled.enabled = false;
+        focus.update_availability(MailboxId(1), &disabled);
+        focus.update_availability(MailboxId(3), &disabled);
+        assert_eq!(focus.move_focus(FocusDirection::Backward), None);
+        assert_eq!(focus.hit_test(5.0, 5.0), None);
     }
 }

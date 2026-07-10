@@ -37,13 +37,14 @@ use aether_kinds::{
 };
 
 use crate::widget::set::{
-    APPROX_ADVANCE_RATIO, approx_text_width, push_border, quad, text_origin_y,
+    APPROX_ADVANCE_RATIO, approx_text_width, push_control_outlines, quad, text_origin_y,
 };
+use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::text_edit::{EditPolicy, SingleLineLayout, TextEditState, TextSpan};
-use crate::widget::theme::{SetTheme, Theme, WidgetState};
+use crate::widget::theme::{SetTheme, Theme, ThemeState};
 use crate::widget::{
-    Collect, FocusGained, FocusLost, TextCommitted, TextFieldConfig, WidgetDrawItem,
-    WidgetDrawList, WidgetFrame,
+    Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, TextCommitted,
+    TextFieldConfig, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 /// A single-line editable string. Holds the reusable editing state, the
@@ -55,7 +56,7 @@ pub struct TextFieldWidget {
     max_chars: u32,
     theme: Theme,
     frame: WidgetFrame,
-    focused: bool,
+    state: InteractionState,
     modifiers: Modifiers,
     /// Whether a left-button drag is in progress (a pointer move only extends
     /// the selection while the button is held, never on a bare hover).
@@ -227,6 +228,14 @@ impl TextFieldWidget {
             .nth(index)
             .map_or(text.len(), |(byte, _)| byte)
     }
+
+    fn theme_state(&self) -> ThemeState {
+        if self.state.focused() {
+            self.state.supporting_theme_state(self.dragging)
+        } else {
+            self.state.theme_state(self.dragging)
+        }
+    }
 }
 
 /// A text-field widget. Spawned inline by a panel root with a
@@ -246,13 +255,13 @@ impl WasmActor for TextFieldWidget {
             edit: TextEditState::new(config.initial),
             max_chars: config.max_chars,
             theme: config.theme,
+            state: InteractionState::new(config.state),
             frame: WidgetFrame {
                 x: 0.0,
                 y: 0.0,
                 width: 0.0,
                 height: 0.0,
             },
-            focused: false,
             modifiers: Modifiers::default(),
             dragging: false,
             desired_font_id,
@@ -276,7 +285,29 @@ impl WasmActor for TextFieldWidget {
         self.max_chars = config.max_chars;
         self.set_desired_font_id(config.theme.font_id);
         self.theme = config.theme;
+        if self.state.replace(config.state) {
+            if !self.state.can_mutate() {
+                self.edit.clear_composition();
+            }
+            if !self.state.is_available() {
+                self.dragging = false;
+            }
+            emit_state_changed(ctx, &self.state);
+        }
         self.pump_font_metrics(ctx);
+    }
+
+    #[handler::single]
+    fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
+        if self.state.replace(set.state) {
+            if !self.state.can_mutate() {
+                self.edit.clear_composition();
+            }
+            if !self.state.is_available() {
+                self.dragging = false;
+            }
+            emit_state_changed(ctx, &self.state);
+        }
     }
 
     /// Restyle: adopt the fanned theme and request metrics for its font.
@@ -296,20 +327,34 @@ impl WasmActor for TextFieldWidget {
     /// Take keyboard focus (draw the caret and focus ring).
     #[handler::single]
     fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.focused = true;
+        self.state.gain_focus();
     }
 
     /// Release keyboard focus.
     #[handler::single]
     fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        self.focused = false;
+        self.state.lose_focus();
         self.dragging = false;
+        self.edit.clear_composition();
+    }
+
+    #[handler::single]
+    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
+        self.state.set_hovered(true);
+    }
+
+    #[handler::single]
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
     }
 
     /// Insert committed text over the active selection. `TextInput` is already
     /// resolved through the layout and IME, so any composition ends here.
     #[handler::single]
     fn on_text_input(&mut self, _ctx: &mut WasmCtx<'_>, input: TextInput) {
+        if !self.state.can_mutate() {
+            return;
+        }
         self.edit.clear_composition();
         self.edit.insert(&input.text, self.policy());
     }
@@ -319,9 +364,12 @@ impl WasmActor for TextFieldWidget {
     /// to the panel root.
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
+        if !self.state.is_available() {
+            return;
+        }
         let extend = self.modifiers.shift;
         match key.code {
-            KEY_BACKSPACE => self.edit.delete_backward(),
+            KEY_BACKSPACE if self.state.can_mutate() => self.edit.delete_backward(),
             KEY_LEFT => self.edit.move_left(extend),
             KEY_RIGHT => self.edit.move_right(extend),
             KEY_ENTER => {
@@ -339,7 +387,7 @@ impl WasmActor for TextFieldWidget {
     /// buttons are ignored.
     #[handler::single]
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
-        if press.button != mouse_button::LEFT {
+        if press.button != mouse_button::LEFT || !self.state.is_available() {
             return;
         }
         self.dragging = true;
@@ -350,7 +398,7 @@ impl WasmActor for TextFieldWidget {
     /// A move during a live drag extends the selection to the pointer.
     #[handler::single]
     fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
-        if !self.dragging {
+        if !self.dragging || !self.state.is_available() {
             return;
         }
         let byte = self.hit_byte(moved.x);
@@ -369,13 +417,18 @@ impl WasmActor for TextFieldWidget {
     /// movement and future chord-aware edits can consult it.
     #[handler::single]
     fn on_modifiers(&mut self, _ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
-        self.modifiers = modifiers;
+        if self.state.is_available() {
+            self.modifiers = modifiers;
+        }
     }
 
     /// Track the in-flight IME composition at the active selection. Empty text
     /// clears it.
     #[handler::single]
     fn on_ime_preedit(&mut self, _ctx: &mut WasmCtx<'_>, preedit: ImePreedit) {
+        if !self.state.can_mutate() {
+            return;
+        }
         let cursor = match (preedit.cursor_begin, preedit.cursor_end) {
             (Some(begin), Some(end)) => Some(TextSpan::new(begin as usize, end as usize)),
             _ => None,
@@ -409,12 +462,23 @@ impl WasmActor for TextFieldWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
+        let Some(parent) = ctx.parent() else {
+            return;
+        };
+        if !self.state.is_visible() {
+            parent.send(&WidgetDrawList {
+                intrinsic: None,
+                items: Vec::new(),
+            });
+            return;
+        }
         let width = self.frame.width;
         let height = self.frame.height;
         let pad = self.theme.pad;
         let size = self.theme.value_size_pixels;
         let text_y = text_origin_y(0.0, height, size);
         let caret_height = pad.mul_add(-2.0, height).max(1.0);
+        let theme_state = self.theme_state();
 
         let displayed = self.displayed_edit();
 
@@ -437,8 +501,7 @@ impl WasmActor for TextFieldWidget {
             0.0,
             width,
             height,
-            self.theme
-                .fill(self.theme.surface_raised, WidgetState::Normal),
+            self.theme.fill(self.theme.surface_raised, theme_state),
         ));
         if let Some(span) = displayed.selection_span {
             let x0 = pad + prefix_width(span.start_byte);
@@ -472,7 +535,7 @@ impl WasmActor for TextFieldWidget {
                 font_id: self.theme.font_id,
                 text: displayed.text.clone(),
                 size_pixels: size,
-                color: self.theme.text_primary,
+                color: self.theme.fill(self.theme.text_primary, theme_state),
                 clip: None,
             });
         }
@@ -494,25 +557,22 @@ impl WasmActor for TextFieldWidget {
                 items.push(quad(cursor_x, pad, 1.0, caret_height, self.theme.accent));
             }
         }
-        if self.focused && !displayed.composing {
+        if self.state.focused() && !displayed.composing {
             let caret_x = pad + prefix_width(displayed.caret_byte);
             items.push(quad(caret_x, pad, 1.0, caret_height, self.theme.accent));
         }
-        if self.focused {
-            push_border(&mut items, width, height, 2.0, self.theme.accent);
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                intrinsic: None,
-                items,
-            });
-        }
+        push_control_outlines(&mut items, width, height, &self.state, &self.theme);
+        parent.send(&WidgetDrawList {
+            intrinsic: None,
+            items,
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widget::WidgetControlState;
     use aether_kinds::FontMetrics;
 
     /// A field with the given desired font id, no metrics resolved yet — the
@@ -522,13 +582,13 @@ mod tests {
             edit: TextEditState::new(String::new()),
             max_chars: 0,
             theme: Theme::DEFAULT,
+            state: InteractionState::new(WidgetControlState::default()),
             frame: WidgetFrame {
                 x: 0.0,
                 y: 0.0,
                 width: 100.0,
                 height: 24.0,
             },
-            focused: false,
             modifiers: Modifiers::default(),
             dragging: false,
             desired_font_id,

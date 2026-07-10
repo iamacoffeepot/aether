@@ -18,11 +18,12 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
 
-use crate::widget::set::{push_border, quad};
-use crate::widget::theme::{SetTheme, Theme, WidgetState};
+use crate::widget::set::{push_control_outlines, quad};
+use crate::widget::state::{InteractionState, emit_state_changed};
+use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
-    Collect, FocusGained, FocusLost, SliderChanged, SliderConfig, WidgetDrawItem, WidgetDrawList,
-    WidgetFrame,
+    Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, SliderChanged,
+    SliderConfig, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 /// A horizontal value slider. Local draw is a track with a fill from the left
@@ -34,7 +35,7 @@ pub struct SliderWidget {
     value: f32,
     theme: Theme,
     frame: WidgetFrame,
-    focused: bool,
+    state: InteractionState,
     /// Whether a drag is in flight (a left press landed and no release has
     /// cleared it). Streams uncommitted values while set.
     dragging: bool,
@@ -118,13 +119,13 @@ impl WasmActor for SliderWidget {
             step: config.step,
             value: config.initial,
             theme: config.theme,
+            state: InteractionState::new(config.state),
             frame: WidgetFrame {
                 x: 0.0,
                 y: 0.0,
                 width: 0.0,
                 height: 0.0,
             },
-            focused: false,
             dragging: false,
         };
         slider.value = slider.snapped(config.initial);
@@ -135,12 +136,28 @@ impl WasmActor for SliderWidget {
     /// value into the new range. `initial` is ignored on re-config (it seeds
     /// the value only at init) so a restyle does not jump the value.
     #[handler::single]
-    fn on_config(&mut self, _ctx: &mut WasmCtx<'_>, config: SliderConfig) {
+    fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: SliderConfig) {
         self.min = config.min;
         self.max = config.max;
         self.step = config.step;
         self.theme = config.theme;
         self.value = self.snapped(self.value);
+        if self.state.replace(config.state) {
+            if !self.state.can_mutate() {
+                self.dragging = false;
+            }
+            emit_state_changed(ctx, &self.state);
+        }
+    }
+
+    #[handler::single]
+    fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
+        if self.state.replace(set.state) {
+            if !self.state.can_mutate() {
+                self.dragging = false;
+            }
+            emit_state_changed(ctx, &self.state);
+        }
     }
 
     /// Restyle: adopt the fanned theme.
@@ -158,19 +175,30 @@ impl WasmActor for SliderWidget {
     /// Take keyboard focus (draw the focus ring).
     #[handler::single]
     fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
-        self.focused = true;
+        self.state.gain_focus();
     }
 
     /// Release keyboard focus.
     #[handler::single]
     fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
-        self.focused = false;
+        self.state.lose_focus();
+        self.dragging = false;
+    }
+
+    #[handler::single]
+    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
+        self.state.set_hovered(true);
+    }
+
+    #[handler::single]
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
     }
 
     /// A left press begins a drag and sets the value from the cursor.
     #[handler::single]
     fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
-        if press.button != mouse_button::LEFT {
+        if press.button != mouse_button::LEFT || !self.state.can_mutate() {
             return;
         }
         self.dragging = true;
@@ -181,7 +209,7 @@ impl WasmActor for SliderWidget {
     /// A move while dragging updates the value and streams it uncommitted.
     #[handler::single]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
-        if !self.dragging {
+        if !self.dragging || !self.state.can_mutate() {
             return;
         }
         self.value = self.value_from_pointer_x(moved.x);
@@ -191,7 +219,7 @@ impl WasmActor for SliderWidget {
     /// A left release ends the drag and commits the value.
     #[handler::single]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
-        if release.button != mouse_button::LEFT || !self.dragging {
+        if release.button != mouse_button::LEFT || !self.dragging || !self.state.can_mutate() {
             return;
         }
         self.value = self.value_from_pointer_x(release.x);
@@ -203,6 +231,9 @@ impl WasmActor for SliderWidget {
     /// forwards keyboard mail to the focused child).
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
+        if !self.state.can_mutate() {
+            return;
+        }
         let delta = match key.code {
             KEY_LEFT | KEY_DOWN => -self.nudge_amount(),
             KEY_RIGHT | KEY_UP => self.nudge_amount(),
@@ -219,8 +250,19 @@ impl WasmActor for SliderWidget {
     /// The panel root's per-frame poll; not useful to send manually.
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
+        if !self.state.is_visible() {
+            if let Some(parent) = ctx.parent() {
+                parent.send(&WidgetDrawList {
+                    intrinsic: None,
+                    items: Vec::new(),
+                });
+            }
+            return;
+        }
         let width = self.frame.width;
         let height = self.frame.height;
+        let theme_state = self.state.theme_state(self.dragging);
+        let track_state = self.state.supporting_theme_state(false);
         let track_height = (height * 0.35).clamp(4.0, height.max(4.0));
         let track_y = (height - track_height) * 0.5;
 
@@ -230,19 +272,16 @@ impl WasmActor for SliderWidget {
             track_y,
             width,
             track_height,
-            self.theme
-                .fill(self.theme.surface_raised, WidgetState::Normal),
+            self.theme.fill(self.theme.surface_raised, track_state),
         ));
         items.push(quad(
             0.0,
             track_y,
             width * self.fill_fraction(),
             track_height,
-            self.theme.fill(self.theme.accent, WidgetState::Normal),
+            self.theme.fill(self.theme.accent, theme_state),
         ));
-        if self.focused {
-            push_border(&mut items, width, height, 2.0, self.theme.accent);
-        }
+        push_control_outlines(&mut items, width, height, &self.state, &self.theme);
         if let Some(parent) = ctx.parent() {
             parent.send(&WidgetDrawList {
                 intrinsic: None,
@@ -255,6 +294,7 @@ impl WasmActor for SliderWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widget::WidgetControlState;
 
     fn slider(min: f32, max: f32, step: f32, initial: f32) -> SliderWidget {
         SliderWidget {
@@ -263,13 +303,13 @@ mod tests {
             step,
             value: initial,
             theme: Theme::DEFAULT,
+            state: InteractionState::new(WidgetControlState::default()),
             frame: WidgetFrame {
                 x: 100.0,
                 y: 0.0,
                 width: 200.0,
                 height: 24.0,
             },
-            focused: false,
             dragging: false,
         }
     }

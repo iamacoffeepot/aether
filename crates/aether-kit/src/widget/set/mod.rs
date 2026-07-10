@@ -19,10 +19,9 @@
 //! input; the root forwards it — see [`super::focus::Focus`] and
 //! [`super::panel::WidgetPanel`].
 //!
-//! An inline child receives only `init` (no `wire`, and `init` cannot mail),
-//! so a widget does nothing at boot beyond building its state; the root's
-//! first `WidgetFrame` gives it its rect and the first `Collect` its first
-//! draw.
+//! Inline children run `wire` after `init`, like loaded actors, but still rely
+//! on the root's first `WidgetFrame` for layout and the first `Collect` for
+//! their first draw.
 
 pub mod button;
 pub mod label;
@@ -41,6 +40,8 @@ use alloc::vec::Vec;
 use aether_math::Rgba;
 
 use crate::widget::WidgetDrawItem;
+use crate::widget::state::InteractionState;
+use crate::widget::theme::Theme;
 
 /// A flat-colored quad in a widget's own local coordinates — the shared
 /// constructor the widgets build their chrome from.
@@ -70,6 +71,60 @@ pub(crate) fn push_border(
     items.push(quad(0.0, height - thickness, width, thickness, color));
     items.push(quad(0.0, 0.0, thickness, height, color));
     items.push(quad(width - thickness, 0.0, thickness, height, color));
+}
+
+fn push_inset_border(
+    items: &mut Vec<WidgetDrawItem>,
+    width: f32,
+    height: f32,
+    inset: f32,
+    thickness: f32,
+    color: Rgba,
+) {
+    let inner_width = inset.mul_add(-2.0, width).max(0.0);
+    let inner_height = inset.mul_add(-2.0, height).max(0.0);
+    items.push(quad(inset, inset, inner_width, thickness, color));
+    items.push(quad(
+        inset,
+        inset + inner_height - thickness,
+        inner_width,
+        thickness,
+        color,
+    ));
+    items.push(quad(inset, inset, thickness, inner_height, color));
+    items.push(quad(
+        inset + inner_width - thickness,
+        inset,
+        thickness,
+        inner_height,
+        color,
+    ));
+}
+
+/// Draw validation and focus as orthogonal outlines. Validation owns the outer
+/// ring; when both are present focus moves inward so neither signal covers the
+/// other.
+pub(super) fn push_control_outlines(
+    items: &mut Vec<WidgetDrawItem>,
+    width: f32,
+    height: f32,
+    state: &InteractionState,
+    theme: &Theme,
+) {
+    let validation = state.validation_color(theme);
+    if let Some(color) = validation {
+        push_border(items, width, height, 2.0, color);
+    }
+    if state.focused() {
+        push_inset_border(
+            items,
+            width,
+            height,
+            if validation.is_some() { 2.0 } else { 0.0 },
+            2.0,
+            theme.accent,
+        );
+    }
 }
 
 /// A rough per-character advance for caret placement and content sizing, as a

@@ -485,15 +485,66 @@ pub struct WidgetConfig {
     pub children: Vec<WidgetChildSpec>,
 }
 
-/// The four data-down lanes of the widget set (config / style / layout
-/// frame) and the one events-up lane (value) that the reference panel root
-/// drives its inline widget children through. The kinds carry **no widget
-/// identity field**: a value-up reply is attributed by the root against the
-/// `MailboxId` it recorded when it spawned each child (`ctx.source_mailbox`),
-/// so a widget's identity stays its inline subname rather than a field the
-/// widget could get wrong. Layout and focus flow down the same way the
-/// compositing `Collect` does — the root owns every child's rect and focus,
-/// and the widget only reacts.
+/// Validation feedback attached to a stock widget's external control state.
+/// The message is consumer-facing context; the stock widgets render only the
+/// named warning/error role so the wire value does not dictate presentation.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub enum WidgetValidation {
+    #[default]
+    Valid,
+    Warning {
+        message: String,
+    },
+    Error {
+        message: String,
+    },
+}
+
+/// Shared external availability and validation state for every stock widget.
+/// This is deliberately separate from frame-local hover, press, drag, and
+/// focus state, which widgets derive from root-forwarded interaction mail.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WidgetControlState {
+    pub visible: bool,
+    pub enabled: bool,
+    pub read_only: bool,
+    pub validation: WidgetValidation,
+}
+
+impl Default for WidgetControlState {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            enabled: true,
+            read_only: false,
+            validation: WidgetValidation::Valid,
+        }
+    }
+}
+
+/// `aether.kit.widget.set_state` — replace a stock widget's external state
+/// without resetting its authored value or other configuration.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.set_state")]
+pub struct SetWidgetState {
+    pub state: WidgetControlState,
+}
+
+/// `aether.kit.widget.state_changed` — a source-attributed events-up reply
+/// emitted only when a re-sent config or [`SetWidgetState`] changes external
+/// state. The panel uses it to keep routing availability synchronized.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.state_changed")]
+pub struct WidgetStateChanged {
+    pub state: WidgetControlState,
+}
+
+/// The widget set's config/style/layout/state/interaction data-down lanes and
+/// value/state events-up lanes. Events carry **no widget identity field**: the
+/// root attributes replies against the `MailboxId` recorded at spawn
+/// (`ctx.source_mailbox`), so identity stays the inline subname. Layout, focus,
+/// hover, and external state flow down like compositing `Collect`; the root
+/// owns routing and the widget reacts.
 ///
 /// Each per-widget `Config` embeds a [`Theme`] (the theme-first sequencing:
 /// there is no separate widget-style kind — a widget's whole look is its
@@ -512,6 +563,8 @@ pub struct SliderConfig {
     pub step: f32,
     pub initial: f32,
     pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
 }
 
 impl Default for SliderConfig {
@@ -522,6 +575,7 @@ impl Default for SliderConfig {
             step: 0.0,
             initial: 0.0,
             theme: Theme::default(),
+            state: WidgetControlState::default(),
         }
     }
 }
@@ -536,6 +590,8 @@ pub struct TextFieldConfig {
     pub initial: String,
     pub max_chars: u32,
     pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
 }
 
 /// `aether.kit.widget.radio.config` — a vertical list of mutually-exclusive
@@ -547,6 +603,8 @@ pub struct RadioConfig {
     pub options: Vec<String>,
     pub initial_index: u32,
     pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
 }
 
 /// `aether.kit.widget.button.config` — a momentary push button showing
@@ -556,6 +614,8 @@ pub struct RadioConfig {
 pub struct ButtonConfig {
     pub label: String,
     pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
 }
 
 /// `aether.kit.widget.label.config` — static, non-interactive `text`. A label
@@ -565,6 +625,8 @@ pub struct ButtonConfig {
 pub struct LabelConfig {
     pub text: String,
     pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
 }
 
 /// `aether.kit.widget.slider.changed` — a slider's value-up event.
@@ -629,6 +691,18 @@ pub struct FocusGained;
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.widget.focus_lost")]
 pub struct FocusLost;
+
+/// `aether.kit.widget.hover_gained` — the root tells a pointer-eligible child
+/// that the pointer has entered its live hit rectangle. Fieldless.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.hover_gained")]
+pub struct HoverGained;
+
+/// `aether.kit.widget.hover_lost` — the root tells the previously hovered
+/// child that the pointer left its live hit rectangle. Fieldless.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.hover_lost")]
+pub struct HoverLost;
 
 /// `aether.kit.widget.panel.config` — the reference panel root's layout
 /// config: where the vertical widget stack sits (`x` / `y` top-left, `width`),

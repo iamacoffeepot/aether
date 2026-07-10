@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 use aether_actor::Addressable;
 use aether_capabilities::RenderCapability;
 use aether_capabilities::fs::NamespaceRoots;
-use aether_capabilities::render::WHITE_TEXTURE_ID;
+use aether_capabilities::render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
 use aether_capabilities::text::{
     FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
 };
@@ -59,7 +59,10 @@ use aether_kinds::{
     LogTailResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove, NamedMail, TextInput,
     Tick,
 };
-use aether_kit::{PanelConfig, Theme};
+use aether_kit::{
+    ButtonConfig, PanelConfig, SetWidgetState, SliderConfig, Theme, ThemeState, WidgetChildSpec,
+    WidgetControlState, WidgetKind, WidgetValidation,
+};
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{init_save_sandbox, require_runtime},
@@ -122,6 +125,15 @@ fn panel_address() -> String {
     format!(
         "aether.component/{}:panel",
         aether_capabilities::WasmTrampoline::NAMESPACE,
+    )
+}
+
+fn child_address(subname: &str) -> String {
+    format!(
+        "{}/{}:{}",
+        panel_address(),
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+        subname,
     )
 }
 
@@ -203,6 +215,15 @@ fn load_metrics(bench: &mut TestBench, font_id: u32) -> CachedFontMetrics {
 /// panel does not kick off its own load). Every widget draws text with that
 /// font.
 fn load_panel(bench: &mut TestBench, wasm: &[u8], font_id: u32) {
+    load_panel_with_children(bench, wasm, font_id, Vec::new());
+}
+
+fn load_panel_with_children(
+    bench: &mut TestBench,
+    wasm: &[u8],
+    font_id: u32,
+    children: Vec<WidgetChildSpec>,
+) {
     let config = PanelConfig {
         x: PANEL_X,
         y: PANEL_Y,
@@ -213,7 +234,7 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8], font_id: u32) {
             font_id,
             ..Theme::DEFAULT
         },
-        children: Vec::new(),
+        children,
     };
     let loaded = bench
         .execute(vec![(
@@ -249,6 +270,16 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8], font_id: u32) {
 fn boot_panel(bench: &mut TestBench, wasm: &[u8]) {
     let font_id = load_font(bench);
     load_panel(bench, wasm, font_id);
+    warm_panel(bench);
+}
+
+fn boot_panel_with_children(bench: &mut TestBench, wasm: &[u8], children: Vec<WidgetChildSpec>) {
+    let font_id = load_font(bench);
+    load_panel_with_children(bench, wasm, font_id, children);
+    warm_panel(bench);
+}
+
+fn warm_panel(bench: &mut TestBench) {
     let panel = panel_address();
     bench
         .execute(vec![
@@ -279,6 +310,117 @@ fn press(x: f32, y: f32) -> MouseButton {
 /// A left mouse-button release at `(x, y)`.
 fn release(x: f32, y: f32) -> MouseButtonRelease {
     MouseButtonRelease { button: LEFT, x, y }
+}
+
+fn button_child(subname: &str, label: &str, state: WidgetControlState) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::Button,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: ButtonConfig {
+            label: label.to_owned(),
+            theme: Theme::DEFAULT,
+            state,
+        }
+        .encode_into_bytes(),
+    }
+}
+
+fn slider_child(subname: &str, state: WidgetControlState) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::Slider,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: SliderConfig {
+            min: 0.0,
+            max: 1.0,
+            step: 0.1,
+            initial: 0.5,
+            theme: Theme::DEFAULT,
+            state,
+        }
+        .encode_into_bytes(),
+    }
+}
+
+fn row_clip(y: f32) -> ClipRect {
+    ClipRect {
+        x: PANEL_X,
+        y,
+        width: PANEL_WIDTH,
+        height: ROW_HEIGHT,
+    }
+}
+
+fn solid_for<'a>(snapshot: &'a [DrawTexturedQuads], clip: &ClipRect) -> &'a DrawTexturedQuads {
+    snapshot
+        .iter()
+        .find(|batch| batch.texture_id == WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(clip))
+        .unwrap_or_else(|| panic!("missing solid batch for {clip:?}; snapshot: {snapshot:?}"))
+}
+
+fn assert_initial_control_snapshot(snapshot: &[DrawTexturedQuads], slider_y: f32, hover_y: f32) {
+    let hidden_clip = row_clip(PANEL_Y);
+    assert!(
+        snapshot
+            .iter()
+            .all(|batch| batch.clip.as_ref() != Some(&hidden_clip)),
+        "the hidden first child retains its slot but contributes no solid or glyph batch",
+    );
+
+    let disabled_batch = solid_for(snapshot, &row_clip(PANEL_Y + ROW_HEIGHT + GAP));
+    assert_eq!(
+        disabled_batch.quads[0].tint,
+        Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Disabled),
+        "disabled button fill uses the shared disabled role",
+    );
+
+    let value_batch = solid_for(snapshot, &row_clip(slider_y));
+    assert_eq!(
+        value_batch.quads.len(),
+        10,
+        "track + fill + two four-quad outlines"
+    );
+    assert!(
+        value_batch.quads[2..6]
+            .iter()
+            .all(|quad| quad.tint == Theme::DEFAULT.error),
+        "the outer validation ring uses the error role",
+    );
+    assert!(
+        value_batch.quads[6..10]
+            .iter()
+            .all(|quad| quad.tint == Theme::DEFAULT.accent),
+        "the inset focus ring remains visible after validation",
+    );
+    assert_eq!(value_batch.quads[2].y, slider_y);
+    assert_eq!(value_batch.quads[6].y, slider_y + BORDER);
+
+    let hover_batch = solid_for(snapshot, &row_clip(hover_y));
+    assert_eq!(
+        hover_batch.quads[0].tint,
+        Theme::DEFAULT.fill(Theme::DEFAULT.accent, ThemeState::Hover),
+        "the final sibling owns hover after lost-before-gained delivery",
+    );
+}
+
+fn assert_updated_control_snapshot(snapshot: &[DrawTexturedQuads], slider_y: f32, hover_y: f32) {
+    assert!(
+        !solid_for(snapshot, &row_clip(PANEL_Y)).quads.is_empty(),
+        "runtime visible=true restores drawing in the retained first slot",
+    );
+    assert_eq!(
+        solid_for(snapshot, &row_clip(slider_y)).quads[2].tint,
+        Theme::DEFAULT.warning,
+        "runtime validation changes the outer role without resetting the slider",
+    );
+    assert_eq!(
+        solid_for(snapshot, &row_clip(hover_y)).quads[0].tint,
+        Theme::DEFAULT.accent,
+        "child→empty hover emits HoverLost and restores the normal fill",
+    );
 }
 
 /// A half-open window band `[min_x, max_x) × [min_y, max_y)` as an inclusive
@@ -1314,6 +1456,122 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         "clicking after `abé`, extending over `cd`, and committing `Z` must leave the non-ASCII \
          value `abéZ`; log was:\n{joined}",
     );
+}
+
+/// Exact overlay batches prove the shared state contract without raster
+/// ambiguity: hidden slots are absent, disabled/hover fills use the expected
+/// derived roles, and validation plus focus remain two ordered outlines.
+#[test]
+fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = build_bench();
+
+    let hidden = WidgetControlState {
+        visible: false,
+        ..WidgetControlState::default()
+    };
+    let disabled = WidgetControlState {
+        enabled: false,
+        ..WidgetControlState::default()
+    };
+    let invalid = WidgetControlState {
+        validation: WidgetValidation::Error {
+            message: "outside range".to_owned(),
+        },
+        ..WidgetControlState::default()
+    };
+    boot_panel_with_children(
+        &mut bench,
+        &wasm,
+        vec![
+            button_child("hidden", "Hidden", hidden),
+            button_child("disabled", "Disabled", disabled),
+            slider_child("value", invalid),
+            button_child("hover", "Hover", WidgetControlState::default()),
+        ],
+    );
+
+    let panel = panel_address();
+    let slider_y = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0;
+    let hover_y = PANEL_Y + (ROW_HEIGHT + GAP) * 3.0;
+    bench
+        .execute(vec![
+            // Focus skips hidden + disabled and lands on the invalid slider.
+            ("focus", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            // Exercise sibling→sibling hover before settling on the button.
+            (
+                "hover_slider",
+                BenchOp::send_mail(
+                    &panel,
+                    &MouseMove {
+                        x: PANEL_X + 20.0,
+                        y: slider_y + ROW_HEIGHT * 0.5,
+                    },
+                ),
+            ),
+            (
+                "hover_button",
+                BenchOp::send_mail(
+                    &panel,
+                    &MouseMove {
+                        x: PANEL_X + 20.0,
+                        y: hover_y + ROW_HEIGHT * 0.5,
+                    },
+                ),
+            ),
+            (
+                "capture",
+                BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new()),
+            ),
+        ])
+        .expect("state snapshot");
+
+    assert_initial_control_snapshot(&bench.committed_overlay_snapshot(), slider_y, hover_y);
+
+    // Moving to empty clears hover; runtime mail reveals the hidden slot and
+    // changes the slider's validation role without changing either value.
+    let warning = WidgetControlState {
+        validation: WidgetValidation::Warning {
+            message: "check value".to_owned(),
+        },
+        ..WidgetControlState::default()
+    };
+    bench
+        .execute(vec![
+            (
+                "hover_empty",
+                BenchOp::send_mail(
+                    &panel,
+                    &MouseMove {
+                        x: WINDOW_WIDTH as f32 - 2.0,
+                        y: WINDOW_HEIGHT as f32 - 2.0,
+                    },
+                ),
+            ),
+            (
+                "show_hidden",
+                BenchOp::send_mail(
+                    child_address("hidden"),
+                    &SetWidgetState {
+                        state: WidgetControlState::default(),
+                    },
+                ),
+            ),
+            (
+                "warn_value",
+                BenchOp::send_mail(child_address("value"), &SetWidgetState { state: warning }),
+            ),
+            (
+                "capture_updated",
+                BenchOp::capture_with_mails(vec![tick_to_panel()], Vec::new()),
+            ),
+        ])
+        .expect("runtime state update snapshot");
+
+    assert_updated_control_snapshot(&bench.committed_overlay_snapshot(), slider_y, hover_y);
 }
 
 #[test]
