@@ -150,7 +150,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
     let tint = Rgba::WHITE;
     let panel =
         load_panel(&mut bench, &wasm, &image_config(first_texture_id, ImageFit::Fill, WidgetControlState::default()));
-    let image = format!("{panel}/{}:image", aether_capabilities::WasmTrampoline::NAMESPACE,);
+    let image = format!("{panel}/{}:image", aether_capabilities::WasmTrampoline::NAMESPACE);
 
     let fill_pixels = capture(&mut bench, &panel);
     assert_image_batch(
@@ -170,7 +170,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
     );
     let red =
         target_color_stats(&fill_pixels, [255, 0, 0], 24, Some(Rect { min_x: 9, min_y: 10, max_x: 12, max_y: 13 }));
-    assert!(red.fraction > 0.8, "bounded top-left probe should see the four-color texture's red quadrant: {red:?}",);
+    assert!(red.fraction > 0.8, "bounded top-left probe should see the four-color texture's red quadrant: {red:?}");
 
     for (fit, expected) in [
         (
