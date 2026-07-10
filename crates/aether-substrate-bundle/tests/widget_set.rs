@@ -12,7 +12,7 @@
 //! Value-up events flow child → panel *inside the cluster*, so they never
 //! cross the observable render / broadcast sink `count_observed` watches — the
 //! log ring is the correct observation surface here. The rendered-output gate
-//! (one `DrawSolidQuads` per cluster) is issue 2659's `widget_compositing`
+//! (one root render sender per cluster) is issue 2659's `widget_compositing`
 //! scenario and is not duplicated.
 //!
 //! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
@@ -227,6 +227,7 @@ fn slider_spec(subname: &str, initial: f32) -> WidgetChildSpec {
         subname: subname.to_owned(),
         kind: WidgetKind::Slider,
         origin: [0.0, 0.0],
+        clip: None,
         config: SliderConfig {
             min: 0.0,
             max: 255.0,

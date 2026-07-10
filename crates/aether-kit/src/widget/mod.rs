@@ -14,8 +14,9 @@
 //! - The **root** (`config.root`) subscribes the frame stage once and, on
 //!   each `Tick`, resets its [`Composite`], appends its own chrome, and
 //!   sends [`Collect`] to each child in layout order. When its slots close
-//!   it emits the whole subtree as one `DrawSolidQuads` (plus one
-//!   `DrawText` per glyph run) to `aether.render` / `aether.text`.
+//!   it emits the whole subtree as contiguous equal-clip `DrawSolidQuads`
+//!   runs (plus one `DrawText` per glyph run) to `aether.render` /
+//!   `aether.text`, remaining the cluster's only render sender.
 //! - An **interior** node does the same on each inbound [`Collect`], but
 //!   instead of emitting it replies its flattened composite up to its
 //!   parent — withholding that reply until its own slots close, which is
@@ -55,10 +56,11 @@ use aether_capabilities::render::{DrawSolidQuads, SolidQuad};
 use aether_capabilities::text::DrawText;
 use aether_capabilities::{LifecycleCapability, RenderCapability, TextCapability};
 use aether_data::Kind;
-use aether_kinds::{QuadSpace, Tick};
+use aether_kinds::{ClipRect, QuadSpace, Tick};
 use aether_math::Vec2;
 
 use crate::widget::composite::Composite;
+use crate::widget::kinds::WidgetClipIntersection;
 
 /// A compositing widget node. `config` fixes its role and layout;
 /// `composite` accumulates its subtree each frame; `spawned` guards the
@@ -94,6 +96,7 @@ impl Widget {
                 Ok(alias) => self.composite.register_slot(
                     alias,
                     Vec2::new(spec.origin[0], spec.origin[1]),
+                    spec.clip,
                     &spec.subname,
                     <Self as Addressable>::NAMESPACE,
                 ),
@@ -168,38 +171,76 @@ pub(crate) fn accept_child_list(
     composite.is_complete()
 }
 
-/// Emit a flattened subtree as the cluster's single render + text output:
-/// one `DrawSolidQuads` for all the flat fills (in depth-first order, so
-/// chrome draws under children), then one `DrawText` per glyph run. Text's
-/// extra hop through the text cap lands its glyphs after the direct quad
-/// batch the same frame — the fills-under-labels layering a composited UI
-/// surface needs.
+/// One contiguous run of solid quads sharing an effective widget-local clip.
+#[derive(Debug, PartialEq)]
+struct SolidRun {
+    clip: Option<WidgetClipRect>,
+    quads: Vec<SolidQuad>,
+}
+
+/// Plan the quad subsequence into contiguous equal-clip runs. Text is emitted
+/// by its separate capability after solids, so text items neither enter nor
+/// split these runs. Invalid explicit clips omit their items.
+fn solid_runs(list: &WidgetDrawList) -> Vec<SolidRun> {
+    let mut runs: Vec<SolidRun> = Vec::new();
+    for item in &list.items {
+        let WidgetDrawItem::Quad {
+            x,
+            y,
+            width,
+            height,
+            color,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        let clip = match item.valid_clip() {
+            WidgetClipIntersection::Unbounded => None,
+            WidgetClipIntersection::Finite { rect } => Some(rect),
+            WidgetClipIntersection::Empty => continue,
+        };
+        let quad = SolidQuad {
+            x: *x,
+            y: *y,
+            width: *width,
+            height: *height,
+            color: *color,
+        };
+        if let Some(run) = runs.last_mut()
+            && run.clip == clip
+        {
+            run.quads.push(quad);
+        } else {
+            runs.push(SolidRun {
+                clip,
+                quads: vec![quad],
+            });
+        }
+    }
+    runs
+}
+
+fn framebuffer_clip(rect: WidgetClipRect) -> ClipRect {
+    ClipRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+    }
+}
+
+/// Emit a flattened subtree as the cluster's single render + text sender:
+/// contiguous `DrawSolidQuads` runs for the flat fills (preserving their
+/// depth-first relative order), then one `DrawText` per glyph run. Text's extra
+/// hop through the text cap lands its glyphs after the direct quad batches the
+/// same frame — the fills-under-labels layering a composited UI surface needs.
 pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
-    let quads: Vec<SolidQuad> = list
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            WidgetDrawItem::Quad {
-                x,
-                y,
-                width,
-                height,
-                color,
-            } => Some(SolidQuad {
-                x: *x,
-                y: *y,
-                width: *width,
-                height: *height,
-                color: *color,
-            }),
-            WidgetDrawItem::Text { .. } => None,
-        })
-        .collect();
-    if !quads.is_empty() {
+    for run in solid_runs(list) {
         ctx.actor::<RenderCapability>().send(&DrawSolidQuads {
             space: QuadSpace::Screen,
-            clip: None,
-            quads,
+            clip: run.clip.map(framebuffer_clip),
+            quads: run.quads,
         });
     }
     for item in &list.items {
@@ -210,8 +251,14 @@ pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
             text,
             size_pixels,
             color,
+            ..
         } = item
         {
+            let clip = match item.valid_clip() {
+                WidgetClipIntersection::Unbounded => None,
+                WidgetClipIntersection::Finite { rect } => Some(framebuffer_clip(rect)),
+                WidgetClipIntersection::Empty => continue,
+            };
             ctx.actor::<TextCapability>().send(&DrawText {
                 font_id: *font_id,
                 text: text.clone(),
@@ -219,9 +266,98 @@ pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
                 color: *color,
                 origin: [*x, *y],
                 space: QuadSpace::Screen,
-                clip: None,
+                clip,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_math::Rgba;
+
+    fn quad(x: f32, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
+        WidgetDrawItem::Quad {
+            x,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            color: Rgba::WHITE,
+            clip,
+        }
+    }
+
+    fn text(clip: Option<WidgetClipRect>) -> WidgetDrawItem {
+        WidgetDrawItem::Text {
+            x: 0.0,
+            y: 0.0,
+            font_id: 1,
+            text: "text".into(),
+            size_pixels: 12.0,
+            color: Rgba::WHITE,
+            clip,
+        }
+    }
+
+    #[test]
+    fn solid_planner_coalesces_only_adjacent_equal_clips_in_quad_order() {
+        let a = WidgetClipRect {
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        };
+        let b = WidgetClipRect {
+            x: 5.0,
+            y: 6.0,
+            width: 7.0,
+            height: 8.0,
+        };
+        let list = WidgetDrawList {
+            intrinsic: None,
+            items: vec![
+                quad(0.0, None),
+                quad(1.0, Some(a)),
+                text(Some(b)),
+                quad(2.0, Some(a)),
+                quad(3.0, Some(b)),
+                quad(4.0, Some(a)),
+            ],
+        };
+        let runs = solid_runs(&list);
+        assert_eq!(runs.len(), 4);
+        assert_eq!(runs[0].clip, None);
+        assert_eq!(runs[1].clip, Some(a));
+        assert_eq!(runs[2].clip, Some(b));
+        assert_eq!(runs[3].clip, Some(a));
+        assert_eq!(runs[1].quads.len(), 2, "text does not split a solid run");
+        let xs: Vec<f32> = runs
+            .iter()
+            .flat_map(|run| run.quads.iter().map(|quad| quad.x))
+            .collect();
+        assert_eq!(xs, vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn solid_planner_keeps_unclipped_output_one_batch_and_omits_invalid_clips() {
+        let invalid = WidgetClipRect {
+            x: 0.0,
+            y: 0.0,
+            width: -1.0,
+            height: 2.0,
+        };
+        let list = WidgetDrawList {
+            intrinsic: None,
+            items: vec![quad(1.0, None), quad(2.0, Some(invalid)), quad(3.0, None)],
+        };
+        let runs = solid_runs(&list);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].clip, None);
+        assert_eq!(
+            runs[0].quads.iter().map(|quad| quad.x).collect::<Vec<_>>(),
+            vec![1.0, 3.0],
+        );
     }
 }
 
@@ -232,9 +368,10 @@ pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
 /// Load the root with a `WidgetConfig { root: true, chrome, children }`;
 /// each `children` entry carries a pre-encoded child `WidgetConfig` in its
 /// `config` bytes, so the whole tree ships in one load. The cluster is one
-/// render sender: the root emits a single `DrawSolidQuads` per frame with
-/// every widget's quads in structural depth-first order, so a background
-/// drawn as root chrome sits under the children by construction.
+/// render sender: the root emits every widget's quads in structural
+/// depth-first order, grouped only where adjacent quads share an effective
+/// clip, so a background drawn as root chrome sits under the children by
+/// construction.
 #[actor(instanced)]
 impl WasmActor for Widget {
     type Config = WidgetConfig;

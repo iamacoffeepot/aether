@@ -9,7 +9,8 @@ layout for each new knob.
 
 The widgets build on two foundations documented alongside them: the
 draw-compositing protocol (ADR-0117 — `Collect` down, `WidgetDrawList` up, the
-`Composite` helper, and the one-render-sender-per-cluster emit) and the theme
+`Composite` helper, widget-local clipping, and the one-render-sender-per-cluster
+emit) and the theme
 (`Theme` tokens plus `Theme::fill`, carried on each widget's config). This page
 covers the layer above those: the four mail lanes every widget speaks and the
 focus-and-input model the root owns.
@@ -37,7 +38,9 @@ widget sends can misreport it.
   height }` in window pixels. The child caches it to lay out its local draw and
   to map a forwarded pointer position into its own space; the root keeps the
   same rect to offset the child's draws (through `Composite`) and to hit-test
-  pointer input (through `Focus`).
+  pointer input (through `Focus`). A generic `WidgetChildSpec.clip` is
+  parent-local; the reference panel derives that slot clip from the assigned
+  `WidgetFrame` so oversized child content cannot escape its row.
 - **Value, up.** `SliderChanged { value, committed }`, `TextCommitted { text }`,
   `RadioSelected { index }`, and `ButtonClicked` flow to the parent through
   `ctx.parent()`. A slider streams `committed: false` values through a drag and
@@ -91,3 +94,20 @@ To add a new widget — a dropdown, a checkbox, a color well — write one more
 `#[actor(instanced)]` type that speaks the same four lanes and answers `Collect`
 with a `WidgetDrawList`, then spawn it into a panel's stack. The focus model and
 the draw protocol carry it with no new machinery.
+
+## Local clipping and root emission
+
+`WidgetDrawItem::{Quad, Text}.clip` uses `WidgetClipRect { x, y, width,
+height }` in the drawing widget's local pixel space. `WidgetChildSpec.clip`
+uses the same named type in the parent that owns the slot. `Composite` moves an
+item clip with its geometry, intersects it with the slot clip, and repeats that
+at each ancestor. A missing clip is unbounded; an invalid, empty, disjoint, or
+edge-touching result omits the draw. Stock leaves normally leave their item
+clip unset and rely on their parent-owned slot.
+
+Only the root has framebuffer coordinates. It converts the effective
+`WidgetClipRect` to the render/text `ClipRect` when it emits. Solid items remain
+in authored relative order and are grouped into contiguous equal-clip batches;
+text still follows the established solids-before-text lane. Thus an unclipped
+tree remains one solid batch, while distinct clips may produce several mails
+from the same single root render sender.

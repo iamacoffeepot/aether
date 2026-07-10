@@ -1,8 +1,10 @@
 //! ADR-0117 widget-compositing end-to-end scenarios (issue 2659).
 //!
 //! A cluster of `aether-kit` `Widget` inline-child actors draws local and
-//! composites up so the whole subtree reaches `aether.render` as **one**
-//! ordered `DrawSolidQuads`. These are the gate that the protocol's own
+//! composites up so the whole subtree reaches `aether.render` through **one
+//! root sender**. Unclipped baselines remain one ordered `DrawSolidQuads`;
+//! distinct effective clips may require multiple ordered batches. These are
+//! the gate that the protocol's own
 //! logic — the filled-slot completion counter, `source_mailbox`
 //! attribution, and the depth-first flatten — holds end-to-end through the
 //! real inline-cluster FIFO drain, not just in the unit tests over the
@@ -10,10 +12,11 @@
 //!
 //! Two properties are pinned per frame:
 //!
-//! - **One render sender.** `count_observed("aether.render.draw_solid_quads")`
-//!   is exactly 1 after one frame, for a flat panel and for a two-level
-//!   tree alike — the #1852 fan-in fix (the whole cluster is one sender
-//!   regardless of widget count).
+//! - **Unclipped one-batch baseline.**
+//!   `count_observed("aether.render.draw_solid_quads")` is exactly 1 after one
+//!   frame for an unclipped flat panel and two-level tree alike. Clipped runs
+//!   may emit multiple mails, but every batch still comes from the one root
+//!   sender — the #1852 fan-in fix regardless of widget count.
 //! - **Structural draw order.** A background drawn as the root's own chrome
 //!   sits *under* its children, and a nested subtree draws its own chrome
 //!   under its own children — the depth-first order the tree structure
@@ -31,10 +34,14 @@
 
 use std::fs;
 
-use aether_data::Kind;
-use aether_kinds::{LoadComponent, LoadResult, NamedMail};
-use aether_kit::{WidgetChildSpec, WidgetConfig, WidgetDrawItem, WidgetKind};
-use aether_math::Rgba;
+use aether_capabilities::render::WHITE_TEXTURE_ID;
+use aether_data::{Kind, MailboxId};
+use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail};
+use aether_kit::widget::composite::Composite;
+use aether_kit::{
+    WidgetChildSpec, WidgetClipRect, WidgetConfig, WidgetDrawItem, WidgetDrawList, WidgetKind,
+};
+use aether_math::{Rgba, Vec2};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{Image, background_top_left, decode_png};
 
@@ -65,6 +72,25 @@ fn quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> WidgetDrawItem 
         width,
         height,
         color,
+        clip: None,
+    }
+}
+
+fn clipped_quad(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    color: Rgba,
+    clip: WidgetClipRect,
+) -> WidgetDrawItem {
+    WidgetDrawItem::Quad {
+        x,
+        y,
+        width,
+        height,
+        color,
+        clip: Some(clip),
     }
 }
 
@@ -159,12 +185,14 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
                 subname: "a".to_owned(),
                 kind: WidgetKind::Composite,
                 origin: [12.0, 12.0],
+                clip: None,
                 config: leaf_config(12.0, 12.0, RED),
             },
             WidgetChildSpec {
                 subname: "b".to_owned(),
                 kind: WidgetKind::Composite,
                 origin: [36.0, 20.0],
+                clip: None,
                 config: leaf_config(12.0, 12.0, GREEN),
             },
         ],
@@ -245,6 +273,7 @@ fn nested_tree_draws_in_depth_first_order() {
             subname: "b1".to_owned(),
             kind: WidgetKind::Composite,
             origin: [2.0, 2.0],
+            clip: None,
             config: b1,
         }],
     }
@@ -262,12 +291,14 @@ fn nested_tree_draws_in_depth_first_order() {
                 subname: "a".to_owned(),
                 kind: WidgetKind::Composite,
                 origin: [12.0, 14.0],
+                clip: None,
                 config: leaf_config(8.0, 8.0, RED),
             },
             WidgetChildSpec {
                 subname: "b".to_owned(),
                 kind: WidgetKind::Composite,
                 origin: [30.0, 12.0],
+                clip: None,
                 config: interior_b,
             },
         ],
@@ -313,5 +344,215 @@ fn nested_tree_draws_in_depth_first_order() {
         b1_pixel[0] > 150 && b1_pixel[1] > 150 && b1_pixel[2] > 150,
         "the interior's white leaf should read bright on every channel (drawn over \
          its green parent chrome), got {b1_pixel:?}",
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one cohesive nested clip structural + pixel acceptance run
+fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+
+    let leaf_clip = WidgetClipRect {
+        x: 6.0,
+        y: 5.0,
+        width: 10.0,
+        height: 8.0,
+    };
+    let root_clip = WidgetClipRect {
+        x: 12.0,
+        y: 10.0,
+        width: 20.0,
+        height: 16.0,
+    };
+    let green_local_clip = WidgetClipRect {
+        x: 2.0,
+        y: 1.0,
+        width: 20.0,
+        height: 20.0,
+    };
+    let disjoint_local_clip = WidgetClipRect {
+        x: 30.0,
+        y: 30.0,
+        width: 4.0,
+        height: 4.0,
+    };
+    let red_local_clip = WidgetClipRect {
+        x: 0.0,
+        y: 0.0,
+        width: 30.0,
+        height: 20.0,
+    };
+    let red_effective_clip = root_clip;
+    let green_effective_clip = WidgetClipRect {
+        x: 16.0,
+        y: 13.0,
+        width: 10.0,
+        height: 8.0,
+    };
+
+    // Pin the pure two-level composition first: local clips translate with
+    // their items, parent-local slot clips do not, and the disjoint white item
+    // disappears without disturbing the blue/red/green order.
+    let leaf_items = vec![
+        clipped_quad(0.0, 0.0, 30.0, 20.0, GREEN, green_local_clip),
+        clipped_quad(0.0, 0.0, 30.0, 20.0, WHITE, disjoint_local_clip),
+    ];
+    let mut interior = Composite::new();
+    interior.register_slot(
+        MailboxId(1),
+        Vec2::new(4.0, 3.0),
+        Some(leaf_clip),
+        "leaf",
+        "aether.kit.widget",
+    );
+    interior.begin_frame();
+    interior.extend_chrome([clipped_quad(0.0, 0.0, 30.0, 20.0, RED, red_local_clip)]);
+    assert!(interior.fill(
+        MailboxId(1),
+        WidgetDrawList {
+            intrinsic: None,
+            items: leaf_items.clone(),
+        },
+    ));
+    let mut root = Composite::new();
+    root.register_slot(
+        MailboxId(2),
+        Vec2::new(10.0, 8.0),
+        Some(root_clip),
+        "interior",
+        "aether.kit.widget",
+    );
+    root.begin_frame();
+    root.extend_chrome([quad(0.0, 0.0, 64.0, 48.0, BLUE)]);
+    assert!(root.fill(MailboxId(2), interior.flatten(None)));
+    assert_eq!(
+        root.flatten(None).items,
+        vec![
+            quad(0.0, 0.0, 64.0, 48.0, BLUE),
+            clipped_quad(10.0, 8.0, 30.0, 20.0, RED, red_effective_clip),
+            clipped_quad(14.0, 11.0, 30.0, 20.0, GREEN, green_effective_clip),
+        ],
+    );
+
+    let leaf = WidgetConfig {
+        root: false,
+        chrome: leaf_items,
+        intrinsic: None,
+        children: Vec::new(),
+    }
+    .encode_into_bytes();
+    let interior = WidgetConfig {
+        root: false,
+        chrome: vec![clipped_quad(0.0, 0.0, 30.0, 20.0, RED, red_local_clip)],
+        intrinsic: None,
+        children: vec![WidgetChildSpec {
+            subname: "leaf".to_owned(),
+            kind: WidgetKind::Composite,
+            origin: [4.0, 3.0],
+            clip: Some(leaf_clip),
+            config: leaf,
+        }],
+    }
+    .encode_into_bytes();
+    let config = WidgetConfig {
+        root: true,
+        chrome: vec![quad(0.0, 0.0, 64.0, 48.0, BLUE)],
+        intrinsic: None,
+        children: vec![WidgetChildSpec {
+            subname: "interior".to_owned(),
+            kind: WidgetKind::Composite,
+            origin: [10.0, 8.0],
+            clip: Some(root_clip),
+            config: interior,
+        }],
+    };
+
+    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
+    load_panel(&mut bench, &wasm, &config);
+    let captured = bench
+        .execute(vec![(
+            "snap",
+            BenchOp::capture_with_mails(vec![tick_to_root()], vec![]),
+        )])
+        .expect("capture clipped tree");
+    let img =
+        decode_png(captured.captured("snap").expect("snap bytes")).expect("decode clipped capture");
+
+    let solids: Vec<_> = bench
+        .committed_overlay_snapshot()
+        .into_iter()
+        .filter(|batch| batch.texture_id == WHITE_TEXTURE_ID)
+        .collect();
+    assert_eq!(
+        solids.len(),
+        3,
+        "None, root clip, and nested clip are three runs"
+    );
+    assert_eq!(solids[0].clip, None);
+    assert_eq!(
+        solids[1].clip,
+        Some(ClipRect {
+            x: 12.0,
+            y: 10.0,
+            width: 20.0,
+            height: 16.0,
+        }),
+    );
+    assert_eq!(
+        solids[2].clip,
+        Some(ClipRect {
+            x: 16.0,
+            y: 13.0,
+            width: 10.0,
+            height: 8.0,
+        }),
+    );
+    assert_eq!(solids[0].quads.len(), 1);
+    assert_eq!(solids[1].quads.len(), 1);
+    assert_eq!(solids[2].quads.len(), 1);
+    assert_eq!(solids[0].quads[0].tint, BLUE);
+    assert_eq!(solids[1].quads[0].tint, RED);
+    assert_eq!(solids[2].quads[0].tint, GREEN);
+    assert_eq!(
+        (
+            solids[1].quads[0].x,
+            solids[1].quads[0].y,
+            solids[1].quads[0].width,
+            solids[1].quads[0].height,
+        ),
+        (10.0, 8.0, 30.0, 20.0),
+    );
+    assert_eq!(
+        (
+            solids[2].quads[0].x,
+            solids[2].quads[0].y,
+            solids[2].quads[0].width,
+            solids[2].quads[0].height,
+        ),
+        (14.0, 11.0, 30.0, 20.0),
+    );
+
+    assert!(
+        dominant(rgb_at(&img, 11, 11), 2),
+        "red is clipped before x=12"
+    );
+    assert!(
+        dominant(rgb_at(&img, 13, 11), 0),
+        "red appears inside its clip"
+    );
+    assert!(
+        dominant(rgb_at(&img, 15, 15), 0),
+        "green is clipped before x=16"
+    );
+    assert!(
+        dominant(rgb_at(&img, 18, 16), 1),
+        "green appears inside the nested clip"
+    );
+    assert!(
+        dominant(rgb_at(&img, 33, 12), 2),
+        "red is clipped after x=32"
     );
 }

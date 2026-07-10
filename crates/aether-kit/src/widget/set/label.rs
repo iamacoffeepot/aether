@@ -83,6 +83,7 @@ impl WasmActor for LabelWidget {
                 text: self.text.clone(),
                 size_pixels: size,
                 color: self.theme.text_primary,
+                clip: None,
             });
         }
         if let Some(parent) = ctx.parent() {
