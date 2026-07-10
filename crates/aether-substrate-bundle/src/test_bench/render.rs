@@ -74,6 +74,7 @@ impl Gpu {
         }))
         .expect("request_device");
 
+        render_handles.enable_overlay_observation();
         render_handles.install_gpu(RenderGpu::new(
             Arc::new(device),
             Arc::new(queue),
