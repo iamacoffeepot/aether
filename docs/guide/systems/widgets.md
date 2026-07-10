@@ -97,17 +97,25 @@ the draw protocol carry it with no new machinery.
 
 ## Local clipping and root emission
 
-`WidgetDrawItem::{Quad, Text}.clip` uses `WidgetClipRect { x, y, width,
-height }` in the drawing widget's local pixel space. `WidgetChildSpec.clip`
-uses the same named type in the parent that owns the slot. `Composite` moves an
-item clip with its geometry, intersects it with the slot clip, and repeats that
-at each ancestor. A missing clip is unbounded; an invalid, empty, disjoint, or
-edge-touching result omits the draw. Stock leaves normally leave their item
-clip unset and rely on their parent-owned slot.
+`WidgetDrawItem::{Quad, TexturedQuad, Text}.clip` uses `WidgetClipRect { x, y,
+width, height }` in the drawing widget's local pixel space.
+`WidgetDrawItem::TexturedQuad` also carries named destination and UV fields,
+an `Rgba` tint, and a non-owning session texture id from `CreateTexture`; the
+producer that created the texture remains responsible for update and destroy.
+`WidgetChildSpec.clip` uses the same named clip type in the parent that owns
+the slot. `Composite` moves an item clip with its geometry, intersects it with
+the slot clip, and repeats that at each ancestor. A missing clip is unbounded;
+an invalid, empty, disjoint, or edge-touching result omits the draw. Stock
+leaves normally leave their item clip unset and rely on their parent-owned
+slot.
 
 Only the root has framebuffer coordinates. It converts the effective
-`WidgetClipRect` to the render/text `ClipRect` when it emits. Solid items remain
-in authored relative order and are grouped into contiguous equal-clip batches;
-text still follows the established solids-before-text lane. Thus an unclipped
-tree remains one solid batch, while distinct clips may produce several mails
-from the same single root render sender.
+`WidgetClipRect` to the render/text `ClipRect` when it emits. In one pass over
+the non-text items, solids group into contiguous equal-clip batches and
+textured items group by contiguous equal `(texture_id, clip)` keys. Kind,
+texture, and clip transitions flush; repeated keys are never regrouped across
+a transition. Both direct handlers target the same render recipient, whose
+FIFO preserves authored order. Text still follows the established later lane.
+Thus an unclipped all-solid tree remains one solid batch, while mixed items or
+distinct clips may produce several mails from the same single root render
+sender.

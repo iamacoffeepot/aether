@@ -232,6 +232,22 @@ mod tests {
         item
     }
 
+    fn textured(x: f32, y: f32, clip: WidgetClipRect) -> WidgetDrawItem {
+        WidgetDrawItem::TexturedQuad {
+            texture_id: 23,
+            x,
+            y,
+            width: 12.0,
+            height: 9.0,
+            u0: 0.125,
+            v0: 0.25,
+            u1: 0.75,
+            v1: 0.875,
+            tint: Rgba::new(0.4, 0.6, 0.8, 0.9),
+            clip: Some(clip),
+        }
+    }
+
     fn list(items: Vec<WidgetDrawItem>) -> WidgetDrawList {
         WidgetDrawList {
             intrinsic: None,
@@ -333,7 +349,9 @@ mod tests {
             .items
             .iter()
             .map(|item| match item {
-                WidgetDrawItem::Quad { x, .. } | WidgetDrawItem::Text { x, .. } => *x,
+                WidgetDrawItem::Quad { x, .. }
+                | WidgetDrawItem::TexturedQuad { x, .. }
+                | WidgetDrawItem::Text { x, .. } => *x,
             })
             .collect();
         assert_eq!(
@@ -341,6 +359,75 @@ mod tests {
             vec![0.0, 101.0, 202.0],
             "chrome draws under the children, then slots in registration order, \
              each offset by its assigned origin",
+        );
+    }
+
+    #[test]
+    fn nested_flatten_moves_textured_geometry_and_clip_but_not_payload() {
+        let mut interior = Composite::new();
+        interior.register_slot(
+            MailboxId(11),
+            Vec2::new(4.0, 3.0),
+            Some(WidgetClipRect {
+                x: 6.0,
+                y: 5.0,
+                width: 10.0,
+                height: 8.0,
+            }),
+            "leaf",
+            "aether.kit.widget",
+        );
+        interior.begin_frame();
+        assert!(interior.fill(
+            MailboxId(11),
+            list(vec![textured(
+                2.0,
+                1.0,
+                WidgetClipRect {
+                    x: 3.0,
+                    y: 2.0,
+                    width: 20.0,
+                    height: 20.0,
+                },
+            )]),
+        ));
+
+        let mut root = Composite::new();
+        root.register_slot(
+            MailboxId(22),
+            Vec2::new(10.0, 8.0),
+            Some(WidgetClipRect {
+                x: 12.0,
+                y: 10.0,
+                width: 20.0,
+                height: 16.0,
+            }),
+            "interior",
+            "aether.kit.widget",
+        );
+        root.begin_frame();
+        assert!(root.fill(MailboxId(22), interior.flatten(None)));
+
+        assert_eq!(
+            root.flatten(None).items,
+            vec![WidgetDrawItem::TexturedQuad {
+                texture_id: 23,
+                x: 16.0,
+                y: 12.0,
+                width: 12.0,
+                height: 9.0,
+                u0: 0.125,
+                v0: 0.25,
+                u1: 0.75,
+                v1: 0.875,
+                tint: Rgba::new(0.4, 0.6, 0.8, 0.9),
+                clip: Some(WidgetClipRect {
+                    x: 17.0,
+                    y: 13.0,
+                    width: 9.0,
+                    height: 8.0,
+                }),
+            }],
         );
     }
 
@@ -437,7 +524,9 @@ mod tests {
         for item in &flat.items {
             let (x, tag, clip) = match item {
                 WidgetDrawItem::Quad { x, color, clip, .. } => (*x, color.r, *clip),
-                WidgetDrawItem::Text { .. } => unreachable!("test builds only quads"),
+                WidgetDrawItem::TexturedQuad { .. } | WidgetDrawItem::Text { .. } => {
+                    unreachable!("test builds only solid quads")
+                }
             };
             xs.push(x);
             tags.push(tag);
