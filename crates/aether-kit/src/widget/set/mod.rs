@@ -38,8 +38,8 @@ pub mod segmented;
 pub mod slider;
 pub mod text_area;
 pub mod text_field;
-pub mod virtual_list;
 pub mod toggle;
+pub mod virtual_list;
 
 pub use button::ButtonWidget;
 pub use image::ImageWidget;
@@ -50,8 +50,8 @@ pub use segmented::SegmentedWidget;
 pub use slider::SliderWidget;
 pub use text_area::TextAreaWidget;
 pub use text_field::TextFieldWidget;
-pub use virtual_list::VirtualListWidget;
 pub use toggle::ToggleWidget;
+pub use virtual_list::VirtualListWidget;
 
 use alloc::vec::Vec;
 

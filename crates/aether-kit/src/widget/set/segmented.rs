@@ -229,7 +229,11 @@ impl WasmActor for SegmentedWidget {
             for (index, option) in self.options.iter().enumerate() {
                 let x = index as f32 * segment_width;
                 let selected = index == self.selected;
-                let base = if selected { self.theme.accent } else { self.theme.surface_raised };
+                let base = if selected {
+                    self.theme.accent
+                } else {
+                    self.theme.surface_raised
+                };
                 let theme_state = if self.pressed_segment == Some(index) {
                     ThemeState::Pressed
                 } else if self.hovered_segment == Some(index) {
@@ -251,9 +255,14 @@ impl WasmActor for SegmentedWidget {
                         font_id: self.theme.font_id,
                         text: option.clone(),
                         size_pixels: size,
-                        color: self
-                            .theme
-                            .fill(if selected { self.theme.accent_text } else { self.theme.text_primary }, theme_state),
+                        color: self.theme.fill(
+                            if selected {
+                                self.theme.accent_text
+                            } else {
+                                self.theme.text_primary
+                            },
+                            theme_state,
+                        ),
                         clip: None,
                     });
                 }
@@ -267,7 +276,11 @@ impl WasmActor for SegmentedWidget {
 }
 
 fn clamp_index(index: u32, len: usize) -> usize {
-    if len == 0 { 0 } else { (index as usize).min(len - 1) }
+    if len == 0 {
+        0
+    } else {
+        (index as usize).min(len - 1)
+    }
 }
 
 #[cfg(test)]

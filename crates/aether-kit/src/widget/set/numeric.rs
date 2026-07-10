@@ -50,9 +50,21 @@ struct NumericBounds {
 
 impl NumericBounds {
     fn from_config(min: f32, max: f32) -> Self {
-        let min = if min.is_finite() { min } else { f32::MIN };
-        let max = if max.is_finite() { max } else { f32::MAX };
-        if min <= max { Self { min, max } } else { Self { min: max, max: min } }
+        let min = if min.is_finite() {
+            min
+        } else {
+            f32::MIN
+        };
+        let max = if max.is_finite() {
+            max
+        } else {
+            f32::MAX
+        };
+        if min <= max {
+            Self { min, max }
+        } else {
+            Self { min: max, max: min }
+        }
     }
 }
 
@@ -141,11 +153,19 @@ impl NumericWidget {
         // The finite check below rejects an f64 result outside f32's range.
         #[allow(clippy::cast_possible_truncation)]
         let snapped = snapped as f32;
-        Some(if snapped.is_finite() { snapped.clamp(bounds.min, bounds.max) } else { clamped })
+        Some(if snapped.is_finite() {
+            snapped.clamp(bounds.min, bounds.max)
+        } else {
+            clamped
+        })
     }
 
     fn canonical(value: f32) -> String {
-        if value == 0.0 { String::from("0") } else { value.to_string() }
+        if value == 0.0 {
+            String::from("0")
+        } else {
+            value.to_string()
+        }
     }
 
     fn policy() -> EditPolicy {
@@ -162,14 +182,22 @@ impl NumericWidget {
 
     fn insert_text(&mut self, text: &str) -> Option<NumericEmission> {
         self.edit.clear_composition();
-        if self.edit.insert(text, Self::policy()) { self.preview() } else { None }
+        if self.edit.insert(text, Self::policy()) {
+            self.preview()
+        } else {
+            None
+        }
     }
 
     fn delete_backward(&mut self) -> Option<NumericEmission> {
         let before = String::from(self.edit.value());
         self.edit.clear_composition();
         self.edit.delete_backward();
-        if self.edit.value() == before { None } else { self.preview() }
+        if self.edit.value() == before {
+            None
+        } else {
+            self.preview()
+        }
     }
 
     fn copy_selection(&self) -> Option<String> {
@@ -196,7 +224,11 @@ impl NumericWidget {
 
     fn stepped(&mut self, direction: StepDirection) -> NumericEmission {
         let base = self.parsed_buffer().unwrap_or(self.committed_value);
-        let amount = if self.step.is_finite() && self.step > 0.0 { self.step } else { 1.0 };
+        let amount = if self.step.is_finite() && self.step > 0.0 {
+            self.step
+        } else {
+            1.0
+        };
         let raw = match direction {
             StepDirection::Down => f64::from(base) - f64::from(amount),
             StepDirection::Up => f64::from(base) + f64::from(amount),
@@ -655,7 +687,11 @@ mod tests {
         for invalid in ["", "-", ".", "NaN", "inf", "-inf"] {
             widget.edit.select_all();
             widget.edit.delete_backward();
-            let emission = if invalid.is_empty() { widget.preview() } else { widget.insert_text(invalid) };
+            let emission = if invalid.is_empty() {
+                widget.preview()
+            } else {
+                widget.insert_text(invalid)
+            };
             assert_eq!(emission, None, "{invalid:?} is not a finite numeric preview");
             assert_eq!(widget.edit.value(), invalid);
         }

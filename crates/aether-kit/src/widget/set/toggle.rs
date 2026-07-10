@@ -234,10 +234,22 @@ impl WasmActor for ToggleWidget {
         let track_width = (track_height * 1.8).min(width.max(0.0));
         let track_y = (height - track_height) * 0.5;
         let knob_size = (track_height - 4.0).max(1.0);
-        let knob_x = if self.on { (track_width - knob_size - 2.0).max(2.0) } else { 2.0 };
+        let knob_x = if self.on {
+            (track_width - knob_size - 2.0).max(2.0)
+        } else {
+            2.0
+        };
         let state = self.state.theme_state(self.pressed());
-        let track_color = if self.on { self.theme.accent } else { self.theme.surface_raised };
-        let knob_color = if self.on { self.theme.accent_text } else { self.theme.outline };
+        let track_color = if self.on {
+            self.theme.accent
+        } else {
+            self.theme.surface_raised
+        };
+        let knob_color = if self.on {
+            self.theme.accent_text
+        } else {
+            self.theme.outline
+        };
 
         let mut items = Vec::new();
         items.push(quad(0.0, track_y, track_width, track_height, self.theme.fill(track_color, state)));
