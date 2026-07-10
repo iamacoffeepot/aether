@@ -1,6 +1,6 @@
 //! Pure ordered-selection and semantic mutation planning.
 
-use alloc::{collections::BTreeSet, string::String, vec::Vec};
+use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 
 use crate::mark::{Mark, MarkGeometry, MarkMutationError, MarkRef};
 use crate::world::{MAX_STAMP_VERTICES, WorldPoint};
@@ -176,7 +176,7 @@ pub(super) fn validate_batch_marks(marks: &[Mark]) -> Result<(), TerrainEditorEr
         return Err(TerrainEditorError::MarkMutationRejected {
             requested: Some(mark.reference()),
             error: MarkMutationError::InvalidGeometry {
-                reason: alloc::format!(
+                reason: format!(
                     "{kind} requires {minimum}..={MAX_STAMP_VERTICES} world points; got {length}"
                 ),
             },

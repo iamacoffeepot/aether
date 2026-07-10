@@ -147,12 +147,6 @@ impl PendingCommand {
                 index: 0,
             },
             Self::Batch {
-                marks, plan: None, ..
-            } => MarkRequestContext {
-                stage: MarkRequestStage::Preflight,
-                index: index_u32(marks.len()),
-            },
-            Self::Batch {
                 plan: Some(BatchPlan::Updates(_)),
                 index,
                 ..
@@ -168,6 +162,13 @@ impl PendingCommand {
                 stage: MarkRequestStage::Delete,
                 index: index_u32(*index),
             },
+            Self::Batch { marks, plan, .. } => {
+                debug_assert!(plan.is_none());
+                MarkRequestContext {
+                    stage: MarkRequestStage::Preflight,
+                    index: index_u32(marks.len()),
+                }
+            }
         }
     }
 
@@ -183,14 +184,6 @@ impl PendingCommand {
                 PendingMarkRequest::Get(MarkGet { id: requested.id })
             }
             Self::Create { request, .. } => PendingMarkRequest::Create(request.clone()),
-            Self::Batch {
-                requested,
-                marks,
-                plan: None,
-                ..
-            } => PendingMarkRequest::Get(MarkGet {
-                id: requested[marks.len()].id,
-            }),
             Self::Batch {
                 plan: Some(BatchPlan::Updates(updates)),
                 index,
@@ -210,6 +203,17 @@ impl PendingCommand {
             } => PendingMarkRequest::Delete(MarkDelete {
                 id: deletes[*index].requested.id,
             }),
+            Self::Batch {
+                requested,
+                marks,
+                plan,
+                ..
+            } => {
+                debug_assert!(plan.is_none());
+                PendingMarkRequest::Get(MarkGet {
+                    id: requested[marks.len()].id,
+                })
+            }
         };
         OutboundMarkRequest { payload, context }
     }
@@ -259,6 +263,16 @@ impl TerrainEditor {
             Err(TerrainEditorError::MarkBookNotConfigured)
         } else {
             Ok(())
+        }
+    }
+
+    fn mark_book_command_ready(&self, ctx: &mut WasmCtx<'_, Manual>) -> bool {
+        match self.require_idle().and_then(|()| self.require_mark_book()) {
+            Ok(()) => true,
+            Err(error) => {
+                ctx.reply(&self.rejection(error));
+                false
+            }
         }
     }
 
@@ -372,8 +386,7 @@ impl TerrainEditor {
     }
 
     fn start_batch(&mut self, ctx: &mut WasmCtx<'_, Manual>, operation: BatchOperation) {
-        if let Err(error) = self.require_idle().and_then(|()| self.require_mark_book()) {
-            ctx.reply(&self.rejection(error));
+        if !self.mark_book_command_ready(ctx) {
             return;
         }
         if self.selection.is_empty() {
@@ -497,6 +510,20 @@ impl TerrainEditor {
             }
         }
     }
+
+    fn advance_batch_commit(&mut self, ctx: &mut WasmCtx<'_, Manual>, complete: bool) {
+        if !complete {
+            self.issue_next(ctx);
+            return;
+        }
+        let result = match self.pending.as_mut() {
+            Some(PendingCommand::Batch { progress, .. }) => {
+                take(progress).finish(&self.selection, None)
+            }
+            _ => unreachable!("batch remains pending"),
+        };
+        self.finish(ctx, &result);
+    }
 }
 
 #[actor]
@@ -551,8 +578,7 @@ impl WasmActor for TerrainEditor {
         ctx: &mut WasmCtx<'_, Manual>,
         command: ToggleTerrainSelection,
     ) {
-        if let Err(error) = self.require_idle().and_then(|()| self.require_mark_book()) {
-            ctx.reply(&self.rejection(error));
+        if !self.mark_book_command_ready(ctx) {
             return;
         }
         self.begin(
@@ -580,8 +606,7 @@ impl WasmActor for TerrainEditor {
 
     #[handler::manual]
     fn on_create_mark(&mut self, ctx: &mut WasmCtx<'_, Manual>, command: CreateTerrainMark) {
-        if let Err(error) = self.require_idle().and_then(|()| self.require_mark_book()) {
-            ctx.reply(&self.rejection(error));
+        if !self.mark_book_command_ready(ctx) {
             return;
         }
         self.begin(
@@ -754,17 +779,7 @@ impl WasmActor for TerrainEditor {
             }
             _ => unreachable!("update stage checked above"),
         };
-        if complete {
-            let result = match self.pending.as_mut() {
-                Some(PendingCommand::Batch { progress, .. }) => {
-                    take(progress).finish(&self.selection, None)
-                }
-                _ => unreachable!("batch remains pending"),
-            };
-            self.finish(ctx, &result);
-        } else {
-            self.issue_next(ctx);
-        }
+        self.advance_batch_commit(ctx, complete);
     }
 
     #[handler::manual]
@@ -804,17 +819,7 @@ impl WasmActor for TerrainEditor {
             }
             _ => unreachable!("delete stage checked above"),
         };
-        if complete {
-            let result = match self.pending.as_mut() {
-                Some(PendingCommand::Batch { progress, .. }) => {
-                    take(progress).finish(&self.selection, None)
-                }
-                _ => unreachable!("batch remains pending"),
-            };
-            self.finish(ctx, &result);
-        } else {
-            self.issue_next(ctx);
-        }
+        self.advance_batch_commit(ctx, complete);
     }
 }
 
