@@ -5,6 +5,15 @@ on:
   push:
     branches: [ main ]
 
+# A push to a branch supersedes that branch's in-flight run: cancel it
+# instead of letting it hold 8-vCPU runners to completion (the account
+# spot quota is the scarce resource). Main is exempt — every main push
+# is a distinct merge whose full run carries the cache-save and scan
+# signal.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
 
