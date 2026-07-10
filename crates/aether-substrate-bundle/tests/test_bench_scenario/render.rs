@@ -476,6 +476,107 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
     assert!(bench.committed_overlay_snapshot().is_empty());
 }
 
+/// Observation follows record-time rejection, not the raw submission cache:
+/// empty and offscreen-clipped batches disappear individually, while an
+/// aggregate vertex-buffer overflow drops the whole pass from both the
+/// structural snapshot and rendered frame.
+#[test]
+fn committed_overlay_snapshot_excludes_record_time_rejections() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let (frame_width, frame_height) = (64u32, 48u32);
+    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+    let texture_id = create_observation_texture(&mut bench);
+    let valid_quad = TexturedQuad {
+        x: 16.0,
+        y: 12.0,
+        width: 24.0,
+        height: 18.0,
+        u0: 0.0,
+        v0: 0.0,
+        u1: 1.0,
+        v1: 1.0,
+        tint: Rgba::new(1.0, 0.2, 0.1, 1.0),
+    };
+    let valid_batch = DrawTexturedQuads {
+        texture_id,
+        space: QuadSpace::Screen,
+        clip: None,
+        quads: vec![valid_quad.clone()],
+    };
+    let submissions = vec![
+        envelope(
+            "aether.render",
+            &DrawTexturedQuads {
+                texture_id,
+                space: QuadSpace::Screen,
+                clip: None,
+                quads: Vec::new(),
+            },
+        ),
+        envelope(
+            "aether.render",
+            &DrawTexturedQuads {
+                texture_id,
+                space: QuadSpace::Screen,
+                clip: Some(ClipRect {
+                    x: 74.0,
+                    y: 0.0,
+                    width: 5.0,
+                    height: 5.0,
+                }),
+                quads: vec![valid_quad.clone()],
+            },
+        ),
+        envelope("aether.render", &valid_batch),
+    ];
+    let captured = bench
+        .execute(vec![(
+            "filtered",
+            BenchOp::capture_with_mails(submissions, vec![]),
+        )])
+        .expect("capture valid and individually rejected batches");
+    let snapshot = bench.committed_overlay_snapshot();
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].texture_id, valid_batch.texture_id);
+    assert_eq!(snapshot[0].space, valid_batch.space);
+    assert_eq!(snapshot[0].clip, valid_batch.clip);
+    assert_eq!(snapshot[0].quads, valid_batch.quads);
+    let filtered = decode_png(captured.captured("filtered").expect("filtered capture"))
+        .expect("decode filtered capture");
+    let filtered_coverage = coverage(&filtered, background_top_left(&filtered), 5);
+    assert!(
+        (0.08..0.22).contains(&filtered_coverage),
+        "only the valid quad should render, coverage was {filtered_coverage}",
+    );
+
+    let bytes_per_quad = usize::try_from(QUAD_VERTEX_STRIDE)
+        .expect("quad vertex stride fits usize")
+        * QUAD_VERTICES_PER_QUAD;
+    let over_budget_count = QUAD_VERTEX_BUFFER_BYTES / bytes_per_quad + 1;
+    let oversized = DrawTexturedQuads {
+        texture_id,
+        space: QuadSpace::Screen,
+        clip: None,
+        quads: vec![valid_quad; over_budget_count],
+    };
+    let overflow = bench
+        .execute(vec![(
+            "overflow",
+            BenchOp::capture_with_mails(vec![envelope("aether.render", &oversized)], vec![]),
+        )])
+        .expect("capture over-budget overlay pass");
+    assert!(bench.committed_overlay_snapshot().is_empty());
+    let overflow = decode_png(overflow.captured("overflow").expect("overflow capture"))
+        .expect("decode overflow capture");
+    let overflow_coverage = coverage(&overflow, background_top_left(&overflow), 5);
+    assert!(
+        overflow_coverage < 0.01,
+        "over-budget pass should render nothing, coverage was {overflow_coverage}",
+    );
+}
+
 /// Issue #2831: a destroyed texture is removed from the registry, so a
 /// later draw using the old id warn-drops during frame record and the
 /// captured frame returns to clear color.

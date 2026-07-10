@@ -52,6 +52,9 @@ use aether_kinds::{
     ReplaceResult,
 };
 use aether_math::{Mat4, Rgb, Rgba, Vec3};
+use aether_substrate::render::{
+    QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD,
+};
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
