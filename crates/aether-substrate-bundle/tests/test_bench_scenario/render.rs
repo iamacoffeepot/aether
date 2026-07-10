@@ -1742,3 +1742,289 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
         other => panic!("expected Centroid result, got {other:?}"),
     }
 }
+
+/// `measurements.json`'s shape, mirrored locally so the scenario can
+/// decode a persisted `ArtifactGuard` write and cross-check it against
+/// the real `CaptureFrame` verdict it was armed from — `FrameCheck` /
+/// `FrameCheckResult` already derive `Deserialize`, so only the
+/// wrapping record needs restating.
+#[derive(serde::Deserialize)]
+struct PersistedMeasurements {
+    id: String,
+    checks: Vec<FrameCheck>,
+    results: Vec<FrameCheckResult>,
+}
+
+/// Count of opaque-white pixels in a decoded mask, plus their mean and
+/// bounding extent — the same three readings `diagnostic_mask`'s own
+/// `run_checks`-agreement unit tests in `visual.rs` compute, just
+/// derived here from the persisted PNG bytes rather than the in-memory
+/// mask, since this scenario runs as a separate integration-test crate
+/// with no access to `visual`'s crate-internal helper.
+struct MaskStats {
+    lit_count: usize,
+    mean: Option<(f32, f32)>,
+    bounds: Option<(u32, u32, u32, u32)>,
+}
+
+fn mask_stats(mask: &Image) -> MaskStats {
+    let lit: Vec<(u32, u32)> = mask
+        .rgba
+        .chunks_exact(4)
+        .enumerate()
+        .filter(|(_, pixel)| *pixel == [255, 255, 255, 255])
+        .map(|(flat, _)| {
+            #[allow(clippy::cast_possible_truncation)]
+            let flat = flat as u32;
+            (flat % mask.width, flat / mask.width)
+        })
+        .collect();
+    if lit.is_empty() {
+        return MaskStats {
+            lit_count: 0,
+            mean: None,
+            bounds: None,
+        };
+    }
+    let (sum_x, sum_y) = lit.iter().fold((0u64, 0u64), |(sx, sy), &(x, y)| {
+        (sx + u64::from(x), sy + u64::from(y))
+    });
+    #[allow(clippy::cast_precision_loss)]
+    let mean = (
+        sum_x as f32 / lit.len() as f32,
+        sum_y as f32 / lit.len() as f32,
+    );
+    let bounds = lit.iter().fold(
+        (u32::MAX, 0u32, u32::MAX, 0u32),
+        |(min_x, max_x, min_y, max_y), &(x, y)| {
+            (min_x.min(x), max_x.max(x), min_y.min(y), max_y.max(y))
+        },
+    );
+    MaskStats {
+        lit_count: lit.len(),
+        mean: Some(mean),
+        bounds: Some(bounds),
+    }
+}
+
+/// Issue 2914: `ArtifactGuard` closes the failure-diagnostic gap for a
+/// direct `TestBench` visual assertion. Draws the same known
+/// solid-quad scene `capture_frame_checks_return_substrate_verdict`
+/// scores, then exercises the guard's full write contract against the
+/// real captured PNG and verdict:
+///
+/// - a panicking assertion persists `actual.png` (byte-identical to
+///   the capture), `measurements.json`, and one `mask_N.png` per check
+///   — each mask's own lit-pixel reading agreeing with the verdict
+///   result it visualizes;
+/// - an attached altered reference produces a deterministic
+///   `difference.png`;
+/// - a passing assertion (no panic) leaves no directory behind at all.
+#[test]
+#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
+    if !require_wgpu_only() {
+        return;
+    }
+    let (frame_width, frame_height) = (64u32, 48u32);
+    let mut bench = TestBench::start_with_size(frame_width, frame_height).expect("boot");
+
+    let (quad_x, quad_y, quad_w, quad_h) = (16.0f32, 12.0f32, 24.0f32, 18.0f32);
+    let draw = envelope(
+        "aether.render",
+        &DrawSolidQuads {
+            space: QuadSpace::Screen,
+            clip: None,
+            quads: vec![SolidQuad {
+                x: quad_x,
+                y: quad_y,
+                width: quad_w,
+                height: quad_h,
+                color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            }],
+        },
+    );
+    let tolerance = 5u8;
+    let mk_check = |reduction| FrameCheck {
+        reduction,
+        tolerance,
+        background: None,
+        region: None,
+    };
+    let checks = vec![
+        mk_check(FrameReduction::NotAllBlack),
+        mk_check(FrameReduction::Coverage),
+        mk_check(FrameReduction::Centroid),
+        mk_check(FrameReduction::BoundingBox),
+    ];
+
+    let result = bench
+        .execute(vec![(
+            "snap",
+            BenchOp::send_and_await(
+                "aether.render",
+                &CaptureFrame {
+                    mails: vec![draw],
+                    after_mails: vec![],
+                    checks: checks.clone(),
+                    similarity: None,
+                },
+            ),
+        )])
+        .expect("send_and_await(CaptureFrame) with checks");
+    let reply: CaptureFrameResult = result.reply("snap").expect("decode CaptureFrameResult");
+    let (png, verdict) = match reply {
+        CaptureFrameResult::Ok { png, verdict, .. } => {
+            (png, verdict.expect("a checks request returns a verdict"))
+        }
+        CaptureFrameResult::Err { error } => panic!("capture_frame replied Err: {error}"),
+    };
+
+    let panic_id = "artifact_guard_e2e_panic";
+    let panic_dir = artifact_dir(panic_id);
+    let _ = fs::remove_dir_all(&panic_dir);
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+        let _guard = ArtifactGuard::arm(
+            panic_id,
+            png.clone(),
+            checks.clone(),
+            verdict.results.clone(),
+        );
+        panic!("simulated failing visual assertion");
+    }));
+    assert!(
+        outcome.is_err(),
+        "test setup: the guarded closure must panic"
+    );
+
+    let actual_bytes = fs::read(panic_dir.join("actual.png")).expect("actual.png should persist");
+    assert_eq!(
+        actual_bytes, png,
+        "the persisted actual.png must be byte-identical to the exact captured PNG",
+    );
+
+    let measurements_json = fs::read_to_string(panic_dir.join("measurements.json"))
+        .expect("measurements.json should persist");
+    let measurements: PersistedMeasurements =
+        serde_json::from_str(&measurements_json).expect("decode measurements.json");
+    assert_eq!(measurements.id, panic_id);
+    assert_eq!(measurements.checks, checks);
+    assert_eq!(measurements.results, verdict.results);
+
+    let total_pixels = f64::from(frame_width) * f64::from(frame_height);
+    for (index, check_result) in verdict.results.iter().enumerate() {
+        let mask_bytes = fs::read(panic_dir.join(format!("mask_{index}.png")))
+            .unwrap_or_else(|error| panic!("mask_{index}.png should persist: {error}"));
+        let mask = decode_png(&mask_bytes).expect("decode mask png");
+        assert_eq!((mask.width, mask.height), (frame_width, frame_height));
+        let stats = mask_stats(&mask);
+        match check_result {
+            FrameCheckResult::NotAllBlack { passed, .. } => {
+                assert!(*passed, "test setup: the drawn quad must pass NotAllBlack");
+                assert!(stats.lit_count > 0, "mask_{index} should show the lit quad");
+            }
+            FrameCheckResult::Coverage { fraction, .. } => {
+                let mask_fraction = stats.lit_count as f64 / total_pixels;
+                assert!(
+                    (mask_fraction - f64::from(*fraction)).abs() < 0.02,
+                    "mask_{index} lit fraction {mask_fraction} should agree with the verdict's \
+                     coverage {fraction}",
+                );
+            }
+            FrameCheckResult::Centroid { centroid, .. } => {
+                let [cx, cy] = centroid.expect("a lit frame has a centroid");
+                let (mean_x, mean_y) = stats.mean.expect("a lit mask should report a mean");
+                assert!(
+                    (mean_x - cx).abs() < 1.0 && (mean_y - cy).abs() < 1.0,
+                    "mask_{index} mean ({mean_x}, {mean_y}) should agree with the verdict's \
+                     centroid ({cx}, {cy})",
+                );
+            }
+            FrameCheckResult::BoundingBox { rect, .. } => {
+                let rect = rect.expect("a lit frame has a bounding box");
+                let bounds = stats.bounds.expect("a lit mask should report bounds");
+                assert_eq!(
+                    bounds,
+                    (rect.min_x, rect.max_x, rect.min_y, rect.max_y),
+                    "mask_{index} bounding box should agree exactly with the verdict's",
+                );
+            }
+            FrameCheckResult::DiffersFromBackground { .. } => {
+                panic!("test setup: no DiffersFromBackground check was requested");
+            }
+        }
+    }
+    assert!(
+        !panic_dir.join("reference.png").exists(),
+        "no reference.png without an attached reference",
+    );
+    assert!(
+        !panic_dir.join("difference.png").exists(),
+        "no difference.png without an attached reference",
+    );
+
+    // An explicit altered reference produces a deterministic difference
+    // image. The reference is all-black, so `difference.png`'s RGB
+    // equals the actual capture's own RGB exactly.
+    let reference_id = "artifact_guard_e2e_reference";
+    let reference_dir = artifact_dir(reference_id);
+    let _ = fs::remove_dir_all(&reference_dir);
+    let all_black_reference = substrate_render::encode_png(
+        &vec![0u8; (frame_width * frame_height * 4) as usize],
+        frame_width,
+        frame_height,
+    )
+    .expect("encode all-black reference png");
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+        let _guard = ArtifactGuard::arm(
+            reference_id,
+            png.clone(),
+            checks.clone(),
+            verdict.results.clone(),
+        )
+        .with_reference_png(all_black_reference.clone());
+        panic!("simulated failing similarity assertion");
+    }));
+    assert!(
+        outcome.is_err(),
+        "test setup: the guarded closure must panic"
+    );
+
+    let reference_bytes =
+        fs::read(reference_dir.join("reference.png")).expect("reference.png should persist");
+    assert_eq!(reference_bytes, all_black_reference);
+    let difference_bytes =
+        fs::read(reference_dir.join("difference.png")).expect("difference.png should persist");
+    let difference = decode_png(&difference_bytes).expect("decode difference png");
+    let actual_image = decode_png(&png).expect("decode actual png");
+    for (difference_pixel, actual_pixel) in difference
+        .rgba
+        .chunks_exact(4)
+        .zip(actual_image.rgba.chunks_exact(4))
+    {
+        assert_eq!(&difference_pixel[..3], &actual_pixel[..3]);
+        assert_eq!(difference_pixel[3], 255);
+    }
+
+    // A passing assertion (no panic) leaves no directory behind at all.
+    let passing_id = "artifact_guard_e2e_passing";
+    let passing_dir = artifact_dir(passing_id);
+    let _ = fs::remove_dir_all(&passing_dir);
+    {
+        let _guard = ArtifactGuard::arm(
+            passing_id,
+            png.clone(),
+            checks.clone(),
+            verdict.results.clone(),
+        );
+        // Guard drops here without panicking.
+    }
+    assert!(
+        !passing_dir.exists(),
+        "a passing assertion must leave no artifact directory behind",
+    );
+
+    let _ = fs::remove_dir_all(&panic_dir);
+    let _ = fs::remove_dir_all(&reference_dir);
+    let _ = fs::remove_dir_all(&passing_dir);
+}

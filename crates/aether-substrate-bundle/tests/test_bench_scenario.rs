@@ -30,7 +30,8 @@
 // not cap config.
 #![allow(clippy::disallowed_methods)]
 
-use std::path::Path;
+use std::panic::{self, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 
 use aether_capabilities::fs::{
     Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult,
@@ -52,11 +53,12 @@ use aether_kinds::{
     ReplaceResult, SimilarityCheck,
 };
 use aether_math::{Mat4, Rgb, Rgba, Vec3};
+use aether_substrate::render as substrate_render;
 use aether_substrate::render::{
     QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD,
 };
 use aether_substrate_bundle::test_bench::{
-    BenchOp, TestBench,
+    ArtifactGuard, BenchOp, TestBench,
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
 };
 use aether_substrate_bundle::visual::{
@@ -105,6 +107,22 @@ fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
         payload: mail.encode_into_bytes(),
         count: 1,
     }
+}
+
+/// Mirrors `ArtifactGuard`'s private root resolution (`CARGO_MANIFEST_DIR`
+/// two levels up to the workspace root, `CARGO_TARGET_DIR` override if
+/// set) so the artifact-guard scenario below can locate the directory a
+/// real [`ArtifactGuard::arm`] call just wrote to. `id` must already be
+/// filesystem-safe (alphanumeric/`-`/`_` only) — the scenario below only
+/// ever passes ids it controls, so no sanitization is needed here.
+fn artifact_dir(id: &str) -> PathBuf {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root reachable from CARGO_MANIFEST_DIR");
+    let target_root =
+        env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
+    target_root.join("test-bench-artifacts").join(id)
 }
 
 fn rgba_at(img: &Image, x: u32, y: u32) -> [u8; 4] {
