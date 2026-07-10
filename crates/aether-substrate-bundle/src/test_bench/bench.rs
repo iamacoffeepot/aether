@@ -53,6 +53,7 @@ use aether_substrate::{
 };
 
 use super::chassis::{TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS};
+use super::config::TestBenchClipboardMode;
 use super::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use super::render::Gpu;
 use crate::chassis_common::SettlementConfig;
@@ -250,6 +251,7 @@ pub struct TestBenchBuilder {
     trace_ring_capacity: Option<usize>,
     trace_ring_max_capacity: Option<usize>,
     settlement_cap: Option<Duration>,
+    clipboard_mode: TestBenchClipboardMode,
 }
 
 impl Default for TestBenchBuilder {
@@ -263,6 +265,7 @@ impl Default for TestBenchBuilder {
             trace_ring_capacity: None,
             trace_ring_max_capacity: None,
             settlement_cap: None,
+            clipboard_mode: TestBenchClipboardMode::default(),
         }
     }
 }
@@ -345,6 +348,15 @@ impl TestBenchBuilder {
         self
     }
 
+    /// Select the clipboard actor composed into this bench. The default is
+    /// deterministic in-memory storage; `Unavailable` composes the fail-fast
+    /// companion for negative-path scenarios.
+    #[must_use]
+    pub fn clipboard_mode(mut self, mode: TestBenchClipboardMode) -> Self {
+        self.clipboard_mode = mode;
+        self
+    }
+
     /// Boot the bench. Equivalent to `TestBench::start_with_size` for
     /// the default builder; overrides applied via the builder methods
     /// flow through to `SubstrateBoot::builder` and the chassis-side
@@ -376,6 +388,7 @@ impl TestBenchBuilder {
             self.pool_workers,
             ring_caps,
             settlement_cap,
+            self.clipboard_mode,
         )
     }
 }
@@ -404,6 +417,7 @@ impl TestBench {
             None,
             RingCapacities::default(),
             SettlementConfig::from_env().to_cap(),
+            TestBenchClipboardMode::default(),
         )
     }
 
@@ -414,6 +428,7 @@ impl TestBench {
         pool_workers: Option<usize>,
         ring_caps: RingCapacities,
         settlement_cap: Duration,
+        clipboard_mode: TestBenchClipboardMode,
     ) -> Result<Self, TestBenchError> {
         let capture_queue = CaptureQueue::new();
         let (events_tx, events_rx) = event_channel();
@@ -437,6 +452,7 @@ impl TestBench {
             events_tx,
             capture_queue: capture_queue.clone(),
             namespace_roots,
+            clipboard_mode,
             // Issue #2509: the teardown gate honors the same resolved cap
             // (env knob or programmatic override) as the settlement-await
             // loops the bench stores this value for.

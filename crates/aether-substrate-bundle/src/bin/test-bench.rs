@@ -35,7 +35,8 @@ const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 use aether_substrate_bundle::chassis_root::next_chassis_correlation;
 use aether_substrate_bundle::resolve_teardown_cap;
 use aether_substrate_bundle::test_bench::{
-    RenderSizeConfig, TestBenchBuild, TestBenchChassis, TestBenchEnv, WORKERS,
+    RenderSizeConfig, TestBenchBuild, TestBenchChassis, TestBenchClipboardMode, TestBenchEnv,
+    WORKERS,
     events::{self, ChassisEvent},
     render::Gpu,
 };
@@ -63,6 +64,7 @@ fn main() -> anyhow::Result<()> {
         events_tx,
         capture_queue: capture_queue.clone(),
         namespace_roots: Some(namespace_roots),
+        clipboard_mode: TestBenchClipboardMode::InMemory,
         // Issue #2509: the standalone binary is an env-reading edge, so
         // its teardown gate honors `AETHER_SETTLEMENT_CAP_SECS` (including
         // the `0 → wait forever` sentinel) — the same knob the settlement

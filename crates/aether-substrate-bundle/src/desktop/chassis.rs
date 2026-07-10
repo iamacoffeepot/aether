@@ -23,10 +23,10 @@ use aether_actor::Addressable;
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
-    AnthropicConfig, AudioCapability, CaptureBackend, ComponentHostConfig, ContentGenConfig,
-    GeminiConfig, HttpServerConfig, InputConfig, RenderCapability, RenderConfig,
-    RenderTuningConfig, UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf,
-    fs::NamespaceRoots, http::HttpConfig as HttpConf,
+    AnthropicConfig, AudioCapability, CaptureBackend, ClipboardCapability, ClipboardConfig,
+    ComponentHostConfig, ContentGenConfig, GeminiConfig, HttpServerConfig, InputConfig,
+    RenderCapability, RenderConfig, RenderTuningConfig, UnsupportedTestBenchCapability,
+    audio::AudioConfig as AudioConf, fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
 use aether_kinds::BinaryManifest;
 use aether_kinds::WindowMode;
@@ -152,6 +152,7 @@ impl DesktopChassis {
         let mut caps = crate::common_cap_namespaces();
         caps.extend([
             <AudioCapability as Addressable>::NAMESPACE,
+            <ClipboardCapability as Addressable>::NAMESPACE,
             <RenderCapability as Addressable>::NAMESPACE,
             <UnsupportedTestBenchCapability as Addressable>::NAMESPACE,
             <LifecycleCapability as Addressable>::NAMESPACE,
@@ -521,6 +522,7 @@ impl DesktopChassis {
         // `CloseRequested` → `Quit` bridge and terminal-reached exit).
         let builder = with_common_caps(Builder::<Self>::new(registry, Arc::clone(&mailer)), common)
             .with_actor::<AudioCapability>(audio)
+            .with_actor::<ClipboardCapability>(ClipboardConfig::System)
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<UnsupportedTestBenchCapability>(())
             .with_actor::<LifecycleCapability>(frame_lifecycle_config(

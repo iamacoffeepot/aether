@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::{
-    CaptureBackend, FsCapability, HeadlessWindowCapability, InputCapability, InputConfig,
+    CaptureBackend, ClipboardCapability, ClipboardConfig, FsCapability,
+    HeadlessClipboardCapability, HeadlessWindowCapability, InputCapability, InputConfig,
     RenderCapability, RenderConfig, RenderHandles, TcpCapability, TextCapability,
     fs::NamespaceRoots, trace::TraceDispatchCapability,
 };
@@ -29,6 +30,7 @@ use aether_substrate::{
 };
 
 use super::cap::{TestBenchCapConfig, TestBenchCapability};
+use super::config::TestBenchClipboardMode;
 use super::events::{ChassisEvent, EventSender};
 use crate::chassis_common::frame_lifecycle_config;
 use aether_capabilities::LifecycleConfig;
@@ -151,6 +153,8 @@ pub struct TestBenchEnv {
     /// pre-issue-673 silent-skip semantics. When `None`, fs is not
     /// booted at all.
     pub namespace_roots: Option<NamespaceRoots>,
+    /// Clipboard implementation composed for this bench.
+    pub clipboard_mode: TestBenchClipboardMode,
     /// Issue #2509: cumulative patience for the instanced-actor teardown
     /// close-done gate. The in-process `TestBench` resolves this from the
     /// same `SettlementConfig` (`AETHER_SETTLEMENT_CAP_SECS`) knob its
@@ -216,6 +220,7 @@ impl TestBenchChassis {
             events_tx,
             capture_queue,
             namespace_roots,
+            clipboard_mode,
             teardown_cap,
         } = env;
 
@@ -348,6 +353,14 @@ impl TestBenchChassis {
             .with_actor::<LifecycleCapability>(frame_lifecycle_config(
                 LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT,
             ));
+        builder = match clipboard_mode {
+            TestBenchClipboardMode::InMemory => {
+                builder.with_actor::<ClipboardCapability>(ClipboardConfig::InMemory)
+            }
+            TestBenchClipboardMode::Unavailable => {
+                builder.with_actor::<HeadlessClipboardCapability>(())
+            }
+        };
         if let Some(roots) = io_roots {
             builder = builder.with_actor::<FsCapability>(roots);
         }

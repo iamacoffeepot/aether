@@ -2,6 +2,16 @@
 
 use super::bench::{DEFAULT_HEIGHT, DEFAULT_WIDTH};
 
+/// Clipboard composition selected for an in-process [`TestBench`](super::TestBench).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TestBenchClipboardMode {
+    /// Deterministic process-local text clipboard.
+    #[default]
+    InMemory,
+    /// Fail-fast companion used to prove unavailable-chassis behavior.
+    Unavailable,
+}
+
 /// Render-size knob for the standalone test-bench binary
 /// (`AETHER_TEST_BENCH_SIZE=WxH`). Mirrors the single-field
 /// `SettlementConfig` shape:
