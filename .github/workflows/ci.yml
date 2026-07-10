@@ -9,9 +9,12 @@ on:
 # instead of letting it hold 8-vCPU runners to completion (the account
 # spot quota is the scarce resource). Main is exempt — every main push
 # is a distinct merge whose full run carries the cache-save and scan
-# signal.
+# signal — and each main push gets its own group (keyed by sha):
+# GitHub allows only one running + one queued run per group, so a
+# shared main group would serialize back-to-back merges and silently
+# cancel the intermediate runs.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
