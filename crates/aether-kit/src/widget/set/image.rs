@@ -145,9 +145,6 @@ impl ImageWidget {
         let Some(placement) = self.placement() else {
             return WidgetDrawList { intrinsic, items: Vec::new() };
         };
-        if self.texture_id == 0 {
-            return WidgetDrawList { intrinsic, items: Vec::new() };
-        }
         WidgetDrawList {
             intrinsic,
             items: vec![WidgetDrawItem::TexturedQuad {
@@ -358,9 +355,12 @@ mod tests {
             assert!(frame_y.draw_list().items.is_empty());
         }
 
-        let mut widget = image(ImageFit::Contain);
-        widget.texture_id = 0;
-        assert!(widget.draw_list().items.is_empty());
+        let mut first_consumer_texture = image(ImageFit::Contain);
+        first_consumer_texture.texture_id = 0;
+        assert!(matches!(
+            first_consumer_texture.draw_list().items[0],
+            WidgetDrawItem::TexturedQuad { texture_id: 0, .. }
+        ));
     }
 
     #[test]

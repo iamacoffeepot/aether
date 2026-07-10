@@ -77,10 +77,10 @@ The config names its natural pixel size with `natural_width_pixels` and
 row, `Contain` preserves aspect ratio and centers the whole image, `Cover`
 fills the row and center-crops through UV coordinates, and `Natural` centers
 the configured natural size. Natural content larger than the row is clipped by
-the parent-owned slot. `Contain` is the default. Texture id `0`, zero or
-non-finite natural dimensions, and non-positive or non-finite frame dimensions
-produce no textured draw; the inert `ImageConfig::default()` therefore cannot
-draw the renderer's reserved white texture.
+the parent-owned slot. `Contain` is the default. Consumer-created texture ids,
+including the registry's first id `0`, are valid. Zero or non-finite natural
+dimensions and non-positive or non-finite frame dimensions produce no textured
+draw; the inert `ImageConfig::default()` therefore paints nothing.
 
 Valid natural dimensions are reported through the existing
 `WidgetDrawList::intrinsic` field, including while the image is hidden. The
