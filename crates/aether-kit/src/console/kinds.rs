@@ -2,42 +2,43 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_data::MailboxId;
+use aether_math::Rgba;
 use serde::{Deserialize, Serialize};
 
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct ConsoleTheme {
-    pub background_color: [f32; 4],
-    pub separator_color: [f32; 4],
-    pub prompt_color: [f32; 4],
-    pub input_color: [f32; 4],
-    pub output_color: [f32; 4],
-    pub error_color: [f32; 4],
-    pub cursor_color: [f32; 4],
+    pub background_color: Rgba,
+    pub separator_color: Rgba,
+    pub prompt_color: Rgba,
+    pub input_color: Rgba,
+    pub output_color: Rgba,
+    pub error_color: Rgba,
+    pub cursor_color: Rgba,
     #[serde(default)]
     pub markdown: ConsoleMarkdownTheme,
 }
 
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct ConsoleMarkdownTheme {
-    pub heading_color: [f32; 4],
-    pub emphasis_color: [f32; 4],
-    pub strong_color: [f32; 4],
-    pub inline_code_color: [f32; 4],
-    pub inline_code_background_color: [f32; 4],
-    pub fenced_code_color: [f32; 4],
-    pub fenced_code_background_color: [f32; 4],
-    pub link_color: [f32; 4],
-    pub image_color: [f32; 4],
-    pub quote_marker_color: [f32; 4],
-    pub quote_text_color: [f32; 4],
-    pub list_marker_color: [f32; 4],
-    pub task_marker_color: [f32; 4],
-    pub table_border_color: [f32; 4],
-    pub table_header_color: [f32; 4],
-    pub table_text_color: [f32; 4],
-    pub thematic_break_color: [f32; 4],
-    pub muted_marker_color: [f32; 4],
-    pub escaped_marker_color: [f32; 4],
+    pub heading_color: Rgba,
+    pub emphasis_color: Rgba,
+    pub strong_color: Rgba,
+    pub inline_code_color: Rgba,
+    pub inline_code_background_color: Rgba,
+    pub fenced_code_color: Rgba,
+    pub fenced_code_background_color: Rgba,
+    pub link_color: Rgba,
+    pub image_color: Rgba,
+    pub quote_marker_color: Rgba,
+    pub quote_text_color: Rgba,
+    pub list_marker_color: Rgba,
+    pub task_marker_color: Rgba,
+    pub table_border_color: Rgba,
+    pub table_header_color: Rgba,
+    pub table_text_color: Rgba,
+    pub thematic_break_color: Rgba,
+    pub muted_marker_color: Rgba,
+    pub escaped_marker_color: Rgba,
     pub code_padding_pixels: f32,
     pub strong_offset_pixels: f32,
 }
@@ -45,10 +46,10 @@ pub struct ConsoleMarkdownTheme {
 impl ConsoleMarkdownTheme {
     #[must_use]
     pub fn from_palette(
-        separator_color: [f32; 4],
-        prompt_color: [f32; 4],
-        input_color: [f32; 4],
-        output_color: [f32; 4],
+        separator_color: Rgba,
+        prompt_color: Rgba,
+        input_color: Rgba,
+        output_color: Rgba,
     ) -> Self {
         Self {
             heading_color: prompt_color,
@@ -58,8 +59,8 @@ impl ConsoleMarkdownTheme {
             inline_code_background_color: scaled_color(separator_color, 0.35, 0.45),
             fenced_code_color: input_color,
             fenced_code_background_color: scaled_color(separator_color, 0.25, 0.38),
-            link_color: [0.45, 0.74, 1.0, 1.0],
-            image_color: [0.68, 0.82, 1.0, 1.0],
+            link_color: Rgba::new(0.45, 0.74, 1.0, 1.0),
+            image_color: Rgba::new(0.68, 0.82, 1.0, 1.0),
             quote_marker_color: separator_color,
             quote_text_color: output_color,
             list_marker_color: separator_color,
@@ -79,28 +80,28 @@ impl ConsoleMarkdownTheme {
 impl Default for ConsoleMarkdownTheme {
     fn default() -> Self {
         Self::from_palette(
-            [0.36, 0.40, 0.46, 0.90],
-            [0.65, 0.92, 0.72, 1.0],
-            [0.92, 0.95, 0.98, 1.0],
-            [0.78, 0.82, 0.88, 1.0],
+            Rgba::new(0.36, 0.40, 0.46, 0.90),
+            Rgba::new(0.65, 0.92, 0.72, 1.0),
+            Rgba::new(0.92, 0.95, 0.98, 1.0),
+            Rgba::new(0.78, 0.82, 0.88, 1.0),
         )
     }
 }
 
 impl Default for ConsoleTheme {
     fn default() -> Self {
-        let separator_color = [0.36, 0.40, 0.46, 0.90];
-        let prompt_color = [0.65, 0.92, 0.72, 1.0];
-        let input_color = [0.92, 0.95, 0.98, 1.0];
-        let output_color = [0.78, 0.82, 0.88, 1.0];
+        let separator_color = Rgba::new(0.36, 0.40, 0.46, 0.90);
+        let prompt_color = Rgba::new(0.65, 0.92, 0.72, 1.0);
+        let input_color = Rgba::new(0.92, 0.95, 0.98, 1.0);
+        let output_color = Rgba::new(0.78, 0.82, 0.88, 1.0);
         Self {
-            background_color: [0.02, 0.025, 0.03, 0.88],
+            background_color: Rgba::new(0.02, 0.025, 0.03, 0.88),
             separator_color,
             prompt_color,
             input_color,
             output_color,
-            error_color: [1.0, 0.45, 0.42, 1.0],
-            cursor_color: [1.0, 1.0, 1.0, 1.0],
+            error_color: Rgba::new(1.0, 0.45, 0.42, 1.0),
+            cursor_color: Rgba::WHITE,
             markdown: ConsoleMarkdownTheme::from_palette(
                 separator_color,
                 prompt_color,
@@ -111,13 +112,13 @@ impl Default for ConsoleTheme {
     }
 }
 
-fn scaled_color(color: [f32; 4], rgb_scale: f32, alpha: f32) -> [f32; 4] {
-    [
-        color[0] * rgb_scale,
-        color[1] * rgb_scale,
-        color[2] * rgb_scale,
+fn scaled_color(color: Rgba, rgb_scale: f32, alpha: f32) -> Rgba {
+    Rgba::new(
+        color.r * rgb_scale,
+        color.g * rgb_scale,
+        color.b * rgb_scale,
         alpha,
-    ]
+    )
 }
 
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]

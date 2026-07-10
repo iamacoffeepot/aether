@@ -104,7 +104,7 @@ const PLAYER_HEIGHT: f32 = 1.8;
 const PLAYER_RADIUS: f32 = 0.3;
 
 /// Marker tint — a warm blue that reads over the meadow-and-lake palette.
-const MARKER_COLOR: (f32, f32, f32) = (0.24, 0.55, 0.95);
+const MARKER_COLOR: Rgb = Rgb::new(0.24, 0.55, 0.95);
 
 /// Direction the scene light travels. The capsule bakes a simple Lambert
 /// shade against it into vertex colors so it reads as a solid 3D form (the
@@ -492,7 +492,7 @@ fn intersect_ground(eye: Vec3, dir: Vec3) -> Option<(f32, f32)> {
 /// band of triangles. Per-vertex normals carry a Lambert shade against
 /// [`LIGHT_DIR`] baked into the color, so the form reads as solid 3D under a
 /// pipeline that has no lighting of its own.
-fn push_capsule(out: &mut Vec<DrawTriangle>, cx: f32, cz: f32, base: (f32, f32, f32)) {
+fn push_capsule(out: &mut Vec<DrawTriangle>, cx: f32, cz: f32, base: Rgb) {
     /// Vertices around each ring.
     const RADIAL: usize = 16;
     /// Rings per hemisphere cap (pole to equator inclusive of the equator).
@@ -538,13 +538,13 @@ fn push_capsule(out: &mut Vec<DrawTriangle>, cx: f32, cz: f32, base: (f32, f32, 
     let shade = |normal: Vec3| {
         let lambert = normal.dot(to_light).max(0.0);
         let f = 0.65f32.mul_add(lambert, 0.35);
-        (base.0 * f, base.1 * f, base.2 * f)
+        Rgb::new(base.r * f, base.g * f, base.b * f)
     };
-    let vert = |p: Vec3, rgb: (f32, f32, f32)| Vertex {
+    let vert = |p: Vec3, color: Rgb| Vertex {
         x: p.x,
         y: p.y,
         z: p.z,
-        color: Rgb::new(rgb.0, rgb.1, rgb.2),
+        color,
     };
 
     for band in 0..rings.len() - 1 {

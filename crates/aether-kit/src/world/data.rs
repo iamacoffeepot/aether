@@ -220,7 +220,7 @@ impl CellPos {
 
     /// Index of this cell within its chunk's row-major planes.
     /// `rem_euclid` so negative cells map into `0..256` correctly.
-    fn chunk_index(self) -> usize {
+    pub(super) fn chunk_index(self) -> usize {
         (self.z.rem_euclid(CELLS_PER_CHUNK) * CELLS_PER_CHUNK + self.x.rem_euclid(CELLS_PER_CHUNK))
             as usize
     }
@@ -872,6 +872,17 @@ impl World {
     /// Insert (or replace) the chunk at `at`.
     pub fn insert_chunk(&mut self, at: ChunkPos, chunk: impl Into<Box<Chunk>>) {
         self.chunks.insert(at, chunk.into());
+    }
+
+    /// The mutable chunk at `at`, creating an empty one when absent. Shape
+    /// stamps use this narrow sibling-module seam to write the overlay
+    /// material and scalar coverage planes without exposing the world's
+    /// chunk map as public API.
+    pub(super) fn chunk_mut_or_insert(&mut self, at: ChunkPos) -> &mut Chunk {
+        self.chunks
+            .entry(at)
+            .or_insert_with(Chunk::empty_boxed)
+            .as_mut()
     }
 
     /// Register a region under a 1-based `id`. The table is positional,

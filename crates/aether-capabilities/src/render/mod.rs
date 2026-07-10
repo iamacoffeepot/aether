@@ -69,7 +69,7 @@ use aether_kinds::CaptureFrame;
 #[cfg(feature = "render-runtime")]
 pub use runtime::{
     CaptureBackend, RenderConfig, RenderGpu, RenderHandles, RenderTuningConfig,
-    RenderTuningConfigLayer, RenderTuningOverlay,
+    RenderTuningConfigLayer, RenderTuningOverlay, WHITE_TEXTURE_ID,
 };
 
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123
@@ -303,6 +303,62 @@ mod tests {
         assert!(textures.entries.contains_key(&user_texture_id));
         assert!(textures.entries.contains_key(&WHITE_TEXTURE_ID));
 
+        drop(chassis);
+    }
+
+    /// The diagnostic white texture id is visible to `TestBench` callers but
+    /// remains engine-owned: `UpdateTexture` must not recolor later solid
+    /// draws through the shared sentinel texel.
+    #[test]
+    fn update_texture_reserved_id_leaves_white_pixels_untouched() {
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<RenderCapability>(RenderConfig::default())
+            .build_passive()
+            .expect("build succeeds");
+        let handles = chassis
+            .handle::<RenderHandles>()
+            .expect("RenderCapability publishes RenderHandles");
+        {
+            let mut textures = handles
+                .textures
+                .lock()
+                .expect("textures mutex is not poisoned");
+            textures
+                .entries
+                .insert(WHITE_TEXTURE_ID, test_staged_texture(vec![255; 16]));
+        }
+
+        let mail = UpdateTexture {
+            texture_id: WHITE_TEXTURE_ID,
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            pixels: vec![0, 0, 0, 255],
+        };
+        deliver(
+            &registry,
+            RenderCapability::NAMESPACE,
+            <UpdateTexture as Kind>::ID,
+            &mail.encode_into_bytes(),
+        );
+        thread::sleep(Duration::from_millis(50));
+
+        let textures = handles
+            .textures
+            .lock()
+            .expect("textures mutex is not poisoned");
+        assert_eq!(
+            textures
+                .entries
+                .get(&WHITE_TEXTURE_ID)
+                .expect("white texture remains registered")
+                .pixels,
+            vec![255; 16],
+        );
+
+        drop(textures);
         drop(chassis);
     }
 

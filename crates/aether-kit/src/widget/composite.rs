@@ -197,6 +197,7 @@ impl Composite {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_math::Rgba;
 
     fn quad(x: f32, tag: f32) -> WidgetDrawItem {
         WidgetDrawItem::Quad {
@@ -204,7 +205,7 @@ mod tests {
             y: 0.0,
             width: 1.0,
             height: 1.0,
-            color: [tag, 0.0, 0.0, 1.0],
+            color: Rgba::new(tag, 0.0, 0.0, 1.0),
         }
     }
 

@@ -20,17 +20,18 @@ use aether_kinds::{QuadScale, QuadSpace};
 use aether_substrate::render::{
     CaptureMeta, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw,
     MaterialPassDraw, MaterialPassRecord, MaterialPipelines, OverlayDraw, Pipeline,
-    QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD, QuadPipeline, RenderError, Targets,
-    TextureBindings, build_main_pipeline, build_material_pipelines, build_quad_pipeline,
-    build_texture_bindings, finish_capture, map_capture_rgba, prepare_capture_copy,
-    push_coverage_params, push_material_rect_vertices, push_screen_quad_vertices,
-    push_textured_params, push_world_quad_vertices, record_main_pass, record_material_pass,
-    record_quad_overlay_pass,
+    QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD, QuadPipeline,
+    RenderError, Targets, TextureBindings, build_main_pipeline, build_material_pipelines,
+    build_quad_pipeline, build_texture_bindings, finish_capture, map_capture_rgba,
+    prepare_capture_copy, push_coverage_params, push_material_rect_vertices,
+    push_screen_quad_vertices, push_textured_params, push_world_quad_vertices, record_main_pass,
+    record_material_pass, record_quad_overlay_pass,
 };
 
 use super::material::{MaterialBatch, accepts_coverage_texture};
 use super::quad::QuadBatch;
 use super::texture::TextureRegistry;
+use crate::render::DrawTexturedQuads;
 
 /// Bundle of accumulator state plus GPU resources, shared between
 /// the cap's dispatcher thread (write side for accumulators) and the
@@ -66,6 +67,10 @@ pub struct RenderHandles {
     /// idle `capture` (no producer this frame) replays them, matching
     /// `last_submitted`'s role for triangles.
     pub quad_last_submitted: Arc<Mutex<Vec<QuadBatch>>>,
+    /// Optional TestBench-only sink for overlay batches accepted by the
+    /// low-level draw pass. Production chassis never install it, so they
+    /// retain no second payload cache and clone no observation data.
+    pub quad_observation: Arc<OnceLock<Arc<Mutex<Vec<DrawTexturedQuads>>>>>,
     /// Per-frame material accumulator (ADR-0140), holding both typed
     /// material kinds in receive order so mixed material submissions
     /// preserve painter's order among overlapping surfaces.
@@ -117,7 +122,47 @@ fn commit_or_replay<T>(live: &Mutex<Vec<T>>, last: &Mutex<Vec<T>>, replay_cache_
     }
 }
 
+fn observed_batch(batch: &QuadBatch) -> DrawTexturedQuads {
+    DrawTexturedQuads {
+        texture_id: batch.texture_id,
+        space: batch.space.clone(),
+        clip: batch.clip.clone(),
+        quads: batch.quads.clone(),
+    }
+}
+
+/// Mirror the low-level overlay pass's scissor rejection without moving that
+/// validation earlier in the production render path. This runs only when
+/// `TestBench` has installed an observation sink; keep its arithmetic aligned
+/// with `aether_substrate::render::quad::clamped_scissor`.
+#[allow(clippy::cast_precision_loss)]
+fn overlay_clip_is_visible(clip: Option<[f32; 4]>, target_width: u32, target_height: u32) -> bool {
+    let Some([x, y, width, height]) = clip else {
+        return true;
+    };
+    if !x.is_finite() || !y.is_finite() || !width.is_finite() || !height.is_finite() {
+        return false;
+    }
+    let min_x = x.max(0.0).min(target_width as f32).floor();
+    let min_y = y.max(0.0).min(target_height as f32).floor();
+    let max_x = (x + width).max(0.0).min(target_width as f32).ceil();
+    let max_y = (y + height).max(0.0).min(target_height as f32).ceil();
+    max_x > min_x && max_y > min_y
+}
+
 impl RenderHandles {
+    /// Enable the TestBench-only committed-overlay observation sink.
+    /// Production chassis do not call this and therefore pay no payload
+    /// cloning or history cost while recording frames.
+    ///
+    /// # Panics
+    /// Panics if observation was already enabled for these handles.
+    pub fn enable_overlay_observation(&self) {
+        self.quad_observation
+            .set(Arc::new(Mutex::new(Vec::new())))
+            .expect("RenderHandles::enable_overlay_observation called twice");
+    }
+
     /// Install the wgpu resources the encoder-level methods read.
     /// The driver constructs [`RenderGpu`] once it has a device +
     /// queue — for desktop that's inside `resumed` after winit hands
@@ -143,6 +188,35 @@ impl RenderHandles {
     #[must_use]
     pub fn gpu(&self) -> Option<&RenderGpu> {
         self.gpu.get()
+    }
+
+    /// Snapshot the ordered overlay batches from the most recently
+    /// committed frame as their public [`DrawTexturedQuads`] shape.
+    /// Solid submissions are already normalized over the reserved white
+    /// texture before entering this cache, so callers see the exact
+    /// texture, projection space, clip, geometry, UV, tint, and painter's
+    /// order that [`Self::record_overlay_pass`] draws.
+    ///
+    /// `TestBench` enables the observation sink during GPU initialization.
+    /// Production chassis leave it disabled, in which case this returns an
+    /// empty vector and frame recording performs no observation cloning.
+    ///
+    /// The returned values own their data. Mutating the live or committed
+    /// accumulators after this call cannot change an existing snapshot.
+    ///
+    /// # Panics
+    /// Panics if the committed-overlay mutex is poisoned — fail-fast per
+    /// ADR-0063.
+    #[must_use]
+    pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
+        self.quad_observation
+            .get()
+            .map_or_else(Vec::new, |observed| {
+                observed
+                    .lock()
+                    .expect("mutex poisoned; fail-fast per ADR-0063")
+                    .clone()
+            })
     }
 
     fn expect_gpu(&self) -> &RenderGpu {
@@ -271,6 +345,12 @@ impl RenderHandles {
             .expect("mutex poisoned; fail-fast per ADR-0063")
             .clone();
         if batches.is_empty() {
+            if let Some(observed) = self.quad_observation.get() {
+                observed
+                    .lock()
+                    .expect("mutex poisoned; fail-fast per ADR-0063")
+                    .clear();
+            }
             return;
         }
 
@@ -377,6 +457,30 @@ impl RenderHandles {
             viewport,
             view_proj,
         );
+
+        if let Some(observed) = self.quad_observation.get() {
+            let mut recorded = Vec::new();
+            if vertex_bytes.len() <= QUAD_VERTEX_BUFFER_BYTES {
+                for batch in &batches {
+                    let clip = batch
+                        .clip
+                        .as_ref()
+                        .map(|clip| [clip.x, clip.y, clip.width, clip.height]);
+                    let is_recorded = registry
+                        .entries
+                        .get(&batch.texture_id)
+                        .is_some_and(|entry| entry.realized.is_some())
+                        && !batch.quads.is_empty()
+                        && overlay_clip_is_visible(clip, targets.width(), targets.height());
+                    if is_recorded {
+                        recorded.push(observed_batch(batch));
+                    }
+                }
+            }
+            *observed
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063") = recorded;
+        }
     }
 
     /// Record the depth-tested world-space material pass (ADR-0140)
@@ -756,5 +860,182 @@ impl RenderGpu {
             targets: Mutex::new(targets),
             color_format,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_kinds::ClipRect;
+    use aether_math::Rgba;
+
+    use crate::render::TexturedQuad;
+
+    fn handles_with_committed_overlays(batches: Vec<QuadBatch>) -> RenderHandles {
+        let recorded = batches.iter().map(observed_batch).collect();
+        let observation = Arc::new(OnceLock::new());
+        observation
+            .set(Arc::new(Mutex::new(recorded)))
+            .expect("test: observation is installed once");
+        RenderHandles {
+            frame_vertices: Arc::new(Mutex::new(Vec::new())),
+            last_submitted: Arc::new(Mutex::new(Vec::new())),
+            triangles_rendered: Arc::new(AtomicU64::new(0)),
+            camera_state: Arc::new(Mutex::new([0.0; 16])),
+            quad_frame: Arc::new(Mutex::new(Vec::new())),
+            quad_last_submitted: Arc::new(Mutex::new(batches)),
+            quad_observation: observation,
+            material_frame: Arc::new(Mutex::new(Vec::new())),
+            material_last_submitted: Arc::new(Mutex::new(Vec::new())),
+            textures: Arc::new(Mutex::new(TextureRegistry::new())),
+            gpu: Arc::new(OnceLock::new()),
+            vertex_buffer_bytes: 0,
+        }
+    }
+
+    fn textured_quad(x: f32, tint: Rgba) -> TexturedQuad {
+        TexturedQuad {
+            x,
+            y: x + 1.0,
+            width: x + 2.0,
+            height: x + 3.0,
+            u0: 0.1,
+            v0: 0.2,
+            u1: 0.7,
+            v1: 0.8,
+            tint,
+        }
+    }
+
+    /// An uncommitted render starts with no overlay observations rather
+    /// than manufacturing a sentinel batch.
+    #[test]
+    fn committed_overlay_snapshot_is_empty_without_a_committed_frame() {
+        let handles = handles_with_committed_overlays(Vec::new());
+
+        assert!(handles.committed_overlay_snapshot().is_empty());
+    }
+
+    /// Production handles leave observation disabled, so reading the
+    /// diagnostic surface allocates no retained payload and returns empty.
+    #[test]
+    fn committed_overlay_snapshot_is_empty_when_observation_is_disabled() {
+        let mut handles = handles_with_committed_overlays(vec![QuadBatch {
+            texture_id: 7,
+            space: QuadSpace::Screen,
+            clip: None,
+            quads: vec![textured_quad(3.0, Rgba::new(1.0, 0.0, 0.0, 1.0))],
+        }]);
+        handles.quad_observation = Arc::new(OnceLock::new());
+
+        assert!(handles.committed_overlay_snapshot().is_empty());
+    }
+
+    /// Observation applies the same finite, clamped, non-empty scissor
+    /// contract as the low-level overlay pass.
+    #[test]
+    fn overlay_observation_rejects_non_drawing_clips() {
+        assert!(overlay_clip_is_visible(None, 64, 48));
+        assert!(overlay_clip_is_visible(
+            Some([-1.0, -1.0, 2.0, 2.0]),
+            64,
+            48
+        ));
+        assert!(overlay_clip_is_visible(
+            Some([63.5, 47.5, 1.0, 1.0]),
+            64,
+            48
+        ));
+        assert!(!overlay_clip_is_visible(
+            Some([64.0, 0.0, 1.0, 1.0]),
+            64,
+            48
+        ));
+        assert!(!overlay_clip_is_visible(Some([0.0, 0.0, 0.0, 1.0]), 64, 48));
+        assert!(!overlay_clip_is_visible(
+            Some([f32::NAN, 0.0, 1.0, 1.0]),
+            64,
+            48
+        ));
+    }
+
+    /// Converting the private cache to public draw values preserves every
+    /// field and the mixed-space painter's order consumed by the GPU pass.
+    #[test]
+    fn committed_overlay_snapshot_preserves_order_and_fields() {
+        let screen_clip = ClipRect {
+            x: 2.0,
+            y: 3.0,
+            width: 40.0,
+            height: 30.0,
+        };
+        let world_space = QuadSpace::World {
+            anchor: [1.0, 2.0, 3.0],
+            scale: QuadScale::Distance {
+                reference_distance: 9.0,
+            },
+        };
+        let handles = handles_with_committed_overlays(vec![
+            QuadBatch {
+                texture_id: 17,
+                space: QuadSpace::Screen,
+                clip: Some(screen_clip.clone()),
+                quads: vec![textured_quad(4.0, Rgba::new(1.0, 0.5, 0.25, 0.75))],
+            },
+            QuadBatch {
+                texture_id: 23,
+                space: world_space.clone(),
+                clip: None,
+                quads: vec![textured_quad(8.0, Rgba::new(0.2, 0.4, 0.6, 0.8))],
+            },
+        ]);
+
+        let snapshot = handles.committed_overlay_snapshot();
+
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot[0].texture_id, 17);
+        assert_eq!(snapshot[0].space, QuadSpace::Screen);
+        assert_eq!(snapshot[0].clip, Some(screen_clip));
+        assert_eq!(
+            snapshot[0].quads,
+            vec![textured_quad(4.0, Rgba::new(1.0, 0.5, 0.25, 0.75))]
+        );
+        assert_eq!(snapshot[1].texture_id, 23);
+        assert_eq!(snapshot[1].space, world_space);
+        assert_eq!(snapshot[1].clip, None);
+        assert_eq!(
+            snapshot[1].quads,
+            vec![textured_quad(8.0, Rgba::new(0.2, 0.4, 0.6, 0.8))]
+        );
+    }
+
+    /// A snapshot owns its values, so a later commit can reuse and mutate
+    /// the cache without rewriting observations a test already retained.
+    #[test]
+    fn committed_overlay_snapshot_isolated_from_later_cache_mutation() {
+        let handles = handles_with_committed_overlays(vec![QuadBatch {
+            texture_id: 7,
+            space: QuadSpace::Screen,
+            clip: None,
+            quads: vec![textured_quad(3.0, Rgba::new(1.0, 0.0, 0.0, 1.0))],
+        }]);
+        let snapshot = handles.committed_overlay_snapshot();
+
+        {
+            let mut cache = handles
+                .quad_observation
+                .get()
+                .expect("test: observation is installed")
+                .lock()
+                .expect("test: quad cache mutex is not poisoned");
+            cache[0].texture_id = 99;
+            cache[0].quads[0].x = 100.0;
+        }
+
+        assert_eq!(snapshot[0].texture_id, 7);
+        assert_eq!(snapshot[0].quads[0].x, 3.0);
+        let later = handles.committed_overlay_snapshot();
+        assert_eq!(later[0].texture_id, 99);
+        assert_eq!(later[0].quads[0].x, 100.0);
     }
 }

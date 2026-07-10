@@ -7,7 +7,7 @@
 //! The field is a thin actor over the reusable
 //! [`TextEditState`]: committed
 //! `TextInput` replaces the active selection at the caret; the editing keys the
-//! substrate emits scancodes for (Backspace, Left, Right, Enter) delete, move —
+//! field handles (Backspace, Left, Right, Enter) delete, move —
 //! extending the selection while Shift is held — or commit; a pointer press
 //! places the caret and a drag extends the selection; an in-flight IME
 //! composition (`ImePreedit`) renders underlined at the active selection with
@@ -19,6 +19,10 @@
 //! theme's font and measures against the resolved
 //! [`CachedFontMetrics`]. Until then it falls
 //! back to the proportional approximation as a bounded font-warm-up placement.
+//!
+//! The chassis keycode vocabulary also includes Delete, Home, End, Page Up,
+//! and Page Down. `TextFieldWidget` does not yet implement behavior for those
+//! keys.
 
 use alloc::string::String;
 use alloc::vec::Vec;

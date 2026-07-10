@@ -2,7 +2,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_capabilities::render::{DrawTriangle, Vertex};
-use aether_math::Rgb;
 
 use crate::world::{CellPos, ChunkPos, Material, World};
 
@@ -12,7 +11,7 @@ use super::constants::{
 };
 use super::contour::{SmoothParams, march_grid, minimize_corners};
 use super::partition::chunk_placement;
-use super::style::{StyleTable, hsl_to_linear_rgb};
+use super::style::{StyleTable, flat_color};
 
 /// Distinct non-void overlay materials present in the chunk, in stable
 /// material-id order.
@@ -84,13 +83,12 @@ pub(super) fn mesh_coverage(
             }
         }
         let (samples, width, height) = minimize_corners(&field, n, n, upsample, &params);
-        let style = styles.get(material);
-        let color = hsl_to_linear_rgb(style.base_hue, style.base_sat, style.base_light);
+        let color = flat_color(styles.get(material));
         let vertex = |wx: f32, wz: f32| Vertex {
             x: wx,
             y: COVERAGE_LIFT,
             z: wz,
-            color: Rgb::new(color[0], color[1], color[2]),
+            color,
         };
         march_grid(&samples, width, height, &placement, &vertex, tris);
     }

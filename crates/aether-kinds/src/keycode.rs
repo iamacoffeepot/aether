@@ -82,3 +82,10 @@ pub const KEY_CTRL_LEFT: u32 = 0x0122;
 pub const KEY_CTRL_RIGHT: u32 = 0x0123;
 pub const KEY_ALT_LEFT: u32 = 0x0124;
 pub const KEY_ALT_RIGHT: u32 = 0x0125;
+
+/// Text-editing navigation keys.
+pub const KEY_DELETE: u32 = 0x0126;
+pub const KEY_HOME: u32 = 0x0127;
+pub const KEY_END: u32 = 0x0128;
+pub const KEY_PAGE_UP: u32 = 0x0129;
+pub const KEY_PAGE_DOWN: u32 = 0x012A;
