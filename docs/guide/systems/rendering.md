@@ -244,7 +244,11 @@ the continuous meter-space position, the owning `CellPos`, the sampled
 surface height, the ray distance, and a nearest-octimeter `WorldPoint` that
 can be passed directly to `aether.kit.mark.create`. Picking follows the
 rendered top surface, including relief and water; missing/Void terrain is not a
-mark anchor.
+mark anchor. The bounded march accepts only a present above-to-below bracket
+whose two sides converge on the sampled height; entering terrain from the side
+or crossing a discontinuous cliff with a horizontal ray is not reclassified as
+a top-surface hit. Its step and convergence epsilon are both derived from the
+shared subcell resolution.
 
 The world does not own or mutate marks. Send
 `aether.kit.world.set_mark_overlay_visibility { "visible": true }` to start a
@@ -270,6 +274,14 @@ Select only an exact cached revision:
 requested revision is ahead or missing and a refresh was requested). A later
 snapshot that edits or deletes the selected mark clears the highlight instead
 of silently moving it to another revision.
+
+Scalar overlay-only ground uses the contour library's continuous reconstructed
+coverage at the same 127.5 crossing as the rendered mesh, rather than treating a
+whole subcell as its stored byte. Mark geometry is capped per frame at 10,240
+triangles / 30,720 vertices — enough for one maximum-size selected area. Marks
+are traversed in stable id order; geometry after the cap is omitted and the
+first omitted mark plus the emitted counts are warning-logged once when the
+view enters overflow.
 
 **From an agent over MCP — stage, then capture.** Use `capture_frame`: its
 `mails` bundle dispatches before the readback (the state that should appear) and

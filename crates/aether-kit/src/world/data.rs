@@ -181,19 +181,7 @@ const OCTIMETER_BITS: u32 = 8;
 
 /// A cell address on the world lattice. Cells are addresses; their
 /// properties live in the plane stack.
-#[derive(
-    aether_data::Schema,
-    Serialize,
-    Deserialize,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Debug,
-    Hash,
-)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct CellPos {
     pub x: i32,
     pub z: i32,
@@ -553,6 +541,48 @@ impl World {
         chunk.overlay_mask[cell.chunk_index() * SUBCELLS_PER_CELL + within]
     }
 
+    fn overlay_material_coverage(&self, global_subcell_x: i32, global_subcell_z: i32, material: Material) -> u8 {
+        let subcells = SUBCELLS_PER_CELL_EDGE.cast_signed();
+        let cell = CellPos { x: global_subcell_x.div_euclid(subcells), z: global_subcell_z.div_euclid(subcells) };
+        if self.overlay(cell) != material {
+            return 0;
+        }
+        self.overlay_coverage(cell, global_subcell_x.rem_euclid(subcells), global_subcell_z.rem_euclid(subcells))
+    }
+
+    fn reconstructed_overlay_coverage(&self, global_subcell_x: i32, global_subcell_z: i32, material: Material) -> u8 {
+        super::mesher::contour::reconstructed_coverage(
+            self.overlay_material_coverage(global_subcell_x, global_subcell_z, material),
+            self.overlay_material_coverage(global_subcell_x.saturating_add(1), global_subcell_z, material),
+            self.overlay_material_coverage(global_subcell_x, global_subcell_z.saturating_add(1), material),
+            self.overlay_material_coverage(
+                global_subcell_x.saturating_add(1),
+                global_subcell_z.saturating_add(1),
+                material,
+            ),
+            0.5,
+            0.5,
+        )
+    }
+
+    fn continuous_overlay_coverage_at(&self, x_meters: f32, z_meters: f32, material: Material) -> f32 {
+        let subcells = SUBCELLS_PER_CELL_EDGE as f32;
+        let sample_x = x_meters.mul_add(subcells, -0.5);
+        let sample_z = z_meters.mul_add(subcells, -0.5);
+        let base_x = floor_to_i32(sample_x);
+        let base_z = floor_to_i32(sample_z);
+        let fraction_x = sample_x - base_x as f32;
+        let fraction_z = sample_z - base_z as f32;
+        super::mesher::contour::interpolated_coverage(
+            self.reconstructed_overlay_coverage(base_x, base_z, material),
+            self.reconstructed_overlay_coverage(base_x.saturating_add(1), base_z, material),
+            self.reconstructed_overlay_coverage(base_x, base_z.saturating_add(1), material),
+            self.reconstructed_overlay_coverage(base_x.saturating_add(1), base_z.saturating_add(1), material),
+            fraction_x,
+            fraction_z,
+        )
+    }
+
     /// Elevation at `cell` in octimeters — the raw lakebed read. Unset
     /// cells read `0`. Under a water cell this is the ground beneath the
     /// surface, not the water level ([`World::water_level`] resolves that).
@@ -827,24 +857,24 @@ impl World {
         if !x_meters.is_finite() || !z_meters.is_finite() {
             return None;
         }
-        let cell = CellPos {
-            x: floor_to_i32(x_meters),
-            z: floor_to_i32(z_meters),
-        };
+        let cell = CellPos { x: floor_to_i32(x_meters), z: floor_to_i32(z_meters) };
         let subcells = SUBCELLS_PER_CELL_EDGE.cast_signed();
         let subcells_f32 = subcells as f32;
         let sub_x = floor_to_i32((x_meters - cell.x as f32) * subcells_f32).clamp(0, subcells - 1);
         let sub_z = floor_to_i32((z_meters - cell.z as f32) * subcells_f32).clamp(0, subcells - 1);
         let underlay_present = self.underlay_point(cell, sub_x, sub_z) != Material::Void;
-        let overlay_present = self.overlay(cell) != Material::Void
-            && self.overlay_coverage(cell, sub_x, sub_z) >= SCALAR_COVERAGE_THRESHOLD;
+        let overlay_present = [Material::Grass, Material::Dirt, Material::Stone, Material::Sand, Material::Water]
+            .into_iter()
+            .any(|material| {
+                super::mesher::contour::scalar_coverage_is_inside(
+                    self.continuous_overlay_coverage_at(x_meters, z_meters, material),
+                )
+            });
         if !underlay_present && !overlay_present {
             return None;
         }
-        let x_octimeters =
-            i32::try_from((x_meters * OCTIMETERS_PER_CELL as f32).round() as i64).ok()?;
-        let z_octimeters =
-            i32::try_from((z_meters * OCTIMETERS_PER_CELL as f32).round() as i64).ok()?;
+        let x_octimeters = i32::try_from((x_meters * OCTIMETERS_PER_CELL as f32).round() as i64).ok()?;
+        let z_octimeters = i32::try_from((z_meters * OCTIMETERS_PER_CELL as f32).round() as i64).ok()?;
         Some(TerrainSurface {
             cell,
             mark_point: WorldPoint::new(x_octimeters, z_octimeters),
@@ -1029,6 +1059,8 @@ pub enum WorldDecodeError {
     BadVersion(u8),
     /// A region name was not valid UTF-8.
     BadName,
+    /// A table count exceeded the format's addressable or operational cap.
+    LimitExceeded,
 }
 
 /// The current write version. Version 7 expands the per-cell packed
@@ -1053,6 +1085,23 @@ const WORLD_FORMAT_VERSION: u8 = 7;
 
 /// The oldest version [`World::from_bytes`] still decodes.
 const WORLD_FORMAT_VERSION_MIN: u8 = 1;
+
+const MAX_DECODED_REGIONS: usize = u16::MAX as usize;
+const MAX_DECODED_SMOOTHING_PROFILES: usize = u8::MAX as usize;
+const MAX_DECODED_WATER_PLANES: usize = u16::MAX as usize;
+const MAX_DECODED_CHUNKS: usize = 65_536;
+
+fn chunk_record_bytes(version: u8) -> usize {
+    let overlay_mask_bytes = if version >= 7 { OVERLAY_MASK_WIRE_BYTES } else { 2 * CELLS_PER_CHUNK_AREA };
+    8 + 2 * CELLS_PER_CHUNK_AREA
+        + overlay_mask_bytes
+        + 4 * CELLS_PER_CHUNK_AREA
+        + if version >= 4 { 2 * CELLS_PER_CHUNK_AREA } else { 0 }
+        + 2 * CELLS_PER_CHUNK_AREA
+        + if version >= 2 { CELLS_PER_CHUNK_AREA } else { 0 }
+        + if version >= 5 { UNDERLAY_POINTS_PER_CHUNK } else { 0 }
+        + if version >= 6 { 2 * HEIGHT_POINTS_PER_CHUNK } else { 0 }
+}
 
 impl World {
     /// Serialize to the compact `aether.kit.world.load` binary format: a
@@ -1124,7 +1173,9 @@ impl World {
         if !(WORLD_FORMAT_VERSION_MIN..=WORLD_FORMAT_VERSION).contains(&version) {
             return Err(WorldDecodeError::BadVersion(version));
         }
-        let region_count = reader.u32()? as usize;
+        let region_count_raw = reader.u32()?;
+        let region_count =
+            reader.checked_count(region_count_raw, 2 + 1 + usize::from(version >= 3), MAX_DECODED_REGIONS)?;
         let mut regions = Vec::with_capacity(region_count);
         for _ in 0..region_count {
             let name_len = reader.u16()? as usize;
@@ -1136,7 +1187,8 @@ impl World {
         }
         let mut smoothing_profiles = Vec::new();
         if version >= 2 {
-            let profile_count = reader.u32()? as usize;
+            let profile_count_raw = reader.u32()?;
+            let profile_count = reader.checked_count(profile_count_raw, 3, MAX_DECODED_SMOOTHING_PROFILES)?;
             smoothing_profiles.reserve(profile_count);
             for _ in 0..profile_count {
                 let iterations = u32::from(reader.u8()?);
@@ -1146,13 +1198,15 @@ impl World {
         }
         let mut water_planes = Vec::new();
         if version >= 4 {
-            let plane_count = reader.u32()? as usize;
+            let plane_count_raw = reader.u32()?;
+            let plane_count = reader.checked_count(plane_count_raw, 4, MAX_DECODED_WATER_PLANES)?;
             water_planes.reserve(plane_count);
             for _ in 0..plane_count {
                 water_planes.push(WaterPlane { level_octimeters: reader.i32()? });
             }
         }
-        let chunk_count = reader.u32()? as usize;
+        let chunk_count_raw = reader.u32()?;
+        let chunk_count = reader.checked_count(chunk_count_raw, chunk_record_bytes(version), MAX_DECODED_CHUNKS)?;
         let mut chunks = BTreeMap::new();
         for _ in 0..chunk_count {
             let x = reader.i32()?;
@@ -1241,6 +1295,27 @@ impl<'a> Reader<'a> {
         Ok(slice)
     }
 
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.pos
+    }
+
+    fn checked_count(
+        &self,
+        count: u32,
+        minimum_record_bytes: usize,
+        maximum_count: usize,
+    ) -> Result<usize, WorldDecodeError> {
+        let count = usize::try_from(count).map_err(|_| WorldDecodeError::LimitExceeded)?;
+        if count > maximum_count {
+            return Err(WorldDecodeError::LimitExceeded);
+        }
+        let required = count.checked_mul(minimum_record_bytes).ok_or(WorldDecodeError::LimitExceeded)?;
+        if required > self.remaining() {
+            return Err(WorldDecodeError::Truncated);
+        }
+        Ok(count)
+    }
+
     fn u8(&mut self) -> Result<u8, WorldDecodeError> {
         Ok(self.take(1)?[0])
     }
@@ -1269,7 +1344,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::SetChunk;
+    use crate::world::{SetChunk, mesher::contour::COVERAGE_CROSSING};
 
     fn cell(x: i32, z: i32) -> CellPos {
         CellPos { x, z }
@@ -1615,6 +1690,29 @@ mod tests {
         let mut buf = vec![WORLD_FORMAT_VERSION];
         buf.extend_from_slice(&1u32.to_le_bytes());
         assert_eq!(World::from_bytes(&buf), Err(WorldDecodeError::Truncated));
+
+        let mut oversized_regions = vec![WORLD_FORMAT_VERSION];
+        oversized_regions
+            .extend_from_slice(&u32::try_from(MAX_DECODED_REGIONS + 1).expect("region cap fits u32").to_le_bytes());
+        assert_eq!(World::from_bytes(&oversized_regions), Err(WorldDecodeError::LimitExceeded),);
+
+        let mut oversized_profiles = vec![WORLD_FORMAT_VERSION];
+        oversized_profiles.extend_from_slice(&0u32.to_le_bytes());
+        oversized_profiles.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(World::from_bytes(&oversized_profiles), Err(WorldDecodeError::LimitExceeded),);
+
+        let mut oversized_water = vec![WORLD_FORMAT_VERSION];
+        oversized_water.extend_from_slice(&0u32.to_le_bytes());
+        oversized_water.extend_from_slice(&0u32.to_le_bytes());
+        oversized_water.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(World::from_bytes(&oversized_water), Err(WorldDecodeError::LimitExceeded),);
+
+        let mut oversized_chunks = vec![WORLD_FORMAT_VERSION];
+        oversized_chunks.extend_from_slice(&0u32.to_le_bytes());
+        oversized_chunks.extend_from_slice(&0u32.to_le_bytes());
+        oversized_chunks.extend_from_slice(&0u32.to_le_bytes());
+        oversized_chunks.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(World::from_bytes(&oversized_chunks), Err(WorldDecodeError::LimitExceeded),);
     }
 
     /// A world with one chunk whose heights come from `f(x, z)` over the
@@ -2126,35 +2224,53 @@ mod tests {
         chunk.height[0] = 256;
         world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
 
-        let surface = world
-            .terrain_surface_at(0.5, 0.5)
-            .expect("resolved underlay is markable");
+        let surface = world.terrain_surface_at(0.5, 0.5).expect("resolved underlay is markable");
         assert_eq!(surface.cell, cell(0, 0));
         assert_eq!(surface.mark_point, WorldPoint::new(128, 128));
         assert!((surface.height_meters - 1.0).abs() < 1e-4);
 
         let subcell = (8 * SUBCELLS_PER_CELL_EDGE + 8) as usize;
-        world
-            .chunk_mut_or_insert(ChunkPos { x: 0, z: 0 })
-            .underlay_points[subcell] = Material::Void.to_u8();
-        assert!(
-            world.terrain_surface_at(0.5, 0.5).is_none(),
-            "an explicit underlay-point hole is not markable"
-        );
+        world.chunk_mut_or_insert(ChunkPos { x: 0, z: 0 }).underlay_points[subcell] = Material::Void.to_u8();
+        assert!(world.terrain_surface_at(0.5, 0.5).is_none(), "an explicit underlay-point hole is not markable");
 
         let chunk = world.chunk_mut_or_insert(ChunkPos { x: 0, z: 0 });
         chunk.overlay[0] = Material::Sand;
-        chunk.overlay_mask[subcell] = SCALAR_COVERAGE_THRESHOLD - 1;
-        assert!(
-            world.terrain_surface_at(0.5, 0.5).is_none(),
-            "coverage below the contour threshold stays absent"
-        );
-        world
-            .chunk_mut_or_insert(ChunkPos { x: 0, z: 0 })
-            .overlay_mask[subcell] = SCALAR_COVERAGE_THRESHOLD;
+        chunk.overlay_mask[..SUBCELLS_PER_CELL].fill(SCALAR_COVERAGE_THRESHOLD - 1);
+        assert!(world.terrain_surface_at(0.5, 0.5).is_none(), "coverage below the contour threshold stays absent");
+        world.chunk_mut_or_insert(ChunkPos { x: 0, z: 0 }).overlay_mask[..SUBCELLS_PER_CELL]
+            .fill(SCALAR_COVERAGE_THRESHOLD);
         assert!(
             world.terrain_surface_at(0.5, 0.5).is_some(),
             "the exact contour threshold makes an overlay-only sample markable"
+        );
+    }
+
+    #[test]
+    fn terrain_surface_sampler_matches_a_continuous_scalar_overlay_crossing() {
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        chunk.overlay[0] = Material::Stone;
+        let subcells = SUBCELLS_PER_CELL_EDGE as usize;
+        for subcell_z in 0..subcells {
+            for subcell_x in 0..subcells {
+                chunk.overlay_mask[subcell_z * subcells + subcell_x] = if subcell_x < subcells / 2 { 100 } else { 200 };
+            }
+        }
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+
+        let low_sample_x = (subcells / 2 - 2) as f32 / subcells as f32 + 0.5 / subcells as f32;
+        let high_sample_x = (subcells / 2 - 1) as f32 / subcells as f32 + 0.5 / subcells as f32;
+        let high_reconstructed = 150.0;
+        let crossing_fraction = (COVERAGE_CROSSING - 100.0) / (high_reconstructed - 100.0);
+        let crossing_x = low_sample_x + (high_sample_x - low_sample_x) * crossing_fraction;
+
+        assert!(
+            world.terrain_surface_at(crossing_x - 0.001, 0.5).is_none(),
+            "the point immediately before the rendered 100→200 crossing stays absent"
+        );
+        assert!(
+            world.terrain_surface_at(crossing_x + 0.001, 0.5).is_some(),
+            "the point immediately after the rendered 100→200 crossing is markable"
         );
     }
 
@@ -2168,14 +2284,36 @@ mod tests {
         deltas[8 * SUBCELLS_PER_CELL_EDGE as usize + 8] = 128;
         world.set_cell_heights(cell(0, 0), &deltas);
 
-        let surface = world
-            .terrain_surface_at(0.53125, 0.53125)
-            .expect("relief remains markable");
-        assert!(
-            surface.height_meters > 0.0,
-            "the sampler uses the same relief-aware surface-height path"
-        );
+        let surface = world.terrain_surface_at(0.53125, 0.53125).expect("relief remains markable");
+        assert!(surface.height_meters > 0.0, "the sampler uses the same relief-aware surface-height path");
         assert!(world.terrain_surface_at(f32::NAN, 0.5).is_none());
         assert!(world.terrain_surface_at(0.5, f32::INFINITY).is_none());
+    }
+
+    #[test]
+    fn terrain_surface_sampler_resolves_water_and_negative_coordinates_directly() {
+        let mut water = World::new();
+        water.insert_water_plane(1, WaterPlane { level_octimeters: 512 });
+        let mut water_chunk = Chunk::empty();
+        water_chunk.underlay[0] = Material::Water;
+        water_chunk.height[0] = -256;
+        water_chunk.water_plane[0] = 1;
+        water.insert_chunk(ChunkPos { x: 0, z: 0 }, water_chunk);
+        let water_surface = water.terrain_surface_at(0.5, 0.5).expect("water is a markable top surface");
+        assert_eq!(water_surface.cell, cell(0, 0));
+        assert_eq!(water_surface.mark_point, WorldPoint::new(128, 128));
+        assert!((water_surface.height_meters - 2.0).abs() < 1e-4);
+
+        let negative_cell = cell(-1, -1);
+        let mut negative_chunk = Chunk::empty();
+        negative_chunk.underlay[negative_cell.chunk_index()] = Material::Grass;
+        negative_chunk.height[negative_cell.chunk_index()] = 128;
+        let mut negative = World::new();
+        negative.insert_chunk(negative_cell.chunk(), negative_chunk);
+        let negative_surface =
+            negative.terrain_surface_at(-0.5, -0.5).expect("negative lattice coordinates remain markable");
+        assert_eq!(negative_surface.cell, negative_cell);
+        assert_eq!(negative_surface.mark_point, WorldPoint::new(-128, -128));
+        assert!((negative_surface.height_meters - 0.5).abs() < 1e-4);
     }
 }

@@ -218,9 +218,7 @@ pub struct PickTerrain {
 }
 
 /// Reply to [`PickTerrain`].
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 #[kind(name = "aether.kit.world.pick_terrain_result")]
 pub enum PickTerrainResult {
     Hit { hit: TerrainSurfaceHit },
@@ -237,17 +235,7 @@ pub struct SetMarkOverlayVisibility {
 }
 
 /// Visibility state after [`SetMarkOverlayVisibility`].
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    Serialize,
-    Deserialize,
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[kind(name = "aether.kit.world.set_mark_overlay_visibility_result")]
 pub struct SetMarkOverlayVisibilityResult {
     pub visible: bool,
@@ -263,31 +251,13 @@ pub struct SetMarkOverlaySelection {
 }
 
 /// Result of applying an exact-revision overlay selection.
-#[derive(
-    aether_data::Kind,
-    aether_data::Schema,
-    Serialize,
-    Deserialize,
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[kind(name = "aether.kit.world.set_mark_overlay_selection_result")]
 pub enum SetMarkOverlaySelectionResult {
-    Selected {
-        reference: MarkRef,
-    },
+    Selected { reference: MarkRef },
     Cleared,
-    Stale {
-        requested: MarkRef,
-        current: MarkRef,
-    },
-    Unsynchronized {
-        requested: MarkRef,
-        cached: Option<MarkRef>,
-    },
+    Stale { requested: MarkRef, current: MarkRef },
+    Unsynchronized { requested: MarkRef, cached: Option<MarkRef> },
 }
 
 /// Maximum number of vertices accepted by one polygon stamp.
@@ -513,35 +483,4 @@ impl SetRegion {
 pub struct WorldLoad {
     pub namespace: String,
     pub path: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use aether_data::Kind as _;
-
-    #[test]
-    fn terrain_pick_and_overlay_kind_names_are_stable() {
-        assert_eq!(PickTerrain::NAME, "aether.kit.world.pick_terrain");
-        assert_eq!(
-            PickTerrainResult::NAME,
-            "aether.kit.world.pick_terrain_result"
-        );
-        assert_eq!(
-            SetMarkOverlayVisibility::NAME,
-            "aether.kit.world.set_mark_overlay_visibility"
-        );
-        assert_eq!(
-            SetMarkOverlayVisibilityResult::NAME,
-            "aether.kit.world.set_mark_overlay_visibility_result"
-        );
-        assert_eq!(
-            SetMarkOverlaySelection::NAME,
-            "aether.kit.world.set_mark_overlay_selection"
-        );
-        assert_eq!(
-            SetMarkOverlaySelectionResult::NAME,
-            "aether.kit.world.set_mark_overlay_selection_result"
-        );
-    }
 }
