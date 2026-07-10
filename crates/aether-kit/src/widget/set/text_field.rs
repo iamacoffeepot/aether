@@ -15,7 +15,8 @@
 //! `char` boundary, so a multi-byte character is never split.
 //!
 //! Caret placement and pointer hit-testing are exact once the font's metrics
-//! settle: the field drives a single-flight [`FontMetricsRequest`] for its
+//! settle: the field drives a single-flight
+//! [`FontMetricsRequest`](aether_capabilities::text::FontMetricsRequest) for its
 //! theme's font and measures against the resolved
 //! [`CachedFontMetrics`]. Until then it falls
 //! back to the proportional approximation as a bounded font-warm-up placement.
