@@ -41,7 +41,9 @@ const STYLES: [MaterialStyle; 6] = [
     },
     // Dirt — hsl(31, 42.9, 31.5).
     MaterialStyle {
-        base: Hsl::new(31.0, 0.429, 0.315),
+        // Preserve the exact `f32` produced by the former percentage
+        // conversion so this type migration cannot move rendered colors.
+        base: Hsl::new(31.0, 42.9 / 100.0, 0.315),
     },
     // Stone — hsl(240, 3.45, 56.5).
     MaterialStyle {
