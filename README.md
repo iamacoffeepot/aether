@@ -66,7 +66,7 @@ Reference component in-tree: `aether-kit`, a multi-actor module (ADR-0096) packi
 ## Testing and CI
 
 - **Tests** run under `cargo nextest run --workspace`. Timing-sensitive concurrency tests live in a `mod heavy` submodule so the runner serializes them; see the *Heavy tests* section of `CLAUDE.md`.
-- **CI is the build engine**: GitHub Actions runs the full check set (fmt, clippy, doc, tests, the wasm32 component cross-build, and qodana) on every push and is the merge gate. Locally, run `cargo fmt` before pushing; push early as a draft and fix any red as it surfaces. See [Local checks and CI](docs/guide/local-verification.md).
+- **CI is the build engine**: GitHub Actions runs the full check set (fmt, clippy, doc, tests, the wasm32 component cross-build, and qodana) on every push and is the merge gate. Locally, run `cargo fmt` before pushing; push early as a draft and fix any red as it surfaces. See [Local checks and CI](docs/guide/local-verification.md). The heavy jobs run on ephemeral EC2 runners provisioned by [RunsOn](https://runs-on.com).
 
 ## Documentation
 
