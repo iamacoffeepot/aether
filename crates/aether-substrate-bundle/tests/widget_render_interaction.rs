@@ -45,7 +45,7 @@ use aether_capabilities::fs::NamespaceRoots;
 use aether_capabilities::render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
 use aether_capabilities::text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
 use aether_data::Kind;
-use aether_kinds::keycode::{KEY_BACKSPACE, KEY_ENTER, KEY_RIGHT, KEY_TAB};
+use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_RIGHT, KEY_TAB, KEY_UP};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
     CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, FrameCheck, FrameCheckResult, FrameRect,
@@ -53,11 +53,11 @@ use aether_kinds::{
     MouseButtonRelease, MouseMove, NamedMail, TextInput, Tick,
 };
 use aether_kit::{
-    ButtonConfig, PanelConfig, SetWidgetState, SliderConfig, Theme, ThemeState, WidgetChildSpec, WidgetControlState,
-    WidgetKind, WidgetValidation,
+    ButtonConfig, PanelConfig, SetWidgetState, SliderConfig, TextAreaConfig, Theme, ThemeState, WidgetChildSpec,
+    WidgetControlState, WidgetKind, WidgetValidation,
 };
 use aether_substrate_bundle::test_bench::{
-    BenchOp, TestBench,
+    ArtifactGuard, BenchOp, TestBench,
     test_helpers::{init_save_sandbox, require_runtime},
 };
 
@@ -279,6 +279,23 @@ fn slider_child(subname: &str, state: WidgetControlState) -> WidgetChildSpec {
     }
 }
 
+fn text_area_child(subname: &str, rows: u32, font_id: u32) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::TextArea,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: TextAreaConfig {
+            initial: String::new(),
+            max_chars: 0,
+            rows,
+            theme: Theme { font_id, ..Theme::DEFAULT },
+            state: WidgetControlState::default(),
+        }
+        .encode_into_bytes(),
+    }
+}
+
 fn control_state_children() -> Vec<WidgetChildSpec> {
     let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
@@ -402,6 +419,40 @@ fn capture(bench: &mut TestBench, checks: Vec<FrameCheck>) -> FrameVerdict {
     match captured.reply::<CaptureFrameResult>("snap").expect("decode CaptureFrameResult") {
         CaptureFrameResult::Ok { verdict, .. } => verdict.expect("checks requested → verdict"),
         CaptureFrameResult::Err { error } => panic!("capture failed: {error}"),
+    }
+}
+
+struct GuardedCapture {
+    verdict: FrameVerdict,
+    _artifacts: ArtifactGuard,
+}
+
+/// Capture a scored frame while keeping its exact PNG and check masks alive
+/// as failure-only diagnostics for every assertion in the caller's scope.
+fn capture_guarded(bench: &mut TestBench, id: &str, expectation: &str, checks: Vec<FrameCheck>) -> GuardedCapture {
+    let captured = bench
+        .execute(vec![(
+            "snap",
+            BenchOp::send_and_await(
+                RenderCapability::NAMESPACE,
+                &CaptureFrame {
+                    mails: vec![tick_to_panel()],
+                    after_mails: Vec::new(),
+                    checks: checks.clone(),
+                    similarity: None,
+                },
+            ),
+        )])
+        .expect("guarded capture with region checks");
+    match captured.reply::<CaptureFrameResult>("snap").expect("decode guarded CaptureFrameResult") {
+        CaptureFrameResult::Ok { png, verdict: Some(verdict), .. } => {
+            let artifacts = ArtifactGuard::arm(id, png, checks, verdict.results.clone()).with_expectation(expectation);
+            GuardedCapture { verdict, _artifacts: artifacts }
+        }
+        CaptureFrameResult::Ok { verdict: None, .. } => {
+            panic!("guarded capture requested checks but returned no verdict")
+        }
+        CaptureFrameResult::Err { error } => panic!("guarded capture failed: {error}"),
     }
 }
 
@@ -1107,6 +1158,251 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         log.iter().any(|m| m.contains("widget text committed") && m.contains("text=abéZ")),
         "clicking after `abé`, extending over `cd`, and committing `Z` must leave the non-ASCII \
          value `abéZ`; log was:\n{joined}",
+    );
+}
+
+/// **Bug class: multiline editing state and its measured render projection
+/// diverge across a scrolled viewport.** This drives plain Enter insertion,
+/// measured Up/Down selection through unequal UTF-8 lines, whole-line scroll,
+/// IME replacement across a newline, and Ctrl+Enter commit through the real
+/// panel. Exact overlay batches pin the two row-local selection bands and the
+/// preedit cursor/underline geometry; raster checks prove those authored
+/// quads survive the GPU path. Failure-only guards retain both scored frames.
+#[test]
+#[allow(clippy::too_many_lines)] // one cohesive multiline edit/render/commit acceptance run
+fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = build_bench();
+
+    let font_id = load_font(&mut bench);
+    let metrics = load_metrics(&mut bench, font_id);
+    load_panel_with_children(&mut bench, &wasm, font_id, vec![text_area_child("notes", 2, font_id)]);
+    let panel = panel_address();
+    bench
+        .execute(vec![
+            ("spawn", BenchOp::send_mail(&panel, &Tick)),
+            ("prime", BenchOp::send_mail(&panel, &Tick)),
+            ("settle", BenchOp::advance(4)),
+        ])
+        .expect("warm text area and measured font");
+
+    let row_height = Theme::DEFAULT.row_height;
+    let size = Theme::DEFAULT.value_size_pixels;
+    let content_x = PANEL_X + Theme::DEFAULT.pad;
+    let area_height = row_height * 2.0;
+    let area_clip = ClipRect { x: PANEL_X, y: PANEL_Y, width: PANEL_WIDTH, height: area_height };
+
+    // Build five lines with the control's plain-Enter policy. The final caret
+    // forces a two-row viewport to show only `last` and `tail`.
+    bench
+        .execute(vec![
+            ("focus", BenchOp::send_mail(&panel, &press(content_x, PANEL_Y + 10.0))),
+            ("focus_up", BenchOp::send_mail(&panel, &release(content_x, PANEL_Y + 10.0))),
+            ("line0", BenchOp::send_mail(&panel, &TextInput { text: "imx".to_owned() })),
+            ("enter0", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("line1", BenchOp::send_mail(&panel, &TextInput { text: "é".to_owned() })),
+            ("enter1", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("line2", BenchOp::send_mail(&panel, &TextInput { text: "short".to_owned() })),
+            ("enter2", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("line3", BenchOp::send_mail(&panel, &TextInput { text: "last".to_owned() })),
+            ("enter3", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("line4", BenchOp::send_mail(&panel, &TextInput { text: "tail".to_owned() })),
+            ("rasterize", BenchOp::send_mail(&panel, &Tick)),
+            ("settle_glyphs", BenchOp::advance(2)),
+        ])
+        .expect("type five text-area lines");
+
+    // Place after `tai` on the second visible row. Shift+Up selects from that
+    // point back to the same measured x on `last`; Down and Up again exercise
+    // both directions while leaving the same cross-newline selection active.
+    let after_three_x = content_x + metrics.caret_x("tail", 3, size);
+    bench
+        .execute(vec![
+            ("place", BenchOp::send_mail(&panel, &press(after_three_x, PANEL_Y + row_height + 10.0))),
+            ("place_up", BenchOp::send_mail(&panel, &release(after_three_x, PANEL_Y + row_height + 10.0))),
+            ("shift", BenchOp::send_mail(&panel, &Modifiers { shift: true, ..Modifiers::default() })),
+            ("up", BenchOp::send_mail(&panel, &Key { code: KEY_UP })),
+            ("down", BenchOp::send_mail(&panel, &Key { code: KEY_DOWN })),
+            ("up_again", BenchOp::send_mail(&panel, &Key { code: KEY_UP })),
+        ])
+        .expect("measured multiline selection");
+
+    let last_selection_x = content_x + metrics.caret_x("last", 3, size);
+    let last_selection_end_x = content_x + metrics.caret_x("last", 4, size);
+    let tail_selection_end_x = content_x + metrics.caret_x("tail", 3, size);
+    let selection_top = PANEL_Y + Theme::DEFAULT.pad;
+    let selection_height = row_height - Theme::DEFAULT.pad * 2.0;
+    let selection_checks = vec![
+        check(
+            FrameReduction::Coverage,
+            rect(
+                last_selection_x + 1.0,
+                selection_top + 1.0,
+                last_selection_end_x - 1.0,
+                selection_top + selection_height - 1.0,
+            ),
+            SURFACE_RAISED_SRGB,
+            PARTITION_TOLERANCE,
+        ),
+        check(
+            FrameReduction::Coverage,
+            rect(
+                content_x + 1.0,
+                selection_top + row_height + 1.0,
+                tail_selection_end_x - 1.0,
+                selection_top + row_height + selection_height - 1.0,
+            ),
+            SURFACE_RAISED_SRGB,
+            PARTITION_TOLERANCE,
+        ),
+    ];
+    let selected = capture_guarded(
+        &mut bench,
+        "text-area-multiline-selection",
+        "the selected final character of `last` and first three characters of `tail` fill two measured row bands",
+        selection_checks,
+    );
+    assert!(
+        selected.verdict.results.iter().all(|result| coverage(result) > 0.75),
+        "both measured row-local selection bands must survive rasterization; verdict: {:?}",
+        selected.verdict,
+    );
+
+    {
+        let snapshot = bench.committed_overlay_snapshot();
+        let solid = solid_for(&snapshot, &area_clip);
+        assert_eq!(
+            solid.quads.len(),
+            8,
+            "background + two selection bands + caret + four focus edges; snapshot: {snapshot:?}",
+        );
+        assert_eq!(solid.quads[0].x, PANEL_X);
+        assert_eq!(solid.quads[0].y, PANEL_Y);
+        assert_eq!(solid.quads[0].width, PANEL_WIDTH);
+        assert_eq!(solid.quads[0].height, area_height);
+        assert_eq!(solid.quads[0].tint, Theme::DEFAULT.surface_raised);
+        assert_eq!(solid.quads[1].x, last_selection_x);
+        assert_eq!(solid.quads[1].y, selection_top);
+        assert_eq!(solid.quads[1].width, metrics.caret_x("last", 4, size) - metrics.caret_x("last", 3, size),);
+        assert_eq!(solid.quads[1].height, selection_height);
+        assert_eq!(solid.quads[1].tint, Theme::DEFAULT.accent);
+        assert_eq!(solid.quads[2].x, last_selection_x);
+        assert_eq!(solid.quads[2].y, selection_top);
+        assert_eq!(solid.quads[2].width, 1.0);
+        assert_eq!(solid.quads[2].height, selection_height);
+        assert_eq!(solid.quads[2].tint, Theme::DEFAULT.accent);
+        assert_eq!(solid.quads[3].x, content_x);
+        assert_eq!(solid.quads[3].y, selection_top + row_height);
+        assert_eq!(solid.quads[3].width, metrics.caret_x("tail", 3, size));
+        assert_eq!(solid.quads[3].height, selection_height);
+        assert_eq!(solid.quads[3].tint, Theme::DEFAULT.accent);
+        let area_glyphs: Vec<_> = snapshot
+            .iter()
+            .filter(|batch| batch.texture_id != WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(&area_clip))
+            .flat_map(|batch| &batch.quads)
+            .collect();
+        assert!(
+            area_glyphs.iter().any(|quad| { quad.y >= PANEL_Y && quad.y + quad.height <= PANEL_Y + row_height }),
+            "the first visible line's glyphs must stay in row zero; snapshot: {snapshot:?}",
+        );
+        assert!(
+            area_glyphs
+                .iter()
+                .any(|quad| { quad.y >= PANEL_Y + row_height && quad.y + quad.height <= PANEL_Y + area_height }),
+            "the second visible line's glyphs must stay in row one; snapshot: {snapshot:?}",
+        );
+    }
+
+    // Replace the cross-newline selection visually with a non-ASCII preedit.
+    // The displayed document now has one final line, so its measured cursor
+    // span and underline occupy row zero of the retained whole-line viewport.
+    bench
+        .execute(vec![
+            (
+                "preedit",
+                BenchOp::send_mail(
+                    &panel,
+                    &ImePreedit { text: "üx".to_owned(), cursor_begin: Some(0), cursor_end: Some(2) },
+                ),
+            ),
+            ("rasterize_preedit", BenchOp::send_mail(&panel, &Tick)),
+            ("settle_preedit", BenchOp::advance(2)),
+        ])
+        .expect("multiline IME preedit");
+
+    let preedit_x = content_x + metrics.caret_x("las", 3, size);
+    let preedit_cursor_end_x = preedit_x + metrics.caret_x("üx", 1, size);
+    let preedit_end_x = preedit_x + metrics.caret_x("üx", 2, size);
+    let underline_y = PANEL_Y + (row_height - size) * 0.5 + size;
+    let composition_checks = vec![
+        check(
+            FrameReduction::Coverage,
+            rect(
+                preedit_x + 1.0,
+                selection_top + 1.0,
+                preedit_cursor_end_x - 1.0,
+                selection_top + selection_height - 1.0,
+            ),
+            SURFACE_RAISED_SRGB,
+            PARTITION_TOLERANCE,
+        ),
+        check(
+            FrameReduction::Coverage,
+            rect(preedit_x + 1.0, underline_y, preedit_end_x - 1.0, underline_y + 1.0),
+            SURFACE_RAISED_SRGB,
+            PARTITION_TOLERANCE,
+        ),
+    ];
+    let composed = capture_guarded(
+        &mut bench,
+        "text-area-multiline-preedit",
+        "the non-collapsed IME cursor fills `ü` and the underline spans measured `üx`",
+        composition_checks,
+    );
+    assert!(
+        composed.verdict.results.iter().all(|result| coverage(result) > 0.6),
+        "the measured preedit cursor and underline must survive rasterization; verdict: {:?}",
+        composed.verdict,
+    );
+
+    {
+        let snapshot = bench.committed_overlay_snapshot();
+        let solid = solid_for(&snapshot, &area_clip);
+        assert_eq!(
+            solid.quads.len(),
+            7,
+            "background + IME cursor band + underline + four focus edges; snapshot: {snapshot:?}",
+        );
+        assert_eq!(solid.quads[1].x, preedit_x);
+        assert_eq!(solid.quads[1].y, selection_top);
+        assert_eq!(solid.quads[1].width, metrics.caret_x("üx", 1, size));
+        assert_eq!(solid.quads[1].height, selection_height);
+        assert_eq!(solid.quads[1].tint, Theme::DEFAULT.accent);
+        assert_eq!(solid.quads[2].x, preedit_x);
+        assert_eq!(solid.quads[2].y, underline_y);
+        assert_eq!(solid.quads[2].width, metrics.caret_x("üx", 2, size));
+        assert_eq!(solid.quads[2].height, 1.0);
+        assert_eq!(solid.quads[2].tint, Theme::DEFAULT.accent);
+    }
+
+    // Committed input replaces the selected `t\ntai`; Ctrl+Enter emits the
+    // value upward without inserting another newline.
+    bench
+        .execute(vec![
+            ("commit_preedit", BenchOp::send_mail(&panel, &TextInput { text: "Z".to_owned() })),
+            ("ctrl", BenchOp::send_mail(&panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
+            ("commit_area", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+        ])
+        .expect("commit multiline replacement");
+
+    let log = panel_log_messages(&mut bench);
+    let joined = log.join("\n");
+    assert!(
+        log.iter().any(|message| { message.contains("widget text committed") && message.contains("lasZl") }),
+        "Ctrl+Enter must commit `imx\\né\\nshort\\nlasZl` without inserting a newline; log was:\n{joined}",
     );
 }
 

@@ -1,4 +1,4 @@
-//! Reusable single-line plain-text editing state (issue 2924).
+//! Reusable plain-text editing state and measured line layout (issue 2924).
 //!
 //! [`TextEditState`] owns a committed `String`, a selection expressed as an
 //! `anchor` and an active `caret` (both byte offsets), and an in-flight IME
@@ -69,8 +69,9 @@ impl Default for EditPolicy {
     }
 }
 
-/// A single-line plain-text editing core: committed text, a selection, and an
-/// IME composition, all on `char` boundaries.
+/// A plain-text editing core: committed text, a selection, and an IME
+/// composition, all on `char` boundaries. [`EditPolicy`] decides whether an
+/// individual consumer accepts line breaks.
 #[derive(Debug, Clone, Default)]
 pub struct TextEditState {
     text: String,
@@ -84,6 +85,18 @@ pub struct TextEditState {
     /// The IME's reported cursor/selection span as byte offsets into `preedit`,
     /// `None` when the IME gives no span.
     preedit_cursor: Option<TextSpan>,
+}
+
+/// The committed editor state projected into the string rendered this frame,
+/// with every owned span remapped into that string's byte offsets. While an
+/// IME composition is active, its preedit replaces the committed selection.
+pub(super) struct DisplayedEdit {
+    pub(super) text: String,
+    pub(super) caret_byte: usize,
+    pub(super) selection_span: Option<TextSpan>,
+    pub(super) preedit_span: Option<TextSpan>,
+    pub(super) preedit_cursor_span: Option<TextSpan>,
+    pub(super) composing: bool,
 }
 
 /// Floor `byte` to a `char` boundary of `text`, clamping to `text.len()` first.
@@ -145,6 +158,42 @@ impl TextEditState {
     #[must_use]
     pub fn preedit_cursor(&self) -> Option<TextSpan> {
         self.preedit_cursor
+    }
+
+    /// Project committed text, selection, and preedit into one render string.
+    /// The projection is line-agnostic: single-line and multiline widgets can
+    /// split the returned text however their own layout policy requires.
+    #[must_use]
+    pub(super) fn displayed(&self) -> DisplayedEdit {
+        let selection = self.selection();
+        if self.preedit.is_empty() {
+            return DisplayedEdit {
+                text: self.text.clone(),
+                caret_byte: self.caret,
+                selection_span: (!selection.is_collapsed()).then_some(selection),
+                preedit_span: None,
+                preedit_cursor_span: None,
+                composing: false,
+            };
+        }
+
+        let mut text = String::with_capacity(self.text.len() + self.preedit.len());
+        text.push_str(&self.text[..selection.start_byte]);
+        text.push_str(&self.preedit);
+        text.push_str(&self.text[selection.end_byte..]);
+        let span_end = selection.start_byte + self.preedit.len();
+        let cursor = self.preedit_cursor.unwrap_or_else(|| TextSpan::new(self.preedit.len(), self.preedit.len()));
+        DisplayedEdit {
+            text,
+            caret_byte: span_end,
+            selection_span: None,
+            preedit_span: Some(TextSpan::new(selection.start_byte, span_end)),
+            preedit_cursor_span: Some(TextSpan::new(
+                selection.start_byte + cursor.start_byte,
+                selection.start_byte + cursor.end_byte,
+            )),
+            composing: true,
+        }
     }
 
     /// The filtered form of `s` under `policy` — line breaks dropped for a
@@ -341,6 +390,67 @@ struct CaretStop {
 #[derive(Debug, Clone)]
 pub struct SingleLineLayout {
     stops: Vec<CaretStop>,
+}
+
+/// Single-flight cache for the font metrics a measured text control needs.
+/// It owns only request attribution and cache freshness; actors still send the
+/// actual capability mail so this helper remains independent of dispatch.
+pub(super) struct FontMetricsAdapter {
+    desired_font_id: u32,
+    current_font_id: Option<u32>,
+    inflight_font_id: Option<u32>,
+    metrics: Option<CachedFontMetrics>,
+}
+
+impl FontMetricsAdapter {
+    pub(super) const fn new(desired_font_id: u32) -> Self {
+        Self { desired_font_id, current_font_id: None, inflight_font_id: None, metrics: None }
+    }
+
+    /// Adopt a desired font. Metrics from the old id stop being readable
+    /// immediately, while an outstanding request remains attributed until its
+    /// reply settles.
+    pub(super) fn set_desired(&mut self, desired_font_id: u32) {
+        if self.desired_font_id == desired_font_id {
+            return;
+        }
+        self.desired_font_id = desired_font_id;
+        self.current_font_id = None;
+        self.metrics = None;
+    }
+
+    /// Exact metrics only while the installed id is still desired.
+    pub(super) fn resolved(&self) -> Option<&CachedFontMetrics> {
+        (self.current_font_id == Some(self.desired_font_id)).then_some(self.metrics.as_ref()).flatten()
+    }
+
+    /// Reserve the next request, coalescing while one is outstanding.
+    pub(super) fn take_pending_request(&mut self) -> Option<u32> {
+        if self.inflight_font_id.is_some()
+            || (self.current_font_id == Some(self.desired_font_id) && self.metrics.is_some())
+        {
+            return None;
+        }
+        self.inflight_font_id = Some(self.desired_font_id);
+        Some(self.desired_font_id)
+    }
+
+    /// Settle the outstanding request. Install successful metrics only when
+    /// their id is still desired. Returns `true` when a newer desired id was
+    /// deferred behind this flight and should now be pumped.
+    pub(super) fn accept_reply(&mut self, metrics: Option<CachedFontMetrics>) -> bool {
+        let Some(id) = self.inflight_font_id.take() else {
+            return false;
+        };
+        if id != self.desired_font_id {
+            return true;
+        }
+        if let Some(metrics) = metrics {
+            self.current_font_id = Some(id);
+            self.metrics = Some(metrics);
+        }
+        false
+    }
 }
 
 impl SingleLineLayout {
@@ -648,5 +758,37 @@ mod tests {
         assert_eq!(layout.hit_test(124.0), 2);
         assert_eq!(layout.hit_test(126.0), 3);
         assert_eq!(layout.hit_test(999.0), 3, "past the end clamps to the last stop");
+    }
+
+    #[test]
+    fn font_metrics_adapter_coalesces_and_installs_zero_id() {
+        let mut adapter = FontMetricsAdapter::new(0);
+        assert_eq!(adapter.take_pending_request(), Some(0));
+        assert_eq!(adapter.take_pending_request(), None, "one flight at a time");
+        assert!(!adapter.accept_reply(Some(variable_metrics())));
+        assert!(adapter.resolved().is_some());
+        assert_eq!(adapter.take_pending_request(), None, "desired id is cached");
+    }
+
+    #[test]
+    fn font_metrics_adapter_drops_stale_reply_then_pumps_latest() {
+        let mut adapter = FontMetricsAdapter::new(7);
+        assert_eq!(adapter.take_pending_request(), Some(7));
+        adapter.set_desired(9);
+        assert_eq!(adapter.take_pending_request(), None, "old flight still owns the slot");
+        assert!(adapter.accept_reply(Some(variable_metrics())));
+        assert!(adapter.resolved().is_none(), "stale metrics never install");
+        assert_eq!(adapter.take_pending_request(), Some(9));
+        assert!(!adapter.accept_reply(Some(variable_metrics())));
+        assert!(adapter.resolved().is_some());
+    }
+
+    #[test]
+    fn font_metrics_adapter_current_error_waits_for_a_later_pump() {
+        let mut adapter = FontMetricsAdapter::new(7);
+        assert_eq!(adapter.take_pending_request(), Some(7));
+        assert!(!adapter.accept_reply(None), "a current error must not request again from its own reply handler");
+        assert!(adapter.resolved().is_none());
+        assert_eq!(adapter.take_pending_request(), Some(7), "a later config or theme event may retry");
     }
 }

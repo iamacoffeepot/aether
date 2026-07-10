@@ -59,13 +59,14 @@ use crate::widget::focus::{
     AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition, HoverTransition,
 };
 use crate::widget::set::{
-    ButtonWidget, ImageWidget, LabelWidget, RadioGroupWidget, SliderWidget, TextFieldWidget, quad,
+    ButtonWidget, ImageWidget, LabelWidget, RadioGroupWidget, SliderWidget, TextAreaWidget, TextFieldWidget, quad,
 };
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
     ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig,
-    PanelConfig, RadioConfig, RadioSelected, SliderChanged, SliderConfig, TextCommitted, TextFieldConfig,
-    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
+    PanelConfig, RadioConfig, RadioSelected, SliderChanged, SliderConfig, TextAreaConfig, TextCommitted,
+    TextFieldConfig, WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind,
+    WidgetStateChanged,
 };
 use crate::widget::{accept_child_list, emit, flush_membership};
 
@@ -257,6 +258,18 @@ fn spawn_panel_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row:
                 focusable: true,
                 state,
                 type_namespace: <TextFieldWidget as Addressable>::NAMESPACE,
+            })
+        }),
+        WidgetKind::TextArea => decode_child::<TextAreaConfig>(spec).and_then(|config| {
+            let height = row * config.rows.max(1) as f32;
+            let state = config.state.clone();
+            spawn::<TextAreaWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                height,
+                pointer_eligible: true,
+                focusable: true,
+                state,
+                type_namespace: <TextAreaWidget as Addressable>::NAMESPACE,
             })
         }),
         WidgetKind::Button => decode_child::<ButtonConfig>(spec).and_then(|config| {
@@ -467,6 +480,10 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
             let config = decode_named::<TextFieldConfig>(&spec.subname, &host_spec.wrapped_config)?;
             (row, true, true, config.state)
         }
+        WidgetKind::TextArea => {
+            let config = decode_named::<TextAreaConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            (row * config.rows.max(1) as f32, true, true, config.state)
+        }
         WidgetKind::Button => {
             let config = decode_named::<ButtonConfig>(&spec.subname, &host_spec.wrapped_config)?;
             (row, true, true, config.state)
@@ -505,6 +522,7 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
             ImageConfig::ID.0,
             SliderConfig::ID.0,
             TextFieldConfig::ID.0,
+            TextAreaConfig::ID.0,
             ButtonConfig::ID.0,
             RadioConfig::ID.0,
             SliderChanged::ID.0,
@@ -857,6 +875,7 @@ mod behavior_tests {
         assert_eq!(WidgetKind::Image.type_tag(), Some(ActorTypeTag::of::<ImageWidget>().0));
         assert_eq!(WidgetKind::Radio.type_tag(), Some(ActorTypeTag::of::<RadioGroupWidget>().0));
         assert_eq!(WidgetKind::TextField.type_tag(), Some(ActorTypeTag::of::<TextFieldWidget>().0));
+        assert_eq!(WidgetKind::TextArea.type_tag(), Some(ActorTypeTag::of::<TextAreaWidget>().0));
         assert_eq!(WidgetKind::Composite.type_tag(), None);
         assert_eq!(WidgetKind::BehaviorHost.type_tag(), None);
     }

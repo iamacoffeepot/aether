@@ -307,6 +307,10 @@ pub enum WidgetKind {
     /// A static image — `config` decodes as [`ImageConfig`]. Not focusable.
     /// Appended to preserve the established wire discriminants above.
     Image,
+    /// A multiline text area — `config` decodes as [`TextAreaConfig`]. Kept at
+    /// the end so adding it does not renumber the landed image discriminant or
+    /// any earlier wire discriminant.
+    TextArea,
 }
 
 impl WidgetKind {
@@ -332,6 +336,7 @@ impl WidgetKind {
             Self::Slider => aether_data::mailbox_id_from_name("aether.kit.widget.slider").0,
             Self::Radio => aether_data::mailbox_id_from_name("aether.kit.widget.radio").0,
             Self::TextField => aether_data::mailbox_id_from_name("aether.kit.widget.text_field").0,
+            Self::TextArea => aether_data::mailbox_id_from_name("aether.kit.widget.text_area").0,
             Self::Button => aether_data::mailbox_id_from_name("aether.kit.widget.button").0,
             Self::Composite | Self::BehaviorHost => return None,
         };
@@ -525,6 +530,20 @@ pub struct TextFieldConfig {
     pub state: WidgetControlState,
 }
 
+/// `aether.kit.widget.text_area.config` — a multiline editable string with a
+/// fixed whole-line viewport. `rows` is the number of visible rows (`0` uses
+/// one row); `max_chars` counts Unicode scalar values (`0` = no cap).
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.kit.widget.text_area.config")]
+pub struct TextAreaConfig {
+    pub initial: String,
+    pub max_chars: u32,
+    pub rows: u32,
+    pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
+}
+
 /// `aether.kit.widget.radio.config` — a vertical list of mutually-exclusive
 /// `options`, one selected at a time, starting at `initial_index` (clamped
 /// into range at init). Each option draws as one theme row.
@@ -620,8 +639,8 @@ pub struct SliderChanged {
     pub committed: bool,
 }
 
-/// `aether.kit.widget.text_field.committed` — a text field's value-up event,
-/// emitted when the field's Enter key commits its current contents.
+/// `aether.kit.widget.text_field.committed` — the shared text-control value-up
+/// event. A text field emits it on Enter; a text area emits it on Ctrl+Enter.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.widget.text_field.committed")]
 pub struct TextCommitted {
@@ -723,6 +742,15 @@ impl Default for PanelConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_data::wire::to_vec;
+    use alloc::vec;
+
+    #[test]
+    fn text_area_appends_after_the_landed_image_wire_discriminant() {
+        assert_eq!(to_vec(&WidgetKind::BehaviorHost).expect("encode BehaviorHost"), vec![6, 0, 0, 0]);
+        assert_eq!(to_vec(&WidgetKind::Image).expect("encode Image"), vec![7, 0, 0, 0]);
+        assert_eq!(to_vec(&WidgetKind::TextArea).expect("encode TextArea"), vec![8, 0, 0, 0]);
+    }
 
     #[test]
     fn quad_offset_translates_position_and_keeps_size() {
