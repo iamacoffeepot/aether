@@ -46,7 +46,7 @@ enum SelectionMove {
 }
 
 /// A fixed-row virtual list. The item vector is retained, but every collect
-/// allocates draw items for only [`VisibleRowWindow`].
+/// allocates draw items for only the current `VisibleRowWindow`.
 pub struct VirtualListWidget {
     items: Vec<String>,
     selected_index: Option<usize>,
