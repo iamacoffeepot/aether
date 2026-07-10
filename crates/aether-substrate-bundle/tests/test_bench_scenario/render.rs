@@ -365,12 +365,19 @@ fn assert_quadrant_matches(img: &Image, label: &str, region: Rect, target: [u8; 
          (region {region:?})",
         stats.fraction,
     );
-    let (center_x, center_y) = stats.centroid.expect("high-fraction probe has a centroid");
+    let center = stats.centroid.expect("high-fraction probe has a centroid");
     assert!(
-        (region.min_x as f32..=region.max_x as f32).contains(&center_x)
-            && (region.min_y as f32..=region.max_y as f32).contains(&center_y),
-        "{label} centroid ({center_x}, {center_y}) should sit inside its own probe \
+        (region.min_x as f32..=region.max_x as f32).contains(&center.x)
+            && (region.min_y as f32..=region.max_y as f32).contains(&center.y),
+        "{label} centroid ({}, {}) should sit inside its own probe \
          region {region:?}",
+        center.x,
+        center.y,
+    );
+    assert_eq!(
+        stats.bounding_box,
+        Some(region),
+        "{label} target-color extent should exactly recover its inset probe region",
     );
 }
 

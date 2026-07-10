@@ -226,20 +226,30 @@ impl From<Rect> for FrameRect {
     }
 }
 
+/// A point in absolute frame pixel coordinates. Coordinates may be
+/// fractional when the point is an aggregate such as a pixel centroid;
+/// `x` increases across columns and `y` increases down rows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FramePoint {
+    pub x: f32,
+    pub y: f32,
+}
+
 /// Bounded target-color statistics for a frame-clamped region, returned
 /// by `target_color_stats`: how many pixels the region walk sampled, how
 /// many matched the requested target within tolerance, the resulting
 /// matching fraction, and the matched pixels' centroid and bounding box
 /// (both in absolute frame coordinates, mirroring `centroid` /
-/// `bounding_box`). `centroid` and `bounding_box` are `None` exactly
-/// when `matching` is `0` — an empty match set has no location or
-/// extent to report.
+/// `bounding_box`). The centroid is a [`FramePoint`] whose named `x`
+/// and `y` fields make the coordinate order explicit. `centroid` and
+/// `bounding_box` are `None` exactly when `matching` is `0` — an empty
+/// match set has no location or extent to report.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColorRegionStats {
     pub sampled: u64,
     pub matching: u64,
     pub fraction: f32,
-    pub centroid: Option<(f32, f32)>,
+    pub centroid: Option<FramePoint>,
     pub bounding_box: Option<Rect>,
 }
 
@@ -367,13 +377,15 @@ pub fn bounding_box(image: &Image, bg: [u8; 3], tol: u8) -> Option<Rect> {
 /// ignored, matching every other reduction's convention), and return
 /// the aggregate `ColorRegionStats` — sampled and matching pixel
 /// counts, matching fraction, and the matched pixels' centroid and
-/// bounding box in absolute frame coordinates. `region: None` scores
-/// the whole frame. An empty or fully out-of-frame region (an empty
-/// `clamp_region` result — a zero-size frame, a region entirely outside
-/// the frame, or a degenerate `min > max`) yields zero sampled/matching
-/// counts, `0.0` fraction, and no centroid/bounding box; a non-empty
-/// region with no matching pixel reports its non-zero `sampled` count
-/// alongside the same zero `matching`/`fraction`/`None` geometry.
+/// bounding box in absolute frame coordinates. The centroid's named
+/// `FramePoint` `x` and `y` fields identify the axes.
+/// `region: None` scores the whole frame. An empty or fully out-of-frame
+/// region (an empty `clamp_region` result — a zero-size frame, a region
+/// entirely outside the frame, or a degenerate `min > max`) yields zero
+/// sampled/matching counts, `0.0` fraction, and no centroid/bounding
+/// box; a non-empty region with no matching pixel reports its non-zero
+/// `sampled` count alongside the same zero `matching`/`fraction`/`None`
+/// geometry.
 #[must_use]
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 pub fn target_color_stats(
@@ -419,10 +431,10 @@ pub fn target_color_stats(
         sampled,
         matching,
         fraction: matching as f32 / sampled as f32,
-        centroid: Some((
-            sum_x as f32 / matching as f32,
-            sum_y as f32 / matching as f32,
-        )),
+        centroid: Some(FramePoint {
+            x: sum_x as f32 / matching as f32,
+            y: sum_y as f32 / matching as f32,
+        }),
         bounding_box: Some(Rect {
             min_x,
             min_y,
@@ -901,6 +913,10 @@ mod tests {
             stats.matching, 0,
             "a pixel one unit past the tolerance boundary must not match"
         );
+        assert_eq!(stats.sampled, 4);
+        assert_eq!(stats.fraction, 0.0);
+        assert_eq!(stats.centroid, None);
+        assert_eq!(stats.bounding_box, None);
     }
 
     #[test]
@@ -983,11 +999,13 @@ mod tests {
             rect,
         );
         let stats = target_color_stats(&img, target, 5, None);
-        let (center_x, center_y) = stats.centroid.expect("a matched region has a centroid");
+        let center = stats.centroid.expect("a matched region has a centroid");
         assert!(
-            (center_x - 5.5).abs() < 1e-6 && (center_y - 7.5).abs() < 1e-6,
-            "centroid ({center_x}, {center_y}) should be the rect's frame-coordinate \
+            (center.x - 5.5).abs() < 1e-6 && (center.y - 7.5).abs() < 1e-6,
+            "centroid ({}, {}) should be the rect's frame-coordinate \
              center (5.5, 7.5)",
+            center.x,
+            center.y,
         );
         assert_eq!(
             stats.bounding_box,
