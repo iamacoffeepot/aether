@@ -409,7 +409,7 @@ jobs:
             labels="$(gh api "repos/${REPO}/issues/${PR}/labels" --jq '.[].name')"
             if grep -qx 'review:unresolved' <<<"$labels"; then
               state="failure"
-              description="review unresolved; see the rollup comment. Clear via fix + workflow_dispatch re-run, or strip the label + dispatch."
+              description="review unresolved; see rollup. Fix: workflow_dispatch clears it. Decline: strip label, next CI green re-mirrors (not dispatch, re-sets it)."
             else
               state="success"
               description="review verdict clear"
