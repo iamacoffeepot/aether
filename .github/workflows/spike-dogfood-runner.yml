@@ -130,6 +130,24 @@ jobs:
         run: |
           printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$PWD" > "$HOME/.claude.json"
 
+      # Shape-check the token WITHOUT leaking it: length, the generic
+      # type prefix, and whitespace/charset verdicts. Distinguishes a
+      # paste-mangled secret (wrapped copy injecting a newline, trailing
+      # space, wrong substring) from a well-formed token the API rejects.
+      - name: "Stage 2a-pre — token shape check (leaks nothing)"
+        if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: |
+          t="$CLAUDE_CODE_OAUTH_TOKEN"
+          echo "length: ${#t}"
+          echo "prefix: $(printf '%s' "$t" | cut -c1-12)"
+          case "$t" in *$'\n'*) echo "contains-newline: YES";; *) echo "contains-newline: no";; esac
+          case "$t" in *[$' \t']*) echo "contains-space-or-tab: YES";; *) echo "contains-space-or-tab: no";; esac
+          if printf '%s' "$t" | grep -qE '^sk-ant-oat01-[A-Za-z0-9_-]+$'; then
+            echo "charset: ok (sk-ant-oat01- + base64url)"
+          else
+            echo "charset: UNEXPECTED (not sk-ant-oat01- + base64url)"
+          fi
+
       # Auth in isolation, before any MCP is involved: a one-line prompt
       # with no tools. If this fails, the OAuth token itself is the
       # problem (bad secret value or unsupported auth path) — not the
