@@ -1,0 +1,674 @@
+// `#[handler]` methods take their decoded mail by value per the ADR-0033
+// dispatch ABI (see `widget/mod.rs`).
+#![allow(clippy::needless_pass_by_value)]
+
+//! Multiline measured text editing with a fixed whole-line viewport.
+
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_capabilities::TextCapability;
+use aether_capabilities::text::{FontMetricsRequest, FontMetricsResult, FontRef};
+use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
+use aether_kinds::{
+    CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput, mouse_button,
+};
+
+use crate::widget::set::{push_control_outlines, quad, reply_if_hidden, text_origin_y};
+use crate::widget::state::{InteractionState, emit_state_changed};
+use crate::widget::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState, TextSpan};
+use crate::widget::theme::{SetTheme, Theme, ThemeState};
+use crate::widget::{
+    Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, TextAreaConfig, TextCommitted,
+    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TextLine {
+    start_byte: usize,
+    end_byte: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerticalDirection {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnterAction {
+    Ignore,
+    InsertNewline,
+    Commit,
+}
+
+fn text_lines(text: &str) -> Vec<TextLine> {
+    let mut lines = Vec::new();
+    let mut start_byte = 0;
+    for (byte, ch) in text.char_indices() {
+        if ch == '\n' {
+            lines.push(TextLine { start_byte, end_byte: byte });
+            start_byte = byte + ch.len_utf8();
+        }
+    }
+    lines.push(TextLine { start_byte, end_byte: text.len() });
+    lines
+}
+
+fn line_index_for_byte(lines: &[TextLine], byte: usize) -> usize {
+    lines.iter().position(|line| byte <= line.end_byte).unwrap_or_else(|| lines.len().saturating_sub(1))
+}
+
+fn span_on_line(span: TextSpan, line: TextLine, text_len: usize) -> Option<TextSpan> {
+    let start_byte = span.start_byte.max(line.start_byte).min(line.end_byte);
+    let end_byte = span.end_byte.min(line.end_byte).max(start_byte);
+    if start_byte < end_byte {
+        return Some(TextSpan::new(start_byte - line.start_byte, end_byte - line.start_byte));
+    }
+    let selects_newline = line.end_byte < text_len && span.start_byte <= line.end_byte && span.end_byte > line.end_byte;
+    selects_newline.then_some(TextSpan::new(line.end_byte - line.start_byte, line.end_byte - line.start_byte))
+}
+
+/// A multiline text editor. It delegates UTF-8-safe mutation, selection, and
+/// IME state to [`TextEditState`] and owns only line layout, vertical motion,
+/// whole-line scrolling, and the Enter/Ctrl+Enter policy.
+pub struct TextAreaWidget {
+    edit: TextEditState,
+    max_chars: u32,
+    rows: u32,
+    theme: Theme,
+    frame: WidgetFrame,
+    state: InteractionState,
+    modifiers: Modifiers,
+    dragging: bool,
+    preferred_x_pixels: Option<f32>,
+    scroll_top: usize,
+    font_metrics: FontMetricsAdapter,
+}
+
+impl TextAreaWidget {
+    fn policy(&self) -> EditPolicy {
+        EditPolicy { single_line: false, max_chars: self.max_chars }
+    }
+
+    fn visible_rows(&self) -> usize {
+        usize::try_from(self.rows.max(1)).unwrap_or(usize::MAX)
+    }
+
+    fn theme_state(&self) -> ThemeState {
+        if self.state.focused() {
+            self.state.supporting_theme_state(self.dragging)
+        } else {
+            self.state.theme_state(self.dragging)
+        }
+    }
+
+    fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
+        if self.state.replace(next) {
+            if !self.state.can_mutate() {
+                self.edit.clear_composition();
+            }
+            if !self.state.is_available() {
+                self.dragging = false;
+            }
+            emit_state_changed(ctx, &self.state);
+        }
+    }
+
+    fn pump_font_metrics(&mut self, ctx: &mut WasmCtx<'_>) {
+        if let Some(id) = self.font_metrics.take_pending_request() {
+            ctx.actor::<TextCapability>().send(&FontMetricsRequest { font: FontRef::Id(id) });
+        }
+    }
+
+    fn reconcile_scroll(&mut self) {
+        let lines = text_lines(self.edit.value());
+        let caret_line = line_index_for_byte(&lines, self.edit.caret());
+        let visible = self.visible_rows();
+        if caret_line < self.scroll_top {
+            self.scroll_top = caret_line;
+        } else if caret_line >= self.scroll_top.saturating_add(visible) {
+            self.scroll_top = caret_line.saturating_add(1).saturating_sub(visible);
+        }
+        self.scroll_top = self.scroll_top.min(lines.len().saturating_sub(visible.min(lines.len())));
+    }
+
+    fn after_horizontal_or_edit(&mut self) {
+        self.preferred_x_pixels = None;
+        self.reconcile_scroll();
+    }
+
+    fn enter_action(&self) -> EnterAction {
+        if !self.state.can_mutate() {
+            EnterAction::Ignore
+        } else if self.modifiers.ctrl {
+            EnterAction::Commit
+        } else {
+            EnterAction::InsertNewline
+        }
+    }
+
+    fn move_vertical(&mut self, direction: VerticalDirection, extend: bool) {
+        let target = {
+            let Some(metrics) = self.font_metrics.resolved() else {
+                return;
+            };
+            let text = self.edit.value();
+            let lines = text_lines(text);
+            let current_index = line_index_for_byte(&lines, self.edit.caret());
+            let target_index = match direction {
+                VerticalDirection::Up => current_index.checked_sub(1),
+                VerticalDirection::Down => current_index.checked_add(1).filter(|index| *index < lines.len()),
+            };
+            let Some(target_index) = target_index else {
+                return;
+            };
+            let current = lines[current_index];
+            let current_text = &text[current.start_byte..current.end_byte];
+            let current_layout = SingleLineLayout::build(current_text, metrics, self.theme.value_size_pixels);
+            let local_caret = self.edit.caret().min(current.end_byte) - current.start_byte;
+            let desired_x = self.preferred_x_pixels.unwrap_or_else(|| current_layout.caret_x(local_caret));
+            let target_line = lines[target_index];
+            let target_layout = SingleLineLayout::build(
+                &text[target_line.start_byte..target_line.end_byte],
+                metrics,
+                self.theme.value_size_pixels,
+            );
+            (target_line.start_byte + target_layout.hit_test(desired_x), desired_x)
+        };
+
+        if extend {
+            self.edit.extend_to(target.0);
+        } else {
+            self.edit.place_caret(target.0);
+        }
+        self.preferred_x_pixels = Some(target.1);
+        self.reconcile_scroll();
+    }
+
+    fn scroll_drag_edge(&mut self, event_y: f32) {
+        let lines = text_lines(self.edit.value());
+        let max_first = lines.len().saturating_sub(self.visible_rows().min(lines.len()));
+        if event_y < self.frame.y {
+            self.scroll_top = self.scroll_top.saturating_sub(1);
+        } else if event_y >= self.frame.y + self.frame.height {
+            self.scroll_top = self.scroll_top.saturating_add(1).min(max_first);
+        }
+    }
+
+    fn hit_byte(&self, event_x: f32, event_y: f32) -> Option<usize> {
+        let metrics = self.font_metrics.resolved()?;
+        let lines = text_lines(self.edit.value());
+        let visible = self.visible_rows();
+        let local_y = event_y - self.frame.y;
+        let row_height = self.theme.row_height.max(1.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let row = if local_y <= 0.0 { 0 } else { (local_y / row_height) as usize }.min(visible.saturating_sub(1));
+        let line_index = self.scroll_top.saturating_add(row).min(lines.len().saturating_sub(1));
+        let line = lines[line_index];
+        let local_x = event_x - self.frame.x - self.theme.pad;
+        let layout = SingleLineLayout::build(
+            &self.edit.value()[line.start_byte..line.end_byte],
+            metrics,
+            self.theme.value_size_pixels,
+        );
+        Some(line.start_byte + layout.hit_test(local_x))
+    }
+
+    fn push_line_band(&self, items: &mut Vec<WidgetDrawItem>, layout: &SingleLineLayout, span: TextSpan, row_top: f32) {
+        let x0 = self.theme.pad + layout.caret_x(span.start_byte);
+        let x1 = self.theme.pad + layout.caret_x(span.end_byte);
+        let height = self.theme.pad.mul_add(-2.0, self.theme.row_height).max(1.0);
+        items.push(quad(x0, row_top + self.theme.pad, (x1 - x0).max(1.0), height, self.theme.accent));
+    }
+
+    fn line_layout(&self, text: &str) -> Option<SingleLineLayout> {
+        self.font_metrics.resolved().map(|metrics| SingleLineLayout::build(text, metrics, self.theme.value_size_pixels))
+    }
+
+    fn draw_items(&self) -> Vec<WidgetDrawItem> {
+        let width = self.frame.width;
+        let height = self.frame.height;
+        let size = self.theme.value_size_pixels;
+        let row_height = self.theme.row_height;
+        let theme_state = self.theme_state();
+        let displayed = self.edit.displayed();
+        let lines = text_lines(&displayed.text);
+        let first = self.scroll_top.min(lines.len().saturating_sub(1));
+        let end = first.saturating_add(self.visible_rows()).min(lines.len());
+        let mut items = vec![quad(0.0, 0.0, width, height, self.theme.fill(self.theme.surface_raised, theme_state))];
+
+        for (visible_index, line) in lines[first..end].iter().copied().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let row_top = visible_index as f32 * row_height;
+            let line_text = &displayed.text[line.start_byte..line.end_byte];
+            let layout = self.line_layout(line_text);
+
+            if let Some(layout) = &layout {
+                if let Some(span) =
+                    displayed.selection_span.and_then(|span| span_on_line(span, line, displayed.text.len()))
+                {
+                    self.push_line_band(&mut items, layout, span, row_top);
+                }
+                if let Some(span) = displayed
+                    .preedit_cursor_span
+                    .filter(|span| !span.is_collapsed())
+                    .and_then(|span| span_on_line(span, line, displayed.text.len()))
+                {
+                    self.push_line_band(&mut items, layout, span, row_top);
+                }
+            }
+
+            if !line_text.is_empty() {
+                items.push(WidgetDrawItem::Text {
+                    x: self.theme.pad,
+                    y: text_origin_y(row_top, row_height, size),
+                    font_id: self.theme.font_id,
+                    text: String::from(line_text),
+                    size_pixels: size,
+                    color: self.theme.fill(self.theme.text_primary, theme_state),
+                    clip: None,
+                });
+            }
+
+            let Some(layout) = &layout else {
+                continue;
+            };
+            if let Some(span) = displayed.preedit_span.and_then(|span| span_on_line(span, line, displayed.text.len())) {
+                let x0 = self.theme.pad + layout.caret_x(span.start_byte);
+                let x1 = self.theme.pad + layout.caret_x(span.end_byte);
+                items.push(quad(
+                    x0,
+                    text_origin_y(row_top, row_height, size) + size,
+                    (x1 - x0).max(1.0),
+                    1.0,
+                    self.theme.accent,
+                ));
+                if let Some(cursor) = displayed
+                    .preedit_cursor_span
+                    .filter(|cursor| cursor.is_collapsed())
+                    .filter(|cursor| cursor.start_byte >= line.start_byte && cursor.end_byte <= line.end_byte)
+                {
+                    let local = cursor.end_byte - line.start_byte;
+                    let cursor_x = self.theme.pad + layout.caret_x(local);
+                    items.push(quad(
+                        cursor_x,
+                        row_top + self.theme.pad,
+                        1.0,
+                        self.theme.pad.mul_add(-2.0, row_height).max(1.0),
+                        self.theme.accent,
+                    ));
+                }
+            }
+            if self.state.focused()
+                && !displayed.composing
+                && displayed.caret_byte >= line.start_byte
+                && displayed.caret_byte <= line.end_byte
+            {
+                let local = displayed.caret_byte - line.start_byte;
+                let caret_x = self.theme.pad + layout.caret_x(local);
+                items.push(quad(
+                    caret_x,
+                    row_top + self.theme.pad,
+                    1.0,
+                    self.theme.pad.mul_add(-2.0, row_height).max(1.0),
+                    self.theme.accent,
+                ));
+            }
+        }
+        push_control_outlines(&mut items, width, height, &self.state, &self.theme);
+        items
+    }
+}
+
+/// Multiline text area with a fixed whole-line viewport.
+///
+/// # Agent
+/// Not loaded directly — a panel spawns it from [`TextAreaConfig`]. Plain
+/// Enter inserts a newline; Ctrl+Enter emits [`TextCommitted`] to the parent.
+#[actor(instanced)]
+impl WasmActor for TextAreaWidget {
+    type Config = TextAreaConfig;
+    const NAMESPACE: &'static str = "aether.kit.widget.text_area";
+
+    fn init(config: TextAreaConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        let mut area = Self {
+            edit: TextEditState::new(config.initial),
+            max_chars: config.max_chars,
+            rows: config.rows,
+            font_metrics: FontMetricsAdapter::new(config.theme.font_id),
+            theme: config.theme,
+            frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+            state: InteractionState::new(config.state),
+            modifiers: Modifiers::default(),
+            dragging: false,
+            preferred_x_pixels: None,
+            scroll_top: 0,
+        };
+        area.reconcile_scroll();
+        Ok(area)
+    }
+
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+        self.pump_font_metrics(ctx);
+    }
+
+    #[handler::single]
+    fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: TextAreaConfig) {
+        self.edit = TextEditState::new(config.initial);
+        self.max_chars = config.max_chars;
+        self.rows = config.rows;
+        self.font_metrics.set_desired(config.theme.font_id);
+        self.theme = config.theme;
+        self.dragging = false;
+        self.preferred_x_pixels = None;
+        self.scroll_top = 0;
+        self.apply_control_state(ctx, config.state);
+        self.reconcile_scroll();
+        self.pump_font_metrics(ctx);
+    }
+
+    #[handler::single]
+    fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
+        self.apply_control_state(ctx, set.state);
+    }
+
+    #[handler::single]
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+        self.font_metrics.set_desired(set.theme.font_id);
+        self.theme = set.theme;
+        self.pump_font_metrics(ctx);
+    }
+
+    #[handler::single]
+    fn on_frame(&mut self, _ctx: &mut WasmCtx<'_>, frame: WidgetFrame) {
+        self.frame = frame;
+    }
+
+    #[handler::single]
+    fn on_focus_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: FocusGained) {
+        self.state.gain_focus();
+        self.reconcile_scroll();
+    }
+
+    #[handler::single]
+    fn on_focus_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
+        self.state.lose_focus();
+        self.dragging = false;
+        self.preferred_x_pixels = None;
+        self.edit.clear_composition();
+    }
+
+    #[handler::single]
+    fn on_hover_gained(&mut self, _ctx: &mut WasmCtx<'_>, _gained: HoverGained) {
+        self.state.set_hovered(true);
+    }
+
+    #[handler::single]
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+        self.state.set_hovered(false);
+    }
+
+    #[handler::single]
+    fn on_text_input(&mut self, _ctx: &mut WasmCtx<'_>, input: TextInput) {
+        if !self.state.can_mutate() {
+            return;
+        }
+        self.edit.clear_composition();
+        if self.edit.insert(&input.text, self.policy()) {
+            self.after_horizontal_or_edit();
+        }
+    }
+
+    #[handler::single]
+    fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
+        if !self.state.is_available() {
+            return;
+        }
+        let extend = self.modifiers.shift;
+        match key.code {
+            KEY_BACKSPACE if self.state.can_mutate() => {
+                self.edit.delete_backward();
+                self.after_horizontal_or_edit();
+            }
+            KEY_LEFT => {
+                self.edit.move_left(extend);
+                self.after_horizontal_or_edit();
+            }
+            KEY_RIGHT => {
+                self.edit.move_right(extend);
+                self.after_horizontal_or_edit();
+            }
+            KEY_UP => self.move_vertical(VerticalDirection::Up, extend),
+            KEY_DOWN => self.move_vertical(VerticalDirection::Down, extend),
+            KEY_ENTER => match self.enter_action() {
+                EnterAction::Ignore => {}
+                EnterAction::Commit => {
+                    if let Some(parent) = ctx.parent() {
+                        parent.send(&TextCommitted { text: String::from(self.edit.value()) });
+                    }
+                }
+                EnterAction::InsertNewline => {
+                    if self.edit.insert("\n", self.policy()) {
+                        self.after_horizontal_or_edit();
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    #[handler::single]
+    fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
+        if press.button != mouse_button::LEFT || !self.state.is_available() {
+            return;
+        }
+        let Some(byte) = self.hit_byte(press.x, press.y) else {
+            return;
+        };
+        self.dragging = true;
+        self.preferred_x_pixels = None;
+        self.edit.place_caret(byte);
+        self.reconcile_scroll();
+    }
+
+    #[handler::single]
+    fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
+        if !self.dragging || !self.state.is_available() {
+            return;
+        }
+        self.scroll_drag_edge(moved.y);
+        if let Some(byte) = self.hit_byte(moved.x, moved.y) {
+            self.edit.extend_to(byte);
+            self.preferred_x_pixels = None;
+        }
+    }
+
+    #[handler::single]
+    fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
+        if release.button == mouse_button::LEFT {
+            self.dragging = false;
+        }
+    }
+
+    #[handler::single]
+    fn on_modifiers(&mut self, _ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
+        if self.state.is_available() {
+            self.modifiers = modifiers;
+        }
+    }
+
+    #[handler::single]
+    fn on_ime_preedit(&mut self, _ctx: &mut WasmCtx<'_>, preedit: ImePreedit) {
+        if !self.state.can_mutate() {
+            return;
+        }
+        let cursor = match (preedit.cursor_begin, preedit.cursor_end) {
+            (Some(begin), Some(end)) => Some(TextSpan::new(begin as usize, end as usize)),
+            _ => None,
+        };
+        self.edit.set_composition(preedit.text, cursor);
+        self.preferred_x_pixels = None;
+    }
+
+    #[handler::single]
+    fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
+        let pump_deferred = match result {
+            FontMetricsResult::Ok { metrics } => self.font_metrics.accept_reply(Some(CachedFontMetrics::new(&metrics))),
+            FontMetricsResult::Err { error } => {
+                tracing::warn!(target: "aether_kit", %error, "text area font metrics failed");
+                self.font_metrics.accept_reply(None)
+            }
+        };
+        if pump_deferred {
+            self.pump_font_metrics(ctx);
+        }
+    }
+
+    #[handler::single]
+    fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
+        if reply_if_hidden(ctx, &self.state) {
+            return;
+        }
+        if let Some(parent) = ctx.parent() {
+            parent.send(&WidgetDrawList { intrinsic: None, items: self.draw_items() });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_kinds::{FontMetrics, GlyphAdvance};
+
+    fn variable_metrics() -> CachedFontMetrics {
+        CachedFontMetrics::new(&FontMetrics {
+            units_per_em: 1000.0,
+            ascent: 800.0,
+            descent: -200.0,
+            line_gap: 0.0,
+            default_advance: 500.0,
+            advances: vec![
+                GlyphAdvance { codepoint: u32::from('i'), advance_units: 200.0 },
+                GlyphAdvance { codepoint: u32::from('m'), advance_units: 800.0 },
+            ],
+        })
+    }
+
+    #[allow(clippy::cast_precision_loss)] // test rows are tiny exact integers
+    fn area(text: &str, rows: u32) -> TextAreaWidget {
+        let mut font_metrics = FontMetricsAdapter::new(7);
+        assert_eq!(font_metrics.take_pending_request(), Some(7));
+        assert!(!font_metrics.accept_reply(Some(variable_metrics())));
+        let mut area = TextAreaWidget {
+            edit: TextEditState::new(String::from(text)),
+            max_chars: 0,
+            rows,
+            theme: Theme { value_size_pixels: 100.0, ..Theme::DEFAULT },
+            frame: WidgetFrame {
+                x: 10.0,
+                y: 20.0,
+                width: 400.0,
+                height: Theme::DEFAULT.row_height * rows.max(1) as f32,
+            },
+            state: InteractionState::new(WidgetControlState::default()),
+            modifiers: Modifiers::default(),
+            dragging: false,
+            preferred_x_pixels: None,
+            scroll_top: 0,
+            font_metrics,
+        };
+        area.state.gain_focus();
+        area.reconcile_scroll();
+        area
+    }
+
+    #[test]
+    fn line_indexing_preserves_empty_and_trailing_rows() {
+        assert_eq!(
+            text_lines("a\n\n"),
+            vec![
+                TextLine { start_byte: 0, end_byte: 1 },
+                TextLine { start_byte: 2, end_byte: 2 },
+                TextLine { start_byte: 3, end_byte: 3 },
+            ]
+        );
+    }
+
+    #[test]
+    fn enter_policy_inserts_newlines_and_reserves_ctrl_enter_for_commit() {
+        let mut area = area("terrain", 2);
+        assert_eq!(area.enter_action(), EnterAction::InsertNewline);
+        assert!(area.edit.insert("\n", area.policy()));
+        assert_eq!(area.edit.value(), "terrain\n");
+
+        area.modifiers.ctrl = true;
+        assert_eq!(area.enter_action(), EnterAction::Commit);
+
+        let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
+        area.state.replace(read_only);
+        assert_eq!(area.enter_action(), EnterAction::Ignore);
+    }
+
+    #[test]
+    fn vertical_motion_preserves_measured_x_across_a_short_line() {
+        let mut area = area("imx\ni\nimx", 3);
+        area.edit.place_caret(3);
+        area.move_vertical(VerticalDirection::Down, false);
+        assert_eq!(area.edit.caret(), 5, "short middle line clamps at its end");
+        area.move_vertical(VerticalDirection::Down, false);
+        assert_eq!(
+            area.edit.caret(),
+            area.edit.value().len(),
+            "the original measured x recovers on the longer third line"
+        );
+    }
+
+    #[test]
+    fn shift_vertical_selection_replaces_on_type_without_splitting_utf8() {
+        let mut area = area("éx\nmi", 2);
+        area.edit.place_caret(2);
+        area.move_vertical(VerticalDirection::Down, true);
+        let selected = area.edit.selection();
+        assert_eq!(selected.start_byte, 2);
+        assert!(selected.end_byte > selected.start_byte);
+        assert!(area.edit.value().is_char_boundary(selected.end_byte));
+        assert!(area.edit.insert("Q", area.policy()));
+        assert_eq!(area.edit.value(), "éQi");
+    }
+
+    #[test]
+    fn scroll_window_tracks_caret_in_both_directions() {
+        let mut area = area("zero\none\ntwo\nthree", 2);
+        assert_eq!(area.scroll_top, 2, "end caret reveals the final two rows");
+        area.edit.move_to_start(false);
+        area.reconcile_scroll();
+        assert_eq!(area.scroll_top, 0, "document start reveals the first rows");
+    }
+
+    #[test]
+    fn multiline_selection_draws_one_measured_band_per_covered_row() {
+        let mut area = area("im\ni", 2);
+        area.edit.move_to_start(false);
+        area.edit.extend_to(area.edit.value().len());
+        let items = area.draw_items();
+        let accent_bands: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Quad { x, y, width, color, .. } if *color == Theme::DEFAULT.accent && *width > 1.0 => {
+                    Some((*x, *y, *width))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            accent_bands.iter().any(|(_, y, width)| *y == 8.0 && *width == 100.0),
+            "first row uses measured i+m width"
+        );
+        assert!(
+            accent_bands.iter().any(|(_, y, width)| *y == 32.0 && *width == 20.0),
+            "second row uses measured i width"
+        );
+    }
+}

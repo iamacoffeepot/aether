@@ -1,7 +1,7 @@
 # The widget set & focus model
 
 `aether-kit` ships a set of guest-side widgets — a slider, a text field, a
-radio group, a button, a label, and an image — as ordinary
+multiline text area, a radio group, a button, a label, and an image — as ordinary
 `#[actor(instanced)]` types.
 A panel root spawns them as inline children (ADR-0114) and drives them entirely
 by mail, so composing an editor panel is a matter of laying out widgets and
@@ -26,9 +26,9 @@ recorded at spawn, so a widget's identity is its inline subname and nothing a
 widget sends can misreport it.
 
 - **Config, down.** One `Config` kind per widget — `SliderConfig`,
-  `TextFieldConfig`, `RadioConfig`, `ButtonConfig`, `LabelConfig`,
-  `ImageConfig` — each
-  embedding a `theme: Theme`. The config is both the value
+  `TextFieldConfig`, `TextAreaConfig`, `RadioConfig`, `ButtonConfig`,
+  `LabelConfig`, `ImageConfig` — each embedding a `theme: Theme`. The config is
+  both the value
   `spawn_inline_child::<W>(subname, &config)` boots the widget with and a
   re-sendable mail: send a widget its config kind again to reconfigure it in
   place (a slider's range, a field's cap, a button's label).
@@ -50,9 +50,9 @@ widget sends can misreport it.
   value; a changed config or state mail emits source-attributed
   `WidgetStateChanged` so panel routing cannot drift. Hidden widgets keep their
   slot and answer `Collect` with an empty `WidgetDrawList`; disabled widgets
-  draw muted but leave input routing; read-only Slider, Radio, and TextField
-  remain focusable but reject mutation. Button and Label ignore read-only and
-  validation.
+  draw muted but leave input routing; read-only Slider, Radio, TextField, and
+  TextArea remain focusable but reject mutation. Button and Label ignore
+  read-only and validation.
 - **Interaction, down.** The root sends `FocusGained` / `FocusLost` and
   `HoverGained` / `HoverLost`. Hover comes from explicit edges, not from a child
   inferring absence from raw motion. Pressed and hover select an exclusive fill
@@ -125,6 +125,17 @@ A focused Button activates once on Enter press (repeat presses are suppressed
 until release) and once on Space release after a matching Space press. Focus
 loss or unavailability cancels the keyboard arm.
 
+TextField and TextArea share the same UTF-8-safe edit, selection, and IME
+state. Once the configured font resolves, pointer placement, caret motion,
+selection fills, preedit cursor bands, and preedit underlines all use its exact
+glyph advances. `TextAreaConfig { initial, max_chars, rows, theme, state }`
+adds a fixed whole-line viewport: `rows` is the number of visible theme rows
+(`0` means one), vertical motion preserves the caret's preferred measured x
+across shorter lines, and the viewport scrolls by complete lines to keep the
+caret visible. Plain Enter inserts a newline; Ctrl+Enter sends
+`TextCommitted` without changing the value. A multiline selection can cross
+newlines and renders one measured band in each covered visible row.
+
 ## The reference panel
 
 `WidgetPanel` (export `aether.kit.widget.panel`) is the worked example — the
@@ -132,10 +143,11 @@ test vehicle and the template a real editor forks. It embeds `Composite` and
 `Focus`, spawns the vertical stack its `PanelConfig` declares on its first
 frame (each `WidgetChildSpec` names a `WidgetKind` and carries that widget's
 pre-encoded config; an empty child list falls back to the built-in reference
-original reference stack), loads a font through `aether.text` and stamps the
+stack), loads a font through `aether.text` and stamps the
 session `font_id` into its theme when `load_font_result` arrives, drives the
 collect/emit loop each frame, and routes input through `Focus`. Row height,
 initial state, and static eligibility derive from each child's decoded config.
+TextArea slots derive their height from `theme.row_height * rows.max(1)`.
 A `WidgetKind::BehaviorHost` derives the same metadata from both its `wrapped`
 discriminator and opaque `wrapped_config`; wrapping does not make every child
 focusable. The vertical order follows the declared order, so what a panel

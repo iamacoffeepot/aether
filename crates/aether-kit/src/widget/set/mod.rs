@@ -6,6 +6,7 @@
 //! - [`SliderWidget`] — a horizontal value slider, dragged or
 //!   arrow-nudged.
 //! - [`TextFieldWidget`] — a single-line editable string.
+//! - [`TextAreaWidget`] — a multiline measured editor with line scrolling.
 //! - [`RadioGroupWidget`] — a vertical list of exclusive options.
 //! - [`ButtonWidget`] — a momentary push button.
 //! - [`LabelWidget`] — static, non-interactive text.
@@ -29,6 +30,7 @@ pub mod image;
 pub mod label;
 pub mod radio;
 pub mod slider;
+pub mod text_area;
 pub mod text_field;
 
 pub use button::ButtonWidget;
@@ -36,6 +38,7 @@ pub use image::ImageWidget;
 pub use label::LabelWidget;
 pub use radio::RadioGroupWidget;
 pub use slider::SliderWidget;
+pub use text_area::TextAreaWidget;
 pub use text_field::TextFieldWidget;
 
 use alloc::vec::Vec;
