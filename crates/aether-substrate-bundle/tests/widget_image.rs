@@ -69,7 +69,7 @@ fn image_config(texture_id: u32, fit: ImageFit, state: WidgetControlState) -> Im
         natural_width_pixels: 20.0,
         natural_height_pixels: 10.0,
         fit,
-        tint: Rgba::new(0.8, 0.9, 1.0, 0.8),
+        tint: Rgba::WHITE,
         theme: theme(),
         state,
     }
@@ -147,7 +147,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
     let mut bench = TestBench::start_with_size(48, 40).expect("boot");
     let first_texture_id = create_texture(&mut bench, "first_texture", first_texture_pixels());
     let second_texture_id = create_texture(&mut bench, "second_texture", second_texture_pixels());
-    let tint = Rgba::new(0.8, 0.9, 1.0, 0.8);
+    let tint = Rgba::WHITE;
     let panel =
         load_panel(&mut bench, &wasm, &image_config(first_texture_id, ImageFit::Fill, WidgetControlState::default()));
     let image = format!("{panel}/{}:image", aether_capabilities::WasmTrampoline::NAMESPACE,);
@@ -169,7 +169,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         },
     );
     let red =
-        target_color_stats(&fill_pixels, [255, 0, 0], 40, Some(Rect { min_x: 10, min_y: 11, max_x: 18, max_y: 16 }));
+        target_color_stats(&fill_pixels, [255, 0, 0], 24, Some(Rect { min_x: 9, min_y: 10, max_x: 12, max_y: 13 }));
     assert!(red.fraction > 0.8, "bounded top-left probe should see the four-color texture's red quadrant: {red:?}",);
 
     for (fit, expected) in [
