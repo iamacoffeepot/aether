@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use super::data::cliff_material_from_u8;
 use super::*;
+use crate::mark::MarkRef;
 
 /// `aether.kit.world.set_chunk` — write one chunk's planes. The ground
 /// planes ride as raw `Bytes` (256 material/shape bytes each);
@@ -214,6 +215,137 @@ pub struct StampHexagon {
     pub center: WorldPoint,
     pub radius_octimeters: u32,
     pub material: u8,
+}
+
+/// A cell address used by terrain operators.
+///
+/// The axes stay named on the wire so this cannot be confused with a point
+/// measured in octimeters or with a positional `[x, z]` pair.
+#[derive(
+    aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
+)]
+pub struct OperatorCell {
+    pub cell_x: i32,
+    pub cell_z: i32,
+}
+
+impl OperatorCell {
+    /// Convert the wire address to the world's internal lattice address.
+    #[must_use]
+    pub const fn cell_pos(self) -> CellPos {
+        CellPos {
+            x: self.cell_x,
+            z: self.cell_z,
+        }
+    }
+}
+
+/// A chunk address reported by terrain-operator statistics.
+#[derive(
+    aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
+)]
+pub struct OperatorChunk {
+    pub chunk_x: i32,
+    pub chunk_z: i32,
+}
+
+impl From<ChunkPos> for OperatorChunk {
+    fn from(value: ChunkPos) -> Self {
+        Self {
+            chunk_x: value.x,
+            chunk_z: value.z,
+        }
+    }
+}
+
+/// Hard execution limits for one terrain operator.
+///
+/// Operators charge before every mutation. Reaching either limit returns a
+/// typed failure with the consistent partial result and never performs the
+/// over-cap write.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperatorBudget {
+    pub max_steps: u32,
+    pub max_subcells: u32,
+}
+
+/// Parameters shared by every disc placement along a brush path.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrushParameters {
+    pub radius_octimeters: u32,
+    pub spacing_octimeters: u32,
+    /// Raw [`Material`] byte written to the overlay plane.
+    pub material: u8,
+}
+
+/// Deterministic reference automata supported by [`RunAutomaton`].
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomatonRule {
+    /// Paint every cell within `generations` four-neighbor expansions of the
+    /// seed. Generation zero contains only the seed.
+    Grow {
+        /// Raw [`Material`] byte written to every accepted cell's point plane.
+        material: u8,
+        generations: u32,
+    },
+}
+
+/// Why a terrain operator stopped without completing its requested work.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum OperatorError {
+    InvalidParameters { reason: String },
+    StepBudgetExhausted,
+    SubcellBudgetExhausted,
+}
+
+/// Exact accounting for a complete or partial terrain-operator execution.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct OperatorStats {
+    pub steps_run: u32,
+    pub subcells_written: u32,
+    pub touched_chunks: Vec<OperatorChunk>,
+}
+
+/// `aether.kit.world.apply_brush` — place bounded disc stamps at a stable
+/// spacing along a named world-space path.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.world.apply_brush")]
+pub struct ApplyBrush {
+    pub source: MarkRef,
+    pub path: Vec<WorldPoint>,
+    pub brush: BrushParameters,
+    pub budget: OperatorBudget,
+}
+
+/// `aether.kit.world.run_automaton` — execute one bounded reference automaton
+/// from a named cell seed.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.world.run_automaton")]
+pub struct RunAutomaton {
+    pub source: MarkRef,
+    pub seed: OperatorCell,
+    pub rule: AutomatonRule,
+    pub budget: OperatorBudget,
+}
+
+/// Reply shared by [`ApplyBrush`] and [`RunAutomaton`].
+///
+/// A failure reports the writes accepted before exhaustion. Transaction state
+/// belongs to ADR-0143's proposal surface and is deliberately absent here.
+#[derive(
+    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
+)]
+#[kind(name = "aether.kit.world.operator_result")]
+pub enum OperatorResult {
+    Applied {
+        source: MarkRef,
+        stats: OperatorStats,
+    },
+    Failed {
+        source: MarkRef,
+        error: OperatorError,
+        stats: OperatorStats,
+    },
 }
 
 /// `aether.kit.world.set_cell_heights` — stamp one cell's `SUB × SUB` height

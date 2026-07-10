@@ -101,6 +101,7 @@ fn load_panel_with_host(bench: &mut TestBench, kit_wasm: &[u8], script: Vec<u8>)
         step: 1.0,
         initial: 40.0,
         theme: Theme::DEFAULT,
+        state: aether_kit::WidgetControlState::default(),
     }
     .encode_into_bytes();
     let host_spec = BehaviorHostSpec {

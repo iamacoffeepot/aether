@@ -26,6 +26,9 @@
 //! - `aether.kit.world.stamp_{polygon,disc,hexagon}` — rasterize a compact
 //!   world-octimeter shape into scalar subcell coverage and remesh every
 //!   touched chunk plus its cached apron neighbors.
+//! - `aether.kit.world.{apply_brush,run_automaton}` — execute a bounded,
+//!   mark-attributed terrain operator, reply with exact partial statistics,
+//!   and remesh its deduplicated touched-chunk apron even on exhaustion.
 //! - `aether.kit.world.set_region` — register a region so the underlay
 //!   cascade has a default to resolve to; remeshes every cached chunk
 //!   (a region default can change any chunk's cascade-resolved underlay).
@@ -38,11 +41,12 @@ pub use data::*;
 mod kinds;
 pub use kinds::*;
 pub mod mesher;
+mod operator;
 mod raster;
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::fs::{Read, ReadResult};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::DrawTriangle;
@@ -59,11 +63,14 @@ use self::mesher::style::StyleTable;
 /// # Agent
 /// Load with the `aether_kit@aether.kit.world` export. Paint the world by
 /// sending `aether.kit.world.stamp_{polygon,disc,hexagon}` for compact smooth
-/// shapes, `aether.kit.world.set_chunk` for raw planes, and
+/// shapes, bounded `apply_brush` / `run_automaton` requests for repeatable
+/// mark-attributed generation, `aether.kit.world.set_chunk` for raw planes, and
 /// `aether.kit.world.set_region` for an underlay cascade default; each send
 /// remeshes and the world renders every frame under the active
 /// `aether.view_projection` view. `aether.kit.world.load` swaps a serialized
-/// world from `aether.fs`. Use `capture_frame` to verify.
+/// world from `aether.fs`. Operator replies report an applied or exhausted
+/// partial result; proposal/commit state remains ADR-0143's separate surface.
+/// Use `capture_frame` to verify.
 pub struct WorldView {
     world: World,
     meshes: BTreeMap<ChunkPos, Vec<DrawTriangle>>,
@@ -108,6 +115,34 @@ impl WorldView {
                         .insert(neighbor, mesh_chunk(&self.world, neighbor, &self.styles));
                 }
             }
+        }
+    }
+
+    /// Rebuild every touched chunk and cached apron neighbor exactly once.
+    /// Operators may touch adjacent chunks, whose 3×3 aprons overlap heavily;
+    /// collecting first prevents repeated meshing while preserving the
+    /// ordinary rule that an absent, untouched neighbor needs no cache entry.
+    fn remesh_touched(&mut self, touched: &BTreeSet<ChunkPos>) {
+        let mut remesh = touched.clone();
+        for pos in touched {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let Some(x) = pos.x.checked_add(dx) else {
+                        continue;
+                    };
+                    let Some(z) = pos.z.checked_add(dz) else {
+                        continue;
+                    };
+                    let neighbor = ChunkPos { x, z };
+                    if self.meshes.contains_key(&neighbor) {
+                        remesh.insert(neighbor);
+                    }
+                }
+            }
+        }
+        for pos in remesh {
+            self.meshes
+                .insert(pos, mesh_chunk(&self.world, pos, &self.styles));
         }
     }
 
@@ -230,6 +265,48 @@ impl WasmActor for WorldView {
     fn on_stamp_hexagon(&mut self, _ctx: &mut WasmCtx<'_>, msg: StampHexagon) {
         let vertices = raster::regular_hexagon_vertices(msg.center, msg.radius_octimeters);
         self.stamp_vertices(&vertices, Material::from_u8_or_void(msg.material));
+    }
+
+    /// Apply a bounded disc brush along a world-space path and reply with the
+    /// exact accepted prefix. Exhaustion is a typed result, not a trap: the
+    /// consistent partial world is remeshed before the reply is emitted.
+    ///
+    /// # Agent
+    /// Send `aether.kit.world.apply_brush` with a revisioned `source`, named
+    /// `WorldPoint` path, non-zero radius/spacing, raw material byte, and both
+    /// execution limits. Inspect `aether.kit.world.operator_result`; on
+    /// failure its stats describe the committed partial result exactly.
+    #[handler::manual]
+    fn on_apply_brush(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: ApplyBrush) {
+        let execution = operator::apply_brush(
+            &mut self.world,
+            msg.source,
+            &msg.path,
+            msg.brush,
+            msg.budget,
+        );
+        self.remesh_touched(&execution.touched);
+        if ctx.reply_target().is_some() {
+            ctx.reply(&execution.result);
+        }
+    }
+
+    /// Run a bounded iterative cell automaton and reply with exact accounting.
+    /// Every accepted cell charges one step and `SUBCELLS_PER_CELL` subcells;
+    /// the rejected over-cap cell is never mutated.
+    ///
+    /// # Agent
+    /// Send `aether.kit.world.run_automaton` with a revisioned `source`, named
+    /// seed cell, rule, and budget. The shared operator result deliberately
+    /// says nothing about proposal/commit state; ADR-0143 owns that boundary.
+    #[handler::manual]
+    fn on_run_automaton(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: RunAutomaton) {
+        let execution =
+            operator::run_automaton(&mut self.world, msg.source, msg.seed, msg.rule, msg.budget);
+        self.remesh_touched(&execution.touched);
+        if ctx.reply_target().is_some() {
+            ctx.reply(&execution.result);
+        }
     }
 
     /// Stamp one cell's height deltas into the world, then remesh that cell's

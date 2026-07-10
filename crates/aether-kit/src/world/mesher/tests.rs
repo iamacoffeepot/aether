@@ -30,6 +30,22 @@ fn world_with_underlay(pos: ChunkPos, fill: impl Fn(i32, i32) -> Material) -> Wo
     world
 }
 
+#[test]
+fn operator_remesh_preflight_pins_the_apron_safe_chunk_boundaries() {
+    assert!(chunk_remesh_extent_is_coordinate_safe(ChunkPos {
+        x: -524_286,
+        z: 524_285,
+    }));
+    assert!(!chunk_remesh_extent_is_coordinate_safe(ChunkPos {
+        x: -524_287,
+        z: 0,
+    }));
+    assert!(!chunk_remesh_extent_is_coordinate_safe(ChunkPos {
+        x: 524_286,
+        z: 0,
+    }));
+}
+
 /// Two chunks of grass-default region with an explicit sand band over
 /// cells `10..22 × 4..8` (crossing the chunk border at `x = 16`).
 /// `profile` paints every cell's smoothing plane with the given

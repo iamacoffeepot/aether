@@ -184,6 +184,38 @@ mask before writing its new samples, because the overlay plane stores one
 material per cell. The existing `set_cell_points` and `set_chunk` raw-array
 paths remain available for direct plane authoring and save compatibility.
 
+**Run repeatable terrain work through a bounded operator.** The world actor also
+accepts `aether.kit.world.apply_brush` and
+`aether.kit.world.run_automaton`. Every request carries the revisioned mark
+reference that motivated it, raw execution geometry, and an explicit step and
+subcell budget. Coordinates remain named records rather than positional arrays:
+
+```json
+{
+  "source": { "id": 7, "revision": 3 },
+  "path": [
+    { "x_octimeters": 512, "z_octimeters": 512 },
+    { "x_octimeters": 1536, "z_octimeters": 512 }
+  ],
+  "brush": {
+    "radius_octimeters": 128,
+    "spacing_octimeters": 128,
+    "material": 3
+  },
+  "budget": { "max_steps": 16, "max_subcells": 8192 }
+}
+```
+
+The shared `aether.kit.world.operator_result` reply echoes `source` and reports
+`steps_run`, `subcells_written`, and named `touched_chunks`. If either budget is
+exhausted, the reply is `Failed` with a typed step/subcell error and statistics
+for the accepted prefix; the rejected over-cap write never occurs, and the
+consistent partial world is still remeshed. `RunAutomaton` takes a named
+`seed: { cell_x, cell_z }` and a `Grow { material, generations }` rule. Each
+accepted automaton cell costs one step and all 256 of its material subcells.
+These are live mutation results only: preview/commit/discard state belongs to
+the separate proposal transaction in ADR-0143.
+
 **From an agent over MCP — stage, then capture.** Use `capture_frame`: its
 `mails` bundle dispatches before the readback (the state that should appear) and
 `after_mails` after (cleanup), all around one synchronous PNG read. So to see a

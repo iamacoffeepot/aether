@@ -31,11 +31,10 @@
 //! trigger. A self-addressed flush would run *before* the children's
 //! replies on that same FIFO, so counting is the only correct signal.
 //!
-//! Children are spawned lazily on the node's first activation rather than
-//! in `wire`: an inline child receives only `init` (no `wire`), and `init`
-//! cannot spawn, so an interior node spawns its own children from its first
-//! `Collect` handler — where it holds a send-capable ctx. The root spawns
-//! on its first `Tick` for the one code path.
+//! Children are spawned lazily on the node's first activation. Inline children
+//! now run `wire`, but `init` still cannot spawn; keeping root and interior
+//! spawning on the shared `Tick` / `Collect` activation path gives both roles
+//! one guarded layout setup.
 
 mod kinds;
 pub use kinds::*;
@@ -43,6 +42,7 @@ pub mod composite;
 pub mod focus;
 mod panel;
 pub mod set;
+mod state;
 pub mod text_edit;
 pub mod theme;
 
@@ -75,8 +75,8 @@ pub struct Widget {
 
 impl Widget {
     /// Spawn this node's children once and register a slot per child. An
-    /// inline child gets only `init` (which cannot spawn), so this runs
-    /// from the node's first activation handler, where the ctx can spawn.
+    /// `init` cannot spawn, so this runs from the node's first activation
+    /// handler and is shared by root and interior roles.
     /// A child whose subname fails validation or whose config fails to
     /// decode is skipped with a warn — its slot is never registered, so
     /// the completion counter stays honest.
