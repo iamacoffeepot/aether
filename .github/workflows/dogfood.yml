@@ -45,10 +45,14 @@ name: Dogfood
 # `trial` job executes branch code (build + headless Claude with
 # --dangerously-skip-permissions on the ephemeral box) and holds `contents:
 # read` and nothing else; only the `post` job, which never runs branch code
-# (it checks out main), carries the write scopes. A default-drop iptables egress
-# firewall inside the trial job closes the arbitrary-exfiltration channel for
-# the inference-scoped OAuth token. Verdicts stay advisory — never a required
-# status check; the teeth are the dogfood:unresolved /land gate (issue 2969).
+# (it checks out main), carries the write scopes. The trial job currently runs
+# WITHOUT an egress firewall: the first default-drop attempt broke the runner's
+# own control plane and then cargo's CDN-backed downloads (IP pinning cannot
+# track CDN rotation), so it was pulled by owner call; issue 3063 tracks the
+# domain-scoped restoration. Until then the OAuth token's exposure rests on the
+# same-repo gate and the token's inference-only scope. Verdicts stay advisory —
+# never a required status check; the teeth are the dogfood:unresolved /land
+# gate (issue 2969).
 
 on:
   workflow_run:
@@ -301,86 +305,9 @@ jobs:
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
       - uses: mozilla-actions/sccache-action@v0.0.9
 
-      # Install Claude Code BEFORE the firewall so the npm registry never needs
-      # an allowlist entry (the simpler of the two options: install-before vs.
-      # allow registry.npmjs.org).
       - name: Install Claude Code
         if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
         run: npm install -g @anthropic-ai/claude-code
-
-      # Egress firewall — default-drop OUTPUT, allowlist the few hosts the trial
-      # legitimately reaches, drop the rest. This closes the arbitrary-
-      # exfiltration channel for the inference-scoped OAuth token (issue 2968's
-      # security requirement). Runs after apt/toolchain + the runs-on cache
-      # setup and after the npm install, but BEFORE the tunnel + Claude come up.
-      # Honest limits: domains resolve to IPs at rule time, so CDN rotation can
-      # break a long job mid-run and IP-pinning is audit-grade, not adversary-
-      # proof — but it kills arbitrary exfiltration, which is the stated bar.
-      - name: Install the egress firewall (default-drop iptables)
-        run: |
-          set -euo pipefail
-          # Hosts the trial reaches: inference, GitHub (checkout is already
-          # done, but cargo/git may still fetch), crates.io, and the two S3
-          # faces (the evidence bucket + the runs-on sccache bucket). S3 is
-          # resolved by hostname at rule time per the scope decision (simpler
-          # than pinning the VPC-endpoint prefix list).
-          domains="api.anthropic.com github.com api.github.com codeload.github.com \
-            objects.githubusercontent.com raw.githubusercontent.com \
-            static.crates.io crates.io index.crates.io \
-            s3.amazonaws.com s3.${RUNS_ON_AWS_REGION}.amazonaws.com \
-            aether-evidence.s3.amazonaws.com aether-evidence.s3.${RUNS_ON_AWS_REGION}.amazonaws.com \
-            ${RUNS_ON_S3_BUCKET_CACHE}.s3.amazonaws.com ${RUNS_ON_S3_BUCKET_CACHE}.s3.${RUNS_ON_AWS_REGION}.amazonaws.com"
-
-          # The runner agent's OWN control plane. Without these, the DROP policy
-          # silences the agent's re-dials: connections opened before the flip
-          # keep working (the ESTABLISHED rule) — so live logs still stream —
-          # but the first channel that must reconnect (session long-poll /
-          # short-lived credential renewal, ~10 min TTL) hits the drop, GitHub
-          # declares the runner lost, and cancels the job after its ~10-minute
-          # grace ("The operation was canceled." mid-build).
-          domains="$domains \
-            pipelines.actions.githubusercontent.com \
-            broker.actions.githubusercontent.com \
-            results-receiver.actions.githubusercontent.com \
-            vstoken.actions.githubusercontent.com \
-            launch.actions.githubusercontent.com \
-            token.actions.githubusercontent.com"
-
-          # Artifact + log payloads (upload-artifact v4, step logs) upload to
-          # GitHub's OWN Azure storage accounts — a finite, GitHub-owned set
-          # (productionresultssa0..N; unresolvable names drop out harmlessly in
-          # the getent loop). Enumerating them keeps uploads pinned to GitHub's
-          # accounts; a blanket *.blob.core.windows.net allow would reopen
-          # arbitrary-account exfiltration, defeating the firewall's whole point.
-          for i in $(seq 0 29); do
-            domains="$domains productionresultssa${i}.blob.core.windows.net"
-          done
-
-          # Flush OUTPUT but leave the policy ACCEPT during setup so the getent
-          # DNS lookups below still resolve; the final rule flips it to DROP.
-          sudo iptables -F OUTPUT
-          sudo iptables -A OUTPUT -o lo -j ACCEPT
-          sudo iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-          # DNS itself (udp + tcp 53) so resolution keeps working post-drop.
-          sudo iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-          sudo iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
-          # EC2 instance metadata (IMDS) — the aws CLI needs it for the append-
-          # only instance-profile creds that push evidence to S3. Link-local,
-          # not an internet exfiltration path; consistent with the pre-existing
-          # exposure every Runs-On CI job already has.
-          sudo iptables -A OUTPUT -d 169.254.169.254 -j ACCEPT
-          for d in $domains; do
-            for ip in $(getent ahostsv4 "$d" | awk '{print $1}' | sort -u); do
-              echo "allow 443 -> $ip ($d)"
-              sudo iptables -A OUTPUT -p tcp -d "$ip" --dport 443 -j ACCEPT
-            done
-          done
-          # Log what falls through before dropping it, so a legitimately blocked
-          # domain (a rotated CDN IP) is diagnosable from the run log.
-          sudo iptables -A OUTPUT -j LOG --log-prefix "egress-drop: " --log-level 4
-          sudo iptables -P OUTPUT DROP
-          echo "egress firewall installed:"
-          sudo iptables -L OUTPUT -n --line-numbers
 
       # The repo's .claude hooks bind interactive sessions into per-session
       # worktrees and police edits outside them — actively harmful in CI, where
