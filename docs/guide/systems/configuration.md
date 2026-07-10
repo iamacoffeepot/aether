@@ -105,11 +105,14 @@ Over MCP there are three ways to set configuration, from coarsest to finest:
   hyphenate (`AETHER_HTTP_TIMEOUT_MS` → `--http-timeout-ms`).
 - **Component config** is finer still: a component declares a typed `Config` and
   receives it at `init`. Because a guest's config crosses the wasm boundary as
-  bytes, that type is a **kind** (schema-bearing), so `describe_component`
-  surfaces the config shape the way it surfaces a handler kind. You deliver the
-  bytes through `load_component`'s `config_path` — the chassis decodes them and
-  hands the value to the guest's `init`. This mirrors a native actor exactly:
-  both declare `type Config` and receive it at construction
+  bytes, that type is a **kind** (schema-bearing): `describe_component`
+  identifies the config kind and `describe_kinds` surfaces its shape. Over MCP,
+  pass either `load_component.config` as inline structured JSON or `config_path`
+  as a path to a JSON file; the harness schema-encodes that JSON to wire bytes
+  before the byte-transparent chassis hands the decoded value to the guest's
+  `init`. The two inputs are mutually exclusive, and `config_path` is JSON
+  rather than pre-encoded wire bytes. This mirrors a native actor exactly: both
+  declare `type Config` and receive it at construction
   ([ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md)
   §5). Boot config arrives at `init`; *runtime* reconfiguration, if a component
   wants it, is ordinary mail — the same kind can serve both.
@@ -171,7 +174,7 @@ cap, the per-request timeout — is the subject of [HTTP egress](http.md).
 
 - The rollout's design, the source-stack rationale, and the crate choice —
   [ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md).
-- The `spawn_substrate` arguments and `load_component` config path in their tool
+- The `spawn_substrate` arguments and `load_component` config inputs in their tool
   context — [The MCP harness](../mcp-harness.md).
 - How a component declares and receives `type Config` —
   [Components & lifecycle](components.md).

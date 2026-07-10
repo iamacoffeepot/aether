@@ -62,7 +62,7 @@ fn child_address(subname: &str) -> String {
 /// `aether.kit.widget.panel`) with a config that places its stack at
 /// `(10, 10)` 200px wide, no font (`font_path` empty, so no `aether.text`
 /// dependency), and the default theme.
-fn load_panel(bench: &mut TestBench, wasm: &[u8]) {
+fn load_panel(bench: &mut TestBench, wasm: &[u8]) -> String {
     let config = PanelConfig {
         x: 10.0,
         y: 10.0,
@@ -90,10 +90,13 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8]) {
         .reply::<LoadResult>("load")
         .expect("decode LoadResult")
     {
-        LoadResult::Ok { name, .. } => assert!(
-            name.ends_with(":panel"),
-            "the panel root should register under :panel; got {name}",
-        ),
+        LoadResult::Ok { name, .. } => {
+            assert!(
+                name.ends_with(":panel"),
+                "the panel root should register under :panel; got {name}",
+            );
+            name
+        }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }
 }
@@ -131,9 +134,8 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut bench = TestBench::start_with_size(240, 220).expect("boot");
-    load_panel(&mut bench, &wasm);
+    let panel = load_panel(&mut bench, &wasm);
 
-    let panel = panel_address();
     // The first tick spawns the widget stack and assigns each child its frame;
     // every later step drives one input event, settling its whole in-cluster
     // chain before the next.
@@ -229,6 +231,81 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
             .any(|m| m.contains("widget text committed") && m.contains("text=hi")),
         "the text entry then Enter should commit \"hi\" — proving pointer focus \
          and text routing; log was:\n{joined}",
+    );
+}
+
+/// The `LoadResult.name` returned at the public component boundary is the
+/// prefix for first-class inline-child names. Appending the built-in slot's
+/// `aether.embedded:button` node must let an external name-addressed sender
+/// change that live Button's state; a blocked then enabled click is the
+/// positive/negative proof that the mail reached the child rather than being
+/// warn-dropped at an unknown name.
+#[test]
+fn load_result_lineage_reaches_builtin_button_state_externally() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = TestBench::start_with_size(240, 220).expect("boot");
+    let panel = load_panel(&mut bench, &wasm);
+    let button = format!(
+        "{panel}/{}:button",
+        aether_capabilities::WasmTrampoline::NAMESPACE,
+    );
+    let unavailable = WidgetControlState {
+        enabled: false,
+        ..WidgetControlState::default()
+    };
+
+    bench
+        .execute(vec![
+            ("spawn", BenchOp::send_mail(&panel, &Tick)),
+            (
+                "disable_by_lineage",
+                BenchOp::send_mail(&button, &SetWidgetState { state: unavailable }),
+            ),
+            (
+                "blocked_press",
+                BenchOp::send_mail(&panel, &press(30.0, 190.0)),
+            ),
+            (
+                "blocked_release",
+                BenchOp::send_mail(&panel, &release(30.0, 190.0)),
+            ),
+            (
+                "enable_by_lineage",
+                BenchOp::send_mail(
+                    &button,
+                    &SetWidgetState {
+                        state: WidgetControlState::default(),
+                    },
+                ),
+            ),
+            (
+                "allowed_press",
+                BenchOp::send_mail(&panel, &press(30.0, 190.0)),
+            ),
+            (
+                "allowed_release",
+                BenchOp::send_mail(&panel, &release(30.0, 190.0)),
+            ),
+        ])
+        .expect("external inline-child lineage session");
+
+    let log = match bench.log_tail(&panel, None) {
+        LogTailResult::Ok { entries, .. } => entries,
+        LogTailResult::Err { error } => panic!("log_tail on the loaded panel failed: {error}"),
+    };
+    let clicks = log
+        .iter()
+        .filter(|entry| {
+            entry.message.contains("widget button clicked")
+                && entry.message.contains("widget=button")
+        })
+        .count();
+    assert_eq!(
+        clicks, 1,
+        "lineage-addressed disable blocks the first click and re-enable permits the second",
     );
 }
 

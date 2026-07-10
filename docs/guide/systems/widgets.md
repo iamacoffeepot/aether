@@ -88,7 +88,9 @@ Drag capture is the kit's own policy over the raw button vocabulary: a left
 press that hits a widget sets capture on that child, moves route to it while
 capture holds, and the matching release clears it. That is what lets a slider
 track the cursor past the end of its track and a button cancel when the release
-drifts off it.
+drifts off it. `MouseButton.button` and `MouseButtonRelease.button` use the
+engine constants in `aether_kinds::mouse_button`; `LEFT` is `0`, including for a
+synthetic `aether.mouse_button` sent over MCP.
 
 A focused Button activates once on Enter press (repeat presses are suppressed
 until release) and once on Space release after a matching Space press. Focus
@@ -113,6 +115,43 @@ value-up handlers are the seam: each attributes the event by
 `ctx.source_mailbox()` and is where a map editor translates a widget change
 into world-knob driver mail. Fork it by handing it your own `children` and
 filling in those handlers.
+
+Inline children are externally addressable by lineage. Keep the exact root
+`name` returned by `load_component`, then append
+`/aether.embedded:<subname>`. For example, a panel loaded as `panel` returns
+`aether.component/aether.embedded:panel`, and its built-in Button is
+`aether.component/aether.embedded:panel/aether.embedded:button`. The empty
+`children` fallback uses the stable subnames `label`, `slider`, `radio`,
+`text_field`, and `button`; a declared `WidgetChildSpec` uses its own `subname`
+in the same position. These aliases are ordinary mailbox names, so MCP
+`send_mail` can target a child directly. This disables the built-in Button
+without resetting its label or any sibling state:
+
+```json
+{
+  "mails": [{
+    "engine_id": "<engine-id>",
+    "recipient_name": "aether.component/aether.embedded:panel/aether.embedded:button",
+    "kind_name": "aether.kit.widget.set_state",
+    "params": {
+      "state": {
+        "visible": true,
+        "enabled": false,
+        "read_only": false,
+        "validation": "Valid"
+      }
+    }
+  }],
+  "fire_and_forget": false
+}
+```
+
+At the MCP boundary, `load_component` takes a registry `selector` plus either
+an inline structured `config` object or `config_path` pointing to a JSON object;
+the harness schema-encodes that JSON to `PanelConfig`. Do not pre-encode
+`LoadComponent.config` bytes in tool JSON. Use `describe_component` for the live
+config kind and `describe_kinds` for its schema, and set `children` to `[]` to
+request the built-in stack above.
 
 To add a new widget — a dropdown, a checkbox, a color well — write one more
 `#[actor(instanced)]` type that speaks the same state/interaction lanes and answers `Collect`
