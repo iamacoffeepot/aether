@@ -3,9 +3,11 @@ name: Review
 # Producer-side quality check: run the repo's five-pillar review workflow
 # (.claude/workflows/review.js) over a PR's diff via headless Claude Code,
 # and post the rollup as inline PR annotations + a summary comment with an
-# advisory `review:unresolved` label. Never a required status check — the
-# five-pillar verdicts are agent judgment; the teeth are the implement
-# loop's obligation to address the comment, not a merge gate.
+# advisory `review:unresolved` label. The five-pillar verdicts are agent
+# judgment posted as a COMMENT review, never REQUEST_CHANGES — advisory in
+# content. The `gate` job below mirrors the label into a required `Review
+# gate` commit status that blocks merge on a Rust-touching PR; a non-Rust
+# PR is never held.
 #
 # Trigger is first-green, once-only. The workflow fires when a PR's CI run
 # completes successfully (`workflow_run` on "CI"), resolves the PR from the
