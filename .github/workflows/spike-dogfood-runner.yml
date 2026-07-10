@@ -1,0 +1,156 @@
+name: Spike — dogfood runner
+
+# Spike: can a Runs-On ephemeral runner host the whole dogfood loop?
+# Three questions, answered as three stages of one job (one runner, one
+# build, sequential — each stage's PASS is a hard prerequisite for the
+# next being meaningful):
+#
+#   1. harness — does the branch's own build of the MCP stack
+#      (tunnel -> aether-mcp -> hub -> substrate) come up on the runner
+#      via scripts/ensure-tunnel.sh? No Claude involved; no secret needed.
+#   2. drive   — does headless Claude Code, authenticated with a
+#      subscription OAuth token (CLAUDE_CODE_OAUTH_TOKEN secret from
+#      `claude setup-token`), connect to that stack through .mcp.json and
+#      drive a headless substrate end-to-end (spawn, fs write/read,
+#      terminate)?
+#   3. visual  — does the desktop chassis boot under Xvfb + Mesa lavapipe
+#      (no GPU, no real display) far enough that capture_frame returns a
+#      real PNG? This is the gate for cloud-side render-judged dogfood.
+#
+# Stages 2 and 3 skip cleanly when the CLAUDE_CODE_OAUTH_TOKEN secret is
+# absent, so stage 1 is provable before the token exists. This workflow
+# lives only on the spike branch and triggers only on pushes to it.
+
+on:
+  push:
+    branches: [ spike/dogfood-runner ]
+  workflow_dispatch:
+
+concurrency:
+  group: spike-dogfood-runner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  spike:
+    name: Spike (harness / drive / visual)
+    # Same ephemeral EC2 shape as CI's clippy job; s3-cache extra feeds
+    # sccache so the release build of the tunnel chain is warm after the
+    # first run.
+    runs-on: runs-on=${{ github.run_id }}/runner=8cpu-linux-x64/extras=s3-cache
+    # Cold release-profile build of the chassis binaries is the long pole
+    # on the first run; warm runs are minutes.
+    timeout-minutes: 45
+    env:
+      # Mold for the native link, mirroring CI's test job (target-scoped
+      # so nothing leaks into a wasm build if one is ever added here).
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -Clink-arg=-fuse-ld=mold
+      # No audio device on an EC2 runner — keep the desktop chassis from
+      # tripping on cpal init.
+      AETHER_AUDIO_DISABLE: "1"
+      # Present at job level so step-level `if: env... != ''` gating works.
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    steps:
+      - uses: runs-on/action@v2
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux deps (ALSA headers for cpal, Mesa lavapipe for wgpu, Xvfb for the desktop chassis, mold)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+          mesa-vulkan-drivers xvfb mold
+      - uses: Swatinem/rust-cache@v2
+      - name: Configure sccache (S3 backend)
+        run: |
+          echo "SCCACHE_BUCKET=$RUNS_ON_S3_BUCKET_CACHE" >> "$GITHUB_ENV"
+          echo "SCCACHE_REGION=$RUNS_ON_AWS_REGION" >> "$GITHUB_ENV"
+          echo "SCCACHE_S3_KEY_PREFIX=cache/sccache" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      # The desktop chassis is not in ensure-tunnel.sh's own build list
+      # (it builds tunnel/mcp/hub/headless), but the script DOES ingest
+      # target/release/aether-substrate into the hub's binary store when
+      # it exists — so build it first and the visual stage can spawn it
+      # by selector with no extra plumbing.
+      - name: Build the desktop chassis (for the visual stage)
+        run: cargo build --release -p aether-substrate-bundle --bin aether-substrate
+
+      # Xvfb up BEFORE the tunnel launches: the tunnel forks the hub,
+      # the hub forks substrates, and the desktop chassis inherits
+      # DISPLAY through that chain.
+      - name: Start Xvfb (virtual display for the desktop chassis)
+        run: |
+          Xvfb :99 -screen 0 1280x800x24 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      # Stage 1 — harness. ensure-tunnel.sh builds the fork chain from
+      # THIS checkout (branch-build fidelity is the point), launches the
+      # tunnel detached, and exits 0 best-effort; the poll below is the
+      # actual assertion that the stack came up.
+      - name: "Stage 1 — bring up the MCP harness from this branch's build"
+        run: scripts/ensure-tunnel.sh
+      - name: "Stage 1 — assert tunnel + children are up"
+        run: |
+          ok=""
+          for _ in $(seq 1 30); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8890/admin/status -o /tmp/status.json; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          if [ -z "$ok" ]; then
+            echo "SPIKE-HARNESS-FAIL: /admin/status never answered"
+            exit 1
+          fi
+          echo "admin/status:"
+          cat /tmp/status.json
+          echo
+          echo "SPIKE-HARNESS-PASS"
+
+      - name: Note when the OAuth token secret is absent
+        if: env.CLAUDE_CODE_OAUTH_TOKEN == ''
+        run: |
+          echo "CLAUDE_CODE_OAUTH_TOKEN secret is not set — stages 2 (drive) and 3 (visual) skipped."
+          echo "Mint one with 'claude setup-token' and add it: gh secret set CLAUDE_CODE_OAUTH_TOKEN"
+
+      - name: Install Claude Code
+        if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: npm install -g @anthropic-ai/claude-code
+
+      # Stage 2 — drive. Headless Claude Code, subscription OAuth auth,
+      # project .mcp.json as the tool source. --dangerously-skip-permissions
+      # is the ephemeral-runner pattern: the box holds nothing but this
+      # job's tokens and dies at job end.
+      - name: "Stage 2 — headless Claude drives a headless substrate over MCP"
+        if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: |
+          claude -p "$(cat .github/spike/dogfood-drive-prompt.md)" \
+            --mcp-config .mcp.json \
+            --dangerously-skip-permissions \
+            --model claude-sonnet-5 \
+            --max-turns 40 | tee /tmp/drive.log
+          grep -q "SPIKE-DRIVE-PASS" /tmp/drive.log
+
+      # Stage 3 — visual. Same headless Claude, but it spawns the DESKTOP
+      # chassis (under the Xvfb display) and calls capture_frame. PASS =
+      # a real image came back through the swapchain readback path.
+      - name: "Stage 3 — desktop chassis under Xvfb answers capture_frame"
+        if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: |
+          claude -p "$(cat .github/spike/dogfood-visual-prompt.md)" \
+            --mcp-config .mcp.json \
+            --dangerously-skip-permissions \
+            --model claude-sonnet-5 \
+            --max-turns 40 | tee /tmp/visual.log
+          grep -q "SPIKE-VISUAL-PASS" /tmp/visual.log
+
+      - name: Tunnel log (diagnostics)
+        if: always()
+        run: |
+          LOG="${TMPDIR:-/tmp}/aether-tunnel/tunnel.log"
+          if [ -f "$LOG" ]; then
+            echo "--- tail of $LOG ---"
+            tail -n 200 "$LOG"
+          else
+            echo "no tunnel log at $LOG"
+          fi
