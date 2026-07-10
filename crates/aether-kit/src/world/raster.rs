@@ -291,8 +291,14 @@ fn regular_polygon_vertices(
         .map(|index| {
             let angle = index as f64 * TAU / vertex_count as f64;
             WorldPoint::new(
-                (angle.cos().mul_add(radius, f64::from(center.x_octimeters))).round() as i32,
-                (angle.sin().mul_add(radius, f64::from(center.z_octimeters))).round() as i32,
+                angle
+                    .cos()
+                    .mul_add(radius, f64::from(center.x_octimeters))
+                    .round() as i32,
+                angle
+                    .sin()
+                    .mul_add(radius, f64::from(center.z_octimeters))
+                    .round() as i32,
             )
         })
         .collect()
