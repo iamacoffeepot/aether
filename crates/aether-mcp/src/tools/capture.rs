@@ -63,10 +63,12 @@ pub(super) fn capture_check(spec: &CaptureCheckSpec) -> Result<FrameCheck, McpEr
 /// `{"saved": {"error": …}}` block instead of failing the call — the
 /// image bytes are already in hand and must not be dropped.
 pub(super) fn save_capture_png(path: &Path, bytes: &[u8]) -> Result<(PathBuf, usize), String> {
+    use std::fs as std_fs;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create_dir_all {parent:?}: {e}"))?;
+        std_fs::create_dir_all(parent)
+            .map_err(|e| format!("create_dir_all {}: {e}", parent.display()))?;
     }
-    std::fs::write(path, bytes).map_err(|e| format!("write {path:?}: {e}"))?;
+    std_fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok((path.to_path_buf(), bytes.len()))
 }
 

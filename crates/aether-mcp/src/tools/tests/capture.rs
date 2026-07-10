@@ -20,6 +20,7 @@ async fn capture_frame_bad_bundle_is_tool_error() {
             after_mails: vec![],
             checks: vec![],
             similarity: None,
+            save_path: None,
         }))
         .await;
     assert!(
