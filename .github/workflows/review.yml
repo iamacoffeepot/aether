@@ -222,6 +222,33 @@ jobs:
 
           echo "proceed=true" >> "$GITHUB_OUTPUT"
 
+      # Hand the resolved PR to the chained Dogfood workflow. Dogfood triggers
+      # on this workflow's completion, but a workflow_run-triggered run object
+      # attaches to the latest MAIN commit — its head_branch is always "main" —
+      # so a downstream chain can never re-derive the PR from the event the way
+      # this workflow does from CI's push-triggered run. This artifact is the
+      # explicit hand-off. It is written on EVERY path that resolves a PR
+      # (label/cap/non-Rust/marker skips included), matching the `gate` job's
+      # coverage, so dogfood can apply its own gate stack (the live `Review
+      # gate` status among them) to the right PR.
+      - name: Write the review-context hand-off for Dogfood
+        if: steps.resolve.outputs.pr_number != ''
+        env:
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+        run: |
+          jq -nc --argjson pr "$PR_NUMBER" --arg head_sha "$HEAD_SHA" \
+            '{pr: $pr, head_sha: $head_sha}' > "$RUNNER_TEMP/review-context.json"
+          cat "$RUNNER_TEMP/review-context.json"
+      - uses: actions/upload-artifact@v4
+        if: steps.resolve.outputs.pr_number != ''
+        with:
+          name: review-context
+          path: ${{ runner.temp }}/review-context.json
+          # Consumed by the Dogfood run that fires minutes later; nothing
+          # reads it after that.
+          retention-days: 1
+
       # Check out the PR head with full history so the /review skill's
       # `git diff origin/main...HEAD` prep resolves. The base ref is not
       # present after a single-ref checkout, so fetch it explicitly.

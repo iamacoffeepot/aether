@@ -60,11 +60,15 @@ on:
         description: PR number to dogfood (bypasses the retry-state guards)
         required: true
 
-# One trial per PR; a newer trigger supersedes an in-flight one. Keyed by the
-# head branch on the workflow_run path (the Review workflow_run event exposes
-# the PR head branch), or the dispatched PR number.
+# The PR is not knowable at workflow level on the workflow_run path — the
+# triggering Review run is itself workflow_run-triggered, so its run object
+# attaches to the latest MAIN commit (head_branch is always "main"); the real
+# PR arrives via the review-context artifact the resolve job downloads. So the
+# workflow-level group only dedupes per trigger (and per PR on the dispatch
+# path); the one-trial-per-PR supersede lives on the `trial` job, keyed by the
+# resolved PR number.
 concurrency:
-  group: dogfood-${{ github.event.workflow_run.head_branch || github.event.inputs.pr }}
+  group: dogfood-${{ github.event.workflow_run.id || github.event.inputs.pr }}
   cancel-in-progress: true
 
 env:
@@ -78,8 +82,11 @@ jobs:
     name: Resolve gate stack
     runs-on: ubuntu-latest
     # Pure GitHub API calls — no checkout, no branch code. Read-only.
+    # actions: read is for downloading the triggering Review run's
+    # review-context artifact (the PR hand-off).
     permissions:
       contents: read
+      actions: read
     # Job-level guard mirroring review.yml: manual dispatch is always allowed
     # and resolves its own PR; the workflow_run path requires the parent (the
     # Review workflow) to have succeeded and its head to be this repo — a fork
@@ -105,7 +112,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT: ${{ github.event_name }}
           DISPATCH_PR: ${{ github.event.inputs.pr }}
-          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          REVIEW_RUN_ID: ${{ github.event.workflow_run.id }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -120,15 +127,28 @@ jobs:
 
           # Gate 1 (structural) is the trigger chain itself: this workflow only
           # fires on a successful Review workflow_run, which only fires on a
-          # successful CI run. Resolve the PR from the head branch (dispatch
-          # supplies it directly).
+          # successful CI run. The PR comes from the review-context artifact
+          # the Review run uploaded when its own resolve found an open PR
+          # (dispatch supplies it directly). The Review run's head_branch is
+          # useless here: a workflow_run-triggered run object attaches to the
+          # latest MAIN commit, so it always reads "main" — review can resolve
+          # the branch from CI's push-triggered run, but one chain level down
+          # the event no longer carries it.
           if [ "$EVENT" = "workflow_dispatch" ]; then
             pr="$DISPATCH_PR"
           else
-            pr="$(gh api "repos/${REPO}/pulls?head=iamacoffeepot:${HEAD_BRANCH}&state=open" \
-              --jq '.[0].number // empty')"
+            artifact_id="$(gh api "repos/${REPO}/actions/runs/${REVIEW_RUN_ID}/artifacts" \
+              --jq '[.artifacts[] | select(.name == "review-context")][0].id // empty')"
+            [ -n "${artifact_id:-}" ] || skip "Review run ${REVIEW_RUN_ID} uploaded no review-context artifact — it resolved no open PR, nothing to dogfood."
+            gh api "repos/${REPO}/actions/artifacts/${artifact_id}/zip" > /tmp/review-context.zip
+            unzip -o -d /tmp/review-context /tmp/review-context.zip
+            pr="$(jq -r '.pr // empty' /tmp/review-context/review-context.json)"
           fi
-          [ -n "${pr:-}" ] || skip "No open PR for branch '${HEAD_BRANCH}' — nothing to dogfood."
+          # Belt-and-braces shape check: the artifact is main-code-produced but
+          # still data — a non-numeric value must not reach the API paths below.
+          case "${pr:-}" in
+            ''|*[!0-9]*) skip "Resolved PR '${pr:-}' is not a number — nothing to dogfood." ;;
+          esac
 
           head_sha="$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha')"
           echo "pr=$pr" >> "$GITHUB_OUTPUT"
@@ -218,6 +238,14 @@ jobs:
     name: Dogfood trial
     needs: resolve
     if: needs.resolve.outputs.proceed == 'true'
+    # One trial per PR; a newer green event supersedes an in-flight trial of
+    # the same PR. Job-level because the PR number only exists after resolve
+    # (see the workflow-level concurrency comment). Cancelling a superseded
+    # trial is safe for the bookkeeping: its `post` no-ops (rollup_produced
+    # never turns true), so attempts/verdict state is untouched.
+    concurrency:
+      group: dogfood-trial-${{ needs.resolve.outputs.pr }}
+      cancel-in-progress: true
     # Same ephemeral EC2 shape as the spike proved: 8cpu buys the workflow's
     # agent fan-out headroom, s3-cache warms sccache across a retrying PR's runs.
     runs-on: runs-on=${{ github.run_id }}/runner=8cpu-linux-x64/extras=s3-cache
