@@ -101,6 +101,9 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ptr;
+use serde::{Deserialize, Serialize};
+
+use super::kinds::{TerrainSurface, WorldPoint};
 
 /// Cells along one edge of a chunk. Chunks are `16 × 16` cells.
 pub const CELLS_PER_CHUNK: i32 = 16;
@@ -119,6 +122,11 @@ pub const CELLS_PER_CHUNK_AREA: usize = 256;
 /// change; the wire plane length is derived from it
 /// ([`OVERLAY_MASK_WIRE_BYTES`]), never hard-coded.
 pub const SUBCELLS_PER_CELL_EDGE: u32 = 16;
+
+/// Scalar-coverage samples at or above this value belong to the rendered
+/// overlay surface. The contour marcher and terrain sampler share this exact
+/// threshold so a picked overlay cannot disagree with the visible field.
+pub const SCALAR_COVERAGE_THRESHOLD: u8 = 128;
 
 /// Coverage samples in one cell's overlay plane: `SUB²`.
 pub const SUBCELLS_PER_CELL: usize = (SUBCELLS_PER_CELL_EDGE * SUBCELLS_PER_CELL_EDGE) as usize;
@@ -173,7 +181,19 @@ const OCTIMETER_BITS: u32 = 8;
 
 /// A cell address on the world lattice. Cells are addresses; their
 /// properties live in the plane stack.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+#[derive(
+    aether_data::Schema,
+    Serialize,
+    Deserialize,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Debug,
+    Hash,
+)]
 pub struct CellPos {
     pub x: i32,
     pub z: i32,
@@ -793,6 +813,43 @@ impl World {
     pub fn surface_height(&self, wx: f32, wz: f32) -> f32 {
         let cell = CellPos { x: floor_to_i32(wx), z: floor_to_i32(wz) };
         self.surface_height_in(cell, wx, wz)
+    }
+
+    /// Sample the markable top surface at meter-space XZ coordinates.
+    ///
+    /// Presence follows the same authored fields the mesher consumes: a
+    /// non-Void resolved underlay point or a non-Void overlay sample at the
+    /// shared half-coverage threshold. Missing terrain and explicit holes
+    /// return None. Height resolves through the existing stood-on surface,
+    /// including relief, plate breaks, and water levels.
+    #[must_use]
+    pub fn terrain_surface_at(&self, x_meters: f32, z_meters: f32) -> Option<TerrainSurface> {
+        if !x_meters.is_finite() || !z_meters.is_finite() {
+            return None;
+        }
+        let cell = CellPos {
+            x: floor_to_i32(x_meters),
+            z: floor_to_i32(z_meters),
+        };
+        let subcells = SUBCELLS_PER_CELL_EDGE.cast_signed();
+        let subcells_f32 = subcells as f32;
+        let sub_x = floor_to_i32((x_meters - cell.x as f32) * subcells_f32).clamp(0, subcells - 1);
+        let sub_z = floor_to_i32((z_meters - cell.z as f32) * subcells_f32).clamp(0, subcells - 1);
+        let underlay_present = self.underlay_point(cell, sub_x, sub_z) != Material::Void;
+        let overlay_present = self.overlay(cell) != Material::Void
+            && self.overlay_coverage(cell, sub_x, sub_z) >= SCALAR_COVERAGE_THRESHOLD;
+        if !underlay_present && !overlay_present {
+            return None;
+        }
+        let x_octimeters =
+            i32::try_from((x_meters * OCTIMETERS_PER_CELL as f32).round() as i64).ok()?;
+        let z_octimeters =
+            i32::try_from((z_meters * OCTIMETERS_PER_CELL as f32).round() as i64).ok()?;
+        Some(TerrainSurface {
+            cell,
+            mark_point: WorldPoint::new(x_octimeters, z_octimeters),
+            height_meters: self.surface_height_in(cell, x_meters, z_meters),
+        })
     }
 
     /// The material `cell`'s cliff faces wear — its region's
@@ -2059,5 +2116,66 @@ mod tests {
         // the raise outward across the break.
         let outside = world.surface_height(5.0 + 0.5 / sub_f, 5.0 + 0.5 / sub_f);
         assert!(outside.abs() < 1e-4, "a flat subcell outside the plateau stays at the base, got {outside}");
+    }
+
+    #[test]
+    fn terrain_surface_sampler_shares_presence_and_height_truth() {
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        chunk.underlay[0] = Material::Stone;
+        chunk.height[0] = 256;
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+
+        let surface = world
+            .terrain_surface_at(0.5, 0.5)
+            .expect("resolved underlay is markable");
+        assert_eq!(surface.cell, cell(0, 0));
+        assert_eq!(surface.mark_point, WorldPoint::new(128, 128));
+        assert!((surface.height_meters - 1.0).abs() < 1e-4);
+
+        let subcell = (8 * SUBCELLS_PER_CELL_EDGE + 8) as usize;
+        world
+            .chunk_mut_or_insert(ChunkPos { x: 0, z: 0 })
+            .underlay_points[subcell] = Material::Void.to_u8();
+        assert!(
+            world.terrain_surface_at(0.5, 0.5).is_none(),
+            "an explicit underlay-point hole is not markable"
+        );
+
+        let chunk = world.chunk_mut_or_insert(ChunkPos { x: 0, z: 0 });
+        chunk.overlay[0] = Material::Sand;
+        chunk.overlay_mask[subcell] = SCALAR_COVERAGE_THRESHOLD - 1;
+        assert!(
+            world.terrain_surface_at(0.5, 0.5).is_none(),
+            "coverage below the contour threshold stays absent"
+        );
+        world
+            .chunk_mut_or_insert(ChunkPos { x: 0, z: 0 })
+            .overlay_mask[subcell] = SCALAR_COVERAGE_THRESHOLD;
+        assert!(
+            world.terrain_surface_at(0.5, 0.5).is_some(),
+            "the exact contour threshold makes an overlay-only sample markable"
+        );
+    }
+
+    #[test]
+    fn terrain_surface_sampler_follows_relief_and_rejects_nonfinite_coordinates() {
+        let mut world = World::new();
+        let mut chunk = Chunk::empty();
+        chunk.underlay.fill(Material::Grass);
+        world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+        let mut deltas = [0; SUBCELLS_PER_CELL];
+        deltas[8 * SUBCELLS_PER_CELL_EDGE as usize + 8] = 128;
+        world.set_cell_heights(cell(0, 0), &deltas);
+
+        let surface = world
+            .terrain_surface_at(0.53125, 0.53125)
+            .expect("relief remains markable");
+        assert!(
+            surface.height_meters > 0.0,
+            "the sampler uses the same relief-aware surface-height path"
+        );
+        assert!(world.terrain_surface_at(f32::NAN, 0.5).is_none());
+        assert!(world.terrain_surface_at(0.5, f32::INFINITY).is_none());
     }
 }

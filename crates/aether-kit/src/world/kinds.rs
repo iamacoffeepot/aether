@@ -158,6 +158,138 @@ impl WorldPoint {
     }
 }
 
+/// A position in the rendered world's meter-space coordinate system.
+///
+/// Axes and units stay named so callers never have to infer the ordering or
+/// scale of a positional vector.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct WorldPositionMeters {
+    pub x_meters: f32,
+    pub y_meters: f32,
+    pub z_meters: f32,
+}
+
+/// A ray direction. Components need not normalize it before sending.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct WorldDirection {
+    pub x_unitless: f32,
+    pub y_unitless: f32,
+    pub z_unitless: f32,
+}
+
+/// A bounded world-space ray used for terrain-surface picking.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct TerrainRay {
+    pub origin: WorldPositionMeters,
+    pub direction: WorldDirection,
+    pub max_distance_meters: f32,
+}
+
+/// The markable terrain sample underneath a picked world position.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct TerrainSurface {
+    pub cell: CellPos,
+    pub mark_point: WorldPoint,
+    pub height_meters: f32,
+}
+
+/// First top-surface intersection of a validated terrain ray.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct TerrainSurfaceHit {
+    pub position: WorldPositionMeters,
+    pub surface: TerrainSurface,
+    pub ray_distance_meters: f32,
+}
+
+/// Why a terrain ray cannot be evaluated.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerrainPickError {
+    NonFiniteRay,
+    ZeroDirection,
+    InvalidMaxDistance,
+}
+
+/// `aether.kit.world.pick_terrain` — intersect a bounded world ray with the
+/// first markable terrain top surface.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
+#[kind(name = "aether.kit.world.pick_terrain")]
+pub struct PickTerrain {
+    pub ray: TerrainRay,
+}
+
+/// Reply to [`PickTerrain`].
+#[derive(
+    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq,
+)]
+#[kind(name = "aether.kit.world.pick_terrain_result")]
+pub enum PickTerrainResult {
+    Hit { hit: TerrainSurfaceHit },
+    Miss,
+    Rejected { error: TerrainPickError },
+}
+
+/// `aether.kit.world.set_mark_overlay_visibility` — show or hide the
+/// read-only `MarkBook` projection rendered by [`WorldView`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
+#[kind(name = "aether.kit.world.set_mark_overlay_visibility")]
+pub struct SetMarkOverlayVisibility {
+    pub visible: bool,
+}
+
+/// Visibility state after [`SetMarkOverlayVisibility`].
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+)]
+#[kind(name = "aether.kit.world.set_mark_overlay_visibility_result")]
+pub struct SetMarkOverlayVisibilityResult {
+    pub visible: bool,
+    pub synchronized: bool,
+}
+
+/// `aether.kit.world.set_mark_overlay_selection` — select an exact cached
+/// mark revision for highlighted overlay rendering, or clear the selection.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
+#[kind(name = "aether.kit.world.set_mark_overlay_selection")]
+pub struct SetMarkOverlaySelection {
+    pub selected: Option<MarkRef>,
+}
+
+/// Result of applying an exact-revision overlay selection.
+#[derive(
+    aether_data::Kind,
+    aether_data::Schema,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+)]
+#[kind(name = "aether.kit.world.set_mark_overlay_selection_result")]
+pub enum SetMarkOverlaySelectionResult {
+    Selected {
+        reference: MarkRef,
+    },
+    Cleared,
+    Stale {
+        requested: MarkRef,
+        current: MarkRef,
+    },
+    Unsynchronized {
+        requested: MarkRef,
+        cached: Option<MarkRef>,
+    },
+}
+
 /// Maximum number of vertices accepted by one polygon stamp.
 pub const MAX_STAMP_VERTICES: usize = 1024;
 /// Maximum raster extent of one stamp along either axis, in subcells.
@@ -381,4 +513,35 @@ impl SetRegion {
 pub struct WorldLoad {
     pub namespace: String,
     pub path: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_data::Kind as _;
+
+    #[test]
+    fn terrain_pick_and_overlay_kind_names_are_stable() {
+        assert_eq!(PickTerrain::NAME, "aether.kit.world.pick_terrain");
+        assert_eq!(
+            PickTerrainResult::NAME,
+            "aether.kit.world.pick_terrain_result"
+        );
+        assert_eq!(
+            SetMarkOverlayVisibility::NAME,
+            "aether.kit.world.set_mark_overlay_visibility"
+        );
+        assert_eq!(
+            SetMarkOverlayVisibilityResult::NAME,
+            "aether.kit.world.set_mark_overlay_visibility_result"
+        );
+        assert_eq!(
+            SetMarkOverlaySelection::NAME,
+            "aether.kit.world.set_mark_overlay_selection"
+        );
+        assert_eq!(
+            SetMarkOverlaySelectionResult::NAME,
+            "aether.kit.world.set_mark_overlay_selection_result"
+        );
+    }
 }

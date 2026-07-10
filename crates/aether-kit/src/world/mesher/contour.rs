@@ -27,6 +27,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::world::SCALAR_COVERAGE_THRESHOLD;
 use aether_capabilities::render::{DrawTriangle, Vertex};
 /// Octimeters per meter (`1 cell = 1 m = 256 octimeters`), for the
 /// octimeter-to-meter conversion at vertex emit.
@@ -61,11 +62,10 @@ pub struct SmoothParams {
     pub smoothing_degrees: u32,
 }
 
-const COVERAGE_THRESHOLD: u8 = 128;
 const COVERAGE_CROSSING: f32 = 127.5;
 
 fn covered(sample: u8) -> bool {
-    sample >= COVERAGE_THRESHOLD
+    sample >= SCALAR_COVERAGE_THRESHOLD
 }
 
 fn binary_coverage(sample: u8) -> bool {
