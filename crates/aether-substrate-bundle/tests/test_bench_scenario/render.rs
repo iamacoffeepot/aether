@@ -359,7 +359,7 @@ fn assert_committed_overlay_snapshot(
     textured_quad: TexturedQuad,
 ) {
     assert_eq!(snapshot.len(), 2);
-    assert_eq!(snapshot[0].texture_id, u32::MAX);
+    assert_eq!(snapshot[0].texture_id, WHITE_TEXTURE_ID);
     assert_eq!(snapshot[0].space, QuadSpace::Screen);
     assert_eq!(snapshot[0].clip, Some(solid_clip));
     assert_eq!(snapshot[0].quads.len(), 1);
@@ -567,6 +567,10 @@ fn destroyed_texture_draw_drops_from_frame() {
         destroyed_coverage < 0.01,
         "after destroy the same draw should drop from the frame, but coverage was \
          {destroyed_coverage}",
+    );
+    assert!(
+        bench.committed_overlay_snapshot().is_empty(),
+        "the typed observation must reject the same missing-texture batch as the raster pass",
     );
 }
 

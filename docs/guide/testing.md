@@ -144,8 +144,10 @@ rectangle geometry, clips, texture coordinates, tint, texture identity, projecti
 space, and submission order through `TestBench::committed_overlay_snapshot`; then use
 `CaptureFrame` reductions for the smaller set of outcomes that need end-to-end proof
 through projection, blending, rasterization, and GPU readback. The typed snapshot
-localizes a malformed submission, while the rendered capture proves the pipeline
-actually produced the intended pixels.
+contains only batches accepted into the recorded draw plan, so missing textures,
+invalid/empty clips, and an over-budget overlay pass cannot masquerade as rendered
+work. It localizes a malformed submission, while the rendered capture proves the
+pipeline actually produced the intended pixels.
 
 A test that drives neither harness and exercises none of our own pure logic is the
 case to look at hardest, because there may be no engine behavior under it at all. Our

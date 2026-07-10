@@ -39,7 +39,7 @@ use aether_capabilities::render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured,
     DrawSolidQuads, DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect,
     MaterialTexturedRect, SolidQuad, TextureFormat, TexturedQuad, UpdateTexture, Vertex,
-    ViewProjection,
+    ViewProjection, WHITE_TEXTURE_ID,
 };
 use aether_capabilities::text::{
     DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,

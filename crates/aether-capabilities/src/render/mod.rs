@@ -69,7 +69,7 @@ use aether_kinds::CaptureFrame;
 #[cfg(feature = "render-runtime")]
 pub use runtime::{
     CaptureBackend, RenderConfig, RenderGpu, RenderHandles, RenderTuningConfig,
-    RenderTuningConfigLayer, RenderTuningOverlay,
+    RenderTuningConfigLayer, RenderTuningOverlay, WHITE_TEXTURE_ID,
 };
 
 // `#[actor]` sits on each capability struct (the struct-hosted ADR-0123

@@ -142,6 +142,7 @@ impl NativeActor for RenderCapability {
             camera_state: Arc::new(Mutex::new(IDENTITY_VIEW_PROJ)),
             quad_frame: Arc::new(Mutex::new(Vec::new())),
             quad_last_submitted: Arc::new(Mutex::new(Vec::new())),
+            quad_last_recorded: Arc::new(Mutex::new(Vec::new())),
             material_frame: Arc::new(Mutex::new(Vec::new())),
             material_last_submitted: Arc::new(Mutex::new(Vec::new())),
             textures: Arc::new(Mutex::new(TextureRegistry::new())),

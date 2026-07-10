@@ -20,12 +20,12 @@ use aether_kinds::{QuadScale, QuadSpace};
 use aether_substrate::render::{
     CaptureMeta, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw,
     MaterialPassDraw, MaterialPassRecord, MaterialPipelines, OverlayDraw, Pipeline,
-    QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD, QuadPipeline, RenderError, Targets,
-    TextureBindings, build_main_pipeline, build_material_pipelines, build_quad_pipeline,
-    build_texture_bindings, finish_capture, map_capture_rgba, prepare_capture_copy,
-    push_coverage_params, push_material_rect_vertices, push_screen_quad_vertices,
-    push_textured_params, push_world_quad_vertices, record_main_pass, record_material_pass,
-    record_quad_overlay_pass,
+    QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD, QuadPipeline,
+    RenderError, Targets, TextureBindings, build_main_pipeline, build_material_pipelines,
+    build_quad_pipeline, build_texture_bindings, clamped_scissor, finish_capture, map_capture_rgba,
+    prepare_capture_copy, push_coverage_params, push_material_rect_vertices,
+    push_screen_quad_vertices, push_textured_params, push_world_quad_vertices, record_main_pass,
+    record_material_pass, record_quad_overlay_pass,
 };
 
 use super::material::{MaterialBatch, accepts_coverage_texture};
@@ -67,6 +67,11 @@ pub struct RenderHandles {
     /// idle `capture` (no producer this frame) replays them, matching
     /// `last_submitted`'s role for triangles.
     pub quad_last_submitted: Arc<Mutex<Vec<QuadBatch>>>,
+    /// Public-shape overlay batches that survived record-time texture,
+    /// clip, emptiness, and fixed-buffer validation in the latest pass.
+    /// This is separate from `quad_last_submitted`, whose raw cache must
+    /// stay available for idle-capture replay.
+    pub quad_last_recorded: Arc<Mutex<Vec<DrawTexturedQuads>>>,
     /// Per-frame material accumulator (ADR-0140), holding both typed
     /// material kinds in receive order so mixed material submissions
     /// preserve painter's order among overlapping surfaces.
@@ -118,6 +123,15 @@ fn commit_or_replay<T>(live: &Mutex<Vec<T>>, last: &Mutex<Vec<T>>, replay_cache_
     }
 }
 
+fn observed_batch(batch: &QuadBatch) -> DrawTexturedQuads {
+    DrawTexturedQuads {
+        texture_id: batch.texture_id,
+        space: batch.space.clone(),
+        clip: batch.clip.clone(),
+        quads: batch.quads.clone(),
+    }
+}
+
 impl RenderHandles {
     /// Install the wgpu resources the encoder-level methods read.
     /// The driver constructs [`RenderGpu`] once it has a device +
@@ -161,17 +175,10 @@ impl RenderHandles {
     /// ADR-0063.
     #[must_use]
     pub fn committed_overlay_snapshot(&self) -> Vec<DrawTexturedQuads> {
-        self.quad_last_submitted
+        self.quad_last_recorded
             .lock()
             .expect("mutex poisoned; fail-fast per ADR-0063")
-            .iter()
-            .map(|batch| DrawTexturedQuads {
-                texture_id: batch.texture_id,
-                space: batch.space.clone(),
-                clip: batch.clip.clone(),
-                quads: batch.quads.clone(),
-            })
-            .collect()
+            .clone()
     }
 
     fn expect_gpu(&self) -> &RenderGpu {
@@ -300,6 +307,10 @@ impl RenderHandles {
             .expect("mutex poisoned; fail-fast per ADR-0063")
             .clone();
         if batches.is_empty() {
+            self.quad_last_recorded
+                .lock()
+                .expect("mutex poisoned; fail-fast per ADR-0063")
+                .clear();
             return;
         }
 
@@ -339,11 +350,22 @@ impl RenderHandles {
         // list, immutably borrowing each realized texture's bind group.
         let mut vertex_bytes = Vec::new();
         let mut draws: Vec<OverlayDraw<'_>> = Vec::new();
+        let mut recorded = Vec::new();
         for batch in &batches {
             let Some(entry) = registry.entries.get(&batch.texture_id) else {
                 continue;
             };
             let Some(realized) = entry.realized.as_ref() else {
+                continue;
+            };
+            let Some(scissor) = clamped_scissor(
+                batch
+                    .clip
+                    .as_ref()
+                    .map(|clip| [clip.x, clip.y, clip.width, clip.height]),
+                targets.width(),
+                targets.height(),
+            ) else {
                 continue;
             };
             #[allow(clippy::cast_possible_truncation)]
@@ -389,13 +411,12 @@ impl RenderHandles {
                 bind_group: realized.bind_group(),
                 first_vertex,
                 vertex_count,
-                clip: batch
-                    .clip
-                    .as_ref()
-                    .map(|clip| [clip.x, clip.y, clip.width, clip.height]),
+                scissor,
             });
+            recorded.push(observed_batch(batch));
         }
 
+        let pass_fits = vertex_bytes.len() <= QUAD_VERTEX_BUFFER_BYTES;
         record_quad_overlay_pass(
             &gpu.queue,
             encoder,
@@ -406,6 +427,15 @@ impl RenderHandles {
             viewport,
             view_proj,
         );
+        let mut last_recorded = self
+            .quad_last_recorded
+            .lock()
+            .expect("mutex poisoned; fail-fast per ADR-0063");
+        if pass_fits {
+            *last_recorded = recorded;
+        } else {
+            last_recorded.clear();
+        }
     }
 
     /// Record the depth-tested world-space material pass (ADR-0140)
@@ -797,6 +827,7 @@ mod tests {
     use crate::render::TexturedQuad;
 
     fn handles_with_committed_overlays(batches: Vec<QuadBatch>) -> RenderHandles {
+        let recorded = batches.iter().map(observed_batch).collect();
         RenderHandles {
             frame_vertices: Arc::new(Mutex::new(Vec::new())),
             last_submitted: Arc::new(Mutex::new(Vec::new())),
@@ -804,6 +835,7 @@ mod tests {
             camera_state: Arc::new(Mutex::new([0.0; 16])),
             quad_frame: Arc::new(Mutex::new(Vec::new())),
             quad_last_submitted: Arc::new(Mutex::new(batches)),
+            quad_last_recorded: Arc::new(Mutex::new(recorded)),
             material_frame: Arc::new(Mutex::new(Vec::new())),
             material_last_submitted: Arc::new(Mutex::new(Vec::new())),
             textures: Arc::new(Mutex::new(TextureRegistry::new())),
@@ -899,7 +931,7 @@ mod tests {
 
         {
             let mut cache = handles
-                .quad_last_submitted
+                .quad_last_recorded
                 .lock()
                 .expect("test: quad cache mutex is not poisoned");
             cache[0].texture_id = 99;

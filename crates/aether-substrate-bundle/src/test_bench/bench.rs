@@ -533,7 +533,9 @@ impl TestBench {
     /// Snapshot the ordered, typed overlay submissions from the latest
     /// frame committed by [`Self::execute`]'s `advance` or `capture` op.
     /// Solid submissions appear normalized as [`DrawTexturedQuads`] over
-    /// the renderer's reserved white texture.
+    /// the renderer's reserved white texture. Batches rejected while
+    /// recording — for example a missing texture, invalid/empty clip, or
+    /// an overlay pass beyond the fixed vertex budget — are absent.
     ///
     /// Capture uses replay-cache semantics: if it receives no new overlay
     /// mail, this snapshot remains the frame from the latest committed

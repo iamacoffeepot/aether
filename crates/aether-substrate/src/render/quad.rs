@@ -91,8 +91,8 @@ pub struct OverlayDraw<'a> {
     pub bind_group: &'a wgpu::BindGroup,
     pub first_vertex: u32,
     pub vertex_count: u32,
-    /// Optional framebuffer-pixel scissor: `[x, y, width, height]`.
-    pub clip: Option<[f32; 4]>,
+    /// Validated framebuffer-pixel scissor: `[x, y, width, height]`.
+    pub scissor: [u32; 4],
 }
 
 /// Build the shared texture + sampler bindings used by texture-sampling
@@ -531,10 +531,12 @@ pub fn record_quad_overlay_pass(
         if draw.vertex_count == 0 {
             continue;
         }
-        let Some(scissor) = clamped_scissor(draw.clip, targets.width(), targets.height()) else {
-            continue;
-        };
-        pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
+        pass.set_scissor_rect(
+            draw.scissor[0],
+            draw.scissor[1],
+            draw.scissor[2],
+            draw.scissor[3],
+        );
         pass.set_bind_group(1, draw.bind_group, &[]);
         pass.draw(
             draw.first_vertex..draw.first_vertex + draw.vertex_count,
@@ -544,7 +546,11 @@ pub fn record_quad_overlay_pass(
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn clamped_scissor(
+/// Validate and clamp an optional framebuffer-pixel clip rectangle.
+/// `None` selects the full target; non-finite, empty, and wholly
+/// out-of-bounds clips do not produce a draw.
+#[must_use]
+pub fn clamped_scissor(
     clip: Option<[f32; 4]>,
     target_width: u32,
     target_height: u32,
