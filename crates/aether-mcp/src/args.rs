@@ -827,4 +827,14 @@ pub struct CaptureFrameArgs {
     /// (iamacoffeepot/aether#1780).
     #[serde(default)]
     pub similarity: Option<CaptureSimilaritySpec>,
+    /// Optional absolute harness-host path to also persist the exact
+    /// captured PNG bytes to (iamacoffeepot/aether#2962). Missing parent
+    /// directories are created; an existing file at the path is
+    /// overwritten. A relative path is an `invalid_params` error before
+    /// the capture touches the wire. A write failure after a successful
+    /// capture never fails the call — the inline image content is
+    /// unchanged either way, and the outcome rides in its own `saved`
+    /// text block. Omit for the prior inline-only behaviour.
+    #[serde(default)]
+    pub save_path: Option<String>,
 }

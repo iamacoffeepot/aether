@@ -1,0 +1,237 @@
+name: Review
+
+# Producer-side quality check: run the repo's five-pillar review workflow
+# (.claude/workflows/review.js) over a PR's diff via headless Claude Code,
+# and post the rollup as inline PR annotations + a summary comment with an
+# advisory `review:unresolved` label. Never a required status check — the
+# five-pillar verdicts are agent judgment; the teeth are the implement
+# loop's obligation to address the comment, not a merge gate.
+#
+# Trigger is first-green, once-only. The workflow fires when a PR's CI run
+# completes successfully (`workflow_run` on "CI"), resolves the PR from the
+# run's head branch, and exits as a no-op if the PR already carries the
+# `<!-- aether-review -->` marker comment — so the pre-green push churn
+# never fires a review and a post-review fix push never re-fires one. State
+# lives on the PR itself (the marker comment), no external bookkeeping.
+# Deliberate re-runs go through `workflow_dispatch` with a `pr` input, which
+# bypasses the once-only guard (findings already posted are deduped by the
+# poster's fingerprints, so a re-run never double-annotates).
+#
+# Same security posture as the dogfood runner: subscription OAuth token
+# (CLAUDE_CODE_OAUTH_TOKEN), same-repo head only, and a least-privilege
+# split — the code-executing `review` job is read-only on the repo, and
+# only the `post` job (which never runs branch code) holds write scopes.
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to review (bypasses the once-only guard)
+        required: true
+
+# One review per PR; a newer trigger supersedes an in-flight one. Keyed by
+# the head branch on the workflow_run path, or the dispatched PR number.
+concurrency:
+  group: review-${{ github.event.workflow_run.head_branch || github.event.inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Five-pillar review
+    runs-on: ubuntu-latest
+    # Read-only on the repo. This job checks out and executes PR-head code
+    # (headless Claude Code drives the review over the branch's checkout),
+    # so it must never hold a write scope — all posting is the `post` job's.
+    permissions:
+      contents: read
+    # Job-level guard: on the workflow_run path the parent CI must have
+    # succeeded and the head must be this repo (fork PRs never see the
+    # secret and never run here); the manual dispatch path is always
+    # allowed and resolves its own PR.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    env:
+      # Present at job level so step-level `if: env... != ''` gating works
+      # (mirrors the dogfood runner). Absent secret => the CC steps skip
+      # cleanly and no rollup artifact is produced, so `post` no-ops.
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    outputs:
+      pr_number: ${{ steps.resolve.outputs.pr_number }}
+      rollup_produced: ${{ steps.rollup.outputs.produced }}
+    steps:
+      # Resolve the PR and apply the run gates BEFORE any checkout — these
+      # are pure GitHub API calls. Sets proceed=false (a clean no-op) when
+      # there is no open PR, the opt-in `review` label is absent, or the
+      # once-only marker is already present. head_sha feeds the checkout.
+      - name: Resolve PR and apply gates
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
+          DISPATCH_PR: ${{ github.event.inputs.pr }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            pr="$DISPATCH_PR"
+          else
+            # Resolve the PR from the CI run's head branch. `head` is
+            # owner:branch; state=open bounds it to a live PR.
+            pr="$(gh api "repos/${REPO}/pulls?head=iamacoffeepot:${HEAD_BRANCH}&state=open" \
+              --jq '.[0].number // empty')"
+          fi
+          if [ -z "${pr:-}" ]; then
+            echo "No open PR for branch '${HEAD_BRANCH}' — nothing to review."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "pr_number=$pr" >> "$GITHUB_OUTPUT"
+
+          # Bring-up gate (plan step 6): the opt-in `review` label is
+          # required while the annotation contract proves out on real PRs.
+          # A follow-up one-liner removes this block once it has.
+          has_label="$(gh api "repos/${REPO}/issues/${pr}/labels" --jq 'any(.[]; .name == "review")')"
+          if [ "$has_label" != "true" ]; then
+            echo "PR #$pr lacks the opt-in 'review' label — skipping."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Once-only guard: the marker comment is the run-once state. A
+          # manual dispatch bypasses it (deliberate re-review); the poster
+          # dedupes already-posted findings by fingerprint.
+          if [ "$EVENT" != "workflow_dispatch" ]; then
+            if gh api "repos/${REPO}/issues/${pr}/comments" --paginate --jq '.[].body' \
+              | grep -q '<!-- aether-review -->'; then
+              echo "PR #$pr already reviewed (marker present) — skipping."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          echo "head_sha=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha')" >> "$GITHUB_OUTPUT"
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+      # Check out the PR head with full history so the /review skill's
+      # `git diff origin/main...HEAD` prep resolves. The base ref is not
+      # present after a single-ref checkout, so fetch it explicitly.
+      - uses: actions/checkout@v4
+        if: steps.resolve.outputs.proceed == 'true'
+        with:
+          ref: ${{ steps.resolve.outputs.head_sha }}
+          fetch-depth: 0
+      - name: Fetch the diff base (origin/main)
+        if: steps.resolve.outputs.proceed == 'true'
+        run: git fetch origin main:refs/remotes/origin/main
+
+      - name: Note when the OAuth token secret is absent
+        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN == ''
+        run: |
+          echo "CLAUDE_CODE_OAUTH_TOKEN secret is not set — the review is skipped."
+          echo "Mint one with 'claude setup-token' and add it: gh secret set CLAUDE_CODE_OAUTH_TOKEN"
+
+      - name: Install Claude Code
+        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: npm install -g @anthropic-ai/claude-code
+
+      # Pre-trust the checkout so settings.json permissions aren't ignored
+      # with a warning under skip-permissions.
+      - name: Pre-trust the workspace for headless Claude
+        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$PWD" > "$HOME/.claude.json"
+
+      # Auth in isolation before the real run: a one-line prompt, no tools.
+      # --max-turns 3 (not 1) because the model occasionally spends a turn
+      # before emitting the reply, and a 1-turn cap turns that into a
+      # spurious failure that reads like an auth problem (spike #2961).
+      - name: Auth probe (no tools)
+        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: |
+          claude -p "Reply with exactly: AUTH-OK" \
+            --model claude-sonnet-5 \
+            --max-turns 3 | tee /tmp/auth.log
+          grep -q "AUTH-OK" /tmp/auth.log
+
+      # The review itself. Headless Claude invokes the repo's /review skill
+      # in integrated mode (it owns the caller-side prep — changed-file set,
+      # per-file diffs, issue text from the PR's closing reference) and
+      # writes the workflow's returned rollup JSON verbatim to
+      # review-rollup.json. GH_TOKEN lets the skill resolve the closing
+      # issue via gh. `|| true` so a review failure never fails the job —
+      # a missing rollup file is the signal that no post happens.
+      - name: Run the five-pillar review
+        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+        run: |
+          claude -p "You are running headless in CI on a checkout of PR #${PR_NUMBER}'s head branch.
+          The diff base is origin/main; the head is the current HEAD.
+          Invoke the repo's /review skill in INTEGRATED mode against origin/main...HEAD:
+          resolve the changed .rs files and their per-file diffs from git, and read the issue
+          text this PR closes (use gh to find the PR's closing reference for issue #${PR_NUMBER}
+          if needed). Let the skill run the review.js workflow in a single pass.
+          When the workflow returns { rollup, files }, write the returned ROLLUP object as JSON
+          verbatim to review-rollup.json in the repo root (the rollup, not the whole return).
+          Do not edit any source. Print exactly REVIEW-DONE when the file is written." \
+            --dangerously-skip-permissions \
+            --model claude-sonnet-5 \
+            --max-turns 80 | tee /tmp/review.log || true
+
+      # Whether the run produced a rollup gates the `post` job. Kept as a
+      # step so `post` can `needs`-read it without inspecting the artifact.
+      - name: Note whether a rollup was produced
+        id: rollup
+        if: always() && steps.resolve.outputs.proceed == 'true'
+        run: |
+          if [ -f review-rollup.json ]; then
+            echo "produced=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "produced=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.rollup.outputs.produced == 'true'
+        with:
+          name: review-rollup
+          path: review-rollup.json
+          if-no-files-found: ignore
+
+  post:
+    name: Post review rollup
+    needs: review
+    # No-op when the review job produced no rollup (token absent, no open
+    # PR, gated out, or the review itself failed).
+    if: needs.review.outputs.rollup_produced == 'true'
+    runs-on: ubuntu-latest
+    # The only job with write scopes, and it never executes branch code:
+    # the default checkout is the base repo (main), so the poster script is
+    # the trusted version — the PR head is only ever read as data.
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: review-rollup
+      - name: Fetch the PR's changed files + diff hunks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/pulls/${{ needs.review.outputs.pr_number }}/files" \
+            --paginate > pr-files.json
+      - name: Post the rollup as annotations + summary
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.review.outputs.pr_number }}
+          ROLLUP_PATH: review-rollup.json
+          FILES_PATH: pr-files.json
+        run: node scripts/post-review-rollup.mjs
