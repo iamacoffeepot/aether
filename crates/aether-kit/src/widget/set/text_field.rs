@@ -35,7 +35,7 @@ use aether_kinds::{
 use crate::widget::set::{
     APPROX_ADVANCE_RATIO, approx_text_width, push_border, quad, text_origin_y,
 };
-use crate::widget::text_edit::{EditPolicy, SingleLineLayout, TextEditState};
+use crate::widget::text_edit::{EditPolicy, SingleLineLayout, TextEditState, TextSpan};
 use crate::widget::theme::{SetTheme, Theme, WidgetState};
 use crate::widget::{
     Collect, FocusGained, FocusLost, TextCommitted, TextFieldConfig, WidgetDrawItem,
@@ -58,13 +58,24 @@ pub struct TextFieldWidget {
     dragging: bool,
     /// The latest font id the theme asks metrics for.
     desired_font_id: u32,
-    /// The font id whose metrics are currently installed (`0` = none).
-    current_font_id: u32,
+    /// The font id whose metrics are currently installed.
+    current_font_id: Option<u32>,
     /// The font id of the one outstanding `FontMetricsRequest`, if any.
     inflight_font_id: Option<u32>,
     /// The resolved metrics for `current_font_id`, `None` until the first reply
     /// installs.
     metrics: Option<CachedFontMetrics>,
+}
+
+/// The committed editor state projected into the one string rendered this
+/// frame, with every owned span remapped into that string's byte offsets.
+struct DisplayedEdit {
+    text: String,
+    caret_byte: usize,
+    selection_span: Option<TextSpan>,
+    preedit_span: Option<TextSpan>,
+    preedit_cursor_span: Option<TextSpan>,
+    composing: bool,
 }
 
 impl TextFieldWidget {
@@ -77,14 +88,36 @@ impl TextFieldWidget {
         }
     }
 
+    /// Adopt a desired font id. Metrics are only usable for the id that
+    /// produced them, so a change returns placement to the warm-up fallback
+    /// until the replacement request resolves.
+    fn set_desired_font_id(&mut self, desired_font_id: u32) {
+        if self.desired_font_id == desired_font_id {
+            return;
+        }
+        self.desired_font_id = desired_font_id;
+        self.current_font_id = None;
+        self.metrics = None;
+    }
+
+    /// Metrics are exact only while their installed font is still the theme's
+    /// desired font. The id check keeps stale tables out of hit testing and all
+    /// selection / composition / caret geometry.
+    fn resolved_metrics(&self) -> Option<&CachedFontMetrics> {
+        (self.current_font_id == Some(self.desired_font_id))
+            .then_some(self.metrics.as_ref())
+            .flatten()
+    }
+
     /// The font id a pump should request now, or `None` to stay put: only when
-    /// no request is outstanding and the nonzero desired id lacks current
-    /// metrics. Pure over the adapter fields.
+    /// no request is outstanding and the desired id lacks current metrics.
+    /// Font id zero is valid; absence is represented by `Option` instead of a
+    /// numeric sentinel. Pure over the adapter fields.
     fn pending_request(&self) -> Option<u32> {
-        if self.inflight_font_id.is_some() || self.desired_font_id == 0 {
+        if self.inflight_font_id.is_some() {
             return None;
         }
-        if self.current_font_id == self.desired_font_id && self.metrics.is_some() {
+        if self.current_font_id == Some(self.desired_font_id) && self.metrics.is_some() {
             return None;
         }
         Some(self.desired_font_id)
@@ -101,20 +134,22 @@ impl TextFieldWidget {
 
     /// Attribute a metrics reply to the outstanding flight (`Some` for `Ok`,
     /// `None` for `Err`), install it only when its id is still the desired id,
-    /// and always clear the flight. Pure over the adapter fields; the caller
-    /// pumps a deferred newer request after. A late reply for a superseded font
-    /// is dropped rather than replacing current metrics.
-    fn accept_reply(&mut self, metrics: Option<CachedFontMetrics>) {
+    /// and always clear the flight. Returns whether the settled flight was
+    /// superseded and the caller should pump the deferred newer id. A current
+    /// id's error deliberately returns `false`: retrying it immediately would
+    /// form an unbounded request/reply loop.
+    fn accept_reply(&mut self, metrics: Option<CachedFontMetrics>) -> bool {
         let Some(id) = self.inflight_font_id.take() else {
-            return;
+            return false;
         };
         if id != self.desired_font_id {
-            return;
+            return true;
         }
         if let Some(metrics) = metrics {
-            self.current_font_id = id;
+            self.current_font_id = Some(id);
             self.metrics = Some(metrics);
         }
+        false
     }
 
     /// Start a font-metrics request when one is due (single-flight; a duplicate
@@ -127,6 +162,45 @@ impl TextFieldWidget {
         }
     }
 
+    /// Project committed text, selection, and preedit into one render string.
+    /// While composing, the preedit replaces the active selection and its
+    /// cursor span is translated from preedit-local into display byte offsets.
+    fn displayed_edit(&self) -> DisplayedEdit {
+        let selection = self.edit.selection();
+        if self.edit.preedit().is_empty() {
+            return DisplayedEdit {
+                text: String::from(self.edit.value()),
+                caret_byte: self.edit.caret(),
+                selection_span: (!selection.is_collapsed()).then_some(selection),
+                preedit_span: None,
+                preedit_cursor_span: None,
+                composing: false,
+            };
+        }
+
+        let preedit = self.edit.preedit();
+        let mut text = String::with_capacity(self.edit.value().len() + preedit.len());
+        text.push_str(&self.edit.value()[..selection.start_byte]);
+        text.push_str(preedit);
+        text.push_str(&self.edit.value()[selection.end_byte..]);
+        let span_end = selection.start_byte + preedit.len();
+        let cursor = self
+            .edit
+            .preedit_cursor()
+            .unwrap_or_else(|| TextSpan::new(preedit.len(), preedit.len()));
+        DisplayedEdit {
+            text,
+            caret_byte: span_end,
+            selection_span: None,
+            preedit_span: Some(TextSpan::new(selection.start_byte, span_end)),
+            preedit_cursor_span: Some(TextSpan::new(
+                selection.start_byte + cursor.start_byte,
+                selection.start_byte + cursor.end_byte,
+            )),
+            composing: true,
+        }
+    }
+
     /// The `char`-boundary byte offset a pointer at window `event_x` lands on —
     /// exact against the metric table when resolved, else the proportional
     /// approximation.
@@ -134,7 +208,7 @@ impl TextFieldWidget {
         let size = self.theme.value_size_pixels;
         let local_x = event_x - self.frame.x - self.theme.pad;
         let text = self.edit.value();
-        if let Some(metrics) = &self.metrics {
+        if let Some(metrics) = self.resolved_metrics() {
             return SingleLineLayout::build(text, metrics, size).hit_test(local_x);
         }
         let advance = (size * APPROX_ADVANCE_RATIO).max(1.0);
@@ -148,17 +222,6 @@ impl TextFieldWidget {
         text.char_indices()
             .nth(index)
             .map_or(text.len(), |(byte, _)| byte)
-    }
-
-    /// The pixel x of the caret sitting after `byte` bytes of `displayed` at
-    /// `size` — exact against the metric table when resolved, else the
-    /// proportional approximation.
-    fn prefix_width(&self, displayed: &str, byte: usize, size: f32) -> f32 {
-        let chars = displayed[..byte].chars().count();
-        self.metrics.as_ref().map_or_else(
-            || approx_text_width(chars, size),
-            |metrics| metrics.caret_x(displayed, chars, size),
-        )
     }
 }
 
@@ -189,7 +252,7 @@ impl WasmActor for TextFieldWidget {
             modifiers: Modifiers::default(),
             dragging: false,
             desired_font_id,
-            current_font_id: 0,
+            current_font_id: None,
             inflight_font_id: None,
             metrics: None,
         })
@@ -207,7 +270,7 @@ impl WasmActor for TextFieldWidget {
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: TextFieldConfig) {
         self.edit = TextEditState::new(config.initial);
         self.max_chars = config.max_chars;
-        self.desired_font_id = config.theme.font_id;
+        self.set_desired_font_id(config.theme.font_id);
         self.theme = config.theme;
         self.pump_font_metrics(ctx);
     }
@@ -215,7 +278,7 @@ impl WasmActor for TextFieldWidget {
     /// Restyle: adopt the fanned theme and request metrics for its font.
     #[handler::single]
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
-        self.desired_font_id = set.theme.font_id;
+        self.set_desired_font_id(set.theme.font_id);
         self.theme = set.theme;
         self.pump_font_metrics(ctx);
     }
@@ -310,7 +373,7 @@ impl WasmActor for TextFieldWidget {
     #[handler::single]
     fn on_ime_preedit(&mut self, _ctx: &mut WasmCtx<'_>, preedit: ImePreedit) {
         let cursor = match (preedit.cursor_begin, preedit.cursor_end) {
-            (Some(begin), Some(end)) => Some((begin as usize, end as usize)),
+            (Some(begin), Some(end)) => Some(TextSpan::new(begin as usize, end as usize)),
             _ => None,
         };
         self.edit.set_composition(preedit.text, cursor);
@@ -320,16 +383,18 @@ impl WasmActor for TextFieldWidget {
     /// stale reply (its font is no longer the desired one) is dropped.
     #[handler::single]
     fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
-        match result {
+        let pump_deferred = match result {
             FontMetricsResult::Ok { metrics } => {
-                self.accept_reply(Some(CachedFontMetrics::new(&metrics)));
+                self.accept_reply(Some(CachedFontMetrics::new(&metrics)))
             }
             FontMetricsResult::Err { error } => {
                 tracing::warn!(target: "aether_kit", %error, "text field font metrics failed");
-                self.accept_reply(None);
+                self.accept_reply(None)
             }
+        };
+        if pump_deferred {
+            self.pump_font_metrics(ctx);
         }
-        self.pump_font_metrics(ctx);
     }
 
     /// Reply the field's local draw: a box, any selection band, the text plus a
@@ -347,40 +412,20 @@ impl WasmActor for TextFieldWidget {
         let text_y = text_origin_y(0.0, height, size);
         let caret_height = pad.mul_add(-2.0, height).max(1.0);
 
-        let (sel_start, sel_end) = self.edit.selection();
-        let composing = !self.edit.preedit().is_empty();
+        let displayed = self.displayed_edit();
 
-        // The visible string, the caret byte within it, an optional selection
-        // band to highlight, and — while composing — the preedit span and its
-        // cursor. Composing renders the preedit inserted at the selection start
-        // (the selection reads as replaced), so no selection band is drawn then.
-        let displayed;
-        let caret_byte;
-        let mut sel_band = None;
-        let mut preedit_span = None;
-        let mut preedit_cursor_byte = None;
-        if composing {
-            let preedit = self.edit.preedit();
-            let mut shown = String::with_capacity(self.edit.value().len() + preedit.len());
-            shown.push_str(&self.edit.value()[..sel_start]);
-            shown.push_str(preedit);
-            shown.push_str(&self.edit.value()[sel_end..]);
-            let span_end = sel_start + preedit.len();
-            preedit_span = Some((sel_start, span_end));
-            let cursor = self
-                .edit
-                .preedit_cursor()
-                .map_or(preedit.len(), |(_, end)| end);
-            preedit_cursor_byte = Some(sel_start + cursor);
-            caret_byte = span_end;
-            displayed = shown;
-        } else {
-            displayed = String::from(self.edit.value());
-            caret_byte = self.edit.caret();
-            if sel_start != sel_end {
-                sel_band = Some((sel_start, sel_end));
-            }
-        }
+        // One measured layout per rendered string. Every geometry lookup below
+        // reads this table; the warm-up fallback remains character-count based
+        // only until the desired font's metrics settle.
+        let layout = self
+            .resolved_metrics()
+            .map(|metrics| SingleLineLayout::build(&displayed.text, metrics, size));
+        let prefix_width = |byte: usize| {
+            layout.as_ref().map_or_else(
+                || approx_text_width(displayed.text[..byte].chars().count(), size),
+                |layout| layout.caret_x(byte),
+            )
+        };
 
         let mut items: Vec<WidgetDrawItem> = Vec::new();
         items.push(quad(
@@ -391,9 +436,9 @@ impl WasmActor for TextFieldWidget {
             self.theme
                 .fill(self.theme.surface_raised, WidgetState::Normal),
         ));
-        if let Some((start, end)) = sel_band {
-            let x0 = pad + self.prefix_width(&displayed, start, size);
-            let x1 = pad + self.prefix_width(&displayed, end, size);
+        if let Some(span) = displayed.selection_span {
+            let x0 = pad + prefix_width(span.start_byte);
+            let x1 = pad + prefix_width(span.end_byte);
             items.push(quad(
                 x0,
                 pad,
@@ -402,19 +447,33 @@ impl WasmActor for TextFieldWidget {
                 self.theme.accent,
             ));
         }
-        if !displayed.is_empty() {
+        if let Some(span) = displayed
+            .preedit_cursor_span
+            .filter(|span| !span.is_collapsed())
+        {
+            let x0 = pad + prefix_width(span.start_byte);
+            let x1 = pad + prefix_width(span.end_byte);
+            items.push(quad(
+                x0,
+                pad,
+                (x1 - x0).max(1.0),
+                caret_height,
+                self.theme.accent,
+            ));
+        }
+        if !displayed.text.is_empty() {
             items.push(WidgetDrawItem::Text {
                 x: pad,
                 y: text_y,
                 font_id: self.theme.font_id,
-                text: displayed.clone(),
+                text: displayed.text.clone(),
                 size_pixels: size,
                 color: self.theme.text_primary,
             });
         }
-        if let Some((start, end)) = preedit_span {
-            let x0 = pad + self.prefix_width(&displayed, start, size);
-            let x1 = pad + self.prefix_width(&displayed, end, size);
+        if let Some(span) = displayed.preedit_span {
+            let x0 = pad + prefix_width(span.start_byte);
+            let x1 = pad + prefix_width(span.end_byte);
             items.push(quad(
                 x0,
                 text_y + size,
@@ -422,13 +481,16 @@ impl WasmActor for TextFieldWidget {
                 1.0,
                 self.theme.accent,
             ));
-            if let Some(byte) = preedit_cursor_byte {
-                let cursor_x = pad + self.prefix_width(&displayed, byte, size);
+            if let Some(cursor) = displayed
+                .preedit_cursor_span
+                .filter(|cursor| cursor.is_collapsed())
+            {
+                let cursor_x = pad + prefix_width(cursor.end_byte);
                 items.push(quad(cursor_x, pad, 1.0, caret_height, self.theme.accent));
             }
         }
-        if self.focused && !composing {
-            let caret_x = pad + self.prefix_width(&displayed, caret_byte, size);
+        if self.focused && !displayed.composing {
+            let caret_x = pad + prefix_width(displayed.caret_byte);
             items.push(quad(caret_x, pad, 1.0, caret_height, self.theme.accent));
         }
         if self.focused {
@@ -465,7 +527,7 @@ mod tests {
             modifiers: Modifiers::default(),
             dragging: false,
             desired_font_id,
-            current_font_id: 0,
+            current_font_id: None,
             inflight_font_id: None,
             metrics: None,
         }
@@ -485,6 +547,25 @@ mod tests {
     }
 
     #[test]
+    fn composition_projection_preserves_the_full_multibyte_cursor_span() {
+        let mut field = adapter_field(7);
+        field.edit = TextEditState::new(String::from("abécd"));
+        field.edit.move_left(true);
+        field.edit.move_left(true); // select `cd` at bytes 4..6
+        field
+            .edit
+            .set_composition(String::from("üx"), Some(TextSpan::new(0, 2)));
+
+        let displayed = field.displayed_edit();
+        assert_eq!(displayed.text, "abéüx");
+        assert_eq!(displayed.selection_span, None);
+        assert_eq!(displayed.preedit_span, Some(TextSpan::new(4, 7)));
+        assert_eq!(displayed.preedit_cursor_span, Some(TextSpan::new(4, 6)));
+        assert_eq!(displayed.caret_byte, 7);
+        assert!(displayed.composing);
+    }
+
+    #[test]
     fn initial_load_requests_desired_once_then_coalesces() {
         let mut field = adapter_field(7);
         assert_eq!(field.take_pending_request(), Some(7));
@@ -496,22 +577,25 @@ mod tests {
     fn a_resolved_reply_installs_and_stops_requesting() {
         let mut field = adapter_field(7);
         assert_eq!(field.take_pending_request(), Some(7));
-        field.accept_reply(Some(some_metrics()));
-        assert_eq!(field.current_font_id, 7);
+        assert!(!field.accept_reply(Some(some_metrics())));
+        assert_eq!(field.current_font_id, Some(7));
         assert!(field.metrics.is_some());
         // Desired is satisfied, so nothing more is requested.
         assert_eq!(field.take_pending_request(), None);
     }
 
     #[test]
-    fn an_error_reply_clears_the_flight_and_retries() {
+    fn an_error_for_the_current_font_does_not_immediately_retry() {
         let mut field = adapter_field(7);
         assert_eq!(field.take_pending_request(), Some(7));
-        field.accept_reply(None);
-        assert_eq!(field.current_font_id, 0);
+        assert!(
+            !field.accept_reply(None),
+            "the result handler must not pump the just-failed id"
+        );
+        assert_eq!(field.current_font_id, None);
         assert!(field.metrics.is_none());
-        // The flight cleared without installing, so the same desired id is
-        // requested again.
+        assert_eq!(field.inflight_font_id, None);
+        // A later config/theme event may retry the id explicitly.
         assert_eq!(field.take_pending_request(), Some(7));
     }
 
@@ -520,18 +604,50 @@ mod tests {
         let mut field = adapter_field(7);
         assert_eq!(field.take_pending_request(), Some(7));
         // The theme font changes while the request for 7 is outstanding.
-        field.desired_font_id = 9;
+        field.set_desired_font_id(9);
         // Still single-flight: no new request until the outstanding one settles.
         assert_eq!(field.take_pending_request(), None);
         // The reply for the superseded font 7 must not install as current.
-        field.accept_reply(Some(some_metrics()));
-        assert_eq!(field.current_font_id, 0);
+        assert!(field.accept_reply(Some(some_metrics())));
+        assert_eq!(field.current_font_id, None);
         assert!(field.metrics.is_none());
         // Now the deferred request for the latest desired id goes out and
         // installs.
         assert_eq!(field.take_pending_request(), Some(9));
-        field.accept_reply(Some(some_metrics()));
-        assert_eq!(field.current_font_id, 9);
+        assert!(!field.accept_reply(Some(some_metrics())));
+        assert_eq!(field.current_font_id, Some(9));
         assert!(field.metrics.is_some());
+    }
+
+    #[test]
+    fn a_stale_error_pumps_the_deferred_newer_font() {
+        let mut field = adapter_field(7);
+        assert_eq!(field.take_pending_request(), Some(7));
+        field.set_desired_font_id(9);
+        assert!(field.accept_reply(None));
+        assert_eq!(field.take_pending_request(), Some(9));
+    }
+
+    #[test]
+    fn a_font_change_clears_installed_metrics_before_new_geometry() {
+        let mut field = adapter_field(7);
+        assert_eq!(field.take_pending_request(), Some(7));
+        assert!(!field.accept_reply(Some(some_metrics())));
+        assert!(field.resolved_metrics().is_some());
+
+        field.set_desired_font_id(9);
+        assert_eq!(field.current_font_id, None);
+        assert!(field.metrics.is_none());
+        assert!(field.resolved_metrics().is_none());
+        assert_eq!(field.take_pending_request(), Some(9));
+    }
+
+    #[test]
+    fn zero_is_a_valid_font_id_and_requests_metrics() {
+        let mut field = adapter_field(0);
+        assert_eq!(field.take_pending_request(), Some(0));
+        assert!(!field.accept_reply(Some(some_metrics())));
+        assert_eq!(field.current_font_id, Some(0));
+        assert!(field.resolved_metrics().is_some());
     }
 }

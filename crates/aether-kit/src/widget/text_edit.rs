@@ -2,7 +2,7 @@
 //!
 //! [`TextEditState`] owns a committed `String`, a selection expressed as an
 //! `anchor` and an active `caret` (both byte offsets), and an in-flight IME
-//! composition (`preedit` plus an optional byte-offset cursor span). Every
+//! composition (`preedit` plus an optional [`TextSpan`] cursor span). Every
 //! stored offset is normalized to a UTF-8 `char` boundary, so a multi-byte
 //! character is never split by a caret, a selection edge, or a preedit span.
 //!
@@ -36,6 +36,36 @@ pub struct EditPolicy {
     pub max_chars: u32,
 }
 
+/// A half-open byte span in edited or preedit text. [`TextEditState`] normalizes
+/// spans before storing them; named fields keep the unit and endpoint ordering
+/// explicit at the public API.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TextSpan {
+    /// Inclusive byte offset where the span begins.
+    pub start_byte: usize,
+    /// Exclusive byte offset where the span ends.
+    pub end_byte: usize,
+}
+
+impl TextSpan {
+    /// Construct a span from byte endpoints. Consumers that pass it into
+    /// [`TextEditState`] may use arbitrary endpoints; the state normalizes them
+    /// before storing the span.
+    #[must_use]
+    pub const fn new(start_byte: usize, end_byte: usize) -> Self {
+        Self {
+            start_byte,
+            end_byte,
+        }
+    }
+
+    /// Whether both endpoints name the same caret position.
+    #[must_use]
+    pub const fn is_collapsed(self) -> bool {
+        self.start_byte == self.end_byte
+    }
+}
+
 impl Default for EditPolicy {
     fn default() -> Self {
         Self {
@@ -59,7 +89,7 @@ pub struct TextEditState {
     preedit: String,
     /// The IME's reported cursor/selection span as byte offsets into `preedit`,
     /// `None` when the IME gives no span.
-    preedit_cursor: Option<(usize, usize)>,
+    preedit_cursor: Option<TextSpan>,
 }
 
 /// Floor `byte` to a `char` boundary of `text`, clamping to `text.len()` first.
@@ -99,14 +129,14 @@ impl TextEditState {
         self.caret
     }
 
-    /// The selection as a sorted `(start, end)` byte range; `start == end` when
-    /// the selection is collapsed to a caret.
+    /// The selection as a sorted byte span; both endpoints match when the
+    /// selection is collapsed to a caret.
     #[must_use]
-    pub fn selection(&self) -> (usize, usize) {
+    pub fn selection(&self) -> TextSpan {
         if self.anchor <= self.caret {
-            (self.anchor, self.caret)
+            TextSpan::new(self.anchor, self.caret)
         } else {
-            (self.caret, self.anchor)
+            TextSpan::new(self.caret, self.anchor)
         }
     }
 
@@ -125,7 +155,7 @@ impl TextEditState {
     /// The IME cursor/selection span as byte offsets into
     /// [`preedit`](Self::preedit), `None` when the IME reported none.
     #[must_use]
-    pub fn preedit_cursor(&self) -> Option<(usize, usize)> {
+    pub fn preedit_cursor(&self) -> Option<TextSpan> {
         self.preedit_cursor
     }
 
@@ -148,7 +178,9 @@ impl TextEditState {
         if filtered.is_empty() {
             return false;
         }
-        let (start, end) = self.selection();
+        let selection = self.selection();
+        let start = selection.start_byte;
+        let end = selection.end_byte;
         if policy.max_chars > 0 {
             let removed = self.text[start..end].chars().count();
             let added = filtered.chars().count();
@@ -195,7 +227,9 @@ impl TextEditState {
     }
 
     fn delete_selection(&mut self) {
-        let (start, end) = self.selection();
+        let selection = self.selection();
+        let start = selection.start_byte;
+        let end = selection.end_byte;
         self.text.replace_range(start..end, "");
         self.anchor = start;
         self.caret = start;
@@ -206,7 +240,7 @@ impl TextEditState {
     /// its left edge and a collapsed caret steps one character.
     pub fn move_left(&mut self, extend: bool) {
         if !extend && self.has_selection() {
-            let (start, _) = self.selection();
+            let start = self.selection().start_byte;
             self.anchor = start;
             self.caret = start;
             return;
@@ -224,7 +258,7 @@ impl TextEditState {
     /// collapsed caret steps one character.
     pub fn move_right(&mut self, extend: bool) {
         if !extend && self.has_selection() {
-            let (_, end) = self.selection();
+            let end = self.selection().end_byte;
             self.anchor = end;
             self.caret = end;
             return;
@@ -277,21 +311,21 @@ impl TextEditState {
     /// span. Empty `text` clears the composition. The span is normalized to
     /// `char` boundaries of `text` and ordered, and dropped entirely when it
     /// falls outside the composition.
-    pub fn set_composition(&mut self, text: String, cursor: Option<(usize, usize)>) {
+    pub fn set_composition(&mut self, text: String, cursor: Option<TextSpan>) {
         if text.is_empty() {
             self.clear_composition();
             return;
         }
-        let cursor = cursor.and_then(|(begin, end)| {
-            if begin > text.len() || end > text.len() {
+        let cursor = cursor.and_then(|cursor| {
+            if cursor.start_byte > text.len() || cursor.end_byte > text.len() {
                 return None;
             }
-            let begin = floor_boundary(&text, begin);
-            let end = floor_boundary(&text, end);
-            Some(if begin <= end {
-                (begin, end)
+            let start_byte = floor_boundary(&text, cursor.start_byte);
+            let end_byte = floor_boundary(&text, cursor.end_byte);
+            Some(if start_byte <= end_byte {
+                TextSpan::new(start_byte, end_byte)
             } else {
-                (end, begin)
+                TextSpan::new(end_byte, start_byte)
             })
         });
         self.preedit = text;
@@ -395,7 +429,7 @@ mod tests {
     fn new_collapses_caret_at_the_end() {
         let s = state("abc");
         assert_eq!(s.caret(), 3);
-        assert_eq!(s.selection(), (3, 3));
+        assert_eq!(s.selection(), TextSpan::new(3, 3));
         assert!(!s.has_selection());
     }
 
@@ -458,7 +492,7 @@ mod tests {
         s.move_to_start(false);
         s.move_right(true); // select "a"
         s.move_right(true); // select "ab"
-        assert_eq!(s.selection(), (0, 2));
+        assert_eq!(s.selection(), TextSpan::new(0, 2));
         assert!(s.has_selection());
         // A non-extending left collapses to the selection's left edge.
         s.move_left(false);
@@ -466,7 +500,7 @@ mod tests {
         assert!(!s.has_selection());
         // Re-select then a non-extending right collapses to the right edge.
         s.select_all();
-        assert_eq!(s.selection(), (0, 4));
+        assert_eq!(s.selection(), TextSpan::new(0, 4));
         s.move_right(false);
         assert_eq!(s.caret(), 4);
         assert!(!s.has_selection());
@@ -478,11 +512,11 @@ mod tests {
         // Caret at end; extend left twice selects "bc" backward.
         s.move_left(true);
         s.move_left(true);
-        assert_eq!(s.selection(), (1, 3));
+        assert_eq!(s.selection(), TextSpan::new(1, 3));
         assert_eq!(s.caret(), 1);
         // Document-edge extend to start selects the whole run.
         s.move_to_start(true);
-        assert_eq!(s.selection(), (0, 3));
+        assert_eq!(s.selection(), TextSpan::new(0, 3));
         assert_eq!(s.caret(), 0);
     }
 
@@ -496,6 +530,36 @@ mod tests {
         assert_eq!(s.value(), "HEllo");
         assert_eq!(s.caret(), 2);
         assert!(!s.has_selection());
+    }
+
+    #[test]
+    fn multibyte_movement_and_selection_keep_byte_boundaries() {
+        let mut s = state("aéb"); // boundaries: 0, 1, 3, 4
+        s.move_left(true);
+        assert_eq!(s.selection(), TextSpan::new(3, 4));
+        assert_eq!(s.caret(), 3);
+        s.move_left(true);
+        assert_eq!(s.selection(), TextSpan::new(1, 4));
+        assert_eq!(s.caret(), 1);
+        s.move_right(true);
+        assert_eq!(s.selection(), TextSpan::new(3, 4));
+        assert_eq!(s.caret(), 3);
+    }
+
+    #[test]
+    fn mid_codepoint_place_and_extend_floor_before_replacement() {
+        let mut s = state("éx"); // boundaries: 0, 2, 3
+        s.place_caret(1);
+        assert_eq!(s.caret(), 0, "a click inside é floors before the char");
+        s.extend_to(2);
+        assert_eq!(s.selection(), TextSpan::new(0, 2));
+        assert!(s.insert("Z", uncapped()));
+        assert_eq!(s.value(), "Zx");
+        assert_eq!(s.caret(), 1);
+
+        s.place_caret(2);
+        s.extend_to(usize::MAX);
+        assert_eq!(s.selection(), TextSpan::new(2, 2));
     }
 
     #[test]
@@ -556,14 +620,14 @@ mod tests {
     fn composition_normalizes_and_clears() {
         let mut s = state("");
         // A span landing mid-`char` floors to the char boundary and orders.
-        s.set_composition(String::from("éà"), Some((3, 1)));
+        s.set_composition(String::from("éà"), Some(TextSpan::new(3, 1)));
         assert_eq!(s.preedit(), "éà");
-        assert_eq!(s.preedit_cursor(), Some((0, 2)));
+        assert_eq!(s.preedit_cursor(), Some(TextSpan::new(0, 2)));
         // An out-of-range span is dropped, not clamped into a lie.
-        s.set_composition(String::from("x"), Some((0, 9)));
+        s.set_composition(String::from("x"), Some(TextSpan::new(0, 9)));
         assert_eq!(s.preedit_cursor(), None);
         // Empty text clears the composition.
-        s.set_composition(String::new(), Some((0, 0)));
+        s.set_composition(String::new(), Some(TextSpan::new(0, 0)));
         assert_eq!(s.preedit(), "");
         assert_eq!(s.preedit_cursor(), None);
     }
@@ -578,7 +642,7 @@ mod tests {
             descent: -200.0,
             line_gap: 0.0,
             default_advance: 500.0,
-            advances: alloc::vec![
+            advances: vec![
                 GlyphAdvance {
                     codepoint: u32::from('i'),
                     advance_units: 200.0,

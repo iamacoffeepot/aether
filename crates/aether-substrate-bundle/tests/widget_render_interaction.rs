@@ -991,17 +991,13 @@ fn focus_ring_follows_tab() {
     );
 }
 
-/// **Bug class: the reusable editing state's measured pointer placement,
-/// selection, and IME composition not reaching the pixels.** The other text
-/// scenario (`text_field_backspace_...`) proves an editing key round-trips; this
-/// drives the issue-2924 rework end-to-end — a *measured* pointer click that
-/// places the caret at a known character boundary, a Shift-extended selection
-/// that must render an accent band, an `ImePreedit` with a nontrivial cursor
-/// span that must render a composition mark below the glyph baseline, then a
-/// committed `TextInput` replacing the selection and Enter — and asserts each
-/// rendered band plus the final committed UTF-8 value off the log ring. It reads
-/// the field's own resolved font metrics for its expected boundaries, so a
-/// regression in measured placement (not the approximate warm-up) fails here.
+/// **Bug class: measured selection / composition / caret geometry drifting from
+/// the edited UTF-8 value.** The measured click is deliberately chosen where
+/// the warm-up approximation resolves to the *next* character, so the final
+/// committed value proves the field installed its metric table. Tight positive
+/// and neighboring exclusion regions then pin the first selected cell, the full
+/// non-collapsed IME cursor span, the preedit underline at the replaced
+/// selection (not the old trailing position), and the final measured caret.
 #[test]
 #[allow(clippy::too_many_lines)] // one cohesive place → select → compose → commit acceptance run
 fn text_field_selection_and_ime_render_measured_bands_and_commit() {
@@ -1028,42 +1024,10 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
 
     let size = Theme::DEFAULT.value_size_pixels;
     let (text_top, _) = row_band(TEXT_ROW, 1.0);
-    // The field's interior, inset past the focus-ring border, scored against its
-    // raised-surface fill so glyph + selection + caret ink form the mask.
-    let interior = rect(
-        PANEL_X + BORDER + 1.0,
-        text_top + BORDER + 1.0,
-        PANEL_X + PANEL_WIDTH - BORDER,
-        text_top + ROW_HEIGHT - BORDER,
-    );
-    let interior_coverage = || {
-        vec![check(
-            FrameReduction::Coverage,
-            interior,
-            SURFACE_RAISED_SRGB,
-            PARTITION_TOLERANCE,
-        )]
-    };
-    // A thin band straddling the composition underline (`text_origin_y + size`
-    // local, below the lowercase glyph run) — where only the underline and the
-    // full-height composition cursor light up, not the resting glyph ink.
-    let underline_local = (ROW_HEIGHT - size) * 0.5 + size;
-    let underline_band = rect(
-        PANEL_X + BORDER + 1.0,
-        text_top + underline_local - 1.0,
-        PANEL_X + PANEL_WIDTH - BORDER,
-        text_top + underline_local + 2.0,
-    );
-    let underline_coverage = || {
-        vec![check(
-            FrameReduction::Coverage,
-            underline_band,
-            SURFACE_RAISED_SRGB,
-            PARTITION_TOLERANCE,
-        )]
-    };
+    let content_x = PANEL_X + PAD;
+    let typed_text = "abécd";
 
-    // Focus the field with a click, type "abcd", and rasterize the glyphs.
+    // Focus the field, type a value with a multibyte scalar, and rasterize it.
     bench
         .execute(vec![
             (
@@ -1079,7 +1043,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
                 BenchOp::send_mail(
                     &panel,
                     &TextInput {
-                        text: "abcd".to_owned(),
+                        text: typed_text.to_owned(),
                     },
                 ),
             ),
@@ -1088,15 +1052,58 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         ])
         .expect("focus + type");
 
-    let typed_interior = coverage(&capture(&mut bench, interior_coverage()).results[0]);
-    let typed_underline = coverage(&capture(&mut bench, underline_coverage()).results[0]);
+    // Click after "abé" (char index 3, byte 4). Roboto Mono advances 0.6em,
+    // while the bounded warm-up fallback uses 0.5em: at this boundary the
+    // fallback rounds to char index 4. Pin that fixture property so this
+    // scenario cannot silently stop discriminating exact from approximate hit
+    // testing after a font or theme change.
+    let measured_boundary = metrics.caret_x(typed_text, 3, size);
+    let fallback_advance = (size * 0.5).max(1.0);
+    let fallback_index =
+        ((measured_boundary / fallback_advance + 0.5) as usize).min(typed_text.chars().count());
+    assert_eq!(
+        fallback_index, 4,
+        "the measured click fixture must differ from the 0.5em fallback"
+    );
+    let boundary_x = content_x + measured_boundary;
+    let after_two_x = content_x + metrics.caret_x(typed_text, 2, size);
+    let after_four_x = content_x + metrics.caret_x(typed_text, 4, size);
+    let after_five_x = content_x + metrics.caret_x(typed_text, 5, size);
+    let mark_top = text_top + PAD + 1.0;
+    let mark_bottom = text_top + ROW_HEIGHT - PAD - 1.0;
+    let selected_first_cell = rect(boundary_x + 1.0, mark_top, after_four_x - 1.0, mark_bottom);
+    let selection_exclusion = rect(after_two_x + 1.0, mark_top, boundary_x - 1.0, mark_bottom);
+    let second_selected_cell = rect(
+        after_four_x + 1.0,
+        mark_top,
+        after_five_x - 1.0,
+        mark_bottom,
+    );
+    let cell_checks = || {
+        [
+            selected_first_cell,
+            selection_exclusion,
+            second_selected_cell,
+        ]
+        .into_iter()
+        .map(|region| {
+            check(
+                FrameReduction::Coverage,
+                region,
+                SURFACE_RAISED_SRGB,
+                PARTITION_TOLERANCE,
+            )
+        })
+        .collect()
+    };
+    let typed_cells = capture(&mut bench, cell_checks());
+    let typed_first = coverage(&typed_cells.results[0]);
+    let typed_exclusion = coverage(&typed_cells.results[1]);
 
-    // A *measured* click at the boundary after "ab" (char index 2): the field
-    // resolves the pointer to byte 2 via its metric table, placing the caret
-    // between "ab" and "cd".
-    let boundary_x = PANEL_X + PAD + metrics.caret_x("abcd", 2, size);
     let click_y = text_top + 10.0;
-    // Shift-extend two characters right to select "cd".
+    // Shift-extend two characters right to select "cd". If the click takes the
+    // approximate path it starts after `c` and selects only `d`, so the first
+    // expected cell and final committed value both fail.
     bench
         .execute(vec![
             (
@@ -1128,25 +1135,28 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         ])
         .expect("measured place + Shift-extend");
 
-    let selected_interior = coverage(&capture(&mut bench, interior_coverage()).results[0]);
+    let selected_cells = capture(&mut bench, cell_checks());
+    let selected_first = coverage(&selected_cells.results[0]);
+    let selected_exclusion_coverage = coverage(&selected_cells.results[1]);
     eprintln!(
-        "field interior coverage: typed {typed_interior:.3} → selected {selected_interior:.3}",
+        "selection first-cell coverage: typed {typed_first:.3} → selected {selected_first:.3}; \
+         neighbor {typed_exclusion:.3} → {selected_exclusion_coverage:.3}",
     );
-    // The band is the field accent (#a8c97a) — every channel >95 above the
-    // raised-surface fill, so it fully clears PARTITION_TOLERANCE — but it is
-    // only `caret_height` (~8px) tall over the two "cd" cells (~2 monospace
-    // advances) inside the full ~195x19px interior, so a correctly-placed band
-    // adds only ~0.02-0.03 coverage. Assert a floor comfortably above capture
-    // noise, not a large jump the small band geometry can never produce.
     assert!(
-        selected_interior > typed_interior + 0.01,
-        "a Shift-extended selection must render an accent band over \"cd\", raising interior \
-         coverage above the resting glyphs ({typed_interior:.3}); it was {selected_interior:.3} \
-         — the selection-band-not-rendered class",
+        selected_first > 0.75 && selected_first > typed_first + 0.25,
+        "the first measured selection cell (`c`) must be accent-filled; resting coverage was \
+         {typed_first:.3}, selected was {selected_first:.3}",
+    );
+    assert!(
+        (selected_exclusion_coverage - typed_exclusion).abs() < 0.08,
+        "the preceding `é` cell must remain outside the selection; coverage changed from \
+         {typed_exclusion:.3} to {selected_exclusion_coverage:.3}",
     );
 
-    // An IME composition with a nontrivial cursor span: it renders inserted at
-    // the selection with an underline + composition cursor below the baseline.
+    // Compose `üx` over `cd`, with a non-collapsed byte span selecting the
+    // first, two-byte `ü`. The cursor-span band must fill only the first preedit
+    // cell, while the whole two-cell preedit receives an underline at this
+    // measured selection position.
     bench
         .execute(vec![
             (
@@ -1154,8 +1164,8 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
                 BenchOp::send_mail(
                     &panel,
                     &ImePreedit {
-                        text: "xy".to_owned(),
-                        cursor_begin: Some(1),
+                        text: "üx".to_owned(),
+                        cursor_begin: Some(0),
                         cursor_end: Some(2),
                     },
                 ),
@@ -1165,26 +1175,69 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         ])
         .expect("ime preedit");
 
-    let preedit_underline = coverage(&capture(&mut bench, underline_coverage()).results[0]);
-    eprintln!(
-        "composition underline-band coverage: resting {typed_underline:.3} → composing \
-         {preedit_underline:.3}",
+    let underline_y = text_top + (ROW_HEIGHT - size) * 0.5 + size;
+    let preedit_underline = rect(
+        boundary_x + 1.0,
+        underline_y,
+        after_five_x - 1.0,
+        underline_y + 2.0,
     );
-    // The composition mark in this band is a 1px-tall accent underline over the
-    // "xy" preedit plus the 1px composition cursor — only a few pixels of new
-    // ink against a ~195x3px band that already reads ~0.10 from glyph overlap,
-    // so it lifts coverage by only a few thousandths. Assert a presence floor
-    // that a fully-absent mark (delta ~0) still fails, not a large jump a 1px
-    // mark cannot make. CI renders are deterministic, so this floor is stable.
+    let underline_exclusion = rect(
+        after_five_x + 1.0,
+        underline_y,
+        after_five_x + (after_four_x - boundary_x) - 1.0,
+        underline_y + 2.0,
+    );
+    let composition = capture(
+        &mut bench,
+        vec![
+            check(
+                FrameReduction::Coverage,
+                selected_first_cell,
+                SURFACE_RAISED_SRGB,
+                PARTITION_TOLERANCE,
+            ),
+            check(
+                FrameReduction::Coverage,
+                second_selected_cell,
+                SURFACE_RAISED_SRGB,
+                PARTITION_TOLERANCE,
+            ),
+            check(
+                FrameReduction::Coverage,
+                preedit_underline,
+                SURFACE_RAISED_SRGB,
+                PARTITION_TOLERANCE,
+            ),
+            check(
+                FrameReduction::Coverage,
+                underline_exclusion,
+                SURFACE_RAISED_SRGB,
+                PARTITION_TOLERANCE,
+            ),
+        ],
+    );
+    let cursor_span = coverage(&composition.results[0]);
+    let cursor_exclusion = coverage(&composition.results[1]);
+    let underline = coverage(&composition.results[2]);
+    let underline_after = coverage(&composition.results[3]);
+    eprintln!(
+        "composition coverage: cursor-span {cursor_span:.3}, next-cell {cursor_exclusion:.3}, \
+         underline {underline:.3}, after-underline {underline_after:.3}",
+    );
     assert!(
-        preedit_underline > typed_underline + 0.003,
-        "an IME composition must render its underline / cursor in the measured band below the \
-         baseline, above the resting {typed_underline:.3}; it was {preedit_underline:.3} — the \
-         composition-mark-not-rendered class",
+        cursor_span > 0.75 && cursor_span > cursor_exclusion + 0.25,
+        "the full IME cursor selection must fill the first preedit cell only; span coverage was \
+         {cursor_span:.3}, neighboring cell was {cursor_exclusion:.3}",
+    );
+    assert!(
+        underline > 0.2 && underline > underline_after + 0.15,
+        "the preedit underline must occupy its two measured cells at the replaced selection; \
+         coverage there was {underline:.3}, after the preedit was {underline_after:.3}",
     );
 
-    // Commit replacement text (clears the composition and replaces the "cd"
-    // selection), then Enter to commit the field. The result is "abZ".
+    // Commit replacement text (clears the composition and replaces `cd`), then
+    // measure the caret at the end of the non-ASCII result `abéZ`.
     bench
         .execute(vec![
             (
@@ -1201,32 +1254,47 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         ])
         .expect("commit replacement text");
 
-    // The final caret + glyphs still occupy the field interior (a non-empty
-    // mask bounded to the interior band).
+    let final_text = "abéZ";
+    let final_caret_x = content_x + metrics.caret_x(final_text, 4, size);
+    let final_caret = rect(
+        final_caret_x - 1.0,
+        text_top + PAD,
+        final_caret_x + 2.0,
+        text_top + ROW_HEIGHT - PAD,
+    );
+    let final_caret_exclusion = rect(
+        final_caret_x + 3.0,
+        text_top + PAD,
+        final_caret_x + 6.0,
+        text_top + ROW_HEIGHT - PAD,
+    );
     let final_verdict = capture(
         &mut bench,
-        vec![check(
-            FrameReduction::BoundingBox,
-            interior,
-            SURFACE_RAISED_SRGB,
-            PARTITION_TOLERANCE,
-        )],
+        vec![
+            check(
+                FrameReduction::Coverage,
+                final_caret,
+                SURFACE_RAISED_SRGB,
+                PARTITION_TOLERANCE,
+            ),
+            check(
+                FrameReduction::Coverage,
+                final_caret_exclusion,
+                SURFACE_RAISED_SRGB,
+                PARTITION_TOLERANCE,
+            ),
+        ],
     );
-    let final_box =
-        bounding_box(&final_verdict.results[0]).expect("the committed field still renders glyphs");
+    let caret_coverage = coverage(&final_verdict.results[0]);
+    let caret_exclusion = coverage(&final_verdict.results[1]);
     eprintln!(
-        "final field glyph bbox x[{}..{}] y[{}..{}]",
-        final_box.min_x, final_box.max_x, final_box.min_y, final_box.max_y,
+        "final caret coverage: expected {caret_coverage:.3}, neighboring exclusion \
+         {caret_exclusion:.3}",
     );
     assert!(
-        final_box.max_x < (PANEL_X + PANEL_WIDTH) as u32
-            && final_box.max_y < (text_top + ROW_HEIGHT) as u32,
-        "the final caret and glyphs must sit inside the field interior; bbox was \
-         x[{}..{}] y[{}..{}]",
-        final_box.min_x,
-        final_box.max_x,
-        final_box.min_y,
-        final_box.max_y,
+        caret_coverage > 0.2 && caret_coverage > caret_exclusion + 0.2,
+        "the final measured caret must occupy its tight expected band; coverage there was \
+         {caret_coverage:.3}, neighboring coverage was {caret_exclusion:.3}",
     );
 
     bench
@@ -1240,8 +1308,8 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     let joined = log.join("\n");
     assert!(
         log.iter()
-            .any(|m| m.contains("widget text committed") && m.contains("text=abZ")),
-        "clicking at the measured boundary after \"ab\", extending over \"cd\", and committing \
-         \"Z\" must leave \"abZ\"; log was:\n{joined}",
+            .any(|m| m.contains("widget text committed") && m.contains("text=abéZ")),
+        "clicking after `abé`, extending over `cd`, and committing `Z` must leave the non-ASCII \
+         value `abéZ`; log was:\n{joined}",
     );
 }
