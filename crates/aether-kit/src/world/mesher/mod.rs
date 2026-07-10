@@ -49,7 +49,7 @@
 //! break shows. A relief-free cell keeps the whole-cell fast path,
 //! byte-identical to a world with no height points.
 //!
-//! One bounded [`cliffs::CliffPlan`] classifies every canonical east/north
+//! One bounded `CliffPlan` classifies every canonical east/north
 //! sample adjacency in the fixed `320 × 320` apron exactly once. Only a
 //! level difference strictly past the step ceiling enters the plan. Each
 //! owned window connects those physical crossings with a finite local case:
