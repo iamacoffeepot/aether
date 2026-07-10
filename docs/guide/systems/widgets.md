@@ -2,7 +2,8 @@
 
 `aether-kit` ships a set of guest-side widgets — a slider, a text field, a
 multiline text area, a radio group, a fixed-row virtual list, a button, a label,
-and an image — as ordinary `#[actor(instanced)]` types.
+an image, a toggle, a segmented control, and a numeric editor — as ordinary
+`#[actor(instanced)]` types.
 A panel root spawns them as inline children (ADR-0114) and drives them entirely
 by mail, so composing an editor panel is a matter of laying out widgets and
 translating their value events, never re-deriving hit rects, focus, or per-row
@@ -27,8 +28,9 @@ widget sends can misreport it.
 
 - **Config, down.** One `Config` kind per widget — `SliderConfig`,
   `TextFieldConfig`, `TextAreaConfig`, `RadioConfig`, `VirtualListConfig`,
-  `ButtonConfig`, `LabelConfig`, `ImageConfig` — each embedding a
-  `theme: Theme`. The config is both the value
+  `ButtonConfig`, `LabelConfig`, `ImageConfig`, `ToggleConfig`,
+  `SegmentedConfig`, `NumericConfig` — each embedding a `theme: Theme`. The
+  config is both the value
   `spawn_inline_child::<W>(subname, &config)` boots the widget with and a
   re-sendable mail: send a widget its config kind again to reconfigure it in
   place (a slider's range, a field's cap, a button's label).
@@ -51,8 +53,9 @@ widget sends can misreport it.
   `WidgetStateChanged` so panel routing cannot drift. Hidden widgets keep their
   slot and answer `Collect` with an empty `WidgetDrawList`; disabled widgets
   draw muted but leave input routing; read-only Slider, Radio, TextField,
-  TextArea, and VirtualList remain focusable but reject mutation. Button and
-  Label ignore read-only and validation.
+  TextArea, VirtualList, Toggle, Segmented, and Numeric controls remain
+  focusable but reject mutation. Button and Label ignore read-only and
+  validation.
 - **Interaction, down.** The root sends `FocusGained` / `FocusLost` and
   `HoverGained` / `HoverLost`. Hover comes from explicit edges, not from a child
   inferring absence from raw motion. Pressed and hover select an exclusive fill
@@ -64,6 +67,10 @@ widget sends can misreport it.
   `committed: false` values through a drag and a final `committed: true` on
   release, so a consumer previews the drag and commits the expensive work
   once.
+
+  `ToggleChanged { on }`, `SegmentedSelected { index }`, and
+  `NumericChanged { value, committed }` use that same source-attributed lane;
+  Numeric applies the preview/commit distinction to typed values.
 
 ## Fixed-row virtual lists
 
@@ -109,6 +116,42 @@ but draw nothing. Disabled images stay visible with the theme's disabled alpha
 applied to their configured tint. Images are never pointer- or focus-eligible;
 read-only and validation state have no visual or behavioral meaning for this
 static leaf.
+
+## Toggle, segmented, and numeric controls
+
+`WidgetKind::Toggle` spawns `ToggleWidget` from `ToggleConfig { label,
+initial, theme, state }`. A left press arms the switch and a release back
+inside toggles it once. A focused Enter press or matching Space release also
+toggles once; key repeats, focus loss, read-only state, and unavailability
+cancel the arm. `ToggleChanged { on }` reports the new boolean value. The
+local draw orders the track before its moving knob and label, then adds the
+common validation/focus outlines.
+
+`WidgetKind::Segmented` spawns `SegmentedWidget` from `SegmentedConfig {
+options, initial_index, theme, state }`. The assigned row is divided into
+equal-width named segments. A pointer press selects its bucket, and focused
+Left/Right movement clamps at the first and last option. Empty option lists
+have no hit buckets. `SegmentedSelected { index }` reports only actual changes;
+selected, hovered, pressed, disabled, validation, and focus presentation use
+the common theme/state contract.
+
+`WidgetKind::Numeric` spawns `NumericWidget` from `NumericConfig { min, max,
+step, initial, theme, state }`. It reuses the shared `TextEditState`, named
+`TextSpan`, and measured `SingleLineLayout`, so pointer placement, dragging,
+selection, replacement, and clipboard edits stay on UTF-8 boundaries. Typed
+characters arrive only through `TextInput`; `Key` remains navigation and
+control (`Backspace`, Left/Right, Enter, Up/Down, and Ctrl+A/C/X/V).
+
+Numeric keeps the visible buffer separate from its last committed number.
+Empty, `-`, `.`, and other invalid or non-finite intermediates remain visible
+and emit nothing. A finite edit is clamped and snapped for a
+`NumericChanged { committed: false }` preview without rewriting what the user
+typed. Enter or focus loss canonicalizes a valid value and emits
+`committed: true`; an invalid buffer reverts to the last canonical value
+without an event. Up/Down step from the current valid value, falling back to
+the committed value, and immediately canonicalize and commit. Copy never
+mutates, while cut and asynchronous paste pass through the same selection,
+parse, clamp, and preview path.
 
 ## Root-owned focus and input
 

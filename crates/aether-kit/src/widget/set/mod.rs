@@ -12,6 +12,9 @@
 //! - [`LabelWidget`] — static, non-interactive text.
 //! - [`ImageWidget`] — a static, non-interactive borrowed texture.
 //! - [`VirtualListWidget`] — a fixed-row virtualized item list.
+//! - [`ToggleWidget`] — a boolean switch.
+//! - [`SegmentedWidget`] — a horizontal exclusive choice.
+//! - [`NumericWidget`] — a typed and steppable bounded number.
 //!
 //! Each caches its assigned [`WidgetFrame`](crate::widget::WidgetFrame) rect
 //! and its [`Theme`], answers every
@@ -29,20 +32,26 @@
 pub mod button;
 pub mod image;
 pub mod label;
+pub mod numeric;
 pub mod radio;
+pub mod segmented;
 pub mod slider;
 pub mod text_area;
 pub mod text_field;
 pub mod virtual_list;
+pub mod toggle;
 
 pub use button::ButtonWidget;
 pub use image::ImageWidget;
 pub use label::LabelWidget;
+pub use numeric::NumericWidget;
 pub use radio::RadioGroupWidget;
+pub use segmented::SegmentedWidget;
 pub use slider::SliderWidget;
 pub use text_area::TextAreaWidget;
 pub use text_field::TextFieldWidget;
 pub use virtual_list::VirtualListWidget;
+pub use toggle::ToggleWidget;
 
 use alloc::vec::Vec;
 

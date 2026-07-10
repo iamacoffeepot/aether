@@ -33,8 +33,9 @@
 //!   up — and emits the whole panel as contiguous equal-clip solid batches
 //!   (plus text) from one root render sender.
 //! - **Value.** Each value-up event (`SliderChanged` / `TextCommitted` /
-//!   `RadioSelected` / `VirtualListSelected` / `ButtonClicked`), attributed
-//!   by `ctx.source_mailbox()`, is the seam a real editor translates into
+//!   `RadioSelected` / `VirtualListSelected` / `ButtonClicked` / `ToggleChanged` /
+//!   `SegmentedSelected` / `NumericChanged`), attributed by
+//!   `ctx.source_mailbox()`, is the seam a real editor translates into
 //!   world-knob driver mail; the reference logs it.
 
 use alloc::string::String;
@@ -59,14 +60,15 @@ use crate::widget::focus::{
     AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition, HoverTransition,
 };
 use crate::widget::set::{
-    ButtonWidget, ImageWidget, LabelWidget, RadioGroupWidget, SliderWidget, TextAreaWidget, TextFieldWidget,
-    VirtualListWidget, quad,
+    ButtonWidget, ImageWidget, LabelWidget, NumericWidget, RadioGroupWidget, SegmentedWidget, SliderWidget,
+    TextAreaWidget, TextFieldWidget, ToggleWidget, VirtualListWidget, quad,
 };
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
     ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig,
-    PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget,
-    SliderChanged, SliderConfig, TextAreaConfig, TextCommitted, TextFieldConfig, VirtualListConfig,
+    NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, SegmentedConfig, SegmentedSelected,
+    ScrollConfig, ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget, SliderChanged, SliderConfig,
+    TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig, VirtualListConfig,
     VirtualListSelected, Widget, WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame,
     WidgetKind, WidgetStateChanged,
 };
@@ -369,6 +371,7 @@ pub fn spawn_widget_child(
             })
         }),
         WidgetKind::VirtualList => spawn_virtual_list_child(ctx, spec, row),
+        WidgetKind::Toggle | WidgetKind::Segmented | WidgetKind::Numeric => spawn_added_control(ctx, spec, row),
         WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
         WidgetKind::Composite => spawn_composite_child(ctx, spec, layout, row),
         WidgetKind::Scroll => spawn_scroll_child(ctx, spec, layout),
@@ -474,6 +477,54 @@ fn spawn_scroll_child(
             scroll_viewport: Some(viewport),
         })
     })
+}
+
+/// Spawn the three issue-2926 one-row controls. Keeping their mechanical
+/// decode/spawn profiles together prevents the main exhaustive dispatcher from
+/// becoming a second long-form implementation surface.
+fn spawn_added_control(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
+    match spec.kind {
+        WidgetKind::Toggle => decode_child::<ToggleConfig>(spec).and_then(|config| {
+            let state = config.state.clone();
+            spawn::<ToggleWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                width_pixels: None,
+                height_pixels: row,
+                pointer_eligible: true,
+                focusable: true,
+                state,
+                type_namespace: <ToggleWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
+            })
+        }),
+        WidgetKind::Segmented => decode_child::<SegmentedConfig>(spec).and_then(|config| {
+            let state = config.state.clone();
+            spawn::<SegmentedWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                width_pixels: None,
+                height_pixels: row,
+                pointer_eligible: true,
+                focusable: true,
+                state,
+                type_namespace: <SegmentedWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
+            })
+        }),
+        WidgetKind::Numeric => decode_child::<NumericConfig>(spec).and_then(|config| {
+            let state = config.state.clone();
+            spawn::<NumericWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                width_pixels: None,
+                height_pixels: row,
+                pointer_eligible: true,
+                focusable: true,
+                state,
+                type_namespace: <NumericWidget as Addressable>::NAMESPACE,
+                scroll_viewport: None,
+            })
+        }),
+        _ => None,
+    }
 }
 
 /// Decode one child spec's opaque config bytes as the concrete config type
@@ -625,11 +676,17 @@ fn behavior_mirror_kinds() -> Vec<u64> {
         ButtonConfig::ID.0,
         RadioConfig::ID.0,
         VirtualListConfig::ID.0,
+        ToggleConfig::ID.0,
+        SegmentedConfig::ID.0,
+        NumericConfig::ID.0,
         SliderChanged::ID.0,
         TextCommitted::ID.0,
         ButtonClicked::ID.0,
         RadioSelected::ID.0,
         VirtualListSelected::ID.0,
+        ToggleChanged::ID.0,
+        SegmentedSelected::ID.0,
+        NumericChanged::ID.0,
         FocusGained::ID.0,
         FocusLost::ID.0,
         HoverGained::ID.0,
@@ -717,6 +774,18 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
                 state: config.state,
             }
         }
+        WidgetKind::Toggle => {
+            let config = decode_named::<ToggleConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
+        }
+        WidgetKind::Segmented => {
+            let config = decode_named::<SegmentedConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
+        }
+        WidgetKind::Numeric => {
+            let config = decode_named::<NumericConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            ChildProfile { height: row, pointer_eligible: true, focusable: true, state: config.state }
+        }
         WidgetKind::Composite | WidgetKind::Scroll | WidgetKind::BehaviorHost => return None,
     };
     let script = match host_spec.script {
@@ -799,7 +868,8 @@ fn spawn_behavior_host(_ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, _
 /// `PanelConfig` (top-left, width, theme, a font to load, and the `children`
 /// it stacks). With an empty `children` list it spawns a demonstration stack
 /// of the original interactive/reference widgets; otherwise it stacks exactly
-/// the declared specs (including `Image` children). It routes
+/// the declared specs (including `Image`, `Toggle`, `Segmented`, and `Numeric`
+/// children). It routes
 /// real input through the focus model and logs each value-up event. Fork it
 /// into a real editor panel by handing it your own `children` and translating
 /// the value-up handlers into your own world-knob driver mail.
@@ -1108,6 +1178,40 @@ impl WasmActor for WidgetPanel {
         );
     }
 
+    /// A toggle value-up. The map-editor seam; the reference logs it.
+    #[handler::manual]
+    fn on_toggle_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: ToggleChanged) {
+        tracing::info!(
+            target: "aether_kit",
+            widget = self.child_name(ctx.source_mailbox()),
+            on = changed.on,
+            "widget toggle changed",
+        );
+    }
+
+    /// A segmented selection. The map-editor seam; the reference logs it.
+    #[handler::manual]
+    fn on_segmented_selected(&mut self, ctx: &mut WasmCtx<'_, Manual>, selected: SegmentedSelected) {
+        tracing::info!(
+            target: "aether_kit",
+            widget = self.child_name(ctx.source_mailbox()),
+            index = selected.index,
+            "widget segmented selected",
+        );
+    }
+
+    /// A numeric preview or commit. The map-editor seam; the reference logs it.
+    #[handler::manual]
+    fn on_numeric_changed(&mut self, ctx: &mut WasmCtx<'_, Manual>, changed: NumericChanged) {
+        tracing::info!(
+            target: "aether_kit",
+            widget = self.child_name(ctx.source_mailbox()),
+            value = changed.value,
+            committed = changed.committed,
+            "widget numeric changed",
+        );
+    }
+
     /// The font finished loading: stamp the real `font_id` into the theme and
     /// re-fan it so every child draws text with it.
     #[handler::single]
@@ -1213,6 +1317,9 @@ mod behavior_tests {
         assert_eq!(WidgetKind::TextField.type_tag(), Some(ActorTypeTag::of::<TextFieldWidget>().0));
         assert_eq!(WidgetKind::TextArea.type_tag(), Some(ActorTypeTag::of::<TextAreaWidget>().0));
         assert_eq!(WidgetKind::VirtualList.type_tag(), Some(ActorTypeTag::of::<VirtualListWidget>().0));
+        assert_eq!(WidgetKind::Toggle.type_tag(), Some(ActorTypeTag::of::<ToggleWidget>().0));
+        assert_eq!(WidgetKind::Segmented.type_tag(), Some(ActorTypeTag::of::<SegmentedWidget>().0));
+        assert_eq!(WidgetKind::Numeric.type_tag(), Some(ActorTypeTag::of::<NumericWidget>().0));
         assert_eq!(WidgetKind::Composite.type_tag(), None);
         assert_eq!(WidgetKind::Scroll.type_tag(), None);
         assert_eq!(WidgetKind::BehaviorHost.type_tag(), None);

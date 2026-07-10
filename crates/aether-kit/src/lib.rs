@@ -91,9 +91,10 @@ pub use widget::theme::{SetTheme, Theme, ThemeState};
 pub use widget::{
     ButtonClicked, ButtonConfig, ChildrenChanged, Collect, EditorConfig, EditorKeyChord, EditorRegionRect, EditorShell,
     FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, ImageFit, LabelConfig, MembershipEntry, PanelConfig,
-    RadioConfig, RadioSelected, RegionInputLanes, RegionSpec, ScrollConfig, ScrollDelta, ScrollExtent, ScrollOffset,
-    ScrollOutcome, ScrollResidual, SetWidgetState, SliderChanged, SliderConfig, TextAreaConfig, TextCommitted,
-    TextFieldConfig, VirtualListConfig, VirtualListSelected, WidgetChildSpec, WidgetClipRect, WidgetConfig,
+    NumericChanged, NumericConfig, RadioConfig, RadioSelected, RegionInputLanes, RegionSpec, ScrollConfig, ScrollDelta,
+    ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, SegmentedConfig, SegmentedSelected, SetWidgetState,
+    SliderChanged, SliderConfig, TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig,
+    VirtualListConfig, VirtualListSelected, WidgetChildSpec, WidgetClipRect, WidgetConfig,
     WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged, WidgetValidation,
 };
 pub use world::{
@@ -149,6 +150,9 @@ aether_actor::export!(
     widget::set::LabelWidget,
     widget::set::ImageWidget,
     widget::set::VirtualListWidget,
+    widget::set::ToggleWidget,
+    widget::set::SegmentedWidget,
+    widget::set::NumericWidget,
     EditorShell,
     widget::WidgetPanel
 );
@@ -173,6 +177,9 @@ aether_actor::export!(
     widget::set::LabelWidget,
     widget::set::ImageWidget,
     widget::set::VirtualListWidget,
+    widget::set::ToggleWidget,
+    widget::set::SegmentedWidget,
+    widget::set::NumericWidget,
     EditorShell,
     widget::WidgetPanel,
     aether_behavior::BehaviorHost
