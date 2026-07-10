@@ -742,6 +742,15 @@ impl Default for PanelConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_data::wire::to_vec;
+    use alloc::vec;
+
+    #[test]
+    fn text_area_appends_after_the_landed_image_wire_discriminant() {
+        assert_eq!(to_vec(&WidgetKind::BehaviorHost).expect("encode BehaviorHost"), vec![6, 0, 0, 0]);
+        assert_eq!(to_vec(&WidgetKind::Image).expect("encode Image"), vec![7, 0, 0, 0]);
+        assert_eq!(to_vec(&WidgetKind::TextArea).expect("encode TextArea"), vec![8, 0, 0, 0]);
+    }
 
     #[test]
     fn quad_offset_translates_position_and_keeps_size() {

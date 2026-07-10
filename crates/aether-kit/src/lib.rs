@@ -90,8 +90,7 @@ pub use widget::{
     ButtonClicked, ButtonConfig, ChildrenChanged, Collect, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig,
     ImageFit, LabelConfig, MembershipEntry, PanelConfig, RadioConfig, RadioSelected, SetWidgetState, SliderChanged,
     SliderConfig, TextAreaConfig, TextCommitted, TextFieldConfig, WidgetChildSpec, WidgetClipRect, WidgetConfig,
-    WidgetControlState,
-    WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged, WidgetValidation,
+    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged, WidgetValidation,
 };
 pub use world::{
     ApplyBrush, AutomatonRule, BrushParameters, CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk,
