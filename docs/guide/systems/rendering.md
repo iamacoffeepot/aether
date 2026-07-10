@@ -192,7 +192,7 @@ subcell budget. Coordinates remain named records rather than positional arrays:
 
 ```json
 {
-  "source": { "id": 7, "revision": 3 },
+  "source": { "id": { "0": 7 }, "revision": 3 },
   "path": [
     { "x_octimeters": 512, "z_octimeters": 512 },
     { "x_octimeters": 1536, "z_octimeters": 512 }
@@ -215,6 +215,73 @@ consistent partial world is still remeshed. `RunAutomaton` takes a named
 accepted automaton cell costs one step and all 256 of its material subcells.
 These are live mutation results only: preview/commit/discard state belongs to
 the separate proposal transaction in ADR-0143.
+
+**Pick and project revisioned terrain marks.** Load the MarkBook under its
+default component name (`aether.kit.mark`) alongside the world component.
+`aether.kit.world.pick_terrain` accepts a named meter-space ray rather than a
+screen-space tuple:
+
+```json
+{
+  "ray": {
+    "origin": {
+      "x_meters": 2.0,
+      "y_meters": 8.0,
+      "z_meters": 2.0
+    },
+    "direction": {
+      "x_unitless": 0.0,
+      "y_unitless": -1.0,
+      "z_unitless": 0.0
+    },
+    "max_distance_meters": 16.0
+  }
+}
+```
+
+The typed result is either `Hit`, `Miss`, or `Rejected`. A hit reports
+the continuous meter-space position, the owning `CellPos`, the sampled
+surface height, the ray distance, and a nearest-octimeter `WorldPoint` that
+can be passed directly to `aether.kit.mark.create`. Picking follows the
+rendered top surface, including relief and water; missing/Void terrain is not a
+mark anchor. The bounded march accepts only a present above-to-below bracket
+whose two sides converge on the sampled height; entering terrain from the side
+or crossing a discontinuous cliff with a horizontal ray is not reclassified as
+a top-surface hit. Its step and convergence epsilon are both derived from the
+shared subcell resolution.
+
+The world does not own or mutate marks. Send
+`aether.kit.world.set_mark_overlay_visibility { "visible": true }` to start a
+correlated `MarkList` projection from the default-loaded MarkBook. The reply
+reports whether the first full snapshot has synchronized. While visible, each
+render refreshes at most one snapshot in flight and draws the cached point,
+path, and area geometry after the ground mesh. Every overlay vertex resamples
+terrain height, so an unchanged mark follows a later terrain edit.
+
+Select only an exact cached revision:
+
+```json
+{
+  "selected": {
+    "id": { "0": 7 },
+    "revision": 3
+  }
+}
+```
+
+`set_mark_overlay_selection_result` distinguishes `Selected`, `Cleared`,
+`Stale` (the cache has a newer revision), and `Unsynchronized` (the
+requested revision is ahead or missing and a refresh was requested). A later
+snapshot that edits or deletes the selected mark clears the highlight instead
+of silently moving it to another revision.
+
+Scalar overlay-only ground uses the contour library's continuous reconstructed
+coverage at the same 127.5 crossing as the rendered mesh, rather than treating a
+whole subcell as its stored byte. Mark geometry is capped per frame at 10,240
+triangles / 30,720 vertices — enough for one maximum-size selected area. Marks
+are traversed in stable id order; geometry after the cap is omitted and the
+first omitted mark plus the emitted counts are warning-logged once when the
+view enters overflow.
 
 **From an agent over MCP — stage, then capture.** Use `capture_frame`: its
 `mails` bundle dispatches before the readback (the state that should appear) and

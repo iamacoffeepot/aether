@@ -27,6 +27,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::world::SCALAR_COVERAGE_THRESHOLD;
 use aether_capabilities::render::{DrawTriangle, Vertex};
 /// Octimeters per meter (`1 cell = 1 m = 256 octimeters`), for the
 /// octimeter-to-meter conversion at vertex emit.
@@ -61,11 +62,10 @@ pub struct SmoothParams {
     pub smoothing_degrees: u32,
 }
 
-const COVERAGE_THRESHOLD: u8 = 128;
-const COVERAGE_CROSSING: f32 = 127.5;
+pub(crate) const COVERAGE_CROSSING: f32 = SCALAR_COVERAGE_THRESHOLD as f32 - 0.5;
 
 fn covered(sample: u8) -> bool {
-    sample >= COVERAGE_THRESHOLD
+    scalar_coverage_is_inside(f32::from(sample))
 }
 
 fn binary_coverage(sample: u8) -> bool {
@@ -95,14 +95,44 @@ fn scalar_zone(coverage: &[u8], width: usize, height: usize, x: i32, z: i32) -> 
         .any(|(dx, dz)| !binary_coverage(sample_at(coverage, width, height, x + dx, z + dz, 0)))
 }
 
-fn bilinear_coverage(coverage: &[u8], width: usize, height: usize, x: i32, z: i32, fx: f32, fz: f32) -> u8 {
-    let bl = f32::from(sample_at(coverage, width, height, x, z, 0));
-    let br = f32::from(sample_at(coverage, width, height, x + 1, z, 0));
-    let tl = f32::from(sample_at(coverage, width, height, x, z + 1, 0));
-    let tr = f32::from(sample_at(coverage, width, height, x + 1, z + 1, 0));
+pub(crate) fn interpolated_coverage(
+    bottom_left: u8,
+    bottom_right: u8,
+    top_left: u8,
+    top_right: u8,
+    fraction_x: f32,
+    fraction_z: f32,
+) -> f32 {
+    let bl = f32::from(bottom_left);
+    let br = f32::from(bottom_right);
+    let tl = f32::from(top_left);
+    let tr = f32::from(top_right);
+    let fx = fraction_x.clamp(0.0, 1.0);
+    let fz = fraction_z.clamp(0.0, 1.0);
     let bottom = bl + (br - bl) * fx;
     let top = tl + (tr - tl) * fx;
-    (bottom + (top - bottom) * fz).round().clamp(0.0, 255.0) as u8
+    bottom + (top - bottom) * fz
+}
+
+pub(crate) fn reconstructed_coverage(
+    bottom_left: u8,
+    bottom_right: u8,
+    top_left: u8,
+    top_right: u8,
+    fraction_x: f32,
+    fraction_z: f32,
+) -> u8 {
+    if [bottom_left, bottom_right, top_left, top_right].into_iter().all(binary_coverage) {
+        bottom_left
+    } else {
+        interpolated_coverage(bottom_left, bottom_right, top_left, top_right, fraction_x, fraction_z)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    }
+}
+
+pub(crate) fn scalar_coverage_is_inside(coverage: f32) -> bool {
+    coverage >= COVERAGE_CROSSING
 }
 
 /// The corner-flip test: the two orthogonal neighbors and the diagonal
@@ -167,13 +197,16 @@ pub fn minimize_corners(
         for gx in 0..gw {
             let cx = (gx / upsample) as i32;
             let cz = (gz / upsample) as i32;
-            grid[gz * gw + gx] = if scalar_zone(coverage, width, height, cx, cz) {
-                let fx = ((gx % upsample) as f32 + 0.5) * inv;
-                let fz = ((gz % upsample) as f32 + 0.5) * inv;
-                bilinear_coverage(coverage, width, height, cx, cz, fx, fz)
-            } else {
-                sample_at(coverage, width, height, cx, cz, 0)
-            };
+            let fx = ((gx % upsample) as f32 + 0.5) * inv;
+            let fz = ((gz % upsample) as f32 + 0.5) * inv;
+            grid[gz * gw + gx] = reconstructed_coverage(
+                sample_at(coverage, width, height, cx, cz, 0),
+                sample_at(coverage, width, height, cx + 1, cz, 0),
+                sample_at(coverage, width, height, cx, cz + 1, 0),
+                sample_at(coverage, width, height, cx + 1, cz + 1, 0),
+                fx,
+                fz,
+            );
         }
     }
     let max_iterations = params.iter().map(|p| p.iterations).max().unwrap_or(0);
