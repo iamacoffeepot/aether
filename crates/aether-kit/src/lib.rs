@@ -78,7 +78,8 @@ pub use widget::{
 pub use world::{
     CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk, ChunkPos,
     HEIGHT_POINT_INHERIT, HEIGHT_POINTS_PER_CHUNK, Material, Region, SetCellHeights, SetCellPoints,
-    SetChunk, SetRegion, SmoothingProfile, WaterPlane, World, WorldDecodeError, WorldLoad,
+    SetChunk, SetRegion, SmoothingProfile, StampDisc, StampHexagon, StampPolygon, WaterPlane,
+    World, WorldDecodeError, WorldLoad, WorldPoint,
 };
 
 /// Octimeters per tile: `1 tile = 1 meter = 256 octimeters`.

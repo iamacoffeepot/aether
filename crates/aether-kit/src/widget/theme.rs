@@ -15,6 +15,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use aether_math::Rgba;
+
 /// Per-frame local interaction state a widget is in. Never serialized
 /// — it's derived fresh each frame from input, not carried on the
 /// wire. Passed by value to [`Theme::fill`].
@@ -24,15 +26,6 @@ pub enum WidgetState {
     Hover,
     Pressed,
     Disabled,
-}
-
-/// Convert one 8-bit sRGB channel to a linear-space float via the same
-/// approximate `channel²` transfer the world mesher uses
-/// (`crates/aether-kit/src/world/mesher/style.rs`, `hsl_to_linear_rgb`):
-/// `(channel / 255)²`.
-const fn srgb_channel_to_linear(channel: u8) -> f32 {
-    let c = channel as f32 / 255.0;
-    c * c
 }
 
 /// The shared visual language every widget draws from: palette role
@@ -49,27 +42,27 @@ const fn srgb_channel_to_linear(channel: u8) -> f32 {
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Theme {
     /// Base background fill — panel / window backdrop.
-    pub surface: [f32; 4],
+    pub surface: Rgba,
     /// A surface lifted one step above `surface` — cards, rows,
     /// raised panels within a panel.
-    pub surface_raised: [f32; 4],
+    pub surface_raised: Rgba,
     /// Borders, dividers, and control outlines.
-    pub outline: [f32; 4],
+    pub outline: Rgba,
     /// Primary text and iconography.
-    pub text_primary: [f32; 4],
+    pub text_primary: Rgba,
     /// De-emphasized text — captions, disabled labels, hints.
-    pub text_muted: [f32; 4],
+    pub text_muted: Rgba,
     /// The interactive / highlight role — buttons, active track
     /// fills, selection.
-    pub accent: [f32; 4],
+    pub accent: Rgba,
     /// Text/iconography drawn on top of an `accent`-filled surface.
-    pub accent_text: [f32; 4],
+    pub accent_text: Rgba,
     /// Role-agnostic lift composited over a base color on
     /// [`WidgetState::Hover`] — a subtle white brighten.
-    pub hover_overlay: [f32; 4],
+    pub hover_overlay: Rgba,
     /// Role-agnostic press composited over a base color on
     /// [`WidgetState::Pressed`] — a subtle black darken.
-    pub pressed_overlay: [f32; 4],
+    pub pressed_overlay: Rgba,
     /// Alpha multiplier applied to a base color on
     /// [`WidgetState::Disabled`].
     pub disabled_alpha: f32,
@@ -101,26 +94,23 @@ impl Theme {
     /// for `Hover` / `Pressed`; `base`'s alpha scaled by
     /// `disabled_alpha` for `Disabled`.
     #[must_use]
-    pub fn fill(&self, base: [f32; 4], state: WidgetState) -> [f32; 4] {
+    pub fn fill(&self, base: Rgba, state: WidgetState) -> Rgba {
         match state {
             WidgetState::Normal => base,
             WidgetState::Hover => Self::composite_over(base, self.hover_overlay),
             WidgetState::Pressed => Self::composite_over(base, self.pressed_overlay),
-            WidgetState::Disabled => [base[0], base[1], base[2], base[3] * self.disabled_alpha],
+            WidgetState::Disabled => {
+                Rgba::new(base.r, base.g, base.b, base.a * self.disabled_alpha)
+            }
         }
     }
 
     /// Standard src-over blend of `overlay` atop `base`, preserving
     /// `base`'s own alpha channel: each RGB channel lerps toward the
     /// overlay's channel by the overlay's alpha.
-    fn composite_over(base: [f32; 4], overlay: [f32; 4]) -> [f32; 4] {
-        let a = overlay[3];
-        [
-            (overlay[0] - base[0]).mul_add(a, base[0]),
-            (overlay[1] - base[1]).mul_add(a, base[1]),
-            (overlay[2] - base[2]).mul_add(a, base[2]),
-            base[3],
-        ]
+    fn composite_over(base: Rgba, overlay: Rgba) -> Rgba {
+        let blended = base.lerp(overlay, overlay.a);
+        Rgba::new(blended.r, blended.g, blended.b, base.a)
     }
 
     /// The compiled-in default theme, seeded from the settled
@@ -129,56 +119,21 @@ impl Theme {
     /// during widget-set bring-up.
     pub const DEFAULT: Self = Self {
         // `#191b15` — workbench `--bg`.
-        surface: [
-            srgb_channel_to_linear(0x19),
-            srgb_channel_to_linear(0x1b),
-            srgb_channel_to_linear(0x15),
-            1.0,
-        ],
+        surface: Rgba::from_srgb8(0x19, 0x1b, 0x15, 0xff),
         // `#20231b` — workbench `--panel`.
-        surface_raised: [
-            srgb_channel_to_linear(0x20),
-            srgb_channel_to_linear(0x23),
-            srgb_channel_to_linear(0x1b),
-            1.0,
-        ],
+        surface_raised: Rgba::from_srgb8(0x20, 0x23, 0x1b, 0xff),
         // `#32362a` — workbench `--line`.
-        outline: [
-            srgb_channel_to_linear(0x32),
-            srgb_channel_to_linear(0x36),
-            srgb_channel_to_linear(0x2a),
-            1.0,
-        ],
+        outline: Rgba::from_srgb8(0x32, 0x36, 0x2a, 0xff),
         // `#e6e4d6` — workbench `--ink`.
-        text_primary: [
-            srgb_channel_to_linear(0xe6),
-            srgb_channel_to_linear(0xe4),
-            srgb_channel_to_linear(0xd6),
-            1.0,
-        ],
+        text_primary: Rgba::from_srgb8(0xe6, 0xe4, 0xd6, 0xff),
         // `#9aa08c` — workbench `--dim`.
-        text_muted: [
-            srgb_channel_to_linear(0x9a),
-            srgb_channel_to_linear(0xa0),
-            srgb_channel_to_linear(0x8c),
-            1.0,
-        ],
+        text_muted: Rgba::from_srgb8(0x9a, 0xa0, 0x8c, 0xff),
         // `#a8c97a` — workbench `--accent`.
-        accent: [
-            srgb_channel_to_linear(0xa8),
-            srgb_channel_to_linear(0xc9),
-            srgb_channel_to_linear(0x7a),
-            1.0,
-        ],
+        accent: Rgba::from_srgb8(0xa8, 0xc9, 0x7a, 0xff),
         // `#191b15` — dark ink on the light accent (= `surface`).
-        accent_text: [
-            srgb_channel_to_linear(0x19),
-            srgb_channel_to_linear(0x1b),
-            srgb_channel_to_linear(0x15),
-            1.0,
-        ],
-        hover_overlay: [1.0, 1.0, 1.0, 0.08],
-        pressed_overlay: [0.0, 0.0, 0.0, 0.12],
+        accent_text: Rgba::from_srgb8(0x19, 0x1b, 0x15, 0xff),
+        hover_overlay: Rgba::new(1.0, 1.0, 1.0, 0.08),
+        pressed_overlay: Rgba::new(0.0, 0.0, 0.0, 0.12),
         disabled_alpha: 0.4,
         pad: 8.0,
         gap: 6.0,
@@ -215,7 +170,7 @@ mod tests {
         // Tripwire: Normal must return the base color untouched — no
         // overlay, no alpha scaling.
         let theme = Theme::DEFAULT;
-        let base = [0.2, 0.4, 0.6, 0.8];
+        let base = Rgba::new(0.2, 0.4, 0.6, 0.8);
         assert_eq!(theme.fill(base, WidgetState::Normal), base);
     }
 
@@ -225,11 +180,14 @@ mod tests {
         // each RGB channel lerps toward the overlay by the overlay's
         // alpha, and base's own alpha survives untouched.
         let theme = Theme {
-            hover_overlay: [1.0, 0.0, 0.0, 0.5],
+            hover_overlay: Rgba::new(1.0, 0.0, 0.0, 0.5),
             ..Theme::DEFAULT
         };
-        let base = [0.0, 1.0, 0.0, 1.0];
-        assert_eq!(theme.fill(base, WidgetState::Hover), [0.5, 0.5, 0.0, 1.0]);
+        let base = Rgba::new(0.0, 1.0, 0.0, 1.0);
+        assert_eq!(
+            theme.fill(base, WidgetState::Hover),
+            Rgba::new(0.5, 0.5, 0.0, 1.0)
+        );
     }
 
     #[test]
@@ -240,10 +198,10 @@ mod tests {
             disabled_alpha: 0.4,
             ..Theme::DEFAULT
         };
-        let base = [0.1, 0.2, 0.3, 1.0];
+        let base = Rgba::new(0.1, 0.2, 0.3, 1.0);
         assert_eq!(
             theme.fill(base, WidgetState::Disabled),
-            [0.1, 0.2, 0.3, 0.4]
+            Rgba::new(0.1, 0.2, 0.3, 0.4)
         );
     }
 }

@@ -89,13 +89,11 @@ requires an R8 texture, thresholds at iso 127.5, and renders a body/rim band
 from the rect parameters. Both are immediate-mode: resend the batch every frame
 or it disappears on the next commit-current frame.
 
-`aether.kit.world` uses the coverage material for painted overlay surfaces. It
-prepares the same smoothed scalar material mask plane the CPU contour oracle
-marches, uploads that plane as an R8 texture per chunk/material, and redraws a
-depth-tested coverage material rect for each ready plane on `Render`. Repainting
-the overlay plane updates the existing texture instead of sending replacement
-overlay triangles; terrain underlay, relief, walls, and raw calibration geometry
-remain ordinary `DrawTriangle` meshes.
+`aether.kit.world` stores painted overlay surfaces as one scalar coverage byte
+per subcell. Its CPU contour marcher reconstructs the fixed 127.5 boundary and
+caches the resulting `DrawTriangle` geometry per chunk. Coverage values between
+0 and 255 put crossings between subcell centers, so shape stamps have smooth
+edges while legacy binary masks retain their midpoint crossings.
 
 **The `view_proj` uniform, latest wins.** The substrate holds one column-major
 4×4 matrix and uploads it verbatim to the shader each frame (column-major matches
@@ -156,6 +154,35 @@ Address the cap by type — `ctx.actor::<RenderCapability>()` — and send
 lifecycle graph omits `Render` (headless), subscribing to it rejects fail-fast at
 wire time, and the actor simply never submits — a no-op where there's no GPU
 anyway.
+
+**Author a sub-cell world shape with one stamp.** Send this payload as
+`aether.kit.world.stamp_hexagon` to the loaded `aether.kit.world` component:
+
+```json
+{
+  "center": {
+    "x_octimeters": 2048,
+    "z_octimeters": 2048
+  },
+  "radius_octimeters": 768,
+  "material": 3
+}
+```
+
+That paints a Stone (`Material` byte `3`) hexagon centered at world cell
+`(8, 8)`, with a three-meter center-to-vertex radius. The component generates
+the six vertices, area-rasterizes the ring into `0..255` subcell coverage, and
+remeshes every touched chunk and apron. Use `stamp_disc` with the same center,
+radius, and material fields, or `stamp_polygon` with `points` containing named
+`{ "x_octimeters": ..., "z_octimeters": ... }` world points. A stamp is
+bounded to 1,024 polygon vertices, 4,096 subcells per axis, and 1,048,576
+subcells of raster area, with a 33,554,432-operation conservative scanline
+work budget; an oversized stamp paints nothing. Repeated stamps of the same
+material max-compose coverage sample by sample. A different material takes
+painter-order ownership at cell granularity and clears that cell's previous
+mask before writing its new samples, because the overlay plane stores one
+material per cell. The existing `set_cell_points` and `set_chunk` raw-array
+paths remain available for direct plane authoring and save compatibility.
 
 **From an agent over MCP — stage, then capture.** Use `capture_frame`: its
 `mails` bundle dispatches before the readback (the state that should appear) and

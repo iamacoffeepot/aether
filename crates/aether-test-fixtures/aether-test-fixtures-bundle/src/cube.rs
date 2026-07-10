@@ -92,14 +92,14 @@ impl Cube {
         let ppp = corner(1.0, 1.0, 1.0);
 
         // One vertex with a face color baked in.
-        let vert = |position: (f32, f32, f32), color: [f32; 3]| Vertex {
+        let vert = |position: (f32, f32, f32), color: Rgb| Vertex {
             x: position.0,
             y: position.1,
             z: position.2,
-            color: Rgb::new(color[0], color[1], color[2]),
+            color,
         };
         // A quad as two triangles, all six vertices sharing `color`.
-        let quad = |a, b, c, d, color: [f32; 3]| {
+        let quad = |a, b, c, d, color: Rgb| {
             [
                 DrawTriangle {
                     verts: [vert(a, color), vert(b, color), vert(c, color)],
@@ -110,12 +110,12 @@ impl Cube {
             ]
         };
 
-        let [front_0, front_1] = quad(nnp, pnp, ppp, npp, [0.85, 0.20, 0.20]); // +Z
-        let [back_0, back_1] = quad(pnn, nnn, npn, ppn, [0.20, 0.30, 0.85]); // -Z
-        let [right_0, right_1] = quad(pnp, pnn, ppn, ppp, [0.20, 0.75, 0.30]); // +X
-        let [left_0, left_1] = quad(nnn, nnp, npp, npn, [0.85, 0.75, 0.20]); // -X
-        let [top_0, top_1] = quad(npp, ppp, ppn, npn, [0.80, 0.45, 0.85]); // +Y
-        let [bottom_0, bottom_1] = quad(nnn, pnn, pnp, nnp, [0.30, 0.80, 0.80]); // -Y
+        let [front_0, front_1] = quad(nnp, pnp, ppp, npp, Rgb::new(0.85, 0.20, 0.20)); // +Z
+        let [back_0, back_1] = quad(pnn, nnn, npn, ppn, Rgb::new(0.20, 0.30, 0.85)); // -Z
+        let [right_0, right_1] = quad(pnp, pnn, ppn, ppp, Rgb::new(0.20, 0.75, 0.30)); // +X
+        let [left_0, left_1] = quad(nnn, nnp, npp, npn, Rgb::new(0.85, 0.75, 0.20)); // -X
+        let [top_0, top_1] = quad(npp, ppp, ppn, npn, Rgb::new(0.80, 0.45, 0.85)); // +Y
+        let [bottom_0, bottom_1] = quad(nnn, pnn, pnp, nnp, Rgb::new(0.30, 0.80, 0.80)); // -Y
 
         [
             front_0, front_1, back_0, back_1, right_0, right_1, left_0, left_1, top_0, top_1,
