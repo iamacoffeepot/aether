@@ -195,6 +195,23 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
           mesa-vulkan-drivers mold
       - uses: Swatinem/rust-cache@v2
+      # sccache caches individual rustc invocations content-keyed in
+      # the RunsOn S3 cache bucket (in-VPC, instance-profile creds) —
+      # covering the workspace-member crates that rust-cache
+      # deliberately excludes, which dominate this job's compile time
+      # (the workspace build and every per-package `xtask dist` wasm
+      # build). The key prefix sits under cache/ so entries fall under
+      # the bucket's 10-day expiration rule. Incremental compilation
+      # is off because sccache cannot cache incremental artifacts —
+      # a fresh runner has no incremental state to reuse anyway.
+      - name: Configure sccache (S3 backend)
+        run: |
+          echo "SCCACHE_BUCKET=$RUNS_ON_S3_BUCKET_CACHE" >> "$GITHUB_ENV"
+          echo "SCCACHE_REGION=$RUNS_ON_AWS_REGION" >> "$GITHUB_ENV"
+          echo "SCCACHE_S3_KEY_PREFIX=cache/sccache" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+      - uses: mozilla-actions/sccache-action@v0.0.9
       # Pre-build the packaged artifact tree the scenario runner loads
       # at test time. Without this, ADR-0067 per-component scenarios
       # silently skip in CI ("wasm not built"); `AETHER_REQUIRE_RUNTIME=1`
@@ -251,6 +268,11 @@ jobs:
           path: target/test-bench-artifacts/**
           if-no-files-found: ignore
           retention-days: 7
+      # Hit-rate visibility while the S3 backend beds in; harmless to
+      # keep once it does.
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
   # Qodana scan folded in from .github/workflows/qodana.yml so the
   # ci-pass aggregator can needs: it directly (iamacoffeepot/aether#941).
