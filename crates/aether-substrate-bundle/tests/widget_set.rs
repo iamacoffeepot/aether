@@ -36,7 +36,7 @@ use aether_kinds::{
     MouseButtonRelease, MouseMove, TextInput, Tick,
 };
 use aether_kit::{
-    ButtonConfig, PanelConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme,
+    ButtonConfig, PanelConfig, RadioConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme,
     WidgetChildSpec, WidgetControlState, WidgetKind,
 };
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
@@ -275,6 +275,22 @@ fn button_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpec {
     }
 }
 
+fn radio_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::Radio,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: RadioConfig {
+            options: vec!["First".to_owned(), "Second".to_owned(), "Third".to_owned()],
+            initial_index: 0,
+            theme: Theme::DEFAULT,
+            state,
+        }
+        .encode_into_bytes(),
+    }
+}
+
 fn text_field_spec(subname: &str, initial: &str, state: WidgetControlState) -> WidgetChildSpec {
     WidgetChildSpec {
         subname: subname.to_owned(),
@@ -339,6 +355,17 @@ fn slider_changed_widget(message: &str) -> Option<String> {
             .unwrap_or_default()
             .to_owned()
     })
+}
+
+/// The selected index from a `widget radio selected` log line.
+fn radio_selected_index(message: &str) -> Option<u32> {
+    message
+        .split("index=")
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// A panel handed an explicit `children` list stacks exactly those widgets in
@@ -552,6 +579,229 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
     assert_eq!(
         clicks, 2,
         "Space release and the first Enter press click exactly once each; log was:\n{joined}",
+    );
+}
+
+/// Read-only must block both of Radio's value-changing paths. Re-enabling the
+/// same actor makes keyboard and pointer selection live, proving the negative
+/// phase was neither unrouted input nor an unobserved child event.
+#[test]
+fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = TestBench::start_with_size(240, 100).expect("boot");
+    let read_only = WidgetControlState {
+        read_only: true,
+        ..WidgetControlState::default()
+    };
+    load_panel_with(&mut bench, &wasm, vec![radio_spec("choice", read_only)]);
+
+    let panel = panel_address();
+    bench
+        .execute(vec![
+            ("spawn", BenchOp::send_mail(&panel, &Tick)),
+            ("focus", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            (
+                "blocked_key",
+                BenchOp::send_mail(&panel, &Key { code: KEY_DOWN }),
+            ),
+            (
+                "blocked_pointer",
+                BenchOp::send_mail(&panel, &press(30.0, 70.0)),
+            ),
+            (
+                "blocked_pointer_release",
+                BenchOp::send_mail(&panel, &release(30.0, 70.0)),
+            ),
+            (
+                "enable",
+                BenchOp::send_mail(
+                    child_address("choice"),
+                    &SetWidgetState {
+                        state: WidgetControlState::default(),
+                    },
+                ),
+            ),
+            (
+                "allowed_key",
+                BenchOp::send_mail(&panel, &Key { code: KEY_DOWN }),
+            ),
+            (
+                "allowed_pointer",
+                BenchOp::send_mail(&panel, &press(30.0, 70.0)),
+            ),
+            (
+                "allowed_pointer_release",
+                BenchOp::send_mail(&panel, &release(30.0, 70.0)),
+            ),
+        ])
+        .expect("read-only radio session");
+
+    let log = panel_log_messages(&mut bench);
+    let joined = log.join("\n");
+    let selections: Vec<u32> = log
+        .iter()
+        .filter(|message| {
+            message.contains("widget radio selected") && message.contains("widget=choice")
+        })
+        .map(|message| radio_selected_index(message).expect("radio log line carries an index"))
+        .collect();
+    assert_eq!(
+        selections,
+        vec![1, 2],
+        "read-only key/click input must emit nothing or alter the later enabled indexes; log was:\n{joined}",
+    );
+}
+
+/// Arm, disable, and re-enable Button before its decisive stale release.
+fn drive_button_cancellation_session(bench: &mut TestBench) {
+    let run = child_address("run");
+    let unavailable = WidgetControlState {
+        enabled: false,
+        ..WidgetControlState::default()
+    };
+    bench
+        .execute(vec![
+            // Address the live child directly so focus loss cannot mask a
+            // failure to clear its pointer arm on the state transition.
+            ("arm_button", BenchOp::send_mail(&run, &press(30.0, 22.0))),
+            (
+                "disable_button",
+                BenchOp::send_mail(&run, &SetWidgetState { state: unavailable }),
+            ),
+            (
+                "enable_button",
+                BenchOp::send_mail(
+                    &run,
+                    &SetWidgetState {
+                        state: WidgetControlState::default(),
+                    },
+                ),
+            ),
+            (
+                "stale_button_release",
+                BenchOp::send_mail(&run, &release(30.0, 22.0)),
+            ),
+            (
+                "live_button_press",
+                BenchOp::send_mail(&run, &press(30.0, 22.0)),
+            ),
+            (
+                "live_button_release",
+                BenchOp::send_mail(&run, &release(30.0, 22.0)),
+            ),
+        ])
+        .expect("button state cancellation session");
+}
+
+fn drive_slider_cancellation_session(bench: &mut TestBench) {
+    let panel = panel_address();
+    let value = child_address("value");
+    let read_only = WidgetControlState {
+        read_only: true,
+        ..WidgetControlState::default()
+    };
+    bench
+        .execute(vec![
+            // Read-only leaves root capture intact. Re-enable before moving;
+            // only clearing Slider's own drag state prevents stale values.
+            ("begin_drag", BenchOp::send_mail(&panel, &press(60.0, 52.0))),
+            (
+                "make_slider_read_only",
+                BenchOp::send_mail(&value, &SetWidgetState { state: read_only }),
+            ),
+            (
+                "enable_slider",
+                BenchOp::send_mail(
+                    &value,
+                    &SetWidgetState {
+                        state: WidgetControlState::default(),
+                    },
+                ),
+            ),
+            (
+                "stale_drag_move",
+                BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 }),
+            ),
+            (
+                "stale_drag_release",
+                BenchOp::send_mail(&panel, &release(160.0, 52.0)),
+            ),
+            (
+                "live_drag_press",
+                BenchOp::send_mail(&panel, &press(110.0, 52.0)),
+            ),
+            (
+                "live_drag_move",
+                BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 }),
+            ),
+            (
+                "live_drag_release",
+                BenchOp::send_mail(&panel, &release(160.0, 52.0)),
+            ),
+        ])
+        .expect("slider state cancellation session");
+}
+
+/// A state change cancels child-owned transient input, not merely root
+/// routing. Each actor is re-enabled before the stale release/move so failure
+/// to clear its internal arm/drag would create an observable extra event.
+#[test]
+fn live_state_changes_cancel_button_arm_and_slider_drag() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = TestBench::start_with_size(240, 90).expect("boot");
+    load_panel_with(
+        &mut bench,
+        &wasm,
+        vec![
+            button_spec("run", WidgetControlState::default()),
+            slider_spec("value", 0.0),
+        ],
+    );
+
+    let panel = panel_address();
+    bench
+        .execute(vec![("spawn", BenchOp::send_mail(&panel, &Tick))])
+        .expect("spawn widget set");
+    drive_button_cancellation_session(&mut bench);
+    drive_slider_cancellation_session(&mut bench);
+
+    let log = panel_log_messages(&mut bench);
+    let joined = log.join("\n");
+    let clicks = log
+        .iter()
+        .filter(|message| {
+            message.contains("widget button clicked") && message.contains("widget=run")
+        })
+        .count();
+    assert_eq!(
+        clicks, 1,
+        "the stale release must not click; the enabled positive control clicks once; log was:\n{joined}",
+    );
+
+    let slider_changes: Vec<_> = log
+        .iter()
+        .filter(|message| {
+            message.contains("widget slider changed") && message.contains("widget=value")
+        })
+        .collect();
+    let committed = slider_changes
+        .iter()
+        .filter(|message| message.contains("committed=true"))
+        .count();
+    assert_eq!(
+        slider_changes.len(),
+        4,
+        "the cancelled drag emits only its initial press; the live drag emits press/move/release; log was:\n{joined}",
+    );
+    assert_eq!(
+        committed, 1,
+        "only the enabled positive-control drag may commit; log was:\n{joined}",
     );
 }
 
