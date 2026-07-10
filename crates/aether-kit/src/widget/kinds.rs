@@ -856,27 +856,52 @@ impl Default for PanelConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_data::wire;
+    use aether_data::wire::{self, to_vec};
+    use alloc::vec;
 
     #[test]
     fn virtual_list_wire_vocabulary_uses_named_records_not_positional_storage() {
         let source = include_str!("kinds.rs");
-        assert!(source.contains("pub struct VirtualListConfig {"));
-        assert!(source.contains("pub struct VirtualListSelected {"));
-        assert!(!source.contains("pub struct VirtualListConfig("));
-        assert!(!source.contains("pub struct VirtualListSelected("));
-        assert!(!source.contains("pub type VirtualListConfig"));
-        assert!(!source.contains("pub type VirtualListSelected"));
-
         let config = source
-            .split("pub struct VirtualListConfig {")
+            .split("/// `aether.kit.widget.virtual_list.config`")
             .nth(1)
-            .and_then(|rest| rest.split("pub struct ButtonConfig").next())
+            .and_then(|rest| rest.split("/// `aether.kit.widget.button.config`").next())
             .expect("virtual-list config source section");
+        assert!(config.contains("pub struct VirtualListConfig {"));
+        assert!(!config.contains("pub struct VirtualListConfig("));
+        assert!(!config.contains("pub type VirtualListConfig"));
         assert!(
-            !config.contains('['),
-            "virtual-list config must not smuggle semantic values through fixed arrays",
+            config.lines().filter(|line| line.trim_start().starts_with("pub ")).all(|line| !line.contains('[')),
+            "virtual-list config fields must not smuggle semantic values through fixed arrays",
         );
+
+        let selected = source
+            .split("/// `aether.kit.widget.virtual_list.selected`")
+            .nth(1)
+            .and_then(|rest| rest.split("/// `aether.kit.widget.button.clicked`").next())
+            .expect("virtual-list selected source section");
+        assert!(selected.contains("pub struct VirtualListSelected {"));
+        assert!(!selected.contains("pub struct VirtualListSelected("));
+        assert!(!selected.contains("pub type VirtualListSelected"));
+        assert!(
+            selected.lines().filter(|line| line.trim_start().starts_with("pub ")).all(|line| !line.contains('[')),
+            "virtual-list event fields must not use fixed positional storage",
+        );
+    }
+
+    #[test]
+    fn virtual_list_appends_without_renumbering_established_widget_kinds() {
+        assert_eq!(to_vec(&WidgetKind::Composite).expect("encode Composite"), vec![0, 0, 0, 0]);
+        assert_eq!(to_vec(&WidgetKind::Label).expect("encode Label"), vec![1, 0, 0, 0]);
+        assert_eq!(to_vec(&WidgetKind::Slider).expect("encode Slider"), vec![2, 0, 0, 0]);
+        assert_eq!(to_vec(&WidgetKind::Radio).expect("encode Radio"), vec![3, 0, 0, 0]);
+        assert_eq!(to_vec(&WidgetKind::TextField).expect("encode TextField"), vec![4, 0, 0, 0]);
+        assert_eq!(to_vec(&WidgetKind::Button).expect("encode Button"), vec![5, 0, 0, 0]);
+        assert_eq!(to_vec(&WidgetKind::BehaviorHost).expect("encode BehaviorHost"), vec![6, 0, 0, 0]);
+        assert_eq!(to_vec(&WidgetKind::Image).expect("encode Image"), vec![7, 0, 0, 0]);
+        assert_eq!(to_vec(&WidgetKind::TextArea).expect("encode TextArea"), vec![8, 0, 0, 0]);
+        assert_eq!(to_vec(&WidgetKind::Scroll).expect("encode Scroll"), vec![9, 0, 0, 0]);
+        assert_eq!(to_vec(&WidgetKind::VirtualList).expect("encode VirtualList"), vec![10, 0, 0, 0]);
     }
 
     #[test]

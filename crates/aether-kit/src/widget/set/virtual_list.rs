@@ -21,8 +21,8 @@ use crate::widget::set::{push_control_outlines, quad, reply_if_hidden, text_orig
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
-    Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, VirtualListConfig,
-    VirtualListSelected, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, VirtualListConfig, VirtualListSelected,
+    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,13 +68,8 @@ impl VirtualListWidget {
             self.first_index = 0;
             return;
         };
-        self.first_index = reveal_window(
-            selected_index,
-            self.first_index,
-            self.visible_row_count,
-            self.items.len(),
-        )
-        .first_index;
+        self.first_index =
+            reveal_window(selected_index, self.first_index, self.visible_row_count, self.items.len()).first_index;
     }
 
     fn select(&mut self, selected_index: usize) -> Option<u32> {
@@ -86,14 +81,19 @@ impl VirtualListWidget {
         u32::try_from(selected_index).ok()
     }
 
+    fn select_if_mutable(&mut self, selected_index: usize) -> Option<u32> {
+        self.state.can_mutate().then_some(())?;
+        self.select(selected_index)
+    }
+
     fn move_selection(&mut self, movement: SelectionMove) -> Option<u32> {
-        let next = moved_selection(
-            self.selected_index,
-            movement,
-            self.visible_row_count,
-            self.items.len(),
-        )?;
+        let next = moved_selection(self.selected_index, movement, self.visible_row_count, self.items.len())?;
         self.select(next)
+    }
+
+    fn move_selection_if_mutable(&mut self, movement: SelectionMove) -> Option<u32> {
+        self.state.can_mutate().then_some(())?;
+        self.move_selection(movement)
     }
 
     fn emit(ctx: &WasmCtx<'_>, selected_index: u32) {
@@ -139,6 +139,9 @@ impl VirtualListWidget {
     }
 
     fn draw_items(&self) -> Vec<WidgetDrawItem> {
+        if !self.state.is_visible() {
+            return Vec::new();
+        }
         let window = self.window();
         let visible_row_count = window.len();
         if visible_row_count == 0 || !valid_frame(&self.frame) {
@@ -152,55 +155,27 @@ impl VirtualListWidget {
         }
 
         let mut items = Vec::with_capacity(visible_row_count.saturating_mul(2).saturating_add(8));
-        for (row_offset, item) in self.items[window.first_index..window.end_exclusive_index]
-            .iter()
-            .enumerate()
-        {
+        for (row_offset, item) in self.items[window.first_index..window.end_exclusive_index].iter().enumerate() {
             #[allow(clippy::cast_precision_loss)]
             let row_y = row_offset as f32 * row_height;
             let item_index = window.first_index + row_offset;
             let selected = self.selected_index == Some(item_index);
-            let base = if selected {
-                self.theme.accent
-            } else {
-                self.theme.surface_raised
-            };
-            let row_state = if selected {
-                self.state.theme_state(self.pressed)
-            } else {
-                self.state.supporting_theme_state(false)
-            };
-            items.push(quad(
-                0.0,
-                row_y,
-                self.frame.width,
-                row_height,
-                self.theme.fill(base, row_state),
-            ));
-            let text_base = if selected {
-                self.theme.accent_text
-            } else {
-                self.theme.text_primary
-            };
+            let base = if selected { self.theme.accent } else { self.theme.surface_raised };
+            let row_state =
+                if selected { self.state.theme_state(self.pressed) } else { self.state.supporting_theme_state(false) };
+            items.push(quad(0.0, row_y, self.frame.width, row_height, self.theme.fill(base, row_state)));
+            let text_base = if selected { self.theme.accent_text } else { self.theme.text_primary };
             items.push(WidgetDrawItem::Text {
                 x: self.theme.pad,
                 y: text_origin_y(row_y, row_height, self.theme.label_size_pixels),
                 font_id: self.theme.font_id,
                 text: item.clone(),
                 size_pixels: self.theme.label_size_pixels,
-                color: self
-                    .theme
-                    .fill(text_base, self.state.supporting_theme_state(false)),
+                color: self.theme.fill(text_base, self.state.supporting_theme_state(false)),
                 clip: None,
             });
         }
-        push_control_outlines(
-            &mut items,
-            self.frame.width,
-            self.frame.height,
-            &self.state,
-            &self.theme,
-        );
+        push_control_outlines(&mut items, self.frame.width, self.frame.height, &self.state, &self.theme);
         items
     }
 }
@@ -229,12 +204,7 @@ impl WasmActor for VirtualListWidget {
             first_index,
             visible_row_count,
             theme: config.theme,
-            frame: WidgetFrame {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                height: 0.0,
-            },
+            frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
             state: InteractionState::new(config.state),
             pressed: false,
         })
@@ -294,7 +264,7 @@ impl WasmActor for VirtualListWidget {
         }
         self.pressed = true;
         if let Some(selected_index) = self.row_at_local_y(press.y - self.frame.y)
-            && let Some(selected_index) = self.select(selected_index)
+            && let Some(selected_index) = self.select_if_mutable(selected_index)
         {
             Self::emit(ctx, selected_index);
         }
@@ -319,7 +289,7 @@ impl WasmActor for VirtualListWidget {
             KEY_PAGE_DOWN => SelectionMove::PageDown,
             _ => return,
         };
-        if let Some(selected_index) = self.move_selection(movement) {
+        if let Some(selected_index) = self.move_selection_if_mutable(movement) {
             Self::emit(ctx, selected_index);
         }
     }
@@ -330,10 +300,7 @@ impl WasmActor for VirtualListWidget {
             return;
         }
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                intrinsic: None,
-                items: self.draw_items(),
-            });
+            parent.send(&WidgetDrawList { intrinsic: None, items: self.draw_items() });
         }
     }
 }
@@ -349,20 +316,11 @@ fn initial_selection(initial_selected_index: u32, item_count: usize) -> Option<u
     Some(usize_from_u32(initial_selected_index).min(item_count - 1))
 }
 
-fn clamped_window(
-    first_index: usize,
-    requested_visible_row_count: usize,
-    item_count: usize,
-) -> VisibleRowWindow {
+fn clamped_window(first_index: usize, requested_visible_row_count: usize, item_count: usize) -> VisibleRowWindow {
     let visible_row_count = requested_visible_row_count.min(item_count);
     let max_first_index = item_count.saturating_sub(visible_row_count);
     let first_index = first_index.min(max_first_index);
-    VisibleRowWindow {
-        first_index,
-        end_exclusive_index: first_index
-            .saturating_add(visible_row_count)
-            .min(item_count),
-    }
+    VisibleRowWindow { first_index, end_exclusive_index: first_index.saturating_add(visible_row_count).min(item_count) }
 }
 
 fn reveal_window(
@@ -379,9 +337,7 @@ fn reveal_window(
     if selected_index < window.first_index {
         window = clamped_window(selected_index, visible_row_count, item_count);
     } else if selected_index >= window.end_exclusive_index {
-        let first_index = selected_index
-            .saturating_add(1)
-            .saturating_sub(visible_row_count);
+        let first_index = selected_index.saturating_add(1).saturating_sub(visible_row_count);
         window = clamped_window(first_index, visible_row_count, item_count);
     }
     window
@@ -402,9 +358,7 @@ fn moved_selection(
         SelectionMove::Up => selected_index.saturating_sub(1),
         SelectionMove::Down => selected_index.saturating_add(1).min(last_index),
         SelectionMove::PageUp => selected_index.saturating_sub(visible_row_count),
-        SelectionMove::PageDown => selected_index
-            .saturating_add(visible_row_count)
-            .min(last_index),
+        SelectionMove::PageDown => selected_index.saturating_add(visible_row_count).min(last_index),
     })
 }
 
@@ -420,32 +374,21 @@ fn valid_frame(frame: &WidgetFrame) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widget::theme::ThemeState;
     use crate::widget::{WidgetDrawItem, WidgetValidation};
     use alloc::format;
     use alloc::vec;
 
-    fn list(
-        item_count: usize,
-        visible_row_count: usize,
-        selected_index: usize,
-    ) -> VirtualListWidget {
-        let items = (0..item_count)
-            .map(|index| format!("row {index}"))
-            .collect();
-        let selected_index =
-            (item_count > 0).then_some(selected_index.min(item_count.saturating_sub(1)));
+    fn list(item_count: usize, visible_row_count: usize, selected_index: usize) -> VirtualListWidget {
+        let items = (0..item_count).map(|index| format!("row {index}")).collect();
+        let selected_index = (item_count > 0).then_some(selected_index.min(item_count.saturating_sub(1)));
         VirtualListWidget {
             items,
             selected_index,
             first_index: 0,
             visible_row_count,
             theme: Theme::DEFAULT,
-            frame: WidgetFrame {
-                x: 10.0,
-                y: 20.0,
-                width: 100.0,
-                height: 120.0,
-            },
+            frame: WidgetFrame { x: 10.0, y: 20.0, width: 100.0, height: 120.0 },
             state: InteractionState::new(WidgetControlState::default()),
             pressed: false,
         }
@@ -453,54 +396,15 @@ mod tests {
 
     #[test]
     fn window_clamps_zero_one_beginning_middle_and_tail() {
-        assert_eq!(
-            clamped_window(0, 5, 0),
-            VisibleRowWindow {
-                first_index: 0,
-                end_exclusive_index: 0
-            }
-        );
-        assert_eq!(
-            clamped_window(8, 0, 10),
-            VisibleRowWindow {
-                first_index: 8,
-                end_exclusive_index: 8
-            }
-        );
-        assert_eq!(
-            clamped_window(8, 1, 10),
-            VisibleRowWindow {
-                first_index: 8,
-                end_exclusive_index: 9
-            }
-        );
-        assert_eq!(
-            clamped_window(0, 5, 100),
-            VisibleRowWindow {
-                first_index: 0,
-                end_exclusive_index: 5
-            }
-        );
-        assert_eq!(
-            clamped_window(40, 5, 100),
-            VisibleRowWindow {
-                first_index: 40,
-                end_exclusive_index: 45
-            }
-        );
-        assert_eq!(
-            clamped_window(99, 5, 100),
-            VisibleRowWindow {
-                first_index: 95,
-                end_exclusive_index: 100
-            }
-        );
+        assert_eq!(clamped_window(0, 5, 0), VisibleRowWindow { first_index: 0, end_exclusive_index: 0 });
+        assert_eq!(clamped_window(8, 0, 10), VisibleRowWindow { first_index: 8, end_exclusive_index: 8 });
+        assert_eq!(clamped_window(8, 1, 10), VisibleRowWindow { first_index: 8, end_exclusive_index: 9 });
+        assert_eq!(clamped_window(0, 5, 100), VisibleRowWindow { first_index: 0, end_exclusive_index: 5 });
+        assert_eq!(clamped_window(40, 5, 100), VisibleRowWindow { first_index: 40, end_exclusive_index: 45 });
+        assert_eq!(clamped_window(99, 5, 100), VisibleRowWindow { first_index: 95, end_exclusive_index: 100 });
         assert_eq!(
             clamped_window(usize::MAX, usize::MAX, 100),
-            VisibleRowWindow {
-                first_index: 0,
-                end_exclusive_index: 100
-            }
+            VisibleRowWindow { first_index: 0, end_exclusive_index: 100 }
         );
     }
 
@@ -524,70 +428,25 @@ mod tests {
         assert_eq!(initial_selection(0, 0), None);
         assert_eq!(initial_selection(0, 1), Some(0));
         assert_eq!(initial_selection(99, 5), Some(4));
-        assert_eq!(
-            initial_selection(u32::MAX, usize::MAX),
-            Some(usize_from_u32(u32::MAX))
-        );
+        assert_eq!(initial_selection(u32::MAX, usize::MAX), Some(usize_from_u32(u32::MAX)));
     }
 
     #[test]
     fn reveal_moves_only_enough_to_include_selection() {
-        assert_eq!(
-            reveal_window(4, 0, 5, 100),
-            VisibleRowWindow {
-                first_index: 0,
-                end_exclusive_index: 5
-            }
-        );
-        assert_eq!(
-            reveal_window(5, 0, 5, 100),
-            VisibleRowWindow {
-                first_index: 1,
-                end_exclusive_index: 6
-            }
-        );
-        assert_eq!(
-            reveal_window(2, 10, 5, 100),
-            VisibleRowWindow {
-                first_index: 2,
-                end_exclusive_index: 7
-            }
-        );
-        assert_eq!(
-            reveal_window(99, 90, 5, 100),
-            VisibleRowWindow {
-                first_index: 95,
-                end_exclusive_index: 100
-            }
-        );
-        assert_eq!(
-            reveal_window(0, 0, 0, 100),
-            VisibleRowWindow {
-                first_index: 0,
-                end_exclusive_index: 0
-            }
-        );
+        assert_eq!(reveal_window(4, 0, 5, 100), VisibleRowWindow { first_index: 0, end_exclusive_index: 5 });
+        assert_eq!(reveal_window(5, 0, 5, 100), VisibleRowWindow { first_index: 1, end_exclusive_index: 6 });
+        assert_eq!(reveal_window(2, 10, 5, 100), VisibleRowWindow { first_index: 2, end_exclusive_index: 7 });
+        assert_eq!(reveal_window(99, 90, 5, 100), VisibleRowWindow { first_index: 95, end_exclusive_index: 100 });
+        assert_eq!(reveal_window(0, 0, 0, 100), VisibleRowWindow { first_index: 0, end_exclusive_index: 0 });
     }
 
     #[test]
     fn arrow_and_page_movement_clamp_and_require_a_nonzero_viewport() {
         assert_eq!(moved_selection(Some(0), SelectionMove::Up, 5, 100), Some(0));
-        assert_eq!(
-            moved_selection(Some(0), SelectionMove::Down, 5, 100),
-            Some(1)
-        );
-        assert_eq!(
-            moved_selection(Some(5), SelectionMove::PageUp, 5, 100),
-            Some(0)
-        );
-        assert_eq!(
-            moved_selection(Some(5), SelectionMove::PageDown, 5, 100),
-            Some(10)
-        );
-        assert_eq!(
-            moved_selection(Some(99), SelectionMove::PageDown, 5, 100),
-            Some(99)
-        );
+        assert_eq!(moved_selection(Some(0), SelectionMove::Down, 5, 100), Some(1));
+        assert_eq!(moved_selection(Some(5), SelectionMove::PageUp, 5, 100), Some(0));
+        assert_eq!(moved_selection(Some(5), SelectionMove::PageDown, 5, 100), Some(10));
+        assert_eq!(moved_selection(Some(99), SelectionMove::PageDown, 5, 100), Some(99));
         assert_eq!(moved_selection(Some(0), SelectionMove::Down, 0, 100), None);
         assert_eq!(moved_selection(None, SelectionMove::Down, 5, 0), None);
     }
@@ -619,7 +478,7 @@ mod tests {
             .iter()
             .filter_map(|item| match item {
                 WidgetDrawItem::Text { text, .. } => Some(text.as_str()),
-                WidgetDrawItem::Quad { .. } => None,
+                WidgetDrawItem::Quad { .. } | WidgetDrawItem::TexturedQuad { .. } => None,
             })
             .collect();
         assert_eq!(text, vec!["row 2", "row 3", "row 4", "row 5", "row 6"]);
@@ -631,45 +490,42 @@ mod tests {
         let mut widget = list(200, 5, 0);
         assert_eq!(widget.select(0), None);
         assert_eq!(widget.move_selection(SelectionMove::PageDown), Some(5));
-        assert_eq!(
-            widget.window(),
-            VisibleRowWindow {
-                first_index: 1,
-                end_exclusive_index: 6
-            }
-        );
+        assert_eq!(widget.window(), VisibleRowWindow { first_index: 1, end_exclusive_index: 6 });
         assert_eq!(widget.move_selection(SelectionMove::Down), Some(6));
-        assert_eq!(
-            widget.window(),
-            VisibleRowWindow {
-                first_index: 2,
-                end_exclusive_index: 7
-            }
-        );
+        assert_eq!(widget.window(), VisibleRowWindow { first_index: 2, end_exclusive_index: 7 });
         assert_eq!(widget.select(200), None);
     }
 
     #[test]
     fn disabled_and_read_only_state_block_selection_mutation() {
-        for mut control in [WidgetControlState::default(), WidgetControlState::default()] {
-            if control == WidgetControlState::default() {
-                control.enabled = false;
-            }
+        let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
+        let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
+        for control in [disabled, read_only] {
             let mut widget = list(20, 5, 0);
             widget.replace_control_state(control);
             assert!(!widget.state.can_mutate());
+            assert_eq!(widget.move_selection_if_mutable(SelectionMove::PageDown), None);
+            assert_eq!(widget.select_if_mutable(4), None);
             assert_eq!(widget.selected_index, Some(0));
         }
 
         let mut widget = list(20, 5, 0);
-        let mut read_only = WidgetControlState::default();
-        read_only.read_only = true;
+        let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
         assert!(widget.replace_control_state(read_only.clone()));
-        assert!(
-            !widget.replace_control_state(read_only),
-            "same state emits no second change"
-        );
+        assert!(!widget.replace_control_state(read_only), "same state emits no second change");
         assert!(!widget.state.can_mutate());
+        widget.state.gain_focus();
+        assert!(widget.state.focused(), "read-only remains keyboard-focusable");
+    }
+
+    #[test]
+    fn hidden_draw_is_empty_while_retaining_the_bounded_window() {
+        let mut widget = list(200, 5, 6);
+        widget.first_index = 2;
+        let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
+        widget.replace_control_state(hidden);
+        assert!(widget.draw_items().is_empty());
+        assert_eq!(widget.window(), VisibleRowWindow { first_index: 2, end_exclusive_index: 7 });
     }
 
     #[test]
@@ -677,46 +533,32 @@ mod tests {
         let mut widget = list(20, 5, 0);
         widget.state.set_hovered(true);
         widget.state.gain_focus();
-        assert_eq!(
-            widget.state.theme_state(false),
-            crate::widget::theme::ThemeState::Hover
-        );
+        assert_eq!(widget.state.theme_state(false), ThemeState::Hover);
         assert!(widget.state.focused());
         widget.state.lose_focus();
-        assert_eq!(
-            widget.state.theme_state(false),
-            crate::widget::theme::ThemeState::Hover
-        );
-        let mut disabled = WidgetControlState::default();
-        disabled.enabled = false;
+        assert_eq!(widget.state.theme_state(false), ThemeState::Hover);
+        let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
         assert!(widget.replace_control_state(disabled));
         assert!(!widget.state.focused());
-        assert_eq!(
-            widget.state.theme_state(false),
-            crate::widget::theme::ThemeState::Disabled
-        );
+        assert_eq!(widget.state.theme_state(false), ThemeState::Disabled);
     }
 
     #[test]
     fn validation_outline_precedes_the_inset_focus_outline() {
         let mut widget = list(20, 5, 0);
-        let mut control = WidgetControlState::default();
-        control.validation = WidgetValidation::Warning {
-            message: String::from("warning"),
+        let control = WidgetControlState {
+            validation: WidgetValidation::Warning { message: String::from("warning") },
+            ..WidgetControlState::default()
         };
         widget.replace_control_state(control);
         widget.state.gain_focus();
         let items = widget.draw_items();
         assert_eq!(items.len(), 18, "ten row items plus two four-quad outlines");
         for item in &items[10..14] {
-            assert!(
-                matches!(item, WidgetDrawItem::Quad { color, .. } if *color == widget.theme.warning)
-            );
+            assert!(matches!(item, WidgetDrawItem::Quad { color, .. } if *color == widget.theme.warning));
         }
         for item in &items[14..18] {
-            assert!(
-                matches!(item, WidgetDrawItem::Quad { color, .. } if *color == widget.theme.accent)
-            );
+            assert!(matches!(item, WidgetDrawItem::Quad { color, .. } if *color == widget.theme.accent));
         }
     }
 }

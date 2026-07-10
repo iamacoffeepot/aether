@@ -360,34 +360,37 @@ pub fn spawn_widget_child(
                 scroll_viewport: None,
             })
         }),
-        WidgetKind::VirtualList => decode_child::<VirtualListConfig>(spec).and_then(|config| {
-            let Some(height) = virtual_list_height(row, config.visible_row_count) else {
-                tracing::warn!(
-                    target: "aether_kit",
-                    subname = %spec.subname,
-                    row_height = row,
-                    visible_row_count = config.visible_row_count,
-                    "virtual-list viewport height is invalid; slot skipped",
-                );
-                return None;
-            };
-            let eligible = !config.items.is_empty() && config.visible_row_count > 0;
-            let state = config.state.clone();
-            spawn::<VirtualListWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
-                id,
-                width_pixels: None,
-                height_pixels: height,
-                pointer_eligible: eligible,
-                focusable: eligible,
-                state,
-                type_namespace: <VirtualListWidget as Addressable>::NAMESPACE,
-                scroll_viewport: None,
-            })
-        }),
+        WidgetKind::VirtualList => spawn_virtual_list_child(ctx, spec, row),
         WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
         WidgetKind::Composite => spawn_composite_child(ctx, spec, layout, row),
         WidgetKind::Scroll => spawn_scroll_child(ctx, spec, layout),
     }
+}
+
+fn spawn_virtual_list_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
+    let config = decode_child::<VirtualListConfig>(spec)?;
+    let Some(height) = virtual_list_height(row, config.visible_row_count) else {
+        tracing::warn!(
+            target: "aether_kit",
+            subname = %spec.subname,
+            row_height = row,
+            visible_row_count = config.visible_row_count,
+            "virtual-list viewport height is invalid; slot skipped",
+        );
+        return None;
+    };
+    let eligible = !config.items.is_empty() && config.visible_row_count > 0;
+    let state = config.state.clone();
+    spawn::<VirtualListWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+        id,
+        width_pixels: None,
+        height_pixels: height,
+        pointer_eligible: eligible,
+        focusable: eligible,
+        state,
+        type_namespace: <VirtualListWidget as Addressable>::NAMESPACE,
+        scroll_viewport: None,
+    })
 }
 
 fn virtual_list_height(row_height: f32, visible_row_count: u32) -> Option<f32> {
@@ -1159,6 +1162,16 @@ mod dispatch_tests {
     fn feature_off_keeps_behavior_host_and_scroll_unwrappable() {
         assert_eq!(WidgetKind::BehaviorHost.type_tag(), None);
         assert_eq!(WidgetKind::Scroll.type_tag(), None);
+    }
+
+    #[test]
+    fn virtual_list_height_is_finite_and_preserves_zero_viewports() {
+        assert_eq!(virtual_list_height(24.0, 5), Some(120.0));
+        assert_eq!(virtual_list_height(24.0, 0), Some(0.0));
+        assert_eq!(virtual_list_height(0.0, 5), None);
+        assert_eq!(virtual_list_height(-1.0, 5), None);
+        assert_eq!(virtual_list_height(f32::NAN, 5), None);
+        assert_eq!(virtual_list_height(f32::MAX, 2), None);
     }
 }
 
