@@ -6,8 +6,7 @@ use aether_capabilities::render::{DrawTriangle, Vertex};
 use crate::world::{CellPos, ChunkPos, Material, STEP_MAX_OCTIMETERS, World};
 
 use super::constants::{
-    EDGE, MAX_APRON_SUBCELLS, OCTIMETERS_PER_METER, OCTIMETERS_PER_SUBCELL, SUB,
-    SUBCELLS_PER_CHUNK_EDGE,
+    EDGE, MAX_APRON_SUBCELLS, OCTIMETERS_PER_METER, OCTIMETERS_PER_SUBCELL, SUBCELLS_PER_CHUNK_EDGE,
 };
 use super::geometry::push_wall_quad;
 use super::style::{StyleTable, flat_color};
@@ -245,6 +244,7 @@ impl WindowPlan {
                         end: junction,
                         high_corners,
                         low_corners,
+                        material_anchor: a.high_anchor,
                     },
                     WallSegment {
                         key: b.key,
@@ -252,6 +252,7 @@ impl WindowPlan {
                         end: b.point,
                         high_corners,
                         low_corners,
+                        material_anchor: b.high_anchor,
                     },
                 ]
             }
@@ -277,6 +278,7 @@ impl WindowPlan {
                         end: self.center,
                         high_corners: 1 << high,
                         low_corners: 1 << low,
+                        material_anchor: crossing.high_anchor,
                     });
                 }
                 segments
@@ -408,6 +410,7 @@ struct WallSegment {
     end: PlanarPoint,
     high_corners: u8,
     low_corners: u8,
+    material_anchor: SampleAnchor,
 }
 
 /// One bounded per-chunk physical-cliff inventory. The constructor scans
@@ -466,8 +469,8 @@ impl CliffPlan {
         let mut windows = Vec::new();
         let mut window_lookup = vec![None; OWNED_WINDOWS];
         let mut cells_with_cliffs = vec![false; (EDGE * EDGE) as usize];
-        for local_z in 0..SUBCELLS_PER_CHUNK_EDGE {
-            for local_x in 0..SUBCELLS_PER_CHUNK_EDGE {
+        for local_z in 0..=SUBCELLS_PER_CHUNK_EDGE {
+            for local_x in 0..=SUBCELLS_PER_CHUNK_EDGE {
                 let wi = (local_x + apron - 1) as usize;
                 let wj = (local_z + apron - 1) as usize;
                 let flags = [
@@ -504,6 +507,23 @@ impl CliffPlan {
                         z_oct: gz * OCTIMETERS_PER_SUBCELL + half,
                     },
                 ];
+                for (index, anchor) in corners.iter().enumerate() {
+                    let cell = anchor.cell();
+                    if corners[..index].iter().any(|other| other.cell() == cell) {
+                        continue;
+                    }
+                    let cell_x = cell.x - at.x * EDGE;
+                    let cell_z = cell.z - at.z * EDGE;
+                    if (0..EDGE).contains(&cell_x) && (0..EDGE).contains(&cell_z) {
+                        cells_with_cliffs[(cell_z * EDGE + cell_x) as usize] = true;
+                    }
+                }
+                // The positive-boundary centers are owned and emitted by the
+                // neighboring chunk. They still overlap this chunk's final
+                // cell, which must leave its cap to the shared window.
+                if local_x == SUBCELLS_PER_CHUNK_EDGE || local_z == SUBCELLS_PER_CHUNK_EDGE {
+                    continue;
+                }
                 let window_levels = [
                     levels[wj * n + wi],
                     levels[wj * n + wi + 1],
@@ -528,9 +548,6 @@ impl CliffPlan {
                 let lookup_index = (local_z * SUBCELLS_PER_CHUNK_EDGE + local_x) as usize;
                 window_lookup[lookup_index] = Some(windows.len() as u32);
                 windows.push(plan);
-                let cell_x = local_x / SUB;
-                let cell_z = local_z / SUB;
-                cells_with_cliffs[(cell_z * EDGE + cell_x) as usize] = true;
             }
         }
 
@@ -603,6 +620,7 @@ impl CliffPlan {
         world: &World,
         center: WindowCenter,
         cap: MaterialCap<'_>,
+        cap_fragment_count: &mut usize,
         styles: &StyleTable,
         tris: &mut Vec<DrawTriangle>,
     ) {
@@ -611,7 +629,6 @@ impl CliffPlan {
         };
         let faces = window.faces();
         debug_assert!(faces.len() <= 4);
-        debug_assert!(faces.len() * 4 <= MAX_CAP_FRAGMENTS_PER_WINDOW);
         for face in faces {
             let mut fragment = intersect_convex(cap.polygon, &face.polygon);
             insert_boundary_vertices(&mut fragment, &face.polygon);
@@ -628,6 +645,11 @@ impl CliffPlan {
             if cap.material == Material::Void && enclosed_mask == 0 {
                 continue; // open Void has a skirt but deliberately no low cap
             }
+            *cap_fragment_count += 1;
+            assert!(
+                *cap_fragment_count <= MAX_CAP_FRAGMENTS_PER_WINDOW,
+                "cliff cap fragments exceeded the fixed per-window topology budget"
+            );
             let color = if cap.material == Material::Void {
                 let anchor = window.anchor_for(enclosed_mask, fragment[0]);
                 let floor = enclosed_void_floor(
@@ -676,13 +698,7 @@ impl CliffPlan {
                     same_point(crossing, segment.start) || same_point(crossing, segment.end),
                     "every wall segment references its physical-cliff adjacency"
                 );
-                let start_high_anchor = window.anchor_for(segment.high_corners, segment.start);
-                if world.underlay_point(
-                    start_high_anchor.cell(),
-                    start_high_anchor.x_oct.rem_euclid(256) / OCTIMETERS_PER_SUBCELL,
-                    start_high_anchor.z_oct.rem_euclid(256) / OCTIMETERS_PER_SUBCELL,
-                ) == Material::Void
-                {
+                if WindowPlan::anchor_material(world, segment.material_anchor) == Material::Void {
                     continue;
                 }
                 let top_start = window.cap_vertex(
@@ -706,7 +722,8 @@ impl CliffPlan {
                 {
                     continue;
                 }
-                let face = flat_color(styles.get(world.cliff_material(start_high_anchor.cell())));
+                let face =
+                    flat_color(styles.get(world.cliff_material(segment.material_anchor.cell())));
                 push_wall_quad(
                     tris,
                     [top_start.x, top_start.z, top_start.y],
@@ -814,7 +831,7 @@ fn classify_case(
         }
     }
     LocalCase::Pinned {
-        rotation: ((gx ^ gz).rem_euclid(4)) as u8,
+        rotation: (gx ^ gz).rem_euclid(4) as u8,
     }
 }
 
@@ -975,8 +992,95 @@ fn dedup_polygon(points: Vec<PlanarPoint>) -> Vec<PlanarPoint> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::contour::{label_case, label_window_polys};
+    use super::super::windows::label_case_is_connected;
     use super::*;
     use crate::world::{CELLS_PER_CHUNK_AREA, Chunk};
+    use core::array::from_fn;
+
+    fn fixture_anchors() -> [SampleAnchor; 4] {
+        [
+            SampleAnchor {
+                x_oct: -8,
+                z_oct: -8,
+            },
+            SampleAnchor {
+                x_oct: 8,
+                z_oct: -8,
+            },
+            SampleAnchor { x_oct: 8, z_oct: 8 },
+            SampleAnchor {
+                x_oct: -8,
+                z_oct: 8,
+            },
+        ]
+    }
+
+    fn window_for_levels(levels: [i32; 4]) -> WindowPlan {
+        let corners = fixture_anchors();
+        let mut crossings = [None; 4];
+        for (edge, crossing) in crossings.iter_mut().enumerate() {
+            let (a, b) = edge_corners(edge);
+            if (levels[a] - levels[b]).abs() > STEP_MAX_OCTIMETERS {
+                *crossing = Some(make_crossing(0, 0, edge, corners, levels));
+            }
+        }
+        WindowPlan {
+            center: PlanarPoint {
+                x_oct: 0.0,
+                z_oct: 0.0,
+            },
+            corners,
+            levels,
+            crossings,
+            case: classify_case(0, 0, crossings, levels),
+        }
+    }
+
+    fn binary_height_window(high_corners: u8) -> WindowPlan {
+        window_for_levels(from_fn(|corner| {
+            if high_corners & (1 << corner) != 0 {
+                200
+            } else {
+                0
+            }
+        }))
+    }
+
+    fn material_polygons(corners: [u8; 4]) -> Vec<Vec<PlanarPoint>> {
+        let [bottom_left, bottom_right, top_right, top_left] =
+            fixture_anchors().map(SampleAnchor::point);
+        let points = [
+            bottom_left,
+            bottom_right,
+            top_right,
+            top_left,
+            bottom_left.midpoint(bottom_right),
+            bottom_right.midpoint(top_right),
+            top_right.midpoint(top_left),
+            top_left.midpoint(bottom_left),
+        ];
+        let mut polygons = Vec::new();
+        for index in 0..4 {
+            let label = corners[index];
+            if corners[..index].contains(&label) {
+                continue;
+            }
+            let case = label_case(&corners, 2, 0, 0, label);
+            let connected = label_case_is_connected(corners, label, case);
+            for polygon in label_window_polys(case, connected) {
+                if !polygon.is_empty() {
+                    polygons.push(
+                        polygon
+                            .iter()
+                            .map(|&point| points[point as usize])
+                            .collect(),
+                    );
+                }
+            }
+        }
+        polygons
+    }
 
     fn world_with_levels(level: impl Fn(i32, i32) -> i32) -> World {
         let mut world = World::new();
@@ -1040,92 +1144,94 @@ mod tests {
     }
 
     #[test]
-    fn every_local_case_stays_within_the_four_segment_bound() {
-        let anchors = [
-            SampleAnchor {
-                x_oct: -8,
-                z_oct: -8,
-            },
-            SampleAnchor {
-                x_oct: 8,
-                z_oct: -8,
-            },
-            SampleAnchor { x_oct: 8, z_oct: 8 },
-            SampleAnchor {
-                x_oct: -8,
-                z_oct: 8,
-            },
-        ];
-        for levels in [
-            [0i32, 200, 200, 200],
-            [0, 200, 0, 200],
-            [0, 200, 0, 40],
-            [0, 200, 0, 200],
-            [0, 100, 70, 40],
-        ] {
-            let mut crossings = [None; 4];
-            for (edge, crossing) in crossings.iter_mut().enumerate() {
-                let (a, b) = edge_corners(edge);
-                if (levels[a] - levels[b]).abs() > STEP_MAX_OCTIMETERS {
-                    *crossing = Some(make_crossing(0, 0, edge, anchors, levels));
+    fn every_abstract_local_case_stays_within_the_four_segment_bound() {
+        let corners = fixture_anchors();
+        let levels = [0, 100, 200, 300];
+        for crossing_mask in 1u8..16 {
+            for rotation in 0..4 {
+                let mut crossings = [None; 4];
+                for (edge, crossing) in crossings.iter_mut().enumerate() {
+                    if crossing_mask & (1 << edge) != 0 {
+                        *crossing = Some(make_crossing(0, 0, edge, corners, levels));
+                    }
                 }
+                let plan = WindowPlan {
+                    center: PlanarPoint {
+                        x_oct: 0.0,
+                        z_oct: 0.0,
+                    },
+                    corners,
+                    levels,
+                    crossings,
+                    case: LocalCase::Pinned { rotation },
+                };
+                assert_eq!(
+                    plan.wall_segments().len(),
+                    crossing_mask.count_ones() as usize
+                );
+                assert!(plan.wall_segments().len() <= 4);
+                assert_eq!(plan.faces().len(), 4);
             }
-            if crossings.iter().all(Option::is_none) {
+        }
+
+        for high_corners in 1u8..15 {
+            let low_corners = 0b1111 ^ high_corners;
+            if high_corners > low_corners {
                 continue;
             }
-            let plan = WindowPlan {
-                center: PlanarPoint {
-                    x_oct: 0.0,
-                    z_oct: 0.0,
-                },
-                corners: anchors,
-                levels,
-                crossings,
-                case: classify_case(0, 0, crossings, levels),
-            };
+            let plan = binary_height_window(high_corners);
             assert!(plan.wall_segments().len() <= 4);
             assert!(plan.faces().len() <= 4);
         }
     }
 
     #[test]
-    fn local_cases_chord_consistent_plates_and_pin_junctions() {
-        let anchors = [
-            SampleAnchor {
-                x_oct: -8,
-                z_oct: -8,
-            },
-            SampleAnchor {
-                x_oct: 8,
-                z_oct: -8,
-            },
-            SampleAnchor { x_oct: 8, z_oct: 8 },
-            SampleAnchor {
-                x_oct: -8,
-                z_oct: 8,
-            },
-        ];
-        let make_window = |levels: [i32; 4]| {
-            let mut crossings = [None; 4];
-            for (edge, crossing) in crossings.iter_mut().enumerate() {
-                let (a, b) = edge_corners(edge);
-                if (levels[a] - levels[b]).abs() > STEP_MAX_OCTIMETERS {
-                    *crossing = Some(make_crossing(0, 0, edge, anchors, levels));
-                }
+    fn exhaustive_material_and_height_arrangements_fit_the_named_cap_bounds() {
+        let mut height_arrangements = Vec::new();
+        for high_corners in 1u8..15 {
+            let low_corners = 0b1111 ^ high_corners;
+            if high_corners > low_corners {
+                continue;
             }
-            WindowPlan {
-                center: PlanarPoint {
-                    x_oct: 0.0,
-                    z_oct: 0.0,
-                },
-                corners: anchors,
-                levels,
-                crossings,
-                case: classify_case(0, 0, crossings, levels),
-            }
-        };
+            height_arrangements.push(binary_height_window(high_corners).faces());
+        }
+        assert_eq!(height_arrangements.len(), 7);
 
-        let chord = make_window([200, 0, 0, 0]);
+        let mut maximum_fragments = 0;
+        let mut maximum_vertices = 0;
+        for encoded in 0..256usize {
+            let mut remaining = encoded;
+            let corners = from_fn(|_| {
+                let label = (remaining % 4) as u8;
+                remaining /= 4;
+                label
+            });
+            let material_polygons = material_polygons(corners);
+            for faces in &height_arrangements {
+                let mut fragment_count = 0;
+                for polygon in &material_polygons {
+                    for face in faces {
+                        let mut fragment = intersect_convex(polygon, &face.polygon);
+                        insert_boundary_vertices(&mut fragment, &face.polygon);
+                        if fragment.len() < 3 || polygon_area_doubled(&fragment) < 0.5 {
+                            continue;
+                        }
+                        fragment_count += 1;
+                        maximum_vertices = maximum_vertices.max(fragment.len());
+                    }
+                }
+                maximum_fragments = maximum_fragments.max(fragment_count);
+                assert!(fragment_count <= MAX_CAP_FRAGMENTS_PER_WINDOW);
+                assert!(maximum_vertices <= MAX_CAP_FRAGMENT_VERTICES);
+            }
+        }
+        assert_eq!(maximum_fragments, 6);
+        assert_eq!(maximum_vertices, 7);
+    }
+
+    #[test]
+    fn local_cases_chord_consistent_plates_and_pin_junctions() {
+        let chord = window_for_levels([200, 0, 0, 0]);
         assert!(matches!(chord.case, LocalCase::Chord { .. }));
         assert_eq!(chord.wall_segments().len(), 2);
         assert_eq!(chord.faces().len(), 2);
@@ -1133,11 +1239,11 @@ mod tests {
         // One large break can return around the other three sides through
         // legal steps. It is a branch cut, not an iso-contour to extend
         // across the window, so the local case pins its sole physical edge.
-        let branch = make_window([0, 100, 70, 40]);
+        let branch = window_for_levels([0, 100, 70, 40]);
         assert!(matches!(branch.case, LocalCase::Pinned { .. }));
         assert_eq!(branch.wall_segments().len(), 1);
 
-        let saddle = make_window([0, 200, 0, 200]);
+        let saddle = window_for_levels([0, 200, 0, 200]);
         assert!(matches!(saddle.case, LocalCase::Pinned { .. }));
         assert_eq!(saddle.wall_segments().len(), 4);
     }

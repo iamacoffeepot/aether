@@ -212,16 +212,23 @@ fn rounded_cliff_renders_without_a_convex_corner_seam() {
     load_world(&mut bench, &wasm_path);
     let world = component_address();
 
-    // A four-by-four grass plateau in a Void chunk. Its one-meter height
-    // step is the physical cliff; the material is deliberately uniform on
-    // the high side so the rendered curtain proves the bounded height plan,
-    // not a material-only contour.
+    // A four-by-four grass plateau over a wider solid grass annulus. The low
+    // cap climbs gently along z while the high cap stays at one meter, so the
+    // rendered curtain must seal both the rounded high seam and a sloped low
+    // seam. The outer annulus remains within the legal-step ceiling of the
+    // Void surround and therefore adds no unrelated physical cliff.
     let mut underlay = vec![Material::Void.to_u8(); CELLS_PER_CHUNK_AREA];
     let mut height = vec![0; CELLS_PER_CHUNK_AREA];
+    for cell_z in 4..12 {
+        for cell_x in 4..12 {
+            let index = cell_z * 16 + cell_x;
+            underlay[index] = Material::Grass.to_u8();
+            height[index] = (i32::try_from(cell_z).expect("fixture cell fits i32") - 8) * 8;
+        }
+    }
     for cell_z in 6..10 {
         for cell_x in 6..10 {
             let index = cell_z * 16 + cell_x;
-            underlay[index] = Material::Grass.to_u8();
             height[index] = 256;
         }
     }

@@ -155,6 +155,19 @@ fn emit_label_quad(
     emit_flat_quad(rect, color, &surface, tris);
 }
 
+pub(super) fn label_case_is_connected(corners: [u8; 4], label: u8, case: u8) -> bool {
+    if case != 5 && case != 10 {
+        return true;
+    }
+    // The other diagonal pair: [BR, TL] for case 5, [BL, TR] for case 10.
+    let (other_a, other_b) = if case == 5 {
+        (corners[1], corners[2])
+    } else {
+        (corners[0], corners[3])
+    };
+    other_a != other_b || label > other_a
+}
+
 /// Emit every label's case polygon for one mixed boundary window, colored
 /// by its material's flat color and lifted per vertex through the vertex's
 /// own cell. A two-label saddle resolves by label order — the higher label
@@ -198,24 +211,14 @@ fn emit_mixed_window(
         z_octimeters: z_lo + half,
     };
     let has_cliff = cliffs.has_window_at(center);
+    let mut cap_fragment_count = 0;
     for k in 0..4 {
         let label = corners[k];
         if corners[..k].contains(&label) || (label == 0 && !has_cliff) {
             continue;
         }
         let case = label_case(display, gw, wi, wj, label);
-        let connected = if case == 5 || case == 10 {
-            // The other diagonal pair: [BR, TL] for case 5, [BL, TR] for
-            // case 10.
-            let (o1, o2) = if case == 5 {
-                (corners[1], corners[2])
-            } else {
-                (corners[0], corners[3])
-            };
-            o1 != o2 || label > o1
-        } else {
-            true
-        };
+        let connected = label_case_is_connected(corners, label, case);
         let material = Material::from_u8_or_void(label);
         let color = flat_color(styles.get(material));
         let vertex = |pos: [f32; 2], sides: [Option<(i32, bool)>; 2]| {
@@ -249,6 +252,7 @@ fn emit_mixed_window(
                         polygon: &material_points,
                         material,
                     },
+                    &mut cap_fragment_count,
                     styles,
                     tris,
                 );

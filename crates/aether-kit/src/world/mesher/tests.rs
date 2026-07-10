@@ -3,9 +3,10 @@ use core::ops::Range;
 
 use aether_capabilities::render::{DrawTriangle, Vertex};
 
+use super::cliffs::WindowCenter;
 use super::constants::{COVERAGE_LIFT, EDGE, OCTIMETERS_PER_METER, SUB};
 use super::coverage::{overlay_materials, subcell_coverage};
-use super::style::StyleTable;
+use super::style::{StyleTable, flat_color};
 use super::*;
 use crate::world::{
     CELLS_PER_CHUNK_AREA, CellPos, Chunk, ChunkPos, Material, Region, STEP_MAX_OCTIMETERS,
@@ -533,6 +534,39 @@ mod partition_inputs {
 mod walls {
     use super::*;
 
+    fn cell_cliff_world(break_x: i32) -> World {
+        let mut world = World::new();
+        for chunk_z in -1..=1 {
+            for chunk_x in -1..=2 {
+                let mut chunk = Chunk::empty();
+                chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+                for local_z in 0..EDGE {
+                    for local_x in 0..EDGE {
+                        let global_x = chunk_x * EDGE + local_x;
+                        chunk.height[(local_z * EDGE + local_x) as usize] =
+                            if global_x >= break_x { 256 } else { 0 };
+                    }
+                }
+                world.insert_chunk(
+                    ChunkPos {
+                        x: chunk_x,
+                        z: chunk_z,
+                    },
+                    chunk,
+                );
+            }
+        }
+        world
+    }
+
+    fn cap_cover_count(meshes: &[&[DrawTriangle]], x: f32, z: f32) -> usize {
+        meshes
+            .iter()
+            .flat_map(|mesh| mesh.iter())
+            .filter(|triangle| xz_area_doubled(triangle) > 1e-6 && covers(triangle, x, z))
+            .count()
+    }
+
     /// The vertical span of a triangle — a wall face stands ~1 m tall while
     /// a cap or ground quad is near-flat, so the split filters walls from
     /// the surfaces they join.
@@ -540,6 +574,114 @@ mod walls {
         let max = t.verts.iter().map(|v| v.y).fold(f32::MIN, f32::max);
         let min = t.verts.iter().map(|v| v.y).fold(f32::MAX, f32::min);
         max - min
+    }
+
+    #[test]
+    fn cliff_windows_disable_every_overlapped_cell_and_emit_one_cap_layer() {
+        let internal = cell_cliff_world(8);
+        let internal_plan = CliffPlan::build(&internal, ChunkPos { x: 0, z: 0 });
+        assert!(internal_plan.cell_has_cliff(CellPos { x: 7, z: 8 }));
+        assert!(internal_plan.cell_has_cliff(CellPos { x: 8, z: 8 }));
+        let internal_mesh = mesh_chunk(&internal, ChunkPos { x: 0, z: 0 }, &StyleTable::default());
+        assert_eq!(
+            cap_cover_count(&[&internal_mesh], 7.981, 8.011),
+            1,
+            "the low half of an internal cliff window has one cap layer",
+        );
+
+        let seam = cell_cliff_world(16);
+        let west_plan = CliffPlan::build(&seam, ChunkPos { x: 0, z: 0 });
+        let east_plan = CliffPlan::build(&seam, ChunkPos { x: 1, z: 0 });
+        assert!(west_plan.cell_has_cliff(CellPos { x: 15, z: 8 }));
+        assert!(east_plan.cell_has_cliff(CellPos { x: 16, z: 8 }));
+        assert!(!west_plan.has_window_at(WindowCenter {
+            x_octimeters: 16 * 256,
+            z_octimeters: 8 * 256,
+        }));
+        let west = mesh_chunk(&seam, ChunkPos { x: 0, z: 0 }, &StyleTable::default());
+        let east = mesh_chunk(&seam, ChunkPos { x: 1, z: 0 }, &StyleTable::default());
+        assert_eq!(
+            cap_cover_count(&[&west, &east], 15.981, 8.011),
+            1,
+            "the neighbor-owned local-256 window has one fleet-wide cap layer",
+        );
+    }
+
+    #[test]
+    fn a_chord_uses_each_crossing_high_side_cliff_material() {
+        let mut world = World::new();
+        world.insert_region(
+            1,
+            Region {
+                name: "lower".into(),
+                default_material: Material::Grass,
+                cliff_material: Material::Stone,
+            },
+        );
+        world.insert_region(
+            2,
+            Region {
+                name: "upper".into(),
+                default_material: Material::Grass,
+                cliff_material: Material::Sand,
+            },
+        );
+        for chunk_z in -1..=1 {
+            for chunk_x in -1..=1 {
+                let mut chunk = Chunk::empty();
+                chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
+                for local_z in 0..EDGE {
+                    for local_x in 0..EDGE {
+                        let global_x = chunk_x * EDGE + local_x;
+                        let global_z = chunk_z * EDGE + local_z;
+                        let index = (local_z * EDGE + local_x) as usize;
+                        chunk.height[index] = if global_x >= 8 { 256 } else { 0 };
+                        chunk.region[index] = if global_z < 8 { 1 } else { 2 };
+                    }
+                }
+                world.insert_chunk(
+                    ChunkPos {
+                        x: chunk_x,
+                        z: chunk_z,
+                    },
+                    chunk,
+                );
+            }
+        }
+
+        let styles = StyleTable::default();
+        let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, &styles);
+        let stone = flat_color(styles.get(Material::Stone));
+        let sand = flat_color(styles.get(Material::Sand));
+        let wall_half = |upper: bool| {
+            mesh.iter().filter(move |triangle| {
+                if xz_area_doubled(triangle) > 1e-6
+                    || y_span(triangle) < 0.5
+                    || !triangle
+                        .verts
+                        .iter()
+                        .all(|vertex| (vertex.x - 8.0).abs() < 1e-6)
+                {
+                    return false;
+                }
+                let center_z = triangle.verts.iter().map(|vertex| vertex.z).sum::<f32>() / 3.0;
+                let in_window = (center_z - 8.0).abs() < 1.0 / 32.0;
+                in_window && (center_z > 8.0) == upper
+            })
+        };
+        let lower: Vec<_> = wall_half(false).collect();
+        let upper: Vec<_> = wall_half(true).collect();
+        assert!(!lower.is_empty() && !upper.is_empty());
+        assert!(
+            lower
+                .iter()
+                .all(|triangle| { triangle.verts.iter().all(|vertex| vertex.color == stone) })
+        );
+        assert!(
+            upper
+                .iter()
+                .all(|triangle| { triangle.verts.iter().all(|vertex| vertex.color == sand) })
+        );
     }
 
     #[test]
