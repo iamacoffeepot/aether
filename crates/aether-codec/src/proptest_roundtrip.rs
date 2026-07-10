@@ -25,6 +25,8 @@
 
 #![cfg(test)]
 
+use std::collections::BTreeMap;
+
 use aether_data::{EnumVariant, Primitive, SchemaCell, SchemaType};
 use proptest::prelude::*;
 use proptest::strategy::Union;
@@ -276,14 +278,20 @@ fn value_for_map(key_schema: &SchemaType, value_schema: &SchemaType) -> BoxedStr
         )
         .prop_map(|m| Value::Object(m.into_iter().collect()))
         .boxed(),
-        SchemaType::Bool => prop::collection::btree_map(any::<bool>(), value_strat, 0..=2)
-            .prop_map(|m| Value::Object(m.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<Map<_, _>>()))
-            .boxed(),
-        SchemaType::Scalar(p) => prop::collection::btree_map(arb_int_key(*p), value_strat, 0..=MAX_WIDTH)
-            .prop_map(|m| Value::Object(m.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<Map<_, _>>()))
-            .boxed(),
+        SchemaType::Bool => {
+            prop::collection::btree_map(any::<bool>(), value_strat, 0..=2).prop_map(stringify_keys).boxed()
+        }
+        SchemaType::Scalar(p) => {
+            prop::collection::btree_map(arb_int_key(*p), value_strat, 0..=MAX_WIDTH).prop_map(stringify_keys).boxed()
+        }
         other => unreachable!("arb_map_key_schema never yields {other:?} as a map key"),
     }
+}
+
+/// Wrap a generated map as a JSON object, stringifying its native keys
+/// into the canonical decimal / `"true"`-`"false"` form the decoder emits.
+fn stringify_keys<K: ToString>(m: BTreeMap<K, Value>) -> Value {
+    Value::Object(m.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<Map<_, _>>())
 }
 
 /// Integer-key generator spanning the primitive's full value range, held

@@ -190,7 +190,7 @@ fn decode_cast_field(cur: &mut Cursor<'_>, ty: &SchemaType, path: &str) -> Resul
         SchemaType::Scalar(p) => {
             let a = align_of_primitive(*p);
             cur.skip_pad_to(a);
-            read_primitive_cast(cur, *p, path)
+            read_primitive_le(cur, *p, path)
         }
         SchemaType::Array { element, len } => {
             let elem_align = alignment_of_schema(element)?;
@@ -240,7 +240,10 @@ fn render_type_id_value(id: u64, type_id: u64, _path: &str) -> Result<Value, Dec
     Ok(tagged_id::encode(id).map_or_else(|| Value::from(id), Value::String))
 }
 
-fn read_primitive_cast(cur: &mut Cursor<'_>, p: Primitive, path: &str) -> Result<Value, DecodeError> {
+/// Fixed-width little-endian read of the declared width — shared by the
+/// repr-C cast path and the wire path (the inverse of
+/// `encode::write_scalar_wire`). No varints, no zigzag.
+fn read_primitive_le(cur: &mut Cursor<'_>, p: Primitive, path: &str) -> Result<Value, DecodeError> {
     match p {
         Primitive::U8 => Ok(Value::from(u8::from_le_bytes(cur.take::<1>(path)?))),
         Primitive::U16 => Ok(Value::from(u16::from_le_bytes(cur.take::<2>(path)?))),
@@ -296,7 +299,7 @@ fn decode_wire_value(cur: &mut Cursor<'_>, schema: &SchemaType, path: &str) -> R
                 _ => Err(DecodeError::InvalidBool { path: path.into(), byte: b }),
             }
         }
-        SchemaType::Scalar(p) => read_primitive_wire(cur, *p, path),
+        SchemaType::Scalar(p) => read_primitive_le(cur, *p, path),
         SchemaType::String => {
             let len = cur.read_count(path)? as usize;
             let bytes = cur.take_slice(len, path)?;
@@ -386,23 +389,6 @@ fn decode_wire_value(cur: &mut Cursor<'_>, schema: &SchemaType, path: &str) -> R
             let id = u64::from_le_bytes(cur.take::<8>(path)?);
             render_type_id_value(id, *type_id, path)
         }
-    }
-}
-
-fn read_primitive_wire(cur: &mut Cursor<'_>, p: Primitive, path: &str) -> Result<Value, DecodeError> {
-    // Fixed-width little-endian of the declared width — the inverse of
-    // `encode::write_scalar_wire`. No varints, no zigzag.
-    match p {
-        Primitive::U8 => Ok(Value::from(u8::from_le_bytes(cur.take::<1>(path)?))),
-        Primitive::U16 => Ok(Value::from(u16::from_le_bytes(cur.take::<2>(path)?))),
-        Primitive::U32 => Ok(Value::from(u32::from_le_bytes(cur.take::<4>(path)?))),
-        Primitive::U64 => Ok(Value::from(u64::from_le_bytes(cur.take::<8>(path)?))),
-        Primitive::I8 => Ok(Value::from(i8::from_le_bytes(cur.take::<1>(path)?))),
-        Primitive::I16 => Ok(Value::from(i16::from_le_bytes(cur.take::<2>(path)?))),
-        Primitive::I32 => Ok(Value::from(i32::from_le_bytes(cur.take::<4>(path)?))),
-        Primitive::I64 => Ok(Value::from(i64::from_le_bytes(cur.take::<8>(path)?))),
-        Primitive::F32 => Ok(json_f64(f64::from(f32::from_le_bytes(cur.take::<4>(path)?)))),
-        Primitive::F64 => Ok(json_f64(f64::from_le_bytes(cur.take::<8>(path)?))),
     }
 }
 

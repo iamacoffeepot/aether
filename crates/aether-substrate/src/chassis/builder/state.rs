@@ -147,80 +147,6 @@ impl<C: Chassis> Builder<C, NoDriver> {
         self
     }
 
-    /// Issue 745: override the worker pool size. `None` keeps
-    /// [`PoolConfig::default`](crate::scheduler::PoolConfig::default)
-    /// (`available_parallelism() - 1`, min 1);
-    /// `Some(n)` plumbs `n` into the pool at boot. `Some(0)` is
-    /// clamped to 1 since the pool requires at least one worker. The
-    /// override can be applied either before or after `.driver(_)`.
-    #[must_use]
-    pub fn with_workers(mut self, workers: Option<usize>) -> Self {
-        self.workers = workers.map(|n| n.max(1));
-        self
-    }
-
-    /// Issue 1990: override the per-actor ring capacities (`ActorLogRing`
-    /// / `ActorTraceRing`). Default is [`RingCapacities::default`] (the
-    /// `aether-actor` const caps). Production chassis mains resolve the
-    /// `ActorRingConfig` derive-`Config` knob (`AETHER_ACTOR_LOG_RING_SIZE`
-    /// / `AETHER_ACTOR_TRACE_RING_SIZE`) and pass the lowered
-    /// `RingCapacities` here; the caps thread into every spawned actor's
-    /// rings and the chassis-host trace ring at boot. The override can be
-    /// applied either before or after `.driver(_)`.
-    #[must_use]
-    pub fn with_ring_caps(mut self, ring_caps: RingCapacities) -> Self {
-        self.ring_caps = ring_caps;
-        self
-    }
-
-    /// Override the scheduler hot-path tuning ([`SchedulerTuning`]).
-    /// Default is [`SchedulerTuning::default`] (the built-in literals /
-    /// adaptive knobs). Production chassis mains resolve the bundle-side
-    /// `SchedulerTuningConfig` derive-`Config` knob (env `AETHER_*`) and
-    /// pass the lowered `SchedulerTuning` here; `boot_passives` installs it
-    /// into the scheduler's process-global before `Pool::start`. The
-    /// override can be applied either before or after `.driver(_)`.
-    #[must_use]
-    pub fn with_scheduler_tuning(mut self, scheduler_tuning: SchedulerTuning) -> Self {
-        self.scheduler_tuning = scheduler_tuning;
-        self
-    }
-
-    /// Issue #2509: override the instanced-actor teardown close-done
-    /// gate's cumulative patience cap. Default is `DEFAULT_TEARDOWN_CAP`
-    /// (the 300s backstop). Production chassis mains resolve the shared
-    /// `AETHER_SETTLEMENT_CAP_SECS` knob (`SettlementConfig::to_cap`,
-    /// including its `0 → Duration::MAX` "wait forever" sentinel) and pass
-    /// the lowered `Duration` here, so one knob covers both the settlement
-    /// gates and the teardown gate; `boot_passives` stores it on
-    /// `BootedPassives`, whose `shutdown_in_place` hands it to
-    /// `Spawner::shutdown_instanced`. The override can be applied either
-    /// before or after `.driver(_)`.
-    #[must_use]
-    pub fn with_teardown_cap(mut self, teardown_cap: Duration) -> Self {
-        self.teardown_cap = teardown_cap;
-        self
-    }
-
-    /// Register a fallback router — a single-shot handler the
-    /// substrate consults for envelopes whose mailbox name doesn't
-    /// resolve. Multiple calls collapse to a `BootError` at
-    /// `build()` (single-claim invariant).
-    #[must_use]
-    pub fn with_fallback_router(mut self, handler: FallbackRouter) -> Self {
-        self.passives.push(Box::new(FallbackRouterBoot::new(handler)));
-        self
-    }
-
-    #[must_use]
-    pub fn with_actor<A>(mut self, config: A::Config) -> Self
-    where
-        A: NativeActor,
-    {
-        self.passives.push(Box::new(NativeActorBoot::<A>::new(config)));
-        self
-    }
-
     /// Supply the chassis's driver. Transitions to [`HasDriver`] —
     /// further `.driver(_)` calls are forbidden by the type system.
     /// Per ADR-0071 the driver type is fixed by `C::Driver`, so the
@@ -278,19 +204,24 @@ impl<C: Chassis> Builder<C, NoDriver> {
     }
 }
 
-impl<C: Chassis> Builder<C, HasDriver> {
-    /// Register a fallback router after the driver was supplied.
-    /// Booted before the driver in declaration order.
+/// State-independent declarations, available both before and after
+/// `.driver(_)`: passives declared after the driver still boot before it
+/// (declaration order never outranks the passives-before-driver
+/// invariant), and the pool / ring / tuning / teardown overrides are
+/// consumed only at `build()` / `build_passive()`.
+impl<C: Chassis, S: BuilderState> Builder<C, S> {
+    /// Register a fallback router — a single-shot handler the
+    /// substrate consults for envelopes whose mailbox name doesn't
+    /// resolve. Multiple calls collapse to a `BootError` at
+    /// `build()` (single-claim invariant).
     #[must_use]
     pub fn with_fallback_router(mut self, handler: FallbackRouter) -> Self {
         self.passives.push(Box::new(FallbackRouterBoot::new(handler)));
         self
     }
 
-    /// Mirror of [`Builder::with_actor`][Builder<C, NoDriver>::with_actor]
-    /// for the post-driver state — same semantics, accepted because
-    /// declaration-order before/after `.driver(_)` doesn't change
-    /// boot order (passives boot before the driver regardless).
+    /// Declare a native actor to boot with the chassis, configured per
+    /// ADR-0090's derive-`Config` path.
     #[must_use]
     pub fn with_actor<A>(mut self, config: A::Config) -> Self
     where
@@ -300,38 +231,59 @@ impl<C: Chassis> Builder<C, HasDriver> {
         self
     }
 
-    /// Mirror of [`Builder::with_workers`][Builder<C, NoDriver>::with_workers]
-    /// for the post-driver state. Issue 745.
+    /// Issue 745: override the worker pool size. `None` keeps
+    /// [`PoolConfig::default`](crate::scheduler::PoolConfig::default)
+    /// (`available_parallelism() - 1`, min 1);
+    /// `Some(n)` plumbs `n` into the pool at boot. `Some(0)` is
+    /// clamped to 1 since the pool requires at least one worker.
     #[must_use]
     pub fn with_workers(mut self, workers: Option<usize>) -> Self {
         self.workers = workers.map(|n| n.max(1));
         self
     }
 
-    /// Mirror of [`Builder::with_ring_caps`][Builder<C, NoDriver>::with_ring_caps]
-    /// for the post-driver state. Issue 1990.
+    /// Issue 1990: override the per-actor ring capacities (`ActorLogRing`
+    /// / `ActorTraceRing`). Default is [`RingCapacities::default`] (the
+    /// `aether-actor` const caps). Production chassis mains resolve the
+    /// `ActorRingConfig` derive-`Config` knob (`AETHER_ACTOR_LOG_RING_SIZE`
+    /// / `AETHER_ACTOR_TRACE_RING_SIZE`) and pass the lowered
+    /// `RingCapacities` here; the caps thread into every spawned actor's
+    /// rings and the chassis-host trace ring at boot.
     #[must_use]
     pub fn with_ring_caps(mut self, ring_caps: RingCapacities) -> Self {
         self.ring_caps = ring_caps;
         self
     }
 
-    /// Mirror of [`Builder::with_scheduler_tuning`][Builder<C, NoDriver>::with_scheduler_tuning]
-    /// for the post-driver state.
+    /// Override the scheduler hot-path tuning ([`SchedulerTuning`]).
+    /// Default is [`SchedulerTuning::default`] (the built-in literals /
+    /// adaptive knobs). Production chassis mains resolve the bundle-side
+    /// `SchedulerTuningConfig` derive-`Config` knob (env `AETHER_*`) and
+    /// pass the lowered `SchedulerTuning` here; `boot_passives` installs it
+    /// into the scheduler's process-global before `Pool::start`.
     #[must_use]
     pub fn with_scheduler_tuning(mut self, scheduler_tuning: SchedulerTuning) -> Self {
         self.scheduler_tuning = scheduler_tuning;
         self
     }
 
-    /// Mirror of [`Builder::with_teardown_cap`][Builder<C, NoDriver>::with_teardown_cap]
-    /// for the post-driver state. Issue #2509.
+    /// Issue #2509: override the instanced-actor teardown close-done
+    /// gate's cumulative patience cap. Default is `DEFAULT_TEARDOWN_CAP`
+    /// (the 300s backstop). Production chassis mains resolve the shared
+    /// `AETHER_SETTLEMENT_CAP_SECS` knob (`SettlementConfig::to_cap`,
+    /// including its `0 → Duration::MAX` "wait forever" sentinel) and pass
+    /// the lowered `Duration` here, so one knob covers both the settlement
+    /// gates and the teardown gate; `boot_passives` stores it on
+    /// `BootedPassives`, whose `shutdown_in_place` hands it to
+    /// `Spawner::shutdown_instanced`.
     #[must_use]
     pub fn with_teardown_cap(mut self, teardown_cap: Duration) -> Self {
         self.teardown_cap = teardown_cap;
         self
     }
+}
 
+impl<C: Chassis> Builder<C, HasDriver> {
     /// Boot every passive in declaration order, then boot the driver
     /// against a [`DriverCtx`]. Any failure aborts the build and
     /// shuts down the passives that already booted (via the

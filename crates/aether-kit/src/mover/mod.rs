@@ -509,18 +509,17 @@ fn push_capsule(out: &mut Vec<DrawTriangle>, cx: f32, cz: f32, base: Rgb) {
         Rgb::new(base.r * f, base.g * f, base.b * f)
     };
     let vert = |p: Vec3, color: Rgb| Vertex { x: p.x, y: p.y, z: p.z, color };
+    let tri = |a: (Vec3, Vec3), b: (Vec3, Vec3), c: (Vec3, Vec3)| DrawTriangle {
+        verts: [vert(a.0, shade(a.1)), vert(b.0, shade(b.1)), vert(c.0, shade(c.1))],
+    };
 
     for band in 0..rings.len() - 1 {
         let (lo, hi) = (rings[band], rings[band + 1]);
         for j in 0..RADIAL {
             let k = (j + 1) % RADIAL;
             let (l0, hi0, l1, hi1) = (lo[j], hi[j], lo[k], hi[k]);
-            out.push(DrawTriangle {
-                verts: [vert(l0.0, shade(l0.1)), vert(hi0.0, shade(hi0.1)), vert(hi1.0, shade(hi1.1))],
-            });
-            out.push(DrawTriangle {
-                verts: [vert(l0.0, shade(l0.1)), vert(hi1.0, shade(hi1.1)), vert(l1.0, shade(l1.1))],
-            });
+            out.push(tri(l0, hi0, hi1));
+            out.push(tri(l0, hi1, l1));
         }
     }
 }

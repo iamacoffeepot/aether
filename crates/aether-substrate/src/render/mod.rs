@@ -94,6 +94,36 @@ pub fn vertex_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
+/// Single-entry vertex-stage uniform-buffer bind group layout — the
+/// shape the camera and quad-viewport uniforms share.
+fn uniform_bind_group_layout(device: &wgpu::Device, label: &str, bytes: u64) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(bytes),
+            },
+            count: None,
+        }],
+    })
+}
+
+/// Load-preserving color attachment over the frame's color target —
+/// how the material and quad-overlay passes draw over the main pass
+/// output without clearing it.
+fn load_color_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttachment<'_> {
+    wgpu::RenderPassColorAttachment {
+        view,
+        resolve_target: None,
+        depth_slice: None,
+        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+    }
+}
+
 /// Source for the shared `(pos, color)` shader. Chassis-side
 /// pipelines that share the vertex layout (wireframe overlay, etc.)
 /// can reach for this directly.

@@ -933,6 +933,12 @@ fn decode_keepup_cells(trials: &[TrialReport]) -> Vec<Vec<KeepUpCell>> {
 /// Find the keep-up cell matching (`workers`, `topo`) in one trial's cells (a
 /// free fn so the returned borrow ties to the slice's lifetime, mirroring
 /// [`find_cell`] / [`find_throughput_cell`]).
+/// Collect the matching cell from each of the first `k` trials — one side
+/// (base or candidate) of a keep-up comparison row.
+fn keepup_trial_hits<'a>(trials: &'a [Vec<KeepUpCell>], k: usize, workers: usize, topo: &str) -> Vec<&'a KeepUpCell> {
+    trials[..k.min(trials.len())].iter().filter_map(|c| find_keepup_cell(c, workers, topo)).collect()
+}
+
 fn find_keepup_cell<'a>(cells: &'a [KeepUpCell], workers: usize, topo: &str) -> Option<&'a KeepUpCell> {
     cells.iter().find(|c| c.workers == workers && c.topo == topo)
 }
@@ -960,10 +966,8 @@ fn compare_keepup(
     };
 
     for (workers, topo) in &keys {
-        let base_hits: Vec<&KeepUpCell> =
-            base_cells[..k.min(base_cells.len())].iter().filter_map(|c| find_keepup_cell(c, *workers, topo)).collect();
-        let cand_hits: Vec<&KeepUpCell> =
-            cand_cells[..k.min(cand_cells.len())].iter().filter_map(|c| find_keepup_cell(c, *workers, topo)).collect();
+        let base_hits = keepup_trial_hits(base_cells, k, *workers, topo);
+        let cand_hits = keepup_trial_hits(cand_cells, k, *workers, topo);
         if base_hits.len() != k || cand_hits.len() != k || k == 0 {
             continue; // cell not present in every trial — skip
         }

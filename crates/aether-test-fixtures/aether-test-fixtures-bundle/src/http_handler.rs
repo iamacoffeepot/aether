@@ -74,6 +74,39 @@ const STREAM_CHUNK_COUNT: u32 = 20;
 /// reassembles a deterministic body.
 ///
 /// Registered at `aether.component/aether.embedded:test.web_stream` after load.
+/// Spend one `HttpStreamCredit` grant: arm the stream handle on the first
+/// grant (ADR-0133 — the counterparty that dispatched it, so chunks flow
+/// back to whoever paced the stream rather than a hard-coded cap
+/// singleton), emit up to `credit.credit` more chunks, and terminate once
+/// all [`STREAM_CHUNK_COUNT`] have gone out. Shared verbatim by
+/// [`StreamingHttpHandler`] and [`RoutedStreamingHttpHandler`] so their
+/// e2e comparison isolates the dispatch path, not the behavior.
+fn spend_credit(
+    stream_slot: &mut Option<ResponseStream>,
+    next_index: &mut u32,
+    ended: &mut bool,
+    ctx: &mut WasmCtx<'_, Manual>,
+    credit: &HttpStreamCredit,
+) {
+    let stream = match *stream_slot {
+        Some(stream) => stream,
+        None => match ResponseStream::from_credit(ctx, credit) {
+            Some(stream) => *stream_slot.insert(stream),
+            None => return,
+        },
+    };
+    let mut budget = credit.credit;
+    while budget > 0 && *next_index < STREAM_CHUNK_COUNT {
+        stream.chunk(ctx, format!("chunk-{}\n", *next_index).into_bytes());
+        *next_index += 1;
+        budget -= 1;
+    }
+    if *next_index >= STREAM_CHUNK_COUNT && !*ended {
+        stream.end(ctx);
+        *ended = true;
+    }
+}
+
 pub struct StreamingHttpHandler {
     /// The stream this handler is feeding (ADR-0133), captured from the
     /// first credit mail — the counterparty that dispatched it plus the
@@ -117,26 +150,7 @@ impl WasmActor for StreamingHttpHandler {
     /// in response.
     #[handler::manual]
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
-        // ADR-0133: capture the stream handle from the first credit grant —
-        // the counterparty that dispatched it, so chunks flow back to
-        // whoever paced the stream rather than a hard-coded cap singleton.
-        let stream = match self.stream {
-            Some(stream) => stream,
-            None => match ResponseStream::from_credit(ctx, &credit) {
-                Some(stream) => *self.stream.insert(stream),
-                None => return,
-            },
-        };
-        let mut budget = credit.credit;
-        while budget > 0 && self.next_index < STREAM_CHUNK_COUNT {
-            stream.chunk(ctx, format!("chunk-{}\n", self.next_index).into_bytes());
-            self.next_index += 1;
-            budget -= 1;
-        }
-        if self.next_index >= STREAM_CHUNK_COUNT && !self.ended {
-            stream.end(ctx);
-            self.ended = true;
-        }
+        spend_credit(&mut self.stream, &mut self.next_index, &mut self.ended, ctx, &credit);
     }
 }
 
@@ -366,22 +380,6 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// window slot.
     #[handler::manual]
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
-        let stream = match self.stream {
-            Some(stream) => stream,
-            None => match ResponseStream::from_credit(ctx, &credit) {
-                Some(stream) => *self.stream.insert(stream),
-                None => return,
-            },
-        };
-        let mut budget = credit.credit;
-        while budget > 0 && self.next_index < STREAM_CHUNK_COUNT {
-            stream.chunk(ctx, format!("chunk-{}\n", self.next_index).into_bytes());
-            self.next_index += 1;
-            budget -= 1;
-        }
-        if self.next_index >= STREAM_CHUNK_COUNT && !self.ended {
-            stream.end(ctx);
-            self.ended = true;
-        }
+        spend_credit(&mut self.stream, &mut self.next_index, &mut self.ended, ctx, &credit);
     }
 }

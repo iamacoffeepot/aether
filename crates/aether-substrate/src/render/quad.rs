@@ -151,19 +151,8 @@ pub fn build_quad_pipeline(
         source: wgpu::ShaderSource::Wgsl(QUAD_SHADER_WGSL.into()),
     });
 
-    let viewport_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("quad viewport bind group layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(QUAD_UNIFORM_BYTES),
-            },
-            count: None,
-        }],
-    });
+    let viewport_bind_group_layout =
+        super::uniform_bind_group_layout(device, "quad viewport bind group layout", QUAD_UNIFORM_BYTES);
 
     let viewport_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("quad viewport uniform"),
@@ -442,12 +431,7 @@ pub fn record_quad_overlay_pass(
 
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("aether quad overlay pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: targets.color_view(),
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-        })],
+        color_attachments: &[Some(super::load_color_attachment(targets.color_view()))],
         depth_stencil_attachment: None,
         timestamp_writes: None,
         occlusion_query_set: None,

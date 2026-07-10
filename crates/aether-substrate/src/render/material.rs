@@ -340,12 +340,7 @@ pub fn record_material_pass(encoder: &mut wgpu::CommandEncoder, record: Material
 
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("aether material pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: targets.color_view(),
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-        })],
+        color_attachments: &[Some(super::load_color_attachment(targets.color_view()))],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: &targets.depth.view,
             depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),

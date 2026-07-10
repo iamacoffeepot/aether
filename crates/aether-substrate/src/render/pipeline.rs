@@ -72,19 +72,8 @@ pub fn build_main_pipeline(
         source: wgpu::ShaderSource::Wgsl(MAIN_SHADER_WGSL.into()),
     });
 
-    let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("camera bind group layout"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(CAMERA_UNIFORM_BYTES),
-            },
-            count: None,
-        }],
-    });
+    let camera_bind_group_layout =
+        super::uniform_bind_group_layout(device, "camera bind group layout", CAMERA_UNIFORM_BYTES);
 
     let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("camera uniform"),

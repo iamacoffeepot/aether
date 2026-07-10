@@ -564,51 +564,12 @@ mod tests {
     use aether_math::Rgba;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::outbound::EgressEvent;
-    use aether_substrate::testing::{decode_session_reply, drive_task_completion, test_mailer_and_rx};
+    use aether_substrate::testing::{
+        assert_next_send_kind, decode_session_reply, decode_session_reply_with_session, drive_task_completion,
+        fs_reply_source, session_sender, test_mailer_and_rx,
+    };
     use std::sync::mpsc::Receiver;
     use std::time::Duration;
-
-    fn session_sender() -> Source {
-        session_sender_with(0)
-    }
-
-    fn session_sender_with(id: u128) -> Source {
-        Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(id))))
-    }
-
-    fn decode_session_reply_with_session<K>(rx: &Receiver<EgressEvent>) -> (SessionToken, K)
-    where
-        K: Kind,
-    {
-        loop {
-            let event = rx.recv_timeout(Duration::from_secs(2)).expect("test: egress event arrives within deadline");
-            if let EgressEvent::ToSession { session, kind_name, payload, .. } = event
-                && kind_name == K::NAME
-            {
-                return (session, K::decode_from_bytes(&payload).expect("test: reply payload decodes"));
-            }
-        }
-    }
-
-    /// Flush the cap's buffered sends, then drain egress asserting the
-    /// next `UnresolvedMail` carries kind `K`. The bare registry has no
-    /// `aether.render` / `aether.fs`, so a forwarded send bubbles to the
-    /// loopback outbound; `flush_outbound` is what `NativeCtx::Drop`
-    /// would otherwise do at the end of a real dispatch turn.
-    fn assert_next_send_kind<K: Kind>(binding: &NativeBinding, rx: &Receiver<EgressEvent>) -> u64 {
-        binding.flush_outbound();
-        loop {
-            let event = rx.recv_timeout(Duration::from_secs(2)).expect("test: egress event arrives within deadline");
-            if let EgressEvent::UnresolvedMail { kind_id, correlation_id, .. } = event {
-                assert_eq!(kind_id, K::ID, "unexpected bubbled kind");
-                return correlation_id;
-            }
-        }
-    }
-
-    fn fs_reply_source(correlation_id: u64) -> Source {
-        Source::with_correlation(SourceAddr::None, correlation_id)
-    }
 
     fn ctx_binding() -> (Arc<NativeBinding>, Receiver<EgressEvent>) {
         let (mailer, rx) = test_mailer_and_rx();

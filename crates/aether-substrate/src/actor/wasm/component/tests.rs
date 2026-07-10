@@ -16,6 +16,7 @@ use crate::actor::wasm::host_fns;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
 use crate::mail::registry;
+use crate::mail::registry::InboxHandler;
 use crate::mail::registry::MailboxEntry;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::Registry;
@@ -27,23 +28,26 @@ use std::sync::mpsc::Receiver;
 /// lineage-propagation tests in this module.
 type LineageCapture = Arc<Mutex<Vec<(MailId, MailId, Option<MailId>)>>>;
 
+/// Build an inbox handler that captures every dispatched mail's lineage
+/// triple into a shared `Vec`, discharging each dispatch (ADR-0094:
+/// terminal test capture sink). Returns the capture handle alongside.
+fn lineage_capture_handler() -> (LineageCapture, Arc<dyn InboxHandler>) {
+    let captured: LineageCapture = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_handler = Arc::clone(&captured);
+    let handler = Arc::new(move |dispatch: OwnedDispatch| {
+        dispatch.discharge();
+        captured_for_handler.lock().unwrap().push((dispatch.mail_id, dispatch.root, dispatch.parent_mail));
+    });
+    (captured, handler)
+}
+
 /// Register a sink that captures every dispatched mail's lineage
 /// triple into a shared `Vec`. Both lineage tests below share
 /// this setup; the helper returns the capture handle and the
 /// registered mailbox id.
 fn register_lineage_capture_sink(registry: &Arc<Registry>, name: &str) -> (LineageCapture, MailboxId) {
-    let captured: LineageCapture = Arc::new(Mutex::new(Vec::new()));
-    let captured_for_handler = Arc::clone(&captured);
-    let sink_id = registry
-        .try_register_inbox(
-            name,
-            Arc::new(move |dispatch: OwnedDispatch| {
-                // ADR-0094: terminal test capture sink — discharge.
-                dispatch.discharge();
-                captured_for_handler.lock().unwrap().push((dispatch.mail_id, dispatch.root, dispatch.parent_mail));
-            }),
-        )
-        .expect("register sink");
+    let (captured, handler) = lineage_capture_handler();
+    let sink_id = registry.try_register_inbox(name, handler).expect("register sink");
     (captured, sink_id)
 }
 
@@ -1187,19 +1191,11 @@ fn inline_alias_folded_id_matches_post_1920_convention() {
 #[test]
 fn inline_alias_routes_into_parent_slot_inbox() {
     let registry = Arc::new(Registry::new());
-    let captured: LineageCapture = Arc::new(Mutex::new(Vec::new()));
-    let captured_for_handler = Arc::clone(&captured);
+    let (captured, capture_handler) = lineage_capture_handler();
     let parent_name = "aether.component/aether.embedded:testparent".to_owned();
     let parent_id = aether_data::mailbox_id_from_path(&parent_name);
     registry
-        .try_register_inbox_with_id(
-            parent_id,
-            parent_name.clone(),
-            Arc::new(move |dispatch: OwnedDispatch| {
-                dispatch.discharge();
-                captured_for_handler.lock().unwrap().push((dispatch.mail_id, dispatch.root, dispatch.parent_mail));
-            }),
-        )
+        .try_register_inbox_with_id(parent_id, parent_name.clone(), capture_handler)
         .expect("parent registers under its lineage id");
 
     // Mirror the host fn: fold the alias id and register an alias route

@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aether_data::{Kind, Source};
+use aether_data::{Kind, SessionToken, Source, SourceAddr, Uuid};
 use aether_kinds::descriptors;
 
 use crate::actor::native::binding::NativeBinding;
@@ -188,6 +188,57 @@ where
             return K::decode_from_bytes(&payload).expect("test: reply payload decodes");
         }
     }
+}
+
+/// Sibling of [`decode_session_reply`] that also returns which session
+/// the reply targeted, for cap tests that fan replies across sessions.
+pub fn decode_session_reply_with_session<K>(rx: &Receiver<EgressEvent>) -> (SessionToken, K)
+where
+    K: Kind,
+{
+    loop {
+        let event = rx.recv_timeout(Duration::from_secs(2)).expect("test: egress event arrives within deadline");
+        if let EgressEvent::ToSession { session, kind_name, payload, .. } = event
+            && kind_name == K::NAME
+        {
+            return (session, K::decode_from_bytes(&payload).expect("test: reply payload decodes"));
+        }
+    }
+}
+
+/// Flush the cap's buffered sends, then drain egress asserting the next
+/// `UnresolvedMail` carries kind `K`, returning its correlation id. The
+/// bare registry has no `aether.render` / `aether.fs`, so a forwarded
+/// send bubbles to the loopback outbound; `flush_outbound` is what
+/// `NativeCtx::Drop` would otherwise do at the end of a real dispatch
+/// turn.
+pub fn assert_next_send_kind<K: Kind>(binding: &NativeBinding, rx: &Receiver<EgressEvent>) -> u64 {
+    binding.flush_outbound();
+    loop {
+        let event = rx.recv_timeout(Duration::from_secs(2)).expect("test: egress event arrives within deadline");
+        if let EgressEvent::UnresolvedMail { kind_id, correlation_id, .. } = event {
+            assert_eq!(kind_id, K::ID, "unexpected bubbled kind");
+            return correlation_id;
+        }
+    }
+}
+
+/// `Source` for a session-origin dispatch (id 0) — the shape a cap sees
+/// when a session client sends it mail.
+pub fn session_sender() -> Source {
+    session_sender_with(0)
+}
+
+/// [`session_sender`] with an explicit session id, for tests that tell
+/// two sessions apart.
+pub fn session_sender_with(id: u128) -> Source {
+    Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(id))))
+}
+
+/// `Source` for a correlated no-address reply — the shape a task result
+/// (e.g. an `aether.fs` read) carries back into a cap's result handler.
+pub fn fs_reply_source(correlation_id: u64) -> Source {
+    Source::with_correlation(SourceAddr::None, correlation_id)
 }
 
 /// Decode the *next* egress as a `ToSession` reply of kind `K`. Strict
