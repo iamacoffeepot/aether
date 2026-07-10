@@ -69,12 +69,16 @@ jobs:
     name: Clippy
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    # 8 vCPU ephemeral EC2 spot runner (RunsOn stack, us-east-1).
-    # extras=s3-cache redirects the GitHub cache API (rust-cache
-    # included) to the stack's S3 bucket — no 10 GB repo cap.
-    runs-on: runs-on=${{ github.run_id }}/runner=8cpu-linux-x64/extras=s3-cache
+    # PR runs are latency-sensitive (the push-watch-fix loop), so they
+    # get an 8 vCPU ephemeral EC2 spot runner (RunsOn stack, us-east-1)
+    # with extras=s3-cache redirecting the GitHub cache API (rust-cache
+    # included) to the stack's S3 bucket — no 10 GB repo cap. Main
+    # pushes are post-merge — nobody blocks on them — so they run on
+    # free GitHub-hosted runners, keeping the whole spot quota for PRs.
+    runs-on: ${{ github.event_name == 'pull_request' && format('runs-on={0}/runner=8cpu-linux-x64/extras=s3-cache', github.run_id) || 'ubuntu-latest' }}
     steps:
       - uses: runs-on/action@v2
+        if: github.event_name == 'pull_request'
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -137,32 +141,27 @@ jobs:
   # triples CI time without catching anything new. See ADR-0035 § CI
   # matrix scope.
   test:
-    name: Test (workspace, linux, shard ${{ matrix.partition }}/2)
+    name: Test (workspace, linux)
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    # 8 vCPU ephemeral EC2 spot runner per shard (RunsOn stack,
-    # us-east-1); both shards fit the current 32-vCPU spot quota
-    # alongside clippy + qodana. S3 magic cache — see clippy.
+    # PR runs on the fast spot runner, main pushes on GitHub-hosted —
+    # rationale on the clippy job.
     # volume=150gb: the default ~40 GB root volume ENOSPCs under the
     # full runner image + the --all-features workspace test build +
     # fleetbench's per-test substrate copies; the volume lives only
-    # for the job so the size is effectively free.
-    runs-on: runs-on=${{ github.run_id }}/runner=8cpu-linux-x64/volume=150gb/extras=s3-cache
-    # The suite is sharded 2-way by nextest's deterministic name-hash
-    # partition (iamacoffeepot/aether#2803): each shard compiles the
-    # workspace against the shared rust-cache and runs half the tests,
-    # so the wall clock is setup + compile + half the execution. A
-    # build-once/nextest-archive split would serialize build -> run
-    # and ship multi-GB test binaries between jobs, which is slower
-    # end-to-end than two concurrent warm-cache compiles. A warm shard
-    # is ~8 min; cap at 30 so runner-load variance never cancels a
-    # healthy run mid-flight while a genuine hang still can't eat the
-    # default 6h quota.
+    # for the job so the size is effectively free. (The GitHub-hosted
+    # side survives on the free-disk-space reclaim step instead.)
+    runs-on: ${{ github.event_name == 'pull_request' && format('runs-on={0}/runner=8cpu-linux-x64/volume=150gb/extras=s3-cache', github.run_id) || 'ubuntu-latest' }}
+    # Quota-gated single job: the account's 32-vCPU spot quota can't
+    # absorb two 8-vCPU shards alongside clippy + qodana when runs
+    # overlap (MaxSpotInstanceCountExceeded -> on-demand fallback /
+    # queueing). The 2-way nextest name-hash shard split
+    # (iamacoffeepot/aether#2803) costs ~half the test execution in
+    # wall clock (~2 min) when collapsed, which sccache's member-crate
+    # caching more than buys back. Restore the split when the pending
+    # spot-quota increase lands: matrix partition [1, 2] + nextest
+    # --partition 'hash:N/2' + shard-qualified artifact name.
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        partition: [ 1, 2 ]
     env:
       # Use mold to reduce peak link memory and speed up the test
       # build — keeps the linker OOM (collect2: ld terminated with
@@ -185,9 +184,26 @@ jobs:
       # fetch-depth on the initial checkout keeps target/ alive into
       # the test step.
       - uses: runs-on/action@v2
+        if: github.event_name == 'pull_request'
       - uses: actions/checkout@v4
         with:
           fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+      # Main pushes run on GitHub-hosted runners, whose ~14 GB of free
+      # disk can't hold the --all-features workspace test build.
+      # Reclaim ~19 GB by removing preinstalled Android / .NET /
+      # Haskell tooling the build never uses (the slow apt-purge
+      # categories stay pinned off; see iamacoffeepot/aether#2803).
+      # PR runs get a 150 GB volume from the runner label instead.
+      - name: Free disk space (GitHub-hosted only)
+        if: github.event_name != 'pull_request'
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          android: 'true'
+          dotnet: 'true'
+          haskell: 'true'
+          large-packages: 'false'
+          docker-images: 'false'
+          swap-storage: 'false'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -204,7 +220,10 @@ jobs:
       # the bucket's 10-day expiration rule. Incremental compilation
       # is off because sccache cannot cache incremental artifacts —
       # a fresh runner has no incremental state to reuse anyway.
+      # PR-only: the S3 bucket env exists only on RunsOn runners, and
+      # main pushes on GitHub-hosted compile without a wrapper.
       - name: Configure sccache (S3 backend)
+        if: github.event_name == 'pull_request'
         run: |
           echo "SCCACHE_BUCKET=$RUNS_ON_S3_BUCKET_CACHE" >> "$GITHUB_ENV"
           echo "SCCACHE_REGION=$RUNS_ON_AWS_REGION" >> "$GITHUB_ENV"
@@ -212,6 +231,7 @@ jobs:
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
       - uses: mozilla-actions/sccache-action@v0.0.9
+        if: github.event_name == 'pull_request'
       # Pre-build the packaged artifact tree the scenario runner loads
       # at test time. Without this, ADR-0067 per-component scenarios
       # silently skip in CI ("wasm not built"); `AETHER_REQUIRE_RUNTIME=1`
@@ -244,34 +264,28 @@ jobs:
       # steady-state cap.
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
-      # hash partitioning assigns each test to a shard by a stable hash
-      # of its name — every test runs in exactly one shard regardless of
-      # how many binaries it spans, and the slow substrate-bundle
-      # integration tests spread statistically instead of clumping.
       - name: Run tests (workspace, parallel)
         run: cargo nextest run --all-features --profile ci
-          --partition 'hash:${{ matrix.partition }}/2'
         env:
           AETHER_REQUIRE_RUNTIME: "1"
       # iamacoffeepot/aether#2914: a failing direct TestBench visual
       # assertion that armed `test_bench::artifacts::ArtifactGuard`
       # leaves its actual/mask/measurements set under
-      # `target/test-bench-artifacts/`; a passing shard writes nothing
-      # there. Upload is shard-qualified (each partition gets its own
-      # artifact name) and ignores the tree being absent, matching the
+      # `target/test-bench-artifacts/`; a passing run writes nothing
+      # there. Upload ignores the tree being absent, matching the
       # fuzz-crash-artifact upload pattern in fuzz-nightly.yml.
       - name: Upload test-bench failure artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: test-bench-artifacts-shard-${{ matrix.partition }}
+          name: test-bench-artifacts
           path: target/test-bench-artifacts/**
           if-no-files-found: ignore
           retention-days: 7
       # Hit-rate visibility while the S3 backend beds in; harmless to
       # keep once it does.
       - name: sccache stats
-        if: always()
+        if: always() && github.event_name == 'pull_request'
         run: sccache --show-stats
 
   # Qodana scan folded in from .github/workflows/qodana.yml so the
@@ -289,15 +303,16 @@ jobs:
     name: Qodana scan
     needs: changes
     if: needs.changes.outputs.qodana == 'true'
-    # 8 vCPU ephemeral EC2 spot runner (RunsOn stack, us-east-1).
-    # S3 magic cache — see clippy.
-    runs-on: runs-on=${{ github.run_id }}/runner=8cpu-linux-x64/extras=s3-cache
+    # PR runs on the fast spot runner, main pushes on GitHub-hosted —
+    # rationale on the clippy job.
+    runs-on: ${{ github.event_name == 'pull_request' && format('runs-on={0}/runner=8cpu-linux-x64/extras=s3-cache', github.run_id) || 'ubuntu-latest' }}
     permissions:
       contents: write
       pull-requests: write
       checks: write
     steps:
       - uses: runs-on/action@v2
+        if: github.event_name == 'pull_request'
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
