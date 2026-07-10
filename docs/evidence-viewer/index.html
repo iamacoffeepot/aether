@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aether Evidence Viewer</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: #1b1f23;
+    --bg: #ffffff;
+    --muted: #57606a;
+    --border: #d0d7de;
+    --card: #f6f8fa;
+    --link: #0969da;
+    --ok: #1a7f37;
+    --bad: #cf222e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #e6edf3;
+      --bg: #0d1117;
+      --muted: #9198a1;
+      --border: #30363d;
+      --card: #161b22;
+      --link: #4493f8;
+      --ok: #3fb950;
+      --bad: #f85149;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 1.5rem;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--fg);
+    background: var(--bg);
+    line-height: 1.5;
+  }
+  main {
+    max-width: 960px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 1.4rem;
+    margin: 0 0 1rem;
+  }
+  h2 {
+    font-size: 1.1rem;
+    margin: 1.75rem 0 0.5rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.25rem;
+  }
+  a {
+    color: var(--link);
+  }
+  .muted {
+    color: var(--muted);
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+  }
+  .verdict-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 0.5rem;
+  }
+  .badge {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .badge-ok { color: var(--ok); border-color: var(--ok); }
+  .badge-bad { color: var(--bad); border-color: var(--bad); }
+  .badge-neutral { color: var(--muted); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th {
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 0.85rem;
+  }
+  .category-heading {
+    margin-top: 1rem;
+    font-weight: 600;
+  }
+  ul.plain {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  ul.plain li {
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  video, img.frame {
+    max-width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    display: block;
+    margin: 0.5rem 0;
+  }
+  .links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin: 0.5rem 0;
+  }
+  code {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.1rem 0.35rem;
+  }
+</style>
+</head>
+<body>
+<main id="app">
+  <h1>Aether Evidence Viewer</h1>
+  <p class="muted">Loading&hellip;</p>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  // Storage-repoint knobs: change these two constants to retroactively fix every
+  // previously posted evidence link (bucket rename, CloudFront/OAC swap, etc).
+  var BRANCH_BASE = "https://raw.githubusercontent.com/iamacoffeepot/aether/dogfood/evidence/evidence/";
+  var BUCKET_BASE = "https://aether-evidence.s3.amazonaws.com/evidence/";
+
+  var app = document.getElementById("app");
+
+  function clear(el) {
+    while (el.firstChild) el.removeChild(el.firstChild);
+  }
+
+  function el(tag, opts) {
+    var node = document.createElement(tag);
+    opts = opts || {};
+    if (opts.className) node.className = opts.className;
+    if (opts.text !== undefined) node.textContent = opts.text;
+    if (opts.href !== undefined) node.href = opts.href;
+    if (opts.attrs) {
+      for (var k in opts.attrs) {
+        if (Object.prototype.hasOwnProperty.call(opts.attrs, k)) node.setAttribute(k, opts.attrs[k]);
+      }
+    }
+    return node;
+  }
+
+  // Validates and parses ?run=<issue>/<run>. issue must be digits; run must be
+  // [A-Za-z0-9._-]+. Returns null for anything else — these values are
+  // interpolated into URLs, never into HTML unescaped.
+  function parseRun(raw) {
+    if (!raw) return null;
+    var parts = raw.split("/");
+    if (parts.length !== 2) return null;
+    var issue = parts[0];
+    var run = parts[1];
+    if (!/^[0-9]+$/.test(issue)) return null;
+    if (!/^[A-Za-z0-9._-]+$/.test(run)) return null;
+    return { issue: issue, run: run, joined: issue + "/" + run };
+  }
+
+  function renderNoRun() {
+    clear(app);
+    app.appendChild(el("h1", { text: "Aether Evidence Viewer" }));
+    var p = el("p", { className: "muted" });
+    p.appendChild(document.createTextNode("Open this page with "));
+    p.appendChild(el("code", { text: "?run=<issue>/<run>" }));
+    p.appendChild(document.createTextNode(" to view a dogfood trial, e.g. "));
+    var example = el("code", { text: "?run=2974/2026-07-10T00-00-00" });
+    p.appendChild(example);
+    p.appendChild(document.createTextNode("."));
+    app.appendChild(p);
+  }
+
+  function renderInvalidRun(raw) {
+    clear(app);
+    app.appendChild(el("h1", { text: "Aether Evidence Viewer" }));
+    var p = el("p", { className: "muted" });
+    p.appendChild(document.createTextNode("The "));
+    p.appendChild(el("code", { text: "run" }));
+    p.appendChild(document.createTextNode(" query parameter must look like "));
+    p.appendChild(el("code", { text: "<issue>/<run>" }));
+    p.appendChild(document.createTextNode(" (digits, then letters/digits/._-)."));
+    app.appendChild(p);
+  }
+
+  function renderNotFound(run) {
+    clear(app);
+    app.appendChild(el("h1", { text: "Aether Evidence Viewer" }));
+    var p = el("p", { className: "card" });
+    p.appendChild(document.createTextNode("No evidence found for run "));
+    p.appendChild(el("code", { text: run.joined }));
+    p.appendChild(document.createTextNode(". The rollup for this run could not be fetched — it may not have been uploaded yet, or the run id is wrong."));
+    app.appendChild(p);
+  }
+
+  function badgeFor(ok, label) {
+    var cls = ok === true ? "badge badge-ok" : ok === false ? "badge badge-bad" : "badge badge-neutral";
+    return el("span", { className: cls, text: label });
+  }
+
+  function renderVerdictHeader(rollup) {
+    var section = el("div", { className: "card" });
+    var row1 = el("div", { className: "verdict-row" });
+    row1.appendChild(badgeFor(rollup.succeeded === true, "succeeded: " + String(rollup.succeeded)));
+    if (rollup.buildGreen !== null && rollup.buildGreen !== undefined) {
+      row1.appendChild(badgeFor(rollup.buildGreen === true, "buildGreen: " + String(rollup.buildGreen)));
+    }
+    if (rollup.artifact) {
+      var verdict = rollup.artifact.verdict;
+      row1.appendChild(badgeFor(verdict === "correct" ? true : verdict === "wrong" ? false : null, "artifact: " + String(verdict)));
+    }
+    section.appendChild(row1);
+    if (rollup.summary) {
+      section.appendChild(el("p", { text: rollup.summary }));
+    }
+    if (rollup.artifact && rollup.artifact.rationale) {
+      var rat = el("p", { className: "muted" });
+      rat.appendChild(document.createTextNode("Judge rationale: " + rollup.artifact.rationale));
+      section.appendChild(rat);
+    }
+    return section;
+  }
+
+  function fieldText(value) {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "object") {
+      try { return JSON.stringify(value); } catch (e) { return String(value); }
+    }
+    return String(value);
+  }
+
+  function renderFrictionTable(friction) {
+    var wrap = document.createDocumentFragment();
+    if (!friction || typeof friction !== "object") return wrap;
+    var categories = Object.keys(friction);
+    var any = false;
+    for (var i = 0; i < categories.length; i++) {
+      var category = categories[i];
+      var items = friction[category];
+      if (!Array.isArray(items) || items.length === 0) continue;
+      any = true;
+      wrap.appendChild(el("div", { className: "category-heading", text: category + " (" + items.length + ")" }));
+      var table = el("table");
+      var thead = el("thead");
+      var headRow = el("tr");
+      ["severity", "where", "what", "suggested"].forEach(function (h) {
+        headRow.appendChild(el("th", { text: h }));
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+      var tbody = el("tbody");
+      items.forEach(function (finding) {
+        var tr = el("tr");
+        tr.appendChild(el("td", { text: fieldText(finding && finding.severity) }));
+        tr.appendChild(el("td", { text: fieldText(finding && finding.where) }));
+        tr.appendChild(el("td", { text: fieldText(finding && finding.what) }));
+        tr.appendChild(el("td", { text: fieldText(finding && finding.suggested) }));
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+    }
+    if (!any) {
+      wrap.appendChild(el("p", { className: "muted", text: "No friction findings." }));
+    }
+    return wrap;
+  }
+
+  function renderSoftHolds(softHolds) {
+    var wrap = document.createDocumentFragment();
+    if (!Array.isArray(softHolds) || softHolds.length === 0) {
+      wrap.appendChild(el("p", { className: "muted", text: "No soft-holds." }));
+      return wrap;
+    }
+    var ul = el("ul", { className: "plain" });
+    softHolds.forEach(function (hold) {
+      var li = el("li");
+      var kind = fieldText(hold && hold.kind);
+      var where = fieldText(hold && hold.where);
+      var detail = fieldText(hold && hold.detail);
+      var text = kind;
+      if (where) text += " (" + where + ")";
+      if (detail) text += ": " + detail;
+      li.textContent = text;
+      ul.appendChild(li);
+    });
+    wrap.appendChild(ul);
+    return wrap;
+  }
+
+  function renderMedia(run) {
+    var wrap = document.createDocumentFragment();
+
+    var img = el("img", {
+      className: "frame",
+      attrs: { alt: "judged frame for run " + run.joined },
+    });
+    img.src = BRANCH_BASE + run.joined + "/frame.png";
+    img.onerror = function () {
+      img.style.display = "none";
+    };
+    wrap.appendChild(img);
+
+    var video = el("video", { attrs: { controls: "", preload: "metadata" } });
+    video.src = BUCKET_BASE + run.joined + "/trial.mp4";
+    video.onerror = function () {
+      video.style.display = "none";
+    };
+    wrap.appendChild(video);
+
+    var links = el("div", { className: "links" });
+    var transcript = el("a", { text: "transcript.jsonl", href: BUCKET_BASE + run.joined + "/transcript.jsonl" });
+    var solution = el("a", {
+      text: "solution/",
+      href: "https://github.com/iamacoffeepot/aether/tree/dogfood/evidence/evidence/" + run.joined + "/solution",
+    });
+    links.appendChild(transcript);
+    links.appendChild(solution);
+    wrap.appendChild(links);
+
+    return wrap;
+  }
+
+  function renderRollup(run, rollup) {
+    clear(app);
+    app.appendChild(el("h1", { text: "Evidence: " + run.joined }));
+    app.appendChild(renderVerdictHeader(rollup));
+
+    app.appendChild(el("h2", { text: "Friction" }));
+    app.appendChild(renderFrictionTable(rollup.friction));
+
+    app.appendChild(el("h2", { text: "Soft-holds" }));
+    app.appendChild(renderSoftHolds(rollup.softHolds));
+
+    app.appendChild(el("h2", { text: "Media & artifacts" }));
+    app.appendChild(renderMedia(run));
+  }
+
+  function main() {
+    var params = new URLSearchParams(window.location.search);
+    var raw = params.get("run");
+    if (!raw) {
+      renderNoRun();
+      return;
+    }
+    var run = parseRun(raw);
+    if (!run) {
+      renderInvalidRun(raw);
+      return;
+    }
+    var rollupUrl = BRANCH_BASE + run.joined + "/rollup.json";
+    fetch(rollupUrl)
+      .then(function (resp) {
+        if (!resp.ok) throw new Error("rollup fetch failed: " + resp.status);
+        return resp.json();
+      })
+      .then(function (rollup) {
+        renderRollup(run, rollup);
+      })
+      .catch(function () {
+        renderNotFound(run);
+      });
+  }
+
+  main();
+})();
+</script>
+</body>
+</html>
