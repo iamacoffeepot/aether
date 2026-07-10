@@ -58,12 +58,14 @@ use crate::widget::composite::Composite;
 use crate::widget::focus::{
     AvailabilityEffects, Focus, FocusDirection, FocusEligibility, FocusRect, FocusTransition, HoverTransition,
 };
-use crate::widget::set::{ButtonWidget, LabelWidget, RadioGroupWidget, SliderWidget, TextFieldWidget, quad};
+use crate::widget::set::{
+    ButtonWidget, ImageWidget, LabelWidget, RadioGroupWidget, SliderWidget, TextFieldWidget, quad,
+};
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
-    ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, LabelConfig, PanelConfig,
-    RadioConfig, RadioSelected, SliderChanged, SliderConfig, TextCommitted, TextFieldConfig, WidgetChildSpec,
-    WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
+    ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig,
+    PanelConfig, RadioConfig, RadioSelected, SliderChanged, SliderConfig, TextCommitted, TextFieldConfig,
+    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
 };
 use crate::widget::{accept_child_list, emit, flush_membership};
 
@@ -210,6 +212,17 @@ fn spawn_panel_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row:
                 focusable: false,
                 state,
                 type_namespace: <LabelWidget as Addressable>::NAMESPACE,
+            })
+        }),
+        WidgetKind::Image => decode_child::<ImageConfig>(spec).and_then(|config| {
+            let state = config.state.clone();
+            spawn::<ImageWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
+                id,
+                height: row,
+                pointer_eligible: false,
+                focusable: false,
+                state,
+                type_namespace: <ImageWidget as Addressable>::NAMESPACE,
             })
         }),
         WidgetKind::Slider => decode_child::<SliderConfig>(spec).and_then(|config| {
@@ -438,6 +451,10 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
             let config = decode_named::<LabelConfig>(&spec.subname, &host_spec.wrapped_config)?;
             (row, false, false, config.state)
         }
+        WidgetKind::Image => {
+            let config = decode_named::<ImageConfig>(&spec.subname, &host_spec.wrapped_config)?;
+            (row, false, false, config.state)
+        }
         WidgetKind::Slider => {
             let config = decode_named::<SliderConfig>(&spec.subname, &host_spec.wrapped_config)?;
             (row, true, true, config.state)
@@ -485,6 +502,7 @@ fn spawn_behavior_host(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, ro
         frame_trigger: Collect::ID.0,
         mirror_kinds: vec![
             LabelConfig::ID.0,
+            ImageConfig::ID.0,
             SliderConfig::ID.0,
             TextFieldConfig::ID.0,
             ButtonConfig::ID.0,
@@ -547,7 +565,8 @@ fn spawn_behavior_host(_ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, _
 /// Load `aether_kit.wasm` with `export: "aether.kit.widget.panel"` and a
 /// `PanelConfig` (top-left, width, theme, a font to load, and the `children`
 /// it stacks). With an empty `children` list it spawns a demonstration stack
-/// of every widget; otherwise it stacks exactly the declared specs. It routes
+/// of the original interactive/reference widgets; otherwise it stacks exactly
+/// the declared specs (including `Image` children). It routes
 /// real input through the focus model and logs each value-up event. Fork it
 /// into a real editor panel by handing it your own `children` and translating
 /// the value-up handlers into your own world-knob driver mail.
@@ -835,6 +854,7 @@ mod behavior_tests {
         assert_eq!(WidgetKind::Slider.type_tag(), Some(ActorTypeTag::of::<SliderWidget>().0));
         assert_eq!(WidgetKind::Button.type_tag(), Some(ActorTypeTag::of::<ButtonWidget>().0));
         assert_eq!(WidgetKind::Label.type_tag(), Some(ActorTypeTag::of::<LabelWidget>().0));
+        assert_eq!(WidgetKind::Image.type_tag(), Some(ActorTypeTag::of::<ImageWidget>().0));
         assert_eq!(WidgetKind::Radio.type_tag(), Some(ActorTypeTag::of::<RadioGroupWidget>().0));
         assert_eq!(WidgetKind::TextField.type_tag(), Some(ActorTypeTag::of::<TextFieldWidget>().0));
         assert_eq!(WidgetKind::Composite.type_tag(), None);

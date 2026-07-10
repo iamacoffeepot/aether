@@ -1,4 +1,4 @@
-//! The concrete widget set (issue 2660): five plain `#[actor(instanced)]`
+//! The concrete widget set: plain `#[actor(instanced)]`
 //! types a panel root spawns as inline children and drives by mail in four
 //! lanes — config / style / layout-frame data-down, value events-up — over the
 //! ADR-0117 draw-compositing protocol.
@@ -9,6 +9,7 @@
 //! - [`RadioGroupWidget`] — a vertical list of exclusive options.
 //! - [`ButtonWidget`] — a momentary push button.
 //! - [`LabelWidget`] — static, non-interactive text.
+//! - [`ImageWidget`] — a static, non-interactive borrowed texture.
 //!
 //! Each caches its assigned [`WidgetFrame`](crate::widget::WidgetFrame) rect
 //! and its [`Theme`], answers every
@@ -24,12 +25,14 @@
 //! their first draw.
 
 pub mod button;
+pub mod image;
 pub mod label;
 pub mod radio;
 pub mod slider;
 pub mod text_field;
 
 pub use button::ButtonWidget;
+pub use image::ImageWidget;
 pub use label::LabelWidget;
 pub use radio::RadioGroupWidget;
 pub use slider::SliderWidget;
