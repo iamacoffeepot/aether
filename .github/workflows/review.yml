@@ -130,7 +130,15 @@ jobs:
           if grep -qE '\.rs$|Cargo\.(toml|lock)$' <<<"$files"; then
             echo "touches_rust=true" >> "$GITHUB_OUTPUT"
           else
+            # No Rust in the diff → skip the review session entirely, not
+            # just the verdict: the /review skill refuses an empty .rs file
+            # set, so running it here would loud-fail on every docs/workflow
+            # PR. The gate job still posts its success-skip status from the
+            # touches_rust output above.
             echo "touches_rust=false" >> "$GITHUB_OUTPUT"
+            echo "PR #$pr touches no Rust — review session skipped."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           # Once-only guard: the marker comment is the run-once state. A
