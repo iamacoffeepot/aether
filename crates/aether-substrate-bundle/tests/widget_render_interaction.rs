@@ -57,10 +57,10 @@ use aether_kinds::{
     MouseButton, MouseButtonRelease, MouseMove, MouseWheel, NamedMail, TextInput, Tick,
 };
 use aether_kit::{
-    ButtonConfig, EditorConfig, EditorRegionRect, LabelConfig, PanelConfig, RegionInputLanes, RegionSpec, ScrollConfig,
-    ScrollExtent, ScrollOffset, SegmentedConfig, SetTheme, SetWidgetState, SliderConfig, TextAreaConfig,
-    TextFieldConfig, Theme, ThemeState, ToggleConfig, VirtualListConfig, WidgetChildSpec, WidgetConfig,
-    WidgetControlState, WidgetDrawItem, WidgetKind, WidgetValidation, NumericConfig,
+    ButtonConfig, EditorConfig, EditorRegionRect, LabelConfig, NumericConfig, PanelConfig, RegionInputLanes,
+    RegionSpec, ScrollConfig, ScrollExtent, ScrollOffset, SegmentedConfig, SetTheme, SetWidgetState, SliderConfig,
+    TextAreaConfig, TextFieldConfig, Theme, ThemeState, ToggleConfig, VirtualListConfig, WidgetChildSpec, WidgetConfig,
+    WidgetControlState, WidgetDrawItem, WidgetKind, WidgetValidation,
 };
 use aether_math::Rgba;
 use aether_substrate_bundle::test_bench::{

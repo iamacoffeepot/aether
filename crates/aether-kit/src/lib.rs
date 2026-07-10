@@ -90,11 +90,11 @@ pub use terrain_editor::{
 pub use widget::theme::{SetTheme, Theme, ThemeState};
 pub use widget::{
     ButtonClicked, ButtonConfig, ChildrenChanged, Collect, EditorConfig, EditorKeyChord, EditorRegionRect, EditorShell,
-    FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, ImageFit, LabelConfig, MembershipEntry, PanelConfig,
-    NumericChanged, NumericConfig, RadioConfig, RadioSelected, RegionInputLanes, RegionSpec, ScrollConfig, ScrollDelta,
-    ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, SegmentedConfig, SegmentedSelected, SetWidgetState,
-    SliderChanged, SliderConfig, TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig,
-    VirtualListConfig, VirtualListSelected, WidgetChildSpec, WidgetClipRect, WidgetConfig,
+    FocusGained, FocusLost, HoverGained, HoverLost, ImageConfig, ImageFit, LabelConfig, MembershipEntry,
+    NumericChanged, NumericConfig, PanelConfig, RadioConfig, RadioSelected, RegionInputLanes, RegionSpec, ScrollConfig,
+    ScrollDelta, ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, SegmentedConfig, SegmentedSelected,
+    SetWidgetState, SliderChanged, SliderConfig, TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged,
+    ToggleConfig, VirtualListConfig, VirtualListSelected, WidgetChildSpec, WidgetClipRect, WidgetConfig,
     WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged, WidgetValidation,
 };
 pub use world::{
