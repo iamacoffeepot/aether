@@ -120,20 +120,26 @@ jobs:
           echo "pr_number=$pr" >> "$GITHUB_OUTPUT"
           echo "head_sha=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha')" >> "$GITHUB_OUTPUT"
 
-          # Rust-touch detection drives the gate verdict: only PRs that change
-          # Rust (`.rs`) or a manifest (`Cargo.toml` / `Cargo.lock`) — the
-          # surface the five pillars judge — are held to the review verdict;
-          # every other PR gets an automatic success. Capture the file list
-          # first, then match with a here-string (not a pipe) so a `grep -q`
-          # early exit can't SIGPIPE the paginated gh under `pipefail`.
+          # Rust-touch detection drives the gate verdict: classification
+          # tracks changed `.rs` source only — the surface the five pillars
+          # judge; a PR that changes any `.rs` file is held to the review
+          # verdict, every other PR gets an automatic success. A
+          # manifest-only PR (lockfile / `Cargo.toml` edit with no `.rs`
+          # change) is intentionally treated as no-Rust: there is no
+          # reviewable surface, so the gate auto-succeeds rather than
+          # holding a PR the review can never produce a verdict for.
+          # Capture the file list first, then match with a here-string (not
+          # a pipe) so a `grep -q` early exit can't SIGPIPE the paginated gh
+          # under `pipefail`.
           files="$(gh api "repos/${REPO}/pulls/${pr}/files" --paginate --jq '.[].filename')"
-          if grep -qE '\.rs$|Cargo\.(toml|lock)$' <<<"$files"; then
+          if grep -qE '\.rs$' <<<"$files"; then
             echo "touches_rust=true" >> "$GITHUB_OUTPUT"
           else
-            # No Rust in the diff → skip the review session entirely, not
-            # just the verdict: the /review skill refuses an empty .rs file
-            # set, so running it here would loud-fail on every docs/workflow
-            # PR. The gate job still posts its success-skip status from the
+            # No Rust source in the diff (including a manifest-only PR) →
+            # skip the review session entirely, not just the verdict: the
+            # /review skill refuses an empty .rs file set, so running it
+            # here would loud-fail on every docs/workflow/manifest-only PR.
+            # The gate job still posts its success-skip status from the
             # touches_rust output above.
             echo "touches_rust=false" >> "$GITHUB_OUTPUT"
             echo "PR #$pr touches no Rust — review session skipped."
