@@ -1,4 +1,4 @@
-# ADR-0141: Terrain mark identity and revisions
+# ADR-0142: Terrain mark identity and revisions
 
 - **Status:** Proposed
 - **Date:** 2026-07-09
