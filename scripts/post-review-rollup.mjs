@@ -109,10 +109,12 @@ function commentableLines(patch) {
   return lines
 }
 
-// The rollup stores each confirmed finding's `file` as a basename (review.js
-// bases it). Resolve it back to a full changed-file path; null when the
-// basename is ambiguous or unknown, in which case the finding degrades to
-// the review body rather than being dropped.
+// The rollup now stores each confirmed finding's `file` as the full changed-file
+// path (review.js only bases at render-time label sites). The changed.has()
+// fast-path below resolves it directly; the basename-match arms are defensive
+// back-compat for a rollup produced before this normalization, degrading to
+// null when a bare basename is ambiguous, in which case the finding drops to
+// the folded review body rather than being dropped outright.
 function resolvePath(fileField, changed) {
   if (!fileField) return null
   if (changed.has(fileField)) return fileField

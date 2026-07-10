@@ -705,7 +705,9 @@ for (const e of clean) {
     for (const fd of (x.r.findings || [])) {
       totals.findings++
       const lens = x.lens
-      const file = base(fd.file || runFile)
+      // Full path, not a basename — the dedup key and grouped map below key on
+      // this, and a basename collides across same-named files (mod.rs, kinds.rs).
+      const file = fd.file || runFile
       const v = fd.verify
       if (ALWAYS_VERIFY.has(lens.key) && fd.confidence === 'high') {
         // ALWAYS_VERIFY consults the refuter even at high confidence: a refuted high-confidence
@@ -728,7 +730,7 @@ for (const e of clean) {
   // profile instead routes its per-PR challenge misses through the refuter, below).
   for (const ch of (e.challenged || [])) {
     const v = ch.challenge
-    const file = base(ch.file || (e.files && e.files[0]))
+    const file = ch.file || (e.files && e.files[0])
     if (v && v.final_verdict === 'missed') {
       for (const m of (v.missed || [])) { totals.challengerMissed++; confirmed.push(rowOf(file, ch.lens, m, 'challenger-missed')) }
     } else if (v && v.final_verdict === 'uncertain') {
@@ -740,7 +742,7 @@ for (const e of clean) {
 // Per-PR challenge misses (pr profile) — refute-gated before confirmed, unlike the backfill path.
 for (const it of prChallengeMissed) {
   const { fd, lens } = it
-  const file = base(it.file)
+  const file = it.file
   const v = fd.verify
   if (v && v.final_verdict === 'confirmed') { totals.challengerMissed++; confirmed.push(rowOf(file, lens, fd, 'challenger-missed')) }
   else if (v && v.final_verdict === 'false-positive') { spared.push({ ...rowOf(file, lens, fd, 'spared'), reason: v.rationale }); totals.falsePositives++ }
