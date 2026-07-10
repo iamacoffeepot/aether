@@ -1,11 +1,11 @@
 export const meta = {
   name: 'review',
-  description: "Pre-land review of a code change against five judgment pillars that mechanical gates (clippy/rustc/Qodana/fmt) cannot decide: spec fidelity (asked-vs-changed delta), correctness (named bug-shapes), test integrity (does the test catch an owned bug), economy (fewest chars that still make sense, including large-file split pressure), and convention/architecture (stated rules + ADR conformance, fed back as lint candidates). Cheap whole-PR scope filter first, then per-file specialist finders, then a two-sided verify funnel (refute low/med findings, challenge clean lenses). Returns an issue-ready rollup with soft-hold flags on high-severity correctness/spec findings; never gates CI, never touches GitHub.",
+  description: "Pre-land review of a code change against five judgment pillars that mechanical gates (clippy/rustc/Qodana/fmt) cannot decide: spec fidelity (asked-vs-changed delta), correctness (named bug-shapes), test integrity (does the test catch an owned bug), economy (fewest chars that still make sense, including large-file split pressure), and convention/architecture (stated rules + ADR conformance, fed back as lint candidates). Cheap whole-PR scope filter first, then per-file finders (a merged quality lens and batched small diffs in the pr profile), then a two-sided verify funnel (severity-tiered, per-file batched refutes plus a false-negative challenge). Returns an issue-ready rollup with soft-hold flags on high-severity correctness/spec findings; never gates CI, never touches GitHub.",
   whenToUse: "Integrated review of a PR-bound change is automatic in CI (the review action runs this workflow at the PR's first green) — do not invoke it inline at the end of /implement. Invoke for backfill mode (no issue, whole-file, sharded per-crate) to audit existing code, or for a change that never becomes a PR. The caller resolves the file set and passes it in args — the workflow sandbox cannot run git/grep itself. Output is a triage rollup for human review; filing follow-up issues and clearing soft-holds are separate human-gated steps.",
   phases: [
     { title: 'Scope', detail: 'one agent over the issue + whole diff: out-of-scope prune + over/under-delivery/leakage findings' },
-    { title: 'Find', detail: 'per-file specialist finders, one per applicable pillar lens' },
-    { title: 'Verify', detail: 'refute low/med-confidence findings (false positives) and challenge clean lenses (false negatives)' },
+    { title: 'Find', detail: 'per-file finders, one per applicable pillar lens (economy+convention merge into one quality finder in the pr profile; small diffs batch into shared calls)' },
+    { title: 'Verify', detail: 'severity-tiered refutes (high-severity correctness test-grounded, the rest per-file batched) and a false-negative challenge (per-PR in the pr profile, per-file in backfill)' },
   ],
 }
 
@@ -19,12 +19,15 @@ export const meta = {
 //                                       omit to skip test review. May overlap with files.
 //   issue,        string              — the issue/scope text. Presence enables Phase 0
 //                                       (spec fidelity, integrated mode); omit for backfill.
-//   diffs,        { [absPath]: text } — per-file diff hunks. Presence makes finders diff-scoped;
-//                                       omit for whole-file review (backfill).
+//   diffs,        { [absPath]: text } — per-file diff hunks. Presence makes finders diff-scoped
+//                                       (and selects the pr profile); omit for whole-file review.
+//   profile,      'pr'|'backfill'     — funnel shape; default: pr when diffs present, else backfill.
+//   finderShape,  'merged'|'specialist' — per-file finder composition; default: merged for pr,
+//                                       specialist for backfill.
 //   lenses,       [string]            — optional subset of pillar keys to run.
-//   finderModel,  string              — model for Phase 0 + finders (default 'sonnet').
-//   verifyModel,  string              — model for the verify funnel (default 'opus').
-//   noChallenge,  bool                — skip the clean-lens challenge (cheaper).
+//   finderModel,  string              — model for Phase 0 + finders + batched/challenge verify (default 'sonnet').
+//   verifyModel,  string              — model for the high-severity correctness refuter (default 'opus').
+//   noChallenge,  bool                — skip the false-negative challenge (per-PR in pr, per-file in backfill).
 // }
 //
 // returns { rollup, files }. rollup = { totals, spec, softHolds, confirmed, grouped,
@@ -45,16 +48,44 @@ if (!FILES.length && !TEST_FILES.length) throw new Error('review: args.files (an
 const FINDER_MODEL = A.finderModel || 'sonnet'
 const VERIFY_MODEL = A.verifyModel || 'opus'
 const DIFFS = A.diffs || {}
+const HAS_DIFFS = Object.keys(DIFFS).length > 0
+
+// Profile parameterizes the whole funnel (issue #3015). The pr profile is the per-PR merge gate:
+// merged finders, small-diff batching, and one per-PR challenge, all gated on the diff-line data
+// that only diffs carry. Backfill is elective whole-file auditing and keeps specialist finders +
+// per-file challenges pending A/B evidence. The mode-independent compressions (tiered/batched
+// refutes, the rollup verdict fix) apply in both.
+const PROFILE = A.profile || (HAS_DIFFS ? 'pr' : 'backfill')
+if (PROFILE !== 'pr' && PROFILE !== 'backfill') throw new Error(`review: args.profile must be 'pr' or 'backfill', got ${JSON.stringify(A.profile)}`)
+const FINDER_SHAPE = A.finderShape || (PROFILE === 'pr' ? 'merged' : 'specialist')
+if (FINDER_SHAPE !== 'merged' && FINDER_SHAPE !== 'specialist') throw new Error(`review: args.finderShape must be 'merged' or 'specialist', got ${JSON.stringify(A.finderShape)}`)
+
+// Small-diff batching (pr profile): files whose diff changes fewer than SMALL_DIFF_LINES lines
+// group into shared finder calls, at most BATCH_CAP files per call.
+const SMALL_DIFF_LINES = 30
+const BATCH_CAP = 5
 
 // Pillars where a high-confidence finding STILL gets a verifier — a confident hallucination
 // does the most damage in correctness, so it is never trusted on confidence alone.
 const ALWAYS_VERIFY = new Set(['correctness'])
-// Pillars worth a clean-lens challenge (false negatives hide here). Economy/convention misses
-// are low-stakes and the Opus all-lens challenge cost a third of a run for zero yield, so it is
-// restricted and runs on the cheap model.
+// Pillars worth a false-negative challenge (misses hide here). Economy/convention misses are
+// low-stakes and the all-lens challenge cost a third of a run for zero yield, so it is restricted
+// and runs on the cheap model.
 const CHALLENGE_LENSES = new Set(['correctness', 'test-integrity'])
 
 const base = (f) => f.split('/').slice(-1)[0]
+
+// Changed-line count of a unified diff (added/removed rows, excluding the +++/--- file headers).
+// The batching gate; the only file-size signal available to the sandbox, and only in the pr profile.
+function changedLineCount(diff) {
+  if (!diff) return Infinity
+  let n = 0
+  for (const row of diff.split('\n')) {
+    if (row.startsWith('+++') || row.startsWith('---')) continue
+    if (row[0] === '+' || row[0] === '-') n++
+  }
+  return n
+}
 
 const NORTH_STAR = `NORTH STAR (economy): "the fewest characters that still make sense." OVER-VERBOSE = a strictly shorter form reads at least as clearly and loses no meaning, safety, or exhaustiveness. OVER-TERSE = the code is compressed past clarity/safety and the fix ADDS characters to restore them. Ceremony (a long name, a confident abstraction, a clever one-liner) is not evidence — flag only when you can state the concrete better form AND why it is at least as clear/correct. When unsure, do not flag.`
 
@@ -149,19 +180,97 @@ const SELECTED = Array.isArray(A.lenses) && A.lenses.length
 if (!SELECTED.length) throw new Error(`review: no lenses selected; valid keys are ${ALL_LENSES.map(l => l.key).join(', ')}`)
 
 const SPEC_LENS = SELECTED.find(l => l.key === 'spec-fidelity')
-const FILE_LENSES = SELECTED.filter(l => l.unit === 'file')
 const TEST_LENS = SELECTED.find(l => l.unit === 'test-file')
+
+// The merged quality lens (finderShape 'merged'): one finder carries both advisory code pillars —
+// economy and convention — so a changed file is read by two finders (correctness + quality) rather
+// than three. It composes from the two source lens objects (concatenated taxonomies, both carve-outs,
+// the economy north-star retained) and tags each finding with its pillar so the rollup rows and poster
+// output stay byte-identical in shape. Correctness stays a solo specialist — it is the soft-hold pillar.
+const ECONOMY_LENS = ALL_LENSES.find(l => l.key === 'economy')
+const CONVENTION_LENS = ALL_LENSES.find(l => l.key === 'convention')
+const QUALITY_LENS = {
+  key: 'quality',
+  name: 'Quality (economy + convention)',
+  oracle: `${ECONOMY_LENS.oracle}; and ${CONVENTION_LENS.oracle}`,
+  unit: 'file',
+  gate: 'advisory',
+  taxonomy: `Two pillars in one pass — tag every finding with pillar = economy or convention.
+
+ECONOMY (${ECONOMY_LENS.oracle}):
+${ECONOMY_LENS.taxonomy}
+
+CONVENTION & ARCHITECTURE (${CONVENTION_LENS.oracle}):
+${CONVENTION_LENS.taxonomy}`,
+  carveOut: `${ECONOMY_LENS.carveOut}
+
+CONVENTION carve-out: ${CONVENTION_LENS.carveOut}`,
+}
+
+// Per-file lenses, honoring the finder shape. 'merged' collapses the economy + convention members
+// into the single quality lens; 'specialist' keeps all three separate.
+let FILE_LENSES = SELECTED.filter(l => l.unit === 'file')
+if (FINDER_SHAPE === 'merged') {
+  const merged = []
+  let addedQuality = false
+  for (const l of FILE_LENSES) {
+    if (l.key === 'economy' || l.key === 'convention') {
+      if (!addedQuality) { merged.push(QUALITY_LENS); addedQuality = true }
+    } else merged.push(l)
+  }
+  FILE_LENSES = merged
+}
 
 // Deterministic scope resolution (no agents): one entry per file, carrying the lenses that
 // apply to it (code lenses for files, test-integrity for testFiles) and its diff hunk if any.
+// In the pr profile, small-diff code-only entries are grouped into shared finder calls.
 function resolveScope() {
   const all = [...new Set([...FILES, ...TEST_FILES])]
-  return all.map(f => {
+  const entries = all.map(f => {
     const lenses = []
     if (FILES.includes(f)) lenses.push(...FILE_LENSES)
     if (TEST_FILES.includes(f) && TEST_LENS) lenses.push(TEST_LENS)
     return { file: f, lenses, diff: DIFFS[f] || null }
   }).filter(e => e.lenses.length)
+  return PROFILE === 'pr' ? batchSmallDiffs(entries) : entries
+}
+
+// Group consecutive small-diff, code-only entries (no test lens — a batched call runs FILE_LENSES)
+// into batch entries of up to BATCH_CAP files. A lone small file stays a single entry. The pr
+// profile only; a batch entry is { batch, members: [{file, diff}], lenses }.
+function batchSmallDiffs(entries) {
+  const out = []
+  let bucket = []
+  const flush = () => {
+    if (!bucket.length) return
+    if (bucket.length === 1) out.push(bucket[0])
+    else out.push({ batch: true, members: bucket.map(e => ({ file: e.file, diff: e.diff })), lenses: FILE_LENSES })
+    bucket = []
+  }
+  for (const e of entries) {
+    const codeOnly = e.lenses.every(l => l.unit === 'file')
+    const small = e.diff && changedLineCount(e.diff) < SMALL_DIFF_LINES
+    if (codeOnly && small) {
+      bucket.push(e)
+      if (bucket.length >= BATCH_CAP) flush()
+    } else {
+      flush()
+      out.push(e)
+    }
+  }
+  flush()
+  return out
+}
+
+// Flatten scope entries (single or batch) into { file, diff } units — for the whole-change agents
+// (spec filter, per-PR challenge) that judge the diff set rather than fanning out per entry.
+function scopeUnits(entries) {
+  const units = []
+  for (const e of entries) {
+    if (e.batch) for (const m of e.members) units.push({ file: m.file, diff: m.diff })
+    else units.push({ file: e.file, diff: e.diff })
+  }
+  return units
 }
 
 const SPEC_SCHEMA = {
@@ -198,13 +307,13 @@ const FINDING_ITEM = {
     line: { type: 'integer', description: 'approximate line of the site (advisory)' },
     category: { type: 'string', description: 'the lens sub-shape (e.g. economy naming|ownership|control-flow; correctness swallowed-error|missing-bounds-cap; convention units|generics; test-integrity mirror|derive-only-roundtrip)' },
     severity: { type: 'string', enum: ['high', 'medium', 'low'], description: 'impact if unaddressed — correctness/spec high-severity soft-holds the land' },
-    confidence: { type: 'string', enum: ['high', 'medium', 'low'], description: 'low/medium routes to a refuter; high goes straight to the rollup' },
+    confidence: { type: 'string', enum: ['high', 'medium', 'low'], description: 'low/medium routes to a refuter; high goes straight to the rollup (except correctness, always verified)' },
     recommendation: { type: 'string', enum: ['fix', 'remove', 'rewrite', 'promote-lint'] },
     current_form: { type: 'string', description: 'the current code / name / test, briefly' },
     suggested_form: { type: 'string', description: 'the proposed action — code for economy/convention; the failing input + correct behavior for correctness; "remove" or the rewrite for test-integrity' },
     rationale: { type: 'string', description: 'the judgment: why the fix is at least as clear/correct/safe — not a restatement of the code' },
-    direction: { type: 'string', enum: ['over-verbose', 'over-terse'], description: 'ECONOMY lens only' },
-    char_delta: { type: 'integer', description: 'ECONOMY lens only: suggested length minus current length, in characters (negative = shorter)' },
+    direction: { type: 'string', enum: ['over-verbose', 'over-terse'], description: 'ECONOMY findings only' },
+    char_delta: { type: 'integer', description: 'ECONOMY findings only: suggested length minus current length, in characters (negative = shorter)' },
   },
 }
 
@@ -232,6 +341,40 @@ const FIND_SCHEMA = {
   },
 }
 
+// The finder schema for a lens/entry: the merged quality lens requires a `pillar` on every finding
+// (so rollup rows keep economy/convention fidelity), and a batched call requires a `file` on every
+// finding and lint candidate (so rows attribute to the right member file). One built from FIND_SCHEMA
+// so the taxonomies, row shape, and lint feed stay single-sourced.
+function findSchema({ pillar, batched }) {
+  const props = { ...FINDING_ITEM.properties }
+  const required = [...FINDING_ITEM.required]
+  if (pillar) {
+    props.pillar = { type: 'string', enum: ['economy', 'convention'], description: 'MERGED quality lens: which pillar this finding belongs to' }
+    required.push('pillar')
+  }
+  if (batched) {
+    props.file = { type: 'string', description: 'absolute path of the batched file this finding is in' }
+    required.push('file')
+  }
+  const findingItem = { ...FINDING_ITEM, required, properties: props }
+  const lintItem = batched
+    ? {
+      type: 'object',
+      additionalProperties: false,
+      required: ['file', 'symbol', 'note'],
+      properties: { file: { type: 'string', description: 'absolute path of the batched file' }, ...FIND_SCHEMA.properties.lintCandidates.items.properties },
+    }
+    : FIND_SCHEMA.properties.lintCandidates.items
+  return {
+    ...FIND_SCHEMA,
+    properties: {
+      ...FIND_SCHEMA.properties,
+      findings: { type: 'array', items: findingItem },
+      lintCandidates: { ...FIND_SCHEMA.properties.lintCandidates, items: lintItem },
+    },
+  }
+}
+
 const VERDICT = {
   type: 'object',
   additionalProperties: false,
@@ -240,6 +383,29 @@ const VERDICT = {
     symbol: { type: 'string' },
     final_verdict: { type: 'string', enum: ['confirmed', 'false-positive', 'uncertain'] },
     rationale: { type: 'string', description: 'why the fix genuinely wins under the strict bar, OR why it is a false positive; use uncertain only when the relevant code could not be read' },
+  },
+}
+
+// Batch refuter verdict — one adjudication per submitted finding, keyed by its index in the list.
+const BATCH_VERDICT = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['verdicts'],
+  properties: {
+    verdicts: {
+      type: 'array',
+      description: 'one verdict per submitted finding, keyed by its index (#0, #1, …)',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['index', 'final_verdict', 'rationale'],
+        properties: {
+          index: { type: 'integer', description: 'the finding index from the submitted list' },
+          final_verdict: { type: 'string', enum: ['confirmed', 'false-positive', 'uncertain'] },
+          rationale: { type: 'string', description: 'why it holds under the strict bar, or why it is a false positive' },
+        },
+      },
+    },
   },
 }
 
@@ -254,9 +420,32 @@ const CHALLENGE = {
   },
 }
 
-function specPrompt(issue, scoped) {
-  const fileList = scoped.map(f => f.diff ? `--- ${f.file}\n${f.diff}` : f.file).join('\n\n')
-  const diffed = scoped.some(f => f.diff)
+// Per-PR challenge (pr profile): one agent over the whole change, so each missed finding must carry
+// the file it is in and the lens the finders missed it under before the tiered refute path can route it.
+const PR_CHALLENGE_MISSED_ITEM = {
+  ...FINDING_ITEM,
+  required: [...FINDING_ITEM.required, 'file', 'lens'],
+  properties: {
+    ...FINDING_ITEM.properties,
+    file: { type: 'string', description: 'absolute path of the file the missed finding is in' },
+    lens: { type: 'string', enum: ['correctness', 'test-integrity'], description: 'the pillar the finder passes missed it under' },
+  },
+}
+
+const PR_CHALLENGE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['final_verdict', 'missed'],
+  properties: {
+    final_verdict: { type: 'string', enum: ['clean-confirmed', 'missed', 'uncertain'] },
+    missed: { type: 'array', description: 'findings the per-file finders overlooked across the whole change (empty unless final_verdict = missed)', items: PR_CHALLENGE_MISSED_ITEM },
+  },
+}
+
+function specPrompt(issue, entries) {
+  const units = scopeUnits(entries)
+  const fileList = units.map(u => u.diff ? `--- ${u.file}\n${u.diff}` : u.file).join('\n\n')
+  const diffed = units.some(u => u.diff)
   return `You are reviewing a code change for SPEC FIDELITY — the delta between what an issue asked for and what the diff actually changed. Read the issue, then the changed files${diffed ? ' (diff hunks shown)' : ''} (open the full files where you need context).
 
 ISSUE / SCOPE:
@@ -273,11 +462,16 @@ Report outOfScope = the files the issue never asked to touch (drive-by / unrelat
 }
 
 function findPrompt(f, lens) {
-  const scope = f.diff
-    ? `Focus on the CHANGED lines in the diff below; open the full file at ${f.file} for context, and scope every finding to the change.\n\nDIFF:\n${f.diff}`
-    : `Read the full file at ${f.file} (and the types/helpers it references where you need them to judge).`
-  const north = lens.key === 'economy' ? `\n${NORTH_STAR}\n\n${FILE_SPLIT_BAR}\n` : ''
-  return `You are one specialist judge on a code-review panel, auditing a Rust file under a single lens.
+  const units = f.batch ? f.members : [{ file: f.file, diff: f.diff }]
+  const multi = units.length > 1
+  const blocks = units.map(u => u.diff
+    ? `FILE: ${u.file}\nFocus on the CHANGED lines below; open the full file for context, and scope every finding to the change.\nDIFF:\n${u.diff}`
+    : `FILE: ${u.file}\nRead the full file (and the types/helpers it references where you need them to judge).`).join('\n\n')
+  const econ = lens.key === 'economy' || lens.key === 'quality'
+  const north = econ ? `\n${NORTH_STAR}\n\n${FILE_SPLIT_BAR}\n` : ''
+  const pillarNote = lens.key === 'quality' ? ' This lens spans two pillars — tag every finding with pillar = economy or convention.' : ''
+  const fileNote = f.batch ? ' Report which file each finding (and lint candidate) belongs to in its file field.' : ''
+  return `You are one specialist judge on a code-review panel, auditing ${multi ? 'a batch of Rust files' : 'a Rust file'} under a single lens.
 
 Lens: ${lens.name}
 Oracle (what you judge against): ${lens.oracle}
@@ -285,22 +479,22 @@ ${lens.taxonomy}
 
 CARVE-OUT (do NOT raise as judgment findings — route to lintCandidates or the named pillar): ${lens.carveOut}
 ${north}
-${scope}
+${blocks}
 
-Report every site this lens flags as a finding: symbol + approximate line, category (the sub-shape), severity, the current form, the suggested fix, a rationale stating the judgment (why the fix is at least as clear/correct/safe — not a restatement), and your confidence.${lens.key === 'economy' ? ' Fill direction (over-verbose|over-terse) and char_delta on every finding.' : ''} Put mechanically-decidable observations in lintCandidates, not findings. Report nothing this lens does not own — another panelist covers the others. Report ONLY sites located in ${f.file} itself: if you notice an issue in a different file it references, do not report it (that file gets its own finder). If the file is clean under this lens, return an empty findings array. Be precise and conservative: a confident story is not a finding; flag only when you can name the concrete better form AND why it wins.`
+Report every site this lens flags as a finding: symbol + approximate line, category (the sub-shape), severity, the current form, the suggested fix, a rationale stating the judgment (why the fix is at least as clear/correct/safe — not a restatement), and your confidence.${pillarNote}${econ ? ' Fill direction (over-verbose|over-terse) and char_delta on every economy finding.' : ''}${fileNote} Put mechanically-decidable observations in lintCandidates, not findings. Report nothing this lens does not own — another panelist covers the others. Report ONLY sites located in the file(s) above: if you notice an issue in a different file they reference, do not report it (that file gets its own finder). If the file is clean under this lens, return an empty findings array. Be precise and conservative: a confident story is not a finding; flag only when you can name the concrete better form AND why it wins.`
 }
 
-function refutePrompt(f, fd) {
-  const corr = fd.lens.key === 'correctness'
+function refutePrompt(file, fd, lens) {
+  const corr = lens.key === 'correctness'
   const grounding = corr
     ? `\nGROUND THE VERDICT IN TESTS, not inspection — a confident reading of subtle code (math conventions, sign order, edge cases) is exactly where this lens hallucinates a bug.
 1. Read the existing #[test]s for this item. A passing test that pins the claimed-broken behavior REFUTES the finding (final_verdict='false-positive') — cite the test by name.
 2. If no test covers the claim and the finding is high-severity, WRITE one and RUN it: add a focused #[test], run \`cargo test -p <crate> <name>\` from the crate root, let the result decide, then delete the scratch test.
 3. NEVER uphold a finding whose suggested fix would break a currently-passing test — check the fix against the suite before confirming.\n`
     : ''
-  return `A code-review finding was raised under the ${fd.lens.name} lens. Decide whether it survives a STRICT bar — do not rescue it with a plausible story, and do not reject a real issue out of conservatism.
+  return `A code-review finding was raised under the ${lens.name} lens. Decide whether it survives a STRICT bar — do not rescue it with a plausible story, and do not reject a real issue out of conservatism.
 
-File: ${f.file}
+File: ${file}
 Site: ${fd.symbol} (around line ${fd.line})
 Category: ${fd.category}
 Current form: ${fd.current_form}
@@ -314,10 +508,30 @@ ${BAR}
 If the finding genuinely meets the bar, final_verdict='confirmed' with the concrete reason it holds (for correctness: the failing input/path, confirmed against a test where possible). If the code is fine as written (the verbosity/terseness is load-bearing, the behavior is correct, a passing test already pins it, the rule does not apply), final_verdict='false-positive'. Use 'uncertain' only when you cannot read or run the relevant code.`
 }
 
-function challengePrompt(f, lens) {
+function batchRefutePrompt(file, items) {
+  const list = items.map((it, i) => `#${i} [${it.lens.name}] ${it.fd.symbol} (around line ${it.fd.line})
+  category: ${it.fd.category}
+  current form: ${it.fd.current_form}
+  suggested fix: ${it.fd.suggested_form}
+  finder rationale: ${it.fd.rationale}`).join('\n\n')
+  return `A batch of code-review findings on one file was raised under various lenses. Adjudicate EACH against a STRICT bar — do not rescue one with a plausible story, and do not reject a real issue out of conservatism. This is a READ-ONLY pass: read the site and the code it depends on; you cannot run tests.
+
+File: ${file}
+
+FINDINGS (adjudicate every one, keyed by its index):
+${list}
+
+${BAR}
+
+For a CORRECTNESS finding, ground the verdict in tests you can READ — a passing #[test] that pins the claimed-broken behavior refutes it; since you cannot run code, mark a subtle correctness claim you cannot settle by reading as 'uncertain' rather than confirming it.
+
+Return one verdict per finding, keyed by its index: final_verdict='confirmed' when it genuinely meets the bar, 'false-positive' when the code is fine as written (load-bearing verbosity, correct behavior, a passing test already pins it, the rule does not apply), or 'uncertain' when you cannot read the relevant code.`
+}
+
+function challengePrompt(file, lens) {
   return `The ${lens.name} lens reported NO findings for this file. CHALLENGE that clean verdict — re-read the file and look specifically for what this lens catches that a first pass missed.
 
-File: ${f.file}
+File: ${file}
 Oracle: ${lens.oracle}
 ${lens.taxonomy}
 
@@ -326,6 +540,64 @@ CARVE-OUT (do NOT raise — mechanically settled or another pillar's): ${lens.ca
 ${BAR}
 
 If the file is genuinely clean under this lens, final_verdict='clean-confirmed' and missed=[]. If you find real issues that meet the bar, final_verdict='missed' and list them in missed[] using the full finding shape (symbol, line, category, severity, confidence, recommendation, current_form, suggested_form, rationale). Use 'uncertain' only when you cannot read the relevant code.`
+}
+
+function prChallengePrompt(entries, lenses) {
+  const units = scopeUnits(entries).filter(u => u.diff)
+  const blocks = units.map(u => `FILE: ${u.file}\nDIFF:\n${u.diff}`).join('\n\n')
+  const taxo = lenses.map(l => `### ${l.name}\nOracle: ${l.oracle}\n${l.taxonomy}\n\nCARVE-OUT: ${l.carveOut}`).join('\n\n')
+  return `The per-file finder passes reported their findings for this change. CHALLENGE the clean verdict ACROSS THE WHOLE CHANGE under the recall-sensitive pillars below — re-read every diff hunk (open the full files where you need context) and look specifically for what these lenses catch that the finders missed.
+
+CHANGED HUNKS:
+${blocks}
+
+PILLARS TO CHALLENGE:
+${taxo}
+
+${BAR}
+
+If the change is genuinely clean under these lenses, final_verdict='clean-confirmed' and missed=[]. If you find real issues that meet the strict bar, final_verdict='missed' and list each in missed[] using the full finding shape, tagging every item with its file and the lens (correctness|test-integrity) the finders missed it under. Use 'uncertain' only when you cannot read the relevant code.`
+}
+
+// The verify funnel, shared by the per-file stage and the per-PR challenge (issue #3015 item 3).
+// Each item is { fd, lens, file }; the verdict is attached back onto item.fd.verify. High-severity
+// correctness gets a per-finding, test-grounded refuter on the Opus verify model (the soft-hold
+// pillar, where a confident hallucination costs most); every other refute-bound finding goes to one
+// read-only batch adjudicator per file on the cheap finder model, verdicts keyed by list index.
+async function refuteFlags(items) {
+  const isTopTier = (it) => it.lens.key === 'correctness' && it.fd.severity === 'high'
+  const perFinding = items.filter(isTopTier)
+  const batched = items.filter(it => !isTopTier(it))
+
+  const single = parallel(perFinding.map(it => () =>
+    agent(refutePrompt(it.file, it.fd, it.lens), {
+      label: `refute:${it.lens.key}:${it.fd.symbol}`.slice(0, 80),
+      phase: 'Verify',
+      model: VERIFY_MODEL,
+      // A Bash-capable agent so it can write/run a grounding test, not just read.
+      agentType: 'general-purpose',
+      schema: VERDICT,
+    }).then(v => { it.fd.verify = v })
+  ))
+
+  const byFile = new Map()
+  for (const it of batched) { const a = byFile.get(it.file) || []; a.push(it); byFile.set(it.file, a) }
+  const batches = parallel([...byFile.entries()].map(([file, its]) => () =>
+    agent(batchRefutePrompt(file, its), {
+      label: `refute-batch:${base(file)}`.slice(0, 80),
+      phase: 'Verify',
+      model: FINDER_MODEL,
+      schema: BATCH_VERDICT,
+    }).then(res => {
+      for (const v of ((res && res.verdicts) || [])) {
+        const it = its[v.index]
+        if (it) it.fd.verify = { final_verdict: v.final_verdict, rationale: v.rationale }
+      }
+    })
+  ))
+
+  await single
+  await batches
 }
 
 const scoped = resolveScope()
@@ -339,86 +611,124 @@ if (A.issue && SPEC_LENS) {
   phase('Scope')
   spec = await agent(specPrompt(A.issue, scoped), { label: 'spec-fidelity', phase: 'Scope', model: FINDER_MODEL, schema: SPEC_SCHEMA })
   const out = new Set((spec && spec.outOfScope) || [])
-  inScope = scoped.filter(f => !out.has(f.file))
-  if (out.size) log(`spec-fidelity: ${out.size} out-of-scope file(s) pruned from the per-file passes`)
+  if (out.size) {
+    inScope = scoped.map(e => {
+      if (!e.batch) return out.has(e.file) ? null : e
+      const members = e.members.filter(m => !out.has(m.file))
+      return members.length ? { ...e, members } : null
+    }).filter(Boolean)
+    log(`spec-fidelity: ${out.size} out-of-scope file(s) pruned from the per-file passes`)
+  }
 }
 
-// Phases 1+2 — per-file funnel, pipelined (no barrier between files). Stage 1 fans out the
-// applicable specialist finders; stage 2 refutes low/med findings and challenges clean lenses.
+// Phases 1+2 — per-file funnel, pipelined (no barrier between entries). Stage 1 fans out the
+// applicable finders (one per lens; a batch entry runs each lens over all its member files);
+// stage 2 runs the tiered/batched refutes, plus the per-file clean-lens challenge in backfill
+// (the pr profile runs one per-PR challenge post-pipeline instead).
 const results = await pipeline(
   inScope,
   (f) => parallel(f.lenses.map(lens => () =>
-    agent(findPrompt(f, lens), { label: `find:${lens.key}:${base(f.file)}`, phase: 'Find', model: FINDER_MODEL, schema: FIND_SCHEMA })
-      .then(r => ({ lens, r }))
+    agent(findPrompt(f, lens), {
+      label: f.batch ? `find:${lens.key}:batch${f.members.length}` : `find:${lens.key}:${base(f.file)}`,
+      phase: 'Find',
+      model: FINDER_MODEL,
+      schema: findSchema({ pillar: lens.key === 'quality', batched: !!f.batch }),
+    }).then(r => ({ lens, r }))
   )),
   async (lensRuns, f) => {
     const runs = (lensRuns || []).filter(Boolean).filter(x => x.r)
-    if (!runs.length) return { file: f.file, runs: [], verified: [], challenged: [] }
+    const files = f.batch ? f.members.map(m => m.file) : [f.file]
+    if (!runs.length) return { files, runs: [], challenged: [] }
 
     const flags = []
-    for (const x of runs) for (const fd of (x.r.findings || [])) flags.push({ ...fd, lens: x.lens })
+    for (const x of runs) for (const fd of (x.r.findings || [])) flags.push({ fd, lens: x.lens, file: fd.file || x.r.file || files[0] })
     // Correctness is verified regardless of confidence; other lenses skip high-confidence flags.
-    const toRefute = flags.filter(fd => ALWAYS_VERIFY.has(fd.lens.key) || fd.confidence !== 'high')
-    const refute = parallel(toRefute.map(fd => () =>
-      agent(refutePrompt(f, fd), {
-        label: `refute:${fd.lens.key}:${fd.symbol}`.slice(0, 80),
-        phase: 'Verify',
-        model: VERIFY_MODEL,
-        // Correctness gets a Bash-capable agent so it can run a grounding test, not just read.
-        agentType: fd.lens.key === 'correctness' ? 'general-purpose' : undefined,
-        schema: VERDICT,
-      }).then(v => ({ lensKey: fd.lens.key, symbol: fd.symbol, verify: v }))
-    ))
+    const toRefute = flags.filter(fl => ALWAYS_VERIFY.has(fl.lens.key) || fl.fd.confidence !== 'high')
+    const refute = refuteFlags(toRefute)
 
-    // Challenge only the pillars where misses hide, on the cheap model.
-    const cleanRuns = A.noChallenge ? [] : runs.filter(x => !(x.r.findings || []).length && CHALLENGE_LENSES.has(x.lens.key))
+    // Per-file clean-lens challenge — backfill only, on the cheap model.
+    const cleanRuns = (A.noChallenge || PROFILE === 'pr') ? [] : runs.filter(x => !(x.r.findings || []).length && CHALLENGE_LENSES.has(x.lens.key))
     const challenge = parallel(cleanRuns.map(x => () =>
-      agent(challengePrompt(f, x.lens), { label: `challenge:${x.lens.key}:${base(f.file)}`, phase: 'Verify', model: FINDER_MODEL, schema: CHALLENGE })
-        .then(c => ({ lens: x.lens, challenge: c }))
+      agent(challengePrompt(x.r.file || files[0], x.lens), { label: `challenge:${x.lens.key}:${base(x.r.file || files[0])}`, phase: 'Verify', model: FINDER_MODEL, schema: CHALLENGE })
+        .then(c => ({ lens: x.lens, file: x.r.file || files[0], challenge: c }))
     ))
 
-    return { file: f.file, runs, verified: (await refute).filter(Boolean), challenged: (await challenge).filter(Boolean) }
+    await refute
+    return { files, runs, challenged: (await challenge).filter(Boolean) }
   }
 )
 
-// Deterministic rollup. A finding is CONFIRMED three ways: high-confidence (no refuter),
-// refuter 'confirmed' (a low/med flag upheld), or challenger 'missed' (a clean lens overlooked
-// it). 'spared' = a flag the refuter overturned. gate = soft-hold only for a high-severity
-// finding on a soft-hold pillar (spec/correctness); everything else advisory.
+const clean = results.filter(Boolean)
+
+// Per-PR challenge (pr profile) — one agent over all in-scope diff hunks looks for what the finders
+// missed under the recall-sensitive pillars, then its missed findings run the tiered refute path
+// before any can reach confirmed. This closes the one path where a challenger-missed finding used to
+// reach confirmed unverified. noChallenge skips it.
+let prChallengeMissed = []
+const challengeLenses = SELECTED.filter(l => CHALLENGE_LENSES.has(l.key))
+if (PROFILE === 'pr' && !A.noChallenge && challengeLenses.length && scopeUnits(inScope).some(u => u.diff)) {
+  phase('Verify')
+  const ch = await agent(prChallengePrompt(inScope, challengeLenses), { label: 'challenge:pr', phase: 'Verify', model: FINDER_MODEL, schema: PR_CHALLENGE_SCHEMA })
+  if (ch && ch.final_verdict === 'missed') {
+    const lensByKey = new Map(challengeLenses.map(l => [l.key, l]))
+    for (const m of (ch.missed || [])) {
+      const lens = lensByKey.get(m.lens) || challengeLenses[0]
+      prChallengeMissed.push({ fd: m, lens, file: m.file })
+    }
+    if (prChallengeMissed.length) await refuteFlags(prChallengeMissed)
+  }
+}
+
+// Deterministic rollup. A finding is CONFIRMED three ways: high-confidence (no live refuter, or an
+// ALWAYS_VERIFY finding its refuter upheld), refuter 'confirmed' (a low/med flag upheld), or
+// challenger 'missed' (a clean lens overlooked it — refute-gated in the pr profile). 'spared' = a
+// flag the refuter overturned, now including a refuted high-confidence correctness finding (issue
+// #3015 item 2 — the Opus refuter's verdict is consulted rather than discarded). gate = soft-hold
+// only for a high-severity finding on a soft-hold pillar (spec/correctness); everything else advisory.
 const gateFor = (lens, severity) => (lens.gate === 'soft-hold' && severity === 'high') ? 'soft-hold' : 'advisory'
 const rowOf = (file, lens, fd, source) => ({
-  file, pillar: lens.key, source, category: fd.category, line: fd.line, symbol: fd.symbol,
+  file, pillar: fd.pillar || lens.key, source, category: fd.category, line: fd.line, symbol: fd.symbol,
   severity: fd.severity, gate: gateFor(lens, fd.severity), recommendation: fd.recommendation,
   suggested_form: fd.suggested_form, direction: fd.direction, char_delta: fd.char_delta,
 })
 
-const clean = results.filter(Boolean)
 const totals = { files: 0, finders: 0, findings: 0, confirmed: 0, falsePositives: 0, challengerMissed: 0, softHolds: 0 }
 const confirmed = [], spared = [], uncertain = [], lintCandidates = []
 
 for (const e of clean) {
   if (!e.runs || !e.runs.length) continue
-  totals.files++
-  const file = base(e.file)
-  const vmap = new Map((e.verified || []).map(v => [`${v.lensKey}:${v.symbol}`, v.verify]))
 
   for (const x of e.runs) {
     totals.finders++
-    for (const lc of (x.r.lintCandidates || [])) lintCandidates.push({ file, lens: x.lens.key, symbol: lc.symbol, note: lc.note })
+    const runFile = x.r.file || (e.files && e.files[0])
+    for (const lc of (x.r.lintCandidates || [])) lintCandidates.push({ file: base(lc.file || runFile), lens: x.lens.key, symbol: lc.symbol, note: lc.note })
     for (const fd of (x.r.findings || [])) {
       totals.findings++
-      if (fd.confidence === 'high') confirmed.push(rowOf(file, x.lens, fd, 'high-confidence'))
-      else {
-        const v = vmap.get(`${x.lens.key}:${fd.symbol}`)
-        if (v && v.final_verdict === 'confirmed') confirmed.push(rowOf(file, x.lens, fd, 'refuter'))
-        else if (v && v.final_verdict === 'false-positive') { spared.push({ ...rowOf(file, x.lens, fd, 'spared'), reason: v.rationale }); totals.falsePositives++ }
-        else uncertain.push({ ...rowOf(file, x.lens, fd, 'uncertain'), stage: 'refute', note: (v && v.rationale) || 'no verify result' })
+      const lens = x.lens
+      const file = base(fd.file || runFile)
+      const v = fd.verify
+      if (ALWAYS_VERIFY.has(lens.key) && fd.confidence === 'high') {
+        // ALWAYS_VERIFY consults the refuter even at high confidence: a refuted high-confidence
+        // correctness finding is spared, an upheld one confirmed with source high-confidence.
+        if (v && v.final_verdict === 'false-positive') { spared.push({ ...rowOf(file, lens, fd, 'spared'), reason: v.rationale }); totals.falsePositives++ }
+        else confirmed.push(rowOf(file, lens, fd, 'high-confidence'))
+      } else if (fd.confidence === 'high') {
+        confirmed.push(rowOf(file, lens, fd, 'high-confidence'))
+      } else if (v && v.final_verdict === 'confirmed') {
+        confirmed.push(rowOf(file, lens, fd, 'refuter'))
+      } else if (v && v.final_verdict === 'false-positive') {
+        spared.push({ ...rowOf(file, lens, fd, 'spared'), reason: v.rationale }); totals.falsePositives++
+      } else {
+        uncertain.push({ ...rowOf(file, lens, fd, 'uncertain'), stage: 'refute', note: (v && v.rationale) || 'no verify result' })
       }
     }
   }
 
+  // Backfill per-file clean-lens challenge — a 'missed' finding goes straight to confirmed (the pr
+  // profile instead routes its per-PR challenge misses through the refuter, below).
   for (const ch of (e.challenged || [])) {
     const v = ch.challenge
+    const file = base(ch.file || (e.files && e.files[0]))
     if (v && v.final_verdict === 'missed') {
       for (const m of (v.missed || [])) { totals.challengerMissed++; confirmed.push(rowOf(file, ch.lens, m, 'challenger-missed')) }
     } else if (v && v.final_verdict === 'uncertain') {
@@ -427,9 +737,19 @@ for (const e of clean) {
   }
 }
 
-// Dedup backstop: a finder that strayed into another file, or two sub-lenses overlapping,
-// can raise the same site twice (the in-file finder constraint prevents most of it). Keep the
-// first row per (file, pillar, category, line).
+// Per-PR challenge misses (pr profile) — refute-gated before confirmed, unlike the backfill path.
+for (const it of prChallengeMissed) {
+  const { fd, lens } = it
+  const file = base(it.file)
+  const v = fd.verify
+  if (v && v.final_verdict === 'confirmed') { totals.challengerMissed++; confirmed.push(rowOf(file, lens, fd, 'challenger-missed')) }
+  else if (v && v.final_verdict === 'false-positive') { spared.push({ ...rowOf(file, lens, fd, 'spared'), reason: v.rationale }); totals.falsePositives++ }
+  else uncertain.push({ ...rowOf(file, lens, fd, 'uncertain'), stage: 'challenge', note: (v && v.rationale) || 'no verify result' })
+}
+
+// Dedup backstop: a finder that strayed into another file, two sub-lenses overlapping, or a per-PR
+// challenge miss on a site a finder already raised can produce the same row twice. Keep the first
+// row per (file, pillar, category, line).
 const seenRows = new Set()
 const deduped = []
 for (const r of confirmed) {
@@ -438,6 +758,9 @@ for (const r of confirmed) {
   seenRows.add(k); deduped.push(r)
 }
 
+const processedFiles = new Set()
+for (const e of clean) if (e.runs && e.runs.length) for (const fl of (e.files || [])) processedFiles.add(fl)
+totals.files = processedFiles.size
 totals.confirmed = deduped.length
 const softHolds = deduped.filter(r => r.gate === 'soft-hold')
 totals.softHolds = softHolds.length
@@ -448,7 +771,7 @@ for (const r of deduped) ((grouped[r.file] ||= {})[r.pillar] ||= []).push(r)
 const bySource = deduped.reduce((a, r) => ((a[r.source] = (a[r.source] || 0) + 1), a), {})
 const specCount = spec ? (spec.findings || []).length : 0
 
-log(`review: ${totals.files} files, ${totals.finders} finders -> ${totals.confirmed} confirmed (high-conf ${bySource['high-confidence'] || 0}, refuter ${bySource['refuter'] || 0}, challenger ${bySource['challenger-missed'] || 0}), ${softHolds.length} SOFT-HOLD, ${spared.length} spared, ${uncertain.length} uncertain, ${lintCandidates.length} lint candidates, ${specCount} spec findings`)
+log(`review [${PROFILE}/${FINDER_SHAPE}]: ${totals.files} files, ${totals.finders} finders -> ${totals.confirmed} confirmed (high-conf ${bySource['high-confidence'] || 0}, refuter ${bySource['refuter'] || 0}, challenger ${bySource['challenger-missed'] || 0}), ${softHolds.length} SOFT-HOLD, ${spared.length} spared, ${uncertain.length} uncertain, ${lintCandidates.length} lint candidates, ${specCount} spec findings`)
 
 return {
   rollup: {
