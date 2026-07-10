@@ -82,7 +82,9 @@ impl VirtualListWidget {
     }
 
     fn select_if_mutable(&mut self, selected_index: usize) -> Option<u32> {
-        self.state.can_mutate().then_some(())?;
+        if !self.state.can_mutate() {
+            return None;
+        }
         self.select(selected_index)
     }
 
@@ -92,7 +94,9 @@ impl VirtualListWidget {
     }
 
     fn move_selection_if_mutable(&mut self, movement: SelectionMove) -> Option<u32> {
-        self.state.can_mutate().then_some(())?;
+        if !self.state.can_mutate() {
+            return None;
+        }
         self.move_selection(movement)
     }
 
