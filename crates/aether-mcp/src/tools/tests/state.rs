@@ -9,11 +9,7 @@ use super::super::*;
 fn widened_struct_schema() -> SchemaType {
     use aether_data::NamedField;
     SchemaType::Struct {
-        fields: vec![NamedField {
-            name: "button".into(),
-            ty: SchemaType::String,
-        }]
-        .into(),
+        fields: vec![NamedField { name: "button".into(), ty: SchemaType::String }].into(),
         repr_c: false,
     }
 }
@@ -21,10 +17,7 @@ fn widened_struct_schema() -> SchemaType {
 /// The empty-struct schema a widened kind had *before* it gained a
 /// field — the stale shape the harness holds cached (issue 2672).
 fn narrow_struct_schema() -> SchemaType {
-    SchemaType::Struct {
-        fields: vec![].into(),
-        repr_c: false,
-    }
+    SchemaType::Struct { fields: vec![].into(), repr_c: false }
 }
 
 /// Build the single-entry `ListKindsResult` a `RouteInventorySink`
@@ -57,21 +50,14 @@ async fn resolve_and_encode_refreshes_on_field_mismatch() {
 
     // The live engine's vocabulary carries the widened shape.
     let calls = Arc::new(AtomicUsize::new(0));
-    let (_chassis, port) =
-        boot_hub_with_route_loopback(canned_kinds_reply(name, &widened), Arc::clone(&calls));
+    let (_chassis, port) = boot_hub_with_route_loopback(canned_kinds_reply(name, &widened), Arc::clone(&calls));
     let mcp = connect_mcp(port);
 
     // Pre-seed the per-engine cache with the STALE narrow shape, so
     // the name is a cache hit (no unknown-kind-miss refresh) — only
     // the encode failure can drive the refresh.
     let engine = EngineId(Uuid::from_u128(0x2672_dead_beef));
-    mcp.merge_into_engine_cache(
-        engine,
-        vec![KindDescriptor {
-            name: name.to_owned(),
-            schema: narrow_struct_schema(),
-        }],
-    );
+    mcp.merge_into_engine_cache(engine, vec![KindDescriptor { name: name.to_owned(), schema: narrow_struct_schema() }]);
 
     // Params carrying the new field: rejected by the narrow cached
     // schema, accepted by the widened live one.
@@ -81,21 +67,10 @@ async fn resolve_and_encode_refreshes_on_field_mismatch() {
         .await
         .expect("field-mismatch encode failure refreshes and retries");
 
-    assert_eq!(
-        calls.load(Ordering::Relaxed),
-        1,
-        "the field-mismatch triggered exactly one refresh RPC",
-    );
-    assert_eq!(
-        desc.schema, widened,
-        "resolve_and_encode returns the fresh (widened) descriptor",
-    );
-    let decoded = aether_codec::decode_schema(&payload, &widened)
-        .expect("payload decodes against the widened schema");
-    assert_eq!(
-        decoded, params,
-        "the new field round-trips through the refreshed schema",
-    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "the field-mismatch triggered exactly one refresh RPC",);
+    assert_eq!(desc.schema, widened, "resolve_and_encode returns the fresh (widened) descriptor",);
+    let decoded = aether_codec::decode_schema(&payload, &widened).expect("payload decodes against the widened schema");
+    assert_eq!(decoded, params, "the new field round-trips through the refreshed schema",);
 }
 
 /// Issue 2672: the refresh-and-retry is bounded to exactly one
@@ -113,33 +88,18 @@ async fn resolve_and_encode_retry_is_bounded_to_one_refresh() {
     // The live vocabulary is *also* narrow — the refresh changes
     // nothing, so the re-encode fails identically.
     let calls = Arc::new(AtomicUsize::new(0));
-    let (_chassis, port) = boot_hub_with_route_loopback(
-        canned_kinds_reply(name, &narrow_struct_schema()),
-        Arc::clone(&calls),
-    );
+    let (_chassis, port) =
+        boot_hub_with_route_loopback(canned_kinds_reply(name, &narrow_struct_schema()), Arc::clone(&calls));
     let mcp = connect_mcp(port);
 
     let engine = EngineId(Uuid::from_u128(0x2672_beef_cafe));
-    mcp.merge_into_engine_cache(
-        engine,
-        vec![KindDescriptor {
-            name: name.to_owned(),
-            schema: narrow_struct_schema(),
-        }],
-    );
+    mcp.merge_into_engine_cache(engine, vec![KindDescriptor { name: name.to_owned(), schema: narrow_struct_schema() }]);
 
     let params = serde_json::json!({ "button": "left" });
     let result = mcp.resolve_and_encode(engine, name, params).await;
 
-    assert!(
-        result.is_err(),
-        "a field the fresh vocab still lacks surfaces an error, not a hang",
-    );
-    assert_eq!(
-        calls.load(Ordering::Relaxed),
-        1,
-        "the retry refreshed exactly once — no loop",
-    );
+    assert!(result.is_err(), "a field the fresh vocab still lacks surfaces an error, not a hang",);
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "the retry refreshed exactly once — no loop",);
 }
 
 /// ADR-0091 issue 1232 (end-to-end): a kind registered in the
@@ -163,10 +123,8 @@ async fn lookup_descriptor_picks_up_a_post_load_kind_via_inventory() {
 
     // The component-defined kind in this scenario: present in the
     // substrate's `Registry` but not in `descriptors::all()`.
-    let component_kind = KindDescriptor {
-        name: "aether.test.component_defined_kind".to_owned(),
-        schema: SchemaType::String,
-    };
+    let component_kind =
+        KindDescriptor { name: "aether.test.component_defined_kind".to_owned(), schema: SchemaType::String };
 
     let extras = vec![component_kind.clone()];
     let (_chassis, port) = boot_hub_with_inventory(&extras);
@@ -183,9 +141,7 @@ async fn lookup_descriptor_picks_up_a_post_load_kind_via_inventory() {
     // it to native, the test surfaces immediately rather than
     // silently bypassing the cache-refresh path.)
     assert!(
-        !descriptors::all()
-            .iter()
-            .any(|d| d.name == component_kind.name),
+        !descriptors::all().iter().any(|d| d.name == component_kind.name),
         "test invariant: the component kind must not be in the static descriptors",
     );
 
@@ -199,33 +155,21 @@ async fn lookup_descriptor_picks_up_a_post_load_kind_via_inventory() {
     // shaped (the engines cap doesn't proxy to a separate
     // substrate); in production the hub forwards to the engine
     // and the engine answers via its local `aether.inventory`.
-    let reply = mcp
-        .session
-        .call_one(local_envelope(INVENTORY_CAP, &ListKinds {}))
-        .await
-        .expect("aether.inventory.kinds reply");
-    let result =
-        ListKindsResult::decode_from_bytes(&reply.payload).expect("ListKindsResult decodes");
+    let reply =
+        mcp.session.call_one(local_envelope(INVENTORY_CAP, &ListKinds {})).await.expect("aether.inventory.kinds reply");
+    let result = ListKindsResult::decode_from_bytes(&reply.payload).expect("ListKindsResult decodes");
     // The reply must include the registered component kind with a
     // schema that decodes back to the originally registered shape
     // — the wire path the harness's cache reads from.
-    let entry = result
-        .kinds
-        .iter()
-        .find(|k| k.name == component_kind.name)
-        .unwrap_or_else(|| {
-            panic!(
-                "ListKindsResult should include the registered component kind; \
+    let entry = result.kinds.iter().find(|k| k.name == component_kind.name).unwrap_or_else(|| {
+        panic!(
+            "ListKindsResult should include the registered component kind; \
                  got {:?}",
-                result.kinds.iter().map(|k| &k.name).collect::<Vec<_>>(),
-            )
-        });
-    let decoded_schema: SchemaType =
-        wire::from_bytes(&entry.schema_wire).expect("schema_wire decodes");
-    assert!(
-        matches!(decoded_schema, SchemaType::String),
-        "the registered schema round-trips through the wire",
-    );
+            result.kinds.iter().map(|k| &k.name).collect::<Vec<_>>(),
+        )
+    });
+    let decoded_schema: SchemaType = wire::from_bytes(&entry.schema_wire).expect("schema_wire decodes");
+    assert!(matches!(decoded_schema, SchemaType::String), "the registered schema round-trips through the wire",);
 
     // Now drive the harness's encode path directly. Seed the
     // per-engine cache the way a real refresh would (engine id is
@@ -261,10 +205,7 @@ async fn lookup_descriptor_picks_up_a_post_load_kind_via_inventory() {
     );
     assert_eq!(
         envelope.kind,
-        KindId(kind_id_from_parts(
-            &component_kind.name,
-            &component_kind.schema
-        )),
+        KindId(kind_id_from_parts(&component_kind.name, &component_kind.schema)),
         "envelope kind id matches the live KindId of the component-defined kind",
     );
 }

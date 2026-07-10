@@ -144,12 +144,8 @@ pub fn surface_net(
                 // `(i - 1) + 0.5 = i - 0.5`. World placement maps a real
                 // coordinate `c` to `origin + cell * c`, so the boundary
                 // shell's cubes sit a half-cell outside the sample extent.
-                let centroid = origin
-                    + Vec3::new(
-                        cell.x * (i as f32 - 0.5),
-                        cell.y * (j as f32 - 0.5),
-                        cell.z * (k as f32 - 0.5),
-                    );
+                let centroid =
+                    origin + Vec3::new(cell.x * (i as f32 - 0.5), cell.y * (j as f32 - 0.5), cell.z * (k as f32 - 0.5));
                 // The vertex count is bounded by the boundary cell count;
                 // a field with more than `u32::MAX - 1` straddling cubes
                 // (4 billion) is not representable, so this never
@@ -257,26 +253,15 @@ fn emit_quad(out: &mut Vec<Triangle>, positions: &[Vec3], q: [u32; 4], endpoint0
     if q.contains(&NO_VERTEX) {
         return;
     }
-    let p = [
-        positions[q[0] as usize],
-        positions[q[1] as usize],
-        positions[q[2] as usize],
-        positions[q[3] as usize],
-    ];
+    let p = [positions[q[0] as usize], positions[q[1] as usize], positions[q[2] as usize], positions[q[3] as usize]];
     // CCW fan (0,1,2)+(0,2,3) faces one way; reverse for the other sign.
     let (t0, t1) = if endpoint0_inside {
         ([p[0], p[1], p[2]], [p[0], p[2], p[3]])
     } else {
         ([p[0], p[2], p[1]], [p[0], p[3], p[2]])
     };
-    out.push(Triangle {
-        vertices: t0,
-        color: SURFACE_COLOR,
-    });
-    out.push(Triangle {
-        vertices: t1,
-        color: SURFACE_COLOR,
-    });
+    out.push(Triangle { vertices: t0, color: SURFACE_COLOR });
+    out.push(Triangle { vertices: t1, color: SURFACE_COLOR });
 }
 
 #[cfg(test)]
@@ -355,11 +340,7 @@ mod tests {
         // sign-change edge → one quad → 9 quads per face. 6 * 9 = 54 quads
         // → 108 triangles. The interior is never meshed (the O(area)
         // guarantee, not O(volume)).
-        assert_eq!(
-            tris_shallow.len(),
-            6 * 3 * 3 * 2,
-            "3x3x3 full box shell = 6 faces * 9 quads * 2 tris",
-        );
+        assert_eq!(tris_shallow.len(), 6 * 3 * 3 * 2, "3x3x3 full box shell = 6 faces * 9 quads * 2 tris",);
     }
 
     /// A volume with an interior empty pocket emits more triangles than
@@ -376,18 +357,12 @@ mod tests {
         let pocket = volume(w, h, d, |x, y, z| (x, y, z) != (2, 2, 2));
         let tris_full = surface_net(w, h, d, &full, 1, cell, origin);
         let tris_pocket = surface_net(w, h, d, &pocket, 1, cell, origin);
-        assert!(
-            tris_pocket.len() > tris_full.len(),
-            "an interior empty pocket adds boundary surface (a cavity)",
-        );
+        assert!(tris_pocket.len() > tris_full.len(), "an interior empty pocket adds boundary surface (a cavity)",);
         // The vertex bounding box spans the outer shell's cube centroids,
         // which sit a half-cell outside the sample extent: real coordinate
         // -0.5 at the low side, (dim-1)+0.5 at the high side along each
         // axis.
-        let pts: Vec<Vec3> = tris_pocket
-            .iter()
-            .flat_map(|t| t.vertices.iter().copied())
-            .collect();
+        let pts: Vec<Vec3> = tris_pocket.iter().flat_map(|t| t.vertices.iter().copied()).collect();
         let bbox = Aabb::from_points(&pts);
         let lo = -0.5_f32;
         let hi_x = (w - 1) as f32 + 0.5;
@@ -397,21 +372,9 @@ mod tests {
         assert!((bbox.min.x - lo).abs() < eps, "bbox min.x = {}", bbox.min.x);
         assert!((bbox.min.y - lo).abs() < eps, "bbox min.y = {}", bbox.min.y);
         assert!((bbox.min.z - lo).abs() < eps, "bbox min.z = {}", bbox.min.z);
-        assert!(
-            (bbox.max.x - hi_x).abs() < eps,
-            "bbox max.x = {}",
-            bbox.max.x
-        );
-        assert!(
-            (bbox.max.y - hi_y).abs() < eps,
-            "bbox max.y = {}",
-            bbox.max.y
-        );
-        assert!(
-            (bbox.max.z - hi_z).abs() < eps,
-            "bbox max.z = {}",
-            bbox.max.z
-        );
+        assert!((bbox.max.x - hi_x).abs() < eps, "bbox max.x = {}", bbox.max.x);
+        assert!((bbox.max.y - hi_y).abs() < eps, "bbox max.y = {}", bbox.max.y);
+        assert!((bbox.max.z - hi_z).abs() < eps, "bbox max.z = {}", bbox.max.z);
     }
 
     /// The single-voxel cube's faces wind outward: every triangle's
@@ -431,11 +394,7 @@ mod tests {
             let normal = (b - a).cross(c - a);
             let face_center = (a + b + c) * (1.0 / 3.0);
             let outward = face_center - center;
-            assert!(
-                normal.dot(outward) > 0.0,
-                "triangle normal must face outward: n·out = {}",
-                normal.dot(outward),
-            );
+            assert!(normal.dot(outward) > 0.0, "triangle normal must face outward: n·out = {}", normal.dot(outward),);
         }
     }
 
@@ -451,11 +410,7 @@ mod tests {
         // index z*H*W + y*W + x = 1*9 + 1*3 + 1 = 13.
         v[13] = u32::MAX;
         let tris = surface_net(3, 3, 3, &v, 1, cell, origin);
-        assert_eq!(
-            tris.len(),
-            12,
-            "a u32::MAX sample is inside under iso_threshold = 1",
-        );
+        assert_eq!(tris.len(), 12, "a u32::MAX sample is inside under iso_threshold = 1",);
     }
 
     /// Degenerate dimensions (a single slice along any axis) have no
@@ -467,10 +422,7 @@ mod tests {
         for (w, h, d) in [(1, 3, 3), (3, 1, 3), (3, 3, 1)] {
             let v = volume(w, h, d, |_, _, _| true);
             let tris = surface_net(w, h, d, &v, 1, cell, origin);
-            assert!(
-                tris.is_empty(),
-                "a {w}x{h}x{d} volume has no cells → 0 triangles",
-            );
+            assert!(tris.is_empty(), "a {w}x{h}x{d} volume has no cells → 0 triangles",);
         }
     }
 
@@ -492,10 +444,7 @@ mod tests {
         let origin = Vec3::new(10.0, 20.0, 30.0);
         let v = volume(3, 3, 3, |x, y, z| (x, y, z) == (1, 1, 1));
         let tris = surface_net(3, 3, 3, &v, 1, cell, origin);
-        let pts: Vec<Vec3> = tris
-            .iter()
-            .flat_map(|t| t.vertices.iter().copied())
-            .collect();
+        let pts: Vec<Vec3> = tris.iter().flat_map(|t| t.vertices.iter().copied()).collect();
         let bbox = Aabb::from_points(&pts);
         // Centroids at i in {0, 1}: x = 10 + 2*(0.5) = 11 and
         // 10 + 2*(1.5) = 13; y = 20 + 3*0.5 = 21.5 .. 24.5;

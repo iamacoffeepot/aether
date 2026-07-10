@@ -28,8 +28,8 @@ use super::ComponentHostCapability;
 pub use self::config::ComponentHostConfig;
 
 use aether_kinds::{
-    DescribeComponent, DescribeComponentResult, DropComponent, ListComponents,
-    ListComponentsResult, LoadComponent, LoadResult, ReplaceComponent,
+    DescribeComponent, DescribeComponentResult, DropComponent, ListComponents, ListComponentsResult, LoadComponent,
+    LoadResult, ReplaceComponent,
 };
 
 // Crate-local wiring the `#[runtime] impl` handler bodies name (sibling caps it
@@ -98,12 +98,8 @@ pub struct ComponentHostCapabilityState {
 /// A free fn (no `self`) under the ADR-0122 split: the state-bearing struct
 /// holds no field this helper reads, so it stays stateless and the handlers
 /// reach it through the parent's `use runtime::*` glob.
-fn forward_to_trampoline<P>(
-    ctx: &mut NativeCtx<'_>,
-    recipient: MailboxId,
-    kind: KindId,
-    payload: &P,
-) where
+fn forward_to_trampoline<P>(ctx: &mut NativeCtx<'_>, recipient: MailboxId, kind: KindId, payload: &P)
+where
     P: Kind,
 {
     let bytes = payload.encode_into_bytes();
@@ -151,11 +147,7 @@ impl NativeActor for ComponentHostCapability {
     /// invalid wasm, instantiation trap) come back as
     /// `LoadResult::Err`.
     #[handler::single]
-    fn on_load_component(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        payload: LoadComponent,
-    ) -> LoadResult {
+    fn on_load_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: LoadComponent) -> LoadResult {
         // ADR-0109: the return type is the reply contract — the
         // `#[actor]` macro routes this `LoadResult` back to the sender
         // through `OutboundReply::reply`, so no manual `ctx.reply`.
@@ -183,26 +175,14 @@ impl NativeActor for ComponentHostCapability {
         // trampoline from its fan-out sets. Mail rather than direct
         // mutation post-issue-640 — each cap is the sole owner of its
         // own subscriber table.
-        ctx.actor::<InputCapability>().send(&UnsubscribeAll {
-            mailbox: payload.mailbox_id,
-        });
-        ctx.actor::<LifecycleCapability>()
-            .send(&LifecycleUnsubscribeAll {
-                mailbox: payload.mailbox_id.0,
-            });
+        ctx.actor::<InputCapability>().send(&UnsubscribeAll { mailbox: payload.mailbox_id });
+        ctx.actor::<LifecycleCapability>().send(&LifecycleUnsubscribeAll { mailbox: payload.mailbox_id.0 });
         // The http server registers only when a bind is configured
         // (ADR-0108), so gate its route purge on the cap being live —
         // an unguarded typed send would warn-drop on every component
         // drop in a chassis that serves no HTTP.
-        if state
-            .registry
-            .lookup(<HttpServerCapability as Addressable>::NAMESPACE)
-            .is_some()
-        {
-            ctx.actor::<HttpServerCapability>()
-                .send(&UnregisterRoutesAll {
-                    mailbox: payload.mailbox_id,
-                });
+        if state.registry.lookup(<HttpServerCapability as Addressable>::NAMESPACE).is_some() {
+            ctx.actor::<HttpServerCapability>().send(&UnregisterRoutesAll { mailbox: payload.mailbox_id });
         }
         forward_to_trampoline(ctx, payload.mailbox_id, DropComponent::ID, &payload);
     }
@@ -223,11 +203,7 @@ impl NativeActor for ComponentHostCapability {
     /// replacement module to instantiate; `None` reuses the type the
     /// trampoline currently hosts.
     #[handler::single]
-    fn on_replace_component(
-        _state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        payload: ReplaceComponent,
-    ) {
+    fn on_replace_component(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
         forward_to_trampoline(ctx, payload.mailbox_id, ReplaceComponent::ID, &payload);
     }
 
@@ -289,15 +265,13 @@ impl NativeActor for ComponentHostCapability {
         payload: DescribeComponent,
     ) -> DescribeComponentResult {
         let Some(mailbox) = state.registry.lookup(&payload.name) else {
-            return DescribeComponentResult::Err {
-                error: format!("no component registered at name {}", payload.name),
-            };
+            return DescribeComponentResult::Err { error: format!("no component registered at name {}", payload.name) };
         };
         match state.mailer.capability_registry().describe(mailbox) {
             Some(capabilities) => DescribeComponentResult::Ok { capabilities },
-            None => DescribeComponentResult::Err {
-                error: format!("no capabilities retained for name {}", payload.name),
-            },
+            None => {
+                DescribeComponentResult::Err { error: format!("no capabilities retained for name {}", payload.name) }
+            }
         }
     }
 }

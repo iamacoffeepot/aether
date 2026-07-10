@@ -51,8 +51,8 @@ use aether_actor::actor;
 // declares — including these ten stream-event kinds, not just the
 // subscribe/unsubscribe family.
 use aether_kinds::{
-    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
-    TextInput, WindowSize,
+    ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
+    WindowSize,
 };
 
 /// `aether.input` cap **identity** (ADR-0122 identity/runtime split). A
@@ -162,19 +162,13 @@ impl InputMailboxExt for WasmActorMailbox<'_, InputCapability> {
         self.send(&SubscribeInputSelf { kind: K::ID });
     }
     fn subscribe_for<K: Kind>(&self, mailbox: MailboxId) {
-        self.send(&SubscribeInput {
-            kind: K::ID,
-            mailbox,
-        });
+        self.send(&SubscribeInput { kind: K::ID, mailbox });
     }
     fn unsubscribe<K: Kind>(&self) {
         self.send(&UnsubscribeInputSelf { kind: K::ID });
     }
     fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId) {
-        self.send(&UnsubscribeInput {
-            kind: K::ID,
-            mailbox,
-        });
+        self.send(&UnsubscribeInput { kind: K::ID, mailbox });
     }
     fn unsubscribe_all(&self, mailbox: MailboxId) {
         self.send(&UnsubscribeAll { mailbox });
@@ -187,19 +181,13 @@ impl InputMailboxExt for NativeActorMailbox<'_, InputCapability> {
         self.send(&SubscribeInputSelf { kind: K::ID });
     }
     fn subscribe_for<K: Kind>(&self, mailbox: MailboxId) {
-        self.send(&SubscribeInput {
-            kind: K::ID,
-            mailbox,
-        });
+        self.send(&SubscribeInput { kind: K::ID, mailbox });
     }
     fn unsubscribe<K: Kind>(&self) {
         self.send(&UnsubscribeInputSelf { kind: K::ID });
     }
     fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId) {
-        self.send(&UnsubscribeInput {
-            kind: K::ID,
-            mailbox,
-        });
+        self.send(&UnsubscribeInput { kind: K::ID, mailbox });
     }
     fn unsubscribe_all(&self, mailbox: MailboxId) {
         self.send(&UnsubscribeAll { mailbox });

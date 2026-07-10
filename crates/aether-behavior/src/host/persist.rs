@@ -77,10 +77,7 @@ mod tests {
     #[test]
     fn bundle_round_trips_and_rejects_garbage() {
         let bundle = HostPersist {
-            script_source: ScriptSource::FsRef {
-                namespace: "assets".into(),
-                path: "scripts/knob.wasm".into(),
-            },
+            script_source: ScriptSource::FsRef { namespace: "assets".into(), path: "scripts/knob.wasm".into() },
             script_bytes: vec![0, 97, 115, 109],
             script_state: vec![1, 2, 3, 4],
             wrapped_child_id: 0xDEAD_BEEF,

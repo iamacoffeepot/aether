@@ -37,20 +37,10 @@ fn render_shape_enum_kind() {
     use std::borrow::Cow;
     let schema = ST::Enum {
         variants: Cow::Borrowed(&[
-            EnumVariant::Unit {
-                name: Cow::Borrowed("Off"),
-                discriminant: 0,
-            },
-            EnumVariant::Tuple {
-                name: Cow::Borrowed("On"),
-                discriminant: 1,
-                fields: Cow::Borrowed(&[ST::Bool]),
-            },
+            EnumVariant::Unit { name: Cow::Borrowed("Off"), discriminant: 0 },
+            EnumVariant::Tuple { name: Cow::Borrowed("On"), discriminant: 1, fields: Cow::Borrowed(&[ST::Bool]) },
         ]),
     };
     let shape = render_shape(&schema);
-    assert_eq!(
-        shape, "Off | On(bool)",
-        "enum shape should be Var1 | Var2(inner)"
-    );
+    assert_eq!(shape, "Off | On(bool)", "enum shape should be Var1 | Var2(inner)");
 }

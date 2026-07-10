@@ -84,11 +84,7 @@ type VertKey = (i32, i32, i32);
 
 fn vert_key(v: Vec3) -> VertKey {
     use crate::fixed::f32_to_fixed;
-    (
-        f32_to_fixed(v.x).unwrap_or(0),
-        f32_to_fixed(v.y).unwrap_or(0),
-        f32_to_fixed(v.z).unwrap_or(0),
-    )
+    (f32_to_fixed(v.x).unwrap_or(0), f32_to_fixed(v.y).unwrap_or(0), f32_to_fixed(v.z).unwrap_or(0))
 }
 
 fn from_key(k: VertKey) -> Vec3 {
@@ -103,11 +99,7 @@ fn from_key(k: VertKey) -> Vec3 {
 /// purely a diagnostic-side cast.
 fn polygon_loops_f32(p: &Polygon) -> (Vec<Vec3>, Vec<Vec<Vec3>>) {
     let outer: Vec<Vec3> = p.vertices.iter().map(|v| v.to_f32()).collect();
-    let holes: Vec<Vec<Vec3>> = p
-        .holes
-        .iter()
-        .map(|h| h.iter().map(|v| v.to_f32()).collect())
-        .collect();
+    let holes: Vec<Vec<Vec3>> = p.holes.iter().map(|h| h.iter().map(|v| v.to_f32()).collect()).collect();
     (outer, holes)
 }
 
@@ -119,12 +111,7 @@ pub enum ManifoldViolation {
     BoundaryEdge { v0: Vec3, v1: Vec3 },
     /// Edge (or its reverse) appears more than 2 times total —
     /// non-manifold topology. Multiple faces share this edge.
-    SingularEdge {
-        v0: Vec3,
-        v1: Vec3,
-        forward_count: usize,
-        reverse_count: usize,
-    },
+    SingularEdge { v0: Vec3, v1: Vec3, forward_count: usize, reverse_count: usize },
     /// Edge appears the right number of times (2 total) but both in
     /// the same direction — adjacent faces don't have opposite
     /// winding, so the surface orientation is inconsistent.
@@ -177,12 +164,7 @@ pub fn validate_manifold(polygons: &[Polygon]) -> Vec<ManifoldViolation> {
         if total == 1 {
             violations.push(ManifoldViolation::BoundaryEdge { v0, v1 });
         } else if total > 2 {
-            violations.push(ManifoldViolation::SingularEdge {
-                v0,
-                v1,
-                forward_count: forward,
-                reverse_count: reverse,
-            });
+            violations.push(ManifoldViolation::SingularEdge { v0, v1, forward_count: forward, reverse_count: reverse });
         } else if forward != 1 || reverse != 1 {
             // Total is 2 but not 1+1 — both same direction.
             violations.push(ManifoldViolation::InconsistentWinding { v0, v1 });
@@ -203,23 +185,14 @@ pub enum GeometryViolation {
     /// polygon's stored plane. Catches a polygon whose stored normal
     /// disagrees with its actual vertex layout (cleanup failure, plane
     /// re-derivation bug, or a genuinely non-planar n-gon).
-    NonPlanar {
-        polygon_index: usize,
-        vertex: Vec3,
-        distance: f32,
-    },
+    NonPlanar { polygon_index: usize, vertex: Vec3, distance: f32 },
     /// A polygon's projected signed area is below `tol::DEGENERATE_AREA`
     /// — it tessellates to ~zero pixels and is a likely source of
     /// downstream NaNs.
     DegenerateArea { polygon_index: usize, area: f32 },
     /// A polygon edge is shorter than `tol::SLIVER_EDGE`. Slivers slip
     /// through CSG cleanup and trigger CDT pathologies.
-    SliverEdge {
-        polygon_index: usize,
-        v0: Vec3,
-        v1: Vec3,
-        length: f32,
-    },
+    SliverEdge { polygon_index: usize, v0: Vec3, v1: Vec3, length: f32 },
     /// A polygon's longest:shortest edge ratio exceeds `tol::ASPECT_RATIO`.
     ExtremeAspectRatio { polygon_index: usize, ratio: f32 },
     /// Two polygons share an edge but their stored normals point nearly
@@ -229,12 +202,7 @@ pub enum GeometryViolation {
     /// A vertex lies on the open interior of a non-incident edge — a
     /// T-junction. Cleanup should have inserted this vertex into the
     /// edge's owning loop; missing it produces render-visible cracks.
-    TJunction {
-        vertex: Vec3,
-        edge_v0: Vec3,
-        edge_v1: Vec3,
-        distance: f32,
-    },
+    TJunction { vertex: Vec3, edge_v0: Vec3, edge_v1: Vec3, distance: f32 },
 }
 
 /// Build a 2D basis (u, v) on the plane normal to `n` so a polygon can
@@ -289,11 +257,7 @@ pub fn validate_planarity(polygons: &[Polygon]) -> Vec<GeometryViolation> {
         let check = |v: Vec3, out: &mut Vec<GeometryViolation>| {
             let d = ((v) - (p0)).dot(n).abs();
             if d > tol::PLANARITY {
-                out.push(GeometryViolation::NonPlanar {
-                    polygon_index: i,
-                    vertex: v,
-                    distance: d,
-                });
+                out.push(GeometryViolation::NonPlanar { polygon_index: i, vertex: v, distance: d });
             }
         };
         for &v in &outer {
@@ -318,10 +282,7 @@ pub fn validate_polygon_quality(polygons: &[Polygon]) -> Vec<GeometryViolation> 
         let (outer, _holes) = polygon_loops_f32(poly);
         let area = projected_area(&outer, poly.plane_normal).abs();
         if area < tol::DEGENERATE_AREA {
-            out.push(GeometryViolation::DegenerateArea {
-                polygon_index: i,
-                area,
-            });
+            out.push(GeometryViolation::DegenerateArea { polygon_index: i, area });
         }
         let mut min_edge = f32::INFINITY;
         let mut max_edge: f32 = 0.0;
@@ -331,12 +292,7 @@ pub fn validate_polygon_quality(polygons: &[Polygon]) -> Vec<GeometryViolation> 
             let b = outer[(j + 1) % n];
             let len = ((b) - (a)).length();
             if len < tol::SLIVER_EDGE {
-                out.push(GeometryViolation::SliverEdge {
-                    polygon_index: i,
-                    v0: a,
-                    v1: b,
-                    length: len,
-                });
+                out.push(GeometryViolation::SliverEdge { polygon_index: i, v0: a, v1: b, length: len });
             }
             if len > 0.0 {
                 if len < min_edge {
@@ -350,10 +306,7 @@ pub fn validate_polygon_quality(polygons: &[Polygon]) -> Vec<GeometryViolation> 
         if min_edge.is_finite() && min_edge > 0.0 {
             let ratio = max_edge / min_edge;
             if ratio > tol::ASPECT_RATIO {
-                out.push(GeometryViolation::ExtremeAspectRatio {
-                    polygon_index: i,
-                    ratio,
-                });
+                out.push(GeometryViolation::ExtremeAspectRatio { polygon_index: i, ratio });
             }
         }
     }
@@ -380,10 +333,7 @@ pub fn validate_normal_coherence(polygons: &[Polygon]) -> Vec<GeometryViolation>
                     continue;
                 }
                 let canonical = if a < b { (a, b) } else { (b, a) };
-                edges
-                    .entry(canonical)
-                    .or_default()
-                    .push((i, poly.plane_normal));
+                edges.entry(canonical).or_default().push((i, poly.plane_normal));
             }
         };
         let (outer, holes) = polygon_loops_f32(poly);
@@ -409,11 +359,7 @@ pub fn validate_normal_coherence(polygons: &[Polygon]) -> Vec<GeometryViolation>
         }
         let cos = n0.dot(n1);
         if cos < tol::FOLD_COS {
-            out.push(GeometryViolation::FoldedNormals {
-                v0: from_key(*a),
-                v1: from_key(*b),
-                cos_angle: cos,
-            });
+            out.push(GeometryViolation::FoldedNormals { v0: from_key(*a), v1: from_key(*b), cos_angle: cos });
         }
     }
     out.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
@@ -490,12 +436,7 @@ pub fn validate_no_t_junctions(polygons: &[Polygon]) -> Vec<GeometryViolation> {
             let d = *v - proj;
             let d_sq = d.dot(d);
             if d_sq <= tol_sq {
-                out.push(GeometryViolation::TJunction {
-                    vertex: *v,
-                    edge_v0: a,
-                    edge_v1: b,
-                    distance: d_sq.sqrt(),
-                });
+                out.push(GeometryViolation::TJunction { vertex: *v, edge_v0: a, edge_v1: b, distance: d_sq.sqrt() });
             }
         }
     }
@@ -545,26 +486,15 @@ pub fn summary(polygons: &[Polygon]) -> Summary {
             outer_tri + hole_tri
         })
         .sum();
-    let (vmin, vmax, vsum) =
-        polygons
-            .iter()
-            .fold((usize::MAX, 0usize, 0usize), |(mn, mx, sum), p| {
-                let n = p.vertices.len();
-                (mn.min(n), mx.max(n), sum + n)
-            });
-    let avg = if polygon_count == 0 {
-        0.0
-    } else {
-        vsum as f32 / polygon_count as f32
-    };
+    let (vmin, vmax, vsum) = polygons.iter().fold((usize::MAX, 0usize, 0usize), |(mn, mx, sum), p| {
+        let n = p.vertices.len();
+        (mn.min(n), mx.max(n), sum + n)
+    });
+    let avg = if polygon_count == 0 { 0.0 } else { vsum as f32 / polygon_count as f32 };
     let hole_count_total = polygons.iter().map(|p| p.holes.len()).sum();
     let mut by_plane_direction: HashMap<(i8, i8, i8), usize> = HashMap::new();
     for p in polygons {
-        let key = (
-            p.plane_normal.x.signum() as i8,
-            p.plane_normal.y.signum() as i8,
-            p.plane_normal.z.signum() as i8,
-        );
+        let key = (p.plane_normal.x.signum() as i8, p.plane_normal.y.signum() as i8, p.plane_normal.z.signum() as i8);
         *by_plane_direction.entry(key).or_insert(0) += 1;
     }
     Summary {
@@ -634,11 +564,7 @@ pub fn report(polygons: &[Polygon]) -> String {
     keys.sort();
     out.push_str("  by plane direction (sign x,y,z → count):\n");
     for k in keys {
-        let _ = writeln!(
-            out,
-            "    ({:+},{:+},{:+}) → {}",
-            k.0, k.1, k.2, summ.by_plane_direction[k]
-        );
+        let _ = writeln!(out, "    ({:+},{:+},{:+}) → {}", k.0, k.1, k.2, summ.by_plane_direction[k]);
     }
     if violations.is_empty() {
         out.push_str("  manifold: OK (closed, consistent winding)\n");
@@ -657,12 +583,7 @@ pub fn report(polygons: &[Polygon]) -> String {
         out.push_str("  geometry: OK (planar, well-shaped, coherent, no T-junctions)\n");
     } else {
         let _ = writeln!(out, "  geometry: {total_geom} VIOLATIONS:");
-        for v in planarity
-            .iter()
-            .chain(&quality)
-            .chain(&normals)
-            .chain(&tjunctions)
-        {
+        for v in planarity.iter().chain(&quality).chain(&normals).chain(&tjunctions) {
             let _ = writeln!(out, "    {v:?}");
         }
     }
@@ -681,12 +602,7 @@ mod tests {
     }
 
     fn quad(verts: [Vec3; 4], normal: Vec3) -> Polygon {
-        Polygon {
-            vertices: verts.iter().copied().map(p).collect(),
-            holes: vec![],
-            plane_normal: normal,
-            color: 0,
-        }
+        Polygon { vertices: verts.iter().copied().map(p).collect(), holes: vec![], plane_normal: normal, color: 0 }
     }
 
     /// Six axis-aligned faces of a `[-h, h]³` cube, with consistent
@@ -700,72 +616,42 @@ mod tests {
             (
                 "-X",
                 quad(
-                    [
-                        Vec3::new(-h, -h, -h),
-                        Vec3::new(-h, -h, h),
-                        Vec3::new(-h, h, h),
-                        Vec3::new(-h, h, -h),
-                    ],
+                    [Vec3::new(-h, -h, -h), Vec3::new(-h, -h, h), Vec3::new(-h, h, h), Vec3::new(-h, h, -h)],
                     Vec3::new(-1.0, 0.0, 0.0),
                 ),
             ),
             (
                 "+X",
                 quad(
-                    [
-                        Vec3::new(h, -h, -h),
-                        Vec3::new(h, h, -h),
-                        Vec3::new(h, h, h),
-                        Vec3::new(h, -h, h),
-                    ],
+                    [Vec3::new(h, -h, -h), Vec3::new(h, h, -h), Vec3::new(h, h, h), Vec3::new(h, -h, h)],
                     Vec3::new(1.0, 0.0, 0.0),
                 ),
             ),
             (
                 "-Y",
                 quad(
-                    [
-                        Vec3::new(-h, -h, -h),
-                        Vec3::new(h, -h, -h),
-                        Vec3::new(h, -h, h),
-                        Vec3::new(-h, -h, h),
-                    ],
+                    [Vec3::new(-h, -h, -h), Vec3::new(h, -h, -h), Vec3::new(h, -h, h), Vec3::new(-h, -h, h)],
                     Vec3::new(0.0, -1.0, 0.0),
                 ),
             ),
             (
                 "+Y",
                 quad(
-                    [
-                        Vec3::new(-h, h, -h),
-                        Vec3::new(-h, h, h),
-                        Vec3::new(h, h, h),
-                        Vec3::new(h, h, -h),
-                    ],
+                    [Vec3::new(-h, h, -h), Vec3::new(-h, h, h), Vec3::new(h, h, h), Vec3::new(h, h, -h)],
                     Vec3::new(0.0, 1.0, 0.0),
                 ),
             ),
             (
                 "-Z",
                 quad(
-                    [
-                        Vec3::new(-h, -h, -h),
-                        Vec3::new(-h, h, -h),
-                        Vec3::new(h, h, -h),
-                        Vec3::new(h, -h, -h),
-                    ],
+                    [Vec3::new(-h, -h, -h), Vec3::new(-h, h, -h), Vec3::new(h, h, -h), Vec3::new(h, -h, -h)],
                     Vec3::new(0.0, 0.0, -1.0),
                 ),
             ),
             (
                 "+Z",
                 quad(
-                    [
-                        Vec3::new(-h, -h, h),
-                        Vec3::new(h, -h, h),
-                        Vec3::new(h, h, h),
-                        Vec3::new(-h, h, h),
-                    ],
+                    [Vec3::new(-h, -h, h), Vec3::new(h, -h, h), Vec3::new(h, h, h), Vec3::new(-h, h, h)],
                     Vec3::new(0.0, 0.0, 1.0),
                 ),
             ),
@@ -775,15 +661,9 @@ mod tests {
     #[test]
     fn closed_unit_cube_passes_manifold_check() {
         // 6 quad faces with consistent CCW-from-outside winding.
-        let polys: Vec<Polygon> = unit_cube_faces(0.5)
-            .into_iter()
-            .map(|(_, poly)| poly)
-            .collect();
+        let polys: Vec<Polygon> = unit_cube_faces(0.5).into_iter().map(|(_, poly)| poly).collect();
         let violations = validate_manifold(&polys);
-        assert!(
-            violations.is_empty(),
-            "unit cube should be watertight; got {violations:#?}"
-        );
+        assert!(violations.is_empty(), "unit cube should be watertight; got {violations:#?}");
     }
 
     #[test]
@@ -811,14 +691,8 @@ mod tests {
             quad([a, b, e, e], Vec3::new(0.0, 1.0, 1.0)),
         ];
         let violations = validate_manifold(&polys);
-        let singular = violations
-            .iter()
-            .filter(|v| matches!(v, ManifoldViolation::SingularEdge { .. }))
-            .count();
-        assert!(
-            singular >= 1,
-            "expected at least one SingularEdge, got {violations:#?}"
-        );
+        let singular = violations.iter().filter(|v| matches!(v, ManifoldViolation::SingularEdge { .. })).count();
+        assert!(singular >= 1, "expected at least one SingularEdge, got {violations:#?}");
     }
 
     #[test]
@@ -830,19 +704,12 @@ mod tests {
         let b = Vec3::new(1.0, 0.0, 0.0);
         let c1 = Vec3::new(0.5, 1.0, 0.0);
         let c2 = Vec3::new(0.5, -1.0, 0.0);
-        let polys = vec![
-            quad([a, b, c1, c1], Vec3::new(0.0, 0.0, 1.0)),
-            quad([a, b, c2, c2], Vec3::new(0.0, 0.0, -1.0)),
-        ];
+        let polys =
+            vec![quad([a, b, c1, c1], Vec3::new(0.0, 0.0, 1.0)), quad([a, b, c2, c2], Vec3::new(0.0, 0.0, -1.0))];
         let violations = validate_manifold(&polys);
-        let inconsistent = violations
-            .iter()
-            .filter(|v| matches!(v, ManifoldViolation::InconsistentWinding { .. }))
-            .count();
-        assert!(
-            inconsistent >= 1,
-            "expected at least one InconsistentWinding, got {violations:#?}"
-        );
+        let inconsistent =
+            violations.iter().filter(|v| matches!(v, ManifoldViolation::InconsistentWinding { .. })).count();
+        assert!(inconsistent >= 1, "expected at least one InconsistentWinding, got {violations:#?}");
     }
 
     #[test]
@@ -851,12 +718,7 @@ mod tests {
         // counting logic doesn't silently desync from input size.
         let h = 0.5;
         let polys = vec![quad(
-            [
-                Vec3::new(-h, -h, -h),
-                Vec3::new(h, -h, -h),
-                Vec3::new(h, h, -h),
-                Vec3::new(-h, h, -h),
-            ],
+            [Vec3::new(-h, -h, -h), Vec3::new(h, -h, -h), Vec3::new(h, h, -h), Vec3::new(-h, h, -h)],
             Vec3::new(0.0, 0.0, -1.0),
         )];
         let s = summary(&polys);
@@ -894,19 +756,14 @@ mod tests {
         // Triangle with one edge 1e-4 long — well below the 1e-3
         // SLIVER threshold.
         let polys = vec![Polygon {
-            vertices: vec![
-                p(Vec3::new(0.0, 0.0, 0.0)),
-                p(Vec3::new(1e-4, 0.0, 0.0)),
-                p(Vec3::new(0.5, 1.0, 0.0)),
-            ],
+            vertices: vec![p(Vec3::new(0.0, 0.0, 0.0)), p(Vec3::new(1e-4, 0.0, 0.0)), p(Vec3::new(0.5, 1.0, 0.0))],
             holes: vec![],
             plane_normal: Vec3::new(0.0, 0.0, 1.0),
             color: 0,
         }];
         let v = validate_polygon_quality(&polys);
         assert!(
-            v.iter()
-                .any(|g| matches!(g, GeometryViolation::SliverEdge { .. })),
+            v.iter().any(|g| matches!(g, GeometryViolation::SliverEdge { .. })),
             "expected at least one SliverEdge, got {v:#?}"
         );
     }
@@ -939,8 +796,7 @@ mod tests {
         ];
         let v = validate_normal_coherence(&polys);
         assert!(
-            v.iter()
-                .any(|g| matches!(g, GeometryViolation::FoldedNormals { .. })),
+            v.iter().any(|g| matches!(g, GeometryViolation::FoldedNormals { .. })),
             "expected at least one FoldedNormals, got {v:#?}"
         );
     }
@@ -981,8 +837,7 @@ mod tests {
         ];
         let v = validate_no_t_junctions(&polys);
         assert!(
-            v.iter()
-                .any(|g| matches!(g, GeometryViolation::TJunction { .. })),
+            v.iter().any(|g| matches!(g, GeometryViolation::TJunction { .. })),
             "expected at least one TJunction on edge (a,b), got {v:#?}"
         );
     }
@@ -990,17 +845,11 @@ mod tests {
     #[test]
     fn cube_with_one_face_missing_reports_boundary_edges() {
         // Same as above but drop the +Z face.
-        let polys: Vec<Polygon> = unit_cube_faces(0.5)
-            .into_iter()
-            .filter(|(label, _)| *label != "+Z")
-            .map(|(_, poly)| poly)
-            .collect();
+        let polys: Vec<Polygon> =
+            unit_cube_faces(0.5).into_iter().filter(|(label, _)| *label != "+Z").map(|(_, poly)| poly).collect();
         let violations = validate_manifold(&polys);
         // The 4 edges around where the +Z face would have been are now boundary.
-        let boundary_count = violations
-            .iter()
-            .filter(|v| matches!(v, ManifoldViolation::BoundaryEdge { .. }))
-            .count();
+        let boundary_count = violations.iter().filter(|v| matches!(v, ManifoldViolation::BoundaryEdge { .. })).count();
         assert_eq!(
             boundary_count, 4,
             "expected 4 boundary edges around missing face, got {boundary_count}: {violations:#?}"

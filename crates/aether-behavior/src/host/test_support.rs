@@ -74,11 +74,7 @@ pub(crate) fn fixed_output_wasm(handled: KindId, output: &FilterOutput) -> Vec<u
 
 /// A module whose `filter` traps on `trap_kind` and otherwise returns a fixed,
 /// pre-encoded [`FilterOutput`]. Lets tests witness a trap before a clean call.
-pub(crate) fn conditional_trap_wasm(
-    handled: KindId,
-    trap_kind: KindId,
-    output: &FilterOutput,
-) -> Vec<u8> {
+pub(crate) fn conditional_trap_wasm(handled: KindId, trap_kind: KindId, output: &FilterOutput) -> Vec<u8> {
     let encoded = envelope::encode(output);
     let packed = (2048u64 << 32) | (encoded.len() as u64);
     let body = format!(
@@ -115,20 +111,13 @@ pub(crate) fn stateful_wasm(handled: KindId, default_state: &[u8]) -> Vec<u8> {
         default_len = default_state.len(),
         filter_packed = filter_packed as i64,
     );
-    module_with_data(
-        &body,
-        &[(2048, default_state), (3072, &filter_output)],
-        &[handled],
-    )
+    module_with_data(&body, &[(2048, default_state), (3072, &filter_output)], &[handled])
 }
 
 /// A `Forward`-the-inbound `FilterOutput` for `bytes` — a passthrough script's
 /// output.
 pub(crate) fn forward_output(bytes: &[u8]) -> FilterOutput {
-    FilterOutput {
-        verdict: Verdict::Forward(bytes.to_vec()),
-        effects: Vec::new(),
-    }
+    FilterOutput { verdict: Verdict::Forward(bytes.to_vec()), effects: Vec::new() }
 }
 
 /// Assemble a module: a memory + bump allocator, the caller's `filter`, an
@@ -172,11 +161,7 @@ fn exports_section(kinds: &[KindId]) -> Vec<u8> {
 }
 
 fn custom_section_wat(bytes: &[u8]) -> String {
-    format!(
-        "(@custom \"{name}\" \"{hex}\")",
-        name = manifest::EXPORTS_SECTION,
-        hex = byte_string(bytes),
-    )
+    format!("(@custom \"{name}\" \"{hex}\")", name = manifest::EXPORTS_SECTION, hex = byte_string(bytes),)
 }
 
 /// Render bytes as a WAT string literal's `\xx` escapes.

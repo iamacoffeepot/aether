@@ -44,26 +44,14 @@ pub struct Message {
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum AnthropicError {
     Overloaded,
-    RateLimited {
-        retry_after_millis: Option<u32>,
-    },
-    ContextLengthExceeded {
-        limit: u32,
-    },
+    RateLimited { retry_after_millis: Option<u32> },
+    ContextLengthExceeded { limit: u32 },
     Unauthorized,
     ContentPolicyRefused,
     CliNotFound,
-    UnknownModel {
-        model: String,
-        supported: Vec<String>,
-    },
-    Timeout {
-        elapsed_millis: u32,
-    },
-    ParamNotSupported {
-        param: String,
-        reason: String,
-    },
+    UnknownModel { model: String, supported: Vec<String> },
+    Timeout { elapsed_millis: u32 },
+    ParamNotSupported { param: String, reason: String },
     AdapterError(String),
 }
 
@@ -107,16 +95,8 @@ pub struct CliSend {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.anthropic.messages.send_result")]
 pub enum MessagesSendResult {
-    Ok {
-        request_id: u64,
-        text: String,
-        model_used: String,
-        usage: Usage,
-    },
-    Err {
-        request_id: u64,
-        error: AnthropicError,
-    },
+    Ok { request_id: u64, text: String, model_used: String, usage: Usage },
+    Err { request_id: u64, error: AnthropicError },
 }
 
 /// Reply to [`CliSend`]. Same shape as [`MessagesSendResult`]; the
@@ -125,14 +105,6 @@ pub enum MessagesSendResult {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.anthropic.cli.send_result")]
 pub enum CliSendResult {
-    Ok {
-        request_id: u64,
-        text: String,
-        model_used: String,
-        usage: Usage,
-    },
-    Err {
-        request_id: u64,
-        error: AnthropicError,
-    },
+    Ok { request_id: u64, text: String, model_used: String, usage: Usage },
+    Err { request_id: u64, error: AnthropicError },
 }

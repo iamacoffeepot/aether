@@ -73,10 +73,7 @@ pub enum SpawnError {
     /// when an `Instanced` type tries to spawn under a namespace a
     /// `Singleton` already owns (or vice versa). ADR-0079 unique-owner
     /// invariant.
-    NamespaceOwnedByOtherType {
-        namespace: &'static str,
-        owning_type: TypeId,
-    },
+    NamespaceOwnedByOtherType { namespace: &'static str, owning_type: TypeId },
     /// The full name was previously live and has been retired. Names
     /// don't recycle within a substrate's lifetime (ADR-0079 §Drop /
     /// lifecycle); pick a different subname.
@@ -231,10 +228,8 @@ impl Spawner {
         // the actor whose close cycle failed rather than a bare
         // gate-name panic.
         let entries: Vec<(MailboxId, InstancedSlotEntry)> = {
-            let mut guard = self
-                .instanced_slots
-                .lock()
-                .expect("instanced_slots mutex poisoned; fail-fast per ADR-0063");
+            let mut guard =
+                self.instanced_slots.lock().expect("instanced_slots mutex poisoned; fail-fast per ADR-0063");
             guard.drain().collect()
         };
         if entries.is_empty() {
@@ -263,11 +258,7 @@ impl Spawner {
         // `Abort` in release (the wedge is unrecoverable — route it
         // through the Spawner's aborter). The helper diverges itself on
         // `Panic`; on `Abort` it hands back the wedge for us to abort.
-        let disposition = if cfg!(debug_assertions) {
-            TerminalDisposition::Panic
-        } else {
-            TerminalDisposition::Abort
-        };
+        let disposition = if cfg!(debug_assertions) { TerminalDisposition::Panic } else { TerminalDisposition::Abort };
         for ((id, _entry), rx) in entries.iter().zip(&waiters) {
             // Issue #2509: name the wedged slot in the gate label so a
             // teardown wedge panic/abort points at the actor whose close
@@ -339,14 +330,8 @@ impl Spawner {
         validate_namespace_segment(&subname_str).map_err(SpawnError::SubnameInvalid)?;
 
         // 2. Claim namespace ownership (or verify).
-        if let Err(owning) = self
-            .actor_registry
-            .try_claim_namespace(A::NAMESPACE, TypeId::of::<A>())
-        {
-            return Err(SpawnError::NamespaceOwnedByOtherType {
-                namespace: A::NAMESPACE,
-                owning_type: owning,
-            });
+        if let Err(owning) = self.actor_registry.try_claim_namespace(A::NAMESPACE, TypeId::of::<A>()) {
+            return Err(SpawnError::NamespaceOwnedByOtherType { namespace: A::NAMESPACE, owning_type: owning });
         }
 
         // 3. Compute the lineage carry, id, and rendered name (ADR-0099
@@ -411,10 +396,7 @@ impl Spawner {
         // first `Local::with_mut::<Ring>` finds them instead of building
         // the const-`Default` ring.
         slots.seed(ActorLogRing::with_capacity(self.ring_caps.log));
-        slots.seed(ActorTraceRing::with_growth(
-            self.ring_caps.trace,
-            self.ring_caps.trace_max,
-        ));
+        slots.seed(ActorTraceRing::with_growth(self.ring_caps.trace, self.ring_caps.trace_max));
 
         let actor = {
             // Instanced actors don't publish driver-facing sub-handles
@@ -422,8 +404,7 @@ impl Spawner {
             // ExportedHandles to keep the init-ctx shape uniform with
             // the singleton path.
             let mut throwaway_handles = ExportedHandles::new();
-            let mut init_ctx =
-                NativeInitCtx::new(&transport, &mut throwaway_handles, Arc::clone(&self.mailer));
+            let mut init_ctx = NativeInitCtx::new(&transport, &mut throwaway_handles, Arc::clone(&self.mailer));
             // ADR-0081: wrap `init` in `with_stamped` so any
             // `tracing::*` event the actor fires lands in its
             // per-actor `ActorLogRing`. The pre-ADR
@@ -503,16 +484,7 @@ impl Spawner {
         // The Arc<Sender> here is the same one the sink handler's
         // Weak references — when `mark_dead` drops this entry, the
         // weak upgrade fails for any further external mail.
-        if self
-            .actor_registry
-            .insert_live(
-                id,
-                Arc::clone(&strong_sender),
-                TypeId::of::<A>(),
-                subname_str,
-            )
-            .is_err()
-        {
+        if self.actor_registry.insert_live(id, Arc::clone(&strong_sender), TypeId::of::<A>(), subname_str).is_err() {
             // Hash collision against an existing Live entry on the
             // same id but a slot the mailbox registry didn't reject —
             // possible if a singleton + instanced collide on the same
@@ -578,10 +550,7 @@ impl Spawner {
         // its fan-out in place (ADR-0087 §4). The registry holds the
         // strong slot ref via `instanced_slots` below; the demuxer's
         // `Weak` upgrade fails cleanly once the actor is torn down.
-        self.registry.install_seize_handle(
-            id,
-            SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)),
-        );
+        self.registry.install_seize_handle(id, SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)));
         let wake = WakeHandle::new(Arc::clone(slot.state()), weak, self.wake_sink.clone());
         // Stash the slot's strong Arc so wakes can upgrade their `Weak`.
         // PR C dropped it here, which broke every wake after spawn (the
@@ -595,13 +564,7 @@ impl Spawner {
         self.instanced_slots
             .lock()
             .expect("instanced_slots mutex poisoned; fail-fast per ADR-0063")
-            .insert(
-                id,
-                InstancedSlotEntry {
-                    slot: slot_dyn,
-                    wake: teardown_wake,
-                },
-            );
+            .insert(id, InstancedSlotEntry { slot: slot_dyn, wake: teardown_wake });
         // Pre-loaded `after_init` mail (lines above) was sent straight to
         // the inbox via `tx.send`, which bypasses the closure's wake
         // hook. Fire one wake now so the slot enters the ready queue and
@@ -731,15 +694,7 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
     /// enforced by the move into `finish`, and a double-finish would
     /// require an unsafe API misuse.
     pub fn finish(self) -> Result<MailboxId, SpawnError> {
-        let SpawnBuilder {
-            spawner,
-            subname,
-            config,
-            sender,
-            parent,
-            after_init,
-            ..
-        } = self;
+        let SpawnBuilder { spawner, subname, config, sender, parent, after_init, .. } = self;
         let config = config.expect("SpawnBuilder::finish consumed exactly once");
         Spawner::spawn_actor::<A>(spawner, subname, config, after_init, sender, parent)
     }
@@ -770,10 +725,7 @@ mod tests {
             CycleResult::Idle
         }
         fn set_close_done_tx(&self, tx: crossbeam_channel::Sender<()>) {
-            *self
-                .close_done
-                .lock()
-                .expect("close_done mutex never poisoned in this single-threaded test") = Some(tx);
+            *self.close_done.lock().expect("close_done mutex never poisoned in this single-threaded test") = Some(tx);
         }
         fn as_any(&self) -> &dyn Any {
             self
@@ -801,13 +753,7 @@ mod tests {
         let actor_registry = Arc::new(ActorRegistry::new());
         // One worker is enough — the wedge comes from the close-done
         // signal never firing, not from anything the pool drains.
-        let pool = Pool::start(
-            PoolConfig {
-                workers: 1,
-                ..PoolConfig::default()
-            },
-            Arc::clone(&aborter),
-        );
+        let pool = Pool::start(PoolConfig { workers: 1, ..PoolConfig::default() }, Arc::clone(&aborter));
         let spawner = Spawner::new(
             Arc::clone(&registry),
             actor_registry,
@@ -817,14 +763,8 @@ mod tests {
             RingCapacities::default(),
         );
 
-        let slot: Arc<dyn Drainable> = Arc::new(NeverClosingSlot {
-            close_done: Mutex::new(None),
-        });
-        let wake = WakeHandle::new(
-            Arc::new(SlotState::new()),
-            Arc::downgrade(&slot),
-            pool.wake_sink(),
-        );
+        let slot: Arc<dyn Drainable> = Arc::new(NeverClosingSlot { close_done: Mutex::new(None) });
+        let wake = WakeHandle::new(Arc::new(SlotState::new()), Arc::downgrade(&slot), pool.wake_sink());
         spawner
             .instanced_slots
             .lock()

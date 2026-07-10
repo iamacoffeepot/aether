@@ -50,13 +50,7 @@ pub fn restore(root: &Path) -> RestoredIndex {
             clock += 1;
             entries.insert(
                 hash.to_owned(),
-                Entry {
-                    kind: sidecar.kind,
-                    manifest: sidecar.manifest,
-                    bytes_len,
-                    pinned: false,
-                    last_access: clock,
-                },
+                Entry { kind: sidecar.kind, manifest: sidecar.manifest, bytes_len, pinned: false, last_access: clock },
             );
             total_bytes = total_bytes.saturating_add(bytes_len);
         }
@@ -72,12 +66,7 @@ pub fn restore(root: &Path) -> RestoredIndex {
             }
         }
     }
-    RestoredIndex {
-        entries,
-        names,
-        total_bytes,
-        clock,
-    }
+    RestoredIndex { entries, names, total_bytes, clock }
 }
 
 fn read_sidecar(path: &Path) -> Option<StoredEntry> {
@@ -86,8 +75,7 @@ fn read_sidecar(path: &Path) -> Option<StoredEntry> {
 }
 
 pub fn write_sidecar(path: &Path, sidecar: &StoredEntry) -> io::Result<()> {
-    let bytes =
-        serde_json::to_vec(sidecar).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
+    let bytes = serde_json::to_vec(sidecar).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
     atomic_write(path, &bytes)
 }
 
@@ -97,8 +85,7 @@ pub fn ensure_root(root: &Path) -> PathBuf {
     if fs::create_dir_all(root.join("entries")).is_ok() {
         return root.to_path_buf();
     }
-    let fallback =
-        env::temp_dir().join(format!("aether-binaries-{}-{}", process::id(), now_nanos()));
+    let fallback = env::temp_dir().join(format!("aether-binaries-{}-{}", process::id(), now_nanos()));
     if let Err(e) = fs::create_dir_all(fallback.join("entries")) {
         tracing::warn!(target: TARGET, error = %e, "binary store: temp fallback dir creation failed");
     } else {
@@ -157,7 +144,5 @@ pub fn hash_hex(bytes: &[u8]) -> String {
 
 /// Nanoseconds since the Unix epoch, for temp-dir and tmp-file nonces.
 pub fn now_nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos())
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos())
 }

@@ -18,8 +18,7 @@
 // `#[actor]` emits the `HandlesKind<K>` markers always-on against the
 // identity, and the handler bodies in `runtime` name these kinds.
 use crate::http::kinds::{
-    HttpInboundReady, HttpRequestCredit, HttpResponseChunk, HttpResponseStreamEnd, WebSocketClose,
-    WebSocketMessage,
+    HttpInboundReady, HttpRequestCredit, HttpResponseChunk, HttpResponseStreamEnd, WebSocketClose, WebSocketMessage,
 };
 use aether_kinds::trace::Settled;
 

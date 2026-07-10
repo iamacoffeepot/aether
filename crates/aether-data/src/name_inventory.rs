@@ -373,10 +373,7 @@ mod tests {
             param: ParamKind::Dynamic,
         };
         assert_eq!(entry.pattern(), "aether.embedded:{subname}");
-        assert_eq!(
-            fill_template(&entry.pattern(), "camera").as_deref(),
-            Some("aether.embedded:camera"),
-        );
+        assert_eq!(fill_template(&entry.pattern(), "camera").as_deref(), Some("aether.embedded:camera"),);
         // An empty prefix borrows the template unchanged (the hand-written,
         // single-literal case) — no allocation.
         let lit = TemplateEntry {
@@ -391,14 +388,8 @@ mod tests {
 
     #[test]
     fn fill_template_substitutes_single_hole() {
-        assert_eq!(
-            fill_template("aether-worker-{N}", "7").as_deref(),
-            Some("aether-worker-7")
-        );
-        assert_eq!(
-            fill_template("aether.embedded:{name}", "cam").as_deref(),
-            Some("aether.embedded:cam")
-        );
+        assert_eq!(fill_template("aether-worker-{N}", "7").as_deref(), Some("aether-worker-7"));
+        assert_eq!(fill_template("aether.embedded:{name}", "cam").as_deref(), Some("aether.embedded:cam"));
         assert_eq!(fill_template("no-hole", "x"), None);
     }
 
@@ -409,10 +400,7 @@ mod tests {
     fn static_name_entry_reverses_to_real_name() {
         let map = build_static_reverse_map();
         let id = mailbox_id_from_name("aether.test.inventory_mailbox");
-        assert_eq!(
-            map.get(&id.0).map(String::as_str),
-            Some("aether.test.inventory_mailbox")
-        );
+        assert_eq!(map.get(&id.0).map(String::as_str), Some("aether.test.inventory_mailbox"));
     }
 
     #[test]

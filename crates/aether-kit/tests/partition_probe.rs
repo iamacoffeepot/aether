@@ -1,10 +1,6 @@
 // Probe-point math casts small loop indices to f32; the ranges make the
 // pedantic precision lints non-issues.
-#![allow(
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::suboptimal_flops
-)]
+#![allow(clippy::cast_precision_loss, clippy::cast_sign_loss, clippy::suboptimal_flops)]
 
 //! Partition tiling and frame-budget tripwires over a demo-shaped world
 //! (a lake with a sand ring on a grass-default region, four chunks).
@@ -22,19 +18,10 @@ fn lake_world() -> World {
     let mut world = World::new();
     world.insert_region(
         1,
-        Region {
-            name: "meadow".into(),
-            default_material: Material::Grass,
-            cliff_material: Material::Stone,
-        },
+        Region { name: "meadow".into(), default_material: Material::Grass, cliff_material: Material::Stone },
     );
     // The lake surface plane every lake cell references.
-    world.insert_water_plane(
-        1,
-        WaterPlane {
-            level_octimeters: 0,
-        },
-    );
+    world.insert_water_plane(1, WaterPlane { level_octimeters: 0 });
     let in_lake = |x: f32, z: f32| {
         let (dx, dz) = (x - 16.5, z - 20.0);
         dx.hypot(dz) < 5.5
@@ -73,12 +60,9 @@ fn lake_world() -> World {
 fn demo_world_ground_has_no_holes() {
     let world = lake_world();
     let styles = StyleTable::default();
-    let meshes: Vec<_> = (0..4)
-        .map(|k| mesh_chunk(&world, ChunkPos { x: k % 2, z: k / 2 }, &styles))
-        .collect();
+    let meshes: Vec<_> = (0..4).map(|k| mesh_chunk(&world, ChunkPos { x: k % 2, z: k / 2 }, &styles)).collect();
     let covers = |t: &DrawTriangle, px: f32, pz: f32| {
-        let sign =
-            |ax: f32, az: f32, bx: f32, bz: f32| (px - bx) * (az - bz) - (ax - bx) * (pz - bz);
+        let sign = |ax: f32, az: f32, bx: f32, bz: f32| (px - bx) * (az - bz) - (ax - bx) * (pz - bz);
         let d1 = sign(t.verts[0].x, t.verts[0].z, t.verts[1].x, t.verts[1].z);
         let d2 = sign(t.verts[1].x, t.verts[1].z, t.verts[2].x, t.verts[2].z);
         let d3 = sign(t.verts[2].x, t.verts[2].z, t.verts[0].x, t.verts[0].z);
@@ -91,21 +75,14 @@ fn demo_world_ground_has_no_holes() {
         for i in 0..64 {
             let px = (i as f32) * 0.5 + 0.29;
             let pz = (j as f32) * 0.5 + 0.31;
-            let ground_covered = meshes
-                .iter()
-                .flatten()
-                .any(|t| t.verts.iter().all(|v| v.y == 0.0) && covers(t, px, pz));
+            let ground_covered =
+                meshes.iter().flatten().any(|t| t.verts.iter().all(|v| v.y == 0.0) && covers(t, px, pz));
             if !ground_covered {
                 holes.push((px, pz));
             }
         }
     }
-    assert!(
-        holes.is_empty(),
-        "{} ground holes, first at {:?}",
-        holes.len(),
-        holes.first()
-    );
+    assert!(holes.is_empty(), "{} ground holes, first at {:?}", holes.len(), holes.first());
 }
 
 #[test]
@@ -117,14 +94,9 @@ fn demo_world_fits_the_frame_vertex_budget() {
     // than one full-water chunk's per-subcell body mesh.
     let world = lake_world();
     let styles = StyleTable::default();
-    let total: usize = (0..4)
-        .map(|k| mesh_chunk(&world, ChunkPos { x: k % 2, z: k / 2 }, &styles).len())
-        .sum();
+    let total: usize = (0..4).map(|k| mesh_chunk(&world, ChunkPos { x: k % 2, z: k / 2 }, &styles).len()).sum();
     let budget = CELLS_PER_CHUNK_AREA * SUBCELLS_PER_CELL * 2;
-    assert!(
-        total < budget,
-        "frame budget headroom: {total} triangles, budget {budget}",
-    );
+    assert!(total < budget, "frame budget headroom: {total} triangles, budget {budget}",);
 }
 
 #[test]
@@ -138,13 +110,7 @@ fn dense_multilevel_cliffs_stay_inside_the_local_topology_ceiling() {
         for chunk_x in -1..=1 {
             let mut chunk = Chunk::empty_boxed();
             chunk.underlay = [Material::Grass; CELLS_PER_CHUNK_AREA];
-            world.insert_chunk(
-                ChunkPos {
-                    x: chunk_x,
-                    z: chunk_z,
-                },
-                chunk,
-            );
+            world.insert_chunk(ChunkPos { x: chunk_x, z: chunk_z }, chunk);
         }
     }
     let sub = SUBCELLS_PER_CELL_EDGE as usize;
@@ -156,17 +122,10 @@ fn dense_multilevel_cliffs_stay_inside_the_local_topology_ceiling() {
                     let global_x = cell_x as usize * sub + point_x;
                     let global_z = cell_z as usize * sub + point_z;
                     deltas[point_z * sub + point_x] =
-                        i16::try_from(((global_x + global_z) % 8) * 80)
-                            .expect("fixture levels fit i16");
+                        i16::try_from(((global_x + global_z) % 8) * 80).expect("fixture levels fit i16");
                 }
             }
-            world.set_cell_heights(
-                CellPos {
-                    x: cell_x,
-                    z: cell_z,
-                },
-                &deltas,
-            );
+            world.set_cell_heights(CellPos { x: cell_x, z: cell_z }, &deltas);
         }
     }
 

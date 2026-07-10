@@ -32,30 +32,22 @@ use aether_data::Kind;
 use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_SPACE, KEY_TAB, KEY_UP};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
-    Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, Modifiers, MouseButton,
-    MouseButtonRelease, MouseMove, TextInput, Tick,
+    Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove,
+    TextInput, Tick,
 };
 use aether_kit::{
-    ButtonConfig, PanelConfig, RadioConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme,
-    WidgetChildSpec, WidgetControlState, WidgetKind,
+    ButtonConfig, PanelConfig, RadioConfig, SetWidgetState, SliderConfig, TextFieldConfig, Theme, WidgetChildSpec,
+    WidgetControlState, WidgetKind,
 };
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
-    format!(
-        "aether.component/{}:panel",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    )
+    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE,)
 }
 
 fn child_address(subname: &str) -> String {
-    format!(
-        "{}/{}:{}",
-        panel_address(),
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-        subname,
-    )
+    format!("{}/{}:{}", panel_address(), aether_capabilities::WasmTrampoline::NAMESPACE, subname,)
 }
 
 /// Load the `WidgetPanel` root under the name `panel` (export
@@ -86,15 +78,9 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8]) -> String {
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name, .. } => {
-            assert!(
-                name.ends_with(":panel"),
-                "the panel root should register under :panel; got {name}",
-            );
+            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}",);
             name
         }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
@@ -148,56 +134,21 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
             // Slider drag: press mid-track, drag right, release — the release
             // commits at the dragged value (x=160 → 75% of 0..255 ≈ 191). The
             // press also focuses the slider.
-            (
-                "drag_press",
-                BenchOp::send_mail(&panel, &press(110.0, 52.0)),
-            ),
-            (
-                "drag_move",
-                BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 }),
-            ),
-            (
-                "drag_release",
-                BenchOp::send_mail(&panel, &release(160.0, 52.0)),
-            ),
+            ("drag_press", BenchOp::send_mail(&panel, &press(110.0, 52.0))),
+            ("drag_move", BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 })),
+            ("drag_release", BenchOp::send_mail(&panel, &release(160.0, 52.0))),
             // Tab moves focus off the slider to the radio group; Down then
             // routes to the focused radio, moving its selection to index 1.
             ("tab", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
-            (
-                "radio_key",
-                BenchOp::send_mail(&panel, &Key { code: KEY_DOWN }),
-            ),
+            ("radio_key", BenchOp::send_mail(&panel, &Key { code: KEY_DOWN })),
             // A click on the third radio row (y 118..142) selects index 2.
-            (
-                "radio_press",
-                BenchOp::send_mail(&panel, &press(30.0, 125.0)),
-            ),
-            (
-                "radio_release",
-                BenchOp::send_mail(&panel, &release(30.0, 125.0)),
-            ),
+            ("radio_press", BenchOp::send_mail(&panel, &press(30.0, 125.0))),
+            ("radio_release", BenchOp::send_mail(&panel, &release(30.0, 125.0))),
             // Focus the text field (y 148..172), type into it, and commit.
-            (
-                "text_focus",
-                BenchOp::send_mail(&panel, &press(50.0, 160.0)),
-            ),
-            (
-                "text_focus_up",
-                BenchOp::send_mail(&panel, &release(50.0, 160.0)),
-            ),
-            (
-                "type",
-                BenchOp::send_mail(
-                    &panel,
-                    &TextInput {
-                        text: "hi".to_owned(),
-                    },
-                ),
-            ),
-            (
-                "commit",
-                BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }),
-            ),
+            ("text_focus", BenchOp::send_mail(&panel, &press(50.0, 160.0))),
+            ("text_focus_up", BenchOp::send_mail(&panel, &release(50.0, 160.0))),
+            ("type", BenchOp::send_mail(&panel, &TextInput { text: "hi".to_owned() })),
+            ("commit", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
         ])
         .expect("input session");
 
@@ -205,8 +156,7 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
     let joined = log.join("\n");
 
     assert!(
-        log.iter()
-            .any(|m| m.contains("widget slider changed") && m.contains("committed=true")),
+        log.iter().any(|m| m.contains("widget slider changed") && m.contains("committed=true")),
         "the slider drag-release should log a committed change; log was:\n{joined}",
     );
     assert!(
@@ -216,19 +166,16 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
         "the drag should stream at least one uncommitted change; log was:\n{joined}",
     );
     assert!(
-        log.iter()
-            .any(|m| m.contains("widget radio selected") && m.contains("index=1")),
+        log.iter().any(|m| m.contains("widget radio selected") && m.contains("index=1")),
         "Tab-then-Down should route to the radio and select index 1 — proving the \
          focus cycle and keyboard routing; log was:\n{joined}",
     );
     assert!(
-        log.iter()
-            .any(|m| m.contains("widget radio selected") && m.contains("index=2")),
+        log.iter().any(|m| m.contains("widget radio selected") && m.contains("index=2")),
         "the radio row click should select index 2; log was:\n{joined}",
     );
     assert!(
-        log.iter()
-            .any(|m| m.contains("widget text committed") && m.contains("text=hi")),
+        log.iter().any(|m| m.contains("widget text committed") && m.contains("text=hi")),
         "the text entry then Enter should commit \"hi\" — proving pointer focus \
          and text routing; log was:\n{joined}",
     );
@@ -248,47 +195,21 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut bench = TestBench::start_with_size(240, 220).expect("boot");
     let panel = load_panel(&mut bench, &wasm);
-    let button = format!(
-        "{panel}/{}:button",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    );
-    let unavailable = WidgetControlState {
-        enabled: false,
-        ..WidgetControlState::default()
-    };
+    let button = format!("{panel}/{}:button", aether_capabilities::WasmTrampoline::NAMESPACE,);
+    let unavailable = WidgetControlState { enabled: false, ..WidgetControlState::default() };
 
     bench
         .execute(vec![
             ("spawn", BenchOp::send_mail(&panel, &Tick)),
-            (
-                "disable_by_lineage",
-                BenchOp::send_mail(&button, &SetWidgetState { state: unavailable }),
-            ),
-            (
-                "blocked_press",
-                BenchOp::send_mail(&panel, &press(30.0, 190.0)),
-            ),
-            (
-                "blocked_release",
-                BenchOp::send_mail(&panel, &release(30.0, 190.0)),
-            ),
+            ("disable_by_lineage", BenchOp::send_mail(&button, &SetWidgetState { state: unavailable })),
+            ("blocked_press", BenchOp::send_mail(&panel, &press(30.0, 190.0))),
+            ("blocked_release", BenchOp::send_mail(&panel, &release(30.0, 190.0))),
             (
                 "enable_by_lineage",
-                BenchOp::send_mail(
-                    &button,
-                    &SetWidgetState {
-                        state: WidgetControlState::default(),
-                    },
-                ),
+                BenchOp::send_mail(&button, &SetWidgetState { state: WidgetControlState::default() }),
             ),
-            (
-                "allowed_press",
-                BenchOp::send_mail(&panel, &press(30.0, 190.0)),
-            ),
-            (
-                "allowed_release",
-                BenchOp::send_mail(&panel, &release(30.0, 190.0)),
-            ),
+            ("allowed_press", BenchOp::send_mail(&panel, &press(30.0, 190.0))),
+            ("allowed_release", BenchOp::send_mail(&panel, &release(30.0, 190.0))),
         ])
         .expect("external inline-child lineage session");
 
@@ -298,15 +219,9 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
     };
     let clicks = log
         .iter()
-        .filter(|entry| {
-            entry.message.contains("widget button clicked")
-                && entry.message.contains("widget=button")
-        })
+        .filter(|entry| entry.message.contains("widget button clicked") && entry.message.contains("widget=button"))
         .count();
-    assert_eq!(
-        clicks, 1,
-        "lineage-addressed disable blocks the first click and re-enable permits the second",
-    );
+    assert_eq!(clicks, 1, "lineage-addressed disable blocks the first click and re-enable permits the second",);
 }
 
 /// A slider child spec for the declarative-children scenario: full `0..=255`
@@ -315,25 +230,14 @@ fn slider_spec(subname: &str, initial: f32) -> WidgetChildSpec {
     slider_spec_with_state(subname, initial, WidgetControlState::default())
 }
 
-fn slider_spec_with_state(
-    subname: &str,
-    initial: f32,
-    state: WidgetControlState,
-) -> WidgetChildSpec {
+fn slider_spec_with_state(subname: &str, initial: f32, state: WidgetControlState) -> WidgetChildSpec {
     WidgetChildSpec {
         subname: subname.to_owned(),
         kind: WidgetKind::Slider,
         origin: [0.0, 0.0],
         clip: None,
-        config: SliderConfig {
-            min: 0.0,
-            max: 255.0,
-            step: 1.0,
-            initial,
-            theme: Theme::DEFAULT,
-            state,
-        }
-        .encode_into_bytes(),
+        config: SliderConfig { min: 0.0, max: 255.0, step: 1.0, initial, theme: Theme::DEFAULT, state }
+            .encode_into_bytes(),
     }
 }
 
@@ -343,12 +247,7 @@ fn button_spec(subname: &str, state: WidgetControlState) -> WidgetChildSpec {
         kind: WidgetKind::Button,
         origin: [0.0, 0.0],
         clip: None,
-        config: ButtonConfig {
-            label: "Run".to_owned(),
-            theme: Theme::DEFAULT,
-            state,
-        }
-        .encode_into_bytes(),
+        config: ButtonConfig { label: "Run".to_owned(), theme: Theme::DEFAULT, state }.encode_into_bytes(),
     }
 }
 
@@ -374,13 +273,8 @@ fn text_field_spec(subname: &str, initial: &str, state: WidgetControlState) -> W
         kind: WidgetKind::TextField,
         origin: [0.0, 0.0],
         clip: None,
-        config: TextFieldConfig {
-            initial: initial.to_owned(),
-            max_chars: 0,
-            theme: Theme::DEFAULT,
-            state,
-        }
-        .encode_into_bytes(),
+        config: TextFieldConfig { initial: initial.to_owned(), max_chars: 0, theme: Theme::DEFAULT, state }
+            .encode_into_bytes(),
     }
 }
 
@@ -411,14 +305,10 @@ fn load_panel_with(bench: &mut TestBench, wasm: &[u8], children: Vec<WidgetChild
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
-        LoadResult::Ok { name, .. } => assert!(
-            name.ends_with(":panel"),
-            "the panel root should register under :panel; got {name}",
-        ),
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { name, .. } => {
+            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}",)
+        }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }
 }
@@ -426,23 +316,12 @@ fn load_panel_with(bench: &mut TestBench, wasm: &[u8], children: Vec<WidgetChild
 /// The widget name a `widget slider changed` log line attributes its value to
 /// (the `widget=NAME` field the panel logs) — `None` for a non-slider line.
 fn slider_changed_widget(message: &str) -> Option<String> {
-    message.split("widget=").nth(1).map(|rest| {
-        rest.split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_owned()
-    })
+    message.split("widget=").nth(1).map(|rest| rest.split_whitespace().next().unwrap_or_default().to_owned())
 }
 
 /// The selected index from a `widget radio selected` log line.
 fn radio_selected_index(message: &str) -> Option<u32> {
-    message
-        .split("index=")
-        .nth(1)?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
+    message.split("index=").nth(1)?.split_whitespace().next()?.parse().ok()
 }
 
 /// A panel handed an explicit `children` list stacks exactly those widgets in
@@ -462,11 +341,7 @@ fn panel_stacks_declared_children_in_order() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut bench = TestBench::start_with_size(240, 220).expect("boot");
-    load_panel_with(
-        &mut bench,
-        &wasm,
-        vec![slider_spec("first", 40.0), slider_spec("second", 40.0)],
-    );
+    load_panel_with(&mut bench, &wasm, vec![slider_spec("first", 40.0), slider_spec("second", 40.0)]);
 
     let panel = panel_address();
     bench
@@ -475,23 +350,11 @@ fn panel_stacks_declared_children_in_order() {
             ("spawn", BenchOp::send_mail(&panel, &Tick)),
             // Tab from no focus lands on the first focusable child (index 0);
             // an arrow nudge on the focused slider commits + logs it.
-            (
-                "tab_first",
-                BenchOp::send_mail(&panel, &Key { code: KEY_TAB }),
-            ),
-            (
-                "nudge_first",
-                BenchOp::send_mail(&panel, &Key { code: KEY_UP }),
-            ),
+            ("tab_first", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("nudge_first", BenchOp::send_mail(&panel, &Key { code: KEY_UP })),
             // Tab again advances to the second child; nudge + log it.
-            (
-                "tab_second",
-                BenchOp::send_mail(&panel, &Key { code: KEY_TAB }),
-            ),
-            (
-                "nudge_second",
-                BenchOp::send_mail(&panel, &Key { code: KEY_UP }),
-            ),
+            ("tab_second", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("nudge_second", BenchOp::send_mail(&panel, &Key { code: KEY_UP })),
         ])
         .expect("declared-children session");
 
@@ -519,84 +382,32 @@ fn drive_state_and_keyboard_session(bench: &mut TestBench) {
             ("spawn", BenchOp::send_mail(&panel, &Tick)),
             // Forward Tab skips the disabled first slider and focuses the
             // read-only value. Its arrow input must not mutate.
-            (
-                "tab_value",
-                BenchOp::send_mail(&panel, &Key { code: KEY_TAB }),
-            ),
-            (
-                "blocked_nudge",
-                BenchOp::send_mail(&panel, &Key { code: KEY_UP }),
-            ),
+            ("tab_value", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("blocked_nudge", BenchOp::send_mail(&panel, &Key { code: KEY_UP })),
             // Runtime state changes preserve the value while enabling mutation.
-            (
-                "make_mutable",
-                BenchOp::send_mail(
-                    &value,
-                    &SetWidgetState {
-                        state: WidgetControlState::default(),
-                    },
-                ),
-            ),
-            (
-                "allowed_nudge",
-                BenchOp::send_mail(&panel, &Key { code: KEY_UP }),
-            ),
+            ("make_mutable", BenchOp::send_mail(&value, &SetWidgetState { state: WidgetControlState::default() })),
+            ("allowed_nudge", BenchOp::send_mail(&panel, &Key { code: KEY_UP })),
             // Shift+Tab wraps backward to the Button, skipping the disabled
             // first entry. Space fires on release.
-            (
-                "shift",
-                BenchOp::send_mail(
-                    &panel,
-                    &Modifiers {
-                        shift: true,
-                        ..Modifiers::default()
-                    },
-                ),
-            ),
-            (
-                "reverse_tab",
-                BenchOp::send_mail(&panel, &Key { code: KEY_TAB }),
-            ),
-            (
-                "space",
-                BenchOp::send_mail(&panel, &Key { code: KEY_SPACE }),
-            ),
-            (
-                "space_release",
-                BenchOp::send_mail(&panel, &KeyRelease { code: KEY_SPACE }),
-            ),
+            ("shift", BenchOp::send_mail(&panel, &Modifiers { shift: true, ..Modifiers::default() })),
+            ("reverse_tab", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
+            ("space", BenchOp::send_mail(&panel, &Key { code: KEY_SPACE })),
+            ("space_release", BenchOp::send_mail(&panel, &KeyRelease { code: KEY_SPACE })),
             // Enter fires immediately and suppresses repeated key-down mail
             // until its matching release.
-            (
-                "enter",
-                BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }),
-            ),
-            (
-                "enter_repeat",
-                BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }),
-            ),
-            (
-                "enter_release",
-                BenchOp::send_mail(&panel, &KeyRelease { code: KEY_ENTER }),
-            ),
+            ("enter", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("enter_repeat", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
+            ("enter_release", BenchOp::send_mail(&panel, &KeyRelease { code: KEY_ENTER })),
             // Hiding the focused button moves focus forward to the live slider;
             // no stale keyboard arm or focus remains on the button.
             (
                 "hide_button",
                 BenchOp::send_mail(
                     &run,
-                    &SetWidgetState {
-                        state: WidgetControlState {
-                            visible: false,
-                            ..WidgetControlState::default()
-                        },
-                    },
+                    &SetWidgetState { state: WidgetControlState { visible: false, ..WidgetControlState::default() } },
                 ),
             ),
-            (
-                "nudge_after_hide",
-                BenchOp::send_mail(&panel, &Key { code: KEY_UP }),
-            ),
+            ("nudge_after_hide", BenchOp::send_mail(&panel, &Key { code: KEY_UP })),
         ])
         .expect("state and keyboard session");
 }
@@ -613,14 +424,8 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut bench = TestBench::start_with_size(240, 140).expect("boot");
 
-    let disabled = WidgetControlState {
-        enabled: false,
-        ..WidgetControlState::default()
-    };
-    let read_only = WidgetControlState {
-        read_only: true,
-        ..WidgetControlState::default()
-    };
+    let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
+    let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     load_panel_with(
         &mut bench,
         &wasm,
@@ -649,14 +454,9 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
     );
     let clicks = log
         .iter()
-        .filter(|message| {
-            message.contains("widget button clicked") && message.contains("widget=run")
-        })
+        .filter(|message| message.contains("widget button clicked") && message.contains("widget=run"))
         .count();
-    assert_eq!(
-        clicks, 2,
-        "Space release and the first Enter press click exactly once each; log was:\n{joined}",
-    );
+    assert_eq!(clicks, 2, "Space release and the first Enter press click exactly once each; log was:\n{joined}",);
 }
 
 /// Read-only must block both of Radio's value-changing paths. Re-enabling the
@@ -669,10 +469,7 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut bench = TestBench::start_with_size(240, 100).expect("boot");
-    let read_only = WidgetControlState {
-        read_only: true,
-        ..WidgetControlState::default()
-    };
+    let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     load_panel_with(&mut bench, &wasm, vec![radio_spec("choice", read_only)]);
 
     let panel = panel_address();
@@ -680,39 +477,16 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
         .execute(vec![
             ("spawn", BenchOp::send_mail(&panel, &Tick)),
             ("focus", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
-            (
-                "blocked_key",
-                BenchOp::send_mail(&panel, &Key { code: KEY_DOWN }),
-            ),
-            (
-                "blocked_pointer",
-                BenchOp::send_mail(&panel, &press(30.0, 70.0)),
-            ),
-            (
-                "blocked_pointer_release",
-                BenchOp::send_mail(&panel, &release(30.0, 70.0)),
-            ),
+            ("blocked_key", BenchOp::send_mail(&panel, &Key { code: KEY_DOWN })),
+            ("blocked_pointer", BenchOp::send_mail(&panel, &press(30.0, 70.0))),
+            ("blocked_pointer_release", BenchOp::send_mail(&panel, &release(30.0, 70.0))),
             (
                 "enable",
-                BenchOp::send_mail(
-                    child_address("choice"),
-                    &SetWidgetState {
-                        state: WidgetControlState::default(),
-                    },
-                ),
+                BenchOp::send_mail(child_address("choice"), &SetWidgetState { state: WidgetControlState::default() }),
             ),
-            (
-                "allowed_key",
-                BenchOp::send_mail(&panel, &Key { code: KEY_DOWN }),
-            ),
-            (
-                "allowed_pointer",
-                BenchOp::send_mail(&panel, &press(30.0, 70.0)),
-            ),
-            (
-                "allowed_pointer_release",
-                BenchOp::send_mail(&panel, &release(30.0, 70.0)),
-            ),
+            ("allowed_key", BenchOp::send_mail(&panel, &Key { code: KEY_DOWN })),
+            ("allowed_pointer", BenchOp::send_mail(&panel, &press(30.0, 70.0))),
+            ("allowed_pointer_release", BenchOp::send_mail(&panel, &release(30.0, 70.0))),
         ])
         .expect("read-only radio session");
 
@@ -720,9 +494,7 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
     let joined = log.join("\n");
     let selections: Vec<u32> = log
         .iter()
-        .filter(|message| {
-            message.contains("widget radio selected") && message.contains("widget=choice")
-        })
+        .filter(|message| message.contains("widget radio selected") && message.contains("widget=choice"))
         .map(|message| radio_selected_index(message).expect("radio log line carries an index"))
         .collect();
     assert_eq!(
@@ -735,40 +507,17 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
 /// Arm, disable, and re-enable Button before its decisive stale release.
 fn drive_button_cancellation_session(bench: &mut TestBench) {
     let run = child_address("run");
-    let unavailable = WidgetControlState {
-        enabled: false,
-        ..WidgetControlState::default()
-    };
+    let unavailable = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     bench
         .execute(vec![
             // Address the live child directly so focus loss cannot mask a
             // failure to clear its pointer arm on the state transition.
             ("arm_button", BenchOp::send_mail(&run, &press(30.0, 22.0))),
-            (
-                "disable_button",
-                BenchOp::send_mail(&run, &SetWidgetState { state: unavailable }),
-            ),
-            (
-                "enable_button",
-                BenchOp::send_mail(
-                    &run,
-                    &SetWidgetState {
-                        state: WidgetControlState::default(),
-                    },
-                ),
-            ),
-            (
-                "stale_button_release",
-                BenchOp::send_mail(&run, &release(30.0, 22.0)),
-            ),
-            (
-                "live_button_press",
-                BenchOp::send_mail(&run, &press(30.0, 22.0)),
-            ),
-            (
-                "live_button_release",
-                BenchOp::send_mail(&run, &release(30.0, 22.0)),
-            ),
+            ("disable_button", BenchOp::send_mail(&run, &SetWidgetState { state: unavailable })),
+            ("enable_button", BenchOp::send_mail(&run, &SetWidgetState { state: WidgetControlState::default() })),
+            ("stale_button_release", BenchOp::send_mail(&run, &release(30.0, 22.0))),
+            ("live_button_press", BenchOp::send_mail(&run, &press(30.0, 22.0))),
+            ("live_button_release", BenchOp::send_mail(&run, &release(30.0, 22.0))),
         ])
         .expect("button state cancellation session");
 }
@@ -776,48 +525,19 @@ fn drive_button_cancellation_session(bench: &mut TestBench) {
 fn drive_slider_cancellation_session(bench: &mut TestBench) {
     let panel = panel_address();
     let value = child_address("value");
-    let read_only = WidgetControlState {
-        read_only: true,
-        ..WidgetControlState::default()
-    };
+    let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     bench
         .execute(vec![
             // Read-only leaves root capture intact. Re-enable before moving;
             // only clearing Slider's own drag state prevents stale values.
             ("begin_drag", BenchOp::send_mail(&panel, &press(60.0, 52.0))),
-            (
-                "make_slider_read_only",
-                BenchOp::send_mail(&value, &SetWidgetState { state: read_only }),
-            ),
-            (
-                "enable_slider",
-                BenchOp::send_mail(
-                    &value,
-                    &SetWidgetState {
-                        state: WidgetControlState::default(),
-                    },
-                ),
-            ),
-            (
-                "stale_drag_move",
-                BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 }),
-            ),
-            (
-                "stale_drag_release",
-                BenchOp::send_mail(&panel, &release(160.0, 52.0)),
-            ),
-            (
-                "live_drag_press",
-                BenchOp::send_mail(&panel, &press(110.0, 52.0)),
-            ),
-            (
-                "live_drag_move",
-                BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 }),
-            ),
-            (
-                "live_drag_release",
-                BenchOp::send_mail(&panel, &release(160.0, 52.0)),
-            ),
+            ("make_slider_read_only", BenchOp::send_mail(&value, &SetWidgetState { state: read_only })),
+            ("enable_slider", BenchOp::send_mail(&value, &SetWidgetState { state: WidgetControlState::default() })),
+            ("stale_drag_move", BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 })),
+            ("stale_drag_release", BenchOp::send_mail(&panel, &release(160.0, 52.0))),
+            ("live_drag_press", BenchOp::send_mail(&panel, &press(110.0, 52.0))),
+            ("live_drag_move", BenchOp::send_mail(&panel, &MouseMove { x: 160.0, y: 52.0 })),
+            ("live_drag_release", BenchOp::send_mail(&panel, &release(160.0, 52.0))),
         ])
         .expect("slider state cancellation session");
 }
@@ -835,16 +555,11 @@ fn live_state_changes_cancel_button_arm_and_slider_drag() {
     load_panel_with(
         &mut bench,
         &wasm,
-        vec![
-            button_spec("run", WidgetControlState::default()),
-            slider_spec("value", 0.0),
-        ],
+        vec![button_spec("run", WidgetControlState::default()), slider_spec("value", 0.0)],
     );
 
     let panel = panel_address();
-    bench
-        .execute(vec![("spawn", BenchOp::send_mail(&panel, &Tick))])
-        .expect("spawn widget set");
+    bench.execute(vec![("spawn", BenchOp::send_mail(&panel, &Tick))]).expect("spawn widget set");
     drive_button_cancellation_session(&mut bench);
     drive_slider_cancellation_session(&mut bench);
 
@@ -852,9 +567,7 @@ fn live_state_changes_cancel_button_arm_and_slider_drag() {
     let joined = log.join("\n");
     let clicks = log
         .iter()
-        .filter(|message| {
-            message.contains("widget button clicked") && message.contains("widget=run")
-        })
+        .filter(|message| message.contains("widget button clicked") && message.contains("widget=run"))
         .count();
     assert_eq!(
         clicks, 1,
@@ -863,23 +576,15 @@ fn live_state_changes_cancel_button_arm_and_slider_drag() {
 
     let slider_changes: Vec<_> = log
         .iter()
-        .filter(|message| {
-            message.contains("widget slider changed") && message.contains("widget=value")
-        })
+        .filter(|message| message.contains("widget slider changed") && message.contains("widget=value"))
         .collect();
-    let committed = slider_changes
-        .iter()
-        .filter(|message| message.contains("committed=true"))
-        .count();
+    let committed = slider_changes.iter().filter(|message| message.contains("committed=true")).count();
     assert_eq!(
         slider_changes.len(),
         4,
         "the cancelled drag emits only its initial press; the live drag emits press/move/release; log was:\n{joined}",
     );
-    assert_eq!(
-        committed, 1,
-        "only the enabled positive-control drag may commit; log was:\n{joined}",
-    );
+    assert_eq!(committed, 1, "only the enabled positive-control drag may commit; log was:\n{joined}",);
 }
 
 /// A read-only text field remains focusable but cannot commit. Enabling the
@@ -892,47 +597,21 @@ fn read_only_text_field_blocks_activation_until_enabled() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut bench = TestBench::start_with_size(240, 80).expect("boot");
-    let read_only = WidgetControlState {
-        read_only: true,
-        ..WidgetControlState::default()
-    };
-    load_panel_with(
-        &mut bench,
-        &wasm,
-        vec![text_field_spec("locked", "locked", read_only)],
-    );
+    let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
+    load_panel_with(&mut bench, &wasm, vec![text_field_spec("locked", "locked", read_only)]);
 
     let panel = panel_address();
     bench
         .execute(vec![
             ("spawn", BenchOp::send_mail(&panel, &Tick)),
             ("focus", BenchOp::send_mail(&panel, &Key { code: KEY_TAB })),
-            (
-                "blocked_text",
-                BenchOp::send_mail(
-                    &panel,
-                    &TextInput {
-                        text: " mutation".to_owned(),
-                    },
-                ),
-            ),
-            (
-                "blocked_enter",
-                BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }),
-            ),
+            ("blocked_text", BenchOp::send_mail(&panel, &TextInput { text: " mutation".to_owned() })),
+            ("blocked_enter", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
             (
                 "enable",
-                BenchOp::send_mail(
-                    child_address("locked"),
-                    &SetWidgetState {
-                        state: WidgetControlState::default(),
-                    },
-                ),
+                BenchOp::send_mail(child_address("locked"), &SetWidgetState { state: WidgetControlState::default() }),
             ),
-            (
-                "allowed_enter",
-                BenchOp::send_mail(&panel, &Key { code: KEY_ENTER }),
-            ),
+            ("allowed_enter", BenchOp::send_mail(&panel, &Key { code: KEY_ENTER })),
         ])
         .expect("read-only text activation session");
 
@@ -940,9 +619,7 @@ fn read_only_text_field_blocks_activation_until_enabled() {
     let joined = log.join("\n");
     let commits: Vec<_> = log
         .iter()
-        .filter(|message| {
-            message.contains("widget text committed") && message.contains("widget=locked")
-        })
+        .filter(|message| message.contains("widget text committed") && message.contains("widget=locked"))
         .collect();
     assert_eq!(
         commits.len(),

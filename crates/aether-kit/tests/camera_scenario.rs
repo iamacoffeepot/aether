@@ -51,11 +51,7 @@ const COMPONENT_NAME: &str = "cam";
 /// trampoline node — exactly what `LoadResult.name` reports.
 fn component_address() -> String {
     use aether_actor::Addressable;
-    format!(
-        "aether.component/{}:{}",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-        COMPONENT_NAME,
-    )
+    format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, COMPONENT_NAME,)
 }
 
 /// Load `aether-kit`'s pre-built wasm into the bench, selecting the
@@ -79,10 +75,7 @@ fn load_camera(bench: &mut TestBench, wasm_path: &Path) {
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { .. } => {}
         LoadResult::Err { error } => panic!("load_component: {error}"),
     }
@@ -99,12 +92,8 @@ fn camera_component_lifecycle() {
 
     // A few ticks lets the component finish init, run on_tick, and
     // let the renderer cycle.
-    let result = bench
-        .execute(vec![
-            ("advance", BenchOp::advance(5)),
-            ("snap", BenchOp::capture()),
-        ])
-        .expect("advance + capture");
+    let result =
+        bench.execute(vec![("advance", BenchOp::advance(5)), ("snap", BenchOp::capture())]).expect("advance + capture");
     let png = result.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     not_all_black(&img).expect("camera scene should not be all black");
@@ -129,9 +118,7 @@ fn camera_default_static_publishes_view_proj() {
     // Five ticks: enough for init + a handful of publishes to surface
     // on the camera sink. The component publishes on every tick after
     // init, so any non-zero count proves the path is alive.
-    bench
-        .execute(vec![("advance", BenchOp::advance(5))])
-        .expect("advance");
+    bench.execute(vec![("advance", BenchOp::advance(5))]).expect("advance");
 
     let observed = bench.count_observed(ViewProjection::NAME);
     assert!(
@@ -158,9 +145,7 @@ fn camera_destroy_main_keeps_substrate_alive() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     load_camera(&mut bench, &wasm_path);
 
-    bench
-        .execute(vec![("pre", BenchOp::advance(2))])
-        .expect("pre-destroy advance");
+    bench.execute(vec![("pre", BenchOp::advance(2))]).expect("pre-destroy advance");
     // Baseline: default orbit was publishing before destroy.
     let pre_destroy = bench.count_observed(ViewProjection::NAME);
     assert!(
@@ -180,15 +165,7 @@ fn camera_destroy_main_keeps_substrate_alive() {
     // all-black.
     let result = bench
         .execute(vec![
-            (
-                "destroy",
-                BenchOp::send_mail(
-                    component_address(),
-                    &CameraDestroy {
-                        name: "main".to_owned(),
-                    },
-                ),
-            ),
+            ("destroy", BenchOp::send_mail(component_address(), &CameraDestroy { name: "main".to_owned() })),
             ("post", BenchOp::advance(5)),
             ("snap", BenchOp::capture()),
         ])

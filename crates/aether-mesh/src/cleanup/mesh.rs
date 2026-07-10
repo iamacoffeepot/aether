@@ -52,11 +52,7 @@ impl IndexedMesh {
         let mut out = Vec::with_capacity(polygons.len());
         for poly in polygons {
             let verts = poly.vertices.iter().map(|&i| vertices[i]).collect();
-            out.push(Polygon {
-                vertices: verts,
-                plane: poly.plane,
-                color: poly.color,
-            });
+            out.push(Polygon { vertices: verts, plane: poly.plane, color: poly.color });
         }
         out
     }

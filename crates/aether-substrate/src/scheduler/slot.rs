@@ -90,9 +90,7 @@ pub struct SlotState {
 impl SlotState {
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            state: AtomicU8::new(STATE_IDLE),
-        }
+        Self { state: AtomicU8::new(STATE_IDLE) }
     }
 
     /// Sender-side wake: attempts the `Idle → Ready` transition.
@@ -108,9 +106,7 @@ impl SlotState {
         // `seize` / `try_self_requeue` is what guarantees that the sender and
         // the draining worker cannot both observe stale state and strand the
         // envelope in an Idle, unqueued slot.
-        self.state
-            .compare_exchange(STATE_IDLE, STATE_READY, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+        self.state.compare_exchange(STATE_IDLE, STATE_READY, Ordering::SeqCst, Ordering::SeqCst).is_ok()
     }
 
     /// Worker-side: claim a `Ready` slot for a drain cycle. Returns
@@ -119,14 +115,7 @@ impl SlotState {
     /// queue calls this, and a slot is only in the queue while
     /// `Ready`.
     pub fn enter_running(&self) -> bool {
-        self.state
-            .compare_exchange(
-                STATE_READY,
-                STATE_RUNNING,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
+        self.state.compare_exchange(STATE_READY, STATE_RUNNING, Ordering::AcqRel, Ordering::Acquire).is_ok()
     }
 
     /// Demux-side: claim a `free` slot for an *in-place* dispatch
@@ -146,14 +135,7 @@ impl SlotState {
         // in the single total order shared with `try_wake` / `mark_idle` /
         // `try_self_requeue`, on which transition won — otherwise the loser's
         // mail can strand in an Idle, unqueued slot.
-        self.state
-            .compare_exchange(
-                STATE_IDLE,
-                STATE_RUNNING,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            )
-            .is_ok()
+        self.state.compare_exchange(STATE_IDLE, STATE_RUNNING, Ordering::SeqCst, Ordering::SeqCst).is_ok()
     }
 
     /// Worker-side: leave a drained-to-empty slot. The transition
@@ -187,9 +169,7 @@ impl SlotState {
         // shared with `try_wake` / `seize` / `mark_idle` guarantees exactly
         // one of the two wins the `Idle → Ready` transition and re-pushes the
         // slot, so the rechecked envelope is never lost.
-        self.state
-            .compare_exchange(STATE_IDLE, STATE_READY, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+        self.state.compare_exchange(STATE_IDLE, STATE_READY, Ordering::SeqCst, Ordering::SeqCst).is_ok()
     }
 
     /// Snapshot the current state. For tests + assertions; production
@@ -245,10 +225,7 @@ impl BatchBudget {
     /// Custom budget. Mostly for tests.
     #[must_use]
     pub fn custom(max_mails: u32, max_duration: Duration) -> Self {
-        Self {
-            max_mails,
-            max_dur: max_duration,
-        }
+        Self { max_mails, max_dur: max_duration }
     }
 }
 
@@ -396,16 +373,8 @@ impl WakeSink {
     /// Bundle the pool's shared injector, spin/park coordinator, and worker
     /// count. The chassis builds one from [`super::PoolHandle::wake_sink`].
     #[must_use]
-    pub fn new(
-        injector: Arc<Injector<Arc<dyn Drainable>>>,
-        spin: Arc<SpinPark>,
-        workers: usize,
-    ) -> Self {
-        Self {
-            injector,
-            spin,
-            workers,
-        }
+    pub fn new(injector: Arc<Injector<Arc<dyn Drainable>>>, spin: Arc<SpinPark>, workers: usize) -> Self {
+        Self { injector, spin, workers }
     }
 
     /// Schedule a runnable `slot`: push to the current worker's own deque
@@ -422,11 +391,7 @@ impl WakeSink {
     /// recipient that yielded mid-drain (ADR-0087 Phase 3b). The injector push
     /// is infallible; shutdown is observed through the coordinator's flag.
     pub(crate) fn schedule(&self, slot: Arc<dyn Drainable>) {
-        let kept = worker_deque::try_push_local_budgeted(
-            slot,
-            worker_deque::time_budget(),
-            worker_deque::hard_cap(),
-        );
+        let kept = worker_deque::try_push_local_budgeted(slot, worker_deque::time_budget(), worker_deque::hard_cap());
         if let Err(slot) = kept {
             self.injector.push(slot);
             self.spin.notify();
@@ -691,11 +656,7 @@ pub mod tests {
 
         fn drain_one(&self, env: u32) {
             let n = self.dispatched.fetch_add(1, Ordering::AcqRel) + 1;
-            assert_ne!(
-                Some(n),
-                self.panic_at,
-                "CounterSlot panic at envelope #{n} (test-induced)"
-            );
+            assert_ne!(Some(n), self.panic_at, "CounterSlot panic at envelope #{n} (test-induced)");
             hint::black_box(env);
             if !self.work_per_env.is_zero() {
                 thread::sleep(self.work_per_env);
@@ -714,11 +675,7 @@ pub mod tests {
         fn run_cycle(&self, budget: BatchBudget) -> CycleResult {
             // Worker invariant: state was Ready when we popped. CAS
             // Ready → Running.
-            assert!(
-                self.state.enter_running(),
-                "{}: slot was not Ready at run_cycle entry",
-                self.label
-            );
+            assert!(self.state.enter_running(), "{}: slot was not Ready at run_cycle entry", self.label);
 
             let deadline = Instant::now() + budget.max_dur;
             let outcome = loop {
@@ -729,8 +686,7 @@ pub mod tests {
                     break DrainOutcome::Empty;
                 };
                 self.drain_one(env);
-                let dispatched_this_cycle =
-                    self.dispatched.load(Ordering::Acquire) % budget.max_mails.max(1);
+                let dispatched_this_cycle = self.dispatched.load(Ordering::Acquire) % budget.max_mails.max(1);
                 if dispatched_this_cycle == 0 || Instant::now() >= deadline {
                     // Mail count or wallclock budget hit. Yield.
                     break DrainOutcome::Yielded;
@@ -781,10 +737,7 @@ pub mod tests {
         assert_eq!(state.current(), SlotStateLabel::Ready);
 
         // Second wake attempt against Ready: no-op.
-        assert!(
-            !state.try_wake(),
-            "second try_wake against Ready should fail"
-        );
+        assert!(!state.try_wake(), "second try_wake against Ready should fail");
         assert_eq!(state.current(), SlotStateLabel::Ready);
     }
 
@@ -797,10 +750,7 @@ pub mod tests {
         assert_eq!(state.current(), SlotStateLabel::Running);
         // Second enter_running against Running should fail (invariant
         // protection — only one worker drains a slot at a time).
-        assert!(
-            !state.enter_running(),
-            "cannot re-enter Running from Running"
-        );
+        assert!(!state.enter_running(), "cannot re-enter Running from Running");
     }
 
     #[test]
@@ -918,11 +868,7 @@ pub mod tests {
             // `wake_handle_pushes_to_ready_queue_once_per_idle`).
             slot.state.try_wake();
         }
-        assert_eq!(
-            slot.dispatched(),
-            2,
-            "both envelopes should drain across at most 8 cycles"
-        );
+        assert_eq!(slot.dispatched(), 2, "both envelopes should drain across at most 8 cycles");
     }
 
     #[test]
@@ -955,11 +901,7 @@ pub mod tests {
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let slot = CounterSlot::new("wake");
         let weak: Weak<dyn Drainable> = Arc::downgrade(&(slot.clone() as Arc<dyn Drainable>));
-        let sink = WakeSink::new(
-            Arc::clone(&injector),
-            Arc::new(SpinPark::new()),
-            TEST_WORKERS,
-        );
+        let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()), TEST_WORKERS);
         let wake = WakeHandle::new(slot.state.clone(), weak, sink);
 
         // First wake should spill one slot.
@@ -976,9 +918,6 @@ pub mod tests {
             }
         };
         assert!(first.is_some(), "injector should hold the woken slot");
-        assert!(
-            !matches!(injector.steal(), Steal::Success(_)),
-            "injector should not hold a duplicate"
-        );
+        assert!(!matches!(injector.steal(), Steal::Success(_)), "injector should not hold a duplicate");
     }
 }

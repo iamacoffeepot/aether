@@ -8,14 +8,8 @@ fn config_struct_schema() -> SchemaType {
     use aether_data::NamedField;
     SchemaType::Struct {
         fields: vec![
-            NamedField {
-                name: "seed".into(),
-                ty: SchemaType::Scalar(Primitive::U32),
-            },
-            NamedField {
-                name: "label".into(),
-                ty: SchemaType::String,
-            },
+            NamedField { name: "seed".into(), ty: SchemaType::Scalar(Primitive::U32) },
+            NamedField { name: "label".into(), ty: SchemaType::String },
         ]
         .into(),
         repr_c: false,
@@ -34,15 +28,11 @@ fn config_kind(schema: &SchemaType) -> KindDescriptorWire {
 async fn component_config_inline_json_encodes_to_schema_bytes() {
     let schema = config_struct_schema();
     let kind = config_kind(&schema);
-    let bytes = component_config_bytes(
-        Some(&kind),
-        Some(serde_json::json!({"seed": 7, "label": "demo"})),
-        None,
-        "test",
-    )
-    .await
-    .expect("config encodes")
-    .expect("source present");
+    let bytes =
+        component_config_bytes(Some(&kind), Some(serde_json::json!({"seed": 7, "label": "demo"})), None, "test")
+            .await
+            .expect("config encodes")
+            .expect("source present");
     let decoded = aether_codec::decode_schema(&bytes, &schema).expect("config decodes");
     assert_eq!(decoded, serde_json::json!({"seed": 7, "label": "demo"}));
 }
@@ -52,20 +42,12 @@ async fn component_config_path_is_json_and_encodes() {
     let path = stage_blob_file("config-json", br#"{"seed":9,"label":"from-file"}"#);
     let schema = config_struct_schema();
     let kind = config_kind(&schema);
-    let bytes = component_config_bytes(
-        Some(&kind),
-        None,
-        Some(path.to_str().expect("utf-8 temp path")),
-        "test",
-    )
-    .await
-    .expect("config_path JSON encodes")
-    .expect("source present");
+    let bytes = component_config_bytes(Some(&kind), None, Some(path.to_str().expect("utf-8 temp path")), "test")
+        .await
+        .expect("config_path JSON encodes")
+        .expect("source present");
     let decoded = aether_codec::decode_schema(&bytes, &schema).expect("config decodes");
-    assert_eq!(
-        decoded,
-        serde_json::json!({"seed": 9, "label": "from-file"})
-    );
+    assert_eq!(decoded, serde_json::json!({"seed": 9, "label": "from-file"}));
     std_fs::remove_file(&path).ok();
 }
 
@@ -81,26 +63,15 @@ async fn component_config_rejects_both_sources() {
     )
     .await
     .expect_err("both config sources must be rejected");
-    assert!(
-        err.to_string().contains("set only one"),
-        "unexpected error: {err}"
-    );
+    assert!(err.to_string().contains("set only one"), "unexpected error: {err}");
 }
 
 #[tokio::test]
 async fn component_config_rejects_no_config_component() {
-    let err = component_config_bytes(
-        None,
-        Some(serde_json::json!({"seed": 7, "label": "demo"})),
-        None,
-        "test",
-    )
-    .await
-    .expect_err("config for no-config component must be rejected");
-    assert!(
-        err.to_string().contains("declares no Config kind"),
-        "unexpected error: {err}"
-    );
+    let err = component_config_bytes(None, Some(serde_json::json!({"seed": 7, "label": "demo"})), None, "test")
+        .await
+        .expect_err("config for no-config component must be rejected");
+    assert!(err.to_string().contains("declares no Config kind"), "unexpected error: {err}");
 }
 
 #[tokio::test]
@@ -115,10 +86,7 @@ async fn component_config_field_mismatch_is_invalid_params() {
     )
     .await
     .expect_err("field mismatch must be rejected");
-    assert!(
-        err.to_string().contains("does not match"),
-        "unexpected error: {err}"
-    );
+    assert!(err.to_string().contains("does not match"), "unexpected error: {err}");
 }
 
 /// `components_all_loaded` checks membership, not count. The wrong-set
@@ -145,10 +113,8 @@ fn components_all_loaded_wrong_set_is_not_ready() {
 /// ready).
 #[test]
 fn components_all_loaded_exact_match_is_ready() {
-    let want = vec![
-        "aether.component/aether.embedded:alpha".to_owned(),
-        "aether.component/aether.embedded:beta".to_owned(),
-    ];
+    let want =
+        vec!["aether.component/aether.embedded:alpha".to_owned(), "aether.component/aether.embedded:beta".to_owned()];
     let actual = vec![
         "aether.component/aether.embedded:baseline".to_owned(),
         "aether.component/aether.embedded:alpha".to_owned(),
@@ -158,10 +124,7 @@ fn components_all_loaded_exact_match_is_ready() {
         components_all_loaded(&want, &actual),
         "both wanted names present (alongside an extra baseline) should be ready",
     );
-    assert!(
-        components_all_loaded(&[], &[]),
-        "empty want is trivially ready",
-    );
+    assert!(components_all_loaded(&[], &[]), "empty want is trivially ready",);
 }
 
 /// `components_all_loaded` is false when only a subset of the wanted names
@@ -186,18 +149,9 @@ fn components_all_loaded_partial_match_is_not_ready() {
 /// name that disagrees with what an unreplicated load would resolve to.
 #[test]
 fn replica_base_name_follows_name_export_namespace_precedence() {
-    assert_eq!(
-        replica_base_name(Some("caller"), Some("export-ns"), Some("entry-ns")),
-        Some("caller".to_owned()),
-    );
-    assert_eq!(
-        replica_base_name(None, Some("export-ns"), Some("entry-ns")),
-        Some("export-ns".to_owned()),
-    );
-    assert_eq!(
-        replica_base_name(None, None, Some("entry-ns")),
-        Some("entry-ns".to_owned()),
-    );
+    assert_eq!(replica_base_name(Some("caller"), Some("export-ns"), Some("entry-ns")), Some("caller".to_owned()),);
+    assert_eq!(replica_base_name(None, Some("export-ns"), Some("entry-ns")), Some("export-ns".to_owned()),);
+    assert_eq!(replica_base_name(None, None, Some("entry-ns")), Some("entry-ns".to_owned()),);
     assert_eq!(replica_base_name(None, None, None), None);
 }
 
@@ -206,10 +160,7 @@ fn replica_base_name_follows_name_export_namespace_precedence() {
 /// the `-0` suffix.
 #[test]
 fn replica_names_suffixes_every_instance() {
-    assert_eq!(
-        replica_names("handler", 3),
-        vec!["handler-0", "handler-1", "handler-2"],
-    );
+    assert_eq!(replica_names("handler", 3), vec!["handler-0", "handler-1", "handler-2"],);
     assert_eq!(replica_names("handler", 1), vec!["handler-0"]);
 }
 
@@ -241,10 +192,7 @@ async fn load_component_unresolvable_selector_is_tool_error() {
             replicas: None,
         }))
         .await;
-    assert!(
-        result.is_err(),
-        "an unresolvable selector should be a tool error",
-    );
+    assert!(result.is_err(), "an unresolvable selector should be a tool error",);
 }
 
 /// `load_component` rejects `replicas: 0` (issue 2626, ADR-0090 §4
@@ -265,10 +213,7 @@ async fn load_component_replicas_zero_is_tool_error() {
             replicas: Some(0),
         }))
         .await;
-    assert!(
-        result.is_err(),
-        "replicas: 0 must be a tool error, not a silent no-op",
-    );
+    assert!(result.is_err(), "replicas: 0 must be a tool error, not a silent no-op",);
 }
 
 /// `replace_component` with a malformed tagged mailbox id is
@@ -288,8 +233,5 @@ async fn replace_component_bad_mailbox_id_is_tool_error() {
             export: None,
         }))
         .await;
-    assert!(
-        result.is_err(),
-        "a malformed mailbox_id should be a tool error"
-    );
+    assert!(result.is_err(), "a malformed mailbox_id should be a tool error");
 }

@@ -144,10 +144,7 @@ impl<'m> BehaviorCtx<'m> {
     /// A named child in the host's subtree, addressed path-relative.
     #[must_use]
     pub fn child(&mut self, path: &str) -> ChildHandle<'_, 'm> {
-        ChildHandle {
-            ctx: self,
-            path: String::from(path),
-        }
+        ChildHandle { ctx: self, path: String::from(path) }
     }
 
     /// Drop the in-flight mail. Effects still apply — consume plus an
@@ -188,10 +185,7 @@ impl<'m> BehaviorCtx<'m> {
             VerdictState::ForwardMutated(bytes) => Verdict::Forward(bytes),
             VerdictState::Consume => Verdict::Consume,
         };
-        FilterOutput {
-            verdict,
-            effects: self.effects,
-        }
+        FilterOutput { verdict, effects: self.effects }
     }
 }
 
@@ -209,11 +203,7 @@ impl WidgetHandle<'_, '_> {
     pub fn set<K: Kind + 'static>(&mut self, value: &K) {
         let bytes = value.encode_into_bytes();
         self.ctx.mirrors.widget_mirror.update(K::ID, bytes.clone());
-        self.ctx.effects.push(Effect {
-            target: EffectTarget::Widget,
-            kind_id: K::ID.0,
-            bytes,
-        });
+        self.ctx.effects.push(Effect { target: EffectTarget::Widget, kind_id: K::ID.0, bytes });
     }
 
     /// The last value the widget emitted for `K`, decoded once.
@@ -224,11 +214,7 @@ impl WidgetHandle<'_, '_> {
     /// Ask the widget to re-emit its observable kinds up-lane. The reply is
     /// that traffic filling the mirror, not a return value.
     pub fn report(&mut self) {
-        self.ctx.effects.push(Effect {
-            target: EffectTarget::Widget,
-            kind_id: sentinel::REPORT.0,
-            bytes: Vec::new(),
-        });
+        self.ctx.effects.push(Effect { target: EffectTarget::Widget, kind_id: sentinel::REPORT.0, bytes: Vec::new() });
     }
 }
 
@@ -244,26 +230,13 @@ impl ChildHandle<'_, '_> {
     /// filter returns; the write integrates into the child's mirror.
     pub fn send<K: Kind + 'static>(&mut self, value: &K) {
         let bytes = value.encode_into_bytes();
-        self.ctx
-            .mirrors
-            .child_mirrors
-            .entry(self.path.clone())
-            .or_default()
-            .update(K::ID, bytes.clone());
-        self.ctx.effects.push(Effect {
-            target: EffectTarget::Child(self.path.clone()),
-            kind_id: K::ID.0,
-            bytes,
-        });
+        self.ctx.mirrors.child_mirrors.entry(self.path.clone()).or_default().update(K::ID, bytes.clone());
+        self.ctx.effects.push(Effect { target: EffectTarget::Child(self.path.clone()), kind_id: K::ID.0, bytes });
     }
 
     /// The last value the child emitted for `K`, decoded once.
     pub fn last<K: Kind + 'static>(&mut self) -> Option<&K> {
-        self.ctx
-            .mirrors
-            .child_mirrors
-            .get_mut(&self.path)?
-            .last::<K>()
+        self.ctx.mirrors.child_mirrors.get_mut(&self.path)?.last::<K>()
     }
 
     /// Ask the child to re-emit its observable kinds up-lane.
@@ -287,11 +260,7 @@ impl PanelHandle<'_, '_> {
     pub fn emit<K: Kind + 'static>(&mut self, value: &K) {
         let bytes = value.encode_into_bytes();
         self.ctx.mirrors.panel_mirror.update(K::ID, bytes.clone());
-        self.ctx.effects.push(Effect {
-            target: EffectTarget::Panel,
-            kind_id: K::ID.0,
-            bytes,
-        });
+        self.ctx.effects.push(Effect { target: EffectTarget::Panel, kind_id: K::ID.0, bytes });
     }
 
     /// The last value seen on the parent lane for `K`, decoded once.
@@ -386,9 +355,7 @@ impl<T> Slot<T> {
     /// Build an empty slot. `const` so it can live in a `static`.
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            cell: UnsafeCell::new(None),
-        }
+        Self { cell: UnsafeCell::new(None) }
     }
 }
 
@@ -427,12 +394,7 @@ unsafe impl<T> Sync for Slot<T> {}
 /// `old_ptr` / `old_size` / `align` must describe a live allocation from a
 /// prior call (or `(0, 0)` for a fresh allocation), and `align` must be a
 /// nonzero power of two.
-pub unsafe fn realloc_bytes(
-    old_ptr: *mut u8,
-    old_size: usize,
-    align: usize,
-    new_size: usize,
-) -> *mut u8 {
+pub unsafe fn realloc_bytes(old_ptr: *mut u8, old_size: usize, align: usize, new_size: usize) -> *mut u8 {
     use alloc::alloc::{Layout, alloc, dealloc, realloc};
     use core::ptr::null_mut;
 
@@ -452,13 +414,7 @@ pub unsafe fn realloc_bytes(
     }
     // SAFETY: caller's layout contract holds; `old_ptr` is a live allocation
     // described by `(old_size, align)`, resized to `new_size`.
-    unsafe {
-        realloc(
-            old_ptr,
-            Layout::from_size_align_unchecked(old_size, align),
-            new_size,
-        )
-    }
+    unsafe { realloc(old_ptr, Layout::from_size_align_unchecked(old_size, align), new_size) }
 }
 
 /// Leak an owned byte buffer into guest memory and pack its `(ptr, len)` for

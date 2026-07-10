@@ -8,12 +8,7 @@ use super::*;
 /// call `record_finished`) without tripping the debug guard on drop.
 ///
 /// Returns `(mailer, egress_rx, caller_mailbox, reply_rx)`.
-fn settlement_substrate() -> (
-    Arc<Mailer>,
-    mpsc::Receiver<EgressEvent>,
-    MailboxId,
-    mpsc::Receiver<OwnedDispatch>,
-) {
+fn settlement_substrate() -> (Arc<Mailer>, mpsc::Receiver<EgressEvent>, MailboxId, mpsc::Receiver<OwnedDispatch>) {
     let reg = Arc::new(Registry::new());
     let (outbound, egress_rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&reg)).with_outbound(outbound));
@@ -40,10 +35,7 @@ fn settlement_substrate() -> (
 fn play_track_deferred_reply_settles_caller_chain() {
     let (mailer, rx, caller_mailbox, reply_rx) = settlement_substrate();
     let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let (mut cap, _queue) = live_cap();
     let root = MailId::new(MailboxId(0xC0), 1);
     let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 1);
@@ -66,16 +58,11 @@ fn play_track_deferred_reply_settles_caller_chain() {
     let track_correlation = assert_next_send_kind::<Read>(&transport, &rx);
     let wav = decode::wav_int16_mono(&ramp(512), 24_000);
     {
-        let mut read_ctx =
-            NativeCtx::new_dispatching(&transport, fs_reply_source(track_correlation), root, root);
+        let mut read_ctx = NativeCtx::new_dispatching(&transport, fs_reply_source(track_correlation), root, root);
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,
-            ReadResult::Ok {
-                namespace: "assets".to_owned(),
-                path: "track.wav".to_owned(),
-                bytes: wav,
-            },
+            ReadResult::Ok { namespace: "assets".to_owned(), path: "track.wav".to_owned(), bytes: wav },
         );
     }
 
@@ -85,22 +72,12 @@ fn play_track_deferred_reply_settles_caller_chain() {
     // reply is now in-flight on the caller root — live_roots must
     // stay at 1. Pre-fix: root was MailId::NONE so record_sent_inflight
     // was a no-op and live_roots dropped to 0 here (premature settle).
-    assert_eq!(
-        counter.live_roots(),
-        1,
-        "deferred reply holds the caller chain open after hold releases",
-    );
+    assert_eq!(counter.live_roots(), 1, "deferred reply holds the caller chain open after hold releases",);
 
-    let dispatch = reply_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("reply reached the caller inbox");
+    let dispatch = reply_rx.recv_timeout(Duration::from_secs(2)).expect("reply reached the caller inbox");
     assert_eq!(dispatch.root, root, "reply inherits the caller's root");
     mailer.record_finished(dispatch.mail_id, dispatch.root);
-    assert_eq!(
-        counter.live_roots(),
-        0,
-        "chain settles after the reply's Finished fires",
-    );
+    assert_eq!(counter.live_roots(), 0, "chain settles after the reply's Finished fires",);
 }
 
 /// #1693 / #1701 regression: `load_instrument`'s deferred assembly
@@ -110,10 +87,7 @@ fn play_track_deferred_reply_settles_caller_chain() {
 fn load_instrument_deferred_reply_settles_caller_chain() {
     let (mailer, rx, caller_mailbox, reply_rx) = settlement_substrate();
     let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let (mut cap, _queue) = live_cap();
     let root = MailId::new(MailboxId(0xC0), 3);
     let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 3);
@@ -123,10 +97,7 @@ fn load_instrument_deferred_reply_settles_caller_chain() {
         AudioCapability::on_load_instrument(
             &mut cap,
             &mut ctx,
-            LoadInstrument {
-                namespace: "assets".to_owned(),
-                path: "piano/bank.sfz".to_owned(),
-            },
+            LoadInstrument { namespace: "assets".to_owned(), path: "piano/bank.sfz".to_owned() },
         );
     }
 
@@ -139,8 +110,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
     ";
     let wav = decode::wav_int16_mono(&ramp(256), 24_000);
     {
-        let mut read_ctx =
-            NativeCtx::new_dispatching(&transport, fs_reply_source(sfz_correlation), root, root);
+        let mut read_ctx = NativeCtx::new_dispatching(&transport, fs_reply_source(sfz_correlation), root, root);
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,
@@ -154,52 +124,29 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
     let c4_correlation = assert_next_send_kind::<Read>(&transport, &rx);
     let c5_correlation = assert_next_send_kind::<Read>(&transport, &rx);
     {
-        let mut read_ctx =
-            NativeCtx::new_dispatching(&transport, fs_reply_source(c4_correlation), root, root);
+        let mut read_ctx = NativeCtx::new_dispatching(&transport, fs_reply_source(c4_correlation), root, root);
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,
-            ReadResult::Ok {
-                namespace: "assets".to_owned(),
-                path: "piano/c4.wav".to_owned(),
-                bytes: wav.clone(),
-            },
+            ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/c4.wav".to_owned(), bytes: wav.clone() },
         );
     }
     {
         // Last sample — triggers assembly dispatch and hold acquisition.
-        let mut read_ctx =
-            NativeCtx::new_dispatching(&transport, fs_reply_source(c5_correlation), root, root);
+        let mut read_ctx = NativeCtx::new_dispatching(&transport, fs_reply_source(c5_correlation), root, root);
         AudioCapability::on_read_result(
             &mut cap,
             &mut read_ctx,
-            ReadResult::Ok {
-                namespace: "assets".to_owned(),
-                path: "piano/c5.wav".to_owned(),
-                bytes: wav,
-            },
+            ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/c5.wav".to_owned(), bytes: wav },
         );
     }
 
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
 
-    assert_eq!(
-        counter.live_roots(),
-        1,
-        "assembly reply holds the caller chain open after hold releases",
-    );
+    assert_eq!(counter.live_roots(), 1, "assembly reply holds the caller chain open after hold releases",);
 
-    let dispatch = reply_rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("reply reached the caller inbox");
-    assert_eq!(
-        dispatch.root, root,
-        "assembly reply inherits the caller's root"
-    );
+    let dispatch = reply_rx.recv_timeout(Duration::from_secs(2)).expect("reply reached the caller inbox");
+    assert_eq!(dispatch.root, root, "assembly reply inherits the caller's root");
     mailer.record_finished(dispatch.mail_id, dispatch.root);
-    assert_eq!(
-        counter.live_roots(),
-        0,
-        "chain settles after the reply's Finished fires",
-    );
+    assert_eq!(counter.live_roots(), 0, "chain settles after the reply's Finished fires",);
 }

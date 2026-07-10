@@ -149,11 +149,7 @@ enum BuildState {
     /// A blob with `n_mails` (>= 1) appended; its header sits at
     /// `header_off`, the next free byte is `cursor`. The header is
     /// provisional (`lock` / `total_len` unwritten) until `seal`.
-    Building {
-        header_off: u32,
-        cursor: u32,
-        n_mails: u32,
-    },
+    Building { header_off: u32, cursor: u32, n_mails: u32 },
 }
 
 /// A single-producer, multi-consumer reclaiming byte ring. See the
@@ -235,10 +231,7 @@ impl MailRing {
         let cap = align_up(cap);
         // Offsets and lengths are stored as `u32` (in `MailLoc`, the blob
         // header, and the cursors), so the buffer must fit in `u32`.
-        assert!(
-            u32::try_from(cap).is_ok(),
-            "MailRing capacity ({cap} B) must fit u32"
-        );
+        assert!(u32::try_from(cap).is_ok(), "MailRing capacity ({cap} B) must fit u32");
         let layout = Layout::from_size_align(cap, ALIGN).expect("valid ring layout");
         // SAFETY: `cap > 0` so the layout is non-zero-sized; we check the
         // returned pointer for null below.
@@ -378,11 +371,7 @@ impl MailRing {
         } else {
             size
         };
-        let new_write = if start + occupied == self.cap {
-            0
-        } else {
-            start + occupied
-        };
+        let new_write = if start + occupied == self.cap { 0 } else { start + occupied };
         self.write.store(new_write as u32, Ordering::Relaxed);
         self.live.fetch_add(occupied, Ordering::Relaxed);
         if start == 0 && write != 0 {
@@ -406,10 +395,7 @@ impl MailRing {
         // The sub-header-tail absorb in `push_blob` / `finalize_header`
         // guarantees `write` never stops strictly within `HEADER_LEN`
         // bytes of `cap`, so every filler region has room for its header.
-        debug_assert!(
-            len >= HEADER_LEN,
-            "filler tail of {len} B cannot hold a {HEADER_LEN}-B header"
-        );
+        debug_assert!(len >= HEADER_LEN, "filler tail of {len} B cannot hold a {HEADER_LEN}-B header");
         // SAFETY: caller guarantees the range is producer-owned free space.
         // The backing bytes are uninitialized, so every field is written
         // with a non-dropping `ptr::write`.
@@ -432,12 +418,7 @@ impl MailRing {
         clippy::cast_possible_truncation,
         reason = "offsets and payload lengths are bounded by capacity, asserted <= u32::MAX in with_capacity"
     )]
-    unsafe fn write_blob_at(
-        &self,
-        start: usize,
-        mails: &[OutMail<'_>],
-        size: usize,
-    ) -> Vec<MailLoc> {
+    unsafe fn write_blob_at(&self, start: usize, mails: &[OutMail<'_>], size: usize) -> Vec<MailLoc> {
         // SAFETY: the caller's contract guarantees the range is free and
         // aligned; we only write within `[start, start+size)`.
         unsafe {
@@ -483,20 +464,11 @@ impl MailRing {
         // SAFETY: caller guarantees `off` is aligned, in-bounds free space
         // with room for the entry + payload.
         unsafe {
-            let entry = MailEntry {
-                len: payload.len() as u32,
-                _pad: 0,
-                recipient,
-                kind,
-            };
-            self.buf
-                .add(off)
-                .copy_from_nonoverlapping((&raw const entry).cast::<u8>(), ENTRY_LEN);
+            let entry = MailEntry { len: payload.len() as u32, _pad: 0, recipient, kind };
+            self.buf.add(off).copy_from_nonoverlapping((&raw const entry).cast::<u8>(), ENTRY_LEN);
             let payload_off = off + ENTRY_LEN;
             if !payload.is_empty() {
-                self.buf
-                    .add(payload_off)
-                    .copy_from_nonoverlapping(payload.as_ptr(), payload.len());
+                self.buf.add(payload_off).copy_from_nonoverlapping(payload.as_ptr(), payload.len());
             }
             MailLoc {
                 recipient,
@@ -524,10 +496,7 @@ impl MailRing {
     pub fn open_blob(&self) {
         // SAFETY: producer-only state.
         let state = unsafe { &mut *self.build.get() };
-        assert!(
-            matches!(state, BuildState::Closed),
-            "open_blob called while a blob is already open"
-        );
+        assert!(matches!(state, BuildState::Closed), "open_blob called while a blob is already open");
         self.reclaim();
         *state = BuildState::Empty;
     }
@@ -562,9 +531,7 @@ impl MailRing {
                 // ALIGN-aligned region with room for the header + this
                 // entry; the entry goes right after the (not-yet-written)
                 // header slot.
-                let loc = unsafe {
-                    self.write_entry_at(start + HEADER_LEN, start, recipient, kind, payload)
-                };
+                let loc = unsafe { self.write_entry_at(start + HEADER_LEN, start, recipient, kind, payload) };
                 *state = BuildState::Building {
                     header_off: start as u32,
                     cursor: (start + HEADER_LEN + entry_size) as u32,
@@ -572,11 +539,7 @@ impl MailRing {
                 };
                 Ok(loc)
             }
-            BuildState::Building {
-                header_off,
-                cursor,
-                n_mails,
-            } => {
+            BuildState::Building { header_off, cursor, n_mails } => {
                 let cur = cursor as usize;
                 if cur + entry_size > self.cap {
                     // Crosses the buffer end: seal the current blob, then
@@ -596,14 +559,8 @@ impl MailRing {
                 // in producer-owned free space, and the two checks above
                 // guarantee `[cur, cur + entry_size)` is in-bounds and does
                 // not overrun the live region.
-                let loc = unsafe {
-                    self.write_entry_at(cur, header_off as usize, recipient, kind, payload)
-                };
-                *state = BuildState::Building {
-                    header_off,
-                    cursor: (cur + entry_size) as u32,
-                    n_mails: n_mails + 1,
-                };
+                let loc = unsafe { self.write_entry_at(cur, header_off as usize, recipient, kind, payload) };
+                *state = BuildState::Building { header_off, cursor: (cur + entry_size) as u32, n_mails: n_mails + 1 };
                 Ok(loc)
             }
         }
@@ -622,11 +579,7 @@ impl MailRing {
         match *state {
             BuildState::Closed => panic!("seal called without an open blob"),
             BuildState::Empty => {}
-            BuildState::Building {
-                header_off,
-                cursor,
-                n_mails,
-            } => self.finalize_header(header_off, cursor, n_mails),
+            BuildState::Building { header_off, cursor, n_mails } => self.finalize_header(header_off, cursor, n_mails),
         }
         *state = BuildState::Closed;
     }
@@ -774,11 +727,7 @@ impl MailRing {
                 break;
             }
             let total = hdr.total_len as usize;
-            let new_front = if front + total == self.cap {
-                0
-            } else {
-                front + total
-            };
+            let new_front = if front + total == self.cap { 0 } else { front + total };
             self.front.store(new_front as u32, Ordering::Relaxed);
             self.live.fetch_sub(total, Ordering::Relaxed);
             reclaimed += total;
@@ -824,19 +773,13 @@ mod tests {
     use super::*;
 
     fn out(recipient: u64, kind: u64, payload: &[u8]) -> OutMail<'_> {
-        OutMail {
-            recipient,
-            kind,
-            payload,
-        }
+        OutMail { recipient, kind, payload }
     }
 
     #[test]
     fn push_then_read_round_trips() {
         let ring = MailRing::with_capacity(4096);
-        let locs = ring
-            .push_blob(&[out(1, 10, &[1, 2, 3]), out(2, 20, &[4, 5, 6, 7])])
-            .expect("fits");
+        let locs = ring.push_blob(&[out(1, 10, &[1, 2, 3]), out(2, 20, &[4, 5, 6, 7])]).expect("fits");
         assert_eq!(locs.len(), 2);
         assert_eq!(locs[0].recipient, 1);
         assert_eq!(locs[0].kind, 10);
@@ -844,10 +787,7 @@ mod tests {
         // SAFETY: locks still held (not released), region is live.
         unsafe {
             assert_eq!(ring.payload(locs[0].payload_off, locs[0].len), &[1, 2, 3]);
-            assert_eq!(
-                ring.payload(locs[1].payload_off, locs[1].len),
-                &[4, 5, 6, 7]
-            );
+            assert_eq!(ring.payload(locs[1].payload_off, locs[1].len), &[4, 5, 6, 7]);
         }
         // both mails share one blob header
         assert_eq!(locs[0].header_off, locs[1].header_off);
@@ -856,9 +796,7 @@ mod tests {
     #[test]
     fn reclaim_only_past_zero_lock() {
         let ring = MailRing::with_capacity(4096);
-        let locs = ring
-            .push_blob(&[out(1, 10, &[0; 8]), out(2, 20, &[0; 8])])
-            .unwrap();
+        let locs = ring.push_blob(&[out(1, 10, &[0; 8]), out(2, 20, &[0; 8])]).unwrap();
         let before = ring.live_bytes();
         assert!(before > 0);
         // one of two released → lock still 1 → no reclaim
@@ -875,9 +813,7 @@ mod tests {
     #[test]
     fn batch_release_reclaims() {
         let ring = MailRing::with_capacity(4096);
-        let locs = ring
-            .push_blob(&[out(1, 1, &[9]), out(2, 2, &[9]), out(3, 3, &[9])])
-            .unwrap();
+        let locs = ring.push_blob(&[out(1, 1, &[9]), out(2, 2, &[9]), out(3, 3, &[9])]).unwrap();
         unsafe { ring.release_n(locs[0].header_off, 3) };
         assert!(ring.reclaim() > 0);
         assert_eq!(ring.live_bytes(), 0);
@@ -1002,26 +938,17 @@ mod tests {
         ring.open_blob();
         let mut locs = Vec::new();
         for k in 0..7u64 {
-            locs.push(
-                ring.append(k, k, &[0xAA; 8])
-                    .expect("appends fit the free ring"),
-            );
+            locs.push(ring.append(k, k, &[0xAA; 8]).expect("appends fit the free ring"));
         }
         ring.seal();
         // The fan-out crossed the tail, so it spans >= 2 physical blobs.
         let distinct: BTreeSet<u32> = locs.iter().map(|l| l.header_off).collect();
-        assert!(
-            distinct.len() >= 2,
-            "fan-out should span >=2 blobs across the wrap; header_offs: {distinct:?}"
-        );
+        assert!(distinct.len() >= 2, "fan-out should span >=2 blobs across the wrap; header_offs: {distinct:?}");
         // Every payload still reads back intact across the split.
         for l in &locs {
             // SAFETY: locks held until released below.
             let bytes = unsafe { ring.payload(l.payload_off, l.len) };
-            assert!(
-                bytes.iter().all(|&b| b == 0xAA),
-                "payload corrupted across wrap"
-            );
+            assert!(bytes.iter().all(|&b| b == 0xAA), "payload corrupted across wrap");
         }
         for l in &locs {
             // SAFETY: one held count per loc.
@@ -1056,10 +983,7 @@ mod tests {
                 assert_eq!(loc.len as usize, *len);
                 // SAFETY: lock held until the release loop below.
                 let bytes = unsafe { ring.payload(loc.payload_off, loc.len) };
-                assert!(
-                    bytes.iter().all(|&b| b == tag),
-                    "cycle {i}: tag {tag} corrupted"
-                );
+                assert!(bytes.iter().all(|&b| b == tag), "cycle {i}: tag {tag} corrupted");
             }
             for (loc, _) in &locs {
                 // SAFETY: one held count per loc.
@@ -1236,11 +1160,8 @@ mod tests {
             let tag = (i & 0xff) as u8;
             let n_mails = (i % 3 + 1) as usize;
             let payloads: Vec<Vec<u8>> = (0..n_mails).map(|k| vec![tag; 8 + k * 8]).collect();
-            let mails: Vec<OutMail<'_>> = payloads
-                .iter()
-                .enumerate()
-                .map(|(k, p)| out(k as u64, u64::from(tag), p))
-                .collect();
+            let mails: Vec<OutMail<'_>> =
+                payloads.iter().enumerate().map(|(k, p)| out(k as u64, u64::from(tag), p)).collect();
 
             let locs = loop {
                 if let Ok(locs) = ring.push_blob(&mails) {
@@ -1252,13 +1173,7 @@ mod tests {
                 thread::yield_now();
             };
             for loc in locs {
-                tx.send(Ref {
-                    header_off: loc.header_off,
-                    payload_off: loc.payload_off,
-                    len: loc.len,
-                    tag,
-                })
-                .unwrap();
+                tx.send(Ref { header_off: loc.header_off, payload_off: loc.payload_off, len: loc.len, tag }).unwrap();
             }
             if i % 16 == 0 {
                 ring.reclaim();
@@ -1397,19 +1312,11 @@ mod tests {
             let mut refs = Vec::new();
             while i < appended.len() && appended[i].0.header_off == header_off {
                 let (loc, bytes) = &appended[i];
-                refs.push(ModelRef {
-                    payload_off: loc.payload_off,
-                    len: loc.len,
-                    bytes: bytes.clone(),
-                });
+                refs.push(ModelRef { payload_off: loc.payload_off, len: loc.len, bytes: bytes.clone() });
                 i += 1;
             }
             let outstanding = refs.len() as u32;
-            fifo.push_back(ModelBlob {
-                header_off,
-                outstanding,
-                refs,
-            });
+            fifo.push_back(ModelBlob { header_off, outstanding, refs });
         }
     }
 
@@ -1424,28 +1331,16 @@ mod tests {
                     let mails: Vec<OutMail<'_>> = payloads
                         .iter()
                         .enumerate()
-                        .map(|(k, p)| OutMail {
-                            recipient: k as u64,
-                            kind: k as u64,
-                            payload: p,
-                        })
+                        .map(|(k, p)| OutMail { recipient: k as u64, kind: k as u64, payload: p })
                         .collect();
                     if let Ok(locs) = ring.push_blob(&mails) {
                         let header_off = locs[0].header_off;
                         let refs = locs
                             .iter()
                             .zip(&payloads)
-                            .map(|(l, p)| ModelRef {
-                                payload_off: l.payload_off,
-                                len: l.len,
-                                bytes: p.clone(),
-                            })
+                            .map(|(l, p)| ModelRef { payload_off: l.payload_off, len: l.len, bytes: p.clone() })
                             .collect();
-                        fifo.push_back(ModelBlob {
-                            header_off,
-                            outstanding: locs.len() as u32,
-                            refs,
-                        });
+                        fifo.push_back(ModelBlob { header_off, outstanding: locs.len() as u32, refs });
                     }
                     // RingFull leaves the ring untouched — no model change.
                 }
@@ -1466,18 +1361,11 @@ mod tests {
                     record_appended(&mut fifo, &appended);
                 }
                 Op::Release(idx) => {
-                    let releasable: Vec<usize> = fifo
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, b)| b.outstanding > 0)
-                        .map(|(i, _)| i)
-                        .collect();
+                    let releasable: Vec<usize> =
+                        fifo.iter().enumerate().filter(|(_, b)| b.outstanding > 0).map(|(i, _)| i).collect();
                     if !releasable.is_empty() {
                         let chosen = releasable[idx % releasable.len()];
-                        assert!(
-                            fifo[chosen].outstanding > 0,
-                            "release must never underflow a lock"
-                        );
+                        assert!(fifo[chosen].outstanding > 0, "release must never underflow a lock");
                         // SAFETY: the model holds exactly one count of this
                         // blob's lock per outstanding ref; releasing it once
                         // matches that held count.
@@ -1499,10 +1387,7 @@ mod tests {
                         // have advanced past it. (The converse isn't
                         // asserted: a tail filler can free bytes ahead of a
                         // still-locked blob.)
-                        assert!(
-                            reclaimed > 0,
-                            "front had {popped} zero-lock blob(s) but reclaim freed nothing"
-                        );
+                        assert!(reclaimed > 0, "front had {popped} zero-lock blob(s) but reclaim freed nothing");
                     }
                 }
             }
@@ -1519,11 +1404,7 @@ mod tests {
             }
         }
         while ring.reclaim() > 0 {}
-        assert_eq!(
-            ring.live_bytes(),
-            0,
-            "every blob reclaims once fully released"
-        );
+        assert_eq!(ring.live_bytes(), 0, "every blob reclaims once fully released");
     }
 
     proptest! {

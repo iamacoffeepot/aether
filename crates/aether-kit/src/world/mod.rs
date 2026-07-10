@@ -92,8 +92,7 @@ impl WorldView {
         self.meshes.clear();
         let positions: Vec<ChunkPos> = self.world.chunks().map(|(pos, _)| pos).collect();
         for pos in positions {
-            self.meshes
-                .insert(pos, mesh_chunk(&self.world, pos, &self.styles));
+            self.meshes.insert(pos, mesh_chunk(&self.world, pos, &self.styles));
         }
     }
 
@@ -106,13 +105,9 @@ impl WorldView {
     fn remesh_around(&mut self, pos: ChunkPos) {
         for dz in -1..=1 {
             for dx in -1..=1 {
-                let neighbor = ChunkPos {
-                    x: pos.x + dx,
-                    z: pos.z + dz,
-                };
+                let neighbor = ChunkPos { x: pos.x + dx, z: pos.z + dz };
                 if (dx == 0 && dz == 0) || self.meshes.contains_key(&neighbor) {
-                    self.meshes
-                        .insert(neighbor, mesh_chunk(&self.world, neighbor, &self.styles));
+                    self.meshes.insert(neighbor, mesh_chunk(&self.world, neighbor, &self.styles));
                 }
             }
         }
@@ -141,8 +136,7 @@ impl WorldView {
             }
         }
         for pos in remesh {
-            self.meshes
-                .insert(pos, mesh_chunk(&self.world, pos, &self.styles));
+            self.meshes.insert(pos, mesh_chunk(&self.world, pos, &self.styles));
         }
     }
 
@@ -161,11 +155,7 @@ impl WasmActor for WorldView {
     const NAMESPACE: &'static str = "aether.kit.world";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(WorldView {
-            world: World::new(),
-            meshes: BTreeMap::new(),
-            styles: StyleTable::default(),
-        })
+        Ok(WorldView { world: World::new(), meshes: BTreeMap::new(), styles: StyleTable::default() })
     }
 
     /// Subscribe the `Render` lifecycle stage so the cached meshes
@@ -278,13 +268,7 @@ impl WasmActor for WorldView {
     /// failure its stats describe the committed partial result exactly.
     #[handler::manual]
     fn on_apply_brush(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: ApplyBrush) {
-        let execution = operator::apply_brush(
-            &mut self.world,
-            msg.source,
-            &msg.path,
-            msg.brush,
-            msg.budget,
-        );
+        let execution = operator::apply_brush(&mut self.world, msg.source, &msg.path, msg.brush, msg.budget);
         self.remesh_touched(&execution.touched);
         if ctx.reply_target().is_some() {
             ctx.reply(&execution.result);
@@ -301,8 +285,7 @@ impl WasmActor for WorldView {
     /// says nothing about proposal/commit state; ADR-0143 owns that boundary.
     #[handler::manual]
     fn on_run_automaton(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: RunAutomaton) {
-        let execution =
-            operator::run_automaton(&mut self.world, msg.source, msg.seed, msg.rule, msg.budget);
+        let execution = operator::run_automaton(&mut self.world, msg.source, msg.seed, msg.rule, msg.budget);
         self.remesh_touched(&execution.touched);
         if ctx.reply_target().is_some() {
             ctx.reply(&execution.result);
@@ -351,23 +334,15 @@ impl WasmActor for WorldView {
     #[allow(clippy::unused_self)]
     #[handler::single]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: WorldLoad) {
-        let read = Read {
-            namespace: msg.namespace.clone(),
-            path: msg.path.clone(),
-        };
-        let context = WorldLoadContext {
-            namespace: msg.namespace,
-            path: msg.path,
-        };
+        let read = Read { namespace: msg.namespace.clone(), path: msg.path.clone() };
+        let context = WorldLoadContext { namespace: msg.namespace, path: msg.path };
         tracing::info!(
             target: "aether_kit",
             namespace = %read.namespace,
             path = %read.path,
             "world load requested; issuing read",
         );
-        let _ = ctx
-            .actor::<FsCapability>()
-            .send_with_context(&read, &context);
+        let _ = ctx.actor::<FsCapability>().send_with_context(&read, &context);
     }
 
     /// Consume the `aether.fs` read reply. On `Ok`, decode the bytes with
@@ -420,11 +395,7 @@ mod tests {
 
     #[test]
     fn chunk_border_stamp_remeshes_both_touched_chunks() {
-        let mut view = WorldView {
-            world: World::new(),
-            meshes: BTreeMap::new(),
-            styles: StyleTable::default(),
-        };
+        let mut view = WorldView { world: World::new(), meshes: BTreeMap::new(), styles: StyleTable::default() };
         view.stamp_vertices(
             &[
                 WorldPoint::new(4080, 256),
@@ -437,14 +408,8 @@ mod tests {
 
         let west = ChunkPos { x: 0, z: 0 };
         let east = ChunkPos { x: 1, z: 0 };
-        assert!(
-            view.meshes.contains_key(&west),
-            "west touched chunk remeshed"
-        );
-        assert!(
-            view.meshes.contains_key(&east),
-            "east touched chunk remeshed"
-        );
+        assert!(view.meshes.contains_key(&west), "west touched chunk remeshed");
+        assert!(view.meshes.contains_key(&east), "east touched chunk remeshed");
         assert!(
             view.meshes.get(&west).is_some_and(|mesh| !mesh.is_empty()),
             "west mesh includes the border stamp and its east apron",

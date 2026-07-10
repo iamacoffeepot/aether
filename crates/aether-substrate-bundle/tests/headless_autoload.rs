@@ -27,13 +27,9 @@ use std::time::Duration;
 
 use aether_substrate_bundle::Chassis as _;
 use aether_substrate_bundle::autoload::boot_manifest_autoload;
-use aether_substrate_bundle::bundle_pack::{
-    ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack,
-};
+use aether_substrate_bundle::bundle_pack::{ChassisSettings, Pack, PackedComponent, decode_pack, encode_pack};
 use aether_substrate_bundle::capabilities::http::HttpConfig;
-use aether_substrate_bundle::capabilities::{
-    AnthropicConfig, ContentGenConfig, GeminiConfig, WasmTrampoline,
-};
+use aether_substrate_bundle::capabilities::{AnthropicConfig, ContentGenConfig, GeminiConfig, WasmTrampoline};
 use aether_substrate_bundle::headless::{AutoloadComponent, HeadlessChassis, HeadlessEnv};
 use aether_substrate_bundle::test_bench::test_helpers::{
     init_save_sandbox, locate_component_wasm, test_namespace_roots,
@@ -90,11 +86,7 @@ mod tests {
             scheduler_tuning: aether_substrate_bundle::SchedulerTuning::default(),
             teardown_cap: Duration::from_millis(100),
             lifecycle_advance_timeout_millis: 1_000,
-            autoload: decoded
-                .components
-                .into_iter()
-                .map(AutoloadComponent::from)
-                .collect(),
+            autoload: decoded.components.into_iter().map(AutoloadComponent::from).collect(),
         };
 
         // `build` queues the autoload mail; the worker pool (up after
@@ -145,11 +137,8 @@ mod tests {
         let manifest_json = serde_json::json!({
             "components": [{ "wasm": wasm_path, "name": "probe" }],
         });
-        fs::write(
-            &manifest_path,
-            serde_json::to_vec(&manifest_json).expect("serialize boot manifest"),
-        )
-        .expect("write boot manifest");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest_json).expect("serialize boot manifest"))
+            .expect("write boot manifest");
 
         let autoload = boot_manifest_autoload(&manifest_path).expect("read boot manifest");
         assert_eq!(autoload.len(), 1, "one component listed in the manifest");

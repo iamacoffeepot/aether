@@ -37,7 +37,5 @@ pub const DEFAULT_RPC_PORT: u16 = 8901;
 // a cap config knob.
 #[allow(clippy::disallowed_methods)]
 pub fn rpc_port_from_env() -> Option<u16> {
-    env::var("AETHER_RPC_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
+    env::var("AETHER_RPC_PORT").ok().and_then(|s| s.parse().ok())
 }

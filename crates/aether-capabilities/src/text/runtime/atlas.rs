@@ -71,10 +71,7 @@ pub enum GlyphSlot {
 /// [`GlyphSlot`] — shared by [`Atlas::cached`] and the hit arm of
 /// [`Atlas::get_or_insert`].
 fn cached_slot(entry: Option<AtlasEntry>) -> GlyphSlot {
-    entry.map_or(GlyphSlot::Empty, |entry| GlyphSlot::Placed {
-        entry,
-        uploaded: false,
-    })
+    entry.map_or(GlyphSlot::Empty, |entry| GlyphSlot::Placed { entry, uploaded: false })
 }
 
 /// Fixed-size RGBA8 atlas with a left-to-right, top-to-bottom shelf
@@ -147,13 +144,7 @@ impl Atlas {
     /// uv coordinates are an exact `pixel / ATLAS_SIZE` ratio; both fit in
     /// `f32` without loss for any in-bounds glyph.
     #[allow(clippy::cast_precision_loss)]
-    pub fn get_or_insert(
-        &mut self,
-        key: GlyphKey,
-        width: u32,
-        height: u32,
-        coverage: &[u8],
-    ) -> GlyphSlot {
+    pub fn get_or_insert(&mut self, key: GlyphKey, width: u32, height: u32, coverage: &[u8]) -> GlyphSlot {
         if let Some(cached) = self.cache.get(&key) {
             return cached_slot(*cached);
         }
@@ -183,10 +174,7 @@ impl Atlas {
             v1: (y + height) as f32 / size,
         };
         self.cache.insert(key, Some(entry));
-        GlyphSlot::Placed {
-            entry,
-            uploaded: true,
-        }
+        GlyphSlot::Placed { entry, uploaded: true }
     }
 
     /// The RGBA8 bytes of a placed glyph's rect, row-major — the payload
@@ -244,11 +232,7 @@ mod tests {
     use super::*;
 
     fn key(glyph_index: u16) -> GlyphKey {
-        GlyphKey {
-            font_id: 0,
-            glyph_index,
-            size_pixels: 32,
-        }
+        GlyphKey { font_id: 0, glyph_index, size_pixels: 32 }
     }
 
     #[test]
@@ -292,16 +276,10 @@ mod tests {
     #[test]
     fn zero_area_glyph_is_empty_and_cached() {
         let mut atlas = Atlas::new();
-        assert!(matches!(
-            atlas.get_or_insert(key(3), 0, 0, &[]),
-            GlyphSlot::Empty
-        ));
+        assert!(matches!(atlas.get_or_insert(key(3), 0, 0, &[]), GlyphSlot::Empty));
         // Cached as empty — a second lookup is still Empty, no panic on
         // the empty coverage slice.
-        assert!(matches!(
-            atlas.get_or_insert(key(3), 0, 0, &[]),
-            GlyphSlot::Empty
-        ));
+        assert!(matches!(atlas.get_or_insert(key(3), 0, 0, &[]), GlyphSlot::Empty));
     }
 
     #[test]
@@ -310,9 +288,7 @@ mod tests {
         // A glyph almost as wide as the atlas leaves no room beside it, so
         // the next glyph must drop to a fresh shelf below.
         let wide = vec![255u8; (ATLAS_SIZE as usize - 2) * 4];
-        let GlyphSlot::Placed { entry: first, .. } =
-            atlas.get_or_insert(key(10), ATLAS_SIZE - 2, 4, &wide)
-        else {
+        let GlyphSlot::Placed { entry: first, .. } = atlas.get_or_insert(key(10), ATLAS_SIZE - 2, 4, &wide) else {
             panic!("wide glyph should place on the first shelf");
         };
         let small = vec![255u8; 4 * 4];

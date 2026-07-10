@@ -4,15 +4,15 @@ use super::ids::{parse_engine_id, parse_mailbox_id, resolve_handled_kind};
 use super::render::{frame_size_aware_error, internal, internal_msg, json};
 use super::{COMPONENT_CAP, ENGINE_CAP, Mcp};
 use crate::args::{
-    ListBinariesArgs, ListComponentsArgs, LoadComponentArgs, ReplaceComponentArgs,
-    UploadBinaryArgs, UploadComponentArgs,
+    ListBinariesArgs, ListComponentsArgs, LoadComponentArgs, ReplaceComponentArgs, UploadBinaryArgs,
+    UploadComponentArgs,
 };
 use aether_codec::frame::max_frame_size;
 use aether_data::{EngineId, Kind, SchemaType, wire};
 use aether_kinds::{
     KindDescriptorWire, ListComponentBinaries, ListComponentBinariesResult, ListEngineBinaries,
-    ListEngineBinariesResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult,
-    UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
+    ListEngineBinariesResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult, UploadBinary,
+    UploadBinaryResult, UploadComponent, UploadComponentResult,
 };
 use rmcp::ErrorData as McpError;
 use std::path::PathBuf;
@@ -82,51 +82,28 @@ pub(super) async fn component_config_bytes(
         }
         (Some(value), None) => value,
         (None, Some(path)) => {
-            let bytes = fs::read(path).await.map_err(|e| {
-                McpError::invalid_params(
-                    format!("{context}: reading config_path {path:?}: {e}"),
-                    None,
-                )
-            })?;
+            let bytes = fs::read(path)
+                .await
+                .map_err(|e| McpError::invalid_params(format!("{context}: reading config_path {path:?}: {e}"), None))?;
             serde_json::from_slice(&bytes).map_err(|e| {
-                McpError::invalid_params(
-                    format!("{context}: parsing config_path {path:?} as JSON: {e}"),
-                    None,
-                )
+                McpError::invalid_params(format!("{context}: parsing config_path {path:?} as JSON: {e}"), None)
             })?
         }
     };
 
     let Some(config_kind) = config_kind else {
         return Err(McpError::invalid_params(
-            format!(
-                "{context}: config JSON was provided but the component declares no Config kind"
-            ),
+            format!("{context}: config JSON was provided but the component declares no Config kind"),
             None,
         ));
     };
-    let schema = wire::from_bytes::<SchemaType>(&config_kind.schema_wire).map_err(|e| {
-        internal_msg(&format!(
-            "{context}: decoding config schema for {}: {e}",
-            config_kind.name
-        ))
+    let schema = wire::from_bytes::<SchemaType>(&config_kind.schema_wire)
+        .map_err(|e| internal_msg(&format!("{context}: decoding config schema for {}: {e}", config_kind.name)))?;
+    let resolved = resolve_bytes_params(value, &schema, max_frame_size()).await.map_err(|e| {
+        McpError::invalid_params(format!("{context}: resolving config blob params for {}: {e}", config_kind.name), None)
     })?;
-    let resolved = resolve_bytes_params(value, &schema, max_frame_size())
-        .await
-        .map_err(|e| {
-            McpError::invalid_params(
-                format!(
-                    "{context}: resolving config blob params for {}: {e}",
-                    config_kind.name
-                ),
-                None,
-            )
-        })?;
     let bytes = aether_codec::encode_schema(&resolved, &schema).map_err(|e| {
-        McpError::invalid_params(
-            format!("{context}: config does not match {}: {e}", config_kind.name),
-            None,
-        )
+        McpError::invalid_params(format!("{context}: config does not match {}: {e}", config_kind.name), None)
     })?;
     Ok(Some(bytes))
 }
@@ -148,9 +125,7 @@ pub(super) fn selector_with_explicit_export(selector: &str, export: Option<&str>
     let Some(export) = export else {
         return selector.to_owned();
     };
-    let module = selector
-        .split_once('@')
-        .map_or(selector, |(module, _)| module);
+    let module = selector.split_once('@').map_or(selector, |(module, _)| module);
     format!("{module}@{export}")
 }
 
@@ -174,9 +149,7 @@ pub(super) fn replica_base_name(
 /// under: every instance suffixed, no bare-name special case for index 0,
 /// so `replicas: 1` differs from an omitted field only by the `-0` suffix.
 pub(super) fn replica_names(base: &str, replicas: u32) -> Vec<String> {
-    (0..replicas)
-        .map(|index| format!("{base}-{index}"))
-        .collect()
+    (0..replicas).map(|index| format!("{base}-{index}")).collect()
 }
 
 /// Reject `replicas: 0` (ADR-0090 §4 posture: a bad known value is a hard
@@ -196,19 +169,11 @@ pub(super) async fn upload_binary(mcp: &Mcp, args: UploadBinaryArgs) -> Result<S
     // reading the bytes (unlike load_component).
     let reply = mcp
         .session
-        .call_one(local_envelope(
-            ENGINE_CAP,
-            &UploadBinary {
-                staged_path: args.staged_path,
-                name: args.name,
-            },
-        ))
+        .call_one(local_envelope(ENGINE_CAP, &UploadBinary { staged_path: args.staged_path, name: args.name }))
         .await
         .map_err(internal)?;
     match UploadBinaryResult::decode_from_bytes(&reply.payload) {
-        Some(UploadBinaryResult::Ok { hash, name }) => {
-            json(&serde_json::json!({ "hash": hash, "name": name }))
-        }
+        Some(UploadBinaryResult::Ok { hash, name }) => json(&serde_json::json!({ "hash": hash, "name": name })),
         Some(UploadBinaryResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable UploadBinaryResult")),
     }
@@ -219,11 +184,7 @@ pub(super) async fn list_binaries(mcp: &Mcp, args: ListBinariesArgs) -> Result<S
         .session
         .call_one(local_envelope(
             ENGINE_CAP,
-            &ListEngineBinaries {
-                chassis: args.chassis,
-                caps: args.caps,
-                target: args.target,
-            },
+            &ListEngineBinaries { chassis: args.chassis, caps: args.caps, target: args.target },
         ))
         .await
         .map_err(internal)?;
@@ -233,50 +194,30 @@ pub(super) async fn list_binaries(mcp: &Mcp, args: ListBinariesArgs) -> Result<S
     }
 }
 
-pub(super) async fn upload_component(
-    mcp: &Mcp,
-    args: UploadComponentArgs,
-) -> Result<String, McpError> {
+pub(super) async fn upload_component(mcp: &Mcp, args: UploadComponentArgs) -> Result<String, McpError> {
     // The hub reads the staged path; aether-mcp forwards it, never
     // reading the bytes (unlike the load_component resolve hop, which
     // pulls the bytes back from the store).
     let reply = mcp
         .session
-        .call_one(local_envelope(
-            ENGINE_CAP,
-            &UploadComponent {
-                staged_path: args.staged_path,
-                name: args.name,
-            },
-        ))
+        .call_one(local_envelope(ENGINE_CAP, &UploadComponent { staged_path: args.staged_path, name: args.name }))
         .await
         .map_err(internal)?;
     match UploadComponentResult::decode_from_bytes(&reply.payload) {
-        Some(UploadComponentResult::Ok { hash, name }) => {
-            json(&serde_json::json!({ "hash": hash, "name": name }))
-        }
+        Some(UploadComponentResult::Ok { hash, name }) => json(&serde_json::json!({ "hash": hash, "name": name })),
         Some(UploadComponentResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable UploadComponentResult")),
     }
 }
 
-pub(super) async fn list_components(
-    mcp: &Mcp,
-    args: ListComponentsArgs,
-) -> Result<String, McpError> {
+pub(super) async fn list_components(mcp: &Mcp, args: ListComponentsArgs) -> Result<String, McpError> {
     let handled_kind = match args.handled_kind.as_deref() {
         Some(s) => Some(resolve_handled_kind(s)?),
         None => None,
     };
     let reply = mcp
         .session
-        .call_one(local_envelope(
-            ENGINE_CAP,
-            &ListComponentBinaries {
-                namespace: args.namespace,
-                handled_kind,
-            },
-        ))
+        .call_one(local_envelope(ENGINE_CAP, &ListComponentBinaries { namespace: args.namespace, handled_kind }))
         .await
         .map_err(internal)?;
     match ListComponentBinariesResult::decode_from_bytes(&reply.payload) {
@@ -304,36 +245,23 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
     let export = args.export.or(resolved.export);
 
     let Some(replicas) = args.replicas else {
-        return load_single_component(
-            mcp,
-            engine,
-            &selector,
-            resolved.wasm,
-            args.name,
-            config,
-            export,
-        )
-        .await;
+        return load_single_component(mcp, engine, &selector, resolved.wasm, args.name, config, export).await;
     };
 
     // issue 2626: loop the single-load dispatch N times, one shared
     // wasm/config, naming each instance in the same precedence order
     // `stage_boot_manifest` derives `expected_names` in.
-    let base = replica_base_name(
-        args.name.as_deref(),
-        export.as_deref(),
-        resolved.entry_namespace.as_deref(),
-    )
-    .ok_or_else(|| {
-        McpError::invalid_params(
-            format!(
-                "component {selector:?}: cannot determine a base name for `replicas` \
+    let base = replica_base_name(args.name.as_deref(), export.as_deref(), resolved.entry_namespace.as_deref())
+        .ok_or_else(|| {
+            McpError::invalid_params(
+                format!(
+                    "component {selector:?}: cannot determine a base name for `replicas` \
                      (no `name`, `export`, or entry actor namespace in the wasm manifest); \
                      set `name` or `export`"
-            ),
-            None,
-        )
-    })?;
+                ),
+                None,
+            )
+        })?;
 
     let mut loaded = Vec::with_capacity(replicas as usize);
     for (index, name) in replica_names(&base, replicas).into_iter().enumerate() {
@@ -350,15 +278,9 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
                 },
             ))
             .await
-            .map_err(|e| {
-                frame_size_aware_error(&format!("load_component {selector:?} replica {index}"), e)
-            })?;
+            .map_err(|e| frame_size_aware_error(&format!("load_component {selector:?} replica {index}"), e))?;
         match LoadResult::decode_from_bytes(&reply.payload) {
-            Some(LoadResult::Ok {
-                mailbox_id,
-                name,
-                capabilities,
-            }) => {
+            Some(LoadResult::Ok { mailbox_id, name, capabilities }) => {
                 mcp.components
                     .lock()
                     .expect("component cache mutex is never poisoned")
@@ -395,24 +317,11 @@ async fn load_single_component(
 ) -> Result<String, McpError> {
     let reply = mcp
         .session
-        .call_one(engine_envelope(
-            engine,
-            COMPONENT_CAP,
-            &LoadComponent {
-                wasm,
-                name,
-                config,
-                export,
-            },
-        ))
+        .call_one(engine_envelope(engine, COMPONENT_CAP, &LoadComponent { wasm, name, config, export }))
         .await
         .map_err(|e| frame_size_aware_error(&format!("load_component {selector:?}"), e))?;
     match LoadResult::decode_from_bytes(&reply.payload) {
-        Some(LoadResult::Ok {
-            mailbox_id,
-            name,
-            capabilities,
-        }) => {
+        Some(LoadResult::Ok { mailbox_id, name, capabilities }) => {
             mcp.components
                 .lock()
                 .expect("component cache mutex is never poisoned")
@@ -428,10 +337,7 @@ async fn load_single_component(
     }
 }
 
-pub(super) async fn replace_component(
-    mcp: &Mcp,
-    args: ReplaceComponentArgs,
-) -> Result<String, McpError> {
+pub(super) async fn replace_component(mcp: &Mcp, args: ReplaceComponentArgs) -> Result<String, McpError> {
     let engine = parse_engine_id(&args.engine_id)?;
     let mailbox_id = parse_mailbox_id(&args.mailbox_id)?;
     let selector = selector_with_explicit_export(&args.selector, args.export.as_deref());

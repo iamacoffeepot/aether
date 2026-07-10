@@ -12,12 +12,7 @@ use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
 /// that drive a registered handler synchronously without going
 /// through the full `Mail` → `Mailer::push` path.
 #[cfg(test)]
-pub fn test_dispatch<'a>(
-    kind: KindId,
-    kind_name: &'a str,
-    payload: &'a [u8],
-    count: u32,
-) -> MailDispatch<'a> {
+pub fn test_dispatch<'a>(kind: KindId, kind_name: &'a str, payload: &'a [u8], count: u32) -> MailDispatch<'a> {
     MailDispatch {
         kind,
         kind_name,
@@ -41,12 +36,7 @@ pub fn test_dispatch<'a>(
 /// [`OwnedDispatch`] migration so cap-side dispatcher tests stay
 /// terse without each rebuilding the full struct literal.
 #[cfg(test)]
-pub fn test_owned_dispatch(
-    kind: KindId,
-    kind_name: &str,
-    payload: &[u8],
-    count: u32,
-) -> OwnedDispatch {
+pub fn test_owned_dispatch(kind: KindId, kind_name: &str, payload: &[u8], count: u32) -> OwnedDispatch {
     OwnedDispatch::disarmed(
         kind,
         kind_name.to_owned(),
@@ -153,23 +143,13 @@ impl ObligationGuard {
     /// dispatch carries a guard obligation iff it carries a real
     /// settlement obligation (ADR-0094, issue 1326).
     fn armed(mail_id: MailId, kind_name: String, mailbox: MailboxId) -> Self {
-        Self {
-            mail_id,
-            kind_name,
-            mailbox,
-            armed: Cell::new(mail_id != MailId::NONE),
-        }
+        Self { mail_id, kind_name, mailbox, armed: Cell::new(mail_id != MailId::NONE) }
     }
 
     /// A guard that carries no obligation — test/helper mints and the
     /// disarmed result of a `Clone`.
     fn disarmed(mail_id: MailId, kind_name: String, mailbox: MailboxId) -> Self {
-        Self {
-            mail_id,
-            kind_name,
-            mailbox,
-            armed: Cell::new(false),
-        }
+        Self { mail_id, kind_name, mailbox, armed: Cell::new(false) }
     }
 
     fn disarm(&self) {

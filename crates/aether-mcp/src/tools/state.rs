@@ -2,14 +2,12 @@ use super::bytes::resolve_bytes_params;
 use super::components::{ResolvedComponent, StagedBootManifest};
 use super::ids::{mail_node_to_json, node_reversible_ids};
 use super::{
-    AWAIT_TIMEOUT_DEFAULT_MS, AsyncMutex, ComponentSelector, ComponentSpec, ENGINE_CAP, EngineId,
-    EngineNames, INVENTORY_CAP, Kind, KindDescriptor, KindId, ListKinds, ListKindsResult,
-    MailEnvelope, MailNodeJson, MailNodeWire, MailSpec, MailboxAddress, Manifest, ManifestResult,
-    Mcp, McpError, Resolve, ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType,
-    Uuid, component_config_bytes, descriptors, engine_envelope, frame_size_aware_error,
-    internal_msg, local_envelope, mailbox_id_from_path, max_frame_size, reject_zero_replicas,
-    replica_base_name, replica_names, selector_with_explicit_export, tagged_id,
-    validate_recipient_scope, wire,
+    AWAIT_TIMEOUT_DEFAULT_MS, AsyncMutex, ComponentSelector, ComponentSpec, ENGINE_CAP, EngineId, EngineNames,
+    INVENTORY_CAP, Kind, KindDescriptor, KindId, ListKinds, ListKindsResult, MailEnvelope, MailNodeJson, MailNodeWire,
+    MailSpec, MailboxAddress, Manifest, ManifestResult, Mcp, McpError, Resolve, ResolveComponent,
+    ResolveComponentResult, ResolveResult, SchemaType, Uuid, component_config_bytes, descriptors, engine_envelope,
+    frame_size_aware_error, internal_msg, local_envelope, mailbox_id_from_path, max_frame_size, reject_zero_replicas,
+    replica_base_name, replica_names, selector_with_explicit_export, tagged_id, validate_recipient_scope, wire,
 };
 use aether_data::canonical::kind_id_from_parts;
 use std::collections::HashMap;
@@ -25,10 +23,7 @@ impl Mcp {
     /// collected reply envelopes plus a `timed_out` flag — the await is
     /// bounded by [`AWAIT_TIMEOUT_DEFAULT_MS`] so a cap that never
     /// replies returns at the cap rather than hanging.
-    pub(super) async fn deliver_one(
-        &self,
-        spec: MailSpec,
-    ) -> anyhow::Result<(Vec<MailEnvelope>, bool)> {
+    pub(super) async fn deliver_one(&self, spec: MailSpec) -> anyhow::Result<(Vec<MailEnvelope>, bool)> {
         let envelope = self.build_mail_envelope(spec).await?;
         let timeout = Duration::from_millis(u64::from(AWAIT_TIMEOUT_DEFAULT_MS));
         self.session.call_collecting(envelope, timeout).await
@@ -51,10 +46,7 @@ impl Mcp {
     /// pre-resolution, so the load seam stays path-free. An `Err` reply (no
     /// match, or an attribute query matching more than one component) is a
     /// clean tool error.
-    pub(super) async fn resolve_component(
-        &self,
-        selector: &str,
-    ) -> Result<ResolvedComponent, McpError> {
+    pub(super) async fn resolve_component(&self, selector: &str) -> Result<ResolvedComponent, McpError> {
         let reply = self
             .session
             .call_one(local_envelope(
@@ -70,13 +62,7 @@ impl Mcp {
             .await
             .map_err(|e| frame_size_aware_error(&format!("resolve_component {selector:?}"), e))?;
         match ResolveComponentResult::decode_from_bytes(&reply.payload) {
-            Some(ResolveComponentResult::Ok {
-                wasm,
-                export,
-                manifest,
-                config_kind,
-                ..
-            }) => {
+            Some(ResolveComponentResult::Ok { wasm, export, manifest, config_kind, .. }) => {
                 // ADR-0138: the bare-load entry is the manifest's opted-in
                 // `default_entry` (the single-actor namespace or the
                 // `export!(entry = …)` designation), NOT "the first actor
@@ -84,12 +70,7 @@ impl Mcp {
                 // reports `None`, so replica-name derivation falls through
                 // to `name` / `export`.
                 let entry_namespace = manifest.default_entry;
-                Ok(ResolvedComponent {
-                    wasm,
-                    export,
-                    entry_namespace,
-                    config_kind,
-                })
+                Ok(ResolvedComponent { wasm, export, entry_namespace, config_kind })
             }
             Some(ResolveComponentResult::Err { error }) => Err(internal_msg(&error)),
             None => Err(internal_msg("undecodable ResolveComponentResult")),
@@ -122,17 +103,13 @@ impl Mcp {
         let mut expected_names: Vec<String> = Vec::with_capacity(components.len());
         for spec in components {
             reject_zero_replicas(spec.replicas, &spec.selector)?;
-            let resolve_selector =
-                selector_with_explicit_export(&spec.selector, spec.export.as_deref());
+            let resolve_selector = selector_with_explicit_export(&spec.selector, spec.export.as_deref());
             let resolved = self.resolve_component(&resolve_selector).await?;
             let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-            let wasm_path =
-                env::temp_dir().join(format!("aether-boot-wasm-{}-{seq}.wasm", process::id()));
-            fs::write(&wasm_path, &resolved.wasm).await.map_err(|e| {
-                internal_msg(&format!(
-                    "staging boot wasm for selector {resolve_selector:?}: {e}"
-                ))
-            })?;
+            let wasm_path = env::temp_dir().join(format!("aether-boot-wasm-{}-{seq}.wasm", process::id()));
+            fs::write(&wasm_path, &resolved.wasm)
+                .await
+                .map_err(|e| internal_msg(&format!("staging boot wasm for selector {resolve_selector:?}: {e}")))?;
             let mut entry = serde_json::json!({ "wasm": wasm_path.to_string_lossy() });
             if let Some(name) = &spec.name {
                 entry["name"] = serde_json::json!(name);
@@ -146,12 +123,9 @@ impl Mcp {
             .await?
             {
                 let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-                let config_path =
-                    env::temp_dir().join(format!("aether-boot-config-{}-{seq}.bin", process::id()));
+                let config_path = env::temp_dir().join(format!("aether-boot-config-{}-{seq}.bin", process::id()));
                 fs::write(&config_path, config).await.map_err(|e| {
-                    internal_msg(&format!(
-                        "staging boot config for selector {resolve_selector:?}: {e}"
-                    ))
+                    internal_msg(&format!("staging boot config for selector {resolve_selector:?}: {e}"))
                 })?;
                 entry["config"] = serde_json::json!(config_path.to_string_lossy());
                 config_paths.push(config_path);
@@ -171,19 +145,15 @@ impl Mcp {
             // namespace > entry actor namespace. Fail loud if none is
             // determinable: a spawn that can't name what it's waiting for is
             // a bug to surface at stage time.
-            let ns = replica_base_name(
-                spec.name.as_deref(),
-                export.as_deref(),
-                resolved.entry_namespace.as_deref(),
-            )
-            .ok_or_else(|| {
-                internal_msg(&format!(
-                    "component {:?}: cannot determine expected registered name \
+            let ns = replica_base_name(spec.name.as_deref(), export.as_deref(), resolved.entry_namespace.as_deref())
+                .ok_or_else(|| {
+                    internal_msg(&format!(
+                        "component {:?}: cannot determine expected registered name \
                      (no `name`, `export`, or entry actor namespace in the wasm manifest); \
                      set `name` or `export` on the ComponentSpec",
-                    spec.selector,
-                ))
-            })?;
+                        spec.selector,
+                    ))
+                })?;
             match spec.replicas {
                 Some(replicas) => expected_names.extend(
                     replica_names(&ns, replicas)
@@ -197,19 +167,11 @@ impl Mcp {
         }
 
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let manifest_path =
-            env::temp_dir().join(format!("aether-boot-manifest-{}-{seq}.json", process::id()));
+        let manifest_path = env::temp_dir().join(format!("aether-boot-manifest-{}-{seq}.json", process::id()));
         let bytes = serde_json::to_vec(&serde_json::json!({ "components": entries }))
             .map_err(|e| internal_msg(&format!("encoding boot manifest: {e}")))?;
-        fs::write(&manifest_path, bytes)
-            .await
-            .map_err(|e| internal_msg(&format!("staging boot manifest: {e}")))?;
-        Ok(StagedBootManifest {
-            manifest_path,
-            wasm_paths,
-            config_paths,
-            expected_names,
-        })
+        fs::write(&manifest_path, bytes).await.map_err(|e| internal_msg(&format!("staging boot manifest: {e}")))?;
+        Ok(StagedBootManifest { manifest_path, wasm_paths, config_paths, expected_names })
     }
 
     /// Resolve a `MailSpec` against the per-engine merged kind view
@@ -227,13 +189,10 @@ impl Mcp {
         // infallible for static callers). A breach fails this mail item.
         validate_recipient_scope(&spec.recipient_name)?;
         let engine = EngineId(
-            Uuid::parse_str(&spec.engine_id)
-                .map_err(|e| anyhow::anyhow!("engine_id is not a valid UUID: {e}"))?,
+            Uuid::parse_str(&spec.engine_id).map_err(|e| anyhow::anyhow!("engine_id is not a valid UUID: {e}"))?,
         );
         let params = spec.params.unwrap_or(serde_json::Value::Null);
-        let (desc, payload) = self
-            .resolve_and_encode(engine, &spec.kind_name, params)
-            .await?;
+        let (desc, payload) = self.resolve_and_encode(engine, &spec.kind_name, params).await?;
         Ok(MailEnvelope {
             to: MailboxAddress {
                 engine: Some(engine),
@@ -330,12 +289,7 @@ impl Mcp {
     /// map cached — every lookup then falls back to the hex tag rather
     /// than erroring the tool or re-fetching on every render.
     pub(super) async fn ensure_names(&self, engine: EngineId) {
-        if self
-            .names
-            .lock()
-            .expect("reverse-name cache mutex is never poisoned")
-            .contains_key(&engine)
-        {
+        if self.names.lock().expect("reverse-name cache mutex is never poisoned").contains_key(&engine) {
             return;
         }
         // Fetch outside the lock — the await must not hold a std Mutex.
@@ -347,19 +301,11 @@ impl Mcp {
             .await
             .ok()
             .and_then(|reply| ManifestResult::decode_from_bytes(&reply.payload))
-            .unwrap_or_else(|| ManifestResult {
-                names: Vec::new(),
-                templates: Vec::new(),
-            });
-        let mut cache = self
-            .names
-            .lock()
-            .expect("reverse-name cache mutex is never poisoned");
+            .unwrap_or_else(|| ManifestResult { names: Vec::new(), templates: Vec::new() });
+        let mut cache = self.names.lock().expect("reverse-name cache mutex is never poisoned");
         // A concurrent session may have populated it while we awaited —
         // first writer wins, both maps are equivalent.
-        cache
-            .entry(engine)
-            .or_insert_with(|| EngineNames::from_manifest(&manifest));
+        cache.entry(engine).or_insert_with(|| EngineNames::from_manifest(&manifest));
     }
 
     /// ADR-0091 §3 lookup → miss → refresh → retry → error flow. Look
@@ -379,11 +325,7 @@ impl Mcp {
     /// *schema* has gone stale (a kind widened in place) still resolves to
     /// a hit here; that field-mismatch staleness is caught one layer up in
     /// [`Self::resolve_and_encode`], which refreshes on the encode failure.
-    pub(super) async fn lookup_descriptor(
-        &self,
-        engine: EngineId,
-        kind_name: &str,
-    ) -> anyhow::Result<KindDescriptor> {
+    pub(super) async fn lookup_descriptor(&self, engine: EngineId, kind_name: &str) -> anyhow::Result<KindDescriptor> {
         // Fast path: hit on the cache as it stands. `prefill_engine`
         // populates the static `descriptors::all()` baseline on first
         // touch so the very first send for a substrate-vocab kind
@@ -402,8 +344,7 @@ impl Mcp {
             return Ok(desc);
         }
         self.refresh_engine_kinds(engine).await;
-        self.cache_lookup(engine, kind_name)
-            .ok_or_else(|| anyhow::anyhow!("unknown kind: {kind_name}"))
+        self.cache_lookup(engine, kind_name).ok_or_else(|| anyhow::anyhow!("unknown kind: {kind_name}"))
     }
 
     /// Seed `engine`'s cache from the substrate's static vocabulary
@@ -413,27 +354,14 @@ impl Mcp {
     /// because component-defined kinds aren't shared across engines.
     #[allow(clippy::significant_drop_tightening)] // tight scope already
     pub(super) fn prefill_engine(&self, engine: EngineId) {
-        let mut cache = self
-            .kinds
-            .descriptors
-            .lock()
-            .expect("kinds-cache mutex is never poisoned");
-        cache.entry(engine).or_insert_with(|| {
-            descriptors::all()
-                .into_iter()
-                .map(|d| (d.name.clone(), d))
-                .collect()
-        });
+        let mut cache = self.kinds.descriptors.lock().expect("kinds-cache mutex is never poisoned");
+        cache.entry(engine).or_insert_with(|| descriptors::all().into_iter().map(|d| (d.name.clone(), d)).collect());
     }
 
     /// Synchronous cache hit/miss check — no await, holds the std
     /// `Mutex` only across the cloning lookup.
     pub(super) fn cache_lookup(&self, engine: EngineId, kind_name: &str) -> Option<KindDescriptor> {
-        let cache = self
-            .kinds
-            .descriptors
-            .lock()
-            .expect("kinds-cache mutex is never poisoned");
+        let cache = self.kinds.descriptors.lock().expect("kinds-cache mutex is never poisoned");
         cache.get(&engine).and_then(|m| m.get(kind_name).cloned())
     }
 
@@ -443,15 +371,8 @@ impl Mcp {
     /// function itself, so it's a small concurrent-insert with no
     /// upstream contention.
     pub(super) fn refresh_guard(&self, engine: EngineId) -> Arc<AsyncMutex<()>> {
-        let mut guards = self
-            .kinds
-            .refresh_guards
-            .lock()
-            .expect("kinds-cache refresh-guards mutex is never poisoned");
-        guards
-            .entry(engine)
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone()
+        let mut guards = self.kinds.refresh_guards.lock().expect("kinds-cache refresh-guards mutex is never poisoned");
+        guards.entry(engine).or_insert_with(|| Arc::new(AsyncMutex::new(()))).clone()
     }
 
     /// Issue `ListKinds` against the engine's `aether.inventory`
@@ -481,10 +402,7 @@ impl Mcp {
             .into_iter()
             .filter_map(|wire| {
                 let schema = wire::from_bytes::<SchemaType>(&wire.schema_wire).ok()?;
-                Some(KindDescriptor {
-                    name: wire.name,
-                    schema,
-                })
+                Some(KindDescriptor { name: wire.name, schema })
             })
             .collect();
 
@@ -501,11 +419,7 @@ impl Mcp {
     /// guard.
     #[allow(clippy::significant_drop_tightening)] // tight scope already
     pub(super) fn merge_into_engine_cache(&self, engine: EngineId, fresh: Vec<KindDescriptor>) {
-        let mut cache = self
-            .kinds
-            .descriptors
-            .lock()
-            .expect("kinds-cache mutex is never poisoned");
+        let mut cache = self.kinds.descriptors.lock().expect("kinds-cache mutex is never poisoned");
         let map = cache.entry(engine).or_default();
         for desc in fresh {
             map.insert(desc.name.clone(), desc);
@@ -519,10 +433,7 @@ impl Mcp {
     /// vocabulary on the first `build_mail_envelope` call (`prefill_engine`),
     /// so an empty snapshot only arises on paths that never encoded a kind
     /// for this engine (e.g. a broken `engine_id` before `deliver_one` errored).
-    pub(super) fn snapshot_engine_kinds(
-        &self,
-        engine: EngineId,
-    ) -> HashMap<String, KindDescriptor> {
+    pub(super) fn snapshot_engine_kinds(&self, engine: EngineId) -> HashMap<String, KindDescriptor> {
         self.kinds
             .descriptors
             .lock()
@@ -549,21 +460,14 @@ impl Mcp {
         }
         let Some(ResolveResult { resolved }) = self
             .session
-            .call_one(engine_envelope(
-                engine,
-                INVENTORY_CAP,
-                &Resolve { ids: tagged },
-            ))
+            .call_one(engine_envelope(engine, INVENTORY_CAP, &Resolve { ids: tagged }))
             .await
             .ok()
             .and_then(|reply| ResolveResult::decode_from_bytes(&reply.payload))
         else {
             return;
         };
-        let mut cache = self
-            .names
-            .lock()
-            .expect("reverse-name cache mutex is never poisoned");
+        let mut cache = self.names.lock().expect("reverse-name cache mutex is never poisoned");
         if let Some(names) = cache.get_mut(&engine) {
             for entry in resolved {
                 if let Ok(id) = tagged_id::decode(&entry.id) {
@@ -580,21 +484,14 @@ impl Mcp {
     /// through the now-populated map — falling back to the ADR-0064 hex
     /// tag for any id that resolves to nothing. `Handle` ids stay hex
     /// (they never enter the reverse map).
-    pub(super) async fn render_mail_nodes(
-        &self,
-        engine: EngineId,
-        nodes: Vec<MailNodeWire>,
-    ) -> Vec<MailNodeJson> {
+    pub(super) async fn render_mail_nodes(&self, engine: EngineId, nodes: Vec<MailNodeWire>) -> Vec<MailNodeJson> {
         self.ensure_names(engine).await;
 
         // Collect the mailbox / kind / thread ids that the static map
         // misses, so one batched resolve covers the whole tree.
         let mut misses: Vec<u64> = Vec::new();
         {
-            let cache = self
-                .names
-                .lock()
-                .expect("reverse-name cache mutex is never poisoned");
+            let cache = self.names.lock().expect("reverse-name cache mutex is never poisoned");
             if let Some(names) = cache.get(&engine) {
                 for node in &nodes {
                     for id in node_reversible_ids(node) {
@@ -609,21 +506,12 @@ impl Mcp {
         misses.dedup();
         self.resolve_dynamic(engine, &misses).await;
 
-        let cache = self
-            .names
-            .lock()
-            .expect("reverse-name cache mutex is never poisoned");
+        let cache = self.names.lock().expect("reverse-name cache mutex is never poisoned");
         match cache.get(&engine) {
-            Some(names) => nodes
-                .into_iter()
-                .map(|node| mail_node_to_json(node, Some(names)))
-                .collect(),
+            Some(names) => nodes.into_iter().map(|node| mail_node_to_json(node, Some(names))).collect(),
             // No map for this engine (shouldn't happen post-ensure, but
             // be defensive): render every id as a hex tag.
-            None => nodes
-                .into_iter()
-                .map(|n| mail_node_to_json(n, None))
-                .collect(),
+            None => nodes.into_iter().map(|n| mail_node_to_json(n, None)).collect(),
         }
     }
 }

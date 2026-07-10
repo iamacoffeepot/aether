@@ -55,9 +55,8 @@ pub use self::config::{AudioConfig, AudioConfigLayer, AudioOverlay};
 use self::event::AudioEventSender;
 use self::sample::BankAssembly;
 use super::kinds::{
-    LoadInstrument, NoteOff, NoteOn, PlayTrack, Schedule, ScheduleResult, SetMasterGain,
-    SetMasterGainResult, SetReverbSend, SetReverbSendResult, SetSenderGain, SetSenderGainResult,
-    StopTrack,
+    LoadInstrument, NoteOff, NoteOn, PlayTrack, Schedule, ScheduleResult, SetMasterGain, SetMasterGainResult,
+    SetReverbSend, SetReverbSendResult, SetSenderGain, SetSenderGainResult, StopTrack,
 };
 
 // The substrate-typed + native-only surface the parent's `#[actor] impl`
@@ -162,10 +161,7 @@ impl NativeActor for AudioCapability {
     /// peripheral, not infrastructure). The cap always claims its
     /// mailbox so agents on chassis without audio still get loud
     /// `Err` replies for `SetMasterGain` instead of timing out.
-    fn init(
-        config: AudioConfig,
-        _ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<AudioCapabilityState, BootError> {
+    fn init(config: AudioConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<AudioCapabilityState, BootError> {
         if config.disabled {
             tracing::info!(
                 target: "aether_substrate::audio",
@@ -257,11 +253,7 @@ impl NativeActor for AudioCapability {
 
     /// Schedule a batch of timed note events (ADR-0104).
     #[handler::single]
-    fn on_schedule(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: Schedule,
-    ) -> ScheduleResult {
+    fn on_schedule(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Schedule) -> ScheduleResult {
         state.handle_schedule(ctx, mail)
     }
 
@@ -295,11 +287,7 @@ impl NativeActor for AudioCapability {
 
     /// Load a sampled instrument bank from an `.sfz` file (ADR-0103 §4/§5).
     #[handler::manual]
-    fn on_load_instrument(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Manual>,
-        mail: LoadInstrument,
-    ) {
+    fn on_load_instrument(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadInstrument) {
         state.handle_load_instrument(ctx, mail);
     }
 

@@ -81,8 +81,8 @@ pub use aether_derive::Config;
 pub use boot::{SubstrateBoot, SubstrateBootBuilder};
 pub use chassis::Chassis;
 pub use chassis::builder::{
-    Builder, BuilderState, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, HasDriver,
-    NeverDriver, NeverDriverRunning, NoDriver, PassiveChassis, RunError,
+    Builder, BuilderState, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, HasDriver, NeverDriver,
+    NeverDriverRunning, NoDriver, PassiveChassis, RunError,
 };
 pub use chassis::ctx::{
     ChassisCtx, DropOnShutdownClaim, FallbackRouter, MailboxClaim, MailboxSender, SharedActorSlots,
@@ -90,13 +90,11 @@ pub use chassis::ctx::{
 pub use chassis::error::BootError;
 pub use chassis::inbox::{InboundMail, SettlingInbox};
 pub use config::{
-    ConfigError, FromArgvThenEnv, KnobKind, KnobRecord, KnownKeys, RingCapacities, SchedulerTuning,
-    dump_config, known_keys, validate_env,
+    ConfigError, FromArgvThenEnv, KnobKind, KnobRecord, KnownKeys, RingCapacities, SchedulerTuning, dump_config,
+    known_keys, validate_env,
 };
 pub use mail::mailer::Mailer;
-pub use mail::outbound::{
-    DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend,
-};
+pub use mail::outbound::{DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend};
 pub use mail::registry::{InboxHandler, InlineHandler, MailboxEntry, OwnedDispatch, Registry};
 pub use mail::{KindId, Mail, MailKind, MailRef, MailboxId, RequestId, Source, SourceAddr};
 pub use runtime::panic_hook::init_panic_hook;

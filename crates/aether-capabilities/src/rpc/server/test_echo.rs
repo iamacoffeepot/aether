@@ -38,16 +38,7 @@ use std::time::Duration;
 /// Echo request kind — the test driver sends one of these; the echo
 /// actor replies with a [`TestEchoReply`] carrying the same `value`.
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    aether_data::Kind,
-    aether_data::Schema,
+    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
 )]
 #[kind(name = "aether.rpc.test.echo_request")]
 pub struct TestEchoRequest {
@@ -56,16 +47,7 @@ pub struct TestEchoRequest {
 
 /// Echo reply kind — the echo actor's response to a [`TestEchoRequest`].
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    aether_data::Kind,
-    aether_data::Schema,
+    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
 )]
 #[kind(name = "aether.rpc.test.echo_reply")]
 pub struct TestEchoReply {
@@ -97,11 +79,7 @@ impl NativeActor for TestEchoActor {
 
     /// Stateless echo handler — the empty state is unused.
     #[handler::single]
-    fn on_echo(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        mail: TestEchoRequest,
-    ) -> TestEchoReply {
+    fn on_echo(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: TestEchoRequest) -> TestEchoReply {
         TestEchoReply { value: mail.value }
     }
 }
@@ -115,16 +93,7 @@ impl NativeActor for TestEchoActor {
 /// the spawn so the RPC `Call`'s settlement subscription only fires after
 /// the deferred reply.
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    aether_data::Kind,
-    aether_data::Schema,
+    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
 )]
 #[kind(name = "aether.rpc.test.deferred_echo_request")]
 pub struct DeferredEchoRequest {
@@ -135,16 +104,7 @@ pub struct DeferredEchoRequest {
 /// mailbox (the loopback result mail), and the actor re-replies the same
 /// shape to the original caller.
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    aether_data::Kind,
-    aether_data::Schema,
+    Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, aether_data::Kind, aether_data::Schema,
 )]
 #[kind(name = "aether.rpc.test.deferred_echo_reply")]
 pub struct DeferredEchoReply {
@@ -177,9 +137,7 @@ impl NativeActor for DeferredEchoActor {
     const NAMESPACE: &'static str = "aether.rpc.test.deferred_echo";
 
     fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<DeferredEchoActorState, BootError> {
-        Ok(DeferredEchoActorState {
-            tasks: TaskQueue::new(4),
-        })
+        Ok(DeferredEchoActorState { tasks: TaskQueue::new(4) })
     }
 
     /// Submit the echo off-thread via the ADR-0093 dispatch primitive.
@@ -188,11 +146,7 @@ impl NativeActor for DeferredEchoActor {
     /// bug used to settle in. The framework-held `SettlementHold` keeps
     /// the chain open until the deferred re-reply.
     #[handler::single]
-    fn on_deferred_echo(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        mail: DeferredEchoRequest,
-    ) {
+    fn on_deferred_echo(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DeferredEchoRequest) {
         let value = mail.value;
         state.tasks.submit(ctx, move || {
             // Brief blocking work standing in for a provider call.
@@ -205,11 +159,7 @@ impl NativeActor for DeferredEchoActor {
     /// hold after the reply — `Sent` precedes `Release`), then free the
     /// in-flight slot.
     #[handler(task)]
-    fn on_deferred_echo_done(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        done: TaskDone<DeferredEchoReply>,
-    ) {
+    fn on_deferred_echo_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<DeferredEchoReply>) {
         done.resolve(ctx);
         state.tasks.on_complete(ctx);
     }

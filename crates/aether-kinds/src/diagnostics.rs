@@ -14,18 +14,7 @@ use bytemuck::{Pod, Zeroable};
 /// ADR-0030 / issue #186) so agents can map it back to a name in
 /// tooling. `kind_id` is the kind the original mail carried.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.mail.unresolved")]
 pub struct UnresolvedMail {
     pub recipient_mailbox_id: aether_data::MailboxId,
@@ -45,18 +34,7 @@ pub struct UnresolvedMail {
 /// purely additive if a future revision wants to surface trap vs
 /// shutdown vs cooperative close.
 #[repr(C)]
-#[derive(
-    Copy,
-    Clone,
-    Debug,
-    Default,
-    PartialEq,
-    Eq,
-    Pod,
-    Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
-)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.actor.monitor_notice")]
 pub struct MonitorNotice {
     pub target: aether_data::MailboxId,

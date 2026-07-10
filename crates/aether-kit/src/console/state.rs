@@ -16,10 +16,7 @@ pub struct ParsedCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsoleAction {
-    InvokeExternal {
-        mailbox: MailboxId,
-        payload: ConsoleCommandInvoked,
-    },
+    InvokeExternal { mailbox: MailboxId, payload: ConsoleCommandInvoked },
     Quit,
 }
 
@@ -113,13 +110,7 @@ impl ConsoleState {
 
     pub fn register_external(&mut self, name: String, description: String, mailbox: MailboxId) {
         if let Some(name) = normalize_command_name(&name) {
-            self.commands.insert(
-                name,
-                CommandEntry {
-                    description,
-                    target: CommandTarget::External(mailbox),
-                },
-            );
+            self.commands.insert(name, CommandEntry { description, target: CommandTarget::External(mailbox) });
         }
     }
 
@@ -127,35 +118,22 @@ impl ConsoleState {
         let Some(name) = normalize_command_name(name) else {
             return false;
         };
-        if matches!(
-            self.commands.get(&name).map(|entry| entry.target),
-            Some(CommandTarget::BuiltIn(_))
-        ) {
+        if matches!(self.commands.get(&name).map(|entry| entry.target), Some(CommandTarget::BuiltIn(_))) {
             return false;
         }
         self.commands.remove(&name).is_some()
     }
 
     pub fn push_output(&mut self, text: impl Into<String>) {
-        self.push_line(ConsoleLine {
-            text: text.into(),
-            style: LineStyle::Output,
-        });
+        self.push_line(ConsoleLine { text: text.into(), style: LineStyle::Output });
     }
 
     pub fn push_error(&mut self, text: impl Into<String>) {
-        self.push_line(ConsoleLine {
-            text: text.into(),
-            style: LineStyle::Error,
-        });
+        self.push_line(ConsoleLine { text: text.into(), style: LineStyle::Error });
     }
 
     pub fn append_command_output(&mut self, lines: Vec<String>, error: bool) {
-        let style = if error {
-            LineStyle::Error
-        } else {
-            LineStyle::Output
-        };
+        let style = if error { LineStyle::Error } else { LineStyle::Output };
         for text in lines {
             self.push_line(ConsoleLine { text, style });
         }
@@ -188,12 +166,7 @@ impl ConsoleState {
         let offset = self.scroll_offset.min(max_offset);
         let end = self.lines.len().saturating_sub(offset);
         let start = end.saturating_sub(visible_rows);
-        self.lines
-            .iter()
-            .skip(start)
-            .take(end.saturating_sub(start))
-            .cloned()
-            .collect()
+        self.lines.iter().skip(start).take(end.saturating_sub(start)).cloned().collect()
     }
 
     #[must_use]
@@ -242,9 +215,7 @@ impl ConsoleState {
         if self.submitted.is_empty() {
             return;
         }
-        let next = self
-            .history_cursor
-            .map_or(self.submitted.len() - 1, |cursor| cursor.saturating_sub(1));
+        let next = self.history_cursor.map_or(self.submitted.len() - 1, |cursor| cursor.saturating_sub(1));
         self.apply_history(next);
     }
 
@@ -273,10 +244,7 @@ impl ConsoleState {
     pub fn submit(&mut self, prompt: &str) -> Vec<ConsoleAction> {
         let input = self.input.trim().to_string();
         let echoed = format!("{prompt}{}", self.input);
-        self.push_line(ConsoleLine {
-            text: echoed,
-            style: LineStyle::Input,
-        });
+        self.push_line(ConsoleLine { text: echoed, style: LineStyle::Input });
         self.input.clear();
         self.caret = 0;
         self.history_cursor = None;
@@ -304,28 +272,17 @@ impl ConsoleState {
             CommandTarget::External(mailbox) => {
                 vec![ConsoleAction::InvokeExternal {
                     mailbox,
-                    payload: ConsoleCommandInvoked {
-                        name: parsed.name,
-                        args: parsed.args,
-                        input,
-                    },
+                    payload: ConsoleCommandInvoked { name: parsed.name, args: parsed.args, input },
                 }]
             }
         }
     }
 
-    fn execute_builtin(
-        &mut self,
-        command: BuiltInCommand,
-        args: Vec<String>,
-    ) -> Vec<ConsoleAction> {
+    fn execute_builtin(&mut self, command: BuiltInCommand, args: Vec<String>) -> Vec<ConsoleAction> {
         match command {
             BuiltInCommand::Help => {
-                let lines: Vec<_> = self
-                    .commands
-                    .iter()
-                    .map(|(name, entry)| format!("{name} - {}", entry.description))
-                    .collect();
+                let lines: Vec<_> =
+                    self.commands.iter().map(|(name, entry)| format!("{name} - {}", entry.description)).collect();
                 for line in lines {
                     self.push_output(line);
                 }
@@ -357,31 +314,16 @@ impl ConsoleState {
     fn register_builtins(&mut self) {
         self.register_builtin("help", "list commands", BuiltInCommand::Help);
         self.register_builtin("clear", "clear scrollback", BuiltInCommand::Clear);
-        self.register_builtin(
-            "echo",
-            "write arguments to the console",
-            BuiltInCommand::Echo,
-        );
-        self.register_builtin(
-            "version",
-            "show aether-kit version",
-            BuiltInCommand::Version,
-        );
-        self.register_builtin(
-            "diagnostics",
-            "show console diagnostics",
-            BuiltInCommand::Diagnostics,
-        );
+        self.register_builtin("echo", "write arguments to the console", BuiltInCommand::Echo);
+        self.register_builtin("version", "show aether-kit version", BuiltInCommand::Version);
+        self.register_builtin("diagnostics", "show console diagnostics", BuiltInCommand::Diagnostics);
         self.register_builtin("quit", "request engine shutdown", BuiltInCommand::Quit);
     }
 
     fn register_builtin(&mut self, name: &str, description: &str, command: BuiltInCommand) {
         self.commands.insert(
             String::from(name),
-            CommandEntry {
-                description: String::from(description),
-                target: CommandTarget::BuiltIn(command),
-            },
+            CommandEntry { description: String::from(description), target: CommandTarget::BuiltIn(command) },
         );
     }
 
@@ -415,17 +357,12 @@ pub fn parse_command(input: &str) -> Option<ParsedCommand> {
 
 fn normalize_command_name(name: &str) -> Option<String> {
     let normalized = name.trim().to_ascii_lowercase();
-    (!normalized.is_empty()
-        && normalized
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
-    .then_some(normalized)
+    (!normalized.is_empty() && normalized.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
+        .then_some(normalized)
 }
 
 fn byte_index_for_char(text: &str, char_index: usize) -> usize {
-    text.char_indices()
-        .nth(char_index)
-        .map_or(text.len(), |(index, _)| index)
+    text.char_indices().nth(char_index).map_or(text.len(), |(index, _)| index)
 }
 
 fn char_count(text: &str) -> usize {
@@ -438,10 +375,7 @@ mod tests {
     use crate::console::ConsoleConfig;
 
     fn state() -> ConsoleState {
-        ConsoleState::new(&ConsoleConfig {
-            scrollback_limit: 32,
-            ..ConsoleConfig::default()
-        })
+        ConsoleState::new(&ConsoleConfig { scrollback_limit: 32, ..ConsoleConfig::default() })
     }
 
     #[test]
@@ -455,20 +389,12 @@ mod tests {
     #[test]
     fn help_output_is_alphabetical() {
         let mut state = state();
-        state.register_external(
-            String::from("aaa"),
-            String::from("first external"),
-            MailboxId(0x4000_0000_0000_0002),
-        );
+        state.register_external(String::from("aaa"), String::from("first external"), MailboxId(0x4000_0000_0000_0002));
 
         state.insert_text("help");
         state.submit("> ");
-        let lines: Vec<_> = state
-            .lines()
-            .iter()
-            .map(|line| line.text.as_str())
-            .filter(|line| line.contains(" - "))
-            .collect();
+        let lines: Vec<_> =
+            state.lines().iter().map(|line| line.text.as_str()).filter(|line| line.contains(" - ")).collect();
 
         assert_eq!(lines.first(), Some(&"aaa - first external"));
         assert_eq!(lines.last(), Some(&"version - show aether-kit version"));
@@ -519,10 +445,7 @@ mod tests {
 
         assert_eq!(
             state.lines().back(),
-            Some(&ConsoleLine {
-                text: String::from("unknown command: wat"),
-                style: LineStyle::Error
-            })
+            Some(&ConsoleLine { text: String::from("unknown command: wat"), style: LineStyle::Error })
         );
     }
 

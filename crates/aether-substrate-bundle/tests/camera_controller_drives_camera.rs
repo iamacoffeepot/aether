@@ -33,9 +33,7 @@ use aether_kit::SetChunk;
 use aether_kit::camera_controller::ControllerConfig;
 use aether_kit::world::Material;
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
-use aether_substrate_bundle::visual::{
-    background_top_left, coverage, decode_png, mean_absolute_error,
-};
+use aether_substrate_bundle::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
 
 /// Capture surface — a 4:3 frame the camera's aspect matches once the
 /// `WindowSize` below lands.
@@ -49,10 +47,7 @@ const CHUNK_EDGE: usize = 16;
 /// The full trampoline address a loaded component registers at (ADR-0099 §4):
 /// the component host `/`-joined to the trampoline node under `name`.
 fn component_address(name: &str) -> String {
-    format!(
-        "aether.component/{}:{name}",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    )
+    format!("aether.component/{}:{name}", aether_capabilities::WasmTrampoline::NAMESPACE,)
 }
 
 /// A `NamedMail` carrying `mail`'s wire encoding to `recipient` — the capture
@@ -84,14 +79,10 @@ fn load_kit_export(bench: &mut TestBench, wasm: &[u8], export: &str, name: &str,
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
-        LoadResult::Ok { name: addr, .. } => assert!(
-            addr.ends_with(&format!(":{name}")),
-            "export {export} should register under :{name}; got {addr}",
-        ),
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { name: addr, .. } => {
+            assert!(addr.ends_with(&format!(":{name}")), "export {export} should register under :{name}; got {addr}",)
+        }
         LoadResult::Err { error } => panic!("load {export}: {error}"),
     }
 }
@@ -104,11 +95,7 @@ fn split_chunk() -> SetChunk {
     let mut underlay = vec![0u8; CHUNK_EDGE * CHUNK_EDGE];
     for z in 0..CHUNK_EDGE {
         for x in 0..CHUNK_EDGE {
-            let material = if x < CHUNK_EDGE / 2 {
-                Material::Grass
-            } else {
-                Material::Stone
-            };
+            let material = if x < CHUNK_EDGE / 2 { Material::Grass } else { Material::Stone };
             underlay[z * CHUNK_EDGE + x] = material.to_u8();
         }
     }
@@ -133,9 +120,8 @@ fn split_chunk() -> SetChunk {
 /// both into the accumulator right before the GPU readback.
 fn capture_scene(bench: &mut TestBench, camera: &str, world: &str, label: &'static str) -> Vec<u8> {
     let pre = vec![envelope(camera, &Render), envelope(world, &Render)];
-    let captured = bench
-        .execute(vec![(label, BenchOp::capture_with_mails(pre, Vec::new()))])
-        .expect("capture-with-mails");
+    let captured =
+        bench.execute(vec![(label, BenchOp::capture_with_mails(pre, Vec::new()))]).expect("capture-with-mails");
     captured.captured(label).expect("capture step ran").to_vec()
 }
 
@@ -163,40 +149,19 @@ fn held_key_pans_the_camera_over_the_painted_world() {
     let controller = component_address("controller");
 
     load_kit_export(&mut bench, &wasm, "aether.kit.world", "world", Vec::new());
-    load_kit_export(
-        &mut bench,
-        &wasm,
-        "aether.kit.camera",
-        "aether.kit.camera",
-        Vec::new(),
-    );
+    load_kit_export(&mut bench, &wasm, "aether.kit.camera", "aether.kit.camera", Vec::new());
     // Default config drives the camera's boot `"main"` orbit camera — the
     // documented baseline. Loaded last so the camera instance exists when the
     // controller's `wire()` seed mail arrives.
     let config = ControllerConfig::default().encode_into_bytes();
-    load_kit_export(
-        &mut bench,
-        &wasm,
-        "aether.kit.camera_controller",
-        "controller",
-        config,
-    );
+    load_kit_export(&mut bench, &wasm, "aether.kit.camera_controller", "controller", config);
 
     // Paint the split chunk and feed the camera a real window aspect, then
     // settle the seed + subscriptions before the first capture.
     bench
         .execute(vec![
             ("paint", BenchOp::send_mail(world.as_str(), &split_chunk())),
-            (
-                "aspect",
-                BenchOp::send_mail(
-                    camera.as_str(),
-                    &WindowSize {
-                        width: WINDOW_WIDTH,
-                        height: WINDOW_HEIGHT,
-                    },
-                ),
-            ),
+            ("aspect", BenchOp::send_mail(camera.as_str(), &WindowSize { width: WINDOW_WIDTH, height: WINDOW_HEIGHT })),
             ("settle", BenchOp::advance(2)),
         ])
         .expect("paint + settle");
@@ -208,10 +173,7 @@ fn held_key_pans_the_camera_over_the_painted_world() {
     // 0.15 m/tick pan walks the target ~7 m across the 16 m chunk.
     bench
         .execute(vec![
-            (
-                "press_d",
-                BenchOp::send_mail(controller.as_str(), &Key { code: KEY_D }),
-            ),
+            ("press_d", BenchOp::send_mail(controller.as_str(), &Key { code: KEY_D })),
             ("pan", BenchOp::advance(48)),
         ])
         .expect("hold D + pan");
@@ -222,10 +184,7 @@ fn held_key_pans_the_camera_over_the_painted_world() {
     // the camera pose is frozen and the view stops moving.
     bench
         .execute(vec![
-            (
-                "release_d",
-                BenchOp::send_mail(controller.as_str(), &KeyRelease { code: KEY_D }),
-            ),
+            ("release_d", BenchOp::send_mail(controller.as_str(), &KeyRelease { code: KEY_D })),
             ("idle", BenchOp::advance(48)),
         ])
         .expect("release D + idle");

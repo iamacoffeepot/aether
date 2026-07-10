@@ -43,10 +43,7 @@ pub struct ClaudeCliAdapter {
 
 impl Default for ClaudeCliAdapter {
     fn default() -> Self {
-        Self {
-            binary: String::from("claude"),
-            timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MILLIS)),
-        }
+        Self { binary: String::from("claude"), timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MILLIS)) }
     }
 }
 
@@ -90,9 +87,7 @@ impl ClaudeCliAdapter {
         };
 
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(req.prompt.as_bytes())
-                .map_err(|e| format!("write prompt to stdin: {e}"))?;
+            stdin.write_all(req.prompt.as_bytes()).map_err(|e| format!("write prompt to stdin: {e}"))?;
             // Drop closes the pipe so `claude` sees EOF and proceeds.
         }
 
@@ -127,8 +122,7 @@ impl ClaudeCliAdapter {
                         // JoinHandle detaches the thread; its buffer is moot.
                         let _ = child.kill();
                         let _ = child.wait();
-                        let elapsed_millis =
-                            u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+                        let elapsed_millis = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
                         return Err(format!("{TIMEOUT_SENTINEL}{elapsed_millis}"));
                     }
                     thread::sleep(POLL_INTERVAL);
@@ -165,12 +159,7 @@ impl ClaudeCliAdapter {
         Ok(AnthropicResponse {
             text,
             model_used: req.model.clone(),
-            usage: AdapterUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-                wall_clock_millis,
-                cost_micros: None,
-            },
+            usage: AdapterUsage { input_tokens: 0, output_tokens: 0, wall_clock_millis, cost_micros: None },
         })
     }
 }
@@ -195,13 +184,9 @@ mod tests {
     fn missing_binary_returns_cli_not_found() {
         // Point the adapter at a binary that can't exist on PATH so the
         // test never depends on whether the real `claude` is installed.
-        let adapter = ClaudeCliAdapter::new(
-            "aether-nonexistent-claude-binary-xyzzy".to_string(),
-            Duration::from_secs(30),
-        );
-        let err = adapter
-            .cli_send(&req())
-            .expect_err("a missing binary must error");
+        let adapter =
+            ClaudeCliAdapter::new("aether-nonexistent-claude-binary-xyzzy".to_string(), Duration::from_secs(30));
+        let err = adapter.cli_send(&req()).expect_err("a missing binary must error");
         assert_eq!(err, CLI_NOT_FOUND);
     }
 
@@ -221,30 +206,17 @@ mod tests {
         script.push(format!("aether-cli-timeout-{}.sh", process::id()));
         // Ignore every arg, sleep 5s. A ~50ms deadline must fire first.
         fs::write(&script, "#!/bin/sh\nsleep 5\n").expect("write stand-in script");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
-            .expect("chmod stand-in script");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod stand-in script");
 
-        let adapter = ClaudeCliAdapter::new(
-            script.to_string_lossy().into_owned(),
-            Duration::from_millis(50),
-        );
+        let adapter = ClaudeCliAdapter::new(script.to_string_lossy().into_owned(), Duration::from_millis(50));
         let started = Instant::now();
-        let err = adapter
-            .cli_send(&req())
-            .expect_err("a slow binary must time out");
+        let err = adapter.cli_send(&req()).expect_err("a slow binary must time out");
 
         let _ = fs::remove_file(&script);
 
-        assert!(
-            err.starts_with(TIMEOUT_SENTINEL),
-            "expected timeout sentinel, got {err:?}",
-        );
+        assert!(err.starts_with(TIMEOUT_SENTINEL), "expected timeout sentinel, got {err:?}",);
         // The deadline fired well under the child's 5s lifetime, which
         // also implies the kill returned (the child was reaped).
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "timeout took too long: {:?}",
-            started.elapsed(),
-        );
+        assert!(started.elapsed() < Duration::from_secs(2), "timeout took too long: {:?}", started.elapsed(),);
     }
 }

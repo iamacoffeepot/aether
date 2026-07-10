@@ -123,8 +123,7 @@ mod tests {
     // fixture wiring — reference id derivation, not sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
     use super::{
-        DeathReason, EngineCapCells, EngineCapSink, EngineProxy, EngineProxyConfig,
-        HeartbeatParams, ProxyReplySink,
+        DeathReason, EngineCapCells, EngineCapSink, EngineProxy, EngineProxyConfig, HeartbeatParams, ProxyReplySink,
     };
     use crate::engine::kinds::ForwardEnvelope;
     use crate::rpc::server::test_echo::{TestEchoActor, TestEchoRequest};
@@ -145,11 +144,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn substrate_peer_kind() -> PeerKind {
-        PeerKind::Substrate {
-            engine_name: "test".into(),
-            engine_version: "0.1.0".into(),
-            kinds: vec![],
-        }
+        PeerKind::Substrate { engine_name: "test".into(), engine_version: "0.1.0".into(), kinds: vec![] }
     }
 
     /// Full bridge round-trip: boot an RPC server + the echo actor + a
@@ -177,10 +172,7 @@ mod tests {
             .build_passive()
             .expect("caps boot");
 
-        let port = chassis
-            .handle::<RpcServerHandle>()
-            .expect("RpcServerHandle published")
-            .local_port;
+        let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
 
         // Spawn the proxy, dialing this chassis's own RPC server over
         // loopback. A successful `finish()` means `init` connected +
@@ -201,9 +193,7 @@ mod tests {
             .finish()
             .expect("proxy spawns + connects");
 
-        let proxy_mailbox = chassis
-            .resolve_actor::<EngineProxy>("e1")
-            .expect("proxy resolves Live");
+        let proxy_mailbox = chassis.resolve_actor::<EngineProxy>("e1").expect("proxy resolves Live");
         let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Addressable>::NAMESPACE);
         let sink_mailbox = mailbox_id_from_name(<ProxyReplySink as Addressable>::NAMESPACE);
 
@@ -216,16 +206,8 @@ mod tests {
             payload: TestEchoRequest { value: 42 }.encode_into_bytes(),
         };
         mailer.push(
-            Mail::new(
-                proxy_mailbox,
-                <ForwardEnvelope as Kind>::ID,
-                fwd.encode_into_bytes(),
-                1,
-            )
-            .with_reply_to(Source::with_correlation(
-                SourceAddr::Component(sink_mailbox),
-                777,
-            )),
+            Mail::new(proxy_mailbox, <ForwardEnvelope as Kind>::ID, fwd.encode_into_bytes(), 1)
+                .with_reply_to(Source::with_correlation(SourceAddr::Component(sink_mailbox), 777)),
         );
 
         // Poll for the sink to record the echoed value. The round trip
@@ -233,17 +215,12 @@ mod tests {
         // all across dispatcher threads — give it a generous deadline.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let snapshot = *recorded
-                .lock()
-                .expect("test setup: recorded mutex poisoned");
+            let snapshot = *recorded.lock().expect("test setup: recorded mutex poisoned");
             if let Some(value) = snapshot {
                 assert_eq!(value, 42, "echoed value routed back through the proxy");
                 return;
             }
-            assert!(
-                Instant::now() < deadline,
-                "reply did not route back through the proxy within 5s",
-            );
+            assert!(Instant::now() < deadline, "reply did not route back through the proxy within 5s",);
             thread::sleep(Duration::from_millis(20));
         }
     }
@@ -275,10 +252,7 @@ mod tests {
                 },
             )
             .finish();
-        assert!(
-            result.is_err(),
-            "spawning a proxy at a closed port should fail at init",
-        );
+        assert!(result.is_err(), "spawning a proxy at a closed port should fail at init",);
     }
 
     /// How a [`fake_server`] treats the proxy's heartbeat pings after
@@ -311,10 +285,7 @@ mod tests {
             let _hello: WireFrame = read_frame(&mut reader).expect("read Hello");
             write_frame(
                 &mut writer,
-                &WireFrame::HelloAck(HelloAck {
-                    wire_version: WIRE_VERSION,
-                    server: substrate_peer_kind(),
-                }),
+                &WireFrame::HelloAck(HelloAck { wire_version: WIRE_VERSION, server: substrate_peer_kind() }),
             )
             .expect("write HelloAck");
             if matches!(behavior, Behavior::Close) {
@@ -372,11 +343,7 @@ mod tests {
         loop {
             // Clone out under the guard, then drop it before the branch
             // (clippy `significant_drop_in_scrutinee`).
-            let first = cell
-                .lock()
-                .expect("test setup: cell mutex poisoned")
-                .first()
-                .cloned();
+            let first = cell.lock().expect("test setup: cell mutex poisoned").first().cloned();
             if let Some(first) = first {
                 return first;
             }
@@ -395,16 +362,10 @@ mod tests {
         let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(
             42,
             port,
-            Some(HeartbeatParams {
-                interval: Duration::from_millis(40),
-                miss_limit: 3,
-            }),
+            Some(HeartbeatParams { interval: Duration::from_millis(40), miss_limit: 3 }),
         );
         let died = await_first(&cells.died, "wedged engine not evicted");
-        assert_eq!(
-            died.engine_id, engine_id,
-            "the wedged engine's id is reported dead"
-        );
+        assert_eq!(died.engine_id, engine_id, "the wedged engine's id is reported dead");
         assert!(
             matches!(died.reason, DeathReason::Evicted { .. }),
             "a heartbeat-evicted engine is reported Evicted, got {:?}",
@@ -420,25 +381,15 @@ mod tests {
         let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(
             7,
             port,
-            Some(HeartbeatParams {
-                interval: Duration::from_millis(40),
-                miss_limit: 3,
-            }),
+            Some(HeartbeatParams { interval: Duration::from_millis(40), miss_limit: 3 }),
         );
         let alive = await_first(&cells.alive, "healthy engine never reported alive");
-        assert_eq!(
-            alive, engine_id,
-            "the healthy engine's id is reported alive"
-        );
+        assert_eq!(alive, engine_id, "the healthy engine's id is reported alive");
         // Give the miss-limit window a chance to (wrongly) fire, then
         // confirm a ponging engine is never declared dead.
         thread::sleep(Duration::from_millis(200));
         assert!(
-            cells
-                .died
-                .lock()
-                .expect("test setup: died cell mutex poisoned")
-                .is_empty(),
+            cells.died.lock().expect("test setup: died cell mutex poisoned").is_empty(),
             "a ponging engine must not be evicted",
         );
     }
@@ -452,10 +403,7 @@ mod tests {
         let (port, _server) = fake_server(Behavior::Close);
         let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(99, port, None);
         let died = await_first(&cells.died, "closed engine not reported dead");
-        assert_eq!(
-            died.engine_id, engine_id,
-            "the closed engine's id is reported dead"
-        );
+        assert_eq!(died.engine_id, engine_id, "the closed engine's id is reported dead");
         assert!(
             matches!(died.reason, DeathReason::Crashed { .. }),
             "a connection-close eviction is reported Crashed, got {:?}",

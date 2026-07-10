@@ -106,43 +106,19 @@ pub fn run_reader_loop(
         }
         match read_frame(&mut reader) {
             Ok(frame) => {
-                if inbound_tx
-                    .send(InboundEvent::FrameReceived { conn_id, frame })
-                    .is_err()
-                {
+                if inbound_tx.send(InboundEvent::FrameReceived { conn_id, frame }).is_err() {
                     return;
                 }
-                mailer.push(Mail::new(
-                    self_id,
-                    wake_kind,
-                    RpcInboundReady::default().encode_into_bytes(),
-                    1,
-                ));
+                mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
             }
             Err(FrameError::Io(io_err)) if io_err.kind() == io::ErrorKind::UnexpectedEof => {
-                let _ = inbound_tx.send(InboundEvent::ReaderClosed {
-                    conn_id,
-                    reason: "eof".into(),
-                });
-                mailer.push(Mail::new(
-                    self_id,
-                    wake_kind,
-                    RpcInboundReady::default().encode_into_bytes(),
-                    1,
-                ));
+                let _ = inbound_tx.send(InboundEvent::ReaderClosed { conn_id, reason: "eof".into() });
+                mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
                 return;
             }
             Err(FrameError::FrameTooLarge { size, max }) => {
-                let outcome = handle_oversize_frame(
-                    &mut reader,
-                    conn_id,
-                    size,
-                    max,
-                    inbound_tx,
-                    mailer,
-                    self_id,
-                    wake_kind,
-                );
+                let outcome =
+                    handle_oversize_frame(&mut reader, conn_id, size, max, inbound_tx, mailer, self_id, wake_kind);
                 if outcome.is_terminal() {
                     return;
                 }
@@ -151,16 +127,8 @@ pub fn run_reader_loop(
                 if shutdown.load(Ordering::Acquire) {
                     return;
                 }
-                let _ = inbound_tx.send(InboundEvent::ReaderClosed {
-                    conn_id,
-                    reason: format!("read error: {e}"),
-                });
-                mailer.push(Mail::new(
-                    self_id,
-                    wake_kind,
-                    RpcInboundReady::default().encode_into_bytes(),
-                    1,
-                ));
+                let _ = inbound_tx.send(InboundEvent::ReaderClosed { conn_id, reason: format!("read error: {e}") });
+                mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
                 return;
             }
         }
@@ -203,20 +171,12 @@ fn handle_oversize_frame(
     if size > drain_ceiling {
         let event = InboundEvent::FrameDecodeAborted {
             conn_id,
-            error: RpcError::FrameTooLarge {
-                size: size as u64,
-                max: max as u64,
-            },
+            error: RpcError::FrameTooLarge { size: size as u64, max: max as u64 },
         };
         if inbound_tx.send(event).is_err() {
             return OversizeOutcome::Terminal;
         }
-        mailer.push(Mail::new(
-            self_id,
-            wake_kind,
-            RpcInboundReady::default().encode_into_bytes(),
-            1,
-        ));
+        mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
         return OversizeOutcome::Terminal;
     }
     // `take(size)` bounds the drain so a racy / lying peer can't
@@ -229,12 +189,7 @@ fn handle_oversize_frame(
             conn_id,
             reason: format!("frame too large drain failed: {size} > {max}"),
         });
-        mailer.push(Mail::new(
-            self_id,
-            wake_kind,
-            RpcInboundReady::default().encode_into_bytes(),
-            1,
-        ));
+        mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
         return OversizeOutcome::Terminal;
     };
     if (drained as usize) != size {
@@ -243,29 +198,16 @@ fn handle_oversize_frame(
             conn_id,
             reason: format!("frame too large partial drain: {drained}/{size}"),
         });
-        mailer.push(Mail::new(
-            self_id,
-            wake_kind,
-            RpcInboundReady::default().encode_into_bytes(),
-            1,
-        ));
+        mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
         return OversizeOutcome::Terminal;
     }
     let event = InboundEvent::FrameDecodeError {
         conn_id,
-        error: RpcError::FrameTooLarge {
-            size: size as u64,
-            max: max as u64,
-        },
+        error: RpcError::FrameTooLarge { size: size as u64, max: max as u64 },
     };
     if inbound_tx.send(event).is_err() {
         return OversizeOutcome::Terminal;
     }
-    mailer.push(Mail::new(
-        self_id,
-        wake_kind,
-        RpcInboundReady::default().encode_into_bytes(),
-        1,
-    ));
+    mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
     OversizeOutcome::Continue
 }

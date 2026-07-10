@@ -50,10 +50,7 @@ pub(super) struct MaterialCap<'a> {
 
 impl PlanarPoint {
     fn midpoint(self, other: Self) -> Self {
-        Self {
-            x_oct: (self.x_oct + other.x_oct) * 0.5,
-            z_oct: (self.z_oct + other.z_oct) * 0.5,
-        }
+        Self { x_oct: (self.x_oct + other.x_oct) * 0.5, z_oct: (self.z_oct + other.z_oct) * 0.5 }
     }
 
     fn distance_squared(self, other: Self) -> f32 {
@@ -71,24 +68,15 @@ struct SampleAnchor {
 
 impl SampleAnchor {
     fn point(self) -> PlanarPoint {
-        PlanarPoint {
-            x_oct: self.x_oct as f32,
-            z_oct: self.z_oct as f32,
-        }
+        PlanarPoint { x_oct: self.x_oct as f32, z_oct: self.z_oct as f32 }
     }
 
     fn cell(self) -> CellPos {
-        CellPos {
-            x: self.x_oct.div_euclid(256),
-            z: self.z_oct.div_euclid(256),
-        }
+        CellPos { x: self.x_oct.div_euclid(256), z: self.z_oct.div_euclid(256) }
     }
 
     fn surface(self) -> SurfaceAnchor {
-        SurfaceAnchor {
-            x_octimeters: self.x_oct,
-            z_octimeters: self.z_oct,
-        }
+        SurfaceAnchor { x_octimeters: self.x_oct, z_octimeters: self.z_oct }
     }
 }
 
@@ -112,12 +100,10 @@ impl CanonicalEdgeKey {
         match self.axis {
             EdgeAxis::East => PlanarPoint {
                 x_oct: ((self.x_subcell + 1) * OCTIMETERS_PER_SUBCELL) as f32,
-                z_oct: (self.z_subcell * OCTIMETERS_PER_SUBCELL + OCTIMETERS_PER_SUBCELL / 2)
-                    as f32,
+                z_oct: (self.z_subcell * OCTIMETERS_PER_SUBCELL + OCTIMETERS_PER_SUBCELL / 2) as f32,
             },
             EdgeAxis::North => PlanarPoint {
-                x_oct: (self.x_subcell * OCTIMETERS_PER_SUBCELL + OCTIMETERS_PER_SUBCELL / 2)
-                    as f32,
+                x_oct: (self.x_subcell * OCTIMETERS_PER_SUBCELL + OCTIMETERS_PER_SUBCELL / 2) as f32,
                 z_oct: ((self.z_subcell + 1) * OCTIMETERS_PER_SUBCELL) as f32,
             },
         }
@@ -161,11 +147,7 @@ impl WindowPlan {
     }
 
     fn crossing_edges(&self) -> Vec<usize> {
-        self.crossings
-            .iter()
-            .enumerate()
-            .filter_map(|(edge, crossing)| crossing.map(|_| edge))
-            .collect()
+        self.crossings.iter().enumerate().filter_map(|(edge, crossing)| crossing.map(|_| edge)).collect()
     }
 
     fn faces(&self) -> Vec<HeightFace> {
@@ -188,14 +170,8 @@ impl WindowPlan {
         insert_on_edge(&mut high, a, b, junction);
         insert_on_edge(&mut low, a, b, junction);
         vec![
-            HeightFace {
-                polygon: high,
-                anchor_corners: high_corners,
-            },
-            HeightFace {
-                polygon: low,
-                anchor_corners: low_corners,
-            },
+            HeightFace { polygon: high, anchor_corners: high_corners },
+            HeightFace { polygon: low, anchor_corners: low_corners },
         ]
     }
 
@@ -206,22 +182,10 @@ impl WindowPlan {
         let top = tr.midpoint(tl);
         let left = tl.midpoint(bl);
         vec![
-            HeightFace {
-                polygon: vec![bl, bottom, self.center, left],
-                anchor_corners: 1,
-            },
-            HeightFace {
-                polygon: vec![br, right, self.center, bottom],
-                anchor_corners: 2,
-            },
-            HeightFace {
-                polygon: vec![tr, top, self.center, right],
-                anchor_corners: 4,
-            },
-            HeightFace {
-                polygon: vec![tl, left, self.center, top],
-                anchor_corners: 8,
-            },
+            HeightFace { polygon: vec![bl, bottom, self.center, left], anchor_corners: 1 },
+            HeightFace { polygon: vec![br, right, self.center, bottom], anchor_corners: 2 },
+            HeightFace { polygon: vec![tr, top, self.center, right], anchor_corners: 4 },
+            HeightFace { polygon: vec![tl, left, self.center, top], anchor_corners: 8 },
         ]
     }
 
@@ -264,11 +228,7 @@ impl WindowPlan {
                         continue;
                     };
                     let (a, b) = edge_corners(edge);
-                    let high = if self.levels[a] > self.levels[b] {
-                        a
-                    } else {
-                        b
-                    };
+                    let high = if self.levels[a] > self.levels[b] { a } else { b };
                     let low = if high == a { b } else { a };
                     debug_assert_eq!(self.corners[high], crossing.high_anchor);
                     debug_assert_eq!(self.corners[low], crossing.low_anchor);
@@ -301,22 +261,11 @@ impl WindowPlan {
             .map_or(self.corners[0], |corner| self.corners[corner])
     }
 
-    fn cap_vertex(
-        &self,
-        world: &World,
-        mask: u8,
-        point: PlanarPoint,
-        color: aether_math::Rgb,
-    ) -> Vertex {
+    fn cap_vertex(&self, world: &World, mask: u8, point: PlanarPoint, color: aether_math::Rgb) -> Vertex {
         let anchor = self.anchor_for(mask, point);
         let wx = point.x_oct / OCTIMETERS_PER_METER;
         let wz = point.z_oct / OCTIMETERS_PER_METER;
-        Vertex {
-            x: wx,
-            y: side_anchor_lift(world, anchor.surface(), wx, wz),
-            z: wz,
-            color,
-        }
+        Vertex { x: wx, y: side_anchor_lift(world, anchor.surface(), wx, wz), z: wz, color }
     }
 
     fn anchor_material(world: &World, anchor: SampleAnchor) -> Material {
@@ -328,50 +277,25 @@ impl WindowPlan {
     }
 
     fn material_corner_mask(&self, world: &World, material: Material) -> u8 {
-        self.corners
-            .iter()
-            .enumerate()
-            .fold(0, |mask, (corner, &anchor)| {
-                mask | (u8::from(Self::anchor_material(world, anchor) == material) << corner)
-            })
+        self.corners.iter().enumerate().fold(0, |mask, (corner, &anchor)| {
+            mask | (u8::from(Self::anchor_material(world, anchor) == material) << corner)
+        })
     }
 
     fn enclosed_void_mask(&self, world: &World, mask: u8) -> u8 {
         (0..4).fold(0, |enclosed, corner| {
             let anchor = self.corners[corner];
-            let floor = enclosed_void_floor(
-                world,
-                VoidAnchor {
-                    x_octimeters: anchor.x_oct,
-                    z_octimeters: anchor.z_oct,
-                },
-            );
+            let floor =
+                enclosed_void_floor(world, VoidAnchor { x_octimeters: anchor.x_oct, z_octimeters: anchor.z_oct });
             enclosed | (u8::from(mask & (1 << corner) != 0 && floor.is_some()) << corner)
         })
     }
 
-    fn void_floor_vertex(
-        &self,
-        world: &World,
-        mask: u8,
-        point: PlanarPoint,
-        color: aether_math::Rgb,
-    ) -> Vertex {
+    fn void_floor_vertex(&self, world: &World, mask: u8, point: PlanarPoint, color: aether_math::Rgb) -> Vertex {
         let anchor = self.anchor_for(mask, point);
-        let floor = enclosed_void_floor(
-            world,
-            VoidAnchor {
-                x_octimeters: anchor.x_oct,
-                z_octimeters: anchor.z_oct,
-            },
-        )
-        .expect("enclosed mask contains only floor anchors");
-        Vertex {
-            x: point.x_oct / OCTIMETERS_PER_METER,
-            y: floor.y,
-            z: point.z_oct / OCTIMETERS_PER_METER,
-            color,
-        }
+        let floor = enclosed_void_floor(world, VoidAnchor { x_octimeters: anchor.x_oct, z_octimeters: anchor.z_oct })
+            .expect("enclosed mask contains only floor anchors");
+        Vertex { x: point.x_oct / OCTIMETERS_PER_METER, y: floor.y, z: point.z_oct / OCTIMETERS_PER_METER, color }
     }
 
     fn wall_height(&self, world: &World, mask: u8, point: PlanarPoint, top: f32) -> f32 {
@@ -382,14 +306,7 @@ impl WindowPlan {
             anchor.z_oct.rem_euclid(256) / OCTIMETERS_PER_SUBCELL,
         ) == Material::Void
         {
-            return void_low_base(
-                world,
-                VoidAnchor {
-                    x_octimeters: anchor.x_oct,
-                    z_octimeters: anchor.z_oct,
-                },
-                top,
-            );
+            return void_low_base(world, VoidAnchor { x_octimeters: anchor.x_oct, z_octimeters: anchor.z_oct }, top);
         }
         let wx = point.x_oct / OCTIMETERS_PER_METER;
         let wz = point.z_oct / OCTIMETERS_PER_METER;
@@ -451,16 +368,14 @@ impl CliffPlan {
         for row in 0..n {
             for column in 0..n - 1 {
                 east[row * (n - 1) + column] =
-                    (levels[row * n + column] - levels[row * n + column + 1]).abs()
-                        > STEP_MAX_OCTIMETERS;
+                    (levels[row * n + column] - levels[row * n + column + 1]).abs() > STEP_MAX_OCTIMETERS;
                 adjacency_visits += 1;
             }
         }
         for row in 0..n - 1 {
             for column in 0..n {
                 north[row * n + column] =
-                    (levels[row * n + column] - levels[(row + 1) * n + column]).abs()
-                        > STEP_MAX_OCTIMETERS;
+                    (levels[row * n + column] - levels[(row + 1) * n + column]).abs() > STEP_MAX_OCTIMETERS;
                 adjacency_visits += 1;
             }
         }
@@ -537,13 +452,7 @@ impl CliffPlan {
                     }
                 }
                 let case = classify_case(gx, gz, crossings, window_levels);
-                let plan = WindowPlan {
-                    center,
-                    corners,
-                    levels: window_levels,
-                    crossings,
-                    case,
-                };
+                let plan = WindowPlan { center, corners, levels: window_levels, crossings, case };
                 debug_assert!(plan.crossing_count() <= 4);
                 let lookup_index = (local_z * SUBCELLS_PER_CHUNK_EDGE + local_x) as usize;
                 window_lookup[lookup_index] = Some(windows.len() as u32);
@@ -576,13 +485,7 @@ impl CliffPlan {
         let mut edges: Vec<_> = self
             .windows
             .iter()
-            .flat_map(|window| {
-                window
-                    .crossings
-                    .iter()
-                    .flatten()
-                    .map(|crossing| crossing.key)
-            })
+            .flat_map(|window| window.crossings.iter().flatten().map(|crossing| crossing.key))
             .collect();
         edges.sort_unstable();
         edges.dedup();
@@ -602,13 +505,9 @@ impl CliffPlan {
     }
 
     fn window_at(&self, center: WindowCenter) -> Option<&WindowPlan> {
-        let gx = center.x_octimeters.div_euclid(OCTIMETERS_PER_SUBCELL)
-            - self.at.x * SUBCELLS_PER_CHUNK_EDGE;
-        let gz = center.z_octimeters.div_euclid(OCTIMETERS_PER_SUBCELL)
-            - self.at.z * SUBCELLS_PER_CHUNK_EDGE;
-        if !(0..SUBCELLS_PER_CHUNK_EDGE).contains(&gx)
-            || !(0..SUBCELLS_PER_CHUNK_EDGE).contains(&gz)
-        {
+        let gx = center.x_octimeters.div_euclid(OCTIMETERS_PER_SUBCELL) - self.at.x * SUBCELLS_PER_CHUNK_EDGE;
+        let gz = center.z_octimeters.div_euclid(OCTIMETERS_PER_SUBCELL) - self.at.z * SUBCELLS_PER_CHUNK_EDGE;
+        if !(0..SUBCELLS_PER_CHUNK_EDGE).contains(&gx) || !(0..SUBCELLS_PER_CHUNK_EDGE).contains(&gz) {
             return None;
         }
         let plan_index = self.window_lookup[(gz * SUBCELLS_PER_CHUNK_EDGE + gx) as usize]?;
@@ -639,8 +538,7 @@ impl CliffPlan {
                 fragment.len() <= MAX_CAP_FRAGMENT_VERTICES,
                 "cliff cap fragment exceeded the fixed topology budget"
             );
-            let void_mask =
-                face.anchor_corners & window.material_corner_mask(world, Material::Void);
+            let void_mask = face.anchor_corners & window.material_corner_mask(world, Material::Void);
             let enclosed_mask = window.enclosed_void_mask(world, void_mask);
             if cap.material == Material::Void && enclosed_mask == 0 {
                 continue; // open Void has a skirt but deliberately no low cap
@@ -652,14 +550,9 @@ impl CliffPlan {
             );
             let color = if cap.material == Material::Void {
                 let anchor = window.anchor_for(enclosed_mask, fragment[0]);
-                let floor = enclosed_void_floor(
-                    world,
-                    VoidAnchor {
-                        x_octimeters: anchor.x_oct,
-                        z_octimeters: anchor.z_oct,
-                    },
-                )
-                .expect("enclosed mask contains a floor");
+                let floor =
+                    enclosed_void_floor(world, VoidAnchor { x_octimeters: anchor.x_oct, z_octimeters: anchor.z_oct })
+                        .expect("enclosed mask contains a floor");
                 flat_color(styles.get(world.cliff_material(floor.border)))
             } else {
                 flat_color(styles.get(cap.material))
@@ -673,22 +566,13 @@ impl CliffPlan {
                     }
                 };
                 tris.push(DrawTriangle {
-                    verts: [
-                        vertex(fragment[0]),
-                        vertex(fragment[index]),
-                        vertex(fragment[index + 1]),
-                    ],
+                    verts: [vertex(fragment[0]), vertex(fragment[index]), vertex(fragment[index + 1])],
                 });
             }
         }
     }
 
-    pub(super) fn emit_walls(
-        &self,
-        world: &World,
-        styles: &StyleTable,
-        tris: &mut Vec<DrawTriangle>,
-    ) {
+    pub(super) fn emit_walls(&self, world: &World, styles: &StyleTable, tris: &mut Vec<DrawTriangle>) {
         for window in &self.windows {
             let segments = window.wall_segments();
             debug_assert!(segments.len() <= 4);
@@ -701,29 +585,15 @@ impl CliffPlan {
                 if WindowPlan::anchor_material(world, segment.material_anchor) == Material::Void {
                     continue;
                 }
-                let top_start = window.cap_vertex(
-                    world,
-                    segment.high_corners,
-                    segment.start,
-                    aether_math::Rgb::default(),
-                );
-                let top_end = window.cap_vertex(
-                    world,
-                    segment.high_corners,
-                    segment.end,
-                    aether_math::Rgb::default(),
-                );
-                let bottom_start =
-                    window.wall_height(world, segment.low_corners, segment.start, top_start.y);
-                let bottom_end =
-                    window.wall_height(world, segment.low_corners, segment.end, top_end.y);
-                if (top_start.y - bottom_start).abs() < f32::EPSILON
-                    && (top_end.y - bottom_end).abs() < f32::EPSILON
-                {
+                let top_start =
+                    window.cap_vertex(world, segment.high_corners, segment.start, aether_math::Rgb::default());
+                let top_end = window.cap_vertex(world, segment.high_corners, segment.end, aether_math::Rgb::default());
+                let bottom_start = window.wall_height(world, segment.low_corners, segment.start, top_start.y);
+                let bottom_end = window.wall_height(world, segment.low_corners, segment.end, top_end.y);
+                if (top_start.y - bottom_start).abs() < f32::EPSILON && (top_end.y - bottom_end).abs() < f32::EPSILON {
                     continue;
                 }
-                let face =
-                    flat_color(styles.get(world.cliff_material(segment.material_anchor.cell())));
+                let face = flat_color(styles.get(world.cliff_material(segment.material_anchor.cell())));
                 push_wall_quad(
                     tris,
                     [top_start.x, top_start.z, top_start.y],
@@ -746,61 +616,22 @@ fn edge_corners(edge: usize) -> (usize, usize) {
     }
 }
 
-fn make_crossing(
-    gx: i32,
-    gz: i32,
-    edge: usize,
-    corners: [SampleAnchor; 4],
-    levels: [i32; 4],
-) -> CliffCrossing {
+fn make_crossing(gx: i32, gz: i32, edge: usize, corners: [SampleAnchor; 4], levels: [i32; 4]) -> CliffCrossing {
     let (a, b) = edge_corners(edge);
-    let (high, low) = if levels[a] > levels[b] {
-        (a, b)
-    } else {
-        (b, a)
-    };
+    let (high, low) = if levels[a] > levels[b] { (a, b) } else { (b, a) };
     let point = corners[a].point().midpoint(corners[b].point());
     let key = match edge {
-        0 => CanonicalEdgeKey {
-            x_subcell: gx - 1,
-            z_subcell: gz - 1,
-            axis: EdgeAxis::East,
-        },
-        1 => CanonicalEdgeKey {
-            x_subcell: gx,
-            z_subcell: gz - 1,
-            axis: EdgeAxis::North,
-        },
-        2 => CanonicalEdgeKey {
-            x_subcell: gx - 1,
-            z_subcell: gz,
-            axis: EdgeAxis::East,
-        },
-        _ => CanonicalEdgeKey {
-            x_subcell: gx - 1,
-            z_subcell: gz - 1,
-            axis: EdgeAxis::North,
-        },
+        0 => CanonicalEdgeKey { x_subcell: gx - 1, z_subcell: gz - 1, axis: EdgeAxis::East },
+        1 => CanonicalEdgeKey { x_subcell: gx, z_subcell: gz - 1, axis: EdgeAxis::North },
+        2 => CanonicalEdgeKey { x_subcell: gx - 1, z_subcell: gz, axis: EdgeAxis::East },
+        _ => CanonicalEdgeKey { x_subcell: gx - 1, z_subcell: gz - 1, axis: EdgeAxis::North },
     };
-    CliffCrossing {
-        key,
-        point,
-        high_anchor: corners[high],
-        low_anchor: corners[low],
-    }
+    CliffCrossing { key, point, high_anchor: corners[high], low_anchor: corners[low] }
 }
 
-fn classify_case(
-    gx: i32,
-    gz: i32,
-    crossings: [Option<CliffCrossing>; 4],
-    levels: [i32; 4],
-) -> LocalCase {
-    let edges: Vec<usize> = crossings
-        .iter()
-        .enumerate()
-        .filter_map(|(edge, crossing)| crossing.map(|_| edge))
-        .collect();
+fn classify_case(gx: i32, gz: i32, crossings: [Option<CliffCrossing>; 4], levels: [i32; 4]) -> LocalCase {
+    let edges: Vec<usize> =
+        crossings.iter().enumerate().filter_map(|(edge, crossing)| crossing.map(|_| edge)).collect();
     if edges.len() == 2 {
         let mut component = [0usize, 1, 2, 3];
         for (edge, crossing) in crossings.iter().enumerate() {
@@ -824,15 +655,12 @@ fn classify_case(
         let second_high = high_of(edges[1]);
         if component[first_high] == component[second_high] {
             let high_component = component[first_high];
-            let high_corners = (0..4).fold(0u8, |mask, corner| {
-                mask | (u8::from(component[corner] == high_component) << corner)
-            });
+            let high_corners =
+                (0..4).fold(0u8, |mask, corner| mask | (u8::from(component[corner] == high_component) << corner));
             return LocalCase::Chord { high_corners };
         }
     }
-    LocalCase::Pinned {
-        rotation: (gx ^ gz).rem_euclid(4) as u8,
-    }
+    LocalCase::Pinned { rotation: (gx ^ gz).rem_euclid(4) as u8 }
 }
 
 fn cross(a: PlanarPoint, b: PlanarPoint, p: PlanarPoint) -> f32 {
@@ -846,35 +674,20 @@ fn clip_to_line_side(
     corner_mask: u8,
     corners: &[SampleAnchor; 4],
 ) -> Vec<PlanarPoint> {
-    let representative = (0..4)
-        .find(|corner| corner_mask & (1 << corner) != 0)
-        .unwrap_or(0);
+    let representative = (0..4).find(|corner| corner_mask & (1 << corner) != 0).unwrap_or(0);
     let keep_positive = cross(a, b, corners[representative].point()) >= 0.0;
     clip_half_plane(polygon, a, b, keep_positive)
 }
 
-fn clip_half_plane(
-    polygon: &[PlanarPoint],
-    a: PlanarPoint,
-    b: PlanarPoint,
-    keep_positive: bool,
-) -> Vec<PlanarPoint> {
+fn clip_half_plane(polygon: &[PlanarPoint], a: PlanarPoint, b: PlanarPoint, keep_positive: bool) -> Vec<PlanarPoint> {
     let mut out = Vec::with_capacity(polygon.len() + 2);
     for index in 0..polygon.len() {
         let current = polygon[index];
         let next = polygon[(index + 1) % polygon.len()];
         let current_side = cross(a, b, current);
         let next_side = cross(a, b, next);
-        let current_in = if keep_positive {
-            current_side >= -0.01
-        } else {
-            current_side <= 0.01
-        };
-        let next_in = if keep_positive {
-            next_side >= -0.01
-        } else {
-            next_side <= 0.01
-        };
+        let current_in = if keep_positive { current_side >= -0.01 } else { current_side <= 0.01 };
+        let next_in = if keep_positive { next_side >= -0.01 } else { next_side <= 0.01 };
         if current_in {
             out.push(current);
         }
@@ -892,18 +705,11 @@ fn clip_half_plane(
     dedup_polygon(out)
 }
 
-fn insert_on_edge(
-    polygon: &mut Vec<PlanarPoint>,
-    edge_a: PlanarPoint,
-    edge_b: PlanarPoint,
-    point: PlanarPoint,
-) {
+fn insert_on_edge(polygon: &mut Vec<PlanarPoint>, edge_a: PlanarPoint, edge_b: PlanarPoint, point: PlanarPoint) {
     for index in 0..polygon.len() {
         let a = polygon[index];
         let b = polygon[(index + 1) % polygon.len()];
-        if (same_point(a, edge_a) && same_point(b, edge_b))
-            || (same_point(a, edge_b) && same_point(b, edge_a))
-        {
+        if (same_point(a, edge_a) && same_point(b, edge_b)) || (same_point(a, edge_b) && same_point(b, edge_a)) {
             polygon.insert(index + 1, point);
             return;
         }
@@ -935,8 +741,7 @@ fn point_on_segment(point: PlanarPoint, a: PlanarPoint, b: PlanarPoint) -> bool 
     if cross(a, b, point).abs() > 0.01 {
         return false;
     }
-    let dot = (point.x_oct - a.x_oct) * (point.x_oct - b.x_oct)
-        + (point.z_oct - a.z_oct) * (point.z_oct - b.z_oct);
+    let dot = (point.x_oct - a.x_oct) * (point.x_oct - b.x_oct) + (point.z_oct - a.z_oct) * (point.z_oct - b.z_oct);
     dot <= 0.01
 }
 
@@ -947,12 +752,7 @@ fn intersect_convex(subject: &[PlanarPoint], clip: &[PlanarPoint]) -> Vec<Planar
         if out.is_empty() {
             break;
         }
-        out = clip_half_plane(
-            &out,
-            clip[index],
-            clip[(index + 1) % clip.len()],
-            clip_positive,
-        );
+        out = clip_half_plane(&out, clip[index], clip[(index + 1) % clip.len()], clip_positive);
     }
     dedup_polygon(out)
 }
@@ -1000,19 +800,10 @@ mod tests {
 
     fn fixture_anchors() -> [SampleAnchor; 4] {
         [
-            SampleAnchor {
-                x_oct: -8,
-                z_oct: -8,
-            },
-            SampleAnchor {
-                x_oct: 8,
-                z_oct: -8,
-            },
+            SampleAnchor { x_oct: -8, z_oct: -8 },
+            SampleAnchor { x_oct: 8, z_oct: -8 },
             SampleAnchor { x_oct: 8, z_oct: 8 },
-            SampleAnchor {
-                x_oct: -8,
-                z_oct: 8,
-            },
+            SampleAnchor { x_oct: -8, z_oct: 8 },
         ]
     }
 
@@ -1026,10 +817,7 @@ mod tests {
             }
         }
         WindowPlan {
-            center: PlanarPoint {
-                x_oct: 0.0,
-                z_oct: 0.0,
-            },
+            center: PlanarPoint { x_oct: 0.0, z_oct: 0.0 },
             corners,
             levels,
             crossings,
@@ -1038,18 +826,11 @@ mod tests {
     }
 
     fn binary_height_window(high_corners: u8) -> WindowPlan {
-        window_for_levels(from_fn(|corner| {
-            if high_corners & (1 << corner) != 0 {
-                200
-            } else {
-                0
-            }
-        }))
+        window_for_levels(from_fn(|corner| if high_corners & (1 << corner) != 0 { 200 } else { 0 }))
     }
 
     fn material_polygons(corners: [u8; 4]) -> Vec<Vec<PlanarPoint>> {
-        let [bottom_left, bottom_right, top_right, top_left] =
-            fixture_anchors().map(SampleAnchor::point);
+        let [bottom_left, bottom_right, top_right, top_left] = fixture_anchors().map(SampleAnchor::point);
         let points = [
             bottom_left,
             bottom_right,
@@ -1070,12 +851,7 @@ mod tests {
             let connected = label_case_is_connected(corners, label, case);
             for polygon in label_window_polys(case, connected) {
                 if !polygon.is_empty() {
-                    polygons.push(
-                        polygon
-                            .iter()
-                            .map(|&point| points[point as usize])
-                            .collect(),
-                    );
+                    polygons.push(polygon.iter().map(|&point| points[point as usize]).collect());
                 }
             }
         }
@@ -1095,13 +871,7 @@ mod tests {
                         chunk.height[(local_z * EDGE + local_x) as usize] = level(x, z);
                     }
                 }
-                world.insert_chunk(
-                    ChunkPos {
-                        x: chunk_x,
-                        z: chunk_z,
-                    },
-                    chunk,
-                );
+                world.insert_chunk(ChunkPos { x: chunk_x, z: chunk_z }, chunk);
             }
         }
         world
@@ -1134,10 +904,7 @@ mod tests {
             for local_x in 0..SUBCELLS_PER_CHUNK_EDGE {
                 let center_x = local_x * OCTIMETERS_PER_SUBCELL;
                 let center_z = local_z * OCTIMETERS_PER_SUBCELL;
-                let center = WindowCenter {
-                    x_octimeters: center_x,
-                    z_octimeters: center_z,
-                };
+                let center = WindowCenter { x_octimeters: center_x, z_octimeters: center_z };
                 assert_eq!(a.has_window_at(center), b.has_window_at(center),);
             }
         }
@@ -1156,19 +923,13 @@ mod tests {
                     }
                 }
                 let plan = WindowPlan {
-                    center: PlanarPoint {
-                        x_oct: 0.0,
-                        z_oct: 0.0,
-                    },
+                    center: PlanarPoint { x_oct: 0.0, z_oct: 0.0 },
                     corners,
                     levels,
                     crossings,
                     case: LocalCase::Pinned { rotation },
                 };
-                assert_eq!(
-                    plan.wall_segments().len(),
-                    crossing_mask.count_ones() as usize
-                );
+                assert_eq!(plan.wall_segments().len(), crossing_mask.count_ones() as usize);
                 assert!(plan.wall_segments().len() <= 4);
                 assert_eq!(plan.faces().len(), 4);
             }
@@ -1261,10 +1022,7 @@ mod tests {
         let east_edges = east.canonical_edges();
         assert!(!west_edges.is_empty() && !east_edges.is_empty());
         assert!(
-            west_edges
-                .iter()
-                .chain(&east_edges)
-                .all(|edge| edge.axis == EdgeAxis::North),
+            west_edges.iter().chain(&east_edges).all(|edge| edge.axis == EdgeAxis::North),
             "the unrelated legal x ramp must not acquire an east-facing contour",
         );
         assert!(

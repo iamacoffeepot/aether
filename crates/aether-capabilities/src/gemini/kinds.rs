@@ -89,29 +89,13 @@ pub struct GroundingMetadata {
 /// request omitted. `AdapterError` is the free-form catchall.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum GeminiError {
-    RateLimited {
-        retry_after_millis: Option<u32>,
-    },
+    RateLimited { retry_after_millis: Option<u32> },
     ContentPolicyRefused,
     Unauthorized,
-    UnknownModel {
-        model: String,
-        supported: Vec<String>,
-    },
-    AspectRatioNotSupportedByModel {
-        model: String,
-        aspect_ratio: AspectRatio,
-        supported: Vec<AspectRatio>,
-    },
-    ImageSizeNotSupportedByModel {
-        model: String,
-        image_size: ImageSize,
-        supported: Vec<ImageSize>,
-    },
-    MissingRequiredField {
-        model: String,
-        field: String,
-    },
+    UnknownModel { model: String, supported: Vec<String> },
+    AspectRatioNotSupportedByModel { model: String, aspect_ratio: AspectRatio, supported: Vec<AspectRatio> },
+    ImageSizeNotSupportedByModel { model: String, image_size: ImageSize, supported: Vec<ImageSize> },
+    MissingRequiredField { model: String, field: String },
     AdapterError(String),
 }
 
@@ -191,14 +175,6 @@ pub struct LyriaGenerate {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.gemini.lyria.generate_result")]
 pub enum LyriaGenerateResult {
-    Ok {
-        request_id: u64,
-        output_paths: Vec<String>,
-        model_used: String,
-        usage: Usage,
-    },
-    Err {
-        request_id: u64,
-        error: GeminiError,
-    },
+    Ok { request_id: u64, output_paths: Vec<String>, model_used: String, usage: Usage },
+    Err { request_id: u64, error: GeminiError },
 }

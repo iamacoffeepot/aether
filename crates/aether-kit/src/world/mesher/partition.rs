@@ -25,21 +25,12 @@ pub(super) fn partition_inputs(
     // iterations, so `repartition` runs its crisp path (no chamfer). The
     // per-cell smoothing plane and material smoothing defaults are ignored
     // here; the smoothing rung reintroduces them.
-    let params = vec![
-        SmoothParams {
-            iterations: 0,
-            smoothing_degrees: 90,
-        };
-        n * n
-    ];
+    let params = vec![SmoothParams { iterations: 0, smoothing_degrees: 90 }; n * n];
     let mut frozen = vec![false; n * n];
     let mut any = false;
     for sj in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
         for si in -apron..SUBCELLS_PER_CHUNK_EDGE + apron {
-            let cell = CellPos {
-                x: at.x * EDGE + si.div_euclid(SUB),
-                z: at.z * EDGE + sj.div_euclid(SUB),
-            };
+            let cell = CellPos { x: at.x * EDGE + si.div_euclid(SUB), z: at.z * EDGE + sj.div_euclid(SUB) };
             // Sample the cell's authored point, not the whole-cell material:
             // an all-inherit point folds back to `World::underlay(cell)`, so
             // an unshaped world is unchanged, while an authored point moves
@@ -61,22 +52,15 @@ pub(super) fn partition_inputs(
             // levels and stays unfrozen, so an unshaped world is unchanged.
             let gx = at.x * EDGE * SUB + si;
             let gz = at.z * EDGE * SUB + sj;
-            let own_level = point_surface_level_at(
-                world,
-                gx * OCTIMETERS_PER_SUBCELL,
-                gz * OCTIMETERS_PER_SUBCELL,
-            );
-            frozen[idx] =
-                [(1, 0), (-1, 0), (0, 1), (0, -1)]
-                    .into_iter()
-                    .any(|(dx, dz): (i32, i32)| {
-                        let level = point_surface_level_at(
-                            world,
-                            (gx + dx) * OCTIMETERS_PER_SUBCELL,
-                            (gz + dz) * OCTIMETERS_PER_SUBCELL,
-                        );
-                        (own_level - level).abs() > STEP_MAX_OCTIMETERS
-                    });
+            let own_level = point_surface_level_at(world, gx * OCTIMETERS_PER_SUBCELL, gz * OCTIMETERS_PER_SUBCELL);
+            frozen[idx] = [(1, 0), (-1, 0), (0, 1), (0, -1)].into_iter().any(|(dx, dz): (i32, i32)| {
+                let level = point_surface_level_at(
+                    world,
+                    (gx + dx) * OCTIMETERS_PER_SUBCELL,
+                    (gz + dz) * OCTIMETERS_PER_SUBCELL,
+                );
+                (own_level - level).abs() > STEP_MAX_OCTIMETERS
+            });
         }
     }
     any.then_some((ids, params, frozen))

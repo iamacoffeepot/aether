@@ -53,10 +53,7 @@ impl<K: Kind> KindId<K> {
     #[doc(hidden)]
     #[must_use]
     pub const fn __new(raw: u64) -> Self {
-        Self {
-            raw,
-            _k: PhantomData,
-        }
+        Self { raw, _k: PhantomData }
     }
 
     /// The raw kind id the substrate assigned. Exposed for hand-rolled
@@ -106,11 +103,7 @@ impl<K: Kind> Mailbox<K> {
     #[doc(hidden)]
     #[must_use]
     pub const fn __new(mailbox: u64, kind: u64) -> Self {
-        Self {
-            mailbox,
-            kind,
-            _k: PhantomData,
-        }
+        Self { mailbox, kind, _k: PhantomData }
     }
 
     /// Raw mailbox id. Exposed for components that need to pass the

@@ -19,16 +19,14 @@ use aether_actor::Addressable;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{EngineConfig, EngineServer, trace::TraceDispatchCapability};
 use aether_kinds::BinaryManifest;
-use aether_substrate::chassis::builder::{
-    Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError,
-};
+use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
 use aether_substrate::{Chassis, SubstrateBoot};
 
 use crate::chassis_common::{
-    ActorRingConfig, SchedulerTuningConfig, hub_known_keys, load_chassis_config,
-    resolve_env_with_file, resolve_teardown_cap_with_file, resolve_with_file,
+    ActorRingConfig, SchedulerTuningConfig, hub_known_keys, load_chassis_config, resolve_env_with_file,
+    resolve_teardown_cap_with_file, resolve_with_file,
 };
 use crate::cli::HubCli;
 use crate::hub::DEFAULT_RPC_PORT;
@@ -118,24 +116,13 @@ impl HubEnv {
         validate_env(&hub_known_keys())?;
         let config_file = load_chassis_config(cli.config.clone())?;
         let config_file = config_file.as_ref();
-        let rpc_port = cli
-            .rpc_port
-            .or_else(super::rpc_port_from_env)
-            .unwrap_or(DEFAULT_RPC_PORT);
+        let rpc_port = cli.rpc_port.or_else(super::rpc_port_from_env).unwrap_or(DEFAULT_RPC_PORT);
         Ok(Self {
             rpc_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port),
-            engine: resolve_with_file::<EngineConfig>(
-                cli.engine.clone().into_layer(),
-                config_file,
-                "engine",
-            )?,
-            ring_caps: resolve_env_with_file::<ActorRingConfig>(config_file, "actor")?
-                .to_ring_capacities(),
-            scheduler_tuning: resolve_env_with_file::<SchedulerTuningConfig>(
-                config_file,
-                "scheduler",
-            )?
-            .to_scheduler_tuning(),
+            engine: resolve_with_file::<EngineConfig>(cli.engine.clone().into_layer(), config_file, "engine")?,
+            ring_caps: resolve_env_with_file::<ActorRingConfig>(config_file, "actor")?.to_ring_capacities(),
+            scheduler_tuning: resolve_env_with_file::<SchedulerTuningConfig>(config_file, "scheduler")?
+                .to_scheduler_tuning(),
             teardown_cap: resolve_teardown_cap_with_file(config_file)?,
         })
     }
@@ -143,13 +130,7 @@ impl HubEnv {
 
 impl HubChassis {
     fn build_inner(env: HubEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let HubEnv {
-            rpc_addr,
-            engine,
-            ring_caps,
-            scheduler_tuning,
-            teardown_cap,
-        } = env;
+        let HubEnv { rpc_addr, engine, ring_caps, scheduler_tuning, teardown_cap } = env;
         let boot = SubstrateBoot::builder("aether-hub", env!("CARGO_PKG_VERSION")).build()?;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);

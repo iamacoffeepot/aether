@@ -3,12 +3,7 @@
 // for triangle vertices and matrix elements are the canonical vocabulary.
 // `cast_lossless` fires on the routine `i32 → i64` widening into the
 // exact-arithmetic integer-grid coord pipeline — structurally lossless.
-#![allow(
-    clippy::cast_precision_loss,
-    clippy::suboptimal_flops,
-    clippy::many_single_char_names,
-    clippy::cast_lossless
-)]
+#![allow(clippy::cast_precision_loss, clippy::suboptimal_flops, clippy::many_single_char_names, clippy::cast_lossless)]
 
 //! Mesh a typed AST into a triangle list.
 //!
@@ -89,10 +84,7 @@ fn polygons_to_triangles(polys: &[LoopPolygon]) -> Vec<Triangle> {
         for i in 1..poly.vertices.len() - 1 {
             let v1 = poly.vertices[i].to_f32();
             let v2 = poly.vertices[i + 1].to_f32();
-            tris.push(Triangle {
-                vertices: [v0, v1, v2],
-                color: poly.color,
-            });
+            tris.push(Triangle { vertices: [v0, v1, v2], color: poly.color });
         }
     }
     tris
@@ -104,81 +96,36 @@ fn polygons_to_triangles(polys: &[LoopPolygon]) -> Vec<Triangle> {
 // primitive `mesh_*` helper but the dispatch table itself is long;
 // extracting it would obscure the AST → primitive mapping.
 #[allow(clippy::too_many_lines)]
-fn mesh_into_polygons(
-    out: &mut Vec<LoopPolygon>,
-    node: &Node,
-    offset: Vec3,
-) -> Result<(), MeshError> {
+fn mesh_into_polygons(out: &mut Vec<LoopPolygon>, node: &Node, offset: Vec3) -> Result<(), MeshError> {
     match node {
         Node::Box { x, y, z, color } => mesh_box(out, *x, *y, *z, *color, offset),
-        Node::Lathe {
-            profile,
-            segments,
-            color,
-        } => mesh_lathe(out, profile, *segments, *color, offset),
-        Node::Torus {
-            major_radius,
-            minor_radius,
-            major_segments,
-            minor_segments,
-            color,
-        } => mesh_torus(
-            out,
-            *major_radius,
-            *minor_radius,
-            *major_segments,
-            *minor_segments,
-            *color,
-            offset,
-        ),
-        Node::Sweep {
-            profile,
-            path,
-            scales,
-            open,
-            color,
-        } => mesh_sweep(out, profile, path, scales.as_deref(), *open, *color, offset),
-        Node::Cylinder {
-            radius,
-            height,
-            segments,
-            color,
-        } => mesh_cylinder(out, *radius, *height, *segments, *color, offset),
-        Node::Cone {
-            radius,
-            height,
-            segments,
-            color,
-        } => mesh_cone(out, *radius, *height, *segments, *color, offset),
+        Node::Lathe { profile, segments, color } => mesh_lathe(out, profile, *segments, *color, offset),
+        Node::Torus { major_radius, minor_radius, major_segments, minor_segments, color } => {
+            mesh_torus(out, *major_radius, *minor_radius, *major_segments, *minor_segments, *color, offset)
+        }
+        Node::Sweep { profile, path, scales, open, color } => {
+            mesh_sweep(out, profile, path, scales.as_deref(), *open, *color, offset)
+        }
+        Node::Cylinder { radius, height, segments, color } => {
+            mesh_cylinder(out, *radius, *height, *segments, *color, offset)
+        }
+        Node::Cone { radius, height, segments, color } => mesh_cone(out, *radius, *height, *segments, *color, offset),
         Node::Wedge { x, y, z, color } => mesh_wedge(out, *x, *y, *z, *color, offset),
-        Node::Sphere {
-            radius,
-            subdivisions,
-            color,
-        } => mesh_sphere(out, *radius, *subdivisions, *color, offset),
-        Node::Extrude {
-            profile,
-            depth,
-            color,
-        } => mesh_extrude(out, profile, *depth, *color, offset),
+        Node::Sphere { radius, subdivisions, color } => mesh_sphere(out, *radius, *subdivisions, *color, offset),
+        Node::Extrude { profile, depth, color } => mesh_extrude(out, profile, *depth, *color, offset),
         Node::Composition(children) => {
             for child in children {
                 mesh_into_polygons(out, child, offset)?;
             }
             Ok(())
         }
-        Node::Translate {
-            offset: delta,
-            child,
-        } => mesh_into_polygons(out, child, offset + *delta),
+        Node::Translate { offset: delta, child } => mesh_into_polygons(out, child, offset + *delta),
         Node::Rotate { axis, angle, child } => {
             let mut local = Vec::new();
             mesh_into_polygons(&mut local, child, Vec3::ZERO)?;
             let n = axis.normalize_or(Vec3::Y);
             for poly in &local {
-                if let Some(transformed) =
-                    transform_polygon(poly, |v| v.rotate_axis_angle(n, *angle) + offset)?
-                {
+                if let Some(transformed) = transform_polygon(poly, |v| v.rotate_axis_angle(n, *angle) + offset)? {
                     out.push(transformed);
                 }
             }
@@ -189,11 +136,7 @@ fn mesh_into_polygons(
             mesh_into_polygons(&mut local, child, Vec3::ZERO)?;
             for poly in &local {
                 if let Some(transformed) = transform_polygon(poly, |v| {
-                    Vec3::new(
-                        v.x * factor.x + offset.x,
-                        v.y * factor.y + offset.y,
-                        v.z * factor.z + offset.z,
-                    )
+                    Vec3::new(v.x * factor.x + offset.x, v.y * factor.y + offset.y, v.z * factor.z + offset.z)
                 })? {
                     out.push(transformed);
                 }
@@ -210,11 +153,7 @@ fn mesh_into_polygons(
             }
             Ok(())
         }
-        Node::Array {
-            count,
-            spacing,
-            child,
-        } => {
+        Node::Array { count, spacing, child } => {
             let mut local = Vec::new();
             mesh_into_polygons(&mut local, child, Vec3::ZERO)?;
             for i in 0..*count {
@@ -241,11 +180,7 @@ fn point_from_f32(v: Vec3) -> Result<Point3, MeshError> {
 /// degenerate polygons are silently skipped. Out-of-range vertices
 /// surface as [`MeshError::OutOfRange`] — loud failure at the ±256 unit
 /// boundary.
-fn push_polygon_from_f32(
-    out: &mut Vec<LoopPolygon>,
-    verts: &[Vec3],
-    color: u32,
-) -> Result<(), MeshError> {
+fn push_polygon_from_f32(out: &mut Vec<LoopPolygon>, verts: &[Vec3], color: u32) -> Result<(), MeshError> {
     if verts.len() < 3 {
         return Ok(());
     }
@@ -265,11 +200,7 @@ fn push_polygon_from_f32(
     let Some(plane) = derive_plane_robust(&points) else {
         return Ok(());
     };
-    out.push(LoopPolygon {
-        vertices: points,
-        plane,
-        color,
-    });
+    out.push(LoopPolygon { vertices: points, plane, color });
     Ok(())
 }
 
@@ -291,11 +222,7 @@ where
     let Some(plane) = derive_plane_robust(&new_verts) else {
         return Ok(None);
     };
-    Ok(Some(LoopPolygon {
-        vertices: new_verts,
-        plane,
-        color: poly.color,
-    }))
+    Ok(Some(LoopPolygon { vertices: new_verts, plane, color: poly.color }))
 }
 
 /// Find three non-collinear vertices in `verts` and return the plane
@@ -317,11 +244,7 @@ fn derive_plane_robust(verts: &[Point3]) -> Option<Plane3> {
 /// Mirror `poly` across `axis`, then translate by `offset`. Reflection
 /// inverts winding; reverse the vertex list and re-derive the plane so
 /// downstream classification still treats the polygon as outward-CCW.
-fn mirror_polygon(
-    poly: &LoopPolygon,
-    axis: Axis,
-    offset: Vec3,
-) -> Result<Option<LoopPolygon>, MeshError> {
+fn mirror_polygon(poly: &LoopPolygon, axis: Axis, offset: Vec3) -> Result<Option<LoopPolygon>, MeshError> {
     let mut new_verts = Vec::with_capacity(poly.vertices.len());
     for v in &poly.vertices {
         let f = v.to_f32();
@@ -339,32 +262,17 @@ fn mirror_polygon(
     let Some(plane) = derive_plane_robust(&new_verts) else {
         return Ok(None);
     };
-    Ok(Some(LoopPolygon {
-        vertices: new_verts,
-        plane,
-        color: poly.color,
-    }))
+    Ok(Some(LoopPolygon { vertices: new_verts, plane, color: poly.color }))
 }
 
 /// Emit 6 quad faces for an axis-aligned box of size `(x, y, z)`
 /// centered at `(0, 0, 0)` then translated by `offset`. Faces wound CCW
 /// from outside.
-fn mesh_box(
-    out: &mut Vec<LoopPolygon>,
-    x: f32,
-    y: f32,
-    z: f32,
-    color: u32,
-    offset: Vec3,
-) -> Result<(), MeshError> {
+fn mesh_box(out: &mut Vec<LoopPolygon>, x: f32, y: f32, z: f32, color: u32, offset: Vec3) -> Result<(), MeshError> {
     let hx = x * 0.5;
     let hy = y * 0.5;
     let hz = z * 0.5;
-    let Vec3 {
-        x: ox,
-        y: oy,
-        z: oz,
-    } = offset;
+    let Vec3 { x: ox, y: oy, z: oz } = offset;
 
     let nnn = Vec3::new(ox - hx, oy - hy, oz - hz);
     let pnn = Vec3::new(ox + hx, oy - hy, oz - hz);
@@ -409,11 +317,7 @@ fn mesh_lathe(
 
     let revolve = |radius: f32, height: f32, i: usize| -> Vec3 {
         let (cos, sin) = cos_sin[i % segments];
-        Vec3::new(
-            offset.x + radius * cos,
-            offset.y + height,
-            offset.z + radius * sin,
-        )
+        Vec3::new(offset.x + radius * cos, offset.y + height, offset.z + radius * sin)
     };
 
     for k in 0..profile.len() - 1 {
@@ -458,11 +362,7 @@ fn mesh_torus(
         let cos_b = beta.cos();
         let sin_b = beta.sin();
         let r = major_radius + minor_radius * cos_b;
-        Vec3::new(
-            offset.x + r * cos_a,
-            offset.y + minor_radius * sin_b,
-            offset.z + r * sin_a,
-        )
+        Vec3::new(offset.x + r * cos_a, offset.y + minor_radius * sin_b, offset.z + r * sin_a)
     };
     for i in 0..m {
         let i_next = (i + 1) % m;
@@ -501,8 +401,7 @@ fn mesh_sweep(
     let profile_signed_area_2x: f64 = (0..n)
         .map(|i| {
             let j = (i + 1) % n;
-            (profile[i][0] as f64) * (profile[j][1] as f64)
-                - (profile[j][0] as f64) * (profile[i][1] as f64)
+            (profile[i][0] as f64) * (profile[j][1] as f64) - (profile[j][0] as f64) * (profile[i][1] as f64)
         })
         .sum();
     let profile_ccw = profile_signed_area_2x > 0.0;
@@ -510,11 +409,7 @@ fn mesh_sweep(
     let mut tangents: Vec<Vec3> = Vec::with_capacity(path.len());
     for k in 0..path.len() {
         let prev = if k == 0 { path[k] } else { path[k - 1] };
-        let next = if k == path.len() - 1 {
-            path[k]
-        } else {
-            path[k + 1]
-        };
+        let next = if k == path.len() - 1 { path[k] } else { path[k + 1] };
         tangents.push((next - prev).normalize_or(Vec3::Z));
     }
 
@@ -553,28 +448,18 @@ fn mesh_sweep(
             let b = r1[i];
             let c = r0[j];
             let d = r1[j];
-            let quad: [Vec3; 4] = if profile_ccw {
-                [a, c, d, b]
-            } else {
-                [a, b, d, c]
-            };
+            let quad: [Vec3; 4] = if profile_ccw { [a, c, d, b] } else { [a, b, d, c] };
             push_polygon_from_f32(out, &quad, color)?;
         }
     }
 
     if !open {
         let last = rings.len() - 1;
-        let start_cap: Vec<Vec3> = if profile_ccw {
-            rings[0].iter().rev().copied().collect()
-        } else {
-            rings[0].clone()
-        };
+        let start_cap: Vec<Vec3> =
+            if profile_ccw { rings[0].iter().rev().copied().collect() } else { rings[0].clone() };
         push_polygon_from_f32(out, &start_cap, color)?;
-        let end_cap: Vec<Vec3> = if profile_ccw {
-            rings[last].clone()
-        } else {
-            rings[last].iter().rev().copied().collect()
-        };
+        let end_cap: Vec<Vec3> =
+            if profile_ccw { rings[last].clone() } else { rings[last].iter().rev().copied().collect() };
         push_polygon_from_f32(out, &end_cap, color)?;
     }
     Ok(())
@@ -634,22 +519,11 @@ fn mesh_sphere(
 
 /// Right-triangular prism (ramp) with extents `(x, y, z)` centered at
 /// `offset`. Faces wound CCW from outside.
-fn mesh_wedge(
-    out: &mut Vec<LoopPolygon>,
-    x: f32,
-    y: f32,
-    z: f32,
-    color: u32,
-    offset: Vec3,
-) -> Result<(), MeshError> {
+fn mesh_wedge(out: &mut Vec<LoopPolygon>, x: f32, y: f32, z: f32, color: u32, offset: Vec3) -> Result<(), MeshError> {
     let hx = x * 0.5;
     let hy = y * 0.5;
     let hz = z * 0.5;
-    let Vec3 {
-        x: ox,
-        y: oy,
-        z: oz,
-    } = offset;
+    let Vec3 { x: ox, y: oy, z: oz } = offset;
     let a = Vec3::new(ox - hx, oy - hy, oz - hz); // back-bottom-left
     let b = Vec3::new(ox + hx, oy - hy, oz - hz); // back-bottom-right
     let c = Vec3::new(ox - hx, oy - hy, oz + hz); // front-bottom-left
@@ -682,11 +556,7 @@ fn mesh_extrude(
         return Ok(());
     }
     let n = profile.len();
-    let Vec3 {
-        x: ox,
-        y: oy,
-        z: oz,
-    } = offset;
+    let Vec3 { x: ox, y: oy, z: oz } = offset;
     let base = |i: usize| -> Vec3 { Vec3::new(ox + profile[i][0], oy + profile[i][1], oz) };
     let top = |i: usize| -> Vec3 { Vec3::new(ox + profile[i][0], oy + profile[i][1], oz + depth) };
 
@@ -709,8 +579,8 @@ mod tests {
     #[test]
     fn lathe_meshes_to_non_empty_solid() {
         use crate::parse;
-        let ast = parse("(lathe ((0 -0.5) (0.5 -0.5) (0.5 0.5) (0 0.5)) 16 :color 3)")
-            .expect("test setup: lathe DSL parses");
+        let ast =
+            parse("(lathe ((0 -0.5) (0.5 -0.5) (0.5 0.5) (0 0.5)) 16 :color 3)").expect("test setup: lathe DSL parses");
         let tris = mesh(&ast).expect("lathe must mesh");
         assert!(!tris.is_empty(), "lathe produced no triangles");
         assert!(tris.iter().all(|t| t.color == 3));
@@ -719,8 +589,7 @@ mod tests {
     #[test]
     fn open_profile_lathe_meshes() {
         use crate::parse;
-        let ast = parse("(lathe ((0.5 -0.5) (0.5 0.5)) 16 :color 5)")
-            .expect("test setup: lathe DSL parses");
+        let ast = parse("(lathe ((0.5 -0.5) (0.5 0.5)) 16 :color 5)").expect("test setup: lathe DSL parses");
         let tris = mesh(&ast).expect("open-profile lathe must mesh");
         assert!(!tris.is_empty(), "open lathe produced no triangles");
     }

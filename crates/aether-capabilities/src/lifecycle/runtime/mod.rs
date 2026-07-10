@@ -30,8 +30,8 @@ pub use super::subscribers::broadcast_to_subscribers;
 use aether_actor::runtime;
 use aether_kinds::trace::Settled;
 use aether_kinds::{
-    LifecycleAdvance, LifecycleSubscribe, LifecycleSubscribeResult, LifecycleSubscribeSelf,
-    LifecycleUnsubscribe, LifecycleUnsubscribeAll, LifecycleUnsubscribeSelf, Quit,
+    LifecycleAdvance, LifecycleSubscribe, LifecycleSubscribeResult, LifecycleSubscribeSelf, LifecycleUnsubscribe,
+    LifecycleUnsubscribeAll, LifecycleUnsubscribeSelf, Quit,
 };
 
 pub use aether_actor::Manual;
@@ -190,15 +190,8 @@ impl NativeActor for LifecycleCapability {
     type Config = LifecycleConfig;
     const NAMESPACE: &'static str = "aether.lifecycle";
 
-    fn init(
-        config: LifecycleConfig,
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<LifecycleCapabilityState, BootError> {
-        let LifecycleConfig {
-            graph,
-            initial_subscribers,
-            advance_timeout_millis,
-        } = config;
+    fn init(config: LifecycleConfig, ctx: &mut NativeInitCtx<'_>) -> Result<LifecycleCapabilityState, BootError> {
+        let LifecycleConfig { graph, initial_subscribers, advance_timeout_millis } = config;
         let current_state = graph.start();
         let mailer = ctx.mailer();
         let mut subscribers: BTreeMap<KindId, BTreeSet<DataMailboxId>> = BTreeMap::new();
@@ -249,18 +242,12 @@ impl NativeActor for LifecycleCapability {
         let mailbox = DataMailboxId(payload.mailbox);
         let known = state.graph.state(stage_kind).is_some() || state.graph.is_terminal(stage_kind);
         if known {
-            state
-                .subscribers
-                .entry(stage_kind)
-                .or_default()
-                .insert(mailbox);
+            state.subscribers.entry(stage_kind).or_default().insert(mailbox);
             LifecycleSubscribeResult::Ok
         } else {
             LifecycleSubscribeResult::Err {
                 stage: payload.stage,
-                error: format!(
-                    "stage {stage_kind:?} is not declared by this chassis's lifecycle graph"
-                ),
+                error: format!("stage {stage_kind:?} is not declared by this chassis's lifecycle graph"),
             }
         }
     }
@@ -295,14 +282,9 @@ impl NativeActor for LifecycleCapability {
                     .to_string(),
             },
             Some(sender) => {
-                let known =
-                    state.graph.state(stage_kind).is_some() || state.graph.is_terminal(stage_kind);
+                let known = state.graph.state(stage_kind).is_some() || state.graph.is_terminal(stage_kind);
                 if known {
-                    state
-                        .subscribers
-                        .entry(stage_kind)
-                        .or_default()
-                        .insert(DataMailboxId(sender.0));
+                    state.subscribers.entry(stage_kind).or_default().insert(DataMailboxId(sender.0));
                     LifecycleSubscribeResult::Ok
                 } else {
                     LifecycleSubscribeResult::Err {
@@ -339,9 +321,7 @@ impl NativeActor for LifecycleCapability {
         } else {
             LifecycleSubscribeResult::Err {
                 stage: payload.stage,
-                error: format!(
-                    "stage {stage_kind:?} is not declared by this chassis's lifecycle graph"
-                ),
+                error: format!("stage {stage_kind:?} is not declared by this chassis's lifecycle graph"),
             }
         }
     }
@@ -371,8 +351,7 @@ impl NativeActor for LifecycleCapability {
                     .to_string(),
             },
             Some(sender) => {
-                let known =
-                    state.graph.state(stage_kind).is_some() || state.graph.is_terminal(stage_kind);
+                let known = state.graph.state(stage_kind).is_some() || state.graph.is_terminal(stage_kind);
                 if known {
                     if let Some(set) = state.subscribers.get_mut(&stage_kind) {
                         set.remove(&DataMailboxId(sender.0));
@@ -404,11 +383,7 @@ impl NativeActor for LifecycleCapability {
     /// # Agent
     /// `LifecycleUnsubscribeAll { mailbox }`. Idempotent.
     #[handler::single]
-    fn on_unsubscribe_all(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        payload: LifecycleUnsubscribeAll,
-    ) {
+    fn on_unsubscribe_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, payload: LifecycleUnsubscribeAll) {
         for set in state.subscribers.values_mut() {
             set.remove(&DataMailboxId(payload.mailbox));
         }
@@ -440,18 +415,11 @@ impl NativeActor for LifecycleCapability {
     /// frame. Reply: [`LifecycleAdvanceComplete`] once the broadcast
     /// root settles.
     #[handler::manual]
-    fn on_advance(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Manual>,
-        _payload: LifecycleAdvance,
-    ) {
+    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _payload: LifecycleAdvance) {
         if state.terminal_reached {
             // Already done — reply immediately with zeros so the
             // chassis main loop unblocks and can break on `next == 0`.
-            ctx.reply(&LifecycleAdvanceComplete {
-                completed: 0,
-                next: 0,
-            });
+            ctx.reply(&LifecycleAdvanceComplete { completed: 0, next: 0 });
             return;
         }
 
@@ -466,10 +434,7 @@ impl NativeActor for LifecycleCapability {
             // lifecycle degrades to a stutter instead of wedging
             // forever, then fall through to process *this* advance.
             if !state.pending_timed_out() {
-                let pending = state
-                    .pending
-                    .as_ref()
-                    .expect("pending.is_some() checked above");
+                let pending = state.pending.as_ref().expect("pending.is_some() checked above");
                 tracing::warn!(
                     target: "aether_capabilities::lifecycle",
                     current = ?state.current_state,
@@ -483,10 +448,7 @@ impl NativeActor for LifecycleCapability {
             }
             state.force_complete_pending(ctx);
             if state.terminal_reached {
-                ctx.reply(&LifecycleAdvanceComplete {
-                    completed: 0,
-                    next: 0,
-                });
+                ctx.reply(&LifecycleAdvanceComplete { completed: 0, next: 0 });
                 return;
             }
         }
@@ -494,14 +456,9 @@ impl NativeActor for LifecycleCapability {
         // Decide what to broadcast and the post-settlement state.
         let step = if let Some(state_data) = state.graph.state(state.current_state) {
             let next = resolve_edge(state_data, &mut state.quit_pending);
-            Step::StateAdvance {
-                broadcast: state.current_state,
-                next,
-            }
+            Step::StateAdvance { broadcast: state.current_state, next }
         } else if state.graph.is_terminal(state.current_state) {
-            Step::Terminal {
-                broadcast: state.current_state,
-            }
+            Step::Terminal { broadcast: state.current_state }
         } else {
             // Defensive — builder finalize prevents this.
             Step::Unknown
@@ -511,10 +468,7 @@ impl NativeActor for LifecycleCapability {
             Step::StateAdvance { broadcast, next } => (broadcast, next, false),
             Step::Terminal { broadcast } => (broadcast, KindId(0), true),
             Step::Unknown => {
-                ctx.reply(&LifecycleAdvanceComplete {
-                    completed: 0,
-                    next: 0,
-                });
+                ctx.reply(&LifecycleAdvanceComplete { completed: 0, next: 0 });
                 return;
             }
         };
@@ -559,10 +513,7 @@ impl NativeActor for LifecycleCapability {
             } else {
                 state.current_state = next_kind;
             }
-            ctx.reply(&LifecycleAdvanceComplete {
-                completed: broadcast.0,
-                next: next_kind.0,
-            });
+            ctx.reply(&LifecycleAdvanceComplete { completed: broadcast.0, next: next_kind.0 });
         }
     }
 
@@ -632,25 +583,12 @@ mod tests {
         cap.subscribers.entry(render).or_default().insert(survivor);
         cap.subscribers.entry(present).or_default().insert(dropped);
 
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&cap.mailer),
-            MailboxId(0),
-        ));
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&cap.mailer), MailboxId(0)));
         let mut ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
-        LifecycleCapability::on_unsubscribe_all(
-            &mut cap,
-            &mut ctx,
-            LifecycleUnsubscribeAll { mailbox: dropped.0 },
-        );
+        LifecycleCapability::on_unsubscribe_all(&mut cap, &mut ctx, LifecycleUnsubscribeAll { mailbox: dropped.0 });
 
-        assert!(
-            !cap.subscribers[&render].contains(&dropped),
-            "dropped mailbox must leave the Render stage"
-        );
-        assert!(
-            !cap.subscribers[&present].contains(&dropped),
-            "dropped mailbox must leave the Present stage"
-        );
+        assert!(!cap.subscribers[&render].contains(&dropped), "dropped mailbox must leave the Render stage");
+        assert!(!cap.subscribers[&present].contains(&dropped), "dropped mailbox must leave the Present stage");
         assert!(
             cap.subscribers[&render].contains(&survivor),
             "co-subscribers on a shared stage must survive the purge"
@@ -669,22 +607,13 @@ mod tests {
         let render = <Render as Kind>::ID;
         let sender = DataMailboxId(0x00C0_FFEE);
 
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&cap.mailer),
-            MailboxId(0),
-        ));
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&cap.mailer), MailboxId(0)));
         let source = Source::to(SourceAddr::Component(MailboxId(sender.0)));
         let mut ctx = NativeCtx::new(&transport, source, MailId::NONE, MailId::NONE);
-        LifecycleCapability::on_subscribe_self(
-            &mut cap,
-            &mut ctx,
-            LifecycleSubscribeSelf { stage: render.0 },
-        );
+        LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, LifecycleSubscribeSelf { stage: render.0 });
 
         assert!(
-            cap.subscribers
-                .get(&render)
-                .is_some_and(|s| s.contains(&sender)),
+            cap.subscribers.get(&render).is_some_and(|s| s.contains(&sender)),
             "a Component-source subscribe_self lands that mailbox in the stage set"
         );
     }
@@ -701,17 +630,10 @@ mod tests {
         let mut cap = test_cap(Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT));
         let render = <Render as Kind>::ID;
 
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&cap.mailer),
-            MailboxId(0),
-        ));
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&cap.mailer), MailboxId(0)));
         let source = Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xFEED))));
         let mut ctx = NativeCtx::new(&transport, source, MailId::NONE, MailId::NONE);
-        LifecycleCapability::on_subscribe_self(
-            &mut cap,
-            &mut ctx,
-            LifecycleSubscribeSelf { stage: render.0 },
-        );
+        LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, LifecycleSubscribeSelf { stage: render.0 });
 
         assert!(
             cap.subscribers.get(&render).is_none_or(BTreeSet::is_empty),
@@ -746,62 +668,42 @@ mod tests {
         // back the kind, the host-stamped `Source`, and the payload.
         let (tx, rx) = mpsc::channel::<(KindId, Source, Vec<u8>)>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
-            let captured = (
-                dispatch.kind,
-                dispatch.sender,
-                dispatch.payload.bytes().to_vec(),
-            );
+            let captured = (dispatch.kind, dispatch.sender, dispatch.payload.bytes().to_vec());
             dispatch.discharge();
             let _ = tx.send(captured);
         });
-        let lifecycle_id = registry.register_inbox(
-            <LifecycleCapability as aether_actor::Addressable>::NAMESPACE,
-            handler,
-        );
+        let lifecycle_id =
+            registry.register_inbox(<LifecycleCapability as aether_actor::Addressable>::NAMESPACE, handler);
 
         // The calling actor: a transport stamped with SENDER as its
         // self-mailbox, so its sends carry `Source::Component(SENDER)`.
         let sender = DataMailboxId(0x00C0_FFEE);
         let tx_binding = NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(sender.0));
-        let lifecycle =
-            NativeActorMailbox::<LifecycleCapability>::__new(lifecycle_id.0, &tx_binding);
+        let lifecycle = NativeActorMailbox::<LifecycleCapability>::__new(lifecycle_id.0, &tx_binding);
         lifecycle.subscribe::<Tick>();
         tx_binding.flush_outbound();
 
         let (kind, source, bytes) = rx.try_recv().expect("subscribe::<Tick>() emitted one mail");
-        assert_eq!(
-            kind,
-            <LifecycleSubscribeSelf as Kind>::ID,
-            "the SDK self-subscribe sends LifecycleSubscribeSelf"
-        );
+        assert_eq!(kind, <LifecycleSubscribeSelf as Kind>::ID, "the SDK self-subscribe sends LifecycleSubscribeSelf");
         assert_eq!(
             source.addr,
             SourceAddr::Component(MailboxId(sender.0)),
             "the host stamps the calling actor as the Source"
         );
-        let decoded = LifecycleSubscribeSelf::decode_from_bytes(&bytes)
-            .expect("payload decodes as LifecycleSubscribeSelf");
-        assert_eq!(
-            decoded.stage,
-            <Tick as Kind>::ID.0,
-            "the payload carries the Tick stage id"
-        );
+        let decoded =
+            LifecycleSubscribeSelf::decode_from_bytes(&bytes).expect("payload decodes as LifecycleSubscribeSelf");
+        assert_eq!(decoded.stage, <Tick as Kind>::ID.0, "the payload carries the Tick stage id");
 
         // Deliver the captured mail to the cap exactly as the
         // dispatcher would, and confirm the calling actor is now in the
         // Tick stage set.
         let mut cap = tick_start_graph_cap();
-        let cap_transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&cap.mailer),
-            MailboxId(0),
-        ));
+        let cap_transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&cap.mailer), MailboxId(0)));
         let mut ctx = NativeCtx::new(&cap_transport, source, MailId::NONE, MailId::NONE);
         LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, decoded);
 
         assert!(
-            cap.subscribers
-                .get(&<Tick as Kind>::ID)
-                .is_some_and(|s| s.contains(&sender)),
+            cap.subscribers.get(&<Tick as Kind>::ID).is_some_and(|s| s.contains(&sender)),
             "the calling actor lands in the Tick stage set"
         );
     }

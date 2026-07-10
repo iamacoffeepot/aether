@@ -45,8 +45,7 @@ pub fn route_matches(prefix: &str, path: &str) -> bool {
     if prefix == "/" {
         return true;
     }
-    path.strip_prefix(prefix)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    path.strip_prefix(prefix).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 /// Validate + normalize a registration prefix: must start with `/`;
@@ -58,11 +57,7 @@ pub fn normalize_prefix(raw: &str) -> Result<String, String> {
         return Err(format!("route prefix {raw:?} must start with '/'"));
     }
     let trimmed = raw.trim_end_matches('/');
-    Ok(if trimmed.is_empty() {
-        "/".to_string()
-    } else {
-        trimmed.to_string()
-    })
+    Ok(if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() })
 }
 
 /// Registrant-mailbox validation for the explicit-`mailbox`
@@ -112,10 +107,7 @@ pub fn register_route(
         Err(error) => return RegisterRouteResult::Err { error },
     };
     let mut routes = routes.write().expect("route table lock poisoned");
-    if let Some(existing) = routes
-        .iter_mut()
-        .find(|r| r.prefix == prefix && r.method == method)
-    {
+    if let Some(existing) = routes.iter_mut().find(|r| r.prefix == prefix && r.method == method) {
         // Exclusive re-claim by the sole holder stays the idempotent
         // kind-updating Ok it always was.
         if !shared && !existing.shared && existing.members == [mailbox] {
@@ -127,21 +119,14 @@ pub fn register_route(
                 error: format!(
                     "route ({prefix:?}, {method:?}) is {}; a {} registration cannot \
                      join it (ADR-0136: spreading is a joint opt-in)",
-                    if existing.shared {
-                        "a shared member set"
-                    } else {
-                        "exclusively claimed"
-                    },
+                    if existing.shared { "a shared member set" } else { "exclusively claimed" },
                     if shared { "shared" } else { "exclusive" },
                 ),
             };
         }
         if !shared {
             return RegisterRouteResult::Err {
-                error: format!(
-                    "route ({prefix:?}, {method:?}) already claimed by mailbox {:?}",
-                    existing.members[0],
-                ),
+                error: format!("route ({prefix:?}, {method:?}) already claimed by mailbox {:?}", existing.members[0],),
             };
         }
         if existing.kind != kind {
@@ -158,13 +143,7 @@ pub fn register_route(
         }
         return RegisterRouteResult::Ok;
     }
-    routes.push(Route {
-        prefix,
-        method,
-        kind,
-        shared,
-        members: vec![mailbox],
-    });
+    routes.push(Route { prefix, method, kind, shared, members: vec![mailbox] });
     RegisterRouteResult::Ok
 }
 

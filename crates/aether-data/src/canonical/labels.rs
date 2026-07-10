@@ -6,8 +6,8 @@
 use crate::schema::{KindLabels, LabelCell, LabelNode, VariantLabel};
 
 use super::primitives::{
-    U32_WIDTH, U64_WIDTH, cow_label_nodes, cow_str_as_str, cow_strs, cow_variant_labels,
-    option_str_len, str_len, write_count, write_option_str, write_str, write_u32_le, write_u64_le,
+    U32_WIDTH, U64_WIDTH, cow_label_nodes, cow_str_as_str, cow_strs, cow_variant_labels, option_str_len, str_len,
+    write_count, write_option_str, write_str, write_u32_le, write_u64_le,
 };
 
 const LABEL_ANONYMOUS: u8 = 0;
@@ -32,14 +32,8 @@ pub const fn canonical_len_labels(labels: &KindLabels) -> usize {
 const fn label_node_len(node: &LabelNode) -> usize {
     match node {
         LabelNode::Anonymous => U32_WIDTH,
-        LabelNode::Option(cell) | LabelNode::Vec(cell) | LabelNode::Array(cell) => {
-            U32_WIDTH + label_cell_len(cell)
-        }
-        LabelNode::Struct {
-            type_label,
-            field_names,
-            fields,
-        } => {
+        LabelNode::Option(cell) | LabelNode::Vec(cell) | LabelNode::Array(cell) => U32_WIDTH + label_cell_len(cell),
+        LabelNode::Struct { type_label, field_names, fields } => {
             let names = cow_strs(field_names);
             let fs = cow_label_nodes(fields);
             let mut total = U32_WIDTH + option_str_len(type_label);
@@ -57,10 +51,7 @@ const fn label_node_len(node: &LabelNode) -> usize {
             }
             total
         }
-        LabelNode::Enum {
-            type_label,
-            variants,
-        } => {
+        LabelNode::Enum { type_label, variants } => {
             let vs = cow_variant_labels(variants);
             let mut total = U32_WIDTH + option_str_len(type_label);
             total += U32_WIDTH;
@@ -97,11 +88,7 @@ const fn variant_label_len(v: &VariantLabel) -> usize {
             }
             total
         }
-        VariantLabel::Struct {
-            name,
-            field_names,
-            fields,
-        } => {
+        VariantLabel::Struct { name, field_names, fields } => {
             let names = cow_strs(field_names);
             let fs = cow_label_nodes(fields);
             let mut total = U32_WIDTH + str_len(cow_str_as_str(name));
@@ -135,10 +122,7 @@ pub const fn canonical_serialize_labels<const N: usize>(labels: &KindLabels) -> 
     let mut pos = write_u64_le(labels.kind_id.0, &mut out, 0);
     pos = write_str(cow_str_as_str(&labels.kind_label), &mut out, pos);
     pos = write_label_node(&labels.root, &mut out, pos);
-    assert!(
-        pos == N,
-        "canonical_serialize_labels: size mismatch between len pass and serialize pass"
-    );
+    assert!(pos == N, "canonical_serialize_labels: size mismatch between len pass and serialize pass");
     out
 }
 
@@ -160,11 +144,7 @@ const fn write_label_node(node: &LabelNode, out: &mut [u8], cursor: usize) -> us
             pos = write_u32_le(LABEL_ARRAY as u32, out, pos);
             pos = write_label_cell(cell, out, pos);
         }
-        LabelNode::Struct {
-            type_label,
-            field_names,
-            fields,
-        } => {
+        LabelNode::Struct { type_label, field_names, fields } => {
             let names = cow_strs(field_names);
             let fs = cow_label_nodes(fields);
             pos = write_u32_le(LABEL_STRUCT as u32, out, pos);
@@ -182,10 +162,7 @@ const fn write_label_node(node: &LabelNode, out: &mut [u8], cursor: usize) -> us
                 i += 1;
             }
         }
-        LabelNode::Enum {
-            type_label,
-            variants,
-        } => {
+        LabelNode::Enum { type_label, variants } => {
             let vs = cow_variant_labels(variants);
             pos = write_u32_le(LABEL_ENUM as u32, out, pos);
             pos = write_option_str(type_label, out, pos);
@@ -232,11 +209,7 @@ const fn write_variant_label(v: &VariantLabel, out: &mut [u8], cursor: usize) ->
                 i += 1;
             }
         }
-        VariantLabel::Struct {
-            name,
-            field_names,
-            fields,
-        } => {
+        VariantLabel::Struct { name, field_names, fields } => {
             let names = cow_strs(field_names);
             let fs = cow_label_nodes(fields);
             pos = write_u32_le(VARIANT_LABEL_STRUCT as u32, out, pos);

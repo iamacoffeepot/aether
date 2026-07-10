@@ -39,15 +39,7 @@ unsafe extern "C" {
     /// origin inside its own cluster. Carrying it on the send is what
     /// retires the host's ambient per-receive dispatch-identity cell.
     #[link_name = "send_mail_p32"]
-    pub fn send_mail(
-        recipient: u64,
-        kind: u64,
-        ptr: u32,
-        len: u32,
-        count: u32,
-        detached: u32,
-        from: u64,
-    ) -> u32;
+    pub fn send_mail(recipient: u64, kind: u64, ptr: u32, len: u32, count: u32, detached: u32, from: u64) -> u32;
     /// `from` (issue 1987) is the replying actor's own folded `MailboxId`
     /// raw value — the dispatch identity the host stamps on the reply's
     /// lineage, validated and fallback-resolved exactly like `send_mail`.
@@ -84,13 +76,7 @@ unsafe extern "C" {
     /// `message_ptr/len` are byte slices in guest memory; the host
     /// copies before returning.
     #[link_name = "log_event_p32"]
-    pub fn log_event(
-        level: u32,
-        target_ptr: u32,
-        target_len: u32,
-        message_ptr: u32,
-        message_len: u32,
-    );
+    pub fn log_event(level: u32, target_ptr: u32, target_len: u32, message_ptr: u32, message_len: u32);
     /// ADR-0097: spawn a sibling actor type from the same resident
     /// module. `tag` is the sibling's actor-type tag
     /// (`mailbox_id_from_name(NAMESPACE)`), used to pick the export at
@@ -166,14 +152,7 @@ pub unsafe fn send_mail(
 /// has no FFI host to call, so any invocation is a bug.
 #[cfg(not(target_family = "wasm"))]
 #[must_use]
-pub unsafe fn reply_mail(
-    _sender: u32,
-    _kind: u64,
-    _ptr: u32,
-    _len: u32,
-    _count: u32,
-    _from: u64,
-) -> u32 {
+pub unsafe fn reply_mail(_sender: u32, _kind: u64, _ptr: u32, _len: u32, _count: u32, _from: u64) -> u32 {
     panic!("aether-actor: reply_mail called outside the FFI guest");
 }
 
@@ -246,13 +225,7 @@ pub unsafe fn init_failed(_ptr: u32, _len: u32) {
 /// Always panics — fail-fast per ADR-0063: the host build of the SDK
 /// has no FFI host to call, so any invocation is a bug.
 #[cfg(not(target_family = "wasm"))]
-pub unsafe fn log_event(
-    _level: u32,
-    _target_ptr: u32,
-    _target_len: u32,
-    _message_ptr: u32,
-    _message_len: u32,
-) {
+pub unsafe fn log_event(_level: u32, _target_ptr: u32, _target_len: u32, _message_ptr: u32, _message_len: u32) {
     panic!("aether-actor: log_event called outside the FFI guest");
 }
 

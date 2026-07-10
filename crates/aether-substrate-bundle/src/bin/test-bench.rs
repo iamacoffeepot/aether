@@ -35,8 +35,7 @@ const FRAME_SETTLEMENT_CAP: Duration = Duration::from_secs(30);
 use aether_substrate_bundle::chassis_root::next_chassis_correlation;
 use aether_substrate_bundle::resolve_teardown_cap;
 use aether_substrate_bundle::test_bench::{
-    RenderSizeConfig, TestBenchBuild, TestBenchChassis, TestBenchClipboardMode, TestBenchEnv,
-    WORKERS,
+    RenderSizeConfig, TestBenchBuild, TestBenchChassis, TestBenchClipboardMode, TestBenchEnv, WORKERS,
     events::{self, ChassisEvent},
     render::Gpu,
 };
@@ -72,12 +71,7 @@ fn main() -> anyhow::Result<()> {
         teardown_cap: resolve_teardown_cap(),
     };
 
-    let TestBenchBuild {
-        passive,
-        boot,
-        render_handles,
-        kind_tick,
-    } = TestBenchChassis::build_passive(env)?;
+    let TestBenchBuild { passive, boot, render_handles, kind_tick } = TestBenchChassis::build_passive(env)?;
 
     let (width, height) = RenderSizeConfig::from_env().to_size();
     let gpu = Gpu::new(width, height, render_handles);
@@ -145,12 +139,7 @@ fn drive_events_loop(
                         &chassis_correlation,
                     );
                 }
-                outbound.send_reply(
-                    reply_to,
-                    &AdvanceResult::Ok {
-                        ticks_completed: ticks,
-                    },
-                );
+                outbound.send_reply(reply_to, &AdvanceResult::Ok { ticks_completed: ticks });
             }
             ChassisEvent::CaptureRequested => {
                 run_frame(
@@ -236,11 +225,7 @@ fn run_frame(
                 }
             }
             let result = pre_failed.map_or_else(
-                || {
-                    CaptureFrameResult::from(
-                        gpu.render_and_capture(&req.checks, req.reference.as_ref()),
-                    )
-                },
+                || CaptureFrameResult::from(gpu.render_and_capture(&req.checks, req.reference.as_ref())),
                 |error| CaptureFrameResult::Err { error },
             );
             for mail in req.after_mails {

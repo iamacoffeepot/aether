@@ -208,8 +208,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// `build()` (single-claim invariant).
     #[must_use]
     pub fn with_fallback_router(mut self, handler: FallbackRouter) -> Self {
-        self.passives
-            .push(Box::new(FallbackRouterBoot::new(handler)));
+        self.passives.push(Box::new(FallbackRouterBoot::new(handler)));
         self
     }
 
@@ -218,8 +217,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
     where
         A: NativeActor,
     {
-        self.passives
-            .push(Box::new(NativeActorBoot::<A>::new(config)));
+        self.passives.push(Box::new(NativeActorBoot::<A>::new(config)));
         self
     }
 
@@ -276,10 +274,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
         // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail
         // — each actor owns its own `ActorLogRing` and there is no
         // drain target to configure.
-        Ok(PassiveChassis {
-            booted,
-            _chassis: PhantomData,
-        })
+        Ok(PassiveChassis { booted, _chassis: PhantomData })
     }
 }
 
@@ -288,8 +283,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
     /// Booted before the driver in declaration order.
     #[must_use]
     pub fn with_fallback_router(mut self, handler: FallbackRouter) -> Self {
-        self.passives
-            .push(Box::new(FallbackRouterBoot::new(handler)));
+        self.passives.push(Box::new(FallbackRouterBoot::new(handler)));
         self
     }
 
@@ -302,8 +296,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
     where
         A: NativeActor,
     {
-        self.passives
-            .push(Box::new(NativeActorBoot::<A>::new(config)));
+        self.passives.push(Box::new(NativeActorBoot::<A>::new(config)));
         self
     }
 
@@ -364,16 +357,8 @@ impl<C: Chassis> Builder<C, HasDriver> {
         } = self;
         let driver_boot = driver.expect("HasDriver state implies driver was supplied");
 
-        let mut booted = boot_passives(
-            &registry,
-            &mailer,
-            &aborter,
-            workers,
-            ring_caps,
-            scheduler_tuning,
-            teardown_cap,
-            passives,
-        )?;
+        let mut booted =
+            boot_passives(&registry, &mailer, &aborter, workers, ring_caps, scheduler_tuning, teardown_cap, passives)?;
         // ADR-0081 retired the chassis-pushed `ConfigureLogDrain` mail
         // — each actor owns its own `ActorLogRing`.
         let driver_running = {
@@ -389,10 +374,6 @@ impl<C: Chassis> Builder<C, HasDriver> {
             driver_boot(&mut driver_ctx)?
         };
 
-        Ok(BuiltChassis {
-            booted,
-            driver: driver_running,
-            _chassis: PhantomData,
-        })
+        Ok(BuiltChassis { booted, driver: driver_running, _chassis: PhantomData })
     }
 }

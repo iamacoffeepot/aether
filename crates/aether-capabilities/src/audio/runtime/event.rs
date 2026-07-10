@@ -121,10 +121,5 @@ impl AudioEventSender {
 
 pub fn new_event_channel() -> (AudioEventSender, Arc<ArrayQueue<AudioEvent>>) {
     let queue = Arc::new(ArrayQueue::new(EVENT_QUEUE_CAPACITY));
-    (
-        AudioEventSender {
-            queue: Arc::clone(&queue),
-        },
-        queue,
-    )
+    (AudioEventSender { queue: Arc::clone(&queue) }, queue)
 }

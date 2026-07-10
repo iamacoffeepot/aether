@@ -74,18 +74,10 @@ fn git_sha() -> Option<String> {
 // main — not a capability, no config layer in scope.
 #[allow(clippy::disallowed_methods)]
 fn main() -> ExitCode {
-    let frames: u32 = env::var("AETHER_PERF_FRAMES")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(200);
+    let frames: u32 = env::var("AETHER_PERF_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(200);
     let drive = drive_from_env();
 
-    let cfg = SweepConfig {
-        workers: parse_workers(),
-        topologies: parse_topologies(),
-        frames,
-        drive,
-    };
+    let cfg = SweepConfig { workers: parse_workers(), topologies: parse_topologies(), frames, drive };
     let cells = run_sweep(&cfg);
     if cells.is_empty() {
         eprintln!("perf-trial: no cells measured (no wgpu adapter, or every cell boot failed)");

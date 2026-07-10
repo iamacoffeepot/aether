@@ -45,14 +45,12 @@ pub use aether_substrate::mail::registry::{MailboxEntry, Registry};
 // vocabulary its moved handler bodies name through this module's glob, so
 // the kinds the shard shares with the concern submodules stay `pub use`.
 pub use crate::http::kinds::{
-    HttpHeader, HttpMethod, HttpRequestChunk, HttpRequestCredit, HttpRequestStreamEnd,
-    HttpRequestStreamOpen, HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen,
-    HttpServerRequest, HttpServerResponse, HttpStreamCredit, WebSocketAccept, WebSocketClose,
-    WebSocketMessage,
+    HttpHeader, HttpMethod, HttpRequestChunk, HttpRequestCredit, HttpRequestStreamEnd, HttpRequestStreamOpen,
+    HttpResponseChunk, HttpResponseStreamEnd, HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse,
+    HttpStreamCredit, WebSocketAccept, WebSocketClose, WebSocketMessage,
 };
 use crate::http::kinds::{
-    RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf,
-    UnregisterRoutesAll,
+    RegisterRoute, RegisterRouteResult, RegisterRouteSelf, UnregisterRoute, UnregisterRouteSelf, UnregisterRoutesAll,
 };
 use crate::shared::net::teardown_connect_addr;
 pub use aether_kinds::trace::Settled;
@@ -96,19 +94,11 @@ impl NativeActor for HttpServerCapability {
 
     const NAMESPACE: &'static str = "aether.http.server";
 
-    fn init(
-        config: HttpServerConfig,
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<HttpSupervisorState, BootError> {
-        let listener =
-            TcpListener::bind(&config.bind_addr).map_err(|e| BootError::Other(Box::new(e)))?;
-        let local_addr = listener
-            .local_addr()
-            .map_err(|e| BootError::Other(Box::new(e)))?;
+    fn init(config: HttpServerConfig, ctx: &mut NativeInitCtx<'_>) -> Result<HttpSupervisorState, BootError> {
+        let listener = TcpListener::bind(&config.bind_addr).map_err(|e| BootError::Other(Box::new(e)))?;
+        let local_addr = listener.local_addr().map_err(|e| BootError::Other(Box::new(e)))?;
         let port = local_addr.port();
-        listener
-            .set_nonblocking(false)
-            .map_err(|e| BootError::Other(Box::new(e)))?;
+        listener.set_nonblocking(false).map_err(|e| BootError::Other(Box::new(e)))?;
 
         let accept_shutdown = Arc::new(AtomicBool::new(false));
         let accept_shutdown_for_thread = Arc::clone(&accept_shutdown);
@@ -119,13 +109,8 @@ impl NativeActor for HttpServerCapability {
         let wake_kind = <HttpInboundReady as Kind>::ID;
 
         let wake_dirty = Arc::new(AtomicBool::new(false));
-        let accept_sink = WakeSink {
-            inbound_tx,
-            mailer: Arc::clone(&mailer),
-            self_id,
-            wake_kind,
-            dirty: Arc::clone(&wake_dirty),
-        };
+        let accept_sink =
+            WakeSink { inbound_tx, mailer: Arc::clone(&mailer), self_id, wake_kind, dirty: Arc::clone(&wake_dirty) };
 
         // Transport thread below the mail layer — it accepts sockets
         // that carry inbound mail in; no inbound chain to inherit, no
@@ -258,13 +243,7 @@ impl NativeActor for HttpServerCapability {
         if let Err(error) = validate_route_mailbox(state.mailer.registry(), payload.mailbox) {
             return RegisterRouteResult::Err { error };
         }
-        state.register_route(
-            &payload.prefix,
-            payload.method,
-            payload.kind,
-            payload.mailbox,
-            payload.shared,
-        )
+        state.register_route(&payload.prefix, payload.method, payload.kind, payload.mailbox, payload.shared)
     }
 
     /// Claim a route for the *sending* actor (ADR-0130), resolved from
@@ -284,13 +263,9 @@ impl NativeActor for HttpServerCapability {
         payload: RegisterRouteSelf,
     ) -> RegisterRouteResult {
         match ctx.source_mailbox() {
-            Some(mailbox) => state.register_route(
-                &payload.prefix,
-                payload.method,
-                payload.kind,
-                mailbox,
-                payload.shared,
-            ),
+            Some(mailbox) => {
+                state.register_route(&payload.prefix, payload.method, payload.kind, mailbox, payload.shared)
+            }
             None => RegisterRouteResult::Err {
                 error: "aether.http.server.register_route_self requires a local sender; an \
                         external session or remote engine must use \
@@ -346,11 +321,7 @@ impl NativeActor for HttpServerCapability {
     /// # Agent
     /// `UnregisterRoutesAll { mailbox }`.
     #[handler::single]
-    fn on_unregister_routes_all(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        payload: UnregisterRoutesAll,
-    ) {
+    fn on_unregister_routes_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, payload: UnregisterRoutesAll) {
         state.unregister_routes_all(payload.mailbox);
     }
 }

@@ -1,6 +1,6 @@
 use super::{
-    EngineId, EngineNames, KindId, MailId, MailIdJson, MailNodeJson, MailNodeWire, MailboxId,
-    McpError, Tag, Uuid, descriptors, kind_id_from_parts, tagged_id,
+    EngineId, EngineNames, KindId, MailId, MailIdJson, MailNodeJson, MailNodeWire, MailboxId, McpError, Tag, Uuid,
+    descriptors, kind_id_from_parts, tagged_id,
 };
 
 /// Parse a UUID-string `engine_id` (from `list_engines` /
@@ -28,10 +28,7 @@ pub(super) fn parse_kind_id(s: &str) -> Result<KindId, McpError> {
         return Ok(KindId(id));
     }
     s.parse::<u64>().map(KindId).map_err(|_| {
-        McpError::invalid_params(
-            format!("kind_id: not a tagged `knd-…` id or a decimal u64: {s:?}"),
-            None,
-        )
+        McpError::invalid_params(format!("kind_id: not a tagged `knd-…` id or a decimal u64: {s:?}"), None)
     })
 }
 
@@ -65,10 +62,7 @@ pub(super) fn resolve_handled_kind(s: &str) -> Result<KindId, McpError> {
 /// Cold path — recomputes the inventory's ids on each call; the cost
 /// dump is a diagnostic, not a hot loop.
 pub(super) fn static_kind_name(id: KindId) -> Option<String> {
-    descriptors::all()
-        .into_iter()
-        .find(|d| kind_id_from_parts(&d.name, &d.schema) == id.0)
-        .map(|d| d.name)
+    descriptors::all().into_iter().find(|d| kind_id_from_parts(&d.name, &d.schema) == id.0).map(|d| d.name)
 }
 
 /// Render a raw `u64` mailbox / kind / thread id to its display string
@@ -78,10 +72,7 @@ pub(super) fn static_kind_name(id: KindId) -> Option<String> {
 /// reverse map for the engine) renders the tag directly — the unchanged
 /// pre-inventory output.
 pub(super) fn render_id(id: u64, names: Option<&EngineNames>) -> String {
-    names.map_or_else(
-        || tagged_id::encode(id).unwrap_or_else(|| format!("{id:#x}")),
-        |names| names.render(id),
-    )
+    names.map_or_else(|| tagged_id::encode(id).unwrap_or_else(|| format!("{id:#x}")), |names| names.render(id))
 }
 
 /// Reverse-render a [`MailboxId`] through the engine's name map (or the
@@ -96,10 +87,7 @@ pub(super) fn kind_id_to_tagged(id: KindId, names: Option<&EngineNames>) -> Stri
 }
 
 pub(super) fn mail_id_to_json(id: MailId, names: Option<&EngineNames>) -> MailIdJson {
-    MailIdJson {
-        sender: mailbox_id_to_tagged(id.sender, names),
-        correlation_id: id.correlation_id,
-    }
+    MailIdJson { sender: mailbox_id_to_tagged(id.sender, names), correlation_id: id.correlation_id }
 }
 
 pub(super) fn mail_node_to_json(node: MailNodeWire, names: Option<&EngineNames>) -> MailNodeJson {
@@ -123,12 +111,7 @@ pub(super) fn mail_node_to_json(node: MailNodeWire, names: Option<&EngineNames>)
 /// tagged id, so it's excluded. Thread ids ride in `thread_name` already
 /// resolved substrate-side, so they aren't re-resolved here.
 pub(super) fn node_reversible_ids(node: &MailNodeWire) -> Vec<u64> {
-    let mut ids = vec![
-        node.sender.0,
-        node.recipient.0,
-        node.kind.0,
-        node.mail_id.sender.0,
-    ];
+    let mut ids = vec![node.sender.0, node.recipient.0, node.kind.0, node.mail_id.sender.0];
     if let Some(parent) = &node.parent {
         ids.push(parent.sender.0);
     }

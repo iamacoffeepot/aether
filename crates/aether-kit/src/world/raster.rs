@@ -23,8 +23,8 @@ use alloc::vec::Vec;
 use core::{f64::consts::TAU, mem};
 
 use super::{
-    CellPos, ChunkPos, MAX_STAMP_EDGE_SUBCELLS, MAX_STAMP_RASTER_WORK, MAX_STAMP_SUBCELLS,
-    MAX_STAMP_VERTICES, Material, SUBCELLS_PER_CELL, SUBCELLS_PER_CELL_EDGE, World, WorldPoint,
+    CellPos, ChunkPos, MAX_STAMP_EDGE_SUBCELLS, MAX_STAMP_RASTER_WORK, MAX_STAMP_SUBCELLS, MAX_STAMP_VERTICES,
+    Material, SUBCELLS_PER_CELL, SUBCELLS_PER_CELL_EDGE, World, WorldPoint,
 };
 
 /// One cell is 256 octimeters and contains 16 subcells along each edge.
@@ -45,12 +45,7 @@ struct RasterizedCoverage {
 
 impl RasterizedCoverage {
     fn empty() -> Self {
-        Self {
-            min_subcell_x: 0,
-            min_subcell_z: 0,
-            width: 0,
-            coverage: Vec::new(),
-        }
+        Self { min_subcell_x: 0, min_subcell_z: 0, width: 0, coverage: Vec::new() }
     }
 
     #[cfg(test)]
@@ -68,20 +63,11 @@ impl RasterizedCoverage {
     }
 
     fn covered_samples(&self) -> impl Iterator<Item = (i32, i32, u8)> + '_ {
-        self.coverage
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, coverage)| *coverage > 0)
-            .map(|(index, coverage)| {
-                let x = index % self.width;
-                let z = index / self.width;
-                (
-                    self.min_subcell_x + x as i32,
-                    self.min_subcell_z + z as i32,
-                    coverage,
-                )
-            })
+        self.coverage.iter().copied().enumerate().filter(|(_, coverage)| *coverage > 0).map(|(index, coverage)| {
+            let x = index % self.width;
+            let z = index / self.width;
+            (self.min_subcell_x + x as i32, self.min_subcell_z + z as i32, coverage)
+        })
     }
 }
 
@@ -97,10 +83,7 @@ struct SampleAddress {
 fn sample_address(global_subcell_x: i32, global_subcell_z: i32) -> SampleAddress {
     let subcells = SUBCELLS_PER_CELL_EDGE.cast_signed();
     SampleAddress {
-        cell: CellPos {
-            x: global_subcell_x.div_euclid(subcells),
-            z: global_subcell_z.div_euclid(subcells),
-        },
+        cell: CellPos { x: global_subcell_x.div_euclid(subcells), z: global_subcell_z.div_euclid(subcells) },
         subcell_x: global_subcell_x.rem_euclid(subcells),
         subcell_z: global_subcell_z.rem_euclid(subcells),
     }
@@ -144,15 +127,10 @@ fn rasterize_polygon(points: &[WorldPoint]) -> RasterizedCoverage {
     let Some(len) = width.checked_mul(height) else {
         return RasterizedCoverage::empty();
     };
-    if width > MAX_STAMP_EDGE_SUBCELLS
-        || height > MAX_STAMP_EDGE_SUBCELLS
-        || len > MAX_STAMP_SUBCELLS
-    {
+    if width > MAX_STAMP_EDGE_SUBCELLS || height > MAX_STAMP_EDGE_SUBCELLS || len > MAX_STAMP_SUBCELLS {
         return RasterizedCoverage::empty();
     }
-    if estimated_raster_work(width, height, points.len())
-        .is_none_or(|work| work > MAX_STAMP_RASTER_WORK)
-    {
+    if estimated_raster_work(width, height, points.len()).is_none_or(|work| work > MAX_STAMP_RASTER_WORK) {
         return RasterizedCoverage::empty();
     }
 
@@ -170,12 +148,7 @@ fn rasterize_polygon(points: &[WorldPoint]) -> RasterizedCoverage {
         );
     }
 
-    RasterizedCoverage {
-        min_subcell_x,
-        min_subcell_z,
-        width,
-        coverage,
-    }
+    RasterizedCoverage { min_subcell_x, min_subcell_z, width, coverage }
 }
 
 /// Conservative work estimate for the current scanline implementation.
@@ -186,12 +159,8 @@ fn estimated_raster_work(width: usize, height: usize, vertex_count: usize) -> Op
     let edge_tests = scanlines.checked_mul(vertex_count)?;
     let sort_levels = usize::try_from(vertex_count.next_power_of_two().ilog2()).ok()?;
     let sort_work = edge_tests.checked_mul(sort_levels.max(1))?;
-    let interval_visits = width
-        .checked_mul(scanlines)?
-        .checked_mul(vertex_count / 2)?;
-    edge_tests
-        .checked_add(sort_work)?
-        .checked_add(interval_visits)
+    let interval_visits = width.checked_mul(scanlines)?.checked_mul(vertex_count / 2)?;
+    edge_tests.checked_add(sort_work)?.checked_add(interval_visits)
 }
 
 fn div_ceil(value: i32, divisor: i32) -> i32 {
@@ -227,10 +196,7 @@ fn polygon_scanline_intersections(points: &[WorldPoint], z: f64, intersections: 
     intersections.clear();
     let mut previous = points[points.len() - 1];
     for &current in points {
-        let (az, bz) = (
-            f64::from(previous.z_octimeters),
-            f64::from(current.z_octimeters),
-        );
+        let (az, bz) = (f64::from(previous.z_octimeters), f64::from(current.z_octimeters));
         if (az <= z && z < bz) || (bz <= z && z < az) {
             let t = (z - az) / (bz - az);
             intersections.push(
@@ -254,8 +220,7 @@ fn add_interval_coverage(
     }
     let raster_start = f64::from(min_subcell_x) * f64::from(OCTIMETERS_PER_SUBCELL);
     for (local_x, covered) in covered_scanlines.iter_mut().enumerate() {
-        let subcell_start =
-            (local_x as f64).mul_add(f64::from(OCTIMETERS_PER_SUBCELL), raster_start);
+        let subcell_start = (local_x as f64).mul_add(f64::from(OCTIMETERS_PER_SUBCELL), raster_start);
         let subcell_end = subcell_start + f64::from(OCTIMETERS_PER_SUBCELL);
         let overlap = interval_end.min(subcell_end) - interval_start.max(subcell_start);
         if overlap > 0.0 {
@@ -271,18 +236,11 @@ pub(super) fn disc_vertices(center: WorldPoint, radius_octimeters: u32) -> Vec<W
 
 /// Generate a flat-top regular hexagon vertex ring. The radius is measured
 /// from the center to each vertex.
-pub(super) fn regular_hexagon_vertices(
-    center: WorldPoint,
-    radius_octimeters: u32,
-) -> Vec<WorldPoint> {
+pub(super) fn regular_hexagon_vertices(center: WorldPoint, radius_octimeters: u32) -> Vec<WorldPoint> {
     regular_polygon_vertices(center, radius_octimeters, 6)
 }
 
-fn regular_polygon_vertices(
-    center: WorldPoint,
-    radius_octimeters: u32,
-    vertex_count: usize,
-) -> Vec<WorldPoint> {
+fn regular_polygon_vertices(center: WorldPoint, radius_octimeters: u32, vertex_count: usize) -> Vec<WorldPoint> {
     if radius_octimeters == 0 || vertex_count < 3 {
         return Vec::new();
     }
@@ -291,14 +249,8 @@ fn regular_polygon_vertices(
         .map(|index| {
             let angle = index as f64 * TAU / vertex_count as f64;
             WorldPoint::new(
-                angle
-                    .cos()
-                    .mul_add(radius, f64::from(center.x_octimeters))
-                    .round() as i32,
-                angle
-                    .sin()
-                    .mul_add(radius, f64::from(center.z_octimeters))
-                    .round() as i32,
+                angle.cos().mul_add(radius, f64::from(center.x_octimeters)).round() as i32,
+                angle.sin().mul_add(radius, f64::from(center.z_octimeters)).round() as i32,
             )
         })
         .collect()
@@ -310,11 +262,7 @@ fn regular_polygon_vertices(
 /// order at the cell ownership boundary and clears that cell's prior mask
 /// before receiving the new shape. `Void` (including an unknown material byte
 /// decoded to `Void`) paints nothing.
-pub(super) fn stamp_polygon(
-    world: &mut World,
-    points: &[WorldPoint],
-    material: Material,
-) -> BTreeSet<ChunkPos> {
+pub(super) fn stamp_polygon(world: &mut World, points: &[WorldPoint], material: Material) -> BTreeSet<ChunkPos> {
     stamp_polygon_bounded(world, points, material, u32::MAX).touched
 }
 
@@ -340,11 +288,7 @@ pub(super) fn stamp_polygon_bounded(
     material: Material,
     max_subcells: u32,
 ) -> BoundedStamp {
-    let mut result = BoundedStamp {
-        touched: BTreeSet::new(),
-        subcells_written: 0,
-        exhausted: false,
-    };
+    let mut result = BoundedStamp { touched: BTreeSet::new(), subcells_written: 0, exhausted: false };
     if material == Material::Void {
         return result;
     }
@@ -354,31 +298,20 @@ pub(super) fn stamp_polygon_bounded(
         let chunk_pos = address.cell.chunk();
         let cell_index = address.cell.chunk_index();
         let base = cell_index * SUBCELLS_PER_CELL;
-        let within =
-            (address.subcell_z * SUBCELLS_PER_CELL_EDGE.cast_signed() + address.subcell_x) as usize;
+        let within = (address.subcell_z * SUBCELLS_PER_CELL_EDGE.cast_signed() + address.subcell_x) as usize;
 
         let (material_changes, prior_coverage, cleared_subcells) =
             world.chunk(chunk_pos).map_or((true, 0, 0), |chunk| {
                 let material_changes = chunk.overlay[cell_index] != material;
                 let cleared_subcells = if material_changes {
-                    chunk.overlay_mask[base..base + SUBCELLS_PER_CELL]
-                        .iter()
-                        .filter(|&&sample| sample != 0)
-                        .count() as u32
+                    chunk.overlay_mask[base..base + SUBCELLS_PER_CELL].iter().filter(|&&sample| sample != 0).count()
+                        as u32
                 } else {
                     0
                 };
-                (
-                    material_changes,
-                    chunk.overlay_mask[base + within],
-                    cleared_subcells,
-                )
+                (material_changes, chunk.overlay_mask[base + within], cleared_subcells)
             });
-        let composed = if material_changes {
-            coverage
-        } else {
-            prior_coverage.max(coverage)
-        };
+        let composed = if material_changes { coverage } else { prior_coverage.max(coverage) };
         let coverage_writes = u32::from(material_changes || prior_coverage != composed);
         let write_cost = cleared_subcells + coverage_writes;
         if write_cost > max_subcells - result.subcells_written {
@@ -425,11 +358,7 @@ mod tests {
     fn global_subcell_mapping_handles_cells_negatives_and_chunk_borders() {
         assert_eq!(
             sample_address(15, -1),
-            SampleAddress {
-                cell: CellPos { x: 0, z: -1 },
-                subcell_x: 15,
-                subcell_z: 15,
-            },
+            SampleAddress { cell: CellPos { x: 0, z: -1 }, subcell_x: 15, subcell_z: 15 },
         );
         assert_eq!(sample_address(255, 0).cell.chunk(), ChunkPos { x: 0, z: 0 });
         let across = sample_address(256, 0);
@@ -443,12 +372,7 @@ mod tests {
         let mut world = World::new();
         let touched = stamp_polygon(
             &mut world,
-            &[
-                point(272, -16),
-                point(288, -16),
-                point(288, 0),
-                point(272, 0),
-            ],
+            &[point(272, -16), point(288, -16), point(288, 0), point(272, 0)],
             Material::Sand,
         );
         let cell = CellPos { x: 1, z: -1 };
@@ -467,18 +391,10 @@ mod tests {
         let mut world = World::new();
         let touched = stamp_polygon(
             &mut world,
-            &[
-                point(4080, 256),
-                point(4112, 256),
-                point(4112, 512),
-                point(4080, 512),
-            ],
+            &[point(4080, 256), point(4112, 256), point(4112, 512), point(4080, 512)],
             Material::Stone,
         );
-        assert_eq!(
-            touched,
-            BTreeSet::from([ChunkPos { x: 0, z: 0 }, ChunkPos { x: 1, z: 0 }]),
-        );
+        assert_eq!(touched, BTreeSet::from([ChunkPos { x: 0, z: 0 }, ChunkPos { x: 1, z: 0 }]),);
         assert_eq!(world.overlay(CellPos { x: 15, z: 1 }), Material::Stone);
         assert_eq!(world.overlay_coverage(CellPos { x: 15, z: 1 }, 15, 0), 255);
         assert_eq!(world.overlay(CellPos { x: 16, z: 1 }), Material::Stone);
@@ -490,22 +406,14 @@ mod tests {
         let mut world = World::new();
         let result = stamp_polygon_bounded(
             &mut world,
-            &[
-                point(4080, 256),
-                point(4112, 256),
-                point(4112, 272),
-                point(4080, 272),
-            ],
+            &[point(4080, 256), point(4112, 256), point(4112, 272), point(4080, 272)],
             Material::Stone,
             2,
         );
 
         assert_eq!(result.subcells_written, 2);
         assert!(!result.exhausted);
-        assert_eq!(
-            result.touched,
-            BTreeSet::from([ChunkPos { x: 0, z: 0 }, ChunkPos { x: 1, z: 0 }]),
-        );
+        assert_eq!(result.touched, BTreeSet::from([ChunkPos { x: 0, z: 0 }, ChunkPos { x: 1, z: 0 }]),);
     }
 
     #[test]
@@ -522,11 +430,7 @@ mod tests {
         assert!(result.exhausted);
         let cell = CellPos { x: 0, z: 0 };
         assert_eq!(world.overlay_coverage(cell, 0, 0), 255);
-        assert_eq!(
-            world.overlay_coverage(cell, 1, 0),
-            0,
-            "the second covered sample is the rejected over-cap write",
-        );
+        assert_eq!(world.overlay_coverage(cell, 1, 0), 0, "the second covered sample is the rejected over-cap write",);
     }
 
     #[test]
@@ -561,10 +465,7 @@ mod tests {
         stamp_polygon(&mut world, &full_first_subcell, Material::Stone);
         let half_first_subcell = [point(0, 0), point(16, 0), point(0, 16)];
         let unchanged = stamp_polygon(&mut world, &half_first_subcell, Material::Stone);
-        assert!(
-            unchanged.is_empty(),
-            "lower same-material coverage cannot reduce the max"
-        );
+        assert!(unchanged.is_empty(), "lower same-material coverage cannot reduce the max");
         assert_eq!(world.overlay_coverage(CellPos { x: 0, z: 0 }, 0, 0), 255);
 
         let third_subcell = [point(32, 0), point(48, 0), point(48, 16), point(32, 16)];
@@ -583,10 +484,7 @@ mod tests {
         let vertices = regular_hexagon_vertices(point(512, 512), 300);
         let raster = rasterize_polygon(&vertices);
         assert!(
-            raster
-                .coverage
-                .iter()
-                .any(|coverage| (1..=254).contains(coverage)),
+            raster.coverage.iter().any(|coverage| (1..=254).contains(coverage)),
             "a non-lattice hexagon should author partial edge coverage",
         );
         assert_eq!(vertices.len(), 6);
@@ -615,14 +513,8 @@ mod tests {
 
         let edge_too_long = [
             point(0, 0),
-            point(
-                (MAX_STAMP_EDGE_SUBCELLS as i32 + 1) * OCTIMETERS_PER_SUBCELL,
-                0,
-            ),
-            point(
-                (MAX_STAMP_EDGE_SUBCELLS as i32 + 1) * OCTIMETERS_PER_SUBCELL,
-                OCTIMETERS_PER_SUBCELL,
-            ),
+            point((MAX_STAMP_EDGE_SUBCELLS as i32 + 1) * OCTIMETERS_PER_SUBCELL, 0),
+            point((MAX_STAMP_EDGE_SUBCELLS as i32 + 1) * OCTIMETERS_PER_SUBCELL, OCTIMETERS_PER_SUBCELL),
             point(0, OCTIMETERS_PER_SUBCELL),
         ];
         assert!(rasterize_polygon(&edge_too_long).coverage.is_empty());
@@ -638,22 +530,10 @@ mod tests {
         let mut sorting_too_expensive = Vec::with_capacity(MAX_STAMP_VERTICES);
         for index in 0..MAX_STAMP_VERTICES {
             sorting_too_expensive.push(point(
-                if index % 2 == 0 {
-                    0
-                } else {
-                    OCTIMETERS_PER_SUBCELL
-                },
-                if index % 4 < 2 {
-                    0
-                } else {
-                    MAX_STAMP_EDGE_SUBCELLS as i32 * OCTIMETERS_PER_SUBCELL
-                },
+                if index % 2 == 0 { 0 } else { OCTIMETERS_PER_SUBCELL },
+                if index % 4 < 2 { 0 } else { MAX_STAMP_EDGE_SUBCELLS as i32 * OCTIMETERS_PER_SUBCELL },
             ));
         }
-        assert!(
-            rasterize_polygon(&sorting_too_expensive)
-                .coverage
-                .is_empty()
-        );
+        assert!(rasterize_polygon(&sorting_too_expensive).coverage.is_empty());
     }
 }

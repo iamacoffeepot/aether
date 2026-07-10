@@ -52,10 +52,7 @@ pub(super) fn reply_if_hidden(ctx: &WasmCtx<'_>, state: &InteractionState) -> bo
         return false;
     }
     if let Some(parent) = ctx.parent() {
-        parent.send(&WidgetDrawList {
-            intrinsic: None,
-            items: Vec::new(),
-        });
+        parent.send(&WidgetDrawList { intrinsic: None, items: Vec::new() });
     }
     true
 }
@@ -63,27 +60,14 @@ pub(super) fn reply_if_hidden(ctx: &WasmCtx<'_>, state: &InteractionState) -> bo
 /// A flat-colored quad in a widget's own local coordinates — the shared
 /// constructor the widgets build their chrome from.
 pub(crate) fn quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> WidgetDrawItem {
-    WidgetDrawItem::Quad {
-        x,
-        y,
-        width,
-        height,
-        color,
-        clip: None,
-    }
+    WidgetDrawItem::Quad { x, y, width, height, color, clip: None }
 }
 
 /// Push a `thickness`-pixel border ring around the `width` × `height` local
 /// rect — four thin quads (top, bottom, left, right). A focused widget draws
 /// this from `theme.accent` so the focus ring reads without the root holding
 /// any per-widget-type visual knowledge.
-pub(crate) fn push_border(
-    items: &mut Vec<WidgetDrawItem>,
-    width: f32,
-    height: f32,
-    thickness: f32,
-    color: Rgba,
-) {
+pub(crate) fn push_border(items: &mut Vec<WidgetDrawItem>, width: f32, height: f32, thickness: f32, color: Rgba) {
     items.push(quad(0.0, 0.0, width, thickness, color));
     items.push(quad(0.0, height - thickness, width, thickness, color));
     items.push(quad(0.0, 0.0, thickness, height, color));
@@ -101,21 +85,9 @@ fn push_inset_border(
     let inner_width = inset.mul_add(-2.0, width).max(0.0);
     let inner_height = inset.mul_add(-2.0, height).max(0.0);
     items.push(quad(inset, inset, inner_width, thickness, color));
-    items.push(quad(
-        inset,
-        inset + inner_height - thickness,
-        inner_width,
-        thickness,
-        color,
-    ));
+    items.push(quad(inset, inset + inner_height - thickness, inner_width, thickness, color));
     items.push(quad(inset, inset, thickness, inner_height, color));
-    items.push(quad(
-        inset + inner_width - thickness,
-        inset,
-        thickness,
-        inner_height,
-        color,
-    ));
+    items.push(quad(inset + inner_width - thickness, inset, thickness, inner_height, color));
 }
 
 /// Draw validation and focus as orthogonal outlines. Validation owns the outer
@@ -133,14 +105,7 @@ pub(super) fn push_control_outlines(
         push_border(items, width, height, 2.0, color);
     }
     if state.focused() {
-        push_inset_border(
-            items,
-            width,
-            height,
-            if validation.is_some() { 2.0 } else { 0.0 },
-            2.0,
-            theme.accent,
-        );
+        push_inset_border(items, width, height, if validation.is_some() { 2.0 } else { 0.0 }, 2.0, theme.accent);
     }
 }
 

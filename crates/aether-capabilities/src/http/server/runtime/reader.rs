@@ -22,9 +22,7 @@ pub fn read_more(stream: &mut TcpStream, chunk: &mut [u8]) -> ReadStep {
         match stream.read(chunk) {
             Ok(0) => return ReadStep::Eof,
             Ok(n) => return ReadStep::Filled(n),
-            Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
-            {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
                 return ReadStep::Timeout;
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -125,16 +123,10 @@ fn parse_head(buf: &[u8], max_header_bytes: usize) -> HeadParse {
                         transfer_encoding_chunked = true;
                     }
                 }
-                out_headers.push(HttpHeader {
-                    name: header.name.to_string(),
-                    value,
-                });
+                out_headers.push(HttpHeader { name: header.name.to_string(), value });
             }
             if bad_length {
-                return HeadParse::Reject {
-                    status: 400,
-                    message: "invalid content-length",
-                };
+                return HeadParse::Reject { status: 400, message: "invalid content-length" };
             }
             // Body framing (ADR-0128): `Content-Length` + `Transfer-Encoding`
             // together is request smuggling and a non-`chunked` coding is
@@ -163,22 +155,13 @@ fn parse_head(buf: &[u8], max_header_bytes: usize) -> HeadParse {
         }
         Ok(httparse::Status::Partial) => {
             if buf.len() > max_header_bytes {
-                HeadParse::Reject {
-                    status: 431,
-                    message: "request header fields too large",
-                }
+                HeadParse::Reject { status: 431, message: "request header fields too large" }
             } else {
                 HeadParse::NeedMore
             }
         }
-        Err(httparse::Error::TooManyHeaders) => HeadParse::Reject {
-            status: 431,
-            message: "too many request headers",
-        },
-        Err(_) => HeadParse::Reject {
-            status: 400,
-            message: "malformed request",
-        },
+        Err(httparse::Error::TooManyHeaders) => HeadParse::Reject { status: 431, message: "too many request headers" },
+        Err(_) => HeadParse::Reject { status: 400, message: "malformed request" },
     }
 }
 
@@ -212,10 +195,7 @@ fn connection_has_token(headers: &[HttpHeader], token: &str) -> bool {
 /// First value of the header named `name` (case-insensitive), or `None` if the
 /// request carries no such header. Trimmed of surrounding whitespace.
 fn first_header_value<'a>(headers: &'a [HttpHeader], name: &str) -> Option<&'a str> {
-    headers
-        .iter()
-        .find(|header| header.name.eq_ignore_ascii_case(name))
-        .map(|header| header.value.trim())
+    headers.iter().find(|header| header.name.eq_ignore_ascii_case(name)).map(|header| header.value.trim())
 }
 
 /// Whether the header named `name` lists `token` (case-insensitive), across
@@ -225,12 +205,7 @@ pub fn header_has_token(headers: &[HttpHeader], name: &str, token: &str) -> bool
     headers
         .iter()
         .filter(|header| header.name.eq_ignore_ascii_case(name))
-        .any(|header| {
-            header
-                .value
-                .split(',')
-                .any(|value| value.trim().eq_ignore_ascii_case(token))
-        })
+        .any(|header| header.value.split(',').any(|value| value.trim().eq_ignore_ascii_case(token)))
 }
 
 /// Validate an RFC 6455 upgrade handshake's protocol layer (ADR-0129 §1),
@@ -284,11 +259,7 @@ const MAX_CHUNK_TRAILERS: usize = MAX_HEADER_COUNT;
 enum ReaderResolution {
     /// A live handler: the dispatch target, its dispatch kind, and
     /// whether it takes the streamed body path.
-    Live {
-        handler: MailboxId,
-        kind: KindId,
-        streaming: bool,
-    },
+    Live { handler: MailboxId, kind: KindId, streaming: bool },
     /// A route matched but no member of its set is live — `503`, never
     /// the fallback (that would silently reroute a claimed family).
     Dead,
@@ -324,19 +295,14 @@ fn resolve_at_reader(
                 };
                 Some(found)
             }
-            None => registry
-                .lookup(&shared.handler_mailbox)
-                .map(|handler| (handler, <HttpServerRequest as Kind>::ID)),
+            None => registry.lookup(&shared.handler_mailbox).map(|handler| (handler, <HttpServerRequest as Kind>::ID)),
         }
     };
     match picked {
         Some((handler, kind)) => ReaderResolution::Live {
             handler,
             kind,
-            streaming: sink
-                .mailer
-                .capability_registry()
-                .accepts(handler, <HttpRequestStreamOpen as Kind>::ID),
+            streaming: sink.mailer.capability_registry().accepts(handler, <HttpRequestStreamOpen as Kind>::ID),
         },
         None => ReaderResolution::NoHandler,
     }
@@ -357,10 +323,7 @@ fn ensure_read_timeout(
         return true;
     }
     if stream.set_read_timeout(Some(want)).is_err() {
-        sink.post(InboundEvent::ReaderClosed {
-            conn_id,
-            reason: "set read timeout failed".to_string(),
-        });
+        sink.post(InboundEvent::ReaderClosed { conn_id, reason: "set read timeout failed".to_string() });
         return false;
     }
     *current = want;
@@ -371,19 +334,10 @@ fn ensure_read_timeout(
 /// reader's own full-duplex clone — no response can be in flight at a
 /// pre-dispatch reject — and post `ReaderClosed` so the shard reaps the
 /// connection state.
-fn reject_and_close(
-    stream: &mut TcpStream,
-    sink: &WakeSink,
-    conn_id: ConnId,
-    status: u16,
-    message: &'static str,
-) {
+fn reject_and_close(stream: &mut TcpStream, sink: &WakeSink, conn_id: ConnId, status: u16, message: &'static str) {
     let bytes = render_status_response(status, message);
     let _ = stream.write_all(&bytes).and_then(|()| stream.flush());
-    sink.post(InboundEvent::ReaderClosed {
-        conn_id,
-        reason: message.to_string(),
-    });
+    sink.post(InboundEvent::ReaderClosed { conn_id, reason: message.to_string() });
 }
 
 /// Per-connection reader thread body. An outer per-request loop reads one
@@ -415,13 +369,7 @@ pub fn run_reader_loop(
     tuning: ReaderTuning,
     shared: &ReaderShared,
 ) {
-    let ReaderTuning {
-        request_timeout,
-        idle_timeout,
-        max_header_bytes,
-        max_request_bytes,
-        ..
-    } = tuning;
+    let ReaderTuning { request_timeout, idle_timeout, max_header_bytes, max_request_bytes, .. } = tuning;
     let mut stream = read_half;
     let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
     let mut chunk = [0u8; 8 * 1024];
@@ -453,47 +401,23 @@ pub fn run_reader_loop(
                 }
                 HeadParse::NeedMore => {}
             }
-            let want_timeout = if buf.is_empty() {
-                idle_timeout
-            } else {
-                request_timeout
-            };
-            if !ensure_read_timeout(
-                &mut stream,
-                sink,
-                conn_id,
-                &mut current_timeout,
-                want_timeout,
-            ) {
+            let want_timeout = if buf.is_empty() { idle_timeout } else { request_timeout };
+            if !ensure_read_timeout(&mut stream, sink, conn_id, &mut current_timeout, want_timeout) {
                 return;
             }
             match read_more(&mut stream, &mut chunk) {
                 ReadStep::Filled(n) => buf.extend_from_slice(&chunk[..n]),
                 ReadStep::Eof => {
-                    let reason = if buf.is_empty() {
-                        "eof between requests"
-                    } else {
-                        "eof before request head"
-                    };
-                    sink.post(InboundEvent::ReaderClosed {
-                        conn_id,
-                        reason: reason.to_string(),
-                    });
+                    let reason = if buf.is_empty() { "eof between requests" } else { "eof before request head" };
+                    sink.post(InboundEvent::ReaderClosed { conn_id, reason: reason.to_string() });
                     return;
                 }
                 ReadStep::Timeout => {
                     // An idle-timeout expiry with no partial request buffered
                     // is a silent close of a kept-alive / fresh idle
                     // connection; a timeout mid-head is the slow-loris guard.
-                    let reason = if buf.is_empty() {
-                        "idle"
-                    } else {
-                        "read timeout (head)"
-                    };
-                    sink.post(InboundEvent::ReaderClosed {
-                        conn_id,
-                        reason: reason.to_string(),
-                    });
+                    let reason = if buf.is_empty() { "idle" } else { "read timeout (head)" };
+                    sink.post(InboundEvent::ReaderClosed { conn_id, reason: reason.to_string() });
                     return;
                 }
                 ReadStep::Error(reason) => {
@@ -505,13 +429,7 @@ pub fn run_reader_loop(
 
         // The body read and the `Expect: 100-continue` write run under the
         // in-flight timeout — a request has started arriving.
-        if !ensure_read_timeout(
-            &mut stream,
-            sink,
-            conn_id,
-            &mut current_timeout,
-            request_timeout,
-        ) {
+        if !ensure_read_timeout(&mut stream, sink, conn_id, &mut current_timeout, request_timeout) {
             return;
         }
 
@@ -527,11 +445,7 @@ pub fn run_reader_loop(
         };
         let resolution = resolve_at_reader(shared, sink, &mut route_cursor, &head.path, method);
         let (handler, dispatch_kind, streaming) = match resolution {
-            ReaderResolution::Live {
-                handler,
-                kind,
-                streaming,
-            } => (handler, kind, streaming),
+            ReaderResolution::Live { handler, kind, streaming } => (handler, kind, streaming),
             ReaderResolution::Dead => {
                 reject_and_close(&mut stream, sink, conn_id, 503, "routed handler gone");
                 return;
@@ -584,13 +498,7 @@ pub fn run_reader_loop(
             && let BodyFraming::Length(n) = head.framing
             && n > max_request_bytes
         {
-            reject_and_close(
-                &mut stream,
-                sink,
-                conn_id,
-                413,
-                "request body exceeds limit",
-            );
+            reject_and_close(&mut stream, sink, conn_id, 413, "request body exceeds limit");
             return;
         }
 
@@ -601,8 +509,7 @@ pub fn run_reader_loop(
         // final response still goes out the dispatcher's `write_half`,
         // so the two writes never interleave on the shared fd.
         let expects_continue = head.headers.iter().any(|header| {
-            header.name.eq_ignore_ascii_case("expect")
-                && header.value.to_ascii_lowercase().contains("100-continue")
+            header.name.eq_ignore_ascii_case("expect") && header.value.to_ascii_lowercase().contains("100-continue")
         });
         if expects_continue && let Err(e) = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n") {
             tracing::debug!(
@@ -628,11 +535,7 @@ pub fn run_reader_loop(
                 framing: head.framing,
                 keep_alive,
             };
-            if !sink.post(InboundEvent::RequestHeadParsed {
-                conn_id,
-                head: parsed_head,
-                handler,
-            }) {
+            if !sink.post(InboundEvent::RequestHeadParsed { conn_id, head: parsed_head, handler }) {
                 return;
             }
             // A timeout means the shard never answered (wedged / torn
@@ -662,15 +565,7 @@ pub fn run_reader_loop(
                 StreamOutcome::Closed => return,
             }
         } else {
-            match read_buffered_body(
-                &mut stream,
-                conn_id,
-                shutdown,
-                sink,
-                &head,
-                &buf,
-                max_request_bytes,
-            ) {
+            match read_buffered_body(&mut stream, conn_id, shutdown, sink, &head, &buf, max_request_bytes) {
                 Some((body, next_buf)) => {
                     let payload = HttpServerRequest {
                         method,
@@ -723,20 +618,14 @@ pub fn run_reader_loop(
                             error = %e,
                             "http response write failed",
                         );
-                        sink.post(InboundEvent::ReaderClosed {
-                            conn_id,
-                            reason: "response write failed".to_string(),
-                        });
+                        sink.post(InboundEvent::ReaderClosed { conn_id, reason: "response write failed".to_string() });
                         return;
                     }
                     if resume {
                         buf = next_buf.take().unwrap_or_default();
                         break;
                     }
-                    sink.post(InboundEvent::ReaderClosed {
-                        conn_id,
-                        reason: "response written".to_string(),
-                    });
+                    sink.post(InboundEvent::ReaderClosed { conn_id, reason: "response written".to_string() });
                     return;
                 }
                 Ok(ReaderControl::Resume) => {
@@ -819,17 +708,11 @@ fn read_buffered_body(
                 }
             }
             ReadStep::Eof => {
-                sink.post(InboundEvent::ReaderClosed {
-                    conn_id,
-                    reason: "eof mid-body".to_string(),
-                });
+                sink.post(InboundEvent::ReaderClosed { conn_id, reason: "eof mid-body".to_string() });
                 return None;
             }
             ReadStep::Timeout => {
-                sink.post(InboundEvent::ReaderClosed {
-                    conn_id,
-                    reason: "read timeout (body)".to_string(),
-                });
+                sink.post(InboundEvent::ReaderClosed { conn_id, reason: "read timeout (body)".to_string() });
                 return None;
             }
             ReadStep::Error(reason) => {
@@ -928,10 +811,7 @@ impl BodyStreamer<'_> {
     }
 
     fn post_closed(&self, reason: &str) {
-        self.sink.post(InboundEvent::ReaderClosed {
-            conn_id: self.conn_id,
-            reason: reason.to_string(),
-        });
+        self.sink.post(InboundEvent::ReaderClosed { conn_id: self.conn_id, reason: reason.to_string() });
     }
 
     /// Read one socket batch into `work`, compacting the consumed prefix first.
@@ -959,10 +839,7 @@ impl BodyStreamer<'_> {
                 Err(())
             }
             ReadStep::Error(reason) => {
-                self.sink.post(InboundEvent::ReaderClosed {
-                    conn_id: self.conn_id,
-                    reason,
-                });
+                self.sink.post(InboundEvent::ReaderClosed { conn_id: self.conn_id, reason });
                 Err(())
             }
         }
@@ -995,9 +872,7 @@ impl BodyStreamer<'_> {
                 // A bare resume / respond / upgrade mid-stream, or the
                 // control channel dropped, means a torn-down connection
                 // — stop.
-                Ok(
-                    ReaderControl::Resume | ReaderControl::Respond { .. } | ReaderControl::Upgrade,
-                )
+                Ok(ReaderControl::Resume | ReaderControl::Respond { .. } | ReaderControl::Upgrade)
                 | Err(mpsc::RecvTimeoutError::Disconnected) => return Err(()),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     self.post_closed("stream credit timeout");
@@ -1005,10 +880,7 @@ impl BodyStreamer<'_> {
                 }
             }
         }
-        if !self.sink.post(InboundEvent::RequestBodyChunk {
-            conn_id: self.conn_id,
-            body,
-        }) {
+        if !self.sink.post(InboundEvent::RequestBodyChunk { conn_id: self.conn_id, body }) {
             return Err(());
         }
         self.credit -= 1;

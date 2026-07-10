@@ -59,15 +59,8 @@ fn load_source_observer(bench: &mut TestBench, wasm: Vec<u8>, name: &str) -> (Ma
             ),
         )])
         .expect("load source_observer");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
-        LoadResult::Ok {
-            mailbox_id,
-            name: full_name,
-            ..
-        } => (mailbox_id, full_name),
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { mailbox_id, name: full_name, .. } => (mailbox_id, full_name),
         LoadResult::Err { error } => panic!("load_component {name}: {error}"),
     }
 }
@@ -91,15 +84,10 @@ fn session_source_returns_none() {
     let (_, reader_addr) = load_source_observer(&mut bench, wasm, "reader");
 
     let result = bench
-        .execute(vec![(
-            "query",
-            BenchOp::send_and_await(&reader_addr, &SourceQuery),
-        )])
+        .execute(vec![("query", BenchOp::send_and_await(&reader_addr, &SourceQuery))])
         .expect("send_and_await SourceQuery");
 
-    let report = result
-        .reply::<SourceReport>("query")
-        .expect("decode SourceReport");
+    let report = result.reply::<SourceReport>("query").expect("decode SourceReport");
 
     assert_eq!(
         report.mailbox_id, 0,
@@ -131,15 +119,7 @@ fn component_source_returns_sender_mailbox() {
     // Fire-and-settle: the whole chain (sender → reader handler) settles
     // before `execute` returns, so the log entry is already in the ring.
     bench
-        .execute(vec![(
-            "trigger",
-            BenchOp::send_mail(
-                &sender_addr,
-                &SendSourceQuery {
-                    to: reader_mailbox.0,
-                },
-            ),
-        )])
+        .execute(vec![("trigger", BenchOp::send_mail(&sender_addr, &SendSourceQuery { to: reader_mailbox.0 }))])
         .expect("SendSourceQuery to sender");
 
     // Read the reader's log ring — the handler logs

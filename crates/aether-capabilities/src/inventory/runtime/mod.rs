@@ -83,16 +83,9 @@ impl NativeActor for InventoryCapability {
     // inventories — `state.registry` is only consulted by
     // `on_list_kinds`, so this arm takes `_state`.
     #[handler::single]
-    fn on_manifest(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: Manifest,
-    ) -> ManifestResult {
+    fn on_manifest(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: Manifest) -> ManifestResult {
         let names = name_entries()
-            .map(|entry| NameEntryWire {
-                domain: entry.domain.to_vec(),
-                name: entry.name.into(),
-            })
+            .map(|entry| NameEntryWire { domain: entry.domain.to_vec(), name: entry.name.into() })
             .collect();
         let templates = template_entries()
             .map(|entry| TemplateEntryWire {
@@ -125,11 +118,7 @@ impl NativeActor for InventoryCapability {
     /// no `Schema` impl of its own; decode it with
     /// `wire::from_bytes::<SchemaType>(&desc.schema_wire)`.
     #[handler::single]
-    fn on_list_kinds(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: ListKinds,
-    ) -> ListKindsResult {
+    fn on_list_kinds(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListKinds) -> ListKindsResult {
         let kinds = state
             .registry
             .list_kind_descriptors()
@@ -140,8 +129,8 @@ impl NativeActor for InventoryCapability {
                 // serialization is infallible for `SchemaType`
                 // (no `Map<String, _>` non-string-key edge cases
                 // because every nested field is a derive output).
-                let schema_wire = wire::to_vec(&desc.schema)
-                    .expect("SchemaType always wire-encodes (ADR-0118 canonical form)");
+                let schema_wire =
+                    wire::to_vec(&desc.schema).expect("SchemaType always wire-encodes (ADR-0118 canonical form)");
                 KindDescriptorWire {
                     id: KindId(kind_id_from_parts(&desc.name, &desc.schema)),
                     name: desc.name,
@@ -166,14 +155,8 @@ impl NativeActor for InventoryCapability {
     // Stateless arm — `resolve` reads the process-global runtime
     // registry, not the cap state, so it takes `_state`.
     #[handler::single]
-    fn on_resolve(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        mail: Resolve,
-    ) -> ResolveResult {
-        ResolveResult {
-            resolved: resolve_ids(mail.ids),
-        }
+    fn on_resolve(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Resolve) -> ResolveResult {
+        ResolveResult { resolved: resolve_ids(mail.ids) }
     }
 
     /// Reply with the native handler manifest (ADR-0109 §5): every
@@ -195,11 +178,7 @@ impl NativeActor for InventoryCapability {
     // The manifest is read from the process-global link-time
     // inventory, so this arm takes `_state`.
     #[handler::single]
-    fn on_handlers(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: ListHandlers,
-    ) -> HandlersResult {
+    fn on_handlers(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListHandlers) -> HandlersResult {
         let handlers = handler_entries()
             .map(|entry| HandlerEntryWire {
                 namespace: entry.namespace.into(),
@@ -217,9 +196,7 @@ mod tests {
     use super::*;
     use aether_actor::actor;
     use aether_data::tagged_id;
-    use aether_data::{
-        MailboxId, SessionToken, ThreadId, Uuid, mailbox_id_from_name, thread_id_from_name,
-    };
+    use aether_data::{MailboxId, SessionToken, ThreadId, Uuid, mailbox_id_from_name, thread_id_from_name};
     use aether_kinds::ParamKindWire;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
@@ -242,26 +219,13 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let (outbound, _rx) = HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            MailboxId(0x1117),
-        ));
-        Fixture {
-            transport,
-            state: InventoryCapabilityState {
-                registry: Arc::clone(&registry),
-            },
-        }
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x1117)));
+        Fixture { transport, state: InventoryCapabilityState { registry: Arc::clone(&registry) } }
     }
 
     fn session_ctx(transport: &Arc<NativeBinding>) -> NativeCtx<'_> {
         let sender = Source::to(SourceAddr::Session(SessionToken(Uuid::nil())));
-        NativeCtx::new(
-            transport,
-            sender,
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        )
+        NativeCtx::new(transport, sender, aether_data::MailId::NONE, aether_data::MailId::NONE)
     }
 
     /// The served manifest carries a known chassis mailbox name
@@ -293,16 +257,12 @@ mod tests {
         // The worker template carries a `Bounded` `param` — an
         // enumerable integer hole the client expands locally (ADR-0088 §4).
         assert!(
-            result.templates.iter().any(|t| {
-                t.template == "aether-worker-{N}"
-                    && matches!(t.param, ParamKindWire::Bounded { .. })
-            }),
-            "manifest should carry the aether-worker-{{N}} Bounded template; templates: {:?}",
             result
                 .templates
                 .iter()
-                .map(|t| &t.template)
-                .collect::<Vec<_>>(),
+                .any(|t| { t.template == "aether-worker-{N}" && matches!(t.param, ParamKindWire::Bounded { .. }) }),
+            "manifest should carry the aether-worker-{{N}} Bounded template; templates: {:?}",
+            result.templates.iter().map(|t| &t.template).collect::<Vec<_>>(),
         );
     }
 
@@ -356,37 +316,24 @@ mod tests {
         );
 
         assert_eq!(result.resolved[1].id, unseen_tag);
-        assert_eq!(
-            result.resolved[1].name, None,
-            "unregistered id misses the runtime registry",
-        );
+        assert_eq!(result.resolved[1].name, None, "unregistered id misses the runtime registry",);
 
         assert_eq!(result.resolved[2].id, mailbox_tag);
-        assert_eq!(
-            result.resolved[2].name, None,
-            "a static name lives in the manifest, not the dynamic arm",
-        );
+        assert_eq!(result.resolved[2].name, None, "a static name lives in the manifest, not the dynamic arm",);
 
         assert_eq!(result.resolved[3].id, "not-a-tagged-id");
-        assert_eq!(
-            result.resolved[3].name, None,
-            "a malformed id reports None without aborting the batch",
-        );
+        assert_eq!(result.resolved[3].name, None, "a malformed id reports None without aborting the batch",);
     }
 
     /// A native test cap with a synchronous `-> R` handler — the
     /// surface ADR-0109 §5 makes `aether.inventory.handlers` carry.
     /// Its `#[actor]` expansion submits a link-time `HandlerEntry`
     /// declaring `ProbeReq -> ProbeReply`.
-    #[derive(
-        serde::Serialize, serde::Deserialize, aether_data::Kind, aether_data::Schema, Debug, Clone,
-    )]
+    #[derive(serde::Serialize, serde::Deserialize, aether_data::Kind, aether_data::Schema, Debug, Clone)]
     #[kind(name = "aether.test.inventory_handlers.req")]
     struct ProbeReq {}
 
-    #[derive(
-        serde::Serialize, serde::Deserialize, aether_data::Kind, aether_data::Schema, Debug, Clone,
-    )]
+    #[derive(serde::Serialize, serde::Deserialize, aether_data::Kind, aether_data::Schema, Debug, Clone)]
     #[kind(name = "aether.test.inventory_handlers.reply")]
     struct ProbeReply {}
 

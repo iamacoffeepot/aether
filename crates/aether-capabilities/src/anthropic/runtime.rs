@@ -9,8 +9,8 @@
 
 use super::kinds::{AnthropicError, CliSend, Message, MessagesSend, MessagesSendResult, Role};
 use super::{
-    AnthropicAdapter, AnthropicCapability, AnthropicConfig, CliSendResult,
-    CombinedAnthropicAdapter, DisabledAnthropicAdapter, map_adapter_error,
+    AnthropicAdapter, AnthropicCapability, AnthropicConfig, CliSendResult, CombinedAnthropicAdapter,
+    DisabledAnthropicAdapter, map_adapter_error,
 };
 use crate::shared::contentgen::adapter::{AdapterUsage, AnthropicRequest, AnthropicResponse};
 
@@ -53,10 +53,7 @@ impl AnthropicCapabilityState {
     /// `Builder::with_actor::<AnthropicCapability>(config)`; tests
     /// hand in a stub adapter directly.
     fn from_parts(adapter: Arc<dyn AnthropicAdapter>, max_in_flight: usize) -> Self {
-        Self {
-            adapter,
-            tasks: TaskQueue::new(max_in_flight),
-        }
+        Self { adapter, tasks: TaskQueue::new(max_in_flight) }
     }
 
     /// White-box accessor for tests asserting the queue's in-flight
@@ -73,20 +70,11 @@ impl AnthropicCapabilityState {
     /// supported-model table rejects it; `true` to proceed. Empty
     /// `supported` = accept-any (disabled / CLI passthrough); the CLI
     /// path always passes through.
-    fn gate_model(
-        &self,
-        ctx: &mut NativeCtx<'_, Manual>,
-        path: SendPath,
-        request_id: u64,
-        model: &str,
-    ) -> bool {
+    fn gate_model(&self, ctx: &mut NativeCtx<'_, Manual>, path: SendPath, request_id: u64, model: &str) -> bool {
         let supported = self.adapter.supported_models();
         let gate = matches!(path, SendPath::Messages) && !supported.is_empty();
         if gate && !supported.iter().any(|m| m == model) {
-            let err = AnthropicError::UnknownModel {
-                model: model.to_string(),
-                supported,
-            };
+            let err = AnthropicError::UnknownModel { model: model.to_string(), supported };
             Self::reply_err(ctx, path, request_id, err);
             return false;
         }
@@ -95,12 +83,7 @@ impl AnthropicCapabilityState {
 
     /// Reply an `Err` synchronously (model validation failure)
     /// before any dispatch.
-    fn reply_err(
-        ctx: &mut NativeCtx<'_, Manual>,
-        path: SendPath,
-        request_id: u64,
-        error: AnthropicError,
-    ) {
+    fn reply_err(ctx: &mut NativeCtx<'_, Manual>, path: SendPath, request_id: u64, error: AnthropicError) {
         match path {
             SendPath::Messages => {
                 OutboundReply::reply(ctx, &MessagesSendResult::Err { request_id, error });
@@ -128,14 +111,8 @@ impl NativeActor for AnthropicCapability {
     /// loopback result mails. The adapter is built immediately so a
     /// key-absent boot still loads (replying Unauthorized) rather
     /// than warn-dropping.
-    fn init(
-        config: AnthropicConfig,
-        _ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<AnthropicCapabilityState, BootError> {
-        Ok(AnthropicCapabilityState {
-            adapter: build_adapter(&config),
-            tasks: TaskQueue::new(config.max_in_flight),
-        })
+    fn init(config: AnthropicConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<AnthropicCapabilityState, BootError> {
+        Ok(AnthropicCapabilityState { adapter: build_adapter(&config), tasks: TaskQueue::new(config.max_in_flight) })
     }
 
     /// Run a Messages-API completion off the dispatcher thread.
@@ -146,11 +123,7 @@ impl NativeActor for AnthropicCapability {
     /// then dispatches the blocking HTTPS call on an ephemeral
     /// thread; the reply lands when the call returns.
     #[handler::manual]
-    fn on_messages_send(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Manual>,
-        mail: MessagesSend,
-    ) {
+    fn on_messages_send(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: MessagesSend) {
         let request_id = mail.request_id;
         if !state.gate_model(ctx, SendPath::Messages, request_id, &mail.model) {
             return;
@@ -195,8 +168,7 @@ impl NativeActor for AnthropicCapability {
         if !unsupported.is_empty() {
             let error = AnthropicError::ParamNotSupported {
                 param: unsupported.join(", "),
-                reason: "the claude CLI has no flag for this; use aether.anthropic.messages.send"
-                    .to_string(),
+                reason: "the claude CLI has no flag for this; use aether.anthropic.messages.send".to_string(),
             };
             AnthropicCapabilityState::reply_err(ctx, SendPath::Cli, mail.request_id, error);
             return;
@@ -222,22 +194,14 @@ impl NativeActor for AnthropicCapability {
     /// worker's result to the original caller (drops the hold), then
     /// free the in-flight slot (draining the next pending request).
     #[handler(task)]
-    fn on_messages_done(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        done: TaskDone<MessagesSendResult>,
-    ) {
+    fn on_messages_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<MessagesSendResult>) {
         done.resolve(ctx);
         state.tasks.on_complete(ctx);
     }
 
     /// ADR-0093 completion for a finished CLI call.
     #[handler(task)]
-    fn on_cli_done(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        done: TaskDone<CliSendResult>,
-    ) {
+    fn on_cli_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<CliSendResult>) {
         done.resolve(ctx);
         state.tasks.on_complete(ctx);
     }
@@ -264,8 +228,7 @@ pub fn build_adapter(config: &AnthropicConfig) -> Arc<dyn AnthropicAdapter> {
                 target: "aether_capabilities::anthropic",
                 "anthropic adapter configured (messages + cli)",
             );
-            Arc::new(CombinedAnthropicAdapter::new(key.clone(), config.timeout))
-                as Arc<dyn AnthropicAdapter>
+            Arc::new(CombinedAnthropicAdapter::new(key.clone(), config.timeout)) as Arc<dyn AnthropicAdapter>
         },
     )
 }
@@ -296,10 +259,7 @@ fn to_usage(u: AdapterUsage) -> Usage {
     }
 }
 
-pub fn messages_reply(
-    request_id: u64,
-    result: Result<AnthropicResponse, String>,
-) -> MessagesSendResult {
+pub fn messages_reply(request_id: u64, result: Result<AnthropicResponse, String>) -> MessagesSendResult {
     match result {
         Ok(resp) => MessagesSendResult::Ok {
             request_id,
@@ -307,25 +267,16 @@ pub fn messages_reply(
             model_used: resp.model_used,
             usage: to_usage(resp.usage),
         },
-        Err(raw) => MessagesSendResult::Err {
-            request_id,
-            error: map_adapter_error(&raw),
-        },
+        Err(raw) => MessagesSendResult::Err { request_id, error: map_adapter_error(&raw) },
     }
 }
 
 pub fn cli_reply(request_id: u64, result: Result<AnthropicResponse, String>) -> CliSendResult {
     match result {
-        Ok(resp) => CliSendResult::Ok {
-            request_id,
-            text: resp.text,
-            model_used: resp.model_used,
-            usage: to_usage(resp.usage),
-        },
-        Err(raw) => CliSendResult::Err {
-            request_id,
-            error: map_adapter_error(&raw),
-        },
+        Ok(resp) => {
+            CliSendResult::Ok { request_id, text: resp.text, model_used: resp.model_used, usage: to_usage(resp.usage) }
+        }
+        Err(raw) => CliSendResult::Err { request_id, error: map_adapter_error(&raw) },
     }
 }
 
@@ -334,20 +285,15 @@ mod tests {
     use super::AnthropicCapabilityState;
     use crate::anthropic::{AnthropicAdapter, ClaudeCliAdapter, DisabledAnthropicAdapter};
     use crate::anthropic::{
-        AnthropicCapability, AnthropicError, CliSend, CliSendResult, Message, MessagesSend,
-        MessagesSendResult, Role,
+        AnthropicCapability, AnthropicError, CliSend, CliSendResult, Message, MessagesSend, MessagesSendResult, Role,
     };
-    use crate::shared::contentgen::adapter::{
-        AnthropicRequest, AnthropicResponse, StubAnthropicAdapter,
-    };
+    use crate::shared::contentgen::adapter::{AnthropicRequest, AnthropicResponse, StubAnthropicAdapter};
     use aether_data::{Kind, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::EgressEvent;
-    use aether_substrate::testing::{
-        decode_session_reply, drive_task_completion, test_mailer_and_rx,
-    };
+    use aether_substrate::testing::{decode_session_reply, drive_task_completion, test_mailer_and_rx};
     use serde::de::DeserializeOwned;
     use std::sync::Arc;
     use std::sync::mpsc::Receiver;
@@ -358,10 +304,7 @@ mod tests {
     }
 
     fn user_msg(text: &str) -> Vec<Message> {
-        vec![Message {
-            role: Role::User,
-            content: text.to_string(),
-        }]
+        vec![Message { role: Role::User, content: text.to_string() }]
     }
 
     /// Thin alias over the shared `decode_session_reply` so call
@@ -395,18 +338,10 @@ mod tests {
     fn anthropic_stub_messages() {
         let (mailer, rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state = AnthropicCapabilityState::from_parts(
-            Arc::new(RecordingStub {
-                inner: StubAnthropicAdapter::default(),
-            }),
-            4,
-        );
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            cap_mailbox,
-        ));
-        let mut ctx =
-            NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
+        let mut state =
+            AnthropicCapabilityState::from_parts(Arc::new(RecordingStub { inner: StubAnthropicAdapter::default() }), 4);
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
+        let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
         AnthropicCapability::on_messages_send(
             &mut state,
             &mut ctx,
@@ -423,9 +358,7 @@ mod tests {
         // route it through the cap's task handler.
         drive_task_completion::<AnthropicCapability>(&mut state, &transport, &rx);
         match decode_reply::<MessagesSendResult>(&rx) {
-            MessagesSendResult::Ok {
-                request_id, text, ..
-            } => {
+            MessagesSendResult::Ok { request_id, text, .. } => {
                 assert_eq!(request_id, 7);
                 assert_eq!(text, "stub completion");
             }
@@ -438,18 +371,10 @@ mod tests {
     fn anthropic_unknown_model_errors() {
         let (mailer, rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state = AnthropicCapabilityState::from_parts(
-            Arc::new(RecordingStub {
-                inner: StubAnthropicAdapter::default(),
-            }),
-            4,
-        );
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            cap_mailbox,
-        ));
-        let mut ctx =
-            NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
+        let mut state =
+            AnthropicCapabilityState::from_parts(Arc::new(RecordingStub { inner: StubAnthropicAdapter::default() }), 4);
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
+        let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
         AnthropicCapability::on_messages_send(
             &mut state,
             &mut ctx,
@@ -463,10 +388,7 @@ mod tests {
             },
         );
         match decode_reply::<MessagesSendResult>(&rx) {
-            MessagesSendResult::Err {
-                request_id,
-                error: AnthropicError::UnknownModel { model, supported },
-            } => {
+            MessagesSendResult::Err { request_id, error: AnthropicError::UnknownModel { model, supported } } => {
                 assert_eq!(request_id, 3);
                 assert_eq!(model, "claude-bogus");
                 assert!(supported.contains(&"claude-test".to_string()));
@@ -488,15 +410,10 @@ mod tests {
         temperature: Option<f32>,
     ) -> AnthropicCapabilityState {
         let cap_mailbox = MailboxId(0);
-        let mut state = AnthropicCapabilityState::from_parts(
-            Arc::new(RecordingStub {
-                inner: StubAnthropicAdapter::default(),
-            }),
-            4,
-        );
+        let mut state =
+            AnthropicCapabilityState::from_parts(Arc::new(RecordingStub { inner: StubAnthropicAdapter::default() }), 4);
         let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), cap_mailbox));
-        let mut ctx =
-            NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
         AnthropicCapability::on_cli_send(
             &mut state,
             &mut ctx,
@@ -520,10 +437,7 @@ mod tests {
         let (mailer, rx) = test_mailer_and_rx();
         let state = cli_send_with(&mailer, Some(256), None);
         match decode_reply::<CliSendResult>(&rx) {
-            CliSendResult::Err {
-                request_id,
-                error: AnthropicError::ParamNotSupported { param, reason },
-            } => {
+            CliSendResult::Err { request_id, error: AnthropicError::ParamNotSupported { param, reason } } => {
                 assert_eq!(request_id, 11);
                 assert!(param.contains("max_tokens"), "param was {param:?}");
                 assert!(reason.contains("messages.send"), "reason was {reason:?}");
@@ -541,10 +455,7 @@ mod tests {
         let (mailer, rx) = test_mailer_and_rx();
         let state = cli_send_with(&mailer, None, Some(0.7));
         match decode_reply::<CliSendResult>(&rx) {
-            CliSendResult::Err {
-                request_id,
-                error: AnthropicError::ParamNotSupported { param, .. },
-            } => {
+            CliSendResult::Err { request_id, error: AnthropicError::ParamNotSupported { param, .. } } => {
                 assert_eq!(request_id, 11);
                 assert!(param.contains("temperature"), "param was {param:?}");
             }
@@ -559,11 +470,7 @@ mod tests {
     fn anthropic_cli_no_params_dispatches() {
         let (mailer, _rx) = test_mailer_and_rx();
         let state = cli_send_with(&mailer, None, None);
-        assert_eq!(
-            cap_in_flight(&state),
-            1,
-            "a param-free CliSend should dispatch one in-flight call"
-        );
+        assert_eq!(cap_in_flight(&state), 1, "a param-free CliSend should dispatch one in-flight call");
     }
 
     /// CLI send with a missing `claude` binary replies
@@ -597,12 +504,8 @@ mod tests {
             }),
             4,
         );
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            cap_mailbox,
-        ));
-        let mut ctx =
-            NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
+        let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
         AnthropicCapability::on_cli_send(
             &mut state,
             &mut ctx,
@@ -620,10 +523,7 @@ mod tests {
         // cap's task handler.
         drive_task_completion::<AnthropicCapability>(&mut state, &transport, &rx);
         match decode_reply::<CliSendResult>(&rx) {
-            CliSendResult::Err {
-                request_id,
-                error: AnthropicError::CliNotFound,
-            } => {
+            CliSendResult::Err { request_id, error: AnthropicError::CliNotFound } => {
                 assert_eq!(request_id, 5);
             }
             other => panic!("expected CliNotFound, got {other:?}"),
@@ -635,14 +535,9 @@ mod tests {
     fn anthropic_disabled_messages_replies_unauthorized() {
         let (mailer, rx) = test_mailer_and_rx();
         let cap_mailbox = MailboxId(0);
-        let mut state =
-            AnthropicCapabilityState::from_parts(Arc::new(DisabledAnthropicAdapter::default()), 4);
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            cap_mailbox,
-        ));
-        let mut ctx =
-            NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
+        let mut state = AnthropicCapabilityState::from_parts(Arc::new(DisabledAnthropicAdapter::default()), 4);
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), cap_mailbox));
+        let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
         AnthropicCapability::on_messages_send(
             &mut state,
             &mut ctx,
@@ -661,10 +556,7 @@ mod tests {
         // the cap's task handler.
         drive_task_completion::<AnthropicCapability>(&mut state, &transport, &rx);
         match decode_reply::<MessagesSendResult>(&rx) {
-            MessagesSendResult::Err {
-                request_id,
-                error: AnthropicError::Unauthorized,
-            } => assert_eq!(request_id, 9),
+            MessagesSendResult::Err { request_id, error: AnthropicError::Unauthorized } => assert_eq!(request_id, 9),
             other => panic!("expected Unauthorized, got {other:?}"),
         }
     }

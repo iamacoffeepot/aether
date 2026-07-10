@@ -19,9 +19,7 @@ use ureq::http::Request;
 /// than catching a `ureq::Error`.
 #[must_use]
 pub fn agent() -> ureq::Agent {
-    let config = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .build();
+    let config = ureq::Agent::config_builder().http_status_as_error(false).build();
     ureq::Agent::new_with_config(config)
 }
 
@@ -48,10 +46,7 @@ pub fn run_request(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<u32>().ok())
         .map(|secs| secs.saturating_mul(1000));
-    let text = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("read body: {e}"))?;
+    let text = response.body_mut().read_to_string().map_err(|e| format!("read body: {e}"))?;
     Ok((status, retry_after_millis, text))
 }
 
@@ -67,9 +62,7 @@ pub fn parse_status_prefix(rest: &str) -> Option<(u16, Option<u32>)> {
         tok.strip_prefix("retry_after_millis=").and_then(|v| {
             // The backend formats `Option<u32>` via Debug — `Some(1500)`
             // or `None`. Extract the inner integer when present.
-            v.strip_prefix("Some(")
-                .and_then(|s| s.strip_suffix(')'))
-                .and_then(|n| n.parse::<u32>().ok())
+            v.strip_prefix("Some(").and_then(|s| s.strip_suffix(')')).and_then(|n| n.parse::<u32>().ok())
         })
     });
     Some((status, retry_after_millis))
@@ -98,14 +91,8 @@ mod tests {
 
     #[test]
     fn parse_status_prefix_extracts_status_and_retry() {
-        assert_eq!(
-            parse_status_prefix("429 retry_after_millis=Some(1500) body=x"),
-            Some((429, Some(1500)))
-        );
-        assert_eq!(
-            parse_status_prefix("500 retry_after_millis=None body=oops"),
-            Some((500, None))
-        );
+        assert_eq!(parse_status_prefix("429 retry_after_millis=Some(1500) body=x"), Some((429, Some(1500))));
+        assert_eq!(parse_status_prefix("500 retry_after_millis=None body=oops"), Some((500, None)));
         assert_eq!(parse_status_prefix("not-a-status"), None);
     }
 

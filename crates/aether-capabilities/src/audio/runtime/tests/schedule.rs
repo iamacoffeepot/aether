@@ -9,10 +9,7 @@ use super::*;
 fn schedule_happy_path_replies_ok_and_queues_one_event() {
     let (mut cap, queue) = live_cap();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let mut ctx = load_ctx(&transport);
     let result = AudioCapability::on_schedule(
         &mut cap,
@@ -21,20 +18,9 @@ fn schedule_happy_path_replies_ok_and_queues_one_event() {
             events: vec![
                 ScheduledEvent {
                     at_millis: 0,
-                    event: ScheduledNote::On {
-                        pitch: 60,
-                        velocity: 100,
-                        instrument_id: 0,
-                        pan: 0,
-                    },
+                    event: ScheduledNote::On { pitch: 60, velocity: 100, instrument_id: 0, pan: 0 },
                 },
-                ScheduledEvent {
-                    at_millis: 500,
-                    event: ScheduledNote::Off {
-                        pitch: 60,
-                        instrument_id: 0,
-                    },
-                },
+                ScheduledEvent { at_millis: 500, event: ScheduledNote::Off { pitch: 60, instrument_id: 0 } },
             ],
         },
     );
@@ -55,40 +41,26 @@ fn schedule_happy_path_replies_ok_and_queues_one_event() {
 fn schedule_empty_batch_replies_err() {
     let (mut cap, queue) = live_cap();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let mut ctx = load_ctx(&transport);
     let result = AudioCapability::on_schedule(&mut cap, &mut ctx, Schedule { events: vec![] });
     match result {
         ScheduleResult::Err { .. } => {}
         ScheduleResult::Ok { .. } => panic!("empty batch must reject"),
     }
-    assert!(
-        queue.pop().is_none(),
-        "rejected batch must not queue an event"
-    );
+    assert!(queue.pop().is_none(), "rejected batch must not queue an event");
 }
 
 #[test]
 fn schedule_over_event_cap_rejects_atomically() {
     let (mut cap, queue) = live_cap();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let mut ctx = load_ctx(&transport);
     let events = (0..=SCHEDULE_MAX_EVENTS)
         .map(|_| ScheduledEvent {
             at_millis: 0,
-            event: ScheduledNote::On {
-                pitch: 60,
-                velocity: 100,
-                instrument_id: 0,
-                pan: 0,
-            },
+            event: ScheduledNote::On { pitch: 60, velocity: 100, instrument_id: 0, pan: 0 },
         })
         .collect();
     let result = AudioCapability::on_schedule(&mut cap, &mut ctx, Schedule { events });
@@ -96,20 +68,14 @@ fn schedule_over_event_cap_rejects_atomically() {
         ScheduleResult::Err { error } => assert!(error.contains("cap"), "reason: {error}"),
         ScheduleResult::Ok { .. } => panic!("over-cap batch must reject"),
     }
-    assert!(
-        queue.pop().is_none(),
-        "over-cap batch must not queue an event"
-    );
+    assert!(queue.pop().is_none(), "over-cap batch must not queue an event");
 }
 
 #[test]
 fn schedule_over_horizon_rejects_atomically() {
     let (mut cap, queue) = live_cap();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let mut ctx = load_ctx(&transport);
     let result = AudioCapability::on_schedule(
         &mut cap,
@@ -118,21 +84,11 @@ fn schedule_over_horizon_rejects_atomically() {
             events: vec![
                 ScheduledEvent {
                     at_millis: 0,
-                    event: ScheduledNote::On {
-                        pitch: 60,
-                        velocity: 100,
-                        instrument_id: 0,
-                        pan: 0,
-                    },
+                    event: ScheduledNote::On { pitch: 60, velocity: 100, instrument_id: 0, pan: 0 },
                 },
                 ScheduledEvent {
                     at_millis: SCHEDULE_MAX_MILLIS + 1,
-                    event: ScheduledNote::On {
-                        pitch: 64,
-                        velocity: 100,
-                        instrument_id: 0,
-                        pan: 0,
-                    },
+                    event: ScheduledNote::On { pitch: 64, velocity: 100, instrument_id: 0, pan: 0 },
                 },
             ],
         },
@@ -145,20 +101,14 @@ fn schedule_over_horizon_rejects_atomically() {
     }
     // A single bad event rejects the whole batch — the valid event
     // before it never queues.
-    assert!(
-        queue.pop().is_none(),
-        "over-horizon batch must reject atomically"
-    );
+    assert!(queue.pop().is_none(), "over-horizon batch must reject atomically");
 }
 
 #[test]
 fn schedule_on_nop_chassis_replies_err() {
     let mut cap = AudioCapabilityState::nop();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let mut ctx = load_ctx(&transport);
     let result = AudioCapability::on_schedule(
         &mut cap,
@@ -166,12 +116,7 @@ fn schedule_on_nop_chassis_replies_err() {
         Schedule {
             events: vec![ScheduledEvent {
                 at_millis: 0,
-                event: ScheduledNote::On {
-                    pitch: 60,
-                    velocity: 100,
-                    instrument_id: 0,
-                    pan: 0,
-                },
+                event: ScheduledNote::On { pitch: 60, velocity: 100, instrument_id: 0, pan: 0 },
             }],
         },
     );
@@ -190,13 +135,9 @@ fn schedule_on_nop_chassis_replies_err() {
 fn set_master_gain_on_nop_chassis_replies_err() {
     let mut cap = AudioCapabilityState::nop();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let mut ctx = load_ctx(&transport);
-    let result =
-        AudioCapability::on_set_master_gain(&mut cap, &mut ctx, SetMasterGain { gain: 0.5 });
+    let result = AudioCapability::on_set_master_gain(&mut cap, &mut ctx, SetMasterGain { gain: 0.5 });
     match result {
         SetMasterGainResult::Err { .. } => {}
         SetMasterGainResult::Ok { .. } => panic!("nop chassis must reply Err"),
@@ -207,13 +148,9 @@ fn set_master_gain_on_nop_chassis_replies_err() {
 fn set_master_gain_clamps_over_range_input() {
     let (mut cap, queue) = live_cap();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let mut ctx = load_ctx(&transport);
-    let result =
-        AudioCapability::on_set_master_gain(&mut cap, &mut ctx, SetMasterGain { gain: 1.5 });
+    let result = AudioCapability::on_set_master_gain(&mut cap, &mut ctx, SetMasterGain { gain: 1.5 });
     match result {
         SetMasterGainResult::Ok { applied_gain } => assert_eq!(applied_gain, 1.0),
         SetMasterGainResult::Err { error } => panic!("expected Ok, got Err({error})"),
@@ -229,13 +166,9 @@ fn set_master_gain_clamps_over_range_input() {
 fn set_reverb_send_on_nop_chassis_replies_err() {
     let mut cap = AudioCapabilityState::nop();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let mut ctx = load_ctx(&transport);
-    let result =
-        AudioCapability::on_set_reverb_send(&mut cap, &mut ctx, SetReverbSend { send: 0.5 });
+    let result = AudioCapability::on_set_reverb_send(&mut cap, &mut ctx, SetReverbSend { send: 0.5 });
     match result {
         SetReverbSendResult::Err { .. } => {}
         SetReverbSendResult::Ok { .. } => panic!("nop chassis must reply Err"),
@@ -246,13 +179,9 @@ fn set_reverb_send_on_nop_chassis_replies_err() {
 fn set_reverb_send_clamps_over_range_input() {
     let (mut cap, queue) = live_cap();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let mut ctx = load_ctx(&transport);
-    let result =
-        AudioCapability::on_set_reverb_send(&mut cap, &mut ctx, SetReverbSend { send: 1.5 });
+    let result = AudioCapability::on_set_reverb_send(&mut cap, &mut ctx, SetReverbSend { send: 1.5 });
     match result {
         SetReverbSendResult::Ok { applied_send } => assert_eq!(applied_send, 1.0),
         SetReverbSendResult::Err { error } => panic!("expected Ok, got Err({error})"),

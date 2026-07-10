@@ -23,11 +23,7 @@ pub(super) fn categorise_mailbox_name(name: &str) -> Option<MailboxCategory> {
     // `/...trampoline:CHILD` segment per nested sibling spawn), so the
     // trampoline node is the *leaf* segment rather than the whole-string
     // prefix — match on the last `/`-segment.
-    } else if name
-        .rsplit('/')
-        .next()
-        .is_some_and(|leaf| leaf.starts_with("aether.embedded:"))
-    {
+    } else if name.rsplit('/').next().is_some_and(|leaf| leaf.starts_with("aether.embedded:")) {
         Some(MailboxCategory::Trampoline)
     } else if name.starts_with("aether.") {
         // Chassis caps and substrate-owned actors live under the

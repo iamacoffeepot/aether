@@ -21,8 +21,8 @@ use crate::widget::set::{push_border, quad, reply_if_hidden, text_origin_y};
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
-    ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost,
-    SetWidgetState, WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState,
+    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,12 +144,7 @@ impl WasmActor for ButtonWidget {
             label: config.label,
             theme: config.theme,
             state: InteractionState::new(config.state),
-            frame: WidgetFrame {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                height: 0.0,
-            },
+            frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
             pointer_pressed: false,
             keyboard_arm: None,
         })
@@ -256,13 +251,7 @@ impl WasmActor for ButtonWidget {
         let size = self.theme.label_size_pixels;
 
         let mut items: Vec<WidgetDrawItem> = Vec::new();
-        items.push(quad(
-            0.0,
-            0.0,
-            width,
-            height,
-            self.theme.fill(self.theme.accent, theme_state),
-        ));
+        items.push(quad(0.0, 0.0, width, height, self.theme.fill(self.theme.accent, theme_state)));
         if !self.label.is_empty() {
             items.push(WidgetDrawItem::Text {
                 x: self.theme.pad,
@@ -278,10 +267,7 @@ impl WasmActor for ButtonWidget {
             push_border(&mut items, width, height, 2.0, self.theme.accent);
         }
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                intrinsic: None,
-                items,
-            });
+            parent.send(&WidgetDrawList { intrinsic: None, items });
         }
     }
 }
@@ -296,12 +282,7 @@ mod tests {
             label: String::from("go"),
             theme: Theme::DEFAULT,
             state: InteractionState::new(WidgetControlState::default()),
-            frame: WidgetFrame {
-                x: 10.0,
-                y: 10.0,
-                width: 40.0,
-                height: 20.0,
-            },
+            frame: WidgetFrame { x: 10.0, y: 10.0, width: 40.0, height: 20.0 },
             pointer_pressed: false,
             keyboard_arm: None,
         }
@@ -312,10 +293,7 @@ mod tests {
         let mut b = button();
         b.press_at(20.0, 20.0);
         assert!(b.pointer_pressed);
-        assert!(
-            b.release_at(30.0, 25.0),
-            "press-inside then release-inside is a click"
-        );
+        assert!(b.release_at(30.0, 25.0), "press-inside then release-inside is a click");
         assert!(!b.pointer_pressed, "disarmed after release");
     }
 
@@ -323,10 +301,7 @@ mod tests {
     fn press_inside_then_release_outside_cancels() {
         let mut b = button();
         b.press_at(20.0, 20.0);
-        assert!(
-            !b.release_at(200.0, 200.0),
-            "a release that drifts off the button does not click",
-        );
+        assert!(!b.release_at(200.0, 200.0), "a release that drifts off the button does not click",);
         assert!(!b.pointer_pressed, "disarmed even on a cancel");
     }
 
@@ -335,28 +310,16 @@ mod tests {
         let mut b = button();
         b.press_at(200.0, 200.0);
         assert!(!b.pointer_pressed);
-        assert!(
-            !b.release_at(20.0, 20.0),
-            "a release with no prior inside-press does not click"
-        );
+        assert!(!b.release_at(20.0, 20.0), "a release with no prior inside-press does not click");
     }
 
     #[test]
     fn enter_fires_once_per_press_release_pair_and_ignores_repeat() {
         let mut b = button();
         assert!(b.press_key(KEY_ENTER));
-        assert!(
-            !b.press_key(KEY_ENTER),
-            "repeat while armed cannot duplicate"
-        );
-        assert!(
-            !b.release_key(KEY_ENTER),
-            "Enter fires on press, not release"
-        );
-        assert!(
-            b.press_key(KEY_ENTER),
-            "matching release rearms the next press"
-        );
+        assert!(!b.press_key(KEY_ENTER), "repeat while armed cannot duplicate");
+        assert!(!b.release_key(KEY_ENTER), "Enter fires on press, not release");
+        assert!(b.press_key(KEY_ENTER), "matching release rearms the next press");
     }
 
     #[test]

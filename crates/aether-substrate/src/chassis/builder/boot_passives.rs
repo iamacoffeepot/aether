@@ -95,8 +95,7 @@ impl BootedPassives {
         // never false-fired — the same starvation-vs-wedge fix #2062
         // gave the settlement gates, on the gate it scoped out. The 2s
         // round budget (the warn cadence) is unchanged.
-        self.spawner
-            .shutdown_instanced(Duration::from_secs(2), self.teardown_cap);
+        self.spawner.shutdown_instanced(Duration::from_secs(2), self.teardown_cap);
         while let Some(s) = self.shutdowns.pop() {
             s.shutdown_dyn();
         }
@@ -145,10 +144,7 @@ pub(super) fn boot_passives(
     // (`available_parallelism() - 1`, min 1); `Some(n)` swaps the
     // worker count while preserving every other default field
     // (`budget_template`, etc.).
-    let pool_config = workers.map_or_else(PoolConfig::default, |n| PoolConfig {
-        workers: n,
-        ..PoolConfig::default()
-    });
+    let pool_config = workers.map_or_else(PoolConfig::default, |n| PoolConfig { workers: n, ..PoolConfig::default() });
     // Install the resolved scheduler tuning into the scheduler's
     // process-global *before* the pool starts: `Pool::start` reads the
     // spin window, and `log_handoff_calibration` below reads the handoff
@@ -184,9 +180,7 @@ pub(super) fn boot_passives(
     // reach `fire_settled`.
     let settlement_registry: Arc<SettlementRegistry> = Arc::new(SettlementRegistry::new());
     mailer.install_settlement_registry(Arc::clone(&settlement_registry));
-    mailer
-        .trace_handle()
-        .install_settlement_registry(Arc::clone(&settlement_registry));
+    mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement_registry));
     let settled_kind = <Settled as aether_data::Kind>::ID;
     mailer.install_chassis_router(Box::new(move |mail| {
         // The observer still folds the trace stream and emits a `Settled`
@@ -212,9 +206,7 @@ pub(super) fn boot_passives(
     // floor + growth ceiling explicitly to the same configured trace caps
     // the per-actor rings get. The ring is empty at boot, so resizing it
     // now is safe.
-    mailer
-        .trace_handle()
-        .set_chassis_host_ring_capacity(ring_caps.trace, ring_caps.trace_max);
+    mailer.trace_handle().set_chassis_host_ring_capacity(ring_caps.trace, ring_caps.trace_max);
     let spawner: Arc<crate::Spawner> = Arc::new(crate::Spawner::new(
         Arc::clone(registry),
         Arc::clone(&actor_registry),
@@ -235,14 +227,7 @@ pub(super) fn boot_passives(
     // borrowed slots (e.g., claim pushes into `claimed_actor_mailboxes`).
     macro_rules! build_ctx {
         () => {
-            ChassisCtx::new(
-                registry,
-                mailer,
-                &mut fallback,
-                aborter,
-                &mut claimed_actor_mailboxes,
-                &spawner,
-            )
+            ChassisCtx::new(registry, mailer, &mut fallback, aborter, &mut claimed_actor_mailboxes, &spawner)
         };
     }
 
@@ -267,14 +252,7 @@ pub(super) fn boot_passives(
             shutdown.shutdown_dyn();
         }
         for boot in booted.into_iter().rev() {
-            let mut ctx = ChassisCtx::new(
-                registry,
-                mailer,
-                fallback,
-                aborter,
-                claimed_actor_mailboxes,
-                spawner,
-            );
+            let mut ctx = ChassisCtx::new(registry, mailer, fallback, aborter, claimed_actor_mailboxes, spawner);
             boot.cleanup_after_failure(&mut ctx);
         }
     }
@@ -349,8 +327,7 @@ pub(super) fn boot_passives(
         match boot.spawn(&mut ctx) {
             Ok(s) => shutdowns.push(s),
             Err(e) => {
-                let remaining: Vec<Box<dyn PassiveBoot>> =
-                    booted_opt.into_iter().flatten().collect();
+                let remaining: Vec<Box<dyn PassiveBoot>> = booted_opt.into_iter().flatten().collect();
                 rollback(
                     registry,
                     mailer,

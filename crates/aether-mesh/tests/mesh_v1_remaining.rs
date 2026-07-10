@@ -54,17 +54,9 @@ fn cylinder_outward_normals() {
         // Pick the dominant axis component of the centroid as the
         // expected outward direction.
         let radial_len = c.x.hypot(c.z);
-        let outward = if c.y.abs() > radial_len {
-            [0.0, c.y.signum(), 0.0]
-        } else {
-            [c.x, 0.0, c.z]
-        };
-        let dot =
-            n.z.mul_add(outward[2], n.x.mul_add(outward[0], n.y * outward[1]));
-        assert!(
-            dot > 0.0,
-            "cylinder face normal points inward for triangle {tri:?}"
-        );
+        let outward = if c.y.abs() > radial_len { [0.0, c.y.signum(), 0.0] } else { [c.x, 0.0, c.z] };
+        let dot = n.z.mul_add(outward[2], n.x.mul_add(outward[0], n.y * outward[1]));
+        assert!(dot > 0.0, "cylinder face normal points inward for triangle {tri:?}");
     }
 }
 
@@ -95,10 +87,7 @@ fn cone_outward_normals() {
         let c = tri_centroid(tri);
         let v = c - interior;
         let dot = n.dot(v);
-        assert!(
-            dot > 0.0,
-            "cone face normal points inward for triangle {tri:?}"
-        );
+        assert!(dot > 0.0, "cone face normal points inward for triangle {tri:?}");
     }
 }
 
@@ -125,10 +114,7 @@ fn wedge_outward_normals() {
         let c = tri_centroid(tri);
         let v = c - interior;
         let dot = n.dot(v);
-        assert!(
-            dot > 0.0,
-            "wedge face normal points inward for triangle {tri:?}"
-        );
+        assert!(dot > 0.0, "wedge face normal points inward for triangle {tri:?}");
     }
 }
 
@@ -154,10 +140,7 @@ fn sphere_triangle_count_matches_lathe_pole_collapse() {
     // 2 tris/segment. Total = (2*(n-2) + 2) * segments = (2n - 2) * n.
     // For subdivisions = 8: (16 - 2) * 8 = 112.
     let ast = parse("(sphere 1 8 :color 0)").expect("test setup: sphere DSL parses");
-    assert_eq!(
-        mesh(&ast).expect("test setup: sphere meshes").len(),
-        (2 * 8 - 2) * 8
-    );
+    assert_eq!(mesh(&ast).expect("test setup: sphere meshes").len(), (2 * 8 - 2) * 8);
 }
 
 #[test]
@@ -168,10 +151,7 @@ fn sphere_vertices_lie_on_radius() {
     for tri in &tris {
         for v in tri.vertices {
             let r = v.z.mul_add(v.z, v.x.mul_add(v.x, v.y * v.y)).sqrt();
-            assert!(
-                (r - radius).abs() < 1e-4,
-                "sphere vertex off-radius: r={r}, expected {radius}"
-            );
+            assert!((r - radius).abs() < 1e-4, "sphere vertex off-radius: r={r}, expected {radius}");
         }
     }
 }
@@ -185,10 +165,7 @@ fn sphere_outward_normals() {
         let c = tri_centroid(tri);
         // Centroid is inside the sphere shell; outward = c (radial).
         let dot = n.z.mul_add(c.z, n.x.mul_add(c.x, n.y * c.y));
-        assert!(
-            dot > 0.0,
-            "sphere face normal points inward for triangle {tri:?}"
-        );
+        assert!(dot > 0.0, "sphere face normal points inward for triangle {tri:?}");
     }
 }
 
@@ -234,10 +211,7 @@ fn extrude_cap_normals_face_along_z() {
             Vec3::new(c.x, c.y, 0.0)
         };
         let dot = n.dot(outward);
-        assert!(
-            dot > 0.0,
-            "extrude face normal points inward for triangle {tri:?}"
-        );
+        assert!(dot > 0.0, "extrude face normal points inward for triangle {tri:?}");
     }
 }
 
@@ -253,16 +227,12 @@ fn extrude_with_under_three_profile_points_emits_nothing() {
 fn mirror_x_reflects_box_across_yz_plane() {
     // Box centered at (5, 0, 0), mirrored across YZ plane → centered
     // at (-5, 0, 0).
-    let ast = parse("(mirror x (translate (5 0 0) (box 1 1 1 :color 0)))")
-        .expect("test setup: mirror DSL parses");
+    let ast = parse("(mirror x (translate (5 0 0) (box 1 1 1 :color 0)))").expect("test setup: mirror DSL parses");
     let tris = mesh(&ast).expect("test setup: mirrored box meshes");
     assert_eq!(tris.len(), 12);
     for tri in &tris {
         for v in tri.vertices {
-            assert!(
-                v.x >= -5.51 && v.x <= -4.49,
-                "mirror-x vertex x out of range: {v:?}"
-            );
+            assert!(v.x >= -5.51 && v.x <= -4.49, "mirror-x vertex x out of range: {v:?}");
         }
     }
 }
@@ -271,20 +241,15 @@ fn mirror_x_reflects_box_across_yz_plane() {
 fn mirror_preserves_outward_winding() {
     // After reflection + winding swap, normals should still point
     // outward of the reflected box (toward the new centroid at -5).
-    let ast = parse("(mirror x (translate (5 0 0) (box 2 2 2 :color 0)))")
-        .expect("test setup: mirror DSL parses");
+    let ast = parse("(mirror x (translate (5 0 0) (box 2 2 2 :color 0)))").expect("test setup: mirror DSL parses");
     let tris = mesh(&ast).expect("test setup: mirrored box meshes");
     for tri in &tris {
         let n = tri_normal(tri);
         let c = tri_centroid(tri);
         // Reflected box center is at (-5, 0, 0); outward = c - center.
         let outward = [c.x + 5.0, c.y, c.z];
-        let dot =
-            n.z.mul_add(outward[2], n.x.mul_add(outward[0], n.y * outward[1]));
-        assert!(
-            dot > 0.0,
-            "mirror face normal points inward for triangle {tri:?}"
-        );
+        let dot = n.z.mul_add(outward[2], n.x.mul_add(outward[0], n.y * outward[1]));
+        assert!(dot > 0.0, "mirror face normal points inward for triangle {tri:?}");
     }
 }
 
@@ -292,8 +257,7 @@ fn mirror_preserves_outward_winding() {
 
 #[test]
 fn array_produces_count_copies() {
-    let ast =
-        parse("(array 4 (2 0 0) (box 1 1 1 :color 0))").expect("test setup: array DSL parses");
+    let ast = parse("(array 4 (2 0 0) (box 1 1 1 :color 0))").expect("test setup: array DSL parses");
     let tris = mesh(&ast).expect("test setup: array meshes");
     assert_eq!(tris.len(), 12 * 4);
 }
@@ -302,8 +266,7 @@ fn array_produces_count_copies() {
 fn array_copies_are_translated_correctly() {
     // 3 copies of a unit box at spacing (2, 0, 0): copies sit at
     // x=0, x=2, x=4.
-    let ast =
-        parse("(array 3 (2 0 0) (box 1 1 1 :color 0))").expect("test setup: array DSL parses");
+    let ast = parse("(array 3 (2 0 0) (box 1 1 1 :color 0))").expect("test setup: array DSL parses");
     let tris = mesh(&ast).expect("test setup: array meshes");
     let mut x_centers = BTreeSet::<i32>::new();
     for tri in &tris {
@@ -317,8 +280,7 @@ fn array_copies_are_translated_correctly() {
 
 #[test]
 fn array_zero_count_emits_nothing() {
-    let ast =
-        parse("(array 0 (1 0 0) (box 1 1 1 :color 0))").expect("test setup: array DSL parses");
+    let ast = parse("(array 0 (1 0 0) (box 1 1 1 :color 0))").expect("test setup: array DSL parses");
     assert_eq!(mesh(&ast).expect("test setup: array meshes").len(), 0);
 }
 

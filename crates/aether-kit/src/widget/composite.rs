@@ -20,9 +20,7 @@ use alloc::vec::Vec;
 use aether_data::MailboxId;
 use aether_math::Vec2;
 
-use crate::widget::{
-    ChildrenChanged, MembershipEntry, WidgetClipRect, WidgetDrawItem, WidgetDrawList,
-};
+use crate::widget::{ChildrenChanged, MembershipEntry, WidgetClipRect, WidgetDrawItem, WidgetDrawList};
 
 /// One child's place in a compositing node's layout. `child` is the
 /// inline-child alias the reply is attributed to; `subname` is the child's
@@ -44,13 +42,8 @@ struct Slot {
 /// the full identity (subname + the spawned actor's type namespace); a remove
 /// names just the subname, which the dropped [`Slot`] already stored.
 enum MembershipDelta {
-    Added {
-        subname: String,
-        type_namespace: String,
-    },
-    Removed {
-        subname: String,
-    },
+    Added { subname: String, type_namespace: String },
+    Removed { subname: String },
 }
 
 /// A compositing node's per-frame accumulator: registered child slots plus
@@ -92,13 +85,7 @@ impl Composite {
         if self.slots.iter().any(|slot| slot.child == child) {
             return;
         }
-        self.slots.push(Slot {
-            child,
-            subname: String::from(subname),
-            origin,
-            clip,
-            list: None,
-        });
+        self.slots.push(Slot { child, subname: String::from(subname), origin, clip, list: None });
         self.pending_membership.push(MembershipDelta::Added {
             subname: String::from(subname),
             type_namespace: String::from(type_namespace),
@@ -115,9 +102,7 @@ impl Composite {
             return false;
         };
         let removed = self.slots.remove(index);
-        self.pending_membership.push(MembershipDelta::Removed {
-            subname: removed.subname,
-        });
+        self.pending_membership.push(MembershipDelta::Removed { subname: removed.subname });
         true
     }
 
@@ -134,13 +119,9 @@ impl Composite {
         let mut removed = Vec::new();
         for delta in self.pending_membership.drain(..) {
             match delta {
-                MembershipDelta::Added {
-                    subname,
-                    type_namespace,
-                } => added.push(MembershipEntry {
-                    subname,
-                    type_namespace,
-                }),
+                MembershipDelta::Added { subname, type_namespace } => {
+                    added.push(MembershipEntry { subname, type_namespace })
+                }
                 MembershipDelta::Removed { subname } => removed.push(subname),
             }
         }
@@ -196,11 +177,7 @@ impl Composite {
         let mut items = self.chrome.clone();
         for slot in &self.slots {
             if let Some(list) = &slot.list {
-                items.extend(
-                    list.items
-                        .iter()
-                        .filter_map(|item| item.offset(slot.origin).intersect_clip(slot.clip)),
-                );
+                items.extend(list.items.iter().filter_map(|item| item.offset(slot.origin).intersect_clip(slot.clip)));
             }
         }
         WidgetDrawList { intrinsic, items }
@@ -213,14 +190,7 @@ mod tests {
     use aether_math::Rgba;
 
     fn quad(x: f32, tag: f32) -> WidgetDrawItem {
-        WidgetDrawItem::Quad {
-            x,
-            y: 0.0,
-            width: 1.0,
-            height: 1.0,
-            color: Rgba::new(tag, 0.0, 0.0, 1.0),
-            clip: None,
-        }
+        WidgetDrawItem::Quad { x, y: 0.0, width: 1.0, height: 1.0, color: Rgba::new(tag, 0.0, 0.0, 1.0), clip: None }
     }
 
     fn clipped_quad(x: f32, tag: f32, clip: WidgetClipRect) -> WidgetDrawItem {
@@ -249,19 +219,13 @@ mod tests {
     }
 
     fn list(items: Vec<WidgetDrawItem>) -> WidgetDrawList {
-        WidgetDrawList {
-            intrinsic: None,
-            items,
-        }
+        WidgetDrawList { intrinsic: None, items }
     }
 
     #[test]
     fn a_leaf_with_no_slots_is_immediately_complete() {
         let composite = Composite::new();
-        assert!(
-            composite.is_complete(),
-            "a node with no registered slots completes vacuously — the childless case",
-        );
+        assert!(composite.is_complete(), "a node with no registered slots completes vacuously — the childless case",);
     }
 
     #[test]
@@ -276,10 +240,7 @@ mod tests {
         assert!(composite.fill(a, list(vec![quad(0.0, 0.1)])));
         assert!(!composite.is_complete(), "one of two slots filled");
         assert!(composite.fill(b, list(vec![quad(0.0, 0.2)])));
-        assert!(
-            composite.is_complete(),
-            "both slots filled closes the counter",
-        );
+        assert!(composite.is_complete(), "both slots filled closes the counter",);
     }
 
     #[test]
@@ -291,10 +252,7 @@ mod tests {
             !composite.fill(MailboxId(99), list(vec![quad(0.0, 0.5)])),
             "a stray reply from a non-slot child does not land",
         );
-        assert!(
-            !composite.is_complete(),
-            "and does not close the real slot's counter",
-        );
+        assert!(!composite.is_complete(), "and does not close the real slot's counter",);
     }
 
     #[test]
@@ -306,10 +264,7 @@ mod tests {
         composite.fill(a, list(vec![quad(0.0, 0.1)]));
         assert!(composite.is_complete());
         composite.begin_frame();
-        assert!(
-            !composite.is_complete(),
-            "a new frame re-opens the slot so its reply must arrive again",
-        );
+        assert!(!composite.is_complete(), "a new frame re-opens the slot so its reply must arrive again",);
     }
 
     #[test]
@@ -323,10 +278,7 @@ mod tests {
         composite.fill(a, list(vec![quad(0.0, 0.1)]));
         assert!(!composite.is_complete(), "b still owed");
         assert!(composite.forget_slot(b), "b removed");
-        assert!(
-            composite.is_complete(),
-            "with b despawned the counter closes on a alone",
-        );
+        assert!(composite.is_complete(), "with b despawned the counter closes on a alone",);
     }
 
     #[test]
@@ -368,40 +320,21 @@ mod tests {
         interior.register_slot(
             MailboxId(11),
             Vec2::new(4.0, 3.0),
-            Some(WidgetClipRect {
-                x: 6.0,
-                y: 5.0,
-                width: 10.0,
-                height: 8.0,
-            }),
+            Some(WidgetClipRect { x: 6.0, y: 5.0, width: 10.0, height: 8.0 }),
             "leaf",
             "aether.kit.widget",
         );
         interior.begin_frame();
         assert!(interior.fill(
             MailboxId(11),
-            list(vec![textured(
-                2.0,
-                1.0,
-                WidgetClipRect {
-                    x: 3.0,
-                    y: 2.0,
-                    width: 20.0,
-                    height: 20.0,
-                },
-            )]),
+            list(vec![textured(2.0, 1.0, WidgetClipRect { x: 3.0, y: 2.0, width: 20.0, height: 20.0 },)]),
         ));
 
         let mut root = Composite::new();
         root.register_slot(
             MailboxId(22),
             Vec2::new(10.0, 8.0),
-            Some(WidgetClipRect {
-                x: 12.0,
-                y: 10.0,
-                width: 20.0,
-                height: 16.0,
-            }),
+            Some(WidgetClipRect { x: 12.0, y: 10.0, width: 20.0, height: 16.0 }),
             "interior",
             "aether.kit.widget",
         );
@@ -421,12 +354,7 @@ mod tests {
                 u1: 0.75,
                 v1: 0.875,
                 tint: Rgba::new(0.4, 0.6, 0.8, 0.9),
-                clip: Some(WidgetClipRect {
-                    x: 17.0,
-                    y: 13.0,
-                    width: 9.0,
-                    height: 8.0,
-                }),
+                clip: Some(WidgetClipRect { x: 17.0, y: 13.0, width: 9.0, height: 8.0 }),
             }],
         );
     }
@@ -438,78 +366,28 @@ mod tests {
         interior.register_slot(
             MailboxId(11),
             Vec2::new(4.0, 3.0),
-            Some(WidgetClipRect {
-                x: 6.0,
-                y: 5.0,
-                width: 10.0,
-                height: 8.0,
-            }),
+            Some(WidgetClipRect { x: 6.0, y: 5.0, width: 10.0, height: 8.0 }),
             "leaf",
             "aether.kit.widget",
         );
         interior.begin_frame();
-        interior.extend_chrome([clipped_quad(
-            0.0,
-            0.2,
-            WidgetClipRect {
-                x: 0.0,
-                y: 0.0,
-                width: 30.0,
-                height: 20.0,
-            },
-        )]);
+        interior.extend_chrome([clipped_quad(0.0, 0.2, WidgetClipRect { x: 0.0, y: 0.0, width: 30.0, height: 20.0 })]);
         assert!(interior.fill(
             MailboxId(11),
             list(vec![
-                clipped_quad(
-                    0.0,
-                    0.3,
-                    WidgetClipRect {
-                        x: 2.0,
-                        y: 1.0,
-                        width: 20.0,
-                        height: 20.0,
-                    },
-                ),
-                clipped_quad(
-                    1.0,
-                    0.4,
-                    WidgetClipRect {
-                        x: 30.0,
-                        y: 30.0,
-                        width: 4.0,
-                        height: 4.0,
-                    },
-                ),
-                clipped_quad(
-                    2.0,
-                    0.5,
-                    WidgetClipRect {
-                        x: 3.0,
-                        y: 2.0,
-                        width: 12.0,
-                        height: 12.0,
-                    },
-                ),
+                clipped_quad(0.0, 0.3, WidgetClipRect { x: 2.0, y: 1.0, width: 20.0, height: 20.0 },),
+                clipped_quad(1.0, 0.4, WidgetClipRect { x: 30.0, y: 30.0, width: 4.0, height: 4.0 },),
+                clipped_quad(2.0, 0.5, WidgetClipRect { x: 3.0, y: 2.0, width: 12.0, height: 12.0 },),
             ]),
         ));
         let interior_list = interior.flatten(None);
-        assert_eq!(
-            interior_list.items.len(),
-            3,
-            "the disjoint middle item is omitted"
-        );
+        assert_eq!(interior_list.items.len(), 3, "the disjoint middle item is omitted");
 
         let mut root = Composite::new();
         root.register_slot(
             MailboxId(22),
             Vec2::new(10.0, 8.0),
-            Some(WidgetClipRect {
-                x: 12.0,
-                y: 10.0,
-                width: 20.0,
-                height: 16.0,
-            }),
+            Some(WidgetClipRect { x: 12.0, y: 10.0, width: 20.0, height: 16.0 }),
             "interior",
             "aether.kit.widget",
         );
@@ -538,24 +416,9 @@ mod tests {
             clips,
             vec![
                 None,
-                Some(WidgetClipRect {
-                    x: 12.0,
-                    y: 10.0,
-                    width: 20.0,
-                    height: 16.0,
-                }),
-                Some(WidgetClipRect {
-                    x: 16.0,
-                    y: 13.0,
-                    width: 10.0,
-                    height: 8.0,
-                }),
-                Some(WidgetClipRect {
-                    x: 17.0,
-                    y: 13.0,
-                    width: 9.0,
-                    height: 8.0,
-                }),
+                Some(WidgetClipRect { x: 12.0, y: 10.0, width: 20.0, height: 16.0 }),
+                Some(WidgetClipRect { x: 16.0, y: 13.0, width: 10.0, height: 8.0 }),
+                Some(WidgetClipRect { x: 17.0, y: 13.0, width: 9.0, height: 8.0 }),
             ],
         );
     }
@@ -563,38 +426,15 @@ mod tests {
     #[test]
     fn registers_buffer_one_batched_add_per_child_in_order() {
         let mut composite = Composite::new();
-        composite.register_slot(
-            MailboxId(1),
-            Vec2::ZERO,
-            None,
-            "alpha",
-            "aether.kit.widget.slider",
-        );
-        composite.register_slot(
-            MailboxId(2),
-            Vec2::ZERO,
-            None,
-            "beta",
-            "aether.kit.widget.button",
-        );
-        let changed = composite
-            .take_membership_changes()
-            .expect("two adds are buffered and drain together");
-        assert!(
-            changed.removed.is_empty(),
-            "no removals in an add-only batch"
-        );
+        composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget.slider");
+        composite.register_slot(MailboxId(2), Vec2::ZERO, None, "beta", "aether.kit.widget.button");
+        let changed = composite.take_membership_changes().expect("two adds are buffered and drain together");
+        assert!(changed.removed.is_empty(), "no removals in an add-only batch");
         assert_eq!(
             changed.added,
             vec![
-                MembershipEntry {
-                    subname: "alpha".into(),
-                    type_namespace: "aether.kit.widget.slider".into(),
-                },
-                MembershipEntry {
-                    subname: "beta".into(),
-                    type_namespace: "aether.kit.widget.button".into(),
-                },
+                MembershipEntry { subname: "alpha".into(), type_namespace: "aether.kit.widget.slider".into() },
+                MembershipEntry { subname: "beta".into(), type_namespace: "aether.kit.widget.button".into() },
             ],
             "both adds drain as one batch, in registration order, carrying subname + type",
         );
@@ -604,13 +444,9 @@ mod tests {
     fn forget_buffers_one_remove_naming_the_dropped_subname() {
         let mut composite = Composite::new();
         composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
-        composite
-            .take_membership_changes()
-            .expect("drain the add so the remove stands alone");
+        composite.take_membership_changes().expect("drain the add so the remove stands alone");
         assert!(composite.forget_slot(MailboxId(1)), "the slot is removed");
-        let changed = composite
-            .take_membership_changes()
-            .expect("the remove is buffered");
+        let changed = composite.take_membership_changes().expect("the remove is buffered");
         assert!(changed.added.is_empty(), "no adds in a remove-only batch");
         assert_eq!(
             changed.removed,
@@ -622,15 +458,9 @@ mod tests {
     #[test]
     fn take_membership_changes_clears_the_buffer_and_is_none_when_quiet() {
         let mut composite = Composite::new();
-        assert!(
-            composite.take_membership_changes().is_none(),
-            "nothing has changed yet, so there is no event",
-        );
+        assert!(composite.take_membership_changes().is_none(), "nothing has changed yet, so there is no event",);
         composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
-        assert!(
-            composite.take_membership_changes().is_some(),
-            "the buffered add drains as an event",
-        );
+        assert!(composite.take_membership_changes().is_some(), "the buffered add drains as an event",);
         assert!(
             composite.take_membership_changes().is_none(),
             "the drain cleared the buffer, so a second drain finds nothing",
@@ -641,9 +471,7 @@ mod tests {
     fn a_dedup_suppressed_reregister_records_no_delta() {
         let mut composite = Composite::new();
         composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
-        composite
-            .take_membership_changes()
-            .expect("drain the first, genuine add");
+        composite.take_membership_changes().expect("drain the first, genuine add");
         composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
         assert!(
             composite.take_membership_changes().is_none(),

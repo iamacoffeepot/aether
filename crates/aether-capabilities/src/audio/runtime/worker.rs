@@ -51,9 +51,7 @@ pub fn spawn_audio_worker(
         }
         Err(_) => {
             let _ = thread.join();
-            Err(AudioBuildError::StreamBuild(
-                "audio worker closed channel before init".to_string(),
-            ))
+            Err(AudioBuildError::StreamBuild("audio worker closed channel before init".to_string()))
         }
     }
 }

@@ -57,11 +57,9 @@ pub fn resolve_reference(
         ));
     }
     let Some(assets_dir) = assets_dir else {
-        return Err(
-            "capture_frame similarity: no assets directory is configured on this \
+        return Err("capture_frame similarity: no assets directory is configured on this \
                     chassis; similarity checks are unavailable"
-                .to_owned(),
-        );
+            .to_owned());
     };
     // Reject path components that would escape the assets root
     // (mirrors `LocalFileAdapter::resolve`).
@@ -74,13 +72,7 @@ pub fn resolve_reference(
     }
     let full_path = assets_dir.join(&sim.reference_path);
     match fs::read(&full_path) {
-        Ok(bytes) => Ok(Some(ReferenceCapture {
-            png_bytes: bytes,
-            threshold: sim.threshold,
-        })),
-        Err(e) => Err(format!(
-            "capture_frame similarity: could not read reference {:?}: {e}",
-            sim.reference_path,
-        )),
+        Ok(bytes) => Ok(Some(ReferenceCapture { png_bytes: bytes, threshold: sim.threshold })),
+        Err(e) => Err(format!("capture_frame similarity: could not read reference {:?}: {e}", sim.reference_path,)),
     }
 }

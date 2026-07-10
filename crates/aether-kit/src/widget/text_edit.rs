@@ -53,10 +53,7 @@ impl TextSpan {
     /// before storing the span.
     #[must_use]
     pub const fn new(start_byte: usize, end_byte: usize) -> Self {
-        Self {
-            start_byte,
-            end_byte,
-        }
+        Self { start_byte, end_byte }
     }
 
     /// Whether both endpoints name the same caret position.
@@ -68,10 +65,7 @@ impl TextSpan {
 
 impl Default for EditPolicy {
     fn default() -> Self {
-        Self {
-            single_line: true,
-            max_chars: 0,
-        }
+        Self { single_line: true, max_chars: 0 }
     }
 }
 
@@ -108,13 +102,7 @@ impl TextEditState {
     #[must_use]
     pub fn new(initial: String) -> Self {
         let end = initial.len();
-        Self {
-            text: initial,
-            anchor: end,
-            caret: end,
-            preedit: String::new(),
-            preedit_cursor: None,
-        }
+        Self { text: initial, anchor: end, caret: end, preedit: String::new(), preedit_cursor: None }
     }
 
     /// The committed text (never includes the in-flight preedit).
@@ -379,10 +367,7 @@ impl SingleLineLayout {
     /// stop).
     #[must_use]
     pub fn caret_x(&self, byte: usize) -> f32 {
-        self.stops
-            .iter()
-            .find(|stop| stop.byte == byte)
-            .map_or_else(|| self.width(), |stop| stop.x)
+        self.stops.iter().find(|stop| stop.byte == byte).map_or_else(|| self.width(), |stop| stop.x)
     }
 
     /// The `char`-boundary byte offset whose caret sits nearest `x` — the stop
@@ -419,10 +404,7 @@ mod tests {
     }
 
     fn uncapped() -> EditPolicy {
-        EditPolicy {
-            single_line: true,
-            max_chars: 0,
-        }
+        EditPolicy { single_line: true, max_chars: 0 }
     }
 
     #[test]
@@ -576,10 +558,7 @@ mod tests {
 
     #[test]
     fn whole_insert_respects_the_character_cap() {
-        let policy = EditPolicy {
-            single_line: true,
-            max_chars: 3,
-        };
+        let policy = EditPolicy { single_line: true, max_chars: 3 };
         let mut s = state("ab");
         assert!(s.insert("c", policy), "fills to the cap");
         assert_eq!(s.value(), "abc");
@@ -599,18 +578,12 @@ mod tests {
 
     #[test]
     fn single_line_policy_filters_line_breaks() {
-        let policy = EditPolicy {
-            single_line: true,
-            max_chars: 0,
-        };
+        let policy = EditPolicy { single_line: true, max_chars: 0 };
         let mut s = state("");
         assert!(s.insert("a\nb\r\nc", policy));
         assert_eq!(s.value(), "abc");
 
-        let multiline = EditPolicy {
-            single_line: false,
-            max_chars: 0,
-        };
+        let multiline = EditPolicy { single_line: false, max_chars: 0 };
         let mut m = state("");
         assert!(m.insert("a\nb", multiline));
         assert_eq!(m.value(), "a\nb");
@@ -643,18 +616,9 @@ mod tests {
             line_gap: 0.0,
             default_advance: 500.0,
             advances: vec![
-                GlyphAdvance {
-                    codepoint: u32::from('i'),
-                    advance_units: 200.0,
-                },
-                GlyphAdvance {
-                    codepoint: u32::from('m'),
-                    advance_units: 800.0,
-                },
-                GlyphAdvance {
-                    codepoint: u32::from('x'),
-                    advance_units: 500.0,
-                },
+                GlyphAdvance { codepoint: u32::from('i'), advance_units: 200.0 },
+                GlyphAdvance { codepoint: u32::from('m'), advance_units: 800.0 },
+                GlyphAdvance { codepoint: u32::from('x'), advance_units: 500.0 },
             ],
         })
     }
@@ -678,19 +642,11 @@ mod tests {
         // Stops at x = 0, 20, 100, 150; midpoints at 10, 60, 125.
         assert_eq!(layout.hit_test(-5.0), 0);
         assert_eq!(layout.hit_test(9.0), 0);
-        assert_eq!(
-            layout.hit_test(10.0),
-            1,
-            "a tie rounds to the later boundary"
-        );
+        assert_eq!(layout.hit_test(10.0), 1, "a tie rounds to the later boundary");
         assert_eq!(layout.hit_test(59.0), 1);
         assert_eq!(layout.hit_test(61.0), 2);
         assert_eq!(layout.hit_test(124.0), 2);
         assert_eq!(layout.hit_test(126.0), 3);
-        assert_eq!(
-            layout.hit_test(999.0),
-            3,
-            "past the end clamps to the last stop"
-        );
+        assert_eq!(layout.hit_test(999.0), 3, "past the end clamps to the last stop");
     }
 }

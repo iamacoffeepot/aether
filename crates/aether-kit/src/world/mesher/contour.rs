@@ -95,15 +95,7 @@ fn scalar_zone(coverage: &[u8], width: usize, height: usize, x: i32, z: i32) -> 
         .any(|(dx, dz)| !binary_coverage(sample_at(coverage, width, height, x + dx, z + dz, 0)))
 }
 
-fn bilinear_coverage(
-    coverage: &[u8],
-    width: usize,
-    height: usize,
-    x: i32,
-    z: i32,
-    fx: f32,
-    fz: f32,
-) -> u8 {
+fn bilinear_coverage(coverage: &[u8], width: usize, height: usize, x: i32, z: i32, fx: f32, fz: f32) -> u8 {
     let bl = f32::from(sample_at(coverage, width, height, x, z, 0));
     let br = f32::from(sample_at(coverage, width, height, x + 1, z, 0));
     let tl = f32::from(sample_at(coverage, width, height, x, z + 1, 0));
@@ -140,11 +132,7 @@ fn corner_flip(
 /// sample's angle setting; `99` (unreachable — the window holds 24
 /// neighbors) disables the rule at 90 degrees.
 fn t24_of(smoothing_degrees: u32) -> i32 {
-    if smoothing_degrees >= 90 {
-        99
-    } else {
-        13 + ((smoothing_degrees as i32 - 45) * 2 + 15) / 30
-    }
+    if smoothing_degrees >= 90 { 99 } else { 13 + ((smoothing_degrees as i32 - 45) * 2 + 15) / 30 }
 }
 
 /// Upsample `coverage` (`width × height`) by `upsample` and minimize its
@@ -213,51 +201,19 @@ pub fn minimize_corners(
             let m0 = in_mask(coverage, width, height, cx, cz, false);
             let mut m = m0;
             if fx - fz > 0.5
-                && let Some(a) = corner_flip(
-                    coverage,
-                    width,
-                    height,
-                    m0,
-                    (cx, cz - 1),
-                    (cx + 1, cz),
-                    (cx + 1, cz - 1),
-                )
+                && let Some(a) = corner_flip(coverage, width, height, m0, (cx, cz - 1), (cx + 1, cz), (cx + 1, cz - 1))
             {
                 m = a;
             } else if fx + fz < 0.5
-                && let Some(a) = corner_flip(
-                    coverage,
-                    width,
-                    height,
-                    m0,
-                    (cx, cz - 1),
-                    (cx - 1, cz),
-                    (cx - 1, cz - 1),
-                )
+                && let Some(a) = corner_flip(coverage, width, height, m0, (cx, cz - 1), (cx - 1, cz), (cx - 1, cz - 1))
             {
                 m = a;
             } else if fx + fz > 1.5
-                && let Some(a) = corner_flip(
-                    coverage,
-                    width,
-                    height,
-                    m0,
-                    (cx, cz + 1),
-                    (cx + 1, cz),
-                    (cx + 1, cz + 1),
-                )
+                && let Some(a) = corner_flip(coverage, width, height, m0, (cx, cz + 1), (cx + 1, cz), (cx + 1, cz + 1))
             {
                 m = a;
             } else if fz - fx > 0.5
-                && let Some(a) = corner_flip(
-                    coverage,
-                    width,
-                    height,
-                    m0,
-                    (cx, cz + 1),
-                    (cx - 1, cz),
-                    (cx - 1, cz + 1),
-                )
+                && let Some(a) = corner_flip(coverage, width, height, m0, (cx, cz + 1), (cx - 1, cz), (cx - 1, cz + 1))
             {
                 m = a;
             }
@@ -308,13 +264,7 @@ fn prune_one_wide_artifacts(
                 }
                 let source_x = gx / upsample as i32;
                 let source_z = gz / upsample as i32;
-                if scalar_zone(
-                    source,
-                    mask_width,
-                    params.len() / mask_width,
-                    source_x,
-                    source_z,
-                ) {
+                if scalar_zone(source, mask_width, params.len() / mask_width, source_x, source_z) {
                     continue;
                 }
                 let sample = grid[gz as usize * gw + gx as usize];
@@ -364,13 +314,7 @@ fn cellular_pass(
             }
             let source_x = gx / upsample as i32;
             let source_z = gz / upsample as i32;
-            if scalar_zone(
-                source,
-                mask_width,
-                params.len() / mask_width,
-                source_x,
-                source_z,
-            ) {
+            if scalar_zone(source, mask_width, params.len() / mask_width, source_x, source_z) {
                 continue;
             }
             let t24 = t24_of(own.smoothing_degrees);
@@ -481,14 +425,7 @@ pub fn repartition(
     let mut grid = vec![0u8; gw * gh];
     for gz in 0..gh {
         for gx in 0..gw {
-            grid[gz * gw + gx] = id_at(
-                ids,
-                width,
-                height,
-                (gx / upsample) as i32,
-                (gz / upsample) as i32,
-                0,
-            );
+            grid[gz * gw + gx] = id_at(ids, width, height, (gx / upsample) as i32, (gz / upsample) as i32, 0);
         }
     }
     let max_iterations = params.iter().map(|p| p.iterations).max().unwrap_or(0);
@@ -844,10 +781,7 @@ fn merge_interior(
                 continue;
             }
             let mut w = 1;
-            while wi + w < windows_x
-                && full[wj * windows_x + wi + w]
-                && !consumed[wj * windows_x + wi + w]
-            {
+            while wi + w < windows_x && full[wj * windows_x + wi + w] && !consumed[wj * windows_x + wi + w] {
                 w += 1;
             }
             let mut h = 1;
@@ -921,16 +855,10 @@ fn emit_window_poly_indexed(
     ];
     let vert = |idx: u8| {
         let p = points[idx as usize];
-        vertex(
-            p[0] as f32 / OCTIMETERS_PER_METER,
-            p[1] as f32 / OCTIMETERS_PER_METER,
-            idx,
-        )
+        vertex(p[0] as f32 / OCTIMETERS_PER_METER, p[1] as f32 / OCTIMETERS_PER_METER, idx)
     };
     for k in 1..poly.len() - 1 {
-        tris.push(DrawTriangle {
-            verts: [vert(poly[0]), vert(poly[k]), vert(poly[k + 1])],
-        });
+        tris.push(DrawTriangle { verts: [vert(poly[0]), vert(poly[k]), vert(poly[k + 1])] });
     }
 }
 
@@ -946,11 +874,7 @@ fn emit_window_poly(
 ) {
     let step_oct = window.place.step_oct;
     let edge_t = |a: u8, b: u8| -> f32 {
-        if a == b {
-            0.5
-        } else {
-            ((COVERAGE_CROSSING - f32::from(a)) / (f32::from(b) - f32::from(a))).clamp(0.0, 1.0)
-        }
+        if a == b { 0.5 } else { ((COVERAGE_CROSSING - f32::from(a)) / (f32::from(b) - f32::from(a))).clamp(0.0, 1.0) }
     };
     let x_lo = window.place.origin_oct[0] + wi * step_oct;
     let x_hi = window.place.origin_oct[0] + (wi + 1) * step_oct;
@@ -979,11 +903,7 @@ fn emit_window_poly(
     let vert = |p: [f32; 2]| vertex(p[0] / OCTIMETERS_PER_METER, p[1] / OCTIMETERS_PER_METER);
     for k in 1..poly.len() - 1 {
         tris.push(DrawTriangle {
-            verts: [
-                vert(points[poly[0] as usize]),
-                vert(points[poly[k] as usize]),
-                vert(points[poly[k + 1] as usize]),
-            ],
+            verts: [vert(points[poly[0] as usize]), vert(points[poly[k] as usize]), vert(points[poly[k + 1] as usize])],
         });
     }
 }
@@ -999,12 +919,7 @@ pub fn push_quad(
     z1: i32,
     vertex: &impl Fn(f32, f32) -> Vertex,
 ) {
-    let vert = |x: i32, z: i32| {
-        vertex(
-            x as f32 / OCTIMETERS_PER_METER,
-            z as f32 / OCTIMETERS_PER_METER,
-        )
-    };
+    let vert = |x: i32, z: i32| vertex(x as f32 / OCTIMETERS_PER_METER, z as f32 / OCTIMETERS_PER_METER);
     let a = vert(x0, z0);
     let b = vert(x1, z0);
     let c = vert(x1, z1);
@@ -1022,9 +937,7 @@ mod tests {
     }
 
     fn coverage(mask: &[bool]) -> Vec<u8> {
-        mask.iter()
-            .map(|&sample| if sample { u8::MAX } else { 0 })
-            .collect()
+        mask.iter().map(|&sample| if sample { u8::MAX } else { 0 }).collect()
     }
 
     fn minimize_bool(
@@ -1040,24 +953,13 @@ mod tests {
     /// A flat colorless vertex builder — the `y = 0`, one-color case every
     /// geometry test wants.
     fn flat_vertex(wx: f32, wz: f32) -> Vertex {
-        Vertex {
-            x: wx,
-            y: 0.0,
-            z: wz,
-            color: aether_math::Rgb::new(0.0, 0.0, 0.0),
-        }
+        Vertex { x: wx, y: 0.0, z: wz, color: aether_math::Rgb::new(0.0, 0.0, 0.0) }
     }
 
     /// A uniform per-sample params slice — the single-setting case every
     /// caller had before the field made params spatial.
     fn uniform(iterations: u32, smoothing_degrees: u32, len: usize) -> Vec<SmoothParams> {
-        vec![
-            SmoothParams {
-                iterations,
-                smoothing_degrees,
-            };
-            len
-        ]
+        vec![SmoothParams { iterations, smoothing_degrees }; len]
     }
 
     /// A raw upsample of `mask` by `factor` — the identity `minimize_corners`
@@ -1067,11 +969,7 @@ mod tests {
         let gw = w * factor;
         for gz in 0..h * factor {
             for gx in 0..gw {
-                out[gz * gw + gx] = if mask[(gz / factor) * w + gx / factor] {
-                    u8::MAX
-                } else {
-                    0
-                };
+                out[gz * gw + gx] = if mask[(gz / factor) * w + gx / factor] { u8::MAX } else { 0 };
             }
         }
         out
@@ -1084,20 +982,13 @@ mod tests {
         // hexagon fanned to 4 triangles, one joining BL and TR. A
         // disconnected rule would emit two separate corner triangles.
         let grid = coverage(&[true, false, false, true]); // BL, BR, TL, TR
-        let place = GridPlacement {
-            origin_oct: [0, 0],
-            step_oct: 64,
-        };
+        let place = GridPlacement { origin_oct: [0, 0], step_oct: 64 };
         let mut tris = Vec::new();
         march_grid(&grid, 2, 2, &place, &flat_vertex, &mut tris);
         assert_eq!(tris.len(), 4, "the connected hexagon fans to 4 triangles");
         // BL corner = (0,0) m; TR corner = (64,64) oct = (0.25,0.25) m.
         let joins = tris.iter().any(|t| {
-            let has = |x: f32, z: f32| {
-                t.verts
-                    .iter()
-                    .any(|v| (v.x - x).abs() < 1e-6 && (v.z - z).abs() < 1e-6)
-            };
+            let has = |x: f32, z: f32| t.verts.iter().any(|v| (v.x - x).abs() < 1e-6 && (v.z - z).abs() < 1e-6);
             has(0.0, 0.0) && has(0.25, 0.25)
         });
         assert!(joins, "the connected rule joins the inside diagonal");
@@ -1116,30 +1007,18 @@ mod tests {
             }
         }
         let grid = coverage(&mask);
-        let place = GridPlacement {
-            origin_oct: [0, 0],
-            step_oct: 64,
-        };
+        let place = GridPlacement { origin_oct: [0, 0], step_oct: 64 };
         let mut tris = Vec::new();
         march_grid(&grid, gw, gh, &place, &flat_vertex, &mut tris);
-        let xs: Vec<f32> = tris
-            .iter()
-            .flat_map(|t| t.verts.iter())
-            .map(|v| v.x)
-            .collect();
+        let xs: Vec<f32> = tris.iter().flat_map(|t| t.verts.iter()).map(|v| v.x).collect();
         let max_x = xs.iter().copied().fold(f32::MIN, f32::max);
         // Window 2 (samples 2,3) is the boundary; its right/top mids sit at
         // 2*step + step/2 = 160 oct = 0.625 m — the rightmost geometry.
-        assert!(
-            (max_x - 0.625).abs() < 1e-6,
-            "boundary at 0.625 m, got {max_x}"
-        );
+        assert!((max_x - 0.625).abs() < 1e-6, "boundary at 0.625 m, got {max_x}");
         let on_edge = xs.iter().filter(|&&x| x > 0.5).count();
         assert!(on_edge >= 2, "the edge is one straight, repeated line");
         assert!(
-            xs.iter()
-                .filter(|&&x| x > 0.5)
-                .all(|&x| (x - 0.625).abs() < 1e-6),
+            xs.iter().filter(|&&x| x > 0.5).all(|&x| (x - 0.625).abs() < 1e-6),
             "no crossing kinks short of the straight edge",
         );
     }
@@ -1151,36 +1030,13 @@ mod tests {
         // geometry over its own cells, not stacked at zero.
         let grid = coverage(&[true, false, false, false]); // BL only
         let mut base = Vec::new();
-        march_grid(
-            &grid,
-            2,
-            2,
-            &GridPlacement {
-                origin_oct: [0, 0],
-                step_oct: 64,
-            },
-            &flat_vertex,
-            &mut base,
-        );
+        march_grid(&grid, 2, 2, &GridPlacement { origin_oct: [0, 0], step_oct: 64 }, &flat_vertex, &mut base);
         let mut shifted = Vec::new();
-        march_grid(
-            &grid,
-            2,
-            2,
-            &GridPlacement {
-                origin_oct: [1024, 512],
-                step_oct: 64,
-            },
-            &flat_vertex,
-            &mut shifted,
-        );
+        march_grid(&grid, 2, 2, &GridPlacement { origin_oct: [1024, 512], step_oct: 64 }, &flat_vertex, &mut shifted);
         assert_eq!(base.len(), shifted.len());
         for (b, s) in base.iter().zip(&shifted) {
             for (vb, vs) in b.verts.iter().zip(&s.verts) {
-                assert!(
-                    (vs.x - vb.x - 4.0).abs() < 1e-6,
-                    "x shift is 1024 oct = 4 m"
-                );
+                assert!((vs.x - vb.x - 4.0).abs() < 1e-6, "x shift is 1024 oct = 4 m");
                 assert!((vs.z - vb.z - 2.0).abs() < 1e-6, "z shift is 512 oct = 2 m");
             }
         }
@@ -1229,11 +1085,7 @@ mod tests {
             }
         }
         let (grid, _, _) = minimize_bool(&mask, w, h, 4, &uniform(3, 90, w * h));
-        assert_eq!(
-            grid,
-            raw_upsample(&mask, w, h, 4),
-            "a straight edge is untouched"
-        );
+        assert_eq!(grid, raw_upsample(&mask, w, h, 4), "a straight edge is untouched");
     }
 
     #[test]
@@ -1254,10 +1106,7 @@ mod tests {
         }
         let one = minimize_bool(&mask, w, h, 2, &uniform(1, 90, w * h)).0;
         let five = minimize_bool(&mask, w, h, 2, &uniform(5, 90, w * h)).0;
-        assert_eq!(
-            one, five,
-            "the cellular passes leave a 45-degree diagonal alone at 90 degrees"
-        );
+        assert_eq!(one, five, "the cellular passes leave a 45-degree diagonal alone at 90 degrees");
     }
 
     #[test]
@@ -1276,10 +1125,7 @@ mod tests {
         }
         let at_90 = count_true(&minimize_bool(&mask, w, h, 2, &uniform(8, 90, w * h)).0);
         let at_45 = count_true(&minimize_bool(&mask, w, h, 2, &uniform(8, 45, w * h)).0);
-        assert!(
-            at_45 < at_90,
-            "the 45-degree gate flattens more: {at_45} < {at_90}"
-        );
+        assert!(at_45 < at_90, "the 45-degree gate flattens more: {at_45} < {at_90}");
     }
 
     #[test]
@@ -1289,16 +1135,10 @@ mod tests {
         // 0/255 upsample.
         let (w, h) = (5usize, 4usize);
         let rows = ["#..#.", "###..", ".##..", "....."];
-        let mask: Vec<bool> = rows
-            .iter()
-            .flat_map(|r| r.bytes().map(|b| b == b'#'))
-            .collect();
+        let mask: Vec<bool> = rows.iter().flat_map(|r| r.bytes().map(|b| b == b'#')).collect();
         let (grid, _, _) = minimize_bool(&mask, w, h, 3, &uniform(0, 90, w * h));
         assert_eq!(grid, raw_upsample(&mask, w, h, 3));
-        assert!(
-            grid.iter().all(|sample| binary_coverage(*sample)),
-            "binary coverage remains binary after upsample"
-        );
+        assert!(grid.iter().all(|sample| binary_coverage(*sample)), "binary coverage remains binary after upsample");
     }
 
     #[test]
@@ -1308,22 +1148,12 @@ mod tests {
         // boundary should therefore sit farther right than 0.5 of the
         // window width.
         let grid = [255, 64, 255, 64]; // BL, BR, TL, TR
-        let place = GridPlacement {
-            origin_oct: [0, 0],
-            step_oct: 64,
-        };
+        let place = GridPlacement { origin_oct: [0, 0], step_oct: 64 };
         let mut tris = Vec::new();
         march_grid(&grid, 2, 2, &place, &flat_vertex, &mut tris);
-        let max_x = tris
-            .iter()
-            .flat_map(|t| t.verts.iter())
-            .map(|v| v.x)
-            .fold(f32::MIN, f32::max);
+        let max_x = tris.iter().flat_map(|t| t.verts.iter()).map(|v| v.x).fold(f32::MIN, f32::max);
         let expected = ((127.5 - 255.0) / (64.0 - 255.0)) * 64.0 / 256.0;
-        assert!(
-            (max_x - expected).abs() < 1e-6,
-            "scalar crossing at {expected}, got {max_x}"
-        );
+        assert!((max_x - expected).abs() < 1e-6, "scalar crossing at {expected}, got {max_x}");
     }
 
     #[test]
@@ -1338,12 +1168,7 @@ mod tests {
         let raw = minimize_corners(&field, w, h, 3, &uniform(0, 45, w * h)).0;
         let smoothed = minimize_corners(&field, w, h, 3, &uniform(4, 45, w * h)).0;
         assert_eq!(smoothed, raw, "scalar neighborhoods do not corner-flip");
-        assert!(
-            smoothed
-                .iter()
-                .any(|sample| *sample != 0 && *sample != u8::MAX),
-            "the scalar zone remains scalar"
-        );
+        assert!(smoothed.iter().any(|sample| *sample != 0 && *sample != u8::MAX), "the scalar zone remains scalar");
     }
 
     #[test]
@@ -1376,11 +1201,7 @@ mod tests {
         let raw = raw_upsample(&mask, w, h, 2);
         for gz in 0..h * 2 {
             for gx in 0..w {
-                assert_eq!(
-                    grid[gz * gw + gx],
-                    raw[gz * gw + gx],
-                    "the zero-iteration side stays raw at ({gx}, {gz})",
-                );
+                assert_eq!(grid[gz * gw + gx], raw[gz * gw + gx], "the zero-iteration side stays raw at ({gx}, {gz})",);
             }
         }
 
@@ -1390,10 +1211,7 @@ mod tests {
             .filter(|&(gx, gz)| covered(grid[gz * gw + gx]))
             .count();
         let raw_zone = 8 * 8;
-        assert!(
-            right_zone < raw_zone,
-            "the smoothing side loses corner area: {right_zone} < {raw_zone}"
-        );
+        assert!(right_zone < raw_zone, "the smoothing side loses corner area: {right_zone} < {raw_zone}");
         let (uniform_grid, ugw, _) = minimize_bool(&mask, w, h, 2, &uniform(3, 45, w * h));
         for gz in 0..h * 2 {
             for gx in w + 4..w * 2 {
@@ -1432,10 +1250,7 @@ mod tests {
             ".....#####################",
         ];
         let (w, h) = (rows[0].len(), rows.len());
-        let mask: Vec<bool> = rows
-            .iter()
-            .flat_map(|r| r.bytes().map(|b| b == b'#'))
-            .collect();
+        let mask: Vec<bool> = rows.iter().flat_map(|r| r.bytes().map(|b| b == b'#')).collect();
         let (grid, gw, gh) = minimize_bool(&mask, w, h, 2, &uniform(3, 90, w * h));
         for gz in 0..gh as i32 {
             for gx in 0..gw as i32 {
@@ -1477,21 +1292,14 @@ mod tests {
             ".....#####################",
         ];
         let (w, h) = (rows[0].len(), rows.len());
-        let mask: Vec<bool> = rows
-            .iter()
-            .flat_map(|r| r.bytes().map(|b| b == b'#'))
-            .collect();
+        let mask: Vec<bool> = rows.iter().flat_map(|r| r.bytes().map(|b| b == b'#')).collect();
         let ids: Vec<u8> = mask.iter().map(|&b| u8::from(b)).collect();
         let params = uniform(3, 90, w * h);
         let (bool_grid, gw, gh) = minimize_bool(&mask, w, h, 2, &params);
         let (id_grid, igw, igh) = repartition(&ids, w, h, 2, &params, &vec![false; w * h]);
         assert_eq!((gw, gh), (igw, igh));
         for (i, (&b, &id)) in bool_grid.iter().zip(&id_grid).enumerate() {
-            assert_eq!(
-                u8::from(covered(b)),
-                id,
-                "two-label repartition diverges at {i}"
-            );
+            assert_eq!(u8::from(covered(b)), id, "two-label repartition diverges at {i}");
         }
     }
 
@@ -1518,11 +1326,7 @@ mod tests {
         let (grid, gw, _) = repartition(&ids, w, h, 2, &params, &vec![false; w * h]);
         for gz in 0..h * 2 {
             for gx in 0..12 {
-                assert_eq!(
-                    grid[gz * gw + gx],
-                    ids[(gz / 2) * w + gx / 2],
-                    "crisp-zone sample moved at ({gx}, {gz})",
-                );
+                assert_eq!(grid[gz * gw + gx], ids[(gz / 2) * w + gx / 2], "crisp-zone sample moved at ({gx}, {gz})",);
             }
         }
     }
@@ -1543,10 +1347,7 @@ mod tests {
         // A two-label saddle window: the higher label connects its
         // diagonal, the lower splits into two corner triangles, and the
         // union covers the window exactly once.
-        let place = GridPlacement {
-            origin_oct: [0, 0],
-            step_oct: 64,
-        };
+        let place = GridPlacement { origin_oct: [0, 0], step_oct: 64 };
         // Samples [BL, BR, TL, TR] = [1, 2, 2, 1]: label 1 case 5, label 2
         // case 10. Label 2 wins the diagonal, label 1 splits.
         let ids = [1u8, 2, 2, 1];
@@ -1559,14 +1360,8 @@ mod tests {
         let split_area = poly_area(&tris);
         emit_label_window(0, 0, &place, case2, true, &indexed, &mut tris);
         let window_area = (64.0f32 / 256.0) * (64.0 / 256.0);
-        assert!(
-            (poly_area(&tris) - window_area).abs() < 1e-6,
-            "the saddle window tiles exactly",
-        );
-        assert!(
-            (split_area - window_area / 4.0).abs() < 1e-6,
-            "the split loser holds its two corner triangles",
-        );
+        assert!((poly_area(&tris) - window_area).abs() < 1e-6, "the saddle window tiles exactly",);
+        assert!((split_area - window_area / 4.0).abs() < 1e-6, "the split loser holds its two corner triangles",);
     }
 
     #[test]
@@ -1574,10 +1369,7 @@ mod tests {
         // Three labels in one window: the diagonal-pair label connects,
         // the two single-corner labels take their triangles, and the
         // union tiles the window.
-        let place = GridPlacement {
-            origin_oct: [0, 0],
-            step_oct: 64,
-        };
+        let place = GridPlacement { origin_oct: [0, 0], step_oct: 64 };
         // Samples [BL, BR, TL, TR] = [1, 2, 3, 1]: label 1 case 5 (both
         // diagonal corners), labels 2 and 3 one corner each.
         let ids = [1u8, 2, 3, 1];
@@ -1590,10 +1382,7 @@ mod tests {
             emit_label_window(0, 0, &place, case, true, &indexed, &mut tris);
         }
         let window_area = (64.0f32 / 256.0) * (64.0 / 256.0);
-        assert!(
-            (poly_area(&tris) - window_area).abs() < 1e-6,
-            "three labels tile the window exactly",
-        );
+        assert!((poly_area(&tris) - window_area).abs() < 1e-6, "three labels tile the window exactly",);
     }
 
     #[test]

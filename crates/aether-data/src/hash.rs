@@ -126,10 +126,7 @@ pub const fn mailbox_id_from_name(name: &str) -> MailboxId {
         !has_path_separator(name),
         "mailbox_id_from_name received a `/`-rendered path; resolve it through mailbox_id_from_path"
     );
-    MailboxId(with_tag(
-        Tag::Mailbox,
-        fnv1a_64_prefixed(MAILBOX_DOMAIN, name.as_bytes()),
-    ))
+    MailboxId(with_tag(Tag::Mailbox, fnv1a_64_prefixed(MAILBOX_DOMAIN, name.as_bytes())))
 }
 
 /// The `:` that joins a scope/prefix to a segment in a mailbox name.
@@ -250,9 +247,7 @@ pub enum ScopePathError {
 /// becomes a registry key.
 pub const fn validate_scope_path(segments: &[&str]) -> Result<(), ScopePathError> {
     if segments.len() > MAX_SCOPE_PATH_DEPTH {
-        return Err(ScopePathError::TooDeep {
-            limit: MAX_SCOPE_PATH_DEPTH,
-        });
+        return Err(ScopePathError::TooDeep { limit: MAX_SCOPE_PATH_DEPTH });
     }
     let mut total: usize = 0;
     let mut i = 0;
@@ -264,9 +259,7 @@ pub const fn validate_scope_path(segments: &[&str]) -> Result<(), ScopePathError
         i += 1;
     }
     if total > MAX_SCOPE_PATH_BYTES {
-        return Err(ScopePathError::TooLong {
-            limit: MAX_SCOPE_PATH_BYTES,
-        });
+        return Err(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES });
     }
     Ok(())
 }
@@ -280,10 +273,7 @@ pub const fn validate_scope_path(segments: &[&str]) -> Result<(), ScopePathError
 /// it in a trace event costs no per-hop allocation.
 #[must_use]
 pub const fn thread_id_from_name(name: &str) -> ThreadId {
-    ThreadId(with_tag(
-        Tag::Thread,
-        fnv1a_64_prefixed(THREAD_DOMAIN, name.as_bytes()),
-    ))
+    ThreadId(with_tag(Tag::Thread, fnv1a_64_prefixed(THREAD_DOMAIN, name.as_bytes())))
 }
 
 #[cfg(test)]
@@ -302,14 +292,8 @@ mod tests {
         // chassis namespace both pass, and resolve to the same id a
         // single-segment path does — the guard adds no behavior to a
         // valid name, it only fences the `/`-path footgun.
-        assert_eq!(
-            mailbox_id_from_name("aether.component"),
-            mailbox_id_from_path("aether.component"),
-        );
-        assert_eq!(
-            mailbox_id_from_name("aether.embedded:camera"),
-            mailbox_id_from_path("aether.embedded:camera"),
-        );
+        assert_eq!(mailbox_id_from_name("aether.component"), mailbox_id_from_path("aether.component"),);
+        assert_eq!(mailbox_id_from_name("aether.embedded:camera"), mailbox_id_from_path("aether.embedded:camera"),);
     }
 
     #[test]
@@ -362,24 +346,15 @@ mod tests {
         // The identity scope-relative resolution leans on: composing
         // `prefix` + `:` + `segment` hashes the same as hashing the
         // already-joined name, so the const path never has to allocate.
-        assert_eq!(
-            mailbox_id_from_name_pair("a", "b"),
-            mailbox_id_from_name("a:b"),
-        );
+        assert_eq!(mailbox_id_from_name_pair("a", "b"), mailbox_id_from_name("a:b"),);
         assert_eq!(
             mailbox_id_from_name_pair("aether.embedded", "camera"),
             mailbox_id_from_name("aether.embedded:camera"),
         );
         // Empty prefix / segment still composes consistently with the
         // joined form (the separator is always present).
-        assert_eq!(
-            mailbox_id_from_name_pair("", "x"),
-            mailbox_id_from_name(":x")
-        );
-        assert_eq!(
-            mailbox_id_from_name_pair("x", ""),
-            mailbox_id_from_name("x:")
-        );
+        assert_eq!(mailbox_id_from_name_pair("", "x"), mailbox_id_from_name(":x"));
+        assert_eq!(mailbox_id_from_name_pair("x", ""), mailbox_id_from_name("x:"));
     }
 
     #[test]
@@ -396,10 +371,7 @@ mod tests {
         // name-hash id. Every chassis cap keeps its exact id — zero
         // rehash at depth 1.
         let render = ActorId::singleton("aether.render");
-        assert_eq!(
-            MailboxId(with_tag(Tag::Mailbox, render.0)),
-            mailbox_id_from_name("aether.render"),
-        );
+        assert_eq!(MailboxId(with_tag(Tag::Mailbox, render.0)), mailbox_id_from_name("aether.render"),);
     }
 
     #[test]
@@ -439,10 +411,7 @@ mod tests {
         // This is the inverse of the render (ADR-0099 §4).
         let s0 = ActorId::singleton("root").0;
         let s1 = fold_lineage(s0, ActorId::instanced("scope", "7"));
-        let expected = MailboxId(with_tag(
-            Tag::Mailbox,
-            fold_lineage(s1, ActorId::singleton("leaf")),
-        ));
+        let expected = MailboxId(with_tag(Tag::Mailbox, fold_lineage(s1, ActorId::singleton("leaf"))));
         assert_eq!(mailbox_id_from_path("root/scope:7/leaf"), expected);
 
         // And it is NOT the flat hash of the joined string — names don't
@@ -450,10 +419,7 @@ mod tests {
         // feeding the `/`-joined string to `mailbox_id_from_name` is the
         // exact footgun its guard now forbids, so the contrast is drawn
         // against the bare domain-prefixed FNV the function would apply.
-        let flat = MailboxId(with_tag(
-            Tag::Mailbox,
-            fnv1a_64_prefixed(MAILBOX_DOMAIN, b"root/scope:7/leaf"),
-        ));
+        let flat = MailboxId(with_tag(Tag::Mailbox, fnv1a_64_prefixed(MAILBOX_DOMAIN, b"root/scope:7/leaf")));
         assert_ne!(mailbox_id_from_path("root/scope:7/leaf"), flat);
     }
 
@@ -466,22 +432,12 @@ mod tests {
     #[test]
     fn scope_path_too_deep_is_rejected() {
         let deep = ["x"; MAX_SCOPE_PATH_DEPTH + 1];
-        assert_eq!(
-            validate_scope_path(&deep),
-            Err(ScopePathError::TooDeep {
-                limit: MAX_SCOPE_PATH_DEPTH,
-            }),
-        );
+        assert_eq!(validate_scope_path(&deep), Err(ScopePathError::TooDeep { limit: MAX_SCOPE_PATH_DEPTH }),);
     }
 
     #[test]
     fn scope_path_too_long_is_rejected() {
         let big: String = "x".repeat(MAX_SCOPE_PATH_BYTES + 1);
-        assert_eq!(
-            validate_scope_path(&[big.as_str()]),
-            Err(ScopePathError::TooLong {
-                limit: MAX_SCOPE_PATH_BYTES,
-            }),
-        );
+        assert_eq!(validate_scope_path(&[big.as_str()]), Err(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES }),);
     }
 }

@@ -20,13 +20,8 @@ use std::sync::Arc;
 /// instead of leaving the RPC client hanging.
 pub fn settle_err(mailer: &Arc<Mailer>, target: MailboxId, correlation: u64, error: String) {
     mailer.push(
-        Mail::new(
-            target,
-            <CallSettled as Kind>::ID,
-            CallSettled::Err { error }.encode_into_bytes(),
-            1,
-        )
-        .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
+        Mail::new(target, <CallSettled as Kind>::ID, CallSettled::Err { error }.encode_into_bytes(), 1)
+            .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
     );
 }
 

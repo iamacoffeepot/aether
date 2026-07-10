@@ -139,9 +139,7 @@ use crate::actor::native::blob_lifecycle::{Lifecycle, MAX_GROUPS, Published};
 use crate::mail::cost::CostLookup;
 use crate::mail::mailer::Mailer;
 use crate::mail::{KindId, Mail, MailboxId};
-use crate::scheduler::{
-    BatchBudget, CycleResult, Drainable, SeizeHandle, WakeSink, handoff_cost_nanos, tuning,
-};
+use crate::scheduler::{BatchBudget, CycleResult, Drainable, SeizeHandle, WakeSink, handoff_cost_nanos, tuning};
 
 /// Floor for a fresh blob's group-array capacity — a little headroom so a
 /// couple of subsequent flushes to *new* recipients can accumulate before
@@ -262,9 +260,7 @@ fn trustworthy_mad(mean_nanos: u64, mad_nanos: u64) -> bool {
 /// `(mean_nanos, true)`.
 fn group_mail_cost(costs: &CostLookup<'_>, recipient: MailboxId, kind: KindId) -> (u64, bool) {
     match costs.get(recipient, kind) {
-        Some(sample)
-            if sample.samples > 0 && trustworthy_mad(sample.mean_nanos, sample.mad_nanos) =>
-        {
+        Some(sample) if sample.samples > 0 && trustworthy_mad(sample.mean_nanos, sample.mad_nanos) => {
             (sample.mean_nanos, true)
         }
         // Absent, neutral seed, or high-MAD: unknown cost.
@@ -323,10 +319,7 @@ impl Group {
             recipient,
             lock: AtomicBool::new(false),
             work: AtomicU64::new(work),
-            buf: UnsafeCell::new(GroupBuf {
-                closed: false,
-                mails,
-            }),
+            buf: UnsafeCell::new(GroupBuf { closed: false, mails }),
         }
     }
 
@@ -339,8 +332,7 @@ impl Group {
     /// draining worker reads `work`.
     fn add_work(&self, cost: u64) {
         let prior = self.work.load(Ordering::Relaxed);
-        self.work
-            .store(prior.saturating_add(cost), Ordering::Relaxed);
+        self.work.store(prior.saturating_add(cost), Ordering::Relaxed);
     }
 
     /// The group's accumulated work `Σ cost(recipient, kᵢ)` (nanos).
@@ -353,11 +345,7 @@ impl Group {
     /// allocation-light and panic-free (`Vec` ops abort, not unwind, on OOM),
     /// so the lock is always released — no poison state to model.
     fn with_buf<R>(&self, f: impl FnOnce(&mut GroupBuf) -> R) -> R {
-        while self
-            .lock
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
+        while self.lock.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
             spin_loop();
         }
         // SAFETY: the CAS above acquired the lock, so we hold exclusive
@@ -436,9 +424,7 @@ unsafe impl Sync for GroupSlot {}
 
 impl GroupSlot {
     const fn empty() -> Self {
-        Self {
-            cell: UnsafeCell::new(MaybeUninit::uninit()),
-        }
+        Self { cell: UnsafeCell::new(MaybeUninit::uninit()) }
     }
 
     /// Producer: write the group into this slot.
@@ -532,12 +518,7 @@ impl BlobWork {
     /// An empty blob with a `cap`-slot group array (all slots uninit).
     fn empty(cap: usize, mailer: Arc<Mailer>, sink: WakeSink) -> Arc<Self> {
         let groups = (0..cap).map(|_| GroupSlot::empty()).collect();
-        Arc::new(Self {
-            lifecycle: Lifecycle::new(0),
-            groups,
-            mailer,
-            sink,
-        })
+        Arc::new(Self { lifecycle: Lifecycle::new(0), groups, mailer, sink })
     }
 
     /// Producer (single-threaded for a given blob): fold one flush's mail
@@ -549,11 +530,7 @@ impl BlobWork {
     /// fresh-group count, and the cost-aware recruit signals (`Σw` /
     /// `w_max` / confidence) summed over this flush's fresh groups
     /// (iamacoffeepot/aether#1178).
-    fn append_flush(
-        &self,
-        routed: Vec<Mail>,
-        index: &mut FxHashMap<MailboxId, usize>,
-    ) -> FlushOutcome {
+    fn append_flush(&self, routed: Vec<Mail>, index: &mut FxHashMap<MailboxId, usize>) -> FlushOutcome {
         // Single pass: a recipient already in `index` (a prior flush, or one
         // staged earlier in *this* flush) pushes onto its existing group; a
         // brand-new recipient stages a fresh group at the next free index,
@@ -629,13 +606,7 @@ impl BlobWork {
                     total_work = total_work.saturating_add(w);
                     max_group_work = max_group_work.max(w);
                 }
-                FlushOutcome {
-                    leftover,
-                    fresh_groups: staged,
-                    total_work,
-                    max_group_work,
-                    cost_confident,
-                }
+                FlushOutcome { leftover, fresh_groups: staged, total_work, max_group_work, cost_confident }
             }
             Published::Retired | Published::Full => {
                 // The blob retired (or hit the wire ceiling) between staging
@@ -651,13 +622,7 @@ impl BlobWork {
                     leftover.extend(group.into_mails());
                 }
                 // No fresh groups published — no recruit, no cost signal.
-                FlushOutcome {
-                    leftover,
-                    fresh_groups: 0,
-                    total_work: 0,
-                    max_group_work: 0,
-                    cost_confident: false,
-                }
+                FlushOutcome { leftover, fresh_groups: 0, total_work: 0, max_group_work: 0, cost_confident: false }
             }
         }
     }
@@ -819,12 +784,7 @@ impl BlobProducer {
     /// Build a producer over the pool's [`WakeSink`] and the shared
     /// [`Mailer`].
     pub fn new(mailer: Arc<Mailer>, sink: WakeSink) -> Self {
-        Self {
-            mailer,
-            sink,
-            active: None,
-            detached: Vec::new(),
-        }
+        Self { mailer, sink, active: None, detached: Vec::new() }
     }
 
     /// Fold one flush's routed mail into the active blob (or fresh blobs),
@@ -834,8 +794,7 @@ impl BlobProducer {
         // Prune detached blobs that have retired (fully drained — every
         // group closed, so nothing left to order against). Entries leave
         // on retire, keeping the list self-bounding.
-        self.detached
-            .retain(|(blob, _)| !blob.lifecycle.is_retired());
+        self.detached.retain(|(blob, _)| !blob.lifecycle.is_retired());
 
         let mut pending = self.route_detached(routed);
         while !pending.is_empty() {
@@ -915,10 +874,7 @@ impl BlobProducer {
         let mut pending = Vec::with_capacity(routed.len());
         let mut pushed = vec![false; self.detached.len()];
         'mail: for mail in routed {
-            let in_active = self
-                .active
-                .as_ref()
-                .is_some_and(|(_, index)| index.contains_key(&mail.recipient));
+            let in_active = self.active.as_ref().is_some_and(|(_, index)| index.contains_key(&mail.recipient));
             if in_active {
                 pending.push(mail);
                 continue;
@@ -980,13 +936,7 @@ fn recruit_extra(outcome: &FlushOutcome, w: usize) -> usize {
         return 0;
     }
     if outcome.cost_confident {
-        let k = recruit_k(
-            outcome.total_work,
-            outcome.max_group_work,
-            outcome.fresh_groups,
-            w,
-            wake_cost_nanos(),
-        );
+        let k = recruit_k(outcome.total_work, outcome.max_group_work, outcome.fresh_groups, w, wake_cost_nanos());
         k.min(recruit_cap()).saturating_sub(1)
     } else if outcome.fresh_groups >= recruit_min() {
         // Confidence fallback: the unchanged width gate.
@@ -1023,11 +973,7 @@ mod tests {
     const TEST_WORKERS: usize = 8;
 
     fn wake_sink(injector: &Arc<Injector<Arc<dyn Drainable>>>) -> WakeSink {
-        WakeSink::new(
-            Arc::clone(injector),
-            Arc::new(SpinPark::new()),
-            TEST_WORKERS,
-        )
+        WakeSink::new(Arc::clone(injector), Arc::new(SpinPark::new()), TEST_WORKERS)
     }
 
     /// Drain the injector by running every queued `Drainable` to `Idle`
@@ -1051,11 +997,7 @@ mod tests {
 
     /// Register an inbox under `name` that forwards each delivered mail's
     /// first payload byte onto `tx`; returns the registered mailbox id.
-    fn register_byte_forwarding_inbox(
-        registry: &Registry,
-        name: &str,
-        tx: mpsc::Sender<u8>,
-    ) -> MailboxId {
+    fn register_byte_forwarding_inbox(registry: &Registry, name: &str, tx: mpsc::Sender<u8>) -> MailboxId {
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: OwnedDispatch| {
             // ADR-0094: terminal test consumer — discharge the obligation.
             d.discharge();
@@ -1102,24 +1044,14 @@ mod tests {
     fn seizable_recipient(
         registry: &Registry,
         name: &str,
-    ) -> (
-        MailboxId,
-        Arc<SeizableSink>,
-        mpsc::Receiver<u8>,
-        mpsc::Receiver<u8>,
-    ) {
+    ) -> (MailboxId, Arc<SeizableSink>, mpsc::Receiver<u8>, mpsc::Receiver<u8>) {
         let (deposit_tx, deposit_rx) = mpsc::channel::<u8>();
         let id = register_byte_forwarding_inbox(registry, name, deposit_tx);
         let (direct_tx, direct_rx) = mpsc::channel::<u8>();
-        let fixture = Arc::new(SeizableSink {
-            state: Arc::new(SlotState::new()),
-            direct: direct_tx,
-        });
+        let fixture = Arc::new(SeizableSink { state: Arc::new(SlotState::new()), direct: direct_tx });
         let slot_dyn: Arc<dyn Drainable> = fixture.clone();
-        let installed = registry.install_seize_handle(
-            id,
-            SeizeHandle::new(Arc::clone(&fixture.state), Arc::downgrade(&slot_dyn)),
-        );
+        let installed =
+            registry.install_seize_handle(id, SeizeHandle::new(Arc::clone(&fixture.state), Arc::downgrade(&slot_dyn)));
         assert!(installed, "seize handle installs on a live Inbox entry");
         (id, fixture, direct_rx, deposit_rx)
     }
@@ -1147,11 +1079,7 @@ mod tests {
         for (i, rx) in directs.iter().enumerate() {
             #[allow(clippy::cast_possible_truncation)]
             let want = i as u8;
-            assert_eq!(
-                rx.try_recv().ok(),
-                Some(want),
-                "leaf {i} dispatched in place once"
-            );
+            assert_eq!(rx.try_recv().ok(), Some(want), "leaf {i} dispatched in place once");
             assert!(rx.try_recv().is_err(), "leaf {i} dispatched exactly once");
         }
     }
@@ -1181,20 +1109,13 @@ mod tests {
         let (registry, mailer) = bare_substrate();
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let (id, fixture, direct_rx, deposit_rx) = seizable_recipient(&registry, "r");
-        assert!(
-            fixture.state.seize(),
-            "mark the recipient busy before the demux"
-        );
+        assert!(fixture.state.seize(), "mark the recipient busy before the demux");
 
         let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
         producer.flush(vec![mail_to(id, 9)]);
         drain_injector(&injector);
 
-        assert_eq!(
-            deposit_rx.try_recv().ok(),
-            Some(9),
-            "busy recipient deposited"
-        );
+        assert_eq!(deposit_rx.try_recv().ok(), Some(9), "busy recipient deposited");
         assert!(direct_rx.try_recv().is_err(), "not dispatched in place");
     }
 
@@ -1211,11 +1132,7 @@ mod tests {
         producer.flush(vec![mail_to(id, 3)]);
         drain_injector(&injector);
 
-        assert_eq!(
-            rx.try_recv().ok(),
-            Some(3),
-            "closure inbox receives via deposit"
-        );
+        assert_eq!(rx.try_recv().ok(), Some(3), "closure inbox receives via deposit");
     }
 
     /// Two recipients across two flushes: the second flush to a fresh
@@ -1274,18 +1191,13 @@ mod tests {
         drain_injector(&injector);
 
         // Collect from both paths (all should be direct here, but be robust).
-        let mut got: Vec<u8> = rxs
-            .iter()
-            .filter_map(|(d, p)| d.try_recv().ok().or_else(|| p.try_recv().ok()))
-            .collect();
+        let mut got: Vec<u8> =
+            rxs.iter().filter_map(|(d, p)| d.try_recv().ok().or_else(|| p.try_recv().ok())).collect();
         got.sort_unstable();
         let mut want: Vec<u8> = (0..GROUP_CAP_MIN as u8).collect();
         want.extend((0..5u8).map(|i| 100 + i));
         want.sort_unstable();
-        assert_eq!(
-            got, want,
-            "every recipient delivered exactly once across the roll"
-        );
+        assert_eq!(got, want, "every recipient delivered exactly once across the roll");
     }
 
     /// iamacoffeepot/aether#1533: same-recipient FIFO holds *across* an
@@ -1321,11 +1233,7 @@ mod tests {
             fresh_rxs.push(direct);
         }
         producer.flush(routed);
-        assert_eq!(
-            producer.detached.len(),
-            1,
-            "overflow moves blob1 onto the detached list"
-        );
+        assert_eq!(producer.detached.len(), 1, "overflow moves blob1 onto the detached list");
 
         // Flush 3: r2 → R appends to R's open group in detached blob1.
         producer.flush(vec![mail_to(r, 2)]);
@@ -1334,10 +1242,7 @@ mod tests {
         // pre-fix.
         let blob1 = Arc::clone(&producer.detached[0].0);
         let blob2 = Arc::clone(&producer.active.as_ref().expect("active blob2").0);
-        assert!(
-            !Arc::ptr_eq(&blob1, &blob2),
-            "overflow rolled a second blob"
-        );
+        assert!(!Arc::ptr_eq(&blob1, &blob2), "overflow rolled a second blob");
         assert_eq!(blob2.run_cycle(BatchBudget::standard()), CycleResult::Idle);
         assert_eq!(blob1.run_cycle(BatchBudget::standard()), CycleResult::Idle);
         // Mop up the scheduled copies (both cursors are exhausted).
@@ -1349,11 +1254,7 @@ mod tests {
 
         // Every overflow recipient still delivered exactly once.
         for (i, rx) in fresh_rxs.iter().enumerate() {
-            assert_eq!(
-                rx.try_recv().ok(),
-                Some(100 + i as u8),
-                "fresh recipient {i} delivered"
-            );
+            assert_eq!(rx.try_recv().ok(), Some(100 + i as u8), "fresh recipient {i} delivered");
             assert!(rx.try_recv().is_err(), "fresh recipient {i} exactly once");
         }
 
@@ -1361,10 +1262,7 @@ mod tests {
         // prunes its detached entry.
         assert!(blob1.lifecycle.is_retired(), "blob1 retired after drain");
         producer.flush(Vec::new());
-        assert!(
-            producer.detached.is_empty(),
-            "retired detached entry pruned at flush entry"
-        );
+        assert!(producer.detached.is_empty(), "retired detached entry pruned at flush entry");
     }
 
     /// Empty flush is a no-op.
@@ -1374,11 +1272,7 @@ mod tests {
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         let mut producer = BlobProducer::new(Arc::clone(&mailer), wake_sink(&injector));
         producer.flush(Vec::new());
-        assert_eq!(
-            drain_injector(&injector),
-            0,
-            "no work scheduled for an empty flush"
-        );
+        assert_eq!(drain_injector(&injector), 0, "no work scheduled for an empty flush");
     }
 
     /// A mailer wired to a settlement registry on both seams — the same two
@@ -1390,9 +1284,7 @@ mod tests {
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let settlement = Arc::new(SettlementRegistry::new());
         mailer.install_settlement_registry(Arc::clone(&settlement));
-        mailer
-            .trace_handle()
-            .install_settlement_registry(Arc::clone(&settlement));
+        mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
         (registry, mailer, settlement)
     }
 
@@ -1414,19 +1306,14 @@ mod tests {
         let mail_id = MailId::new(producer, 11);
         let mut index = FxHashMap::default();
         blob.append_flush(
-            vec![
-                Mail::new(recipient, KindId(7), MailRef::from(vec![0u8]), 1)
-                    .with_lineage(mail_id, root, None),
-            ],
+            vec![Mail::new(recipient, KindId(7), MailRef::from(vec![0u8]), 1).with_lineage(mail_id, root, None)],
             &mut index,
         );
 
         // Drop the blob without draining: Drop should record Finished.
         drop(blob);
 
-        settle
-            .recv()
-            .expect("dropped blob records Finished for un-demuxed mail");
+        settle.recv().expect("dropped blob records Finished for un-demuxed mail");
     }
 
     /// A `BlobWork` dropped with a `MailId::NONE` mail settles nothing — the
@@ -1446,17 +1333,11 @@ mod tests {
         let blob = BlobWork::empty(4, Arc::clone(&mailer), wake_sink(&injector));
         let mut index = FxHashMap::default();
         // Mail with MailId::NONE — no lineage stamped.
-        blob.append_flush(
-            vec![Mail::new(recipient, KindId(7), MailRef::from(vec![0u8]), 1)],
-            &mut index,
-        );
+        blob.append_flush(vec![Mail::new(recipient, KindId(7), MailRef::from(vec![0u8]), 1)], &mut index);
 
         drop(blob);
 
-        assert!(
-            guard_rx.try_recv().is_err(),
-            "MailId::NONE mail does not settle any root",
-        );
+        assert!(guard_rx.try_recv().is_err(), "MailId::NONE mail does not settle any root",);
     }
 
     /// End-to-end under a live multi-worker pool: a wide fan-out recruits
@@ -1474,13 +1355,7 @@ mod tests {
         // N < 256 keeps the per-recipient marker byte unique.
         const N: usize = 60;
 
-        let pool = Pool::start(
-            PoolConfig {
-                workers: 8,
-                ..PoolConfig::default()
-            },
-            Arc::new(PanicAborter),
-        );
+        let pool = Pool::start(PoolConfig { workers: 8, ..PoolConfig::default() }, Arc::new(PanicAborter));
         let (registry, mailer) = bare_substrate();
         let mut producer = BlobProducer::new(Arc::clone(&mailer), pool.wake_sink());
 
@@ -1511,16 +1386,10 @@ mod tests {
         }
 
         let results = pool.shutdown_with_results();
-        assert!(
-            results.iter().all(thread::Result::is_ok),
-            "no worker thread panicked during concurrent drain"
-        );
+        assert!(results.iter().all(thread::Result::is_ok), "no worker thread panicked during concurrent drain");
         got.sort_unstable();
         let want: Vec<u8> = (0..N as u8).collect();
-        assert_eq!(
-            got, want,
-            "each recipient dispatched exactly once under concurrent drain"
-        );
+        assert_eq!(got, want, "each recipient dispatched exactly once under concurrent drain");
     }
 
     // iamacoffeepot/aether#1178: the cost-aware recruiter. `recruit_k` is a
@@ -1590,10 +1459,7 @@ mod tests {
         let c = WAKE_FLOOR_NANOS;
         assert_eq!(recruit_k(c, 10, 5, 8, c), 1, "exactly at the floor: local");
         // One nano over the floor with a small pole → recruits.
-        assert!(
-            recruit_k(c + 1, 10, 5, 8, c) > 1,
-            "just over the floor: recruit"
-        );
+        assert!(recruit_k(c + 1, 10, 5, 8, c) > 1, "just over the floor: recruit");
     }
 
     /// `recruit_k` never exceeds `min(G, W)` and never drops below 1.
@@ -1610,18 +1476,9 @@ mod tests {
     #[test]
     fn trustworthy_mad_gates_on_spread() {
         assert!(trustworthy_mad(10_000, 0), "zero MAD is steady");
-        assert!(
-            trustworthy_mad(10_000, 5_000),
-            "half-mean MAD is trustworthy"
-        );
-        assert!(
-            trustworthy_mad(10_000, 10_000),
-            "MAD == mean is the boundary"
-        );
-        assert!(
-            !trustworthy_mad(10_000, 10_001),
-            "MAD over the mean is bimodal / untrustworthy"
-        );
+        assert!(trustworthy_mad(10_000, 5_000), "half-mean MAD is trustworthy");
+        assert!(trustworthy_mad(10_000, 10_000), "MAD == mean is the boundary");
+        assert!(!trustworthy_mad(10_000, 10_001), "MAD over the mean is bimodal / untrustworthy");
         assert!(!trustworthy_mad(0, 1), "a nonzero spread over a zero mean");
     }
 
@@ -1654,17 +1511,11 @@ mod tests {
 
         let blob = BlobWork::empty(8, Arc::clone(&mailer), wake_sink(&injector));
         let mut index = FxHashMap::default();
-        let outcome = blob.append_flush(
-            vec![mail_to(a, 0), mail_to(a, 1), mail_to(b, 2)],
-            &mut index,
-        );
+        let outcome = blob.append_flush(vec![mail_to(a, 0), mail_to(a, 1), mail_to(b, 2)], &mut index);
 
         assert_eq!(outcome.fresh_groups, 2, "two distinct recipients");
         assert_eq!(outcome.total_work, 25_000, "Σw = a(2×10_000) + b(1×5_000)");
-        assert_eq!(
-            outcome.max_group_work, 20_000,
-            "w_max is a's coalesced group (two mails summed)"
-        );
+        assert_eq!(outcome.max_group_work, 20_000, "w_max is a's coalesced group (two mails summed)");
         assert!(outcome.cost_confident, "both handlers seeded + steady");
     }
 
@@ -1692,14 +1543,8 @@ mod tests {
         let outcome = blob.append_flush(routed, &mut index);
 
         assert_eq!(outcome.fresh_groups, 12);
-        assert_eq!(
-            outcome.total_work, 0,
-            "no seeded handlers → no measured work"
-        );
-        assert!(
-            !outcome.cost_confident,
-            "unseeded handlers mark the blob unknown-cost"
-        );
+        assert_eq!(outcome.total_work, 0, "no seeded handlers → no measured work");
+        assert!(!outcome.cost_confident, "unseeded handlers mark the blob unknown-cost");
         // The width fallback recruits (12 >= recruit_min 9): G.min(cap) - 1 =
         // 11 (the final W cap lives in WakeSink::recruit, as it did pre-#1178).
         let extra = recruit_extra(&outcome, 8);
@@ -1760,11 +1605,7 @@ mod tests {
         assert_eq!(outcome.fresh_groups, 3);
         // Σw = 150_000, w_max = 50_000 → K = 3, extra = 2 — recruited despite
         // being far below the width threshold.
-        assert_eq!(
-            recruit_extra(&outcome, 8),
-            2,
-            "heavy narrow fan-out recruits K-1 = 2 without the width gate"
-        );
+        assert_eq!(recruit_extra(&outcome, 8), 2, "heavy narrow fan-out recruits K-1 = 2 without the width gate");
     }
 
     /// A *cheap* narrow fan-out with trustworthy cost stays `K = 1` (local) —
@@ -1789,10 +1630,6 @@ mod tests {
         let outcome = blob.append_flush(routed, &mut index);
 
         assert!(outcome.cost_confident);
-        assert_eq!(
-            recruit_extra(&outcome, 8),
-            0,
-            "cheap fan-out stays local (Σw below the wake floor)"
-        );
+        assert_eq!(recruit_extra(&outcome, 8), 0, "cheap fan-out stays local (Σw below the wake floor)");
     }
 }

@@ -3,10 +3,7 @@ use crate::world::{CellPos, World};
 use super::constants::{OCTIMETERS_PER_METER, OCTIMETERS_PER_SUBCELL, SUB};
 
 fn cell_at(wx: f32, wz: f32) -> CellPos {
-    CellPos {
-        x: floor_to_i32(wx),
-        z: floor_to_i32(wz),
-    }
+    CellPos { x: floor_to_i32(wx), z: floor_to_i32(wz) }
 }
 
 fn cell_or_relief_lift(world: &World, cell: CellPos, wx: f32, wz: f32) -> f32 {
@@ -38,13 +35,7 @@ fn side_resolved_lift(
         return CellLift::of(world, side.cell).y(wx, wz);
     }
     if world.cell_has_height_relief(sample_cell) {
-        return SubPatch::of(
-            world,
-            side.cell,
-            side.sub_x.rem_euclid(SUB),
-            side.sub_z.rem_euclid(SUB),
-        )
-        .y(wx, wz);
+        return SubPatch::of(world, side.cell, side.sub_x.rem_euclid(SUB), side.sub_z.rem_euclid(SUB)).y(wx, wz);
     }
     CellLift::of(world, side.cell).y(wx, wz)
 }
@@ -63,11 +54,7 @@ pub(super) struct CellLift {
 
 impl CellLift {
     pub(super) fn of(world: &World, cell: CellPos) -> Self {
-        Self {
-            x0: cell.x as f32,
-            z0: cell.z as f32,
-            corners: world.cell_corner_heights(cell),
-        }
+        Self { x0: cell.x as f32, z0: cell.z as f32, corners: world.cell_corner_heights(cell) }
     }
 
     /// The patch height at `(wx, wz)` meters, coordinates clamped to the
@@ -153,10 +140,7 @@ pub(super) struct SurfaceAnchor {
 }
 
 pub(super) fn side_anchor_lift(world: &World, anchor: SurfaceAnchor, wx: f32, wz: f32) -> f32 {
-    let anchor_cell = CellPos {
-        x: anchor.x_octimeters.div_euclid(256),
-        z: anchor.z_octimeters.div_euclid(256),
-    };
+    let anchor_cell = CellPos { x: anchor.x_octimeters.div_euclid(256), z: anchor.z_octimeters.div_euclid(256) };
     if world.cell_has_height_relief(anchor_cell) {
         let sub_x = anchor.x_octimeters.rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
         let sub_z = anchor.z_octimeters.rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
@@ -177,17 +161,8 @@ pub(super) fn side_anchor_lift(world: &World, anchor: SurfaceAnchor, wx: f32, wz
 /// side cell as well, so a clipped relief-free material-boundary fragment
 /// reads its own plate; off any break line the side cell is the vertex's own
 /// floor cell, leaving an unclipped relief-free vertex unchanged.
-pub(super) fn fragment_lift(
-    world: &World,
-    owner: CellPos,
-    sides: [Option<(i32, bool)>; 2],
-    wx: f32,
-    wz: f32,
-) -> f32 {
-    let cell = CellPos {
-        x: floor_to_i32(wx),
-        z: floor_to_i32(wz),
-    };
+pub(super) fn fragment_lift(world: &World, owner: CellPos, sides: [Option<(i32, bool)>; 2], wx: f32, wz: f32) -> f32 {
+    let cell = CellPos { x: floor_to_i32(wx), z: floor_to_i32(wz) };
     // The subcell on the fragment's own side of any clipped break line (per
     // axis): on the line, `sides` says which side; off it, the floor subcell.
     let sub_of = |w: f32, side: Option<(i32, bool)>| -> i32 {
@@ -208,22 +183,8 @@ pub(super) fn fragment_lift(
     // lands on the correct plate rather than collapsing both sides to one
     // height (the twin of the `anchored_lift` bug, which left chamfered
     // relief-free corners with unclosed overhang slivers).
-    let side_cell = CellPos {
-        x: sx.div_euclid(SUB),
-        z: sz.div_euclid(SUB),
-    };
-    side_resolved_lift(
-        world,
-        cell,
-        owner,
-        SideLiftSample {
-            cell: side_cell,
-            sub_x: sx,
-            sub_z: sz,
-        },
-        wx,
-        wz,
-    )
+    let side_cell = CellPos { x: sx.div_euclid(SUB), z: sz.div_euclid(SUB) };
+    side_resolved_lift(world, cell, owner, SideLiftSample { cell: side_cell, sub_x: sx, sub_z: sz }, wx, wz)
 }
 
 /// Floor to `i32` — `as i32` truncates toward zero, which is wrong for
@@ -238,10 +199,7 @@ pub(super) fn floor_to_i32(v: f32) -> i32 {
 /// [`World::point_surface_level`]. The marched wall gate samples this so its
 /// break reads the same authored relief the cap drew.
 pub(super) fn point_surface_level_at(world: &World, px: i32, pz: i32) -> i32 {
-    let cell = CellPos {
-        x: px.div_euclid(256),
-        z: pz.div_euclid(256),
-    };
+    let cell = CellPos { x: px.div_euclid(256), z: pz.div_euclid(256) };
     let sub_x = px.rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
     let sub_z = pz.rem_euclid(256) / OCTIMETERS_PER_SUBCELL;
     world.point_surface_level(cell, sub_x, sub_z)

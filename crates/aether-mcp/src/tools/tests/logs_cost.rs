@@ -8,24 +8,12 @@ use super::super::*;
 /// land on `2`).
 #[test]
 fn parse_level_round_trips_documented_strings() {
-    assert_eq!(
-        parse_level("trace").expect("test setup: \"trace\" parses"),
-        0
-    );
-    assert_eq!(
-        parse_level("debug").expect("test setup: \"debug\" parses"),
-        1
-    );
+    assert_eq!(parse_level("trace").expect("test setup: \"trace\" parses"), 0);
+    assert_eq!(parse_level("debug").expect("test setup: \"debug\" parses"), 1);
     assert_eq!(parse_level("info").expect("test setup: \"info\" parses"), 2);
     assert_eq!(parse_level("warn").expect("test setup: \"warn\" parses"), 3);
-    assert_eq!(
-        parse_level("error").expect("test setup: \"error\" parses"),
-        4
-    );
-    assert_eq!(
-        parse_level("INFO").expect("test setup: case-insensitive \"INFO\" parses"),
-        2
-    );
+    assert_eq!(parse_level("error").expect("test setup: \"error\" parses"), 4);
+    assert_eq!(parse_level("INFO").expect("test setup: case-insensitive \"INFO\" parses"), 2);
     assert!(parse_level("verbose").is_err());
 }
 
@@ -35,8 +23,8 @@ fn parse_level_round_trips_documented_strings() {
 #[test]
 fn level_to_str_matches_parse_level_and_falls_back_to_info() {
     for level in 0..=4u8 {
-        let parsed = parse_level(level_to_str(level))
-            .expect("test setup: level_to_str output round-trips through parse_level");
+        let parsed =
+            parse_level(level_to_str(level)).expect("test setup: level_to_str output round-trips through parse_level");
         assert_eq!(parsed, level);
     }
     assert_eq!(level_to_str(99), "info");
@@ -57,10 +45,7 @@ async fn actor_logs_bad_engine_id_is_tool_error() {
             since: None,
         }))
         .await;
-    assert!(
-        result.is_err(),
-        "a malformed engine_id should be a tool error"
-    );
+    assert!(result.is_err(), "a malformed engine_id should be a tool error");
 }
 
 /// Issue 963: the `LogTailResult::Err` arm names the agent-
@@ -89,10 +74,7 @@ async fn actor_cost_bad_engine_id_is_tool_error() {
             kind_id: None,
         }))
         .await;
-    assert!(
-        result.is_err(),
-        "a malformed engine_id should be a tool error"
-    );
+    assert!(result.is_err(), "a malformed engine_id should be a tool error");
 }
 
 /// `actor_logs` with an unknown `level` string is rejected at

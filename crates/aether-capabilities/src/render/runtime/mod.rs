@@ -44,9 +44,7 @@ mod texture;
 // The `RenderTuning*` trio is the derive-Config surface (ADR-0090) the
 // chassis resolves the render boot knobs through.
 pub use self::capture::CaptureBackend;
-pub use self::config::{
-    RenderConfig, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay,
-};
+pub use self::config::{RenderConfig, RenderTuningConfig, RenderTuningConfigLayer, RenderTuningOverlay};
 pub use self::pipeline::{RenderGpu, RenderHandles};
 
 // The moved `#[runtime] impl NativeActor for RenderCapability` body names the
@@ -64,8 +62,8 @@ use aether_substrate::chassis::error::BootError;
 
 use super::{
     CreateTexture, CreateTextureResult, DRAW_TRIANGLE_BYTES, DestroyTexture, DrawMaterialCoverage,
-    DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, RenderCapability,
-    SolidQuad, TextureFormat, TexturedQuad, UpdateTexture, ViewProjection,
+    DrawMaterialTextured, DrawSolidQuads, DrawTexturedQuads, DrawTriangle, RenderCapability, SolidQuad, TextureFormat,
+    TexturedQuad, UpdateTexture, ViewProjection,
 };
 
 // These seam items are `pub` (visible in `render`) in their
@@ -127,17 +125,10 @@ impl NativeActor for RenderCapability {
     /// accumulator at `last_submitted`'s starting capacity (zero)
     /// and the next tick's `on_draw_triangle` would reallocate
     /// from scratch.
-    fn init(
-        config: RenderConfig,
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<RenderCapabilityState, BootError> {
+    fn init(config: RenderConfig, ctx: &mut NativeInitCtx<'_>) -> Result<RenderCapabilityState, BootError> {
         let handles = RenderHandles {
-            frame_vertices: Arc::new(Mutex::new(Vec::<u8>::with_capacity(
-                config.vertex_buffer_bytes,
-            ))),
-            last_submitted: Arc::new(Mutex::new(Vec::<u8>::with_capacity(
-                config.vertex_buffer_bytes,
-            ))),
+            frame_vertices: Arc::new(Mutex::new(Vec::<u8>::with_capacity(config.vertex_buffer_bytes))),
+            last_submitted: Arc::new(Mutex::new(Vec::<u8>::with_capacity(config.vertex_buffer_bytes))),
             triangles_rendered: Arc::new(AtomicU64::new(0)),
             camera_state: Arc::new(Mutex::new(IDENTITY_VIEW_PROJ)),
             quad_frame: Arc::new(Mutex::new(Vec::new())),
@@ -155,12 +146,7 @@ impl NativeActor for RenderCapability {
         // bundle on the chassis's `ExportedHandles` map so the
         // desktop driver retrieves it via `DriverCtx::handle::<RenderHandles>()`.
         ctx.publish_handle(handles.clone());
-        Ok(RenderCapabilityState {
-            handles,
-            config,
-            registry,
-            mailer,
-        })
+        Ok(RenderCapabilityState { handles, config, registry, mailer })
     }
 
     /// `DrawTriangle` handler. Slice-typed because `Mailbox::send_many`
@@ -180,26 +166,17 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_draw_triangle(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mails: &[DrawTriangle]) {
         if let Some(obs) = &state.config.observed_kinds {
-            obs.lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063")
-                .push(<DrawTriangle as Kind>::NAME.into());
+            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<DrawTriangle as Kind>::NAME.into());
         }
         let bytes: &[u8] = bytemuck::cast_slice(mails);
         let cap_bytes = state.config.vertex_buffer_bytes;
-        let mut verts = state
-            .handles
-            .frame_vertices
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let mut verts = state.handles.frame_vertices.lock().expect("mutex poisoned; fail-fast per ADR-0063");
         let available = cap_bytes.saturating_sub(verts.len());
         let write_len = bytes.len().min(available);
         let write_len = write_len - (write_len % DRAW_TRIANGLE_BYTES);
         if write_len > 0 {
             verts.extend_from_slice(&bytes[..write_len]);
-            state
-                .handles
-                .triangles_rendered
-                .fetch_add((write_len / DRAW_TRIANGLE_BYTES) as u64, Ordering::Relaxed);
+            state.handles.triangles_rendered.fetch_add((write_len / DRAW_TRIANGLE_BYTES) as u64, Ordering::Relaxed);
         }
         if write_len < bytes.len() {
             tracing::warn!(
@@ -224,15 +201,9 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_camera(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ViewProjection) {
         if let Some(obs) = &state.config.observed_kinds {
-            obs.lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063")
-                .push(<ViewProjection as Kind>::NAME.into());
+            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<ViewProjection as Kind>::NAME.into());
         }
-        *state
-            .handles
-            .camera_state
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063") = mail.view_proj;
+        *state.handles.camera_state.lock().expect("mutex poisoned; fail-fast per ADR-0063") = mail.view_proj;
     }
 
     /// `CaptureFrame` handler. The cap dispatcher thread doesn't
@@ -255,15 +226,9 @@ impl NativeActor for RenderCapability {
     /// `aether.render.capture_frame_result` carrying the PNG on
     /// success or a free-form reason on failure.
     #[handler::manual]
-    fn on_capture_frame(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Manual>,
-        mail: CaptureFrame,
-    ) {
+    fn on_capture_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: CaptureFrame) {
         if let Some(obs) = &state.config.observed_kinds {
-            obs.lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063")
-                .push(<CaptureFrame as Kind>::NAME.into());
+            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<CaptureFrame as Kind>::NAME.into());
         }
 
         let sender = ctx.reply_target();
@@ -278,19 +243,14 @@ impl NativeActor for RenderCapability {
         let pre = match resolve_bundle(&state.registry, &mail.mails, "capture bundle") {
             Ok(v) => v,
             Err(error) => {
-                backend
-                    .outbound
-                    .send_reply(sender, &CaptureFrameResult::Err { error });
+                backend.outbound.send_reply(sender, &CaptureFrameResult::Err { error });
                 return;
             }
         };
-        let after = match resolve_bundle(&state.registry, &mail.after_mails, "capture after bundle")
-        {
+        let after = match resolve_bundle(&state.registry, &mail.after_mails, "capture after bundle") {
             Ok(v) => v,
             Err(error) => {
-                backend
-                    .outbound
-                    .send_reply(sender, &CaptureFrameResult::Err { error });
+                backend.outbound.send_reply(sender, &CaptureFrameResult::Err { error });
                 return;
             }
         };
@@ -316,11 +276,7 @@ impl NativeActor for RenderCapability {
         let settlement_registry = state.mailer.settlement_registry().cloned();
         let mut pre_settlements = Vec::with_capacity(pre.len());
         for envelope in pre {
-            let mail_id = ctx.send_envelope_detached(
-                envelope.recipient,
-                envelope.kind,
-                envelope.payload.bytes(),
-            );
+            let mail_id = ctx.send_envelope_detached(envelope.recipient, envelope.kind, envelope.payload.bytes());
             if let Some(reg) = settlement_registry.as_deref() {
                 pre_settlements.push(reg.subscribe_settlement(mail_id));
             }
@@ -346,25 +302,17 @@ impl NativeActor for RenderCapability {
         // filesystem I/O stays off the render hot path. The render thread
         // only runs the CPU-side MAE comparison against the pre-fetched
         // bytes.
-        let reference =
-            match resolve_reference(state.config.assets_dir.as_deref(), mail.similarity.as_ref()) {
-                Ok(reference) => reference,
-                Err(error) => {
-                    backend
-                        .outbound
-                        .send_reply(sender, &CaptureFrameResult::Err { error });
-                    return;
-                }
-            };
+        let reference = match resolve_reference(state.config.assets_dir.as_deref(), mail.similarity.as_ref()) {
+            Ok(reference) => reference,
+            Err(error) => {
+                backend.outbound.send_reply(sender, &CaptureFrameResult::Err { error });
+                return;
+            }
+        };
 
         let inbound = ctx.take_inbound();
-        let pending = PendingCapture {
-            reply: inbound,
-            after_mails: after,
-            pre_settlements,
-            checks: mail.checks,
-            reference,
-        };
+        let pending =
+            PendingCapture { reply: inbound, after_mails: after, pre_settlements, checks: mail.checks, reference };
         // A rejected request (`Err`) is handed back so its retained
         // guard can carry the synchronous `Err` reply before it drops
         // — settling after the reply, ADR-0080 §6.
@@ -383,9 +331,7 @@ impl NativeActor for RenderCapability {
             // The wake never reached the render thread, so the request
             // is still parked: take it back and reply `Err` through its
             // retained guard, which then drops and settles the chain.
-            rejected.reply.reply(&CaptureFrameResult::Err {
-                error: reason.to_owned(),
-            });
+            rejected.reply.reply(&CaptureFrameResult::Err { error: reason.to_owned() });
         }
     }
 
@@ -408,17 +354,12 @@ impl NativeActor for RenderCapability {
         mail: CreateTexture,
     ) -> CreateTextureResult {
         if let Some(obs) = &state.config.observed_kinds {
-            obs.lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063")
-                .push(<CreateTexture as Kind>::NAME.into());
+            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<CreateTexture as Kind>::NAME.into());
         }
         let expected = expected_pixel_bytes(mail.width, mail.height, mail.format);
         let Some(expected) = expected else {
             return CreateTextureResult::Err {
-                error: format!(
-                    "texture dimensions {}x{} overflow or are zero",
-                    mail.width, mail.height
-                ),
+                error: format!("texture dimensions {}x{} overflow or are zero", mail.width, mail.height),
             };
         };
         if mail.pixels.len() != expected {
@@ -432,11 +373,7 @@ impl NativeActor for RenderCapability {
                 ),
             };
         }
-        let mut registry = state
-            .handles
-            .textures
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let mut registry = state.handles.textures.lock().expect("mutex poisoned; fail-fast per ADR-0063");
         let texture_id = registry.next_id;
         registry.next_id += 1;
         registry.entries.insert(
@@ -468,9 +405,7 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_update_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UpdateTexture) {
         if let Some(obs) = &state.config.observed_kinds {
-            obs.lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063")
-                .push(<UpdateTexture as Kind>::NAME.into());
+            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<UpdateTexture as Kind>::NAME.into());
         }
         if mail.texture_id == WHITE_TEXTURE_ID {
             tracing::warn!(
@@ -480,11 +415,7 @@ impl NativeActor for RenderCapability {
             );
             return;
         }
-        let mut registry = state
-            .handles
-            .textures
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let mut registry = state.handles.textures.lock().expect("mutex poisoned; fail-fast per ADR-0063");
         let Some(entry) = registry.entries.get_mut(&mail.texture_id) else {
             tracing::warn!(
                 target: "aether_capabilities::render",
@@ -515,9 +446,7 @@ impl NativeActor for RenderCapability {
     #[handler::single]
     fn on_destroy_texture(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DestroyTexture) {
         if let Some(obs) = &state.config.observed_kinds {
-            obs.lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063")
-                .push(<DestroyTexture as Kind>::NAME.into());
+            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<DestroyTexture as Kind>::NAME.into());
         }
         if mail.texture_id == WHITE_TEXTURE_ID {
             tracing::warn!(
@@ -527,11 +456,7 @@ impl NativeActor for RenderCapability {
             );
             return;
         }
-        let mut registry = state
-            .handles
-            .textures
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
+        let mut registry = state.handles.textures.lock().expect("mutex poisoned; fail-fast per ADR-0063");
         if registry.entries.remove(&mail.texture_id).is_none() {
             tracing::warn!(
                 target: "aether_capabilities::render",
@@ -552,27 +477,16 @@ impl NativeActor for RenderCapability {
     /// Mail `aether.render.draw_textured_quads { texture_id, space,
     /// quads }` every frame the quads should appear; no reply.
     #[handler::single]
-    fn on_draw_textured_quads(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        mail: DrawTexturedQuads,
-    ) {
+    fn on_draw_textured_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawTexturedQuads) {
         if let Some(obs) = &state.config.observed_kinds {
-            obs.lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063")
-                .push(<DrawTexturedQuads as Kind>::NAME.into());
+            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<DrawTexturedQuads as Kind>::NAME.into());
         }
-        state
-            .handles
-            .quad_frame
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063")
-            .push(QuadBatch {
-                texture_id: mail.texture_id,
-                space: mail.space,
-                clip: mail.clip,
-                quads: mail.quads,
-            });
+        state.handles.quad_frame.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(QuadBatch {
+            texture_id: mail.texture_id,
+            space: mail.space,
+            clip: mail.clip,
+            quads: mail.quads,
+        });
     }
 
     /// `DrawSolidQuads` handler (ADR-0107 §4). Expands each `SolidQuad`
@@ -587,67 +501,41 @@ impl NativeActor for RenderCapability {
     /// Mail `aether.render.draw_solid_quads { space, quads }` every
     /// frame the rects should appear; no reply.
     #[handler::single]
-    fn on_draw_solid_quads(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        mail: DrawSolidQuads,
-    ) {
+    fn on_draw_solid_quads(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawSolidQuads) {
         if let Some(obs) = &state.config.observed_kinds {
-            obs.lock()
-                .expect("mutex poisoned; fail-fast per ADR-0063")
-                .push(<DrawSolidQuads as Kind>::NAME.into());
+            obs.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(<DrawSolidQuads as Kind>::NAME.into());
         }
-        let mut registry = state
-            .handles
-            .textures
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063");
-        registry
-            .entries
-            .entry(WHITE_TEXTURE_ID)
-            .or_insert_with(|| StagedTexture {
-                width: 1,
-                height: 1,
-                format: TextureFormat::Rgba8,
-                pixels: vec![255, 255, 255, 255],
-                realized: None,
-                dirty: true,
-            });
+        let mut registry = state.handles.textures.lock().expect("mutex poisoned; fail-fast per ADR-0063");
+        registry.entries.entry(WHITE_TEXTURE_ID).or_insert_with(|| StagedTexture {
+            width: 1,
+            height: 1,
+            format: TextureFormat::Rgba8,
+            pixels: vec![255, 255, 255, 255],
+            realized: None,
+            dirty: true,
+        });
         drop(registry);
         let quads: Vec<TexturedQuad> = mail
             .quads
             .into_iter()
-            .map(
-                |SolidQuad {
-                     x,
-                     y,
-                     width,
-                     height,
-                     color,
-                 }| TexturedQuad {
-                    x,
-                    y,
-                    width,
-                    height,
-                    u0: 0.0,
-                    v0: 0.0,
-                    u1: 1.0,
-                    v1: 1.0,
-                    tint: color,
-                },
-            )
+            .map(|SolidQuad { x, y, width, height, color }| TexturedQuad {
+                x,
+                y,
+                width,
+                height,
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+                tint: color,
+            })
             .collect();
-        state
-            .handles
-            .quad_frame
-            .lock()
-            .expect("mutex poisoned; fail-fast per ADR-0063")
-            .push(QuadBatch {
-                texture_id: WHITE_TEXTURE_ID,
-                space: mail.space,
-                clip: mail.clip,
-                quads,
-            });
+        state.handles.quad_frame.lock().expect("mutex poisoned; fail-fast per ADR-0063").push(QuadBatch {
+            texture_id: WHITE_TEXTURE_ID,
+            space: mail.space,
+            clip: mail.clip,
+            quads,
+        });
     }
 
     /// `DrawMaterialTextured` handler (ADR-0140). Accumulates a typed
@@ -659,11 +547,7 @@ impl NativeActor for RenderCapability {
     /// Mail `aether.render.material.textured { texture_id, rects }`
     /// every frame the world-space material rects should appear; no reply.
     #[handler::single]
-    fn on_draw_material_textured(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        mail: DrawMaterialTextured,
-    ) {
+    fn on_draw_material_textured(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialTextured) {
         if let Some(obs) = &state.config.observed_kinds {
             obs.lock()
                 .expect("mutex poisoned; fail-fast per ADR-0063")
@@ -674,10 +558,7 @@ impl NativeActor for RenderCapability {
             .material_frame
             .lock()
             .expect("mutex poisoned; fail-fast per ADR-0063")
-            .push(MaterialBatch::Textured {
-                texture_id: mail.texture_id,
-                rects: mail.rects,
-            });
+            .push(MaterialBatch::Textured { texture_id: mail.texture_id, rects: mail.rects });
     }
 
     /// `DrawMaterialCoverage` handler (ADR-0140). Accumulates a typed
@@ -689,11 +570,7 @@ impl NativeActor for RenderCapability {
     /// Mail `aether.render.material.coverage { texture_id, rects }`
     /// every frame the coverage material should appear; no reply.
     #[handler::single]
-    fn on_draw_material_coverage(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        mail: DrawMaterialCoverage,
-    ) {
+    fn on_draw_material_coverage(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrawMaterialCoverage) {
         if let Some(obs) = &state.config.observed_kinds {
             obs.lock()
                 .expect("mutex poisoned; fail-fast per ADR-0063")
@@ -704,9 +581,6 @@ impl NativeActor for RenderCapability {
             .material_frame
             .lock()
             .expect("mutex poisoned; fail-fast per ADR-0063")
-            .push(MaterialBatch::Coverage {
-                texture_id: mail.texture_id,
-                rects: mail.rects,
-            });
+            .push(MaterialBatch::Coverage { texture_id: mail.texture_id, rects: mail.rects });
     }
 }

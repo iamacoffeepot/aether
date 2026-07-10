@@ -49,13 +49,9 @@ pub(super) fn occluded_capture_disposition(
     if !occluded {
         return OccludedCaptureDisposition::Redraw;
     }
-    pending.map_or(OccludedCaptureDisposition::Empty, |request| {
-        OccludedCaptureDisposition::FailFast {
-            request: Box::new(request),
-            result: CaptureFrameResult::Err {
-                error: OCCLUDED_CAPTURE_ERROR.to_owned(),
-            },
-        }
+    pending.map_or(OccludedCaptureDisposition::Empty, |request| OccludedCaptureDisposition::FailFast {
+        request: Box::new(request),
+        result: CaptureFrameResult::Err { error: OCCLUDED_CAPTURE_ERROR.to_owned() },
     })
 }
 
@@ -139,26 +135,17 @@ mod tests {
 
         // Occluded but nothing parked → no-op (already serviced / stale wake).
         assert!(
-            matches!(
-                occluded_capture_disposition(true, None),
-                OccludedCaptureDisposition::Empty
-            ),
+            matches!(occluded_capture_disposition(true, None), OccludedCaptureDisposition::Empty),
             "occluded + empty slot must be a no-op",
         );
 
         // Visible window → fall through to redraw, regardless of the slot.
         assert!(
-            matches!(
-                occluded_capture_disposition(false, Some(parked())),
-                OccludedCaptureDisposition::Redraw
-            ),
+            matches!(occluded_capture_disposition(false, Some(parked())), OccludedCaptureDisposition::Redraw),
             "visible window must fall through to redraw",
         );
         assert!(
-            matches!(
-                occluded_capture_disposition(false, None),
-                OccludedCaptureDisposition::Redraw
-            ),
+            matches!(occluded_capture_disposition(false, None), OccludedCaptureDisposition::Redraw),
             "visible window must fall through to redraw",
         );
     }
@@ -195,9 +182,7 @@ mod tests {
         // does both installs at boot) so the inbound + reply settle cleanly.
         let settlement = Arc::new(SettlementRegistry::new());
         mailer.install_settlement_registry(Arc::clone(&settlement));
-        mailer
-            .trace_handle()
-            .install_settlement_registry(Arc::clone(&settlement));
+        mailer.trace_handle().install_settlement_registry(Arc::clone(&settlement));
 
         // A `Component` reply target captures the deferred reply so the test
         // reads its delivered `root` and finishes it — the desktop MCP
@@ -233,9 +218,7 @@ mod tests {
                 .with_reply_to(caller)
                 .with_lineage(mail_id, root, None),
         );
-        let reply = inbox
-            .try_next()
-            .expect("the armed CaptureFrame Call is queued");
+        let reply = inbox.try_next().expect("the armed CaptureFrame Call is queued");
         let req = PendingCapture {
             reply,
             after_mails: Vec::new(),
@@ -247,15 +230,10 @@ mod tests {
         // The driver's reply path: reply through the retained guard, then
         // let `req` (the parked request) drop.
         assert!(
-            req.reply.reply(&CaptureFrameResult::Err {
-                error: "deferred".to_owned(),
-            }),
+            req.reply.reply(&CaptureFrameResult::Err { error: "deferred".to_owned() }),
             "the deferred capture reply routed to the Component target",
         );
-        assert!(
-            settle.try_recv().is_err(),
-            "the reply's Sent holds the chain open",
-        );
+        assert!(settle.try_recv().is_err(), "the reply's Sent holds the chain open",);
         drop(req);
         assert!(
             settle.try_recv().is_err(),
@@ -264,23 +242,16 @@ mod tests {
 
         // Finish the reply the way the RPC server's dispatcher would; only
         // now does the root settle — exactly once.
-        let reply_env = reply_rx
-            .recv()
-            .expect("deferred reply routed to the target");
+        let reply_env = reply_rx.recv().expect("deferred reply routed to the target");
         assert_eq!(
             reply_env.kind_name,
             <CaptureFrameResult as Kind>::NAME,
             "the deferred reply is a CaptureFrameResult",
         );
-        assert_eq!(
-            reply_env.root, root,
-            "the deferred capture reply joins the inbound's causal chain (#1758)",
-        );
+        assert_eq!(reply_env.root, root, "the deferred capture reply joins the inbound's causal chain (#1758)",);
         let reply_id = reply_env.mail_id;
         reply_env.discharge();
         mailer.record_finished(reply_id, root);
-        settle
-            .recv()
-            .expect("root settles once the deferred capture reply finishes");
+        settle.recv().expect("root settles once the deferred capture reply finishes");
     }
 }

@@ -48,9 +48,6 @@ pub fn non_cast_variant_error(ty: &SchemaType) -> Option<&'static str> {
         | SchemaType::Enum { .. }
         | SchemaType::Unit
         | SchemaType::Map { .. } => Some(NON_CAST_VARIANTS_MSG),
-        SchemaType::Scalar(_)
-        | SchemaType::TypeId(_)
-        | SchemaType::Array { .. }
-        | SchemaType::Struct { .. } => None,
+        SchemaType::Scalar(_) | SchemaType::TypeId(_) | SchemaType::Array { .. } | SchemaType::Struct { .. } => None,
     }
 }

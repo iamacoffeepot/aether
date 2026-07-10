@@ -31,17 +31,13 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
     let parser = meta::parser(|meta| {
         if meta.path.is_ident("singleton") {
             if matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
-                return Err(
-                    meta.error("`singleton` and `instanced` are mutually exclusive (ADR-0079)")
-                );
+                return Err(meta.error("`singleton` and `instanced` are mutually exclusive (ADR-0079)"));
             }
             opts.cardinality = Some(ActorCardinality::Singleton);
             Ok(())
         } else if meta.path.is_ident("instanced") {
             if matches!(opts.cardinality, Some(ActorCardinality::Singleton)) {
-                return Err(
-                    meta.error("`singleton` and `instanced` are mutually exclusive (ADR-0079)")
-                );
+                return Err(meta.error("`singleton` and `instanced` are mutually exclusive (ADR-0079)"));
             }
             opts.cardinality = Some(ActorCardinality::Instanced);
             Ok(())
@@ -55,15 +51,9 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
         } else if meta.path.get_ident().is_some() && !meta.input.peek(syn::Token![=]) {
             // ADR-0123: a bare positional ident names the runtime module the
             // struct-hosted `#[actor]` reads off disk (default `runtime`).
-            let id = meta
-                .path
-                .get_ident()
-                .expect("checked is_some above")
-                .clone();
+            let id = meta.path.get_ident().expect("checked is_some above").clone();
             if opts.runtime_module.is_some() {
-                return Err(
-                    meta.error("duplicate runtime module name in #[actor] — name it at most once")
-                );
+                return Err(meta.error("duplicate runtime module name in #[actor] — name it at most once"));
             }
             opts.runtime_module = Some(id);
             Ok(())

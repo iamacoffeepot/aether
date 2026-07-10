@@ -43,13 +43,11 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use aether_data::{
-    EnumVariant, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, KINDS_SECTION_VERSION,
-    KindDescriptor, KindLabels, KindShape, LABELS_SECTION_VERSION, LabelNode, NamedField,
-    SchemaCell, SchemaShape, SchemaType, VariantLabel, canonical::kind_id_from_shape, wire,
+    EnumVariant, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, KINDS_SECTION_VERSION, KindDescriptor,
+    KindLabels, KindShape, LABELS_SECTION_VERSION, LabelNode, NamedField, SchemaCell, SchemaShape, SchemaType,
+    VariantLabel, canonical::kind_id_from_shape, wire,
 };
-use aether_kinds::{
-    ComponentCapabilities, ConfigCapability, FallbackCapability, HandlerCapability,
-};
+use aether_kinds::{ComponentCapabilities, ConfigCapability, FallbackCapability, HandlerCapability};
 use serde::de::DeserializeOwned;
 use std::str;
 use wasmparser::{BinaryReader, Parser, Payload, ProducersSectionReader};
@@ -132,12 +130,9 @@ pub fn read_from_bytes(wasm: &[u8]) -> Result<Vec<KindDescriptor>, String> {
         };
         match reader.name() {
             MANIFEST_SECTION => decode_kinds_records(reader.data(), &mut kinds)?,
-            LABELS_SECTION => decode_records(
-                LABELS_SECTION,
-                LABELS_SUPPORTED_VERSIONS,
-                reader.data(),
-                &mut labels_list,
-            )?,
+            LABELS_SECTION => {
+                decode_records(LABELS_SECTION, LABELS_SUPPORTED_VERSIONS, reader.data(), &mut labels_list)?
+            }
             _ => {}
         }
     }
@@ -174,10 +169,7 @@ fn decode_kinds_records(data: &[u8], out: &mut Vec<KindShape>) -> Result<(), Str
                 cursor = rest;
             }
             Err(e) => {
-                return Err(format!(
-                    "{MANIFEST_SECTION}: wire decode failed at record {}: {e}",
-                    out.len() + 1
-                ));
+                return Err(format!("{MANIFEST_SECTION}: wire decode failed at record {}: {e}", out.len() + 1));
             }
         }
     }
@@ -244,9 +236,7 @@ pub fn read_producers_from_bytes(wasm: &[u8]) -> String {
         if reader.name() != "producers" {
             continue;
         }
-        let Ok(producers) =
-            ProducersSectionReader::new(BinaryReader::new(reader.data(), reader.data_offset()))
-        else {
+        let Ok(producers) = ProducersSectionReader::new(BinaryReader::new(reader.data(), reader.data_offset())) else {
             return String::new();
         };
         for field in producers {
@@ -255,13 +245,7 @@ pub fn read_producers_from_bytes(wasm: &[u8]) -> String {
                 .values
                 .into_iter()
                 .filter_map(Result::ok)
-                .map(|v| {
-                    if v.version.is_empty() {
-                        v.name.to_owned()
-                    } else {
-                        format!("{} {}", v.name, v.version)
-                    }
-                })
+                .map(|v| if v.version.is_empty() { v.name.to_owned() } else { format!("{} {}", v.name, v.version) })
                 .collect();
             if !values.is_empty() {
                 parts.push(format!("{}: {}", field.name, values.join(", ")));
@@ -327,20 +311,13 @@ pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, Str
                     capabilities: ComponentCapabilities::default(),
                 });
             }
-            InputsRecord::Handler {
-                id,
-                name,
-                doc,
-                reply,
-            } => {
-                current_capabilities(&mut groups)
-                    .handlers
-                    .push(HandlerCapability {
-                        id,
-                        name: name.into_owned(),
-                        doc: doc.map(Cow::into_owned),
-                        reply,
-                    });
+            InputsRecord::Handler { id, name, doc, reply } => {
+                current_capabilities(&mut groups).handlers.push(HandlerCapability {
+                    id,
+                    name: name.into_owned(),
+                    doc: doc.map(Cow::into_owned),
+                    reply,
+                });
             }
             InputsRecord::Fallback { doc } => {
                 let caps = current_capabilities(&mut groups);
@@ -349,9 +326,7 @@ pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, Str
                         "{INPUTS_SECTION}: duplicate Fallback record — macro emits at most one per actor"
                     ));
                 }
-                caps.fallback = Some(FallbackCapability {
-                    doc: doc.map(Cow::into_owned),
-                });
+                caps.fallback = Some(FallbackCapability { doc: doc.map(Cow::into_owned) });
             }
             InputsRecord::Component { doc } => {
                 let caps = current_capabilities(&mut groups);
@@ -369,10 +344,7 @@ pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, Str
                         "{INPUTS_SECTION}: duplicate Config record — macro emits at most one per actor"
                     ));
                 }
-                caps.config = Some(ConfigCapability {
-                    id,
-                    name: name.into_owned(),
-                });
+                caps.config = Some(ConfigCapability { id, name: name.into_owned() });
             }
         }
     }
@@ -384,10 +356,7 @@ pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, Str
 /// `ActorBoundary` — the single-actor layout, which emits no boundary.
 fn current_capabilities(groups: &mut Vec<ActorInputs>) -> &mut ComponentCapabilities {
     if groups.is_empty() {
-        groups.push(ActorInputs {
-            namespace: None,
-            capabilities: ComponentCapabilities::default(),
-        });
+        groups.push(ActorInputs { namespace: None, capabilities: ComponentCapabilities::default() });
     }
     let last = groups.len() - 1;
     &mut groups[last].capabilities
@@ -399,11 +368,7 @@ fn current_capabilities(groups: &mut Vec<ActorInputs>) -> &mut ComponentCapabili
 /// inputs section. The back-compat view for callers that load the
 /// entry (or single) actor without an export selector.
 pub fn read_inputs_from_bytes(wasm: &[u8]) -> Result<ComponentCapabilities, String> {
-    Ok(read_actor_inputs_from_bytes(wasm)?
-        .into_iter()
-        .next()
-        .map(|actor| actor.capabilities)
-        .unwrap_or_default())
+    Ok(read_actor_inputs_from_bytes(wasm)?.into_iter().next().map(|actor| actor.capabilities).unwrap_or_default())
 }
 
 fn decode_inputs_records(data: &[u8], out: &mut Vec<InputsRecord>) -> Result<(), String> {
@@ -422,10 +387,7 @@ fn decode_inputs_records(data: &[u8], out: &mut Vec<InputsRecord>) -> Result<(),
                 cursor = rest;
             }
             Err(e) => {
-                return Err(format!(
-                    "{INPUTS_SECTION}: wire decode failed at record {}: {e}",
-                    out.len() + 1
-                ));
+                return Err(format!("{INPUTS_SECTION}: wire decode failed at record {}: {e}", out.len() + 1));
             }
         }
     }
@@ -446,9 +408,7 @@ fn decode_records<T: DeserializeOwned>(
     while !cursor.is_empty() {
         let version = cursor[0];
         if !supported_versions.contains(&version) {
-            return Err(format!(
-                "{section_name}: record version {version:#x} not understood by this substrate build"
-            ));
+            return Err(format!("{section_name}: record version {version:#x} not understood by this substrate build"));
         }
         let body = &cursor[1..];
         match wire::take_from_bytes::<T>(body) {
@@ -457,10 +417,7 @@ fn decode_records<T: DeserializeOwned>(
                 cursor = rest;
             }
             Err(e) => {
-                return Err(format!(
-                    "{section_name}: wire decode failed at record {}: {e}",
-                    out.len() + 1
-                ));
+                return Err(format!("{section_name}: wire decode failed at record {}: {e}", out.len() + 1));
             }
         }
     }
@@ -479,9 +436,7 @@ const MAX_MERGE_DEPTH: usize = 64;
 /// block that pushes the function over clippy's line-count limit.
 fn check_merge_depth(depth: usize) -> Result<(), String> {
     if depth > MAX_MERGE_DEPTH {
-        return Err(format!(
-            "{MANIFEST_SECTION}: schema nesting exceeds depth cap {MAX_MERGE_DEPTH}"
-        ));
+        return Err(format!("{MANIFEST_SECTION}: schema nesting exceeds depth cap {MAX_MERGE_DEPTH}"));
     }
     Ok(())
 }
@@ -499,11 +454,7 @@ fn merge(shape: KindShape, labels: Option<&KindLabels>) -> Result<KindDescriptor
     Ok(KindDescriptor { name, schema })
 }
 
-fn merge_schema(
-    shape: &SchemaShape,
-    label: Option<&LabelNode>,
-    depth: usize,
-) -> Result<SchemaType, String> {
+fn merge_schema(shape: &SchemaShape, label: Option<&LabelNode>, depth: usize) -> Result<SchemaType, String> {
     check_merge_depth(depth)?;
     let schema = match shape {
         SchemaShape::Unit => SchemaType::Unit,
@@ -539,11 +490,9 @@ fn merge_schema(
         }
         SchemaShape::Struct { fields, repr_c } => {
             let (field_names, field_labels) = match label {
-                Some(LabelNode::Struct {
-                    field_names,
-                    fields: field_labels,
-                    ..
-                }) => (Some(&**field_names), Some(&**field_labels)),
+                Some(LabelNode::Struct { field_names, fields: field_labels, .. }) => {
+                    (Some(&**field_names), Some(&**field_labels))
+                }
                 _ => (None, None),
             };
             let named_fields: Vec<NamedField> = fields
@@ -555,16 +504,10 @@ fn merge_schema(
                         .cloned()
                         .unwrap_or_else(|| Cow::Owned(String::new()));
                     let field_label = field_labels.and_then(|labels| labels.get(idx));
-                    Ok(NamedField {
-                        name,
-                        ty: merge_schema(ft, field_label, depth + 1)?,
-                    })
+                    Ok(NamedField { name, ty: merge_schema(ft, field_label, depth + 1)? })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            SchemaType::Struct {
-                fields: Cow::Owned(named_fields),
-                repr_c: *repr_c,
-            }
+            SchemaType::Struct { fields: Cow::Owned(named_fields), repr_c: *repr_c }
         }
         SchemaShape::Enum { variants } => {
             let variant_labels = match label {
@@ -574,13 +517,9 @@ fn merge_schema(
             let merged: Vec<EnumVariant> = variants
                 .iter()
                 .enumerate()
-                .map(|(idx, v)| {
-                    merge_variant(v, variant_labels.and_then(|vs| vs.get(idx)), depth + 1)
-                })
+                .map(|(idx, v)| merge_variant(v, variant_labels.and_then(|vs| vs.get(idx)), depth + 1))
                 .collect::<Result<Vec<_>, String>>()?;
-            SchemaType::Enum {
-                variants: Cow::Owned(merged),
-            }
+            SchemaType::Enum { variants: Cow::Owned(merged) }
         }
         SchemaShape::Map { key, value } => {
             // Issue #232: parallel-walk the labels Map arm so any
@@ -613,15 +552,9 @@ fn merge_variant(
                 Some(VariantLabel::Unit { name }) => name.clone(),
                 _ => Cow::Owned(String::new()),
             };
-            EnumVariant::Unit {
-                name,
-                discriminant: *discriminant,
-            }
+            EnumVariant::Unit { name, discriminant: *discriminant }
         }
-        aether_data::VariantShape::Tuple {
-            discriminant,
-            fields,
-        } => {
+        aether_data::VariantShape::Tuple { discriminant, fields } => {
             let (name, field_labels) = match label {
                 Some(VariantLabel::Tuple { name, fields: fl }) => (name.clone(), Some(&**fl)),
                 _ => (Cow::Owned(String::new()), None),
@@ -629,26 +562,15 @@ fn merge_variant(
             let merged: Vec<SchemaType> = fields
                 .iter()
                 .enumerate()
-                .map(|(idx, ft)| {
-                    merge_schema(ft, field_labels.and_then(|fl| fl.get(idx)), depth + 1)
-                })
+                .map(|(idx, ft)| merge_schema(ft, field_labels.and_then(|fl| fl.get(idx)), depth + 1))
                 .collect::<Result<Vec<_>, String>>()?;
-            EnumVariant::Tuple {
-                name,
-                discriminant: *discriminant,
-                fields: Cow::Owned(merged),
-            }
+            EnumVariant::Tuple { name, discriminant: *discriminant, fields: Cow::Owned(merged) }
         }
-        aether_data::VariantShape::Struct {
-            discriminant,
-            fields,
-        } => {
+        aether_data::VariantShape::Struct { discriminant, fields } => {
             let (name, field_names, field_labels) = match label {
-                Some(VariantLabel::Struct {
-                    name,
-                    field_names: fn_,
-                    fields: fl,
-                }) => (name.clone(), Some(&**fn_), Some(&**fl)),
+                Some(VariantLabel::Struct { name, field_names: fn_, fields: fl }) => {
+                    (name.clone(), Some(&**fn_), Some(&**fl))
+                }
                 _ => (Cow::Owned(String::new()), None, None),
             };
             let named: Vec<NamedField> = fields
@@ -665,11 +587,7 @@ fn merge_variant(
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            EnumVariant::Struct {
-                name,
-                discriminant: *discriminant,
-                fields: Cow::Owned(named),
-            }
+            EnumVariant::Struct { name, discriminant: *discriminant, fields: Cow::Owned(named) }
         }
     };
     Ok(variant)
@@ -683,8 +601,7 @@ fn merge_variant(
 mod tests {
     use super::*;
     use aether_data::{
-        KINDS_SECTION_VERSION, LABELS_SECTION_VERSION, LabelCell, LabelNode, Primitive,
-        SchemaShape, VariantShape,
+        KINDS_SECTION_VERSION, LABELS_SECTION_VERSION, LabelCell, LabelNode, Primitive, SchemaShape, VariantShape,
     };
     use std::fs;
     fn wasm_with_section(section_name: &str, section: &[u8]) -> Vec<u8> {
@@ -693,8 +610,7 @@ mod tests {
         for b in section {
             write!(&mut escaped, "\\{b:02x}").expect("write to String");
         }
-        let wat =
-            format!(r#"(module (@custom "{section_name}" "{escaped}") (func (export "noop")))"#);
+        let wat = format!(r#"(module (@custom "{section_name}" "{escaped}") (func (export "noop")))"#);
         wat::parse_str(wat).unwrap()
     }
 
@@ -741,10 +657,7 @@ mod tests {
     fn reads_single_record_with_labels() {
         let shape = KindShape {
             name: Cow::Borrowed("test.kind"),
-            schema: SchemaShape::Struct {
-                fields: vec![SchemaShape::Scalar(Primitive::U32)],
-                repr_c: true,
-            },
+            schema: SchemaShape::Struct { fields: vec![SchemaShape::Scalar(Primitive::U32)], repr_c: true },
         };
         let mut labels = KindLabels {
             kind_id: aether_data::KindId(0),
@@ -777,14 +690,8 @@ mod tests {
     #[test]
     fn reads_multiple_records_pair_by_id() {
         let shapes = [
-            KindShape {
-                name: Cow::Borrowed("a"),
-                schema: SchemaShape::Unit,
-            },
-            KindShape {
-                name: Cow::Borrowed("b"),
-                schema: SchemaShape::Scalar(Primitive::U8),
-            },
+            KindShape { name: Cow::Borrowed("a"), schema: SchemaShape::Unit },
+            KindShape { name: Cow::Borrowed("b"), schema: SchemaShape::Scalar(Primitive::U8) },
         ];
         let mut labels_a = KindLabels {
             kind_id: aether_data::KindId(0),
@@ -841,10 +748,7 @@ mod tests {
     fn canonical_without_labels_produces_anonymous_names() {
         let shape = KindShape {
             name: Cow::Borrowed("t.anon"),
-            schema: SchemaShape::Struct {
-                fields: vec![SchemaShape::Scalar(Primitive::U32)],
-                repr_c: false,
-            },
+            schema: SchemaShape::Struct { fields: vec![SchemaShape::Scalar(Primitive::U32)], repr_c: false },
         };
         let mut canonical = vec![KINDS_SECTION_VERSION];
         canonical.extend(wire::to_vec(&shape).unwrap());
@@ -890,10 +794,7 @@ mod tests {
         // bytes → hash).
         let shape = KindShape {
             name: Cow::Borrowed("test.dup"),
-            schema: SchemaShape::Struct {
-                fields: vec![SchemaShape::Scalar(Primitive::U32)],
-                repr_c: true,
-            },
+            schema: SchemaShape::Struct { fields: vec![SchemaShape::Scalar(Primitive::U32)], repr_c: true },
         };
         let mut labels = KindLabels {
             kind_id: aether_data::KindId(0),
@@ -931,10 +832,7 @@ mod tests {
         // harmlessly ignored. Future-proofs the reader against mixed
         // manifests where a third-party emitter contributes labels
         // for kinds not in this particular binary.
-        let shape = KindShape {
-            name: Cow::Borrowed("present"),
-            schema: SchemaShape::Unit,
-        };
+        let shape = KindShape { name: Cow::Borrowed("present"), schema: SchemaShape::Unit };
         let mut orphan = KindLabels {
             // Deliberately a id that won't match `shape`.
             kind_id: aether_data::KindId(0xDEAD_BEEF_DEAD_BEEF),
@@ -961,14 +859,8 @@ mod tests {
             schema: SchemaShape::Enum {
                 variants: vec![
                     VariantShape::Unit { discriminant: 0 },
-                    VariantShape::Tuple {
-                        discriminant: 1,
-                        fields: vec![SchemaShape::Scalar(Primitive::U64)],
-                    },
-                    VariantShape::Struct {
-                        discriminant: 2,
-                        fields: vec![SchemaShape::String],
-                    },
+                    VariantShape::Tuple { discriminant: 1, fields: vec![SchemaShape::Scalar(Primitive::U64)] },
+                    VariantShape::Struct { discriminant: 2, fields: vec![SchemaShape::String] },
                 ],
             },
         };
@@ -978,13 +870,8 @@ mod tests {
             root: LabelNode::Enum {
                 type_label: Some(Cow::Borrowed("my::Outcome")),
                 variants: Cow::Owned(vec![
-                    VariantLabel::Unit {
-                        name: Cow::Borrowed("Pending"),
-                    },
-                    VariantLabel::Tuple {
-                        name: Cow::Borrowed("Ok"),
-                        fields: Cow::Owned(vec![LabelNode::Anonymous]),
-                    },
+                    VariantLabel::Unit { name: Cow::Borrowed("Pending") },
+                    VariantLabel::Tuple { name: Cow::Borrowed("Ok"), fields: Cow::Owned(vec![LabelNode::Anonymous]) },
                     VariantLabel::Struct {
                         name: Cow::Borrowed("Err"),
                         field_names: Cow::Owned(vec![Cow::Borrowed("reason")]),
@@ -1030,10 +917,7 @@ mod tests {
             schema: SchemaShape::Struct {
                 fields: vec![SchemaShape::Array {
                     element: Box::new(SchemaShape::Struct {
-                        fields: vec![
-                            SchemaShape::Scalar(Primitive::F32),
-                            SchemaShape::Scalar(Primitive::F32),
-                        ],
+                        fields: vec![SchemaShape::Scalar(Primitive::F32), SchemaShape::Scalar(Primitive::F32)],
                         repr_c: true,
                     }),
                     len: 3,
@@ -1071,11 +955,7 @@ mod tests {
             panic!("expected Array");
         };
         assert_eq!(*len, 3);
-        let SchemaType::Struct {
-            fields: inner_fields,
-            ..
-        } = &**element
-        else {
+        let SchemaType::Struct { fields: inner_fields, .. } = &**element else {
             panic!("expected nested Struct");
         };
         assert_eq!(inner_fields[0].name, "x");
@@ -1097,20 +977,14 @@ mod tests {
         // Tripwire: `merge`'s own depth cap must fire before native
         // recursion over an attacker-controlled nesting depth overflows
         // the stack (CLAUDE.md's recursion-over-wire-data rule).
-        let shape = KindShape {
-            name: Cow::Borrowed("test.deep"),
-            schema: nested_option_shape(MAX_MERGE_DEPTH + 2),
-        };
+        let shape = KindShape { name: Cow::Borrowed("test.deep"), schema: nested_option_shape(MAX_MERGE_DEPTH + 2) };
         let err = merge(shape, None).unwrap_err();
         assert!(err.contains("depth cap"), "err was: {err}");
     }
 
     #[test]
     fn merge_succeeds_within_max_merge_depth() {
-        let shape = KindShape {
-            name: Cow::Borrowed("test.shallow"),
-            schema: nested_option_shape(4),
-        };
+        let shape = KindShape { name: Cow::Borrowed("test.shallow"), schema: nested_option_shape(4) };
         let desc = merge(shape, None).unwrap();
         let mut schema = &desc.schema;
         for _ in 0..4 {
@@ -1139,9 +1013,7 @@ mod tests {
     #[test]
     fn reads_handlers_plus_component_doc() {
         let section = inputs_section(&[
-            InputsRecord::Component {
-                doc: "Draws triangles on tick.".into(),
-            },
+            InputsRecord::Component { doc: "Draws triangles on tick.".into() },
             InputsRecord::Handler {
                 id: aether_data::KindId(42),
                 name: "aether.tick".into(),
@@ -1162,14 +1034,8 @@ mod tests {
         assert_eq!(caps.handlers.len(), 2);
         assert_eq!(caps.handlers[0].id, aether_data::KindId(42));
         assert_eq!(caps.handlers[0].name, "aether.tick");
-        assert_eq!(
-            caps.handlers[0].doc.as_deref(),
-            Some("substrate drives this")
-        );
-        assert_eq!(
-            caps.handlers[0].reply,
-            aether_data::ReplyContract::One(aether_data::KindId(0xbeef))
-        );
+        assert_eq!(caps.handlers[0].doc.as_deref(), Some("substrate drives this"));
+        assert_eq!(caps.handlers[0].reply, aether_data::ReplyContract::One(aether_data::KindId(0xbeef)));
         assert_eq!(caps.handlers[1].id, aether_data::KindId(0xff));
         assert_eq!(caps.handlers[1].name, "aether.ping");
         assert!(caps.handlers[1].doc.is_none());
@@ -1211,15 +1077,9 @@ mod tests {
         let caps = read_inputs_from_bytes(&wasm).unwrap();
         assert_eq!(caps.handlers.len(), 4);
         assert_eq!(caps.handlers[0].reply, aether_data::ReplyContract::None);
-        assert_eq!(
-            caps.handlers[1].reply,
-            aether_data::ReplyContract::One(aether_data::KindId(0xabcd))
-        );
+        assert_eq!(caps.handlers[1].reply, aether_data::ReplyContract::One(aether_data::KindId(0xabcd)));
         assert_eq!(caps.handlers[2].reply, aether_data::ReplyContract::Manual);
-        assert_eq!(
-            caps.handlers[3].reply,
-            aether_data::ReplyContract::Multi(aether_data::KindId(0x5678))
-        );
+        assert_eq!(caps.handlers[3].reply, aether_data::ReplyContract::Multi(aether_data::KindId(0x5678)));
     }
 
     #[test]
@@ -1263,14 +1123,8 @@ mod tests {
     #[test]
     fn duplicate_config_is_rejected() {
         let section = inputs_section(&[
-            InputsRecord::Config {
-                id: aether_data::KindId(1),
-                name: "a".into(),
-            },
-            InputsRecord::Config {
-                id: aether_data::KindId(2),
-                name: "b".into(),
-            },
+            InputsRecord::Config { id: aether_data::KindId(1), name: "a".into() },
+            InputsRecord::Config { id: aether_data::KindId(2), name: "b".into() },
         ]);
         let wasm = wasm_with_section(INPUTS_SECTION, &section);
         let err = read_inputs_from_bytes(&wasm).unwrap_err();
@@ -1292,9 +1146,7 @@ mod tests {
 
     #[test]
     fn reads_fallback_record() {
-        let section = inputs_section(&[InputsRecord::Fallback {
-            doc: Some("catchall".into()),
-        }]);
+        let section = inputs_section(&[InputsRecord::Fallback { doc: Some("catchall".into()) }]);
         let wasm = wasm_with_section(INPUTS_SECTION, &section);
         let caps = read_inputs_from_bytes(&wasm).unwrap();
         assert!(caps.handlers.is_empty());
@@ -1311,30 +1163,22 @@ mod tests {
         // Each `ActorBoundary` opens a group; the records that follow
         // belong to it, in order. The first group is the entry type.
         let section = inputs_section(&[
-            InputsRecord::ActorBoundary {
-                namespace: "ui.root".into(),
-            },
-            InputsRecord::Component {
-                doc: "Root.".into(),
-            },
+            InputsRecord::ActorBoundary { namespace: "ui.root".into() },
+            InputsRecord::Component { doc: "Root.".into() },
             InputsRecord::Handler {
                 id: aether_data::KindId(1),
                 name: "ui.click".into(),
                 doc: None,
                 reply: aether_data::ReplyContract::None,
             },
-            InputsRecord::ActorBoundary {
-                namespace: "ui.panel".into(),
-            },
+            InputsRecord::ActorBoundary { namespace: "ui.panel".into() },
             InputsRecord::Handler {
                 id: aether_data::KindId(2),
                 name: "ui.draw".into(),
                 doc: None,
                 reply: aether_data::ReplyContract::None,
             },
-            InputsRecord::Fallback {
-                doc: Some("catchall".into()),
-            },
+            InputsRecord::Fallback { doc: Some("catchall".into()) },
         ]);
         let wasm = wasm_with_section(INPUTS_SECTION, &section);
         let actors = read_actor_inputs_from_bytes(&wasm).unwrap();
@@ -1377,9 +1221,7 @@ mod tests {
         // The at-most-one rule is per group: two fallbacks within one
         // boundary is still a rejected load.
         let section = inputs_section(&[
-            InputsRecord::ActorBoundary {
-                namespace: "ui.root".into(),
-            },
+            InputsRecord::ActorBoundary { namespace: "ui.root".into() },
             InputsRecord::Fallback { doc: None },
             InputsRecord::Fallback { doc: None },
         ]);
@@ -1399,12 +1241,8 @@ mod tests {
 
     #[test]
     fn duplicate_fallback_is_rejected() {
-        let section = inputs_section(&[
-            InputsRecord::Fallback { doc: None },
-            InputsRecord::Fallback {
-                doc: Some("two".into()),
-            },
-        ]);
+        let section =
+            inputs_section(&[InputsRecord::Fallback { doc: None }, InputsRecord::Fallback { doc: Some("two".into()) }]);
         let wasm = wasm_with_section(INPUTS_SECTION, &section);
         let err = read_inputs_from_bytes(&wasm).unwrap_err();
         assert!(err.contains("duplicate Fallback"), "err: {err}");
@@ -1424,10 +1262,8 @@ mod tests {
         // Skips if the wasm isn't built — the cargo-test harness builds
         // workspace members lazily, and example wasms are an opt-in
         // `--examples` build.
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../target/wasm32-unknown-unknown/release/examples/hello.wasm"
-        );
+        let path =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/wasm32-unknown-unknown/release/examples/hello.wasm");
         let Ok(bytes) = fs::read(path) else {
             eprintln!("skipping: hello example wasm not built at {path}");
             return;

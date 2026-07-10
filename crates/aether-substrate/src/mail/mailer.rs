@@ -185,8 +185,7 @@ impl Mailer {
         recipient: aether_data::MailboxId,
         kind: KindId,
     ) {
-        self.trace_handle
-            .record_sent(mail_id, root, parent_mail, sender, recipient, kind);
+        self.trace_handle.record_sent(mail_id, root, parent_mail, sender, recipient, kind);
     }
 
     /// iamacoffeepot/aether#1150: push the `Sent` trace event with an
@@ -275,16 +274,8 @@ impl Mailer {
         payload: Vec<u8>,
         count: u32,
     ) -> aether_data::MailId {
-        let mail_id =
-            aether_data::MailId::new(aether_data::MailboxId::CHASSIS_MAILBOX_ID, correlation_id);
-        self.record_sent(
-            mail_id,
-            mail_id,
-            None,
-            aether_data::MailboxId::CHASSIS_MAILBOX_ID,
-            recipient,
-            kind,
-        );
+        let mail_id = aether_data::MailId::new(aether_data::MailboxId::CHASSIS_MAILBOX_ID, correlation_id);
+        self.record_sent(mail_id, mail_id, None, aether_data::MailboxId::CHASSIS_MAILBOX_ID, recipient, kind);
         self.push(Mail::new(recipient, kind, payload, count).with_lineage(mail_id, mail_id, None));
         mail_id
     }
@@ -387,13 +378,7 @@ impl Mailer {
     where
         K: Kind,
     {
-        self.send_reply(
-            sender,
-            result,
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-            None,
-        )
+        self.send_reply(sender, result, aether_data::MailId::NONE, aether_data::MailId::NONE, None)
     }
 
     /// ADR-0080 §5/§6: route a `*Result` reply that joins the caller's
@@ -433,10 +418,9 @@ impl Mailer {
     {
         match sender.addr {
             SourceAddr::None => false,
-            SourceAddr::Session(_) | SourceAddr::EngineMailbox { .. } => self
-                .outbound
-                .as_ref()
-                .is_some_and(|outbound| outbound.send_reply(sender, result)),
+            SourceAddr::Session(_) | SourceAddr::EngineMailbox { .. } => {
+                self.outbound.as_ref().is_some_and(|outbound| outbound.send_reply(sender, result))
+            }
             SourceAddr::Component(mailbox) => {
                 // ADR-0100: encode the reply through the kind's declared
                 // codec (cast or wire), not a hardcoded codec path.
@@ -454,9 +438,7 @@ impl Mailer {
                     self.record_sent(reply_id, root, parent, reply_id.sender, mailbox, K::ID);
                 }
                 self.push(
-                    Mail::new(mailbox, K::ID, payload, 1)
-                        .with_reply_to(reply_to)
-                        .with_lineage(reply_id, root, parent),
+                    Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to).with_lineage(reply_id, root, parent),
                 );
                 true
             }
@@ -508,9 +490,7 @@ fn route_mail(
             // tail and reply to the caller. (In-process callers reach
             // the same ring via `TraceHandle::chassis_host_tail`.)
             let result = TraceTail::decode_from_bytes(mail.payload.bytes()).map_or_else(
-                || TraceTailResult::Err {
-                    error: "undecodable TraceTail to chassis-host ring".to_owned(),
-                },
+                || TraceTailResult::Err { error: "undecodable TraceTail to chassis-host ring".to_owned() },
                 |request| trace_handle.chassis_host_tail(&request),
             );
             match mail.reply_to.addr {
@@ -525,8 +505,7 @@ fn route_mail(
                     // fresh, un-lineaged reply into the target's inbox.
                     // ADR-0100: encode through the kind's declared codec.
                     let payload = result.encode_into_bytes();
-                    let reply_to =
-                        Source::with_correlation(SourceAddr::None, mail.reply_to.correlation_id);
+                    let reply_to = Source::with_correlation(SourceAddr::None, mail.reply_to.correlation_id);
                     route_mail(
                         Mail::new(target, TraceTailResult::ID, payload, 1).with_reply_to(reply_to),
                         registry,
@@ -706,22 +685,15 @@ fn route_mail(
             // `Session`/`EngineMailbox` targets fall through to the
             // warn-drop, keeping the blast radius minimal.
             if mail.kind.0 == <aether_kinds::LogTail as Kind>::ID.0 {
-                let err = aether_kinds::LogTailResult::Err {
-                    error: format!("mailbox {recipient} not registered on engine"),
-                };
+                let err =
+                    aether_kinds::LogTailResult::Err { error: format!("mailbox {recipient} not registered on engine") };
                 // ADR-0100: encode through the kind's declared codec.
                 let payload = err.encode_into_bytes();
                 if let SourceAddr::Component(target) = mail.reply_to.addr {
-                    let reply_to =
-                        Source::with_correlation(SourceAddr::None, mail.reply_to.correlation_id);
+                    let reply_to = Source::with_correlation(SourceAddr::None, mail.reply_to.correlation_id);
                     route_mail(
-                        Mail::new(
-                            target,
-                            <aether_kinds::LogTailResult as Kind>::ID,
-                            payload,
-                            1,
-                        )
-                        .with_reply_to(reply_to),
+                        Mail::new(target, <aether_kinds::LogTailResult as Kind>::ID, payload, 1)
+                            .with_reply_to(reply_to),
                         registry,
                         outbound,
                         chassis_router,
@@ -788,13 +760,7 @@ mod tests {
 
         let event = outbound_rx.try_recv().expect("bubble-up event emitted");
         match event {
-            EgressEvent::UnresolvedMail {
-                recipient_mailbox_id,
-                kind_id,
-                payload: p,
-                count,
-                ..
-            } => {
+            EgressEvent::UnresolvedMail { recipient_mailbox_id, kind_id, payload: p, count, .. } => {
                 assert_eq!(recipient_mailbox_id, unknown);
                 assert_eq!(kind_id, kind);
                 assert_eq!(p, payload);
@@ -864,9 +830,8 @@ mod tests {
 
         let unknown = MailboxId(0xDEAD_BEEF_u64);
         mailer.push(
-            Mail::new(unknown, <LogTail as Kind>::ID, vec![], 1).with_reply_to(
-                Source::with_correlation(SourceAddr::Component(recorder_id), 0xCAFE),
-            ),
+            Mail::new(unknown, <LogTail as Kind>::ID, vec![], 1)
+                .with_reply_to(Source::with_correlation(SourceAddr::Component(recorder_id), 0xCAFE)),
         );
 
         let recorded = recorded.read().unwrap();
@@ -875,10 +840,9 @@ mod tests {
         assert_eq!(*kind, <LogTailResult as Kind>::ID);
         assert_eq!(*correlation, 0xCAFE, "correlation echoed onto the reply");
         match LogTailResult::decode_from_bytes(payload).unwrap() {
-            LogTailResult::Err { error } => assert!(
-                error.contains(&unknown.to_string()),
-                "error names the recipient id: {error}",
-            ),
+            LogTailResult::Err { error } => {
+                assert!(error.contains(&unknown.to_string()), "error names the recipient id: {error}",)
+            }
             other @ LogTailResult::Ok { .. } => {
                 panic!("expected LogTailResult::Err, got {other:?}")
             }
@@ -899,14 +863,12 @@ mod tests {
 
         let unknown = MailboxId(0xDEAD_BEEF_u64);
         // Arbitrary non-`LogTail` kind id — the reply branch must not fire.
-        mailer.push(Mail::new(unknown, KindId(0xABCD), vec![], 1).with_reply_to(
-            Source::with_correlation(SourceAddr::Component(recorder_id), 0xCAFE),
-        ));
-
-        assert!(
-            recorded.read().unwrap().is_empty(),
-            "non-LogTail unknown-mailbox mail warn-drops with no reply",
+        mailer.push(
+            Mail::new(unknown, KindId(0xABCD), vec![], 1)
+                .with_reply_to(Source::with_correlation(SourceAddr::Component(recorder_id), 0xCAFE)),
         );
+
+        assert!(recorded.read().unwrap().is_empty(), "non-LogTail unknown-mailbox mail warn-drops with no reply",);
     }
 
     /// ADR-0086 Phase 3b: `aether.trace.tail` to `CHASSIS_MAILBOX_ID`
@@ -930,27 +892,14 @@ mod tests {
         // An off-actor chassis-root mail records its `Sent` in the
         // chassis-host ring (the recipient is unregistered and the mail
         // itself warn-drops, but the off-actor `Sent` still lands).
-        let root =
-            mailer.push_chassis_root_mail(0x55, MailboxId(0x1234), KindId(0xFEED), vec![], 1);
+        let root = mailer.push_chassis_root_mail(0x55, MailboxId(0x1234), KindId(0xFEED), vec![], 1);
 
         // Query the chassis-host ring for that root, replying to a
         // `Component` target (the MCP RPC-server reply hop).
-        let request = TraceTail {
-            max: 0,
-            since: None,
-            root: Some(root),
-        };
+        let request = TraceTail { max: 0, since: None, root: Some(root) };
         mailer.push(
-            Mail::new(
-                MailboxId::CHASSIS_MAILBOX_ID,
-                TraceTail::ID,
-                request.encode_into_bytes(),
-                1,
-            )
-            .with_reply_to(Source::with_correlation(
-                SourceAddr::Component(recorder_id),
-                0xCAFE,
-            )),
+            Mail::new(MailboxId::CHASSIS_MAILBOX_ID, TraceTail::ID, request.encode_into_bytes(), 1)
+                .with_reply_to(Source::with_correlation(SourceAddr::Component(recorder_id), 0xCAFE)),
         );
 
         let recorded = recorded.read().unwrap();
@@ -960,9 +909,7 @@ mod tests {
         assert_eq!(*correlation, 0xCAFE, "correlation echoed onto the reply");
         match TraceTailResult::decode_from_bytes(payload).unwrap() {
             TraceTailResult::Ok { entries, .. } => assert!(
-                entries
-                    .iter()
-                    .any(|e| e.root == root && matches!(e.event, TraceEvent::Sent { .. })),
+                entries.iter().any(|e| e.root == root && matches!(e.event, TraceEvent::Sent { .. })),
                 "the chassis-host root Sent came back: {entries:?}",
             ),
             TraceTailResult::Err { error } => panic!("expected Ok, got Err {error}"),
@@ -993,14 +940,8 @@ mod tests {
     fn note_schema() -> SchemaType {
         SchemaType::Struct {
             fields: Cow::Owned(vec![
-                NamedField {
-                    name: Cow::Borrowed("body"),
-                    ty: SchemaType::String,
-                },
-                NamedField {
-                    name: Cow::Borrowed("seq"),
-                    ty: SchemaType::Scalar(Primitive::U32),
-                },
+                NamedField { name: Cow::Borrowed("body"), ty: SchemaType::String },
+                NamedField { name: Cow::Borrowed("seq"), ty: SchemaType::Scalar(Primitive::U32) },
             ]),
             repr_c: false,
         }
@@ -1014,10 +955,7 @@ mod tests {
     }
     impl CapturingSink {
         fn new() -> Self {
-            Self {
-                captured: Arc::new(RwLock::new(Vec::new())),
-                delivery_count: Arc::new(AtomicUsize::new(0)),
-            }
+            Self { captured: Arc::new(RwLock::new(Vec::new())), delivery_count: Arc::new(AtomicUsize::new(0)) }
         }
         /// Inline-variant handler: synchronous capture body. Used by
         /// the `register_inline` test sites; mailer brackets the
@@ -1086,23 +1024,12 @@ mod tests {
         let sink = CapturingSink::new();
         let sink_id = registry.register_inbox("test.sink", sink.inbox_handler());
 
-        let reply = CastReply {
-            code: 0x1122_3344,
-            flag: 0xABCD,
-            _pad: 0,
-        };
-        let sent = mailer.send_reply_unchained(
-            Source::with_correlation(SourceAddr::Component(sink_id), 1),
-            &reply,
-        );
+        let reply = CastReply { code: 0x1122_3344, flag: 0xABCD, _pad: 0 };
+        let sent = mailer.send_reply_unchained(Source::with_correlation(SourceAddr::Component(sink_id), 1), &reply);
         assert!(sent, "Component reply target routes");
 
         let captured = sink.captured.read().unwrap().clone();
-        assert_eq!(
-            captured,
-            vec![bytemuck::bytes_of(&reply).to_vec()],
-            "reply payload is the cast image"
-        );
+        assert_eq!(captured, vec![bytemuck::bytes_of(&reply).to_vec()], "reply payload is the cast image");
     }
 
     /// #1695 / ADR-0080 §5/§6: a `Component`-addressed reply routed
@@ -1130,11 +1057,7 @@ mod tests {
                 // Terminal test consumer — discharge the obligation, then
                 // read the lineage fields off the dispatch.
                 dispatch.discharge();
-                captured_for_handler.write().unwrap().push((
-                    dispatch.mail_id,
-                    dispatch.root,
-                    dispatch.parent_mail,
-                ));
+                captured_for_handler.write().unwrap().push((dispatch.mail_id, dispatch.root, dispatch.parent_mail));
             }),
         );
 
@@ -1148,11 +1071,7 @@ mod tests {
 
         let sent = mailer.send_reply(
             Source::with_correlation(SourceAddr::Component(sink_id), 7),
-            &CastReply {
-                code: 1,
-                flag: 2,
-                _pad: 0,
-            },
+            &CastReply { code: 1, flag: 2, _pad: 0 },
             reply_id,
             root,
             Some(parent),
@@ -1169,21 +1088,13 @@ mod tests {
 
         // The §6 producer hook fired: the bare inbox records no
         // `Finished`, so the reply's `Sent` keeps the root live.
-        assert_eq!(
-            counter.live_roots(),
-            1,
-            "send_reply records the reply's Sent on the caller root"
-        );
+        assert_eq!(counter.live_roots(), 1, "send_reply records the reply's Sent on the caller root");
 
         // The recipient's dispatcher would record the matching `Finished`;
         // doing so here drives the root to zero and reclaims the cell —
         // proving the reply's `Sent` is balanced, not a leak.
         mailer.record_finished(reply_id, root);
-        assert_eq!(
-            counter.live_roots(),
-            0,
-            "the reply's Finished balances its Sent exactly"
-        );
+        assert_eq!(counter.live_roots(), 0, "the reply's Finished balances its Sent exactly");
     }
 
     /// Mail to a registered-kind sink is delivered verbatim — the
@@ -1192,18 +1103,12 @@ mod tests {
     fn registered_kind_passes_through_mailer() {
         let (registry, mailer) = make_mailer();
         let note_id = registry
-            .register_kind_with_descriptor(KindDescriptor {
-                name: Note::NAME.into(),
-                schema: note_schema(),
-            })
+            .register_kind_with_descriptor(KindDescriptor { name: Note::NAME.into(), schema: note_schema() })
             .unwrap();
         let sink = CapturingSink::new();
         let sink_id = registry.register_inbox("test.sink", sink.inbox_handler());
 
-        let note = Note {
-            body: "verbatim".into(),
-            seq: 1,
-        };
+        let note = Note { body: "verbatim".into(), seq: 1 };
         let bytes = wire::to_vec(&note).unwrap();
         mailer.push(Mail::new(sink_id, note_id, bytes.clone(), 1));
 
@@ -1226,9 +1131,7 @@ mod tests {
     /// silent.
     fn settle_probe(mailer: &Mailer, root: MailId) -> Receiver<()> {
         let settle = Arc::new(SettlementRegistry::new());
-        mailer
-            .trace_handle()
-            .install_settlement_registry(Arc::clone(&settle));
+        mailer.trace_handle().install_settlement_registry(Arc::clone(&settle));
         let rx = settle.subscribe_settlement(root);
         mailer.record_sent(root, root, None, root.sender, MailboxId(0), KindId(0));
         rx
@@ -1309,10 +1212,7 @@ mod tests {
                     let rx = settle_probe(&mailer, mail_id);
                     let sink = CapturingSink::new();
                     let id = registry.register_inline("test.meta.sink", sink.inline_handler());
-                    mailer.push(
-                        Mail::new(id, KindId(0xFEED), vec![], 1)
-                            .with_lineage(mail_id, mail_id, None),
-                    );
+                    mailer.push(Mail::new(id, KindId(0xFEED), vec![], 1).with_lineage(mail_id, mail_id, None));
                     rx.try_recv().is_ok()
                 }),
             },
@@ -1328,10 +1228,7 @@ mod tests {
                     let rx = settle_probe(&mailer, mail_id);
                     let sink = CapturingSink::new();
                     let id = registry.register_inbox("test.meta.closure", sink.inbox_handler());
-                    mailer.push(
-                        Mail::new(id, KindId(0xFEED), vec![], 1)
-                            .with_lineage(mail_id, mail_id, None),
-                    );
+                    mailer.push(Mail::new(id, KindId(0xFEED), vec![], 1).with_lineage(mail_id, mail_id, None));
                     rx.try_recv().is_ok()
                 }),
             },
@@ -1346,10 +1243,7 @@ mod tests {
                     let rx = settle_probe(&mailer, mail_id);
                     let id = registry.register_inbox("test.meta.dropped", Arc::new(|_| {}));
                     let _ = registry.drop_mailbox(id).expect("drop");
-                    mailer.push(
-                        Mail::new(id, KindId(0xFEED), vec![], 1)
-                            .with_lineage(mail_id, mail_id, None),
-                    );
+                    mailer.push(Mail::new(id, KindId(0xFEED), vec![], 1).with_lineage(mail_id, mail_id, None));
                     rx.try_recv().is_ok()
                 }),
             },

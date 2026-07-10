@@ -7,8 +7,8 @@ use std::f32::consts::TAU;
 use aether_data::MailboxId;
 
 use super::instrument::{
-    Adsr, InstrumentDef, PARTIAL_COUNT, PARTIAL_SILENCE_FLOOR, PartialBankDef, PitchSweep,
-    REFERENCE_FREQ, VoiceDef, Wave,
+    Adsr, InstrumentDef, PARTIAL_COUNT, PARTIAL_SILENCE_FLOOR, PartialBankDef, PitchSweep, REFERENCE_FREQ, VoiceDef,
+    Wave,
 };
 use super::sample::SampleVoice;
 
@@ -142,15 +142,7 @@ pub fn voice_seed(sender_mailbox: MailboxId, instrument_id: u8, pitch: u8) -> u3
 }
 
 impl OscVoice {
-    pub fn new(
-        pitch: u8,
-        velocity: u8,
-        wave: Wave,
-        adsr: Adsr,
-        base_amp: f32,
-        sample_rate: f32,
-        seed: u32,
-    ) -> Self {
+    pub fn new(pitch: u8, velocity: u8, wave: Wave, adsr: Adsr, base_amp: f32, sample_rate: f32, seed: u32) -> Self {
         let freq = 440.0 * ((f32::from(pitch) - 69.0) / 12.0).exp2();
         let phase_step = freq / sample_rate;
         let v = f32::from(velocity) / 127.0;
@@ -324,12 +316,7 @@ struct Partial {
 }
 
 impl Partial {
-    const SILENT: Self = Self {
-        phase: 0.0,
-        phase_step: 0.0,
-        amp: 0.0,
-        decay_mul: 1.0,
-    };
+    const SILENT: Self = Self { phase: 0.0, phase_step: 0.0, amp: 0.0, decay_mul: 1.0 };
 }
 
 /// Global attack/release ramp wrapping a partial bank. The partials
@@ -437,13 +424,7 @@ pub struct PartialBankVoice {
 }
 
 impl PartialBankVoice {
-    pub fn new(
-        pitch: u8,
-        velocity: u8,
-        def: &PartialBankDef,
-        base_amp: f32,
-        sample_rate: f32,
-    ) -> Self {
+    pub fn new(pitch: u8, velocity: u8, def: &PartialBankDef, base_amp: f32, sample_rate: f32) -> Self {
         let f0 = 440.0 * ((f32::from(pitch) - 69.0) / 12.0).exp2();
         let v = f32::from(velocity) / 127.0;
         let amplitude = base_amp * v;
@@ -458,11 +439,7 @@ impl PartialBankVoice {
             let i_f = i as f32;
             let n = i_f + 1.0;
             let stretch = (def.inharmonicity * n).mul_add(n, 1.0).sqrt();
-            let detune = if i % 2 == 0 {
-                1.0 + def.detune
-            } else {
-                1.0 - def.detune
-            };
+            let detune = if i % 2 == 0 { 1.0 + def.detune } else { 1.0 - def.detune };
             p.phase_step = (n * f0 * stretch * detune) / sample_rate;
             let rate = def.decay_base * i_f.mul_add(def.decay_spread, 1.0) * pitch_scale;
             p.decay_mul = (-rate * dt).exp();
@@ -538,9 +515,7 @@ impl PartialBankVoice {
         // A held voice whose partials have rung out frees itself; a
         // pad (zero partial decay) only ends once its release ramp
         // completes.
-        if matches!(self.stage, BankStage::Sustain)
-            && amp_sum * self.amplitude < PARTIAL_SILENCE_FLOOR
-        {
+        if matches!(self.stage, BankStage::Sustain) && amp_sum * self.amplitude < PARTIAL_SILENCE_FLOOR {
             self.stage = BankStage::Done;
         }
         acc * self.amplitude * ramp
@@ -587,20 +562,15 @@ pub fn build_builtin_kernel(
     match def.voice {
         VoiceDef::Oscillator { wave, adsr } => {
             let seed = voice_seed(sender_mailbox, instrument_id, pitch);
-            let mut osc =
-                OscVoice::new(pitch, velocity, wave, adsr, def.base_amp, sample_rate, seed);
+            let mut osc = OscVoice::new(pitch, velocity, wave, adsr, def.base_amp, sample_rate, seed);
             if let Some(sweep) = def.pitch_sweep {
                 osc = osc.with_pitch_sweep(sweep, sample_rate);
             }
             VoiceKernel::Oscillator(osc)
         }
-        VoiceDef::PartialBank(bank) => VoiceKernel::PartialBank(PartialBankVoice::new(
-            pitch,
-            velocity,
-            &bank,
-            def.base_amp,
-            sample_rate,
-        )),
+        VoiceDef::PartialBank(bank) => {
+            VoiceKernel::PartialBank(PartialBankVoice::new(pitch, velocity, &bank, def.base_amp, sample_rate))
+        }
     }
 }
 

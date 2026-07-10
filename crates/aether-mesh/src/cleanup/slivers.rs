@@ -59,10 +59,7 @@ const MAX_SLIVER_ITERATIONS: usize = 64;
 
 impl IndexedMesh {
     pub(super) fn remove_slivers(self) -> Self {
-        let Self {
-            vertices,
-            mut polygons,
-        } = self;
+        let Self { vertices, mut polygons } = self;
 
         for _ in 0..MAX_SLIVER_ITERATIONS {
             let mut merges: HashMap<VertexId, VertexId> = HashMap::new();
@@ -158,20 +155,11 @@ mod tests {
     use crate::plane::Plane3;
 
     fn xy_plane() -> Plane3 {
-        Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1,
-            d: 0,
-        }
+        Plane3 { n_x: 0, n_y: 0, n_z: 1, d: 0 }
     }
 
     fn poly(vertices: Vec<VertexId>) -> IndexedPolygon {
-        IndexedPolygon {
-            vertices,
-            plane: xy_plane(),
-            color: 0,
-        }
+        IndexedPolygon { vertices, plane: xy_plane(), color: 0 }
     }
 
     fn p(x: i32, y: i32, z: i32) -> Point3 {
@@ -283,10 +271,7 @@ mod tests {
 
     #[test]
     fn empty_mesh_passes_through_unchanged() {
-        let mesh = IndexedMesh {
-            vertices: vec![],
-            polygons: vec![],
-        };
+        let mesh = IndexedMesh { vertices: vec![], polygons: vec![] };
         let cleaned = mesh.remove_slivers();
         assert!(cleaned.vertices.is_empty());
         assert!(cleaned.polygons.is_empty());

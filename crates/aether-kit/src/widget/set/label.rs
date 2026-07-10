@@ -16,9 +16,7 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use crate::widget::set::{reply_if_hidden, text_origin_y};
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme};
-use crate::widget::{
-    Collect, LabelConfig, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
-};
+use crate::widget::{Collect, LabelConfig, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
 
 /// A static text label. Holds the text plus the cached theme / frame.
 pub struct LabelWidget {
@@ -46,12 +44,7 @@ impl WasmActor for LabelWidget {
             text: config.text,
             theme: config.theme,
             state: InteractionState::new(config.state),
-            frame: WidgetFrame {
-                x: 0.0,
-                y: 0.0,
-                width: 0.0,
-                height: 0.0,
-            },
+            frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
         })
     }
 
@@ -103,17 +96,12 @@ impl WasmActor for LabelWidget {
                 font_id: self.theme.font_id,
                 text: self.text.clone(),
                 size_pixels: size,
-                color: self
-                    .theme
-                    .fill(self.theme.text_primary, self.state.theme_state(false)),
+                color: self.theme.fill(self.theme.text_primary, self.state.theme_state(false)),
                 clip: None,
             });
         }
         if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList {
-                intrinsic: None,
-                items,
-            });
+            parent.send(&WidgetDrawList { intrinsic: None, items });
         }
     }
 }

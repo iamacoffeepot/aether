@@ -31,9 +31,7 @@ impl Persistence for CaptureCtx {
 }
 
 /// The state kind a typed actor declares as `type State`.
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "test.state.counter")]
 struct CounterState {
     count: u32,
@@ -42,9 +40,7 @@ struct CounterState {
 /// A reshaped version of the same logical state — an added field changes
 /// the schema and therefore `Kind::ID`, which is exactly how a
 /// `replace_component` against an evolved state kind manifests.
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "test.state.counter.reshaped")]
 struct CounterStateReshaped {
     count: u32,
@@ -74,9 +70,7 @@ fn save_state_kind_round_trips_through_decode_kind() {
     assert_eq!(version, 0, "the generated on_dehydrate frames version 0");
 
     let prior = prior_from(&buf);
-    let recovered = prior
-        .decode_kind::<CounterState>()
-        .expect("the framed bundle decodes back to the same state kind");
+    let recovered = prior.decode_kind::<CounterState>().expect("the framed bundle decodes back to the same state kind");
     assert_eq!(recovered, value);
 }
 
@@ -105,8 +99,5 @@ fn reshaped_state_kind_misses_decode_with_bytes_present() {
         prior.decode_kind::<CounterStateReshaped>().is_none(),
         "a reshaped state kind must not decode the old bundle",
     );
-    assert!(
-        !prior.bytes().is_empty(),
-        "the raw bytes stay present on a decode-miss — this is the warn trigger",
-    );
+    assert!(!prior.bytes().is_empty(), "the raw bytes stay present on a decode-miss — this is the warn trigger",);
 }

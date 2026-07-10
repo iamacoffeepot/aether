@@ -47,10 +47,7 @@ impl NativeActor for TraceDispatchCapability {
     // here for the `#[actor]` macro's expansion.
     const NAMESPACE: &'static str = "aether.trace";
 
-    fn init(
-        (): (),
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<TraceDispatchCapabilityState, BootError> {
+    fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<TraceDispatchCapabilityState, BootError> {
         let registry = Arc::clone(ctx.mailer().registry());
         Ok(TraceDispatchCapabilityState::with_registry(registry))
     }
@@ -139,16 +136,9 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let (outbound, _rx) = HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            MailboxId(0x7ACE),
-        ));
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x7ACE)));
         let state = TraceDispatchCapabilityState::with_registry(Arc::clone(&registry));
-        DispatchTracedFixture {
-            registry,
-            transport,
-            state,
-        }
+        DispatchTracedFixture { registry, transport, state }
     }
 
     /// Build a chassis-root `NativeCtx` against the fixture's
@@ -179,9 +169,12 @@ mod tests {
             registry.register_inline(
                 name,
                 Arc::new(move |d: MailDispatch<'_>| {
-                    sink.lock()
-                        .expect("test stub: captured mutex poisoned")
-                        .push((d.kind, d.root, d.parent_mail, d.payload.to_vec()));
+                    sink.lock().expect("test stub: captured mutex poisoned").push((
+                        d.kind,
+                        d.root,
+                        d.parent_mail,
+                        d.payload.to_vec(),
+                    ));
                 }),
             );
         }
@@ -226,10 +219,7 @@ mod tests {
         // the sink.
         drop(ctx);
 
-        let snapshot = captured
-            .lock()
-            .expect("test stub: captured mutex poisoned")
-            .clone();
+        let snapshot = captured.lock().expect("test stub: captured mutex poisoned").clone();
         assert_eq!(snapshot.len(), 2, "expected each envelope to dispatch");
         assert!(
             snapshot.iter().any(|(k, root, parent, p)| *k == kind_alpha
@@ -247,10 +237,9 @@ mod tests {
         );
 
         match ack {
-            DispatchTracedAck::Ok { root } => assert_eq!(
-                root, inbound,
-                "Ok ack must echo the in-flight inbound mail id as the chassis root"
-            ),
+            DispatchTracedAck::Ok { root } => {
+                assert_eq!(root, inbound, "Ok ack must echo the in-flight inbound mail id as the chassis root")
+            }
             DispatchTracedAck::Err { error } => {
                 panic!("expected Ok ack, got Err: {error}")
             }

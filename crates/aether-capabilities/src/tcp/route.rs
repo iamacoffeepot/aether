@@ -7,8 +7,8 @@ use aether_data::{ActorId, Tag, fold_lineage, with_tag};
 use aether_substrate::actor::native::NativeActorMailbox;
 
 use super::{
-    BindListener, Close, ListListeners, SessionClose, SessionWrite, TcpCapability,
-    TcpListenerActor, TcpSessionActor, UnbindListener,
+    BindListener, Close, ListListeners, SessionClose, SessionWrite, TcpCapability, TcpListenerActor, TcpSessionActor,
+    UnbindListener,
 };
 
 /// ADR-0099 §3: the `MailboxId` of a tcp session — a grandchild of the
@@ -19,10 +19,7 @@ use super::{
 /// identically-named sessions get distinct ids, where the pre-0099 flat
 /// `hash("aether.tcp.session:NAME")` form collided.
 fn session_mailbox_id(cap_carry: u64, listener_name: &str, session_name: &str) -> u64 {
-    let listener_carry = fold_lineage(
-        cap_carry,
-        ActorId::instanced(TcpListenerActor::NAMESPACE, listener_name),
-    );
+    let listener_carry = fold_lineage(cap_carry, ActorId::instanced(TcpListenerActor::NAMESPACE, listener_name));
     let session_node = ActorId::instanced(TcpSessionActor::NAMESPACE, session_name);
     with_tag(Tag::Mailbox, fold_lineage(listener_carry, session_node))
 }
@@ -111,43 +108,29 @@ pub trait TcpWasmExt {
     /// named `name`. The full mailbox address is
     /// `format!("{}:{}", TcpSessionActor::NAMESPACE, name)`. See
     /// [`Self::listener`] for the `R` parameter shape.
-    fn session<R: Addressable>(
-        &self,
-        listener_name: &str,
-        session_name: &str,
-    ) -> WasmActorMailbox<'_, R>;
+    fn session<R: Addressable>(&self, listener_name: &str, session_name: &str) -> WasmActorMailbox<'_, R>;
 }
 
 impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
     //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>) {
-        self.send(&BindListener {
-            addr: addr.into(),
-            name: name.map(Into::into),
-        });
+        self.send(&BindListener { addr: addr.into(), name: name.map(Into::into) });
     }
     fn unbind_listener(&self, listener_name: &str) {
-        self.send(&UnbindListener {
-            listener_name: listener_name.into(),
-        });
+        self.send(&UnbindListener { listener_name: listener_name.into() });
     }
     fn list_listeners(&self) {
         self.send(&ListListeners::default());
     }
     fn close(&self, listener_name: &str) {
-        self.listener::<TcpListenerActor>(listener_name)
-            .send(&Close::default());
+        self.listener::<TcpListenerActor>(listener_name).send(&Close::default());
     }
     //noinspection DuplicatedCode
     fn session_write(&self, listener_name: &str, session_name: &str, bytes: &[u8]) {
-        self.session::<TcpSessionActor>(listener_name, session_name)
-            .send(&SessionWrite {
-                bytes: bytes.to_vec(),
-            });
+        self.session::<TcpSessionActor>(listener_name, session_name).send(&SessionWrite { bytes: bytes.to_vec() });
     }
     fn session_close(&self, listener_name: &str, session_name: &str) {
-        self.session::<TcpSessionActor>(listener_name, session_name)
-            .send(&SessionClose::default());
+        self.session::<TcpSessionActor>(listener_name, session_name).send(&SessionClose::default());
     }
     fn listener<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
         // ADR-0099 §3: a listener is this cap's child — fold its node
@@ -155,19 +138,11 @@ impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
         // its carry).
         self.resolve_peer_scoped::<R>(TcpListenerActor::NAMESPACE, name)
     }
-    fn session<R: Addressable>(
-        &self,
-        listener_name: &str,
-        session_name: &str,
-    ) -> WasmActorMailbox<'_, R> {
+    fn session<R: Addressable>(&self, listener_name: &str, session_name: &str) -> WasmActorMailbox<'_, R> {
         // The session id is folded by a custom scheme rather than by name, so
         // rewrap it with `at`, inheriting this cap handle's ctx binding so the
         // session handle's sends stamp the same origin (issue 1987).
-        self.at::<R>(session_mailbox_id(
-            self.mailbox_id().0,
-            listener_name,
-            session_name,
-        ))
+        self.at::<R>(session_mailbox_id(self.mailbox_id().0, listener_name, session_name))
     }
 }
 
@@ -210,58 +185,37 @@ pub trait TcpNativeExt {
 
     /// Resolve a typed session-instance mailbox. See
     /// [`TcpWasmExt::session`] for the addressing rationale.
-    fn session<R: Addressable>(
-        &self,
-        listener_name: &str,
-        session_name: &str,
-    ) -> NativeActorMailbox<'_, R>;
+    fn session<R: Addressable>(&self, listener_name: &str, session_name: &str) -> NativeActorMailbox<'_, R>;
 }
 
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
     //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>) {
-        self.send(&BindListener {
-            addr: addr.into(),
-            name: name.map(Into::into),
-        });
+        self.send(&BindListener { addr: addr.into(), name: name.map(Into::into) });
     }
     fn unbind_listener(&self, listener_name: &str) {
-        self.send(&UnbindListener {
-            listener_name: listener_name.into(),
-        });
+        self.send(&UnbindListener { listener_name: listener_name.into() });
     }
     fn list_listeners(&self) {
         self.send(&ListListeners::default());
     }
     fn close(&self, listener_name: &str) {
-        self.listener::<TcpListenerActor>(listener_name)
-            .send(&Close::default());
+        self.listener::<TcpListenerActor>(listener_name).send(&Close::default());
     }
     //noinspection DuplicatedCode
     fn session_write(&self, listener_name: &str, session_name: &str, bytes: &[u8]) {
-        self.session::<TcpSessionActor>(listener_name, session_name)
-            .send(&SessionWrite {
-                bytes: bytes.to_vec(),
-            });
+        self.session::<TcpSessionActor>(listener_name, session_name).send(&SessionWrite { bytes: bytes.to_vec() });
     }
     fn session_close(&self, listener_name: &str, session_name: &str) {
-        self.session::<TcpSessionActor>(listener_name, session_name)
-            .send(&SessionClose::default());
+        self.session::<TcpSessionActor>(listener_name, session_name).send(&SessionClose::default());
     }
     fn listener<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         // ADR-0099 §3: fold the listener node onto the cap's carry (the
         // cap is depth-1, so `self`'s id is its carry).
         self.resolve_peer_scoped::<R>(TcpListenerActor::NAMESPACE, name)
     }
-    fn session<R: Addressable>(
-        &self,
-        listener_name: &str,
-        session_name: &str,
-    ) -> NativeActorMailbox<'_, R> {
-        NativeActorMailbox::__new(
-            session_mailbox_id(self.mailbox_id().0, listener_name, session_name),
-            self.binding(),
-        )
+    fn session<R: Addressable>(&self, listener_name: &str, session_name: &str) -> NativeActorMailbox<'_, R> {
+        NativeActorMailbox::__new(session_mailbox_id(self.mailbox_id().0, listener_name, session_name), self.binding())
     }
 }

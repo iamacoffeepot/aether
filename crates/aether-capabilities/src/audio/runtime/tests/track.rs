@@ -113,11 +113,7 @@ fn replay_same_key_restarts_single_track() {
     }
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
-    assert_eq!(
-        synth.track_count(),
-        1,
-        "re-playing the same key must restart, not stack",
-    );
+    assert_eq!(synth.track_count(), 1, "re-playing the same key must restart, not stack",);
 }
 
 /// A `TrackStart` at an explicit sender + lane over the shared
@@ -141,19 +137,11 @@ fn distinct_lanes_under_one_sender_play_independently() {
     let mut synth = Synth::new(queue, TEST_RATE);
     // Two senders that collapse to the same MailboxId(0) (MCP
     // sessions) play the same path under distinct lanes.
-    sender
-        .push(keyed_track_start(MailboxId(0), Some("a"), ramp_pcm(4_800)))
-        .unwrap();
-    sender
-        .push(keyed_track_start(MailboxId(0), Some("b"), ramp_pcm(4_800)))
-        .unwrap();
+    sender.push(keyed_track_start(MailboxId(0), Some("a"), ramp_pcm(4_800))).unwrap();
+    sender.push(keyed_track_start(MailboxId(0), Some("b"), ramp_pcm(4_800))).unwrap();
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
-    assert_eq!(
-        synth.track_count(),
-        2,
-        "distinct lanes must not alias to one track",
-    );
+    assert_eq!(synth.track_count(), 2, "distinct lanes must not alias to one track",);
     // Stopping lane a leaves lane b sounding.
     sender
         .push(AudioEvent::TrackStop {
@@ -165,11 +153,7 @@ fn distinct_lanes_under_one_sender_play_independently() {
         .unwrap();
     let mut tail = vec![0.0f32; 512];
     synth.fill(&mut tail, 1);
-    assert_eq!(
-        synth.track_count(),
-        1,
-        "stopping one lane must not silence the other",
-    );
+    assert_eq!(synth.track_count(), 1, "stopping one lane must not silence the other",);
 }
 
 #[test]
@@ -177,26 +161,17 @@ fn same_sender_and_lane_replays_single_track() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, TEST_RATE);
     for _ in 0..3 {
-        sender
-            .push(keyed_track_start(MailboxId(0), Some("a"), ramp_pcm(256)))
-            .unwrap();
+        sender.push(keyed_track_start(MailboxId(0), Some("a"), ramp_pcm(256))).unwrap();
     }
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
-    assert_eq!(
-        synth.track_count(),
-        1,
-        "re-playing the same (sender, lane) key must restart, not stack",
-    );
+    assert_eq!(synth.track_count(), 1, "re-playing the same (sender, lane) key must restart, not stack",);
 }
 #[test]
 fn play_track_happy_path_replies_ok_and_starts_a_track() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
 
     let root = MailId::new(MailboxId(0xC0), 1);
     let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), root, root);
@@ -217,27 +192,18 @@ fn play_track_happy_path_replies_ok_and_starts_a_track() {
     // Synthesize the fs reply with a real WAV asset (at half the
     // device rate, so decode also resamples).
     let wav = decode::wav_int16_mono(&ramp(512), 24_000);
-    let mut read_ctx =
-        NativeCtx::new_dispatching(&transport, fs_reply_source(track_correlation), root, root);
+    let mut read_ctx = NativeCtx::new_dispatching(&transport, fs_reply_source(track_correlation), root, root);
     AudioCapability::on_read_result(
         &mut cap,
         &mut read_ctx,
-        ReadResult::Ok {
-            namespace: "assets".to_owned(),
-            path: "track.wav".to_owned(),
-            bytes: wav,
-        },
+        ReadResult::Ok { namespace: "assets".to_owned(), path: "track.wav".to_owned(), bytes: wav },
     );
     // The decode worker runs off-thread and pushes the completion
     // wake; route it through the cap's #[handler(task)] arm.
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
 
     match decode_session_reply::<PlayTrackResult>(&rx) {
-        PlayTrackResult::Ok {
-            namespace,
-            path,
-            lane,
-        } => {
+        PlayTrackResult::Ok { namespace, path, lane } => {
             assert_eq!(namespace, "assets");
             assert_eq!(path, "track.wav");
             assert_eq!(lane, None);
@@ -256,13 +222,9 @@ fn play_track_happy_path_replies_ok_and_starts_a_track() {
 fn play_track_echoes_lane_through_result_and_track_start() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
 
-    let mut ctx =
-        NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
+    let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
     AudioCapability::on_play_track(
         &mut cap,
         &mut ctx,
@@ -280,11 +242,7 @@ fn play_track_echoes_lane_through_result_and_track_start() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut read_ctx,
-        ReadResult::Ok {
-            namespace: "assets".to_owned(),
-            path: "track.wav".to_owned(),
-            bytes: wav,
-        },
+        ReadResult::Ok { namespace: "assets".to_owned(), path: "track.wav".to_owned(), bytes: wav },
     );
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
 
@@ -305,13 +263,9 @@ fn play_track_echoes_lane_through_result_and_track_start() {
 fn play_track_missing_file_replies_err_with_fs_error() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
 
-    let mut ctx =
-        NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
+    let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
     AudioCapability::on_play_track(
         &mut cap,
         &mut ctx,
@@ -328,11 +282,7 @@ fn play_track_missing_file_replies_err_with_fs_error() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut read_ctx,
-        ReadResult::Err {
-            namespace: "assets".to_owned(),
-            path: "missing.wav".to_owned(),
-            error: FsError::NotFound,
-        },
+        ReadResult::Err { namespace: "assets".to_owned(), path: "missing.wav".to_owned(), error: FsError::NotFound },
     );
 
     match decode_session_reply::<PlayTrackResult>(&rx) {
@@ -342,22 +292,15 @@ fn play_track_missing_file_replies_err_with_fs_error() {
         }
         PlayTrackResult::Ok { .. } => panic!("expected Err for a missing file"),
     }
-    assert!(
-        queue.pop().is_none(),
-        "a failed read must not start a track"
-    );
+    assert!(queue.pop().is_none(), "a failed read must not start a track");
 }
 
 #[test]
 fn play_track_on_nop_chassis_replies_err() {
     let mut cap = AudioCapabilityState::nop();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
-    let mut ctx =
-        NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
     AudioCapability::on_play_track(
         &mut cap,
         &mut ctx,
@@ -373,18 +316,11 @@ fn play_track_on_nop_chassis_replies_err() {
         PlayTrackResult::Err { .. } => {}
         PlayTrackResult::Ok { .. } => panic!("nop chassis must reply Err"),
     }
-    assert!(
-        rx.try_recv().is_err(),
-        "nop chassis must not forward a read"
-    );
+    assert!(rx.try_recv().is_err(), "nop chassis must not forward a read");
     // stop_track on a nop chassis is a silent no-op (no panic).
     AudioCapability::on_stop_track(
         &mut cap,
         ctx.as_single(),
-        StopTrack {
-            namespace: "assets".to_owned(),
-            path: "track.wav".to_owned(),
-            lane: None,
-        },
+        StopTrack { namespace: "assets".to_owned(), path: "track.wav".to_owned(), lane: None },
     );
 }

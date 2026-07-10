@@ -22,20 +22,18 @@ mod pipeline;
 mod quad;
 mod targets;
 
-pub use capture::{
-    CaptureMeta, encode_png, finish_capture, map_capture_rgba, prepare_capture_copy,
-};
+pub use capture::{CaptureMeta, encode_png, finish_capture, map_capture_rgba, prepare_capture_copy};
 pub use material::{
-    MATERIAL_VERTEX_BUFFER_BYTES, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw,
-    MaterialPassDraw, MaterialPassRecord, MaterialPipelines, build_material_pipelines,
-    push_coverage_params, push_material_rect_vertices, push_textured_params, record_material_pass,
+    MATERIAL_VERTEX_BUFFER_BYTES, MATERIAL_VERTEX_STRIDE, MATERIAL_VERTICES_PER_RECT, MaterialDraw, MaterialPassDraw,
+    MaterialPassRecord, MaterialPipelines, build_material_pipelines, push_coverage_params, push_material_rect_vertices,
+    push_textured_params, record_material_pass,
 };
 pub use pipeline::{Pipeline, RenderError, build_main_pipeline, record_main_pass};
 pub use quad::{
-    OverlayDraw, QUAD_UNIFORM_BYTES, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE,
-    QUAD_VERTICES_PER_QUAD, QuadPipeline, RealizedTexture, TextureBindings, build_quad_pipeline,
-    build_texture_bindings, push_screen_quad_vertices, push_world_quad_vertices, realize_texture,
-    record_quad_overlay_pass, upload_texture_full,
+    OverlayDraw, QUAD_UNIFORM_BYTES, QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD,
+    QuadPipeline, RealizedTexture, TextureBindings, build_quad_pipeline, build_texture_bindings,
+    push_screen_quad_vertices, push_world_quad_vertices, realize_texture, record_quad_overlay_pass,
+    upload_texture_full,
 };
 pub use targets::Targets;
 
@@ -90,16 +88,8 @@ pub fn vertex_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
         array_stride: VERTEX_STRIDE,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
-            wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x3,
-            },
-            wgpu::VertexAttribute {
-                offset: 12,
-                shader_location: 1,
-                format: wgpu::VertexFormat::Float32x3,
-            },
+            wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+            wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
         ],
     }
 }

@@ -10,9 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct GetClipboardText;
 
 /// Reply to [`GetClipboardText`].
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.clipboard.get_text_result")]
 pub enum GetClipboardTextResult {
     Ok { text: String },
@@ -27,9 +25,7 @@ pub struct SetClipboardText {
 }
 
 /// Reply to [`SetClipboardText`].
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.clipboard.set_text_result")]
 pub enum SetClipboardTextResult {
     Ok,

@@ -59,12 +59,7 @@ impl TreeWalk {
     pub fn new(root: MailId) -> Self {
         let mut frontier = VecDeque::new();
         frontier.push_back(root.sender);
-        Self {
-            root,
-            visited: BTreeSet::new(),
-            frontier,
-            collected: Vec::new(),
-        }
+        Self { root, visited: BTreeSet::new(), frontier, collected: Vec::new() }
     }
 
     /// The next mailbox whose trace ring should be queried, or `None`
@@ -125,10 +120,7 @@ impl TreeWalk {
 /// every node's `thread_name` to `None`. See [`stitch_with`] for the
 /// resolver-injecting form and the full contract.
 #[must_use]
-pub fn stitch(
-    root: MailId,
-    entries: impl IntoIterator<Item = TraceRingEntry>,
-) -> DescribeTreeResult {
+pub fn stitch(root: MailId, entries: impl IntoIterator<Item = TraceRingEntry>) -> DescribeTreeResult {
     stitch_with(root, entries, |_| None)
 }
 
@@ -149,11 +141,7 @@ pub fn stitch(
 /// but no `Finished`; the only caller today walks post-settlement, so
 /// it sees `0`.
 #[must_use]
-pub fn stitch_with<F>(
-    root: MailId,
-    entries: impl IntoIterator<Item = TraceRingEntry>,
-    resolve: F,
-) -> DescribeTreeResult
+pub fn stitch_with<F>(root: MailId, entries: impl IntoIterator<Item = TraceRingEntry>, resolve: F) -> DescribeTreeResult
 where
     F: Fn(ThreadId) -> Option<String>,
 {
@@ -161,13 +149,8 @@ where
     if !mails.iter().any(|n| n.mail_id == root) {
         return DescribeTreeResult::Err { not_found: root };
     }
-    let in_flight =
-        u32::try_from(mails.iter().filter(|n| n.t_finished.is_none()).count()).unwrap_or(u32::MAX);
-    DescribeTreeResult::Ok {
-        root,
-        in_flight,
-        mails,
-    }
+    let in_flight = u32::try_from(mails.iter().filter(|n| n.t_finished.is_none()).count()).unwrap_or(u32::MAX);
+    DescribeTreeResult::Ok { root, in_flight, mails }
 }
 
 /// Collapse a flat event stream into one [`MailNodeWire`] per `mail_id`,
@@ -188,42 +171,18 @@ pub fn fold_nodes(entries: impl IntoIterator<Item = TraceRingEntry>) -> Vec<Mail
 /// latency harness folds every relay's ring this way) rather than
 /// reconstructing one tree.
 #[must_use]
-pub fn fold_nodes_with<F>(
-    entries: impl IntoIterator<Item = TraceRingEntry>,
-    resolve: F,
-) -> Vec<MailNodeWire>
+pub fn fold_nodes_with<F>(entries: impl IntoIterator<Item = TraceRingEntry>, resolve: F) -> Vec<MailNodeWire>
 where
     F: Fn(ThreadId) -> Option<String>,
 {
     let mut nodes: BTreeMap<MailId, PartialNode> = BTreeMap::new();
     for entry in entries {
         match entry.event {
-            TraceEvent::Sent {
-                mail_id,
-                parent_mail,
-                sender,
-                recipient,
-                kind,
-                t_construct_start,
-                t,
-                ..
-            } => {
-                nodes.entry(mail_id).or_default().sent = Some(SentFields {
-                    parent: parent_mail,
-                    sender,
-                    recipient,
-                    kind,
-                    t_construct_start,
-                    t_sent: t,
-                });
+            TraceEvent::Sent { mail_id, parent_mail, sender, recipient, kind, t_construct_start, t, .. } => {
+                nodes.entry(mail_id).or_default().sent =
+                    Some(SentFields { parent: parent_mail, sender, recipient, kind, t_construct_start, t_sent: t });
             }
-            TraceEvent::Received {
-                mail_id,
-                t,
-                t_enqueue,
-                enqueue_depth,
-                thread_id,
-            } => {
+            TraceEvent::Received { mail_id, t, t_enqueue, enqueue_depth, thread_id } => {
                 let node = nodes.entry(mail_id).or_default();
                 node.t_received = Some(t);
                 // iamacoffeepot/aether#1134: the deposit instant + backlog
@@ -291,22 +250,14 @@ mod tests {
     use aether_kinds::trace::MailNodeWire;
 
     fn mid(sender: u64, cid: u64) -> MailId {
-        MailId {
-            sender: MailboxId(sender),
-            correlation_id: cid,
-        }
+        MailId { sender: MailboxId(sender), correlation_id: cid }
     }
 
     fn sent(mail_id: MailId, root: MailId, recipient: u64) -> TraceRingEntry {
         sent_parent(mail_id, root, None, recipient)
     }
 
-    fn sent_parent(
-        mail_id: MailId,
-        root: MailId,
-        parent: Option<MailId>,
-        recipient: u64,
-    ) -> TraceRingEntry {
+    fn sent_parent(mail_id: MailId, root: MailId, parent: Option<MailId>, recipient: u64) -> TraceRingEntry {
         TraceRingEntry {
             sequence: 0,
             root,
@@ -358,20 +309,13 @@ mod tests {
         TraceRingEntry {
             sequence: 0,
             root,
-            event: TraceEvent::Finished {
-                mail_id,
-                t: Nanos(mail_id.correlation_id + 2),
-            },
+            event: TraceEvent::Finished { mail_id, t: Nanos(mail_id.correlation_id + 2) },
         }
     }
 
     fn ok(result: DescribeTreeResult) -> (MailId, u32, Vec<MailNodeWire>) {
         match result {
-            DescribeTreeResult::Ok {
-                root,
-                in_flight,
-                mails,
-            } => (root, in_flight, mails),
+            DescribeTreeResult::Ok { root, in_flight, mails } => (root, in_flight, mails),
             DescribeTreeResult::Err { not_found } => panic!("expected Ok, got Err {not_found:?}"),
         }
     }
@@ -383,11 +327,7 @@ mod tests {
     #[test]
     fn stitch_folds_events_per_mail_id_regardless_of_order() {
         let root = mid(1, 1);
-        let entries = vec![
-            finished(root, root),
-            received(root, root),
-            sent(root, root, 2),
-        ];
+        let entries = vec![finished(root, root), received(root, root), sent(root, root, 2)];
         let (got_root, in_flight, mails) = ok(stitch_with(root, entries, fixture_resolver));
         assert_eq!(got_root, root);
         assert_eq!(in_flight, 0, "node has a Finished");
@@ -408,11 +348,7 @@ mod tests {
     #[test]
     fn stitch_without_resolver_leaves_thread_name_none() {
         let root = mid(1, 1);
-        let entries = vec![
-            sent(root, root, 2),
-            received(root, root),
-            finished(root, root),
-        ];
+        let entries = vec![sent(root, root, 2), received(root, root), finished(root, root)];
         let (_, _, mails) = ok(stitch(root, entries));
         assert_eq!(mails.len(), 1);
         assert_eq!(mails[0].thread_name, None);
@@ -462,10 +398,7 @@ mod tests {
         let leaf_b = 21u64;
         let grandchild = 30u64;
 
-        let root = MailId {
-            sender: MailboxId(chassis),
-            correlation_id: 1,
-        };
+        let root = MailId { sender: MailboxId(chassis), correlation_id: 1 };
         let child_a = mid(observer, 2);
         let child_b = mid(observer, 3);
         let gc = mid(leaf_a, 4);
@@ -474,10 +407,7 @@ mod tests {
         // Finished in the recipient's ring.
         let mut rings: BTreeMap<MailboxId, Vec<TraceRingEntry>> = BTreeMap::new();
         // chassis-host: the root's Sent (chassis -> observer).
-        rings
-            .entry(MailboxId(chassis))
-            .or_default()
-            .push(sent(root, root, observer));
+        rings.entry(MailboxId(chassis)).or_default().push(sent(root, root, observer));
         // observer: root's Received/Finished + the two children's Sents.
         rings.entry(MailboxId(observer)).or_default().extend([
             received(root, root),
@@ -492,15 +422,9 @@ mod tests {
             sent_parent(gc, root, Some(child_a), grandchild),
         ]);
         // leaf_b: child_b's Received/Finished, no onward send.
-        rings
-            .entry(MailboxId(leaf_b))
-            .or_default()
-            .extend([received(child_b, root), finished(child_b, root)]);
+        rings.entry(MailboxId(leaf_b)).or_default().extend([received(child_b, root), finished(child_b, root)]);
         // grandchild: gc's Received/Finished.
-        rings
-            .entry(MailboxId(grandchild))
-            .or_default()
-            .extend([received(gc, root), finished(gc, root)]);
+        rings.entry(MailboxId(grandchild)).or_default().extend([received(gc, root), finished(gc, root)]);
 
         // Drive the walk against the fake substrate.
         let mut walk = TreeWalk::new(root);
@@ -524,23 +448,13 @@ mod tests {
         assert_eq!(by_id[&gc].parent, Some(child_a));
         // Every node carries Received + Finished — the walk visited
         // every recipient ring.
-        assert!(
-            mails
-                .iter()
-                .all(|n| n.t_received.is_some() && n.t_finished.is_some())
-        );
+        assert!(mails.iter().all(|n| n.t_received.is_some() && n.t_finished.is_some()));
 
         // The walk visited only the five participating mailboxes, never
         // an actor outside the tree.
         assert_eq!(visited_order.len(), 5);
         let visited: BTreeSet<MailboxId> = visited_order.into_iter().collect();
-        assert_eq!(
-            visited,
-            [chassis, observer, leaf_a, leaf_b, grandchild]
-                .into_iter()
-                .map(MailboxId)
-                .collect()
-        );
+        assert_eq!(visited, [chassis, observer, leaf_a, leaf_b, grandchild].into_iter().map(MailboxId).collect());
     }
 
     /// A diamond (two parents send to the same recipient) visits the
@@ -553,10 +467,7 @@ mod tests {
         let shared = 40u64;
 
         let mut rings: BTreeMap<MailboxId, Vec<TraceRingEntry>> = BTreeMap::new();
-        rings
-            .entry(MailboxId(0))
-            .or_default()
-            .push(sent(root, root, 10));
+        rings.entry(MailboxId(0)).or_default().push(sent(root, root, 10));
         rings.entry(MailboxId(10)).or_default().extend([
             received(root, root),
             finished(root, root),

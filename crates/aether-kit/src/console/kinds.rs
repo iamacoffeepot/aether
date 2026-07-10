@@ -45,12 +45,7 @@ pub struct ConsoleMarkdownTheme {
 
 impl ConsoleMarkdownTheme {
     #[must_use]
-    pub fn from_palette(
-        separator_color: Rgba,
-        prompt_color: Rgba,
-        input_color: Rgba,
-        output_color: Rgba,
-    ) -> Self {
+    pub fn from_palette(separator_color: Rgba, prompt_color: Rgba, input_color: Rgba, output_color: Rgba) -> Self {
         Self {
             heading_color: prompt_color,
             emphasis_color: input_color,
@@ -102,23 +97,13 @@ impl Default for ConsoleTheme {
             output_color,
             error_color: Rgba::new(1.0, 0.45, 0.42, 1.0),
             cursor_color: Rgba::WHITE,
-            markdown: ConsoleMarkdownTheme::from_palette(
-                separator_color,
-                prompt_color,
-                input_color,
-                output_color,
-            ),
+            markdown: ConsoleMarkdownTheme::from_palette(separator_color, prompt_color, input_color, output_color),
         }
     }
 }
 
 fn scaled_color(color: Rgba, rgb_scale: f32, alpha: f32) -> Rgba {
-    Rgba::new(
-        color.r * rgb_scale,
-        color.g * rgb_scale,
-        color.b * rgb_scale,
-        alpha,
-    )
+    Rgba::new(color.r * rgb_scale, color.g * rgb_scale, color.b * rgb_scale, alpha)
 }
 
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
@@ -149,9 +134,7 @@ impl Default for ConsoleConfig {
     }
 }
 
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.kit.console.register_command")]
 pub struct RegisterConsoleCommand {
     pub name: String,
@@ -159,17 +142,13 @@ pub struct RegisterConsoleCommand {
     pub mailbox: MailboxId,
 }
 
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.kit.console.unregister_command")]
 pub struct UnregisterConsoleCommand {
     pub name: String,
 }
 
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.kit.console.command_invoked")]
 pub struct ConsoleCommandInvoked {
     pub name: String,
@@ -177,9 +156,7 @@ pub struct ConsoleCommandInvoked {
     pub input: String,
 }
 
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.kit.console.command_output")]
 pub struct ConsoleCommandOutput {
     pub command: String,
@@ -200,8 +177,7 @@ mod tests {
             error: false,
         };
 
-        let decoded = ConsoleCommandOutput::decode_from_bytes(&output.encode_into_bytes())
-            .expect("output decodes");
+        let decoded = ConsoleCommandOutput::decode_from_bytes(&output.encode_into_bytes()).expect("output decodes");
 
         assert_eq!(decoded, output);
     }
@@ -221,30 +197,21 @@ mod tests {
     fn default_config_uses_embedded_console_font() {
         let config = ConsoleConfig::default();
 
-        assert!(
-            config.font_namespace.is_empty(),
-            "empty namespace selects the embedded console font",
-        );
-        assert!(
-            config.font_path.is_empty(),
-            "empty path selects the embedded console font",
-        );
+        assert!(config.font_namespace.is_empty(), "empty namespace selects the embedded console font",);
+        assert!(config.font_path.is_empty(), "empty path selects the embedded console font",);
     }
 
     #[test]
     fn registration_schema_has_stable_kind_name() {
-        assert_eq!(
-            <RegisterConsoleCommand as Kind>::NAME,
-            "aether.kit.console.register_command"
-        );
+        assert_eq!(<RegisterConsoleCommand as Kind>::NAME, "aether.kit.console.register_command");
         let registration = RegisterConsoleCommand {
             name: String::from("profile"),
             description: String::from("show profiling data"),
             mailbox: MailboxId(0x4000_0000_0000_0001),
         };
 
-        let decoded = RegisterConsoleCommand::decode_from_bytes(&registration.encode_into_bytes())
-            .expect("registration decodes");
+        let decoded =
+            RegisterConsoleCommand::decode_from_bytes(&registration.encode_into_bytes()).expect("registration decodes");
 
         assert_eq!(decoded, registration);
     }

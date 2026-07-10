@@ -23,9 +23,7 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), IoError> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let pid = process::id();
     let file_name = target.file_name().and_then(|n| n.to_str()).unwrap_or("tmp");
     let tmp = target.with_file_name(format!("{file_name}.tmp-{pid}-{nonce}"));

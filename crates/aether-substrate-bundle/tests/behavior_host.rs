@@ -31,9 +31,7 @@ use std::fs;
 use aether_actor::Addressable;
 use aether_data::Kind;
 use aether_kinds::mouse_button::LEFT;
-use aether_kinds::{
-    LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick,
-};
+use aether_kinds::{LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick};
 use aether_kit::widget::{BehaviorHostSpec, ScriptRef};
 use aether_kit::{PanelConfig, SliderConfig, Theme, WidgetChildSpec, WidgetKind};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
@@ -73,22 +71,14 @@ const EPS: f32 = 0.5;
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
-    format!(
-        "aether.component/{}:panel",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    )
+    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE,)
 }
 
 /// The host's registered inline-child lineage address: the panel's address,
 /// then the trampoline scope and the slot subname (the `host_fns` `alias_name`
 /// fold). Sending `SetScript` here swaps the script and gets the reply.
 fn host_address() -> String {
-    format!(
-        "{}/{}:{}",
-        panel_address(),
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-        SLOT,
-    )
+    format!("{}/{}:{}", panel_address(), aether_capabilities::WasmTrampoline::NAMESPACE, SLOT,)
 }
 
 /// Load the reference panel with a single `BehaviorHost` slot wrapping a slider
@@ -141,14 +131,10 @@ fn load_panel_with_host(bench: &mut TestBench, kit_wasm: &[u8], script: Vec<u8>)
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
-        LoadResult::Ok { name, .. } => assert!(
-            name.ends_with(":panel"),
-            "the panel root should register under :panel; got {name}",
-        ),
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { name, .. } => {
+            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}",)
+        }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }
 }
@@ -171,10 +157,7 @@ fn release(x: f32, y: f32) -> MouseButtonRelease {
 fn drag(panel: &str) -> Vec<(&'static str, BenchOp)> {
     vec![
         ("press", BenchOp::send_mail(panel, &press(110.0, 22.0))),
-        (
-            "move",
-            BenchOp::send_mail(panel, &MouseMove { x: 200.0, y: 22.0 }),
-        ),
+        ("move", BenchOp::send_mail(panel, &MouseMove { x: 200.0, y: 22.0 })),
         ("release", BenchOp::send_mail(panel, &release(200.0, 22.0))),
     ]
 }
@@ -183,20 +166,14 @@ fn drag(panel: &str) -> Vec<(&'static str, BenchOp)> {
 /// next cursor so a later phase reads only its own entries.
 fn read_panel_log(bench: &mut TestBench, since: Option<u64>) -> (Vec<String>, u64) {
     match bench.log_tail(&panel_address(), since) {
-        LogTailResult::Ok {
-            entries,
-            next_since,
-            ..
-        } => (entries.into_iter().map(|e| e.message).collect(), next_since),
+        LogTailResult::Ok { entries, next_since, .. } => (entries.into_iter().map(|e| e.message).collect(), next_since),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }
 }
 
 /// The value of a `key=` field in a rendered log line (`None` if absent).
 fn field<'a>(message: &'a str, key: &str) -> Option<&'a str> {
-    message
-        .split_whitespace()
-        .find_map(|token| token.strip_prefix(key))
+    message.split_whitespace().find_map(|token| token.strip_prefix(key))
 }
 
 /// Whether a log line is a slider-changed value-up attributed to the slot.
@@ -228,15 +205,9 @@ fn emitted_counts(messages: &[String]) -> Vec<u32> {
 fn swap_script(bench: &mut TestBench, label: &str, bytes: Vec<u8>) {
     let host = host_address();
     let swapped = bench
-        .execute(vec![(
-            label,
-            BenchOp::send_and_await(&host, &SetScript { bytes }),
-        )])
+        .execute(vec![(label, BenchOp::send_and_await(&host, &SetScript { bytes }))])
         .unwrap_or_else(|error| panic!("{label} swap: {error:?}"));
-    match swapped
-        .reply::<LoadScriptResult>(label)
-        .expect("decode LoadScriptResult")
-    {
+    match swapped.reply::<LoadScriptResult>(label).expect("decode LoadScriptResult") {
         LoadScriptResult::Ok { .. } => {}
         LoadScriptResult::Err { error } => panic!("{label} set_script failed: {error}"),
     }
@@ -284,10 +255,7 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     // panel is clamped, not the raw ~242 the far-right drag produced. Catches
     // interposition up-lane routing + the `&mut K` re-encode/forward.
     let committed = committed_values(&phase1);
-    assert!(
-        !committed.is_empty(),
-        "the drag-release should forward one committed change; log was:\n{joined1}",
-    );
+    assert!(!committed.is_empty(), "the drag-release should forward one committed change; log was:\n{joined1}",);
     assert!(
         committed.iter().all(|v| *v <= CAP + EPS),
         "every committed value the script forwards must be clamped to {CAP}; \
@@ -299,9 +267,7 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     // release still lands (S1). Catches `ctx.consume()` — the same kind takes
     // both consume and forward in one session.
     assert!(
-        !phase1
-            .iter()
-            .any(|m| slider_line(m) && m.contains("committed=false")),
+        !phase1.iter().any(|m| slider_line(m) && m.contains("committed=false")),
         "consumed uncommitted changes must not forward up-lane; log was:\n{joined1}",
     );
 
@@ -339,9 +305,7 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     // integration-level fail-open — a trap wedging the lane, not the filter
     // call #2687's host-unit already drives directly.
     swap_script(&mut bench, "swap_trap", trap);
-    bench
-        .execute(drag(&panel))
-        .expect("S5 drag after trap swap");
+    bench.execute(drag(&panel)).expect("S5 drag after trap swap");
     let (phase3, _) = read_panel_log(&mut bench, Some(cursor));
     let joined3 = phase3.join("\n");
     let committed_trap = committed_values(&phase3);

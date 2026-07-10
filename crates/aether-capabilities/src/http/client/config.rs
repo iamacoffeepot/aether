@@ -22,10 +22,7 @@ use super::{DEFAULT_MAX_BODY_BYTES, DEFAULT_TIMEOUT_MILLIS};
 /// wasm-marker build carries only the domain struct.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "runtime", derive(aether_substrate::Config))]
-#[cfg_attr(
-    feature = "runtime",
-    config(env_prefix = "AETHER_HTTP", cli_prefix = "http")
-)]
+#[cfg_attr(feature = "runtime", config(env_prefix = "AETHER_HTTP", cli_prefix = "http"))]
 pub struct HttpConfig {
     /// `AETHER_HTTP_DISABLE=1` swaps the `UreqHttpAdapter` for a
     /// `DisabledHttpAdapter` that replies `HttpError::Disabled` to
@@ -33,14 +30,7 @@ pub struct HttpConfig {
     /// (`AETHER_HTTP_DISABLE`, `--http-disable`) to the pre-derive
     /// names while the domain field stays `disabled` for read-site
     /// clarity.
-    #[cfg_attr(
-        feature = "runtime",
-        config(
-            env = "AETHER_HTTP_DISABLE",
-            cli_long = "http-disable",
-            default = false
-        )
-    )]
+    #[cfg_attr(feature = "runtime", config(env = "AETHER_HTTP_DISABLE", cli_long = "http-disable", default = false))]
     pub disabled: bool,
     /// Hostnames the adapter will dial. Empty = deny all
     /// (deny-by-default per ADR-0043). The `csv_set` hint auto-wires the
@@ -62,10 +52,7 @@ pub struct HttpConfig {
     /// `layer_field = "timeout_ms"` pins the Layer / env / CLI shape to
     /// the pre-derive name (`AETHER_HTTP_TIMEOUT_MS`,
     /// `--http-timeout-ms`).
-    #[cfg_attr(
-        feature = "runtime",
-        config(default = 30_000, ms_duration, layer_field = "timeout_ms")
-    )]
+    #[cfg_attr(feature = "runtime", config(default = 30_000, ms_duration, layer_field = "timeout_ms"))]
     pub default_timeout: Duration,
 }
 

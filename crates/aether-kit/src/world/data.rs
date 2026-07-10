@@ -191,10 +191,7 @@ impl CellPos {
     /// negative cells floor toward `-∞`.
     #[must_use]
     pub fn chunk(self) -> ChunkPos {
-        ChunkPos {
-            x: self.x >> CHUNK_BITS,
-            z: self.z >> CHUNK_BITS,
-        }
+        ChunkPos { x: self.x >> CHUNK_BITS, z: self.z >> CHUNK_BITS }
     }
 
     /// The cell's center in octimeters — cell-center-anchored, so a
@@ -202,27 +199,20 @@ impl CellPos {
     /// corner. `(x << 8) + 128`.
     #[must_use]
     pub fn center_octimeters(self) -> (i32, i32) {
-        (
-            (self.x << OCTIMETER_BITS) + OCTIMETERS_PER_CELL / 2,
-            (self.z << OCTIMETER_BITS) + OCTIMETERS_PER_CELL / 2,
-        )
+        ((self.x << OCTIMETER_BITS) + OCTIMETERS_PER_CELL / 2, (self.z << OCTIMETER_BITS) + OCTIMETERS_PER_CELL / 2)
     }
 
     /// The cell an octimeter position sits in. Arithmetic right shift —
     /// negative positions floor.
     #[must_use]
     pub fn from_octimeters(x: i32, z: i32) -> Self {
-        Self {
-            x: x >> OCTIMETER_BITS,
-            z: z >> OCTIMETER_BITS,
-        }
+        Self { x: x >> OCTIMETER_BITS, z: z >> OCTIMETER_BITS }
     }
 
     /// Index of this cell within its chunk's row-major planes.
     /// `rem_euclid` so negative cells map into `0..256` correctly.
     pub(super) fn chunk_index(self) -> usize {
-        (self.z.rem_euclid(CELLS_PER_CHUNK) * CELLS_PER_CHUNK + self.x.rem_euclid(CELLS_PER_CHUNK))
-            as usize
+        (self.z.rem_euclid(CELLS_PER_CHUNK) * CELLS_PER_CHUNK + self.x.rem_euclid(CELLS_PER_CHUNK)) as usize
     }
 }
 
@@ -395,13 +385,9 @@ impl Chunk {
             ptr::addr_of_mut!((*ptr).underlay_points)
                 .cast::<u8>()
                 .write_bytes(UNDERLAY_POINT_INHERIT, UNDERLAY_POINTS_PER_CHUNK);
-            ptr::addr_of_mut!((*ptr).height_points)
-                .cast::<i16>()
-                .write_bytes(0, HEIGHT_POINTS_PER_CHUNK);
+            ptr::addr_of_mut!((*ptr).height_points).cast::<i16>().write_bytes(0, HEIGHT_POINTS_PER_CHUNK);
             ptr::addr_of_mut!((*ptr).overlay).write([Material::Void; CELLS_PER_CHUNK_AREA]);
-            ptr::addr_of_mut!((*ptr).overlay_mask)
-                .cast::<u8>()
-                .write_bytes(0, OVERLAY_MASK_WIRE_BYTES);
+            ptr::addr_of_mut!((*ptr).overlay_mask).cast::<u8>().write_bytes(0, OVERLAY_MASK_WIRE_BYTES);
             ptr::addr_of_mut!((*ptr).height).write([0; CELLS_PER_CHUNK_AREA]);
             ptr::addr_of_mut!((*ptr).region).write([0; CELLS_PER_CHUNK_AREA]);
             ptr::addr_of_mut!((*ptr).water_plane).write([0; CELLS_PER_CHUNK_AREA]);
@@ -487,14 +473,10 @@ impl World {
     /// slice clears the cell back to all-inherit. Bytes past the cell's
     /// point count are ignored.
     pub fn set_cell_points(&mut self, cell: CellPos, points: &[u8]) {
-        let chunk = self
-            .chunks
-            .entry(cell.chunk())
-            .or_insert_with(Chunk::empty_boxed);
+        let chunk = self.chunks.entry(cell.chunk()).or_insert_with(Chunk::empty_boxed);
         let base = cell.chunk_index() * SUBCELLS_PER_CELL;
         for i in 0..SUBCELLS_PER_CELL {
-            chunk.underlay_points[base + i] =
-                points.get(i).copied().unwrap_or(UNDERLAY_POINT_INHERIT);
+            chunk.underlay_points[base + i] = points.get(i).copied().unwrap_or(UNDERLAY_POINT_INHERIT);
         }
     }
 
@@ -505,10 +487,7 @@ impl World {
     /// the cell back to no relief; deltas past the cell's point count are
     /// ignored.
     pub fn set_cell_heights(&mut self, cell: CellPos, deltas: &[i16]) {
-        let chunk = self
-            .chunks
-            .entry(cell.chunk())
-            .or_insert_with(Chunk::empty_boxed);
+        let chunk = self.chunks.entry(cell.chunk()).or_insert_with(Chunk::empty_boxed);
         let base = cell.chunk_index() * SUBCELLS_PER_CELL;
         for i in 0..SUBCELLS_PER_CELL {
             chunk.height_points[base + i] = deltas.get(i).copied().unwrap_or(HEIGHT_POINT_INHERIT);
@@ -529,17 +508,13 @@ impl World {
         if region_id == 0 {
             return Material::Void;
         }
-        self.regions
-            .get(region_id as usize - 1)
-            .map_or(Material::Void, |region| region.default_material)
+        self.regions.get(region_id as usize - 1).map_or(Material::Void, |region| region.default_material)
     }
 
     /// The raw overlay material at `cell` — never cascade-resolved.
     #[must_use]
     pub fn overlay(&self, cell: CellPos) -> Material {
-        self.chunks
-            .get(&cell.chunk())
-            .map_or(Material::Void, |chunk| chunk.overlay[cell.chunk_index()])
+        self.chunks.get(&cell.chunk()).map_or(Material::Void, |chunk| chunk.overlay[cell.chunk_index()])
     }
 
     /// The raw overlay coverage byte at subcell point `(sub_x, sub_z)` of
@@ -563,9 +538,7 @@ impl World {
     /// surface, not the water level ([`World::water_level`] resolves that).
     #[must_use]
     pub fn height(&self, cell: CellPos) -> i32 {
-        self.chunks
-            .get(&cell.chunk())
-            .map_or(0, |chunk| chunk.height[cell.chunk_index()])
+        self.chunks.get(&cell.chunk()).map_or(0, |chunk| chunk.height[cell.chunk_index()])
     }
 
     /// The lakebed elevation in octimeters at subcell point `(sub_x, sub_z)`
@@ -597,8 +570,7 @@ impl World {
     /// corner-plate walk reads this so an authored break inside a cell splits
     /// its plates just as a cell-scale cliff splits the cell lattice.
     pub(crate) fn point_surface_level(&self, cell: CellPos, sub_x: i32, sub_z: i32) -> i32 {
-        self.water_level(cell)
-            .unwrap_or_else(|| self.point_height(cell, sub_x, sub_z))
+        self.water_level(cell).unwrap_or_else(|| self.point_height(cell, sub_x, sub_z))
     }
 
     /// The effective surface level of the subcell whose global subcell-lattice
@@ -606,10 +578,7 @@ impl World {
     /// corner plate reads its four incident subcells through this.
     fn subcell_surface_level(&self, sx: i32, sz: i32) -> i32 {
         let sub = SUBCELLS_PER_CELL_EDGE.cast_signed();
-        let cell = CellPos {
-            x: sx.div_euclid(sub),
-            z: sz.div_euclid(sub),
-        };
+        let cell = CellPos { x: sx.div_euclid(sub), z: sz.div_euclid(sub) };
         self.point_surface_level(cell, sx.rem_euclid(sub), sz.rem_euclid(sub))
     }
 
@@ -622,18 +591,12 @@ impl World {
     pub(crate) fn cell_has_height_relief(&self, cell: CellPos) -> bool {
         for dz in -1..=1 {
             for dx in -1..=1 {
-                let n = CellPos {
-                    x: cell.x + dx,
-                    z: cell.z + dz,
-                };
+                let n = CellPos { x: cell.x + dx, z: cell.z + dz };
                 let Some(chunk) = self.chunks.get(&n.chunk()) else {
                     continue;
                 };
                 let base = n.chunk_index() * SUBCELLS_PER_CELL;
-                if chunk.height_points[base..base + SUBCELLS_PER_CELL]
-                    .iter()
-                    .any(|&d| d != HEIGHT_POINT_INHERIT)
-                {
+                if chunk.height_points[base..base + SUBCELLS_PER_CELL].iter().any(|&d| d != HEIGHT_POINT_INHERIT) {
                     return true;
                 }
             }
@@ -659,11 +622,7 @@ impl World {
         if plane_id == 0 {
             return Some(0);
         }
-        Some(
-            self.water_planes
-                .get(plane_id as usize - 1)
-                .map_or(0, |plane| plane.level_octimeters),
-        )
+        Some(self.water_planes.get(plane_id as usize - 1).map_or(0, |plane| plane.level_octimeters))
     }
 
     /// The effective surface level in octimeters at `cell`: the water
@@ -707,10 +666,7 @@ impl World {
         // Incident cells in cyclic order, so consecutive entries (mod 4)
         // share an edge and the diagonal pairs do not.
         let cells = [
-            CellPos {
-                x: kx - 1,
-                z: kz - 1,
-            },
+            CellPos { x: kx - 1, z: kz - 1 },
             CellPos { x: kx, z: kz - 1 },
             CellPos { x: kx, z: kz },
             CellPos { x: kx - 1, z: kz },
@@ -739,11 +695,7 @@ impl World {
         let levels = subs.map(|(sx, sz)| self.subcell_surface_level(sx, sz));
         let is_water = subs.map(|(sx, sz)| {
             let sub = SUBCELLS_PER_CELL_EDGE.cast_signed();
-            self.water_level(CellPos {
-                x: sx.div_euclid(sub),
-                z: sz.div_euclid(sub),
-            })
-            .is_some()
+            self.water_level(CellPos { x: sx.div_euclid(sub), z: sz.div_euclid(sub) }).is_some()
         });
         plate_mean_octimeters(levels, is_water, anchor) / OCTIMETERS_PER_CELL as f32
     }
@@ -839,10 +791,7 @@ impl World {
     /// reads the higher-coordinate side (the floor convention).
     #[must_use]
     pub fn surface_height(&self, wx: f32, wz: f32) -> f32 {
-        let cell = CellPos {
-            x: floor_to_i32(wx),
-            z: floor_to_i32(wz),
-        };
+        let cell = CellPos { x: floor_to_i32(wx), z: floor_to_i32(wz) };
         self.surface_height_in(cell, wx, wz)
     }
 
@@ -879,10 +828,7 @@ impl World {
     /// material and scalar coverage planes without exposing the world's
     /// chunk map as public API.
     pub(super) fn chunk_mut_or_insert(&mut self, at: ChunkPos) -> &mut Chunk {
-        self.chunks
-            .entry(at)
-            .or_insert_with(Chunk::empty_boxed)
-            .as_mut()
+        self.chunks.entry(at).or_insert_with(Chunk::empty_boxed).as_mut()
     }
 
     /// Register a region under a 1-based `id`. The table is positional,
@@ -897,11 +843,7 @@ impl World {
         if index >= self.regions.len() {
             self.regions.resize(
                 index + 1,
-                Region {
-                    name: String::new(),
-                    default_material: Material::Void,
-                    cliff_material: Material::Stone,
-                },
+                Region { name: String::new(), default_material: Material::Void, cliff_material: Material::Stone },
             );
         }
         self.regions[index] = region;
@@ -921,13 +863,7 @@ impl World {
         };
         let index = id as usize - 1;
         if index >= self.smoothing_profiles.len() {
-            self.smoothing_profiles.resize(
-                index + 1,
-                SmoothingProfile {
-                    iterations: 0,
-                    degrees: 90,
-                },
-            );
+            self.smoothing_profiles.resize(index + 1, SmoothingProfile { iterations: 0, degrees: 90 });
         }
         self.smoothing_profiles[index] = clamped;
     }
@@ -943,12 +879,7 @@ impl World {
         }
         let index = id as usize - 1;
         if index >= self.water_planes.len() {
-            self.water_planes.resize(
-                index + 1,
-                WaterPlane {
-                    level_octimeters: 0,
-                },
-            );
+            self.water_planes.resize(index + 1, WaterPlane { level_octimeters: 0 });
         }
         self.water_planes[index] = plane;
     }
@@ -969,9 +900,7 @@ impl World {
     /// Iterate the chunk set in `ChunkPos` order (deterministic — the
     /// `BTreeMap` key order).
     pub fn chunks(&self) -> impl Iterator<Item = (ChunkPos, &Chunk)> {
-        self.chunks
-            .iter()
-            .map(|(pos, chunk)| (*pos, chunk.as_ref()))
+        self.chunks.iter().map(|(pos, chunk)| (*pos, chunk.as_ref()))
     }
 }
 
@@ -1143,19 +1072,10 @@ impl World {
         for _ in 0..region_count {
             let name_len = reader.u16()? as usize;
             let name_bytes = reader.take(name_len)?;
-            let name =
-                String::from_utf8(name_bytes.to_vec()).map_err(|_| WorldDecodeError::BadName)?;
+            let name = String::from_utf8(name_bytes.to_vec()).map_err(|_| WorldDecodeError::BadName)?;
             let default_material = Material::from_u8_or_void(reader.u8()?);
-            let cliff_material = if version >= 3 {
-                cliff_material_from_u8(reader.u8()?)
-            } else {
-                Material::Stone
-            };
-            regions.push(Region {
-                name,
-                default_material,
-                cliff_material,
-            });
+            let cliff_material = if version >= 3 { cliff_material_from_u8(reader.u8()?) } else { Material::Stone };
+            regions.push(Region { name, default_material, cliff_material });
         }
         let mut smoothing_profiles = Vec::new();
         if version >= 2 {
@@ -1164,10 +1084,7 @@ impl World {
             for _ in 0..profile_count {
                 let iterations = u32::from(reader.u8()?);
                 let degrees = u32::from(reader.u16()?);
-                smoothing_profiles.push(SmoothingProfile {
-                    iterations,
-                    degrees,
-                });
+                smoothing_profiles.push(SmoothingProfile { iterations, degrees });
             }
         }
         let mut water_planes = Vec::new();
@@ -1175,9 +1092,7 @@ impl World {
             let plane_count = reader.u32()? as usize;
             water_planes.reserve(plane_count);
             for _ in 0..plane_count {
-                water_planes.push(WaterPlane {
-                    level_octimeters: reader.i32()?,
-                });
+                water_planes.push(WaterPlane { level_octimeters: reader.i32()? });
             }
         }
         let chunk_count = reader.u32()? as usize;
@@ -1221,20 +1136,11 @@ impl World {
             }
             chunks.insert(ChunkPos { x, z }, chunk);
         }
-        Ok(Self {
-            chunks,
-            regions,
-            smoothing_profiles,
-            water_planes,
-        })
+        Ok(Self { chunks, regions, smoothing_profiles, water_planes })
     }
 }
 
-fn read_overlay_mask(
-    reader: &mut Reader<'_>,
-    version: u8,
-    chunk: &mut Chunk,
-) -> Result<(), WorldDecodeError> {
+fn read_overlay_mask(reader: &mut Reader<'_>, version: u8, chunk: &mut Chunk) -> Result<(), WorldDecodeError> {
     if version >= 7 {
         for slot in &mut chunk.overlay_mask {
             *slot = reader.u8()?;
@@ -1251,8 +1157,7 @@ fn read_overlay_mask(
                 let coverage = if (mask >> bit) & 1 == 1 { 255 } else { 0 };
                 for sz in legacy_z * scale..(legacy_z + 1) * scale {
                     for sx in legacy_x * scale..(legacy_x + 1) * scale {
-                        chunk.overlay_mask[base + sz * SUBCELLS_PER_CELL_EDGE as usize + sx] =
-                            coverage;
+                        chunk.overlay_mask[base + sz * SUBCELLS_PER_CELL_EDGE as usize + sx] = coverage;
                     }
                 }
             }
@@ -1274,10 +1179,7 @@ impl<'a> Reader<'a> {
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], WorldDecodeError> {
         let end = self.pos.checked_add(n).ok_or(WorldDecodeError::Truncated)?;
-        let slice = self
-            .bytes
-            .get(self.pos..end)
-            .ok_or(WorldDecodeError::Truncated)?;
+        let slice = self.bytes.get(self.pos..end).ok_or(WorldDecodeError::Truncated)?;
         self.pos = end;
         Ok(slice)
     }
@@ -1366,24 +1268,12 @@ mod tests {
         world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
         world.insert_region(
             1,
-            Region {
-                name: "meadow".into(),
-                default_material: Material::Grass,
-                cliff_material: Material::Stone,
-            },
+            Region { name: "meadow".into(), default_material: Material::Grass, cliff_material: Material::Stone },
         );
 
         assert_eq!(world.underlay(cell(2, 3)), Material::Stone, "cell override");
-        assert_eq!(
-            world.underlay(cell(4, 5)),
-            Material::Grass,
-            "region default"
-        );
-        assert_eq!(
-            world.underlay(cell(6, 7)),
-            Material::Void,
-            "no cascade source"
-        );
+        assert_eq!(world.underlay(cell(4, 5)), Material::Grass, "region default");
+        assert_eq!(world.underlay(cell(6, 7)), Material::Void, "no cascade source");
     }
 
     #[test]
@@ -1401,43 +1291,23 @@ mod tests {
         world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
         world.insert_region(
             1,
-            Region {
-                name: "meadow".into(),
-                default_material: Material::Grass,
-                cliff_material: Material::Stone,
-            },
+            Region { name: "meadow".into(), default_material: Material::Grass, cliff_material: Material::Stone },
         );
 
         // Cell (2,3): inherit points resolve the cell's own paint.
-        assert_eq!(
-            world.underlay_point(cell(2, 3), 0, 0),
-            Material::Stone,
-            "inherit resolves the cell paint",
-        );
+        assert_eq!(world.underlay_point(cell(2, 3), 0, 0), Material::Stone, "inherit resolves the cell paint",);
         assert_eq!(world.underlay_point(cell(2, 3), 3, 3), Material::Stone);
         // Cell (4,5): inherit points resolve the region default; explicit
         // points pin, and an explicit Void reads Void even in a painted cell.
-        assert_eq!(
-            world.underlay_point(cell(4, 5), 2, 2),
-            Material::Grass,
-            "inherit resolves the region default",
-        );
-        assert_eq!(
-            world.underlay_point(cell(4, 5), 0, 0),
-            Material::Sand,
-            "an explicit point overrides the cascade",
-        );
+        assert_eq!(world.underlay_point(cell(4, 5), 2, 2), Material::Grass, "inherit resolves the region default",);
+        assert_eq!(world.underlay_point(cell(4, 5), 0, 0), Material::Sand, "an explicit point overrides the cascade",);
         assert_eq!(
             world.underlay_point(cell(4, 5), 1, 0),
             Material::Void,
             "an explicit Void point reads Void in a painted cell",
         );
         // Cell (6,7): no cascade source, so an inherit point reads Void.
-        assert_eq!(
-            world.underlay_point(cell(6, 7), 0, 0),
-            Material::Void,
-            "no cascade source",
-        );
+        assert_eq!(world.underlay_point(cell(6, 7), 0, 0), Material::Void, "no cascade source",);
     }
 
     #[test]
@@ -1448,10 +1318,7 @@ mod tests {
         world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
 
         // Stamp two Stone points; the short slice leaves the tail inheriting.
-        world.set_cell_points(
-            cell(3, 3),
-            &[Material::Stone.to_u8(), Material::Stone.to_u8()],
-        );
+        world.set_cell_points(cell(3, 3), &[Material::Stone.to_u8(), Material::Stone.to_u8()]);
         assert_eq!(world.underlay_point(cell(3, 3), 0, 0), Material::Stone);
         assert_eq!(world.underlay_point(cell(3, 3), 1, 0), Material::Stone);
         assert_eq!(
@@ -1480,11 +1347,7 @@ mod tests {
         world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
         world.insert_region(
             1,
-            Region {
-                name: "r".into(),
-                default_material: Material::Grass,
-                cliff_material: Material::Stone,
-            },
+            Region { name: "r".into(), default_material: Material::Grass, cliff_material: Material::Stone },
         );
         // Underlay cascades to Grass; overlay stays raw Void.
         assert_eq!(world.underlay(cell(0, 0)), Material::Grass);
@@ -1524,11 +1387,7 @@ mod tests {
         assert_eq!(set.chunk_pos(), ChunkPos { x: 2, z: -1 });
         let chunk = set.into_chunk();
         assert_eq!(chunk.underlay[3 * 16 + 2], Material::Water);
-        assert_eq!(
-            chunk.underlay[0],
-            Material::Void,
-            "unknown byte clamps to Void"
-        );
+        assert_eq!(chunk.underlay[0], Material::Void, "unknown byte clamps to Void");
         assert_eq!(chunk.region[1], 7);
     }
 
@@ -1597,39 +1456,15 @@ mod tests {
         let mut world = World::new();
         world.insert_region(
             1,
-            Region {
-                name: "meadow".into(),
-                default_material: Material::Grass,
-                cliff_material: Material::Stone,
-            },
+            Region { name: "meadow".into(), default_material: Material::Grass, cliff_material: Material::Stone },
         );
         world.insert_region(
             2,
-            Region {
-                name: "shore".into(),
-                default_material: Material::Sand,
-                cliff_material: Material::Dirt,
-            },
+            Region { name: "shore".into(), default_material: Material::Sand, cliff_material: Material::Dirt },
         );
-        world.insert_smoothing_profile(
-            1,
-            SmoothingProfile {
-                iterations: 3,
-                degrees: 60,
-            },
-        );
-        world.insert_water_plane(
-            1,
-            WaterPlane {
-                level_octimeters: -17,
-            },
-        );
-        world.insert_water_plane(
-            2,
-            WaterPlane {
-                level_octimeters: 320,
-            },
-        );
+        world.insert_smoothing_profile(1, SmoothingProfile { iterations: 3, degrees: 60 });
+        world.insert_water_plane(1, WaterPlane { level_octimeters: -17 });
+        world.insert_water_plane(2, WaterPlane { level_octimeters: 320 });
         let mut a = Chunk::empty();
         a.underlay[0] = Material::Stone;
         a.overlay[5] = Material::Water;
@@ -1656,14 +1491,8 @@ mod tests {
         assert_eq!(decoded.regions, world.regions);
         assert_eq!(decoded.smoothing_profiles, world.smoothing_profiles);
         assert_eq!(decoded.water_planes, world.water_planes);
-        assert_eq!(
-            decoded.chunk(ChunkPos { x: 1, z: -3 }),
-            world.chunk(ChunkPos { x: 1, z: -3 })
-        );
-        assert_eq!(
-            decoded.chunk(ChunkPos { x: -7, z: 4 }),
-            world.chunk(ChunkPos { x: -7, z: 4 })
-        );
+        assert_eq!(decoded.chunk(ChunkPos { x: 1, z: -3 }), world.chunk(ChunkPos { x: 1, z: -3 }));
+        assert_eq!(decoded.chunk(ChunkPos { x: -7, z: 4 }), world.chunk(ChunkPos { x: -7, z: 4 }));
     }
 
     #[test]
@@ -1713,36 +1542,18 @@ mod tests {
 
         assert_eq!(
             world.smoothing_override(cell(0, 0)),
-            Some(SmoothingProfile {
-                iterations: 4,
-                degrees: 45,
-            }),
+            Some(SmoothingProfile { iterations: 4, degrees: 45 }),
             "registration clamps to the apron-safe range",
         );
-        assert_eq!(
-            world.smoothing_override(cell(1, 0)),
-            None,
-            "an unregistered id is no override",
-        );
-        assert_eq!(
-            world.smoothing_override(cell(2, 0)),
-            None,
-            "plane 0 is no override",
-        );
-        assert_eq!(
-            world.smoothing_override(cell(100, 100)),
-            None,
-            "a missing chunk is no override",
-        );
+        assert_eq!(world.smoothing_override(cell(1, 0)), None, "an unregistered id is no override",);
+        assert_eq!(world.smoothing_override(cell(2, 0)), None, "plane 0 is no override",);
+        assert_eq!(world.smoothing_override(cell(100, 100)), None, "a missing chunk is no override",);
     }
 
     #[test]
     fn from_bytes_rejects_truncated_and_bad_version() {
         assert_eq!(World::from_bytes(&[]), Err(WorldDecodeError::Truncated));
-        assert_eq!(
-            World::from_bytes(&[9]),
-            Err(WorldDecodeError::BadVersion(9))
-        );
+        assert_eq!(World::from_bytes(&[9]), Err(WorldDecodeError::BadVersion(9)));
         // Version + a region count claiming one region, but no region bytes.
         let mut buf = vec![WORLD_FORMAT_VERSION];
         buf.extend_from_slice(&1u32.to_le_bytes());
@@ -1852,11 +1663,7 @@ mod tests {
         let mut world = World::new();
         world.insert_region(
             0,
-            Region {
-                name: "ignored".into(),
-                default_material: Material::Grass,
-                cliff_material: Material::Stone,
-            },
+            Region { name: "ignored".into(), default_material: Material::Grass, cliff_material: Material::Stone },
         );
         // id 0 is the no-region sentinel — table stays empty, so a cell
         // pointing at region 1 finds no default and reads Void.
@@ -1869,11 +1676,7 @@ mod tests {
         // empty); a cell pointing at region 3 resolves its default.
         world.insert_region(
             3,
-            Region {
-                name: "third".into(),
-                default_material: Material::Stone,
-                cliff_material: Material::Stone,
-            },
+            Region { name: "third".into(), default_material: Material::Stone, cliff_material: Material::Stone },
         );
         let mut chunk3 = Chunk::empty();
         chunk3.region[0] = 3;
@@ -1938,10 +1741,7 @@ mod tests {
         let world = World::from_bytes(&buf).expect("a v4 buffer still decodes");
         let chunk = world.chunk(ChunkPos { x: 0, z: 0 }).expect("chunk");
         assert!(
-            chunk
-                .underlay_points
-                .iter()
-                .all(|point| *point == UNDERLAY_POINT_INHERIT),
+            chunk.underlay_points.iter().all(|point| *point == UNDERLAY_POINT_INHERIT),
             "a pre-5 buffer reads an all-inherit underlay-point plane",
         );
         assert_eq!(
@@ -1954,10 +1754,7 @@ mod tests {
     /// A one-chunk world whose underlay / water-plane / height planes come
     /// from `fill(lx, lz) -> (material, plane id, lakebed height)`, with the
     /// given `(id, level)` water planes registered.
-    fn plane_world(
-        planes: &[(u32, i32)],
-        fill: impl Fn(i32, i32) -> (Material, u16, i32),
-    ) -> World {
+    fn plane_world(planes: &[(u32, i32)], fill: impl Fn(i32, i32) -> (Material, u16, i32)) -> World {
         let mut chunk = Chunk::empty();
         for lz in 0..CELLS_PER_CHUNK {
             for lx in 0..CELLS_PER_CHUNK {
@@ -1970,12 +1767,7 @@ mod tests {
         }
         let mut world = World::new();
         for &(id, level) in planes {
-            world.insert_water_plane(
-                id,
-                WaterPlane {
-                    level_octimeters: level,
-                },
-            );
+            world.insert_water_plane(id, WaterPlane { level_octimeters: level });
         }
         world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
         world
@@ -2011,10 +1803,7 @@ mod tests {
         });
         let level_m = 128.0 / 256.0;
         for corner in world.cell_corner_heights(cell(5, 5)) {
-            assert!(
-                (corner - level_m).abs() < 1e-6,
-                "water corner {corner} not flat at {level_m}",
-            );
+            assert!((corner - level_m).abs() < 1e-6, "water corner {corner} not flat at {level_m}",);
         }
         // And it is the stood-on surface, while height stays the raw lakebed.
         assert!((world.surface_height(5.5, 5.5) - level_m).abs() < 1e-6);
@@ -2069,12 +1858,7 @@ mod tests {
         // the new level after re-registering its plane id.
         let mut world = plane_world(&[(1, 100)], |_, _| (Material::Water, 1, 0));
         assert_eq!(world.water_level(cell(3, 3)), Some(100));
-        world.insert_water_plane(
-            1,
-            WaterPlane {
-                level_octimeters: 240,
-            },
-        );
+        world.insert_water_plane(1, WaterPlane { level_octimeters: 240 });
         assert_eq!(world.water_level(cell(3, 3)), Some(240));
     }
 
@@ -2086,27 +1870,15 @@ mod tests {
         world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
 
         // An inherit (zero) point reads the cell height unchanged.
-        assert_eq!(
-            world.point_height(cell(3, 3), 0, 0),
-            100,
-            "inherit reads cell"
-        );
+        assert_eq!(world.point_height(cell(3, 3), 0, 0), 100, "inherit reads cell");
         // A stamped delta offsets the point off the cell height.
         world.set_cell_heights(cell(3, 3), &[40, -25]);
         assert_eq!(world.point_height(cell(3, 3), 0, 0), 140, "+delta lifts");
         assert_eq!(world.point_height(cell(3, 3), 1, 0), 75, "-delta drops");
-        assert_eq!(
-            world.point_height(cell(3, 3), 2, 0),
-            100,
-            "the untouched tail inherits the cell height",
-        );
+        assert_eq!(world.point_height(cell(3, 3), 2, 0), 100, "the untouched tail inherits the cell height",);
         // A short stamp leaves the tail inheriting; an empty stamp clears all.
         world.set_cell_heights(cell(3, 3), &[]);
-        assert_eq!(
-            world.point_height(cell(3, 3), 0, 0),
-            100,
-            "an empty stamp clears the cell to inherit",
-        );
+        assert_eq!(world.point_height(cell(3, 3), 0, 0), 100, "an empty stamp clears the cell to inherit",);
 
         // Extremes saturate rather than wrap: a max-magnitude delta on a
         // near-i32-max cell height clamps at the bound, not overflow-wraps.
@@ -2115,11 +1887,7 @@ mod tests {
         let mut ex_world = World::new();
         ex_world.insert_chunk(ChunkPos { x: 0, z: 0 }, extreme);
         ex_world.set_cell_heights(cell(0, 0), &[i16::MAX]);
-        assert_eq!(
-            ex_world.point_height(cell(0, 0), 0, 0),
-            i32::MAX,
-            "a lift past the range saturates at i32::MAX",
-        );
+        assert_eq!(ex_world.point_height(cell(0, 0), 0, 0), i32::MAX, "a lift past the range saturates at i32::MAX",);
     }
 
     #[test]
@@ -2153,25 +1921,15 @@ mod tests {
         buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // water planes
         buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // regions
         buf.extend_from_slice(&[0u8; CELLS_PER_CHUNK_AREA]); // smoothing
-        buf.resize(
-            buf.len() + UNDERLAY_POINTS_PER_CHUNK,
-            UNDERLAY_POINT_INHERIT,
-        ); // points
+        buf.resize(buf.len() + UNDERLAY_POINTS_PER_CHUNK, UNDERLAY_POINT_INHERIT); // points
 
         let world = World::from_bytes(&buf).expect("a v5 buffer still decodes");
         let chunk = world.chunk(ChunkPos { x: 0, z: 0 }).expect("chunk");
         assert!(
-            chunk
-                .height_points
-                .iter()
-                .all(|point| *point == HEIGHT_POINT_INHERIT),
+            chunk.height_points.iter().all(|point| *point == HEIGHT_POINT_INHERIT),
             "a pre-6 buffer reads an all-zero height-delta plane",
         );
-        assert_eq!(
-            world.point_height(cell(0, 0), 2, 1),
-            128,
-            "a zero-relief point resolves the cell's own height",
-        );
+        assert_eq!(world.point_height(cell(0, 0), 2, 1), 128, "a zero-relief point resolves the cell's own height",);
     }
 
     #[test]
@@ -2196,24 +1954,15 @@ mod tests {
         buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // water planes
         buf.extend_from_slice(&[0u8; 2 * CELLS_PER_CHUNK_AREA]); // regions
         buf.extend_from_slice(&[0u8; CELLS_PER_CHUNK_AREA]); // smoothing
-        buf.resize(
-            buf.len() + UNDERLAY_POINTS_PER_CHUNK,
-            UNDERLAY_POINT_INHERIT,
-        ); // points
+        buf.resize(buf.len() + UNDERLAY_POINTS_PER_CHUNK, UNDERLAY_POINT_INHERIT); // points
         buf.resize(buf.len() + 2 * HEIGHT_POINTS_PER_CHUNK, 0); // height deltas
 
         let world = World::from_bytes(&buf).expect("a v6 buffer still decodes");
         let chunk = world.chunk(ChunkPos { x: 0, z: 0 }).expect("chunk");
         assert_eq!(chunk.overlay_mask[0], 255);
-        assert_eq!(
-            chunk.overlay_mask[3], 255,
-            "legacy bit 0 expands across its SUB=16 block",
-        );
+        assert_eq!(chunk.overlay_mask[3], 255, "legacy bit 0 expands across its SUB=16 block",);
         assert_eq!(chunk.overlay_mask[4], 0);
-        assert_eq!(
-            chunk.overlay_mask[8], 255,
-            "legacy bit 2 expands across its SUB=16 block",
-        );
+        assert_eq!(chunk.overlay_mask[8], 255, "legacy bit 2 expands across its SUB=16 block",);
     }
 
     #[test]
@@ -2282,11 +2031,7 @@ mod tests {
         for i in 1..48 {
             let wx = 5.02 + i as f32 * 0.02;
             let h = world.surface_height(wx, 5.5);
-            assert!(
-                (h - prev).abs() < 0.05,
-                "a continuous ramp jumped {} at x {wx}",
-                (h - prev).abs(),
-            );
+            assert!((h - prev).abs() < 0.05, "a continuous ramp jumped {} at x {wx}", (h - prev).abs(),);
             prev = h;
         }
     }
@@ -2309,16 +2054,10 @@ mod tests {
         // Center of the raised block (subcell (1,1)..(2,2)) stands at 200/256.
         let sub_f = sub as f32;
         let inside = world.surface_height(5.0 + 1.5 / sub_f, 5.0 + 1.5 / sub_f);
-        assert!(
-            (inside - 200.0 / 256.0).abs() < 1e-4,
-            "the plateau interior stands at the raised level, got {inside}",
-        );
+        assert!((inside - 200.0 / 256.0).abs() < 1e-4, "the plateau interior stands at the raised level, got {inside}",);
         // A flat corner subcell stays at the base — the plate did not blend
         // the raise outward across the break.
         let outside = world.surface_height(5.0 + 0.5 / sub_f, 5.0 + 0.5 / sub_f);
-        assert!(
-            outside.abs() < 1e-4,
-            "a flat subcell outside the plateau stays at the base, got {outside}",
-        );
+        assert!(outside.abs() < 1e-4, "a flat subcell outside the plateau stays at the base, got {outside}",);
     }
 }

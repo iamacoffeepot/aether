@@ -52,22 +52,14 @@ impl NativeActor for TcpListenerActor {
     type Config = TcpListenerConfig;
     const NAMESPACE: &'static str = "aether.tcp.listener";
 
-    fn init(
-        mut config: TcpListenerConfig,
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<TcpListenerState, BootError> {
-        let listener = config
-            .listener
-            .take()
-            .expect("TcpListenerConfig::listener consumed exactly once");
+    fn init(mut config: TcpListenerConfig, ctx: &mut NativeInitCtx<'_>) -> Result<TcpListenerState, BootError> {
+        let listener = config.listener.take().expect("TcpListenerConfig::listener consumed exactly once");
         let addr = config.addr;
         let port = config.port;
         // Stay blocking — the accept loop wakes via self-connect
         // on `unwire`. Nonblocking would require a poll loop +
         // CPU burn for no win.
-        listener
-            .set_nonblocking(false)
-            .map_err(|e| BootError::Other(Box::new(e)))?;
+        listener.set_nonblocking(false).map_err(|e| BootError::Other(Box::new(e)))?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_for_thread = Arc::clone(&shutdown);
 
@@ -127,13 +119,7 @@ impl NativeActor for TcpListenerActor {
             "tcp listener bound",
         );
 
-        Ok(TcpListenerState {
-            local_port: port,
-            shutdown,
-            accept_thread: Some(thread),
-            connection_rx,
-            next_subname: 0,
-        })
+        Ok(TcpListenerState { local_port: port, shutdown, accept_thread: Some(thread), connection_rx, next_subname: 0 })
     }
 
     fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
@@ -179,25 +165,15 @@ impl NativeActor for TcpListenerActor {
     /// we'll see the queue already drained on the second handler
     /// call and exit fast.
     #[handler::single]
-    fn on_connection_ready(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_>,
-        _mail: ConnectionReady,
-    ) {
+    fn on_connection_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: ConnectionReady) {
         while let Ok((stream, peer)) = state.connection_rx.try_recv() {
             let subname = format!("conn-{}", state.next_subname);
             state.next_subname += 1;
             let peer_str = peer.to_string();
-            let session_config = TcpSessionConfig {
-                stream: Some(stream),
-                peer: peer_str.clone(),
-                session_name: subname.clone(),
-            };
+            let session_config =
+                TcpSessionConfig { stream: Some(stream), peer: peer_str.clone(), session_name: subname.clone() };
             match ctx
-                .spawn_child::<TcpSessionActor>(
-                    aether_substrate::Subname::Named(&subname),
-                    session_config,
-                )
+                .spawn_child::<TcpSessionActor>(aether_substrate::Subname::Named(&subname), session_config)
                 .finish()
             {
                 Ok(_) => {

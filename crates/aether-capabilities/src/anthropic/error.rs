@@ -75,21 +75,13 @@ mod tests {
     #[test]
     fn timeout_sentinel_maps_to_timeout() {
         let raw = format!("{TIMEOUT_SENTINEL}1500");
-        assert_eq!(
-            adapter_error_to_typed(&raw),
-            AnthropicError::Timeout {
-                elapsed_millis: 1500
-            }
-        );
+        assert_eq!(adapter_error_to_typed(&raw), AnthropicError::Timeout { elapsed_millis: 1500 });
     }
 
     #[test]
     fn malformed_timeout_sentinel_still_classifies_as_timeout() {
         let raw = format!("{TIMEOUT_SENTINEL}garbage");
-        assert_eq!(
-            adapter_error_to_typed(&raw),
-            AnthropicError::Timeout { elapsed_millis: 0 }
-        );
+        assert_eq!(adapter_error_to_typed(&raw), AnthropicError::Timeout { elapsed_millis: 0 });
     }
 
     #[test]
@@ -102,9 +94,7 @@ mod tests {
     fn rate_limit_threads_retry_after() {
         assert_eq!(
             status_to_error(429, Some(1500), "slow down"),
-            AnthropicError::RateLimited {
-                retry_after_millis: Some(1500)
-            }
+            AnthropicError::RateLimited { retry_after_millis: Some(1500) }
         );
     }
 

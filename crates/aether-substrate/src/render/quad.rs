@@ -151,20 +151,19 @@ pub fn build_quad_pipeline(
         source: wgpu::ShaderSource::Wgsl(QUAD_SHADER_WGSL.into()),
     });
 
-    let viewport_bind_group_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("quad viewport bind group layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(QUAD_UNIFORM_BYTES),
-                },
-                count: None,
-            }],
-        });
+    let viewport_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("quad viewport bind group layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(QUAD_UNIFORM_BYTES),
+            },
+            count: None,
+        }],
+    });
 
     let viewport_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("quad viewport uniform"),
@@ -176,18 +175,12 @@ pub fn build_quad_pipeline(
     let viewport_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("quad viewport bind group"),
         layout: &viewport_bind_group_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: viewport_buffer.as_entire_binding(),
-        }],
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: viewport_buffer.as_entire_binding() }],
     });
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("aether quad pipeline layout"),
-        bind_group_layouts: &[
-            Some(&viewport_bind_group_layout),
-            Some(&texture_bindings.layout),
-        ],
+        bind_group_layouts: &[Some(&viewport_bind_group_layout), Some(&texture_bindings.layout)],
         immediate_size: 0,
     });
 
@@ -196,41 +189,17 @@ pub fn build_quad_pipeline(
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
             // anchor: vec3<f32> at offset 0
-            wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x3,
-            },
+            wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
             // offset_px: vec2<f32> at offset 12
-            wgpu::VertexAttribute {
-                offset: 12,
-                shader_location: 1,
-                format: wgpu::VertexFormat::Float32x2,
-            },
+            wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
             // uv: vec2<f32> at offset 20
-            wgpu::VertexAttribute {
-                offset: 20,
-                shader_location: 2,
-                format: wgpu::VertexFormat::Float32x2,
-            },
+            wgpu::VertexAttribute { offset: 20, shader_location: 2, format: wgpu::VertexFormat::Float32x2 },
             // tint: vec4<f32> at offset 28
-            wgpu::VertexAttribute {
-                offset: 28,
-                shader_location: 3,
-                format: wgpu::VertexFormat::Float32x4,
-            },
+            wgpu::VertexAttribute { offset: 28, shader_location: 3, format: wgpu::VertexFormat::Float32x4 },
             // k: f32 at offset 44
-            wgpu::VertexAttribute {
-                offset: 44,
-                shader_location: 4,
-                format: wgpu::VertexFormat::Float32,
-            },
+            wgpu::VertexAttribute { offset: 44, shader_location: 4, format: wgpu::VertexFormat::Float32 },
             // is_screen: u32 at offset 48
-            wgpu::VertexAttribute {
-                offset: 48,
-                shader_location: 5,
-                format: wgpu::VertexFormat::Uint32,
-            },
+            wgpu::VertexAttribute { offset: 48, shader_location: 5, format: wgpu::VertexFormat::Uint32 },
         ],
     };
 
@@ -279,12 +248,7 @@ pub fn build_quad_pipeline(
         mapped_at_creation: false,
     });
 
-    QuadPipeline {
-        pipeline,
-        vertex_buffer,
-        viewport_buffer,
-        viewport_bind_group,
-    }
+    QuadPipeline { pipeline, vertex_buffer, viewport_buffer, viewport_bind_group }
 }
 
 /// Create a GPU texture from staged `pixels` and build its group-1 bind
@@ -305,11 +269,7 @@ pub fn realize_texture(
 ) -> RealizedTexture {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("aether quad texture"),
-        size: wgpu::Extent3d {
-            width: width.max(1),
-            height: height.max(1),
-            depth_or_array_layers: 1,
-        },
+        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -322,23 +282,11 @@ pub fn realize_texture(
         label: Some("aether texture bind group"),
         layout: &texture_bindings.layout,
         entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&texture_bindings.sampler),
-            },
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&texture_bindings.sampler) },
         ],
     });
-    let realized = RealizedTexture {
-        texture,
-        bind_group,
-        width,
-        height,
-        format,
-    };
+    let realized = RealizedTexture { texture, bind_group, width, height, format };
     upload_texture_full(queue, &realized, pixels);
     realized
 }
@@ -362,11 +310,7 @@ pub fn upload_texture_full(queue: &wgpu::Queue, realized: &RealizedTexture, pixe
             bytes_per_row: Some(realized.width.max(1) * texture_bytes_per_pixel(realized.format)),
             rows_per_image: Some(realized.height.max(1)),
         },
-        wgpu::Extent3d {
-            width: realized.width.max(1),
-            height: realized.height.max(1),
-            depth_or_array_layers: 1,
-        },
+        wgpu::Extent3d { width: realized.width.max(1), height: realized.height.max(1), depth_or_array_layers: 1 },
     );
 }
 
@@ -395,14 +339,8 @@ pub fn push_screen_quad_vertices(out: &mut Vec<u8>, rect: [f32; 4], uv: [f32; 4]
     // Two triangles, CCW in pixel space (top-left, bottom-left,
     // bottom-right) + (top-left, bottom-right, top-right). Cull mode is
     // off so winding doesn't gate visibility regardless.
-    let corners = [
-        (x0, y0, u0, v0),
-        (x0, y1, u0, v1),
-        (x1, y1, u1, v1),
-        (x0, y0, u0, v0),
-        (x1, y1, u1, v1),
-        (x1, y0, u1, v0),
-    ];
+    let corners =
+        [(x0, y0, u0, v0), (x0, y1, u0, v1), (x1, y1, u1, v1), (x0, y0, u0, v0), (x1, y1, u1, v1), (x1, y0, u1, v0)];
     for (px, py, u, v) in corners {
         // anchor (0,0,0) + offset_px (pixel pos) + uv + tint + k=0
         let floats: [f32; 12] = [
@@ -444,14 +382,8 @@ pub fn push_world_quad_vertices(
     let y0 = y;
     let x1 = x + width;
     let y1 = y + height;
-    let corners = [
-        (x0, y0, u0, v0),
-        (x0, y1, u0, v1),
-        (x1, y1, u1, v1),
-        (x0, y0, u0, v0),
-        (x1, y1, u1, v1),
-        (x1, y0, u1, v0),
-    ];
+    let corners =
+        [(x0, y0, u0, v0), (x0, y1, u0, v1), (x1, y1, u1, v1), (x0, y0, u0, v0), (x1, y1, u1, v1), (x1, y0, u1, v0)];
     for (ox, oy, u, v) in corners {
         let floats: [f32; 12] = [
             anchor[0], anchor[1], anchor[2], // anchor: world-space point
@@ -514,10 +446,7 @@ pub fn record_quad_overlay_pass(
             view: targets.color_view(),
             resolve_target: None,
             depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
+            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
         })],
         depth_stencil_attachment: None,
         timestamp_writes: None,
@@ -536,19 +465,12 @@ pub fn record_quad_overlay_pass(
         };
         pass.set_scissor_rect(scissor[0], scissor[1], scissor[2], scissor[3]);
         pass.set_bind_group(1, draw.bind_group, &[]);
-        pass.draw(
-            draw.first_vertex..draw.first_vertex + draw.vertex_count,
-            0..1,
-        );
+        pass.draw(draw.first_vertex..draw.first_vertex + draw.vertex_count, 0..1);
     }
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn clamped_scissor(
-    clip: Option<[f32; 4]>,
-    target_width: u32,
-    target_height: u32,
-) -> Option<[u32; 4]> {
+fn clamped_scissor(clip: Option<[f32; 4]>, target_width: u32, target_height: u32) -> Option<[u32; 4]> {
     let Some([x, y, width, height]) = clip else {
         return Some([0, 0, target_width, target_height]);
     };
@@ -563,10 +485,5 @@ fn clamped_scissor(
         return None;
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    Some([
-        min_x as u32,
-        min_y as u32,
-        (max_x - min_x) as u32,
-        (max_y - min_y) as u32,
-    ])
+    Some([min_x as u32, min_y as u32, (max_x - min_x) as u32, (max_y - min_y) as u32])
 }

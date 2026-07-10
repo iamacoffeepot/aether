@@ -68,10 +68,7 @@ pub struct Many;
 impl Resolve for Many {
     type Args<'a> = &'a str;
     fn resolve(caller_carry: u64, namespace: &str, subname: &str) -> MailboxId {
-        MailboxId(with_tag(
-            Tag::Mailbox,
-            fold_lineage(caller_carry, ActorId::instanced(namespace, subname)),
-        ))
+        MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::instanced(namespace, subname))))
     }
 }
 
@@ -96,10 +93,7 @@ pub struct Embedded;
 impl Resolve for Embedded {
     type Args<'a> = ();
     fn resolve(caller_carry: u64, namespace: &str, _args: ()) -> MailboxId {
-        MailboxId(with_tag(
-            Tag::Mailbox,
-            fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, namespace)),
-        ))
+        MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, namespace))))
     }
 }
 
@@ -112,10 +106,7 @@ pub struct EmbeddedMany;
 impl Resolve for EmbeddedMany {
     type Args<'a> = &'a str;
     fn resolve(caller_carry: u64, _namespace: &str, subname: &str) -> MailboxId {
-        MailboxId(with_tag(
-            Tag::Mailbox,
-            fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, subname)),
-        ))
+        MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, subname))))
     }
 }
 
@@ -345,9 +336,7 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
         return Err(NamespaceError::Empty);
     }
     if s.len() > NAMESPACE_SEGMENT_MAX_LEN {
-        return Err(NamespaceError::TooLong {
-            limit: NAMESPACE_SEGMENT_MAX_LEN,
-        });
+        return Err(NamespaceError::TooLong { limit: NAMESPACE_SEGMENT_MAX_LEN });
     }
     for c in s.chars() {
         if c == ':' {
@@ -436,16 +425,8 @@ mod tests {
         }
 
         let frozen = mailbox_id_from_name("test.resolve.rootcap");
-        assert_eq!(
-            <RootCap as Addressable>::resolve(0, ()),
-            frozen,
-            "One is the depth-1 id"
-        );
-        assert_eq!(
-            <RootCap as Addressable>::resolve(0xDEAD_BEEF, ()),
-            frozen,
-            "One ignores the caller's carry"
-        );
+        assert_eq!(<RootCap as Addressable>::resolve(0, ()), frozen, "One is the depth-1 id");
+        assert_eq!(<RootCap as Addressable>::resolve(0xDEAD_BEEF, ()), frozen, "One ignores the caller's carry");
     }
 
     /// ADR-0099 §5 / ADR-0119: the [`Many`] resolver folds
@@ -460,15 +441,9 @@ mod tests {
         }
 
         let carry = 0x0BAD_F00D_u64;
-        let expected = MailboxId(with_tag(
-            Tag::Mailbox,
-            fold_lineage(carry, ActorId::instanced("test.resolve.per_thing", "42")),
-        ));
-        assert_eq!(
-            <PerThing as Addressable>::resolve(carry, "42"),
-            expected,
-            "folds carry+subname"
-        );
+        let expected =
+            MailboxId(with_tag(Tag::Mailbox, fold_lineage(carry, ActorId::instanced("test.resolve.per_thing", "42"))));
+        assert_eq!(<PerThing as Addressable>::resolve(carry, "42"), expected, "folds carry+subname");
         assert_ne!(
             <PerThing as Addressable>::resolve(carry, "42"),
             <PerThing as Addressable>::resolve(carry, "43"),

@@ -33,88 +33,24 @@ pub fn serialize(node: &Node) -> String {
 #[allow(clippy::too_many_lines)]
 pub(crate) fn node_to_value(node: &Node) -> Value {
     match node {
-        Node::Box { x, y, z, color } => list([
-            sym("box"),
-            num(*x),
-            num(*y),
-            num(*z),
-            kw("color"),
-            uint(*color),
-        ]),
-        Node::Cylinder {
-            radius,
-            height,
-            segments,
-            color,
-        } => list([
-            sym("cylinder"),
-            num(*radius),
-            num(*height),
-            uint(*segments),
-            kw("color"),
-            uint(*color),
-        ]),
-        Node::Cone {
-            radius,
-            height,
-            segments,
-            color,
-        } => list([
-            sym("cone"),
-            num(*radius),
-            num(*height),
-            uint(*segments),
-            kw("color"),
-            uint(*color),
-        ]),
-        Node::Wedge { x, y, z, color } => list([
-            sym("wedge"),
-            num(*x),
-            num(*y),
-            num(*z),
-            kw("color"),
-            uint(*color),
-        ]),
-        Node::Sphere {
-            radius,
-            subdivisions,
-            color,
-        } => list([
-            sym("sphere"),
-            num(*radius),
-            uint(*subdivisions),
-            kw("color"),
-            uint(*color),
-        ]),
-        Node::Lathe {
-            profile,
-            segments,
-            color,
-        } => list([
-            sym("lathe"),
-            profile_to_value(profile),
-            uint(*segments),
-            kw("color"),
-            uint(*color),
-        ]),
-        Node::Extrude {
-            profile,
-            depth,
-            color,
-        } => list([
-            sym("extrude"),
-            profile_to_value(profile),
-            num(*depth),
-            kw("color"),
-            uint(*color),
-        ]),
-        Node::Torus {
-            major_radius,
-            minor_radius,
-            major_segments,
-            minor_segments,
-            color,
-        } => list([
+        Node::Box { x, y, z, color } => list([sym("box"), num(*x), num(*y), num(*z), kw("color"), uint(*color)]),
+        Node::Cylinder { radius, height, segments, color } => {
+            list([sym("cylinder"), num(*radius), num(*height), uint(*segments), kw("color"), uint(*color)])
+        }
+        Node::Cone { radius, height, segments, color } => {
+            list([sym("cone"), num(*radius), num(*height), uint(*segments), kw("color"), uint(*color)])
+        }
+        Node::Wedge { x, y, z, color } => list([sym("wedge"), num(*x), num(*y), num(*z), kw("color"), uint(*color)]),
+        Node::Sphere { radius, subdivisions, color } => {
+            list([sym("sphere"), num(*radius), uint(*subdivisions), kw("color"), uint(*color)])
+        }
+        Node::Lathe { profile, segments, color } => {
+            list([sym("lathe"), profile_to_value(profile), uint(*segments), kw("color"), uint(*color)])
+        }
+        Node::Extrude { profile, depth, color } => {
+            list([sym("extrude"), profile_to_value(profile), num(*depth), kw("color"), uint(*color)])
+        }
+        Node::Torus { major_radius, minor_radius, major_segments, minor_segments, color } => list([
             sym("torus"),
             num(*major_radius),
             num(*minor_radius),
@@ -123,13 +59,7 @@ pub(crate) fn node_to_value(node: &Node) -> Value {
             kw("color"),
             uint(*color),
         ]),
-        Node::Sweep {
-            profile,
-            path,
-            scales,
-            open,
-            color,
-        } => {
+        Node::Sweep { profile, path, scales, open, color } => {
             let mut items = vec![sym("sweep"), profile_to_value(profile), path_to_value(path)];
             if let Some(s) = scales {
                 items.push(kw("scales"));
@@ -151,33 +81,15 @@ pub(crate) fn node_to_value(node: &Node) -> Value {
             items.extend(children.iter().map(node_to_value));
             list(items)
         }
-        Node::Translate { offset, child } => list([
-            sym("translate"),
-            vec3_to_value(*offset),
-            node_to_value(child),
-        ]),
-        Node::Rotate { axis, angle, child } => list([
-            sym("rotate"),
-            vec3_to_value(*axis),
-            num(*angle),
-            node_to_value(child),
-        ]),
-        Node::Scale { factor, child } => {
-            list([sym("scale"), vec3_to_value(*factor), node_to_value(child)])
+        Node::Translate { offset, child } => list([sym("translate"), vec3_to_value(*offset), node_to_value(child)]),
+        Node::Rotate { axis, angle, child } => {
+            list([sym("rotate"), vec3_to_value(*axis), num(*angle), node_to_value(child)])
         }
-        Node::Mirror { axis, child } => {
-            list([sym("mirror"), sym(axis.as_symbol()), node_to_value(child)])
+        Node::Scale { factor, child } => list([sym("scale"), vec3_to_value(*factor), node_to_value(child)]),
+        Node::Mirror { axis, child } => list([sym("mirror"), sym(axis.as_symbol()), node_to_value(child)]),
+        Node::Array { count, spacing, child } => {
+            list([sym("array"), uint(*count), vec3_to_value(*spacing), node_to_value(child)])
         }
-        Node::Array {
-            count,
-            spacing,
-            child,
-        } => list([
-            sym("array"),
-            uint(*count),
-            vec3_to_value(*spacing),
-            node_to_value(child),
-        ]),
     }
 }
 

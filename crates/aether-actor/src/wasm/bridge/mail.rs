@@ -56,14 +56,7 @@ use crate::wasm::raw;
     clippy::must_use_candidate,
     reason = "fire-and-forget by contract — see doc-comment above; #[must_use] retired in issue 892"
 )]
-pub fn send_mail(
-    recipient: u64,
-    kind: u64,
-    bytes: &[u8],
-    count: u32,
-    detached: bool,
-    from: u64,
-) -> u32 {
+pub fn send_mail(recipient: u64, kind: u64, bytes: &[u8], count: u32, detached: bool, from: u64) -> u32 {
     // SAFETY: forwards to `raw::send_mail`, whose ABI is documented
     // at the import site in `ffi/raw.rs`. The `(ptr, len)` pair is
     // derived from the `&[u8]` slice we just received, which the
@@ -103,16 +96,7 @@ pub fn reply_mail(sender: u32, kind: u64, bytes: &[u8], count: u32, from: u64) -
     // derived from the `&[u8]` slice we just received, which the
     // borrow checker proves is valid for `bytes.len()` bytes for
     // the duration of the call; the host copies before returning.
-    unsafe {
-        raw::reply_mail(
-            sender,
-            kind,
-            bytes.as_ptr().addr() as u32,
-            bytes.len() as u32,
-            count,
-            from,
-        )
-    }
+    unsafe { raw::reply_mail(sender, kind, bytes.as_ptr().addr() as u32, bytes.len() as u32, count, from) }
 }
 
 /// Correlation id the host minted for this actor's most recent
@@ -190,10 +174,6 @@ pub fn spawn_inline_child(is_counter: bool, subname: &str) -> u64 {
     // pair is derived from a reference valid for `len` bytes for the
     // call's duration; the host copies before returning.
     unsafe {
-        raw::spawn_inline_child(
-            u32::from(is_counter),
-            subname_bytes.as_ptr().addr() as u32,
-            subname_bytes.len() as u32,
-        )
+        raw::spawn_inline_child(u32::from(is_counter), subname_bytes.as_ptr().addr() as u32, subname_bytes.len() as u32)
     }
 }

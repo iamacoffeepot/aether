@@ -31,10 +31,7 @@ type LineageCapture = Arc<Mutex<Vec<(MailId, MailId, Option<MailId>)>>>;
 /// triple into a shared `Vec`. Both lineage tests below share
 /// this setup; the helper returns the capture handle and the
 /// registered mailbox id.
-fn register_lineage_capture_sink(
-    registry: &Arc<Registry>,
-    name: &str,
-) -> (LineageCapture, MailboxId) {
+fn register_lineage_capture_sink(registry: &Arc<Registry>, name: &str) -> (LineageCapture, MailboxId) {
     let captured: LineageCapture = Arc::new(Mutex::new(Vec::new()));
     let captured_for_handler = Arc::clone(&captured);
     let sink_id = registry
@@ -43,11 +40,7 @@ fn register_lineage_capture_sink(
             Arc::new(move |dispatch: OwnedDispatch| {
                 // ADR-0094: terminal test capture sink — discharge.
                 dispatch.discharge();
-                captured_for_handler.lock().unwrap().push((
-                    dispatch.mail_id,
-                    dispatch.root,
-                    dispatch.parent_mail,
-                ));
+                captured_for_handler.lock().unwrap().push((dispatch.mail_id, dispatch.root, dispatch.parent_mail));
             }),
         )
         .expect("register sink");
@@ -56,12 +49,7 @@ fn register_lineage_capture_sink(
 
 fn ctx() -> ComponentCtx {
     let registry = Arc::new(Registry::new());
-    ComponentCtx::new(
-        MailboxId(0),
-        Arc::clone(&registry),
-        Arc::new(Mailer::new(registry)),
-        HubOutbound::disconnected(),
-    )
+    ComponentCtx::new(MailboxId(0), Arc::clone(&registry), Arc::new(Mailer::new(registry)), HubOutbound::disconnected())
 }
 
 fn instantiate(wat: &str) -> Component {
@@ -498,10 +486,7 @@ fn instantiate_small_config_uses_small_region() {
     let small_ptr = component.small_ptr;
     assert_eq!(component.read_u32(204), small_ptr);
     assert_eq!(component.read_u32(208) as usize, payload.len());
-    assert_eq!(
-        component.read_bytes(small_ptr as usize, payload.len()),
-        payload,
-    );
+    assert_eq!(component.read_bytes(small_ptr as usize, payload.len()), payload,);
 }
 
 /// ADR-0095: a config larger than `SMALL_REGION_BYTES` but within the deliverable
@@ -516,10 +501,7 @@ fn instantiate_large_config_grows_large_region() {
     let mut component = instantiate_with_config(&wat_init_with_config(), &payload);
     let large_ptr = component.large_ptr;
     assert_ne!(large_ptr, 0, "large region must have been grown");
-    assert_ne!(
-        large_ptr, component.small_ptr,
-        "large config must not land in the small region",
-    );
+    assert_ne!(large_ptr, component.small_ptr, "large config must not land in the small region",);
     // init saw the large-region pointer.
     assert_eq!(component.read_u32(204), large_ptr);
     assert_eq!(component.read_u32(208) as usize, payload.len());
@@ -558,10 +540,7 @@ fn instantiate_config_without_allocator_returns_clean_error() {
         panic!("config to a guest without an allocator must fail");
     };
     let msg = format!("{err}");
-    assert!(
-        msg.contains("no realloc_p32 allocator"),
-        "error should name the missing allocator; got: {msg}",
-    );
+    assert!(msg.contains("no realloc_p32 allocator"), "error should name the missing allocator; got: {msg}",);
 }
 
 #[test]
@@ -592,11 +571,7 @@ fn wire_invokes_export_and_writes_marker() {
     // wire hasn't been invoked yet — `instantiate` no longer fires it.
     assert_eq!(component.read_u32(100), 0);
     component.wire().expect("wire ok");
-    assert_eq!(
-        component.read_u32(100),
-        0x77,
-        "wire must run when Component::wire is invoked",
-    );
+    assert_eq!(component.read_u32(100), 0x77, "wire must run when Component::wire is invoked",);
     // Mailbox id stamped into offset 108 by the WAT — test ctx
     // uses MailboxId(0), so the low 32 bits are 0.
     assert_eq!(component.read_u32(108), 0);
@@ -626,10 +601,7 @@ fn unwire_invokes_export_and_writes_marker() {
 fn wire_trap_propagates_via_component_wire() {
     let mut component = instantiate(WAT_WIRE_TRAPS);
     let result = component.wire();
-    assert!(
-        result.is_err(),
-        "Component::wire must propagate the guest trap as wasmtime::Error",
-    );
+    assert!(result.is_err(), "Component::wire must propagate the guest trap as wasmtime::Error",);
 }
 
 /// Issue 584 Phase 2b: `unwire` traps are contained the same way
@@ -662,11 +634,7 @@ fn deliver_small_payload_uses_small_region() {
     let rc = component.deliver(&mail).expect("deliver ok");
     assert_eq!(rc, 0, "guest receive should have run");
     // The fixture's `receive` recorded the pointer it was handed at offset 16.
-    assert_eq!(
-        component.read_u32(16),
-        small_ptr,
-        "small payload should land in the cached small region",
-    );
+    assert_eq!(component.read_u32(16), small_ptr, "small payload should land in the cached small region",);
 }
 
 /// ADR-0095: a payload larger than `SMALL_REGION_BYTES` but within the deliverable
@@ -682,11 +650,7 @@ fn deliver_large_payload_grows_large_region() {
     let large_ptr = component.large_ptr;
     assert_ne!(large_ptr, 0, "large region must have been grown");
     assert_ne!(large_ptr, component.small_ptr);
-    assert_eq!(
-        component.read_u32(16),
-        large_ptr,
-        "large payload should land in the grown large region",
-    );
+    assert_eq!(component.read_u32(16), large_ptr, "large payload should land in the grown large region",);
 }
 
 /// ADR-0095: a payload past the absolute deliverable ceiling is dropped
@@ -695,12 +659,7 @@ fn deliver_large_payload_grows_large_region() {
 #[test]
 fn deliver_oversize_payload_dropped() {
     let mut component = instantiate(&wat_records_mail_ptr());
-    let mail = Mail::new(
-        MailboxId(0),
-        aether_data::KindId(0),
-        vec![0u8; MAX_DELIVERABLE_MAIL_BYTES + 1],
-        1,
-    );
+    let mail = Mail::new(MailboxId(0), aether_data::KindId(0), vec![0u8; MAX_DELIVERABLE_MAIL_BYTES + 1], 1);
     let rc = component.deliver(&mail).expect("deliver must not trap");
     assert_eq!(rc, DISPATCH_DROPPED_OVERSIZE);
 }
@@ -736,26 +695,17 @@ fn save_state_over_cap_records_error_and_no_bundle() {
 #[test]
 fn call_on_rehydrate_writes_bytes_and_invokes_hook() {
     let mut component = instantiate(&wat_rehydrates());
-    let bundle = StateBundle {
-        version: 0x2A,
-        bytes: vec![0x01, 0x02, 0x03, 0x04, 0x05],
-    };
+    let bundle = StateBundle { version: 0x2A, bytes: vec![0x01, 0x02, 0x03, 0x04, 0x05] };
     component.call_on_rehydrate(&bundle).expect("rehydrate ok");
     // Hook copied the version to offset 396 and the bytes to 400.
     assert_eq!(component.read_u32(396), 0x2A);
-    assert_eq!(
-        component.read_bytes(400, 5),
-        vec![0x01, 0x02, 0x03, 0x04, 0x05],
-    );
+    assert_eq!(component.read_bytes(400, 5), vec![0x01, 0x02, 0x03, 0x04, 0x05],);
 }
 
 #[test]
 fn call_on_rehydrate_without_export_is_noop() {
     let mut component = instantiate(WAT_NO_HOOKS);
-    let bundle = StateBundle {
-        version: 1,
-        bytes: vec![9, 9, 9],
-    };
+    let bundle = StateBundle { version: 1, bytes: vec![9, 9, 9] };
     // Silently discards the bundle per ADR-0016 §3.
     component.call_on_rehydrate(&bundle).expect("noop ok");
 }
@@ -812,10 +762,7 @@ fn deliver_with_real_token_allocates_session_handle() {
     component.deliver(&mail).expect("deliver");
     let observed = component.read_u32(500);
     assert_ne!(observed, NO_REPLY_HANDLE);
-    assert_eq!(
-        component.store.data().reply_table.resolve(observed),
-        Some(ReplyEntry::session(token)),
-    );
+    assert_eq!(component.store.data().reply_table.resolve(observed), Some(ReplyEntry::session(token)),);
 }
 
 #[test]
@@ -832,10 +779,7 @@ fn deliver_with_component_reply_target_allocates_component_handle() {
     component.deliver(&mail).expect("deliver");
     let observed = component.read_u32(500);
     assert_ne!(observed, NO_REPLY_HANDLE);
-    assert_eq!(
-        component.store.data().reply_table.resolve(observed),
-        Some(ReplyEntry::component(M(7))),
-    );
+    assert_eq!(component.store.data().reply_table.resolve(observed), Some(ReplyEntry::component(M(7))),);
 }
 
 /// Issue 2001: `receive` stores the low 32 bits of the `source` param
@@ -909,11 +853,7 @@ fn deliver_threads_zero_source_for_session_origin() {
     let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
         .with_reply_to(Source::to(SourceAddr::Session(token)));
     component.deliver(&mail).expect("deliver");
-    assert_eq!(
-        component.read_u32(500),
-        0,
-        "a session origin must thread 0 (MailboxId::NONE) as the source param",
-    );
+    assert_eq!(component.read_u32(500), 0, "a session origin must thread 0 (MailboxId::NONE) as the source param",);
 }
 
 #[test]
@@ -926,11 +866,7 @@ fn deliver_threads_zero_source_for_no_reply_target() {
     // prior value, proving the substrate threaded NONE.
     let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1);
     component.deliver(&mail).expect("deliver");
-    assert_eq!(
-        component.read_u32(500),
-        0,
-        "a no-reply-target origin must thread 0 as the source param",
-    );
+    assert_eq!(component.read_u32(500), 0, "a no-reply-target origin must thread 0 as the source param",);
 }
 
 #[test]
@@ -942,15 +878,10 @@ fn reply_correlation_import_exposes_reply_envelope_only() {
     let reply = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
         .with_reply_to(Source::with_correlation(SourceAddr::None, 0x5151));
     component.deliver(&reply).expect("deliver reply");
-    assert_eq!(
-        component.read_u32(500),
-        0x5151,
-        "reply envelope must expose its echoed correlation",
-    );
+    assert_eq!(component.read_u32(500), 0x5151, "reply envelope must expose its echoed correlation",);
 
-    let request = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1).with_reply_to(
-        Source::with_correlation(SourceAddr::Component(M(7)), 0x9999),
-    );
+    let request = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
+        .with_reply_to(Source::with_correlation(SourceAddr::Component(M(7)), 0x9999));
     component.deliver(&request).expect("deliver request");
     assert_eq!(
         component.read_u32(500),
@@ -966,10 +897,7 @@ fn plane_ctx_for_reply() -> (ComponentCtx, Receiver<EgressEvent>, aether_data::K
     let (outbound, rx) = HubOutbound::attached_loopback();
     let registry = Arc::new(Registry::new());
     let pong_id = registry
-        .register_kind_with_descriptor(KindDescriptor {
-            name: "test.pong".into(),
-            schema: SchemaType::Unit,
-        })
+        .register_kind_with_descriptor(KindDescriptor { name: "test.pong".into(), schema: SchemaType::Unit })
         .expect("register kind");
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let ctx = ComponentCtx::new(M(0), registry, mailer, outbound);
@@ -999,10 +927,7 @@ fn reply_mail_emits_session_addressed_frame() {
     component.deliver(&mail).expect("deliver");
 
     let event = rx.try_recv().expect("outbound egress queued");
-    let EgressEvent::ToSession {
-        session, kind_name, ..
-    } = event
-    else {
+    let EgressEvent::ToSession { session, kind_name, .. } = event else {
         panic!("expected ToSession egress, got {event:?}");
     };
     assert_eq!(session, token);
@@ -1064,28 +989,19 @@ fn reply_mail_component_target_echoes_inbound_correlation() {
     // The reply kind must be known so the Component arm's validation
     // guard (`kind_name(kind).is_some()`) passes.
     let pong_id = registry
-        .register_kind_with_descriptor(KindDescriptor {
-            name: "test.pong".into(),
-            schema: SchemaType::Unit,
-        })
+        .register_kind_with_descriptor(KindDescriptor { name: "test.pong".into(), schema: SchemaType::Unit })
         .expect("register kind");
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let ctx = ComponentCtx::new(
-        M(0),
-        Arc::clone(&registry),
-        mailer,
-        HubOutbound::disconnected(),
-    );
+    let ctx = ComponentCtx::new(M(0), Arc::clone(&registry), mailer, HubOutbound::disconnected());
     let mut component = instantiate_with_ctx(&wat_replies(pong_id.0), ctx);
 
     // Inbound whose reply target is a peer component, carrying
     // `INBOUND_CORRELATION`. The guest's `receive_p32` calls
     // `reply_mail_p32` with the sender handle the substrate
     // allocated for this reply target.
-    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1).with_reply_to(
-        Source::with_correlation(SourceAddr::Component(recipient), INBOUND_CORRELATION),
-    );
+    let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
+        .with_reply_to(Source::with_correlation(SourceAddr::Component(recipient), INBOUND_CORRELATION));
     component.deliver(&mail).expect("deliver");
 
     let captured = captured.lock().unwrap();
@@ -1095,11 +1011,7 @@ fn reply_mail_component_target_echoes_inbound_correlation() {
         reply_to.correlation_id, INBOUND_CORRELATION,
         "reply must echo the inbound correlation, not a fresh mint",
     );
-    assert_eq!(
-        reply_to.addr,
-        SourceAddr::None,
-        "reply-of-a-reply target must be None, matching native send_reply",
-    );
+    assert_eq!(reply_to.addr, SourceAddr::None, "reply-of-a-reply target must be None, matching native send_reply",);
 }
 
 /// ADR-0037 Phase 1 + Phase 2: when a component sends to a mailbox
@@ -1111,9 +1023,7 @@ fn reply_mail_component_target_echoes_inbound_correlation() {
 fn unknown_recipient_bubbles_up_with_sender_mailbox() {
     let (outbound, outbound_rx) = HubOutbound::attached_loopback();
     let registry = Arc::new(Registry::new());
-    let sender = registry
-        .try_register_inbox("client", registry::noop_handler())
-        .expect("register client mailbox");
+    let sender = registry.try_register_inbox("client", registry::noop_handler()).expect("register client mailbox");
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
 
@@ -1126,14 +1036,7 @@ fn unknown_recipient_bubbles_up_with_sender_mailbox() {
 
     let event = outbound_rx.try_recv().expect("bubble-up event emitted");
     match event {
-        EgressEvent::UnresolvedMail {
-            recipient_mailbox_id,
-            kind_id,
-            payload,
-            count,
-            source_mailbox_id,
-            ..
-        } => {
+        EgressEvent::UnresolvedMail { recipient_mailbox_id, kind_id, payload, count, source_mailbox_id, .. } => {
             assert_eq!(recipient_mailbox_id, unknown);
             assert_eq!(kind_id, kind);
             assert_eq!(payload, vec![1, 2, 3]);
@@ -1151,26 +1054,15 @@ fn unknown_recipient_bubbles_up_with_sender_mailbox() {
 fn unknown_recipient_without_outbound_warn_drops() {
     let (outbound, outbound_rx) = HubOutbound::attached_loopback();
     let registry = Arc::new(Registry::new());
-    let sender = registry
-        .try_register_inbox("client", registry::noop_handler())
-        .expect("register client mailbox");
+    let sender = registry.try_register_inbox("client", registry::noop_handler()).expect("register client mailbox");
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     // Deliberately no `with_outbound` — exercises the local warn-drop path.
 
     let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
 
-    ctx.send(
-        MailboxId(0xDEAD_BEEF_u64),
-        aether_data::KindId(0xABCD),
-        vec![],
-        0,
-        MailboxId::NONE,
-    );
-    assert!(
-        outbound_rx.try_recv().is_err(),
-        "no bubble-up without a wired outbound"
-    );
+    ctx.send(MailboxId(0xDEAD_BEEF_u64), aether_data::KindId(0xABCD), vec![], 0, MailboxId::NONE);
+    assert!(outbound_rx.try_recv().is_err(), "no bubble-up without a wired outbound");
 }
 
 /// Issue iamacoffeepot/aether#722: when `Component::deliver` populates
@@ -1188,12 +1080,7 @@ fn send_propagates_in_flight_lineage_on_closure_branch() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
-    let ctx = ComponentCtx::new(
-        sender,
-        Arc::clone(&registry),
-        Arc::clone(&mailer),
-        HubOutbound::disconnected(),
-    );
+    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
 
     // Inbound lineage: the chassis-driven tick chain we're "in"
     // when the wasm guest's on_tick handler fires its outbound.
@@ -1201,22 +1088,12 @@ fn send_propagates_in_flight_lineage_on_closure_branch() {
     let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x99)), 42);
     ctx.set_in_flight(inbound_mail, inbound_root);
 
-    ctx.send(
-        sink_id,
-        aether_data::KindId(0xABCD),
-        vec![1, 2, 3],
-        1,
-        MailboxId::NONE,
-    );
+    ctx.send(sink_id, aether_data::KindId(0xABCD), vec![1, 2, 3], 1, MailboxId::NONE);
 
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1, "sink should have been called once");
     let (mail_id, root, parent) = captured[0];
-    assert_eq!(
-        parent,
-        Some(inbound_mail),
-        "parent_mail must point at inbound"
-    );
+    assert_eq!(parent, Some(inbound_mail), "parent_mail must point at inbound");
     assert_eq!(root, inbound_root, "root must inherit from inbound chain");
     // The minted mail_id is fresh — sender = self, correlation
     // from the per-component counter (starts at 1 for the first send).
@@ -1235,21 +1112,10 @@ fn send_without_in_flight_mints_fresh_root_chain() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x33));
-    let ctx = ComponentCtx::new(
-        sender,
-        Arc::clone(&registry),
-        Arc::clone(&mailer),
-        HubOutbound::disconnected(),
-    );
+    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
     // No `set_in_flight` call.
 
-    ctx.send(
-        sink_id,
-        aether_data::KindId(0xCAFE),
-        vec![],
-        1,
-        MailboxId::NONE,
-    );
+    ctx.send(sink_id, aether_data::KindId(0xCAFE), vec![], 1, MailboxId::NONE);
 
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1);
@@ -1273,33 +1139,19 @@ fn send_detached_mints_fresh_chain_despite_in_flight() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x55));
-    let ctx = ComponentCtx::new(
-        sender,
-        Arc::clone(&registry),
-        Arc::clone(&mailer),
-        HubOutbound::disconnected(),
-    );
+    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
 
     // Set an in-flight chain the default `send` would inherit.
     let inbound_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 9);
     let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x77)), 13);
     ctx.set_in_flight(inbound_mail, inbound_root);
 
-    ctx.send_detached(
-        sink_id,
-        aether_data::KindId(0xF00D),
-        vec![7, 8],
-        1,
-        MailboxId::NONE,
-    );
+    ctx.send_detached(sink_id, aether_data::KindId(0xF00D), vec![7, 8], 1, MailboxId::NONE);
 
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1, "sink should have been called once");
     let (mail_id, root, parent) = captured[0];
-    assert!(
-        parent.is_none(),
-        "detached send carries no parent edge despite in-flight"
-    );
+    assert!(parent.is_none(), "detached send carries no parent edge despite in-flight");
     assert_eq!(root, mail_id, "detached send is its own root");
     assert_eq!(mail_id.sender, sender);
 }
@@ -1319,18 +1171,11 @@ fn inline_alias_folded_id_matches_post_1920_convention() {
     );
     let folded = MailboxId(aether_data::with_tag(
         Tag::Mailbox,
-        aether_data::fold_lineage(
-            parent_carry,
-            aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, "widget"),
-        ),
+        aether_data::fold_lineage(parent_carry, aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, "widget")),
     ));
-    let from_path = aether_data::mailbox_id_from_path(
-        "aether.component/aether.embedded:testparent/aether.embedded:widget",
-    );
-    assert_eq!(
-        folded, from_path,
-        "the host-fn alias fold matches the rendered-name parse → fold",
-    );
+    let from_path =
+        aether_data::mailbox_id_from_path("aether.component/aether.embedded:testparent/aether.embedded:widget");
+    assert_eq!(folded, from_path, "the host-fn alias fold matches the rendered-name parse → fold",);
 }
 
 /// ADR-0114 step 1: an alias `MailboxEntry` cloned from the parent's
@@ -1352,11 +1197,7 @@ fn inline_alias_routes_into_parent_slot_inbox() {
             parent_name.clone(),
             Arc::new(move |dispatch: OwnedDispatch| {
                 dispatch.discharge();
-                captured_for_handler.lock().unwrap().push((
-                    dispatch.mail_id,
-                    dispatch.root,
-                    dispatch.parent_mail,
-                ));
+                captured_for_handler.lock().unwrap().push((dispatch.mail_id, dispatch.root, dispatch.parent_mail));
             }),
         )
         .expect("parent registers under its lineage id");
@@ -1373,25 +1214,12 @@ fn inline_alias_routes_into_parent_slot_inbox() {
         .expect("alias registers under the folded id");
 
     // Name resolution (the wire `Call` path) resolves the alias.
-    assert_eq!(
-        registry.lookup(&alias_name),
-        Some(alias_id),
-        "the rendered alias name resolves to the folded alias id",
-    );
+    assert_eq!(registry.lookup(&alias_name), Some(alias_id), "the rendered alias name resolves to the folded alias id",);
 
     // Mail addressed to the alias lands in the parent slot's inbox.
     let mailer = Mailer::new(Arc::clone(&registry));
-    mailer.push(Mail::new(
-        alias_id,
-        aether_data::KindId(0xABCD),
-        vec![1, 2, 3],
-        1,
-    ));
-    assert_eq!(
-        captured.lock().unwrap().len(),
-        1,
-        "alias mail dispatched into the parent slot's inbox",
-    );
+    mailer.push(Mail::new(alias_id, aether_data::KindId(0xABCD), vec![1, 2, 3], 1));
+    assert_eq!(captured.lock().unwrap().len(), 1, "alias mail dispatched into the parent slot's inbox",);
 }
 
 /// Issue 1987: a guest `send` carrying `from == self` (a
@@ -1403,22 +1231,14 @@ fn send_stamps_self_when_recipient_is_own_mailbox() {
     let (captured, sink_id) = register_lineage_capture_sink(&registry, "inline_self_origin_sink");
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
-    let ctx = ComponentCtx::new(
-        sender,
-        Arc::clone(&registry),
-        Arc::clone(&mailer),
-        HubOutbound::disconnected(),
-    );
+    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
 
     // `from == self` (a normally-addressed actor).
     ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1, sender);
 
     let captured = captured.lock().unwrap();
     let (mail_id, _root, _parent) = captured[0];
-    assert_eq!(
-        mail_id.sender, sender,
-        "origin stamps the component's own id when from == self",
-    );
+    assert_eq!(mail_id.sender, sender, "origin stamps the component's own id when from == self",);
 }
 
 /// Issue 1987: a guest `send` carrying `from == an inline-child alias`
@@ -1431,24 +1251,13 @@ fn send_stamps_alias_when_recipient_is_inline_child() {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
     let alias = MailboxId(aether_data::with_tag(Tag::Mailbox, 0xA11A5));
-    let ctx = ComponentCtx::new(
-        sender,
-        Arc::clone(&registry),
-        Arc::clone(&mailer),
-        HubOutbound::disconnected(),
-    );
+    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
 
     // `from == an inline-child alias` distinct from the component's own id.
     ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1, alias);
 
     let captured = captured.lock().unwrap();
     let (mail_id, _root, _parent) = captured[0];
-    assert_eq!(
-        mail_id.sender, alias,
-        "origin stamps the alias (dispatch identity) when from is a child",
-    );
-    assert_ne!(
-        mail_id.sender, sender,
-        "the child's send must not stamp the parent component",
-    );
+    assert_eq!(mail_id.sender, alias, "origin stamps the alias (dispatch identity) when from is a child",);
+    assert_ne!(mail_id.sender, sender, "the child's send must not stamp the parent component",);
 }

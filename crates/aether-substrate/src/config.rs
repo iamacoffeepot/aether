@@ -104,11 +104,7 @@ use crate::BootError;
 /// Never errors (the return type is [`Infallible`]); the `Result` is the
 /// shape confique's `parse_env` contract requires.
 pub fn parse_csv_set(s: &str) -> Result<HashSet<String>, Infallible> {
-    Ok(s.split(',')
-        .map(str::trim)
-        .filter(|element| !element.is_empty())
-        .map(str::to_string)
-        .collect())
+    Ok(s.split(',').map(str::trim).filter(|element| !element.is_empty()).map(str::to_string).collect())
 }
 
 /// The two per-actor ring capacities resolved once at chassis boot and
@@ -139,11 +135,7 @@ pub struct RingCapacities {
 
 impl Default for RingCapacities {
     fn default() -> Self {
-        Self {
-            log: DEFAULT_RING_CAP,
-            trace: DEFAULT_TRACE_RING_CAP,
-            trace_max: DEFAULT_TRACE_RING_MAX_CAP,
-        }
+        Self { log: DEFAULT_RING_CAP, trace: DEFAULT_TRACE_RING_CAP, trace_max: DEFAULT_TRACE_RING_MAX_CAP }
     }
 }
 
@@ -271,9 +263,7 @@ pub trait FromArgvThenEnv: Sized {
     /// Returns [`ConfigError::UnparseableKnown`] when a known env key
     /// (or argv overlay value) fails the layer's parser — the soft
     /// `.expect()` fall-through is gone.
-    fn try_from_argv_then_env(
-        argv: <Self::Layer as confique::Config>::Layer,
-    ) -> Result<Self, ConfigError> {
+    fn try_from_argv_then_env(argv: <Self::Layer as confique::Config>::Layer) -> Result<Self, ConfigError> {
         Self::try_resolve(argv, None)
     }
 
@@ -289,9 +279,7 @@ pub trait FromArgvThenEnv: Sized {
         argv: <Self::Layer as confique::Config>::Layer,
         file: Option<<Self::Layer as confique::Config>::Layer>,
     ) -> Result<Self, ConfigError> {
-        let mut builder = <Self::Layer as confique::Config>::builder()
-            .preloaded(argv)
-            .env();
+        let mut builder = <Self::Layer as confique::Config>::builder().preloaded(argv).env();
         if let Some(file) = file {
             builder = builder.preloaded(file);
         }
@@ -447,9 +435,7 @@ struct DumpRow {
 /// source as `env` (set) or `default` (unset).
 fn leaf_row(env_key: &str, leaf: &LeafKind, doc: &[&'static str]) -> DumpRow {
     let default = match leaf {
-        LeafKind::Required {
-            default: Some(expr),
-        } => render_expr(expr),
+        LeafKind::Required { default: Some(expr) } => render_expr(expr),
         LeafKind::Required { default: None } | LeafKind::Optional => String::new(),
     };
     // The sanctioned ADR-0090 config machinery: this is the central env-read
@@ -457,15 +443,8 @@ fn leaf_row(env_key: &str, leaf: &LeafKind, doc: &[&'static str]) -> DumpRow {
     // ...)]` discovery dump), the one place capabilities *should* configure
     // through rather than reading env themselves.
     #[allow(clippy::disallowed_methods)]
-    let (value, source) =
-        env::var(env_key).map_or_else(|_| (default.clone(), "default"), |v| (v, "env"));
-    DumpRow {
-        key: env_key.to_owned(),
-        value,
-        source,
-        default,
-        doc: doc.join(" ").trim().to_owned(),
-    }
+    let (value, source) = env::var(env_key).map_or_else(|_| (default.clone(), "default"), |v| (v, "env"));
+    DumpRow { key: env_key.to_owned(), value, source, default, doc: doc.join(" ").trim().to_owned() }
 }
 
 /// Walk one `Meta` into `rows`, resolving every leaf's discovery row
@@ -477,10 +456,7 @@ fn collect_meta_rows(meta: &'static Meta, rows: &mut Vec<DumpRow>) {
         for field in m.fields {
             let Field { doc, kind, .. } = field;
             match kind {
-                FieldKind::Leaf {
-                    env: Some(key),
-                    kind: leaf,
-                } => rows.push(leaf_row(key, leaf, doc)),
+                FieldKind::Leaf { env: Some(key), kind: leaf } => rows.push(leaf_row(key, leaf, doc)),
                 FieldKind::Leaf { env: None, .. } => {}
                 FieldKind::Nested { meta } => stack.push(meta),
             }
@@ -509,40 +485,22 @@ pub fn dump_config(metas: &[&'static Meta], records: &[KnobRecord]) -> String {
         // knob's live source for the `--config` discovery dump, the central
         // config-read path, not a cap reading its own env.
         #[allow(clippy::disallowed_methods)]
-        let (value, source) =
-            env::var(record.env_key).map_or_else(|_| (default.clone(), "default"), |v| (v, "env"));
-        rows.push(DumpRow {
-            key: record.env_key.to_owned(),
-            value,
-            source,
-            default,
-            doc: record.doc.to_owned(),
-        });
+        let (value, source) = env::var(record.env_key).map_or_else(|_| (default.clone(), "default"), |v| (v, "env"));
+        rows.push(DumpRow { key: record.env_key.to_owned(), value, source, default, doc: record.doc.to_owned() });
     }
     rows.sort_by(|a, b| a.key.cmp(&b.key));
 
     let key_w = rows.iter().map(|r| r.key.len()).max().unwrap_or(3).max(3);
     let val_w = rows.iter().map(|r| r.value.len()).max().unwrap_or(5).max(5);
     let src_w = 7; // "default" is the widest source label
-    let def_w = rows
-        .iter()
-        .map(|r| r.default.len())
-        .max()
-        .unwrap_or(7)
-        .max(7);
+    let def_w = rows.iter().map(|r| r.default.len()).max().unwrap_or(7).max(7);
 
     let mut out = String::new();
     let (k, v, s, d, doc) = ("KEY", "VALUE", "SOURCE", "DEFAULT", "DOC");
-    let _ = writeln!(
-        out,
-        "{k:<key_w$}  {v:<val_w$}  {s:<src_w$}  {d:<def_w$}  {doc}"
-    );
+    let _ = writeln!(out, "{k:<key_w$}  {v:<val_w$}  {s:<src_w$}  {d:<def_w$}  {doc}");
     for r in &rows {
         let (key, value, source, default, doc) = (&r.key, &r.value, r.source, &r.default, &r.doc);
-        let _ = writeln!(
-            out,
-            "{key:<key_w$}  {value:<val_w$}  {source:<src_w$}  {default:<def_w$}  {doc}"
-        );
+        let _ = writeln!(out, "{key:<key_w$}  {value:<val_w$}  {source:<src_w$}  {default:<def_w$}  {doc}");
     }
     out
 }
@@ -596,11 +554,7 @@ impl ConfigError {
     /// key, and value.
     #[must_use]
     pub fn from_confique(err: confique::Error) -> Self {
-        Self::UnparseableKnown {
-            key: String::new(),
-            value: None,
-            source: Box::new(err),
-        }
+        Self::UnparseableKnown { key: String::new(), value: None, source: Box::new(err) }
     }
 
     /// Build an `UnparseableKnown` from a hand-resolved env read (a
@@ -611,35 +565,19 @@ impl ConfigError {
         value: impl Into<String>,
         source: impl StdError + Send + Sync + 'static,
     ) -> Self {
-        Self::UnparseableKnown {
-            key: key.into(),
-            value: Some(value.into()),
-            source: Box::new(source),
-        }
+        Self::UnparseableKnown { key: key.into(), value: Some(value.into()), source: Box::new(source) }
     }
 
     /// Build a hard error for an explicitly supplied config file.
     #[must_use]
-    pub fn config_file(
-        path: impl Into<PathBuf>,
-        source: impl StdError + Send + Sync + 'static,
-    ) -> Self {
-        Self::ConfigFile {
-            path: path.into(),
-            source: Box::new(source),
-        }
+    pub fn config_file(path: impl Into<PathBuf>, source: impl StdError + Send + Sync + 'static) -> Self {
+        Self::ConfigFile { path: path.into(), source: Box::new(source) }
     }
 
     /// Build a hard error for a malformed section in a config file.
     #[must_use]
-    pub fn config_section(
-        section: impl Into<String>,
-        source: impl StdError + Send + Sync + 'static,
-    ) -> Self {
-        Self::ConfigSection {
-            section: section.into(),
-            source: Box::new(source),
-        }
+    pub fn config_section(section: impl Into<String>, source: impl StdError + Send + Sync + 'static) -> Self {
+        Self::ConfigSection { section: section.into(), source: Box::new(source) }
     }
 }
 
@@ -650,15 +588,9 @@ impl fmt::Display for ConfigError {
                 if key.is_empty() {
                     write!(f, "unparseable config value: {source}")
                 } else if let Some(value) = value {
-                    write!(
-                        f,
-                        "unparseable value {value:?} for known config key {key:?}: {source}"
-                    )
+                    write!(f, "unparseable value {value:?} for known config key {key:?}: {source}")
                 } else {
-                    write!(
-                        f,
-                        "unparseable value for known config key {key:?}: {source}"
-                    )
+                    write!(f, "unparseable value for known config key {key:?}: {source}")
                 }
             }
             Self::ConfigFile { path, source } => {
@@ -666,10 +598,7 @@ impl fmt::Display for ConfigError {
                 write!(f, "failed to load chassis config file {path}: {source}")
             }
             Self::ConfigSection { section, source } => {
-                write!(
-                    f,
-                    "failed to parse chassis config section [{section}]: {source}"
-                )
+                write!(f, "failed to parse chassis config section [{section}]: {source}")
             }
         }
     }
@@ -772,10 +701,7 @@ mod tests {
     #[test]
     fn parse_csv_set_trims_and_drops_empties() {
         let got = parse_csv_set("a.com, b.com ,, c.com").expect("infallible");
-        let want: HashSet<String> = ["a.com", "b.com", "c.com"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+        let want: HashSet<String> = ["a.com", "b.com", "c.com"].iter().map(|s| (*s).to_string()).collect();
         assert_eq!(got, want);
         assert!(parse_csv_set("").expect("infallible").is_empty());
         assert!(parse_csv_set("  ,  , ").expect("infallible").is_empty());
@@ -844,14 +770,8 @@ mod tests {
         let dump = dump_config(&[], FIXTURE_KNOBS);
         // SAFETY: same scope.
         unsafe { env::remove_var("AETHER_FIXTURE_KNOB") };
-        let row = dump
-            .lines()
-            .find(|l| l.contains("AETHER_FIXTURE_KNOB"))
-            .expect("knob row present");
-        assert!(
-            row.contains("99"),
-            "value should be the env override: {row}"
-        );
+        let row = dump.lines().find(|l| l.contains("AETHER_FIXTURE_KNOB")).expect("knob row present");
+        assert!(row.contains("99"), "value should be the env override: {row}");
         assert!(row.contains("env"), "source should be env: {row}");
     }
 
@@ -904,8 +824,8 @@ mod tests {
 
         // SAFETY: unique key set then removed in this test scope.
         unsafe { env::set_var("AETHER_PRECEDENCE_COUNT", "22") };
-        let resolved = PrecedenceConfig::try_resolve(argv, Some(precedence_file_layer(11)))
-            .expect("argv/env/file resolve");
+        let resolved =
+            PrecedenceConfig::try_resolve(argv, Some(precedence_file_layer(11))).expect("argv/env/file resolve");
         assert_eq!(resolved.count, 33, "argv wins over env and file");
 
         let env_wins = PrecedenceConfig::try_resolve(

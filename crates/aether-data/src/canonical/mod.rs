@@ -43,9 +43,9 @@ mod primitives;
 mod schema;
 
 pub use inputs::{
-    inputs_actor_boundary_len, inputs_component_len, inputs_config_len, inputs_fallback_len,
-    inputs_handler_len, reply_contract_len, write_inputs_actor_boundary, write_inputs_component,
-    write_inputs_config, write_inputs_fallback, write_inputs_handler, write_reply_contract,
+    inputs_actor_boundary_len, inputs_component_len, inputs_config_len, inputs_fallback_len, inputs_handler_len,
+    reply_contract_len, write_inputs_actor_boundary, write_inputs_component, write_inputs_config,
+    write_inputs_fallback, write_inputs_handler, write_reply_contract,
 };
 pub use labels::{canonical_len_labels, canonical_serialize_labels};
 pub use schema::{
@@ -75,8 +75,8 @@ mod tests {
     use crate::hash::{KIND_DOMAIN, fnv1a_64_prefixed};
     use crate::ids::KindId;
     use crate::schema::{
-        EnumVariant, KindLabels, KindShape, LabelCell, LabelNode, NamedField, Primitive,
-        SchemaCell, SchemaShape, SchemaType, VariantLabel, VariantShape,
+        EnumVariant, KindLabels, KindShape, LabelCell, LabelNode, NamedField, Primitive, SchemaCell, SchemaShape,
+        SchemaType, VariantLabel, VariantShape,
     };
     use crate::tag_bits::{HASH_MASK, TAG_KIND, TAG_SHIFT};
     use crate::wire;
@@ -91,14 +91,8 @@ mod tests {
     /// reused by struct, nested-array, and structural-equality tests.
     static VERTEX: SchemaType = SchemaType::Struct {
         fields: Cow::Borrowed(&[
-            NamedField {
-                name: Cow::Borrowed("x"),
-                ty: SchemaType::Scalar(Primitive::F32),
-            },
-            NamedField {
-                name: Cow::Borrowed("y"),
-                ty: SchemaType::Scalar(Primitive::F32),
-            },
+            NamedField { name: Cow::Borrowed("x"), ty: SchemaType::Scalar(Primitive::F32) },
+            NamedField { name: Cow::Borrowed("y"), ty: SchemaType::Scalar(Primitive::F32) },
         ]),
         repr_c: true,
     };
@@ -108,10 +102,7 @@ mod tests {
     /// inside larger shapes (e.g. `TRIANGLE`'s array element).
     fn vertex_shape() -> SchemaShape {
         SchemaShape::Struct {
-            fields: vec![
-                SchemaShape::Scalar(Primitive::F32),
-                SchemaShape::Scalar(Primitive::F32),
-            ],
+            fields: vec![SchemaShape::Scalar(Primitive::F32), SchemaShape::Scalar(Primitive::F32)],
             repr_c: true,
         }
     }
@@ -126,17 +117,11 @@ mod tests {
     }
 
     fn ok_u64_shape() -> VariantShape {
-        VariantShape::Tuple {
-            discriminant: 1,
-            fields: vec![SchemaShape::Scalar(Primitive::U64)],
-        }
+        VariantShape::Tuple { discriminant: 1, fields: vec![SchemaShape::Scalar(Primitive::U64)] }
     }
 
     fn err_reason_shape() -> VariantShape {
-        VariantShape::Struct {
-            discriminant: 2,
-            fields: vec![SchemaShape::String],
-        }
+        VariantShape::Struct { discriminant: 2, fields: vec![SchemaShape::String] }
     }
 
     /// `VariantShape` list mirroring `RESULT`'s variant set
@@ -149,28 +134,20 @@ mod tests {
     /// the three-variant Unit/Tuple/Struct enum exercised by the all-variants
     /// round-trip test.
     fn result_enum_shape() -> SchemaShape {
-        SchemaShape::Enum {
-            variants: result_variant_shapes(),
-        }
+        SchemaShape::Enum { variants: result_variant_shapes() }
     }
 
     static TRIANGLE: SchemaType = SchemaType::Struct {
         fields: Cow::Borrowed(&[NamedField {
             name: Cow::Borrowed("verts"),
-            ty: SchemaType::Array {
-                element: SchemaCell::Static(&VERTEX),
-                len: 3,
-            },
+            ty: SchemaType::Array { element: SchemaCell::Static(&VERTEX), len: 3 },
         }]),
         repr_c: true,
     };
 
     static RESULT: SchemaType = SchemaType::Enum {
         variants: Cow::Borrowed(&[
-            EnumVariant::Unit {
-                name: Cow::Borrowed("Pending"),
-                discriminant: 0,
-            },
+            EnumVariant::Unit { name: Cow::Borrowed("Pending"), discriminant: 0 },
             EnumVariant::Tuple {
                 name: Cow::Borrowed("Ok"),
                 discriminant: 1,
@@ -179,10 +156,7 @@ mod tests {
             EnumVariant::Struct {
                 name: Cow::Borrowed("Err"),
                 discriminant: 2,
-                fields: Cow::Borrowed(&[NamedField {
-                    name: Cow::Borrowed("reason"),
-                    ty: SchemaType::String,
-                }]),
+                fields: Cow::Borrowed(&[NamedField { name: Cow::Borrowed("reason"), ty: SchemaType::String }]),
             },
         ]),
     };
@@ -209,10 +183,7 @@ mod tests {
         const BYTES: [u8; N] = canonical_serialize_schema::<N>(&TRIANGLE);
         let shape: SchemaShape = wire::from_bytes(&BYTES).expect("decode");
         let expected = SchemaShape::Struct {
-            fields: vec![SchemaShape::Array {
-                element: Box::new(vertex_shape()),
-                len: 3,
-            }],
+            fields: vec![SchemaShape::Array { element: Box::new(vertex_shape()), len: 3 }],
             repr_c: true,
         };
         assert_eq!(shape, expected);
@@ -256,8 +227,7 @@ mod tests {
         const BYTES: [u8; N] = canonical_serialize_kind::<N>(NAME, &TRIANGLE);
         // Domain-prefixed (issue #186) + ADR-0064 tag-stamped — agrees
         // with the derive macro's compile-time emission.
-        let expected = (u64::from(TAG_KIND) << TAG_SHIFT)
-            | (fnv1a_64_prefixed(KIND_DOMAIN, &BYTES) & HASH_MASK);
+        let expected = (u64::from(TAG_KIND) << TAG_SHIFT) | (fnv1a_64_prefixed(KIND_DOMAIN, &BYTES) & HASH_MASK);
         assert_eq!(kind_id_from_parts(NAME, &TRIANGLE), expected);
     }
 
@@ -270,14 +240,8 @@ mod tests {
         // `row`, `col` — same shape, different names.
         static V2: SchemaType = SchemaType::Struct {
             fields: Cow::Borrowed(&[
-                NamedField {
-                    name: Cow::Borrowed("row"),
-                    ty: SchemaType::Scalar(Primitive::F32),
-                },
-                NamedField {
-                    name: Cow::Borrowed("col"),
-                    ty: SchemaType::Scalar(Primitive::F32),
-                },
+                NamedField { name: Cow::Borrowed("row"), ty: SchemaType::Scalar(Primitive::F32) },
+                NamedField { name: Cow::Borrowed("col"), ty: SchemaType::Scalar(Primitive::F32) },
             ]),
             repr_c: true,
         };
@@ -336,13 +300,8 @@ mod tests {
         root: LabelNode::Enum {
             type_label: Some(Cow::Borrowed("my_crate::Result")),
             variants: Cow::Borrowed(&[
-                VariantLabel::Unit {
-                    name: Cow::Borrowed("Pending"),
-                },
-                VariantLabel::Tuple {
-                    name: Cow::Borrowed("Ok"),
-                    fields: Cow::Borrowed(&[LabelNode::Anonymous]),
-                },
+                VariantLabel::Unit { name: Cow::Borrowed("Pending") },
+                VariantLabel::Tuple { name: Cow::Borrowed("Ok"), fields: Cow::Borrowed(&[LabelNode::Anonymous]) },
                 VariantLabel::Struct {
                     name: Cow::Borrowed("Err"),
                     field_names: Cow::Borrowed(&[Cow::Borrowed("reason")]),
@@ -379,12 +338,7 @@ mod tests {
         const BYTES: [u8; N] = write_inputs_handler::<N>(ID, NAME, DOC, REPLY_TAG, REPLY_ID);
         let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
         match decoded {
-            InputsRecord::Handler {
-                id,
-                name,
-                doc,
-                reply,
-            } => {
+            InputsRecord::Handler { id, name, doc, reply } => {
                 assert_eq!(id, KindId(ID));
                 assert_eq!(name, NAME);
                 assert_eq!(doc.as_deref(), DOC);
@@ -409,12 +363,7 @@ mod tests {
         let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(
             decoded,
-            InputsRecord::Handler {
-                id: KindId(ID),
-                name: NAME.into(),
-                doc: None,
-                reply: ReplyContract::None,
-            }
+            InputsRecord::Handler { id: KindId(ID), name: NAME.into(), doc: None, reply: ReplyContract::None }
         );
     }
 
@@ -431,10 +380,7 @@ mod tests {
             let mut buf = [0u8; 16];
             let written = write_reply_contract(tag, id, &mut buf, 0);
             assert_eq!(written, len, "cursor advance matches reported length");
-            assert_eq!(
-                buf[0], expect_disc,
-                "selector's low byte is the variant index"
-            );
+            assert_eq!(buf[0], expect_disc, "selector's low byte is the variant index");
             let from_wire = wire::to_vec(&expect).expect("encode");
             assert_eq!(&buf[..len], from_wire.as_slice(), "matches wire runtime");
             let decoded: ReplyContract = wire::from_bytes(&buf[..len]).expect("decode");
@@ -454,9 +400,7 @@ mod tests {
         let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(
             decoded,
-            InputsRecord::Fallback {
-                doc: Some(DOC.expect("test setup: DOC is Some by construction").into()),
-            }
+            InputsRecord::Fallback { doc: Some(DOC.expect("test setup: DOC is Some by construction").into()) }
         );
     }
 
@@ -479,13 +423,7 @@ mod tests {
         const N: usize = inputs_config_len(ID, NAME);
         const BYTES: [u8; N] = write_inputs_config::<N>(ID, NAME);
         let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
-        assert_eq!(
-            decoded,
-            InputsRecord::Config {
-                id: KindId(ID),
-                name: NAME.into(),
-            }
-        );
+        assert_eq!(decoded, InputsRecord::Config { id: KindId(ID), name: NAME.into() });
     }
 
     #[test]
@@ -498,12 +436,7 @@ mod tests {
         const N: usize = inputs_actor_boundary_len(NS);
         const BYTES: [u8; N] = write_inputs_actor_boundary::<N>(NS);
         let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
-        assert_eq!(
-            decoded,
-            InputsRecord::ActorBoundary {
-                namespace: NS.into()
-            }
-        );
+        assert_eq!(decoded, InputsRecord::ActorBoundary { namespace: NS.into() });
     }
 
     #[test]

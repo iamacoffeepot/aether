@@ -6,23 +6,8 @@ use super::*;
 // `on_instrument_assembled` through a `new_for_test` binding, the
 // same pattern as the track tests above.
 
-fn test_region(
-    lokey: u8,
-    hikey: u8,
-    lovel: u8,
-    hivel: u8,
-    pitch_keycenter: u8,
-    pcm: Vec<f32>,
-) -> SampleRegion {
-    SampleRegion {
-        lokey,
-        hikey,
-        lovel,
-        hivel,
-        pitch_keycenter,
-        pcm: Arc::from(pcm),
-        loop_region: None,
-    }
+fn test_region(lokey: u8, hikey: u8, lovel: u8, hivel: u8, pitch_keycenter: u8, pcm: Vec<f32>) -> SampleRegion {
+    SampleRegion { lokey, hikey, lovel, hivel, pitch_keycenter, pcm: Arc::from(pcm), loop_region: None }
 }
 
 /// A full-range region carrying a device-rate sustain loop over
@@ -41,11 +26,7 @@ fn looped_region(pcm: Vec<f32>, start: f32, end: f32) -> SampleRegion {
 
 fn test_bank(regions: Vec<SampleRegion>) -> Arc<SampleBank> {
     let resident_bytes = regions.iter().map(|r| r.pcm.len() * 4).sum();
-    Arc::new(SampleBank {
-        name: "test".to_owned(),
-        regions,
-        resident_bytes,
-    })
+    Arc::new(SampleBank { name: "test".to_owned(), regions, resident_bytes })
 }
 
 #[test]
@@ -54,34 +35,18 @@ fn loaded_bank_registers_past_builtins_and_plays() {
     let mut synth = Synth::new(queue, TEST_RATE);
     let id = builtin_id_ceiling();
     sender
-        .push(AudioEvent::RegisterInstrument {
-            id,
-            bank: test_bank(vec![test_region(0, 127, 0, 127, 60, ramp(256))]),
-        })
+        .push(AudioEvent::RegisterInstrument { id, bank: test_bank(vec![test_region(0, 127, 0, 127, 60, ramp(256))]) })
         .unwrap();
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
-    assert_eq!(
-        synth.bank_count(),
-        1,
-        "bank not appended past the built-ins"
-    );
+    assert_eq!(synth.bank_count(), 1, "bank not appended past the built-ins");
 
     sender
-        .push(AudioEvent::NoteOn {
-            sender_mailbox: MailboxId(1),
-            pitch: 60,
-            velocity: 100,
-            instrument_id: id,
-            pan: 0,
-        })
+        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 60, velocity: 100, instrument_id: id, pan: 0 })
         .unwrap();
     synth.fill(&mut buf, 1);
     assert_eq!(synth.voice_count(), 1, "loaded id did not sound a voice");
-    assert!(
-        buf.iter().any(|s| s.abs() > 0.0),
-        "sampled instrument produced silence",
-    );
+    assert!(buf.iter().any(|s| s.abs() > 0.0), "sampled instrument produced silence",);
 }
 
 #[test]
@@ -105,14 +70,8 @@ fn banks_register_in_load_order() {
     let mut buf = vec![0.0f32; 32];
     synth.fill(&mut buf, 1);
     assert_eq!(synth.bank_count(), 2);
-    assert!(
-        synth.bank_for(first).unwrap().select(60, 100).is_some(),
-        "id {first} should resolve the first bank",
-    );
-    assert!(
-        synth.bank_for(second).unwrap().select(72, 100).is_some(),
-        "id {second} should resolve the second bank",
-    );
+    assert!(synth.bank_for(first).unwrap().select(60, 100).is_some(), "id {first} should resolve the first bank",);
+    assert!(synth.bank_for(second).unwrap().select(72, 100).is_some(), "id {second} should resolve the second bank",);
 }
 
 #[test]
@@ -162,16 +121,9 @@ fn note_on_outside_every_region_drops() {
 
 #[test]
 fn region_selected_by_pitch_and_velocity() {
-    let bank = test_bank(vec![
-        test_region(60, 71, 0, 63, 60, ramp(8)),
-        test_region(60, 71, 64, 127, 60, ramp(8)),
-    ]);
-    let soft = bank
-        .select(64, 30)
-        .expect("soft region covers low velocity");
-    let loud = bank
-        .select(64, 110)
-        .expect("loud region covers high velocity");
+    let bank = test_bank(vec![test_region(60, 71, 0, 63, 60, ramp(8)), test_region(60, 71, 64, 127, 60, ramp(8))]);
+    let soft = bank.select(64, 30).expect("soft region covers low velocity");
+    let loud = bank.select(64, 110).expect("loud region covers high velocity");
     assert_eq!((soft.lovel, soft.hivel), (0, 63));
     assert_eq!((loud.lovel, loud.hivel), (64, 127));
     assert!(bank.select(90, 100).is_none(), "pitch above every region");
@@ -191,10 +143,7 @@ fn sample_voice_ends_when_sample_exhausts() {
         n += 1;
     }
     assert!(voice.done(), "sample voice never finished");
-    assert!(
-        (479..=481).contains(&n),
-        "ended at {n} samples, expected ~480",
-    );
+    assert!((479..=481).contains(&n), "ended at {n} samples, expected ~480",);
 }
 
 #[test]
@@ -214,10 +163,7 @@ fn note_off_release_ends_sample_voice_before_sample_end() {
         n += 1;
     }
     assert!(voice.done(), "released sample voice never ended");
-    assert!(
-        n < 10_000,
-        "release ({n}) should end well before the sample exhausts",
-    );
+    assert!(n < 10_000, "release ({n}) should end well before the sample exhausts",);
 }
 
 #[test]
@@ -235,10 +181,7 @@ fn looped_sample_voice_sustains_past_sample_length() {
             sounded = true;
         }
     }
-    assert!(
-        !voice.done(),
-        "held looped voice ended at sample exhaustion"
-    );
+    assert!(!voice.done(), "held looped voice ended at sample exhaustion");
     assert!(sounded, "held looped voice produced silence");
 }
 
@@ -261,10 +204,7 @@ fn looped_sample_voice_ends_on_note_off_release() {
         n += 1;
     }
     assert!(voice.done(), "released looped voice never ended");
-    assert!(
-        n < 10_000,
-        "release ({n}) should retire the voice within the ramp",
-    );
+    assert!(n < 10_000, "release ({n}) should retire the voice within the ramp",);
 }
 
 #[test]
@@ -279,33 +219,14 @@ fn assemble_bank_scales_loop_points_by_resample_ratio() {
         lovel: 0,
         hivel: 127,
         pitch_keycenter: 60,
-        loop_spec: Some(SfzLoop {
-            start: 100,
-            end: 400,
-            mode: sfz::LoopMode::Continuous,
-        }),
+        loop_spec: Some(SfzLoop { start: 100, end: 400, mode: sfz::LoopMode::Continuous }),
     };
     let wav = decode::wav_int16_mono(&ramp(1000), 24_000);
-    let bank = assemble_bank(
-        "test".to_owned(),
-        &[region],
-        &[("a.wav".to_owned(), wav)],
-        48_000,
-    )
-    .expect("bank assembles");
-    let lp = bank.regions[0]
-        .loop_region
-        .expect("loop scaled through to the region");
-    assert!(
-        (lp.start - 200.0).abs() < 2.0,
-        "loop_start should scale ~2x to 200, got {}",
-        lp.start,
-    );
-    assert!(
-        (lp.end - 800.0).abs() < 2.0,
-        "loop_end should scale ~2x to 800, got {}",
-        lp.end,
-    );
+    let bank =
+        assemble_bank("test".to_owned(), &[region], &[("a.wav".to_owned(), wav)], 48_000).expect("bank assembles");
+    let lp = bank.regions[0].loop_region.expect("loop scaled through to the region");
+    assert!((lp.start - 200.0).abs() < 2.0, "loop_start should scale ~2x to 200, got {}", lp.start,);
+    assert!((lp.end - 800.0).abs() < 2.0, "loop_end should scale ~2x to 800, got {}", lp.end,);
 }
 
 #[test]
@@ -319,29 +240,16 @@ fn assemble_bank_clamps_loop_end_to_resampled_length() {
         lovel: 0,
         hivel: 127,
         pitch_keycenter: 60,
-        loop_spec: Some(SfzLoop {
-            start: 10,
-            end: 100_000,
-            mode: sfz::LoopMode::Continuous,
-        }),
+        loop_spec: Some(SfzLoop { start: 10, end: 100_000, mode: sfz::LoopMode::Continuous }),
     };
     let wav = decode::wav_int16_mono(&ramp(1000), 24_000);
-    let bank = assemble_bank(
-        "test".to_owned(),
-        &[region],
-        &[("a.wav".to_owned(), wav)],
-        48_000,
-    )
-    .expect("bank assembles");
+    let bank =
+        assemble_bank("test".to_owned(), &[region], &[("a.wav".to_owned(), wav)], 48_000).expect("bank assembles");
     let region = &bank.regions[0];
     let lp = region.loop_region.expect("loop scaled through");
     #[allow(clippy::cast_precision_loss)]
     let len = region.pcm.len() as f32;
-    assert!(
-        lp.end <= len,
-        "loop_end {} must clamp to the resampled length {len}",
-        lp.end,
-    );
+    assert!(lp.end <= len, "loop_end {} must clamp to the resampled length {len}", lp.end,);
 }
 
 #[test]
@@ -358,13 +266,8 @@ fn unlooped_region_assembles_without_a_loop() {
         loop_spec: None,
     };
     let wav = decode::wav_int16_mono(&ramp(256), 24_000);
-    let bank = assemble_bank(
-        "test".to_owned(),
-        &[region],
-        &[("a.wav".to_owned(), wav)],
-        48_000,
-    )
-    .expect("bank assembles");
+    let bank =
+        assemble_bank("test".to_owned(), &[region], &[("a.wav".to_owned(), wav)], 48_000).expect("bank assembles");
     assert_eq!(bank.regions[0].loop_region, None);
 }
 
@@ -393,30 +296,20 @@ fn sample_voices_count_against_max_voices() {
             .unwrap();
     }
     synth.fill(&mut buf, 1);
-    assert_eq!(
-        synth.voice_count(),
-        MAX_VOICES,
-        "sample voices must count against MAX_VOICES and steal",
-    );
+    assert_eq!(synth.voice_count(), MAX_VOICES, "sample voices must count against MAX_VOICES and steal",);
 }
 
 #[test]
 fn load_instrument_happy_path_replies_ok_and_registers() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
 
     let mut ctx = manual_ctx(&transport);
     AudioCapability::on_load_instrument(
         &mut cap,
         &mut ctx,
-        LoadInstrument {
-            namespace: "assets".to_owned(),
-            path: "piano/bank.sfz".to_owned(),
-        },
+        LoadInstrument { namespace: "assets".to_owned(), path: "piano/bank.sfz".to_owned() },
     );
     let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
@@ -447,11 +340,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
     AudioCapability::on_read_result(
         &mut cap,
         &mut c4_ctx,
-        ReadResult::Ok {
-            namespace: "assets".to_owned(),
-            path: "piano/c4.wav".to_owned(),
-            bytes: wav.clone(),
-        },
+        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/c4.wav".to_owned(), bytes: wav.clone() },
     );
     // One sample still missing — no dispatch yet.
     assert_eq!(cap.assemblies.len(), 1, "assembly dispatched too early");
@@ -459,21 +348,13 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
     AudioCapability::on_read_result(
         &mut cap,
         &mut c5_ctx,
-        ReadResult::Ok {
-            namespace: "assets".to_owned(),
-            path: "piano/c5.wav".to_owned(),
-            bytes: wav,
-        },
+        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/c5.wav".to_owned(), bytes: wav },
     );
     // The last sample triggers the assembly dispatch off-thread.
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
 
     match decode_session_reply::<LoadInstrumentResult>(&rx) {
-        LoadInstrumentResult::Ok {
-            instrument_id,
-            name,
-            resident_bytes,
-        } => {
+        LoadInstrumentResult::Ok { instrument_id, name, resident_bytes } => {
             assert_eq!(instrument_id, builtin_id_ceiling());
             assert_eq!(name, "bank");
             assert!(resident_bytes > 0, "resident bytes not reported");
@@ -492,10 +373,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
 fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
     let (mut cap, _queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let first_session = SessionToken(Uuid::from_u128(1));
     let second_session = SessionToken(Uuid::from_u128(2));
 
@@ -508,10 +386,7 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
     AudioCapability::on_load_instrument(
         &mut cap,
         &mut first_ctx,
-        LoadInstrument {
-            namespace: "assets".to_owned(),
-            path: "piano/bank_a.sfz".to_owned(),
-        },
+        LoadInstrument { namespace: "assets".to_owned(), path: "piano/bank_a.sfz".to_owned() },
     );
     let first_sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
@@ -524,10 +399,7 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
     AudioCapability::on_load_instrument(
         &mut cap,
         &mut second_ctx,
-        LoadInstrument {
-            namespace: "assets".to_owned(),
-            path: "piano/bank_b.sfz".to_owned(),
-        },
+        LoadInstrument { namespace: "assets".to_owned(), path: "piano/bank_b.sfz".to_owned() },
     );
     let second_sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
@@ -536,11 +408,7 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut first_sfz_ctx,
-        ReadResult::Ok {
-            namespace: "assets".to_owned(),
-            path: "piano/bank_a.sfz".to_owned(),
-            bytes: sfz.to_vec(),
-        },
+        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/bank_a.sfz".to_owned(), bytes: sfz.to_vec() },
     );
     let first_sample_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
@@ -548,11 +416,7 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut second_sfz_ctx,
-        ReadResult::Ok {
-            namespace: "assets".to_owned(),
-            path: "piano/bank_b.sfz".to_owned(),
-            bytes: sfz.to_vec(),
-        },
+        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/bank_b.sfz".to_owned(), bytes: sfz.to_vec() },
     );
     let second_sample_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
@@ -561,11 +425,7 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut second_sample_ctx,
-        ReadResult::Ok {
-            namespace: "assets".to_owned(),
-            path: "piano/shared.wav".to_owned(),
-            bytes: wav.clone(),
-        },
+        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/shared.wav".to_owned(), bytes: wav.clone() },
     );
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
     let (session, reply) = decode_session_reply_with_session::<LoadInstrumentResult>(&rx);
@@ -579,11 +439,7 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut first_sample_ctx,
-        ReadResult::Ok {
-            namespace: "assets".to_owned(),
-            path: "piano/shared.wav".to_owned(),
-            bytes: wav,
-        },
+        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/shared.wav".to_owned(), bytes: wav },
     );
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
     let (session, reply) = decode_session_reply_with_session::<LoadInstrumentResult>(&rx);
@@ -598,10 +454,7 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
 fn interleaved_track_and_instrument_reads_demux_by_request_context() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let track_session = SessionToken(Uuid::from_u128(3));
     let instrument_session = SessionToken(Uuid::from_u128(4));
 
@@ -633,10 +486,7 @@ fn interleaved_track_and_instrument_reads_demux_by_request_context() {
     AudioCapability::on_load_instrument(
         &mut cap,
         &mut instrument_ctx,
-        LoadInstrument {
-            namespace: "assets".to_owned(),
-            path: "piano/bank.sfz".to_owned(),
-        },
+        LoadInstrument { namespace: "assets".to_owned(), path: "piano/bank.sfz".to_owned() },
     );
     let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
 
@@ -657,29 +507,18 @@ fn interleaved_track_and_instrument_reads_demux_by_request_context() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut sample_ctx,
-        ReadResult::Ok {
-            namespace: "assets".to_owned(),
-            path: "piano/shared.wav".to_owned(),
-            bytes: wav.clone(),
-        },
+        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/shared.wav".to_owned(), bytes: wav.clone() },
     );
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
     let (session, reply) = decode_session_reply_with_session::<LoadInstrumentResult>(&rx);
     assert_eq!(session, instrument_session);
-    assert!(
-        matches!(reply, LoadInstrumentResult::Ok { .. }),
-        "sample reply should complete the instrument load"
-    );
+    assert!(matches!(reply, LoadInstrumentResult::Ok { .. }), "sample reply should complete the instrument load");
 
     let mut track_read_ctx = read_result_ctx(&transport, track_correlation);
     AudioCapability::on_read_result(
         &mut cap,
         &mut track_read_ctx,
-        ReadResult::Ok {
-            namespace: "assets".to_owned(),
-            path: "piano/shared.wav".to_owned(),
-            bytes: wav,
-        },
+        ReadResult::Ok { namespace: "assets".to_owned(), path: "piano/shared.wav".to_owned(), bytes: wav },
     );
     drive_task_completion::<AudioCapability>(&mut cap, &transport, &rx);
     let (session, reply) = decode_session_reply_with_session::<PlayTrackResult>(&rx);
@@ -693,28 +532,19 @@ fn interleaved_track_and_instrument_reads_demux_by_request_context() {
         matches!(queue.pop(), Some(AudioEvent::RegisterInstrument { .. })),
         "instrument load should register a bank"
     );
-    assert!(
-        matches!(queue.pop(), Some(AudioEvent::TrackStart { .. })),
-        "track load should start a track"
-    );
+    assert!(matches!(queue.pop(), Some(AudioEvent::TrackStart { .. })), "track load should start a track");
 }
 
 #[test]
 fn load_instrument_missing_sample_replies_err() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let mut ctx = manual_ctx(&transport);
     AudioCapability::on_load_instrument(
         &mut cap,
         &mut ctx,
-        LoadInstrument {
-            namespace: "assets".to_owned(),
-            path: "bank.sfz".to_owned(),
-        },
+        LoadInstrument { namespace: "assets".to_owned(), path: "bank.sfz".to_owned() },
     );
     let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
     let mut sfz_ctx = read_result_ctx(&transport, sfz_correlation);
@@ -733,11 +563,7 @@ fn load_instrument_missing_sample_replies_err() {
     AudioCapability::on_read_result(
         &mut cap,
         &mut sample_ctx,
-        ReadResult::Err {
-            namespace: "assets".to_owned(),
-            path: "c4.wav".to_owned(),
-            error: FsError::NotFound,
-        },
+        ReadResult::Err { namespace: "assets".to_owned(), path: "c4.wav".to_owned(), error: FsError::NotFound },
     );
     match decode_session_reply::<LoadInstrumentResult>(&rx) {
         LoadInstrumentResult::Err { error, .. } => {
@@ -753,18 +579,12 @@ fn load_instrument_missing_sample_replies_err() {
 fn load_instrument_malformed_sfz_replies_err() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let mut ctx = manual_ctx(&transport);
     AudioCapability::on_load_instrument(
         &mut cap,
         &mut ctx,
-        LoadInstrument {
-            namespace: "assets".to_owned(),
-            path: "bank.sfz".to_owned(),
-        },
+        LoadInstrument { namespace: "assets".to_owned(), path: "bank.sfz".to_owned() },
     );
     let sfz_correlation = assert_next_send_kind::<Read>(&transport, &rx);
     let mut sfz_ctx = read_result_ctx(&transport, sfz_correlation);
@@ -792,25 +612,16 @@ fn load_instrument_malformed_sfz_replies_err() {
 fn load_instrument_on_nop_chassis_replies_err() {
     let mut cap = AudioCapabilityState::nop();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(
-        Arc::clone(&mailer),
-        MailboxId(0),
-    ));
+    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
     let mut ctx = manual_ctx(&transport);
     AudioCapability::on_load_instrument(
         &mut cap,
         &mut ctx,
-        LoadInstrument {
-            namespace: "assets".to_owned(),
-            path: "bank.sfz".to_owned(),
-        },
+        LoadInstrument { namespace: "assets".to_owned(), path: "bank.sfz".to_owned() },
     );
     match decode_session_reply::<LoadInstrumentResult>(&rx) {
         LoadInstrumentResult::Err { .. } => {}
         LoadInstrumentResult::Ok { .. } => panic!("nop chassis must reply Err"),
     }
-    assert!(
-        rx.try_recv().is_err(),
-        "nop chassis must not forward a read"
-    );
+    assert!(rx.try_recv().is_err(), "nop chassis must not forward a read");
 }

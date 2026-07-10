@@ -1,18 +1,15 @@
 use super::{
-    Arc, HttpResponseStreamOpen, KindId, MailboxId, OPCODE_BINARY, OPCODE_CONTINUATION,
-    OPCODE_TEXT, RegisterRouteResult, RwLock, SharedRoutes, WsFrameParse, http_date,
-    normalize_prefix, parse_http_method, parse_ws_frame, percent_decode_path, reason_phrase,
-    register_route, render_stream_head, request_keeps_alive, route_matches, sec_websocket_accept,
-    serialize_ws_frame, sha1, unregister_route, unregister_routes_all, validate_ws_handshake,
+    Arc, HttpResponseStreamOpen, KindId, MailboxId, OPCODE_BINARY, OPCODE_CONTINUATION, OPCODE_TEXT,
+    RegisterRouteResult, RwLock, SharedRoutes, WsFrameParse, http_date, normalize_prefix, parse_http_method,
+    parse_ws_frame, percent_decode_path, reason_phrase, register_route, render_stream_head, request_keeps_alive,
+    route_matches, sec_websocket_accept, serialize_ws_frame, sha1, unregister_route, unregister_routes_all,
+    validate_ws_handshake,
 };
 use crate::http::kinds::{HttpHeader, HttpMethod};
 use std::time::{Duration, UNIX_EPOCH};
 
 fn conn_header(value: &str) -> Vec<HttpHeader> {
-    vec![HttpHeader {
-        name: "Connection".to_string(),
-        value: value.to_string(),
-    }]
+    vec![HttpHeader { name: "Connection".to_string(), value: value.to_string() }]
 }
 
 /// Tripwire: keep-alive defaulting is branch logic over the HTTP version
@@ -31,10 +28,7 @@ fn keep_alive_defaults_by_version_and_connection_header() {
     assert!(!request_keeps_alive(Some(0), &conn_header("close")));
     // Case-insensitive, and a token among comma-separated values counts.
     assert!(!request_keeps_alive(Some(1), &conn_header("Close")));
-    assert!(request_keeps_alive(
-        Some(0),
-        &conn_header("keep-alive, Upgrade")
-    ));
+    assert!(request_keeps_alive(Some(0), &conn_header("keep-alive, Upgrade")));
 }
 
 /// Segment-boundary semantics (ADR-0130): a prefix matches at `/`
@@ -82,10 +76,7 @@ fn known_methods_map_unknown_is_none() {
 /// keep-alive-after-stream fix (issue #2582) at the unit level.
 #[test]
 fn render_stream_head_honors_keep_alive() {
-    let open = HttpResponseStreamOpen {
-        status: 200,
-        headers: vec![],
-    };
+    let open = HttpResponseStreamOpen { status: 200, headers: vec![] };
     let keep_alive_head = String::from_utf8(render_stream_head(&open, true)).expect("head is utf8");
     assert!(keep_alive_head.contains("Connection: keep-alive\r\n"));
     assert!(!keep_alive_head.contains("Connection: close"));
@@ -155,36 +146,25 @@ fn sec_websocket_accept_matches_the_rfc_6455_vector() {
     // GUID)). A computed value pinning the SHA-1, the GUID, and the base64
     // together; it drifts if any of the three is wrong (the GUID's last
     // byte especially).
-    assert_eq!(
-        sec_websocket_accept("dGhlIHNhbXBsZSBub25jZQ=="),
-        "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
-    );
+    assert_eq!(sec_websocket_accept("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
 }
 
 #[test]
 fn ws_frame_serialize_matches_rfc_6455_examples() {
     // Tripwire: RFC 6455 §5.7 byte-layout examples — computed frame bytes.
     // #1 single unmasked text "Hello".
-    assert_eq!(
-        serialize_ws_frame(OPCODE_TEXT, b"Hello", None),
-        vec![0x81, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f]
-    );
+    assert_eq!(serialize_ws_frame(OPCODE_TEXT, b"Hello", None), vec![0x81, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f]);
     // #2 single masked text "Hello" (mask 0x37fa213d).
     assert_eq!(
         serialize_ws_frame(OPCODE_TEXT, b"Hello", Some([0x37, 0xfa, 0x21, 0x3d])),
-        vec![
-            0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58
-        ]
+        vec![0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58]
     );
     // #4 256-byte binary: the 16-bit extended-length header.
     let big = serialize_ws_frame(OPCODE_BINARY, &[0u8; 256], None);
     assert_eq!(&big[..4], &[0x82, 0x7e, 0x01, 0x00]);
     // #5 65536-byte binary: the 64-bit extended-length header.
     let huge = serialize_ws_frame(OPCODE_BINARY, &vec![0u8; 65_536], None);
-    assert_eq!(
-        &huge[..10],
-        &[0x82, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]
-    );
+    assert_eq!(&huge[..10], &[0x82, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]);
 }
 
 #[test]
@@ -192,9 +172,7 @@ fn ws_frame_parse_unmasks_the_rfc_6455_masked_example() {
     // Tripwire: parse RFC 6455 §5.7 #2 (masked "Hello") back to its
     // payload — the mask XOR and header decode as a round-trip of the
     // serialize tripwire above.
-    let bytes = [
-        0x81u8, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58,
-    ];
+    let bytes = [0x81u8, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58];
     match parse_ws_frame(&bytes, 1024) {
         WsFrameParse::Complete { frame, consumed } => {
             assert!(frame.fin);
@@ -211,10 +189,7 @@ fn ws_frame_parse_rejects_an_unmasked_client_frame() {
     // A client→server frame MUST be masked (RFC 6455 §5.1); an unmasked one
     // is a `1002` protocol error, never a panic on untrusted input.
     let bytes = [0x81u8, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f];
-    assert!(matches!(
-        parse_ws_frame(&bytes, 1024),
-        WsFrameParse::Error { code: 1002, .. }
-    ));
+    assert!(matches!(parse_ws_frame(&bytes, 1024), WsFrameParse::Error { code: 1002, .. }));
 }
 
 #[test]
@@ -222,10 +197,7 @@ fn ws_frame_parse_needs_more_on_a_partial_frame() {
     // A header that announces more payload than is buffered yields NeedMore,
     // not a panic or a wrong-length read.
     let bytes = [0x81u8, 0x85, 0x37, 0xfa, 0x21]; // header cut mid-mask-key
-    assert!(matches!(
-        parse_ws_frame(&bytes, 1024),
-        WsFrameParse::NeedMore
-    ));
+    assert!(matches!(parse_ws_frame(&bytes, 1024), WsFrameParse::NeedMore));
 }
 
 #[test]
@@ -262,50 +234,29 @@ fn ws_continuation_frames_decode_as_a_fragmented_message() {
 #[test]
 fn ws_handshake_validation_enforces_version_and_key() {
     let base = |extra: &[(&str, &str)]| -> Vec<HttpHeader> {
-        let mut headers = vec![HttpHeader {
-            name: "Connection".to_string(),
-            value: "Upgrade".to_string(),
-        }];
+        let mut headers = vec![HttpHeader { name: "Connection".to_string(), value: "Upgrade".to_string() }];
         for (name, value) in extra {
-            headers.push(HttpHeader {
-                name: (*name).to_string(),
-                value: (*value).to_string(),
-            });
+            headers.push(HttpHeader { name: (*name).to_string(), value: (*value).to_string() });
         }
         headers
     };
     // Valid: version 13 + a key echoes the key back.
     assert_eq!(
-        validate_ws_handshake(&base(&[
-            ("Sec-WebSocket-Version", "13"),
-            ("Sec-WebSocket-Key", "abc"),
-        ])),
+        validate_ws_handshake(&base(&[("Sec-WebSocket-Version", "13"), ("Sec-WebSocket-Key", "abc"),])),
         Ok("abc".to_string())
     );
     // Wrong version → 426.
     assert!(matches!(
-        validate_ws_handshake(&base(&[
-            ("Sec-WebSocket-Version", "8"),
-            ("Sec-WebSocket-Key", "abc"),
-        ])),
+        validate_ws_handshake(&base(&[("Sec-WebSocket-Version", "8"), ("Sec-WebSocket-Key", "abc"),])),
         Err((426, _))
     ));
     // Missing key → 400.
-    assert!(matches!(
-        validate_ws_handshake(&base(&[("Sec-WebSocket-Version", "13")])),
-        Err((400, _))
-    ));
+    assert!(matches!(validate_ws_handshake(&base(&[("Sec-WebSocket-Version", "13")])), Err((400, _))));
     // Missing Connection: Upgrade → 400.
     assert!(matches!(
         validate_ws_handshake(&[
-            HttpHeader {
-                name: "Sec-WebSocket-Version".to_string(),
-                value: "13".to_string(),
-            },
-            HttpHeader {
-                name: "Sec-WebSocket-Key".to_string(),
-                value: "abc".to_string(),
-            },
+            HttpHeader { name: "Sec-WebSocket-Version".to_string(), value: "13".to_string() },
+            HttpHeader { name: "Sec-WebSocket-Key".to_string(), value: "abc".to_string() },
         ]),
         Err((400, _))
     ));
@@ -314,18 +265,15 @@ fn ws_handshake_validation_enforces_version_and_key() {
 #[test]
 fn config_layer_defaults_match_the_named_consts() {
     use super::super::{
-        DEFAULT_BIND_ADDR, DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS, DEFAULT_MAX_CONNECTIONS,
-        DEFAULT_MAX_HEADER_BYTES, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_STREAM_WINDOW,
-        DEFAULT_REQUEST_TIMEOUT_MILLIS, DEFAULT_RESPONSE_STREAM_WINDOW,
-        DEFAULT_WS_IDLE_TIMEOUT_MILLIS, HttpServerConfig, HttpServerConfigLayer,
+        DEFAULT_BIND_ADDR, DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_HEADER_BYTES,
+        DEFAULT_MAX_REQUEST_BYTES, DEFAULT_REQUEST_STREAM_WINDOW, DEFAULT_REQUEST_TIMEOUT_MILLIS,
+        DEFAULT_RESPONSE_STREAM_WINDOW, DEFAULT_WS_IDLE_TIMEOUT_MILLIS, HttpServerConfig, HttpServerConfigLayer,
     };
     use confique::Config as _;
     // No `.env()` source: loads the literal defaults only, so this is
     // env-free and guards the layer defaults against the consts +
     // `HttpServerConfig::default()`.
-    let layer = HttpServerConfigLayer::builder()
-        .load()
-        .expect("defaults load");
+    let layer = HttpServerConfigLayer::builder().load().expect("defaults load");
     let default = HttpServerConfig::default();
     assert_eq!(layer.bind_addr, DEFAULT_BIND_ADDR);
     assert_eq!(layer.bind_addr, default.bind_addr);
@@ -333,31 +281,16 @@ fn config_layer_defaults_match_the_named_consts() {
     assert_eq!(layer.max_request_bytes, DEFAULT_MAX_REQUEST_BYTES);
     assert_eq!(layer.max_header_bytes, DEFAULT_MAX_HEADER_BYTES);
     assert_eq!(layer.request_timeout_millis, DEFAULT_REQUEST_TIMEOUT_MILLIS);
-    assert_eq!(
-        layer.keep_alive_timeout_millis,
-        DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS
-    );
-    assert_eq!(
-        default.keep_alive_timeout_millis,
-        DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS
-    );
+    assert_eq!(layer.keep_alive_timeout_millis, DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS);
+    assert_eq!(default.keep_alive_timeout_millis, DEFAULT_KEEP_ALIVE_TIMEOUT_MILLIS);
     assert_eq!(layer.max_connections, DEFAULT_MAX_CONNECTIONS);
     assert_eq!(layer.max_connections, default.max_connections);
     assert_eq!(layer.response_stream_window, DEFAULT_RESPONSE_STREAM_WINDOW);
-    assert_eq!(
-        default.response_stream_window,
-        DEFAULT_RESPONSE_STREAM_WINDOW
-    );
+    assert_eq!(default.response_stream_window, DEFAULT_RESPONSE_STREAM_WINDOW);
     assert_eq!(layer.request_stream_window, DEFAULT_REQUEST_STREAM_WINDOW);
     assert_eq!(default.request_stream_window, DEFAULT_REQUEST_STREAM_WINDOW);
-    assert_eq!(
-        layer.websocket_idle_timeout_millis,
-        DEFAULT_WS_IDLE_TIMEOUT_MILLIS
-    );
-    assert_eq!(
-        default.websocket_idle_timeout_millis,
-        DEFAULT_WS_IDLE_TIMEOUT_MILLIS
-    );
+    assert_eq!(layer.websocket_idle_timeout_millis, DEFAULT_WS_IDLE_TIMEOUT_MILLIS);
+    assert_eq!(default.websocket_idle_timeout_millis, DEFAULT_WS_IDLE_TIMEOUT_MILLIS);
 }
 
 /// Route-table registration and conflict resolution (ADR-0130 /
@@ -368,8 +301,8 @@ fn config_layer_defaults_match_the_named_consts() {
 /// independent actors' registration mail happens to reach the table.
 mod route_registration {
     use super::{
-        Arc, KindId, MailboxId, RegisterRouteResult, RwLock, SharedRoutes, register_route,
-        unregister_route, unregister_routes_all,
+        Arc, KindId, MailboxId, RegisterRouteResult, RwLock, SharedRoutes, register_route, unregister_route,
+        unregister_routes_all,
     };
     use crate::http::kinds::HttpMethod;
 
@@ -379,19 +312,15 @@ mod route_registration {
 
     #[track_caller]
     fn expect_ok(result: RegisterRouteResult) {
-        assert!(
-            matches!(result, RegisterRouteResult::Ok),
-            "expected Ok, got {result:?}",
-        );
+        assert!(matches!(result, RegisterRouteResult::Ok), "expected Ok, got {result:?}",);
     }
 
     #[track_caller]
     fn expect_err_containing(result: RegisterRouteResult, needle: &str) {
         match result {
-            RegisterRouteResult::Err { error } => assert!(
-                error.contains(needle),
-                "error {error:?} does not contain {needle:?}",
-            ),
+            RegisterRouteResult::Err { error } => {
+                assert!(error.contains(needle), "error {error:?} does not contain {needle:?}",)
+            }
             RegisterRouteResult::Ok => panic!("expected Err containing {needle:?}, got Ok"),
         }
     }
@@ -400,12 +329,7 @@ mod route_registration {
     /// table holds exactly one route — the shape every case below checks.
     fn only_route(routes: &SharedRoutes) -> (Vec<MailboxId>, KindId, bool) {
         let table = routes.read().expect("route table lock");
-        assert_eq!(
-            table.len(),
-            1,
-            "expected exactly one route, got {}",
-            table.len(),
-        );
+        assert_eq!(table.len(), 1, "expected exactly one route, got {}", table.len(),);
         let route = &table[0];
         let snapshot = (route.members.clone(), route.kind, route.shared);
         drop(table);
@@ -459,22 +383,8 @@ mod route_registration {
         let (a, b) = (MailboxId(1), MailboxId(2));
         let kind = KindId(100);
 
-        expect_ok(register_route(
-            &routes,
-            "/m",
-            Some(HttpMethod::Get),
-            kind,
-            a,
-            false,
-        ));
-        expect_ok(register_route(
-            &routes,
-            "/m",
-            Some(HttpMethod::Post),
-            kind,
-            b,
-            false,
-        ));
+        expect_ok(register_route(&routes, "/m", Some(HttpMethod::Get), kind, a, false));
+        expect_ok(register_route(&routes, "/m", Some(HttpMethod::Post), kind, b, false));
 
         assert_eq!(routes.read().expect("route table lock").len(), 2);
     }
@@ -490,19 +400,13 @@ mod route_registration {
         let (a, b) = (MailboxId(1), MailboxId(2));
         let kind = KindId(100);
         expect_ok(register_route(&excl, "/k", None, kind, a, false));
-        expect_err_containing(
-            register_route(&excl, "/k", None, kind, b, true),
-            "exclusively claimed",
-        );
+        expect_err_containing(register_route(&excl, "/k", None, kind, b, true), "exclusively claimed");
         assert_eq!(only_route(&excl), (vec![a], kind, false));
 
         // Exclusive claim onto a shared key: rejected, stays shared.
         let shared = fresh_routes();
         expect_ok(register_route(&shared, "/k", None, kind, a, true));
-        expect_err_containing(
-            register_route(&shared, "/k", None, kind, b, false),
-            "shared member set",
-        );
+        expect_err_containing(register_route(&shared, "/k", None, kind, b, false), "shared member set");
         assert_eq!(only_route(&shared), (vec![a], kind, true));
     }
 
@@ -516,10 +420,7 @@ mod route_registration {
         let (kind_a, kind_b) = (KindId(100), KindId(200));
 
         expect_ok(register_route(&routes, "/pool", None, kind_a, a, true));
-        expect_err_containing(
-            register_route(&routes, "/pool", None, kind_b, b, true),
-            "cannot join",
-        );
+        expect_err_containing(register_route(&routes, "/pool", None, kind_b, b, true), "cannot join");
 
         assert_eq!(only_route(&routes), (vec![a], kind_a, true));
     }
@@ -593,10 +494,7 @@ mod wake_coalescing {
         let registry = Arc::new(Registry::new());
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let counter = Arc::new(CountingInbox(AtomicUsize::new(0)));
-        let self_id = registry.register_inbox(
-            "test.wake_target",
-            Arc::clone(&counter) as Arc<dyn InboxHandler>,
-        );
+        let self_id = registry.register_inbox("test.wake_target", Arc::clone(&counter) as Arc<dyn InboxHandler>);
         let (inbound_tx, inbound_rx) = mpsc::channel();
         let sink = WakeSink {
             inbound_tx,

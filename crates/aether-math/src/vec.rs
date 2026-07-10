@@ -77,11 +77,7 @@ impl Vec2 {
     #[must_use]
     pub fn normalize(self) -> Self {
         let len = self.length();
-        if len > 0.0 {
-            self * (1.0 / len)
-        } else {
-            Self::ZERO
-        }
+        if len > 0.0 { self * (1.0 / len) } else { Self::ZERO }
     }
 
     #[inline]
@@ -160,11 +156,7 @@ impl Vec3 {
     #[must_use]
     pub fn normalize(self) -> Self {
         let len = self.length();
-        if len > 0.0 {
-            self * (1.0 / len)
-        } else {
-            Self::ZERO
-        }
+        if len > 0.0 { self * (1.0 / len) } else { Self::ZERO }
     }
 
     /// Like [`Self::normalize`] but returns `fallback` (instead of
@@ -256,12 +248,7 @@ impl Vec4 {
     #[inline]
     #[must_use]
     pub const fn splat(v: f32) -> Self {
-        Self {
-            x: v,
-            y: v,
-            z: v,
-            w: v,
-        }
+        Self { x: v, y: v, z: v, w: v }
     }
 
     /// Construct a `Vec4` from a `[f32; 4]`. Mirror of
@@ -301,11 +288,7 @@ impl Vec4 {
     #[must_use]
     pub fn normalize(self) -> Self {
         let len = self.length();
-        if len > 0.0 {
-            self * (1.0 / len)
-        } else {
-            Self::ZERO
-        }
+        if len > 0.0 { self * (1.0 / len) } else { Self::ZERO }
     }
 
     #[inline]

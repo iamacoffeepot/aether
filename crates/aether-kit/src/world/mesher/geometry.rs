@@ -18,12 +18,7 @@ pub(super) fn emit_flat_quad(
     let corner = |xo: i32, zo: i32| {
         let wx = xo as f32 / OCTIMETERS_PER_METER;
         let wz = zo as f32 / OCTIMETERS_PER_METER;
-        Vertex {
-            x: wx,
-            y: surface(wx, wz),
-            z: wz,
-            color,
-        }
+        Vertex { x: wx, y: surface(wx, wz), z: wz, color }
     };
     let a = corner(rect[0], rect[1]);
     let b = corner(rect[2], rect[1]);

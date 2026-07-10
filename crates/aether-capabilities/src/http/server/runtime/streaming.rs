@@ -19,26 +19,14 @@ impl HttpShardState {
     ) {
         let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         let window = self.request_stream_window.max(1);
-        self.request_streams.insert(
-            stream_id,
-            RequestStreamState {
-                conn_id,
-                handler,
-                method,
-                keep_alive: head.keep_alive,
-            },
-        );
+        self.request_streams
+            .insert(stream_id, RequestStreamState { conn_id, handler, method, keep_alive: head.keep_alive });
         if let Some(conn) = self.connections.get_mut(&conn_id) {
             conn.active_stream = Some(stream_id);
         }
-        let payload = HttpRequestStreamOpen {
-            stream_id,
-            method,
-            path: head.path,
-            query: head.query,
-            headers: head.headers,
-        }
-        .encode_into_bytes();
+        let payload =
+            HttpRequestStreamOpen { stream_id, method, path: head.path, query: head.query, headers: head.headers }
+                .encode_into_bytes();
         let _ = ctx.send_envelope_detached(handler, <HttpRequestStreamOpen as Kind>::ID, &payload);
         self.signal_reader(conn_id, ReaderControl::Stream { credit: window });
         tracing::debug!(
@@ -53,12 +41,7 @@ impl HttpShardState {
     /// Forward one inbound body piece to the handler as an `HttpRequestChunk`
     /// on the connection's active stream (ADR-0128). A missing stream (the
     /// connection closed, or the stream already ended) drops the chunk.
-    pub fn forward_request_chunk(
-        &mut self,
-        ctx: &mut NativeCtx<'_>,
-        conn_id: ConnId,
-        body: Vec<u8>,
-    ) {
+    pub fn forward_request_chunk(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId, body: Vec<u8>) {
         let Some(stream_id) = self.connections.get(&conn_id).and_then(|c| c.active_stream) else {
             return;
         };
@@ -76,22 +59,14 @@ impl HttpShardState {
     /// upload answers with one ordinary response and the settlement safety net
     /// still `502`s a handler that drops without replying.
     pub fn end_request_stream(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId) {
-        let Some(stream_id) = self
-            .connections
-            .get_mut(&conn_id)
-            .and_then(|c| c.active_stream.take())
-        else {
+        let Some(stream_id) = self.connections.get_mut(&conn_id).and_then(|c| c.active_stream.take()) else {
             return;
         };
         let Some(stream) = self.request_streams.remove(&stream_id) else {
             return;
         };
         let payload = HttpRequestStreamEnd { stream_id }.encode_into_bytes();
-        let mail_id = ctx.send_envelope_detached(
-            stream.handler,
-            <HttpRequestStreamEnd as Kind>::ID,
-            &payload,
-        );
+        let mail_id = ctx.send_envelope_detached(stream.handler, <HttpRequestStreamEnd as Kind>::ID, &payload);
         if let Some(registry) = self.mailer.settlement_registry() {
             registry.subscribe_settlement_mail(
                 mail_id,
@@ -102,12 +77,7 @@ impl HttpShardState {
         }
         self.in_flight.insert(
             mail_id.correlation_id,
-            PendingRequest {
-                conn_id,
-                method: stream.method,
-                keep_alive: stream.keep_alive,
-                handler: stream.handler,
-            },
+            PendingRequest { conn_id, method: stream.method, keep_alive: stream.keep_alive, handler: stream.handler },
         );
     }
 
@@ -143,9 +113,7 @@ impl HttpShardState {
         let (keep_alive, handler) = self
             .in_flight
             .remove(&stream_id)
-            .map_or((false, MailboxId(0)), |pending| {
-                (pending.keep_alive, pending.handler)
-            });
+            .map_or((false, MailboxId(0)), |pending| (pending.keep_alive, pending.handler));
         let head = render_stream_head(open, keep_alive);
         self.write_raw_to(conn_id, &head);
 
@@ -181,23 +149,22 @@ impl HttpShardState {
         // Per-connection writer below the mail layer, mirroring the reader
         // sidecar — it owns only the socket write, never the cap state.
         #[allow(clippy::disallowed_methods)]
-        let writer_thread = match thread::Builder::new()
-            .name(format!("aether-http-writer-{conn_id}"))
-            .spawn(move || {
+        let writer_thread =
+            match thread::Builder::new().name(format!("aether-http-writer-{conn_id}")).spawn(move || {
                 run_writer_loop(write_half, stream_id, &rx, &sink, idle_deadline);
             }) {
-            Ok(thread) => thread,
-            Err(e) => {
-                tracing::warn!(
-                    target: "aether_substrate::http_server",
-                    conn = conn_id,
-                    error = %e,
-                    "http stream: writer thread spawn failed; closing",
-                );
-                self.close_connection(conn_id, "stream writer spawn failed");
-                return;
-            }
-        };
+                Ok(thread) => thread,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "aether_substrate::http_server",
+                        conn = conn_id,
+                        error = %e,
+                        "http stream: writer thread spawn failed; closing",
+                    );
+                    self.close_connection(conn_id, "stream writer spawn failed");
+                    return;
+                }
+            };
 
         self.streams.insert(
             stream_id,
@@ -228,10 +195,8 @@ impl HttpShardState {
     /// stream down; otherwise it spends one credit and hands the bytes to the
     /// writer thread over the bounded channel.
     pub fn push_chunk(&mut self, stream_id: u64, body: Vec<u8>) {
-        let Some((conn_id, has_credit)) = self
-            .streams
-            .get(&stream_id)
-            .map(|stream| (stream.conn_id, stream.credit_outstanding > 0))
+        let Some((conn_id, has_credit)) =
+            self.streams.get(&stream_id).map(|stream| (stream.conn_id, stream.credit_outstanding > 0))
         else {
             // No such stream — already ended / torn down, or never opened.
             return;
@@ -243,10 +208,7 @@ impl HttpShardState {
             return;
         }
         let send_result = {
-            let stream = self
-                .streams
-                .get_mut(&stream_id)
-                .expect("stream present under the same borrow");
+            let stream = self.streams.get_mut(&stream_id).expect("stream present under the same borrow");
             stream.credit_outstanding -= 1;
             stream.tx.try_send(WriterMsg::Chunk(body))
         };
@@ -294,10 +256,8 @@ impl HttpShardState {
     /// already gone; `resume_connection`'s send fails and it falls back to
     /// `close_connection` on that same path.
     pub fn finish_stream(&mut self, stream_id: u64) {
-        let Some((conn_id, keep_alive)) = self
-            .streams
-            .get(&stream_id)
-            .map(|stream| (stream.conn_id, stream.keep_alive))
+        let Some((conn_id, keep_alive)) =
+            self.streams.get(&stream_id).map(|stream| (stream.conn_id, stream.keep_alive))
         else {
             return;
         };

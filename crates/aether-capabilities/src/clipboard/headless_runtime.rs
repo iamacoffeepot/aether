@@ -1,8 +1,7 @@
 //! Fail-fast runtime companion for chassis without a clipboard peripheral.
 
 use super::{
-    GetClipboardText, GetClipboardTextResult, HeadlessClipboardCapability, SetClipboardText,
-    SetClipboardTextResult,
+    GetClipboardText, GetClipboardTextResult, HeadlessClipboardCapability, SetClipboardText, SetClipboardTextResult,
 };
 use aether_actor::runtime;
 
@@ -21,10 +20,7 @@ impl NativeActor for HeadlessClipboardCapability {
 
     const NAMESPACE: &'static str = "aether.clipboard";
 
-    fn init(
-        _config: (),
-        _ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<HeadlessClipboardCapabilityState, BootError> {
+    fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<HeadlessClipboardCapabilityState, BootError> {
         Ok(HeadlessClipboardCapabilityState)
     }
 
@@ -34,9 +30,7 @@ impl NativeActor for HeadlessClipboardCapability {
         _ctx: &mut NativeCtx<'_>,
         _mail: GetClipboardText,
     ) -> GetClipboardTextResult {
-        GetClipboardTextResult::Err {
-            error: UNAVAILABLE_ERROR.to_owned(),
-        }
+        GetClipboardTextResult::Err { error: UNAVAILABLE_ERROR.to_owned() }
     }
 
     #[handler::single]
@@ -45,9 +39,7 @@ impl NativeActor for HeadlessClipboardCapability {
         _ctx: &mut NativeCtx<'_>,
         _mail: SetClipboardText,
     ) -> SetClipboardTextResult {
-        SetClipboardTextResult::Err {
-            error: UNAVAILABLE_ERROR.to_owned(),
-        }
+        SetClipboardTextResult::Err { error: UNAVAILABLE_ERROR.to_owned() }
     }
 }
 

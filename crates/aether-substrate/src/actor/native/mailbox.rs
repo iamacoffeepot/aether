@@ -60,13 +60,7 @@ impl<'a, R> NativeActorMailbox<'a, R> {
     /// `ctx.actor::<R>().send()` inherits the handler's chain.
     #[doc(hidden)]
     pub fn __new(mailbox: u64, binding: &'a NativeBinding) -> Self {
-        Self {
-            mailbox,
-            binding,
-            parent: None,
-            root: None,
-            _r: PhantomData,
-        }
+        Self { mailbox, binding, parent: None, root: None, _r: PhantomData }
     }
 
     /// Not part of the public API; the per-handler
@@ -83,13 +77,7 @@ impl<'a, R> NativeActorMailbox<'a, R> {
         parent: Option<MailId>,
         root: Option<MailId>,
     ) -> Self {
-        Self {
-            mailbox,
-            binding,
-            parent,
-            root,
-            _r: PhantomData,
-        }
+        Self { mailbox, binding, parent, root, _r: PhantomData }
     }
 
     /// The receiver's typed mailbox id. Exposed for callers that need
@@ -118,11 +106,7 @@ impl<'a, R> NativeActorMailbox<'a, R> {
     /// the parent carry (exact for a root-pinned cap, depth-1). Threads
     /// the existing `'a` binding ref from the parent handle.
     #[must_use]
-    pub fn resolve_peer_scoped<Peer: Addressable>(
-        &self,
-        scope: &str,
-        segment: &str,
-    ) -> NativeActorMailbox<'a, Peer> {
+    pub fn resolve_peer_scoped<Peer: Addressable>(&self, scope: &str, segment: &str) -> NativeActorMailbox<'a, Peer> {
         let node = ActorId::instanced(scope, segment);
         NativeActorMailbox::__new_in_flight(
             with_tag(Tag::Mailbox, fold_lineage(self.mailbox, node)),
@@ -153,14 +137,7 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
         let bytes = payload.encode_into_bytes();
         // 2b: buffer into the actor's send-side ring with the captured
         // in-flight lineage. Flushed at handler end by `NativeCtx`'s `Drop`.
-        let _ = self.binding.push_envelope_buffered(
-            self.mailbox,
-            K::ID.0,
-            &bytes,
-            1,
-            self.parent,
-            self.root,
-        );
+        let _ = self.binding.push_envelope_buffered(self.mailbox, K::ID.0, &bytes, 1, self.parent, self.root);
     }
 
     /// Send a slice of payloads as a contiguous batch. Cast-only.
@@ -175,14 +152,7 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
         // realistic mail batches stay well below `u32::MAX`.
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
-        let _ = self.binding.push_envelope_buffered(
-            self.mailbox,
-            K::ID.0,
-            bytes,
-            count,
-            self.parent,
-            self.root,
-        );
+        let _ = self.binding.push_envelope_buffered(self.mailbox, K::ID.0, bytes, count, self.parent, self.root);
     }
 
     /// ADR-0080 §7 fire-and-forget escape hatch: send `payload` to `R`
@@ -199,9 +169,7 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        let _ = self
-            .binding
-            .push_envelope_buffered(self.mailbox, K::ID.0, &bytes, 1, None, None);
+        let _ = self.binding.push_envelope_buffered(self.mailbox, K::ID.0, &bytes, 1, None, None);
     }
 
     /// Like [`Self::send`] but returns the minted `MailId` so the caller
@@ -230,14 +198,7 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.binding.push_envelope_buffered(
-            self.mailbox,
-            K::ID.0,
-            &bytes,
-            1,
-            self.parent,
-            self.root,
-        )
+        self.binding.push_envelope_buffered(self.mailbox, K::ID.0, &bytes, 1, self.parent, self.root)
     }
 
     /// Send a request and store a typed context under the minted correlation
@@ -251,8 +212,7 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
         C: Kind,
     {
         let mail_id = self.send_tracked(payload);
-        self.binding
-            .store_request_context(RequestId(mail_id.correlation_id), context);
+        self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
         mail_id
     }
 }

@@ -68,8 +68,8 @@ pub use runtime::ComponentHostConfig;
 // identity, outside the `feature = "runtime"` gate — so both the input kinds
 // and the reply kinds must be in scope here, not behind the runtime gate.
 use aether_kinds::{
-    DescribeComponent, DescribeComponentResult, DropComponent, ListComponents,
-    ListComponentsResult, LoadComponent, LoadResult, ReplaceComponent,
+    DescribeComponent, DescribeComponentResult, DropComponent, ListComponents, ListComponentsResult, LoadComponent,
+    LoadResult, ReplaceComponent,
 };
 
 // The `#[actor]` attribute sits on the capability struct (the struct-hosted
@@ -146,10 +146,7 @@ mod tests {
         assert_eq!(camera.mailbox_id(), canonical);
 
         // Not the pre-0099 flat name-hash, and not the bare load-name.
-        assert_ne!(
-            camera.mailbox_id(),
-            mailbox_id_from_name(&format!("{}:camera", WasmTrampoline::NAMESPACE)),
-        );
+        assert_ne!(camera.mailbox_id(), mailbox_id_from_name(&format!("{}:camera", WasmTrampoline::NAMESPACE)),);
         assert_ne!(camera.mailbox_id(), mailbox_id_from_name("camera"));
     }
 }

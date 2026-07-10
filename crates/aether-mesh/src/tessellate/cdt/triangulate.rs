@@ -71,10 +71,7 @@ pub(in crate::tessellate) fn triangulate(
     if input_ids.len() < 3 {
         return None;
     }
-    let projected: Vec<Point2> = input_ids
-        .iter()
-        .map(|&v| project_point(vertices[v], axis_a, axis_b))
-        .collect();
+    let projected: Vec<Point2> = input_ids.iter().map(|&v| project_point(vertices[v], axis_a, axis_b)).collect();
 
     // 2. Build the unconstrained Delaunay triangulation. Bowyer-Watson
     // adds a super-triangle, so vertex indices in the mesh are offset by
@@ -119,15 +116,8 @@ pub(in crate::tessellate) fn triangulate(
     // against every input loop. A point is inside the polygon iff an
     // odd number of loops contain it (outer = 1; outer + hole = 2;
     // none = 0).
-    let projected_loops: Vec<Vec<Point2>> = loops
-        .iter()
-        .map(|loop_| {
-            loop_
-                .iter()
-                .map(|&v| project_point(vertices[v], axis_a, axis_b))
-                .collect()
-        })
-        .collect();
+    let projected_loops: Vec<Vec<Point2>> =
+        loops.iter().map(|loop_| loop_.iter().map(|&v| project_point(vertices[v], axis_a, axis_b)).collect()).collect();
 
     // 5. Collect alive triangles whose centroid is inside the polygon.
     let mut output = Vec::new();
@@ -135,24 +125,9 @@ pub(in crate::tessellate) fn triangulate(
         if tri.verts.iter().any(|&v| v < super_count) {
             continue;
         }
-        let p0 = projected_loops_lookup(
-            vertices,
-            input_ids[tri.verts[0] - super_count],
-            axis_a,
-            axis_b,
-        );
-        let p1 = projected_loops_lookup(
-            vertices,
-            input_ids[tri.verts[1] - super_count],
-            axis_a,
-            axis_b,
-        );
-        let p2 = projected_loops_lookup(
-            vertices,
-            input_ids[tri.verts[2] - super_count],
-            axis_a,
-            axis_b,
-        );
+        let p0 = projected_loops_lookup(vertices, input_ids[tri.verts[0] - super_count], axis_a, axis_b);
+        let p1 = projected_loops_lookup(vertices, input_ids[tri.verts[1] - super_count], axis_a, axis_b);
+        let p2 = projected_loops_lookup(vertices, input_ids[tri.verts[2] - super_count], axis_a, axis_b);
         // Centroid = (p0 + p1 + p2) / 3. Avoid division by working with 3*centroid:
         // shift the polygon-loop edges by 3x as well.
         let cx3 = p0.0 as i128 + p1.0 as i128 + p2.0 as i128;
@@ -176,12 +151,7 @@ pub(in crate::tessellate) fn triangulate(
     Some(output)
 }
 
-fn projected_loops_lookup(
-    vertices: &[Point3],
-    vid: VertexId,
-    axis_a: Axis,
-    axis_b: Axis,
-) -> Point2 {
+fn projected_loops_lookup(vertices: &[Point3], vid: VertexId, axis_a: Axis, axis_b: Axis) -> Point2 {
     project_point(vertices[vid], axis_a, axis_b)
 }
 
@@ -238,8 +208,7 @@ pub(in crate::tessellate) fn signed_area2_2d(loop2d: &[Point2]) -> i128 {
     let n = loop2d.len();
     for i in 0..n {
         let j = (i + 1) % n;
-        sum += (loop2d[i].0 as i128) * (loop2d[j].1 as i128)
-            - (loop2d[j].0 as i128) * (loop2d[i].1 as i128);
+        sum += (loop2d[i].0 as i128) * (loop2d[j].1 as i128) - (loop2d[j].0 as i128) * (loop2d[i].1 as i128);
     }
     sum
 }
@@ -250,12 +219,7 @@ mod tests {
     use crate::test_helpers::pt;
 
     fn xy_plane() -> Plane3 {
-        Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1,
-            d: 0,
-        }
+        Plane3 { n_x: 0, n_y: 0, n_z: 1, d: 0 }
     }
 
     fn assert_ccw_around_plane(triangles: &[[VertexId; 3]], vertices: &[Point3], plane: &Plane3) {
@@ -268,10 +232,7 @@ mod tests {
             let q0 = project_point(p0, axis_a, axis_b);
             let q1 = project_point(p1, axis_a, axis_b);
             let q2 = project_point(p2, axis_a, axis_b);
-            assert!(
-                orient2d(q0, q1, q2) > 0,
-                "triangle {tri:?} not CCW in projection"
-            );
+            assert!(orient2d(q0, q1, q2) > 0, "triangle {tri:?} not CCW in projection");
         }
     }
 
@@ -324,23 +285,16 @@ mod tests {
     fn triangle_yields_one_triangle() {
         let vertices = vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(0.0, 1.0, 0.0)];
         let loops = vec![vec![0, 1, 2]];
-        let tris = triangulate(&vertices, &loops, &xy_plane())
-            .expect("test setup: triangle is triangulable");
+        let tris = triangulate(&vertices, &loops, &xy_plane()).expect("test setup: triangle is triangulable");
         assert_eq!(tris.len(), 1);
         assert_ccw_around_plane(&tris, &vertices, &xy_plane());
     }
 
     #[test]
     fn quad_yields_two_triangles() {
-        let vertices = vec![
-            pt(0.0, 0.0, 0.0),
-            pt(1.0, 0.0, 0.0),
-            pt(1.0, 1.0, 0.0),
-            pt(0.0, 1.0, 0.0),
-        ];
+        let vertices = vec![pt(0.0, 0.0, 0.0), pt(1.0, 0.0, 0.0), pt(1.0, 1.0, 0.0), pt(0.0, 1.0, 0.0)];
         let loops = vec![vec![0, 1, 2, 3]];
-        let tris = triangulate(&vertices, &loops, &xy_plane())
-            .expect("test setup: unit square is triangulable");
+        let tris = triangulate(&vertices, &loops, &xy_plane()).expect("test setup: unit square is triangulable");
         assert_eq!(tris.len(), 2);
         assert_ccw_around_plane(&tris, &vertices, &xy_plane());
         // Total area = 1 (a unit square).
@@ -352,33 +306,21 @@ mod tests {
     fn square_with_square_hole_triangulates_at_topological_minimum() {
         // Outer 2x2 square (CCW around +z), inner 1x1 hole (CW around +z).
         let (vertices, loops) = annular_square_with_hole(2.0);
-        let tris = triangulate(&vertices, &loops, &xy_plane())
-            .expect("test setup: annular region is triangulable");
+        let tris = triangulate(&vertices, &loops, &xy_plane()).expect("test setup: annular region is triangulable");
         // Topological minimum for a rectangle-with-rectangular-hole on
         // 8 boundary vertices: V + 2H - 2 = 8 triangles.
-        assert_eq!(
-            tris.len(),
-            8,
-            "expected 8 annular triangles, got {}",
-            tris.len()
-        );
+        assert_eq!(tris.len(), 8, "expected 8 annular triangles, got {}", tris.len());
         assert_ccw_around_plane(&tris, &vertices, &xy_plane());
         // Total area = outer (4) - hole (1) = 3.
         let unit = 1_i128 << 16;
-        assert_eq!(
-            total_doubled_area(&tris, &vertices),
-            3 * 2 * unit * unit,
-            "annular area mismatch"
-        );
+        assert_eq!(total_doubled_area(&tris, &vertices), 3 * 2 * unit * unit, "annular area mismatch");
     }
 
     #[test]
     fn cdt_is_deterministic_across_runs() {
         let (vertices, loops) = annular_square_with_hole(2.0);
-        let r1 = triangulate(&vertices, &loops, &xy_plane())
-            .expect("test setup: annular region is triangulable");
-        let r2 = triangulate(&vertices, &loops, &xy_plane())
-            .expect("test setup: annular region is triangulable");
+        let r1 = triangulate(&vertices, &loops, &xy_plane()).expect("test setup: annular region is triangulable");
+        let r2 = triangulate(&vertices, &loops, &xy_plane()).expect("test setup: annular region is triangulable");
         assert_eq!(r1, r2);
     }
 
@@ -386,12 +328,7 @@ mod tests {
     fn projection_axes_axis_aligned_cases() {
         // Six axis-aligned planes, each picking the right (a, b) pair
         // with the orientation that preserves CCW under projection.
-        let mut p = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 0,
-            d: 0,
-        };
+        let mut p = Plane3 { n_x: 0, n_y: 0, n_z: 0, d: 0 };
         // +X dominant → (Y, Z)
         p.n_x = 1;
         p.n_y = 0;
@@ -434,12 +371,7 @@ mod tests {
         // chain favors x first, so x is treated as dominant. Pin the
         // tie-breaking so a future refactor doesn't silently change
         // which two axes get projected.
-        let p = Plane3 {
-            n_x: 1,
-            n_y: 1,
-            n_z: 1,
-            d: 0,
-        };
+        let p = Plane3 { n_x: 1, n_y: 1, n_z: 1, d: 0 };
         let (a, b) = projection_axes(&p);
         assert!(matches!(a, Axis::Y));
         assert!(matches!(b, Axis::Z));
@@ -450,11 +382,7 @@ mod tests {
         // Catches a typo refactor (Axis::X→p.y, etc.) that wouldn't
         // surface in axis-aligned tests because xy-plane projections
         // pick (X, Y) and the test inputs happen to keep z=0.
-        let point = Point3 {
-            x: 100,
-            y: 200,
-            z: 300,
-        };
+        let point = Point3 { x: 100, y: 200, z: 300 };
         assert_eq!(project_point(point, Axis::X, Axis::Y), (100, 200));
         assert_eq!(project_point(point, Axis::Y, Axis::Z), (200, 300));
         assert_eq!(project_point(point, Axis::Z, Axis::X), (300, 100));
@@ -470,10 +398,7 @@ mod tests {
         let poly = vec![(0_i64, 0_i64), (2, 0), (2, 2), (0, 2)];
         assert!(point_in_polygon_3x(3, 3, &poly), "(1,1) should be inside");
         assert!(!point_in_polygon_3x(9, 9, &poly), "(3,3) should be outside");
-        assert!(
-            !point_in_polygon_3x(-3, -3, &poly),
-            "(-1,-1) should be outside"
-        );
+        assert!(!point_in_polygon_3x(-3, -3, &poly), "(-1,-1) should be outside");
     }
 
     #[test]
@@ -489,22 +414,13 @@ mod tests {
         // doesn't do half — use 3*y = 1, then cy3=1 means y=1/3. We
         // need a clean test. Use cx3=6, cy3=2 (y = 2/3 < 1) so we're
         // outside the hole.
-        let inside_outer_only =
-            (point_in_polygon_3x(6, 2, &outer) as u32) + (point_in_polygon_3x(6, 2, &hole) as u32);
-        assert_eq!(
-            inside_outer_only, 1,
-            "point in annulus must be inside exactly 1 loop (the outer)"
-        );
+        let inside_outer_only = (point_in_polygon_3x(6, 2, &outer) as u32) + (point_in_polygon_3x(6, 2, &hole) as u32);
+        assert_eq!(inside_outer_only, 1, "point in annulus must be inside exactly 1 loop (the outer)");
         // Point (2, 2) (= scaled cx3=6, cy3=6) is inside both.
-        let inside_both =
-            (point_in_polygon_3x(6, 6, &outer) as u32) + (point_in_polygon_3x(6, 6, &hole) as u32);
-        assert_eq!(
-            inside_both, 2,
-            "point inside hole must be inside both outer and hole loops"
-        );
+        let inside_both = (point_in_polygon_3x(6, 6, &outer) as u32) + (point_in_polygon_3x(6, 6, &hole) as u32);
+        assert_eq!(inside_both, 2, "point inside hole must be inside both outer and hole loops");
         // Point (5, 2) (scaled cx3=15, cy3=6) is outside both.
-        let inside_neither = (point_in_polygon_3x(15, 6, &outer) as u32)
-            + (point_in_polygon_3x(15, 6, &hole) as u32);
+        let inside_neither = (point_in_polygon_3x(15, 6, &outer) as u32) + (point_in_polygon_3x(15, 6, &hole) as u32);
         assert_eq!(inside_neither, 0);
     }
 
@@ -551,8 +467,7 @@ mod tests {
             vec![4, 7, 6, 5],   // hole 1 CW
             vec![8, 11, 10, 9], // hole 2 CW
         ];
-        let tris = triangulate(&vertices, &loops, &xy_plane())
-            .expect("test setup: multi-hole region is triangulable");
+        let tris = triangulate(&vertices, &loops, &xy_plane()).expect("test setup: multi-hole region is triangulable");
         // Total area = outer (16) - 2*hole (1 each) = 14.
         let unit = 1_i128 << 16;
         assert_eq!(
@@ -618,12 +533,7 @@ mod tests {
             ),
             (
                 "quad",
-                vec![
-                    pt(0.0, 0.0, 0.0),
-                    pt(3.0, 0.0, 0.0),
-                    pt(3.0, 3.0, 0.0),
-                    pt(0.0, 3.0, 0.0),
-                ],
+                vec![pt(0.0, 0.0, 0.0), pt(3.0, 0.0, 0.0), pt(3.0, 3.0, 0.0), pt(0.0, 3.0, 0.0)],
                 vec![vec![0, 1, 2, 3]],
                 9 * 2 * unit * unit,
             ),
@@ -635,11 +545,7 @@ mod tests {
         for (label, vertices, loops, expected_doubled_area) in cases {
             let tris = triangulate(&vertices, &loops, &xy_plane())
                 .unwrap_or_else(|| panic!("{label}: triangulation returned None"));
-            assert_eq!(
-                total_doubled_area(&tris, &vertices),
-                expected_doubled_area,
-                "{label}: area not conserved"
-            );
+            assert_eq!(total_doubled_area(&tris, &vertices), expected_doubled_area, "{label}: area not conserved");
         }
     }
 
@@ -660,8 +566,7 @@ mod tests {
             pt(0.0, 2.0, 0.0), // 5
         ];
         let loops = vec![vec![0, 1, 2, 3, 4, 5]];
-        let tris = triangulate(&vertices, &loops, &xy_plane())
-            .expect("test setup: L-shape is triangulable");
+        let tris = triangulate(&vertices, &loops, &xy_plane()).expect("test setup: L-shape is triangulable");
         // 6-vertex non-convex polygon: V - 2 = 4 triangles.
         assert_eq!(tris.len(), 4);
         assert_ccw_around_plane(&tris, &vertices, &xy_plane());

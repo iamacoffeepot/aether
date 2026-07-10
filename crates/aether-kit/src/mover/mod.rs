@@ -59,9 +59,7 @@ use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawTriangle, Vertex, ViewProjection};
 use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
-use aether_kinds::{
-    Key, KeyRelease, MouseButton, MouseMove, Render, Tick, WindowSize, keycode, mouse_button,
-};
+use aether_kinds::{Key, KeyRelease, MouseButton, MouseMove, Render, Tick, WindowSize, keycode, mouse_button};
 use aether_math::{Mat4, Rgb, Vec3};
 
 use crate::OCTIMETERS_PER_TILE;
@@ -223,9 +221,7 @@ impl WasmActor for WorldMover {
         // This actor owns the follow camera: publish the view each frame
         // (latest-wins, so it drives the ground projection too), then the
         // marker geometry over the ground.
-        render.send(&ViewProjection {
-            view_proj: self.view_proj(),
-        });
+        render.send(&ViewProjection { view_proj: self.view_proj() });
         render.send_many(&self.render_triangles());
     }
 
@@ -259,11 +255,7 @@ impl WasmActor for WorldMover {
 
     #[handler::single]
     fn on_teleport(&mut self, _ctx: &mut WasmCtx<'_>, mail: MoverTeleport) {
-        self.pos = CellPos {
-            x: mail.cell_x,
-            z: mail.cell_z,
-        }
-        .center_octimeters();
+        self.pos = CellPos { x: mail.cell_x, z: mail.cell_z }.center_octimeters();
         self.target = None;
         self.target_from_click = false;
     }
@@ -288,12 +280,8 @@ impl WorldMover {
 
     /// Orbit the camera one tick from the held arrow keys.
     fn orbit_camera(&mut self) {
-        let (yaw, pitch) = step_camera(
-            self.cam_yaw,
-            self.cam_pitch,
-            self.cam_held.yaw_dir(),
-            self.cam_held.pitch_dir(),
-        );
+        let (yaw, pitch) =
+            step_camera(self.cam_yaw, self.cam_pitch, self.cam_held.yaw_dir(), self.cam_held.pitch_dir());
         self.cam_yaw = yaw;
         self.cam_pitch = pitch;
     }
@@ -341,11 +329,7 @@ impl WorldMover {
     /// `WindowSize`.
     fn aspect(&self) -> f32 {
         let (w, h) = self.window;
-        if w == 0 || h == 0 {
-            DEFAULT_ASPECT
-        } else {
-            w as f32 / h as f32
-        }
+        if w == 0 || h == 0 { DEFAULT_ASPECT } else { w as f32 / h as f32 }
     }
 
     /// World-space eye and target for the follow camera: it looks at a point
@@ -354,11 +338,7 @@ impl WorldMover {
     /// trails the body as it walks and the arrow keys swing it around.
     fn camera_eye_target(&self) -> (Vec3, Vec3) {
         let to_metres = |oct: i32| oct as f32 / OCTIMETERS_PER_CELL;
-        let target = Vec3::new(
-            to_metres(self.pos.0),
-            CAMERA_TARGET_HEIGHT,
-            to_metres(self.pos.1),
-        );
+        let target = Vec3::new(to_metres(self.pos.0), CAMERA_TARGET_HEIGHT, to_metres(self.pos.1));
         // `yaw = 0` puts the eye behind the body (`+Z`); higher pitch lifts it
         // toward straight overhead.
         let horizontal = CAMERA_DISTANCE * self.cam_pitch.cos();
@@ -423,10 +403,7 @@ impl WorldMover {
 /// direction, whose center the body then glides onto.
 fn commit_target(pos: (i32, i32), dx: i32, dz: i32) -> CellPos {
     let cur = CellPos::from_octimeters(pos.0, pos.1);
-    CellPos {
-        x: cur.x + dx,
-        z: cur.z + dz,
-    }
+    CellPos { x: cur.x + dx, z: cur.z + dz }
 }
 
 /// Advance a point `speed` octimeters *along the straight line to* `target` —
@@ -448,17 +425,10 @@ fn step_toward(cur: (i32, i32), target: (i32, i32), speed: i32) -> (i32, i32) {
     // Round speed·d / dist to nearest, away from zero on a tie.
     let round_div = |num: i64| {
         let half = dist / 2;
-        if num >= 0 {
-            (num + half) / dist
-        } else {
-            (num - half) / dist
-        }
+        if num >= 0 { (num + half) / dist } else { (num - half) / dist }
     };
     // |speed·d / dist| ≤ speed, so the result fits an i32 axis step.
-    (
-        cur.0 + round_div(speed * dx) as i32,
-        cur.1 + round_div(speed * dz) as i32,
-    )
+    (cur.0 + round_div(speed * dx) as i32, cur.1 + round_div(speed * dz) as i32)
 }
 
 /// Advance the camera orbit one tick. `yaw_dir` / `pitch_dir` are the held
@@ -467,9 +437,7 @@ fn step_toward(cur: (i32, i32), target: (i32, i32), speed: i32) -> (i32, i32) {
 /// reaches the degenerate straight-overhead pose.
 fn step_camera(yaw: f32, pitch: f32, yaw_dir: f32, pitch_dir: f32) -> (f32, f32) {
     let yaw = yaw_dir.mul_add(CAMERA_YAW_SPEED, yaw).rem_euclid(TAU);
-    let pitch = pitch_dir
-        .mul_add(CAMERA_PITCH_SPEED, pitch)
-        .clamp(CAMERA_PITCH_MIN, CAMERA_PITCH_MAX);
+    let pitch = pitch_dir.mul_add(CAMERA_PITCH_SPEED, pitch).clamp(CAMERA_PITCH_MIN, CAMERA_PITCH_MAX);
     (yaw, pitch)
 }
 
@@ -540,12 +508,7 @@ fn push_capsule(out: &mut Vec<DrawTriangle>, cx: f32, cz: f32, base: Rgb) {
         let f = 0.65f32.mul_add(lambert, 0.35);
         Rgb::new(base.r * f, base.g * f, base.b * f)
     };
-    let vert = |p: Vec3, color: Rgb| Vertex {
-        x: p.x,
-        y: p.y,
-        z: p.z,
-        color,
-    };
+    let vert = |p: Vec3, color: Rgb| Vertex { x: p.x, y: p.y, z: p.z, color };
 
     for band in 0..rings.len() - 1 {
         let (lo, hi) = (rings[band], rings[band + 1]);
@@ -553,18 +516,10 @@ fn push_capsule(out: &mut Vec<DrawTriangle>, cx: f32, cz: f32, base: Rgb) {
             let k = (j + 1) % RADIAL;
             let (l0, hi0, l1, hi1) = (lo[j], hi[j], lo[k], hi[k]);
             out.push(DrawTriangle {
-                verts: [
-                    vert(l0.0, shade(l0.1)),
-                    vert(hi0.0, shade(hi0.1)),
-                    vert(hi1.0, shade(hi1.1)),
-                ],
+                verts: [vert(l0.0, shade(l0.1)), vert(hi0.0, shade(hi0.1)), vert(hi1.0, shade(hi1.1))],
             });
             out.push(DrawTriangle {
-                verts: [
-                    vert(l0.0, shade(l0.1)),
-                    vert(hi1.0, shade(hi1.1)),
-                    vert(l1.0, shade(l1.1)),
-                ],
+                verts: [vert(l0.0, shade(l0.1)), vert(hi1.0, shade(hi1.1)), vert(l1.0, shade(l1.1))],
             });
         }
     }
@@ -623,11 +578,7 @@ mod tests {
         let start = CellPos { x: 4, z: 7 };
         let (sx, sz) = start.center_octimeters();
         let target = commit_target((sx, sz), -1, -1);
-        assert_eq!(
-            target,
-            CellPos { x: 3, z: 6 },
-            "commits to the north-west cell"
-        );
+        assert_eq!(target, CellPos { x: 3, z: 6 }, "commits to the north-west cell");
         let center = target.center_octimeters();
         let mut p = (sx, sz);
         for _ in 0..1000 {
@@ -648,17 +599,11 @@ mod tests {
         for _ in 0..10_000 {
             (yaw, pitch) = step_camera(yaw, pitch, 0.0, -1.0);
         }
-        assert!(
-            (pitch - CAMERA_PITCH_MIN).abs() < 1e-5,
-            "pitch floored: {pitch}"
-        );
+        assert!((pitch - CAMERA_PITCH_MIN).abs() < 1e-5, "pitch floored: {pitch}");
         for _ in 0..10_000 {
             (yaw, pitch) = step_camera(yaw, pitch, 0.0, 1.0);
         }
-        assert!(
-            (pitch - CAMERA_PITCH_MAX).abs() < 1e-5,
-            "pitch ceiled: {pitch}"
-        );
+        assert!((pitch - CAMERA_PITCH_MAX).abs() < 1e-5, "pitch ceiled: {pitch}");
         for _ in 0..10_000 {
             (yaw, pitch) = step_camera(yaw, pitch, 1.0, 0.0);
         }

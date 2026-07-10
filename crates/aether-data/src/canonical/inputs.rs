@@ -9,8 +9,8 @@
 //! `wire::take_from_bytes` symmetrically.
 
 use super::primitives::{
-    U32_WIDTH, U64_WIDTH, option_borrowed_str_len, str_len, write_option_borrowed_str, write_str,
-    write_u32_le, write_u64_le,
+    U32_WIDTH, U64_WIDTH, option_borrowed_str_len, str_len, write_option_borrowed_str, write_str, write_u32_le,
+    write_u64_le,
 };
 
 /// Byte length of a [`ReplyContract`](crate::ReplyContract)'s aether-wire
@@ -34,12 +34,7 @@ pub const fn reply_contract_len(reply_tag: u8, _reply_id: u64) -> usize {
 /// `wire::to_vec(ReplyContract)` shape: a `u32` LE selector then, for
 /// `One` / `Multi`, the `KindId` as a bare `u64` LE.
 #[must_use]
-pub const fn write_reply_contract(
-    reply_tag: u8,
-    reply_id: u64,
-    out: &mut [u8],
-    mut pos: usize,
-) -> usize {
+pub const fn write_reply_contract(reply_tag: u8, reply_id: u64, out: &mut [u8], mut pos: usize) -> usize {
     pos = write_u32_le(reply_tag as u32, out, pos);
     if reply_tag == 1 || reply_tag == 2 {
         pos = write_u64_le(reply_id, out, pos);
@@ -52,18 +47,8 @@ pub const fn write_reply_contract(
 /// `option_str(doc)` + `reply_contract(reply_tag, reply_id)` — the
 /// ADR-0112 reply class.
 #[must_use]
-pub const fn inputs_handler_len(
-    _id: u64,
-    name: &str,
-    doc: Option<&str>,
-    reply_tag: u8,
-    reply_id: u64,
-) -> usize {
-    U32_WIDTH
-        + U64_WIDTH
-        + str_len(name)
-        + option_borrowed_str_len(doc)
-        + reply_contract_len(reply_tag, reply_id)
+pub const fn inputs_handler_len(_id: u64, name: &str, doc: Option<&str>, reply_tag: u8, reply_id: u64) -> usize {
+    U32_WIDTH + U64_WIDTH + str_len(name) + option_borrowed_str_len(doc) + reply_contract_len(reply_tag, reply_id)
 }
 
 /// Serialize an `InputsRecord::Handler` into a fixed-size array sized

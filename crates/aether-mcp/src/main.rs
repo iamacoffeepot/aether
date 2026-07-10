@@ -46,13 +46,9 @@ async fn main() -> anyhow::Result<()> {
     // Top-level process config for the MCP binary (the hub address it dials and
     // its own bind port) — process wiring in main, not a capability reading config.
     #[allow(clippy::disallowed_methods)]
-    let hub_addr =
-        env::var("AETHER_HUB_RPC_ADDR").unwrap_or_else(|_| DEFAULT_HUB_RPC_ADDR.to_owned());
+    let hub_addr = env::var("AETHER_HUB_RPC_ADDR").unwrap_or_else(|_| DEFAULT_HUB_RPC_ADDR.to_owned());
     #[allow(clippy::disallowed_methods)]
-    let mcp_port: u16 = env::var("AETHER_MCP_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MCP_PORT);
+    let mcp_port: u16 = env::var("AETHER_MCP_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(DEFAULT_MCP_PORT);
     let mcp_addr = format!("127.0.0.1:{mcp_port}");
 
     // Dial the hub. The handshake is blocking, so run it on a

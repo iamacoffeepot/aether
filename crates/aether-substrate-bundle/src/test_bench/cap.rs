@@ -64,10 +64,7 @@ impl NativeActor for TestBenchCapability {
 
     const NAMESPACE: &'static str = "aether.test_bench";
 
-    fn init(
-        config: TestBenchCapConfig,
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<TestBenchCapabilityState, BootError> {
+    fn init(config: TestBenchCapConfig, ctx: &mut NativeInitCtx<'_>) -> Result<TestBenchCapabilityState, BootError> {
         let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
             BootError::Other(Box::new(io::Error::other(
                 "HubOutbound must be wired on Mailer before \
@@ -75,10 +72,7 @@ impl NativeActor for TestBenchCapability {
                  the Builder chain)",
             )))
         })?;
-        Ok(TestBenchCapabilityState {
-            events: config.events,
-            outbound,
-        })
+        Ok(TestBenchCapabilityState { events: config.events, outbound })
     }
 
     /// Push `ChassisEvent::Advance` onto the embedder loop. If the
@@ -87,19 +81,10 @@ impl NativeActor for TestBenchCapability {
     #[handler::single]
     fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Advance) {
         let sender = ctx.reply_target();
-        if state
-            .events
-            .send(ChassisEvent::Advance {
-                reply_to: sender,
-                ticks: mail.ticks,
-            })
-            .is_err()
-        {
+        if state.events.send(ChassisEvent::Advance { reply_to: sender, ticks: mail.ticks }).is_err() {
             state.outbound.send_reply(
                 sender,
-                &AdvanceResult::Err {
-                    error: "test-bench chassis shutting down — advance aborted".to_owned(),
-                },
+                &AdvanceResult::Err { error: "test-bench chassis shutting down — advance aborted".to_owned() },
             );
         }
     }

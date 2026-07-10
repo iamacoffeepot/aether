@@ -15,14 +15,9 @@ fn list_components_reports_loaded_probe_lineage() {
     load_probe(&mut bench, &wasm_path);
 
     let listed = bench
-        .execute(vec![(
-            "list",
-            BenchOp::send_and_await("aether.component", &ListComponents {}),
-        )])
+        .execute(vec![("list", BenchOp::send_and_await("aether.component", &ListComponents {}))])
         .expect("list sequence");
-    let result = listed
-        .reply::<ListComponentsResult>("list")
-        .expect("decode ListComponentsResult");
+    let result = listed.reply::<ListComponentsResult>("list").expect("decode ListComponentsResult");
     assert!(
         result.names.contains(&probe_address()),
         "the loaded probe should be listed at its lineage address {}, got {:?}",
@@ -42,9 +37,7 @@ fn input_subscription_yields_one_tick_observed_per_advance() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     load_probe(&mut bench, &wasm_path);
 
-    bench
-        .execute(vec![("advance", BenchOp::advance(5))])
-        .expect("advance 5");
+    bench.execute(vec![("advance", BenchOp::advance(5))]).expect("advance 5");
     assert_eq!(
         bench.count_observed(TICK_OBSERVED),
         5,
@@ -85,13 +78,8 @@ fn multi_actor_module_loads_entry_export() {
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
-        LoadResult::Ok {
-            name, capabilities, ..
-        } => {
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { name, capabilities, .. } => {
             assert!(
                 name.ends_with(":test.probe"),
                 "entry export should resolve to the first type's NAMESPACE \
@@ -136,13 +124,8 @@ fn multi_actor_module_loads_selected_export() {
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
-        LoadResult::Ok {
-            name, capabilities, ..
-        } => {
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { name, capabilities, .. } => {
             assert!(
                 name.ends_with(":test.ui.panel"),
                 "selected export should resolve to Panel's NAMESPACE (test.ui.panel); got {name}",
@@ -172,19 +155,11 @@ fn multi_actor_unknown_export_errors() {
             "load",
             BenchOp::send_and_await(
                 "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: None,
-                    config: Vec::new(),
-                    export: Some("ui.does_not_exist".to_owned()),
-                },
+                &LoadComponent { wasm, name: None, config: Vec::new(), export: Some("ui.does_not_exist".to_owned()) },
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Err { error } => {
             assert!(
                 error.contains("ui.does_not_exist"),
@@ -218,12 +193,7 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
             "load",
             BenchOp::send_and_await(
                 "aether.component",
-                &LoadComponent {
-                    wasm: wasm.clone(),
-                    name: None,
-                    config: Vec::new(),
-                    export: None,
-                },
+                &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("bare load sequence");
@@ -254,10 +224,7 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
             ),
         )])
         .expect("named load sequence");
-    match named
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    match named.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name, .. } => {
             assert!(
                 name.ends_with(":test.defaultless.alpha"),
@@ -303,17 +270,11 @@ fn multi_actor_sibling_spawn() {
             ),
         )])
         .expect("load sequence");
-    let root_name = match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    let root_name = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name, .. } => name,
         LoadResult::Err { error } => panic!("multi-actor load failed: {error}"),
     };
-    assert!(
-        root_name.ends_with(":test.ui.root"),
-        "selected export should resolve to test.ui.root; got {root_name}",
-    );
+    assert!(root_name.ends_with(":test.ui.root"), "selected export should resolve to test.ui.root; got {root_name}",);
 
     // ADR-0099 §3/§4: a spawned sibling nests under its spawner, so the
     // Panel registers at the `/`-rendered lineage path — the RootManager's
@@ -324,15 +285,9 @@ fn multi_actor_sibling_spawn() {
     bench
         .execute(vec![
             // RootManager spawns a Panel sibling (Counter → 0).
-            (
-                "spawn",
-                BenchOp::send_mail::<Ping>(root_name.as_str(), &Ping { seq: 0 }),
-            ),
+            ("spawn", BenchOp::send_mail::<Ping>(root_name.as_str(), &Ping { seq: 0 })),
             // The spawned Panel broadcasts TickObserved when pinged.
-            (
-                "ping_panel",
-                BenchOp::send_mail::<Ping>(panel_name.as_str(), &Ping { seq: 1 }),
-            ),
+            ("ping_panel", BenchOp::send_mail::<Ping>(panel_name.as_str(), &Ping { seq: 1 })),
         ])
         .expect("spawn + ping sequence");
 
@@ -366,19 +321,11 @@ fn multi_actor_sibling_spawn_twice_in_one_receive() {
             "load",
             BenchOp::send_and_await(
                 "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: None,
-                    config: Vec::new(),
-                    export: Some("test.ui.root".to_owned()),
-                },
+                &LoadComponent { wasm, name: None, config: Vec::new(), export: Some("test.ui.root".to_owned()) },
             ),
         )])
         .expect("load sequence");
-    let root_name = match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    let root_name = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { name, .. } => name,
         LoadResult::Err { error } => panic!("multi-actor load failed: {error}"),
     };
@@ -392,18 +339,9 @@ fn multi_actor_sibling_spawn_twice_in_one_receive() {
         .execute(vec![
             // RootManager spawns two Panel siblings (Counter 0 and 1)
             // from this one Ping receive.
-            (
-                "spawn_two",
-                BenchOp::send_mail::<Ping>(root_name.as_str(), &Ping { seq: 2 }),
-            ),
-            (
-                "ping_panel_0",
-                BenchOp::send_mail::<Ping>(panel_0.as_str(), &Ping { seq: 1 }),
-            ),
-            (
-                "ping_panel_1",
-                BenchOp::send_mail::<Ping>(panel_1.as_str(), &Ping { seq: 1 }),
-            ),
+            ("spawn_two", BenchOp::send_mail::<Ping>(root_name.as_str(), &Ping { seq: 2 })),
+            ("ping_panel_0", BenchOp::send_mail::<Ping>(panel_0.as_str(), &Ping { seq: 1 })),
+            ("ping_panel_1", BenchOp::send_mail::<Ping>(panel_1.as_str(), &Ping { seq: 1 })),
         ])
         .expect("spawn-twice + ping-both sequence");
 
@@ -428,9 +366,7 @@ fn drop_component_silences_tick_echoes() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let probe_mbox = load_probe(&mut bench, &wasm_path);
 
-    bench
-        .execute(vec![("warm", BenchOp::advance(3))])
-        .expect("pre-drop advance");
+    bench.execute(vec![("warm", BenchOp::advance(3))]).expect("pre-drop advance");
     assert_eq!(
         bench.count_observed(TICK_OBSERVED),
         3,
@@ -443,29 +379,16 @@ fn drop_component_silences_tick_echoes() {
     // ahead of the next advance. `SendAndAwait` blocks on `DropResult`
     // so the probe's mailbox is fully gone before the next advance.
     let dropped = bench
-        .execute(vec![(
-            "drop",
-            BenchOp::send_and_await(
-                "aether.component",
-                &DropComponent {
-                    mailbox_id: probe_mbox,
-                },
-            ),
-        )])
+        .execute(vec![("drop", BenchOp::send_and_await("aether.component", &DropComponent { mailbox_id: probe_mbox }))])
         .expect("drop sequence");
-    match dropped
-        .reply::<DropResult>("drop")
-        .expect("decode DropResult")
-    {
+    match dropped.reply::<DropResult>("drop").expect("decode DropResult") {
         DropResult::Ok => {}
         DropResult::Err { error } => panic!("drop_component: {error}"),
     }
 
     let post_drop = bench.count_observed(TICK_OBSERVED);
 
-    bench
-        .execute(vec![("post", BenchOp::advance(10))])
-        .expect("post-drop advance");
+    bench.execute(vec![("post", BenchOp::advance(10))]).expect("post-drop advance");
     assert_eq!(
         bench.count_observed(TICK_OBSERVED),
         post_drop,
@@ -489,9 +412,7 @@ fn replace_component_preserves_mailbox_identity() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let probe_mbox = load_probe(&mut bench, &wasm_path);
 
-    bench
-        .execute(vec![("warm", BenchOp::advance(3))])
-        .expect("pre-replace advance");
+    bench.execute(vec![("warm", BenchOp::advance(3))]).expect("pre-replace advance");
     assert_eq!(
         bench.count_observed(TICK_OBSERVED),
         3,
@@ -518,18 +439,13 @@ fn replace_component_preserves_mailbox_identity() {
             ),
         )])
         .expect("replace sequence");
-    match swapped
-        .reply::<ReplaceResult>("swap")
-        .expect("decode ReplaceResult")
-    {
+    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
         ReplaceResult::Ok { .. } => {}
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
     let post_replace_baseline = bench.count_observed(TICK_OBSERVED);
-    bench
-        .execute(vec![("post", BenchOp::advance(4))])
-        .expect("post-replace advance");
+    bench.execute(vec![("post", BenchOp::advance(4))]).expect("post-replace advance");
     let post_replace = bench.count_observed(TICK_OBSERVED);
 
     assert!(
@@ -559,10 +475,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let addr = format!(
-        "aether.component/{}:{FIXTURE_NAME}",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    );
+    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE,);
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
@@ -583,10 +496,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
             ),
         )])
         .expect("load sequence");
-    let mailbox_id = match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
         LoadResult::Err { error } => panic!("stateful_replace load failed: {error}"),
     };
@@ -601,14 +511,8 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
             ("query", BenchOp::send_and_await(addr.as_str(), &CountQuery)),
         ])
         .expect("bump + query sequence");
-    let pre_count = pre
-        .reply::<CountReport>("query")
-        .expect("decode pre-replace CountReport");
-    assert_eq!(
-        pre_count,
-        CountReport { count: 3 },
-        "three bumps should leave the counter at 3 before the replace",
-    );
+    let pre_count = pre.reply::<CountReport>("query").expect("decode pre-replace CountReport");
+    assert_eq!(pre_count, CountReport { count: 3 }, "three bumps should leave the counter at 3 before the replace",);
 
     // Replace the wasm at the same mailbox id with the same binary.
     // `on_dehydrate` saves the count on the old instance; `on_rehydrate`
@@ -619,20 +523,11 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
             "swap",
             BenchOp::send_and_await(
                 "aether.component",
-                &ReplaceComponent {
-                    mailbox_id,
-                    wasm,
-                    drain_timeout_ms: None,
-                    config: Vec::new(),
-                    export: None,
-                },
+                &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("replace sequence");
-    match swapped
-        .reply::<ReplaceResult>("swap")
-        .expect("decode ReplaceResult")
-    {
+    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
         ReplaceResult::Ok { .. } => {}
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
@@ -640,14 +535,9 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     // The new instance booted fresh (init count = 0) and then rehydrated
     // from the saved bundle. Query it: the count must still be 3.
     let post = bench
-        .execute(vec![(
-            "query",
-            BenchOp::send_and_await(addr.as_str(), &CountQuery),
-        )])
+        .execute(vec![("query", BenchOp::send_and_await(addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
-    let post_count = post
-        .reply::<CountReport>("query")
-        .expect("decode post-replace CountReport");
+    let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
         post_count,
         CountReport { count: 3 },
@@ -673,10 +563,7 @@ fn replace_preserves_state_via_typed_state_kind() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_stateful_typed") else {
         return;
     };
-    let addr = format!(
-        "aether.component/{}:{FIXTURE_NAME}",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    );
+    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE,);
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
@@ -686,19 +573,11 @@ fn replace_preserves_state_via_typed_state_kind() {
             "load",
             BenchOp::send_and_await(
                 "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: Some(FIXTURE_NAME.to_owned()),
-                    config: Vec::new(),
-                    export: None,
-                },
+                &LoadComponent { wasm, name: Some(FIXTURE_NAME.to_owned()), config: Vec::new(), export: None },
             ),
         )])
         .expect("load sequence");
-    let mailbox_id = match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
         LoadResult::Err { error } => panic!("stateful_replace_typed load failed: {error}"),
     };
@@ -713,8 +592,7 @@ fn replace_preserves_state_via_typed_state_kind() {
         ])
         .expect("bump + query sequence");
     assert_eq!(
-        pre.reply::<CountReport>("query")
-            .expect("decode pre-replace CountReport"),
+        pre.reply::<CountReport>("query").expect("decode pre-replace CountReport"),
         CountReport { count: 3 },
         "three bumps should leave the counter at 3 before the replace",
     );
@@ -726,33 +604,19 @@ fn replace_preserves_state_via_typed_state_kind() {
             "swap",
             BenchOp::send_and_await(
                 "aether.component",
-                &ReplaceComponent {
-                    mailbox_id,
-                    wasm,
-                    drain_timeout_ms: None,
-                    config: Vec::new(),
-                    export: None,
-                },
+                &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("replace sequence");
-    match swapped
-        .reply::<ReplaceResult>("swap")
-        .expect("decode ReplaceResult")
-    {
+    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
         ReplaceResult::Ok { .. } => {}
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
     let post = bench
-        .execute(vec![(
-            "query",
-            BenchOp::send_and_await(addr.as_str(), &CountQuery),
-        )])
+        .execute(vec![("query", BenchOp::send_and_await(addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
-    let post_count = post
-        .reply::<CountReport>("query")
-        .expect("decode post-replace CountReport");
+    let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
         post_count,
         CountReport { count: 3 },
@@ -783,10 +647,7 @@ fn typed_state_decode_miss_boots_fresh() {
     let Some(reshaped_path) = require_runtime("aether_test_fixtures_stateful_reshaped") else {
         return;
     };
-    let addr = format!(
-        "aether.component/{}:{TYPED_NAME}",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    );
+    let addr = format!("aether.component/{}:{TYPED_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE,);
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let typed_wasm = fs::read(&typed_path).expect("read typed fixture wasm");
@@ -805,10 +666,7 @@ fn typed_state_decode_miss_boots_fresh() {
             ),
         )])
         .expect("load sequence");
-    let mailbox_id = match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
         LoadResult::Err { error } => panic!("stateful_replace_typed load failed: {error}"),
     };
@@ -822,8 +680,7 @@ fn typed_state_decode_miss_boots_fresh() {
         ])
         .expect("bump + query sequence");
     assert_eq!(
-        pre.reply::<CountReport>("query")
-            .expect("decode pre-replace CountReport"),
+        pre.reply::<CountReport>("query").expect("decode pre-replace CountReport"),
         CountReport { count: 3 },
         "three bumps should leave the counter at 3 before the replace",
     );
@@ -846,23 +703,15 @@ fn typed_state_decode_miss_boots_fresh() {
             ),
         )])
         .expect("replace sequence");
-    match swapped
-        .reply::<ReplaceResult>("swap")
-        .expect("decode ReplaceResult")
-    {
+    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
         ReplaceResult::Ok { .. } => {}
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
     let post = bench
-        .execute(vec![(
-            "query",
-            BenchOp::send_and_await(addr.as_str(), &CountQuery),
-        )])
+        .execute(vec![("query", BenchOp::send_and_await(addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
-    let post_count = post
-        .reply::<CountReport>("query")
-        .expect("decode post-replace CountReport");
+    let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
         post_count,
         CountReport { count: 0 },
@@ -887,10 +736,7 @@ fn childless_component_hot_reloads_unchanged() {
     let Some(wasm_path) = require_runtime("aether_test_fixtures_bundle") else {
         return;
     };
-    let addr = format!(
-        "aether.component/{}:{FIXTURE_NAME}",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    );
+    let addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE,);
 
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
@@ -910,10 +756,7 @@ fn childless_component_hot_reloads_unchanged() {
             ),
         )])
         .expect("load sequence");
-    let mailbox_id = match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
         LoadResult::Err { error } => panic!("stateful_replace load failed: {error}"),
     };
@@ -926,8 +769,7 @@ fn childless_component_hot_reloads_unchanged() {
         ])
         .expect("bump + query sequence");
     assert_eq!(
-        pre.reply::<CountReport>("query")
-            .expect("decode pre-replace CountReport"),
+        pre.reply::<CountReport>("query").expect("decode pre-replace CountReport"),
         CountReport { count: 2 },
         "two bumps leave the childless counter at 2 before the replace",
     );
@@ -938,33 +780,20 @@ fn childless_component_hot_reloads_unchanged() {
             "swap",
             BenchOp::send_and_await(
                 "aether.component",
-                &ReplaceComponent {
-                    mailbox_id,
-                    wasm,
-                    drain_timeout_ms: None,
-                    config: Vec::new(),
-                    export: None,
-                },
+                &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("replace sequence");
-    match swapped
-        .reply::<ReplaceResult>("swap")
-        .expect("decode ReplaceResult")
-    {
+    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
         ReplaceResult::Ok { .. } => {}
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
     let post = bench
-        .execute(vec![(
-            "query",
-            BenchOp::send_and_await(addr.as_str(), &CountQuery),
-        )])
+        .execute(vec![("query", BenchOp::send_and_await(addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
     assert_eq!(
-        post.reply::<CountReport>("query")
-            .expect("decode post-replace CountReport"),
+        post.reply::<CountReport>("query").expect("decode post-replace CountReport"),
         CountReport { count: 2 },
         "a childless component's state survives the reload unchanged (byte-identical composite)",
     );

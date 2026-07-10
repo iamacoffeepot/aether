@@ -82,22 +82,19 @@ impl fmt::Display for DecodeError {
             Self::Truncated { path, needed, had } => {
                 write!(f, "truncated at {path}: needed {needed} bytes, had {had}")
             }
-            Self::TrailingBytes { path, remaining } => write!(
-                f,
-                "trailing bytes after decoding {path}: {remaining} unread"
-            ),
+            Self::TrailingBytes { path, remaining } => {
+                write!(f, "trailing bytes after decoding {path}: {remaining} unread")
+            }
             Self::InvalidBool { path, byte } => {
                 write!(f, "invalid bool at {path}: 0x{byte:02x} not 0 or 1")
             }
             Self::InvalidUtf8 { path } => write!(f, "invalid utf-8 in string at {path}"),
-            Self::ValueBudgetExceeded { path, budget } => write!(
-                f,
-                "decode value budget exceeded at {path}: more than {budget} values for the input length"
-            ),
-            Self::UnknownEnumDiscriminant { path, discriminant } => write!(
-                f,
-                "enum at {path} has no variant for discriminant {discriminant}"
-            ),
+            Self::ValueBudgetExceeded { path, budget } => {
+                write!(f, "decode value budget exceeded at {path}: more than {budget} values for the input length")
+            }
+            Self::UnknownEnumDiscriminant { path, discriminant } => {
+                write!(f, "enum at {path} has no variant for discriminant {discriminant}")
+            }
             Self::UnsupportedSchema(shape) => {
                 write!(f, "schema arm not supported by hub decoder: {shape}")
             }
@@ -149,25 +146,15 @@ pub fn decode_schema(bytes: &[u8], schema: &SchemaType) -> Result<Value, DecodeE
     let mut cur = Cursor::new(bytes);
     let value = decode_value(&mut cur, schema, "$")?;
     if cur.remaining() != 0 {
-        return Err(DecodeError::TrailingBytes {
-            path: "$".into(),
-            remaining: cur.remaining(),
-        });
+        return Err(DecodeError::TrailingBytes { path: "$".into(), remaining: cur.remaining() });
     }
     Ok(value)
 }
 
-fn decode_value(
-    cur: &mut Cursor<'_>,
-    schema: &SchemaType,
-    path: &str,
-) -> Result<Value, DecodeError> {
+fn decode_value(cur: &mut Cursor<'_>, schema: &SchemaType, path: &str) -> Result<Value, DecodeError> {
     match schema {
         SchemaType::Unit => Ok(Value::Null),
-        SchemaType::Struct {
-            fields,
-            repr_c: true,
-        } => {
+        SchemaType::Struct { fields, repr_c: true } => {
             let obj = decode_cast_struct(cur, fields, path)?;
             let max_align = struct_alignment(fields)?;
             cur.skip_pad_to(max_align);
@@ -191,11 +178,7 @@ fn decode_cast_struct(
     Ok(out)
 }
 
-fn decode_cast_field(
-    cur: &mut Cursor<'_>,
-    ty: &SchemaType,
-    path: &str,
-) -> Result<Value, DecodeError> {
+fn decode_cast_field(cur: &mut Cursor<'_>, ty: &SchemaType, path: &str) -> Result<Value, DecodeError> {
     // Non-cast variants share the same error message across encode +
     // decode; `cast::non_cast_variant_error` owns the classification
     // (and its own exhaustiveness check forces new SchemaType variants
@@ -219,10 +202,7 @@ fn decode_cast_field(
             }
             Ok(Value::Array(arr))
         }
-        SchemaType::Struct {
-            fields,
-            repr_c: true,
-        } => {
+        SchemaType::Struct { fields, repr_c: true } => {
             let nested_align = alignment_of_schema(ty)?;
             cur.skip_pad_to(nested_align);
             let obj = decode_cast_struct(cur, fields, path)?;
@@ -230,9 +210,9 @@ fn decode_cast_field(
             cur.skip_pad_to(inner_max);
             Ok(Value::Object(obj))
         }
-        SchemaType::Struct { repr_c: false, .. } => Err(DecodeError::UnsupportedSchema(
-            "Struct { repr_c: false } in cast-shaped parent",
-        )),
+        SchemaType::Struct { repr_c: false, .. } => {
+            Err(DecodeError::UnsupportedSchema("Struct { repr_c: false } in cast-shaped parent"))
+        }
         SchemaType::TypeId(type_id) => {
             // ADR-0065: typed-id inside cast-shape parent. 8 bytes
             // LE, 8-byte align — same as a `u64`.
@@ -255,16 +235,12 @@ fn decode_cast_field(
 /// `type_id` doesn't correspond to a typed-id newtype the codec
 /// knows how to translate.
 fn render_type_id_value(id: u64, type_id: u64, _path: &str) -> Result<Value, DecodeError> {
-    let _expected = aether_data::tag_for_type_id(type_id)
-        .ok_or(DecodeError::UnsupportedSchema("unknown TypeId in schema"))?;
+    let _expected =
+        aether_data::tag_for_type_id(type_id).ok_or(DecodeError::UnsupportedSchema("unknown TypeId in schema"))?;
     Ok(tagged_id::encode(id).map_or_else(|| Value::from(id), Value::String))
 }
 
-fn read_primitive_cast(
-    cur: &mut Cursor<'_>,
-    p: Primitive,
-    path: &str,
-) -> Result<Value, DecodeError> {
+fn read_primitive_cast(cur: &mut Cursor<'_>, p: Primitive, path: &str) -> Result<Value, DecodeError> {
     match p {
         Primitive::U8 => Ok(Value::from(u8::from_le_bytes(cur.take::<1>(path)?))),
         Primitive::U16 => Ok(Value::from(u16::from_le_bytes(cur.take::<2>(path)?))),
@@ -274,9 +250,7 @@ fn read_primitive_cast(
         Primitive::I16 => Ok(Value::from(i16::from_le_bytes(cur.take::<2>(path)?))),
         Primitive::I32 => Ok(Value::from(i32::from_le_bytes(cur.take::<4>(path)?))),
         Primitive::I64 => Ok(Value::from(i64::from_le_bytes(cur.take::<8>(path)?))),
-        Primitive::F32 => Ok(json_f64(f64::from(f32::from_le_bytes(
-            cur.take::<4>(path)?,
-        )))),
+        Primitive::F32 => Ok(json_f64(f64::from(f32::from_le_bytes(cur.take::<4>(path)?)))),
         Primitive::F64 => Ok(json_f64(f64::from_le_bytes(cur.take::<8>(path)?))),
     }
 }
@@ -295,13 +269,8 @@ fn alignment_of_schema(ty: &SchemaType) -> Result<usize, DecodeError> {
         // ADR-0065: typed ids are u64-shaped — 8 bytes, 8-byte align.
         SchemaType::TypeId(_) => Ok(8),
         SchemaType::Array { element, .. } => alignment_of_schema(element),
-        SchemaType::Struct {
-            fields,
-            repr_c: true,
-        } => struct_alignment(fields),
-        _ => Err(DecodeError::UnsupportedSchema(
-            "alignment query on non-cast schema",
-        )),
+        SchemaType::Struct { fields, repr_c: true } => struct_alignment(fields),
+        _ => Err(DecodeError::UnsupportedSchema("alignment query on non-cast schema")),
     }
 }
 
@@ -311,11 +280,7 @@ fn alignment_of_schema(ty: &SchemaType) -> Result<usize, DecodeError> {
 // purpose of this fn. Values are bare interior bytes; the leading
 // version byte was stripped by `decode_schema`.
 #[allow(clippy::too_many_lines)]
-fn decode_wire_value(
-    cur: &mut Cursor<'_>,
-    schema: &SchemaType,
-    path: &str,
-) -> Result<Value, DecodeError> {
+fn decode_wire_value(cur: &mut Cursor<'_>, schema: &SchemaType, path: &str) -> Result<Value, DecodeError> {
     // Every wire node charges exactly once — collection elements,
     // struct fields, enum bodies — including through recursion, so the
     // decode-wide budget bounds the zero-wire-byte-element class whose
@@ -328,18 +293,14 @@ fn decode_wire_value(
             match b {
                 0 => Ok(Value::Bool(false)),
                 1 => Ok(Value::Bool(true)),
-                _ => Err(DecodeError::InvalidBool {
-                    path: path.into(),
-                    byte: b,
-                }),
+                _ => Err(DecodeError::InvalidBool { path: path.into(), byte: b }),
             }
         }
         SchemaType::Scalar(p) => read_primitive_wire(cur, *p, path),
         SchemaType::String => {
             let len = cur.read_count(path)? as usize;
             let bytes = cur.take_slice(len, path)?;
-            let s = str::from_utf8(bytes)
-                .map_err(|_| DecodeError::InvalidUtf8 { path: path.into() })?;
+            let s = str::from_utf8(bytes).map_err(|_| DecodeError::InvalidUtf8 { path: path.into() })?;
             Ok(Value::String(s.into()))
         }
         SchemaType::Bytes => {
@@ -354,10 +315,7 @@ fn decode_wire_value(
             match tag {
                 0 => Ok(Value::Null),
                 1 => decode_wire_value(cur, inner, path),
-                _ => Err(DecodeError::InvalidBool {
-                    path: path.into(),
-                    byte: tag,
-                }),
+                _ => Err(DecodeError::InvalidBool { path: path.into(), byte: tag }),
             }
         }
         SchemaType::Vec(inner) => {
@@ -397,16 +355,10 @@ fn decode_wire_value(
             let variant = variants
                 .iter()
                 .find(|v| v.discriminant() == disc)
-                .ok_or_else(|| DecodeError::UnknownEnumDiscriminant {
-                    path: path.into(),
-                    discriminant: disc,
-                })?;
+                .ok_or_else(|| DecodeError::UnknownEnumDiscriminant { path: path.into(), discriminant: disc })?;
             decode_enum_body(cur, variant, path)
         }
-        SchemaType::Map {
-            key: key_schema,
-            value: value_schema,
-        } => {
+        SchemaType::Map { key: key_schema, value: value_schema } => {
             // Issue #232 + proto3-style JSON mapping. Wire is the
             // `aether_data::wire` `Map` shape — `u32(count)` followed by
             // `(k, v)` pairs in ascending encoded-key byte order. We emit
@@ -437,11 +389,7 @@ fn decode_wire_value(
     }
 }
 
-fn read_primitive_wire(
-    cur: &mut Cursor<'_>,
-    p: Primitive,
-    path: &str,
-) -> Result<Value, DecodeError> {
+fn read_primitive_wire(cur: &mut Cursor<'_>, p: Primitive, path: &str) -> Result<Value, DecodeError> {
     // Fixed-width little-endian of the declared width — the inverse of
     // `encode::write_scalar_wire`. No varints, no zigzag.
     match p {
@@ -453,18 +401,12 @@ fn read_primitive_wire(
         Primitive::I16 => Ok(Value::from(i16::from_le_bytes(cur.take::<2>(path)?))),
         Primitive::I32 => Ok(Value::from(i32::from_le_bytes(cur.take::<4>(path)?))),
         Primitive::I64 => Ok(Value::from(i64::from_le_bytes(cur.take::<8>(path)?))),
-        Primitive::F32 => Ok(json_f64(f64::from(f32::from_le_bytes(
-            cur.take::<4>(path)?,
-        )))),
+        Primitive::F32 => Ok(json_f64(f64::from(f32::from_le_bytes(cur.take::<4>(path)?)))),
         Primitive::F64 => Ok(json_f64(f64::from_le_bytes(cur.take::<8>(path)?))),
     }
 }
 
-fn decode_enum_body(
-    cur: &mut Cursor<'_>,
-    variant: &EnumVariant,
-    path: &str,
-) -> Result<Value, DecodeError> {
+fn decode_enum_body(cur: &mut Cursor<'_>, variant: &EnumVariant, path: &str) -> Result<Value, DecodeError> {
     let name = variant.name().to_owned();
     match variant {
         EnumVariant::Unit { .. } => {
@@ -508,36 +450,24 @@ fn decode_enum_body(
 /// is `UnsupportedSchema` — the `BTreeMap`<K: Ord, V> bound at the Rust
 /// layer makes those unreachable, but the codec rejects them defensively
 /// in case a descriptor lands here from an external source.
-fn render_map_key(
-    key_value: &Value,
-    key_schema: &SchemaType,
-    path: &str,
-) -> Result<String, DecodeError> {
+fn render_map_key(key_value: &Value, key_schema: &SchemaType, path: &str) -> Result<String, DecodeError> {
     match (key_schema, key_value) {
         (SchemaType::String, Value::String(s)) => Ok(s.clone()),
         (SchemaType::Bool, Value::Bool(b)) => Ok(if *b { "true".into() } else { "false".into() }),
         (SchemaType::Scalar(p), Value::Number(n)) => match p {
             Primitive::U8 | Primitive::U16 | Primitive::U32 | Primitive::U64 => Ok(n
                 .as_u64()
-                .ok_or(DecodeError::UnsupportedSchema(
-                    "decoded unsigned key value out of u64 range",
-                ))?
+                .ok_or(DecodeError::UnsupportedSchema("decoded unsigned key value out of u64 range"))?
                 .to_string()),
             Primitive::I8 | Primitive::I16 | Primitive::I32 | Primitive::I64 => Ok(n
                 .as_i64()
-                .ok_or(DecodeError::UnsupportedSchema(
-                    "decoded signed key value out of i64 range",
-                ))?
+                .ok_or(DecodeError::UnsupportedSchema("decoded signed key value out of i64 range"))?
                 .to_string()),
-            Primitive::F32 | Primitive::F64 => {
-                Err(DecodeError::UnsupportedSchema("float as Map key (no Ord)"))
-            }
+            Primitive::F32 | Primitive::F64 => Err(DecodeError::UnsupportedSchema("float as Map key (no Ord)")),
         },
         _ => {
             let _ = path;
-            Err(DecodeError::UnsupportedSchema(
-                "Map key must be String, integer scalar, or Bool",
-            ))
+            Err(DecodeError::UnsupportedSchema("Map key must be String, integer scalar, or Bool"))
         }
     }
 }
@@ -562,13 +492,8 @@ impl<'a> Cursor<'a> {
     fn new(bytes: &'a [u8]) -> Self {
         // Saturating: a `bytes.len()` near `usize::MAX` is not reachable
         // (it's a real slice), but the arithmetic stays defined.
-        let values_left =
-            VALUE_BUDGET_BASE.saturating_add(bytes.len().saturating_mul(VALUES_PER_INPUT_BYTE));
-        Self {
-            bytes,
-            pos: 0,
-            values_left,
-        }
+        let values_left = VALUE_BUDGET_BASE.saturating_add(bytes.len().saturating_mul(VALUES_PER_INPUT_BYTE));
+        Self { bytes, pos: 0, values_left }
     }
 
     fn remaining(&self) -> usize {
@@ -587,19 +512,14 @@ impl<'a> Cursor<'a> {
             }
             None => Err(DecodeError::ValueBudgetExceeded {
                 path: path.into(),
-                budget: VALUE_BUDGET_BASE
-                    .saturating_add(self.bytes.len().saturating_mul(VALUES_PER_INPUT_BYTE)),
+                budget: VALUE_BUDGET_BASE.saturating_add(self.bytes.len().saturating_mul(VALUES_PER_INPUT_BYTE)),
             }),
         }
     }
 
     fn take<const N: usize>(&mut self, path: &str) -> Result<[u8; N], DecodeError> {
         if self.remaining() < N {
-            return Err(DecodeError::Truncated {
-                path: path.into(),
-                needed: N,
-                had: self.remaining(),
-            });
+            return Err(DecodeError::Truncated { path: path.into(), needed: N, had: self.remaining() });
         }
         let mut out = [0u8; N];
         out.copy_from_slice(&self.bytes[self.pos..self.pos + N]);
@@ -609,11 +529,7 @@ impl<'a> Cursor<'a> {
 
     fn take_slice(&mut self, n: usize, path: &str) -> Result<&'a [u8], DecodeError> {
         if self.remaining() < n {
-            return Err(DecodeError::Truncated {
-                path: path.into(),
-                needed: n,
-                had: self.remaining(),
-            });
+            return Err(DecodeError::Truncated { path: path.into(), needed: n, had: self.remaining() });
         }
         let slice = &self.bytes[self.pos..self.pos + n];
         self.pos += n;
@@ -661,10 +577,8 @@ mod tests {
     // taking `&Value` would force ad-hoc bindings at every site.
     #[allow(clippy::needless_pass_by_value)]
     fn roundtrip(value: Value, schema: &SchemaType) {
-        let bytes = encode_schema(&value, schema)
-            .unwrap_or_else(|e| panic!("encode failed for {value:?}: {e}"));
-        let back = decode_schema(&bytes, schema)
-            .unwrap_or_else(|e| panic!("decode failed for {value:?}: {e}"));
+        let bytes = encode_schema(&value, schema).unwrap_or_else(|e| panic!("encode failed for {value:?}: {e}"));
+        let back = decode_schema(&bytes, schema).unwrap_or_else(|e| panic!("decode failed for {value:?}: {e}"));
         assert_eq!(back, value, "round-trip mismatch for {value:?}");
     }
 
@@ -676,8 +590,7 @@ mod tests {
 
     #[test]
     fn unit_rejects_trailing_bytes() {
-        let err = decode_schema(&[1, 2, 3], &SchemaType::Unit)
-            .expect_err("trailing bytes after unit must error");
+        let err = decode_schema(&[1, 2, 3], &SchemaType::Unit).expect_err("trailing bytes after unit must error");
         assert!(matches!(err, DecodeError::TrailingBytes { .. }));
     }
 
@@ -685,20 +598,14 @@ mod tests {
 
     #[test]
     fn cast_single_u32() {
-        roundtrip(
-            json!({"code": 42u32}),
-            &cast_struct(vec![scalar("code", Primitive::U32)]),
-        );
+        roundtrip(json!({"code": 42u32}), &cast_struct(vec![scalar("code", Primitive::U32)]));
     }
 
     #[test]
     fn cast_two_f32_fields() {
         roundtrip(
             json!({"x": 1.5, "y": -3.25}),
-            &cast_struct(vec![
-                scalar("x", Primitive::F32),
-                scalar("y", Primitive::F32),
-            ]),
+            &cast_struct(vec![scalar("x", Primitive::F32), scalar("y", Primitive::F32)]),
         );
     }
 
@@ -706,10 +613,7 @@ mod tests {
     fn cast_padding_between_u8_and_u32() {
         roundtrip(
             json!({"a": 7u8, "b": 0x0102_0304u32}),
-            &cast_struct(vec![
-                scalar("a", Primitive::U8),
-                scalar("b", Primitive::U32),
-            ]),
+            &cast_struct(vec![scalar("a", Primitive::U8), scalar("b", Primitive::U32)]),
         );
     }
 
@@ -719,10 +623,7 @@ mod tests {
         // zeros before checking for trailing bytes.
         roundtrip(
             json!({"a": 1u64, "b": 2u8}),
-            &cast_struct(vec![
-                scalar("a", Primitive::U64),
-                scalar("b", Primitive::U8),
-            ]),
+            &cast_struct(vec![scalar("a", Primitive::U64), scalar("b", Primitive::U8)]),
         );
     }
 
@@ -732,20 +633,14 @@ mod tests {
             json!({"xs": [1u8, 2, 3, 4]}),
             &cast_struct(vec![NamedField {
                 name: "xs".into(),
-                ty: SchemaType::Array {
-                    element: SchemaCell::owned(SchemaType::Scalar(Primitive::U8)),
-                    len: 4,
-                },
+                ty: SchemaType::Array { element: SchemaCell::owned(SchemaType::Scalar(Primitive::U8)), len: 4 },
             }]),
         );
     }
 
     #[test]
     fn cast_signed_negative_roundtrip() {
-        roundtrip(
-            json!({"n": -1}),
-            &cast_struct(vec![scalar("n", Primitive::I32)]),
-        );
+        roundtrip(json!({"n": -1}), &cast_struct(vec![scalar("n", Primitive::I32)]));
     }
 
     #[test]
@@ -761,10 +656,7 @@ mod tests {
         ]);
         let triangle = cast_struct(vec![NamedField {
             name: "verts".into(),
-            ty: SchemaType::Array {
-                element: SchemaCell::owned(vertex),
-                len: 3,
-            },
+            ty: SchemaType::Array { element: SchemaCell::owned(vertex), len: 3 },
         }]);
         let v = json!({"x": 0.0, "y": 0.5, "r": 1.0, "g": 0.0, "b": 0.0});
         roundtrip(json!({"verts": [v.clone(), v.clone(), v]}), &triangle);
@@ -782,28 +674,13 @@ mod tests {
 
     #[test]
     fn structured_bool_field() {
-        roundtrip(
-            json!({"flag": true}),
-            &pc_struct(vec![NamedField {
-                name: "flag".into(),
-                ty: SchemaType::Bool,
-            }]),
-        );
-        roundtrip(
-            json!({"flag": false}),
-            &pc_struct(vec![NamedField {
-                name: "flag".into(),
-                ty: SchemaType::Bool,
-            }]),
-        );
+        roundtrip(json!({"flag": true}), &pc_struct(vec![NamedField { name: "flag".into(), ty: SchemaType::Bool }]));
+        roundtrip(json!({"flag": false}), &pc_struct(vec![NamedField { name: "flag".into(), ty: SchemaType::Bool }]));
     }
 
     #[test]
     fn structured_invalid_bool_byte_errors() {
-        let schema = pc_struct(vec![NamedField {
-            name: "flag".into(),
-            ty: SchemaType::Bool,
-        }]);
+        let schema = pc_struct(vec![NamedField { name: "flag".into(), ty: SchemaType::Bool }]);
         let err = decode_schema(&[2], &schema).expect_err("non-0/1 bool byte must error");
         assert!(matches!(err, DecodeError::InvalidBool { .. }));
     }
@@ -812,22 +689,15 @@ mod tests {
     fn structured_string_field() {
         roundtrip(
             json!({"body": "hello world"}),
-            &pc_struct(vec![NamedField {
-                name: "body".into(),
-                ty: SchemaType::String,
-            }]),
+            &pc_struct(vec![NamedField { name: "body".into(), ty: SchemaType::String }]),
         );
     }
 
     #[test]
     fn structured_string_invalid_utf8_errors() {
-        let schema = pc_struct(vec![NamedField {
-            name: "body".into(),
-            ty: SchemaType::String,
-        }]);
+        let schema = pc_struct(vec![NamedField { name: "body".into(), ty: SchemaType::String }]);
         // u32 length 2, then two invalid utf-8 bytes.
-        let err = decode_schema(&[2, 0, 0, 0, 0xff, 0xfe], &schema)
-            .expect_err("invalid utf-8 string body must error");
+        let err = decode_schema(&[2, 0, 0, 0, 0xff, 0xfe], &schema).expect_err("invalid utf-8 string body must error");
         assert!(matches!(err, DecodeError::InvalidUtf8 { .. }));
     }
 
@@ -835,10 +705,7 @@ mod tests {
     fn structured_bytes_field() {
         roundtrip(
             json!({"blob": [1u8, 2, 3, 4, 5]}),
-            &pc_struct(vec![NamedField {
-                name: "blob".into(),
-                ty: SchemaType::Bytes,
-            }]),
+            &pc_struct(vec![NamedField { name: "blob".into(), ty: SchemaType::Bytes }]),
         );
     }
 
@@ -864,20 +731,13 @@ mod tests {
     #[test]
     fn structured_vec_of_nested_structs() {
         let inner = pc_struct(vec![scalar("seq", Primitive::U32)]);
-        let schema = pc_struct(vec![NamedField {
-            name: "items".into(),
-            ty: SchemaType::Vec(SchemaCell::owned(inner)),
-        }]);
-        roundtrip(
-            json!({"items": [{"seq": 1u32}, {"seq": 256u32}, {"seq": 0xDEADu32}]}),
-            &schema,
-        );
+        let schema =
+            pc_struct(vec![NamedField { name: "items".into(), ty: SchemaType::Vec(SchemaCell::owned(inner)) }]);
+        roundtrip(json!({"items": [{"seq": 1u32}, {"seq": 256u32}, {"seq": 0xDEADu32}]}), &schema);
     }
 
     fn sum_schema() -> SchemaType {
-        SchemaType::Enum {
-            variants: pending_ok_err_variants().into(),
-        }
+        SchemaType::Enum { variants: pending_ok_err_variants().into() }
     }
 
     #[test]
@@ -903,8 +763,7 @@ mod tests {
         // discriminant 99 isn't in the schema; the u32 selector is
         // little-endian.
         let schema = sum_schema();
-        let err = decode_schema(&[99, 0, 0, 0], &schema)
-            .expect_err("unknown enum discriminant must error");
+        let err = decode_schema(&[99, 0, 0, 0], &schema).expect_err("unknown enum discriminant must error");
         assert!(matches!(err, DecodeError::UnknownEnumDiscriminant { .. }));
     }
 
@@ -914,10 +773,7 @@ mod tests {
         // couple of round-trips that a varint layout would have shrunk.
         roundtrip(
             json!({"a": 256u16, "b": -2i32}),
-            &pc_struct(vec![
-                scalar("a", Primitive::U16),
-                scalar("b", Primitive::I32),
-            ]),
+            &pc_struct(vec![scalar("a", Primitive::U16), scalar("b", Primitive::I32)]),
         );
     }
 
@@ -950,10 +806,7 @@ mod tests {
     // produces the same shape (key strings stringified per proto3).
 
     fn map_schema(key: SchemaType, value: SchemaType) -> SchemaType {
-        SchemaType::Map {
-            key: SchemaCell::owned(key),
-            value: SchemaCell::owned(value),
-        }
+        SchemaType::Map { key: SchemaCell::owned(key), value: SchemaCell::owned(value) }
     }
 
     #[test]
@@ -998,18 +851,12 @@ mod tests {
             name: "headers".into(),
             ty: map_schema(SchemaType::String, SchemaType::String),
         }]);
-        roundtrip(
-            json!({"headers": {"x-foo": "bar", "x-baz": "qux"}}),
-            &schema,
-        );
+        roundtrip(json!({"headers": {"x-foo": "bar", "x-baz": "qux"}}), &schema);
     }
 
     #[test]
     fn map_empty_roundtrip() {
-        roundtrip(
-            json!({}),
-            &map_schema(SchemaType::String, SchemaType::String),
-        );
+        roundtrip(json!({}), &map_schema(SchemaType::String, SchemaType::String));
     }
 
     #[test]
@@ -1044,14 +891,8 @@ mod tests {
         // Same as above but with a `repr_c: true` parent so the
         // cast-shape path runs (8 bytes LE at 8-byte align).
         let schema = cast_struct(vec![
-            NamedField {
-                name: "stream".into(),
-                ty: SchemaType::Scalar(Primitive::U8),
-            },
-            NamedField {
-                name: "mailbox".into(),
-                ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
-            },
+            NamedField { name: "stream".into(), ty: SchemaType::Scalar(Primitive::U8) },
+            NamedField { name: "mailbox".into(), ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID) },
         ]);
         let mailbox = aether_data::MailboxId::from_name("aether.component");
         let s = tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");
@@ -1086,16 +927,11 @@ mod tests {
         len_bytes.extend_from_slice(&u32::MAX.to_le_bytes());
 
         let vec_schema = SchemaType::Vec(SchemaCell::owned(SchemaType::Scalar(Primitive::U32)));
-        let err = decode_schema(&len_bytes, &vec_schema)
-            .expect_err("oversized Vec length must error, not allocate");
+        let err = decode_schema(&len_bytes, &vec_schema).expect_err("oversized Vec length must error, not allocate");
         assert!(matches!(err, DecodeError::Truncated { .. }));
 
-        let map = map_schema(
-            SchemaType::Scalar(Primitive::U32),
-            SchemaType::Scalar(Primitive::U32),
-        );
-        let err = decode_schema(&len_bytes, &map)
-            .expect_err("oversized Map length must error, not allocate");
+        let map = map_schema(SchemaType::Scalar(Primitive::U32), SchemaType::Scalar(Primitive::U32));
+        let err = decode_schema(&len_bytes, &map).expect_err("oversized Map length must error, not allocate");
         assert!(matches!(err, DecodeError::Truncated { .. }));
     }
 
@@ -1111,13 +947,12 @@ mod tests {
         count_bytes.extend_from_slice(&u32::MAX.to_le_bytes());
 
         let unit_vec = SchemaType::Vec(SchemaCell::owned(SchemaType::Unit));
-        let err = decode_schema(&count_bytes, &unit_vec)
-            .expect_err("Vec<Unit> bomb must exceed the value budget");
+        let err = decode_schema(&count_bytes, &unit_vec).expect_err("Vec<Unit> bomb must exceed the value budget");
         assert!(matches!(err, DecodeError::ValueBudgetExceeded { .. }));
 
         let struct_vec = SchemaType::Vec(SchemaCell::owned(pc_struct(vec![])));
-        let err = decode_schema(&count_bytes, &struct_vec)
-            .expect_err("Vec<Struct {}> bomb must exceed the value budget");
+        let err =
+            decode_schema(&count_bytes, &struct_vec).expect_err("Vec<Struct {}> bomb must exceed the value budget");
         assert!(matches!(err, DecodeError::ValueBudgetExceeded { .. }));
     }
 

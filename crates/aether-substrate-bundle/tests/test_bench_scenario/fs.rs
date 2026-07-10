@@ -13,11 +13,8 @@ fn fs_write_then_read_round_trips_in_save_namespace() {
         return;
     }
     let sandbox = init_save_sandbox("test-bench-fs");
-    let mut bench = TestBench::builder()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench =
+        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
 
     let path = "fs-roundtrip.bin".to_owned();
     let payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
@@ -28,48 +25,28 @@ fn fs_write_then_read_round_trips_in_save_namespace() {
                 "write",
                 BenchOp::send_and_await(
                     FS_MAILBOX,
-                    &Write {
-                        namespace: FS_NAMESPACE_SAVE.to_owned(),
-                        path: path.clone(),
-                        bytes: payload.clone(),
-                    },
+                    &Write { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone(), bytes: payload.clone() },
                 ),
             ),
             (
                 "read",
                 BenchOp::send_and_await(
                     FS_MAILBOX,
-                    &Read {
-                        namespace: FS_NAMESPACE_SAVE.to_owned(),
-                        path: path.clone(),
-                    },
+                    &Read { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone() },
                 ),
             ),
         ])
         .expect("write + read");
 
-    match result
-        .reply::<WriteResult>("write")
-        .expect("decode WriteResult")
-    {
-        WriteResult::Ok {
-            namespace,
-            path: echoed_path,
-        } => {
+    match result.reply::<WriteResult>("write").expect("decode WriteResult") {
+        WriteResult::Ok { namespace, path: echoed_path } => {
             assert_eq!(namespace, FS_NAMESPACE_SAVE);
             assert_eq!(echoed_path, path);
         }
         WriteResult::Err { error, .. } => panic!("write failed: {error:?}"),
     }
-    match result
-        .reply::<ReadResult>("read")
-        .expect("decode ReadResult")
-    {
-        ReadResult::Ok {
-            namespace,
-            path: echoed_path,
-            bytes,
-        } => {
+    match result.reply::<ReadResult>("read").expect("decode ReadResult") {
+        ReadResult::Ok { namespace, path: echoed_path, bytes } => {
             assert_eq!(namespace, FS_NAMESPACE_SAVE);
             assert_eq!(echoed_path, path);
             assert_eq!(bytes, payload);
@@ -87,11 +64,8 @@ fn fs_delete_removes_written_file() {
         return;
     }
     let sandbox = init_save_sandbox("test-bench-fs");
-    let mut bench = TestBench::builder()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench =
+        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
 
     let path = "fs-delete.bin".to_owned();
     // A failed write would abort the sequence with `OpFailed`, so
@@ -102,52 +76,27 @@ fn fs_delete_removes_written_file() {
                 "write",
                 BenchOp::send_and_await(
                     FS_MAILBOX,
-                    &Write {
-                        namespace: FS_NAMESPACE_SAVE.to_owned(),
-                        path: path.clone(),
-                        bytes: vec![1, 2, 3],
-                    },
+                    &Write { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone(), bytes: vec![1, 2, 3] },
                 ),
             ),
             (
                 "delete",
                 BenchOp::send_and_await(
                     FS_MAILBOX,
-                    &Delete {
-                        namespace: FS_NAMESPACE_SAVE.to_owned(),
-                        path: path.clone(),
-                    },
+                    &Delete { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone() },
                 ),
             ),
-            (
-                "read",
-                BenchOp::send_and_await(
-                    FS_MAILBOX,
-                    &Read {
-                        namespace: FS_NAMESPACE_SAVE.to_owned(),
-                        path,
-                    },
-                ),
-            ),
+            ("read", BenchOp::send_and_await(FS_MAILBOX, &Read { namespace: FS_NAMESPACE_SAVE.to_owned(), path })),
         ])
         .expect("write + delete + read");
 
-    match result
-        .reply::<DeleteResult>("delete")
-        .expect("decode DeleteResult")
-    {
+    match result.reply::<DeleteResult>("delete").expect("decode DeleteResult") {
         DeleteResult::Ok { .. } => {}
         DeleteResult::Err { error, .. } => panic!("delete failed: {error:?}"),
     }
-    match result
-        .reply::<ReadResult>("read")
-        .expect("decode ReadResult")
-    {
+    match result.reply::<ReadResult>("read").expect("decode ReadResult") {
         ReadResult::Ok { .. } => panic!("read should not have found a deleted file"),
-        ReadResult::Err {
-            error: FsError::NotFound,
-            ..
-        } => {}
+        ReadResult::Err { error: FsError::NotFound, .. } => {}
         ReadResult::Err { error, .. } => panic!("expected NotFound, got {error:?}"),
     }
 }
@@ -161,11 +110,8 @@ fn fs_list_returns_written_path() {
         return;
     }
     let sandbox = init_save_sandbox("test-bench-fs");
-    let mut bench = TestBench::builder()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench =
+        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
 
     let path = "probe-list.bin".to_owned();
     let result = bench
@@ -174,35 +120,22 @@ fn fs_list_returns_written_path() {
                 "write",
                 BenchOp::send_and_await(
                     FS_MAILBOX,
-                    &Write {
-                        namespace: FS_NAMESPACE_SAVE.to_owned(),
-                        path: path.clone(),
-                        bytes: vec![0],
-                    },
+                    &Write { namespace: FS_NAMESPACE_SAVE.to_owned(), path: path.clone(), bytes: vec![0] },
                 ),
             ),
             (
                 "list",
                 BenchOp::send_and_await(
                     FS_MAILBOX,
-                    &List {
-                        namespace: FS_NAMESPACE_SAVE.to_owned(),
-                        prefix: String::new(),
-                    },
+                    &List { namespace: FS_NAMESPACE_SAVE.to_owned(), prefix: String::new() },
                 ),
             ),
         ])
         .expect("write + list");
 
-    match result
-        .reply::<ListResult>("list")
-        .expect("decode ListResult")
-    {
+    match result.reply::<ListResult>("list").expect("decode ListResult") {
         ListResult::Ok { entries, .. } => {
-            assert!(
-                entries.iter().any(|e| e == &path),
-                "expected entries to include {path:?}; got {entries:?}",
-            );
+            assert!(entries.iter().any(|e| e == &path), "expected entries to include {path:?}; got {entries:?}",);
         }
         ListResult::Err { error, .. } => panic!("list failed: {error:?}"),
     }
@@ -216,34 +149,22 @@ fn fs_read_unknown_path_returns_not_found() {
         return;
     }
     let sandbox = init_save_sandbox("test-bench-fs");
-    let mut bench = TestBench::builder()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench =
+        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
 
     let result = bench
         .execute(vec![(
             "read",
             BenchOp::send_and_await(
                 FS_MAILBOX,
-                &Read {
-                    namespace: FS_NAMESPACE_SAVE.to_owned(),
-                    path: "nonexistent-do-not-create.bin".to_owned(),
-                },
+                &Read { namespace: FS_NAMESPACE_SAVE.to_owned(), path: "nonexistent-do-not-create.bin".to_owned() },
             ),
         )])
         .expect("read");
 
-    match result
-        .reply::<ReadResult>("read")
-        .expect("decode ReadResult")
-    {
+    match result.reply::<ReadResult>("read").expect("decode ReadResult") {
         ReadResult::Ok { .. } => panic!("read should not have found a never-written file"),
-        ReadResult::Err {
-            error: FsError::NotFound,
-            ..
-        } => {}
+        ReadResult::Err { error: FsError::NotFound, .. } => {}
         ReadResult::Err { error, .. } => panic!("expected NotFound, got {error:?}"),
     }
 }

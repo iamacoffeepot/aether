@@ -37,10 +37,7 @@ use aether_data::KindDescriptor;
 #[must_use]
 pub fn all() -> Vec<KindDescriptor> {
     inventory::iter::<DescriptorEntry>()
-        .map(|e| KindDescriptor {
-            name: e.name.to_string(),
-            schema: e.schema.clone(),
-        })
+        .map(|e| KindDescriptor { name: e.name.to_string(), schema: e.schema.clone() })
         .collect()
 }
 
@@ -58,10 +55,6 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(
-            names.len(),
-            sorted.len(),
-            "duplicate kind names in descriptors::all(): {names:?}",
-        );
+        assert_eq!(names.len(), sorted.len(), "duplicate kind names in descriptors::all(): {names:?}",);
     }
 }

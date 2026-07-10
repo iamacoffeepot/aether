@@ -35,12 +35,7 @@ pub struct AutoloadComponent {
 
 impl From<PackedComponent> for AutoloadComponent {
     fn from(packed: PackedComponent) -> Self {
-        Self {
-            wasm: packed.wasm,
-            config: packed.config,
-            name: packed.name,
-            export: packed.export,
-        }
+        Self { wasm: packed.wasm, config: packed.config, name: packed.name, export: packed.export }
     }
 }
 
@@ -62,9 +57,8 @@ impl From<PackedComponent> for AutoloadComponent {
 /// value" path — boot aborts loudly) when the manifest or any wasm /
 /// config file it names can't be read or parsed.
 pub fn boot_manifest_autoload(path: &Path) -> Result<Vec<AutoloadComponent>, ConfigError> {
-    let pack = bundle_pack::pack_from_manifest(path).map_err(|e| {
-        ConfigError::unparseable("AETHER_BOOT_MANIFEST", path.display().to_string(), e)
-    })?;
+    let pack = bundle_pack::pack_from_manifest(path)
+        .map_err(|e| ConfigError::unparseable("AETHER_BOOT_MANIFEST", path.display().to_string(), e))?;
     let mut components = Vec::with_capacity(pack.components.len());
     for packed in pack.components {
         components.extend(expand_replicas(packed)?);
@@ -180,10 +174,7 @@ mod tests {
             name: Some("loco-motion".to_owned()),
             export: None,
         });
-        assert_eq!(
-            mail.recipient,
-            mailbox_id_from_name(<ComponentHostCapability as Addressable>::NAMESPACE)
-        );
+        assert_eq!(mail.recipient, mailbox_id_from_name(<ComponentHostCapability as Addressable>::NAMESPACE));
         assert_eq!(mail.kind, LoadComponent::ID);
     }
 
@@ -207,10 +198,7 @@ mod tests {
         let entries = expand_replicas(packed(Some(3))).expect("3 replicas expand");
         assert_eq!(entries.len(), 3);
         for (index, entry) in entries.iter().enumerate() {
-            assert_eq!(
-                entry.name.as_deref(),
-                Some(format!("handler-{index}").as_str())
-            );
+            assert_eq!(entry.name.as_deref(), Some(format!("handler-{index}").as_str()));
             assert_eq!(entry.wasm, vec![0, 1, 2, 3]);
             assert_eq!(entry.config, vec![9, 9, 9]);
             assert_eq!(entry.export, None);

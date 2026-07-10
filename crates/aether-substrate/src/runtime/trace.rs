@@ -79,10 +79,7 @@ impl fmt::Debug for TraceHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TraceHandle")
             .field("boot_time", &self.boot_time)
-            .field(
-                "settlement_registry_installed",
-                &self.settlement_registry.get().is_some(),
-            )
+            .field("settlement_registry_installed", &self.settlement_registry.get().is_some())
             .finish_non_exhaustive()
     }
 }
@@ -113,10 +110,7 @@ impl TraceHandle {
     /// Panics if the chassis-host ring mutex is poisoned (fail-fast per
     /// ADR-0063) — unreachable at boot before any producer runs.
     pub fn set_chassis_host_ring_capacity(&self, floor: usize, max: usize) {
-        *self
-            .chassis_host_ring
-            .lock()
-            .expect("chassis-host trace ring mutex poisoned; fail-fast per ADR-0063") =
+        *self.chassis_host_ring.lock().expect("chassis-host trace ring mutex poisoned; fail-fast per ADR-0063") =
             ActorTraceRing::with_growth(floor, max);
     }
 
@@ -245,16 +239,7 @@ impl TraceHandle {
         kind: KindId,
     ) {
         let now = self.now_nanos();
-        self.record_sent_event_at(
-            mail_id,
-            root,
-            parent_mail,
-            sender,
-            recipient,
-            kind,
-            now,
-            now,
-        );
+        self.record_sent_event_at(mail_id, root, parent_mail, sender, recipient, kind, now, now);
         self.record_sent_inflight(root);
     }
 
@@ -285,16 +270,7 @@ impl TraceHandle {
     ) {
         self.push_trace_ring(
             root,
-            TraceEvent::Sent {
-                mail_id,
-                root,
-                parent_mail,
-                sender,
-                recipient,
-                kind,
-                t_construct_start,
-                t,
-            },
+            TraceEvent::Sent { mail_id, root, parent_mail, sender, recipient, kind, t_construct_start, t },
         );
     }
 
@@ -350,10 +326,7 @@ impl TraceHandle {
         if root != MailId::NONE {
             self.settlement_counter.record_hold_open(root);
         }
-        SettlementHold {
-            handle: self.clone(),
-            root,
-        }
+        SettlementHold { handle: self.clone(), root }
     }
 }
 
@@ -397,10 +370,7 @@ mod tests {
     use super::*;
 
     fn mid(sender: u64, cid: u64) -> MailId {
-        MailId {
-            sender: MailboxId(sender),
-            correlation_id: cid,
-        }
+        MailId { sender: MailboxId(sender), correlation_id: cid }
     }
 
     /// A `TraceHandle` with a fresh registry installed, plus the registry
@@ -426,15 +396,8 @@ mod tests {
         assert!(rx.try_recv().is_err(), "must not settle before Finished");
 
         handle.record_finished(root, root);
-        assert!(
-            rx.try_recv().is_ok(),
-            "emit-time counter must fire Settled on the Finished zero-transition"
-        );
-        assert_eq!(
-            handle.settlement_counter().live_roots(),
-            0,
-            "cell reclaimed"
-        );
+        assert!(rx.try_recv().is_ok(), "emit-time counter must fire Settled on the Finished zero-transition");
+        assert_eq!(handle.settlement_counter().live_roots(), 0, "cell reclaimed");
     }
 
     /// The hold contract (ADR-0080 §12): `Finished` dropping `in_flight`
@@ -449,16 +412,10 @@ mod tests {
         let hold = handle.acquire_settlement_hold(root);
         handle.record_sent(root, root, None, MailboxId(1), MailboxId(2), KindId(3));
         handle.record_finished(root, root);
-        assert!(
-            rx.try_recv().is_err(),
-            "an open hold must keep the root from settling"
-        );
+        assert!(rx.try_recv().is_err(), "an open hold must keep the root from settling");
 
         drop(hold);
-        assert!(
-            rx.try_recv().is_ok(),
-            "releasing the last hold fires Settled"
-        );
+        assert!(rx.try_recv().is_ok(), "releasing the last hold fires Settled");
         assert_eq!(handle.settlement_counter().live_roots(), 0);
     }
 
@@ -469,14 +426,7 @@ mod tests {
     fn none_root_carries_no_settlement() {
         let (handle, registry) = handle_with_registry();
         let rx = registry.subscribe_settlement(MailId::NONE);
-        handle.record_sent(
-            MailId::NONE,
-            MailId::NONE,
-            None,
-            MailboxId(1),
-            MailboxId(2),
-            KindId(3),
-        );
+        handle.record_sent(MailId::NONE, MailId::NONE, None, MailboxId(1), MailboxId(2), KindId(3));
         handle.record_finished(mid(1, 1), MailId::NONE);
         assert!(rx.try_recv().is_err(), "NONE root must never settle");
         assert_eq!(handle.settlement_counter().live_roots(), 0);
@@ -492,10 +442,6 @@ mod tests {
         let root = mid(3, 3);
         handle.record_sent(root, root, None, MailboxId(1), MailboxId(2), KindId(3));
         handle.record_finished(root, root);
-        assert_eq!(
-            handle.settlement_counter().live_roots(),
-            0,
-            "still reclaimed"
-        );
+        assert_eq!(handle.settlement_counter().live_roots(), 0, "still reclaimed");
     }
 }

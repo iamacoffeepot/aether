@@ -34,24 +34,13 @@ pub enum ParseError {
     #[error("expected symbol, got {0}")]
     ExpectedSymbolValue(String),
     #[error("{node}: wrong number of positional arguments — expected {expected}, got {got}")]
-    WrongArity {
-        node: &'static str,
-        expected: usize,
-        got: usize,
-    },
+    WrongArity { node: &'static str, expected: usize, got: usize },
     #[error("{node}: missing required keyword :{keyword}")]
-    MissingKeyword {
-        node: &'static str,
-        keyword: &'static str,
-    },
+    MissingKeyword { node: &'static str, keyword: &'static str },
     #[error("{node}: unknown keyword :{keyword}")]
     UnknownKeyword { node: &'static str, keyword: String },
     #[error("{node}: expected vector of length {expected}, got {got}")]
-    WrongVectorLength {
-        node: &'static str,
-        expected: usize,
-        got: usize,
-    },
+    WrongVectorLength { node: &'static str, expected: usize, got: usize },
     #[error("axis must be one of x, y, z, got {0}")]
     InvalidAxis(String),
     #[error("profile point must be (x y), got list of length {0}")]
@@ -65,14 +54,10 @@ pub enum ParseError {
 pub fn parse(text: &str) -> Result<Node, ParseError> {
     let opts = Options::default().with_keyword_syntax(KeywordSyntax::ColonPrefix);
     let mut parser = lexpr::Parser::from_str_custom(text, opts);
-    let value = parser
-        .next_value()?
-        .ok_or_else(|| ParseError::NotAList("empty input".into()))?;
+    let value = parser.next_value()?.ok_or_else(|| ParseError::NotAList("empty input".into()))?;
     let node = parse_node(&value)?;
     if let Some(extra) = parser.next_value()? {
-        return Err(ParseError::TrailingInput {
-            trailing: format!("{extra}"),
-        });
+        return Err(ParseError::TrailingInput { trailing: format!("{extra}") });
     }
     Ok(node)
 }
@@ -80,9 +65,7 @@ pub fn parse(text: &str) -> Result<Node, ParseError> {
 fn parse_node(value: &Value) -> Result<Node, ParseError> {
     let items = list_to_vec(value)?;
     let (head, rest) = items.split_first().ok_or(ParseError::EmptyList)?;
-    let head_sym = head
-        .as_symbol()
-        .ok_or_else(|| ParseError::ExpectedSymbol(format!("{head}")))?;
+    let head_sym = head.as_symbol().ok_or_else(|| ParseError::ExpectedSymbol(format!("{head}")))?;
 
     let (positional, keywords) = split_args(rest)?;
 
@@ -134,10 +117,9 @@ fn split_args<'a>(args: &[&'a Value]) -> Result<SplitArgs<'a>, ParseError> {
     let mut i = 0;
     while i < args.len() {
         if let Some(kw) = args[i].as_keyword() {
-            let val = args.get(i + 1).ok_or(ParseError::MissingKeyword {
-                node: "<unknown>",
-                keyword: "<value-after-keyword>",
-            })?;
+            let val = args
+                .get(i + 1)
+                .ok_or(ParseError::MissingKeyword { node: "<unknown>", keyword: "<value-after-keyword>" })?;
             keywords.push((kw.to_string(), *val));
             i += 2;
         } else {
@@ -148,19 +130,11 @@ fn split_args<'a>(args: &[&'a Value]) -> Result<SplitArgs<'a>, ParseError> {
     Ok((positional, keywords))
 }
 
-fn expect_arity(
-    node: &'static str,
-    positional: &[&Value],
-    expected: usize,
-) -> Result<(), ParseError> {
+fn expect_arity(node: &'static str, positional: &[&Value], expected: usize) -> Result<(), ParseError> {
     if positional.len() == expected {
         Ok(())
     } else {
-        Err(ParseError::WrongArity {
-            node,
-            expected,
-            got: positional.len(),
-        })
+        Err(ParseError::WrongArity { node, expected, got: positional.len() })
     }
 }
 
@@ -170,10 +144,7 @@ fn require_color(node: &'static str, keywords: &[(String, &Value)]) -> Result<u3
             return as_uint(v);
         }
     }
-    Err(ParseError::MissingKeyword {
-        node,
-        keyword: "color",
-    })
+    Err(ParseError::MissingKeyword { node, keyword: "color" })
 }
 
 fn check_no_extra_keywords(
@@ -183,10 +154,7 @@ fn check_no_extra_keywords(
 ) -> Result<(), ParseError> {
     for (k, _) in keywords {
         if !allowed.contains(&k.as_str()) {
-            return Err(ParseError::UnknownKeyword {
-                node,
-                keyword: k.clone(),
-            });
+            return Err(ParseError::UnknownKeyword { node, keyword: k.clone() });
         }
     }
     Ok(())
@@ -197,16 +165,11 @@ fn check_no_extra_keywords(
 // we keep the lower-precision in-engine representation).
 #[allow(clippy::cast_possible_truncation)]
 fn as_float(value: &Value) -> Result<f32, ParseError> {
-    value
-        .as_f64()
-        .map(|n| n as f32)
-        .ok_or_else(|| ParseError::ExpectedNumber(format!("{value}")))
+    value.as_f64().map(|n| n as f32).ok_or_else(|| ParseError::ExpectedNumber(format!("{value}")))
 }
 
 fn as_uint(value: &Value) -> Result<u32, ParseError> {
-    let n = value
-        .as_u64()
-        .ok_or_else(|| ParseError::ExpectedInteger(format!("{value}")))?;
+    let n = value.as_u64().ok_or_else(|| ParseError::ExpectedInteger(format!("{value}")))?;
     u32::try_from(n).map_err(|_| ParseError::ExpectedInteger(format!("{value} (out of u32 range)")))
 }
 
@@ -229,17 +192,9 @@ fn as_bool(value: &Value) -> Result<bool, ParseError> {
 fn as_vec3(node: &'static str, value: &Value) -> Result<Vec3, ParseError> {
     let items = list_to_vec(value)?;
     if items.len() != 3 {
-        return Err(ParseError::WrongVectorLength {
-            node,
-            expected: 3,
-            got: items.len(),
-        });
+        return Err(ParseError::WrongVectorLength { node, expected: 3, got: items.len() });
     }
-    Ok(Vec3::new(
-        as_float(items[0])?,
-        as_float(items[1])?,
-        as_float(items[2])?,
-    ))
+    Ok(Vec3::new(as_float(items[0])?, as_float(items[1])?, as_float(items[2])?))
 }
 
 fn as_profile(value: &Value) -> Result<Vec<[f32; 2]>, ParseError> {
@@ -266,10 +221,7 @@ fn parse_box(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<Nod
     })
 }
 
-fn parse_cylinder(
-    positional: &[&Value],
-    keywords: &[(String, &Value)],
-) -> Result<Node, ParseError> {
+fn parse_cylinder(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<Node, ParseError> {
     expect_arity("cylinder", positional, 3)?;
     check_no_extra_keywords("cylinder", keywords, &["color"])?;
     Ok(Node::Cylinder {
@@ -347,26 +299,14 @@ fn parse_torus(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<N
 fn parse_sweep(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<Node, ParseError> {
     expect_arity("sweep", positional, 2)?;
     check_no_extra_keywords("sweep", keywords, &["color", "scales", "open"])?;
-    let scales = keywords
-        .iter()
-        .find(|(k, _)| k == "scales")
-        .map(|(_, v)| as_scalar_list(v))
-        .transpose()?;
+    let scales = keywords.iter().find(|(k, _)| k == "scales").map(|(_, v)| as_scalar_list(v)).transpose()?;
     let path = as_path(positional[1])?;
     if let Some(s) = scales.as_ref()
         && s.len() != path.len()
     {
-        return Err(ParseError::SweepScalesLengthMismatch {
-            scales_len: s.len(),
-            path_len: path.len(),
-        });
+        return Err(ParseError::SweepScalesLengthMismatch { scales_len: s.len(), path_len: path.len() });
     }
-    let open = keywords
-        .iter()
-        .find(|(k, _)| k == "open")
-        .map(|(_, v)| as_bool(v))
-        .transpose()?
-        .unwrap_or(false);
+    let open = keywords.iter().find(|(k, _)| k == "open").map(|(_, v)| as_bool(v)).transpose()?.unwrap_or(false);
     Ok(Node::Sweep {
         profile: as_profile(positional[0])?,
         path,
@@ -390,28 +330,16 @@ fn as_path(value: &Value) -> Result<Vec<Vec3>, ParseError> {
     Ok(out)
 }
 
-fn parse_composition(
-    positional: &[&Value],
-    keywords: &[(String, &Value)],
-) -> Result<Node, ParseError> {
+fn parse_composition(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<Node, ParseError> {
     check_no_extra_keywords("composition", keywords, &[])?;
-    let children = positional
-        .iter()
-        .map(|v| parse_node(v))
-        .collect::<Result<Vec<_>, _>>()?;
+    let children = positional.iter().map(|v| parse_node(v)).collect::<Result<Vec<_>, _>>()?;
     Ok(Node::Composition(children))
 }
 
-fn parse_translate(
-    positional: &[&Value],
-    keywords: &[(String, &Value)],
-) -> Result<Node, ParseError> {
+fn parse_translate(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<Node, ParseError> {
     expect_arity("translate", positional, 2)?;
     check_no_extra_keywords("translate", keywords, &[])?;
-    Ok(Node::Translate {
-        offset: as_vec3("translate", positional[0])?,
-        child: Box::new(parse_node(positional[1])?),
-    })
+    Ok(Node::Translate { offset: as_vec3("translate", positional[0])?, child: Box::new(parse_node(positional[1])?) })
 }
 
 fn parse_rotate(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<Node, ParseError> {
@@ -427,24 +355,16 @@ fn parse_rotate(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<
 fn parse_scale(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<Node, ParseError> {
     expect_arity("scale", positional, 2)?;
     check_no_extra_keywords("scale", keywords, &[])?;
-    Ok(Node::Scale {
-        factor: as_vec3("scale", positional[0])?,
-        child: Box::new(parse_node(positional[1])?),
-    })
+    Ok(Node::Scale { factor: as_vec3("scale", positional[0])?, child: Box::new(parse_node(positional[1])?) })
 }
 
 fn parse_mirror(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<Node, ParseError> {
     expect_arity("mirror", positional, 2)?;
     check_no_extra_keywords("mirror", keywords, &[])?;
-    let axis_sym = positional[0]
-        .as_symbol()
-        .ok_or_else(|| ParseError::ExpectedSymbolValue(format!("{}", positional[0])))?;
-    let axis =
-        Axis::from_symbol(axis_sym).ok_or_else(|| ParseError::InvalidAxis(axis_sym.to_string()))?;
-    Ok(Node::Mirror {
-        axis,
-        child: Box::new(parse_node(positional[1])?),
-    })
+    let axis_sym =
+        positional[0].as_symbol().ok_or_else(|| ParseError::ExpectedSymbolValue(format!("{}", positional[0])))?;
+    let axis = Axis::from_symbol(axis_sym).ok_or_else(|| ParseError::InvalidAxis(axis_sym.to_string()))?;
+    Ok(Node::Mirror { axis, child: Box::new(parse_node(positional[1])?) })
 }
 
 fn parse_array(positional: &[&Value], keywords: &[(String, &Value)]) -> Result<Node, ParseError> {
@@ -479,10 +399,7 @@ mod tests {
         let err = parse(&dsl).expect_err("values above u32::MAX must error");
         match err {
             ParseError::ExpectedInteger(msg) => {
-                assert!(
-                    msg.contains("out of u32 range"),
-                    "expected range diagnostic, got: {msg}"
-                );
+                assert!(msg.contains("out of u32 range"), "expected range diagnostic, got: {msg}");
             }
             other => panic!("expected ExpectedInteger, got {other:?}"),
         }

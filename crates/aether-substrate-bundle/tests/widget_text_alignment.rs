@@ -31,11 +31,7 @@
 // Pixel-rect layout constants read clearest as float literals inline, and the
 // window rects cast small, non-negative float pixel coords to the u32
 // `FrameRect` fields.
-#![allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
+#![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 // Row-rect geometry reads clearest as plain `top + n * height` sums; the
 // `mul_add` rewrite obscures the layout math for no accuracy that matters to
 // a pixel region.
@@ -50,8 +46,8 @@ use aether_capabilities::fs::NamespaceRoots;
 use aether_capabilities::text::{LoadFont, LoadFontResult};
 use aether_data::Kind;
 use aether_kinds::{
-    CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction,
-    LoadComponent, LoadResult, NamedMail, Tick,
+    CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, LoadComponent,
+    LoadResult, NamedMail, Tick,
 };
 use aether_kit::{PanelConfig, Theme};
 use aether_substrate_bundle::test_bench::{
@@ -88,10 +84,7 @@ const ACCENT_SRGB: [u8; 3] = [0xa8, 0xc9, 0x7a];
 
 /// The full trampoline address the loaded panel registers at (ADR-0099 §4).
 fn panel_address() -> String {
-    format!(
-        "aether.component/{}:panel",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    )
+    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE,)
 }
 
 /// The bundle's `assets/` dir — where `RobotoMono.ttf` ships, resolved
@@ -110,17 +103,11 @@ fn load_font(bench: &mut TestBench) -> u32 {
             "font",
             BenchOp::send_and_await(
                 "aether.text",
-                &LoadFont {
-                    namespace: "assets".to_owned(),
-                    path: "fonts/RobotoMono.ttf".to_owned(),
-                },
+                &LoadFont { namespace: "assets".to_owned(), path: "fonts/RobotoMono.ttf".to_owned() },
             ),
         )])
         .expect("load_font sequence");
-    match loaded
-        .reply::<LoadFontResult>("font")
-        .expect("decode LoadFontResult")
-    {
+    match loaded.reply::<LoadFontResult>("font").expect("decode LoadFontResult") {
         LoadFontResult::Ok { font_id, .. } => font_id,
         LoadFontResult::Err { error, .. } => panic!("load RobotoMono: {error}"),
     }
@@ -137,10 +124,7 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8], font_id: u32) {
         width: PANEL_WIDTH,
         font_namespace: String::new(),
         font_path: String::new(),
-        theme: Theme {
-            font_id,
-            ..Theme::DEFAULT
-        },
+        theme: Theme { font_id, ..Theme::DEFAULT },
         children: Vec::new(),
     };
     let loaded = bench
@@ -157,26 +141,17 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8], font_id: u32) {
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
-        LoadResult::Ok { name, .. } => assert!(
-            name.ends_with(":panel"),
-            "the panel root should register under :panel; got {name}",
-        ),
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { name, .. } => {
+            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}",)
+        }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }
 }
 
 /// One synthesized frame tick addressed straight to the panel's mailbox.
 fn tick_to_panel() -> NamedMail {
-    NamedMail {
-        recipient_name: panel_address(),
-        kind_name: Tick::NAME.to_owned(),
-        payload: Vec::new(),
-        count: 1,
-    }
+    NamedMail { recipient_name: panel_address(), kind_name: Tick::NAME.to_owned(), payload: Vec::new(), count: 1 }
 }
 
 /// A region-scoped `Centroid` check over the inclusive window rect
@@ -258,16 +233,8 @@ fn panel_glyphs_sit_inside_their_row_frames() {
     // `assets://` points at the bundle assets dir (where the TTF lives);
     // `save://` / `config://` sink into a per-process sandbox tempdir.
     let sandbox = init_save_sandbox("widget-text-alignment");
-    let roots = NamespaceRoots {
-        save: sandbox.to_path_buf(),
-        assets: assets_dir(),
-        config: sandbox.to_path_buf(),
-    };
-    let mut bench = TestBench::builder()
-        .size(240, 220)
-        .namespace_roots(roots)
-        .build()
-        .expect("boot");
+    let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets: assets_dir(), config: sandbox.to_path_buf() };
+    let mut bench = TestBench::builder().size(240, 220).namespace_roots(roots).build().expect("boot");
     let font_id = load_font(&mut bench);
     load_panel(&mut bench, &wasm, font_id);
 
@@ -293,28 +260,16 @@ fn panel_glyphs_sit_inside_their_row_frames() {
             "snap",
             BenchOp::send_and_await(
                 RenderCapability::NAMESPACE,
-                &CaptureFrame {
-                    mails: vec![tick_to_panel()],
-                    after_mails: Vec::new(),
-                    checks,
-                    similarity: None,
-                },
+                &CaptureFrame { mails: vec![tick_to_panel()], after_mails: Vec::new(), checks, similarity: None },
             ),
         )])
         .expect("capture with region checks");
-    let verdict = match captured
-        .reply::<CaptureFrameResult>("snap")
-        .expect("decode CaptureFrameResult")
-    {
+    let verdict = match captured.reply::<CaptureFrameResult>("snap").expect("decode CaptureFrameResult") {
         CaptureFrameResult::Ok { verdict, .. } => verdict.expect("checks requested → verdict"),
         CaptureFrameResult::Err { error } => panic!("capture failed: {error}"),
     };
 
-    assert_eq!(
-        verdict.results.len(),
-        rows.len(),
-        "one result per requested check",
-    );
+    assert_eq!(verdict.results.len(), rows.len(), "one result per requested check",);
 
     // A quarter of the row height: the corrected origin centers glyphs well
     // inside this band, while the removed ascent sag sits a full ascent
@@ -324,8 +279,7 @@ fn panel_glyphs_sit_inside_their_row_frames() {
         let FrameCheckResult::Centroid { centroid, .. } = result else {
             panic!("row {} scored a non-Centroid result: {result:?}", row.name);
         };
-        let centroid =
-            centroid.unwrap_or_else(|| panic!("row {} drew no glyphs (empty mask)", row.name));
+        let centroid = centroid.unwrap_or_else(|| panic!("row {} drew no glyphs (empty mask)", row.name));
         let offset = centroid[1] - row.center_y;
         eprintln!(
             "row {}: centroid_y={:.1} row_center={:.1} offset={:+.1} (tol ±{tolerance_y:.1})",

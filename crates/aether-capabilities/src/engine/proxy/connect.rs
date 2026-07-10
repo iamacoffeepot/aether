@@ -94,12 +94,7 @@ pub fn connect_proxy(
         // closure, so a retry needs a fresh one.
         let wake_mailer = Arc::clone(mailer);
         let on_frame = move || {
-            wake_mailer.push(Mail::new(
-                self_mailbox,
-                wake_kind,
-                RpcInboundReady::default().encode_into_bytes(),
-                1,
-            ));
+            wake_mailer.push(Mail::new(self_mailbox, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
         };
         return match RpcClient::connect(
             addr,
@@ -120,9 +115,7 @@ pub fn connect_proxy(
                 if let Some(child) = child.as_deref_mut()
                     && let Ok(Some(status)) = child.try_wait()
                 {
-                    return Err(ProxyConnectError::ChildExited {
-                        status: Some(status),
-                    });
+                    return Err(ProxyConnectError::ChildExited { status: Some(status) });
                 }
                 let within_budget = deadline.is_none_or(|d| Instant::now() < d);
                 if retry && is_transient_connect_error(&e) && within_budget {
@@ -146,10 +139,7 @@ pub fn is_reforkable_spawn_failure(err: &SpawnError) -> bool {
     let SpawnError::InitFailed(BootError::Other(boxed)) = err else {
         return false;
     };
-    matches!(
-        boxed.downcast_ref::<ProxyConnectError>(),
-        Some(ProxyConnectError::ChildExited { .. })
-    )
+    matches!(boxed.downcast_ref::<ProxyConnectError>(), Some(ProxyConnectError::ChildExited { .. }))
 }
 
 /// `true` for the connection-level errors a still-coming-up
@@ -187,9 +177,7 @@ mod tests {
         // A child that exits immediately. The dial targets a port
         // nothing is listening on, so every attempt refuses — the only
         // way out under a long budget is the child-exit fast-fail.
-        let mut child = Command::new("true")
-            .spawn()
-            .expect("spawn a trivially-exiting child");
+        let mut child = Command::new("true").spawn().expect("spawn a trivially-exiting child");
 
         // Pick an almost-certainly-unbound port and never bind it, so
         // the dial refuses on every attempt.
@@ -197,15 +185,7 @@ mod tests {
         let budget = Duration::from_secs(30);
 
         let start = Instant::now();
-        let result = connect_proxy(
-            addr,
-            &mailer,
-            self_mailbox,
-            wake_kind,
-            true,
-            Some(budget),
-            Some(&mut child),
-        );
+        let result = connect_proxy(addr, &mailer, self_mailbox, wake_kind, true, Some(budget), Some(&mut child));
         let elapsed = start.elapsed();
 
         let _ = child.wait();

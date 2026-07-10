@@ -96,24 +96,16 @@ pub fn typed_then_fallback_or_warn<A>(
 ///
 /// #1774: takes `(kind, payload)` instead of `&Envelope` — the
 /// only fields this arm reads.
-pub fn dispatch_log_tail_if_matching(
-    ctx: &mut NativeCtx<'_, crate::Manual>,
-    kind: KindId,
-    payload: &[u8],
-) -> bool {
+pub fn dispatch_log_tail_if_matching(ctx: &mut NativeCtx<'_, crate::Manual>, kind: KindId, payload: &[u8]) -> bool {
     if kind.0 != <LogTail as Kind>::ID.0 {
         return false;
     }
     let Some(request) = <LogTail as Kind>::decode_from_bytes(payload) else {
-        ctx.reply(&LogTailResult::Err {
-            error: "aether.log.tail: payload failed to decode".to_owned(),
-        });
+        ctx.reply(&LogTailResult::Err { error: "aether.log.tail: payload failed to decode".to_owned() });
         return true;
     };
-    let reply =
-        ActorLogRing::try_with(|ring| ring.tail(&request)).unwrap_or_else(|| LogTailResult::Err {
-            error: "aether.log.tail: actor has no stamped slots".to_owned(),
-        });
+    let reply = ActorLogRing::try_with(|ring| ring.tail(&request))
+        .unwrap_or_else(|| LogTailResult::Err { error: "aether.log.tail: actor has no stamped slots".to_owned() });
     ctx.reply(&reply);
     true
 }
@@ -128,25 +120,16 @@ pub fn dispatch_log_tail_if_matching(
 ///
 /// #1774: takes `(kind, payload)` instead of `&Envelope` — the
 /// only fields this arm reads.
-pub fn dispatch_trace_tail_if_matching(
-    ctx: &mut NativeCtx<'_, crate::Manual>,
-    kind: KindId,
-    payload: &[u8],
-) -> bool {
+pub fn dispatch_trace_tail_if_matching(ctx: &mut NativeCtx<'_, crate::Manual>, kind: KindId, payload: &[u8]) -> bool {
     if kind.0 != <TraceTail as Kind>::ID.0 {
         return false;
     }
     let Some(request) = <TraceTail as Kind>::decode_from_bytes(payload) else {
-        ctx.reply(&TraceTailResult::Err {
-            error: "aether.trace.tail: payload failed to decode".to_owned(),
-        });
+        ctx.reply(&TraceTailResult::Err { error: "aether.trace.tail: payload failed to decode".to_owned() });
         return true;
     };
-    let reply = ActorTraceRing::try_with(|ring| ring.tail(&request)).unwrap_or_else(|| {
-        TraceTailResult::Err {
-            error: "aether.trace.tail: actor has no stamped slots".to_owned(),
-        }
-    });
+    let reply = ActorTraceRing::try_with(|ring| ring.tail(&request))
+        .unwrap_or_else(|| TraceTailResult::Err { error: "aether.trace.tail: actor has no stamped slots".to_owned() });
     ctx.reply(&reply);
     true
 }
@@ -173,18 +156,13 @@ pub fn dispatch_cost_tail_if_matching(
         return false;
     }
     let Some(request) = <CostTail as Kind>::decode_from_bytes(payload) else {
-        ctx.reply(&CostTailResult::Err {
-            error: "aether.cost.tail: payload failed to decode".to_owned(),
-        });
+        ctx.reply(&CostTailResult::Err { error: "aether.cost.tail: payload failed to decode".to_owned() });
         return true;
     };
     // Read the global cost table filtered to this actor's mailbox (cold
     // path, read lock fine) so the dump surfaces the load-time
     // neutral-seed rows even before any dispatch has folded a sample.
-    let reply = binding
-        .mailer()
-        .cost_table()
-        .tail(binding.self_mailbox(), &request);
+    let reply = binding.mailer().cost_table().tail(binding.self_mailbox(), &request);
     ctx.reply(&reply);
     true
 }
@@ -210,14 +188,11 @@ pub fn dispatch_log_tail_if_matching_free(env: &Envelope) -> Option<LogTailResul
         return None;
     }
     let Some(request) = <LogTail as Kind>::decode_from_bytes(env.payload.bytes()) else {
-        return Some(LogTailResult::Err {
-            error: "aether.log.tail: payload failed to decode".to_owned(),
-        });
+        return Some(LogTailResult::Err { error: "aether.log.tail: payload failed to decode".to_owned() });
     };
     Some(
-        ActorLogRing::try_with(|ring| ring.tail(&request)).unwrap_or_else(|| LogTailResult::Err {
-            error: "aether.log.tail: actor has no stamped slots".to_owned(),
-        }),
+        ActorLogRing::try_with(|ring| ring.tail(&request))
+            .unwrap_or_else(|| LogTailResult::Err { error: "aether.log.tail: actor has no stamped slots".to_owned() }),
     )
 }
 
@@ -231,15 +206,11 @@ pub fn dispatch_trace_tail_if_matching_free(env: &Envelope) -> Option<TraceTailR
         return None;
     }
     let Some(request) = <TraceTail as Kind>::decode_from_bytes(env.payload.bytes()) else {
-        return Some(TraceTailResult::Err {
-            error: "aether.trace.tail: payload failed to decode".to_owned(),
-        });
+        return Some(TraceTailResult::Err { error: "aether.trace.tail: payload failed to decode".to_owned() });
     };
     Some(
-        ActorTraceRing::try_with(|ring| ring.tail(&request)).unwrap_or_else(|| {
-            TraceTailResult::Err {
-                error: "aether.trace.tail: actor has no stamped slots".to_owned(),
-            }
+        ActorTraceRing::try_with(|ring| ring.tail(&request)).unwrap_or_else(|| TraceTailResult::Err {
+            error: "aether.trace.tail: actor has no stamped slots".to_owned(),
         }),
     )
 }
@@ -261,9 +232,7 @@ pub fn dispatch_cost_tail_if_matching_free(
         return None;
     }
     let Some(request) = <CostTail as Kind>::decode_from_bytes(env.payload.bytes()) else {
-        return Some(CostTailResult::Err {
-            error: "aether.cost.tail: payload failed to decode".to_owned(),
-        });
+        return Some(CostTailResult::Err { error: "aether.cost.tail: payload failed to decode".to_owned() });
     };
     Some(mailer.cost_table().tail(self_mailbox, &request))
 }
@@ -300,10 +269,7 @@ pub fn fold_handler_cost(kind: KindId, t_received: Nanos, finished: Nanos) {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test-setup unwraps: fixture construction panic on failure is the assertion"
-)]
+#[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 mod cost_tests {
     use super::*;
     use crate::mail::MailboxId;
@@ -333,15 +299,10 @@ mod cost_tests {
             fold_handler_cost(handled, Nanos(1_000), Nanos(6_000));
         });
 
-        let CostTailResult::Ok { rows } =
-            mailer.cost_table().tail(self_mbx, &CostTail { kind: None })
-        else {
+        let CostTailResult::Ok { rows } = mailer.cost_table().tail(self_mbx, &CostTail { kind: None }) else {
             panic!("expected Ok");
         };
-        let row = rows
-            .iter()
-            .find(|r| r.kind_id == handled)
-            .expect("handled kind's row present");
+        let row = rows.iter().find(|r| r.kind_id == handled).expect("handled kind's row present");
         assert_eq!(row.samples, 1, "one sample folded");
         assert_eq!(row.mean_nanos, 5_000, "(finished − received) = 5000ns");
     }
@@ -366,15 +327,10 @@ mod cost_tests {
             fold_handler_cost(stranger, Nanos(0), Nanos(9_999));
         });
 
-        let CostTailResult::Ok { rows } =
-            mailer.cost_table().tail(self_mbx, &CostTail { kind: None })
-        else {
+        let CostTailResult::Ok { rows } = mailer.cost_table().tail(self_mbx, &CostTail { kind: None }) else {
             panic!("expected Ok");
         };
-        assert!(
-            rows.iter().all(|r| r.kind_id != stranger),
-            "an unseeded kind folds into no cell",
-        );
+        assert!(rows.iter().all(|r| r.kind_id != stranger), "an unseeded kind folds into no cell",);
         // The seeded handler stays at its neutral seed (samples = 0).
         let seeded_row = rows.iter().find(|r| r.kind_id == handled).unwrap();
         assert_eq!(seeded_row.samples, 0);
@@ -389,24 +345,15 @@ mod cost_tests {
     fn cost_tail_arm_reports_seeded_rows() {
         let (_registry, mailer) = bare_substrate();
         let self_mbx = MailboxId(0x1128);
-        mailer
-            .cost_table()
-            .seed(self_mbx, &[KindId(10), KindId(20)]);
+        mailer.cost_table().seed(self_mbx, &[KindId(10), KindId(20)]);
 
-        let CostTailResult::Ok { rows } = mailer.cost_table().tail(
-            self_mbx,
-            &CostTail {
-                kind: Some(KindId(20)),
-            },
-        ) else {
+        let CostTailResult::Ok { rows } = mailer.cost_table().tail(self_mbx, &CostTail { kind: Some(KindId(20)) })
+        else {
             panic!("expected Ok");
         };
         assert_eq!(rows.len(), 1, "kind filter narrows the dump");
         assert_eq!(rows[0].kind_id, KindId(20));
-        assert_eq!(
-            rows[0].samples, 0,
-            "neutral seed surfaces before any dispatch"
-        );
+        assert_eq!(rows[0].samples, 0, "neutral seed surfaces before any dispatch");
     }
 }
 
@@ -414,10 +361,7 @@ mod cost_tests {
 /// free framework dispatch arm variants the desktop window driver
 /// reaches for from its bespoke inbox drain.
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test-setup unwraps: fixture construction panic on failure is the assertion"
-)]
+#[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 mod free_dispatch_tests {
     use super::*;
     use crate::mail::mailer::Mailer;
@@ -467,11 +411,7 @@ mod free_dispatch_tests {
     /// nothing itself.
     #[test]
     fn dispatch_log_tail_free_returns_some_on_match() {
-        let env = build_envelope(&LogTail {
-            max: 10,
-            min_level: None,
-            since: None,
-        });
+        let env = build_envelope(&LogTail { max: 10, min_level: None, since: None });
 
         // The arm reads `ActorLogRing::try_with`, so it must run inside a
         // `with_stamped` block. Stamping with a fresh slot map makes the
@@ -492,9 +432,7 @@ mod free_dispatch_tests {
     fn dispatch_log_tail_free_returns_none_on_non_match() {
         // Build an envelope of a different kind (`SetWindowTitle`); the
         // arm must return `None`.
-        let env = build_envelope(&SetWindowTitle {
-            title: "test".to_owned(),
-        });
+        let env = build_envelope(&SetWindowTitle { title: "test".to_owned() });
 
         let slots = ActorSlots::new();
         let result = with_stamped(&slots, || dispatch_log_tail_if_matching_free(&env));
@@ -510,11 +448,7 @@ mod free_dispatch_tests {
         let mailer = fresh_substrate();
         let self_mbx = MailboxId(0x1272_AAAA);
 
-        let trace_env = build_envelope(&TraceTail {
-            max: 16,
-            since: None,
-            root: None,
-        });
+        let trace_env = build_envelope(&TraceTail { max: 16, since: None, root: None });
         let cost_env = build_envelope(&CostTail { kind: None });
 
         let slots = ActorSlots::new();

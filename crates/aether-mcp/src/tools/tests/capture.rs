@@ -23,10 +23,7 @@ async fn capture_frame_bad_bundle_is_tool_error() {
             save_path: None,
         }))
         .await;
-    assert!(
-        result.is_err(),
-        "an unknown kind in the bundle should be a tool error",
-    );
+    assert!(result.is_err(), "an unknown kind in the bundle should be a tool error",);
 }
 
 /// `capture_frame` with a relative `save_path` is rejected up front —
@@ -46,10 +43,7 @@ async fn capture_frame_relative_save_path_is_tool_error() {
             save_path: Some("relative/frame.png".to_owned()),
         }))
         .await;
-    assert!(
-        result.is_err(),
-        "a relative save_path should be rejected before the capture touches the wire",
-    );
+    assert!(result.is_err(), "a relative save_path should be rejected before the capture touches the wire",);
 }
 
 /// A unique scratch directory under the system temp dir for the
@@ -57,13 +51,8 @@ async fn capture_frame_relative_save_path_is_tool_error() {
 /// another concurrent test process's temp files (mirrors bytes.rs's
 /// `reply_scratch_dir`).
 fn capture_scratch_dir(tag: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let dir = std_env::temp_dir().join(format!(
-        "aether-mcp-capture-test-{tag}-{}-{nanos}",
-        process::id()
-    ));
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = std_env::temp_dir().join(format!("aether-mcp-capture-test-{tag}-{}-{nanos}", process::id()));
     std_fs::create_dir_all(&dir).expect("create scratch dir");
     dir
 }

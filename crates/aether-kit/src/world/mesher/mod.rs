@@ -109,11 +109,9 @@ pub(super) fn chunk_remesh_extent_is_coordinate_safe(at: ChunkPos) -> bool {
     fn mesh_axis_is_coordinate_safe(chunk: i64) -> bool {
         let chunk_subcell = chunk * i64::from(SUBCELLS_PER_CHUNK_EDGE);
         let min_subcell = chunk_subcell - i64::from(MAX_APRON_SUBCELLS) - 1;
-        let max_subcell =
-            chunk_subcell + i64::from(SUBCELLS_PER_CHUNK_EDGE) + i64::from(MAX_APRON_SUBCELLS);
+        let max_subcell = chunk_subcell + i64::from(SUBCELLS_PER_CHUNK_EDGE) + i64::from(MAX_APRON_SUBCELLS);
         let octimeters = i64::from(OCTIMETERS_PER_SUBCELL);
-        i32::try_from(min_subcell * octimeters).is_ok()
-            && i32::try_from(max_subcell * octimeters).is_ok()
+        i32::try_from(min_subcell * octimeters).is_ok() && i32::try_from(max_subcell * octimeters).is_ok()
     }
 
     (-1..=1).all(|delta| mesh_axis_is_coordinate_safe(i64::from(at.x) + delta))

@@ -25,9 +25,7 @@ pub fn pt(x: f32, y: f32, z: f32) -> Point3 {
 pub fn triangle_fan(triangles: &[(Point3, Point3, Point3)], color: u32) -> Vec<Polygon> {
     triangles
         .iter()
-        .map(|&(a, b, c)| {
-            Polygon::from_triangle(a, b, c, color).expect("test setup: non-degenerate triangle")
-        })
+        .map(|&(a, b, c)| Polygon::from_triangle(a, b, c, color).expect("test setup: non-degenerate triangle"))
         .collect()
 }
 
@@ -44,13 +42,6 @@ pub fn indexed_mesh_on(
 ) -> IndexedMesh {
     IndexedMesh {
         vertices,
-        polygons: polygons
-            .into_iter()
-            .map(|verts| IndexedPolygon {
-                vertices: verts,
-                plane,
-                color,
-            })
-            .collect(),
+        polygons: polygons.into_iter().map(|verts| IndexedPolygon { vertices: verts, plane, color }).collect(),
     }
 }

@@ -3,14 +3,14 @@ use std::sync::Arc;
 use aether_actor::OutboundReply;
 
 use super::{
-    AudioCapabilityState, AudioEvent, AudioLoadContext, BankAssemblyContext, BankAssemblyOutput,
-    DecodeOutput, FsCapability, Manual, NativeCtx, Read, ReadResult, SCHEDULE_MAX_EVENTS,
-    SCHEDULE_MAX_MILLIS, TaskDone, TrackDecodeContext, sender_mailbox_id,
+    AudioCapabilityState, AudioEvent, AudioLoadContext, BankAssemblyContext, BankAssemblyOutput, DecodeOutput,
+    FsCapability, Manual, NativeCtx, Read, ReadResult, SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS, TaskDone,
+    TrackDecodeContext, sender_mailbox_id,
 };
 use crate::audio::kinds::{
-    LoadInstrument, LoadInstrumentResult, NoteOff, NoteOn, PlayTrack, PlayTrackResult, Schedule,
-    ScheduleResult, SetMasterGain, SetMasterGainResult, SetReverbSend, SetReverbSendResult,
-    SetSenderGain, SetSenderGainResult, StopTrack,
+    LoadInstrument, LoadInstrumentResult, NoteOff, NoteOn, PlayTrack, PlayTrackResult, Schedule, ScheduleResult,
+    SetMasterGain, SetMasterGainResult, SetReverbSend, SetReverbSendResult, SetSenderGain, SetSenderGainResult,
+    StopTrack,
 };
 
 impl AudioCapabilityState {
@@ -50,11 +50,7 @@ impl AudioCapabilityState {
         }
     }
 
-    pub fn handle_set_master_gain(
-        &mut self,
-        _ctx: &mut NativeCtx<'_>,
-        mail: SetMasterGain,
-    ) -> SetMasterGainResult {
+    pub fn handle_set_master_gain(&mut self, _ctx: &mut NativeCtx<'_>, mail: SetMasterGain) -> SetMasterGainResult {
         let applied = mail.gain.clamp(0.0, 1.0);
         let Some(s) = self.sender.as_ref() else {
             return SetMasterGainResult::Err {
@@ -68,16 +64,10 @@ impl AudioCapabilityState {
             applied,
             "master gain set",
         );
-        SetMasterGainResult::Ok {
-            applied_gain: applied,
-        }
+        SetMasterGainResult::Ok { applied_gain: applied }
     }
 
-    pub fn handle_set_reverb_send(
-        &mut self,
-        _ctx: &mut NativeCtx<'_>,
-        mail: SetReverbSend,
-    ) -> SetReverbSendResult {
+    pub fn handle_set_reverb_send(&mut self, _ctx: &mut NativeCtx<'_>, mail: SetReverbSend) -> SetReverbSendResult {
         let applied = mail.send.clamp(0.0, 1.0);
         let Some(s) = self.sender.as_ref() else {
             return SetReverbSendResult::Err {
@@ -91,16 +81,10 @@ impl AudioCapabilityState {
             applied,
             "reverb send set",
         );
-        SetReverbSendResult::Ok {
-            applied_send: applied,
-        }
+        SetReverbSendResult::Ok { applied_send: applied }
     }
 
-    pub fn handle_set_sender_gain(
-        &mut self,
-        ctx: &mut NativeCtx<'_>,
-        mail: SetSenderGain,
-    ) -> SetSenderGainResult {
+    pub fn handle_set_sender_gain(&mut self, ctx: &mut NativeCtx<'_>, mail: SetSenderGain) -> SetSenderGainResult {
         let applied = mail.gain.clamp(0.0, 4.0);
         let Some(s) = self.sender.as_ref() else {
             return SetSenderGainResult::Err {
@@ -108,19 +92,14 @@ impl AudioCapabilityState {
             };
         };
         let sender_mailbox = sender_mailbox_id(ctx.reply_target());
-        let _ = s.push(AudioEvent::SetSenderGain {
-            sender_mailbox,
-            gain: applied,
-        });
+        let _ = s.push(AudioEvent::SetSenderGain { sender_mailbox, gain: applied });
         tracing::info!(
             target: "aether_substrate::audio",
             requested = mail.gain,
             applied,
             "sender gain set",
         );
-        SetSenderGainResult::Ok {
-            applied_gain: applied,
-        }
+        SetSenderGainResult::Ok { applied_gain: applied }
     }
 
     pub fn handle_schedule(&mut self, ctx: &mut NativeCtx<'_>, mail: Schedule) -> ScheduleResult {
@@ -130,9 +109,7 @@ impl AudioCapabilityState {
             };
         };
         if mail.events.is_empty() {
-            return ScheduleResult::Err {
-                error: "schedule batch carries no events".to_owned(),
-            };
+            return ScheduleResult::Err { error: "schedule batch carries no events".to_owned() };
         }
         if mail.events.len() > SCHEDULE_MAX_EVENTS {
             return ScheduleResult::Err {
@@ -142,11 +119,7 @@ impl AudioCapabilityState {
                 ),
             };
         }
-        if let Some(over) = mail
-            .events
-            .iter()
-            .find(|e| e.at_millis > SCHEDULE_MAX_MILLIS)
-        {
+        if let Some(over) = mail.events.iter().find(|e| e.at_millis > SCHEDULE_MAX_MILLIS) {
             return ScheduleResult::Err {
                 error: format!(
                     "scheduled event at {} millis exceeds the {SCHEDULE_MAX_MILLIS}-millis horizon",
@@ -158,14 +131,9 @@ impl AudioCapabilityState {
         // fits u32, so the accepted count never truncates.
         #[allow(clippy::cast_possible_truncation)]
         let accepted = mail.events.len() as u32;
-        let ev = AudioEvent::Schedule {
-            sender_mailbox: sender_mailbox_id(ctx.reply_target()),
-            events: mail.events,
-        };
+        let ev = AudioEvent::Schedule { sender_mailbox: sender_mailbox_id(ctx.reply_target()), events: mail.events };
         if sender.push(ev).is_err() {
-            return ScheduleResult::Err {
-                error: "audio event queue full — schedule dropped".to_owned(),
-            };
+            return ScheduleResult::Err { error: "audio event queue full — schedule dropped".to_owned() };
         }
         ScheduleResult::Ok { accepted }
     }
@@ -185,26 +153,16 @@ impl AudioCapabilityState {
 
         let source = ctx.reply_target();
         let sender_mailbox = sender_mailbox_id(source);
-        let context = AudioLoadContext::Track {
-            source,
-            sender_mailbox,
-            lane: mail.lane,
-            gain: mail.gain,
-            looping: mail.looping,
-        };
+        let context =
+            AudioLoadContext::Track { source, sender_mailbox, lane: mail.lane, gain: mail.gain, looping: mail.looping };
 
         // Forward the read to the single fs resolver (ADR-0041) — the
         // reply (`ReadResult`) routes back to this cap's own mailbox,
         // where `on_read_result` recovers this request context. Keeping
         // the read on the fs cap means the audio cap never grows a second
         // namespace registry (ADR-0103 §2).
-        let read = Read {
-            namespace: mail.namespace,
-            path: mail.path,
-        };
-        let _ = ctx
-            .actor::<FsCapability>()
-            .send_with_context(&read, &context);
+        let read = Read { namespace: mail.namespace, path: mail.path };
+        let _ = ctx.actor::<FsCapability>().send_with_context(&read, &context);
     }
 
     pub fn handle_read_result(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: ReadResult) {
@@ -212,11 +170,7 @@ impl AudioCapabilityState {
             return;
         };
         match mail {
-            ReadResult::Ok {
-                namespace,
-                path,
-                bytes,
-            } => match context {
+            ReadResult::Ok { namespace, path, bytes } => match context {
                 track @ AudioLoadContext::Track { .. } => {
                     self.start_track_decode(ctx, track, namespace, path, bytes);
                 }
@@ -227,30 +181,15 @@ impl AudioCapabilityState {
                     self.on_sample_loaded(ctx, assembly_id, slot, bytes);
                 }
             },
-            ReadResult::Err {
-                namespace,
-                path,
-                error,
-            } => {
+            ReadResult::Err { namespace, path, error } => {
                 let reason = format!("file read failed: {error:?}");
                 match context {
-                    AudioLoadContext::Track { source, lane, .. } => ctx.reply_to(
-                        source,
-                        &PlayTrackResult::Err {
-                            namespace,
-                            path,
-                            lane,
-                            error: reason,
-                        },
-                    ),
-                    AudioLoadContext::Instrument { source } => ctx.reply_to(
-                        source,
-                        &LoadInstrumentResult::Err {
-                            namespace,
-                            path,
-                            error: reason,
-                        },
-                    ),
+                    AudioLoadContext::Track { source, lane, .. } => {
+                        ctx.reply_to(source, &PlayTrackResult::Err { namespace, path, lane, error: reason })
+                    }
+                    AudioLoadContext::Instrument { source } => {
+                        ctx.reply_to(source, &LoadInstrumentResult::Err { namespace, path, error: reason })
+                    }
                     AudioLoadContext::Sample { assembly_id, .. } => {
                         self.fail_assembly(ctx, assembly_id, reason);
                     }
@@ -259,11 +198,7 @@ impl AudioCapabilityState {
         }
     }
 
-    pub fn handle_track_decoded(
-        &mut self,
-        ctx: &mut NativeCtx<'_>,
-        done: TaskDone<DecodeOutput, TrackDecodeContext>,
-    ) {
+    pub fn handle_track_decoded(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<DecodeOutput, TrackDecodeContext>) {
         // Build the lane event while the output/context borrows are
         // live, then end them before `resolve_with` consumes `done`.
         let decode_err = match done.output() {
@@ -324,11 +259,7 @@ impl AudioCapabilityState {
         }
     }
 
-    pub fn handle_load_instrument(
-        &mut self,
-        ctx: &mut NativeCtx<'_, Manual>,
-        mail: LoadInstrument,
-    ) {
+    pub fn handle_load_instrument(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: LoadInstrument) {
         // Nop chassis (headless / hub / disabled / no device): fail
         // fast with a loud Err (ADR-0103 §7).
         if self.sender.is_none() || self.sample_rate.is_none() {
@@ -346,13 +277,8 @@ impl AudioCapabilityState {
         // Forward the `.sfz` read to the single fs resolver (ADR-0041);
         // the `ReadResult` routes back to `on_read_result`, which parses
         // it and fans out the sample reads (ADR-0103 §2/§5).
-        let read = Read {
-            namespace: mail.namespace,
-            path: mail.path,
-        };
-        let _ = ctx
-            .actor::<FsCapability>()
-            .send_with_context(&read, &context);
+        let read = Read { namespace: mail.namespace, path: mail.path };
+        let _ = ctx.actor::<FsCapability>().send_with_context(&read, &context);
     }
 
     pub fn handle_instrument_assembled(
@@ -373,10 +299,7 @@ impl AudioCapabilityState {
                     // PCM byte counts are bounded well below u64.
                     let resident_bytes = bank.resident_bytes as u64;
                     if sender
-                        .push(AudioEvent::RegisterInstrument {
-                            id: instrument_id,
-                            bank: Arc::clone(bank),
-                        })
+                        .push(AudioEvent::RegisterInstrument { id: instrument_id, bank: Arc::clone(bank) })
                         .is_err()
                     {
                         tracing::warn!(
@@ -391,18 +314,13 @@ impl AudioCapabilityState {
                         resident_bytes,
                         "sampled instrument loaded",
                     );
-                    LoadInstrumentResult::Ok {
-                        instrument_id,
-                        name,
-                        resident_bytes,
-                    }
+                    LoadInstrumentResult::Ok { instrument_id, name, resident_bytes }
                 } else {
                     let cx = done.context();
                     LoadInstrumentResult::Err {
                         namespace: cx.namespace.clone(),
                         path: cx.path.clone(),
-                        error: "audio pipeline not initialised on this desktop substrate"
-                            .to_owned(),
+                        error: "audio pipeline not initialised on this desktop substrate".to_owned(),
                     }
                 }
             }

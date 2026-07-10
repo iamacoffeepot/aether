@@ -170,12 +170,7 @@ impl aether_actor::Lifecycle<Self> for Relay {
     type InitCtx<'a> = NativeInitCtx<'a>;
     type Ctx<'a> = NativeCtx<'a>;
     fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self {
-            downstreams: config.downstreams,
-            work_iters: config.work_iters,
-            received: 0,
-            sent: 0,
-        })
+        Ok(Self { downstreams: config.downstreams, work_iters: config.work_iters, received: 0, sent: 0 })
     }
 }
 impl NativeActor for Relay {
@@ -191,10 +186,7 @@ impl Dispatch<Self> for Relay {
         // Run-end keep-up harvest (iamacoffeepot/aether#1233): answer the
         // out-of-band counter query before the `Ping` fast path.
         if kind.0 == CountQuery::ID.0 {
-            ctx.reply(&CountReport {
-                sent: state.sent,
-                received: state.received,
-            });
+            ctx.reply(&CountReport { sent: state.sent, received: state.received });
             return Some(());
         }
         if kind.0 != Ping::ID.0 {
@@ -268,12 +260,7 @@ impl aether_actor::Lifecycle<Self> for TickSource {
     type Ctx<'a> = NativeCtx<'a>;
     fn init(config: Self::Config, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         let (entry, burst) = config;
-        Ok(Self {
-            entry,
-            burst,
-            seq: 0,
-            sent: 0,
-        })
+        Ok(Self { entry, burst, seq: 0, sent: 0 })
     }
 }
 impl NativeActor for TickSource {
@@ -289,10 +276,7 @@ impl Dispatch<Self> for TickSource {
         // Run-end keep-up harvest (iamacoffeepot/aether#1233): the source
         // never receives a `Ping`, so its `received` is 0.
         if kind.0 == CountQuery::ID.0 {
-            ctx.reply(&CountReport {
-                sent: state.sent,
-                received: 0,
-            });
+            ctx.reply(&CountReport { sent: state.sent, received: 0 });
             return Some(());
         }
         if kind.0 != Tick::ID.0 {
@@ -401,9 +385,7 @@ pub fn max_out_degree(topo: &Topology) -> usize {
 /// the [`depth_chain`] (light) and [`ui_roundtrip`] (real) factories so the
 /// chain-build lives in one place.
 fn forward_chain_edges(d: usize) -> Vec<Vec<usize>> {
-    (0..d)
-        .map(|i| if i + 1 < d { vec![i + 1] } else { vec![] })
-        .collect()
+    (0..d).map(|i| if i + 1 < d { vec![i + 1] } else { vec![] }).collect()
 }
 
 /// `0 -> 1 -> ... -> d-1`. Each relay forwards to the next; the last is
@@ -411,12 +393,7 @@ fn forward_chain_edges(d: usize) -> Vec<Vec<usize>> {
 #[must_use]
 pub fn depth_chain(d: usize) -> Topology {
     let downstreams = forward_chain_edges(d);
-    Topology {
-        name: format!("depth-{d}"),
-        work_iters: vec![0; downstreams.len()],
-        tier: Tier::Light,
-        downstreams,
-    }
+    Topology { name: format!("depth-{d}"), work_iters: vec![0; downstreams.len()], tier: Tier::Light, downstreams }
 }
 
 /// `0 -> {1, 2, ..., b}`. Entry fans to b leaves.
@@ -424,12 +401,7 @@ pub fn depth_chain(d: usize) -> Topology {
 pub fn fanout(b: usize) -> Topology {
     let mut downstreams = vec![vec![]; b + 1];
     downstreams[0] = (1..=b).collect();
-    Topology {
-        name: format!("fanout-{b}"),
-        work_iters: vec![0; downstreams.len()],
-        tier: Tier::Light,
-        downstreams,
-    }
+    Topology { name: format!("fanout-{b}"), work_iters: vec![0; downstreams.len()], tier: Tier::Light, downstreams }
 }
 
 /// A `fanout(b)` whose `b` leaves each burn `work_iters` of `busy_spin`
@@ -586,12 +558,7 @@ pub fn socket_server(n: usize, codec_work: u64, logic_work: u64) -> Topology {
         // writers stay trivial leaves (downstreams empty, work 0).
     }
 
-    Topology {
-        name: format!("socket-server-{n}"),
-        downstreams,
-        work_iters,
-        tier: Tier::Real,
-    }
+    Topology { name: format!("socket-server-{n}"), downstreams, work_iters, tier: Tier::Real }
 }
 
 /// `tick-broadcast-N` (ADR-0085 amendment): a tick-paced source feeding a
@@ -623,12 +590,7 @@ pub fn tick_broadcast(n: usize, codec_work: u64, sim_work: u64) -> Topology {
         work_iters[enc] = codec_work;
     }
 
-    Topology {
-        name: format!("tick-broadcast-{n}"),
-        downstreams,
-        work_iters,
-        tier: Tier::Real,
-    }
+    Topology { name: format!("tick-broadcast-{n}"), downstreams, work_iters, tier: Tier::Real }
 }
 
 /// `ui-roundtrip` (ADR-0085 amendment): request → handler → response → a
@@ -650,12 +612,7 @@ pub fn ui_roundtrip(followup_steps: usize, handler_work: u64) -> Topology {
     let mut work_iters = vec![0u64; total];
     work_iters[1] = handler_work;
 
-    Topology {
-        name: "ui-roundtrip".to_owned(),
-        downstreams,
-        work_iters,
-        tier: Tier::Real,
-    }
+    Topology { name: "ui-roundtrip".to_owned(), downstreams, work_iters, tier: Tier::Real }
 }
 
 /// The full default topology set (depth chains 1/2/4/8, fan-outs 2/4/8,
@@ -685,11 +642,7 @@ pub struct Stats {
     pub n: usize,
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn nearest_rank(sorted: &[u64], q: f64) -> u64 {
     if sorted.is_empty() {
         return 0;
@@ -879,10 +832,7 @@ pub struct SweepConfig {
 /// the `perf-trial` bin so the parse lives in one place.
 #[must_use]
 pub fn pace_hz_from_env() -> Option<u64> {
-    env::var("AETHER_LATENCY_PACE_HZ")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&h| h > 0)
+    env::var("AETHER_LATENCY_PACE_HZ").ok().and_then(|s| s.parse().ok()).filter(|&h| h > 0)
 }
 
 /// Default pacing for the real tier when `AETHER_LATENCY_PACE_HZ` is unset
@@ -907,9 +857,7 @@ pub const DEFAULT_REAL_PACE_HZ: u64 = 60;
 #[must_use]
 pub fn drive_for_tier(drive: Drive, tier: Tier) -> Drive {
     match tier {
-        Tier::Real => Drive::Latency {
-            pace_hz: Some(pace_hz_from_env().unwrap_or(DEFAULT_REAL_PACE_HZ)),
-        },
+        Tier::Real => Drive::Latency { pace_hz: Some(pace_hz_from_env().unwrap_or(DEFAULT_REAL_PACE_HZ)) },
         Tier::Light | Tier::Heavy => drive,
     }
 }
@@ -976,12 +924,8 @@ pub fn saturate_backlog_from_env() -> u32 {
 #[must_use]
 pub fn drive_from_env() -> Drive {
     match env::var("AETHER_PERF_DRIVE").as_deref() {
-        Ok("saturate") => Drive::Saturate {
-            backlog: saturate_backlog_from_env(),
-        },
-        _ => Drive::Latency {
-            pace_hz: pace_hz_from_env(),
-        },
+        Ok("saturate") => Drive::Saturate { backlog: saturate_backlog_from_env() },
+        _ => Drive::Latency { pace_hz: pace_hz_from_env() },
     }
 }
 
@@ -1060,11 +1004,8 @@ pub fn wide_fanout_widths_from_env() -> Vec<usize> {
     let Ok(spec) = env::var("AETHER_LATENCY_WIDE_FANOUT") else {
         return Vec::new();
     };
-    let mut out: Vec<usize> = spec
-        .split(',')
-        .filter_map(|t| t.trim().parse::<usize>().ok())
-        .filter(|&w| w > 0)
-        .collect();
+    let mut out: Vec<usize> =
+        spec.split(',').filter_map(|t| t.trim().parse::<usize>().ok()).filter(|&w| w > 0).collect();
     out.sort_unstable();
     out.dedup();
     out
@@ -1095,11 +1036,7 @@ pub fn parse_workers() -> Vec<usize> {
         .split(',')
         .filter_map(|tok| {
             let t = tok.trim();
-            if t.eq_ignore_ascii_case("max") {
-                Some(max)
-            } else {
-                t.parse::<usize>().ok().map(|w| w.max(1))
-            }
+            if t.eq_ignore_ascii_case("max") { Some(max) } else { t.parse::<usize>().ok().map(|w| w.max(1)) }
         })
         .collect();
     out.sort_unstable();
@@ -1128,13 +1065,7 @@ fn light_topologies() -> Vec<Topology> {
     let mut topos = if topos_full() {
         default_topologies()
     } else {
-        vec![
-            depth_chain(1),
-            depth_chain(8),
-            fanout(4),
-            fanout(8),
-            two_level_tree(),
-        ]
+        vec![depth_chain(1), depth_chain(8), fanout(4), fanout(8), two_level_tree()]
     };
     for w in wide_fanout_widths_from_env() {
         topos.push(fanout(w));
@@ -1290,9 +1221,7 @@ fn harvest_keepup(
     // reaches here (the real tier is always paced), so the `_ => 0` arm is a
     // belt-and-braces guard.
     let expected_nanos = match drive {
-        Drive::Latency { pace_hz: Some(hz) } if hz > 0 => {
-            u64::from(frames).saturating_mul(1_000_000_000 / hz)
-        }
+        Drive::Latency { pace_hz: Some(hz) } if hz > 0 => u64::from(frames).saturating_mul(1_000_000_000 / hz),
         _ => 0,
     };
     Some(KeepUp {
@@ -1336,17 +1265,10 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             let n = topo.downstreams.len();
             let mut spawned_ok = true;
             for i in 0..n {
-                let downstreams: Arc<[MailboxId]> =
-                    topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
+                let downstreams: Arc<[MailboxId]> = topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
                 let sub = i.to_string();
-                let config = RelayConfig {
-                    downstreams,
-                    work_iters: topo.work_iters[i],
-                };
-                if let Err(e) = tb
-                    .spawn_actor::<Relay>(Subname::Named(&sub), config)
-                    .finish()
-                {
+                let config = RelayConfig { downstreams, work_iters: topo.work_iters[i] };
+                if let Err(e) = tb.spawn_actor::<Relay>(Subname::Named(&sub), config).finish() {
                     tracing::warn!(target: "aether_perf", topo = %topo.name, relay = i, error = ?e, "relay spawn failed");
                     spawned_ok = false;
                     break;
@@ -1382,21 +1304,14 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
                     backlog.min(ring_cap / fanout_divisor)
                 }
             };
-            if let Err(e) = tb
-                .spawn_actor::<TickSource>(Subname::Named("src"), (relay_id(0), burst))
-                .finish()
-            {
+            if let Err(e) = tb.spawn_actor::<TickSource>(Subname::Named("src"), (relay_id(0), burst)).finish() {
                 tracing::warn!(target: "aether_perf", topo = %topo.name, error = ?e, "tick source spawn failed");
                 continue;
             }
 
             // Subscribe the source to the `Tick` lifecycle stage so
             // `advance` broadcasts a tick to it each frame (ADR-0082).
-            let sub_req = LifecycleSubscribe {
-                stage: Tick::ID.0,
-                mailbox: ticksrc_id().0,
-            }
-            .encode_into_bytes();
+            let sub_req = LifecycleSubscribe { stage: Tick::ID.0, mailbox: ticksrc_id().0 }.encode_into_bytes();
             match tb.send_bytes_and_await("aether.lifecycle", LifecycleSubscribe::ID, sub_req) {
                 Ok(reply) => match LifecycleSubscribeResult::decode_from_bytes(&reply) {
                     Some(LifecycleSubscribeResult::Ok) => {}
@@ -1423,9 +1338,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             // (iamacoffeepot/aether#1233).
             let drive_start = Instant::now();
             match drive {
-                Drive::Latency {
-                    pace_hz: Some(hz), ..
-                } => {
+                Drive::Latency { pace_hz: Some(hz), .. } => {
                     let period = Duration::from_secs_f64(1.0 / hz as f64);
                     for _ in 0..frames {
                         let f = Instant::now();
@@ -1476,19 +1389,10 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
             for name in &names {
                 // `max: u32::MAX` clamps to the ring capacity — pull the
                 // whole ring, `root: None` across every tree in the run.
-                let req = TraceTail {
-                    max: u32::MAX,
-                    since: None,
-                    root: None,
-                }
-                .encode_into_bytes();
+                let req = TraceTail { max: u32::MAX, since: None, root: None }.encode_into_bytes();
                 match tb.send_bytes_and_await(name, TraceTail::ID, req) {
                     Ok(reply) => match TraceTailResult::decode_from_bytes(&reply) {
-                        Some(TraceTailResult::Ok {
-                            entries: ring,
-                            truncated_before,
-                            ..
-                        }) => {
+                        Some(TraceTailResult::Ok { entries: ring, truncated_before, .. }) => {
                             truncated |= truncated_before.is_some();
                             entries.extend(ring);
                         }
@@ -1603,10 +1507,7 @@ pub fn run_sweep_samples(cfg: &SweepConfig) -> Vec<CellSamples> {
 /// on-demand observe table.
 #[must_use]
 pub fn run_sweep(cfg: &SweepConfig) -> Vec<CellResult> {
-    run_sweep_samples(cfg)
-        .into_iter()
-        .map(CellSamples::summarize)
-        .collect()
+    run_sweep_samples(cfg).into_iter().map(CellSamples::summarize).collect()
 }
 
 #[cfg(test)]
@@ -1655,10 +1556,7 @@ mod tests {
             "saturate should drain the whole backlog × hops-per-root"
         );
         let mps = cell.throughput_mps.expect("saturate cell reports a rate");
-        assert!(
-            mps.is_finite() && mps > 0.0,
-            "throughput must be positive and finite, got {mps}"
-        );
+        assert!(mps.is_finite() && mps > 0.0, "throughput must be positive and finite, got {mps}");
     }
 
     #[test]
@@ -1681,10 +1579,7 @@ mod tests {
             "fanout-8 at the default backlog must report a rate, not truncate to None \
              (iamacoffeepot/aether#1226)",
         );
-        assert!(
-            mps.is_finite() && mps > 0.0,
-            "throughput must be positive and finite, got {mps}"
-        );
+        assert!(mps.is_finite() && mps > 0.0, "throughput must be positive and finite, got {mps}");
     }
 
     #[test]
@@ -1709,10 +1604,7 @@ mod tests {
         // relationship is the paired-delta comparator's job (ADR-0085), which
         // cancels runner drift by pairing base/candidate on one runner.
         for mps in [&small, &large].map(|c| c.throughput_mps.expect("saturate rate")) {
-            assert!(
-                mps.is_finite() && mps > 0.0,
-                "rate must be positive + finite: {mps}"
-            );
+            assert!(mps.is_finite() && mps > 0.0, "rate must be positive + finite: {mps}");
         }
         assert!(
             large.handler.len() > small.handler.len(),
@@ -1743,13 +1635,8 @@ mod tests {
             eprintln!("skipping: no wgpu adapter");
             return;
         };
-        let mps = cell
-            .throughput_mps
-            .expect("frames>1 saturate must still report a rate, not truncate to None");
-        assert!(
-            mps.is_finite() && mps > 0.0,
-            "rate must be positive + finite: {mps}"
-        );
+        let mps = cell.throughput_mps.expect("frames>1 saturate must still report a rate, not truncate to None");
+        assert!(mps.is_finite() && mps > 0.0, "rate must be positive + finite: {mps}");
     }
 
     #[test]
@@ -1764,10 +1651,7 @@ mod tests {
             eprintln!("skipping: no wgpu adapter");
             return;
         };
-        assert!(
-            cell.throughput_mps.is_none(),
-            "latency mode must not report a throughput rate"
-        );
+        assert!(cell.throughput_mps.is_none(), "latency mode must not report a throughput rate");
     }
 
     // The former `over_capacity_backlog_flags_truncation_not_a_wrong_rate`
@@ -1800,10 +1684,7 @@ mod tests {
         unsafe {
             env::remove_var("AETHER_PERF_BACKLOG");
         }
-        assert_eq!(
-            parsed, cap,
-            "an over-capacity backlog clamps to the ring cap"
-        );
+        assert_eq!(parsed, cap, "an over-capacity backlog clamps to the ring cap");
     }
 
     /// Serialises the `AETHER_PERF_BACKLOG`-mutating test against any other
@@ -1823,10 +1704,7 @@ mod tests {
         use aether_data::MailId;
         use aether_kinds::trace::Nanos;
         MailNodeWire {
-            mail_id: MailId {
-                sender: MailboxId(0),
-                correlation_id: correlation,
-            },
+            mail_id: MailId { sender: MailboxId(0), correlation_id: correlation },
             parent: None,
             sender: MailboxId(0),
             recipient: MailboxId(0),
@@ -1880,10 +1758,7 @@ mod tests {
         let rate = throughput_from_nodes(&nodes).expect("a populated cell reports a rate");
         // The trimmed inner window is the evenly-paced steady run; the rate is
         // `completions / span = STEADY / ((STEADY-1)·dt)` ≈ 1000/sec.
-        assert!(
-            (rate - 1000.0).abs() < 20.0,
-            "trimmed rate must recover the ~1000/sec steady rate, got {rate}"
-        );
+        assert!((rate - 1000.0).abs() < 20.0, "trimmed rate must recover the ~1000/sec steady rate, got {rate}");
         // The full-batch makespan average is dragged far lower by the slow
         // ramp/tail — the contamination this fix removes.
         let total = STEADY + 2 * TRIM;
@@ -1940,30 +1815,12 @@ mod tests {
     /// checks (keeps Qodana's `DuplicatedCode` quiet).
     fn assert_well_formed_real(topo: &Topology, expected_nodes: usize) {
         assert_eq!(topo.tier, Tier::Real, "real factory must tag Tier::Real");
-        assert_eq!(
-            topo.downstreams.len(),
-            expected_nodes,
-            "node count for {}",
-            topo.name
-        );
-        assert_eq!(
-            topo.work_iters.len(),
-            topo.downstreams.len(),
-            "work_iters must be one-per-node for {}",
-            topo.name
-        );
+        assert_eq!(topo.downstreams.len(), expected_nodes, "node count for {}", topo.name);
+        assert_eq!(topo.work_iters.len(), topo.downstreams.len(), "work_iters must be one-per-node for {}", topo.name);
         for (i, downs) in topo.downstreams.iter().enumerate() {
             for &j in downs {
-                assert!(
-                    j < topo.downstreams.len(),
-                    "{} edge {i}->{j} out of range",
-                    topo.name
-                );
-                assert!(
-                    j > i,
-                    "{} edge {i}->{j} is not forward — the DAG must stay acyclic",
-                    topo.name
-                );
+                assert!(j < topo.downstreams.len(), "{} edge {i}->{j} out of range", topo.name);
+                assert!(j > i, "{} edge {i}->{j} is not forward — the DAG must stay acyclic", topo.name);
             }
         }
     }
@@ -2001,16 +1858,8 @@ mod tests {
         // downstream and no node shared between chains (no broadcast join).
         for i in 1..=n {
             assert_eq!(t.downstreams[i], vec![n + i], "decoder {i} → its own logic");
-            assert_eq!(
-                t.downstreams[n + i],
-                vec![2 * n + i],
-                "logic {i} → its own encoder"
-            );
-            assert_eq!(
-                t.downstreams[2 * n + i],
-                vec![3 * n + i],
-                "encoder {i} → its own writer"
-            );
+            assert_eq!(t.downstreams[n + i], vec![2 * n + i], "logic {i} → its own encoder");
+            assert_eq!(t.downstreams[2 * n + i], vec![3 * n + i], "encoder {i} → its own writer");
             assert!(t.downstreams[3 * n + i].is_empty(), "writer {i} is a leaf");
         }
         // The per-frame mail volume is O(N) — `1 + 4N` Ping mails per root,
@@ -2047,10 +1896,7 @@ mod tests {
     fn real_topologies_carry_the_real_tier() {
         let topos = real_topologies();
         assert_eq!(topos.len(), 3, "three real shapes");
-        assert!(
-            topos.iter().all(|t| t.tier == Tier::Real),
-            "every real shape must be tagged Tier::Real"
-        );
+        assert!(topos.iter().all(|t| t.tier == Tier::Real), "every real shape must be tagged Tier::Real");
     }
 
     #[test]
@@ -2058,10 +1904,7 @@ mod tests {
         // Real is always paced, even when the sweep was configured saturate.
         let sat = Drive::Saturate { backlog: 64 };
         assert!(
-            matches!(
-                drive_for_tier(sat, Tier::Real),
-                Drive::Latency { pace_hz: Some(_) }
-            ),
+            matches!(drive_for_tier(sat, Tier::Real), Drive::Latency { pace_hz: Some(_) }),
             "real tier must be driven paced regardless of cfg.drive"
         );
         // Light / heavy keep the configured drive verbatim.
@@ -2102,18 +1945,9 @@ mod tests {
             return;
         };
         assert_eq!(cell.tier, Tier::Real, "the cell carries the real tier");
-        assert!(
-            !cell.handler.is_empty(),
-            "a paced real cell must produce per-hop latency samples"
-        );
-        assert!(
-            cell.throughput_mps.is_none(),
-            "a paced (latency) real cell reports no throughput rate"
-        );
-        assert!(
-            cell.keepup.is_some(),
-            "a paced real cell harvests keep-up counters (iamacoffeepot/aether#1233)"
-        );
+        assert!(!cell.handler.is_empty(), "a paced real cell must produce per-hop latency samples");
+        assert!(cell.throughput_mps.is_none(), "a paced (latency) real cell reports no throughput rate");
+        assert!(cell.keepup.is_some(), "a paced real cell harvests keep-up counters (iamacoffeepot/aether#1233)");
     }
 
     #[test]
@@ -2130,19 +1964,9 @@ mod tests {
             return;
         };
         let keepup = cell.keepup.expect("a real cell harvests keep-up counters");
-        assert_eq!(
-            keepup.offered, keepup.completed,
-            "a drained run handles every offered mail (offered == completed)"
-        );
+        assert_eq!(keepup.offered, keepup.completed, "a drained run handles every offered mail (offered == completed)");
         // `real_cell` advances 4 frames at burst 1 → 4 roots.
-        assert_eq!(
-            keepup.offered,
-            4 * hops as u64,
-            "offered = frames × hops-per-root"
-        );
-        assert!(
-            keepup.expected_nanos > 0,
-            "a paced cell carries a positive 60 Hz budget"
-        );
+        assert_eq!(keepup.offered, 4 * hops as u64, "offered = frames × hops-per-root");
+        assert!(keepup.expected_nanos > 0, "a paced cell carries a positive 60 Hz budget");
     }
 }

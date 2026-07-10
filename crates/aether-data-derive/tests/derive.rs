@@ -104,11 +104,7 @@ fn cast_eligible_propagates_through_array_of_substruct() {
         panic!("expected Array");
     };
     assert_eq!(*len, 3);
-    let SchemaType::Struct {
-        repr_c: nested_repr,
-        fields: nested_fields,
-    } = &**element
-    else {
+    let SchemaType::Struct { repr_c: nested_repr, fields: nested_fields } = &**element else {
         panic!("expected nested Struct");
     };
     assert!(*nested_repr);
@@ -125,9 +121,7 @@ fn structured_struct_marks_repr_c_false_and_specializes_bytes() {
     let by_name: HashMap<&str, &SchemaType> = fields.iter().map(|f| (&*f.name, &f.ty)).collect();
     assert_eq!(by_name["body"], &SchemaType::String);
     assert!(matches!(by_name["tags"], SchemaType::Vec(inner) if **inner == SchemaType::String));
-    assert!(
-        matches!(by_name["optional"], SchemaType::Option(inner) if **inner == SchemaType::Scalar(Primitive::U32))
-    );
+    assert!(matches!(by_name["optional"], SchemaType::Option(inner) if **inner == SchemaType::Scalar(Primitive::U32)));
     // Vec<u8> is the load-bearing specialization — must land as
     // `Bytes`, not `Vec(Scalar(U8))`. Catching this regression is the
     // point of having a dedicated assertion.
@@ -163,12 +157,7 @@ fn enum_emits_each_variant_shape_with_sequential_discriminants() {
     assert_eq!(name, "Pending");
     assert_eq!(*discriminant, 0);
 
-    let EnumVariant::Tuple {
-        name,
-        discriminant,
-        fields,
-    } = &variants[1]
-    else {
+    let EnumVariant::Tuple { name, discriminant, fields } = &variants[1] else {
         panic!("expected Tuple variant second");
     };
     assert_eq!(name, "Ok");
@@ -176,23 +165,12 @@ fn enum_emits_each_variant_shape_with_sequential_discriminants() {
     assert_eq!(fields.len(), 1);
     assert_eq!(fields[0], SchemaType::Scalar(Primitive::U64));
 
-    let EnumVariant::Struct {
-        name,
-        discriminant,
-        fields,
-    } = &variants[2]
-    else {
+    let EnumVariant::Struct { name, discriminant, fields } = &variants[2] else {
         panic!("expected Struct variant third");
     };
     assert_eq!(name, "Err");
     assert_eq!(*discriminant, 2);
-    assert_eq!(
-        fields,
-        &vec![NamedField {
-            name: "reason".into(),
-            ty: SchemaType::String,
-        }]
-    );
+    assert_eq!(fields, &vec![NamedField { name: "reason".into(), ty: SchemaType::String }]);
 }
 
 #[test]

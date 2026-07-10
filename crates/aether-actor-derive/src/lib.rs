@@ -123,19 +123,13 @@ pub fn actor(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn runtime(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {
-        return syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "#[runtime] takes no arguments",
-        )
-        .to_compile_error()
-        .into();
+        return syn::Error::new(proc_macro2::Span::call_site(), "#[runtime] takes no arguments")
+            .to_compile_error()
+            .into();
     }
     let item = parse_macro_input!(item as ItemImpl);
-    let is_native_actor = item
-        .trait_
-        .as_ref()
-        .and_then(|(_, p, _)| p.segments.last())
-        .is_some_and(|s| s.ident == "NativeActor");
+    let is_native_actor =
+        item.trait_.as_ref().and_then(|(_, p, _)| p.segments.last()).is_some_and(|s| s.ident == "NativeActor");
     if !is_native_actor {
         return syn::Error::new_spanned(
             &item.self_ty,
@@ -160,12 +154,9 @@ pub fn handler(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     // attribute scans for #[handler] markers). This standalone shim
     // only exists so rustc accepts `#[handler]` syntactically outside
     // macro expansion and so rust-analyzer doesn't redline it.
-    syn::Error::new(
-        proc_macro2::Span::call_site(),
-        "#[handler] may only appear inside a `#[actor]` impl block",
-    )
-    .to_compile_error()
-    .into()
+    syn::Error::new(proc_macro2::Span::call_site(), "#[handler] may only appear inside a `#[actor]` impl block")
+        .to_compile_error()
+        .into()
 }
 
 #[proc_macro_attribute]
@@ -173,12 +164,9 @@ pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     // Same story as `#[handler]` — marker attribute consumed by the
     // enclosing `#[actor]` scan. Standalone invocation is a
     // compile-time error.
-    syn::Error::new(
-        proc_macro2::Span::call_site(),
-        "#[fallback] may only appear inside a `#[actor]` impl block",
-    )
-    .to_compile_error()
-    .into()
+    syn::Error::new(proc_macro2::Span::call_site(), "#[fallback] may only appear inside a `#[actor]` impl block")
+        .to_compile_error()
+        .into()
 }
 
 /// `#[local]` — attribute macro that declares a struct as
@@ -263,12 +251,9 @@ pub fn local(_attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {
-        return syn::Error::new(
-            proc_macro2::Span::call_site(),
-            "#[capability] takes no arguments",
-        )
-        .to_compile_error()
-        .into();
+        return syn::Error::new(proc_macro2::Span::call_site(), "#[capability] takes no arguments")
+            .to_compile_error()
+            .into();
     }
     let mut item = parse_macro_input!(item as ItemStruct);
     // Issue 552 stage 4: gate fields on `not(target_family = "wasm")`
@@ -281,9 +266,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             for field in &mut fields.named {
                 let already_cfg = field.attrs.iter().any(|a| a.path().is_ident("cfg"));
                 if !already_cfg {
-                    field
-                        .attrs
-                        .push(syn::parse_quote!(#[cfg(not(target_family = "wasm"))]));
+                    field.attrs.push(syn::parse_quote!(#[cfg(not(target_family = "wasm"))]));
                 }
             }
         }
@@ -291,9 +274,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
             for field in &mut fields.unnamed {
                 let already_cfg = field.attrs.iter().any(|a| a.path().is_ident("cfg"));
                 if !already_cfg {
-                    field
-                        .attrs
-                        .push(syn::parse_quote!(#[cfg(not(target_family = "wasm"))]));
+                    field.attrs.push(syn::parse_quote!(#[cfg(not(target_family = "wasm"))]));
                 }
             }
         }
@@ -310,11 +291,7 @@ fn expand_handlers(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenStream2
         // works regardless of the user's import style — bare
         // `WasmActor` / `NativeActor`, `aether_actor::WasmActor`,
         // `aether_substrate::NativeActor`, etc. all resolve here.
-        let last = trait_path
-            .segments
-            .last()
-            .map(|s| s.ident.to_string())
-            .unwrap_or_default();
+        let last = trait_path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
         match last.as_str() {
             "NativeActor" => expand_native_actor_trait(item, opts, NativeEmit::Full),
             // `WasmActor` is the post-552 trait name; `Component` is

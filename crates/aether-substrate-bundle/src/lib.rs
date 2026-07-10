@@ -28,8 +28,7 @@ pub mod autoload;
 pub mod bundle_pack;
 mod chassis_common;
 pub use chassis_common::{
-    binary_manifest, chassis_config_dump, common_cap_namespaces, hub_config_dump, hub_known_keys,
-    resolve_teardown_cap,
+    binary_manifest, chassis_config_dump, common_cap_namespaces, hub_config_dump, hub_known_keys, resolve_teardown_cap,
 };
 pub mod chassis_root;
 pub mod cli;
@@ -43,9 +42,8 @@ pub mod visual;
 pub use aether_capabilities as capabilities;
 pub use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 pub use aether_substrate::{
-    Chassis, Component, ComponentCtx, HubOutbound, InboxHandler, InlineHandler, KindId, Mail,
-    MailKind, MailboxEntry, MailboxId, Mailer, OwnedDispatch, Registry, RingCapacities,
-    SchedulerTuning, Source, SourceAddr, SubstrateBoot,
+    Chassis, Component, ComponentCtx, HubOutbound, InboxHandler, InlineHandler, KindId, Mail, MailKind, MailboxEntry,
+    MailboxId, Mailer, OwnedDispatch, Registry, RingCapacities, SchedulerTuning, Source, SourceAddr, SubstrateBoot,
     actor::wasm::{component, host_fns, kind_manifest, reply_table},
     capture::{CaptureQueue, PendingCapture},
     chassis::frame_loop,

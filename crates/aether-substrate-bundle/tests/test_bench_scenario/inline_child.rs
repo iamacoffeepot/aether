@@ -23,10 +23,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     let Some(wasm_path) = require_runtime(BUNDLE_STEM) else {
         return;
     };
-    let parent_addr = format!(
-        "aether.component/{}:{FIXTURE_NAME}",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    );
+    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE,);
     // The child's first-class lineage address: the parent's rendered name
     // plus the inline-child node (ADR-0114). The parent spawns it under
     // the `Named("widget")` subname in `wire`.
@@ -53,10 +50,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
             ),
         )])
         .expect("load sequence");
-    let mailbox_id = match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
         LoadResult::Err { error } => panic!("inline_child_stateful load failed: {error}"),
     };
@@ -66,23 +60,13 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     // before the query.
     let pre = bench
         .execute(vec![
-            (
-                "bump_a",
-                BenchOp::send_mail::<Bump>(child_addr.as_str(), &Bump),
-            ),
-            (
-                "bump_b",
-                BenchOp::send_mail::<Bump>(child_addr.as_str(), &Bump),
-            ),
-            (
-                "query",
-                BenchOp::send_and_await(child_addr.as_str(), &CountQuery),
-            ),
+            ("bump_a", BenchOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
+            ("bump_b", BenchOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
+            ("query", BenchOp::send_and_await(child_addr.as_str(), &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
-        pre.reply::<CountReport>("query")
-            .expect("decode pre-replace CountReport"),
+        pre.reply::<CountReport>("query").expect("decode pre-replace CountReport"),
         CountReport { count: 2 },
         "two bumps should leave the inline child's counter at 2 before the replace",
     );
@@ -96,20 +80,11 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
             "swap",
             BenchOp::send_and_await(
                 "aether.component",
-                &ReplaceComponent {
-                    mailbox_id,
-                    wasm,
-                    drain_timeout_ms: None,
-                    config: Vec::new(),
-                    export: None,
-                },
+                &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("replace sequence");
-    match swapped
-        .reply::<ReplaceResult>("swap")
-        .expect("decode ReplaceResult")
-    {
+    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
         ReplaceResult::Ok { .. } => {}
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
@@ -118,14 +93,9 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     // A 0 here means the child vanished across the reload (its state lost,
     // or it booted fresh) — the regression ADR-0114 §5 closes.
     let post = bench
-        .execute(vec![(
-            "query",
-            BenchOp::send_and_await(child_addr.as_str(), &CountQuery),
-        )])
+        .execute(vec![("query", BenchOp::send_and_await(child_addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
-    let post_count = post
-        .reply::<CountReport>("query")
-        .expect("decode post-replace CountReport");
+    let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
         post_count,
         CountReport { count: 2 },
@@ -158,10 +128,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     let Some(wasm_path) = require_runtime(BUNDLE_STEM) else {
         return;
     };
-    let parent_addr = format!(
-        "aether.component/{}:{FIXTURE_NAME}",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    );
+    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE,);
     // The tag-spawned child's first-class lineage address — the parent spawns
     // it under the `Named("tagged")` subname in `wire`.
     let child_addr = format!("{parent_addr}/aether.embedded:tagged");
@@ -185,10 +152,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
             ),
         )])
         .expect("load sequence");
-    let mailbox_id = match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
         LoadResult::Err { error } => panic!("inline_child_tag load failed: {error}"),
     };
@@ -199,35 +163,19 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     // it to 2 through its own alias and read it back.
     let pre = bench
         .execute(vec![
-            (
-                "tag_report",
-                BenchOp::send_and_await(parent_addr.as_str(), &TagSpawnQuery),
-            ),
-            (
-                "bump_a",
-                BenchOp::send_mail::<Bump>(child_addr.as_str(), &Bump),
-            ),
-            (
-                "bump_b",
-                BenchOp::send_mail::<Bump>(child_addr.as_str(), &Bump),
-            ),
-            (
-                "query",
-                BenchOp::send_and_await(child_addr.as_str(), &CountQuery),
-            ),
+            ("tag_report", BenchOp::send_and_await(parent_addr.as_str(), &TagSpawnQuery)),
+            ("bump_a", BenchOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
+            ("bump_b", BenchOp::send_mail::<Bump>(child_addr.as_str(), &Bump)),
+            ("query", BenchOp::send_and_await(child_addr.as_str(), &CountQuery)),
         ])
         .expect("tag report + bump + query sequence");
     assert_eq!(
-        pre.reply::<TagSpawnReport>("tag_report")
-            .expect("decode TagSpawnReport"),
-        TagSpawnReport {
-            unknown_tag_rejected: true,
-        },
+        pre.reply::<TagSpawnReport>("tag_report").expect("decode TagSpawnReport"),
+        TagSpawnReport { unknown_tag_rejected: true },
         "a bogus ActorTypeTag must be rejected with UnknownActorTag by the generated resolver",
     );
     assert_eq!(
-        pre.reply::<CountReport>("query")
-            .expect("decode pre-replace CountReport"),
+        pre.reply::<CountReport>("query").expect("decode pre-replace CountReport"),
         CountReport { count: 2 },
         "the tag-spawned InlineStatefulChild is live and its counter climbs to 2",
     );
@@ -241,33 +189,19 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
             "swap",
             BenchOp::send_and_await(
                 "aether.component",
-                &ReplaceComponent {
-                    mailbox_id,
-                    wasm,
-                    drain_timeout_ms: None,
-                    config: Vec::new(),
-                    export: None,
-                },
+                &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("replace sequence");
-    match swapped
-        .reply::<ReplaceResult>("swap")
-        .expect("decode ReplaceResult")
-    {
+    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
         ReplaceResult::Ok { .. } => {}
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
     let post = bench
-        .execute(vec![(
-            "query",
-            BenchOp::send_and_await(child_addr.as_str(), &CountQuery),
-        )])
+        .execute(vec![("query", BenchOp::send_and_await(child_addr.as_str(), &CountQuery))])
         .expect("post-replace query sequence");
-    let post_count = post
-        .reply::<CountReport>("query")
-        .expect("decode post-replace CountReport");
+    let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
         post_count,
         CountReport { count: 2 },
@@ -301,10 +235,7 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     let Some(wasm_path) = require_runtime(BUNDLE_STEM) else {
         return;
     };
-    let parent_addr = format!(
-        "aether.component/{}:{FIXTURE_NAME}",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    );
+    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_capabilities::WasmTrampoline::NAMESPACE,);
     // The child's first-class lineage address: the parent's rendered name
     // plus the inline-child node (ADR-0114). The parent spawns it under the
     // `Named("widget")` subname in `wire`.
@@ -332,10 +263,7 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
                     },
                 ),
             ),
-            (
-                "probe",
-                BenchOp::send_and_await(child_addr.as_str(), &InlineProbe),
-            ),
+            ("probe", BenchOp::send_and_await(child_addr.as_str(), &InlineProbe)),
         ])
         .expect("load + live-probe sequence");
     match live.reply::<LoadResult>("load").expect("decode LoadResult") {
@@ -343,11 +271,8 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
         LoadResult::Err { error } => panic!("inline_child_despawn load failed: {error}"),
     }
     assert_eq!(
-        live.reply::<InlineEcho>("probe")
-            .expect("decode live-probe InlineEcho"),
-        InlineEcho {
-            who: INLINE_WHO_CHILD,
-        },
+        live.reply::<InlineEcho>("probe").expect("decode live-probe InlineEcho"),
+        InlineEcho { who: INLINE_WHO_CHILD },
         "a probe to the live child's alias is demuxed to and answered by the child",
     );
 
@@ -357,22 +282,13 @@ fn despawn_inline_child_settles_orphan_mail_via_parent() {
     // here would be the leak this verb prevents) and the *parent* answers.
     let post = bench
         .execute(vec![
-            (
-                "despawn",
-                BenchOp::send_mail::<DespawnChild>(parent_addr.as_str(), &DespawnChild),
-            ),
-            (
-                "probe",
-                BenchOp::send_and_await(child_addr.as_str(), &InlineProbe),
-            ),
+            ("despawn", BenchOp::send_mail::<DespawnChild>(parent_addr.as_str(), &DespawnChild)),
+            ("probe", BenchOp::send_and_await(child_addr.as_str(), &InlineProbe)),
         ])
         .expect("despawn + post-teardown probe must settle, not SettlementTimeout");
     assert_eq!(
-        post.reply::<InlineEcho>("probe")
-            .expect("decode post-teardown InlineEcho"),
-        InlineEcho {
-            who: INLINE_WHO_PARENT,
-        },
+        post.reply::<InlineEcho>("probe").expect("decode post-teardown InlineEcho"),
+        InlineEcho { who: INLINE_WHO_PARENT },
         "after teardown, a probe to the same alias falls through to the parent \
          (kept alias → membrane no resident child → parent dispatch tail)",
     );

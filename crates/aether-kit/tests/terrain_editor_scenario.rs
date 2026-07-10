@@ -6,13 +6,12 @@ use std::path::Path;
 use aether_actor::{Addressable, Kind};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::mark::{
-    Mark, MarkCreate, MarkCreateResult, MarkGeometry, MarkGet, MarkGetResult, MarkRef, MarkUpdate,
-    MarkUpdateResult,
+    Mark, MarkCreate, MarkCreateResult, MarkGeometry, MarkGet, MarkGetResult, MarkRef, MarkUpdate, MarkUpdateResult,
 };
 use aether_kit::terrain_editor::{
-    CreateTerrainMark, DeleteTerrainSelection, MoveTerrainSelection, RelabelTerrainSelection,
-    SetTerrainSelection, TerrainCommandResult, TerrainEditorConfig, TerrainEditorError,
-    TerrainEditorQuery, TerrainEditorQueryResult, WorldDelta,
+    CreateTerrainMark, DeleteTerrainSelection, MoveTerrainSelection, RelabelTerrainSelection, SetTerrainSelection,
+    TerrainCommandResult, TerrainEditorConfig, TerrainEditorError, TerrainEditorQuery, TerrainEditorQueryResult,
+    WorldDelta,
 };
 use aether_kit::world::WorldPoint;
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
@@ -24,10 +23,7 @@ const MARK_COMPONENT_NAME: &str = "terrain-marks";
 const EDITOR_COMPONENT_NAME: &str = "terrain-editor";
 
 fn component_address(name: &str) -> String {
-    format!(
-        "aether.component/{}:{name}",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    )
+    format!("aether.component/{}:{name}", aether_capabilities::WasmTrampoline::NAMESPACE,)
 }
 
 fn load_mark_book(bench: &mut TestBench, wasm_path: &Path) -> aether_data::MailboxId {
@@ -45,13 +41,8 @@ fn load_mark_book(bench: &mut TestBench, wasm_path: &Path) -> aether_data::Mailb
             ),
         )])
         .expect("load mark book sequence");
-    match loaded
-        .reply::<LoadResult>("load_mark_book")
-        .expect("decode mark-book LoadResult")
-    {
-        LoadResult::Ok {
-            name, mailbox_id, ..
-        } => {
+    match loaded.reply::<LoadResult>("load_mark_book").expect("decode mark-book LoadResult") {
+        LoadResult::Ok { name, mailbox_id, .. } => {
             assert_eq!(name, component_address(MARK_COMPONENT_NAME));
             mailbox_id
         }
@@ -75,10 +66,7 @@ fn load_editor(bench: &mut TestBench, wasm_path: &Path, mark_book_mailbox: aethe
             ),
         )])
         .expect("load editor sequence");
-    match loaded
-        .reply::<LoadResult>("load_editor")
-        .expect("decode editor LoadResult")
-    {
+    match loaded.reply::<LoadResult>("load_editor").expect("decode editor LoadResult") {
         LoadResult::Ok { name, .. } => {
             assert_eq!(name, component_address(EDITOR_COMPONENT_NAME));
         }
@@ -86,28 +74,11 @@ fn load_editor(bench: &mut TestBench, wasm_path: &Path, mark_book_mailbox: aethe
     }
 }
 
-fn create_mark(
-    bench: &mut TestBench,
-    address: &str,
-    geometry: MarkGeometry,
-    label: &str,
-) -> MarkRef {
+fn create_mark(bench: &mut TestBench, address: &str, geometry: MarkGeometry, label: &str) -> MarkRef {
     let created = bench
-        .execute(vec![(
-            "create",
-            BenchOp::send_and_await(
-                address,
-                &MarkCreate {
-                    geometry,
-                    label: label.to_owned(),
-                },
-            ),
-        )])
+        .execute(vec![("create", BenchOp::send_and_await(address, &MarkCreate { geometry, label: label.to_owned() }))])
         .expect("create mark sequence");
-    match created
-        .reply::<MarkCreateResult>("create")
-        .expect("decode MarkCreateResult")
-    {
+    match created.reply::<MarkCreateResult>("create").expect("decode MarkCreateResult") {
         MarkCreateResult::Created { reference } => reference,
         MarkCreateResult::Rejected { error } => panic!("create mark rejected: {error:?}"),
     }
@@ -115,16 +86,9 @@ fn create_mark(
 
 fn get_mark(bench: &mut TestBench, address: &str, reference: MarkRef) -> Mark {
     let fetched = bench
-        .execute(vec![(
-            "get",
-            BenchOp::send_and_await(address, &MarkGet { id: reference.id }),
-        )])
+        .execute(vec![("get", BenchOp::send_and_await(address, &MarkGet { id: reference.id }))])
         .expect("get mark sequence");
-    fetched
-        .reply::<MarkGetResult>("get")
-        .expect("decode MarkGetResult")
-        .mark
-        .expect("mark exists")
+    fetched.reply::<MarkGetResult>("get").expect("decode MarkGetResult").mark.expect("mark exists")
 }
 
 struct AppliedCommand {
@@ -135,15 +99,7 @@ struct AppliedCommand {
 
 fn expect_applied(result: TerrainCommandResult) -> AppliedCommand {
     match result {
-        TerrainCommandResult::Applied {
-            selection,
-            changed,
-            deleted,
-        } => AppliedCommand {
-            selection,
-            changed,
-            deleted,
-        },
+        TerrainCommandResult::Applied { selection, changed, deleted } => AppliedCommand { selection, changed, deleted },
         other => panic!("expected applied terrain command, got {other:?}"),
     }
 }
@@ -165,17 +121,12 @@ fn editor_selection_semantics_and_preflight_run_through_real_wasm() {
             "editor_create",
             BenchOp::send_and_await(
                 &editor_address,
-                &CreateTerrainMark {
-                    geometry: MarkGeometry::Point(WorldPoint::new(10, 20)),
-                    label: "camp".to_owned(),
-                },
+                &CreateTerrainMark { geometry: MarkGeometry::Point(WorldPoint::new(10, 20)), label: "camp".to_owned() },
             ),
         )])
         .expect("editor create sequence");
     let created_point = expect_applied(
-        created_point
-            .reply::<TerrainCommandResult>("editor_create")
-            .expect("decode editor create result"),
+        created_point.reply::<TerrainCommandResult>("editor_create").expect("decode editor create result"),
     );
     assert_eq!(created_point.selection, created_point.changed);
     assert_eq!(created_point.changed.len(), 1);
@@ -199,48 +150,24 @@ fn editor_selection_semantics_and_preflight_run_through_real_wasm() {
     let area = create_mark(
         &mut bench,
         &mark_address,
-        MarkGeometry::Area(vec![
-            WorldPoint::new(-4, 0),
-            WorldPoint::new(0, 8),
-            WorldPoint::new(4, 0),
-        ]),
+        MarkGeometry::Area(vec![WorldPoint::new(-4, 0), WorldPoint::new(0, 8), WorldPoint::new(4, 0)]),
         "grove",
     );
 
     let ordered = vec![area, point, path];
     let selected = bench
         .execute(vec![
-            (
-                "set",
-                BenchOp::send_and_await(
-                    &editor_address,
-                    &SetTerrainSelection {
-                        references: ordered.clone(),
-                    },
-                ),
-            ),
-            (
-                "query",
-                BenchOp::send_and_await(&editor_address, &TerrainEditorQuery),
-            ),
+            ("set", BenchOp::send_and_await(&editor_address, &SetTerrainSelection { references: ordered.clone() })),
+            ("query", BenchOp::send_and_await(&editor_address, &TerrainEditorQuery)),
         ])
         .expect("set and query sequence");
-    let set = expect_applied(
-        selected
-            .reply::<TerrainCommandResult>("set")
-            .expect("decode set result"),
-    );
+    let set = expect_applied(selected.reply::<TerrainCommandResult>("set").expect("decode set result"));
     assert_eq!(set.selection, ordered);
     assert!(set.changed.is_empty());
     assert!(set.deleted.is_empty());
     assert_eq!(
-        selected
-            .reply::<TerrainEditorQueryResult>("query")
-            .expect("decode query result"),
-        TerrainEditorQueryResult {
-            selection: ordered,
-            busy: false,
-        }
+        selected.reply::<TerrainEditorQueryResult>("query").expect("decode query result"),
+        TerrainEditorQueryResult { selection: ordered, busy: false }
     );
 
     let moved = bench
@@ -248,20 +175,11 @@ fn editor_selection_semantics_and_preflight_run_through_real_wasm() {
             "move",
             BenchOp::send_and_await(
                 &editor_address,
-                &MoveTerrainSelection {
-                    delta: WorldDelta {
-                        x_octimeters: 3,
-                        z_octimeters: -2,
-                    },
-                },
+                &MoveTerrainSelection { delta: WorldDelta { x_octimeters: 3, z_octimeters: -2 } },
             ),
         )])
         .expect("move sequence");
-    let moved = expect_applied(
-        moved
-            .reply::<TerrainCommandResult>("move")
-            .expect("decode move result"),
-    );
+    let moved = expect_applied(moved.reply::<TerrainCommandResult>("move").expect("decode move result"));
     assert_eq!(moved.selection, moved.changed);
     assert_eq!(moved.changed.len(), 3);
     assert!(moved.deleted.is_empty());
@@ -270,11 +188,7 @@ fn editor_selection_semantics_and_preflight_run_through_real_wasm() {
         Mark {
             id: area.id,
             revision: 2,
-            geometry: MarkGeometry::Area(vec![
-                WorldPoint::new(-1, -2),
-                WorldPoint::new(3, 6),
-                WorldPoint::new(7, -2),
-            ]),
+            geometry: MarkGeometry::Area(vec![WorldPoint::new(-1, -2), WorldPoint::new(3, 6), WorldPoint::new(7, -2),]),
             label: "grove".to_owned(),
         }
     );
@@ -300,19 +214,10 @@ fn editor_selection_semantics_and_preflight_run_through_real_wasm() {
     let relabeled = bench
         .execute(vec![(
             "relabel",
-            BenchOp::send_and_await(
-                &editor_address,
-                &RelabelTerrainSelection {
-                    label: "ridge".to_owned(),
-                },
-            ),
+            BenchOp::send_and_await(&editor_address, &RelabelTerrainSelection { label: "ridge".to_owned() }),
         )])
         .expect("relabel sequence");
-    let relabeled = expect_applied(
-        relabeled
-            .reply::<TerrainCommandResult>("relabel")
-            .expect("decode relabel result"),
-    );
+    let relabeled = expect_applied(relabeled.reply::<TerrainCommandResult>("relabel").expect("decode relabel result"));
     assert_eq!(relabeled.selection, relabeled.changed);
     assert!(relabeled.deleted.is_empty());
     for reference in &relabeled.selection {
@@ -320,11 +225,8 @@ fn editor_selection_semantics_and_preflight_run_through_real_wasm() {
         assert_eq!(mark.reference(), *reference);
         assert_eq!(mark.label, "ridge");
     }
-    let before_external: Vec<Mark> = relabeled
-        .selection
-        .iter()
-        .map(|reference| get_mark(&mut bench, &mark_address, *reference))
-        .collect();
+    let before_external: Vec<Mark> =
+        relabeled.selection.iter().map(|reference| get_mark(&mut bench, &mark_address, *reference)).collect();
     let stale_index = relabeled.selection.len() - 1;
 
     let externally_changed = bench
@@ -353,19 +255,12 @@ fn editor_selection_semantics_and_preflight_run_through_real_wasm() {
             "stale_move",
             BenchOp::send_and_await(
                 &editor_address,
-                &MoveTerrainSelection {
-                    delta: WorldDelta {
-                        x_octimeters: 100,
-                        z_octimeters: 100,
-                    },
-                },
+                &MoveTerrainSelection { delta: WorldDelta { x_octimeters: 100, z_octimeters: 100 } },
             ),
         )])
         .expect("stale move sequence");
     assert_eq!(
-        stale_move
-            .reply::<TerrainCommandResult>("stale_move")
-            .expect("decode stale move result"),
+        stale_move.reply::<TerrainCommandResult>("stale_move").expect("decode stale move result"),
         TerrainCommandResult::Rejected {
             selection: relabeled.selection.clone(),
             error: TerrainEditorError::StaleReference {
@@ -374,10 +269,7 @@ fn editor_selection_semantics_and_preflight_run_through_real_wasm() {
             },
         }
     );
-    for (reference, before) in relabeled.selection[..stale_index]
-        .iter()
-        .zip(&before_external[..stale_index])
-    {
+    for (reference, before) in relabeled.selection[..stale_index].iter().zip(&before_external[..stale_index]) {
         assert_eq!(
             get_mark(&mut bench, &mark_address, *reference),
             *before,
@@ -386,62 +278,30 @@ fn editor_selection_semantics_and_preflight_run_through_real_wasm() {
     }
     let changed_after_stale = get_mark(&mut bench, &mark_address, externally_changed);
     assert_eq!(changed_after_stale.reference(), externally_changed);
-    assert_eq!(
-        changed_after_stale.geometry,
-        before_external[stale_index].geometry
-    );
+    assert_eq!(changed_after_stale.geometry, before_external[stale_index].geometry);
     assert_eq!(changed_after_stale.label, "external");
 
-    let fresh_selection = vec![
-        relabeled.selection[0],
-        relabeled.selection[1],
-        externally_changed,
-    ];
+    let fresh_selection = vec![relabeled.selection[0], relabeled.selection[1], externally_changed];
     let deleted = bench
         .execute(vec![
             (
                 "set_fresh",
-                BenchOp::send_and_await(
-                    &editor_address,
-                    &SetTerrainSelection {
-                        references: fresh_selection.clone(),
-                    },
-                ),
+                BenchOp::send_and_await(&editor_address, &SetTerrainSelection { references: fresh_selection.clone() }),
             ),
-            (
-                "delete",
-                BenchOp::send_and_await(&editor_address, &DeleteTerrainSelection),
-            ),
-            (
-                "query",
-                BenchOp::send_and_await(&editor_address, &TerrainEditorQuery),
-            ),
+            ("delete", BenchOp::send_and_await(&editor_address, &DeleteTerrainSelection)),
+            ("query", BenchOp::send_and_await(&editor_address, &TerrainEditorQuery)),
         ])
         .expect("fresh selection and delete sequence");
     assert_eq!(
-        expect_applied(
-            deleted
-                .reply::<TerrainCommandResult>("set_fresh")
-                .expect("decode fresh set result")
-        )
-        .selection,
+        expect_applied(deleted.reply::<TerrainCommandResult>("set_fresh").expect("decode fresh set result")).selection,
         fresh_selection
     );
-    let deleted_result = expect_applied(
-        deleted
-            .reply::<TerrainCommandResult>("delete")
-            .expect("decode delete result"),
-    );
+    let deleted_result = expect_applied(deleted.reply::<TerrainCommandResult>("delete").expect("decode delete result"));
     assert!(deleted_result.selection.is_empty());
     assert!(deleted_result.changed.is_empty());
     assert_eq!(deleted_result.deleted, fresh_selection);
     assert_eq!(
-        deleted
-            .reply::<TerrainEditorQueryResult>("query")
-            .expect("decode final query result"),
-        TerrainEditorQueryResult {
-            selection: Vec::new(),
-            busy: false,
-        }
+        deleted.reply::<TerrainEditorQueryResult>("query").expect("decode final query result"),
+        TerrainEditorQueryResult { selection: Vec::new(), busy: false }
     );
 }

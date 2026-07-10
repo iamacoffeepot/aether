@@ -3,12 +3,7 @@
 // bounds in the module doc. The byte layout is the load-bearing
 // contract; `From::from` / `try_into` would obscure the bit-width
 // reasoning that makes the predicates exact.
-#![allow(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
-)]
+#![allow(clippy::cast_lossless, clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
 
 //! Integer-coefficient plane representation: `n · P = d`.
 //!
@@ -64,9 +59,7 @@ impl Plane3 {
         let n_x = e1y * e2z - e1z * e2y;
         let n_y = e1z * e2x - e1x * e2z;
         let n_z = e1x * e2y - e1y * e2x;
-        let d = (n_x as i128) * (a.x as i128)
-            + (n_y as i128) * (a.y as i128)
-            + (n_z as i128) * (a.z as i128);
+        let d = (n_x as i128) * (a.x as i128) + (n_y as i128) * (a.y as i128) + (n_z as i128) * (a.z as i128);
         Self { n_x, n_y, n_z, d }
     }
 
@@ -80,9 +73,7 @@ impl Plane3 {
     /// normal direction), `< 0` behind, `0` on the plane.
     #[must_use]
     pub fn side(&self, p: Point3) -> i128 {
-        (self.n_x as i128) * (p.x as i128)
-            + (self.n_y as i128) * (p.y as i128)
-            + (self.n_z as i128) * (p.z as i128)
+        (self.n_x as i128) * (p.x as i128) + (self.n_y as i128) * (p.y as i128) + (self.n_z as i128) * (p.z as i128)
             - self.d
     }
 
@@ -127,12 +118,7 @@ impl Plane3 {
 
     #[must_use]
     pub fn invert(self) -> Self {
-        Self {
-            n_x: -self.n_x,
-            n_y: -self.n_y,
-            n_z: -self.n_z,
-            d: -self.d,
-        }
+        Self { n_x: -self.n_x, n_y: -self.n_y, n_z: -self.n_z, d: -self.d }
     }
 
     /// GCD-normalized canonical key for plane equality.
@@ -161,12 +147,7 @@ impl Plane3 {
             return (self.n_x, self.n_y, self.n_z, self.d);
         }
         let g = g as i128;
-        (
-            (self.n_x as i128 / g) as i64,
-            (self.n_y as i128 / g) as i64,
-            (self.n_z as i128 / g) as i64,
-            self.d / g,
-        )
+        ((self.n_x as i128 / g) as i64, (self.n_y as i128 / g) as i64, (self.n_z as i128 / g) as i64, self.d / g)
     }
 
     /// Sign of `dot(self.normal, other.normal)`. Used to distinguish
@@ -209,17 +190,9 @@ pub(crate) fn projection_axes(plane: &Plane3) -> (Axis, Axis) {
     let ay = plane.n_y.unsigned_abs();
     let az = plane.n_z.unsigned_abs();
     if ax >= ay && ax >= az {
-        if plane.n_x >= 0 {
-            (Axis::Y, Axis::Z)
-        } else {
-            (Axis::Z, Axis::Y)
-        }
+        if plane.n_x >= 0 { (Axis::Y, Axis::Z) } else { (Axis::Z, Axis::Y) }
     } else if ay >= az {
-        if plane.n_y >= 0 {
-            (Axis::Z, Axis::X)
-        } else {
-            (Axis::X, Axis::Z)
-        }
+        if plane.n_y >= 0 { (Axis::Z, Axis::X) } else { (Axis::X, Axis::Z) }
     } else if plane.n_z >= 0 {
         (Axis::X, Axis::Y)
     } else {
@@ -348,18 +321,12 @@ mod tests {
         let nx = xy_plane.n_x.unsigned_abs() as u128;
         let ny = xy_plane.n_y.unsigned_abs() as u128;
         let nz = xy_plane.n_z.unsigned_abs() as u128;
-        assert_eq!(
-            xy_plane.coplanar_threshold(),
-            (nx * nx + ny * ny + nz * nz).isqrt() as i128
-        );
+        assert_eq!(xy_plane.coplanar_threshold(), (nx * nx + ny * ny + nz * nz).isqrt() as i128);
         let diag = Plane3::from_points(p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(0.0, 0.0, 1.0));
         let nx = diag.n_x.unsigned_abs() as u128;
         let ny = diag.n_y.unsigned_abs() as u128;
         let nz = diag.n_z.unsigned_abs() as u128;
-        assert_eq!(
-            diag.coplanar_threshold(),
-            (nx * nx + ny * ny + nz * nz).isqrt() as i128
-        );
+        assert_eq!(diag.coplanar_threshold(), (nx * nx + ny * ny + nz * nz).isqrt() as i128);
     }
 
     #[test]
@@ -417,10 +384,7 @@ mod tests {
         // a sign asymmetry, BSP classification stability across CSG
         // operations (which heavily rely on plane inversion) breaks.
         let plane = Plane3::from_points(p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(0.0, 0.0, 1.0));
-        assert_eq!(
-            plane.coplanar_threshold(),
-            plane.invert().coplanar_threshold()
-        );
+        assert_eq!(plane.coplanar_threshold(), plane.invert().coplanar_threshold());
     }
 
     #[test]
@@ -431,10 +395,7 @@ mod tests {
         let plane = Plane3::from_points(p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(0.0, 0.0, 1.0));
         assert_eq!(plane.n_x, plane.n_y);
         assert_eq!(plane.n_y, plane.n_z);
-        assert!(
-            plane.n_x > 0,
-            "winding-CCW from outside-origin gives outward normal"
-        );
+        assert!(plane.n_x > 0, "winding-CCW from outside-origin gives outward normal");
         // Origin is on the *negative* side of this plane.
         assert!(plane.side(p(0.0, 0.0, 0.0)) < 0);
         // Far-from-origin point along (+,+,+) is on the positive side.
@@ -539,12 +500,7 @@ mod tests {
         // with those fields directly, and re-keying.
         let plane = Plane3::from_points(p(0.0, 0.0, 0.0), p(2.0, 0.0, 0.0), p(0.0, 3.0, 0.0));
         let key = plane.canonical_key();
-        let normalized = Plane3 {
-            n_x: key.0,
-            n_y: key.1,
-            n_z: key.2,
-            d: key.3,
-        };
+        let normalized = Plane3 { n_x: key.0, n_y: key.1, n_z: key.2, d: key.3 };
         assert_eq!(normalized.canonical_key(), key);
     }
 
@@ -621,11 +577,7 @@ mod tests {
         // coefficient construction. Query side at the opposite corner.
         // The doc claims i128 headroom; this test would panic on
         // overflow under debug.
-        let plane = Plane3::from_points(
-            p(256.0, -256.0, -256.0),
-            p(-256.0, 256.0, -256.0),
-            p(-256.0, -256.0, 256.0),
-        );
+        let plane = Plane3::from_points(p(256.0, -256.0, -256.0), p(-256.0, 256.0, -256.0), p(-256.0, -256.0, 256.0));
         let extreme_query = p(256.0, 256.0, 256.0);
         let s = plane.side(extreme_query);
         // The opposite corner from the plane's centroid must be on

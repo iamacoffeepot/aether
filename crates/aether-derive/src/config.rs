@@ -22,8 +22,8 @@ use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::{
-    Attribute, Data, DataStruct, DeriveInput, Expr, Field, Fields, GenericArgument, Ident, LitStr,
-    Path, PathArguments, Type, TypePath, parse_macro_input, spanned::Spanned,
+    Attribute, Data, DataStruct, DeriveInput, Expr, Field, Fields, GenericArgument, Ident, LitStr, Path, PathArguments,
+    Type, TypePath, parse_macro_input, spanned::Spanned,
 };
 
 /// Container-level `#[config(env_prefix = "...", cli_prefix = "...")]`.
@@ -115,10 +115,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         "{}Overlay",
         // Strip the trailing `Config` so `HttpConfig` → `HttpOverlay`.
         // `NamespaceRoots` (no `Config` suffix) stays `NamespaceRootsOverlay`.
-        domain_ident
-            .to_string()
-            .strip_suffix("Config")
-            .unwrap_or(&domain_ident.to_string())
+        domain_ident.to_string().strip_suffix("Config").unwrap_or(&domain_ident.to_string())
     );
     let vis = &input.vis;
 
@@ -172,24 +169,14 @@ fn parse_container_attr(attrs: &[Attribute]) -> syn::Result<ContainerAttr> {
 
     let env_prefix = env_prefix.ok_or_else(|| {
         let span = attrs.first().map_or_else(Span::call_site, Spanned::span);
-        syn::Error::new(
-            span,
-            "missing `#[config(env_prefix = \"...\")]` container attribute",
-        )
+        syn::Error::new(span, "missing `#[config(env_prefix = \"...\")]` container attribute")
     })?;
     let cli_prefix = cli_prefix.ok_or_else(|| {
         let span = attrs.first().map_or_else(Span::call_site, Spanned::span);
-        syn::Error::new(
-            span,
-            "missing `#[config(cli_prefix = \"...\")]` container attribute",
-        )
+        syn::Error::new(span, "missing `#[config(cli_prefix = \"...\")]` container attribute")
     })?;
 
-    Ok(ContainerAttr {
-        env_prefix,
-        cli_prefix,
-        skip_from_layer,
-    })
+    Ok(ContainerAttr { env_prefix, cli_prefix, skip_from_layer })
 }
 
 fn parse_field_attr(attrs: &[Attribute]) -> syn::Result<FieldAttr> {
@@ -244,39 +231,23 @@ fn collect_fields(input: &DeriveInput, container: &ContainerAttr) -> syn::Result
         ));
     };
     let Fields::Named(named) = fields else {
-        return Err(syn::Error::new_spanned(
-            fields,
-            "`#[derive(Config)]` only supports structs with named fields",
-        ));
+        return Err(syn::Error::new_spanned(fields, "`#[derive(Config)]` only supports structs with named fields"));
     };
 
-    named
-        .named
-        .iter()
-        .map(|f| field_info(f, container))
-        .collect()
+    named.named.iter().map(|f| field_info(f, container)).collect()
 }
 
 fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo> {
-    let ident = field
-        .ident
-        .clone()
-        .expect("checked by `collect_fields` — named struct");
+    let ident = field.ident.clone().expect("checked by `collect_fields` — named struct");
     let attr = parse_field_attr(&field.attrs)?;
     let domain_ty = field.ty.clone();
     let span = field.span();
 
     if attr.ms_duration && !is_duration_type(&domain_ty) {
-        return Err(syn::Error::new(
-            span,
-            "`ms_duration` hint requires field type `std::time::Duration`",
-        ));
+        return Err(syn::Error::new(span, "`ms_duration` hint requires field type `std::time::Duration`"));
     }
     if attr.nonzero && attr.default.is_none() {
-        return Err(syn::Error::new(
-            span,
-            "`nonzero` hint requires a `default` (a resolved `0` coerces to it)",
-        ));
+        return Err(syn::Error::new(span, "`nonzero` hint requires a `default` (a resolved `0` coerces to it)"));
     }
 
     let is_bool = is_bool_type(&domain_ty);
@@ -284,9 +255,8 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
     let inner_option_ty = unwrap_option(&domain_ty);
     // Whether this is `Option<numeric>` whose Layer rep is `Option<String>`.
     let is_option_numeric = inner_option_ty.as_ref().is_some_and(is_numeric_type);
-    let is_option_string = inner_option_ty
-        .as_ref()
-        .is_some_and(|t| matches!(t, Type::Path(tp) if path_is(&tp.path, "String")));
+    let is_option_string =
+        inner_option_ty.as_ref().is_some_and(|t| matches!(t, Type::Path(tp) if path_is(&tp.path, "String")));
 
     // Layer ident:
     //   - `layer_field = "..."` override always wins.
@@ -350,22 +320,17 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
     //   `<PREFIX>_<DOMAIN_IDENT_UPPER>`. The layer-ident path covers
     //   the common `ms_duration` shape so the env key follows the
     //   stored-as-ms convention without an explicit override.
-    let env_key = attr
-        .env
-        .clone()
-        .unwrap_or_else(|| format!("{}_{}", container.env_prefix, layer_ident).to_uppercase());
+    let env_key =
+        attr.env.clone().unwrap_or_else(|| format!("{}_{}", container.env_prefix, layer_ident).to_uppercase());
     // CLI flag: explicit `cli_long` override > prefix-joined
     //   layer-ident. Using the layer ident (rather than the domain
     //   ident) keeps the flag honest about the wire shape — the user
     //   typing `--http-timeout-ms 5000` is setting the millisecond
     //   knob, not the `Duration`.
-    let cli_long = attr.cli_long.clone().unwrap_or_else(|| {
-        format!(
-            "{}-{}",
-            container.cli_prefix,
-            layer_ident.to_string().replace('_', "-")
-        )
-    });
+    let cli_long = attr
+        .cli_long
+        .clone()
+        .unwrap_or_else(|| format!("{}-{}", container.cli_prefix, layer_ident.to_string().replace('_', "-")));
     let cli_id = cli_long.replace('-', "_");
 
     let resolved_parse = resolve_parse_env(&attr);
@@ -387,15 +352,9 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
     } else {
         FromLayerKind::Plain
     };
-    let from_layer_expr = build_from_layer_expr(
-        &ident,
-        &layer_ident,
-        &domain_ty,
-        &from_layer_kind,
-        attr.default.as_ref(),
-    );
-    let into_layer_stmt =
-        build_into_layer_stmt(&ident, &layer_ident, attr.csv_set, is_option_numeric);
+    let from_layer_expr =
+        build_from_layer_expr(&ident, &layer_ident, &domain_ty, &from_layer_kind, attr.default.as_ref());
+    let into_layer_stmt = build_into_layer_stmt(&ident, &layer_ident, attr.csv_set, is_option_numeric);
 
     Ok(FieldInfo {
         ident,
@@ -416,10 +375,7 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
 /// confique's native deserialization (which trims, treats an empty value
 /// as unset → default, and hard-errors on garbage — ADR-0090 §4).
 fn resolve_parse_env(attr: &FieldAttr) -> Option<Path> {
-    attr.parse.clone().or_else(|| {
-        attr.csv_set
-            .then(|| syn::parse_quote!(::aether_substrate::config::parse_csv_set))
-    })
+    attr.parse.clone().or_else(|| attr.csv_set.then(|| syn::parse_quote!(::aether_substrate::config::parse_csv_set)))
 }
 
 fn build_layer_attrs(env_key: &str, default: Option<&Expr>, parse: Option<&Path>) -> TokenStream2 {
@@ -552,11 +508,7 @@ fn build_into_layer_stmt(
     }
 }
 
-fn emit_layer_struct(
-    layer_ident: &Ident,
-    vis: &syn::Visibility,
-    fields: &[FieldInfo],
-) -> TokenStream2 {
+fn emit_layer_struct(layer_ident: &Ident, vis: &syn::Visibility, fields: &[FieldInfo]) -> TokenStream2 {
     let field_decls = fields.iter().map(|f| {
         let attrs = &f.layer_attrs;
         let ident = &f.layer_ident;
@@ -574,11 +526,7 @@ fn emit_layer_struct(
     }
 }
 
-fn emit_trait_impl(
-    domain_ident: &Ident,
-    layer_ident: &Ident,
-    fields: &[FieldInfo],
-) -> TokenStream2 {
+fn emit_trait_impl(domain_ident: &Ident, layer_ident: &Ident, fields: &[FieldInfo]) -> TokenStream2 {
     let body = fields.iter().map(|f| &f.from_layer_expr);
     quote! {
         impl ::aether_substrate::FromArgvThenEnv for #domain_ident {

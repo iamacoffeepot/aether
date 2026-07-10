@@ -58,9 +58,7 @@
 // `ProbeWithConfig::on_config_query` takes `&mut self` for the same reason.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{
-    ActorInitError, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
-};
+use aether_actor::{ActorInitError, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawTriangle, Vertex};
@@ -68,8 +66,8 @@ use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability
 use aether_kinds::{Key, TextInput, Tick};
 use aether_math::Rgb;
 use aether_test_fixtures_kinds::{
-    ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig, SetRender, TEST_BENCH_OBSERVER_MAILBOX_NAME,
-    TextInputObserved, TickObserved,
+    ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig, SetRender, TEST_BENCH_OBSERVER_MAILBOX_NAME, TextInputObserved,
+    TickObserved,
 };
 
 pub struct Probe {
@@ -82,10 +80,7 @@ impl WasmActor for Probe {
     const NAMESPACE: &'static str = "test.probe";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Probe {
-            tick_count: 0,
-            render: SetRender::default(),
-        })
+        Ok(Probe { tick_count: 0, render: SetRender::default() })
     }
 
     //noinspection DuplicatedCode
@@ -116,12 +111,7 @@ impl WasmActor for Probe {
     #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
         self.tick_count += 1;
-        ctx.send_to_named::<TickObserved>(
-            TEST_BENCH_OBSERVER_MAILBOX_NAME,
-            &TickObserved {
-                count: self.tick_count,
-            },
-        );
+        ctx.send_to_named::<TickObserved>(TEST_BENCH_OBSERVER_MAILBOX_NAME, &TickObserved { count: self.tick_count });
         if self.tick_count == 1 {
             tracing::info!(target: "aether_test_fixture_probe", "typed_send_alive");
         }
@@ -129,15 +119,8 @@ impl WasmActor for Probe {
             let r = f32::from(self.render.r) / 255.0;
             let g = f32::from(self.render.g) / 255.0;
             let b = f32::from(self.render.b) / 255.0;
-            let v = |x: f32, y: f32| Vertex {
-                x,
-                y,
-                z: 0.5,
-                color: Rgb::new(r, g, b),
-            };
-            ctx.actor::<RenderCapability>().send(&DrawTriangle {
-                verts: [v(-0.9, -0.9), v(0.9, -0.9), v(0.0, 0.9)],
-            });
+            let v = |x: f32, y: f32| Vertex { x, y, z: 0.5, color: Rgb::new(r, g, b) };
+            ctx.actor::<RenderCapability>().send(&DrawTriangle { verts: [v(-0.9, -0.9), v(0.9, -0.9), v(0.0, 0.9)] });
         }
     }
 
@@ -152,10 +135,7 @@ impl WasmActor for Probe {
     /// Watch `receive_mail` for `aether.test_fixture.key_observed`.
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
-        ctx.send_to_named::<KeyObserved>(
-            TEST_BENCH_OBSERVER_MAILBOX_NAME,
-            &KeyObserved { code: key.code },
-        );
+        ctx.send_to_named::<KeyObserved>(TEST_BENCH_OBSERVER_MAILBOX_NAME, &KeyObserved { code: key.code });
     }
 
     /// Broadcasts a `text_input_observed` for each `TextInput` dispatch,
@@ -203,10 +183,7 @@ impl WasmActor for ProbeWithConfig {
     const NAMESPACE: &'static str = "test.probe_with_config";
 
     fn init(config: ProbeConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(ProbeWithConfig {
-            seed: config.seed,
-            label: config.label,
-        })
+        Ok(ProbeWithConfig { seed: config.seed, label: config.label })
     }
 
     /// Reply with a `ConfigEcho` describing the cached config. Lets
@@ -215,10 +192,7 @@ impl WasmActor for ProbeWithConfig {
     #[handler::manual]
     fn on_config_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: ConfigQuery) {
         if ctx.reply_target().is_some() {
-            ctx.reply(&ConfigEcho {
-                seed: self.seed,
-                label: self.label.clone(),
-            });
+            ctx.reply(&ConfigEcho { seed: self.seed, label: self.label.clone() });
         }
     }
 }

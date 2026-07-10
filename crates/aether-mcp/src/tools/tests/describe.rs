@@ -11,28 +11,18 @@ async fn describe_kinds_returns_the_substrate_inventory() {
     let (_chassis, port) = boot_hub();
     let mcp = connect_mcp(port);
     let out = mcp
-        .describe_kinds(Parameters(DescribeKindsArgs {
-            engine_id: None,
-            prefix: None,
-            full: false,
-        }))
+        .describe_kinds(Parameters(DescribeKindsArgs { engine_id: None, prefix: None, full: false }))
         .await
         .expect("describe_kinds ok");
     let kinds: serde_json::Value = serde_json::from_str(&out).expect("json array");
     let arr = kinds.as_array().expect("result is a JSON array");
-    assert!(
-        !arr.is_empty(),
-        "describe_kinds should list the substrate vocabulary"
-    );
+    assert!(!arr.is_empty(), "describe_kinds should list the substrate vocabulary");
     let first = &arr[0];
     assert!(
         first.get("name").is_some() && first.get("shape").is_some(),
         "compact entry must carry name and shape, got: {first}",
     );
-    assert!(
-        first.get("schema").is_none(),
-        "compact entry must not carry schema, got: {first}",
-    );
+    assert!(first.get("schema").is_none(), "compact entry must not carry schema, got: {first}",);
 }
 
 /// `describe_kinds(prefix="aether.fs")` narrows the array to only the
@@ -50,16 +40,10 @@ async fn describe_kinds_prefix_narrows_results() {
         .await
         .expect("describe_kinds ok");
     let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
-    assert!(
-        !arr.is_empty(),
-        "aether.fs prefix should match at least one kind"
-    );
+    assert!(!arr.is_empty(), "aether.fs prefix should match at least one kind");
     for entry in &arr {
         let name = entry["name"].as_str().expect("name is a string");
-        assert!(
-            name.starts_with("aether.fs"),
-            "entry name {name:?} should start with \"aether.fs\"",
-        );
+        assert!(name.starts_with("aether.fs"), "entry name {name:?} should start with \"aether.fs\"",);
     }
 }
 
@@ -78,19 +62,10 @@ async fn describe_kinds_full_returns_schema_key() {
         .await
         .expect("describe_kinds ok");
     let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
-    assert!(
-        !arr.is_empty(),
-        "aether.fs prefix should match at least one kind"
-    );
+    assert!(!arr.is_empty(), "aether.fs prefix should match at least one kind");
     for entry in &arr {
-        assert!(
-            entry.get("schema").is_some(),
-            "full entry must carry schema, got: {entry}",
-        );
-        assert!(
-            entry.get("shape").is_none(),
-            "full entry must not carry shape, got: {entry}",
-        );
+        assert!(entry.get("schema").is_some(), "full entry must carry schema, got: {entry}",);
+        assert!(entry.get("shape").is_none(), "full entry must not carry shape, got: {entry}",);
     }
 }
 
@@ -109,28 +84,21 @@ async fn describe_kinds_nonmatching_prefix_returns_empty() {
         .await
         .expect("describe_kinds returns ok even with no matches");
     let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
-    assert!(
-        arr.is_empty(),
-        "non-matching prefix should return empty array, got {arr:?}"
-    );
+    assert!(arr.is_empty(), "non-matching prefix should return empty array, got {arr:?}");
 }
 
 #[tokio::test]
 async fn describe_kinds_live_path_surfaces_component_defined_kind() {
     use aether_data::{KindDescriptor, SchemaType};
 
-    let component_kind = KindDescriptor {
-        name: "test.issue_2420.uniquely_named_kind".to_owned(),
-        schema: SchemaType::String,
-    };
+    let component_kind =
+        KindDescriptor { name: "test.issue_2420.uniquely_named_kind".to_owned(), schema: SchemaType::String };
 
     // Pre-condition: absent from the static vocabulary in both the
     // production and the test binary — ensures the assertion below
     // can only pass if describe_kinds reads the engine cache.
     assert!(
-        !descriptors::all()
-            .iter()
-            .any(|d| d.name == component_kind.name),
+        !descriptors::all().iter().any(|d| d.name == component_kind.name),
         "test invariant: the component kind must not be in descriptors::all()",
     );
 
@@ -149,22 +117,15 @@ async fn describe_kinds_live_path_surfaces_component_defined_kind() {
     mcp.merge_into_engine_cache(engine, vec![component_kind.clone()]);
 
     let out = mcp
-        .describe_kinds(Parameters(DescribeKindsArgs {
-            engine_id: Some(engine_id_str),
-            prefix: None,
-            full: false,
-        }))
+        .describe_kinds(Parameters(DescribeKindsArgs { engine_id: Some(engine_id_str), prefix: None, full: false }))
         .await
         .expect("describe_kinds ok with engine_id");
     let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
     assert!(
-        arr.iter()
-            .any(|e| e["name"].as_str() == Some(&component_kind.name)),
+        arr.iter().any(|e| e["name"].as_str() == Some(&component_kind.name)),
         "describe_kinds must surface the component-defined kind from the engine cache; \
          got names: {:?}",
-        arr.iter()
-            .filter_map(|e| e["name"].as_str())
-            .collect::<Vec<_>>(),
+        arr.iter().filter_map(|e| e["name"].as_str()).collect::<Vec<_>>(),
     );
 }
 
@@ -188,17 +149,13 @@ async fn describe_component_reads_the_cache() {
             component: tagged.clone(),
         }))
         .await;
-    assert!(
-        miss.is_err(),
-        "an uncached component addressed by id should be a tool error"
-    );
+    assert!(miss.is_err(), "an uncached component addressed by id should be a tool error");
 
     // Seed the cache with a handler that declares a `-> R` reply
     // contract (ADR-0109). `describe_component` surfaces the `reply`
     // kind id verbatim through serde, so a caller reads `In -> Out`
     // before issuing the call.
-    let engine =
-        EngineId(Uuid::parse_str(engine_id).expect("test setup: engine_id is a valid uuid"));
+    let engine = EngineId(Uuid::parse_str(engine_id).expect("test setup: engine_id is a valid uuid"));
     let seeded = ComponentCapabilities {
         handlers: vec![aether_kinds::HandlerCapability {
             id: KindId(0x11),
@@ -213,18 +170,12 @@ async fn describe_component_reads_the_cache() {
         .expect("test setup: component cache mutex is never poisoned")
         .insert((engine, mailbox), seeded);
     let hit = mcp
-        .describe_component(Parameters(DescribeComponentArgs {
-            engine_id: engine_id.to_owned(),
-            component: tagged,
-        }))
+        .describe_component(Parameters(DescribeComponentArgs { engine_id: engine_id.to_owned(), component: tagged }))
         .await
         .expect("cached component describes");
     let caps: serde_json::Value = serde_json::from_str(&hit).expect("json");
     assert!(caps.get("handlers").is_some(), "capabilities shape: {hit}");
-    assert!(
-        !caps["handlers"][0]["reply"].is_null(),
-        "the handler's ADR-0109 reply contract is surfaced: {hit}"
-    );
+    assert!(!caps["handlers"][0]["reply"].is_null(), "the handler's ADR-0109 reply contract is surfaced: {hit}");
 
     // Name-addressed describe resolves the lineage name to the SAME
     // cache key the substrate registers under (`mailbox_id_from_path`,

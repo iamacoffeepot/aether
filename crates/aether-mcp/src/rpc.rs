@@ -85,12 +85,7 @@ impl Connection {
     /// the demux router thread. Blocking — call it off the async
     /// runtime.
     fn establish(addr: &str) -> anyhow::Result<Self> {
-        let RpcConnection {
-            client,
-            server,
-            inbound,
-            reader,
-        } = RpcClient::connect(
+        let RpcConnection { client, server, inbound, reader } = RpcClient::connect(
             addr,
             PeerKind::Client {
                 client_name: "aether-mcp".to_owned(),
@@ -108,73 +103,59 @@ impl Connection {
         // Out-of-process aether-mcp router — not an engine actor; there is no
         // settlement/trace umbrella in this process to opt out of.
         #[allow(clippy::disallowed_methods)]
-        let router = thread::Builder::new()
-            .name("aether-mcp-rpc-router".into())
-            .spawn(move || {
-                // `inbound.recv()` ends with `Err` once the reader
-                // sidecar drops its sender (connection torn down).
-                while let Ok(frame) = inbound.recv() {
-                    let cid = match &frame {
-                        WireFrame::ReplyEvent { cid, .. } | WireFrame::ReplyEnd { cid, .. } => *cid,
-                        WireFrame::Bye { reason } => {
-                            tracing::warn!(
-                                target: "aether_mcp::rpc",
-                                reason = %reason,
-                                "hub closed the rpc connection; draining pending calls",
-                            );
-                            break;
-                        }
-                        // Hello / HelloAck / Call / Ping / Pong: a
-                        // client-side router never expects these.
-                        _ => continue,
-                    };
-                    // `cid == 0` is the wire-level out-of-band error
-                    // sentinel (iamacoffeepot/aether#1271): the server
-                    // couldn't decode the frame far enough to learn the
-                    // real cid (e.g. an oversize body), so the
-                    // structured error rides under id 0. Fan it out to
-                    // every pending caller so the original failing
-                    // call surfaces the wire error instead of hanging.
-                    // A `ReplyEnd { cid: 0, Ok }` is not a valid wire
-                    // shape — only `Err` frames carry the sentinel.
-                    let fanout =
-                        cid == 0 && matches!(&frame, WireFrame::ReplyEnd { result: Err(_), .. },);
-                    let pending = router_pending
-                        .lock()
-                        .expect("router pending mutex is never poisoned");
-                    if fanout {
-                        for tx in pending.values() {
-                            let _ = tx.send(frame.clone());
-                        }
-                    } else if let Some(tx) = pending.get(&cid) {
-                        // A failed send just means a stray frame for an
-                        // already-finished call — drop it.
-                        let _ = tx.send(frame);
+        let router = thread::Builder::new().name("aether-mcp-rpc-router".into()).spawn(move || {
+            // `inbound.recv()` ends with `Err` once the reader
+            // sidecar drops its sender (connection torn down).
+            while let Ok(frame) = inbound.recv() {
+                let cid = match &frame {
+                    WireFrame::ReplyEvent { cid, .. } | WireFrame::ReplyEnd { cid, .. } => *cid,
+                    WireFrame::Bye { reason } => {
+                        tracing::warn!(
+                            target: "aether_mcp::rpc",
+                            reason = %reason,
+                            "hub closed the rpc connection; draining pending calls",
+                        );
+                        break;
                     }
-                    drop(pending);
+                    // Hello / HelloAck / Call / Ping / Pong: a
+                    // client-side router never expects these.
+                    _ => continue,
+                };
+                // `cid == 0` is the wire-level out-of-band error
+                // sentinel (iamacoffeepot/aether#1271): the server
+                // couldn't decode the frame far enough to learn the
+                // real cid (e.g. an oversize body), so the
+                // structured error rides under id 0. Fan it out to
+                // every pending caller so the original failing
+                // call surfaces the wire error instead of hanging.
+                // A `ReplyEnd { cid: 0, Ok }` is not a valid wire
+                // shape — only `Err` frames carry the sentinel.
+                let fanout = cid == 0 && matches!(&frame, WireFrame::ReplyEnd { result: Err(_), .. },);
+                let pending = router_pending.lock().expect("router pending mutex is never poisoned");
+                if fanout {
+                    for tx in pending.values() {
+                        let _ = tx.send(frame.clone());
+                    }
+                } else if let Some(tx) = pending.get(&cid) {
+                    // A failed send just means a stray frame for an
+                    // already-finished call — drop it.
+                    let _ = tx.send(frame);
                 }
-                // The router is exiting (peer `Bye` or `inbound` closed).
-                // Mark the connection dead and drop every pending sender
-                // — all under the `pending` lock, so a concurrent
-                // `call_once` either registers before this (and sees
-                // `None` when its sender drops here) or observes `dead`
-                // after and bails without registering. Either way no
-                // call hangs waiting on a router that will never run.
-                let mut pending = router_pending
-                    .lock()
-                    .expect("router pending mutex is never poisoned");
-                router_dead.store(true, Ordering::Release);
-                pending.clear();
-            })?;
+                drop(pending);
+            }
+            // The router is exiting (peer `Bye` or `inbound` closed).
+            // Mark the connection dead and drop every pending sender
+            // — all under the `pending` lock, so a concurrent
+            // `call_once` either registers before this (and sees
+            // `None` when its sender drops here) or observes `dead`
+            // after and bails without registering. Either way no
+            // call hangs waiting on a router that will never run.
+            let mut pending = router_pending.lock().expect("router pending mutex is never poisoned");
+            router_dead.store(true, Ordering::Release);
+            pending.clear();
+        })?;
 
-        Ok(Self {
-            client: Mutex::new(client),
-            pending,
-            dead,
-            server,
-            _reader: reader,
-            _router: router,
-        })
+        Ok(Self { client: Mutex::new(client), pending, dead, server, _reader: reader, _router: router })
     }
 }
 
@@ -226,12 +207,7 @@ impl RpcSession {
     /// Snapshot the live connection. Held only long enough to clone the
     /// `Arc`, so concurrent calls don't serialize on the socket.
     fn live(&self) -> Arc<Connection> {
-        Arc::clone(
-            &self
-                .conn
-                .lock()
-                .expect("rpc connection mutex is never poisoned"),
-        )
+        Arc::clone(&self.conn.lock().expect("rpc connection mutex is never poisoned"))
     }
 
     /// Re-dial the hub and swap in a fresh [`Connection`], single-flight
@@ -268,10 +244,7 @@ impl RpcSession {
                     // when the last in-flight call releases it; its
                     // `RpcReaderHandle::Drop` then tears the dead socket
                     // down and the old router thread exits.
-                    *self
-                        .conn
-                        .lock()
-                        .expect("rpc connection mutex is never poisoned") = Arc::new(conn);
+                    *self.conn.lock().expect("rpc connection mutex is never poisoned") = Arc::new(conn);
                     self.generation.fetch_add(1, Ordering::Release);
                     tracing::info!(
                         target: "aether_mcp::rpc",
@@ -309,9 +282,7 @@ impl RpcSession {
                 // Retry once against the healed connection. A second
                 // transport failure surfaces — we don't loop on a hub
                 // that keeps dropping mid-call.
-                self.call_once(&envelope)
-                    .await
-                    .map_err(CallError::into_anyhow)
+                self.call_once(&envelope).await.map_err(CallError::into_anyhow)
             }
             Err(other) => Err(other.into_anyhow()),
         }
@@ -339,8 +310,7 @@ impl RpcSession {
             match rx.recv().await {
                 Some(WireFrame::ReplyEvent { envelope, .. }) => events.push(envelope),
                 Some(WireFrame::ReplyEnd { result, .. }) => {
-                    break result
-                        .map_err(|e| CallError::Call(anyhow::anyhow!("rpc call failed: {e:?}")));
+                    break result.map_err(|e| CallError::Call(anyhow::anyhow!("rpc call failed: {e:?}")));
                 }
                 // The router only ever routes ReplyEvent / ReplyEnd to
                 // a pending entry.
@@ -355,10 +325,7 @@ impl RpcSession {
                 }
             }
         };
-        conn.pending
-            .lock()
-            .expect("rpc pending mutex is never poisoned")
-            .remove(&cid);
+        conn.pending.lock().expect("rpc pending mutex is never poisoned").remove(&cid);
         outcome.map(|()| events)
     }
 
@@ -375,9 +342,7 @@ impl RpcSession {
                  this usually means the capability is unavailable on that engine \
                  (e.g. frame capture on a windowless/headless substrate emits no frame)"
             )),
-            n => Err(anyhow::anyhow!(
-                "expected exactly one reply event, got {n} (kind {kind}, mailbox {mailbox})"
-            )),
+            n => Err(anyhow::anyhow!("expected exactly one reply event, got {n} (kind {kind}, mailbox {mailbox})")),
         }
     }
 
@@ -411,9 +376,7 @@ impl RpcSession {
                     "rpc call_collecting hit a dead socket; re-dialing the hub",
                 );
                 self.reconnect(generation).await?;
-                self.call_collecting_once(&envelope, timeout)
-                    .await
-                    .map_err(CallError::into_anyhow)
+                self.call_collecting_once(&envelope, timeout).await.map_err(CallError::into_anyhow)
             }
             Err(other) => Err(other.into_anyhow()),
         }
@@ -463,10 +426,7 @@ impl RpcSession {
                 () = &mut sleep => break Ok(true),
             }
         };
-        conn.pending
-            .lock()
-            .expect("rpc pending mutex is never poisoned")
-            .remove(&cid);
+        conn.pending.lock().expect("rpc pending mutex is never poisoned").remove(&cid);
         outcome.map(|timed_out| (events, timed_out))
     }
 
@@ -500,10 +460,7 @@ impl RpcSession {
         let generation = self.generation.load(Ordering::Acquire);
         let conn = self.live();
         if conn.dead.load(Ordering::Acquire) {
-            return Err(CallError::Transport {
-                generation,
-                source: anyhow::anyhow!("rpc connection is closed"),
-            });
+            return Err(CallError::Transport { generation, source: anyhow::anyhow!("rpc connection is closed") });
         }
         conn.client
             .lock()
@@ -521,10 +478,7 @@ enum CallError {
     /// The socket is dead (write error, or the call's channel closed
     /// after a `Bye`). Carries the connection generation the caller
     /// saw, so [`RpcSession::reconnect`] stays single-flight.
-    Transport {
-        generation: u64,
-        source: anyhow::Error,
-    },
+    Transport { generation: u64, source: anyhow::Error },
     /// The hub answered with `ReplyEnd { Err }` — a clean call failure,
     /// not a transport problem.
     Call(anyhow::Error),
@@ -548,10 +502,7 @@ fn classify_write_error(e: &RpcClientError, generation: u64) -> CallError {
     if matches!(e, RpcClientError::Frame(FrameError::EncodeTooLarge { .. })) {
         return CallError::Call(anyhow::anyhow!("rpc call encode rejected: {e}"));
     }
-    CallError::Transport {
-        generation,
-        source: anyhow::anyhow!("rpc call write failed: {e}"),
-    }
+    CallError::Transport { generation, source: anyhow::anyhow!("rpc call write failed: {e}") }
 }
 
 /// Send a `Call` over `conn`, register the resulting `cid` against
@@ -568,15 +519,9 @@ fn register_call(
     tx: mpsc::UnboundedSender<WireFrame>,
     generation: u64,
 ) -> Result<u64, CallError> {
-    let mut pending = conn
-        .pending
-        .lock()
-        .expect("rpc pending mutex is never poisoned");
+    let mut pending = conn.pending.lock().expect("rpc pending mutex is never poisoned");
     if conn.dead.load(Ordering::Acquire) {
-        return Err(CallError::Transport {
-            generation,
-            source: anyhow::anyhow!("rpc connection is closed"),
-        });
+        return Err(CallError::Transport { generation, source: anyhow::anyhow!("rpc connection is closed") });
     }
     let cid = conn
         .client
@@ -593,9 +538,7 @@ fn register_call(
 #[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
 mod tests {
     use super::RpcSession;
-    use aether_capabilities::rpc::{
-        HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame,
-    };
+    use aether_capabilities::rpc::{HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{KindId, MailboxId};
     use std::io::{BufReader, ErrorKind};
@@ -641,10 +584,7 @@ mod tests {
     impl ServeMode {
         /// One `ReplyEvent` + `ReplyEnd` — the original echo behaviour.
         fn echo() -> Self {
-            Self {
-                reply_events: 1,
-                send_end: true,
-            }
+            Self { reply_events: 1, send_end: true }
         }
     }
 
@@ -664,9 +604,7 @@ mod tests {
             // Non-blocking accept so the loop can observe the shutdown
             // flag promptly; each session reads on its own thread with a
             // blocking socket (no read timeout → no partial-frame race).
-            listener
-                .set_nonblocking(true)
-                .expect("fake hub set_nonblocking");
+            listener.set_nonblocking(true).expect("fake hub set_nonblocking");
 
             let shutdown = Arc::new(AtomicBool::new(false));
             let conns: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
@@ -679,9 +617,7 @@ mod tests {
                     while !shutdown_for_thread.load(Ordering::Acquire) {
                         match listener.accept() {
                             Ok((stream, _)) => {
-                                stream
-                                    .set_nonblocking(false)
-                                    .expect("session socket blocking");
+                                stream.set_nonblocking(false).expect("session socket blocking");
                                 conns_for_thread
                                     .lock()
                                     .expect("conns mutex")
@@ -706,15 +642,7 @@ mod tests {
                 })
                 .expect("spawn fake hub");
 
-            (
-                Self {
-                    shutdown,
-                    conns,
-                    port: bound_port,
-                    thread: Some(thread),
-                },
-                bound_port,
-            )
+            (Self { shutdown, conns, port: bound_port, thread: Some(thread) }, bound_port)
         }
 
         /// Handshake + blocking echo loop for one accepted connection.
@@ -753,30 +681,14 @@ mod tests {
                     // Client closed or `stop` shut the socket down.
                     Err(_) => return,
                 };
-                if let WireFrame::Call {
-                    cid: Some(cid),
-                    envelope,
-                } = frame
-                {
+                if let WireFrame::Call { cid: Some(cid), envelope } = frame {
                     for _ in 0..mode.reply_events {
-                        write_frame(
-                            &mut write_half,
-                            &WireFrame::ReplyEvent {
-                                cid,
-                                envelope: envelope.clone(),
-                            },
-                        )
-                        .expect("write ReplyEvent");
+                        write_frame(&mut write_half, &WireFrame::ReplyEvent { cid, envelope: envelope.clone() })
+                            .expect("write ReplyEvent");
                     }
                     if mode.send_end {
-                        write_frame(
-                            &mut write_half,
-                            &WireFrame::ReplyEnd {
-                                cid,
-                                result: Ok(()),
-                            },
-                        )
-                        .expect("write ReplyEnd");
+                        write_frame(&mut write_half, &WireFrame::ReplyEnd { cid, result: Ok(()) })
+                            .expect("write ReplyEnd");
                     }
                 }
             }
@@ -833,18 +745,14 @@ mod tests {
     async fn run_redial_after_hub_restart() {
         // Boot the first hub on an OS-picked port.
         let (hub, port) = FakeHub::serve(0);
-        let session =
-            task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
-                .await
-                .expect("connect task")
-                .expect("first connect");
+        let session = task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
+            .await
+            .expect("connect task")
+            .expect("first connect");
         let session = Arc::new(session);
 
         // First call against the live hub round-trips.
-        session
-            .call(probe_envelope())
-            .await
-            .expect("first call succeeds against the live hub");
+        session.call(probe_envelope()).await.expect("first call succeeds against the live hub");
 
         // Kill the hub. The client reader sees EOF and the router
         // drains every pending call.
@@ -854,10 +762,7 @@ mod tests {
         // re-dial and fails cleanly (not a hang). This proves the
         // dead-socket path surfaces an error rather than blocking.
         let while_down = session.call(probe_envelope()).await;
-        assert!(
-            while_down.is_err(),
-            "a call against a still-down hub must error cleanly, not hang",
-        );
+        assert!(while_down.is_err(), "a call against a still-down hub must error cleanly, not hang",);
 
         // The hub comes back on the same port.
         let (hub2, port2) = FakeHub::serve(port);
@@ -865,10 +770,7 @@ mod tests {
 
         // The next call must re-dial and succeed — not error out
         // permanently on the dead socket.
-        session
-            .call(probe_envelope())
-            .await
-            .expect("call must re-dial + succeed once the hub is back");
+        session.call(probe_envelope()).await.expect("call must re-dial + succeed once the hub is back");
 
         hub2.stop();
     }
@@ -879,11 +781,10 @@ mod tests {
     #[tokio::test]
     async fn concurrent_calls_share_a_single_redial() {
         let (hub, port) = FakeHub::serve(0);
-        let session =
-            task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
-                .await
-                .expect("connect task")
-                .expect("first connect");
+        let session = task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
+            .await
+            .expect("connect task")
+            .expect("first connect");
         let session = Arc::new(session);
 
         // Warm the connection.
@@ -900,14 +801,10 @@ mod tests {
         let mut tasks = Vec::new();
         for _ in 0..8 {
             let session = Arc::clone(&session);
-            tasks.push(tokio::spawn(
-                async move { session.call(probe_envelope()).await },
-            ));
+            tasks.push(tokio::spawn(async move { session.call(probe_envelope()).await }));
         }
         for t in tasks {
-            t.await
-                .expect("join")
-                .expect("every concurrent call recovers after the single re-dial");
+            t.await.expect("join").expect("every concurrent call recovers after the single re-dial");
         }
 
         // One successful re-dial advanced the generation exactly once.
@@ -934,18 +831,11 @@ mod tests {
     /// multi-reply collection the single-event `call_one` discarded.
     #[tokio::test]
     async fn call_collecting_returns_events_in_order() {
-        let (hub, port) = FakeHub::serve_with(
-            0,
-            ServeMode {
-                reply_events: 2,
-                send_end: true,
-            },
-        );
-        let session =
-            task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
-                .await
-                .expect("connect task")
-                .expect("connect");
+        let (hub, port) = FakeHub::serve_with(0, ServeMode { reply_events: 2, send_end: true });
+        let session = task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
+            .await
+            .expect("connect task")
+            .expect("connect");
 
         let (events, timed_out) = session
             .call_collecting(probe_envelope(), Duration::from_secs(5))
@@ -955,17 +845,9 @@ mod tests {
         assert!(!timed_out, "a settled call is not a timeout");
         assert_eq!(events.len(), 2, "both echoed reply events are surfaced");
         for event in &events {
-            assert_eq!(
-                event.payload,
-                probe_envelope().payload,
-                "each reply echoes the probe envelope",
-            );
+            assert_eq!(event.payload, probe_envelope().payload, "each reply echoes the probe envelope",);
         }
-        assert_eq!(
-            pending_count(&session),
-            0,
-            "a settled call de-registers its cid",
-        );
+        assert_eq!(pending_count(&session), 0, "a settled call de-registers its cid",);
 
         hub.stop();
     }
@@ -986,11 +868,10 @@ mod tests {
                 send_end: false,
             },
         );
-        let session =
-            task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
-                .await
-                .expect("connect task")
-                .expect("connect");
+        let session = task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
+            .await
+            .expect("connect task")
+            .expect("connect");
 
         let (events, timed_out) = session
             .call_collecting(probe_envelope(), Duration::from_millis(250))
@@ -998,16 +879,8 @@ mod tests {
             .expect("a timeout is not a transport error");
 
         assert!(timed_out, "withholding ReplyEnd forces the timeout arm");
-        assert_eq!(
-            events.len(),
-            1,
-            "the reply that arrived before the timeout is still returned",
-        );
-        assert_eq!(
-            pending_count(&session),
-            0,
-            "a timed-out call must not leak its cid in pending",
-        );
+        assert_eq!(events.len(), 1, "the reply that arrived before the timeout is still returned",);
+        assert_eq!(pending_count(&session), 0, "a timed-out call must not leak its cid in pending",);
 
         hub.stop();
     }
@@ -1020,22 +893,14 @@ mod tests {
     #[tokio::test]
     async fn fire_does_not_register_pending() {
         let (hub, port) = FakeHub::serve(0);
-        let session =
-            task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
-                .await
-                .expect("connect task")
-                .expect("connect");
-
-        session
-            .fire(probe_envelope())
+        let session = task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
             .await
-            .expect("fire writes the call");
+            .expect("connect task")
+            .expect("connect");
 
-        assert_eq!(
-            pending_count(&session),
-            0,
-            "fire registers nothing in pending",
-        );
+        session.fire(probe_envelope()).await.expect("fire writes the call");
+
+        assert_eq!(pending_count(&session), 0, "fire registers nothing in pending",);
 
         hub.stop();
     }
@@ -1045,23 +910,13 @@ mod tests {
     /// kind and mailbox so the caller can correlate the diagnostic.
     #[tokio::test]
     async fn call_one_zero_replies_is_actionable_error() {
-        let (hub, port) = FakeHub::serve_with(
-            0,
-            ServeMode {
-                reply_events: 0,
-                send_end: true,
-            },
-        );
-        let session =
-            task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
-                .await
-                .expect("connect task")
-                .expect("connect");
-
-        let err = session
-            .call_one(probe_envelope())
+        let (hub, port) = FakeHub::serve_with(0, ServeMode { reply_events: 0, send_end: true });
+        let session = task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
             .await
-            .expect_err("zero-reply settle must be an error");
+            .expect("connect task")
+            .expect("connect");
+
+        let err = session.call_one(probe_envelope()).await.expect_err("zero-reply settle must be an error");
 
         let msg = err.to_string();
         assert!(
@@ -1081,23 +936,13 @@ mod tests {
     /// zero-reply case (issue 1934) and names the kind and mailbox.
     #[tokio::test]
     async fn call_one_multi_reply_is_protocol_error() {
-        let (hub, port) = FakeHub::serve_with(
-            0,
-            ServeMode {
-                reply_events: 2,
-                send_end: true,
-            },
-        );
-        let session =
-            task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
-                .await
-                .expect("connect task")
-                .expect("connect");
-
-        let err = session
-            .call_one(probe_envelope())
+        let (hub, port) = FakeHub::serve_with(0, ServeMode { reply_events: 2, send_end: true });
+        let session = task::spawn_blocking(move || RpcSession::connect(&format!("127.0.0.1:{port}")))
             .await
-            .expect_err("multi-reply settle must be an error");
+            .expect("connect task")
+            .expect("connect");
+
+        let err = session.call_one(probe_envelope()).await.expect_err("multi-reply settle must be an error");
 
         let msg = err.to_string();
         assert!(

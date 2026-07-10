@@ -35,11 +35,9 @@ fn main() {
     emit_provenance();
     println!("cargo:rerun-if-env-changed=AETHER_BUNDLE_MANIFEST");
     println!("cargo:rerun-if-changed=src/bundle_pack.rs");
-    let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by cargo"))
-        .join("bundle_pack.bin");
-    let pack = env::var_os("AETHER_BUNDLE_MANIFEST").map_or_else(Pack::default, |manifest_path| {
-        pack_for(Path::new(&manifest_path))
-    });
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by cargo")).join("bundle_pack.bin");
+    let pack = env::var_os("AETHER_BUNDLE_MANIFEST")
+        .map_or_else(Pack::default, |manifest_path| pack_for(Path::new(&manifest_path)));
     fs::write(&out, encode_pack(&pack)).expect("write bundle pack blob");
 }
 
@@ -67,11 +65,7 @@ fn emit_provenance() {
         .filter(|out| out.status.success())
         .and_then(|out| String::from_utf8(out.stdout).ok())
         .map_or_else(|| "unknown".to_owned(), |s| s.trim().to_owned());
-    let git_sha = if git_sha.is_empty() {
-        "unknown".to_owned()
-    } else {
-        git_sha
-    };
+    let git_sha = if git_sha.is_empty() { "unknown".to_owned() } else { git_sha };
     println!("cargo:rustc-env=AETHER_GIT_SHA={git_sha}");
     let profile = env::var("PROFILE").unwrap_or_else(|_| "unknown".to_owned());
     println!("cargo:rustc-env=AETHER_BUILD_PROFILE={profile}");

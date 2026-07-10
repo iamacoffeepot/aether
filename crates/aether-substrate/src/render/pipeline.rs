@@ -10,8 +10,7 @@
 
 use super::targets::Targets;
 use super::{
-    CAMERA_UNIFORM_BYTES, DEPTH_FORMAT, IDENTITY_VIEW_PROJ, MAIN_SHADER_WGSL, VERTEX_STRIDE,
-    vertex_buffer_layout,
+    CAMERA_UNIFORM_BYTES, DEPTH_FORMAT, IDENTITY_VIEW_PROJ, MAIN_SHADER_WGSL, VERTEX_STRIDE, vertex_buffer_layout,
 };
 use std::slice;
 
@@ -73,20 +72,19 @@ pub fn build_main_pipeline(
         source: wgpu::ShaderSource::Wgsl(MAIN_SHADER_WGSL.into()),
     });
 
-    let camera_bind_group_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("camera bind group layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(CAMERA_UNIFORM_BYTES),
-                },
-                count: None,
-            }],
-        });
+    let camera_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("camera bind group layout"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(CAMERA_UNIFORM_BYTES),
+            },
+            count: None,
+        }],
+    });
 
     let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("camera uniform"),
@@ -99,10 +97,7 @@ pub fn build_main_pipeline(
     let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("camera bind group"),
         layout: &camera_bind_group_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: camera_buffer.as_entire_binding(),
-        }],
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() }],
     });
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -159,14 +154,7 @@ pub fn build_main_pipeline(
         mapped_at_creation: false,
     });
 
-    Pipeline {
-        pipeline,
-        vertex_buffer,
-        camera_buffer,
-        camera_bind_group,
-        camera_bind_group_layout,
-        pipeline_layout,
-    }
+    Pipeline { pipeline, vertex_buffer, camera_buffer, camera_bind_group, camera_bind_group_layout, pipeline_layout }
 }
 
 /// Upload the frame's `vertices` + `view_proj`, then draw them into
@@ -206,10 +194,7 @@ pub fn record_main_pass(
         // The buffer was created from a `usize`, so its size
         // round-trips losslessly.
         #[allow(clippy::cast_possible_truncation)]
-        return Err(RenderError::VertexBufferOverflow {
-            vertex_bytes,
-            cap: buffer_bytes as usize,
-        });
+        return Err(RenderError::VertexBufferOverflow { vertex_bytes, cap: buffer_bytes as usize });
     }
     if !vertices.is_empty() {
         queue.write_buffer(&pipeline.vertex_buffer, 0, vertices);
@@ -228,21 +213,13 @@ pub fn record_main_pass(
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color {
-                    r: 0.05,
-                    g: 0.07,
-                    b: 0.12,
-                    a: 1.0,
-                }),
+                load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.07, b: 0.12, a: 1.0 }),
                 store: wgpu::StoreOp::Store,
             },
         })],
         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
             view: &targets.depth.view,
-            depth_ops: Some(wgpu::Operations {
-                load: wgpu::LoadOp::Clear(1.0),
-                store: wgpu::StoreOp::Store,
-            }),
+            depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
             stencil_ops: None,
         }),
         timestamp_writes: None,

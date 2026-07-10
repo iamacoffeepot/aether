@@ -153,11 +153,7 @@ impl<'a> ser::Serializer for &'a mut Serializer {
         Ok(())
     }
 
-    fn serialize_newtype_struct<T: ?Sized + Serialize>(
-        self,
-        _name: &'static str,
-        value: &T,
-    ) -> Result<(), Error> {
+    fn serialize_newtype_struct<T: ?Sized + Serialize>(self, _name: &'static str, value: &T) -> Result<(), Error> {
         value.serialize(self)
     }
 
@@ -173,22 +169,14 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     }
 
     fn serialize_seq(self, _len: Option<usize>) -> Result<SeqSerializer<'a>, Error> {
-        Ok(SeqSerializer {
-            ser: self,
-            count: 0,
-            buf: Vec::new(),
-        })
+        Ok(SeqSerializer { ser: self, count: 0, buf: Vec::new() })
     }
 
     fn serialize_tuple(self, _len: usize) -> Result<&'a mut Serializer, Error> {
         Ok(self)
     }
 
-    fn serialize_tuple_struct(
-        self,
-        _name: &'static str,
-        _len: usize,
-    ) -> Result<&'a mut Serializer, Error> {
+    fn serialize_tuple_struct(self, _name: &'static str, _len: usize) -> Result<&'a mut Serializer, Error> {
         Ok(self)
     }
 
@@ -204,18 +192,10 @@ impl<'a> ser::Serializer for &'a mut Serializer {
     }
 
     fn serialize_map(self, _len: Option<usize>) -> Result<MapSerializer<'a>, Error> {
-        Ok(MapSerializer {
-            ser: self,
-            entries: Vec::new(),
-            key: None,
-        })
+        Ok(MapSerializer { ser: self, entries: Vec::new(), key: None })
     }
 
-    fn serialize_struct(
-        self,
-        _name: &'static str,
-        _len: usize,
-    ) -> Result<&'a mut Serializer, Error> {
+    fn serialize_struct(self, _name: &'static str, _len: usize) -> Result<&'a mut Serializer, Error> {
         Ok(self)
     }
 
@@ -309,10 +289,7 @@ impl ser::SerializeMap for MapSerializer<'_> {
     }
 
     fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
-        let key = self
-            .key
-            .take()
-            .ok_or_else(|| Error::Message("map value serialized without a key".into()))?;
+        let key = self.key.take().ok_or_else(|| Error::Message("map value serialized without a key".into()))?;
         self.entries.push((key, encode(value)?));
         Ok(())
     }

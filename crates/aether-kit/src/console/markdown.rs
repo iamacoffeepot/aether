@@ -46,11 +46,7 @@ struct MarkdownBlockState {
     in_fenced_code: bool,
 }
 
-pub fn format_visible_history(
-    lines: &VecDeque<ConsoleLine>,
-    start: usize,
-    end: usize,
-) -> Vec<MarkdownLine> {
+pub fn format_visible_history(lines: &VecDeque<ConsoleLine>, start: usize, end: usize) -> Vec<MarkdownLine> {
     let mut state = MarkdownBlockState::default();
     let bounded_end = end.min(lines.len());
     let mut formatted = Vec::new();
@@ -82,11 +78,7 @@ impl MarkdownBlockState {
                 code_block: true,
                 thematic_break: false,
                 runs: vec![MarkdownRun {
-                    text: if was_open {
-                        String::from("```")
-                    } else {
-                        text.trim().to_string()
-                    },
+                    text: if was_open { String::from("```") } else { text.trim().to_string() },
                     tone: MarkdownTone::MutedMarker,
                 }],
             };
@@ -97,10 +89,7 @@ impl MarkdownBlockState {
                 style: line.style,
                 code_block: true,
                 thematic_break: false,
-                runs: vec![MarkdownRun {
-                    text: sanitize_text(text),
-                    tone: MarkdownTone::FencedCode,
-                }],
+                runs: vec![MarkdownRun { text: sanitize_text(text), tone: MarkdownTone::FencedCode }],
             };
         }
 
@@ -109,10 +98,7 @@ impl MarkdownBlockState {
                 style: line.style,
                 code_block: true,
                 thematic_break: false,
-                runs: vec![MarkdownRun {
-                    text: sanitize_text(code),
-                    tone: MarkdownTone::FencedCode,
-                }],
+                runs: vec![MarkdownRun { text: sanitize_text(code), tone: MarkdownTone::FencedCode }],
             };
         }
 
@@ -121,10 +107,7 @@ impl MarkdownBlockState {
                 style: line.style,
                 code_block: false,
                 thematic_break: true,
-                runs: vec![MarkdownRun {
-                    text: String::new(),
-                    tone: MarkdownTone::ThematicBreak,
-                }],
+                runs: vec![MarkdownRun { text: String::new(), tone: MarkdownTone::ThematicBreak }],
             };
         }
 
@@ -133,10 +116,7 @@ impl MarkdownBlockState {
                 style: line.style,
                 code_block: false,
                 thematic_break: false,
-                runs: vec![MarkdownRun {
-                    text: sanitize_text(text.trim()),
-                    tone: MarkdownTone::TableBorder,
-                }],
+                runs: vec![MarkdownRun { text: sanitize_text(text.trim()), tone: MarkdownTone::TableBorder }],
             };
         }
 
@@ -158,10 +138,7 @@ fn literal_line(line: &ConsoleLine) -> MarkdownLine {
         style: line.style,
         code_block: false,
         thematic_break: false,
-        runs: vec![MarkdownRun {
-            text: sanitize_text(&line.text),
-            tone: MarkdownTone::Text,
-        }],
+        runs: vec![MarkdownRun { text: sanitize_text(&line.text), tone: MarkdownTone::Text }],
     }
 }
 
@@ -172,25 +149,14 @@ fn format_block_line(text: &str, style: LineStyle) -> MarkdownLine {
             style,
             code_block: false,
             thematic_break: false,
-            runs: vec![MarkdownRun {
-                text: sanitize_text(body),
-                tone: MarkdownTone::Heading,
-            }],
+            runs: vec![MarkdownRun { text: sanitize_text(body), tone: MarkdownTone::Heading }],
         };
     }
 
     if let Some(body) = trimmed.strip_prefix("> ") {
-        let mut runs = vec![MarkdownRun {
-            text: String::from("> "),
-            tone: MarkdownTone::QuoteMarker,
-        }];
+        let mut runs = vec![MarkdownRun { text: String::from("> "), tone: MarkdownTone::QuoteMarker }];
         runs.extend(inline_runs(body, MarkdownTone::QuoteText));
-        return MarkdownLine {
-            style,
-            code_block: false,
-            thematic_break: false,
-            runs,
-        };
+        return MarkdownLine { style, code_block: false, thematic_break: false, runs };
     }
 
     if trimmed == ">" {
@@ -198,53 +164,26 @@ fn format_block_line(text: &str, style: LineStyle) -> MarkdownLine {
             style,
             code_block: false,
             thematic_break: false,
-            runs: vec![MarkdownRun {
-                text: String::from(">"),
-                tone: MarkdownTone::QuoteMarker,
-            }],
+            runs: vec![MarkdownRun { text: String::from(">"), tone: MarkdownTone::QuoteMarker }],
         };
     }
 
     if let Some((marker, task, body)) = unordered_list(trimmed) {
-        let mut runs = vec![MarkdownRun {
-            text: marker,
-            tone: MarkdownTone::ListMarker,
-        }];
+        let mut runs = vec![MarkdownRun { text: marker, tone: MarkdownTone::ListMarker }];
         if let Some(task) = task {
-            runs.push(MarkdownRun {
-                text: task,
-                tone: MarkdownTone::TaskMarker,
-            });
+            runs.push(MarkdownRun { text: task, tone: MarkdownTone::TaskMarker });
         }
         runs.extend(inline_runs(body, MarkdownTone::Text));
-        return MarkdownLine {
-            style,
-            code_block: false,
-            thematic_break: false,
-            runs,
-        };
+        return MarkdownLine { style, code_block: false, thematic_break: false, runs };
     }
 
     if let Some((marker, body)) = ordered_list(trimmed) {
-        let mut runs = vec![MarkdownRun {
-            text: marker,
-            tone: MarkdownTone::ListMarker,
-        }];
+        let mut runs = vec![MarkdownRun { text: marker, tone: MarkdownTone::ListMarker }];
         runs.extend(inline_runs(body, MarkdownTone::Text));
-        return MarkdownLine {
-            style,
-            code_block: false,
-            thematic_break: false,
-            runs,
-        };
+        return MarkdownLine { style, code_block: false, thematic_break: false, runs };
     }
 
-    MarkdownLine {
-        style,
-        code_block: false,
-        thematic_break: false,
-        runs: inline_runs(text, MarkdownTone::Text),
-    }
+    MarkdownLine { style, code_block: false, thematic_break: false, runs: inline_runs(text, MarkdownTone::Text) }
 }
 
 fn fenced_code_marker(text: &str) -> Option<&str> {
@@ -319,14 +258,8 @@ fn unordered_list(text: &str) -> Option<(String, Option<String>, &str)> {
 fn task_marker(text: &str) -> Option<(Option<String>, &str)> {
     text.strip_prefix("[ ] ")
         .map(|body| (Some(String::from("[ ] ")), body))
-        .or_else(|| {
-            text.strip_prefix("[x] ")
-                .map(|body| (Some(String::from("[x] ")), body))
-        })
-        .or_else(|| {
-            text.strip_prefix("[X] ")
-                .map(|body| (Some(String::from("[x] ")), body))
-        })
+        .or_else(|| text.strip_prefix("[x] ").map(|body| (Some(String::from("[x] ")), body)))
+        .or_else(|| text.strip_prefix("[X] ").map(|body| (Some(String::from("[x] ")), body)))
 }
 
 fn ordered_list(text: &str) -> Option<(String, &str)> {
@@ -345,10 +278,7 @@ fn ordered_list(text: &str) -> Option<(String, &str)> {
     if !(rest.starts_with(". ") || rest.starts_with(") ")) {
         return None;
     }
-    Some((
-        text.get(..digits + 2)?.to_string(),
-        text.get(digits + 2..)?.trim_start(),
-    ))
+    Some((text.get(..digits + 2)?.to_string(), text.get(digits + 2..)?.trim_start()))
 }
 
 fn table_row(text: &str) -> bool {
@@ -359,18 +289,12 @@ fn table_row(text: &str) -> bool {
 fn table_separator(text: &str) -> bool {
     let trimmed = text.trim();
     trimmed.contains('|')
-        && trimmed
-            .chars()
-            .all(|ch| ch == '|' || ch == '-' || ch == ':' || ch.is_whitespace())
+        && trimmed.chars().all(|ch| ch == '|' || ch == '-' || ch == ':' || ch.is_whitespace())
         && trimmed.chars().filter(|ch| *ch == '-').count() >= 3
 }
 
 fn table_runs(text: &str, header: bool) -> Vec<MarkdownRun> {
-    let cell_tone = if header {
-        MarkdownTone::TableHeader
-    } else {
-        MarkdownTone::TableText
-    };
+    let cell_tone = if header { MarkdownTone::TableHeader } else { MarkdownTone::TableText };
     let mut runs = Vec::new();
     let mut cell = String::new();
     for ch in text.chars() {
@@ -418,10 +342,7 @@ fn inline_runs(text: &str, default_tone: MarkdownTone) -> Vec<MarkdownRun> {
     }
     push_owned_run(&mut runs, &mut plain, default_tone);
     if runs.is_empty() {
-        runs.push(MarkdownRun {
-            text: String::new(),
-            tone: default_tone,
-        });
+        runs.push(MarkdownRun { text: String::new(), tone: default_tone });
     }
     runs
 }
@@ -433,25 +354,7 @@ fn escaped_at(text: &str) -> Option<(usize, &str)> {
 }
 
 fn is_markdown_punctuation(ch: char) -> bool {
-    matches!(
-        ch,
-        '\\' | '`'
-            | '*'
-            | '_'
-            | '{'
-            | '}'
-            | '['
-            | ']'
-            | '('
-            | ')'
-            | '#'
-            | '+'
-            | '-'
-            | '.'
-            | '!'
-            | '|'
-            | '>'
-    )
+    matches!(ch, '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '(' | ')' | '#' | '+' | '-' | '.' | '!' | '|' | '>')
 }
 
 fn image_at(text: &str) -> Option<(usize, String, MarkdownTone)> {
@@ -461,11 +364,7 @@ fn image_at(text: &str) -> Option<(usize, String, MarkdownTone)> {
     let target_end = body.get(target_start..)?.find(')')? + target_start;
     let alt = sanitize_text(&body[..alt_end]);
     let target = sanitize_text(&body[target_start..target_end]);
-    let rendered = if target.is_empty() {
-        format!("[image: {alt}]")
-    } else {
-        format!("[image: {alt}] ({target})")
-    };
+    let rendered = if target.is_empty() { format!("[image: {alt}]") } else { format!("[image: {alt}] ({target})") };
     Some((2 + target_end + 1, rendered, MarkdownTone::Image))
 }
 
@@ -479,11 +378,7 @@ fn link_at(text: &str) -> Option<(usize, String, MarkdownTone)> {
         return None;
     }
     let target = sanitize_text(&body[target_start..target_end]);
-    let rendered = if target.is_empty() {
-        label
-    } else {
-        format!("{label} ({target})")
-    };
+    let rendered = if target.is_empty() { label } else { format!("{label} ({target})") };
     Some((1 + target_end + 1, rendered, MarkdownTone::Link))
 }
 
@@ -502,11 +397,7 @@ fn delimited_at(text: &str) -> Option<(usize, &str, MarkdownTone)> {
         if close_index == 0 {
             continue;
         }
-        return Some((
-            open.len() + close_index + close.len(),
-            &rest[..close_index],
-            tone,
-        ));
+        return Some((open.len() + close_index + close.len(), &rest[..close_index], tone));
     }
     None
 }
@@ -530,10 +421,7 @@ fn push_run(runs: &mut Vec<MarkdownRun>, text: &str, tone: MarkdownTone) {
         last.text.push_str(&sanitized);
         return;
     }
-    runs.push(MarkdownRun {
-        text: sanitized,
-        tone,
-    });
+    runs.push(MarkdownRun { text: sanitized, tone });
 }
 
 fn sanitize_text(text: &str) -> String {
@@ -558,18 +446,11 @@ mod tests {
     use alloc::collections::VecDeque;
 
     fn line(text: &str) -> ConsoleLine {
-        ConsoleLine {
-            text: text.to_string(),
-            style: LineStyle::Output,
-        }
+        ConsoleLine { text: text.to_string(), style: LineStyle::Output }
     }
 
     fn tones(markdown: &MarkdownLine) -> Vec<(&str, MarkdownTone)> {
-        markdown
-            .runs
-            .iter()
-            .map(|run| (run.text.as_str(), run.tone))
-            .collect()
+        markdown.runs.iter().map(|run| (run.text.as_str(), run.tone)).collect()
     }
 
     #[test]
@@ -580,9 +461,7 @@ mod tests {
         );
 
         assert_eq!(
-            runs.iter()
-                .map(|run| (run.text.as_str(), run.tone))
-                .collect::<Vec<_>>(),
+            runs.iter().map(|run| (run.text.as_str(), run.tone)).collect::<Vec<_>>(),
             vec![
                 ("plain ", MarkdownTone::Text),
                 ("em", MarkdownTone::Emphasis),
@@ -602,51 +481,31 @@ mod tests {
     fn block_markdown_formats_heading_quote_lists_and_tasks() {
         let mut state = MarkdownBlockState::default();
 
-        assert_eq!(
-            tones(&state.format_line(&line("## Heading ##"), None)),
-            vec![("Heading", MarkdownTone::Heading)]
-        );
+        assert_eq!(tones(&state.format_line(&line("## Heading ##"), None)), vec![("Heading", MarkdownTone::Heading)]);
         assert_eq!(
             tones(&state.format_line(&line("> quoted"), None)),
-            vec![
-                ("> ", MarkdownTone::QuoteMarker),
-                ("quoted", MarkdownTone::QuoteText),
-            ]
+            vec![("> ", MarkdownTone::QuoteMarker), ("quoted", MarkdownTone::QuoteText),]
         );
         assert_eq!(
             tones(&state.format_line(&line("- [x] done"), None)),
-            vec![
-                ("- ", MarkdownTone::ListMarker),
-                ("[x] ", MarkdownTone::TaskMarker),
-                ("done", MarkdownTone::Text),
-            ]
+            vec![("- ", MarkdownTone::ListMarker), ("[x] ", MarkdownTone::TaskMarker), ("done", MarkdownTone::Text),]
         );
         assert_eq!(
             tones(&state.format_line(&line("1. first"), None)),
-            vec![
-                ("1. ", MarkdownTone::ListMarker),
-                ("first", MarkdownTone::Text),
-            ]
+            vec![("1. ", MarkdownTone::ListMarker), ("first", MarkdownTone::Text),]
         );
     }
 
     #[test]
     fn fenced_code_state_survives_visible_window_slicing() {
-        let lines = VecDeque::from([
-            line("```rust"),
-            line("let value = **literal**;"),
-            line("```"),
-            line("**strong**"),
-        ]);
+        let lines =
+            VecDeque::from([line("```rust"), line("let value = **literal**;"), line("```"), line("**strong**")]);
 
         let visible = format_visible_history(&lines, 1, 3);
 
         assert_eq!(visible.len(), 2);
         assert!(visible[0].code_block);
-        assert_eq!(
-            tones(&visible[0]),
-            vec![("let value = **literal**;", MarkdownTone::FencedCode)]
-        );
+        assert_eq!(tones(&visible[0]), vec![("let value = **literal**;", MarkdownTone::FencedCode)]);
         assert!(visible[1].code_block);
     }
 
@@ -675,9 +534,7 @@ mod tests {
         let runs = inline_runs("\\*not emphasized\\* \\| bad\u{0007}", MarkdownTone::Text);
 
         assert_eq!(
-            runs.iter()
-                .map(|run| (run.text.as_str(), run.tone))
-                .collect::<Vec<_>>(),
+            runs.iter().map(|run| (run.text.as_str(), run.tone)).collect::<Vec<_>>(),
             vec![
                 ("*", MarkdownTone::EscapedMarker),
                 ("not emphasized", MarkdownTone::Text),
@@ -692,14 +549,8 @@ mod tests {
     #[test]
     fn input_echoes_are_not_markdown_formatted() {
         let mut state = MarkdownBlockState::default();
-        let input = ConsoleLine {
-            text: String::from("> **literal**"),
-            style: LineStyle::Input,
-        };
+        let input = ConsoleLine { text: String::from("> **literal**"), style: LineStyle::Input };
 
-        assert_eq!(
-            tones(&state.format_line(&input, None)),
-            vec![("> **literal**", MarkdownTone::Text)]
-        );
+        assert_eq!(tones(&state.format_line(&input, None)), vec![("> **literal**", MarkdownTone::Text)]);
     }
 }

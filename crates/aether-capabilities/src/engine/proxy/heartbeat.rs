@@ -41,11 +41,7 @@ impl Drop for HeartbeatHandle {
 /// each interval — the empty-payload wake shape the RPC reader
 /// sidecar uses (the timer carries no data, only the schedule). The
 /// handle's `Drop` stops + joins the thread.
-pub fn spawn_heartbeat(
-    mailer: Arc<Mailer>,
-    self_mailbox: MailboxId,
-    interval: Duration,
-) -> HeartbeatHandle {
+pub fn spawn_heartbeat(mailer: Arc<Mailer>, self_mailbox: MailboxId, interval: Duration) -> HeartbeatHandle {
     let (stop_tx, stop_rx) = mpsc::channel::<()>();
     let tick_kind = KindId(<EngineHeartbeatTick as Kind>::ID.0);
     // Infra timer thread below the mail layer — like the RPC reader
@@ -61,17 +57,9 @@ pub fn spawn_heartbeat(
             // proxy dropped the sender) returns otherwise and ends
             // the loop.
             while stop_rx.recv_timeout(interval) == Err(mpsc::RecvTimeoutError::Timeout) {
-                mailer.push(Mail::new(
-                    self_mailbox,
-                    tick_kind,
-                    EngineHeartbeatTick::default().encode_into_bytes(),
-                    1,
-                ));
+                mailer.push(Mail::new(self_mailbox, tick_kind, EngineHeartbeatTick::default().encode_into_bytes(), 1));
             }
         })
         .expect("spawn aether-engine-heartbeat thread");
-    HeartbeatHandle {
-        stop: Some(stop_tx),
-        thread: Some(thread),
-    }
+    HeartbeatHandle { stop: Some(stop_tx), thread: Some(thread) }
 }

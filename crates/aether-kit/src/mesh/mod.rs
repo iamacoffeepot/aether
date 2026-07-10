@@ -35,9 +35,7 @@
 mod kinds;
 pub use kinds::*;
 
-use aether_actor::{
-    ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
-};
+use aether_actor::{ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::fs::{Read, ReadResult};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawTriangle, Vertex};
@@ -93,9 +91,7 @@ impl WasmActor for MeshViewer {
     const NAMESPACE: &'static str = "aether.kit.mesh";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(MeshViewer {
-            triangles: Vec::new(),
-        })
+        Ok(MeshViewer { triangles: Vec::new() })
     }
 
     //noinspection DuplicatedCode
@@ -146,24 +142,15 @@ impl WasmActor for MeshViewer {
     #[allow(clippy::needless_pass_by_value, clippy::unused_self)]
     #[handler::single]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: LoadMesh) {
-        let read = Read {
-            namespace: msg.namespace.clone(),
-            path: msg.path.clone(),
-        };
-        let context = MeshLoadContext {
-            reply: ctx.reply_target(),
-            namespace: msg.namespace,
-            path: msg.path,
-        };
+        let read = Read { namespace: msg.namespace.clone(), path: msg.path.clone() };
+        let context = MeshLoadContext { reply: ctx.reply_target(), namespace: msg.namespace, path: msg.path };
         tracing::info!(
             target: "aether_kit",
             namespace = %read.namespace,
             path = %read.path,
             "load requested; issuing read",
         );
-        let _ = ctx
-            .actor::<FsCapability>()
-            .send_with_context(&read, &context);
+        let _ = ctx.actor::<FsCapability>().send_with_context(&read, &context);
     }
 
     /// Consumes the substrate's I/O reply. Dispatches on the request
@@ -216,17 +203,11 @@ struct LoadOutcome {
 
 impl LoadOutcome {
     fn ok() -> Self {
-        Self {
-            error: None,
-            warnings: Vec::new(),
-        }
+        Self { error: None, warnings: Vec::new() }
     }
 
     fn failed(error: String) -> Self {
-        Self {
-            error: Some(error),
-            warnings: Vec::new(),
-        }
+        Self { error: Some(error), warnings: Vec::new() }
     }
 }
 
@@ -274,16 +255,7 @@ impl MeshViewer {
             return;
         };
         let ok = outcome.error.is_none();
-        ctx.reply_to(
-            sender,
-            &MeshLoadResult {
-                ok,
-                namespace,
-                path,
-                error: outcome.error,
-                warnings: outcome.warnings,
-            },
-        );
+        ctx.reply_to(sender, &MeshLoadResult { ok, namespace, path, error: outcome.error, warnings: outcome.warnings });
     }
 
     fn try_replace_dsl(&mut self, dsl: &str) -> LoadOutcome {
@@ -392,24 +364,9 @@ fn to_draw_triangle_palette(tri: [Point3; 3], color: u32) -> DrawTriangle {
 fn to_draw_triangle_rgb(tri: [Vec3; 3], color: Rgb) -> DrawTriangle {
     DrawTriangle {
         verts: [
-            Vertex {
-                x: tri[0].x,
-                y: tri[0].y,
-                z: tri[0].z,
-                color,
-            },
-            Vertex {
-                x: tri[1].x,
-                y: tri[1].y,
-                z: tri[1].z,
-                color,
-            },
-            Vertex {
-                x: tri[2].x,
-                y: tri[2].y,
-                z: tri[2].z,
-                color,
-            },
+            Vertex { x: tri[0].x, y: tri[0].y, z: tri[0].z, color },
+            Vertex { x: tri[1].x, y: tri[1].y, z: tri[1].z, color },
+            Vertex { x: tri[2].x, y: tri[2].y, z: tri[2].z, color },
         ],
     }
 }
@@ -447,10 +404,8 @@ pub fn parse_obj(text: &str) -> Result<Vec<DrawTriangle>, ObjParseError> {
                 vertices.push([x, y, z]);
             }
             "f" => {
-                let indices: Vec<usize> = parts
-                    .filter_map(|tok| tok.split('/').next())
-                    .filter_map(|n| n.parse::<usize>().ok())
-                    .collect();
+                let indices: Vec<usize> =
+                    parts.filter_map(|tok| tok.split('/').next()).filter_map(|n| n.parse::<usize>().ok()).collect();
                 if indices.len() < 3 {
                     return Err(ObjParseError::DegenerateFace);
                 }
@@ -463,24 +418,9 @@ pub fn parse_obj(text: &str) -> Result<Vec<DrawTriangle>, ObjParseError> {
                     let vc = vertices[c];
                     triangles.push(DrawTriangle {
                         verts: [
-                            Vertex {
-                                x: va[0],
-                                y: va[1],
-                                z: va[2],
-                                color: default_color,
-                            },
-                            Vertex {
-                                x: vb[0],
-                                y: vb[1],
-                                z: vb[2],
-                                color: default_color,
-                            },
-                            Vertex {
-                                x: vc[0],
-                                y: vc[1],
-                                z: vc[2],
-                                color: default_color,
-                            },
+                            Vertex { x: va[0], y: va[1], z: va[2], color: default_color },
+                            Vertex { x: vb[0], y: vb[1], z: vb[2], color: default_color },
+                            Vertex { x: vc[0], y: vc[1], z: vc[2], color: default_color },
                         ],
                     });
                 }
@@ -493,10 +433,7 @@ pub fn parse_obj(text: &str) -> Result<Vec<DrawTriangle>, ObjParseError> {
 
 fn obj_idx(one_based: usize, count: usize) -> Result<usize, ObjParseError> {
     if one_based == 0 || one_based > count {
-        Err(ObjParseError::VertexIndexOutOfRange {
-            index: one_based,
-            defined: count,
-        })
+        Err(ObjParseError::VertexIndexOutOfRange { index: one_based, defined: count })
     } else {
         Ok(one_based - 1)
     }
@@ -544,8 +481,7 @@ mod tests {
             s off\n\
             g group_name\n\
             f 1 2 3\n";
-        let tris =
-            parse_obj(obj).expect("test setup: OBJ with unknown directives still parses faces");
+        let tris = parse_obj(obj).expect("test setup: OBJ with unknown directives still parses faces");
         assert_eq!(tris.len(), 1);
     }
 

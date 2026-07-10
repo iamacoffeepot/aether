@@ -92,11 +92,7 @@ impl Mesh {
     /// Build the Delaunay triangulation of the given points. Returns
     /// an empty mesh if `points` is empty.
     pub(super) fn build(points: Vec<Point2>) -> Self {
-        let mut mesh = Self {
-            vertices: Vec::new(),
-            triangles: Vec::new(),
-            super_count: 0,
-        };
+        let mut mesh = Self { vertices: Vec::new(), triangles: Vec::new(), super_count: 0 };
         if points.is_empty() {
             return mesh;
         }
@@ -116,10 +112,7 @@ impl Mesh {
     /// Iterator over alive (non-deleted) triangles, yielding
     /// `(TriId, &Triangle)` pairs.
     pub(super) fn alive_triangles(&self) -> impl Iterator<Item = (TriId, &Triangle)> {
-        self.triangles
-            .iter()
-            .enumerate()
-            .filter_map(|(i, t)| t.as_ref().map(|t| (i, t)))
+        self.triangles.iter().enumerate().filter_map(|(i, t)| t.as_ref().map(|t| (i, t)))
     }
 
     /// True iff edge `(u, v)` exists in some alive triangle.
@@ -301,12 +294,7 @@ impl Mesh {
                     // (inherited from the parent triangle's CCW winding,
                     // since cyclic permutation preserves orientation).
                     let v_self = tri.verts[i];
-                    if in_circle(
-                        self.vertices[v_self],
-                        self.vertices[a],
-                        self.vertices[b],
-                        self.vertices[opp],
-                    ) > 0
+                    if in_circle(self.vertices[v_self], self.vertices[a], self.vertices[b], self.vertices[opp]) > 0
                         && self.flip_edge(tid, i).is_some()
                     {
                         flipped = true;
@@ -353,10 +341,7 @@ impl Mesh {
             // borrowed against the live iterator would conflict with the
             // mutating call inside the loop.
             #[allow(clippy::needless_collect)]
-            let candidates: Vec<_> = self
-                .alive_triangles()
-                .map(|(i, t)| (i, t.clone()))
-                .collect();
+            let candidates: Vec<_> = self.alive_triangles().map(|(i, t)| (i, t.clone())).collect();
             'outer: for (tid2, tri) in candidates {
                 for i in 0..3 {
                     let a = tri.verts[(i + 1) % 3];
@@ -464,10 +449,7 @@ impl Mesh {
         self.vertices.push(v0);
         self.vertices.push(v1);
         self.vertices.push(v2);
-        self.triangles.push(Some(Triangle {
-            verts: [0, 1, 2],
-            neighbors: [None, None, None],
-        }));
+        self.triangles.push(Some(Triangle { verts: [0, 1, 2], neighbors: [None, None, None] }));
     }
 
     /// Walk through the mesh from any alive triangle to the one that
@@ -478,9 +460,7 @@ impl Mesh {
         let p = self.vertices[vid];
         let mut current = self.first_alive();
         loop {
-            let tri = self.triangles[current]
-                .as_ref()
-                .expect("walked into a deleted triangle");
+            let tri = self.triangles[current].as_ref().expect("walked into a deleted triangle");
             let v = tri.verts;
             let mut moved = false;
             for i in 0..3 {
@@ -525,9 +505,7 @@ impl Mesh {
         visited[start] = true;
         let mut stack = vec![start];
         while let Some(tid) = stack.pop() {
-            let tri = self.triangles[tid]
-                .as_ref()
-                .expect("expand_cavity: visited a deleted triangle");
+            let tri = self.triangles[tid].as_ref().expect("expand_cavity: visited a deleted triangle");
             // Iterate neighbor slots in fixed order for determinism.
             let neighbors: [Option<TriId>; 3] = tri.neighbors;
             for &maybe_n in &neighbors {
@@ -536,17 +514,9 @@ impl Mesh {
                     continue;
                 }
                 visited[n] = true;
-                let n_tri = self.triangles[n]
-                    .as_ref()
-                    .expect("expand_cavity: neighbor was deleted");
+                let n_tri = self.triangles[n].as_ref().expect("expand_cavity: neighbor was deleted");
                 let nv = n_tri.verts;
-                if in_circle(
-                    self.vertices[nv[0]],
-                    self.vertices[nv[1]],
-                    self.vertices[nv[2]],
-                    p,
-                ) > 0
-                {
+                if in_circle(self.vertices[nv[0]], self.vertices[nv[1]], self.vertices[nv[2]], p) > 0 {
                     cavity.push(n);
                     stack.push(n);
                 }
@@ -575,9 +545,7 @@ impl Mesh {
         };
         let mut boundary = Vec::new();
         for &tid in cavity {
-            let tri = self.triangles[tid]
-                .as_ref()
-                .expect("cavity_boundary: cavity contains deleted triangle");
+            let tri = self.triangles[tid].as_ref().expect("cavity_boundary: cavity contains deleted triangle");
             for i in 0..3 {
                 let n = tri.neighbors[i];
                 let in_cav = matches!(n, Some(n) if in_cavity[n]);
@@ -632,9 +600,7 @@ impl Mesh {
             });
             // If we have an outside neighbor, update its back-pointer.
             if let Some(o) = outside {
-                let o_tri = self.triangles[o]
-                    .as_mut()
-                    .expect("outside neighbor unexpectedly deleted");
+                let o_tri = self.triangles[o].as_mut().expect("outside neighbor unexpectedly deleted");
                 let edge_idx = (0..3)
                     .find(|&j| {
                         let na = o_tri.verts[(j + 1) % 3];
@@ -671,9 +637,7 @@ impl Mesh {
             // vid (verts[0]) to a (verts[1]). The fan triangle adjacent
             // here has `a` in its `b` slot.
             let nbr_opp_b = by_b.get(&a).copied();
-            let t = self.triangles[tid]
-                .as_mut()
-                .expect("fan triangle just inserted at first_new_tid + k must be live");
+            let t = self.triangles[tid].as_mut().expect("fan triangle just inserted at first_new_tid + k must be live");
             t.neighbors[1] = nbr_opp_a;
             t.neighbors[2] = nbr_opp_b;
         }
@@ -696,11 +660,7 @@ mod tests {
             let p0 = mesh.vertices[tri.verts[0]];
             let p1 = mesh.vertices[tri.verts[1]];
             let p2 = mesh.vertices[tri.verts[2]];
-            assert!(
-                orient2d(p0, p1, p2) > 0,
-                "triangle {tid} is not CCW: verts={:?}",
-                tri.verts
-            );
+            assert!(orient2d(p0, p1, p2) > 0, "triangle {tid} is not CCW: verts={:?}", tri.verts);
         }
     }
 
@@ -712,14 +672,9 @@ mod tests {
                 let Some(n) = tri.neighbors[i] else {
                     continue;
                 };
-                let n_tri = mesh.triangles[n]
-                    .as_ref()
-                    .expect("neighbor pointer to deleted triangle");
+                let n_tri = mesh.triangles[n].as_ref().expect("neighbor pointer to deleted triangle");
                 let back = (0..3).any(|j| n_tri.neighbors[j] == Some(tid));
-                assert!(
-                    back,
-                    "triangle {tid} → {n} but {n} has no back-pointer to {tid}"
-                );
+                assert!(back, "triangle {tid} → {n} but {n} has no back-pointer to {tid}");
             }
         }
     }
@@ -735,12 +690,7 @@ mod tests {
                 if vid == v[0] || vid == v[1] || vid == v[2] {
                     continue;
                 }
-                let sign = in_circle(
-                    mesh.vertices[v[0]],
-                    mesh.vertices[v[1]],
-                    mesh.vertices[v[2]],
-                    mesh.vertices[vid],
-                );
+                let sign = in_circle(mesh.vertices[v[0]], mesh.vertices[v[1]], mesh.vertices[v[2]], mesh.vertices[vid]);
                 assert!(
                     sign <= 0,
                     "Delaunay violated: triangle {tid} {:?} contains vertex {vid} {:?}",
@@ -874,10 +824,8 @@ mod tests {
         // Walk a snapshot of triangles and try a flip on every interior
         // edge. Some flips will be rejected (non-convex quad / boundary);
         // accept that. Survivors must keep the mesh consistent.
-        let snapshot: Vec<(TriId, [Option<TriId>; 3])> = mesh
-            .alive_triangles()
-            .map(|(i, t)| (i, t.neighbors))
-            .collect();
+        let snapshot: Vec<(TriId, [Option<TriId>; 3])> =
+            mesh.alive_triangles().map(|(i, t)| (i, t.neighbors)).collect();
         for (tid, neighbors) in snapshot {
             for (i, n) in neighbors.iter().enumerate() {
                 if n.is_some() && mesh.triangles[tid].is_some() {

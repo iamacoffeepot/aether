@@ -82,14 +82,9 @@ impl fmt::Display for EncodeError {
                 write!(f, "field {field:?} expected {expected}")
             }
             Self::OutOfRange { field, reason } => write!(f, "field {field:?}: {reason}"),
-            Self::ArrayLengthMismatch {
-                field,
-                expected,
-                got,
-            } => write!(
-                f,
-                "field {field:?}: array length {got} != expected {expected}"
-            ),
+            Self::ArrayLengthMismatch { field, expected, got } => {
+                write!(f, "field {field:?}: array length {got} != expected {expected}")
+            }
             Self::UnsupportedSchema(shape) => {
                 write!(f, "schema arm not supported by hub encoder: {shape}")
             }
@@ -120,16 +115,11 @@ pub fn encode_schema(params: &Value, schema: &SchemaType) -> Result<Vec<u8>, Enc
             if let Some(obj) = params.as_object()
                 && !obj.is_empty()
             {
-                return Err(EncodeError::UnexpectedField(
-                    obj.keys().next().cloned().unwrap_or_default(),
-                ));
+                return Err(EncodeError::UnexpectedField(obj.keys().next().cloned().unwrap_or_default()));
             }
             Ok(Vec::new())
         }
-        SchemaType::Struct {
-            fields,
-            repr_c: true,
-        } => {
+        SchemaType::Struct { fields, repr_c: true } => {
             let obj = params.as_object().ok_or(EncodeError::NotAnObject)?;
             for key in obj.keys() {
                 if !fields.iter().any(|f| f.name == *key) {
@@ -160,43 +150,33 @@ pub fn encode_schema(params: &Value, schema: &SchemaType) -> Result<Vec<u8>, Enc
 // Splitting the arms into helpers would force per-arm context structs
 // without saving readability.
 #[allow(clippy::too_many_lines)]
-fn encode_wire_value(
-    value: &Value,
-    schema: &SchemaType,
-    path: &str,
-    out: &mut Vec<u8>,
-) -> Result<(), EncodeError> {
+fn encode_wire_value(value: &Value, schema: &SchemaType, path: &str, out: &mut Vec<u8>) -> Result<(), EncodeError> {
     match schema {
         SchemaType::Unit => Ok(()),
         SchemaType::Bool => {
-            let b = value.as_bool().ok_or_else(|| EncodeError::TypeMismatch {
-                field: path.to_owned(),
-                expected: "bool",
-            })?;
+            let b = value
+                .as_bool()
+                .ok_or_else(|| EncodeError::TypeMismatch { field: path.to_owned(), expected: "bool" })?;
             out.push(u8::from(b));
             Ok(())
         }
         SchemaType::Scalar(p) => write_scalar_wire(*p, value, path, out),
         SchemaType::String => {
-            let s = value.as_str().ok_or_else(|| EncodeError::TypeMismatch {
-                field: path.to_owned(),
-                expected: "string",
-            })?;
+            let s = value
+                .as_str()
+                .ok_or_else(|| EncodeError::TypeMismatch { field: path.to_owned(), expected: "string" })?;
             write_count(out, s.len(), path)?;
             out.extend_from_slice(s.as_bytes());
             Ok(())
         }
         SchemaType::Bytes => {
-            let arr = value.as_array().ok_or_else(|| EncodeError::TypeMismatch {
-                field: path.to_owned(),
-                expected: "byte array",
-            })?;
+            let arr = value
+                .as_array()
+                .ok_or_else(|| EncodeError::TypeMismatch { field: path.to_owned(), expected: "byte array" })?;
             write_count(out, arr.len(), path)?;
             for (i, v) in arr.iter().enumerate() {
                 let n = as_unsigned(v, path, "u8")?;
-                let b: u8 = n
-                    .try_into()
-                    .map_err(|_| oor(&format!("{path}[{i}]"), "u8"))?;
+                let b: u8 = n.try_into().map_err(|_| oor(&format!("{path}[{i}]"), "u8"))?;
                 out.push(b);
             }
             Ok(())
@@ -211,10 +191,9 @@ fn encode_wire_value(
             Ok(())
         }
         SchemaType::Vec(inner) => {
-            let arr = value.as_array().ok_or_else(|| EncodeError::TypeMismatch {
-                field: path.to_owned(),
-                expected: "array",
-            })?;
+            let arr = value
+                .as_array()
+                .ok_or_else(|| EncodeError::TypeMismatch { field: path.to_owned(), expected: "array" })?;
             write_count(out, arr.len(), path)?;
             for (i, v) in arr.iter().enumerate() {
                 let elem_path = format!("{path}[{i}]");
@@ -223,10 +202,9 @@ fn encode_wire_value(
             Ok(())
         }
         SchemaType::Array { element, len } => {
-            let arr = value.as_array().ok_or_else(|| EncodeError::TypeMismatch {
-                field: path.to_owned(),
-                expected: "array",
-            })?;
+            let arr = value
+                .as_array()
+                .ok_or_else(|| EncodeError::TypeMismatch { field: path.to_owned(), expected: "array" })?;
             if arr.len() != *len as usize {
                 return Err(EncodeError::ArrayLengthMismatch {
                     field: path.to_owned(),
@@ -244,19 +222,17 @@ fn encode_wire_value(
             // Wire struct: concatenated field bytes in declaration
             // order. Reject unexpected keys (typo defense) and require
             // every field to be present.
-            let obj = value.as_object().ok_or_else(|| EncodeError::TypeMismatch {
-                field: path.to_owned(),
-                expected: "object",
-            })?;
+            let obj = value
+                .as_object()
+                .ok_or_else(|| EncodeError::TypeMismatch { field: path.to_owned(), expected: "object" })?;
             for key in obj.keys() {
                 if !fields.iter().any(|f| f.name == *key) {
                     return Err(EncodeError::UnexpectedField(format!("{path}.{key}")));
                 }
             }
             for field in fields.iter() {
-                let v = obj
-                    .get(&*field.name)
-                    .ok_or_else(|| EncodeError::MissingField(format!("{path}.{}", field.name)))?;
+                let v =
+                    obj.get(&*field.name).ok_or_else(|| EncodeError::MissingField(format!("{path}.{}", field.name)))?;
                 let field_path = format!("{path}.{}", field.name);
                 encode_wire_value(v, &field.ty, &field_path, out)?;
             }
@@ -268,20 +244,15 @@ fn encode_wire_value(
             // variants. Same shape serde emits by default. Wire is a
             // `u32` little-endian discriminant, then the variant body.
             let (tag, body) = decode_enum_tag(value, path)?;
-            let variant = variants.iter().find(|v| v.name() == tag).ok_or_else(|| {
-                EncodeError::TypeMismatch {
-                    field: path.to_owned(),
-                    expected: "enum variant matching schema",
-                }
+            let variant = variants.iter().find(|v| v.name() == tag).ok_or_else(|| EncodeError::TypeMismatch {
+                field: path.to_owned(),
+                expected: "enum variant matching schema",
             })?;
             out.extend_from_slice(&variant.discriminant().to_le_bytes());
             encode_enum_body(body, variant, path, out)?;
             Ok(())
         }
-        SchemaType::Map {
-            key: key_schema,
-            value: value_schema,
-        } => {
+        SchemaType::Map { key: key_schema, value: value_schema } => {
             // Issue #232 + proto3-style JSON mapping. Input is a JSON
             // object: keys live as strings on the wire-side regardless
             // of declared key type. We parse each JSON-string key
@@ -295,10 +266,9 @@ fn encode_wire_value(
             // numeric order. Sender-order independence keeps two tools
             // producing byte-identical payloads from semantically-equal
             // inputs.
-            let json_map = value.as_object().ok_or_else(|| EncodeError::TypeMismatch {
-                field: path.to_owned(),
-                expected: "object",
-            })?;
+            let json_map = value
+                .as_object()
+                .ok_or_else(|| EncodeError::TypeMismatch { field: path.to_owned(), expected: "object" })?;
             let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(json_map.len());
             for (k_str, v_json) in json_map {
                 let entry_path = format!("{path}.{k_str}");
@@ -337,20 +307,13 @@ fn encode_wire_value(
 /// `UnsupportedSchema` if the schema's `type_id` doesn't correspond
 /// to a typed-id newtype the codec knows how to translate.
 fn decode_type_id_value(value: &Value, type_id: u64, path: &str) -> Result<u64, EncodeError> {
-    let expected = aether_data::tag_for_type_id(type_id)
-        .ok_or(EncodeError::UnsupportedSchema("unknown TypeId in schema"))?;
+    let expected =
+        aether_data::tag_for_type_id(type_id).ok_or(EncodeError::UnsupportedSchema("unknown TypeId in schema"))?;
     match value {
-        Value::String(s) => {
-            tagged_id::decode_with_tag(s, expected).map_err(|e| EncodeError::OutOfRange {
-                field: path.to_owned(),
-                reason: format!("invalid tagged id: {e}"),
-            })
-        }
+        Value::String(s) => tagged_id::decode_with_tag(s, expected)
+            .map_err(|e| EncodeError::OutOfRange { field: path.to_owned(), reason: format!("invalid tagged id: {e}") }),
         Value::Number(_) => Ok(as_unsigned(value, path, "u64 (typed-id back-compat)")?),
-        _ => Err(EncodeError::TypeMismatch {
-            field: path.to_owned(),
-            expected: "tagged-id string or u64 number",
-        }),
+        _ => Err(EncodeError::TypeMismatch { field: path.to_owned(), expected: "tagged-id string or u64 number" }),
     }
 }
 
@@ -392,42 +355,27 @@ fn parse_map_key(k_str: &str, schema: &SchemaType, path: &str) -> Result<Value, 
                 })?;
                 Ok(Value::Number(n.into()))
             }
-            Primitive::F32 | Primitive::F64 => {
-                Err(EncodeError::UnsupportedSchema("float as Map key (no Ord)"))
-            }
+            Primitive::F32 | Primitive::F64 => Err(EncodeError::UnsupportedSchema("float as Map key (no Ord)")),
         },
-        _ => Err(EncodeError::UnsupportedSchema(
-            "Map key must be String, integer scalar, or Bool",
-        )),
+        _ => Err(EncodeError::UnsupportedSchema("Map key must be String, integer scalar, or Bool")),
     }
 }
 
 /// Write one `Primitive` scalar in the `aether_data::wire` layout:
 /// fixed-width little-endian of the declared width, bit-faithful floats,
 /// no varints and no zigzag.
-fn write_scalar_wire(
-    p: Primitive,
-    v: &Value,
-    name: &str,
-    out: &mut Vec<u8>,
-) -> Result<(), EncodeError> {
+fn write_scalar_wire(p: Primitive, v: &Value, name: &str, out: &mut Vec<u8>) -> Result<(), EncodeError> {
     match p {
         Primitive::U8 => {
-            let n: u8 = as_unsigned(v, name, "u8")?
-                .try_into()
-                .map_err(|_| oor(name, "u8"))?;
+            let n: u8 = as_unsigned(v, name, "u8")?.try_into().map_err(|_| oor(name, "u8"))?;
             out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::U16 => {
-            let n: u16 = as_unsigned(v, name, "u16")?
-                .try_into()
-                .map_err(|_| oor(name, "u16"))?;
+            let n: u16 = as_unsigned(v, name, "u16")?.try_into().map_err(|_| oor(name, "u16"))?;
             out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::U32 => {
-            let n: u32 = as_unsigned(v, name, "u32")?
-                .try_into()
-                .map_err(|_| oor(name, "u32"))?;
+            let n: u32 = as_unsigned(v, name, "u32")?.try_into().map_err(|_| oor(name, "u32"))?;
             out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::U64 => {
@@ -435,21 +383,15 @@ fn write_scalar_wire(
             out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::I8 => {
-            let n: i8 = as_signed(v, name, "i8")?
-                .try_into()
-                .map_err(|_| oor(name, "i8"))?;
+            let n: i8 = as_signed(v, name, "i8")?.try_into().map_err(|_| oor(name, "i8"))?;
             out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::I16 => {
-            let n: i16 = as_signed(v, name, "i16")?
-                .try_into()
-                .map_err(|_| oor(name, "i16"))?;
+            let n: i16 = as_signed(v, name, "i16")?.try_into().map_err(|_| oor(name, "i16"))?;
             out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::I32 => {
-            let n: i32 = as_signed(v, name, "i32")?
-                .try_into()
-                .map_err(|_| oor(name, "i32"))?;
+            let n: i32 = as_signed(v, name, "i32")?.try_into().map_err(|_| oor(name, "i32"))?;
             out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::I64 => {
@@ -457,17 +399,11 @@ fn write_scalar_wire(
             out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::F32 => {
-            let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch {
-                field: name.to_owned(),
-                expected: "f32",
-            })?;
+            let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch { field: name.to_owned(), expected: "f32" })?;
             out.extend_from_slice(&(n as f32).to_le_bytes());
         }
         Primitive::F64 => {
-            let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch {
-                field: name.to_owned(),
-                expected: "f64",
-            })?;
+            let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch { field: name.to_owned(), expected: "f64" })?;
             out.extend_from_slice(&n.to_le_bytes());
         }
     }
@@ -505,12 +441,7 @@ fn decode_enum_tag<'a>(value: &'a Value, path: &str) -> Result<(&'a str, &'a Val
     Ok((tag.as_str(), body))
 }
 
-fn encode_enum_body(
-    body: &Value,
-    variant: &EnumVariant,
-    path: &str,
-    out: &mut Vec<u8>,
-) -> Result<(), EncodeError> {
+fn encode_enum_body(body: &Value, variant: &EnumVariant, path: &str, out: &mut Vec<u8>) -> Result<(), EncodeError> {
     match variant {
         EnumVariant::Unit { .. } => {
             // Body should be Null (or absent — the string-tag form).
@@ -558,15 +489,13 @@ fn encode_enum_body(
             })?;
             for key in obj.keys() {
                 if !fields.iter().any(|f| f.name == *key) {
-                    return Err(EncodeError::UnexpectedField(format!(
-                        "{path}::{name}.{key}"
-                    )));
+                    return Err(EncodeError::UnexpectedField(format!("{path}::{name}.{key}")));
                 }
             }
             for field in fields.iter() {
-                let v = obj.get(&*field.name).ok_or_else(|| {
-                    EncodeError::MissingField(format!("{path}::{name}.{}", field.name))
-                })?;
+                let v = obj
+                    .get(&*field.name)
+                    .ok_or_else(|| EncodeError::MissingField(format!("{path}::{name}.{}", field.name)))?;
                 let nested = format!("{path}::{name}.{}", field.name);
                 encode_wire_value(v, &field.ty, &nested, out)?;
             }
@@ -585,9 +514,7 @@ fn encode_struct_fields(
 ) -> Result<usize, EncodeError> {
     let mut max_align = 1usize;
     for field in fields {
-        let value = obj
-            .get(&*field.name)
-            .ok_or_else(|| EncodeError::MissingField(field.name.to_string()))?;
+        let value = obj.get(&*field.name).ok_or_else(|| EncodeError::MissingField(field.name.to_string()))?;
         let a = encode_field_value(out, &field.name, &field.ty, value)?;
         max_align = max_align.max(a);
     }
@@ -598,12 +525,7 @@ fn encode_struct_fields(
 /// the field imposed (so the parent can track `max_align`). Recurses
 /// into nested cast structs; rejects any non-cast leaf type with
 /// `UnsupportedSchema`.
-fn encode_field_value(
-    out: &mut Vec<u8>,
-    name: &str,
-    ty: &SchemaType,
-    value: &Value,
-) -> Result<usize, EncodeError> {
+fn encode_field_value(out: &mut Vec<u8>, name: &str, ty: &SchemaType, value: &Value) -> Result<usize, EncodeError> {
     // Non-cast variants share the same error message across encode +
     // decode; `cast::non_cast_variant_error` owns the classification.
     if let Some(msg) = non_cast_variant_error(ty) {
@@ -617,10 +539,9 @@ fn encode_field_value(
             Ok(a)
         }
         SchemaType::Array { element, len } => {
-            let arr = value.as_array().ok_or_else(|| EncodeError::TypeMismatch {
-                field: name.to_owned(),
-                expected: "array",
-            })?;
+            let arr = value
+                .as_array()
+                .ok_or_else(|| EncodeError::TypeMismatch { field: name.to_owned(), expected: "array" })?;
             if arr.len() != *len as usize {
                 return Err(EncodeError::ArrayLengthMismatch {
                     field: name.to_owned(),
@@ -640,19 +561,15 @@ fn encode_field_value(
             }
             Ok(elem_align)
         }
-        SchemaType::Struct {
-            fields,
-            repr_c: true,
-        } => {
+        SchemaType::Struct { fields, repr_c: true } => {
             // Nested cast struct — pad to its alignment, encode in
             // place, apply trailing padding so the next sibling field
             // starts at the right offset.
             let nested_align = alignment_of_schema(ty)?;
             pad_to(out, nested_align);
-            let obj = value.as_object().ok_or_else(|| EncodeError::TypeMismatch {
-                field: name.to_owned(),
-                expected: "object",
-            })?;
+            let obj = value
+                .as_object()
+                .ok_or_else(|| EncodeError::TypeMismatch { field: name.to_owned(), expected: "object" })?;
             for key in obj.keys() {
                 if !fields.iter().any(|f| f.name == *key) {
                     return Err(EncodeError::UnexpectedField(format!("{name}.{key}")));
@@ -662,9 +579,9 @@ fn encode_field_value(
             pad_to(out, inner_max);
             Ok(nested_align)
         }
-        SchemaType::Struct { repr_c: false, .. } => Err(EncodeError::UnsupportedSchema(
-            "Struct { repr_c: false } in cast-shaped parent",
-        )),
+        SchemaType::Struct { repr_c: false, .. } => {
+            Err(EncodeError::UnsupportedSchema("Struct { repr_c: false } in cast-shaped parent"))
+        }
         SchemaType::TypeId(type_id) => {
             // ADR-0065 typed id inside a `repr_c: true` parent. Wire
             // is a u64 (8 bytes, 8-byte align — same as a `u64`
@@ -690,30 +607,20 @@ fn alignment_of_schema(ty: &SchemaType) -> Result<usize, EncodeError> {
         // ADR-0065: typed ids are u64-shaped — 8 bytes, 8-byte align.
         SchemaType::TypeId(_) => Ok(8),
         SchemaType::Array { element, .. } => alignment_of_schema(element),
-        SchemaType::Struct {
-            fields,
-            repr_c: true,
-        } => {
+        SchemaType::Struct { fields, repr_c: true } => {
             let mut a = 1usize;
             for f in fields.iter() {
                 a = a.max(alignment_of_schema(&f.ty)?);
             }
             Ok(a)
         }
-        _ => Err(EncodeError::UnsupportedSchema(
-            "alignment query on non-cast schema",
-        )),
+        _ => Err(EncodeError::UnsupportedSchema("alignment query on non-cast schema")),
     }
 }
 
 /// Write one `Primitive` scalar into `out` at the cast-shaped wire
 /// layout (LE bytes, no padding — the caller pre-pads to alignment).
-fn write_primitive_schema(
-    out: &mut Vec<u8>,
-    p: Primitive,
-    v: &Value,
-    name: &str,
-) -> Result<(), EncodeError> {
+fn write_primitive_schema(out: &mut Vec<u8>, p: Primitive, v: &Value, name: &str) -> Result<(), EncodeError> {
     match p {
         Primitive::U8 => {
             let n = as_unsigned(v, name, "u8")?;
@@ -754,17 +661,11 @@ fn write_primitive_schema(
             out.extend_from_slice(&n.to_le_bytes());
         }
         Primitive::F32 => {
-            let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch {
-                field: name.to_owned(),
-                expected: "f32",
-            })?;
+            let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch { field: name.to_owned(), expected: "f32" })?;
             out.extend_from_slice(&(n as f32).to_le_bytes());
         }
         Primitive::F64 => {
-            let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch {
-                field: name.to_owned(),
-                expected: "f64",
-            })?;
+            let n = v.as_f64().ok_or_else(|| EncodeError::TypeMismatch { field: name.to_owned(), expected: "f64" })?;
             out.extend_from_slice(&n.to_le_bytes());
         }
     }
@@ -778,75 +679,54 @@ fn pad_to(out: &mut Vec<u8>, align: usize) {
 }
 
 fn as_unsigned(v: &Value, name: &str, expected: &'static str) -> Result<u64, EncodeError> {
-    v.as_u64().ok_or_else(|| EncodeError::TypeMismatch {
-        field: name.to_owned(),
-        expected,
-    })
+    v.as_u64().ok_or_else(|| EncodeError::TypeMismatch { field: name.to_owned(), expected })
 }
 
 fn as_signed(v: &Value, name: &str, expected: &'static str) -> Result<i64, EncodeError> {
-    v.as_i64().ok_or_else(|| EncodeError::TypeMismatch {
-        field: name.to_owned(),
-        expected,
-    })
+    v.as_i64().ok_or_else(|| EncodeError::TypeMismatch { field: name.to_owned(), expected })
 }
 
 fn oor(name: &str, ty: &str) -> EncodeError {
-    EncodeError::OutOfRange {
-        field: name.to_owned(),
-        reason: format!("out of range for {ty}"),
-    }
+    EncodeError::OutOfRange { field: name.to_owned(), reason: format!("out of range for {ty}") }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_fixtures::{
-        cast_struct, named, pending_ok_err_variants, scalar, structured_struct,
-    };
+    use crate::test_fixtures::{cast_struct, named, pending_ok_err_variants, scalar, structured_struct};
     use aether_data::SchemaCell;
     use serde_json::json;
     use std::collections::BTreeMap;
 
     fn enum_schema(variants: Vec<EnumVariant>) -> SchemaType {
-        SchemaType::Enum {
-            variants: variants.into(),
-        }
+        SchemaType::Enum { variants: variants.into() }
     }
 
     #[test]
     fn unit_encodes_empty_payload() {
-        let bytes = encode_schema(&json!({}), &SchemaType::Unit)
-            .expect("test setup: encode empty unit object");
+        let bytes = encode_schema(&json!({}), &SchemaType::Unit).expect("test setup: encode empty unit object");
         assert!(bytes.is_empty());
-        let bytes = encode_schema(&json!(null), &SchemaType::Unit)
-            .expect("test setup: encode null unit value");
+        let bytes = encode_schema(&json!(null), &SchemaType::Unit).expect("test setup: encode null unit value");
         assert!(bytes.is_empty());
     }
 
     #[test]
     fn unit_rejects_non_empty_object() {
-        let err = encode_schema(&json!({"x": 1}), &SchemaType::Unit)
-            .expect_err("unit schema must reject extra field");
+        let err = encode_schema(&json!({"x": 1}), &SchemaType::Unit).expect_err("unit schema must reject extra field");
         assert!(matches!(err, EncodeError::UnexpectedField(_)));
     }
 
     #[test]
     fn cast_struct_single_u32_field() {
         let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let bytes =
-            encode_schema(&json!({"code": 42}), &schema).expect("test setup: encode u32 field");
+        let bytes = encode_schema(&json!({"code": 42}), &schema).expect("test setup: encode u32 field");
         assert_eq!(bytes, vec![42, 0, 0, 0]);
     }
 
     #[test]
     fn cast_struct_two_f32_fields() {
-        let schema = cast_struct(vec![
-            scalar("x", Primitive::F32),
-            scalar("y", Primitive::F32),
-        ]);
-        let bytes = encode_schema(&json!({"x": 1.5, "y": -3.25}), &schema)
-            .expect("test setup: encode two f32 fields");
+        let schema = cast_struct(vec![scalar("x", Primitive::F32), scalar("y", Primitive::F32)]);
+        let bytes = encode_schema(&json!({"x": 1.5, "y": -3.25}), &schema).expect("test setup: encode two f32 fields");
         let mut expected = Vec::new();
         expected.extend_from_slice(&1.5f32.to_le_bytes());
         expected.extend_from_slice(&(-3.25f32).to_le_bytes());
@@ -857,10 +737,7 @@ mod tests {
     fn cast_struct_pads_between_u8_and_u32() {
         // #[repr(C)] { a: u8, b: u32 } is 8 bytes: a at 0, 3 bytes of
         // padding, b at 4.
-        let schema = cast_struct(vec![
-            scalar("a", Primitive::U8),
-            scalar("b", Primitive::U32),
-        ]);
+        let schema = cast_struct(vec![scalar("a", Primitive::U8), scalar("b", Primitive::U32)]);
         let bytes = encode_schema(&json!({"a": 7, "b": 0x0102_0304u32}), &schema)
             .expect("test setup: encode u8+u32 with padding");
         assert_eq!(bytes, vec![7, 0, 0, 0, 4, 3, 2, 1]);
@@ -870,10 +747,7 @@ mod tests {
     fn cast_struct_trailing_padding_for_u64_then_u8() {
         // { a: u64, b: u8 } — 9 bytes of content, rounded to 16 by
         // trailing padding for align-8.
-        let schema = cast_struct(vec![
-            scalar("a", Primitive::U64),
-            scalar("b", Primitive::U8),
-        ]);
+        let schema = cast_struct(vec![scalar("a", Primitive::U64), scalar("b", Primitive::U8)]);
         let bytes = encode_schema(&json!({"a": 1u64, "b": 2}), &schema)
             .expect("test setup: encode u64+u8 with trailing padding");
         assert_eq!(bytes.len(), 16);
@@ -886,13 +760,9 @@ mod tests {
     fn cast_struct_fixed_array_field() {
         let schema = cast_struct(vec![named(
             "xs",
-            SchemaType::Array {
-                element: SchemaCell::owned(SchemaType::Scalar(Primitive::U8)),
-                len: 4,
-            },
+            SchemaType::Array { element: SchemaCell::owned(SchemaType::Scalar(Primitive::U8)), len: 4 },
         )]);
-        let bytes = encode_schema(&json!({"xs": [1, 2, 3, 4]}), &schema)
-            .expect("test setup: encode fixed array");
+        let bytes = encode_schema(&json!({"xs": [1, 2, 3, 4]}), &schema).expect("test setup: encode fixed array");
         assert_eq!(bytes, vec![1, 2, 3, 4]);
     }
 
@@ -900,8 +770,7 @@ mod tests {
     fn cast_struct_signed_negative_roundtrip() {
         // i32 in cast layout = LE bytes; -1 = 0xffffffff.
         let schema = cast_struct(vec![scalar("n", Primitive::I32)]);
-        let bytes =
-            encode_schema(&json!({"n": -1}), &schema).expect("test setup: encode negative i32");
+        let bytes = encode_schema(&json!({"n": -1}), &schema).expect("test setup: encode negative i32");
         assert_eq!(bytes, vec![0xff, 0xff, 0xff, 0xff]);
     }
 
@@ -915,8 +784,8 @@ mod tests {
             code: u32,
         }
         let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let bytes = encode_schema(&json!({"code": 0xdead_beefu32}), &schema)
-            .expect("test setup: encode key shape via cast");
+        let bytes =
+            encode_schema(&json!({"code": 0xdead_beefu32}), &schema).expect("test setup: encode key shape via cast");
         let back: Key = bytemuck::cast_slice(&bytes)[0];
         assert_eq!(back, Key { code: 0xdead_beef });
     }
@@ -924,24 +793,22 @@ mod tests {
     #[test]
     fn cast_struct_missing_field_errors() {
         let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let err =
-            encode_schema(&json!({}), &schema).expect_err("missing required field must error");
+        let err = encode_schema(&json!({}), &schema).expect_err("missing required field must error");
         assert!(matches!(err, EncodeError::MissingField(n) if n == "code"));
     }
 
     #[test]
     fn cast_struct_unexpected_field_errors() {
         let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let err = encode_schema(&json!({"code": 1, "extra": 2}), &schema)
-            .expect_err("unexpected field must error");
+        let err = encode_schema(&json!({"code": 1, "extra": 2}), &schema).expect_err("unexpected field must error");
         assert!(matches!(err, EncodeError::UnexpectedField(n) if n == "extra"));
     }
 
     #[test]
     fn cast_struct_type_mismatch_errors() {
         let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let err = encode_schema(&json!({"code": "not-a-number"}), &schema)
-            .expect_err("string for u32 field must error");
+        let err =
+            encode_schema(&json!({"code": "not-a-number"}), &schema).expect_err("string for u32 field must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
@@ -957,28 +824,16 @@ mod tests {
         //noinspection DuplicatedCode
         let schema = cast_struct(vec![NamedField {
             name: "xs".into(),
-            ty: SchemaType::Array {
-                element: SchemaCell::owned(SchemaType::Scalar(Primitive::U8)),
-                len: 4,
-            },
+            ty: SchemaType::Array { element: SchemaCell::owned(SchemaType::Scalar(Primitive::U8)), len: 4 },
         }]);
-        let err =
-            encode_schema(&json!({"xs": [1, 2, 3]}), &schema).expect_err("short array must error");
-        assert!(matches!(
-            err,
-            EncodeError::ArrayLengthMismatch {
-                expected: 4,
-                got: 3,
-                ..
-            }
-        ));
+        let err = encode_schema(&json!({"xs": [1, 2, 3]}), &schema).expect_err("short array must error");
+        assert!(matches!(err, EncodeError::ArrayLengthMismatch { expected: 4, got: 3, .. }));
     }
 
     #[test]
     fn cast_struct_non_object_params_errors() {
         let schema = cast_struct(vec![scalar("code", Primitive::U32)]);
-        let err = encode_schema(&json!([1, 2, 3]), &schema)
-            .expect_err("array params for struct must error");
+        let err = encode_schema(&json!([1, 2, 3]), &schema).expect_err("array params for struct must error");
         assert!(matches!(err, EncodeError::NotAnObject));
     }
 
@@ -1015,31 +870,16 @@ mod tests {
         };
         let triangle = cast_struct(vec![NamedField {
             name: "verts".into(),
-            ty: SchemaType::Array {
-                element: SchemaCell::owned(vertex),
-                len: 3,
-            },
+            ty: SchemaType::Array { element: SchemaCell::owned(vertex), len: 3 },
         }]);
         let v = json!({"x": 0.0, "y": 0.5, "r": 1.0, "g": 0.0, "b": 0.0});
         let params = json!({"verts": [v, v, v]});
-        let bytes =
-            encode_schema(&params, &triangle).expect("test setup: encode draw_triangle layout");
+        let bytes = encode_schema(&params, &triangle).expect("test setup: encode draw_triangle layout");
         assert_eq!(bytes.len(), 60);
 
         let back: DrawTriangle = bytemuck::cast_slice(&bytes)[0];
-        let v_struct = Vertex {
-            x: 0.0,
-            y: 0.5,
-            r: 1.0,
-            g: 0.0,
-            b: 0.0,
-        };
-        assert_eq!(
-            back,
-            DrawTriangle {
-                verts: [v_struct, v_struct, v_struct]
-            }
-        );
+        let v_struct = Vertex { x: 0.0, y: 0.5, r: 1.0, g: 0.0, b: 0.0 };
+        assert_eq!(back, DrawTriangle { verts: [v_struct, v_struct, v_struct] });
     }
 
     // Wire path. Each test asserts byte-identity with
@@ -1090,17 +930,12 @@ mod tests {
     }
 
     fn pc_string_schema() -> SchemaType {
-        structured_struct(vec![NamedField {
-            name: "body".into(),
-            ty: SchemaType::String,
-        }])
+        structured_struct(vec![NamedField { name: "body".into(), ty: SchemaType::String }])
     }
 
     #[test]
     fn wire_string_field_matches_serde() {
-        let value = WireString {
-            body: "hello world".into(),
-        };
+        let value = WireString { body: "hello world".into() };
         let expected = wire::to_vec(&value).expect("test setup: wire reference string");
         let bytes = encode_schema(&json!({"body": "hello world"}), &pc_string_schema())
             .expect("test setup: encode string field");
@@ -1117,16 +952,10 @@ mod tests {
 
     #[test]
     fn wire_bytes_field_matches_serde() {
-        let value = WireBytes {
-            blob: vec![1, 2, 3, 4, 5],
-        };
+        let value = WireBytes { blob: vec![1, 2, 3, 4, 5] };
         let expected = wire::to_vec(&value).expect("test setup: wire reference bytes");
-        let schema = structured_struct(vec![NamedField {
-            name: "blob".into(),
-            ty: SchemaType::Bytes,
-        }]);
-        let bytes = encode_schema(&json!({"blob": [1, 2, 3, 4, 5]}), &schema)
-            .expect("test setup: encode bytes field");
+        let schema = structured_struct(vec![NamedField { name: "blob".into(), ty: SchemaType::Bytes }]);
+        let bytes = encode_schema(&json!({"blob": [1, 2, 3, 4, 5]}), &schema).expect("test setup: encode bytes field");
         assert_eq!(bytes, expected);
     }
 
@@ -1135,15 +964,11 @@ mod tests {
         // The wire codec is strict and canonical: a `Bytes` field accepts
         // only a JSON byte array. String / base64-object ergonomics live in
         // the aether-mcp preprocessor, never in the codec.
-        let schema = structured_struct(vec![NamedField {
-            name: "blob".into(),
-            ty: SchemaType::Bytes,
-        }]);
-        let err = encode_schema(&json!({"blob": "hello"}), &schema)
-            .expect_err("a bare string must error");
+        let schema = structured_struct(vec![NamedField { name: "blob".into(), ty: SchemaType::Bytes }]);
+        let err = encode_schema(&json!({"blob": "hello"}), &schema).expect_err("a bare string must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
-        let err = encode_schema(&json!({"blob": {"base64": "aGVsbG8="}}), &schema)
-            .expect_err("a base64 object must error");
+        let err =
+            encode_schema(&json!({"blob": {"base64": "aGVsbG8="}}), &schema).expect_err("a base64 object must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
@@ -1153,30 +978,18 @@ mod tests {
             name: "name".into(),
             ty: SchemaType::Option(SchemaCell::owned(SchemaType::String)),
         }]);
-        let some = WireOption {
-            name: Some("Aether".into()),
-        };
-        let some_bytes = encode_schema(&json!({"name": "Aether"}), &schema)
-            .expect("test setup: encode some(name)");
-        assert_eq!(
-            some_bytes,
-            wire::to_vec(&some).expect("test setup: wire reference some")
-        );
+        let some = WireOption { name: Some("Aether".into()) };
+        let some_bytes = encode_schema(&json!({"name": "Aether"}), &schema).expect("test setup: encode some(name)");
+        assert_eq!(some_bytes, wire::to_vec(&some).expect("test setup: wire reference some"));
 
         let none = WireOption { name: None };
-        let none_bytes =
-            encode_schema(&json!({"name": null}), &schema).expect("test setup: encode none(name)");
-        assert_eq!(
-            none_bytes,
-            wire::to_vec(&none).expect("test setup: wire reference none")
-        );
+        let none_bytes = encode_schema(&json!({"name": null}), &schema).expect("test setup: encode none(name)");
+        assert_eq!(none_bytes, wire::to_vec(&none).expect("test setup: wire reference none"));
     }
 
     #[test]
     fn wire_vec_of_strings_matches_serde() {
-        let value = WireVec {
-            tags: vec!["alpha".into(), "beta".into(), "gamma".into()],
-        };
+        let value = WireVec { tags: vec!["alpha".into(), "beta".into(), "gamma".into()] };
         let expected = wire::to_vec(&value).expect("test setup: wire reference vec<string>");
         let schema = structured_struct(vec![NamedField {
             name: "tags".into(),
@@ -1189,23 +1002,16 @@ mod tests {
 
     #[test]
     fn wire_vec_of_nested_structs_matches_serde() {
-        let value = WireNested {
-            items: vec![Inner { seq: 1 }, Inner { seq: 256 }, Inner { seq: 0xDEAD }],
-        };
+        let value = WireNested { items: vec![Inner { seq: 1 }, Inner { seq: 256 }, Inner { seq: 0xDEAD }] };
         let expected = wire::to_vec(&value).expect("test setup: wire reference vec<inner>");
-        let inner_schema = structured_struct(vec![NamedField {
-            name: "seq".into(),
-            ty: SchemaType::Scalar(Primitive::U32),
-        }]);
+        let inner_schema =
+            structured_struct(vec![NamedField { name: "seq".into(), ty: SchemaType::Scalar(Primitive::U32) }]);
         let schema = structured_struct(vec![NamedField {
             name: "items".into(),
             ty: SchemaType::Vec(SchemaCell::owned(inner_schema)),
         }]);
-        let bytes = encode_schema(
-            &json!({"items": [{"seq": 1}, {"seq": 256}, {"seq": 0xDEAD}]}),
-            &schema,
-        )
-        .expect("test setup: encode vec<nested>");
+        let bytes = encode_schema(&json!({"items": [{"seq": 1}, {"seq": 256}, {"seq": 0xDEAD}]}), &schema)
+            .expect("test setup: encode vec<nested>");
         assert_eq!(bytes, expected);
     }
 
@@ -1216,48 +1022,37 @@ mod tests {
     #[test]
     fn wire_enum_unit_variant_as_string_tag() {
         // Unit variant accepts the bare-string form `"Pending"`.
-        let bytes = encode_schema(&json!("Pending"), &sum_schema())
-            .expect("test setup: encode unit variant");
-        assert_eq!(
-            bytes,
-            wire::to_vec(&SimpleSum::Pending).expect("test setup: wire reference pending")
-        );
+        let bytes = encode_schema(&json!("Pending"), &sum_schema()).expect("test setup: encode unit variant");
+        assert_eq!(bytes, wire::to_vec(&SimpleSum::Pending).expect("test setup: wire reference pending"));
     }
 
     #[test]
     fn wire_enum_tuple_variant_with_unwrapped_body() {
         // Single-element tuple variants accept either `{"Ok": 42}` or
         // `{"Ok": [42]}`. Cover the unwrapped-body form here.
-        let bytes = encode_schema(&json!({"Ok": 42u64}), &sum_schema())
-            .expect("test setup: encode tuple variant");
-        assert_eq!(
-            bytes,
-            wire::to_vec(&SimpleSum::Ok(42)).expect("test setup: wire reference ok(42)")
-        );
+        let bytes = encode_schema(&json!({"Ok": 42u64}), &sum_schema()).expect("test setup: encode tuple variant");
+        assert_eq!(bytes, wire::to_vec(&SimpleSum::Ok(42)).expect("test setup: wire reference ok(42)"));
     }
 
     #[test]
     fn wire_enum_struct_variant() {
         let bytes = encode_schema(&json!({"Err": {"reason": "kind conflict"}}), &sum_schema())
             .expect("test setup: encode struct variant");
-        let expected = wire::to_vec(&SimpleSum::Err {
-            reason: "kind conflict".into(),
-        })
-        .expect("test setup: wire reference err{reason}");
+        let expected = wire::to_vec(&SimpleSum::Err { reason: "kind conflict".into() })
+            .expect("test setup: wire reference err{reason}");
         assert_eq!(bytes, expected);
     }
 
     #[test]
     fn wire_enum_unknown_tag_errors() {
-        let err =
-            encode_schema(&json!("Nope"), &sum_schema()).expect_err("unknown enum tag must error");
+        let err = encode_schema(&json!("Nope"), &sum_schema()).expect_err("unknown enum tag must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
     #[test]
     fn wire_string_rejects_non_string() {
-        let err = encode_schema(&json!({"body": 7}), &pc_string_schema())
-            .expect_err("number for string field must error");
+        let err =
+            encode_schema(&json!({"body": 7}), &pc_string_schema()).expect_err("number for string field must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
@@ -1272,10 +1067,7 @@ mod tests {
     // object input always, integer/bool keys stringified.
 
     fn map_schema(key: SchemaType, value: SchemaType) -> SchemaType {
-        SchemaType::Map {
-            key: SchemaCell::owned(key),
-            value: SchemaCell::owned(value),
-        }
+        SchemaType::Map { key: SchemaCell::owned(key), value: SchemaCell::owned(value) }
     }
 
     #[test]
@@ -1293,14 +1085,11 @@ mod tests {
         reference.insert("content-type".into(), "application/json".into());
         reference.insert("x-trace".into(), "abc123".into());
 
-        let expected =
-            wire::to_vec(&reference).expect("test setup: wire reference btreemap<string,string>");
+        let expected = wire::to_vec(&reference).expect("test setup: wire reference btreemap<string,string>");
 
-        let bytes = encode_schema(
-            &json!({"headers": {"x-trace": "abc123", "content-type": "application/json"}}),
-            &schema,
-        )
-        .expect("test setup: encode map<string,string> field");
+        let bytes =
+            encode_schema(&json!({"headers": {"x-trace": "abc123", "content-type": "application/json"}}), &schema)
+                .expect("test setup: encode map<string,string> field");
 
         // A one-field wire struct adds no framing, so the encoded payload
         // is exactly the BTreeMap wire image (one leading version byte +
@@ -1329,14 +1118,10 @@ mod tests {
         reference.insert(42, "answer".into());
         reference.insert(255, "max-u8".into());
 
-        let expected =
-            wire::to_vec(&reference).expect("test setup: wire reference btreemap<u32,string>");
+        let expected = wire::to_vec(&reference).expect("test setup: wire reference btreemap<u32,string>");
 
-        let bytes = encode_schema(
-            &json!({"42": "answer", "1": "one", "255": "max-u8"}),
-            &schema,
-        )
-        .expect("test setup: encode map<u32,string> field");
+        let bytes = encode_schema(&json!({"42": "answer", "1": "one", "255": "max-u8"}), &schema)
+            .expect("test setup: encode map<u32,string> field");
         assert_eq!(bytes, expected);
     }
 
@@ -1347,17 +1132,12 @@ mod tests {
         // 256 < 1. The codec must match `wire`'s encoded-byte order — this
         // is the multi-byte-key case the adapter-vs-walker cross-check
         // guards.
-        let schema = map_schema(
-            SchemaType::Scalar(Primitive::U32),
-            SchemaType::Scalar(Primitive::U8),
-        );
+        let schema = map_schema(SchemaType::Scalar(Primitive::U32), SchemaType::Scalar(Primitive::U8));
         let mut reference: BTreeMap<u32, u8> = BTreeMap::new();
         reference.insert(1, 10);
         reference.insert(256, 20);
-        let expected =
-            wire::to_vec(&reference).expect("test setup: wire reference btreemap<u32,u8>");
-        let bytes = encode_schema(&json!({"1": 10, "256": 20}), &schema)
-            .expect("test setup: encode map<u32,u8> field");
+        let expected = wire::to_vec(&reference).expect("test setup: wire reference btreemap<u32,u8>");
+        let bytes = encode_schema(&json!({"1": 10, "256": 20}), &schema).expect("test setup: encode map<u32,u8> field");
         assert_eq!(bytes, expected);
         // The 256 entry (`[0,1,0,0]`) precedes the 1 entry (`[1,0,0,0]`).
         let mut hand: Vec<u8> = Vec::new();
@@ -1375,18 +1155,16 @@ mod tests {
         let mut reference: BTreeMap<bool, u32> = BTreeMap::new();
         reference.insert(false, 0);
         reference.insert(true, 1);
-        let expected =
-            wire::to_vec(&reference).expect("test setup: wire reference btreemap<bool,u32>");
-        let bytes = encode_schema(&json!({"true": 1, "false": 0}), &schema)
-            .expect("test setup: encode map<bool,u32> field");
+        let expected = wire::to_vec(&reference).expect("test setup: wire reference btreemap<bool,u32>");
+        let bytes =
+            encode_schema(&json!({"true": 1, "false": 0}), &schema).expect("test setup: encode map<bool,u32> field");
         assert_eq!(bytes, expected);
     }
 
     #[test]
     fn map_rejects_non_object_input() {
         let schema = map_schema(SchemaType::String, SchemaType::String);
-        let err = encode_schema(&json!([["k", "v"]]), &schema)
-            .expect_err("array for map field must error");
+        let err = encode_schema(&json!([["k", "v"]]), &schema).expect_err("array for map field must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
@@ -1401,8 +1179,7 @@ mod tests {
     #[test]
     fn map_rejects_invalid_bool_key() {
         let schema = map_schema(SchemaType::Bool, SchemaType::Scalar(Primitive::U32));
-        let err = encode_schema(&json!({"yes": 1}), &schema)
-            .expect_err("non-bool key for bool-keyed map must error");
+        let err = encode_schema(&json!({"yes": 1}), &schema).expect_err("non-bool key for bool-keyed map must error");
         assert!(matches!(err, EncodeError::TypeMismatch { .. }));
     }
 
@@ -1413,14 +1190,11 @@ mod tests {
         // produce garbled bytes.
         let schema = SchemaType::Struct {
             repr_c: true,
-            fields: vec![NamedField {
-                name: "headers".into(),
-                ty: map_schema(SchemaType::String, SchemaType::String),
-            }]
-            .into(),
+            fields: vec![NamedField { name: "headers".into(), ty: map_schema(SchemaType::String, SchemaType::String) }]
+                .into(),
         };
-        let err = encode_schema(&json!({"headers": {"k": "v"}}), &schema)
-            .expect_err("map inside cast struct must error");
+        let err =
+            encode_schema(&json!({"headers": {"k": "v"}}), &schema).expect_err("map inside cast struct must error");
         assert!(matches!(err, EncodeError::UnsupportedSchema(_)));
     }
 
@@ -1437,8 +1211,7 @@ mod tests {
         }]);
         let mailbox = aether_data::MailboxId::from_name("aether.component");
         let s = tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");
-        let bytes = encode_schema(&json!({ "mailbox": s }), &schema)
-            .expect("test setup: encode typed-id wire field");
+        let bytes = encode_schema(&json!({ "mailbox": s }), &schema).expect("test setup: encode typed-id wire field");
         let mut expected: Vec<u8> = Vec::new();
         expected.extend_from_slice(&mailbox.0.to_le_bytes());
         assert_eq!(bytes, expected);
@@ -1469,11 +1242,10 @@ mod tests {
             name: "mailbox".into(),
             ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
         }]);
-        let knd_string =
-            tagged_id::encode(aether_data::with_tag(aether_data::Tag::Kind, 0xdead_beef))
-                .expect("test setup: encode wrongly-tagged kind id");
-        let err = encode_schema(&json!({ "mailbox": knd_string }), &schema)
-            .expect_err("wrong tag must surface OutOfRange");
+        let knd_string = tagged_id::encode(aether_data::with_tag(aether_data::Tag::Kind, 0xdead_beef))
+            .expect("test setup: encode wrongly-tagged kind id");
+        let err =
+            encode_schema(&json!({ "mailbox": knd_string }), &schema).expect_err("wrong tag must surface OutOfRange");
         assert!(matches!(err, EncodeError::OutOfRange { .. }));
     }
 
@@ -1485,10 +1257,7 @@ mod tests {
         // 8 = 16 bytes.
         let schema = cast_struct(vec![
             scalar("stream", Primitive::U8),
-            NamedField {
-                name: "mailbox".into(),
-                ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID),
-            },
+            NamedField { name: "mailbox".into(), ty: SchemaType::TypeId(aether_data::MailboxId::TYPE_ID) },
         ]);
         let mailbox = aether_data::MailboxId::from_name("aether.component");
         let s = tagged_id::encode(mailbox.0).expect("test setup: encode tagged mailbox id");

@@ -6,9 +6,7 @@
 
 use aether_actor::WasmActorMailbox;
 use aether_data::{Kind, MailboxId};
-use aether_kinds::{
-    LifecycleSubscribe, LifecycleSubscribeSelf, LifecycleUnsubscribe, LifecycleUnsubscribeSelf,
-};
+use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeSelf, LifecycleUnsubscribe, LifecycleUnsubscribeSelf};
 
 use super::LifecycleCapability;
 
@@ -80,19 +78,13 @@ impl LifecycleMailboxExt for WasmActorMailbox<'_, LifecycleCapability> {
         self.send(&LifecycleSubscribeSelf { stage: K::ID.0 });
     }
     fn subscribe_for<K: Kind>(&self, mailbox: MailboxId) {
-        self.send(&LifecycleSubscribe {
-            stage: K::ID.0,
-            mailbox: mailbox.0,
-        });
+        self.send(&LifecycleSubscribe { stage: K::ID.0, mailbox: mailbox.0 });
     }
     fn unsubscribe<K: Kind>(&self) {
         self.send(&LifecycleUnsubscribeSelf { stage: K::ID.0 });
     }
     fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId) {
-        self.send(&LifecycleUnsubscribe {
-            stage: K::ID.0,
-            mailbox: mailbox.0,
-        });
+        self.send(&LifecycleUnsubscribe { stage: K::ID.0, mailbox: mailbox.0 });
     }
 }
 
@@ -102,19 +94,13 @@ impl LifecycleMailboxExt for NativeActorMailbox<'_, LifecycleCapability> {
         self.send(&LifecycleSubscribeSelf { stage: K::ID.0 });
     }
     fn subscribe_for<K: Kind>(&self, mailbox: MailboxId) {
-        self.send(&LifecycleSubscribe {
-            stage: K::ID.0,
-            mailbox: mailbox.0,
-        });
+        self.send(&LifecycleSubscribe { stage: K::ID.0, mailbox: mailbox.0 });
     }
     fn unsubscribe<K: Kind>(&self) {
         self.send(&LifecycleUnsubscribeSelf { stage: K::ID.0 });
     }
     fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId) {
-        self.send(&LifecycleUnsubscribe {
-            stage: K::ID.0,
-            mailbox: mailbox.0,
-        });
+        self.send(&LifecycleUnsubscribe { stage: K::ID.0, mailbox: mailbox.0 });
     }
 }
 

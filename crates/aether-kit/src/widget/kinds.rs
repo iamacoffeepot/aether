@@ -68,9 +68,7 @@ pub struct MembershipEntry {
 /// despawn as one event with one `removed` entry. It is the discovery signal a
 /// lane observer (the behavior host's tree cache, a debugger) reads to know
 /// what a node contains and when that changed.
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.kit.widget.children_changed")]
 pub struct ChildrenChanged {
     pub added: Vec<MembershipEntry>,
@@ -97,11 +95,7 @@ impl WidgetClipRect {
     /// Translate this rectangle into its parent's composition space.
     #[must_use]
     fn offset(self, by: Vec2) -> Self {
-        Self {
-            x: self.x + by.x,
-            y: self.y + by.y,
-            ..self
-        }
+        Self { x: self.x + by.x, y: self.y + by.y, ..self }
     }
 
     /// Whether this rectangle has finite coordinates and a positive finite
@@ -131,10 +125,7 @@ pub(super) enum WidgetClipIntersection {
 
 /// Intersect two clips expressed in the same widget composition space.
 #[must_use]
-fn intersect_widget_clips(
-    item: Option<WidgetClipRect>,
-    slot: Option<WidgetClipRect>,
-) -> WidgetClipIntersection {
+fn intersect_widget_clips(item: Option<WidgetClipRect>, slot: Option<WidgetClipRect>) -> WidgetClipIntersection {
     match (item, slot) {
         (None, None) => WidgetClipIntersection::Unbounded,
         (Some(rect), None) | (None, Some(rect)) => {
@@ -152,17 +143,8 @@ fn intersect_widget_clips(
             let y = item.y.max(slot.y);
             let right = (item.x + item.width).min(slot.x + slot.width);
             let bottom = (item.y + item.height).min(slot.y + slot.height);
-            let rect = WidgetClipRect {
-                x,
-                y,
-                width: right - x,
-                height: bottom - y,
-            };
-            if rect.is_valid() {
-                WidgetClipIntersection::Finite { rect }
-            } else {
-                WidgetClipIntersection::Empty
-            }
+            let rect = WidgetClipRect { x, y, width: right - x, height: bottom - y };
+            if rect.is_valid() { WidgetClipIntersection::Finite { rect } } else { WidgetClipIntersection::Empty }
         }
     }
 }
@@ -179,14 +161,7 @@ pub enum WidgetDrawItem {
     /// A flat-colored rectangle. `(x, y)` is the top-left corner and
     /// `(width, height)` the size, in the widget's local pixels; `color`
     /// is a linear RGBA value.
-    Quad {
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        color: Rgba,
-        clip: Option<WidgetClipRect>,
-    },
+    Quad { x: f32, y: f32, width: f32, height: f32, color: Rgba, clip: Option<WidgetClipRect> },
     /// A textured rectangle. `(x, y)` is the top-left corner and
     /// `(width, height)` the size in the widget's local pixels;
     /// `(u0, v0)`–`(u1, v1)` selects the texture sub-rectangle;
@@ -208,15 +183,7 @@ pub enum WidgetDrawItem {
     /// A glyph run. `(x, y)` is the baseline origin in local pixels;
     /// `font_id` names a session-scoped font loaded through `aether.text`;
     /// `color` is a linear RGBA multiplier over glyph coverage.
-    Text {
-        x: f32,
-        y: f32,
-        font_id: u32,
-        text: String,
-        size_pixels: f32,
-        color: Rgba,
-        clip: Option<WidgetClipRect>,
-    },
+    Text { x: f32, y: f32, font_id: u32, text: String, size_pixels: f32, color: Rgba, clip: Option<WidgetClipRect> },
 }
 
 impl WidgetDrawItem {
@@ -228,14 +195,7 @@ impl WidgetDrawItem {
     #[must_use]
     pub fn offset(&self, by: Vec2) -> Self {
         match self {
-            Self::Quad {
-                x,
-                y,
-                width,
-                height,
-                color,
-                clip,
-            } => Self::Quad {
+            Self::Quad { x, y, width, height, color, clip } => Self::Quad {
                 x: x + by.x,
                 y: y + by.y,
                 width: *width,
@@ -243,19 +203,7 @@ impl WidgetDrawItem {
                 color: *color,
                 clip: clip.map(|rect| rect.offset(by)),
             },
-            Self::TexturedQuad {
-                texture_id,
-                x,
-                y,
-                width,
-                height,
-                u0,
-                v0,
-                u1,
-                v1,
-                tint,
-                clip,
-            } => Self::TexturedQuad {
+            Self::TexturedQuad { texture_id, x, y, width, height, u0, v0, u1, v1, tint, clip } => Self::TexturedQuad {
                 texture_id: *texture_id,
                 x: x + by.x,
                 y: y + by.y,
@@ -268,15 +216,7 @@ impl WidgetDrawItem {
                 tint: *tint,
                 clip: clip.map(|rect| rect.offset(by)),
             },
-            Self::Text {
-                x,
-                y,
-                font_id,
-                text,
-                size_pixels,
-                color,
-                clip,
-            } => Self::Text {
+            Self::Text { x, y, font_id, text, size_pixels, color, clip } => Self::Text {
                 x: x + by.x,
                 y: y + by.y,
                 font_id: *font_id,
@@ -293,9 +233,7 @@ impl WidgetDrawItem {
     #[must_use]
     pub(super) fn intersect_clip(&self, slot: Option<WidgetClipRect>) -> Option<Self> {
         let own = match self {
-            Self::Quad { clip, .. } | Self::TexturedQuad { clip, .. } | Self::Text { clip, .. } => {
-                *clip
-            }
+            Self::Quad { clip, .. } | Self::TexturedQuad { clip, .. } | Self::Text { clip, .. } => *clip,
         };
         let clip = match intersect_widget_clips(own, slot) {
             WidgetClipIntersection::Unbounded => None,
@@ -304,9 +242,9 @@ impl WidgetDrawItem {
         };
         let mut item = self.clone();
         match &mut item {
-            Self::Quad { clip: own, .. }
-            | Self::TexturedQuad { clip: own, .. }
-            | Self::Text { clip: own, .. } => *own = clip,
+            Self::Quad { clip: own, .. } | Self::TexturedQuad { clip: own, .. } | Self::Text { clip: own, .. } => {
+                *own = clip
+            }
         }
         Some(item)
     }
@@ -315,9 +253,7 @@ impl WidgetDrawItem {
     #[must_use]
     pub(super) fn valid_clip(&self) -> WidgetClipIntersection {
         let clip = match self {
-            Self::Quad { clip, .. } | Self::TexturedQuad { clip, .. } | Self::Text { clip, .. } => {
-                *clip
-            }
+            Self::Quad { clip, .. } | Self::TexturedQuad { clip, .. } | Self::Text { clip, .. } => *clip,
         };
         intersect_widget_clips(clip, None)
     }
@@ -329,9 +265,7 @@ impl WidgetDrawItem {
 /// content size (`[width, height]`) when the parent needs it to position a
 /// content-sized slot — a cached event, never a pull — and `None` when the
 /// widget's size is externally fixed.
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[kind(name = "aether.kit.widget.draw_list")]
 pub struct WidgetDrawList {
     pub intrinsic: Option<[f32; 2]>,
@@ -346,9 +280,7 @@ pub struct WidgetDrawList {
 /// is closed and kit-owned — every variant maps to a compile-time
 /// `spawn_inline_child::<A>` call — so the dispatch match is exhaustive and
 /// an unknown widget is a compile error, not a runtime failure.
-#[derive(
-    aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default,
-)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WidgetKind {
     /// A nested compositing subtree — the child's `config` decodes as a
     /// [`WidgetConfig`] and spawns another compositing node. The default, so
@@ -513,12 +445,7 @@ pub struct WidgetControlState {
 
 impl Default for WidgetControlState {
     fn default() -> Self {
-        Self {
-            visible: true,
-            enabled: true,
-            read_only: false,
-            validation: WidgetValidation::Valid,
-        }
+        Self { visible: true, enabled: true, read_only: false, validation: WidgetValidation::Valid }
     }
 }
 
@@ -753,12 +680,7 @@ mod tests {
             width: 10.0,
             height: 4.0,
             color: Rgba::new(1.0, 0.0, 0.0, 1.0),
-            clip: Some(WidgetClipRect {
-                x: 4.0,
-                y: 6.0,
-                width: 8.0,
-                height: 2.0,
-            }),
+            clip: Some(WidgetClipRect { x: 4.0, y: 6.0, width: 8.0, height: 2.0 }),
         };
         assert_eq!(
             item.offset(Vec2::new(100.0, 20.0)),
@@ -768,12 +690,7 @@ mod tests {
                 width: 10.0,
                 height: 4.0,
                 color: Rgba::new(1.0, 0.0, 0.0, 1.0),
-                clip: Some(WidgetClipRect {
-                    x: 104.0,
-                    y: 26.0,
-                    width: 8.0,
-                    height: 2.0,
-                }),
+                clip: Some(WidgetClipRect { x: 104.0, y: 26.0, width: 8.0, height: 2.0 }),
             },
             "offset moves the corner by the vector and leaves the extent untouched",
         );
@@ -792,12 +709,7 @@ mod tests {
             u1: 0.75,
             v1: 0.875,
             tint: Rgba::new(0.5, 0.75, 1.0, 0.8),
-            clip: Some(WidgetClipRect {
-                x: 4.0,
-                y: 6.0,
-                width: 8.0,
-                height: 2.0,
-            }),
+            clip: Some(WidgetClipRect { x: 4.0, y: 6.0, width: 8.0, height: 2.0 }),
         };
         assert_eq!(
             item.offset(Vec2::new(100.0, 20.0)),
@@ -812,12 +724,7 @@ mod tests {
                 u1: 0.75,
                 v1: 0.875,
                 tint: Rgba::new(0.5, 0.75, 1.0, 0.8),
-                clip: Some(WidgetClipRect {
-                    x: 104.0,
-                    y: 26.0,
-                    width: 8.0,
-                    height: 2.0,
-                }),
+                clip: Some(WidgetClipRect { x: 104.0, y: 26.0, width: 8.0, height: 2.0 }),
             },
             "offset preserves texture identity, extent, UVs, and tint",
         );
@@ -832,12 +739,7 @@ mod tests {
             text: "hp".into(),
             size_pixels: 12.0,
             color: Rgba::WHITE,
-            clip: Some(WidgetClipRect {
-                x: 3.0,
-                y: 4.0,
-                width: 8.0,
-                height: 6.0,
-            }),
+            clip: Some(WidgetClipRect { x: 3.0, y: 4.0, width: 8.0, height: 6.0 }),
         };
         assert_eq!(
             item.offset(Vec2::new(10.0, 40.0)),
@@ -848,12 +750,7 @@ mod tests {
                 text: "hp".into(),
                 size_pixels: 12.0,
                 color: Rgba::WHITE,
-                clip: Some(WidgetClipRect {
-                    x: 13.0,
-                    y: 44.0,
-                    width: 8.0,
-                    height: 6.0,
-                }),
+                clip: Some(WidgetClipRect { x: 13.0, y: 44.0, width: 8.0, height: 6.0 }),
             },
             "offset moves the baseline and item-local clip while preserving the glyph run",
         );
@@ -861,62 +758,20 @@ mod tests {
 
     #[test]
     fn clip_intersection_distinguishes_unbounded_finite_and_empty() {
-        let outer = WidgetClipRect {
-            x: 10.0,
-            y: 20.0,
-            width: 30.0,
-            height: 40.0,
-        };
+        let outer = WidgetClipRect { x: 10.0, y: 20.0, width: 30.0, height: 40.0 };
+        assert_eq!(intersect_widget_clips(None, None), WidgetClipIntersection::Unbounded,);
+        assert_eq!(intersect_widget_clips(Some(outer), None), WidgetClipIntersection::Finite { rect: outer },);
         assert_eq!(
-            intersect_widget_clips(None, None),
-            WidgetClipIntersection::Unbounded,
+            intersect_widget_clips(Some(outer), Some(WidgetClipRect { x: 15.0, y: 25.0, width: 10.0, height: 12.0 }),),
+            WidgetClipIntersection::Finite { rect: WidgetClipRect { x: 15.0, y: 25.0, width: 10.0, height: 12.0 } },
         );
         assert_eq!(
-            intersect_widget_clips(Some(outer), None),
-            WidgetClipIntersection::Finite { rect: outer },
-        );
-        assert_eq!(
-            intersect_widget_clips(
-                Some(outer),
-                Some(WidgetClipRect {
-                    x: 15.0,
-                    y: 25.0,
-                    width: 10.0,
-                    height: 12.0,
-                }),
-            ),
-            WidgetClipIntersection::Finite {
-                rect: WidgetClipRect {
-                    x: 15.0,
-                    y: 25.0,
-                    width: 10.0,
-                    height: 12.0,
-                },
-            },
-        );
-        assert_eq!(
-            intersect_widget_clips(
-                Some(outer),
-                Some(WidgetClipRect {
-                    x: 40.0,
-                    y: 20.0,
-                    width: 5.0,
-                    height: 5.0,
-                }),
-            ),
+            intersect_widget_clips(Some(outer), Some(WidgetClipRect { x: 40.0, y: 20.0, width: 5.0, height: 5.0 }),),
             WidgetClipIntersection::Empty,
             "touching edges have zero area",
         );
         assert_eq!(
-            intersect_widget_clips(
-                Some(outer),
-                Some(WidgetClipRect {
-                    x: 100.0,
-                    y: 100.0,
-                    width: 5.0,
-                    height: 5.0,
-                }),
-            ),
+            intersect_widget_clips(Some(outer), Some(WidgetClipRect { x: 100.0, y: 100.0, width: 5.0, height: 5.0 }),),
             WidgetClipIntersection::Empty,
             "disjoint rectangles have no effective clip",
         );
@@ -924,80 +779,24 @@ mod tests {
 
     #[test]
     fn clip_intersection_handles_partial_nested_and_invalid_rects() {
-        let a = WidgetClipRect {
-            x: -5.0,
-            y: -5.0,
-            width: 20.0,
-            height: 20.0,
-        };
-        let b = WidgetClipRect {
-            x: 0.0,
-            y: 3.0,
-            width: 20.0,
-            height: 4.0,
-        };
+        let a = WidgetClipRect { x: -5.0, y: -5.0, width: 20.0, height: 20.0 };
+        let b = WidgetClipRect { x: 0.0, y: 3.0, width: 20.0, height: 4.0 };
         let first = match intersect_widget_clips(Some(a), Some(b)) {
             WidgetClipIntersection::Finite { rect } => rect,
             other => panic!("expected finite overlap, got {other:?}"),
         };
+        assert_eq!(first, WidgetClipRect { x: 0.0, y: 3.0, width: 15.0, height: 4.0 },);
         assert_eq!(
-            first,
-            WidgetClipRect {
-                x: 0.0,
-                y: 3.0,
-                width: 15.0,
-                height: 4.0,
-            },
-        );
-        assert_eq!(
-            intersect_widget_clips(
-                Some(first),
-                Some(WidgetClipRect {
-                    x: 2.0,
-                    y: 0.0,
-                    width: 3.0,
-                    height: 20.0,
-                }),
-            ),
-            WidgetClipIntersection::Finite {
-                rect: WidgetClipRect {
-                    x: 2.0,
-                    y: 3.0,
-                    width: 3.0,
-                    height: 4.0,
-                },
-            },
+            intersect_widget_clips(Some(first), Some(WidgetClipRect { x: 2.0, y: 0.0, width: 3.0, height: 20.0 }),),
+            WidgetClipIntersection::Finite { rect: WidgetClipRect { x: 2.0, y: 3.0, width: 3.0, height: 4.0 } },
         );
         for invalid in [
-            WidgetClipRect {
-                x: 0.0,
-                y: 0.0,
-                width: -1.0,
-                height: 1.0,
-            },
-            WidgetClipRect {
-                x: 0.0,
-                y: 0.0,
-                width: 1.0,
-                height: -1.0,
-            },
-            WidgetClipRect {
-                x: f32::NAN,
-                y: 0.0,
-                width: 1.0,
-                height: 1.0,
-            },
-            WidgetClipRect {
-                x: 0.0,
-                y: 0.0,
-                width: f32::INFINITY,
-                height: 1.0,
-            },
+            WidgetClipRect { x: 0.0, y: 0.0, width: -1.0, height: 1.0 },
+            WidgetClipRect { x: 0.0, y: 0.0, width: 1.0, height: -1.0 },
+            WidgetClipRect { x: f32::NAN, y: 0.0, width: 1.0, height: 1.0 },
+            WidgetClipRect { x: 0.0, y: 0.0, width: f32::INFINITY, height: 1.0 },
         ] {
-            assert_eq!(
-                intersect_widget_clips(Some(invalid), None),
-                WidgetClipIntersection::Empty,
-            );
+            assert_eq!(intersect_widget_clips(Some(invalid), None), WidgetClipIntersection::Empty,);
         }
     }
 }

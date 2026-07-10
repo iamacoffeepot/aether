@@ -74,10 +74,7 @@ impl fmt::Debug for MailboxClaim {
         // `ActorSlots` doesn't impl `Debug` (interior `RefCell<HashMap>`
         // of type-erased boxes), so hand-roll Debug on `MailboxClaim`
         // and finish non-exhaustively rather than deriving.
-        f.debug_struct("MailboxClaim")
-            .field("id", &self.id)
-            .field("inbox", &self.inbox)
-            .finish_non_exhaustive()
+        f.debug_struct("MailboxClaim").field("id", &self.id).field("inbox", &self.inbox).finish_non_exhaustive()
     }
 }
 
@@ -180,9 +177,7 @@ pub struct MailboxWakeSlot {
 
 impl fmt::Debug for MailboxWakeSlot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MailboxWakeSlot")
-            .field("installed", &self.inner.get().is_some())
-            .finish()
+        f.debug_struct("MailboxWakeSlot").field("installed", &self.inner.get().is_some()).finish()
     }
 }
 
@@ -255,17 +250,13 @@ pub(crate) fn relay_or_transfer(
         // the guard, then `kind_name` moves out for the caller's log
         // (the rest of the dispatch, guard included, drops here).
         dispatch.mark_transferred();
-        return RelayOutcome::SenderGone {
-            kind_name: dispatch.kind_name,
-        };
+        return RelayOutcome::SenderGone { kind_name: dispatch.kind_name };
     };
     let env: Envelope = dispatch;
     if let Err(mpsc::SendError(env)) = tx.send(env) {
         // ADR-0094: receiver disconnected — discard at the seam, transfer.
         env.mark_transferred();
-        return RelayOutcome::ReceiverGone {
-            kind_name: env.kind_name,
-        };
+        return RelayOutcome::ReceiverGone { kind_name: env.kind_name };
     }
     if let Some(wake) = wake.get() {
         wake();
@@ -350,14 +341,7 @@ impl<'a> ChassisCtx<'a> {
         claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
         spawner: &'a Arc<crate::Spawner>,
     ) -> Self {
-        Self {
-            registry,
-            mailer,
-            fallback,
-            aborter,
-            claimed_actor_mailboxes,
-            spawner,
-        }
+        Self { registry, mailer, fallback, aborter, claimed_actor_mailboxes, spawner }
     }
 
     /// Register a `MailboxEntry::Inbox` under `C::NAMESPACE` and
@@ -450,9 +434,7 @@ impl<'a> ChassisCtx<'a> {
     /// `C::NAMESPACE`. See
     /// [`Self::claim_mailbox_drop_on_shutdown_with_override`] for the
     /// arbitrary-name escape hatch.
-    pub fn claim_mailbox_drop_on_shutdown<C: Addressable>(
-        &mut self,
-    ) -> Result<DropOnShutdownClaim, BootError> {
+    pub fn claim_mailbox_drop_on_shutdown<C: Addressable>(&mut self) -> Result<DropOnShutdownClaim, BootError> {
         self.claim_mailbox_drop_on_shutdown_with_override(C::NAMESPACE)
     }
 
@@ -491,33 +473,26 @@ impl<'a> ChassisCtx<'a> {
             // shutdown — so both abandonment arms are reachable and warn.
             // #1564: settling the obligation in the helper is what keeps a
             // send racing teardown from dropping an armed dispatch.
-            Arc::new(move |dispatch: OwnedDispatch| {
-                match relay_or_transfer(dispatch, &weak, &wake_for_handler) {
-                    RelayOutcome::Delivered => {}
-                    RelayOutcome::SenderGone { kind_name } => {
-                        tracing::warn!(
-                            target: "aether_substrate::capability",
-                            kind = %kind_name,
-                            "capability mailbox sender dropped — mail discarded"
-                        );
-                    }
-                    RelayOutcome::ReceiverGone { kind_name } => {
-                        tracing::warn!(
-                            target: "aether_substrate::capability",
-                            kind = %kind_name,
-                            "capability mailbox receiver dropped — mail discarded"
-                        );
-                    }
+            Arc::new(move |dispatch: OwnedDispatch| match relay_or_transfer(dispatch, &weak, &wake_for_handler) {
+                RelayOutcome::Delivered => {}
+                RelayOutcome::SenderGone { kind_name } => {
+                    tracing::warn!(
+                        target: "aether_substrate::capability",
+                        kind = %kind_name,
+                        "capability mailbox sender dropped — mail discarded"
+                    );
+                }
+                RelayOutcome::ReceiverGone { kind_name } => {
+                    tracing::warn!(
+                        target: "aether_substrate::capability",
+                        kind = %kind_name,
+                        "capability mailbox receiver dropped — mail discarded"
+                    );
                 }
             }),
         )?;
         self.claimed_actor_mailboxes.push(id);
-        Ok(DropOnShutdownClaim {
-            id,
-            receiver: rx,
-            mailbox_sender: MailboxSender::new(tx),
-            wake_slot,
-        })
+        Ok(DropOnShutdownClaim { id, receiver: rx, mailbox_sender: MailboxSender::new(tx), wake_slot })
     }
 
     /// Issue 607 Phase 7: undo a previous `claim_*_mailbox` call.
@@ -609,10 +584,7 @@ impl<'a> ChassisCtx<'a> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test-setup unwraps: fixture construction panic on failure is the assertion"
-)]
+#[allow(clippy::unwrap_used, reason = "test-setup unwraps: fixture construction panic on failure is the assertion")]
 mod tests {
     use super::*;
 
@@ -663,18 +635,10 @@ mod tests {
         ));
         let mut fallback: Option<FallbackRouter> = None;
         let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
-        let mut ctx = ChassisCtx::new(
-            &registry,
-            &mailer,
-            &mut fallback,
-            &aborter,
-            &mut claimed_actor_mailboxes,
-            &spawner,
-        );
+        let mut ctx =
+            ChassisCtx::new(&registry, &mailer, &mut fallback, &aborter, &mut claimed_actor_mailboxes, &spawner);
 
-        let claim = ctx
-            .claim_mailbox_with_override("test.iamacoffeepot.1272.driver")
-            .expect("first claim succeeds");
+        let claim = ctx.claim_mailbox_with_override("test.iamacoffeepot.1272.driver").expect("first claim succeeds");
 
         // Stamp the claim's slots into TLS and write through a `Local<T>`;
         // a second `with_stamped` round-trips reads back through the same
@@ -684,9 +648,8 @@ mod tests {
         with_stamped(claim.actor_slots.slots(), || {
             Probe::with_mut(|p| p.0 = 0x1272);
         });
-        let read_back = with_stamped(claim.actor_slots.slots(), || {
-            Probe::try_with(|p| p.0).expect("stamped slots carry Probe")
-        });
+        let read_back =
+            with_stamped(claim.actor_slots.slots(), || Probe::try_with(|p| p.0).expect("stamped slots carry Probe"));
         assert_eq!(read_back, 0x1272);
 
         // A fresh `ActorSlots` (not the one carried on the claim) must
@@ -694,22 +657,15 @@ mod tests {
         // actually went through the claim's slots and not a stale TLS
         // remnant.
         let other = SharedActorSlots::new();
-        let other_read = with_stamped(other.slots(), || {
-            Probe::try_with(|p| p.0).expect("any stamped slots carry Probe")
-        });
+        let other_read =
+            with_stamped(other.slots(), || Probe::try_with(|p| p.0).expect("any stamped slots carry Probe"));
         assert_eq!(other_read, 0, "fresh slots see the Local at its default");
     }
 
     /// The long-lived owned infra a `ChassisCtx` borrows from. Held by
     /// the test for the duration of the claim so the registered handler
     /// outlives the `ctx` that registered it.
-    type TestInfra = (
-        Arc<Registry>,
-        Arc<Mailer>,
-        Arc<crate::Spawner>,
-        Arc<dyn FatalAborter>,
-        PoolHandle,
-    );
+    type TestInfra = (Arc<Registry>, Arc<Mailer>, Arc<crate::Spawner>, Arc<dyn FatalAborter>, PoolHandle);
 
     fn test_infra() -> TestInfra {
         let registry = Arc::new(Registry::new());
@@ -766,17 +722,10 @@ mod tests {
         {
             let mut fallback: Option<FallbackRouter> = None;
             let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
-            let mut ctx = ChassisCtx::new(
-                &registry,
-                &mailer,
-                &mut fallback,
-                &aborter,
-                &mut claimed_actor_mailboxes,
-                &spawner,
-            );
-            let claim = ctx
-                .claim_mailbox_drop_on_shutdown_with_override("test.1564.sender_gone")
-                .expect("claim succeeds");
+            let mut ctx =
+                ChassisCtx::new(&registry, &mailer, &mut fallback, &aborter, &mut claimed_actor_mailboxes, &spawner);
+            let claim =
+                ctx.claim_mailbox_drop_on_shutdown_with_override("test.1564.sender_gone").expect("claim succeeds");
             claim_id = claim.id;
             // Drop the only strong `Sender` — the registry's `Weak` now
             // fails to upgrade, exactly as it does once a cap shuts down.
@@ -803,17 +752,10 @@ mod tests {
         {
             let mut fallback: Option<FallbackRouter> = None;
             let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
-            let mut ctx = ChassisCtx::new(
-                &registry,
-                &mailer,
-                &mut fallback,
-                &aborter,
-                &mut claimed_actor_mailboxes,
-                &spawner,
-            );
-            let claim = ctx
-                .claim_mailbox_drop_on_shutdown_with_override("test.1564.receiver_gone")
-                .expect("claim succeeds");
+            let mut ctx =
+                ChassisCtx::new(&registry, &mailer, &mut fallback, &aborter, &mut claimed_actor_mailboxes, &spawner);
+            let claim =
+                ctx.claim_mailbox_drop_on_shutdown_with_override("test.1564.receiver_gone").expect("claim succeeds");
             claim_id = claim.id;
             drop(claim.receiver);
             _keep_sender = claim.mailbox_sender;

@@ -2,15 +2,13 @@ use std::time::Duration;
 
 use aether_data::Kind;
 use aether_kinds::{
-    BinarySelector, ListComponents, ListComponentsResult, ListEngines, ListEnginesResult,
-    SpawnEngine, SpawnEngineResult, TerminateEngine, TerminateEngineResult,
+    BinarySelector, ListComponents, ListComponentsResult, ListEngines, ListEnginesResult, SpawnEngine,
+    SpawnEngineResult, TerminateEngine, TerminateEngineResult,
 };
 use rmcp::ErrorData as McpError;
 use tokio::time;
 
-use crate::args::{
-    DeadEngineInfo, EngineInfo, ListEnginesResponse, SpawnSubstrateArgs, TerminateSubstrateArgs,
-};
+use crate::args::{DeadEngineInfo, EngineInfo, ListEnginesResponse, SpawnSubstrateArgs, TerminateSubstrateArgs};
 
 use super::components::components_all_loaded;
 use super::envelope::{engine_envelope, local_envelope};
@@ -19,11 +17,7 @@ use super::render::{death_reason_parts, internal, internal_msg, json};
 use super::{ENGINE_CAP, Mcp};
 
 pub(super) async fn list_engines(mcp: &Mcp) -> Result<String, McpError> {
-    let reply = mcp
-        .session
-        .call_one(local_envelope(ENGINE_CAP, &ListEngines {}))
-        .await
-        .map_err(internal)?;
+    let reply = mcp.session.call_one(local_envelope(ENGINE_CAP, &ListEngines {})).await.map_err(internal)?;
     let result = ListEnginesResult::decode_from_bytes(&reply.payload)
         .ok_or_else(|| internal_msg("undecodable ListEnginesResult"))?;
     let engines: Vec<EngineInfo> = result
@@ -49,16 +43,10 @@ pub(super) async fn list_engines(mcp: &Mcp) -> Result<String, McpError> {
             }
         })
         .collect();
-    json(&ListEnginesResponse {
-        engines,
-        recently_died,
-    })
+    json(&ListEnginesResponse { engines, recently_died })
 }
 
-pub(super) async fn spawn_substrate(
-    mcp: &Mcp,
-    args: SpawnSubstrateArgs,
-) -> Result<String, McpError> {
+pub(super) async fn spawn_substrate(mcp: &Mcp, args: SpawnSubstrateArgs) -> Result<String, McpError> {
     // A boot list rides in as a temp boot-manifest JSON of file paths;
     // the hub injects its path as AETHER_BOOT_MANIFEST and the
     // single-host substrate reads the staged wasm itself (issue 1776).
@@ -68,11 +56,7 @@ pub(super) async fn spawn_substrate(
     // path-based, now fed by the registry. Hold the temp files across
     // the spawn call — the substrate reads them at boot, before the
     // spawn reply returns — then clean them up.
-    let staged = if args.components.is_empty() {
-        None
-    } else {
-        Some(mcp.stage_boot_manifest(&args.components).await?)
-    };
+    let staged = if args.components.is_empty() { None } else { Some(mcp.stage_boot_manifest(&args.components).await?) };
     let reply = mcp
         .session
         .call_one(local_envelope(
@@ -85,9 +69,7 @@ pub(super) async fn spawn_substrate(
                     target: args.target,
                 },
                 args: args.args,
-                boot_manifest: staged
-                    .as_ref()
-                    .map(|s| s.manifest_path.to_string_lossy().into_owned()),
+                boot_manifest: staged.as_ref().map(|s| s.manifest_path.to_string_lossy().into_owned()),
             },
         ))
         .await;
@@ -97,10 +79,7 @@ pub(super) async fn spawn_substrate(
     }
     let reply = reply.map_err(internal)?;
     let info = match SpawnEngineResult::decode_from_bytes(&reply.payload) {
-        Some(SpawnEngineResult::Ok {
-            engine_id,
-            rpc_port,
-        }) => EngineInfo {
+        Some(SpawnEngineResult::Ok { engine_id, rpc_port }) => EngineInfo {
             engine_id,
             rpc_port,
             // A just-spawned engine is alive as of now.
@@ -112,9 +91,9 @@ pub(super) async fn spawn_substrate(
             // the failed spawn against its `recently_died` entry and
             // reap it rather than guessing.
             let message = match engine_id {
-                Some(id) => format!(
-                    "{error} (engine_id {id} — see this id's spawn_failed entry in list_engines.recently_died)"
-                ),
+                Some(id) => {
+                    format!("{error} (engine_id {id} — see this id's spawn_failed entry in list_engines.recently_died)")
+                }
                 None => error,
             };
             return Err(internal_msg(&message));
@@ -141,18 +120,10 @@ pub(super) async fn spawn_substrate(
     json(&info)
 }
 
-pub(super) async fn terminate_substrate(
-    mcp: &Mcp,
-    args: TerminateSubstrateArgs,
-) -> Result<String, McpError> {
+pub(super) async fn terminate_substrate(mcp: &Mcp, args: TerminateSubstrateArgs) -> Result<String, McpError> {
     let reply = mcp
         .session
-        .call_one(local_envelope(
-            ENGINE_CAP,
-            &TerminateEngine {
-                engine_id: args.engine_id,
-            },
-        ))
+        .call_one(local_envelope(ENGINE_CAP, &TerminateEngine { engine_id: args.engine_id }))
         .await
         .map_err(internal)?;
     match TerminateEngineResult::decode_from_bytes(&reply.payload) {
@@ -162,11 +133,7 @@ pub(super) async fn terminate_substrate(
     }
 }
 
-async fn wait_for_loaded_components(
-    mcp: &Mcp,
-    engine_id: &str,
-    want_names: &[String],
-) -> Result<(), McpError> {
+async fn wait_for_loaded_components(mcp: &Mcp, engine_id: &str, want_names: &[String]) -> Result<(), McpError> {
     const POLL_INTERVAL: Duration = Duration::from_millis(100);
     const BUDGET: Duration = Duration::from_secs(30);
 
@@ -175,11 +142,7 @@ async fn wait_for_loaded_components(
     loop {
         let reply = mcp
             .session
-            .call_one(engine_envelope(
-                engine,
-                "aether.component",
-                &ListComponents {},
-            ))
+            .call_one(engine_envelope(engine, "aether.component", &ListComponents {}))
             .await
             .map_err(internal)?;
         let Some(result) = ListComponentsResult::decode_from_bytes(&reply.payload) else {
@@ -189,11 +152,8 @@ async fn wait_for_loaded_components(
             return Ok(());
         }
         if time::Instant::now() >= deadline {
-            let missing: Vec<&str> = want_names
-                .iter()
-                .filter(|w| !result.names.iter().any(|n| n == *w))
-                .map(String::as_str)
-                .collect();
+            let missing: Vec<&str> =
+                want_names.iter().filter(|w| !result.names.iter().any(|n| n == *w)).map(String::as_str).collect();
             return Err(internal_msg(&format!(
                 "spawned engine did not load all boot components within {}s: \
                      still missing: {missing:?}",

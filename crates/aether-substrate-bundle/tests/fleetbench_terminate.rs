@@ -30,15 +30,9 @@ mod tests {
         // is covered deterministically by the `engine::proxy` unit tests.
         let listed = poll_until(|| {
             let engines = bench.list_engines();
-            wanted
-                .iter()
-                .all(|id| engines.iter().any(|e| &e.engine_id == id))
+            wanted.iter().all(|id| engines.iter().any(|e| &e.engine_id == id))
         });
-        assert!(
-            listed,
-            "both spawned engines should round-trip through ListEngines: {:?}",
-            bench.list_engines(),
-        );
+        assert!(listed, "both spawned engines should round-trip through ListEngines: {:?}", bench.list_engines(),);
     }
 
     /// Spawn one headless substrate, confirm it is supervised, then
@@ -88,9 +82,7 @@ mod tests {
         let record = dead
             .iter()
             .find(|d| d.engine_id == engine_id)
-            .unwrap_or_else(|| {
-                panic!("terminated engine {engine_id} should appear in recently_died: {dead:?}")
-            });
+            .unwrap_or_else(|| panic!("terminated engine {engine_id} should appear in recently_died: {dead:?}"));
         assert_eq!(
             record.reason,
             DeathReason::Terminated,

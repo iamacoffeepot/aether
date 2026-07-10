@@ -7,8 +7,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::{
-    BindListener, BindListenerResult, ListListeners, ListListenersResult, TcpCapability,
-    UnbindListener, UnbindListenerResult,
+    BindListener, BindListenerResult, ListListeners, ListListenersResult, TcpCapability, UnbindListener,
+    UnbindListenerResult,
 };
 use aether_actor::Addressable;
 use aether_data::{Kind, SessionToken, Uuid};
@@ -43,11 +43,7 @@ fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>
 /// Collapses the previously-duplicated `fresh_substrate()` +
 /// `Builder::<TestChassis>::new(...)` chain that opened every
 /// test (issue 796).
-fn boot_tcp_substrate() -> (
-    Arc<Registry>,
-    mpsc::Receiver<EgressEvent>,
-    PassiveChassis<TestChassis>,
-) {
+fn boot_tcp_substrate() -> (Arc<Registry>, mpsc::Receiver<EgressEvent>, PassiveChassis<TestChassis>) {
     let (registry, mailer, rx) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TcpCapability>(())
@@ -73,9 +69,7 @@ where
     K: Kind,
     R: Kind,
 {
-    let id = registry
-        .lookup(cap_namespace)
-        .expect("cap mailbox registered");
+    let id = registry.lookup(cap_namespace).expect("cap mailbox registered");
     let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("cap entry") else {
         panic!("expected mailbox entry");
     };
@@ -100,11 +94,7 @@ where
         if let Ok(f) = rx.try_recv() {
             break f;
         }
-        assert!(
-            Instant::now() < deadline,
-            "reply did not arrive within deadline for {}",
-            K::NAME
-        );
+        assert!(Instant::now() < deadline, "reply did not arrive within deadline for {}", K::NAME);
         thread::sleep(Duration::from_millis(5));
     };
     let payload = match frame {
@@ -126,33 +116,18 @@ fn bind_then_list_then_unbind_roundtrip() {
         &registry,
         &rx,
         TcpCapability::NAMESPACE,
-        &BindListener {
-            addr: "127.0.0.1:0".into(),
-            name: None,
-        },
+        &BindListener { addr: "127.0.0.1:0".into(), name: None },
     );
     let (listener_name, local_port) = match bind_reply {
-        BindListenerResult::Ok {
-            listener_name,
-            local_port,
-            ..
-        } => (listener_name, local_port),
+        BindListenerResult::Ok { listener_name, local_port, .. } => (listener_name, local_port),
         BindListenerResult::Err { reason, .. } => panic!("bind failed: {reason}"),
     };
-    assert_eq!(
-        listener_name,
-        local_port.to_string(),
-        "default subname should be the bound port",
-    );
+    assert_eq!(listener_name, local_port.to_string(), "default subname should be the bound port",);
     assert!(local_port > 0, "OS-picked port should be non-zero");
 
     // List enumerates the one listener.
-    let list_reply: ListListenersResult = drive_and_decode(
-        &registry,
-        &rx,
-        TcpCapability::NAMESPACE,
-        &ListListeners::default(),
-    );
+    let list_reply: ListListenersResult =
+        drive_and_decode(&registry, &rx, TcpCapability::NAMESPACE, &ListListeners::default());
     assert_eq!(list_reply.listeners.len(), 1, "exactly one listener");
     let entry = &list_reply.listeners[0];
     assert_eq!(entry.name, listener_name);
@@ -164,9 +139,7 @@ fn bind_then_list_then_unbind_roundtrip() {
         &registry,
         &rx,
         TcpCapability::NAMESPACE,
-        &UnbindListener {
-            listener_name: listener_name.clone(),
-        },
+        &UnbindListener { listener_name: listener_name.clone() },
     );
     match unbind_reply {
         UnbindListenerResult::Ok { listener_name: ln } => assert_eq!(ln, listener_name),
@@ -175,16 +148,9 @@ fn bind_then_list_then_unbind_roundtrip() {
 
     // List should now be empty — cap-local supervisor map
     // dropped the entry on MonitorNotice.
-    let list_reply: ListListenersResult = drive_and_decode(
-        &registry,
-        &rx,
-        TcpCapability::NAMESPACE,
-        &ListListeners::default(),
-    );
-    assert!(
-        list_reply.listeners.is_empty(),
-        "list should drop the unbound listener",
-    );
+    let list_reply: ListListenersResult =
+        drive_and_decode(&registry, &rx, TcpCapability::NAMESPACE, &ListListeners::default());
+    assert!(list_reply.listeners.is_empty(), "list should drop the unbound listener",);
 }
 
 /// Binding the same port twice fails the second bind. Uses
@@ -197,10 +163,7 @@ fn bind_port_in_use_returns_err() {
         &registry,
         &rx,
         TcpCapability::NAMESPACE,
-        &BindListener {
-            addr: "127.0.0.1:0".into(),
-            name: Some("first".into()),
-        },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("first".into()) },
     );
     let local_port = match first {
         BindListenerResult::Ok { local_port, .. } => local_port,
@@ -212,19 +175,13 @@ fn bind_port_in_use_returns_err() {
         &registry,
         &rx,
         TcpCapability::NAMESPACE,
-        &BindListener {
-            addr: format!("127.0.0.1:{local_port}"),
-            name: Some("second".into()),
-        },
+        &BindListener { addr: format!("127.0.0.1:{local_port}"), name: Some("second".into()) },
     );
     match second {
         BindListenerResult::Ok { .. } => panic!("expected port-in-use Err"),
         BindListenerResult::Err { reason, addr } => {
             assert_eq!(addr, format!("127.0.0.1:{local_port}"));
-            assert!(
-                reason.starts_with("bind failed:"),
-                "expected bind-fail reason, got: {reason}",
-            );
+            assert!(reason.starts_with("bind failed:"), "expected bind-fail reason, got: {reason}",);
         }
     }
 }
@@ -235,14 +192,8 @@ fn bind_port_in_use_returns_err() {
 fn unbind_unknown_listener_errors() {
     let (registry, rx, _chassis) = boot_tcp_substrate();
 
-    let reply: UnbindListenerResult = drive_and_decode(
-        &registry,
-        &rx,
-        TcpCapability::NAMESPACE,
-        &UnbindListener {
-            listener_name: "nope".into(),
-        },
-    );
+    let reply: UnbindListenerResult =
+        drive_and_decode(&registry, &rx, TcpCapability::NAMESPACE, &UnbindListener { listener_name: "nope".into() });
     match reply {
         UnbindListenerResult::Err { listener_name, .. } => {
             assert_eq!(listener_name, "nope");
@@ -268,27 +219,17 @@ fn list_enumerates_two_concurrent_listeners() {
         &registry,
         &rx,
         TcpCapability::NAMESPACE,
-        &BindListener {
-            addr: "127.0.0.1:0".into(),
-            name: Some("admin".into()),
-        },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("admin".into()) },
     );
     let _: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
         TcpCapability::NAMESPACE,
-        &BindListener {
-            addr: "127.0.0.1:0".into(),
-            name: Some("game".into()),
-        },
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("game".into()) },
     );
 
-    let list: ListListenersResult = drive_and_decode(
-        &registry,
-        &rx,
-        TcpCapability::NAMESPACE,
-        &ListListeners::default(),
-    );
+    let list: ListListenersResult =
+        drive_and_decode(&registry, &rx, TcpCapability::NAMESPACE, &ListListeners::default());
     let mut names: Vec<String> = list.listeners.iter().map(|l| l.name.clone()).collect();
     names.sort();
     assert_eq!(names, vec!["admin".to_string(), "game".to_string()]);

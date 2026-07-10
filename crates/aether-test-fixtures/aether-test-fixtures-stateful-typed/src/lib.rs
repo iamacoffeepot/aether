@@ -25,9 +25,7 @@ use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 /// via `save_state_kind` on dehydrate and recovers it via `decode_kind` on
 /// rehydrate. The reshaped companion fixture adds a field, changing
 /// `Kind::ID` so the recovery misses.
-#[derive(
-    aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[kind(name = "aether.test_fixtures.counter_state")]
 pub struct CounterState {
     pub count: u32,

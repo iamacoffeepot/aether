@@ -1,9 +1,6 @@
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
 
-use super::{
-    ComponentCtx, DELIVERY_ALIGN, MAX_DELIVERABLE_MAIL_BYTES, ReallocFunc, ReceiveFunc,
-    SMALL_REGION_BYTES,
-};
+use super::{ComponentCtx, DELIVERY_ALIGN, MAX_DELIVERABLE_MAIL_BYTES, ReallocFunc, ReceiveFunc, SMALL_REGION_BYTES};
 
 pub struct Component {
     pub(super) store: Store<ComponentCtx>,
@@ -120,14 +117,7 @@ impl Component {
         large_cap: &mut u32,
         config_bytes: &[u8],
     ) -> wasmtime::Result<u32> {
-        match Self::place(
-            store,
-            realloc,
-            small_ptr,
-            large_ptr,
-            large_cap,
-            config_bytes.len(),
-        )? {
+        match Self::place(store, realloc, small_ptr, large_ptr, large_cap, config_bytes.len())? {
             Placement::At(ptr) => {
                 if !config_bytes.is_empty() {
                     memory.write(store, ptr as usize, config_bytes)?;
@@ -135,11 +125,7 @@ impl Component {
                 Ok(ptr)
             }
             Placement::Oversize => {
-                Self::log_oversize_config(
-                    store,
-                    config_bytes.len(),
-                    "exceeds the absolute deliverable bound",
-                );
+                Self::log_oversize_config(store, config_bytes.len(), "exceeds the absolute deliverable bound");
                 Err(wasmtime::Error::msg(format!(
                     "guest init config of {} bytes exceeds the {MAX_DELIVERABLE_MAIL_BYTES}-byte deliverable bound",
                     config_bytes.len(),
@@ -205,10 +191,7 @@ impl Component {
         let memory = instance
             .get_memory(&mut store, "memory")
             .ok_or_else(|| wasmtime::Error::msg("guest exports no `memory`"))?;
-        let receive = instance.get_typed_func::<(u64, u32, u32, u32, u32, u64, u64), u32>(
-            &mut store,
-            "receive_p32",
-        )?;
+        let receive = instance.get_typed_func::<(u64, u32, u32, u32, u32, u64, u64), u32>(&mut store, "receive_p32")?;
 
         // Optional `init(mailbox_id) -> u32` export: called once before
         // the first `receive`, handed the component's own mailbox id so
@@ -238,18 +221,13 @@ impl Component {
         // `export!`); absent on a non-conforming guest, which then can't receive
         // any payload. The allocator is a module-level export ready right after
         // instantiation and independent of the actor's `init`.
-        let realloc = instance
-            .get_typed_func::<(u32, u32, u32, u32), u32>(&mut store, "realloc_p32")
-            .ok();
+        let realloc = instance.get_typed_func::<(u32, u32, u32, u32), u32>(&mut store, "realloc_p32").ok();
         // Allocate the reused SMALL delivery region once, up front, and cache
         // its (non-null) pointer for the hot path. The LARGE region is grown
         // lazily by `place` only when a payload exceeds the small floor.
         let small_ptr = if let Some(realloc) = &realloc {
             #[allow(clippy::cast_possible_truncation)]
-            let ptr = realloc.call(
-                &mut store,
-                (0, 0, DELIVERY_ALIGN, SMALL_REGION_BYTES as u32),
-            )?;
+            let ptr = realloc.call(&mut store, (0, 0, DELIVERY_ALIGN, SMALL_REGION_BYTES as u32))?;
             if ptr == 0 {
                 return Err(wasmtime::Error::msg(
                     "guest allocator returned null for the small delivery region at instantiate",
@@ -273,9 +251,8 @@ impl Component {
             // either isn't a multi-actor module or was built against an
             // older SDK — a clean boot error, never a silent fall-through
             // to the entry-only `init_with_config_p32`.
-            let init_typed = instance
-                .get_typed_func::<(u64, u64, u32, u32), u32>(&mut store, "init_typed_p32")
-                .map_err(|e| {
+            let init_typed =
+                instance.get_typed_func::<(u64, u64, u32, u32), u32>(&mut store, "init_typed_p32").map_err(|e| {
                     wasmtime::Error::msg(format!(
                         "export selector set but guest exports no `init_typed_p32` \
                          (not a multi-actor module?): {e}"
@@ -325,10 +302,11 @@ impl Component {
         if let Some(rc) = init_rc
             && rc != 0
         {
-            let msg =
-                store.data_mut().init_failure.take().unwrap_or_else(|| {
-                    format!("guest init returned {rc} without staging an error")
-                });
+            let msg = store
+                .data_mut()
+                .init_failure
+                .take()
+                .unwrap_or_else(|| format!("guest init returned {rc} without staging an error"));
             return Err(wasmtime::Error::msg(format!("guest init failed: {msg}")));
         }
 
@@ -339,24 +317,18 @@ impl Component {
         // (Issue 584 Phase 3 retired `on_drop` — `unwire` is the
         // pre-shutdown hook now.) Named save/restore-side so the two
         // locals don't read as a `de`/`re` minimal pair.
-        let save_hook = instance
-            .get_typed_func::<(), u32>(&mut store, "on_dehydrate")
-            .ok();
+        let save_hook = instance.get_typed_func::<(), u32>(&mut store, "on_dehydrate").ok();
         // ADR-0016: `on_rehydrate` takes `(version, ptr, len)` — the
         // substrate writes the state bytes into a delivery region (ADR-0095,
         // via `call_on_rehydrate`), then calls the shim with `(version, ptr, len)`.
-        let restore_hook = instance
-            .get_typed_func::<(u32, u32, u32), u32>(&mut store, "on_rehydrate_p32")
-            .ok();
+        let restore_hook = instance.get_typed_func::<(u32, u32, u32), u32>(&mut store, "on_rehydrate_p32").ok();
         // Issue 584 Phase 2b: optional wire/unwire exports. Both take
         // the component's own mailbox id (same as `init`) so the guest
         // ctx can self-address. Raw-FFI guests without the macro won't
         // emit them; macro-using guests with default no-op trait
         // bodies still emit the symbol (the shim just calls into the
         // default body).
-        let unwire = instance
-            .get_typed_func::<u64, u32>(&mut store, "unwire")
-            .ok();
+        let unwire = instance.get_typed_func::<u64, u32>(&mut store, "unwire").ok();
 
         // Issue 584 Phase 2b / Issue 640 Phase 2: store the `wire`
         // export rather than calling it here. `instantiate` runs

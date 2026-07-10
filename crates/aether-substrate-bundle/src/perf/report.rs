@@ -107,11 +107,7 @@ impl CellJson {
     }
 
     fn key(&self) -> CellKey {
-        CellKey {
-            workers: self.workers,
-            topo: self.topo.clone(),
-            metric: self.metric,
-        }
+        CellKey { workers: self.workers, topo: self.topo.clone(), metric: self.metric }
     }
 }
 
@@ -190,10 +186,7 @@ pub struct ThroughputCell {
 
 impl ThroughputCell {
     fn key(&self) -> ThroughputKey {
-        ThroughputKey {
-            workers: self.workers,
-            topo: self.topo.clone(),
-        }
+        ThroughputKey { workers: self.workers, topo: self.topo.clone() }
     }
 }
 
@@ -347,8 +340,7 @@ impl TrialReport {
             if rows.is_empty() {
                 continue;
             }
-            let body = serde_json::to_value(LatencySection { cells: rows })
-                .unwrap_or(serde_json::Value::Null);
+            let body = serde_json::to_value(LatencySection { cells: rows }).unwrap_or(serde_json::Value::Null);
             sections.push(RawSection {
                 name: tier.section_name().to_owned(),
                 version: LatencySection::VERSION.to_owned(),
@@ -374,21 +366,14 @@ impl TrialReport {
             })
             .collect();
         if !keepup_rows.is_empty() {
-            let body = serde_json::to_value(KeepUpSection { cells: keepup_rows })
-                .unwrap_or(serde_json::Value::Null);
+            let body = serde_json::to_value(KeepUpSection { cells: keepup_rows }).unwrap_or(serde_json::Value::Null);
             sections.push(RawSection {
                 name: KeepUpSection::NAME.to_owned(),
                 version: KeepUpSection::VERSION.to_owned(),
                 body,
             });
         }
-        Self {
-            schema: TRIAL_SCHEMA.to_owned(),
-            git_sha,
-            pace_hz,
-            frames,
-            sections,
-        }
+        Self { schema: TRIAL_SCHEMA.to_owned(), git_sha, pace_hz, frames, sections }
     }
 
     /// Build a *saturation* trial report from a sweep's [`CellResult`]s
@@ -404,18 +389,10 @@ impl TrialReport {
     ///
     /// [`CellResult`]: super::harness::CellResult
     #[must_use]
-    pub fn from_throughput_cells(
-        cells: &[super::harness::CellResult],
-        frames: u32,
-        git_sha: Option<String>,
-    ) -> Self {
+    pub fn from_throughput_cells(cells: &[super::harness::CellResult], frames: u32, git_sha: Option<String>) -> Self {
         let rows: Vec<ThroughputCell> = cells
             .iter()
-            .map(|c| ThroughputCell {
-                workers: c.workers,
-                topo: c.topo.clone(),
-                mails_per_sec: c.throughput_mps,
-            })
+            .map(|c| ThroughputCell { workers: c.workers, topo: c.topo.clone(), mails_per_sec: c.throughput_mps })
             .collect();
         let throughput = ThroughputSection { cells: rows };
         let body = serde_json::to_value(&throughput).unwrap_or(serde_json::Value::Null);
@@ -454,9 +431,7 @@ pub fn probe_schema(json: &[u8]) -> Option<String> {
     struct SchemaProbe {
         schema: String,
     }
-    serde_json::from_slice::<SchemaProbe>(json)
-        .ok()
-        .map(|p| p.schema)
+    serde_json::from_slice::<SchemaProbe>(json).ok().map(|p| p.schema)
 }
 
 #[derive(Clone, Copy)]
@@ -507,9 +482,7 @@ pub enum Direction {
 /// not a closure, so the borrow of the returned `&CellJson` ties to the
 /// slice's lifetime).
 fn find_cell<'a>(cells: &'a [CellJson], key: &CellKey) -> Option<&'a CellJson> {
-    cells
-        .iter()
-        .find(|c| c.workers == key.workers && c.topo == key.topo && c.metric == key.metric)
+    cells.iter().find(|c| c.workers == key.workers && c.topo == key.topo && c.metric == key.metric)
 }
 
 /// improved / stable / regressed verdict for one (cell × percentile).
@@ -662,12 +635,7 @@ pub struct CompareConfig {
 
 impl Default for CompareConfig {
     fn default() -> Self {
-        Self {
-            effect_floor_iqr: 1.5,
-            rel_floor: 0.10,
-            abs_floor_nanos: 300.0,
-            consistency: 0.75,
-        }
+        Self { effect_floor_iqr: 1.5, rel_floor: 0.10, abs_floor_nanos: 300.0, consistency: 0.75 }
     }
 }
 
@@ -676,11 +644,7 @@ fn sorted(mut v: Vec<f64>) -> Vec<f64> {
     v
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn quantile_sorted(s: &[f64], q: f64) -> f64 {
     if s.is_empty() {
         return 0.0;
@@ -730,17 +694,11 @@ pub fn compare(base: &[TrialReport], cand: &[TrialReport], cfg: CompareConfig) -
         let (bsec, csec) = match (on_base, on_cand) {
             (Some(b), Some(c)) => (b, c),
             (None, Some(_)) => {
-                sections.push(SectionReport::Uncompared {
-                    name: name.clone(),
-                    reason: UncomparedReason::NewThisRun,
-                });
+                sections.push(SectionReport::Uncompared { name: name.clone(), reason: UncomparedReason::NewThisRun });
                 continue;
             }
             (Some(_), None) => {
-                sections.push(SectionReport::Uncompared {
-                    name: name.clone(),
-                    reason: UncomparedReason::OnlyBase,
-                });
+                sections.push(SectionReport::Uncompared { name: name.clone(), reason: UncomparedReason::OnlyBase });
                 continue;
             }
             (None, None) => continue,
@@ -748,10 +706,7 @@ pub fn compare(base: &[TrialReport], cand: &[TrialReport], cfg: CompareConfig) -
         if bsec.version != csec.version {
             sections.push(SectionReport::Uncompared {
                 name: name.clone(),
-                reason: UncomparedReason::VersionChanged {
-                    base: bsec.version.clone(),
-                    cand: csec.version.clone(),
-                },
+                reason: UncomparedReason::VersionChanged { base: bsec.version.clone(), cand: csec.version.clone() },
             });
             continue;
         }
@@ -774,17 +729,11 @@ pub fn compare(base: &[TrialReport], cand: &[TrialReport], cfg: CompareConfig) -
             let cand_cells = decode_keepup_cells(&cand[..k]);
             sections.push(compare_keepup(name, &base_cells, &cand_cells, k));
         } else {
-            sections.push(SectionReport::Uncompared {
-                name: name.clone(),
-                reason: UncomparedReason::UnknownName,
-            });
+            sections.push(SectionReport::Uncompared { name: name.clone(), reason: UncomparedReason::UnknownName });
         }
     }
 
-    ComparisonReport {
-        trials: k,
-        sections,
-    }
+    ComparisonReport { trials: k, sections }
 }
 
 /// Per-trial latency cells for the named tier section (`latency`,
@@ -821,21 +770,14 @@ fn compare_latency(
 
     // Key set = cells in the first base trial; verified present across
     // all trials of both sides before comparing.
-    let keys: Vec<CellKey> = base_cells
-        .first()
-        .map(|c| c.iter().map(CellJson::key).collect())
-        .unwrap_or_default();
+    let keys: Vec<CellKey> = base_cells.first().map(|c| c.iter().map(CellJson::key).collect()).unwrap_or_default();
 
     for key in &keys {
         // Per-trial lookup of this cell on each side.
-        let base_hits: Vec<&CellJson> = base_cells[..k.min(base_cells.len())]
-            .iter()
-            .filter_map(|c| find_cell(c, key))
-            .collect();
-        let cand_hits: Vec<&CellJson> = cand_cells[..k.min(cand_cells.len())]
-            .iter()
-            .filter_map(|c| find_cell(c, key))
-            .collect();
+        let base_hits: Vec<&CellJson> =
+            base_cells[..k.min(base_cells.len())].iter().filter_map(|c| find_cell(c, key)).collect();
+        let cand_hits: Vec<&CellJson> =
+            cand_cells[..k.min(cand_cells.len())].iter().filter_map(|c| find_cell(c, key)).collect();
         if base_hits.len() != k || cand_hits.len() != k || k == 0 {
             continue; // cell not present in every trial — skip
         }
@@ -854,19 +796,8 @@ fn compare_latency(
             let delta_median = median_sorted(&delta_sorted);
             let delta_iqr = iqr_sorted(&delta_sorted);
 
-            let verdict = classify(
-                &deltas,
-                delta_median,
-                delta_iqr,
-                base_median,
-                Direction::LowerIsBetter,
-                cfg,
-            );
-            let delta_pct = if base_median > 0.0 {
-                delta_median / base_median * 100.0
-            } else {
-                0.0
-            };
+            let verdict = classify(&deltas, delta_median, delta_iqr, base_median, Direction::LowerIsBetter, cfg);
+            let delta_pct = if base_median > 0.0 { delta_median / base_median * 100.0 } else { 0.0 };
 
             cells.push(CellComparison {
                 workers: key.workers,
@@ -884,22 +815,10 @@ fn compare_latency(
         }
     }
 
-    let improved = cells
-        .iter()
-        .filter(|c| c.verdict == Verdict::Improved)
-        .count();
-    let regressed = cells
-        .iter()
-        .filter(|c| c.verdict == Verdict::Regressed)
-        .count();
+    let improved = cells.iter().filter(|c| c.verdict == Verdict::Improved).count();
+    let regressed = cells.iter().filter(|c| c.verdict == Verdict::Regressed).count();
     let stable = cells.len() - improved - regressed;
-    SectionReport::Compared {
-        name: name.to_owned(),
-        improved,
-        stable,
-        regressed,
-        cells,
-    }
+    SectionReport::Compared { name: name.to_owned(), improved, stable, regressed, cells }
 }
 
 /// Per-trial throughput cells: decode each trial's `throughput` section
@@ -926,13 +845,8 @@ fn decode_throughput_cells(trials: &[TrialReport]) -> Vec<Vec<ThroughputCell>> {
 /// "present in every trial" gate then treats the cell as absent (no
 /// measurement, not a regression to zero) without any further comparator
 /// branch.
-fn find_throughput_cell<'a>(
-    cells: &'a [ThroughputCell],
-    key: &ThroughputKey,
-) -> Option<&'a ThroughputCell> {
-    cells
-        .iter()
-        .find(|c| c.workers == key.workers && c.topo == key.topo && c.mails_per_sec.is_some())
+fn find_throughput_cell<'a>(cells: &'a [ThroughputCell], key: &ThroughputKey) -> Option<&'a ThroughputCell> {
+    cells.iter().find(|c| c.workers == key.workers && c.topo == key.topo && c.mails_per_sec.is_some())
 }
 
 /// The throughput section's per-cell paired-delta compare
@@ -951,20 +865,14 @@ fn compare_throughput(
 ) -> SectionReport {
     let mut cells: Vec<ThroughputComparison> = Vec::new();
 
-    let keys: Vec<ThroughputKey> = base_cells
-        .first()
-        .map(|c| c.iter().map(ThroughputCell::key).collect())
-        .unwrap_or_default();
+    let keys: Vec<ThroughputKey> =
+        base_cells.first().map(|c| c.iter().map(ThroughputCell::key).collect()).unwrap_or_default();
 
     for key in &keys {
-        let base_hits: Vec<&ThroughputCell> = base_cells[..k.min(base_cells.len())]
-            .iter()
-            .filter_map(|c| find_throughput_cell(c, key))
-            .collect();
-        let cand_hits: Vec<&ThroughputCell> = cand_cells[..k.min(cand_cells.len())]
-            .iter()
-            .filter_map(|c| find_throughput_cell(c, key))
-            .collect();
+        let base_hits: Vec<&ThroughputCell> =
+            base_cells[..k.min(base_cells.len())].iter().filter_map(|c| find_throughput_cell(c, key)).collect();
+        let cand_hits: Vec<&ThroughputCell> =
+            cand_cells[..k.min(cand_cells.len())].iter().filter_map(|c| find_throughput_cell(c, key)).collect();
         if base_hits.len() != k || cand_hits.len() != k || k == 0 {
             continue; // cell not present in every trial — skip
         }
@@ -984,19 +892,8 @@ fn compare_throughput(
         let delta_median = median_sorted(&delta_sorted);
         let delta_iqr = iqr_sorted(&delta_sorted);
 
-        let verdict = classify(
-            &deltas,
-            delta_median,
-            delta_iqr,
-            base_median,
-            Direction::HigherIsBetter,
-            cfg,
-        );
-        let delta_pct = if base_median > 0.0 {
-            delta_median / base_median * 100.0
-        } else {
-            0.0
-        };
+        let verdict = classify(&deltas, delta_median, delta_iqr, base_median, Direction::HigherIsBetter, cfg);
+        let delta_pct = if base_median > 0.0 { delta_median / base_median * 100.0 } else { 0.0 };
 
         cells.push(ThroughputComparison {
             workers: key.workers,
@@ -1011,22 +908,10 @@ fn compare_throughput(
         });
     }
 
-    let improved = cells
-        .iter()
-        .filter(|c| c.verdict == Verdict::Improved)
-        .count();
-    let regressed = cells
-        .iter()
-        .filter(|c| c.verdict == Verdict::Regressed)
-        .count();
+    let improved = cells.iter().filter(|c| c.verdict == Verdict::Improved).count();
+    let regressed = cells.iter().filter(|c| c.verdict == Verdict::Regressed).count();
     let stable = cells.len() - improved - regressed;
-    SectionReport::ThroughputCompared {
-        name: name.to_owned(),
-        improved,
-        stable,
-        regressed,
-        cells,
-    }
+    SectionReport::ThroughputCompared { name: name.to_owned(), improved, stable, regressed, cells }
 }
 
 /// Per-trial keep-up cells for the `keepup.real` section
@@ -1048,14 +933,8 @@ fn decode_keepup_cells(trials: &[TrialReport]) -> Vec<Vec<KeepUpCell>> {
 /// Find the keep-up cell matching (`workers`, `topo`) in one trial's cells (a
 /// free fn so the returned borrow ties to the slice's lifetime, mirroring
 /// [`find_cell`] / [`find_throughput_cell`]).
-fn find_keepup_cell<'a>(
-    cells: &'a [KeepUpCell],
-    workers: usize,
-    topo: &str,
-) -> Option<&'a KeepUpCell> {
-    cells
-        .iter()
-        .find(|c| c.workers == workers && c.topo == topo)
+fn find_keepup_cell<'a>(cells: &'a [KeepUpCell], workers: usize, topo: &str) -> Option<&'a KeepUpCell> {
+    cells.iter().find(|c| c.workers == workers && c.topo == topo)
 }
 
 /// The keep-up section's per-cell trend compare (iamacoffeepot/aether#1233) —
@@ -1073,28 +952,18 @@ fn compare_keepup(
 ) -> SectionReport {
     let mut cells: Vec<KeepUpComparison> = Vec::new();
 
-    let keys: Vec<(usize, String)> = base_cells
-        .first()
-        .map(|c| c.iter().map(|x| (x.workers, x.topo.clone())).collect())
-        .unwrap_or_default();
+    let keys: Vec<(usize, String)> =
+        base_cells.first().map(|c| c.iter().map(|x| (x.workers, x.topo.clone())).collect()).unwrap_or_default();
 
     let pace_ratio = |c: &KeepUpCell| -> f64 {
-        if c.expected_nanos > 0 {
-            c.elapsed_nanos as f64 / c.expected_nanos as f64
-        } else {
-            0.0
-        }
+        if c.expected_nanos > 0 { c.elapsed_nanos as f64 / c.expected_nanos as f64 } else { 0.0 }
     };
 
     for (workers, topo) in &keys {
-        let base_hits: Vec<&KeepUpCell> = base_cells[..k.min(base_cells.len())]
-            .iter()
-            .filter_map(|c| find_keepup_cell(c, *workers, topo))
-            .collect();
-        let cand_hits: Vec<&KeepUpCell> = cand_cells[..k.min(cand_cells.len())]
-            .iter()
-            .filter_map(|c| find_keepup_cell(c, *workers, topo))
-            .collect();
+        let base_hits: Vec<&KeepUpCell> =
+            base_cells[..k.min(base_cells.len())].iter().filter_map(|c| find_keepup_cell(c, *workers, topo)).collect();
+        let cand_hits: Vec<&KeepUpCell> =
+            cand_cells[..k.min(cand_cells.len())].iter().filter_map(|c| find_keepup_cell(c, *workers, topo)).collect();
         if base_hits.len() != k || cand_hits.len() != k || k == 0 {
             continue; // cell not present in every trial — skip
         }
@@ -1115,10 +984,7 @@ fn compare_keepup(
         });
     }
 
-    SectionReport::KeepUpCompared {
-        name: name.to_owned(),
-        cells,
-    }
+    SectionReport::KeepUpCompared { name: name.to_owned(), cells }
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -1134,10 +1000,7 @@ fn classify(
         return Verdict::Stable;
     }
     let n = deltas.len() as f64;
-    let same_sign = deltas
-        .iter()
-        .filter(|&&d| d != 0.0 && d.signum() == delta_median.signum())
-        .count() as f64;
+    let same_sign = deltas.iter().filter(|&&d| d != 0.0 && d.signum() == delta_median.signum()).count() as f64;
     let consistent = same_sign / n >= cfg.consistency;
 
     // The absolute floor (`abs_floor_nanos`) is a *nanosecond* resolution
@@ -1149,9 +1012,7 @@ fn classify(
         Direction::LowerIsBetter => cfg.abs_floor_nanos,
         Direction::HigherIsBetter => 0.0,
     };
-    let floor = (cfg.effect_floor_iqr * delta_iqr)
-        .max(cfg.rel_floor * base_median)
-        .max(abs_floor);
+    let floor = (cfg.effect_floor_iqr * delta_iqr).max(cfg.rel_floor * base_median).max(abs_floor);
     let large = delta_median.abs() > floor;
 
     if !(consistent && large) {
@@ -1164,11 +1025,7 @@ fn classify(
         Direction::LowerIsBetter => value_fell,
         Direction::HigherIsBetter => !value_fell,
     };
-    if improved {
-        Verdict::Improved
-    } else {
-        Verdict::Regressed
-    }
+    if improved { Verdict::Improved } else { Verdict::Regressed }
 }
 
 fn us(ns: f64) -> String {
@@ -1190,31 +1047,21 @@ pub const STICKY_MARKER: &str = "<!-- aether-perf-report -->";
 /// [`markdown`] here and `perf-compare`'s `roll_up` so the two never drift.
 #[must_use]
 pub fn headline_counts(report: &ComparisonReport) -> (usize, usize, usize) {
-    report
-        .sections
-        .iter()
-        .fold((0, 0, 0), |(i, s, r), sec| match sec {
-            SectionReport::Compared {
-                name,
-                improved,
-                stable,
-                regressed,
-                ..
-            } if latency_section_renders_verdict(name) => (i + improved, s + stable, r + regressed),
-            SectionReport::ThroughputCompared {
-                improved,
-                stable,
-                regressed,
-                ..
-            } => (i + improved, s + stable, r + regressed),
-            // A non-light latency section is compared (it carries counts)
-            // but its verdict is suppressed — it must not reach the headline.
-            // A keep-up section carries no verdict at all (characterisation),
-            // so it never contributes to the gate signal either.
-            SectionReport::Compared { .. }
-            | SectionReport::KeepUpCompared { .. }
-            | SectionReport::Uncompared { .. } => (i, s, r),
-        })
+    report.sections.iter().fold((0, 0, 0), |(i, s, r), sec| match sec {
+        SectionReport::Compared { name, improved, stable, regressed, .. } if latency_section_renders_verdict(name) => {
+            (i + improved, s + stable, r + regressed)
+        }
+        SectionReport::ThroughputCompared { improved, stable, regressed, .. } => {
+            (i + improved, s + stable, r + regressed)
+        }
+        // A non-light latency section is compared (it carries counts)
+        // but its verdict is suppressed — it must not reach the headline.
+        // A keep-up section carries no verdict at all (characterisation),
+        // so it never contributes to the gate signal either.
+        SectionReport::Compared { .. } | SectionReport::KeepUpCompared { .. } | SectionReport::Uncompared { .. } => {
+            (i, s, r)
+        }
+    })
 }
 
 /// Render the comparison as a sticky PR-comment markdown body: headline
@@ -1250,9 +1097,7 @@ pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> Strin
                 push_keepup_section(&mut s, name, cells);
             }
             SectionReport::Uncompared { name, .. } => {
-                s.push_str(&format!(
-                    "_{name}: new this run — no baseline to compare_\n\n"
-                ));
+                s.push_str(&format!("_{name}: new this run — no baseline to compare_\n\n"));
             }
         }
     }
@@ -1265,17 +1110,9 @@ pub fn markdown(report: &ComparisonReport, title: &str, subtitle: &str) -> Strin
 /// own header + per-row rendering and hand the rendered rows here, so the
 /// table scaffolding lives in one place.
 #[allow(clippy::format_push_string)]
-fn push_section_tables(
-    s: &mut String,
-    name: &str,
-    header: &str,
-    non_stable: &[String],
-    all: &[String],
-) {
+fn push_section_tables(s: &mut String, name: &str, header: &str, non_stable: &[String], all: &[String]) {
     if non_stable.is_empty() {
-        s.push_str(&format!(
-            "_{name}: no cells moved beyond the noise band._\n\n"
-        ));
+        s.push_str(&format!("_{name}: no cells moved beyond the noise band._\n\n"));
     } else {
         s.push_str(header);
         for r in non_stable {
@@ -1284,10 +1121,7 @@ fn push_section_tables(
         s.push('\n');
     }
 
-    s.push_str(&format!(
-        "<details><summary>{name} full grid — {} cells</summary>\n\n",
-        all.len()
-    ));
+    s.push_str(&format!("<details><summary>{name} full grid — {} cells</summary>\n\n", all.len()));
     s.push_str(header);
     for r in all {
         s.push_str(r);
@@ -1334,7 +1168,8 @@ pub const PLOT_ANCHOR_PREFIX: &str = "<!-- aether-perf-plots:";
 
 #[allow(clippy::format_push_string)]
 fn push_latency_verdict_section(s: &mut String, name: &str, cells: &[CellComparison]) {
-    let header = "| topology | w | metric | pct | base µs | this µs | Δ | verdict |\n|---|--:|---|---|--:|--:|--:|---|\n";
+    let header =
+        "| topology | w | metric | pct | base µs | this µs | Δ | verdict |\n|---|--:|---|---|--:|--:|--:|---|\n";
     let row = |c: &CellComparison| -> String {
         let verdict = match c.verdict {
             Verdict::Improved => "improved",
@@ -1357,11 +1192,7 @@ fn push_latency_verdict_section(s: &mut String, name: &str, cells: &[CellCompari
     };
 
     let all: Vec<String> = cells.iter().map(&row).collect();
-    let non_stable: Vec<String> = cells
-        .iter()
-        .filter(|c| c.verdict != Verdict::Stable)
-        .map(&row)
-        .collect();
+    let non_stable: Vec<String> = cells.iter().filter(|c| c.verdict != Verdict::Stable).map(&row).collect();
     push_section_tables(s, name, header, &non_stable, &all);
 }
 
@@ -1370,16 +1201,12 @@ fn push_latency_verdict_section(s: &mut String, name: &str, cells: &[CellCompari
 /// classification (ADR-0085 amendment).
 #[allow(clippy::format_push_string)]
 fn push_latency_trend_section(s: &mut String, name: &str, cells: &[CellComparison]) {
-    let header =
-        "| topology | w | metric | pct | base µs | this µs | Δ |\n|---|--:|---|---|--:|--:|--:|\n";
+    let header = "| topology | w | metric | pct | base µs | this µs | Δ |\n|---|--:|---|---|--:|--:|--:|\n";
     // A plain trend label — cell count + an explicit "no verdict"
     // (iamacoffeepot/aether#1228). The improved/stable/regressed tally is
     // reserved for the verdict-carrying sections (light latency + throughput);
     // a no-verdict tier showing one would read as a misleading gate signal.
-    s.push_str(&format!(
-        "<details><summary>{name} — {} cells, trend (no verdict)</summary>\n\n",
-        cells.len()
-    ));
+    s.push_str(&format!("<details><summary>{name} — {} cells, trend (no verdict)</summary>\n\n", cells.len()));
     s.push_str(header);
     for c in cells {
         s.push_str(&format!(
@@ -1404,8 +1231,7 @@ fn push_latency_trend_section(s: &mut String, name: &str, cells: &[CellCompariso
 /// mails/sec.
 #[allow(clippy::format_push_string)]
 fn push_throughput_section(s: &mut String, name: &str, cells: &[ThroughputComparison]) {
-    let header =
-        "| topology | w | base k/s | this k/s | Δ | verdict |\n|---|--:|--:|--:|--:|---|\n";
+    let header = "| topology | w | base k/s | this k/s | Δ | verdict |\n|---|--:|--:|--:|--:|---|\n";
     let row = |c: &ThroughputComparison| -> String {
         let verdict = match c.verdict {
             Verdict::Improved => "improved",
@@ -1426,11 +1252,7 @@ fn push_throughput_section(s: &mut String, name: &str, cells: &[ThroughputCompar
     };
 
     let all: Vec<String> = cells.iter().map(&row).collect();
-    let non_stable: Vec<String> = cells
-        .iter()
-        .filter(|c| c.verdict != Verdict::Stable)
-        .map(&row)
-        .collect();
+    let non_stable: Vec<String> = cells.iter().filter(|c| c.verdict != Verdict::Stable).map(&row).collect();
     push_section_tables(s, name, header, &non_stable, &all);
 }
 
@@ -1448,13 +1270,8 @@ fn kps(mps: f64) -> String {
 /// none of.
 #[allow(clippy::format_push_string)]
 fn push_keepup_section(s: &mut String, name: &str, cells: &[KeepUpComparison]) {
-    s.push_str(&format!(
-        "<details><summary>{name} — {} cells, keep-up (no verdict)</summary>\n\n",
-        cells.len()
-    ));
-    s.push_str(
-        "| topology | w | offered | completed | base pace | this pace |\n|---|--:|--:|--:|--:|--:|\n",
-    );
+    s.push_str(&format!("<details><summary>{name} — {} cells, keep-up (no verdict)</summary>\n\n", cells.len()));
+    s.push_str("| topology | w | offered | completed | base pace | this pace |\n|---|--:|--:|--:|--:|--:|\n");
     for c in cells {
         s.push_str(&format!(
             "| {} | {} | {:.0}→{:.0} | {:.0}→{:.0} | {:.2}× | {:.2}× |\n",
@@ -1479,11 +1296,7 @@ mod tests {
     /// derived ×1.2 / ×1.5 / ×4 so the cell is well-formed; tests assert on
     /// p50). Shared by the `fanout-8` (light) and `fanout-8-heavy` fixtures so
     /// the derive lives in one place (`DuplicatedCode` guard).
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn cell_json(topo: &str, p50: u64) -> CellJson {
         CellJson {
             workers: 11,
@@ -1508,11 +1321,7 @@ mod tests {
             git_sha: None,
             pace_hz: None,
             frames: 200,
-            sections: vec![RawSection {
-                name: name.to_owned(),
-                version: version.to_owned(),
-                body,
-            }],
+            sections: vec![RawSection { name: name.to_owned(), version: version.to_owned(), body }],
         }
     }
 
@@ -1523,8 +1332,7 @@ mod tests {
         p50s.iter()
             .map(|&p50| {
                 let cells = vec![cell_json("fanout-8", p50)];
-                let body =
-                    serde_json::to_value(LatencySection { cells }).expect("encode latency body");
+                let body = serde_json::to_value(LatencySection { cells }).expect("encode latency body");
                 single_section_trial(LatencySection::NAME, LatencySection::VERSION, body)
             })
             .collect()
@@ -1542,22 +1350,14 @@ mod tests {
         let SectionReport::Compared { cells, .. } = latency_section(rep) else {
             panic!("latency section not compared");
         };
-        cells
-            .iter()
-            .find(|c| c.percentile == "p50")
-            .expect("p50 cell present")
-            .verdict
+        cells.iter().find(|c| c.percentile == "p50").expect("p50 cell present").verdict
     }
 
     #[test]
     fn consistent_win_reads_improved() {
         // base ~167µs, cand ~33µs, every trial — the fan-out win.
-        let base = side(&[
-            167_000, 165_000, 169_000, 166_000, 168_000, 170_000, 164_000, 167_000,
-        ]);
-        let cand = side(&[
-            33_000, 34_000, 32_000, 33_500, 33_000, 31_000, 34_000, 33_000,
-        ]);
+        let base = side(&[167_000, 165_000, 169_000, 166_000, 168_000, 170_000, 164_000, 167_000]);
+        let cand = side(&[33_000, 34_000, 32_000, 33_500, 33_000, 31_000, 34_000, 33_000]);
         let rep = compare(&base, &cand, CompareConfig::default());
         assert_eq!(p50_verdict(&rep), Verdict::Improved);
     }
@@ -1649,19 +1449,14 @@ mod tests {
         let sec = &back.sections[0];
         assert_eq!(sec.name, LatencySection::NAME);
         assert_eq!(sec.version, LatencySection::VERSION);
-        let latency: LatencySection =
-            serde_json::from_value(sec.body.clone()).expect("decode latency body");
+        let latency: LatencySection = serde_json::from_value(sec.body.clone()).expect("decode latency body");
         assert_eq!(latency.cells.len(), 1);
         assert_eq!(latency.cells[0].metric, Metric::Drain);
         assert_eq!(latency.cells[0].p50, 1000);
     }
 
     /// Attach an extra raw section to every trial in a side.
-    fn with_extra_section(
-        mut side: Vec<TrialReport>,
-        name: &str,
-        version: &str,
-    ) -> Vec<TrialReport> {
+    fn with_extra_section(mut side: Vec<TrialReport>, name: &str, version: &str) -> Vec<TrialReport> {
         for t in &mut side {
             t.sections.push(RawSection {
                 name: name.to_owned(),
@@ -1754,13 +1549,7 @@ mod tests {
             .expect("latency uncompared");
         match latency {
             SectionReport::Uncompared { reason, .. } => {
-                assert_eq!(
-                    *reason,
-                    UncomparedReason::VersionChanged {
-                        base: "v1".to_owned(),
-                        cand: "v2".to_owned(),
-                    }
-                );
+                assert_eq!(*reason, UncomparedReason::VersionChanged { base: "v1".to_owned(), cand: "v2".to_owned() });
             }
             _ => panic!("latency should not compare across versions"),
         }
@@ -1799,8 +1588,7 @@ mod tests {
                     topo: "fanout-8".to_owned(),
                     mails_per_sec: Some(mails_per_sec),
                 }];
-                let body = serde_json::to_value(ThroughputSection { cells })
-                    .expect("encode throughput body");
+                let body = serde_json::to_value(ThroughputSection { cells }).expect("encode throughput body");
                 single_section_trial(ThroughputSection::NAME, ThroughputSection::VERSION, body)
             })
             .collect()
@@ -1822,12 +1610,8 @@ mod tests {
         // Throughput is higher-is-better: a clearly-higher candidate rate
         // is an Improvement, even though its paired delta is *positive*
         // (the opposite of a latency win).
-        let base = throughput_side(&[
-            100_000.0, 98_000.0, 102_000.0, 99_000.0, 101_000.0, 100_500.0,
-        ]);
-        let cand = throughput_side(&[
-            200_000.0, 198_000.0, 202_000.0, 199_000.0, 201_000.0, 200_500.0,
-        ]);
+        let base = throughput_side(&[100_000.0, 98_000.0, 102_000.0, 99_000.0, 101_000.0, 100_500.0]);
+        let cand = throughput_side(&[200_000.0, 198_000.0, 202_000.0, 199_000.0, 201_000.0, 200_500.0]);
         let rep = compare(&base, &cand, CompareConfig::default());
         assert_eq!(throughput_verdict(&rep), Verdict::Improved);
     }
@@ -1836,12 +1620,8 @@ mod tests {
     fn lower_throughput_reads_regressed() {
         // A clearly-lower candidate rate is a regression (a negative
         // paired delta, the inverse of the latency direction).
-        let base = throughput_side(&[
-            200_000.0, 198_000.0, 202_000.0, 199_000.0, 201_000.0, 200_500.0,
-        ]);
-        let cand = throughput_side(&[
-            100_000.0, 98_000.0, 102_000.0, 99_000.0, 101_000.0, 100_500.0,
-        ]);
+        let base = throughput_side(&[200_000.0, 198_000.0, 202_000.0, 199_000.0, 201_000.0, 200_500.0]);
+        let cand = throughput_side(&[100_000.0, 98_000.0, 102_000.0, 99_000.0, 101_000.0, 100_500.0]);
         let rep = compare(&base, &cand, CompareConfig::default());
         assert_eq!(throughput_verdict(&rep), Verdict::Regressed);
     }
@@ -1850,12 +1630,8 @@ mod tests {
     fn equal_throughput_reads_stable() {
         // Near-identical rates pair to δ ≈ 0 — below the noise band, so
         // stable regardless of the ns floor (neutralised for a rate).
-        let base = throughput_side(&[
-            100_000.0, 99_000.0, 101_000.0, 100_500.0, 99_500.0, 100_000.0,
-        ]);
-        let cand = throughput_side(&[
-            100_200.0, 99_100.0, 101_100.0, 100_400.0, 99_600.0, 100_100.0,
-        ]);
+        let base = throughput_side(&[100_000.0, 99_000.0, 101_000.0, 100_500.0, 99_500.0, 100_000.0]);
+        let cand = throughput_side(&[100_200.0, 99_100.0, 101_100.0, 100_400.0, 99_600.0, 100_100.0]);
         let rep = compare(&base, &cand, CompareConfig::default());
         assert_eq!(throughput_verdict(&rep), Verdict::Stable);
     }
@@ -1870,12 +1646,9 @@ mod tests {
         let sec = &back.sections[0];
         assert_eq!(sec.name, ThroughputSection::NAME);
         assert_eq!(sec.version, ThroughputSection::VERSION);
-        let tp: ThroughputSection =
-            serde_json::from_value(sec.body.clone()).expect("decode throughput body");
+        let tp: ThroughputSection = serde_json::from_value(sec.body.clone()).expect("decode throughput body");
         assert_eq!(tp.cells.len(), 1);
-        let rate = tp.cells[0]
-            .mails_per_sec
-            .expect("a measured cell round-trips its rate");
+        let rate = tp.cells[0].mails_per_sec.expect("a measured cell round-trips its rate");
         assert!((rate - 100_000.0).abs() < f64::EPSILON);
     }
 
@@ -1914,8 +1687,7 @@ mod tests {
         let sec = &report.sections[0];
         assert_eq!(sec.name, ThroughputSection::NAME);
         assert_eq!(sec.version, ThroughputSection::VERSION); // v2
-        let tp: ThroughputSection =
-            serde_json::from_value(sec.body.clone()).expect("decode throughput body");
+        let tp: ThroughputSection = serde_json::from_value(sec.body.clone()).expect("decode throughput body");
 
         // Both cells are present — the truncated one is flagged, not dropped.
         assert_eq!(tp.cells.len(), 2, "truncated cell must not be filtered out");
@@ -1929,11 +1701,7 @@ mod tests {
             "a truncated cell carries no rate (flagged), got {:?}",
             flagged.mails_per_sec
         );
-        let measured = tp
-            .cells
-            .iter()
-            .find(|c| c.topo == "depth-1")
-            .expect("the measured depth-1 cell is present");
+        let measured = tp.cells.iter().find(|c| c.topo == "depth-1").expect("the measured depth-1 cell is present");
         assert_eq!(measured.mails_per_sec, Some(123_456.0));
     }
 
@@ -1946,13 +1714,7 @@ mod tests {
         // cell is absent from the hit set on both sides and the gate drops it.
         let truncated_side = |k: usize| -> Vec<Vec<ThroughputCell>> {
             (0..k)
-                .map(|_| {
-                    vec![ThroughputCell {
-                        workers: 11,
-                        topo: "fanout-8".to_owned(),
-                        mails_per_sec: None,
-                    }]
-                })
+                .map(|_| vec![ThroughputCell { workers: 11, topo: "fanout-8".to_owned(), mails_per_sec: None }])
                 .collect()
         };
         let k = 4;
@@ -1966,10 +1728,9 @@ mod tests {
         // The only cell present is truncated on both sides, so the section
         // compares with zero scored cells (no regression-to-zero verdict).
         match report {
-            SectionReport::ThroughputCompared { cells, .. } => assert!(
-                cells.is_empty(),
-                "a truncated cell must produce no scored comparison cell, got {cells:?}"
-            ),
+            SectionReport::ThroughputCompared { cells, .. } => {
+                assert!(cells.is_empty(), "a truncated cell must produce no scored comparison cell, got {cells:?}")
+            }
             other => panic!("expected a compared throughput section, got {other:?}"),
         }
     }
@@ -2000,8 +1761,7 @@ mod tests {
         p50s.iter()
             .map(|&p50| {
                 let cells = vec![cell_json("fanout-8-heavy", p50)];
-                let body = serde_json::to_value(LatencySection { cells })
-                    .expect("encode tier latency body");
+                let body = serde_json::to_value(LatencySection { cells }).expect("encode tier latency body");
                 single_section_trial(section_name, LatencySection::VERSION, body)
             })
             .collect()
@@ -2013,8 +1773,7 @@ mod tests {
     fn with_heavy_section(mut side: Vec<TrialReport>, p50s: &[u64]) -> Vec<TrialReport> {
         for (t, &p50) in side.iter_mut().zip(p50s.iter()) {
             let cells = vec![cell_json("fanout-8-heavy", p50)];
-            let body =
-                serde_json::to_value(LatencySection { cells }).expect("encode heavy latency body");
+            let body = serde_json::to_value(LatencySection { cells }).expect("encode heavy latency body");
             t.sections.push(RawSection {
                 name: "latency.heavy".to_owned(),
                 version: LatencySection::VERSION.to_owned(),
@@ -2040,10 +1799,7 @@ mod tests {
             throughput_mps: None,
             keepup: None,
         };
-        let cells = vec![
-            cell("fanout-8", Tier::Light),
-            cell("fanout-8-heavy", Tier::Heavy),
-        ];
+        let cells = vec![cell("fanout-8", Tier::Light), cell("fanout-8-heavy", Tier::Heavy)];
         let report = TrialReport::from_cells(&cells, 200, None, None);
         // One section per tier present, light named `latency` (back-compat),
         // heavy named `latency.heavy`. No empty real section.
@@ -2070,10 +1826,7 @@ mod tests {
             .find(|s| matches!(s, SectionReport::Compared { name, .. } if name == "latency.heavy"))
             .expect("heavy latency section compared");
         // ... and it did compute a non-stable verdict internally.
-        let SectionReport::Compared {
-            improved, cells, ..
-        } = heavy
-        else {
+        let SectionReport::Compared { improved, cells, .. } = heavy else {
             panic!("heavy section should be compared");
         };
         assert!(*improved > 0, "heavy compare still computes the verdict");
@@ -2121,11 +1874,7 @@ mod tests {
         // cells are all stable, so zero improved / regressed from the heavy
         // swing leaks in.
         let (improved, _stable, regressed) = headline_counts(&rep);
-        assert_eq!(
-            (improved, regressed),
-            (0, 0),
-            "the heavy tier's verdict must not reach the gate-signal headline"
-        );
+        assert_eq!((improved, regressed), (0, 0), "the heavy tier's verdict must not reach the gate-signal headline");
     }
 
     #[test]
@@ -2138,17 +1887,11 @@ mod tests {
         let cand = tier_side("latency.real", &[33_000, 34_000, 32_000, 33_500]);
         let rep = compare(&base, &cand, CompareConfig::default());
         assert!(
-            rep.sections.iter().any(
-                |s| matches!(s, SectionReport::Compared { name, .. } if name == "latency.real")
-            ),
+            rep.sections.iter().any(|s| matches!(s, SectionReport::Compared { name, .. } if name == "latency.real")),
             "real latency section routes to the per-cell compare"
         );
         let (improved, _stable, regressed) = headline_counts(&rep);
-        assert_eq!(
-            (improved, regressed),
-            (0, 0),
-            "the real tier's verdict is excluded from the headline too"
-        );
+        assert_eq!((improved, regressed), (0, 0), "the real tier's verdict is excluded from the headline too");
     }
 
     #[test]
@@ -2158,33 +1901,22 @@ mod tests {
         // throughput section emits none (perf-plot renders no throughput PNGs).
         // Build a report carrying light + heavy latency sections *and* a
         // throughput section so all three render in one body.
-        let light_base = with_heavy_section(
-            side(&[167_000, 165_000, 169_000, 166_000]),
-            &[167_000, 165_000, 169_000, 166_000],
-        );
-        let light_cand = with_heavy_section(
-            side(&[33_000, 34_000, 32_000, 33_500]),
-            &[33_000, 34_000, 32_000, 33_500],
-        );
+        let light_base =
+            with_heavy_section(side(&[167_000, 165_000, 169_000, 166_000]), &[167_000, 165_000, 169_000, 166_000]);
+        let light_cand = with_heavy_section(side(&[33_000, 34_000, 32_000, 33_500]), &[33_000, 34_000, 32_000, 33_500]);
         // Splice a throughput section onto each side.
         let base = with_throughput(light_base, &[100_000.0, 98_000.0, 102_000.0, 99_000.0]);
         let cand = with_throughput(light_cand, &[200_000.0, 198_000.0, 202_000.0, 199_000.0]);
         let rep = compare(&base, &cand, CompareConfig::default());
         let md = markdown(&rep, "PR 9999 vs main", "test");
 
-        assert!(
-            md.contains("<!-- aether-perf-plots: latency -->"),
-            "light latency section emits its plot anchor"
-        );
+        assert!(md.contains("<!-- aether-perf-plots: latency -->"), "light latency section emits its plot anchor");
         assert!(
             md.contains("<!-- aether-perf-plots: latency.heavy -->"),
             "heavy latency section emits its plot anchor"
         );
         // The throughput section renders a verdict table but no plot anchor.
-        assert!(
-            md.contains("| topology | w | base k/s |"),
-            "throughput table is present"
-        );
+        assert!(md.contains("| topology | w | base k/s |"), "throughput table is present");
         assert!(
             !md.contains("<!-- aether-perf-plots: throughput -->"),
             "throughput section emits no plot anchor (perf-plot is latency-only)"
@@ -2217,13 +1949,9 @@ mod tests {
     /// latency shape used by the anchor test.
     fn with_throughput(mut side: Vec<TrialReport>, rates: &[f64]) -> Vec<TrialReport> {
         for (t, &mails_per_sec) in side.iter_mut().zip(rates.iter()) {
-            let cells = vec![ThroughputCell {
-                workers: 11,
-                topo: "fanout-8".to_owned(),
-                mails_per_sec: Some(mails_per_sec),
-            }];
-            let body =
-                serde_json::to_value(ThroughputSection { cells }).expect("encode throughput body");
+            let cells =
+                vec![ThroughputCell { workers: 11, topo: "fanout-8".to_owned(), mails_per_sec: Some(mails_per_sec) }];
+            let body = serde_json::to_value(ThroughputSection { cells }).expect("encode throughput body");
             t.sections.push(RawSection {
                 name: ThroughputSection::NAME.to_owned(),
                 version: ThroughputSection::VERSION.to_owned(),
@@ -2249,8 +1977,7 @@ mod tests {
                     elapsed_nanos,
                     expected_nanos: 100_000_000,
                 }];
-                let body =
-                    serde_json::to_value(KeepUpSection { cells }).expect("encode keepup body");
+                let body = serde_json::to_value(KeepUpSection { cells }).expect("encode keepup body");
                 single_section_trial(KeepUpSection::NAME, KeepUpSection::VERSION, body)
             })
             .collect()
@@ -2282,15 +2009,10 @@ mod tests {
         };
         let report = TrialReport::from_cells(&[cell], 200, Some(60), None);
         let names: Vec<&str> = report.sections.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec![KeepUpSection::NAME],
-            "the real tier emits the keep-up section, not latency.real"
-        );
+        assert_eq!(names, vec![KeepUpSection::NAME], "the real tier emits the keep-up section, not latency.real");
         let sec = &report.sections[0];
         assert_eq!(sec.version, KeepUpSection::VERSION);
-        let ku: KeepUpSection =
-            serde_json::from_value(sec.body.clone()).expect("decode keepup body");
+        let ku: KeepUpSection = serde_json::from_value(sec.body.clone()).expect("decode keepup body");
         assert_eq!(ku.cells.len(), 1);
         assert_eq!(ku.cells[0].offered, 6400);
         assert_eq!(ku.cells[0].completed, 6400);
@@ -2315,24 +2037,12 @@ mod tests {
             })
             .expect("keep-up section compared");
         assert_eq!(cells.len(), 1);
-        assert!(
-            (cells[0].base_pace_ratio - 1.0).abs() < 0.05,
-            "base ran ~at pace, got {}",
-            cells[0].base_pace_ratio
-        );
-        assert!(
-            cells[0].cand_pace_ratio > 1.4,
-            "candidate fell behind the pace, got {}",
-            cells[0].cand_pace_ratio
-        );
+        assert!((cells[0].base_pace_ratio - 1.0).abs() < 0.05, "base ran ~at pace, got {}", cells[0].base_pace_ratio);
+        assert!(cells[0].cand_pace_ratio > 1.4, "candidate fell behind the pace, got {}", cells[0].cand_pace_ratio);
 
         // Characterisation only — no verdict reaches the gate-signal headline.
         let (improved, _stable, regressed) = headline_counts(&rep);
-        assert_eq!(
-            (improved, regressed),
-            (0, 0),
-            "keep-up is characterisation; no verdict leaks into the headline"
-        );
+        assert_eq!((improved, regressed), (0, 0), "keep-up is characterisation; no verdict leaks into the headline");
 
         let md = markdown(&rep, "PR 9999 vs main", "test");
         assert!(
@@ -2358,8 +2068,7 @@ mod tests {
         assert_eq!(back.sections.len(), 1);
         assert_eq!(back.sections[0].name, KeepUpSection::NAME);
         assert_eq!(back.sections[0].version, KeepUpSection::VERSION);
-        let ku: KeepUpSection =
-            serde_json::from_value(back.sections[0].body.clone()).expect("decode keepup body");
+        let ku: KeepUpSection = serde_json::from_value(back.sections[0].body.clone()).expect("decode keepup body");
         assert_eq!(ku.cells.len(), 1);
         assert_eq!(ku.cells[0].offered, 6400);
         assert_eq!(ku.cells[0].expected_nanos, 100_000_000);

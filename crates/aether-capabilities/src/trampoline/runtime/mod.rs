@@ -60,18 +60,11 @@ impl NativeActor for WasmTrampoline {
     /// guards the match.
     const NAMESPACE: &'static str = EMBEDDED_SCOPE;
 
-    fn init(
-        config: WasmTrampolineConfig,
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<WasmTrampolineState, BootError> {
+    fn init(config: WasmTrampolineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<WasmTrampolineState, BootError> {
         let mailbox = ctx.self_id();
         let mailer = ctx.mailer();
-        let mut substrate_ctx = ComponentCtx::new(
-            mailbox,
-            Arc::clone(&config.registry),
-            Arc::clone(&mailer),
-            Arc::clone(&config.outbound),
-        );
+        let mut substrate_ctx =
+            ComponentCtx::new(mailbox, Arc::clone(&config.registry), Arc::clone(&mailer), Arc::clone(&config.outbound));
         // Wire the trampoline's binding so the guest's reply /
         // outbound-mail host fns route through *this* trampoline's
         // binding (issue 634 Phase 4 PR 3 — single source of inbox
@@ -90,9 +83,7 @@ impl NativeActor for WasmTrampoline {
             &config.config,
             config.type_tag,
         )
-        .map_err(|e| {
-            BootError::Other(io::Error::other(format!("wasm instantiation failed: {e}")).into())
-        })?;
+        .map_err(|e| BootError::Other(io::Error::other(format!("wasm instantiation failed: {e}")).into()))?;
 
         // iamacoffeepot/aether#1128: seed this component's per-handler
         // cost cells from the guest's declared handler set
@@ -106,8 +97,7 @@ impl NativeActor for WasmTrampoline {
         // `cost.tail` dump and the iamacoffeepot/aether#1178
         // producer-side read. Replace re-seeds on the trampoline's own
         // dispatch (`on_replace_component`); drop clears both indexes.
-        let handler_kinds: Vec<KindId> =
-            config.capabilities.handlers.iter().map(|h| h.id).collect();
+        let handler_kinds: Vec<KindId> = config.capabilities.handlers.iter().map(|h| h.id).collect();
         let seeded = mailer.cost_table().seed(mailbox, &handler_kinds);
         CostCells::try_with_mut(|cells| cells.seed(seeded));
 
@@ -158,11 +148,7 @@ impl NativeActor for WasmTrampoline {
     /// [`Self::forward_to_wasm`], which warn-drops because
     /// `state.component` is `None`.
     #[handler::single]
-    fn on_drop_component(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _payload: DropComponent,
-    ) -> DropResult {
+    fn on_drop_component(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _payload: DropComponent) -> DropResult {
         if let Some(mut component) = state.component.take() {
             // Issue 584 Phase 3 (ADR-0079 amended): unwire is the
             // single pre-shutdown hook — the legacy `on_drop`
@@ -243,14 +229,9 @@ impl NativeActor for WasmTrampoline {
             // frame + the `ComponentCtx` dispatch identity so the
             // membrane demuxes to the child and the child's sends stamp
             // its address as origin.
-            let mail = Mail::new(
-                env.recipient,
-                env.kind,
-                env.payload.bytes().to_vec(),
-                env.count,
-            )
-            .with_reply_to(env.sender)
-            .with_lineage(env.mail_id, env.root, env.parent_mail);
+            let mail = Mail::new(env.recipient, env.kind, env.payload.bytes().to_vec(), env.count)
+                .with_reply_to(env.sender)
+                .with_lineage(env.mail_id, env.root, env.parent_mail);
             if let Err(e) = component.deliver(&mail) {
                 // ADR-0063 fail-fast: a wasm trap (or host-fn error
                 // returned through `Component::deliver`) kills the
@@ -258,10 +239,7 @@ impl NativeActor for WasmTrampoline {
                 // on a future epoch-deadline ADR — symmetric with
                 // native actors, which have no wedge guard either
                 // today.
-                ctx.fatal_abort(format!(
-                    "component {} (kind {}) trapped: {e}",
-                    state.mailbox, env.kind_name,
-                ));
+                ctx.fatal_abort(format!("component {} (kind {}) trapped: {e}", state.mailbox, env.kind_name,));
             }
             component.drain_pending_spawns()
         };

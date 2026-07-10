@@ -31,11 +31,7 @@ fn bool_is_one_byte() {
 
 #[test]
 fn float_is_bit_faithful() {
-    assert_eq!(
-        to_vec(&1.5f32).unwrap()[..],
-        1.5f32.to_le_bytes()[..],
-        "f32 is its IEEE bits, little-endian"
-    );
+    assert_eq!(to_vec(&1.5f32).unwrap()[..], 1.5f32.to_le_bytes()[..], "f32 is its IEEE bits, little-endian");
     // A NaN payload survives unchanged (bit-faithful, no normalization).
     let nan = f64::from_bits(0x7ff8_0000_0000_0001);
     let back: f64 = from_bytes(&to_vec(&nan).unwrap()).unwrap();
@@ -124,10 +120,7 @@ fn map_is_canonical_key_sorted() {
     let mut map = BTreeMap::new();
     map.insert(1u8, 10u8);
     map.insert(2u8, 20u8);
-    assert_eq!(
-        from_bytes::<BTreeMap<u8, u8>>(&to_vec(&map).unwrap()).unwrap(),
-        map
-    );
+    assert_eq!(from_bytes::<BTreeMap<u8, u8>>(&to_vec(&map).unwrap()).unwrap(), map);
 }
 
 #[test]

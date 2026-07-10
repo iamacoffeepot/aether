@@ -86,9 +86,7 @@ pub struct SettlementRegistry {
 
 impl Default for SettlementRegistry {
     fn default() -> Self {
-        Self {
-            cells: array::from_fn(|_| Mutex::new(Cell::default())),
-        }
+        Self { cells: array::from_fn(|_| Mutex::new(Cell::default())) }
     }
 }
 
@@ -138,11 +136,7 @@ enum SettlementSubscriber {
     Channel(Sender<()>),
     /// Push a notification mail to `target` via `mailer` carrying a
     /// [`Settled`] with the settled root as the payload.
-    Mail {
-        target: MailboxId,
-        kind: KindId,
-        mailer: Arc<Mailer>,
-    },
+    Mail { target: MailboxId, kind: KindId, mailer: Arc<Mailer> },
 }
 
 impl SettlementSubscriber {
@@ -155,11 +149,7 @@ impl SettlementSubscriber {
             Self::Channel(tx) => {
                 let _ = tx.try_send(());
             }
-            Self::Mail {
-                target,
-                kind,
-                mailer,
-            } => {
+            Self::Mail { target, kind, mailer } => {
                 push_settlement_notice(&mailer, target, kind, root);
             }
         }
@@ -203,20 +193,14 @@ impl SettlementRegistry {
     /// a poisoned mutex means a prior holder panicked under the guard.
     pub fn subscribe_settlement(&self, root: MailId) -> Receiver<()> {
         let (tx, rx) = bounded::<()>(1);
-        let mut cell = self
-            .cell_for(root)
-            .lock()
-            .expect("settlement registry mutex poisoned; fail-fast per ADR-0063");
+        let mut cell = self.cell_for(root).lock().expect("settlement registry mutex poisoned; fail-fast per ADR-0063");
         if cell.settled.contains(&root) {
             // Pre-fire — root already settled. `try_send` rather
             // than `send` so a closed receiver (caller dropped it
             // before reading) doesn't panic.
             let _ = tx.try_send(());
         } else {
-            cell.pending
-                .entry(root)
-                .or_default()
-                .push(SettlementSubscriber::Channel(tx));
+            cell.pending.entry(root).or_default().push(SettlementSubscriber::Channel(tx));
         }
         rx
     }
@@ -233,31 +217,15 @@ impl SettlementRegistry {
     /// # Panics
     /// Panics if the inner `Mutex` is poisoned — fail-fast per ADR-0063:
     /// a poisoned mutex means a prior holder panicked under the guard.
-    pub fn subscribe_settlement_mail(
-        &self,
-        root: MailId,
-        target: MailboxId,
-        kind: KindId,
-        mailer: Arc<Mailer>,
-    ) {
-        let mut cell = self
-            .cell_for(root)
-            .lock()
-            .expect("settlement registry mutex poisoned; fail-fast per ADR-0063");
+    pub fn subscribe_settlement_mail(&self, root: MailId, target: MailboxId, kind: KindId, mailer: Arc<Mailer>) {
+        let mut cell = self.cell_for(root).lock().expect("settlement registry mutex poisoned; fail-fast per ADR-0063");
         if cell.settled.contains(&root) {
             // Drop the mutex before pushing — `push` may run hot
             // (resolves the recipient inline on this thread).
             drop(cell);
             push_settlement_notice(&mailer, target, kind, root);
         } else {
-            cell.pending
-                .entry(root)
-                .or_default()
-                .push(SettlementSubscriber::Mail {
-                    target,
-                    kind,
-                    mailer,
-                });
+            cell.pending.entry(root).or_default().push(SettlementSubscriber::Mail { target, kind, mailer });
         }
     }
 
@@ -277,10 +245,8 @@ impl SettlementRegistry {
         // tight and removes a re-entrancy hazard if a future
         // subscriber type re-enters the registry.
         let subs = {
-            let mut cell = self
-                .cell_for(root)
-                .lock()
-                .expect("settlement registry mutex poisoned; fail-fast per ADR-0063");
+            let mut cell =
+                self.cell_for(root).lock().expect("settlement registry mutex poisoned; fail-fast per ADR-0063");
             cell.remember_settled(root);
             cell.pending.remove(&root)
         };
@@ -316,12 +282,7 @@ impl SettlementRegistry {
     fn settled_count(&self) -> usize {
         self.cells
             .iter()
-            .map(|cell| {
-                cell.lock()
-                    .expect("settlement registry mutex poisoned; fail-fast per ADR-0063")
-                    .settled
-                    .len()
-            })
+            .map(|cell| cell.lock().expect("settlement registry mutex poisoned; fail-fast per ADR-0063").settled.len())
             .sum()
     }
 
@@ -414,10 +375,7 @@ impl GateWedge {
         } else {
             "internal signal never fired within patience budget"
         };
-        format!(
-            "gate {} wedged: {cause}, waited {:?}",
-            self.gate, self.waited
-        )
+        format!("gate {} wedged: {cause}, waited {:?}", self.gate, self.waited)
     }
 }
 
@@ -508,22 +466,13 @@ pub fn await_internal_signal(
 /// Build the wedge verdict and dispense the one disposition the helper
 /// owns (`Panic`); the rest ride back to the caller in
 /// [`WaitOutcome::Wedged`].
-fn wedge(
-    gate: &str,
-    waited: Duration,
-    disconnected: bool,
-    disposition: TerminalDisposition,
-) -> WaitOutcome {
-    let wedge = GateWedge {
-        gate: gate.to_owned(),
-        waited,
-        disconnected,
-    };
+fn wedge(gate: &str, waited: Duration, disconnected: bool, disposition: TerminalDisposition) -> WaitOutcome {
+    let wedge = GateWedge { gate: gate.to_owned(), waited, disconnected };
     match disposition {
         TerminalDisposition::Panic => panic!("{}", wedge.reason()),
-        TerminalDisposition::Proceed
-        | TerminalDisposition::ReplyErr
-        | TerminalDisposition::Abort => WaitOutcome::Wedged(wedge),
+        TerminalDisposition::Proceed | TerminalDisposition::ReplyErr | TerminalDisposition::Abort => {
+            WaitOutcome::Wedged(wedge)
+        }
     }
 }
 
@@ -546,10 +495,7 @@ mod tests {
     use std::thread;
 
     fn root(sender: u64, cid: u64) -> MailId {
-        MailId {
-            sender: MailboxId(sender),
-            correlation_id: cid,
-        }
+        MailId { sender: MailboxId(sender), correlation_id: cid }
     }
 
     /// One captured dispatch — what the test asserts against.
@@ -565,9 +511,7 @@ mod tests {
     /// captures the dispatched mails into a shared buffer the test
     /// asserts against. Returns the mailer, the registered sink's
     /// mailbox id, and the buffer.
-    fn fresh_mailer_with_sink(
-        sink_name: &str,
-    ) -> (Arc<Mailer>, MailboxId, Arc<StdMutex<Vec<CapturedDispatch>>>) {
+    fn fresh_mailer_with_sink(sink_name: &str) -> (Arc<Mailer>, MailboxId, Arc<StdMutex<Vec<CapturedDispatch>>>) {
         let registry = Arc::new(Registry::new());
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let captured: Arc<StdMutex<Vec<CapturedDispatch>>> = Arc::new(StdMutex::new(Vec::new()));
@@ -679,9 +623,7 @@ mod tests {
         let mail = &captured[0];
         assert_eq!(mail.kind, kind);
         assert_eq!(mail.count, 1);
-        let decoded = Settled::decode_from_bytes(&mail.payload)
-            .expect("decode Settled")
-            .root;
+        let decoded = Settled::decode_from_bytes(&mail.payload).expect("decode Settled").root;
         assert_eq!(decoded, r);
     }
 
@@ -704,9 +646,7 @@ mod tests {
         let captured = captured.lock().unwrap();
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].kind, kind);
-        let decoded = Settled::decode_from_bytes(&captured[0].payload)
-            .expect("decode Settled")
-            .root;
+        let decoded = Settled::decode_from_bytes(&captured[0].payload).expect("decode Settled").root;
         assert_eq!(decoded, r);
     }
 
@@ -731,9 +671,7 @@ mod tests {
         assert_eq!(captured.len(), 3);
         for entry in captured.iter() {
             assert_eq!(entry.kind, kind);
-            let decoded = Settled::decode_from_bytes(&entry.payload)
-                .expect("decode Settled")
-                .root;
+            let decoded = Settled::decode_from_bytes(&entry.payload).expect("decode Settled").root;
             assert_eq!(decoded, r);
         }
     }
@@ -781,9 +719,7 @@ mod tests {
 
         let after_r1 = captured.lock().unwrap().clone();
         assert_eq!(after_r1.len(), 1);
-        let decoded = Settled::decode_from_bytes(&after_r1[0].payload)
-            .expect("decode Settled")
-            .root;
+        let decoded = Settled::decode_from_bytes(&after_r1[0].payload).expect("decode Settled").root;
         assert_eq!(decoded, r1);
 
         reg.fire_settled(r2);
@@ -791,9 +727,7 @@ mod tests {
 
         let after_r2 = captured.lock().unwrap().clone();
         assert_eq!(after_r2.len(), 2);
-        let decoded = Settled::decode_from_bytes(&after_r2[1].payload)
-            .expect("decode Settled")
-            .root;
+        let decoded = Settled::decode_from_bytes(&after_r2[1].payload).expect("decode Settled").root;
         assert_eq!(decoded, r2);
     }
 
@@ -897,9 +831,7 @@ mod tests {
 
         let captured = captured.lock().unwrap();
         assert_eq!(captured.len(), 1);
-        let decoded = Settled::decode_from_bytes(&captured[0].payload)
-            .expect("decode Settled")
-            .root;
+        let decoded = Settled::decode_from_bytes(&captured[0].payload).expect("decode Settled").root;
         assert_eq!(decoded, r);
     }
 
@@ -920,17 +852,10 @@ mod tests {
         for cid in 0..total {
             reg.fire_settled(root(7, cid as u64));
         }
-        assert!(
-            reg.settled_count() <= cap,
-            "settled window exceeded its bound: {} > {cap}",
-            reg.settled_count(),
-        );
+        assert!(reg.settled_count() <= cap, "settled window exceeded its bound: {} > {cap}", reg.settled_count(),);
         // The most recently settled root is inside every cell's window,
         // so a late subscriber still pre-fires.
         let rx = reg.subscribe_settlement(root(7, (total - 1) as u64));
-        assert!(
-            rx.try_recv().is_ok(),
-            "recent root should pre-fire a late subscriber",
-        );
+        assert!(rx.try_recv().is_ok(), "recent root should pre-fire a late subscriber",);
     }
 }

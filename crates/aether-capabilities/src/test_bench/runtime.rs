@@ -34,10 +34,7 @@ impl NativeActor for UnsupportedTestBenchCapability {
     /// ADR-0074 Phase 4 chassis-owned mailbox.
     const NAMESPACE: &'static str = "aether.test_bench";
 
-    fn init(
-        _config: (),
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<UnsupportedTestBenchCapabilityState, BootError> {
+    fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<UnsupportedTestBenchCapabilityState, BootError> {
         let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
             BootError::Other(Box::new(io::Error::other(
                 "HubOutbound must be wired on Mailer before \

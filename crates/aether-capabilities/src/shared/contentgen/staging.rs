@@ -62,20 +62,14 @@ mod tests {
     fn staged_path_round_trips_through_save_adapter() {
         let root = scratch_root("roundtrip");
         let bytes = b"\x89PNG fake artifact bytes";
-        let path = stage_gen_output_under(&root, bytes, "png")
-            .expect("test setup: staging writes the artifact");
+        let path = stage_gen_output_under(&root, bytes, "png").expect("test setup: staging writes the artifact");
         assert!(path.starts_with(&format!("{GEN_PREFIX}/")));
         assert_eq!(path.rsplit('.').next(), Some("png"));
         // Read it back through a fresh adapter on the same root — the
         // file exists and the bytes round-trip verbatim.
         let adapter = LocalFileAdapter::new(root.clone(), Access::ReadWrite)
             .expect("test setup: adapter constructs on scratch root");
-        assert_eq!(
-            adapter
-                .read(&path)
-                .expect("test setup: staged file reads back"),
-            bytes
-        );
+        assert_eq!(adapter.read(&path).expect("test setup: staged file reads back"), bytes);
         cleanup(&root);
     }
 
@@ -83,8 +77,7 @@ mod tests {
     fn distinct_calls_yield_distinct_paths() {
         let root = scratch_root("distinct");
         let a = stage_gen_output_under(&root, b"a", "wav").expect("test setup: first stage writes");
-        let b =
-            stage_gen_output_under(&root, b"b", "wav").expect("test setup: second stage writes");
+        let b = stage_gen_output_under(&root, b"b", "wav").expect("test setup: second stage writes");
         assert_ne!(a, b, "uuid name generation must not collide");
         cleanup(&root);
     }

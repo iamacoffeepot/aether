@@ -6,9 +6,7 @@
 
 use std::collections::HashMap;
 
-use aether_substrate::render::{
-    RealizedTexture, TextureBindings, realize_texture, upload_texture_full,
-};
+use aether_substrate::render::{RealizedTexture, TextureBindings, realize_texture, upload_texture_full};
 
 use crate::render::TextureFormat;
 
@@ -36,22 +34,12 @@ impl StagedTexture {
     /// out of bounds, has a zero dimension, or `pixels` isn't exactly
     /// `width * height * format.bytes_per_pixel()` bytes — the caller logs
     /// and drops.
-    pub fn apply_subrect(
-        &mut self,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        pixels: &[u8],
-    ) -> bool {
+    pub fn apply_subrect(&mut self, x: u32, y: u32, width: u32, height: u32, pixels: &[u8]) -> bool {
         let Some(rect_bytes) = expected_pixel_bytes(width, height, self.format) else {
             return false;
         };
-        let in_bounds = x
-            .checked_add(width)
-            .is_some_and(|right| right <= self.width)
-            && y.checked_add(height)
-                .is_some_and(|bottom| bottom <= self.height);
+        let in_bounds = x.checked_add(width).is_some_and(|right| right <= self.width)
+            && y.checked_add(height).is_some_and(|bottom| bottom <= self.height);
         if !in_bounds || pixels.len() != rect_bytes {
             return false;
         }
@@ -62,8 +50,7 @@ impl StagedTexture {
             let src_start = row * row_bytes;
             let dst_row = y as usize + row;
             let dst_start = dst_row * dst_stride + x as usize * bytes_per_pixel;
-            self.pixels[dst_start..dst_start + row_bytes]
-                .copy_from_slice(&pixels[src_start..src_start + row_bytes]);
+            self.pixels[dst_start..dst_start + row_bytes].copy_from_slice(&pixels[src_start..src_start + row_bytes]);
         }
         self.dirty = true;
         true
@@ -73,12 +60,7 @@ impl StagedTexture {
     /// staged pixels if `update_texture` dirtied them since the last
     /// record. Runs at record time on the driver thread, where a
     /// device + queue are available.
-    pub fn ensure_realized(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        texture_bindings: &TextureBindings,
-    ) {
+    pub fn ensure_realized(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, texture_bindings: &TextureBindings) {
         if let Some(realized) = &self.realized {
             // Already on the GPU; re-upload only if `update_texture`
             // dirtied the staging buffer since the last record.
@@ -126,10 +108,7 @@ pub struct TextureRegistry {
 
 impl TextureRegistry {
     pub fn new() -> Self {
-        Self {
-            next_id: 0,
-            entries: HashMap::new(),
-        }
+        Self { next_id: 0, entries: HashMap::new() }
     }
 }
 
@@ -141,9 +120,7 @@ pub fn expected_pixel_bytes(width: u32, height: u32, format: TextureFormat) -> O
     if width == 0 || height == 0 {
         return None;
     }
-    (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|pixels| pixels.checked_mul(format.bytes_per_pixel()))
+    (width as usize).checked_mul(height as usize).and_then(|pixels| pixels.checked_mul(format.bytes_per_pixel()))
 }
 
 #[cfg(test)]
@@ -160,10 +137,7 @@ mod tests {
         assert_eq!(expected_pixel_bytes(2, 3, TextureFormat::R8), Some(6));
         assert_eq!(expected_pixel_bytes(0, 4, TextureFormat::Rgba8), None);
         assert_eq!(expected_pixel_bytes(4, 0, TextureFormat::R8), None);
-        assert_eq!(
-            expected_pixel_bytes(u32::MAX, u32::MAX, TextureFormat::Rgba8),
-            None
-        );
+        assert_eq!(expected_pixel_bytes(u32::MAX, u32::MAX, TextureFormat::Rgba8), None);
     }
 
     /// `apply_subrect` writes an in-bounds rect into the staged pixels

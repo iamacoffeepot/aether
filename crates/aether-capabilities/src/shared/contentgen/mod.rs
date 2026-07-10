@@ -29,9 +29,8 @@ pub mod task_queue;
 pub mod transport;
 
 pub use adapter::{
-    AdapterUsage, AnthropicAdapter, AnthropicRequest, AnthropicResponse, GeminiAdapter,
-    GeminiArtifact, GeminiImageRequest, GeminiMusicRequest, GeminiResponse, StubAnthropicAdapter,
-    StubGeminiAdapter,
+    AdapterUsage, AnthropicAdapter, AnthropicRequest, AnthropicResponse, GeminiAdapter, GeminiArtifact,
+    GeminiImageRequest, GeminiMusicRequest, GeminiResponse, StubAnthropicAdapter, StubGeminiAdapter,
 };
 pub use config::ContentGenConfig;
 #[cfg(feature = "runtime")]

@@ -41,12 +41,7 @@ async fn send_mail_reports_per_item_errors() {
     let statuses: Vec<MailStatus> = serde_json::from_str(&out).expect("status array");
     assert_eq!(statuses.len(), 3);
     for status in &statuses {
-        assert!(
-            status.status.starts_with("error: "),
-            "item {} should be an error: {}",
-            status.index,
-            status.status,
-        );
+        assert!(status.status.starts_with("error: "), "item {} should be an error: {}", status.index, status.status,);
     }
 }
 
@@ -69,10 +64,7 @@ async fn send_mail_traced_bad_spec_is_tool_error() {
             fire_and_forget: false,
         }))
         .await;
-    assert!(
-        result.is_err(),
-        "an unknown kind in the batch should be a tool error",
-    );
+    assert!(result.is_err(), "an unknown kind in the batch should be a tool error",);
 }
 
 /// Issue 1242: `fire_and_forget: true` is non-blocking — a
@@ -105,19 +97,10 @@ async fn send_mail_fire_and_forget_is_non_blocking() {
         }))
         .await
         .expect("send_mail returns a status array");
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "fire-and-forget must not block on settlement",
-    );
+    assert!(started.elapsed() < Duration::from_secs(5), "fire-and-forget must not block on settlement",);
     let statuses: Vec<MailStatus> = serde_json::from_str(&out).expect("status array");
     assert_eq!(statuses.len(), 1);
-    assert_eq!(
-        statuses[0].status, "dispatched",
-        "fire-and-forget reports dispatched, not delivered",
-    );
-    assert!(
-        statuses[0].replies.is_empty(),
-        "fire-and-forget carries no replies",
-    );
+    assert_eq!(statuses[0].status, "dispatched", "fire-and-forget reports dispatched, not delivered",);
+    assert!(statuses[0].replies.is_empty(), "fire-and-forget carries no replies",);
     assert!(!statuses[0].timed_out, "dispatch is not a timeout");
 }

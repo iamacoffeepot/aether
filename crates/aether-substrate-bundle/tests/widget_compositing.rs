@@ -35,20 +35,15 @@
 use std::fs;
 
 use aether_capabilities::render::{
-    CreateTexture, CreateTextureResult, TextureFormat, TexturedQuad as RenderTexturedQuad,
-    WHITE_TEXTURE_ID,
+    CreateTexture, CreateTextureResult, TextureFormat, TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
 };
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, QuadSpace};
 use aether_kit::widget::composite::Composite;
-use aether_kit::{
-    WidgetChildSpec, WidgetClipRect, WidgetConfig, WidgetDrawItem, WidgetDrawList, WidgetKind,
-};
+use aether_kit::{WidgetChildSpec, WidgetClipRect, WidgetConfig, WidgetDrawItem, WidgetDrawList, WidgetKind};
 use aether_math::{Rgba, Vec2};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
-use aether_substrate_bundle::visual::{
-    Image, Rect, background_top_left, decode_png, target_color_stats,
-};
+use aether_substrate_bundle::visual::{Image, Rect, background_top_left, decode_png, target_color_stats};
 
 /// Linear RGBA primaries chosen so each survives the sRGB encode as a
 /// single dominant channel — the compositing order is then read off the
@@ -68,40 +63,16 @@ const TEXTURE_YELLOW: [u8; 3] = [255, 255, 0];
 /// `panel`, matching what `LoadResult.name` reports.
 fn panel_address() -> String {
     use aether_actor::Addressable;
-    format!(
-        "aether.component/{}:panel",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-    )
+    format!("aether.component/{}:panel", aether_capabilities::WasmTrampoline::NAMESPACE,)
 }
 
 /// A flat-colored quad draw item in the widget's own local coordinates.
 fn quad(x: f32, y: f32, width: f32, height: f32, color: Rgba) -> WidgetDrawItem {
-    WidgetDrawItem::Quad {
-        x,
-        y,
-        width,
-        height,
-        color,
-        clip: None,
-    }
+    WidgetDrawItem::Quad { x, y, width, height, color, clip: None }
 }
 
-fn clipped_quad(
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-    color: Rgba,
-    clip: WidgetClipRect,
-) -> WidgetDrawItem {
-    WidgetDrawItem::Quad {
-        x,
-        y,
-        width,
-        height,
-        color,
-        clip: Some(clip),
-    }
+fn clipped_quad(x: f32, y: f32, width: f32, height: f32, color: Rgba, clip: WidgetClipRect) -> WidgetDrawItem {
+    WidgetDrawItem::Quad { x, y, width, height, color, clip: Some(clip) }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -117,19 +88,7 @@ fn textured_quad(
     v1: f32,
     tint: Rgba,
 ) -> WidgetDrawItem {
-    WidgetDrawItem::TexturedQuad {
-        texture_id,
-        x,
-        y,
-        width,
-        height,
-        u0,
-        v0,
-        u1,
-        v1,
-        tint,
-        clip: None,
-    }
+    WidgetDrawItem::TexturedQuad { texture_id, x, y, width, height, u0, v0, u1, v1, tint, clip: None }
 }
 
 fn four_color_texture_pixels(size: u32) -> Vec<u8> {
@@ -164,10 +123,7 @@ fn create_four_color_texture(bench: &mut TestBench) -> u32 {
             ),
         )])
         .expect("create four-color texture");
-    match created
-        .reply::<CreateTextureResult>("create")
-        .expect("decode CreateTextureResult")
-    {
+    match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
         CreateTextureResult::Err { error } => panic!("create texture: {error}"),
     }
@@ -203,14 +159,10 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8], config: &WidgetConfig) {
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
-        LoadResult::Ok { name, .. } => assert!(
-            name.ends_with(":panel"),
-            "the Widget root should register under :panel; got {name}",
-        ),
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { name, .. } => {
+            assert!(name.ends_with(":panel"), "the Widget root should register under :panel; got {name}",)
+        }
         LoadResult::Err { error } => panic!("load Widget root: {error}"),
     }
 }
@@ -279,10 +231,7 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
     load_panel(&mut bench, &wasm, &config);
 
     let captured = bench
-        .execute(vec![(
-            "snap",
-            BenchOp::capture_with_mails(vec![tick_to_root()], vec![]),
-        )])
+        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], vec![]))])
         .expect("capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
@@ -307,11 +256,7 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
         "child a's rect should read red (its fill over the blue background), got {:?}",
         rgb_at(&img, 18, 18),
     );
-    assert!(
-        dominant(rgb_at(&img, 42, 26), 1),
-        "child b's rect should read green, got {:?}",
-        rgb_at(&img, 42, 26),
-    );
+    assert!(dominant(rgb_at(&img, 42, 26), 1), "child b's rect should read green, got {:?}", rgb_at(&img, 42, 26),);
     // A background-only pixel (inside the chrome rect, outside both
     // children) reads blue — the chrome is visible where nothing overdraws.
     assert!(
@@ -385,10 +330,7 @@ fn nested_tree_draws_in_depth_first_order() {
     load_panel(&mut bench, &wasm, &config);
 
     let captured = bench
-        .execute(vec![(
-            "snap",
-            BenchOp::capture_with_mails(vec![tick_to_root()], vec![]),
-        )])
+        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], vec![]))])
         .expect("capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
@@ -403,11 +345,7 @@ fn nested_tree_draws_in_depth_first_order() {
 
     // Depth-first order, read by hue: root chrome (blue) under the interior
     // node's chrome (green) under the interior's leaf (white).
-    assert!(
-        dominant(rgb_at(&img, 16, 18), 0),
-        "leaf a reads red, got {:?}",
-        rgb_at(&img, 16, 18),
-    );
+    assert!(dominant(rgb_at(&img, 16, 18), 0), "leaf a reads red, got {:?}", rgb_at(&img, 16, 18),);
     // Inside b's green chrome but outside its white leaf: green wins,
     // proving b's chrome drew over the root's blue background.
     assert!(
@@ -434,43 +372,13 @@ fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
 
-    let leaf_clip = WidgetClipRect {
-        x: 6.0,
-        y: 5.0,
-        width: 10.0,
-        height: 8.0,
-    };
-    let root_clip = WidgetClipRect {
-        x: 12.0,
-        y: 10.0,
-        width: 20.0,
-        height: 16.0,
-    };
-    let green_local_clip = WidgetClipRect {
-        x: 2.0,
-        y: 1.0,
-        width: 20.0,
-        height: 20.0,
-    };
-    let disjoint_local_clip = WidgetClipRect {
-        x: 30.0,
-        y: 30.0,
-        width: 4.0,
-        height: 4.0,
-    };
-    let red_local_clip = WidgetClipRect {
-        x: 0.0,
-        y: 0.0,
-        width: 30.0,
-        height: 20.0,
-    };
+    let leaf_clip = WidgetClipRect { x: 6.0, y: 5.0, width: 10.0, height: 8.0 };
+    let root_clip = WidgetClipRect { x: 12.0, y: 10.0, width: 20.0, height: 16.0 };
+    let green_local_clip = WidgetClipRect { x: 2.0, y: 1.0, width: 20.0, height: 20.0 };
+    let disjoint_local_clip = WidgetClipRect { x: 30.0, y: 30.0, width: 4.0, height: 4.0 };
+    let red_local_clip = WidgetClipRect { x: 0.0, y: 0.0, width: 30.0, height: 20.0 };
     let red_effective_clip = root_clip;
-    let green_effective_clip = WidgetClipRect {
-        x: 16.0,
-        y: 13.0,
-        width: 10.0,
-        height: 8.0,
-    };
+    let green_effective_clip = WidgetClipRect { x: 16.0, y: 13.0, width: 10.0, height: 8.0 };
 
     // Pin the pure two-level composition first: local clips translate with
     // their items, parent-local slot clips do not, and the disjoint white item
@@ -480,30 +388,12 @@ fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
         clipped_quad(0.0, 0.0, 30.0, 20.0, WHITE, disjoint_local_clip),
     ];
     let mut interior = Composite::new();
-    interior.register_slot(
-        MailboxId(1),
-        Vec2::new(4.0, 3.0),
-        Some(leaf_clip),
-        "leaf",
-        "aether.kit.widget",
-    );
+    interior.register_slot(MailboxId(1), Vec2::new(4.0, 3.0), Some(leaf_clip), "leaf", "aether.kit.widget");
     interior.begin_frame();
     interior.extend_chrome([clipped_quad(0.0, 0.0, 30.0, 20.0, RED, red_local_clip)]);
-    assert!(interior.fill(
-        MailboxId(1),
-        WidgetDrawList {
-            intrinsic: None,
-            items: leaf_items.clone(),
-        },
-    ));
+    assert!(interior.fill(MailboxId(1), WidgetDrawList { intrinsic: None, items: leaf_items.clone() },));
     let mut root = Composite::new();
-    root.register_slot(
-        MailboxId(2),
-        Vec2::new(10.0, 8.0),
-        Some(root_clip),
-        "interior",
-        "aether.kit.widget",
-    );
+    root.register_slot(MailboxId(2), Vec2::new(10.0, 8.0), Some(root_clip), "interior", "aether.kit.widget");
     root.begin_frame();
     root.extend_chrome([quad(0.0, 0.0, 64.0, 48.0, BLUE)]);
     assert!(root.fill(MailboxId(2), interior.flatten(None)));
@@ -516,13 +406,8 @@ fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
         ],
     );
 
-    let leaf = WidgetConfig {
-        root: false,
-        chrome: leaf_items,
-        intrinsic: None,
-        children: Vec::new(),
-    }
-    .encode_into_bytes();
+    let leaf =
+        WidgetConfig { root: false, chrome: leaf_items, intrinsic: None, children: Vec::new() }.encode_into_bytes();
     let interior = WidgetConfig {
         root: false,
         chrome: vec![clipped_quad(0.0, 0.0, 30.0, 20.0, RED, red_local_clip)],
@@ -552,43 +437,16 @@ fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     load_panel(&mut bench, &wasm, &config);
     let captured = bench
-        .execute(vec![(
-            "snap",
-            BenchOp::capture_with_mails(vec![tick_to_root()], vec![]),
-        )])
+        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], vec![]))])
         .expect("capture clipped tree");
-    let img =
-        decode_png(captured.captured("snap").expect("snap bytes")).expect("decode clipped capture");
+    let img = decode_png(captured.captured("snap").expect("snap bytes")).expect("decode clipped capture");
 
-    let solids: Vec<_> = bench
-        .committed_overlay_snapshot()
-        .into_iter()
-        .filter(|batch| batch.texture_id == WHITE_TEXTURE_ID)
-        .collect();
-    assert_eq!(
-        solids.len(),
-        3,
-        "None, root clip, and nested clip are three runs"
-    );
+    let solids: Vec<_> =
+        bench.committed_overlay_snapshot().into_iter().filter(|batch| batch.texture_id == WHITE_TEXTURE_ID).collect();
+    assert_eq!(solids.len(), 3, "None, root clip, and nested clip are three runs");
     assert_eq!(solids[0].clip, None);
-    assert_eq!(
-        solids[1].clip,
-        Some(ClipRect {
-            x: 12.0,
-            y: 10.0,
-            width: 20.0,
-            height: 16.0,
-        }),
-    );
-    assert_eq!(
-        solids[2].clip,
-        Some(ClipRect {
-            x: 16.0,
-            y: 13.0,
-            width: 10.0,
-            height: 8.0,
-        }),
-    );
+    assert_eq!(solids[1].clip, Some(ClipRect { x: 12.0, y: 10.0, width: 20.0, height: 16.0 }),);
+    assert_eq!(solids[2].clip, Some(ClipRect { x: 16.0, y: 13.0, width: 10.0, height: 8.0 }),);
     assert_eq!(solids[0].quads.len(), 1);
     assert_eq!(solids[1].quads.len(), 1);
     assert_eq!(solids[2].quads.len(), 1);
@@ -596,44 +454,19 @@ fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
     assert_eq!(solids[1].quads[0].tint, RED);
     assert_eq!(solids[2].quads[0].tint, GREEN);
     assert_eq!(
-        (
-            solids[1].quads[0].x,
-            solids[1].quads[0].y,
-            solids[1].quads[0].width,
-            solids[1].quads[0].height,
-        ),
+        (solids[1].quads[0].x, solids[1].quads[0].y, solids[1].quads[0].width, solids[1].quads[0].height,),
         (10.0, 8.0, 30.0, 20.0),
     );
     assert_eq!(
-        (
-            solids[2].quads[0].x,
-            solids[2].quads[0].y,
-            solids[2].quads[0].width,
-            solids[2].quads[0].height,
-        ),
+        (solids[2].quads[0].x, solids[2].quads[0].y, solids[2].quads[0].width, solids[2].quads[0].height,),
         (14.0, 11.0, 30.0, 20.0),
     );
 
-    assert!(
-        dominant(rgb_at(&img, 11, 11), 2),
-        "red is clipped before x=12"
-    );
-    assert!(
-        dominant(rgb_at(&img, 13, 11), 0),
-        "red appears inside its clip"
-    );
-    assert!(
-        dominant(rgb_at(&img, 15, 15), 0),
-        "green is clipped before x=16"
-    );
-    assert!(
-        dominant(rgb_at(&img, 18, 16), 1),
-        "green appears inside the nested clip"
-    );
-    assert!(
-        dominant(rgb_at(&img, 33, 12), 2),
-        "red is clipped after x=32"
-    );
+    assert!(dominant(rgb_at(&img, 11, 11), 2), "red is clipped before x=12");
+    assert!(dominant(rgb_at(&img, 13, 11), 0), "red appears inside its clip");
+    assert!(dominant(rgb_at(&img, 15, 15), 0), "green is clipped before x=16");
+    assert!(dominant(rgb_at(&img, 18, 16), 1), "green appears inside the nested clip");
+    assert!(dominant(rgb_at(&img, 33, 12), 2), "red is clipped after x=32");
 }
 
 /// Mixed root/child solids and textured items keep structural painter order,
@@ -650,46 +483,14 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let texture_id = create_four_color_texture(&mut bench);
 
-    let root_texture_clip = WidgetClipRect {
-        x: 6.0,
-        y: 6.0,
-        width: 12.0,
-        height: 12.0,
-    };
-    let child_clip = WidgetClipRect {
-        x: 26.0,
-        y: 10.0,
-        width: 26.0,
-        height: 24.0,
-    };
+    let root_texture_clip = WidgetClipRect { x: 6.0, y: 6.0, width: 12.0, height: 12.0 };
+    let child_clip = WidgetClipRect { x: 26.0, y: 10.0, width: 26.0, height: 24.0 };
     let child = WidgetConfig {
         root: false,
         chrome: vec![
             quad(0.0, 0.0, 28.0, 26.0, GREEN),
-            textured_quad(
-                texture_id,
-                0.0,
-                0.0,
-                16.0,
-                16.0,
-                0.0,
-                0.0,
-                0.5,
-                0.5,
-                Rgba::WHITE,
-            ),
-            textured_quad(
-                texture_id,
-                12.0,
-                8.0,
-                16.0,
-                16.0,
-                0.0,
-                0.5,
-                0.5,
-                1.0,
-                Rgba::new(0.75, 1.0, 1.0, 1.0),
-            ),
+            textured_quad(texture_id, 0.0, 0.0, 16.0, 16.0, 0.0, 0.0, 0.5, 0.5, Rgba::WHITE),
+            textured_quad(texture_id, 12.0, 8.0, 16.0, 16.0, 0.0, 0.5, 0.5, 1.0, Rgba::new(0.75, 1.0, 1.0, 1.0)),
             quad(20.0, 14.0, 8.0, 8.0, YELLOW),
         ],
         intrinsic: None,
@@ -726,26 +527,14 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
     load_panel(&mut bench, &wasm, &config);
 
     let captured = bench
-        .execute(vec![(
-            "snap",
-            BenchOp::capture_with_mails(vec![tick_to_root()], vec![]),
-        )])
+        .execute(vec![("snap", BenchOp::capture_with_mails(vec![tick_to_root()], vec![]))])
         .expect("capture textured widget tree");
-    let img = decode_png(captured.captured("snap").expect("snap bytes"))
-        .expect("decode textured capture");
+    let img = decode_png(captured.captured("snap").expect("snap bytes")).expect("decode textured capture");
 
-    let child_framebuffer_clip = ClipRect {
-        x: child_clip.x,
-        y: child_clip.y,
-        width: child_clip.width,
-        height: child_clip.height,
-    };
+    let child_framebuffer_clip =
+        ClipRect { x: child_clip.x, y: child_clip.y, width: child_clip.width, height: child_clip.height };
     let snapshot = bench.committed_overlay_snapshot();
-    assert_eq!(
-        snapshot.len(),
-        5,
-        "solid/textured transitions form five runs"
-    );
+    assert_eq!(snapshot.len(), 5, "solid/textured transitions form five runs");
 
     assert_eq!(snapshot[0].texture_id, WHITE_TEXTURE_ID);
     assert_eq!(snapshot[0].space, QuadSpace::Screen);
@@ -859,66 +648,23 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
     );
 
     let tolerance = 20;
-    let intended_region = Rect {
-        min_x: 29,
-        min_y: 13,
-        max_x: 33,
-        max_y: 17,
-    };
+    let intended_region = Rect { min_x: 29, min_y: 13, max_x: 33, max_y: 17 };
     let intended = target_color_stats(&img, TEXTURE_RED, tolerance, Some(intended_region));
-    assert!(
-        intended.fraction > 0.8,
-        "the child's red UV crop should own its intended region: {intended:?}",
-    );
+    assert!(intended.fraction > 0.8, "the child's red UV crop should own its intended region: {intended:?}",);
     let wrong_color = target_color_stats(&img, TEXTURE_GREEN, tolerance, Some(intended_region));
-    assert!(
-        wrong_color.fraction < 0.1,
-        "the red crop must not silently sample the green quadrant: {wrong_color:?}",
-    );
-    let clipped_out = target_color_stats(
-        &img,
-        TEXTURE_RED,
-        tolerance,
-        Some(Rect {
-            min_x: 24,
-            min_y: 12,
-            max_x: 25,
-            max_y: 17,
-        }),
-    );
-    assert!(
-        clipped_out.fraction < 0.1,
-        "the textured child must not escape its slot clip: {clipped_out:?}",
-    );
-    let overlap_blue = target_color_stats(
-        &img,
-        TEXTURE_BLUE,
-        tolerance,
-        Some(Rect {
-            min_x: 38,
-            min_y: 18,
-            max_x: 42,
-            max_y: 20,
-        }),
-    );
+    assert!(wrong_color.fraction < 0.1, "the red crop must not silently sample the green quadrant: {wrong_color:?}",);
+    let clipped_out =
+        target_color_stats(&img, TEXTURE_RED, tolerance, Some(Rect { min_x: 24, min_y: 12, max_x: 25, max_y: 17 }));
+    assert!(clipped_out.fraction < 0.1, "the textured child must not escape its slot clip: {clipped_out:?}",);
+    let overlap_blue =
+        target_color_stats(&img, TEXTURE_BLUE, tolerance, Some(Rect { min_x: 38, min_y: 18, max_x: 42, max_y: 20 }));
     assert!(
         overlap_blue.fraction > 0.8,
         "the later blue UV crop should overdraw the earlier red crop: {overlap_blue:?}",
     );
-    let final_region = Rect {
-        min_x: 46,
-        min_y: 24,
-        max_x: 49,
-        max_y: 27,
-    };
+    let final_region = Rect { min_x: 46, min_y: 24, max_x: 49, max_y: 27 };
     let final_yellow = target_color_stats(&img, TEXTURE_YELLOW, tolerance, Some(final_region));
-    assert!(
-        final_yellow.fraction > 0.8,
-        "the final solid should overdraw the blue textured item: {final_yellow:?}",
-    );
+    assert!(final_yellow.fraction > 0.8, "the final solid should overdraw the blue textured item: {final_yellow:?}",);
     let covered_blue = target_color_stats(&img, TEXTURE_BLUE, tolerance, Some(final_region));
-    assert!(
-        covered_blue.fraction < 0.1,
-        "the blue crop should be hidden beneath the final solid: {covered_blue:?}",
-    );
+    assert!(covered_blue.fraction < 0.1, "the blue crop should be hidden beneath the final solid: {covered_blue:?}",);
 }

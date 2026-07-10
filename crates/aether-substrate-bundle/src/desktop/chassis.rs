@@ -23,10 +23,9 @@ use aether_actor::Addressable;
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
-    AnthropicConfig, AudioCapability, CaptureBackend, ClipboardCapability, ClipboardConfig,
-    ComponentHostConfig, ContentGenConfig, GeminiConfig, HttpServerConfig, InputConfig,
-    RenderCapability, RenderConfig, RenderTuningConfig, UnsupportedTestBenchCapability,
-    audio::AudioConfig as AudioConf, fs::NamespaceRoots, http::HttpConfig as HttpConf,
+    AnthropicConfig, AudioCapability, CaptureBackend, ClipboardCapability, ClipboardConfig, ComponentHostConfig,
+    ContentGenConfig, GeminiConfig, HttpServerConfig, InputConfig, RenderCapability, RenderConfig, RenderTuningConfig,
+    UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf, fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
 use aether_kinds::BinaryManifest;
 use aether_kinds::WindowMode;
@@ -39,9 +38,9 @@ use winit::event_loop::EventLoop;
 use super::driver::{DesktopDriverCapability, WindowConfig};
 use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
 use crate::chassis_common::{
-    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys,
-    frame_lifecycle_config, load_chassis_config, maybe_with_http_server, maybe_with_rpc_server,
-    resolve_env_with_file, resolve_teardown_cap_with_file, resolve_with_file, with_common_caps,
+    ActorRingConfig, ChassisBootConfig, CommonBoot, SchedulerTuningConfig, chassis_known_keys, frame_lifecycle_config,
+    load_chassis_config, maybe_with_http_server, maybe_with_rpc_server, resolve_env_with_file,
+    resolve_teardown_cap_with_file, resolve_with_file, with_common_caps,
 };
 use crate::cli::{CommonOverlay, DesktopCli};
 use crate::hub;
@@ -291,13 +290,9 @@ impl DesktopEnv {
             rpc_port: cli_rpc_port,
         } = common;
 
-        let chassis_boot = resolve_with_file::<ChassisBootConfig>(
-            chassis_boot_overlay.into_layer(),
-            config_file,
-            "chassis",
-        )?;
-        let window_config =
-            resolve_with_file::<WindowConfig>(window_overlay.into_layer(), config_file, "window")?;
+        let chassis_boot =
+            resolve_with_file::<ChassisBootConfig>(chassis_boot_overlay.into_layer(), config_file, "chassis")?;
+        let window_config = resolve_with_file::<WindowConfig>(window_overlay.into_layer(), config_file, "window")?;
 
         // Boot manifest: argv wins over `AETHER_BOOT_MANIFEST` (resolved
         // through `ChassisBootConfig`). When set, the listed components'
@@ -314,27 +309,17 @@ impl DesktopEnv {
         let capture_queue = CaptureQueue::new();
 
         let http = resolve_with_file::<HttpConf>(http.into_layer(), config_file, "http")?;
-        let anthropic =
-            resolve_with_file::<AnthropicConfig>(anthropic.into_layer(), config_file, "anthropic")?;
+        let anthropic = resolve_with_file::<AnthropicConfig>(anthropic.into_layer(), config_file, "anthropic")?;
         let gemini = resolve_with_file::<GeminiConfig>(gemini.into_layer(), config_file, "gemini")?;
-        let contentgen = resolve_with_file::<ContentGenConfig>(
-            contentgen.into_layer(),
-            config_file,
-            "contentgen",
-        )?;
-        let namespace_roots =
-            resolve_with_file::<NamespaceRoots>(fs.into_layer(), config_file, "fs")?;
+        let contentgen = resolve_with_file::<ContentGenConfig>(contentgen.into_layer(), config_file, "contentgen")?;
+        let namespace_roots = resolve_with_file::<NamespaceRoots>(fs.into_layer(), config_file, "fs")?;
         // The HTTP server is opt-in: resolve its config and boot the cap
         // only when `enabled` is set (ADR-0108 / issue 1761). Default-off,
         // so an unconfigured chassis binds no HTTP port.
-        let http_server_config = resolve_with_file::<HttpServerConfig>(
-            http_server_overlay.into_layer(),
-            config_file,
-            "http-server",
-        )?;
+        let http_server_config =
+            resolve_with_file::<HttpServerConfig>(http_server_overlay.into_layer(), config_file, "http-server")?;
         let http_server = http_server_config.enabled.then_some(http_server_config);
-        let audio =
-            resolve_with_file::<AudioConf>(audio_overlay.into_layer(), config_file, "audio")?;
+        let audio = resolve_with_file::<AudioConf>(audio_overlay.into_layer(), config_file, "audio")?;
 
         // Window mode and title: resolved through `WindowConfig` (argv > env >
         // default). `to_boot_mode` delegates to `parse_window_mode_env` and
@@ -346,9 +331,7 @@ impl DesktopEnv {
 
         let rpc_addr = {
             use std::net::{IpAddr, Ipv4Addr};
-            cli_rpc_port
-                .or_else(hub::rpc_port_from_env)
-                .map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p))
+            cli_rpc_port.or_else(hub::rpc_port_from_env).map(|p| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), p))
         };
 
         let workers = chassis_boot.to_workers();
@@ -356,15 +339,13 @@ impl DesktopEnv {
         // Issue 1990: resolve the per-actor ring capacities from
         // `AETHER_ACTOR_{LOG,TRACE}_RING_SIZE` (ADR-0090 §4 hard-error on
         // an unparseable known value, surfaced as `DesktopBootError::Config`).
-        let ring_caps =
-            resolve_env_with_file::<ActorRingConfig>(config_file, "actor")?.to_ring_capacities();
+        let ring_caps = resolve_env_with_file::<ActorRingConfig>(config_file, "actor")?.to_ring_capacities();
         // Issue 2485: resolve the scheduler hot-path tuning from
         // `AETHER_SPIN_WINDOW_USEC` / `AETHER_LOCAL_*` / `AETHER_BLOB_*` /
         // `AETHER_*_COST_*` (ADR-0090 §4 hard-error on an unparseable
         // known value, surfaced as `DesktopBootError::Config`).
         let scheduler_tuning =
-            resolve_env_with_file::<SchedulerTuningConfig>(config_file, "scheduler")?
-                .to_scheduler_tuning();
+            resolve_env_with_file::<SchedulerTuningConfig>(config_file, "scheduler")?.to_scheduler_tuning();
         let teardown_cap = resolve_teardown_cap_with_file(config_file)?;
         // Issue 2706: resolve the render boot knobs
         // (`AETHER_RENDER_VERTEX_BUFFER_BYTES`; ADR-0090 §4 hard-error
@@ -476,8 +457,7 @@ impl DesktopChassis {
         // aborter so a wasm guest trap exits the substrate via
         // `lifecycle::fatal_abort` instead of unwinding. Built before
         // `boot` moves into the driver.
-        let aborter: Arc<dyn FatalAborter> =
-            Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
+        let aborter: Arc<dyn FatalAborter> = Arc::new(OutboundFatalAborter::new(Arc::clone(&boot.outbound)));
 
         // Issue 552 stage 2d: render is a NativeActor. The chassis
         // builder constructs the cap inside `init` (called from
@@ -525,9 +505,7 @@ impl DesktopChassis {
             .with_actor::<ClipboardCapability>(ClipboardConfig::System)
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<UnsupportedTestBenchCapability>(())
-            .with_actor::<LifecycleCapability>(frame_lifecycle_config(
-                lifecycle_advance_timeout_millis,
-            ));
+            .with_actor::<LifecycleCapability>(frame_lifecycle_config(lifecycle_advance_timeout_millis));
         let builder = maybe_with_rpc_server(builder, rpc_addr, "aether-desktop");
         let builder = maybe_with_http_server(builder, http_server);
         let built = builder.driver(driver).build()?;

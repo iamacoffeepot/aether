@@ -26,18 +26,11 @@ fn unit_box_corners_are_at_half_extents() {
             seen_corners.insert([v.x as i32, v.y as i32, v.z as i32]);
         }
     }
-    assert_eq!(
-        seen_corners.len(),
-        8,
-        "expected 8 unique corners, got {seen_corners:?}"
-    );
+    assert_eq!(seen_corners.len(), 8, "expected 8 unique corners, got {seen_corners:?}");
     for &x in &[-1, 1] {
         for &y in &[-1, 1] {
             for &z in &[-1, 1] {
-                assert!(
-                    seen_corners.contains(&[x, y, z]),
-                    "missing corner ({x}, {y}, {z})"
-                );
+                assert!(seen_corners.contains(&[x, y, z]), "missing corner ({x}, {y}, {z})");
             }
         }
     }
@@ -45,8 +38,7 @@ fn unit_box_corners_are_at_half_extents() {
 
 #[test]
 fn translated_box_is_offset() {
-    let ast = parse("(translate (5 0 0) (box 1 1 1 :color 0))")
-        .expect("test setup: translate DSL parses");
+    let ast = parse("(translate (5 0 0) (box 1 1 1 :color 0))").expect("test setup: translate DSL parses");
     let tris = mesh(&ast).expect("test setup: translated box meshes");
     for tri in &tris {
         for v in tri.vertices {
@@ -84,9 +76,6 @@ fn box_face_normals_point_outward() {
         let normal = (b - a).cross(c - a);
         // Centroid of the triangle, treated as a vector from origin.
         let centroid = (a + b + c) * (1.0 / 3.0);
-        assert!(
-            normal.dot(centroid) > 0.0,
-            "face winding wrong — normal points inward for triangle {tri:?}"
-        );
+        assert!(normal.dot(centroid) > 0.0, "face winding wrong — normal points inward for triangle {tri:?}");
     }
 }

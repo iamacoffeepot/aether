@@ -39,13 +39,7 @@ pub fn sec_websocket_accept(key: &str) -> String {
 // (a/b/c/d/e/f/h/w/k); renaming them would obscure the transcription.
 #[allow(clippy::many_single_char_names)]
 pub fn sha1(data: &[u8]) -> [u8; 20] {
-    let mut h: [u32; 5] = [
-        0x6745_2301,
-        0xEFCD_AB89,
-        0x98BA_DCFE,
-        0x1032_5476,
-        0xC3D2_E1F0,
-    ];
+    let mut h: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
     let bit_len = (data.len() as u64).wrapping_mul(8);
     // Pad: append 0x80, zero-fill to 56 mod 64, then the 64-bit big-endian
     // message length in bits.
@@ -73,12 +67,7 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
                 40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
                 _ => (b ^ c ^ d, 0xCA62_C1D6),
             };
-            let tmp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(word);
+            let tmp = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(word);
             e = d;
             d = c;
             c = b.rotate_left(30);
@@ -170,18 +159,12 @@ pub fn parse_ws_frame(buf: &[u8], max_payload: usize) -> WsFrameParse {
     let b0 = buf[0];
     let b1 = buf[1];
     if b0 & 0x70 != 0 {
-        return WsFrameParse::Error {
-            code: 1002,
-            reason: "reserved bits set",
-        };
+        return WsFrameParse::Error { code: 1002, reason: "reserved bits set" };
     }
     let fin = b0 & 0x80 != 0;
     let opcode = b0 & 0x0F;
     if b1 & 0x80 == 0 {
-        return WsFrameParse::Error {
-            code: 1002,
-            reason: "client frame not masked",
-        };
+        return WsFrameParse::Error { code: 1002, reason: "client frame not masked" };
     }
     let len7 = usize::from(b1 & 0x7F);
     let mut cursor = 2;
@@ -204,44 +187,26 @@ pub fn parse_ws_frame(buf: &[u8], max_payload: usize) -> WsFrameParse {
             match usize::try_from(u64::from_be_bytes(arr)) {
                 Ok(n) => n,
                 Err(_) => {
-                    return WsFrameParse::Error {
-                        code: 1009,
-                        reason: "frame too large",
-                    };
+                    return WsFrameParse::Error { code: 1009, reason: "frame too large" };
                 }
             }
         }
         n => n,
     };
     if payload_len > max_payload {
-        return WsFrameParse::Error {
-            code: 1009,
-            reason: "frame too large",
-        };
+        return WsFrameParse::Error { code: 1009, reason: "frame too large" };
     }
     if buf.len() < cursor + 4 + payload_len {
         return WsFrameParse::NeedMore;
     }
-    let mask = [
-        buf[cursor],
-        buf[cursor + 1],
-        buf[cursor + 2],
-        buf[cursor + 3],
-    ];
+    let mask = [buf[cursor], buf[cursor + 1], buf[cursor + 2], buf[cursor + 3]];
     cursor += 4;
     let mut payload = Vec::with_capacity(payload_len);
     for (i, &byte) in buf[cursor..cursor + payload_len].iter().enumerate() {
         payload.push(byte ^ mask[i % 4]);
     }
     cursor += payload_len;
-    WsFrameParse::Complete {
-        frame: WsFrame {
-            fin,
-            opcode,
-            payload,
-        },
-        consumed: cursor,
-    }
+    WsFrameParse::Complete { frame: WsFrame { fin, opcode, payload }, consumed: cursor }
 }
 
 /// Decode a close frame payload: an optional 2-byte big-endian status code
@@ -265,11 +230,7 @@ fn render_ws_accept(key: &str, accept: &WebSocketAccept) -> Vec<u8> {
     let mut head = String::from("HTTP/1.1 101 Switching Protocols\r\n");
     head.push_str("Upgrade: websocket\r\n");
     head.push_str("Connection: Upgrade\r\n");
-    let _ = write!(
-        head,
-        "Sec-WebSocket-Accept: {}\r\n",
-        sec_websocket_accept(key)
-    );
+    let _ = write!(head, "Sec-WebSocket-Accept: {}\r\n", sec_websocket_accept(key));
     if let Some(protocol) = &accept.subprotocol {
         let _ = write!(head, "Sec-WebSocket-Protocol: {protocol}\r\n");
     }
@@ -308,11 +269,7 @@ fn handle_ws_frame(
     max_message_bytes: usize,
 ) -> WsLoop {
     let protocol_close = |code: u16, reason: &str| {
-        sink.post(InboundEvent::WebSocketClose {
-            conn_id,
-            code,
-            reason: reason.to_string(),
-        });
+        sink.post(InboundEvent::WebSocketClose { conn_id, code, reason: reason.to_string() });
         WsLoop::Stop
     };
     match frame.opcode {
@@ -320,10 +277,7 @@ fn handle_ws_frame(
             if !frame.fin {
                 return protocol_close(1002, "fragmented control frame");
             }
-            if sink.post(InboundEvent::WebSocketPing {
-                conn_id,
-                payload: frame.payload,
-            }) {
+            if sink.post(InboundEvent::WebSocketPing { conn_id, payload: frame.payload }) {
                 WsLoop::Continue
             } else {
                 WsLoop::Stop
@@ -333,11 +287,7 @@ fn handle_ws_frame(
         OPCODE_PONG => WsLoop::Continue,
         OPCODE_CLOSE => {
             let (code, reason) = parse_ws_close_payload(&frame.payload);
-            sink.post(InboundEvent::WebSocketClose {
-                conn_id,
-                code,
-                reason,
-            });
+            sink.post(InboundEvent::WebSocketClose { conn_id, code, reason });
             WsLoop::Stop
         }
         OPCODE_TEXT | OPCODE_BINARY => {
@@ -346,11 +296,7 @@ fn handle_ws_frame(
             }
             let binary = frame.opcode == OPCODE_BINARY;
             if frame.fin {
-                if sink.post(InboundEvent::WebSocketMessage {
-                    conn_id,
-                    binary,
-                    data: frame.payload,
-                }) {
+                if sink.post(InboundEvent::WebSocketMessage { conn_id, binary, data: frame.payload }) {
                     WsLoop::Continue
                 } else {
                     WsLoop::Stop
@@ -373,11 +319,7 @@ fn handle_ws_frame(
             if frame.fin {
                 *fragmenting = false;
                 let data = mem::take(msg);
-                if sink.post(InboundEvent::WebSocketMessage {
-                    conn_id,
-                    binary: *msg_binary,
-                    data,
-                }) {
+                if sink.post(InboundEvent::WebSocketMessage { conn_id, binary: *msg_binary, data }) {
                     WsLoop::Continue
                 } else {
                     WsLoop::Stop
@@ -407,11 +349,7 @@ pub fn run_ws_reader_loop(
     leftover: Vec<u8>,
     tuning: ReaderTuning,
 ) {
-    let ReaderTuning {
-        ws_idle_timeout,
-        ws_max_message_bytes,
-        ..
-    } = tuning;
+    let ReaderTuning { ws_idle_timeout, ws_max_message_bytes, .. } = tuning;
     // An idle websocket is normal — read under the (longer) idle deadline. If the
     // setsockopt itself fails, the reader has no idle bound to enforce; close
     // rather than enter the frame loop with an unbounded blocking read.
@@ -455,11 +393,7 @@ pub fn run_ws_reader_loop(
                 }
                 WsFrameParse::NeedMore => break,
                 WsFrameParse::Error { code, reason } => {
-                    sink.post(InboundEvent::WebSocketClose {
-                        conn_id,
-                        code,
-                        reason: reason.to_string(),
-                    });
+                    sink.post(InboundEvent::WebSocketClose { conn_id, code, reason: reason.to_string() });
                     return;
                 }
             }
@@ -475,19 +409,11 @@ pub fn run_ws_reader_loop(
                 return;
             }
             ReadStep::Timeout => {
-                sink.post(InboundEvent::WebSocketClose {
-                    conn_id,
-                    code: 1001,
-                    reason: "idle timeout".to_string(),
-                });
+                sink.post(InboundEvent::WebSocketClose { conn_id, code: 1001, reason: "idle timeout".to_string() });
                 return;
             }
             ReadStep::Error(reason) => {
-                sink.post(InboundEvent::WebSocketClose {
-                    conn_id,
-                    code: 1006,
-                    reason,
-                });
+                sink.post(InboundEvent::WebSocketClose { conn_id, code: 1006, reason });
                 return;
             }
         }
@@ -512,19 +438,11 @@ impl HttpShardState {
         accept: &WebSocketAccept,
     ) {
         self.in_flight.remove(&correlation);
-        let Some(key) = self
-            .connections
-            .get_mut(&conn_id)
-            .and_then(|conn| conn.ws_pending_key.take())
-        else {
+        let Some(key) = self.connections.get_mut(&conn_id).and_then(|conn| conn.ws_pending_key.take()) else {
             // A `WebSocketAccept` with no stashed key — the handler replied it
             // to a non-upgrade request. Cap-level error; the parked reader
             // writes the canned status and exits (ADR-0135 §3).
-            self.respond_and_finish(
-                conn_id,
-                render_status_response(500, "websocket accept without upgrade"),
-                false,
-            );
+            self.respond_and_finish(conn_id, render_status_response(500, "websocket accept without upgrade"), false);
             return;
         };
         let head = render_ws_accept(&key, accept);
@@ -563,23 +481,22 @@ impl HttpShardState {
         let idle_deadline = self.ws_idle_timeout;
 
         #[allow(clippy::disallowed_methods)]
-        let writer_thread = match thread::Builder::new()
-            .name(format!("aether-http-writer-{conn_id}"))
-            .spawn(move || {
+        let writer_thread =
+            match thread::Builder::new().name(format!("aether-http-writer-{conn_id}")).spawn(move || {
                 run_writer_loop(write_half, stream_id, &rx, &sink, idle_deadline);
             }) {
-            Ok(thread) => thread,
-            Err(e) => {
-                tracing::warn!(
-                    target: "aether_substrate::http_server",
-                    conn = conn_id,
-                    error = %e,
-                    "http websocket: writer thread spawn failed; closing",
-                );
-                self.close_connection(conn_id, "websocket writer spawn failed");
-                return;
-            }
-        };
+                Ok(thread) => thread,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "aether_substrate::http_server",
+                        conn = conn_id,
+                        error = %e,
+                        "http websocket: writer thread spawn failed; closing",
+                    );
+                    self.close_connection(conn_id, "websocket writer spawn failed");
+                    return;
+                }
+            };
 
         self.streams.insert(
             stream_id,
@@ -618,10 +535,7 @@ impl HttpShardState {
     /// (ADR-0132), or `None` if `conn_id` names no such connection — the
     /// shared lookup behind every ws dispatch/close/send site.
     fn ws_target(&self, conn_id: ConnId) -> Option<(MailboxId, u64)> {
-        self.connections
-            .get(&conn_id)
-            .and_then(|conn| conn.websocket.as_ref())
-            .map(|ws| (ws.handler, ws.stream_id))
+        self.connections.get(&conn_id).and_then(|conn| conn.websocket.as_ref()).map(|ws| (ws.handler, ws.stream_id))
     }
 
     /// Deliver one reassembled inbound websocket message to the handler
@@ -629,44 +543,22 @@ impl HttpShardState {
     /// stamped with the connection's `stream_id` (ADR-0132) so the handler
     /// knows which socket it arrived on and can answer — or push later — by
     /// naming that id.
-    pub fn dispatch_ws_message(
-        &mut self,
-        ctx: &mut NativeCtx<'_>,
-        conn_id: ConnId,
-        binary: bool,
-        data: Vec<u8>,
-    ) {
+    pub fn dispatch_ws_message(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId, binary: bool, data: Vec<u8>) {
         let Some((handler, stream_id)) = self.ws_target(conn_id) else {
             return;
         };
-        let payload = WebSocketMessage {
-            stream_id,
-            binary,
-            data,
-        }
-        .encode_into_bytes();
+        let payload = WebSocketMessage { stream_id, binary, data }.encode_into_bytes();
         let _ = ctx.send_envelope_detached(handler, <WebSocketMessage as Kind>::ID, &payload);
     }
 
     /// Report a peer-initiated websocket close to the handler (ADR-0129 §5) as
     /// a `WebSocketClose` on its own fresh root — the inbound-close analog of
     /// [`Self::dispatch_ws_message`], so the handler observes the disconnect.
-    pub fn report_ws_close(
-        &mut self,
-        ctx: &mut NativeCtx<'_>,
-        conn_id: ConnId,
-        code: u16,
-        reason: &str,
-    ) {
+    pub fn report_ws_close(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId, code: u16, reason: &str) {
         let Some((handler, stream_id)) = self.ws_target(conn_id) else {
             return;
         };
-        let payload = WebSocketClose {
-            stream_id,
-            code,
-            reason: reason.to_string(),
-        }
-        .encode_into_bytes();
+        let payload = WebSocketClose { stream_id, code, reason: reason.to_string() }.encode_into_bytes();
         let _ = ctx.send_envelope_detached(handler, <WebSocketClose as Kind>::ID, &payload);
     }
 
@@ -681,11 +573,7 @@ impl HttpShardState {
         };
         let opcode = if binary { OPCODE_BINARY } else { OPCODE_TEXT };
         let frame = serialize_ws_frame(opcode, data, None);
-        let Some(has_credit) = self
-            .streams
-            .get(&stream_id)
-            .map(|stream| stream.credit_outstanding > 0)
-        else {
+        let Some(has_credit) = self.streams.get(&stream_id).map(|stream| stream.credit_outstanding > 0) else {
             return;
         };
         if !has_credit {
@@ -694,10 +582,7 @@ impl HttpShardState {
             return;
         }
         let send_result = {
-            let stream = self
-                .streams
-                .get_mut(&stream_id)
-                .expect("stream present under the same borrow");
+            let stream = self.streams.get_mut(&stream_id).expect("stream present under the same borrow");
             stream.credit_outstanding -= 1;
             stream.tx.try_send(WriterMsg::WsData(frame))
         };

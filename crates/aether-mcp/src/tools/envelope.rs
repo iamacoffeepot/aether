@@ -1,6 +1,5 @@
 use super::{
-    EngineId, Kind, MailEnvelope, MailboxAddress, MailboxId, ScopePathError, mailbox_id_from_path,
-    validate_scope_path,
+    EngineId, Kind, MailEnvelope, MailboxAddress, MailboxId, ScopePathError, mailbox_id_from_path, validate_scope_path,
 };
 
 /// ADR-0098/0099 input hygiene: reject a `recipient_name` whose
@@ -44,16 +43,9 @@ pub(super) fn engine_envelope<K: Kind>(engine: EngineId, mailbox: &str, kind: &K
 /// 3b) discovers recipients as ids embedded in `Sent` events, never as
 /// names — a `MailboxId` is a one-way name hash, so there's no name to
 /// reconstruct.
-pub(super) fn engine_envelope_by_id<K: Kind>(
-    engine: EngineId,
-    mailbox: MailboxId,
-    kind: &K,
-) -> MailEnvelope {
+pub(super) fn engine_envelope_by_id<K: Kind>(engine: EngineId, mailbox: MailboxId, kind: &K) -> MailEnvelope {
     MailEnvelope {
-        to: MailboxAddress {
-            engine: Some(engine),
-            mailbox,
-        },
+        to: MailboxAddress { engine: Some(engine), mailbox },
         from: None,
         kind: K::ID,
         correlation_id: None,

@@ -82,15 +82,7 @@ pub enum SubscribeInputResult {
 /// `MailboxId`, fixed size.
 #[repr(C)]
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
+    Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema,
 )]
 #[kind(name = "aether.input.unsubscribe_all")]
 pub struct UnsubscribeAll {

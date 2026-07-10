@@ -70,10 +70,7 @@ impl SetChunk {
     /// The chunk address this write targets.
     #[must_use]
     pub fn chunk_pos(&self) -> ChunkPos {
-        ChunkPos {
-            x: self.chunk_x,
-            z: self.chunk_z,
-        }
+        ChunkPos { x: self.chunk_x, z: self.chunk_z }
     }
 
     /// Decode the wire planes into a [`Chunk`]. Material bytes degrade to
@@ -139,10 +136,7 @@ impl SetCellPoints {
     /// The cell this stamp targets.
     #[must_use]
     pub fn cell(&self) -> CellPos {
-        CellPos {
-            x: self.x,
-            z: self.z,
-        }
+        CellPos { x: self.x, z: self.z }
     }
 }
 
@@ -160,10 +154,7 @@ pub struct WorldPoint {
 impl WorldPoint {
     #[must_use]
     pub const fn new(x_octimeters: i32, z_octimeters: i32) -> Self {
-        Self {
-            x_octimeters,
-            z_octimeters,
-        }
+        Self { x_octimeters, z_octimeters }
     }
 }
 
@@ -221,9 +212,7 @@ pub struct StampHexagon {
 ///
 /// The axes stay named on the wire so this cannot be confused with a point
 /// measured in octimeters or with a positional `[x, z]` pair.
-#[derive(
-    aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
-)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct OperatorCell {
     pub cell_x: i32,
     pub cell_z: i32,
@@ -233,17 +222,12 @@ impl OperatorCell {
     /// Convert the wire address to the world's internal lattice address.
     #[must_use]
     pub const fn cell_pos(self) -> CellPos {
-        CellPos {
-            x: self.cell_x,
-            z: self.cell_z,
-        }
+        CellPos { x: self.cell_x, z: self.cell_z }
     }
 }
 
 /// A chunk address reported by terrain-operator statistics.
-#[derive(
-    aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
-)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct OperatorChunk {
     pub chunk_x: i32,
     pub chunk_z: i32,
@@ -251,10 +235,7 @@ pub struct OperatorChunk {
 
 impl From<ChunkPos> for OperatorChunk {
     fn from(value: ChunkPos) -> Self {
-        Self {
-            chunk_x: value.x,
-            chunk_z: value.z,
-        }
+        Self { chunk_x: value.x, chunk_z: value.z }
     }
 }
 
@@ -332,20 +313,11 @@ pub struct RunAutomaton {
 ///
 /// A failure reports the writes accepted before exhaustion. Transaction state
 /// belongs to ADR-0143's proposal surface and is deliberately absent here.
-#[derive(
-    aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq,
-)]
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.kit.world.operator_result")]
 pub enum OperatorResult {
-    Applied {
-        source: MarkRef,
-        stats: OperatorStats,
-    },
-    Failed {
-        source: MarkRef,
-        error: OperatorError,
-        stats: OperatorStats,
-    },
+    Applied { source: MarkRef, stats: OperatorStats },
+    Failed { source: MarkRef, error: OperatorError, stats: OperatorStats },
 }
 
 /// `aether.kit.world.set_cell_heights` — stamp one cell's `SUB × SUB` height
@@ -369,10 +341,7 @@ impl SetCellHeights {
     /// The cell this stamp targets.
     #[must_use]
     pub fn cell(&self) -> CellPos {
-        CellPos {
-            x: self.x,
-            z: self.z,
-        }
+        CellPos { x: self.x, z: self.z }
     }
 }
 

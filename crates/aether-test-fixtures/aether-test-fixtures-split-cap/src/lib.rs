@@ -14,9 +14,7 @@ use aether_actor::actor;
 /// serde; defined here in the identity so the lifted `HandlesKind<Ping>` marker
 /// resolves feature-off.
 #[repr(C)]
-#[derive(
-    Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema,
-)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.split_cap.ping")]
 pub struct Ping {
     pub seq: u32,
@@ -24,9 +22,7 @@ pub struct Ping {
 
 /// A second handled kind, so the lift emits more than one `HandlesKind` marker.
 #[repr(C)]
-#[derive(
-    Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema,
-)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "test.split_cap.pong")]
 pub struct Pong {
     pub seq: u32,

@@ -37,18 +37,10 @@ pub(super) struct TwinEdgeViolation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PostWeldViolation {
     /// Polygon[`poly_idx`] references `vertex_id ≥ pool_size`.
-    OrphanedId {
-        poly_idx: usize,
-        vertex_id: VertexId,
-        pool_size: usize,
-    },
+    OrphanedId { poly_idx: usize, vertex_id: VertexId, pool_size: usize },
     /// Two distinct pool ids share identical coordinates — the welding
     /// pass's tolerance lookup missed them.
-    DuplicateCoords {
-        keep_id: VertexId,
-        drop_id: VertexId,
-        point: Point3,
-    },
+    DuplicateCoords { keep_id: VertexId, drop_id: VertexId, point: Point3 },
 }
 
 /// One post-T-junction-repair violation: a vertex in the pool lies
@@ -68,11 +60,7 @@ pub(super) enum PostSliverViolation {
     /// Polygon has fewer than 3 vertices.
     TooFewVertices { poly_idx: usize, len: usize },
     /// `polygon.vertices[i] == polygon.vertices[(i+1) % n]`.
-    AdjacentDuplicate {
-        poly_idx: usize,
-        index: usize,
-        vertex_id: VertexId,
-    },
+    AdjacentDuplicate { poly_idx: usize, index: usize, vertex_id: VertexId },
 }
 
 /// One non-simple-loop violation: a polygon's vertex list contains the
@@ -110,11 +98,7 @@ pub(super) fn find_non_simple_loops(mesh: &IndexedMesh) -> Vec<NonSimpleLoopViol
         for (i, &v) in poly.vertices.iter().enumerate() {
             match first_seen.get(&v) {
                 Some(&prior) => {
-                    violations.push(NonSimpleLoopViolation {
-                        poly_idx,
-                        vertex_id: v,
-                        indices: (prior, i),
-                    });
+                    violations.push(NonSimpleLoopViolation { poly_idx, vertex_id: v, indices: (prior, i) });
                     break;
                 }
                 None => {
@@ -148,12 +132,7 @@ pub(super) fn find_twin_edges(mesh: &IndexedMesh) -> Vec<TwinEdgeViolation> {
 
     let mut violations: Vec<TwinEdgeViolation> = Vec::new();
     for (key, edges) in &directed {
-        let plane = Plane3 {
-            n_x: key.0.0,
-            n_y: key.0.1,
-            n_z: key.0.2,
-            d: key.0.3,
-        };
+        let plane = Plane3 { n_x: key.0.0, n_y: key.0.1, n_z: key.0.2, d: key.0.3 };
         let color = key.1;
         for &(a, b) in edges.keys() {
             // Only report each pair once: skip if (b,a) is the
@@ -162,25 +141,12 @@ pub(super) fn find_twin_edges(mesh: &IndexedMesh) -> Vec<TwinEdgeViolation> {
                 continue;
             }
             if edges.contains_key(&(b, a)) {
-                violations.push(TwinEdgeViolation {
-                    plane,
-                    color,
-                    edge: (a, b),
-                });
+                violations.push(TwinEdgeViolation { plane, color, edge: (a, b) });
             }
         }
     }
     // Deterministic order so warn output and tests are stable.
-    violations.sort_by_key(|v| {
-        (
-            v.plane.n_x,
-            v.plane.n_y,
-            v.plane.n_z,
-            v.plane.d,
-            v.color,
-            v.edge,
-        )
-    });
+    violations.sort_by_key(|v| (v.plane.n_x, v.plane.n_y, v.plane.n_z, v.plane.d, v.color, v.edge));
     violations
 }
 
@@ -199,11 +165,7 @@ pub(super) fn find_post_weld_violations(mesh: &IndexedMesh) -> Vec<PostWeldViola
     for (poly_idx, poly) in mesh.polygons.iter().enumerate() {
         for &vertex_id in &poly.vertices {
             if vertex_id >= pool_size {
-                violations.push(PostWeldViolation::OrphanedId {
-                    poly_idx,
-                    vertex_id,
-                    pool_size,
-                });
+                violations.push(PostWeldViolation::OrphanedId { poly_idx, vertex_id, pool_size });
             }
         }
     }
@@ -211,11 +173,7 @@ pub(super) fn find_post_weld_violations(mesh: &IndexedMesh) -> Vec<PostWeldViola
     let mut by_coord: HashMap<Point3, VertexId> = HashMap::with_capacity(pool_size);
     for (id, &point) in mesh.vertices.iter().enumerate() {
         match by_coord.get(&point) {
-            Some(&prior) => violations.push(PostWeldViolation::DuplicateCoords {
-                keep_id: prior,
-                drop_id: id,
-                point,
-            }),
+            Some(&prior) => violations.push(PostWeldViolation::DuplicateCoords { keep_id: prior, drop_id: id, point }),
             None => {
                 by_coord.insert(point, id);
             }
@@ -223,14 +181,8 @@ pub(super) fn find_post_weld_violations(mesh: &IndexedMesh) -> Vec<PostWeldViola
     }
 
     violations.sort_by_key(|v| match v {
-        PostWeldViolation::OrphanedId {
-            poly_idx,
-            vertex_id,
-            ..
-        } => (0u8, *poly_idx, *vertex_id, 0usize),
-        PostWeldViolation::DuplicateCoords {
-            keep_id, drop_id, ..
-        } => (1u8, *keep_id, *drop_id, 0usize),
+        PostWeldViolation::OrphanedId { poly_idx, vertex_id, .. } => (0u8, *poly_idx, *vertex_id, 0usize),
+        PostWeldViolation::DuplicateCoords { keep_id, drop_id, .. } => (1u8, *keep_id, *drop_id, 0usize),
     });
     violations
 }
@@ -267,10 +219,7 @@ pub(super) fn find_unrepaired_tjunctions(mesh: &IndexedMesh) -> Vec<UnrepairedTJ
                 continue;
             }
             if is_strictly_between(p, pa, pb) {
-                violations.push(UnrepairedTJunction {
-                    edge: (a, b),
-                    interior_vertex: v,
-                });
+                violations.push(UnrepairedTJunction { edge: (a, b), interior_vertex: v });
             }
         }
     }
@@ -295,11 +244,7 @@ pub(super) fn find_post_sliver_violations(mesh: &IndexedMesh) -> Vec<PostSliverV
             let a = poly.vertices[i];
             let b = poly.vertices[(i + 1) % n];
             if a == b {
-                violations.push(PostSliverViolation::AdjacentDuplicate {
-                    poly_idx,
-                    index: i,
-                    vertex_id: a,
-                });
+                violations.push(PostSliverViolation::AdjacentDuplicate { poly_idx, index: i, vertex_id: a });
             }
         }
     }
@@ -317,12 +262,7 @@ mod tests {
     }
 
     fn xy_plane() -> Plane3 {
-        Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: 1,
-            d: 0,
-        }
+        Plane3 { n_x: 0, n_y: 0, n_z: 1, d: 0 }
     }
 
     /// Build an `IndexedMesh` on the XY plane (z = 0, color = 0) from
@@ -336,11 +276,7 @@ mod tests {
             vertices,
             polygons: polygons
                 .into_iter()
-                .map(|verts| IndexedPolygon {
-                    vertices: verts,
-                    plane: xy_plane(),
-                    color: 0,
-                })
+                .map(|verts| IndexedPolygon { vertices: verts, plane: xy_plane(), color: 0 })
                 .collect(),
         }
     }
@@ -353,10 +289,7 @@ mod tests {
 
     #[test]
     fn single_triangle_has_no_twin_edges() {
-        let mesh = xy_mesh(
-            vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)],
-            vec![vec![0, 1, 2]],
-        );
+        let mesh = xy_mesh(vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)], vec![vec![0, 1, 2]]);
         assert!(find_twin_edges(&mesh).is_empty());
     }
 
@@ -365,10 +298,8 @@ mod tests {
     /// eliminated this; finding it post-merge means the pass missed it.
     #[test]
     fn twin_edge_in_same_bucket_is_a_violation() {
-        let mesh = xy_mesh(
-            vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0), pt(1, 1, 0)],
-            vec![vec![0, 1, 2], vec![1, 0, 3]],
-        );
+        let mesh =
+            xy_mesh(vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0), pt(1, 1, 0)], vec![vec![0, 1, 2], vec![1, 0, 3]]);
         let violations = find_twin_edges(&mesh);
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].edge, (0, 1));
@@ -383,16 +314,8 @@ mod tests {
         let mesh = IndexedMesh {
             vertices: vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0), pt(1, 1, 0)],
             polygons: vec![
-                IndexedPolygon {
-                    vertices: vec![0, 1, 2],
-                    plane: xy_plane(),
-                    color: 0,
-                },
-                IndexedPolygon {
-                    vertices: vec![1, 0, 3],
-                    plane: xy_plane(),
-                    color: 1,
-                },
+                IndexedPolygon { vertices: vec![0, 1, 2], plane: xy_plane(), color: 0 },
+                IndexedPolygon { vertices: vec![1, 0, 3], plane: xy_plane(), color: 1 },
             ],
         };
         assert!(find_twin_edges(&mesh).is_empty());
@@ -404,25 +327,12 @@ mod tests {
     /// exact `Plane3`, so opposite normals fall into different buckets.
     #[test]
     fn twin_edge_across_opposite_planes_is_not_a_violation() {
-        let opp = Plane3 {
-            n_x: 0,
-            n_y: 0,
-            n_z: -1,
-            d: 0,
-        };
+        let opp = Plane3 { n_x: 0, n_y: 0, n_z: -1, d: 0 };
         let mesh = IndexedMesh {
             vertices: vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0), pt(1, 1, 0)],
             polygons: vec![
-                IndexedPolygon {
-                    vertices: vec![0, 1, 2],
-                    plane: xy_plane(),
-                    color: 0,
-                },
-                IndexedPolygon {
-                    vertices: vec![1, 0, 3],
-                    plane: opp,
-                    color: 0,
-                },
+                IndexedPolygon { vertices: vec![0, 1, 2], plane: xy_plane(), color: 0 },
+                IndexedPolygon { vertices: vec![1, 0, 3], plane: opp, color: 0 },
             ],
         };
         assert!(find_twin_edges(&mesh).is_empty());
@@ -433,14 +343,7 @@ mod tests {
     #[test]
     fn multiple_twin_edges_all_surface() {
         let mesh = xy_mesh(
-            vec![
-                pt(0, 0, 0),
-                pt(1, 0, 0),
-                pt(1, 1, 0),
-                pt(0, 1, 0),
-                pt(2, 0, 0),
-                pt(2, 1, 0),
-            ],
+            vec![pt(0, 0, 0), pt(1, 0, 0), pt(1, 1, 0), pt(0, 1, 0), pt(2, 0, 0), pt(2, 1, 0)],
             vec![
                 // Quad A walks 0→1→2→3.
                 vec![0, 1, 2, 3],
@@ -464,10 +367,7 @@ mod tests {
 
     #[test]
     fn simple_loop_has_no_violations() {
-        let mesh = xy_mesh(
-            vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)],
-            vec![vec![0, 1, 2]],
-        );
+        let mesh = xy_mesh(vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)], vec![vec![0, 1, 2]]);
         assert!(find_non_simple_loops(&mesh).is_empty());
     }
 
@@ -475,10 +375,7 @@ mod tests {
     /// emitted when t-junction repair inserts a vertex twice.
     #[test]
     fn spike_pattern_surfaces_repeated_vertex() {
-        let mesh = xy_mesh(
-            vec![pt(0, 0, 0), pt(1, 0, 0), pt(2, 0, 0), pt(0, 1, 0)],
-            vec![vec![0, 1, 3, 1, 2]],
-        );
+        let mesh = xy_mesh(vec![pt(0, 0, 0), pt(1, 0, 0), pt(2, 0, 0), pt(0, 1, 0)], vec![vec![0, 1, 3, 1, 2]]);
         let violations = find_non_simple_loops(&mesh);
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].vertex_id, 1);
@@ -490,10 +387,7 @@ mod tests {
     /// the spike, just farther apart.
     #[test]
     fn non_adjacent_repeat_surfaces() {
-        let mesh = xy_mesh(
-            vec![pt(0, 0, 0), pt(1, 0, 0), pt(2, 0, 0), pt(3, 0, 0)],
-            vec![vec![0, 1, 2, 3, 1]],
-        );
+        let mesh = xy_mesh(vec![pt(0, 0, 0), pt(1, 0, 0), pt(2, 0, 0), pt(3, 0, 0)], vec![vec![0, 1, 2, 3, 1]]);
         let violations = find_non_simple_loops(&mesh);
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].vertex_id, 1);
@@ -505,39 +399,23 @@ mod tests {
     /// pathological inputs).
     #[test]
     fn one_violation_per_polygon_even_with_multiple_repeats() {
-        let mesh = xy_mesh(
-            vec![pt(0, 0, 0), pt(1, 0, 0), pt(2, 0, 0)],
-            vec![vec![0, 1, 2, 1, 2]],
-        );
+        let mesh = xy_mesh(vec![pt(0, 0, 0), pt(1, 0, 0), pt(2, 0, 0)], vec![vec![0, 1, 2, 1, 2]]);
         let violations = find_non_simple_loops(&mesh);
         assert_eq!(violations.len(), 1);
     }
 
     #[test]
     fn post_weld_clean_mesh_has_no_violations() {
-        let mesh = xy_mesh(
-            vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)],
-            vec![vec![0, 1, 2]],
-        );
+        let mesh = xy_mesh(vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)], vec![vec![0, 1, 2]]);
         assert!(find_post_weld_violations(&mesh).is_empty());
     }
 
     #[test]
     fn post_weld_orphaned_vertex_id_surfaces() {
         // Polygon references id 5 but pool only has 3 entries.
-        let mesh = xy_mesh(
-            vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)],
-            vec![vec![0, 1, 5]],
-        );
+        let mesh = xy_mesh(vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)], vec![vec![0, 1, 5]]);
         let violations = find_post_weld_violations(&mesh);
-        assert_eq!(
-            violations,
-            vec![PostWeldViolation::OrphanedId {
-                poly_idx: 0,
-                vertex_id: 5,
-                pool_size: 3,
-            }]
-        );
+        assert_eq!(violations, vec![PostWeldViolation::OrphanedId { poly_idx: 0, vertex_id: 5, pool_size: 3 }]);
     }
 
     /// Two distinct `VertexId`s resolving to identical fixed-point
@@ -545,20 +423,10 @@ mod tests {
     /// together. Surfacing this means the tolerance lookup missed.
     #[test]
     fn post_weld_duplicate_coords_surface() {
-        let mesh = xy_mesh(
-            vec![pt(0, 0, 0), pt(1, 0, 0), pt(1, 0, 0)],
-            vec![vec![0, 1, 2]],
-        );
+        let mesh = xy_mesh(vec![pt(0, 0, 0), pt(1, 0, 0), pt(1, 0, 0)], vec![vec![0, 1, 2]]);
         let violations = find_post_weld_violations(&mesh);
         assert_eq!(violations.len(), 1);
-        assert!(matches!(
-            violations[0],
-            PostWeldViolation::DuplicateCoords {
-                keep_id: 1,
-                drop_id: 2,
-                ..
-            }
-        ));
+        assert!(matches!(violations[0], PostWeldViolation::DuplicateCoords { keep_id: 1, drop_id: 2, .. }));
     }
 
     #[test]
@@ -568,12 +436,7 @@ mod tests {
         // 4-fixed-unit perpendicular tolerance in `is_strictly_between`
         // doesn't spuriously flag triangle apexes as collinear.
         let mesh = xy_mesh(
-            vec![
-                pt(0, 0, 0),
-                pt(20000, 0, 0),
-                pt(0, 20000, 0),
-                pt(20000, 20000, 0),
-            ],
+            vec![pt(0, 0, 0), pt(20000, 0, 0), pt(0, 20000, 0), pt(20000, 20000, 0)],
             vec![vec![0, 1, 2], vec![1, 3, 2]],
         );
         assert!(find_unrepaired_tjunctions(&mesh).is_empty());
@@ -595,13 +458,7 @@ mod tests {
             vec![vec![0, 1, 3]],
         );
         let violations = find_unrepaired_tjunctions(&mesh);
-        assert_eq!(
-            violations,
-            vec![UnrepairedTJunction {
-                edge: (0, 1),
-                interior_vertex: 2,
-            }]
-        );
+        assert_eq!(violations, vec![UnrepairedTJunction { edge: (0, 1), interior_vertex: 2 }]);
     }
 
     /// Endpoint-only vertices (lying *at* a, b — not strictly between)
@@ -625,27 +482,15 @@ mod tests {
 
     #[test]
     fn post_sliver_clean_triangle_has_no_violations() {
-        let mesh = xy_mesh(
-            vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)],
-            vec![vec![0, 1, 2]],
-        );
+        let mesh = xy_mesh(vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)], vec![vec![0, 1, 2]]);
         assert!(find_post_sliver_violations(&mesh).is_empty());
     }
 
     #[test]
     fn post_sliver_polygon_with_two_vertices_is_a_violation() {
-        let mesh = xy_mesh(
-            vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)],
-            vec![vec![0, 1]],
-        );
+        let mesh = xy_mesh(vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)], vec![vec![0, 1]]);
         let violations = find_post_sliver_violations(&mesh);
-        assert_eq!(
-            violations,
-            vec![PostSliverViolation::TooFewVertices {
-                poly_idx: 0,
-                len: 2,
-            }]
-        );
+        assert_eq!(violations, vec![PostSliverViolation::TooFewVertices { poly_idx: 0, len: 2 }]);
     }
 
     /// Adjacent duplicate within a polygon's vertex list — the slivers
@@ -659,14 +504,7 @@ mod tests {
             vec![vec![0, 1, 1, 2]], // adjacent duplicate at index 1
         );
         let violations = find_post_sliver_violations(&mesh);
-        assert_eq!(
-            violations,
-            vec![PostSliverViolation::AdjacentDuplicate {
-                poly_idx: 0,
-                index: 1,
-                vertex_id: 1,
-            }]
-        );
+        assert_eq!(violations, vec![PostSliverViolation::AdjacentDuplicate { poly_idx: 0, index: 1, vertex_id: 1 }]);
     }
 
     #[test]
@@ -674,20 +512,9 @@ mod tests {
         // (0, 1, 2, 0) — last == first, wraparound duplicate at index 3.
         let mesh = IndexedMesh {
             vertices: vec![pt(0, 0, 0), pt(1, 0, 0), pt(0, 1, 0)],
-            polygons: vec![IndexedPolygon {
-                vertices: vec![0, 1, 2, 0],
-                plane: xy_plane(),
-                color: 0,
-            }],
+            polygons: vec![IndexedPolygon { vertices: vec![0, 1, 2, 0], plane: xy_plane(), color: 0 }],
         };
         let violations = find_post_sliver_violations(&mesh);
-        assert_eq!(
-            violations,
-            vec![PostSliverViolation::AdjacentDuplicate {
-                poly_idx: 0,
-                index: 3,
-                vertex_id: 0,
-            }]
-        );
+        assert_eq!(violations, vec![PostSliverViolation::AdjacentDuplicate { poly_idx: 0, index: 3, vertex_id: 0 }]);
     }
 }

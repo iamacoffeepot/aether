@@ -36,20 +36,11 @@ enum BootState<A: NativeActor> {
     Pending { config: A::Config },
     /// Post-claim, pre-init — mailbox + transport + slots claimed,
     /// config still pending consumption by `init`.
-    Claimed {
-        resources: ClaimResources,
-        config: A::Config,
-    },
+    Claimed { resources: ClaimResources, config: A::Config },
     /// Post-init, pre-wire — actor instance constructed.
-    Initialized {
-        resources: ClaimResources,
-        actor: Box<A::State>,
-    },
+    Initialized { resources: ClaimResources, actor: Box<A::State> },
     /// Post-wire, pre-spawn — wire ran. The dispatcher is next.
-    Wired {
-        resources: ClaimResources,
-        actor: Box<A::State>,
-    },
+    Wired { resources: ClaimResources, actor: Box<A::State> },
     /// Sentinel held only inside a phase method's body between
     /// `mem::replace` and the final state assignment. If the phase
     /// returns Err, it either restores a prior variant (so
@@ -78,16 +69,13 @@ pub(super) struct NativeActorBoot<A: NativeActor> {
 
 impl<A: NativeActor> NativeActorBoot<A> {
     pub(super) fn new(config: A::Config) -> Self {
-        Self {
-            state: BootState::Pending { config },
-        }
+        Self { state: BootState::Pending { config } }
     }
 }
 
 impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
     fn claim(&mut self, ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
-        let BootState::Pending { config } = mem::replace(&mut self.state, BootState::Transitioning)
-        else {
+        let BootState::Pending { config } = mem::replace(&mut self.state, BootState::Transitioning) else {
             panic!("PassiveBoot::claim called in non-Pending state");
         };
 
@@ -98,12 +86,7 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
         // `X::NAMESPACE` collides with this singleton's namespace
         // surfaces as `SpawnError::NamespaceOwnedByOtherType`. Same
         // TypeId re-claiming the same namespace is idempotent.
-        if ctx
-            .spawner_arc()
-            .actor_registry()
-            .try_claim_namespace(A::NAMESPACE, TypeId::of::<A>())
-            .is_err()
-        {
+        if ctx.spawner_arc().actor_registry().try_claim_namespace(A::NAMESPACE, TypeId::of::<A>()).is_err() {
             // The other claim is on the same namespace by a different
             // TypeId — a chassis-build collision. State stays
             // `Transitioning` (no resources held); cleanup_after_failure
@@ -119,23 +102,16 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
         // per-frame drain barrier — settlement gating on the
         // LifecycleAdvance chain root is the frame-integration gate
         // now.
-        let claim_result = ctx.claim_mailbox_drop_on_shutdown::<A>().map(|claim| {
-            (
-                claim.id,
-                claim.receiver,
-                claim.mailbox_sender,
-                claim.wake_slot,
-            )
-        });
+        let claim_result = ctx
+            .claim_mailbox_drop_on_shutdown::<A>()
+            .map(|claim| (claim.id, claim.receiver, claim.mailbox_sender, claim.wake_slot));
         let (mailbox_id, receiver, mailbox_sender, wake_slot) = match claim_result {
             Ok(c) => c,
             Err(e) => {
                 // Release the namespace claim we just made — otherwise
                 // a later cap with a different TypeId legitimately
                 // claiming the same namespace can't (issue 607 Phase 7).
-                ctx.spawner_arc()
-                    .actor_registry()
-                    .release_namespace(A::NAMESPACE, TypeId::of::<A>());
+                ctx.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());
                 // State stays `Transitioning` — no further cleanup
                 // for the rollback loop to do.
                 return Err(e);
@@ -159,32 +135,17 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
         // `Spawner::spawn_actor`.
         let ring_caps = ctx.spawner_arc().ring_caps();
         slots.seed(ActorLogRing::with_capacity(ring_caps.log));
-        slots.seed(ActorTraceRing::with_growth(
-            ring_caps.trace,
-            ring_caps.trace_max,
-        ));
+        slots.seed(ActorTraceRing::with_growth(ring_caps.trace, ring_caps.trace_max));
 
         self.state = BootState::Claimed {
-            resources: ClaimResources {
-                mailbox_id,
-                transport,
-                mailbox_sender,
-                wake_slot,
-                slots,
-            },
+            resources: ClaimResources { mailbox_id, transport, mailbox_sender, wake_slot, slots },
             config,
         };
         Ok(())
     }
 
-    fn init(
-        &mut self,
-        ctx: &mut ChassisCtx<'_>,
-        handles: &mut ExportedHandles,
-    ) -> Result<(), BootError> {
-        let BootState::Claimed { resources, config } =
-            mem::replace(&mut self.state, BootState::Transitioning)
-        else {
+    fn init(&mut self, ctx: &mut ChassisCtx<'_>, handles: &mut ExportedHandles) -> Result<(), BootError> {
+        let BootState::Claimed { resources, config } = mem::replace(&mut self.state, BootState::Transitioning) else {
             panic!("PassiveBoot::init called in non-Claimed state");
         };
 
@@ -206,9 +167,7 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
                 // the mailbox + namespace claim, then let `resources`
                 // drop at end of scope (closing transport + sender).
                 ctx.unclaim_mailbox(resources.mailbox_id);
-                ctx.spawner_arc()
-                    .actor_registry()
-                    .release_namespace(A::NAMESPACE, TypeId::of::<A>());
+                ctx.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());
                 drop(resources);
                 // State stays `Transitioning` — no further work for
                 // the rollback loop to do.
@@ -224,9 +183,7 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
         // macro overrides to enumerate the cap's handlers; the default
         // (empty) covers any cap the macro didn't touch.
         let capabilities = A::capabilities();
-        ctx.mail_send_handle()
-            .capability_registry()
-            .register(resources.mailbox_id, &capabilities);
+        ctx.mail_send_handle().capability_registry().register(resources.mailbox_id, &capabilities);
 
         // iamacoffeepot/aether#1128: seed this native cap's per-handler
         // cost cells into the global `CostTable` (same hook as the
@@ -236,30 +193,20 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
         // native cap's `slots` are right here — wrap the cache seed in
         // `with_stamped(&resources.slots, ...)` exactly like the `init`
         // wrap above so both indexes share the same neutral cells.
-        let handler_kinds: Vec<aether_data::KindId> =
-            capabilities.handlers.iter().map(|h| h.id).collect();
-        let seeded = ctx
-            .mail_send_handle()
-            .cost_table()
-            .seed(resources.mailbox_id, &handler_kinds);
+        let handler_kinds: Vec<aether_data::KindId> = capabilities.handlers.iter().map(|h| h.id).collect();
+        let seeded = ctx.mail_send_handle().cost_table().seed(resources.mailbox_id, &handler_kinds);
         local::with_stamped(&resources.slots, || {
             use aether_actor::Local as _;
             CostCells::try_with_mut(|cells| cells.seed(seeded));
         });
 
         // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
-        self.state = BootState::Initialized {
-            resources,
-            actor: Box::new(actor),
-        };
+        self.state = BootState::Initialized { resources, actor: Box::new(actor) };
         Ok(())
     }
 
     fn wire(&mut self) -> Result<(), BootError> {
-        let BootState::Initialized {
-            resources,
-            mut actor,
-        } = mem::replace(&mut self.state, BootState::Transitioning)
+        let BootState::Initialized { resources, mut actor } = mem::replace(&mut self.state, BootState::Transitioning)
         else {
             panic!("PassiveBoot::wire called in non-Initialized state");
         };
@@ -290,13 +237,7 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
         let BootState::Wired { resources, actor } = self.state else {
             panic!("PassiveBoot::spawn called in non-Wired state");
         };
-        let ClaimResources {
-            mailbox_id,
-            transport,
-            mailbox_sender,
-            wake_slot,
-            slots,
-        } = resources;
+        let ClaimResources { mailbox_id, transport, mailbox_sender, wake_slot, slots } = resources;
 
         // Register a `DispatcherSlot` with the chassis worker pool. No
         // per-actor thread (issue 635 Phase 3 made `Pooled` the only
@@ -305,14 +246,8 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
         // every accepted send.
         let actor_registry = Arc::clone(ctx.spawner_arc().actor_registry());
         let mailer_clone = ctx.mail_send_handle();
-        let slot = DispatcherSlot::<A>::new(
-            actor,
-            Arc::clone(&transport),
-            slots,
-            actor_registry,
-            mailer_clone,
-            mailbox_id,
-        );
+        let slot =
+            DispatcherSlot::<A>::new(actor, Arc::clone(&transport), slots, actor_registry, mailer_clone, mailbox_id);
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
         let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
         // iamacoffeepot/aether#1135: surface the seize handle on this
@@ -321,10 +256,8 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
         // inbox. Same `(state, weak)` pair the wake handle carries; the
         // registry owns the strong slot ref, so the demuxer's `Weak`
         // upgrade fails cleanly after teardown.
-        ctx.registry().install_seize_handle(
-            mailbox_id,
-            SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)),
-        );
+        ctx.registry()
+            .install_seize_handle(mailbox_id, SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn)));
         drop(slot_dyn);
         let wake = WakeHandle::new(Arc::clone(slot.state()), weak, ctx.wake_sink().clone());
         // Issue 697 multi-pass: mail addressed at this actor during the
@@ -341,10 +274,8 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
             let _ = wake.wake();
         }));
         let _ = manual_wake.wake();
-        Ok(Box::new(PooledActorShutdown::<A> {
-            slot: Some(slot),
-            mailbox_sender: Some(mailbox_sender),
-        }) as Box<dyn DynShutdown>)
+        Ok(Box::new(PooledActorShutdown::<A> { slot: Some(slot), mailbox_sender: Some(mailbox_sender) })
+            as Box<dyn DynShutdown>)
     }
 
     fn cleanup_after_failure(self: Box<Self>, ctx: &mut ChassisCtx<'_>) {
@@ -361,9 +292,7 @@ impl<A: NativeActor> PassiveBoot for NativeActorBoot<A> {
             | BootState::Initialized { resources, .. }
             | BootState::Wired { resources, .. } => {
                 ctx.unclaim_mailbox(resources.mailbox_id);
-                ctx.spawner_arc()
-                    .actor_registry()
-                    .release_namespace(A::NAMESPACE, TypeId::of::<A>());
+                ctx.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());
             }
         }
     }

@@ -1,7 +1,7 @@
 use super::bytes::{render_bytes_reply, reply_inline_max_bytes};
 use super::{
-    EngineId, Kind, KindDescriptor, KindId, MailEnvelope, MailId, Mcp, McpError, NamedMail,
-    ReplyEventJson, TracedMailSpec, descriptors, internal_msg, kind_id_from_parts, tagged_id,
+    EngineId, Kind, KindDescriptor, KindId, MailEnvelope, MailId, Mcp, McpError, NamedMail, ReplyEventJson,
+    TracedMailSpec, descriptors, internal_msg, kind_id_from_parts, tagged_id,
 };
 use aether_kinds::trace::DispatchTracedAck;
 use base64::Engine as _;
@@ -42,23 +42,12 @@ pub(super) fn decode_reply_events(
             // replies not yet in the engine cache. Tier 4: base64.
             let descriptor: Option<KindDescriptor> = declared_reply
                 .filter(|&dr| dr == env.kind)
-                .and_then(|dr| {
-                    engine_kinds
-                        .values()
-                        .find(|d| kind_id_from_parts(&d.name, &d.schema) == dr.0)
-                        .cloned()
+                .and_then(|dr| engine_kinds.values().find(|d| kind_id_from_parts(&d.name, &d.schema) == dr.0).cloned())
+                .or_else(|| {
+                    engine_kinds.values().find(|d| kind_id_from_parts(&d.name, &d.schema) == env.kind.0).cloned()
                 })
                 .or_else(|| {
-                    engine_kinds
-                        .values()
-                        .find(|d| kind_id_from_parts(&d.name, &d.schema) == env.kind.0)
-                        .cloned()
-                })
-                .or_else(|| {
-                    static_descriptors
-                        .iter()
-                        .find(|d| kind_id_from_parts(&d.name, &d.schema) == env.kind.0)
-                        .cloned()
+                    static_descriptors.iter().find(|d| kind_id_from_parts(&d.name, &d.schema) == env.kind.0).cloned()
                 });
             let kind_name = descriptor.as_ref().map(|d| d.name.clone());
             let (params, payload_bytes) = descriptor
@@ -83,8 +72,7 @@ pub(super) fn decode_reply_events(
                 // Render the kind id as the ADR-0064 tagged string the
                 // rest of the MCP wire uses, falling back to a hex
                 // literal on an unencodable (non-kind-domain) id.
-                kind_id: tagged_id::encode(env.kind.0)
-                    .unwrap_or_else(|| format!("{:#x}", env.kind.0)),
+                kind_id: tagged_id::encode(env.kind.0).unwrap_or_else(|| format!("{:#x}", env.kind.0)),
                 kind_name,
                 params,
                 payload_bytes,
@@ -99,16 +87,12 @@ pub(super) fn decode_reply_events(
 /// downstream cap replies handled separately. An absent or undecodable
 /// ack, or an `Err` ack, is a tool error.
 pub(super) fn decode_traced_ack(events: &[MailEnvelope]) -> Result<MailId, McpError> {
-    let ack_env = events
-        .first()
-        .ok_or_else(|| internal_msg("send_mail_traced: no ack reply from the trace cap"))?;
+    let ack_env = events.first().ok_or_else(|| internal_msg("send_mail_traced: no ack reply from the trace cap"))?;
     let ack = DispatchTracedAck::decode_from_bytes(&ack_env.payload)
         .ok_or_else(|| internal_msg("undecodable DispatchTracedAck"))?;
     match ack {
         DispatchTracedAck::Ok { root } => Ok(root),
-        DispatchTracedAck::Err { error } => Err(internal_msg(&format!(
-            "send_mail_traced dispatch failed: {error}"
-        ))),
+        DispatchTracedAck::Err { error } => Err(internal_msg(&format!("send_mail_traced dispatch failed: {error}"))),
     }
 }
 

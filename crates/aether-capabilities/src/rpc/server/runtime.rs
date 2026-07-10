@@ -37,9 +37,7 @@ use aether_actor::runtime;
 // methods below ride the same wall (used locally here).
 pub use crate::engine::EngineServer;
 pub use crate::engine::kinds::{CallSettled, RouteEnvelope};
-pub use crate::rpc::{
-    Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame,
-};
+pub use crate::rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame};
 pub use aether_actor::Addressable;
 pub use aether_codec::frame::{FrameError, write_frame};
 pub use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_name};
@@ -116,12 +114,7 @@ pub struct RpcServerState {
 impl RpcServerState {
     /// Allocate a fresh `ConnId`, store the connection's write half,
     /// spin a reader thread for the read half.
-    pub fn spawn_reader_for_peer(
-        &mut self,
-        _ctx: &mut NativeCtx<'_>,
-        stream: TcpStream,
-        peer: SocketAddr,
-    ) {
+    pub fn spawn_reader_for_peer(&mut self, _ctx: &mut NativeCtx<'_>, stream: TcpStream, peer: SocketAddr) {
         let conn_id = self.next_conn_id;
         self.next_conn_id += 1;
 
@@ -149,19 +142,9 @@ impl RpcServerState {
         // Per-connection transport reader below the mail layer — carries inbound
         // mail in; no inbound chain to inherit, no settlement umbrella.
         #[allow(clippy::disallowed_methods)]
-        let thread = match thread::Builder::new()
-            .name(format!("aether-rpc-reader-{conn_id}"))
-            .spawn(move || {
-                run_reader_loop(
-                    read_half,
-                    conn_id,
-                    &shutdown_for_thread,
-                    &inbound_tx,
-                    &mailer,
-                    self_id,
-                    wake_kind,
-                );
-            }) {
+        let thread = match thread::Builder::new().name(format!("aether-rpc-reader-{conn_id}")).spawn(move || {
+            run_reader_loop(read_half, conn_id, &shutdown_for_thread, &inbound_tx, &mailer, self_id, wake_kind);
+        }) {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!(
@@ -176,13 +159,7 @@ impl RpcServerState {
 
         self.connections.insert(
             conn_id,
-            ConnState {
-                peer,
-                write_half,
-                shutdown,
-                reader_thread: Some(thread),
-                hello_received: false,
-            },
+            ConnState { peer, write_half, shutdown, reader_thread: Some(thread), hello_received: false },
         );
         tracing::debug!(
             target: "aether_substrate::rpc",
@@ -230,10 +207,7 @@ impl RpcServerState {
             self.write_frame_to(
                 conn_id,
                 &WireFrame::Bye {
-                    reason: format!(
-                        "wire_version mismatch: peer={}, server={WIRE_VERSION}",
-                        hello.wire_version,
-                    ),
+                    reason: format!("wire_version mismatch: peer={}, server={WIRE_VERSION}", hello.wire_version,),
                 },
             );
             self.close_connection(conn_id, "wire_version mismatch");
@@ -244,20 +218,11 @@ impl RpcServerState {
         }
         self.write_frame_to(
             conn_id,
-            &WireFrame::HelloAck(HelloAck {
-                wire_version: WIRE_VERSION,
-                server: self.peer_kind.clone(),
-            }),
+            &WireFrame::HelloAck(HelloAck { wire_version: WIRE_VERSION, server: self.peer_kind.clone() }),
         );
     }
 
-    pub fn handle_call(
-        &mut self,
-        ctx: &mut NativeCtx<'_>,
-        conn_id: ConnId,
-        cid: Option<u64>,
-        envelope: MailEnvelope,
-    ) {
+    pub fn handle_call(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId, cid: Option<u64>, envelope: MailEnvelope) {
         // Engine-addressed Calls (issue 763 P5a): relay to the
         // engines cap (`aether.engine`), which owns the
         // `EngineId -> proxy` table and re-emits a `ForwardEnvelope`
@@ -289,14 +254,10 @@ impl RpcServerState {
             // sibling type to resolve through.
             #[allow(clippy::disallowed_methods)]
             let engine_cap = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
-            let mail_id = ctx.send_envelope_detached(
-                engine_cap,
-                <RouteEnvelope as Kind>::ID,
-                &route.encode_into_bytes(),
-            );
+            let mail_id =
+                ctx.send_envelope_detached(engine_cap, <RouteEnvelope as Kind>::ID, &route.encode_into_bytes());
             if let Some(wire_cid) = cid {
-                self.in_flight
-                    .insert(mail_id.correlation_id, InFlight { conn_id, wire_cid });
+                self.in_flight.insert(mail_id.correlation_id, InFlight { conn_id, wire_cid });
             }
             return;
         }
@@ -321,21 +282,13 @@ impl RpcServerState {
                 conn_id,
                 &WireFrame::ReplyEnd {
                     cid: wire_cid,
-                    result: Err(RpcError::Other {
-                        reason: "settlement registry unavailable on this chassis".into(),
-                    }),
+                    result: Err(RpcError::Other { reason: "settlement registry unavailable on this chassis".into() }),
                 },
             );
             return;
         };
-        reg.subscribe_settlement_mail(
-            mail_id,
-            self.self_mailbox,
-            <Settled as Kind>::ID,
-            Arc::clone(&self.mailer),
-        );
-        self.in_flight
-            .insert(mail_id.correlation_id, InFlight { conn_id, wire_cid });
+        reg.subscribe_settlement_mail(mail_id, self.self_mailbox, <Settled as Kind>::ID, Arc::clone(&self.mailer));
+        self.in_flight.insert(mail_id.correlation_id, InFlight { conn_id, wire_cid });
     }
 
     pub fn close_connection(&mut self, conn_id: ConnId, reason: &str) {
@@ -370,9 +323,7 @@ impl RpcServerState {
                 FrameError::Io(io_err)
                     if matches!(
                         io_err.kind(),
-                        io::ErrorKind::BrokenPipe
-                            | io::ErrorKind::ConnectionReset
-                            | io::ErrorKind::WriteZero
+                        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::WriteZero
                     ) =>
                 {
                     "peer hung up"
@@ -400,19 +351,11 @@ impl NativeActor for RpcServerCapability {
     type Config = RpcServerConfig;
     const NAMESPACE: &'static str = "aether.rpc.server";
 
-    fn init(
-        config: RpcServerConfig,
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<RpcServerState, BootError> {
-        let listener =
-            TcpListener::bind(&config.bind_addr).map_err(|e| BootError::Other(Box::new(e)))?;
-        let local_addr = listener
-            .local_addr()
-            .map_err(|e| BootError::Other(Box::new(e)))?;
+    fn init(config: RpcServerConfig, ctx: &mut NativeInitCtx<'_>) -> Result<RpcServerState, BootError> {
+        let listener = TcpListener::bind(&config.bind_addr).map_err(|e| BootError::Other(Box::new(e)))?;
+        let local_addr = listener.local_addr().map_err(|e| BootError::Other(Box::new(e)))?;
         let port = local_addr.port();
-        listener
-            .set_nonblocking(false)
-            .map_err(|e| BootError::Other(Box::new(e)))?;
+        listener.set_nonblocking(false).map_err(|e| BootError::Other(Box::new(e)))?;
 
         let accept_shutdown = Arc::new(AtomicBool::new(false));
         let accept_shutdown_for_thread = Arc::clone(&accept_shutdown);
@@ -436,18 +379,10 @@ impl NativeActor for RpcServerCapability {
                             drop(stream);
                             break;
                         }
-                        if inbound_tx_for_thread
-                            .send(InboundEvent::PeerAccepted { stream, peer })
-                            .is_err()
-                        {
+                        if inbound_tx_for_thread.send(InboundEvent::PeerAccepted { stream, peer }).is_err() {
                             break;
                         }
-                        mailer.push(Mail::new(
-                            self_id,
-                            wake_kind,
-                            RpcInboundReady::default().encode_into_bytes(),
-                            1,
-                        ));
+                        mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
                     } else if accept_shutdown_for_thread.load(Ordering::Acquire) {
                         break;
                     }
@@ -551,13 +486,7 @@ impl NativeActor for RpcServerCapability {
                         error = ?error,
                         "rpc inbound frame decode error; keeping connection alive",
                     );
-                    state.write_frame_to(
-                        conn_id,
-                        &WireFrame::ReplyEnd {
-                            cid: 0,
-                            result: Err(error),
-                        },
-                    );
+                    state.write_frame_to(conn_id, &WireFrame::ReplyEnd { cid: 0, result: Err(error) });
                 }
                 InboundEvent::FrameDecodeAborted { conn_id, error } => {
                     // The announced body was big enough to be its
@@ -577,12 +506,7 @@ impl NativeActor for RpcServerCapability {
                         reason = %reason,
                         "rpc inbound frame too large to drain; closing connection",
                     );
-                    state.write_frame_to(
-                        conn_id,
-                        &WireFrame::Bye {
-                            reason: reason.clone(),
-                        },
-                    );
+                    state.write_frame_to(conn_id, &WireFrame::Bye { reason: reason.clone() });
                     state.close_connection(conn_id, &reason);
                 }
             }
@@ -607,13 +531,7 @@ impl NativeActor for RpcServerCapability {
             // cleared eagerly. Either way: drop silently.
             return;
         };
-        state.write_frame_to(
-            entry.conn_id,
-            &WireFrame::ReplyEnd {
-                cid: entry.wire_cid,
-                result: Ok(()),
-            },
-        );
+        state.write_frame_to(entry.conn_id, &WireFrame::ReplyEnd { cid: entry.wire_cid, result: Ok(()) });
     }
 
     /// Catch-all. Any mail addressed at this cap that's not one of
@@ -649,17 +567,9 @@ impl NativeActor for RpcServerCapability {
             let result = match CallSettled::decode_from_bytes(env.payload.bytes()) {
                 Some(CallSettled::Ok) => Ok(()),
                 Some(CallSettled::Err { error }) => Err(RpcError::Other { reason: error }),
-                None => Err(RpcError::Other {
-                    reason: "malformed CallSettled payload".into(),
-                }),
+                None => Err(RpcError::Other { reason: "malformed CallSettled payload".into() }),
             };
-            state.write_frame_to(
-                entry.conn_id,
-                &WireFrame::ReplyEnd {
-                    cid: entry.wire_cid,
-                    result,
-                },
-            );
+            state.write_frame_to(entry.conn_id, &WireFrame::ReplyEnd { cid: entry.wire_cid, result });
             state.in_flight.remove(&correlation);
             return;
         }
@@ -674,12 +584,6 @@ impl NativeActor for RpcServerCapability {
             correlation_id: Some(entry.wire_cid),
             payload: env.payload.bytes().to_vec(),
         };
-        state.write_frame_to(
-            entry.conn_id,
-            &WireFrame::ReplyEvent {
-                cid: entry.wire_cid,
-                envelope,
-            },
-        );
+        state.write_frame_to(entry.conn_id, &WireFrame::ReplyEvent { cid: entry.wire_cid, envelope });
     }
 }

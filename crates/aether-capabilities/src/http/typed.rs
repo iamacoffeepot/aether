@@ -74,11 +74,7 @@ impl<'a, C> Ctx<'a, C> {
     /// Wrap a transport ctx with the dispatched request and matched
     /// route. Called by the `#[http::route]` glue, not by hand.
     pub fn new(transport: &'a mut C, request: HttpServerRequest, route: Route) -> Self {
-        Self {
-            transport,
-            request,
-            route,
-        }
+        Self { transport, request, route }
     }
 
     /// The original inbound request this route dispatched.

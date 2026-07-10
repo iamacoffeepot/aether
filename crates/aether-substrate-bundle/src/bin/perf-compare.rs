@@ -49,8 +49,8 @@ use std::fs;
 use std::process::{Command, ExitCode};
 
 use aether_substrate_bundle::perf::report::{
-    CompareConfig, LatencySection, RawSection, STICKY_MARKER, TRIAL_SCHEMA, TrialReport, compare,
-    headline_counts, markdown, probe_schema,
+    CompareConfig, LatencySection, RawSection, STICKY_MARKER, TRIAL_SCHEMA, TrialReport, compare, headline_counts,
+    markdown, probe_schema,
 };
 
 /// The envelope tag of the last pre-sections report shape: a flat
@@ -85,9 +85,7 @@ struct Args {
 }
 
 fn split_kv(s: &str) -> Result<(String, String), String> {
-    let (k, v) = s
-        .split_once('=')
-        .ok_or_else(|| format!("env must be KEY=VALUE: {s}"))?;
+    let (k, v) = s.split_once('=').ok_or_else(|| format!("env must be KEY=VALUE: {s}"))?;
     Ok((k.to_owned(), v.to_owned()))
 }
 
@@ -186,9 +184,7 @@ fn ingest_trial(stdout: &[u8]) -> Result<TrialReport, TrialErr> {
         }
         Some(tag) if tag == LEGACY_CELLS_SCHEMA => lift_legacy_cells(stdout),
         Some(tag) => Err(TrialErr::Schema(tag)),
-        None => Err(TrialErr::Op(
-            "missing or non-string `schema` field".to_owned(),
-        )),
+        None => Err(TrialErr::Op("missing or non-string `schema` field".to_owned())),
     }
 }
 
@@ -211,10 +207,8 @@ fn lift_legacy_cells(stdout: &[u8]) -> Result<TrialReport, TrialErr> {
 
     let legacy: LegacyTrial =
         serde_json::from_slice(stdout).map_err(|e| TrialErr::Op(format!("lift v3 cells: {e}")))?;
-    let body = serde_json::to_value(LatencySection {
-        cells: legacy.latency.cells,
-    })
-    .map_err(|e| TrialErr::Op(format!("lift v3 cells: {e}")))?;
+    let body = serde_json::to_value(LatencySection { cells: legacy.latency.cells })
+        .map_err(|e| TrialErr::Op(format!("lift v3 cells: {e}")))?;
     Ok(TrialReport {
         schema: TRIAL_SCHEMA.to_owned(),
         git_sha: legacy.git_sha,
@@ -277,9 +271,8 @@ fn main() -> ExitCode {
     }
 
     let report = compare(&base_reports, &cand_reports, CompareConfig::default());
-    let subtitle = args
-        .subtitle
-        .unwrap_or_else(|| format!("{} trials/config, interleaved on one runner", report.trials));
+    let subtitle =
+        args.subtitle.unwrap_or_else(|| format!("{} trials/config, interleaved on one runner", report.trials));
     println!("{}", markdown(&report, &args.title, &subtitle));
 
     if let Some(path) = &args.out {
@@ -302,9 +295,7 @@ fn main() -> ExitCode {
     // suppressed-verdict heavy / real tiers (ADR-0085 amendment), so the two
     // never report different counts.
     let (improved, stable, regressed) = headline_counts(&report);
-    eprintln!(
-        "perf-compare: {improved} improved, {stable} stable, {regressed} regressed (informational)"
-    );
+    eprintln!("perf-compare: {improved} improved, {stable} stable, {regressed} regressed (informational)");
     ExitCode::SUCCESS
 }
 
@@ -312,8 +303,8 @@ fn main() -> ExitCode {
 mod tests {
     use super::ingest_trial;
     use aether_substrate_bundle::perf::report::{
-        CellJson, CompareConfig, ComparisonReport, LatencySection, Metric, RawSection,
-        SectionReport, TRIAL_SCHEMA, TrialReport, Verdict, compare,
+        CellJson, CompareConfig, ComparisonReport, LatencySection, Metric, RawSection, SectionReport, TRIAL_SCHEMA,
+        TrialReport, Verdict, compare,
     };
 
     /// Build a `v4` candidate side with a single `latency` cell whose p50
@@ -331,8 +322,7 @@ mod tests {
                     max: p50,
                     n: 1800,
                 }];
-                let body =
-                    serde_json::to_value(LatencySection { cells }).expect("encode latency body");
+                let body = serde_json::to_value(LatencySection { cells }).expect("encode latency body");
                 TrialReport {
                     schema: TRIAL_SCHEMA.to_owned(),
                     git_sha: None,
@@ -361,10 +351,7 @@ mod tests {
             .iter()
             .find_map(|s| match s {
                 SectionReport::Compared { name, cells, .. } if name == LatencySection::NAME => {
-                    cells
-                        .iter()
-                        .find(|c| c.percentile == "p50")
-                        .map(|c| c.verdict)
+                    cells.iter().find(|c| c.percentile == "p50").map(|c| c.verdict)
                 }
                 _ => None,
             })
@@ -394,10 +381,7 @@ mod tests {
         // still reads instead of blinding.
         let base: Vec<TrialReport> = [167_000u64, 165_000, 169_000, 166_000]
             .iter()
-            .map(|&p50| {
-                ingest_trial(v3_json(p50).as_bytes())
-                    .unwrap_or_else(|_| panic!("lift v3 base p50={p50}"))
-            })
+            .map(|&p50| ingest_trial(v3_json(p50).as_bytes()).unwrap_or_else(|_| panic!("lift v3 base p50={p50}")))
             .collect();
         let cand = v4_side(&[33_000, 34_000, 32_000, 33_500]);
         let rep = compare(&base, &cand, CompareConfig::default());

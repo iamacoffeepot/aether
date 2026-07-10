@@ -15,10 +15,7 @@ use std::time::Duration;
 /// domain struct.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "runtime", derive(aether_substrate::Config))]
-#[cfg_attr(
-    feature = "runtime",
-    config(env_prefix = "AETHER_ANTHROPIC", cli_prefix = "anthropic")
-)]
+#[cfg_attr(feature = "runtime", config(env_prefix = "AETHER_ANTHROPIC", cli_prefix = "anthropic"))]
 pub struct AnthropicConfig {
     /// The Messages-API key. `None` (or `disabled`) wires the
     /// `DisabledAnthropicAdapter` so Messages requests reply
@@ -31,11 +28,7 @@ pub struct AnthropicConfig {
     /// pin the historical wire shape (no `D` suffix on `DISABLE`).
     #[cfg_attr(
         feature = "runtime",
-        config(
-            env = "AETHER_ANTHROPIC_DISABLE",
-            cli_long = "anthropic-disable",
-            default = false
-        )
+        config(env = "AETHER_ANTHROPIC_DISABLE", cli_long = "anthropic-disable", default = false)
     )]
     pub disabled: bool,
     /// Per-cap concurrency bound (doubles as rate-limit throttling).
@@ -47,10 +40,7 @@ pub struct AnthropicConfig {
     /// `ms_duration` hint + `layer_field = "timeout_ms"` pin the
     /// Layer / env / CLI shape to the pre-derive name
     /// (`AETHER_ANTHROPIC_TIMEOUT_MS`, `--anthropic-timeout-ms`).
-    #[cfg_attr(
-        feature = "runtime",
-        config(default = 120_000, ms_duration, layer_field = "timeout_ms")
-    )]
+    #[cfg_attr(feature = "runtime", config(default = 120_000, ms_duration, layer_field = "timeout_ms"))]
     pub timeout: Duration,
 }
 

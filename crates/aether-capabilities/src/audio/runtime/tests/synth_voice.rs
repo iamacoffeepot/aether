@@ -25,10 +25,7 @@ fn builtin_registry_lists_eleven_patches() {
 /// Pull a `PartialBankDef` out of the registry by name for the
 /// kernel tests. Panics if the named patch is not a partial bank.
 fn partial_bank_def(name: &str) -> PartialBankDef {
-    let def = BUILTINS
-        .iter()
-        .find(|d| d.name == name)
-        .expect("named builtin exists");
+    let def = BUILTINS.iter().find(|d| d.name == name).expect("named builtin exists");
     match def.voice {
         VoiceDef::PartialBank(bank) => bank,
         VoiceDef::Oscillator { .. } => panic!("{name} is not a partial-bank patch"),
@@ -65,10 +62,7 @@ fn partial_bank_envelope_decreases_after_attack() {
     for _ in 0..4_000 {
         voice.next_sample(dt);
         let level = voice.envelope_level();
-        assert!(
-            level <= last + f32::EPSILON,
-            "partial envelope must not rise in sustain: {level} > {last}",
-        );
+        assert!(level <= last + f32::EPSILON, "partial envelope must not rise in sustain: {level} > {last}",);
         last = level;
     }
 }
@@ -80,10 +74,7 @@ fn higher_pitch_decays_in_fewer_samples() {
     let mut high = PartialBankVoice::new(84, 100, &def, 0.3, 48_000.0);
     let low_samples = samples_until_done(&mut low, 48_000.0);
     let high_samples = samples_until_done(&mut high, 48_000.0);
-    assert!(
-        high_samples < low_samples,
-        "high pitch ({high_samples}) should ring shorter than low ({low_samples})",
-    );
+    assert!(high_samples < low_samples, "high pitch ({high_samples}) should ring shorter than low ({low_samples})",);
 }
 
 #[test]
@@ -97,10 +88,7 @@ fn upper_partial_energy_rises_with_velocity() {
         let total: f32 = amps.iter().map(|a| a.abs()).sum();
         upper / total
     };
-    assert!(
-        upper_share(&hard) > upper_share(&soft),
-        "harder strike must shift energy toward upper partials",
-    );
+    assert!(upper_share(&hard) > upper_share(&soft), "harder strike must shift energy toward upper partials",);
 }
 
 #[test]
@@ -129,13 +117,7 @@ fn partial_bank_voice_frees_itself_when_silent() {
     let mut synth = Synth::new(queue, 48_000.0);
     // id 5 is piano; high pitch rings out quickly.
     sender
-        .push(AudioEvent::NoteOn {
-            sender_mailbox: MailboxId(1),
-            pitch: 96,
-            velocity: 100,
-            instrument_id: 5,
-            pan: 0,
-        })
+        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 96, velocity: 100, instrument_id: 5, pan: 0 })
         .unwrap();
     let mut buf = vec![0.0f32; 4_800];
     for _ in 0..200 {
@@ -161,21 +143,13 @@ fn pad_holds_level_through_sustain() {
         voice.next_sample(dt);
     }
     let after = voice.envelope_level();
-    assert!(
-        (after - level).abs() < 1.0e-3,
-        "pad must sustain its level while held: {level} -> {after}",
-    );
+    assert!((after - level).abs() < 1.0e-3, "pad must sustain its level while held: {level} -> {after}",);
 }
 
 /// A sustain-holding ADSR (instant attack, no decay, full
 /// sustain) so a kernel test reads the raw waveform without the
 /// envelope shaping the level.
-const HOLD_ADSR: Adsr = Adsr {
-    attack_secs: 0.0,
-    decay_secs: 0.0,
-    sustain: 1.0,
-    release_secs: 0.1,
-};
+const HOLD_ADSR: Adsr = Adsr { attack_secs: 0.0, decay_secs: 0.0, sustain: 1.0, release_secs: 0.1 };
 
 /// Build an oscillator voice and collect `n` samples at 48 kHz.
 fn collect_osc(wave: Wave, base_amp: f32, seed: u32, n: usize) -> Vec<f32> {
@@ -187,40 +161,20 @@ fn collect_osc(wave: Wave, base_amp: f32, seed: u32, n: usize) -> Vec<f32> {
 /// Count sign changes across a sample window — a proxy for
 /// instantaneous frequency.
 fn zero_crossings(samples: &[f32]) -> usize {
-    samples
-        .windows(2)
-        .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
-        .count()
+    samples.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count()
 }
 
 #[test]
 fn noise_is_bounded_and_nonzero() {
-    let samples = collect_osc(
-        Wave::Noise {
-            lowpass: 1.0,
-            tone_mix: 0.0,
-        },
-        1.0,
-        voice_seed(MailboxId(1), 9, 60),
-        4_000,
-    );
-    assert!(
-        samples.iter().all(|s| s.abs() <= 1.0 + f32::EPSILON),
-        "noise sample escaped [-1, 1]",
-    );
-    assert!(
-        samples.iter().any(|s| s.abs() > 0.0),
-        "noise produced silence",
-    );
+    let samples = collect_osc(Wave::Noise { lowpass: 1.0, tone_mix: 0.0 }, 1.0, voice_seed(MailboxId(1), 9, 60), 4_000);
+    assert!(samples.iter().all(|s| s.abs() <= 1.0 + f32::EPSILON), "noise sample escaped [-1, 1]",);
+    assert!(samples.iter().any(|s| s.abs() > 0.0), "noise produced silence",);
 }
 
 #[test]
 fn noise_is_deterministic_for_a_fixed_voice_key() {
     let seed = voice_seed(MailboxId(7), 9, 64);
-    let wave = Wave::Noise {
-        lowpass: 0.8,
-        tone_mix: 0.0,
-    };
+    let wave = Wave::Noise { lowpass: 0.8, tone_mix: 0.0 };
     let first = collect_osc(wave, 1.0, seed, 2_000);
     let second = collect_osc(wave, 1.0, seed, 2_000);
     assert_eq!(first, second, "fixed-key noise must be reproducible");
@@ -229,24 +183,8 @@ fn noise_is_deterministic_for_a_fixed_voice_key() {
 #[test]
 fn lowpass_reduces_sample_to_sample_delta() {
     let seed = voice_seed(MailboxId(1), 9, 60);
-    let unfiltered = collect_osc(
-        Wave::Noise {
-            lowpass: 1.0,
-            tone_mix: 0.0,
-        },
-        1.0,
-        seed,
-        8_000,
-    );
-    let filtered = collect_osc(
-        Wave::Noise {
-            lowpass: 0.15,
-            tone_mix: 0.0,
-        },
-        1.0,
-        seed,
-        8_000,
-    );
+    let unfiltered = collect_osc(Wave::Noise { lowpass: 1.0, tone_mix: 0.0 }, 1.0, seed, 8_000);
+    let filtered = collect_osc(Wave::Noise { lowpass: 0.15, tone_mix: 0.0 }, 1.0, seed, 8_000);
     let mean_delta = |s: &[f32]| -> f32 {
         let sum: f32 = s.windows(2).map(|w| (w[1] - w[0]).abs()).sum();
         // window count is bounded and small — exact in f32.
@@ -254,30 +192,18 @@ fn lowpass_reduces_sample_to_sample_delta() {
         let count = (s.len() - 1) as f32;
         sum / count
     };
-    assert!(
-        mean_delta(&filtered) < mean_delta(&unfiltered),
-        "lowpassed noise should be smoother sample-to-sample",
-    );
+    assert!(mean_delta(&filtered) < mean_delta(&unfiltered), "lowpassed noise should be smoother sample-to-sample",);
 }
 
 #[test]
 fn pitch_sweep_zero_crossing_rate_falls_toward_base() {
     let mut voice = OscVoice::new(60, 100, Wave::Sine, HOLD_ADSR, 1.0, 48_000.0, 1)
-        .with_pitch_sweep(
-            PitchSweep {
-                start_ratio: 8.0,
-                time_constant_secs: 0.05,
-            },
-            48_000.0,
-        );
+        .with_pitch_sweep(PitchSweep { start_ratio: 8.0, time_constant_secs: 0.05 }, 48_000.0);
     let dt = 1.0 / 48_000.0;
     let samples: Vec<f32> = (0..19_200).map(|_| voice.next_sample(dt)).collect();
     let onset = zero_crossings(&samples[0..2_400]);
     let settled = zero_crossings(&samples[16_800..19_200]);
-    assert!(
-        settled < onset,
-        "swept pitch should slow toward the base frequency: onset {onset}, settled {settled}",
-    );
+    assert!(settled < onset, "swept pitch should slow toward the base frequency: onset {onset}, settled {settled}",);
 }
 
 #[test]
@@ -285,26 +211,14 @@ fn note_on_off_lifecycle() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, 48_000.0);
     sender
-        .push(AudioEvent::NoteOn {
-            sender_mailbox: MailboxId(1),
-            pitch: 60,
-            velocity: 100,
-            instrument_id: 0,
-            pan: 0,
-        })
+        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 60, velocity: 100, instrument_id: 0, pan: 0 })
         .unwrap();
     let mut buf = vec![0.0f32; 480];
     synth.fill(&mut buf, 1);
     assert_eq!(synth.voice_count(), 1);
     assert!(buf.iter().any(|s| s.abs() > 0.0));
 
-    sender
-        .push(AudioEvent::NoteOff {
-            sender_mailbox: MailboxId(1),
-            pitch: 60,
-            instrument_id: 0,
-        })
-        .unwrap();
+    sender.push(AudioEvent::NoteOff { sender_mailbox: MailboxId(1), pitch: 60, instrument_id: 0 }).unwrap();
     // Compile-time constant; trivially exact for usize.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let release_samples = (0.5 * 48_000.0) as usize;
@@ -327,19 +241,9 @@ fn reverb_send_zero_matches_pre_reverb_dry_mix_bit_for_bit() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, TEST_RATE);
     sender
-        .push(AudioEvent::NoteOn {
-            sender_mailbox: MailboxId(1),
-            pitch: 60,
-            velocity: 100,
-            instrument_id: 0,
-            pan: 0,
-        })
+        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 60, velocity: 100, instrument_id: 0, pan: 0 })
         .unwrap();
-    assert_eq!(
-        synth.reverb_send(),
-        0.0,
-        "reverb send must default to fully dry",
-    );
+    assert_eq!(synth.reverb_send(), 0.0, "reverb send must default to fully dry",);
 
     let mut buf = vec![0.0f32; 480];
     synth.fill(&mut buf, 1);
@@ -348,10 +252,7 @@ fn reverb_send_zero_matches_pre_reverb_dry_mix_bit_for_bit() {
     // same built-in kernel `trigger_note_on` would have built,
     // stepped and mixed the same way `fill` does (master_gain at
     // its 1.0 default), never touching the reverb.
-    let def = BUILTINS
-        .iter()
-        .find(|d| d.name == "sine_lead")
-        .expect("sine_lead is builtin id 0");
+    let def = BUILTINS.iter().find(|d| d.name == "sine_lead").expect("sine_lead is builtin id 0");
     let mut kernel = build_builtin_kernel(MailboxId(1), 0, 60, 100, def, TEST_RATE);
     let dt = 1.0 / TEST_RATE;
     let expected: Vec<f32> = (0..480)
@@ -364,39 +265,22 @@ fn reverb_send_zero_matches_pre_reverb_dry_mix_bit_for_bit() {
             dry.tanh()
         })
         .collect();
-    assert_eq!(
-        buf, expected,
-        "reverb_send == 0.0 must not alter the dry mix",
-    );
+    assert_eq!(buf, expected, "reverb_send == 0.0 must not alter the dry mix",);
 }
 
 #[test]
 fn reverb_tail_persists_after_the_note_ends() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, TEST_RATE);
+    sender.push(AudioEvent::SetReverbSend { send: 1.0 }).unwrap();
     sender
-        .push(AudioEvent::SetReverbSend { send: 1.0 })
-        .unwrap();
-    sender
-        .push(AudioEvent::NoteOn {
-            sender_mailbox: MailboxId(1),
-            pitch: 60,
-            velocity: 100,
-            instrument_id: 0,
-            pan: 0,
-        })
+        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 60, velocity: 100, instrument_id: 0, pan: 0 })
         .unwrap();
     let mut buf = vec![0.0f32; 480];
     synth.fill(&mut buf, 1);
     assert_eq!(synth.reverb_send(), 1.0);
 
-    sender
-        .push(AudioEvent::NoteOff {
-            sender_mailbox: MailboxId(1),
-            pitch: 60,
-            instrument_id: 0,
-        })
-        .unwrap();
+    sender.push(AudioEvent::NoteOff { sender_mailbox: MailboxId(1), pitch: 60, instrument_id: 0 }).unwrap();
     // Drive well past the release so the voice fully frees.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let release_samples = (0.5 * TEST_RATE) as usize;
@@ -409,10 +293,7 @@ fn reverb_tail_persists_after_the_note_ends() {
     // already ended.
     let mut after = vec![0.0f32; 4_000];
     synth.fill(&mut after, 1);
-    assert!(
-        after.iter().any(|s| s.abs() > 1.0e-6),
-        "expected a reverb tail after the note's voice had already ended",
-    );
+    assert!(after.iter().any(|s| s.abs() > 1.0e-6), "expected a reverb tail after the note's voice had already ended",);
 }
 
 // ADR-0104 scheduled note events. These drive `fill` with known
@@ -429,12 +310,7 @@ fn scheduled_note_fires_at_its_exact_frame() {
             sender_mailbox: MailboxId(1),
             events: vec![ScheduledEvent {
                 at_millis: 1,
-                event: ScheduledNote::On {
-                    pitch: 60,
-                    velocity: 100,
-                    instrument_id: 0,
-                    pan: 0,
-                },
+                event: ScheduledNote::On { pitch: 60, velocity: 100, instrument_id: 0, pan: 0 },
             }],
         })
         .unwrap();
@@ -444,20 +320,12 @@ fn scheduled_note_fires_at_its_exact_frame() {
     for _ in 0..48 {
         synth.fill(&mut buf, 1);
     }
-    assert_eq!(
-        synth.voice_count(),
-        0,
-        "scheduled note fired before its frame"
-    );
+    assert_eq!(synth.voice_count(), 0, "scheduled note fired before its frame");
     assert_eq!(synth.scheduled_count(), 1, "event left the heap too early");
     // The 49th fill renders absolute frame 48 — the exact due frame.
     synth.fill(&mut buf, 1);
     assert_eq!(synth.voice_count(), 1, "scheduled note missed its frame");
-    assert_eq!(
-        synth.scheduled_count(),
-        0,
-        "fired event not drained from the heap"
-    );
+    assert_eq!(synth.scheduled_count(), 0, "fired event not drained from the heap");
     assert!(synth.has_voice_with_pitch(60));
 }
 
@@ -473,32 +341,18 @@ fn simultaneous_scheduled_events_stay_a_chord() {
             events: vec![
                 ScheduledEvent {
                     at_millis: 0,
-                    event: ScheduledNote::On {
-                        pitch: 60,
-                        velocity: 100,
-                        instrument_id: 0,
-                        pan: 0,
-                    },
+                    event: ScheduledNote::On { pitch: 60, velocity: 100, instrument_id: 0, pan: 0 },
                 },
                 ScheduledEvent {
                     at_millis: 0,
-                    event: ScheduledNote::On {
-                        pitch: 64,
-                        velocity: 100,
-                        instrument_id: 0,
-                        pan: 0,
-                    },
+                    event: ScheduledNote::On { pitch: 64, velocity: 100, instrument_id: 0, pan: 0 },
                 },
             ],
         })
         .unwrap();
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
-    assert_eq!(
-        synth.voice_count(),
-        2,
-        "simultaneous notes did not both fire"
-    );
+    assert_eq!(synth.voice_count(), 2, "simultaneous notes did not both fire");
     assert!(synth.has_voice_with_pitch(60));
     assert!(synth.has_voice_with_pitch(64));
 }
@@ -516,20 +370,9 @@ fn scheduled_note_off_releases_after_its_note_on() {
             events: vec![
                 ScheduledEvent {
                     at_millis: 0,
-                    event: ScheduledNote::On {
-                        pitch: 60,
-                        velocity: 100,
-                        instrument_id: 0,
-                        pan: 0,
-                    },
+                    event: ScheduledNote::On { pitch: 60, velocity: 100, instrument_id: 0, pan: 0 },
                 },
-                ScheduledEvent {
-                    at_millis: 10,
-                    event: ScheduledNote::Off {
-                        pitch: 60,
-                        instrument_id: 0,
-                    },
-                },
+                ScheduledEvent { at_millis: 10, event: ScheduledNote::Off { pitch: 60, instrument_id: 0 } },
             ],
         })
         .unwrap();
@@ -545,11 +388,7 @@ fn scheduled_note_off_releases_after_its_note_on() {
     let tail_samples = (0.6 * TEST_RATE) as usize;
     let mut tail = vec![0.0f32; tail_samples];
     synth.fill(&mut tail, 1);
-    assert_eq!(
-        synth.voice_count(),
-        0,
-        "scheduled note-off never released the voice",
-    );
+    assert_eq!(synth.voice_count(), 0, "scheduled note-off never released the voice",);
 }
 
 #[test]
@@ -563,12 +402,7 @@ fn schedule_offset_spans_block_boundaries() {
             sender_mailbox: MailboxId(1),
             events: vec![ScheduledEvent {
                 at_millis: 2,
-                event: ScheduledNote::On {
-                    pitch: 72,
-                    velocity: 100,
-                    instrument_id: 0,
-                    pan: 0,
-                },
+                event: ScheduledNote::On { pitch: 72, velocity: 100, instrument_id: 0, pan: 0 },
             }],
         })
         .unwrap();
@@ -599,11 +433,7 @@ fn same_key_note_ons_stack_voices() {
     }
     let mut buf = vec![0.0f32; 128];
     synth.fill(&mut buf, 1);
-    assert_eq!(
-        synth.voice_count(),
-        2,
-        "two same-key note-ons must both sound as independent voices",
-    );
+    assert_eq!(synth.voice_count(), 2, "two same-key note-ons must both sound as independent voices",);
 }
 
 /// Tripwire: with two voices stacked on one key, `NoteOff` must
@@ -629,42 +459,19 @@ fn note_off_releases_oldest_unreleased_voice_on_shared_key() {
     synth.fill(&mut buf, 1);
     assert_eq!(synth.voice_count(), 2, "setup: both note-ons must sound");
 
-    sender
-        .push(AudioEvent::NoteOff {
-            sender_mailbox: MailboxId(1),
-            pitch: 60,
-            instrument_id: 0,
-        })
-        .unwrap();
+    sender.push(AudioEvent::NoteOff { sender_mailbox: MailboxId(1), pitch: 60, instrument_id: 0 }).unwrap();
     // instrument 0 (sine_lead) releases in 0.18s; run well past that
     // so the released voice finishes its release ramp and is pruned,
     // while its never-released sibling (held in Sustain) stays
     // resident regardless of how long we run.
     let mut tail = vec![0.0f32; 12_000];
     synth.fill(&mut tail, 1);
-    assert_eq!(
-        synth.voice_count(),
-        1,
-        "note-off must release exactly the oldest voice, leaving its sibling sounding",
-    );
-    assert!(
-        synth.has_voice_with_pitch(60),
-        "the un-released sibling must still be sounding",
-    );
+    assert_eq!(synth.voice_count(), 1, "note-off must release exactly the oldest voice, leaving its sibling sounding",);
+    assert!(synth.has_voice_with_pitch(60), "the un-released sibling must still be sounding",);
 
-    sender
-        .push(AudioEvent::NoteOff {
-            sender_mailbox: MailboxId(1),
-            pitch: 60,
-            instrument_id: 0,
-        })
-        .unwrap();
+    sender.push(AudioEvent::NoteOff { sender_mailbox: MailboxId(1), pitch: 60, instrument_id: 0 }).unwrap();
     synth.fill(&mut tail, 1);
-    assert_eq!(
-        synth.voice_count(),
-        0,
-        "second note-off must release the surviving voice",
-    );
+    assert_eq!(synth.voice_count(), 0, "second note-off must release the surviving voice",);
 }
 
 #[test]
@@ -691,16 +498,12 @@ fn different_senders_get_independent_voices() {
 fn set_master_gain_clamps_above_unity() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, 48_000.0);
-    sender
-        .push(AudioEvent::SetMasterGain { gain: 1.5 })
-        .unwrap();
+    sender.push(AudioEvent::SetMasterGain { gain: 1.5 }).unwrap();
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
     assert!((synth.master_gain() - 1.0).abs() < f32::EPSILON);
 
-    sender
-        .push(AudioEvent::SetMasterGain { gain: -0.2 })
-        .unwrap();
+    sender.push(AudioEvent::SetMasterGain { gain: -0.2 }).unwrap();
     synth.fill(&mut buf, 1);
     assert!(synth.master_gain().abs() < f32::EPSILON);
 }
@@ -757,12 +560,7 @@ fn set_sender_gain_scales_voice_contribution() {
         let (sender, queue) = new_event_channel();
         let mut synth = Synth::new(queue, TEST_RATE);
         if let Some(g) = gain {
-            sender
-                .push(AudioEvent::SetSenderGain {
-                    sender_mailbox: MailboxId(1),
-                    gain: g,
-                })
-                .unwrap();
+            sender.push(AudioEvent::SetSenderGain { sender_mailbox: MailboxId(1), gain: g }).unwrap();
         }
         sender
             .push(AudioEvent::NoteOn {
@@ -783,10 +581,7 @@ fn set_sender_gain_scales_voice_contribution() {
     let unity = render_energy(None);
     let halved = render_energy(Some(0.5));
     let ratio = halved / unity;
-    assert!(
-        (ratio - 0.5).abs() < 0.05,
-        "gain 0.5 should halve a sender's energy, got ratio {ratio}",
-    );
+    assert!((ratio - 0.5).abs() < 0.05, "gain 0.5 should halve a sender's energy, got ratio {ratio}",);
 }
 
 // Tripwire: a set_sender_gain arriving after a note is already sounding
@@ -797,13 +592,7 @@ fn set_sender_gain_ducks_a_sounding_voice() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, TEST_RATE);
     sender
-        .push(AudioEvent::NoteOn {
-            sender_mailbox: MailboxId(1),
-            pitch: 60,
-            velocity: 100,
-            instrument_id: 0,
-            pan: 0,
-        })
+        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 60, velocity: 100, instrument_id: 0, pan: 0 })
         .unwrap();
     let mut buf = vec![0.0f32; 256 * 2];
     // Warm past the attack, then measure a steady block at unity.
@@ -811,12 +600,7 @@ fn set_sender_gain_ducks_a_sounding_voice() {
     synth.fill(&mut buf, 2);
     let unity_energy: f32 = buf.iter().map(|s| s.abs()).sum();
     // Duck the already-sounding voice; the next block must drop.
-    sender
-        .push(AudioEvent::SetSenderGain {
-            sender_mailbox: MailboxId(1),
-            gain: 0.25,
-        })
-        .unwrap();
+    sender.push(AudioEvent::SetSenderGain { sender_mailbox: MailboxId(1), gain: 0.25 }).unwrap();
     synth.fill(&mut buf, 2);
     let ducked_energy: f32 = buf.iter().map(|s| s.abs()).sum();
     assert!(
@@ -830,13 +614,7 @@ fn unknown_instrument_id_drops_note() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, 48_000.0);
     sender
-        .push(AudioEvent::NoteOn {
-            sender_mailbox: MailboxId(1),
-            pitch: 60,
-            velocity: 100,
-            instrument_id: 99,
-            pan: 0,
-        })
+        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 60, velocity: 100, instrument_id: 99, pan: 0 })
         .unwrap();
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
@@ -888,13 +666,7 @@ fn voice_steal_evicts_quietest_note() {
         let pitch = u8::try_from(pitch).unwrap();
         let velocity = if pitch == QUIET_PITCH { 1 } else { 127 };
         sender
-            .push(AudioEvent::NoteOn {
-                sender_mailbox: MailboxId(1),
-                pitch,
-                velocity,
-                instrument_id: 0,
-                pan: 0,
-            })
+            .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch, velocity, instrument_id: 0, pan: 0 })
             .unwrap();
     }
     let mut buf = vec![0.0f32; 64];
@@ -904,31 +676,15 @@ fn voice_steal_evicts_quietest_note() {
 
     // One more note saturates the pool — steal fires.
     sender
-        .push(AudioEvent::NoteOn {
-            sender_mailbox: MailboxId(1),
-            pitch: 200,
-            velocity: 100,
-            instrument_id: 0,
-            pan: 0,
-        })
+        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 200, velocity: 100, instrument_id: 0, pan: 0 })
         .unwrap();
     synth.fill(&mut buf, 1);
 
     // The active pool stays exactly at the cap — the stolen voice
     // moved to the (separate) dying pool, not into `voices`.
-    assert_eq!(
-        synth.voice_count(),
-        MAX_VOICES,
-        "active pool must stay at the cap"
-    );
-    assert!(
-        !synth.has_voice_with_pitch(QUIET_PITCH),
-        "voice steal must evict the quietest note (pitch=5, velocity 1)",
-    );
-    assert!(
-        synth.has_voice_with_pitch(0),
-        "the loud oldest voice (pitch=0) must survive a quietest steal",
-    );
+    assert_eq!(synth.voice_count(), MAX_VOICES, "active pool must stay at the cap");
+    assert!(!synth.has_voice_with_pitch(QUIET_PITCH), "voice steal must evict the quietest note (pitch=5, velocity 1)",);
+    assert!(synth.has_voice_with_pitch(0), "the loud oldest voice (pitch=0) must survive a quietest steal",);
 }
 
 /// A stolen voice must fade out over `STEAL_RELEASE_SECS`, not drop to
@@ -936,12 +692,7 @@ fn voice_steal_evicts_quietest_note() {
 /// kernel level.
 #[test]
 fn steal_release_fades_rather_than_cutting() {
-    let adsr = Adsr {
-        attack_secs: 0.0,
-        decay_secs: 0.0,
-        sustain: 1.0,
-        release_secs: 1.0,
-    };
+    let adsr = Adsr { attack_secs: 0.0, decay_secs: 0.0, sustain: 1.0, release_secs: 1.0 };
     let mut voice = OscVoice::new(69, 127, Wave::Sine, adsr, 0.5, 48_000.0, 1);
     let dt = 1.0 / 48_000.0;
     // Advance into sustain (attack/decay are zero-length).
@@ -952,10 +703,7 @@ fn steal_release_fades_rather_than_cutting() {
 
     voice.steal_release();
     // Still audible on the very next sample — not an instant cut.
-    assert!(
-        voice.current_level() > 0.0,
-        "stolen voice must not drop to zero in one sample",
-    );
+    assert!(voice.current_level() > 0.0, "stolen voice must not drop to zero in one sample",);
 
     // Within STEAL_RELEASE_SECS the fast release completes.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

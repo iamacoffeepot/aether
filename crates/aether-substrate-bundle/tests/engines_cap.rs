@@ -18,8 +18,8 @@ use aether_capabilities::{EngineConfig, EngineServer};
 use aether_data::{Kind, mailbox_id_from_name};
 use aether_kinds::descriptors;
 use aether_kinds::{
-    BinarySelector, DeathReason, ListEngines, ListEnginesResult, SpawnEngine, SpawnEngineResult,
-    TerminateEngine, TerminateEngineResult,
+    BinarySelector, DeathReason, ListEngines, ListEnginesResult, SpawnEngine, SpawnEngineResult, TerminateEngine,
+    TerminateEngineResult,
 };
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
@@ -76,37 +76,17 @@ impl NativeActor for ReplySink {
 
     #[handler::single]
     fn on_list_result(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, reply: ListEnginesResult) {
-        *state
-            .cells
-            .list
-            .lock()
-            .expect("test setup: list cell mutex is never poisoned") = Some(reply);
+        *state.cells.list.lock().expect("test setup: list cell mutex is never poisoned") = Some(reply);
     }
 
     #[handler::single]
-    fn on_spawn_result(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        reply: SpawnEngineResult,
-    ) {
-        *state
-            .cells
-            .spawn
-            .lock()
-            .expect("test setup: spawn cell mutex is never poisoned") = Some(reply);
+    fn on_spawn_result(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, reply: SpawnEngineResult) {
+        *state.cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned") = Some(reply);
     }
 
     #[handler::single]
-    fn on_terminate_result(
-        state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        reply: TerminateEngineResult,
-    ) {
-        *state
-            .cells
-            .terminate
-            .lock()
-            .expect("test setup: terminate cell mutex is never poisoned") = Some(reply);
+    fn on_terminate_result(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, reply: TerminateEngineResult) {
+        *state.cells.terminate.lock().expect("test setup: terminate cell mutex is never poisoned") = Some(reply);
     }
 }
 
@@ -164,22 +144,12 @@ fn bootstrap_store_config(store_dir: &Path, engine_root: &Path, headless: &str) 
 /// The `default` registry selector — empty `query`, no attribute filters —
 /// the bare-spawn form that resolves to the bootstrapped headless bin.
 fn default_selector() -> BinarySelector {
-    BinarySelector {
-        query: None,
-        chassis: None,
-        caps: vec![],
-        target: None,
-    }
+    BinarySelector { query: None, chassis: None, caps: vec![], target: None }
 }
 
 /// Drive one request kind at `aether.engine`, reply-to the sink, and
 /// block until `probe` returns a recorded reply (or `deadline` passes).
-fn drive<K: Kind, T>(
-    mailer: &Arc<Mailer>,
-    request: &K,
-    deadline: Duration,
-    probe: impl Fn() -> Option<T>,
-) -> T {
+fn drive<K: Kind, T>(mailer: &Arc<Mailer>, request: &K, deadline: Duration, probe: impl Fn() -> Option<T>) -> T {
     let server = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
     let sink = mailbox_id_from_name(<ReplySink as Addressable>::NAMESPACE);
     mailer.push(
@@ -221,24 +191,12 @@ impl Drop for EngineReaper {
         let server = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
         let sink = mailbox_id_from_name(<ReplySink as Addressable>::NAMESPACE);
         self.mailer.push(
-            Mail::new(
-                server,
-                TerminateEngine::ID,
-                TerminateEngine { engine_id }.encode_into_bytes(),
-                1,
-            )
-            .with_reply_to(Source::with_correlation(SourceAddr::Component(sink), 1)),
+            Mail::new(server, TerminateEngine::ID, TerminateEngine { engine_id }.encode_into_bytes(), 1)
+                .with_reply_to(Source::with_correlation(SourceAddr::Component(sink), 1)),
         );
         let until = Instant::now() + Duration::from_secs(5);
         loop {
-            if self
-                .cells
-                .terminate
-                .lock()
-                .ok()
-                .and_then(|mut g| g.take())
-                .is_some()
-            {
+            if self.cells.terminate.lock().ok().and_then(|mut g| g.take()).is_some() {
                 break;
             }
             if Instant::now() >= until {
@@ -258,11 +216,8 @@ mod tests {
         // Bootstrap the binary store with the headless bin so the cap
         // resolves a `default` selector to it (ADR-0115, #1954). Before
         // `boot()` — init reads the bootstrap env. Cleaned on success.
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let store_dir =
-            env::temp_dir().join(format!("aether-engcap-binstore-{}-{nanos}", process::id()));
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let store_dir = env::temp_dir().join(format!("aether-engcap-binstore-{}-{nanos}", process::id()));
         let root = env::temp_dir().join(format!("aether-engcap-store-{}-{nanos}", process::id()));
 
         let (_chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, &root, headless));
@@ -272,43 +227,23 @@ mod tests {
         // deadline — this covers a debug-build chassis cold start.
         let spawn = drive(
             &mailer,
-            &SpawnEngine {
-                selector: default_selector(),
-                args: vec![],
-                boot_manifest: None,
-            },
+            &SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None },
             Duration::from_secs(30),
-            || {
-                cells
-                    .spawn
-                    .lock()
-                    .expect("test setup: spawn cell mutex is never poisoned")
-                    .take()
-            },
+            || cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take(),
         );
         let engine_id = match spawn {
-            SpawnEngineResult::Ok {
-                engine_id,
-                rpc_port,
-            } => {
+            SpawnEngineResult::Ok { engine_id, rpc_port } => {
                 assert_ne!(rpc_port, 0, "cap should report the assigned RPC port");
                 engine_id
             }
             SpawnEngineResult::Err { error, .. } => panic!("spawn failed: {error}"),
         };
-        let mut reaper = EngineReaper {
-            mailer: Arc::clone(&mailer),
-            cells: cells.clone(),
-            engine_id: Some(engine_id.clone()),
-        };
+        let mut reaper =
+            EngineReaper { mailer: Arc::clone(&mailer), cells: cells.clone(), engine_id: Some(engine_id.clone()) };
 
         // List: the freshly-spawned engine shows up in the cap's table.
         let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
-            cells
-                .list
-                .lock()
-                .expect("test setup: list cell mutex is never poisoned")
-                .take()
+            cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
         });
         assert!(
             list.engines.iter().any(|e| e.engine_id == engine_id),
@@ -317,20 +252,10 @@ mod tests {
 
         // Terminate: the cap forwards to the proxy, which SIGKILLs the
         // substrate and self-shuts-down; the table entry is dropped.
-        let terminate = drive(
-            &mailer,
-            &TerminateEngine {
-                engine_id: engine_id.clone(),
-            },
-            Duration::from_secs(5),
-            || {
-                cells
-                    .terminate
-                    .lock()
-                    .expect("test setup: terminate cell mutex is never poisoned")
-                    .take()
-            },
-        );
+        let terminate =
+            drive(&mailer, &TerminateEngine { engine_id: engine_id.clone() }, Duration::from_secs(5), || {
+                cells.terminate.lock().expect("test setup: terminate cell mutex is never poisoned").take()
+            });
         assert!(
             matches!(terminate, TerminateEngineResult::Ok),
             "terminate of a live engine should succeed: {terminate:?}",
@@ -339,11 +264,7 @@ mod tests {
 
         // After terminate, the engine is gone from the table.
         let list_after = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
-            cells
-                .list
-                .lock()
-                .expect("test setup: list cell mutex is never poisoned")
-                .take()
+            cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
         });
         assert!(
             !list_after.engines.iter().any(|e| e.engine_id == engine_id),
@@ -370,9 +291,7 @@ mod tests {
     fn failed_spawn_surfaces_engine_id_and_records_spawn_failed() {
         use std::os::unix::fs::PermissionsExt;
 
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         let dir = env::temp_dir().join(format!("aether-engcap-badspawn-{}-{nanos}", process::id()));
         fs::create_dir_all(&dir).expect("test setup: bad-spawn temp dir");
 
@@ -418,29 +337,13 @@ mod tests {
         // the budget + fork.
         let spawn = drive(
             &mailer,
-            &SpawnEngine {
-                selector: default_selector(),
-                args: vec![],
-                boot_manifest: None,
-            },
+            &SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None },
             Duration::from_secs(20),
-            || {
-                cells
-                    .spawn
-                    .lock()
-                    .expect("test setup: spawn cell mutex is never poisoned")
-                    .take()
-            },
+            || cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take(),
         );
         let engine_id = match spawn {
-            SpawnEngineResult::Err {
-                engine_id: Some(id),
-                error,
-            } => {
-                assert!(
-                    error.contains("proxy failed to connect"),
-                    "unexpected error: {error}",
-                );
+            SpawnEngineResult::Err { engine_id: Some(id), error } => {
+                assert!(error.contains("proxy failed to connect"), "unexpected error: {error}",);
                 id
             }
             other => panic!("expected an id-bearing spawn Err, got {other:?}"),
@@ -449,11 +352,7 @@ mod tests {
         // The failure is recorded as a `SpawnFailed` death keyed by the
         // same engine_id, so a caller can correlate and reap.
         let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
-            cells
-                .list
-                .lock()
-                .expect("test setup: list cell mutex is never poisoned")
-                .take()
+            cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
         });
         assert!(
             !list.engines.iter().any(|e| e.engine_id == engine_id),
@@ -463,9 +362,7 @@ mod tests {
             .recently_died
             .iter()
             .find(|d| d.engine_id == engine_id)
-            .unwrap_or_else(|| {
-                panic!("failed spawn {engine_id} must leave a recently_died entry: {list:?}")
-            });
+            .unwrap_or_else(|| panic!("failed spawn {engine_id} must leave a recently_died entry: {list:?}"));
         assert!(
             matches!(record.reason, DeathReason::SpawnFailed { .. }),
             "a failed spawn must be recorded as SpawnFailed, got {:?}",

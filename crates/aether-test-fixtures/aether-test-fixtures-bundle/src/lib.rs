@@ -29,12 +29,11 @@ mod ui_widget;
 pub use cube::Cube;
 pub use fs_demux::FsDemux;
 pub use http_handler::{
-    HttpHandler, RoutedHttpHandler, RoutedStreamingHttpHandler, StreamingHttpHandler,
-    WebSocketHandler,
+    HttpHandler, RoutedHttpHandler, RoutedStreamingHttpHandler, StreamingHttpHandler, WebSocketHandler,
 };
 pub use inline_child::{
-    InlineConfiguredChild, InlineConfiguredParent, InlineDespawnParent, InlineParent,
-    InlineStatefulChild, InlineStatefulParent, InlineTagParent,
+    InlineConfiguredChild, InlineConfiguredParent, InlineDespawnParent, InlineParent, InlineStatefulChild,
+    InlineStatefulParent, InlineTagParent,
 };
 pub use mat4_source::MatSource;
 pub use matrix_sweep::{MatrixChild, MatrixParent};

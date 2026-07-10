@@ -48,13 +48,9 @@ pub mod theme;
 
 pub use panel::WidgetPanel;
 
-use aether_actor::{
-    ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
-};
+use aether_actor::{ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::{
-    DrawSolidQuads, DrawTexturedQuads, SolidQuad, TexturedQuad as RenderTexturedQuad,
-};
+use aether_capabilities::render::{DrawSolidQuads, DrawTexturedQuads, SolidQuad, TexturedQuad as RenderTexturedQuad};
 use aether_capabilities::text::DrawText;
 use aether_capabilities::{LifecycleCapability, RenderCapability, TextCapability};
 use aether_data::Kind;
@@ -120,8 +116,7 @@ impl Widget {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
-        self.composite
-            .extend_chrome(self.config.chrome.iter().cloned());
+        self.composite.extend_chrome(self.config.chrome.iter().cloned());
         for spec in &self.config.children {
             if let Some(child) = ctx.child(&spec.subname) {
                 child.send(&Collect);
@@ -177,15 +172,8 @@ pub(crate) fn accept_child_list(
 /// shape. Text is filtered before planning and remains on its later lane.
 #[derive(Debug, PartialEq)]
 enum DirectRun {
-    Solid {
-        clip: Option<WidgetClipRect>,
-        quads: Vec<SolidQuad>,
-    },
-    Textured {
-        texture_id: u32,
-        clip: Option<WidgetClipRect>,
-        quads: Vec<RenderTexturedQuad>,
-    },
+    Solid { clip: Option<WidgetClipRect>, quads: Vec<SolidQuad> },
+    Textured { texture_id: u32, clip: Option<WidgetClipRect>, quads: Vec<RenderTexturedQuad> },
 }
 
 /// Plan the filtered non-text subsequence in one pass. Adjacent solids
@@ -197,53 +185,22 @@ fn direct_runs(list: &WidgetDrawList) -> Vec<DirectRun> {
     let mut runs: Vec<DirectRun> = Vec::new();
     for item in &list.items {
         match item {
-            WidgetDrawItem::Quad {
-                x,
-                y,
-                width,
-                height,
-                color,
-                ..
-            } => {
+            WidgetDrawItem::Quad { x, y, width, height, color, .. } => {
                 let clip = match item.valid_clip() {
                     WidgetClipIntersection::Unbounded => None,
                     WidgetClipIntersection::Finite { rect } => Some(rect),
                     WidgetClipIntersection::Empty => continue,
                 };
-                let quad = SolidQuad {
-                    x: *x,
-                    y: *y,
-                    width: *width,
-                    height: *height,
-                    color: *color,
-                };
-                if let Some(DirectRun::Solid {
-                    clip: run_clip,
-                    quads,
-                }) = runs.last_mut()
+                let quad = SolidQuad { x: *x, y: *y, width: *width, height: *height, color: *color };
+                if let Some(DirectRun::Solid { clip: run_clip, quads }) = runs.last_mut()
                     && *run_clip == clip
                 {
                     quads.push(quad);
                 } else {
-                    runs.push(DirectRun::Solid {
-                        clip,
-                        quads: vec![quad],
-                    });
+                    runs.push(DirectRun::Solid { clip, quads: vec![quad] });
                 }
             }
-            WidgetDrawItem::TexturedQuad {
-                texture_id,
-                x,
-                y,
-                width,
-                height,
-                u0,
-                v0,
-                u1,
-                v1,
-                tint,
-                ..
-            } => {
+            WidgetDrawItem::TexturedQuad { texture_id, x, y, width, height, u0, v0, u1, v1, tint, .. } => {
                 let clip = match item.valid_clip() {
                     WidgetClipIntersection::Unbounded => None,
                     WidgetClipIntersection::Finite { rect } => Some(rect),
@@ -260,21 +217,13 @@ fn direct_runs(list: &WidgetDrawList) -> Vec<DirectRun> {
                     v1: *v1,
                     tint: *tint,
                 };
-                if let Some(DirectRun::Textured {
-                    texture_id: run_texture_id,
-                    clip: run_clip,
-                    quads,
-                }) = runs.last_mut()
+                if let Some(DirectRun::Textured { texture_id: run_texture_id, clip: run_clip, quads }) = runs.last_mut()
                     && *run_texture_id == *texture_id
                     && *run_clip == clip
                 {
                     quads.push(quad);
                 } else {
-                    runs.push(DirectRun::Textured {
-                        texture_id: *texture_id,
-                        clip,
-                        quads: vec![quad],
-                    });
+                    runs.push(DirectRun::Textured { texture_id: *texture_id, clip, quads: vec![quad] });
                 }
             }
             WidgetDrawItem::Text { .. } => {}
@@ -284,12 +233,7 @@ fn direct_runs(list: &WidgetDrawList) -> Vec<DirectRun> {
 }
 
 fn framebuffer_clip(rect: WidgetClipRect) -> ClipRect {
-    ClipRect {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-    }
+    ClipRect { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
 }
 
 /// Emit a flattened subtree as the cluster's single render + text sender.
@@ -306,11 +250,7 @@ pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
                     quads,
                 });
             }
-            DirectRun::Textured {
-                texture_id,
-                clip,
-                quads,
-            } => {
+            DirectRun::Textured { texture_id, clip, quads } => {
                 ctx.actor::<RenderCapability>().send(&DrawTexturedQuads {
                     texture_id,
                     space: QuadSpace::Screen,
@@ -321,16 +261,7 @@ pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
         }
     }
     for item in &list.items {
-        if let WidgetDrawItem::Text {
-            x,
-            y,
-            font_id,
-            text,
-            size_pixels,
-            color,
-            ..
-        } = item
-        {
+        if let WidgetDrawItem::Text { x, y, font_id, text, size_pixels, color, .. } = item {
             let clip = match item.valid_clip() {
                 WidgetClipIntersection::Unbounded => None,
                 WidgetClipIntersection::Finite { rect } => Some(framebuffer_clip(rect)),
@@ -355,14 +286,7 @@ mod tests {
     use aether_math::Rgba;
 
     fn quad(x: f32, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
-        WidgetDrawItem::Quad {
-            x,
-            y: 0.0,
-            width: 1.0,
-            height: 1.0,
-            color: Rgba::WHITE,
-            clip,
-        }
+        WidgetDrawItem::Quad { x, y: 0.0, width: 1.0, height: 1.0, color: Rgba::WHITE, clip }
     }
 
     fn text(clip: Option<WidgetClipRect>) -> WidgetDrawItem {
@@ -396,18 +320,8 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)] // one cohesive direct-run order/key matrix
     fn direct_planner_coalesces_only_adjacent_compatible_non_text_items() {
-        let a = WidgetClipRect {
-            x: 1.0,
-            y: 2.0,
-            width: 3.0,
-            height: 4.0,
-        };
-        let b = WidgetClipRect {
-            x: 5.0,
-            y: 6.0,
-            width: 7.0,
-            height: 8.0,
-        };
+        let a = WidgetClipRect { x: 1.0, y: 2.0, width: 3.0, height: 4.0 };
+        let b = WidgetClipRect { x: 5.0, y: 6.0, width: 7.0, height: 8.0 };
         let list = WidgetDrawList {
             intrinsic: None,
             items: vec![
@@ -477,16 +391,9 @@ mod tests {
 
     #[test]
     fn direct_planner_keeps_unclipped_solids_one_batch_and_omits_invalid_clips() {
-        let invalid = WidgetClipRect {
-            x: 0.0,
-            y: 0.0,
-            width: -1.0,
-            height: 2.0,
-        };
-        let list = WidgetDrawList {
-            intrinsic: None,
-            items: vec![quad(1.0, None), quad(2.0, Some(invalid)), quad(3.0, None)],
-        };
+        let invalid = WidgetClipRect { x: 0.0, y: 0.0, width: -1.0, height: 2.0 };
+        let list =
+            WidgetDrawList { intrinsic: None, items: vec![quad(1.0, None), quad(2.0, Some(invalid)), quad(3.0, None)] };
         let runs = direct_runs(&list);
         assert_eq!(runs.len(), 1);
         assert!(matches!(
@@ -513,11 +420,7 @@ impl WasmActor for Widget {
     const NAMESPACE: &'static str = "aether.kit.widget";
 
     fn init(config: WidgetConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Widget {
-            config,
-            composite: Composite::new(),
-            spawned: false,
-        })
+        Ok(Widget { config, composite: Composite::new(), spawned: false })
     }
 
     /// The root subscribes the frame stage once (the root-subscribes-once

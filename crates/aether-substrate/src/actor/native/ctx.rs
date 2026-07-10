@@ -103,12 +103,7 @@ macro_rules! native_sender_methods {
         #[must_use]
         pub fn actor<R: Singleton>(&self) -> NativeActorMailbox<'_, R> {
             let (parent, root) = self.outbound_lineage();
-            NativeActorMailbox::__new_in_flight(
-                R::resolve(self.binding.carry(), ()).0,
-                self.binding,
-                parent,
-                root,
-            )
+            NativeActorMailbox::__new_in_flight(R::resolve(self.binding.carry(), ()).0, self.binding, parent, root)
         }
 
         /// Multi-instance sender: resolve a typed [`NativeActorMailbox`]
@@ -120,12 +115,7 @@ macro_rules! native_sender_methods {
         #[allow(clippy::disallowed_methods)]
         pub fn resolve_actor<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
             let (parent, root) = self.outbound_lineage();
-            NativeActorMailbox::__new_in_flight(
-                mailbox_id_from_name(name).0,
-                self.binding,
-                parent,
-                root,
-            )
+            NativeActorMailbox::__new_in_flight(mailbox_id_from_name(name).0, self.binding, parent, root)
         }
 
         /// Address an actor by a [`MailboxId`] already in hand — the id a
@@ -161,14 +151,7 @@ impl<'a> NativeCtx<'a, Single> {
         in_flight_mail_id: MailId,
         in_flight_root: MailId,
     ) -> Self {
-        Self {
-            binding,
-            source: sender,
-            in_flight_mail_id,
-            in_flight_root,
-            inbound: None,
-            _mode: PhantomData,
-        }
+        Self { binding, source: sender, in_flight_mail_id, in_flight_root, inbound: None, _mode: PhantomData }
     }
 }
 
@@ -185,14 +168,7 @@ impl<'a> NativeCtx<'a, Manual> {
         in_flight_mail_id: MailId,
         in_flight_root: MailId,
     ) -> Self {
-        Self {
-            binding,
-            source: sender,
-            in_flight_mail_id,
-            in_flight_root,
-            inbound: None,
-            _mode: PhantomData,
-        }
+        Self { binding, source: sender, in_flight_mail_id, in_flight_root, inbound: None, _mode: PhantomData }
     }
 
     /// ADR-0112 downgrade-only coercion: view this [`Manual`] ctx as a
@@ -241,14 +217,7 @@ impl<'a> NativeCtx<'a, Manual> {
         in_flight_root: MailId,
         inbound: Envelope,
     ) -> Self {
-        Self {
-            binding,
-            source: sender,
-            in_flight_mail_id,
-            in_flight_root,
-            inbound: Some(inbound),
-            _mode: PhantomData,
-        }
+        Self { binding, source: sender, in_flight_mail_id, in_flight_root, inbound: Some(inbound), _mode: PhantomData }
     }
 }
 
@@ -272,10 +241,8 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// once.
     #[must_use]
     pub fn take_inbound(&mut self) -> InboundMail {
-        let env = self
-            .inbound
-            .take()
-            .expect("take_inbound: no dispatched envelope (init/close-hook ctx, or already taken)");
+        let env =
+            self.inbound.take().expect("take_inbound: no dispatched envelope (init/close-hook ctx, or already taken)");
         InboundMail::from_dispatched(
             env,
             Arc::clone(self.binding.mailer()),
@@ -343,12 +310,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         A: Addressable + 'static,
         F: FnOnce(InheritCtx<A>) + Send + 'static,
     {
-        spawn_thread::spawn_inherit::<A, F>(
-            Arc::clone(self.binding),
-            self.in_flight_mail_id,
-            self.in_flight_root,
-            f,
-        )
+        spawn_thread::spawn_inherit::<A, F>(Arc::clone(self.binding), self.in_flight_mail_id, self.in_flight_root, f)
     }
 
     /// ADR-0080 §12 spawn primitive: launch a worker thread with no
@@ -448,12 +410,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// replays them here when the request finally dispatches from a later
     /// handler turn — so the deferred work keeps its *own* chain held and
     /// replies to its *own* caller, not the completion handler's.
-    pub fn dispatch_blocking_resumed<O, F>(
-        &mut self,
-        hold: SettlementHold,
-        reply_to: Source,
-        f: F,
-    ) -> DispatchId
+    pub fn dispatch_blocking_resumed<O, F>(&mut self, hold: SettlementHold, reply_to: Source, f: F) -> DispatchId
     where
         O: Send + 'static,
         F: FnOnce() -> O + Send + 'static,
@@ -493,20 +450,13 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         // This IS the ADR-0093 dispatch_blocking primitive — the hold lives in the
         // ledger (not on this worker), so the chain stays open until the resolve.
         #[allow(clippy::disallowed_methods)]
-        let spawned = ThreadBuilder::new()
-            .name(String::from("aether-dispatch-blocking"))
-            .spawn(move || {
-                let output = f();
-                binding.dispatch_fill_output(id, Box::new(output));
-                let wake = TaskCompletionWake { dispatch_id: id.0 };
-                let self_id = binding.self_mailbox();
-                binding.mailer().push(Mail::new(
-                    self_id,
-                    TaskCompletionWake::ID,
-                    wake.encode_into_bytes(),
-                    1,
-                ));
-            });
+        let spawned = ThreadBuilder::new().name(String::from("aether-dispatch-blocking")).spawn(move || {
+            let output = f();
+            binding.dispatch_fill_output(id, Box::new(output));
+            let wake = TaskCompletionWake { dispatch_id: id.0 };
+            let self_id = binding.self_mailbox();
+            binding.mailer().push(Mail::new(self_id, TaskCompletionWake::ID, wake.encode_into_bytes(), 1));
+        });
         if let Err(e) = spawned {
             tracing::error!(
                 target: "aether_substrate::actor::native::dispatch_blocking",
@@ -534,10 +484,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     ///
     /// `None` for an unknown id (cancelled or double-landed) or an `O` /
     /// `C` that doesn't match the dispatch's types (a wiring bug).
-    pub fn take_task_done<O: 'static, C: 'static>(
-        &mut self,
-        id: DispatchId,
-    ) -> Option<TaskDone<O, C>> {
+    pub fn take_task_done<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
         self.binding.dispatch_take::<O, C>(id)
     }
 
@@ -556,10 +503,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     ///
     /// `None` for an unknown id (cancelled / double-landed), an unfilled
     /// output, or an `O` / `C` that doesn't match this entry's dispatch.
-    pub fn try_take_task_done<O: 'static, C: 'static>(
-        &mut self,
-        id: DispatchId,
-    ) -> Option<TaskDone<O, C>> {
+    pub fn try_take_task_done<O: 'static, C: 'static>(&mut self, id: DispatchId) -> Option<TaskDone<O, C>> {
         self.binding.dispatch_try_take::<O, C>(id)
     }
 
@@ -612,9 +556,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// Correlation id of the request this inbound reply answers.
     #[must_use]
     pub fn in_reply_to(&self) -> Option<RequestId> {
-        if matches!(self.source.addr, SourceAddr::None)
-            && self.source.correlation_id != Source::NO_CORRELATION
-        {
+        if matches!(self.source.addr, SourceAddr::None) && self.source.correlation_id != Source::NO_CORRELATION {
             Some(RequestId(self.source.correlation_id))
         } else {
             None
@@ -643,15 +585,8 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// chain settles only after the reply lands (#1695). Routes through
     /// the same [`NativeBinding::send_reply_for_handler`] path as
     /// [`OutboundReply::reply`].
-    pub fn reply_to_target<K: Kind>(
-        &mut self,
-        sender: Source,
-        payload: &K,
-        root: MailId,
-        parent: Option<MailId>,
-    ) {
-        self.binding
-            .send_reply_for_handler(sender, payload, root, parent);
+    pub fn reply_to_target<K: Kind>(&mut self, sender: Source, payload: &K, root: MailId, parent: Option<MailId>) {
+        self.binding.send_reply_for_handler(sender, payload, root, parent);
     }
 
     /// Issue 607 Phase 4a (ADR-0079): self-shutdown signal. Sets a
@@ -746,10 +681,8 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
             .binding
             .spawner()
             .expect("NativeCtx::spawn_child requires a chassis-built binding (no spawner installed — likely a `new_for_test` binding)");
-        let sender = Source {
-            addr: SourceAddr::Component(self.binding.self_mailbox()),
-            correlation_id: Source::NO_CORRELATION,
-        };
+        let sender =
+            Source { addr: SourceAddr::Component(self.binding.self_mailbox()), correlation_id: Source::NO_CORRELATION };
         // ADR-0099 §3: the child nests under this actor — its id folds
         // the new node's `ActorId` onto this actor's lineage carry, and
         // it registers under this actor's rendered name.
@@ -768,11 +701,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// mail from this ctx's in-flight context. `MailId::NONE` collapses
     /// to `None` (chassis-root or close/init ctx).
     pub(crate) fn outbound_parent(&self) -> Option<MailId> {
-        if self.in_flight_mail_id == MailId::NONE {
-            None
-        } else {
-            Some(self.in_flight_mail_id)
-        }
+        if self.in_flight_mail_id == MailId::NONE { None } else { Some(self.in_flight_mail_id) }
     }
 
     /// ADR-0080 §5: derive the inherited `root` to stamp on outbound
@@ -780,11 +709,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// to `None`, in which case `NativeBinding::send_mail_with_lineage`
     /// mints a fresh root from the outbound's own `mail_id`.
     pub(crate) fn outbound_root(&self) -> Option<MailId> {
-        if self.in_flight_root == MailId::NONE {
-            None
-        } else {
-            Some(self.in_flight_root)
-        }
+        if self.in_flight_root == MailId::NONE { None } else { Some(self.in_flight_root) }
     }
 
     /// The `(parent, root)` pair a [`NativeActorMailbox`] captures at
@@ -813,11 +738,7 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// least one consumer.
     ///
     /// Issue iamacoffeepot/aether#723.
-    pub fn fanout<K: Kind>(
-        &mut self,
-        recipients: impl IntoIterator<Item = MailboxId>,
-        payload: &K,
-    ) {
+    pub fn fanout<K: Kind>(&mut self, recipients: impl IntoIterator<Item = MailboxId>, payload: &K) {
         let mut recipients = recipients.into_iter();
         let Some(first) = recipients.next() else {
             return;
@@ -826,11 +747,9 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         let parent = self.outbound_parent();
         let root = self.outbound_root();
         let kind = K::ID.0;
-        self.binding
-            .push_envelope_buffered(first.0, kind, &bytes, 1, parent, root);
+        self.binding.push_envelope_buffered(first.0, kind, &bytes, 1, parent, root);
         for recipient in recipients {
-            self.binding
-                .push_envelope_buffered(recipient.0, kind, &bytes, 1, parent, root);
+            self.binding.push_envelope_buffered(recipient.0, kind, &bytes, 1, parent, root);
         }
     }
 
@@ -862,20 +781,8 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// `send` / `send_many` on `NativeActorMailbox` cover the
     /// fire-and-forget case.
     #[must_use]
-    pub fn send_envelope_tracked(
-        &self,
-        recipient: MailboxId,
-        kind: KindId,
-        bytes: &[u8],
-    ) -> MailId {
-        self.binding.push_envelope_buffered(
-            recipient.0,
-            kind.0,
-            bytes,
-            1,
-            self.outbound_parent(),
-            self.outbound_root(),
-        )
+    pub fn send_envelope_tracked(&self, recipient: MailboxId, kind: KindId, bytes: &[u8]) -> MailId {
+        self.binding.push_envelope_buffered(recipient.0, kind.0, bytes, 1, self.outbound_parent(), self.outbound_root())
     }
 
     /// Re-dispatch variant of [`Self::send_envelope_tracked`] that pins the
@@ -936,14 +843,8 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
     /// (descendants don't settle individually; only the chain root
     /// does).
     #[must_use]
-    pub fn send_envelope_detached(
-        &self,
-        recipient: MailboxId,
-        kind: KindId,
-        bytes: &[u8],
-    ) -> MailId {
-        self.binding
-            .push_envelope_buffered(recipient.0, kind.0, bytes, 1, None, None)
+    pub fn send_envelope_detached(&self, recipient: MailboxId, kind: KindId, bytes: &[u8]) -> MailId {
+        self.binding.push_envelope_buffered(recipient.0, kind.0, bytes, 1, None, None)
     }
 }
 
@@ -985,16 +886,8 @@ pub struct NativeInitCtx<'a> {
 impl<'a> NativeInitCtx<'a> {
     /// Internal constructor — only [`crate::chassis::builder::Builder::with_actor`]
     /// builds these.
-    pub(crate) fn new(
-        binding: &'a Arc<NativeBinding>,
-        handles: &'a mut ExportedHandles,
-        mailer: Arc<Mailer>,
-    ) -> Self {
-        Self {
-            binding,
-            handles,
-            mailer,
-        }
+    pub(crate) fn new(binding: &'a Arc<NativeBinding>, handles: &'a mut ExportedHandles, mailer: Arc<Mailer>) -> Self {
+        Self { binding, handles, mailer }
     }
 
     /// Borrow the Arc'd cap-bound [`NativeBinding`]. Used by the wasm
@@ -1041,9 +934,7 @@ impl<'a> NativeInitCtx<'a> {
     /// a `Clone` struct of `Arc`-wrapped fields (e.g. `RenderHandles`
     /// from ADR-0078).
     pub fn publish_handle<H: Any + Send + Sync + 'static>(&mut self, handle: H) {
-        self.handles
-            .by_type
-            .insert(TypeId::of::<H>(), Box::new(handle));
+        self.handles.by_type.insert(TypeId::of::<H>(), Box::new(handle));
     }
 
     /// Init has no inbound chain to inherit, so a handle built here is
@@ -1140,14 +1031,7 @@ impl<M: ReplyMode> MailSender for NativeCtx<'_, M> {
         let bytes = payload.encode_into_bytes();
         // ADR-0080 §7: suppress the in-flight lineage so the recipient
         // starts a fresh causal chain (the trait default would inherit).
-        self.binding.push_envelope_buffered(
-            R::resolve(self.binding.carry(), ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            None,
-            None,
-        );
+        self.binding.push_envelope_buffered(R::resolve(self.binding.carry(), ()).0, K::ID.0, &bytes, 1, None, None);
     }
 
     //noinspection DuplicatedCode
@@ -1155,14 +1039,7 @@ impl<M: ReplyMode> MailSender for NativeCtx<'_, M> {
     #[allow(clippy::disallowed_methods)]
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.binding.push_envelope_buffered(
-            mailbox_id_from_name(name).0,
-            K::ID.0,
-            &bytes,
-            1,
-            None,
-            None,
-        );
+        self.binding.push_envelope_buffered(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, None, None);
     }
 
     //noinspection DuplicatedCode
@@ -1170,8 +1047,7 @@ impl<M: ReplyMode> MailSender for NativeCtx<'_, M> {
     // `None` lineage minting a fresh root (ADR-0080 §7).
     fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.binding
-            .push_envelope_buffered(id.0, K::ID.0, &bytes, 1, None, None);
+        self.binding.push_envelope_buffered(id.0, K::ID.0, &bytes, 1, None, None);
     }
 }
 
@@ -1204,21 +1080,11 @@ impl OutboundReply for NativeCtx<'_, Manual> {
         // ADR-0080 §5/§6 (#1695): a synchronous reply joins the handler's
         // causal chain — inherit this ctx's `root` + `parent` so the
         // reply's `Sent` lands in the caller's chain.
-        self.binding.send_reply_for_handler(
-            self.source,
-            payload,
-            self.in_flight_root,
-            self.outbound_parent(),
-        );
+        self.binding.send_reply_for_handler(self.source, payload, self.in_flight_root, self.outbound_parent());
     }
 
     fn reply_to<K: Kind>(&mut self, sender: Source, payload: &K) {
-        self.binding.send_reply_for_handler(
-            sender,
-            payload,
-            self.in_flight_root,
-            self.outbound_parent(),
-        );
+        self.binding.send_reply_for_handler(sender, payload, self.in_flight_root, self.outbound_parent());
     }
 }
 
@@ -1240,8 +1106,7 @@ impl<K: Kind> Emit<K> for NativeCtx<'_, Multi<K>> {
             return;
         };
         let bytes = payload.encode_into_bytes();
-        self.binding
-            .push_envelope_buffered(source.0, K::ID.0, &bytes, 1, None, None);
+        self.binding.push_envelope_buffered(source.0, K::ID.0, &bytes, 1, None, None);
     }
 }
 
@@ -1271,9 +1136,7 @@ impl Default for ExportedHandles {
 impl ExportedHandles {
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            by_type: HashMap::new(),
-        }
+        Self { by_type: HashMap::new() }
     }
 
     /// Retrieve a cloned copy of the published handle bundle of type
@@ -1281,10 +1144,7 @@ impl ExportedHandles {
     /// reader; caps publish via [`NativeInitCtx::publish_handle`].
     #[must_use]
     pub fn get<H: Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
-        self.by_type
-            .get(&TypeId::of::<H>())
-            .and_then(|b| b.downcast_ref::<H>())
-            .cloned()
+        self.by_type.get(&TypeId::of::<H>()).and_then(|b| b.downcast_ref::<H>()).cloned()
     }
 
     /// `true` when no cap has published a handle yet. Useful for tests.
@@ -1328,19 +1188,12 @@ mod tests {
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
         fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self {
-                boots: AtomicU32::new(0),
-            })
+            Ok(Self { boots: AtomicU32::new(0) })
         }
     }
 
     impl Dispatch<Self> for StubActor {
-        fn dispatch(
-            _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Manual>,
-            _kind: KindId,
-            _payload: &[u8],
-        ) -> Option<()> {
+        fn dispatch(_state: &mut Self, _ctx: &mut NativeCtx<'_, Manual>, _kind: KindId, _payload: &[u8]) -> Option<()> {
             None
         }
     }
@@ -1362,12 +1215,7 @@ mod tests {
         let mut handles = ExportedHandles::new();
         assert!(handles.is_empty());
         let counter = Arc::new(AtomicU32::new(0));
-        handles.by_type.insert(
-            TypeId::of::<StubHandles>(),
-            Box::new(StubHandles {
-                counter: Arc::clone(&counter),
-            }),
-        );
+        handles.by_type.insert(TypeId::of::<StubHandles>(), Box::new(StubHandles { counter: Arc::clone(&counter) }));
         assert_eq!(handles.len(), 1);
 
         let retrieved: StubHandles = handles.get::<StubHandles>().expect("StubHandles published");
@@ -1387,14 +1235,8 @@ mod tests {
     #[test]
     fn native_ctx_layout_identical_across_modes() {
         use std::mem::{align_of, size_of};
-        assert_eq!(
-            size_of::<NativeCtx<'static, Single>>(),
-            size_of::<NativeCtx<'static, Manual>>(),
-        );
-        assert_eq!(
-            align_of::<NativeCtx<'static, Single>>(),
-            align_of::<NativeCtx<'static, Manual>>(),
-        );
+        assert_eq!(size_of::<NativeCtx<'static, Single>>(), size_of::<NativeCtx<'static, Manual>>(),);
+        assert_eq!(align_of::<NativeCtx<'static, Single>>(), align_of::<NativeCtx<'static, Manual>>(),);
     }
 
     /// ADR-0112: `OutboundReply` is reachable from the `Manual` ctx
@@ -1441,15 +1283,7 @@ mod tests {
 
     impl HandlesKind<CastOnly> for StubActor {}
 
-    #[derive(
-        aether_data::Kind,
-        aether_data::Schema,
-        serde::Serialize,
-        serde::Deserialize,
-        Debug,
-        Clone,
-        PartialEq,
-    )]
+    #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
     #[kind(name = "test.native_request_context")]
     struct NativeRequestContext {
         value: u32,
@@ -1466,10 +1300,7 @@ mod tests {
         let reply_source = Source::with_correlation(SourceAddr::None, 77);
         let mut ctx = NativeCtx::new(&binding, reply_source, MailId::NONE, MailId::NONE);
 
-        assert_eq!(
-            ctx.take_context::<NativeRequestContext>(),
-            Some(NativeRequestContext { value: 9 })
-        );
+        assert_eq!(ctx.take_context::<NativeRequestContext>(), Some(NativeRequestContext { value: 9 }));
         assert_eq!(ctx.take_context::<NativeRequestContext>(), None);
     }
 
@@ -1479,11 +1310,9 @@ mod tests {
 
         let (_registry, mailer) = bare_substrate();
         let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF11)));
-        let mailbox =
-            NativeActorMailbox::<'_, StubActor>::__new_in_flight(0x00FE_ED01, &binding, None, None);
+        let mailbox = NativeActorMailbox::<'_, StubActor>::__new_in_flight(0x00FE_ED01, &binding, None, None);
 
-        let mail_id =
-            mailbox.send_with_context(&CastOnly { code: 1 }, &NativeRequestContext { value: 13 });
+        let mail_id = mailbox.send_with_context(&CastOnly { code: 1 }, &NativeRequestContext { value: 13 });
 
         assert_eq!(
             binding.take_request_context::<NativeRequestContext>(RequestId(mail_id.correlation_id)),
@@ -1516,10 +1345,7 @@ mod tests {
         );
 
         let actor_mailbox = MailboxId(0x00BE_EF02);
-        let binding = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            actor_mailbox,
-        ));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
 
         // The chassis-driven chain this handler is running inside.
         let in_flight_root = MailId::new(MailboxId(0xC0), 7);
@@ -1529,40 +1355,22 @@ mod tests {
         // Default `send` inherits the caller's chain.
         {
             let ctx = NativeCtx::new(&binding, source, in_flight_mail, in_flight_root);
-            ctx.actor_at::<StubActor>(recipient)
-                .send(&CastOnly { code: 1 });
+            ctx.actor_at::<StubActor>(recipient).send(&CastOnly { code: 1 });
             // ctx drops here → `flush_outbound` routes the buffered send.
         }
         let inherited = rx.try_recv().expect("default send routed at flush");
-        assert_eq!(
-            inherited.root, in_flight_root,
-            "send inherits the caller's root"
-        );
-        assert_eq!(
-            inherited.parent_mail,
-            Some(in_flight_mail),
-            "send's parent is the in-flight mail"
-        );
-        assert_ne!(
-            inherited.mail_id, in_flight_mail,
-            "the outbound mail_id is fresh"
-        );
+        assert_eq!(inherited.root, in_flight_root, "send inherits the caller's root");
+        assert_eq!(inherited.parent_mail, Some(in_flight_mail), "send's parent is the in-flight mail");
+        assert_ne!(inherited.mail_id, in_flight_mail, "the outbound mail_id is fresh");
 
         // `send_detached` opens a fresh chain despite the in-flight lineage.
         {
             let ctx = NativeCtx::new(&binding, source, in_flight_mail, in_flight_root);
-            ctx.actor_at::<StubActor>(recipient)
-                .send_detached(&CastOnly { code: 2 });
+            ctx.actor_at::<StubActor>(recipient).send_detached(&CastOnly { code: 2 });
         }
         let detached = rx.try_recv().expect("detached send routed at flush");
-        assert!(
-            detached.parent_mail.is_none(),
-            "detached send carries no parent edge"
-        );
-        assert_eq!(
-            detached.root, detached.mail_id,
-            "detached send is its own root"
-        );
+        assert!(detached.parent_mail.is_none(), "detached send carries no parent edge");
+        assert_eq!(detached.root, detached.mail_id, "detached send is its own root");
     }
 
     /// ADR-0134: a multi handler's `ctx.emit` addresses the dispatch source
@@ -1591,10 +1399,7 @@ mod tests {
         );
 
         let actor_mailbox = MailboxId(0x00BE_EF03);
-        let binding = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            actor_mailbox,
-        ));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
 
         // A dispatch whose source is the sink component: emit addresses it.
         let source = Source::with_correlation(SourceAddr::Component(source_id), 0);
@@ -1604,26 +1409,16 @@ mod tests {
             // ctx drops here → `flush_outbound` routes the buffered emit.
         }
         let emitted = rx.try_recv().expect("emit routed at flush");
-        assert!(
-            emitted.parent_mail.is_none(),
-            "emit carries no parent edge — it is a detached root"
-        );
-        assert_eq!(
-            emitted.root, emitted.mail_id,
-            "a detached emit is its own chain root"
-        );
+        assert!(emitted.parent_mail.is_none(), "emit carries no parent edge — it is a detached root");
+        assert_eq!(emitted.root, emitted.mail_id, "a detached emit is its own chain root");
 
         // A sourceless dispatch (`SourceAddr::None`) drops the emission.
         let none_source = Source::with_correlation(SourceAddr::None, 0);
         {
-            let mut ctx =
-                NativeCtx::new_dispatching(&binding, none_source, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_dispatching(&binding, none_source, MailId::NONE, MailId::NONE);
             Emit::<CastOnly>::emit(ctx.as_multi::<CastOnly>(), &CastOnly { code: 8 });
         }
-        assert!(
-            rx.try_recv().is_err(),
-            "a sourceless emit routes nothing — the emission drops"
-        );
+        assert!(rx.try_recv().is_err(), "a sourceless emit routes nothing — the emission drops");
     }
 
     /// ADR-0134: the multi mode marker is layout-neutral — a `Multi<K>`
@@ -1632,14 +1427,8 @@ mod tests {
     #[test]
     fn native_ctx_layout_identical_for_multi_mode() {
         use std::mem::{align_of, size_of};
-        assert_eq!(
-            size_of::<NativeCtx<'static, Single>>(),
-            size_of::<NativeCtx<'static, Multi<u32>>>(),
-        );
-        assert_eq!(
-            align_of::<NativeCtx<'static, Single>>(),
-            align_of::<NativeCtx<'static, Multi<u32>>>(),
-        );
+        assert_eq!(size_of::<NativeCtx<'static, Single>>(), size_of::<NativeCtx<'static, Multi<u32>>>(),);
+        assert_eq!(align_of::<NativeCtx<'static, Single>>(), align_of::<NativeCtx<'static, Multi<u32>>>(),);
     }
 
     /// ADR-0134: `Emit` is reachable from the `Multi<K>` ctx only. The

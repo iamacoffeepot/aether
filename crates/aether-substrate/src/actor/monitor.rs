@@ -44,11 +44,7 @@ impl MonitorHandle {
         watcher: aether_data::MailboxId,
         target: aether_data::MailboxId,
     ) -> Self {
-        Self {
-            registry,
-            watcher,
-            target,
-        }
+        Self { registry, watcher, target }
     }
 
     /// The target this handle is monitoring. Useful for handlers that

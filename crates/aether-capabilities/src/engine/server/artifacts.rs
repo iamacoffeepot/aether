@@ -6,8 +6,7 @@
 //! Native-only (forks `--describe`, reads / copies files).
 
 use crate::engine::store::{
-    ArtifactKind, ArtifactStore, Selector, StoredArtifact, StoredManifest, component_manifest,
-    config_descriptor,
+    ArtifactKind, ArtifactStore, Selector, StoredArtifact, StoredManifest, component_manifest, config_descriptor,
 };
 use aether_kinds::{
     BinaryManifest, BinarySelector, ComponentSelector, ListComponentBinaries, ListEngineBinaries,
@@ -42,8 +41,7 @@ fn describe_binary(binary_path: &str) -> Result<BinaryManifest, String> {
             String::from_utf8_lossy(&output.stderr).trim(),
         ));
     }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("parsing {binary_path:?} --describe manifest JSON: {e}"))
+    serde_json::from_slice(&output.stdout).map_err(|e| format!("parsing {binary_path:?} --describe manifest JSON: {e}"))
 }
 
 /// Ingest the binary at `path` into `store` content-addressed,
@@ -53,19 +51,10 @@ fn describe_binary(binary_path: &str) -> Result<BinaryManifest, String> {
 /// or a human-readable error for an unreadable path or a `--describe`
 /// that failed / yielded no parseable manifest. Idempotent — identical
 /// bytes dedup to the same hash.
-pub fn ingest_binary(
-    store: &mut ArtifactStore,
-    path: &str,
-    name: Option<String>,
-) -> Result<String, String> {
+pub fn ingest_binary(store: &mut ArtifactStore, path: &str, name: Option<String>) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("reading binary path {path:?}: {e}"))?;
     let manifest = describe_binary(path)?;
-    Ok(store.upload(
-        &bytes,
-        ArtifactKind::Binary,
-        StoredManifest::Binary(manifest),
-        name,
-    ))
+    Ok(store.upload(&bytes, ArtifactKind::Binary, StoredManifest::Binary(manifest), name))
 }
 
 /// Bootstrap-ingest each chassis bin in `paths` into `store`, naming
@@ -77,10 +66,7 @@ pub fn ingest_binary(
 /// Idempotent via content dedup.
 pub fn bootstrap_ingest(store: &mut ArtifactStore, paths: &HashSet<String>) {
     for path in paths {
-        let name = Path::new(path)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .map(str::to_owned);
+        let name = Path::new(path).file_stem().and_then(|stem| stem.to_str()).map(str::to_owned);
         match ingest_binary(store, path, name) {
             Ok(hash) => tracing::info!(
                 target: "aether_substrate::engine_server",
@@ -103,20 +89,10 @@ pub fn bootstrap_ingest(store: &mut ArtifactStore, paths: &HashSet<String>) {
 /// no execution step. Returns the stored content hash, or a
 /// human-readable error for an unreadable path or an unparseable wasm.
 /// Idempotent — identical bytes dedup to the same hash.
-pub fn ingest_component(
-    store: &mut ArtifactStore,
-    path: &str,
-    name: Option<String>,
-) -> Result<String, String> {
+pub fn ingest_component(store: &mut ArtifactStore, path: &str, name: Option<String>) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("reading component path {path:?}: {e}"))?;
-    let manifest = component_manifest(&bytes)
-        .map_err(|e| format!("reading component manifest from {path:?}: {e}"))?;
-    Ok(store.upload(
-        &bytes,
-        ArtifactKind::Component,
-        StoredManifest::Component(manifest),
-        name,
-    ))
+    let manifest = component_manifest(&bytes).map_err(|e| format!("reading component manifest from {path:?}: {e}"))?;
+    Ok(store.upload(&bytes, ArtifactKind::Component, StoredManifest::Component(manifest), name))
 }
 
 /// Resolve a [`ComponentSelector`] against `store` to its wasm bytes +
@@ -129,18 +105,10 @@ pub fn ingest_component(
 /// silent pick). A `module@actor` token's `@actor` part populates the
 /// reply `export` so the forwarded `LoadComponent` instantiates that
 /// actor type (ADR-0096). Returns `Err` for no match / ambiguity.
-pub fn resolve_component(
-    store: &mut ArtifactStore,
-    selector: &ComponentSelector,
-) -> ResolveComponentResult {
+pub fn resolve_component(store: &mut ArtifactStore, selector: &ComponentSelector) -> ResolveComponentResult {
     // An exact token, with the `@actor` half (if any) split off as the
     // export selector forwarded to the substrate.
-    if let Some(token) = selector
-        .query
-        .as_deref()
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-    {
+    if let Some(token) = selector.query.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         return resolve_component_token(store, token);
     }
     // No exact token: a namespace / handled-kind attribute query. A
@@ -188,9 +156,7 @@ fn resolve_component_token(store: &mut ArtifactStore, token: &str) -> ResolveCom
         if let Some(found) = store.get(&Selector::Name(module.to_owned())) {
             return stored_component_reply(store, &found.hash, Some(actor.to_owned()));
         }
-        return ResolveComponentResult::Err {
-            error: format!("no stored component matches the selector {token:?}"),
-        };
+        return ResolveComponentResult::Err { error: format!("no stored component matches the selector {token:?}") };
     }
     // A bare token: an exact hash wins, else a name (latest).
     if store.contains(token) {
@@ -199,9 +165,7 @@ fn resolve_component_token(store: &mut ArtifactStore, token: &str) -> ResolveCom
     if let Some(found) = store.get(&Selector::Name(token.to_owned())) {
         return stored_component_reply(store, &found.hash, None);
     }
-    ResolveComponentResult::Err {
-        error: format!("no stored component matches the selector {token:?}"),
-    }
+    ResolveComponentResult::Err { error: format!("no stored component matches the selector {token:?}") }
 }
 
 /// Read the stored component `hash`'s wasm bytes + manifest off disk and
@@ -209,45 +173,26 @@ fn resolve_component_token(store: &mut ArtifactStore, token: &str) -> ResolveCom
 /// `module@actor` selector's actor half through to the forwarded
 /// `LoadComponent.export`. An entry that isn't a component (a binary
 /// hash) or whose bytes can't be read is a clean `Err`.
-fn stored_component_reply(
-    store: &mut ArtifactStore,
-    hash: &str,
-    export: Option<String>,
-) -> ResolveComponentResult {
+fn stored_component_reply(store: &mut ArtifactStore, hash: &str, export: Option<String>) -> ResolveComponentResult {
     let Some(found) = store.get(&Selector::Hash(hash.to_owned())) else {
-        return ResolveComponentResult::Err {
-            error: format!("no stored artifact has hash {hash:?}"),
-        };
+        return ResolveComponentResult::Err { error: format!("no stored artifact has hash {hash:?}") };
     };
     let Some(manifest) = found.manifest.as_component().cloned() else {
-        return ResolveComponentResult::Err {
-            error: format!("artifact {hash:?} is not a component"),
-        };
+        return ResolveComponentResult::Err { error: format!("artifact {hash:?} is not a component") };
     };
     let wasm = match fs::read(&found.path) {
         Ok(bytes) => bytes,
         Err(e) => {
-            return ResolveComponentResult::Err {
-                error: format!("reading stored component bytes for {hash:?}: {e}"),
-            };
+            return ResolveComponentResult::Err { error: format!("reading stored component bytes for {hash:?}: {e}") };
         }
     };
     let config_kind = match config_descriptor(&wasm, export.as_deref()) {
         Ok(config_kind) => config_kind,
         Err(error) => {
-            return ResolveComponentResult::Err {
-                error: format!("reading config descriptor for {hash:?}: {error}"),
-            };
+            return ResolveComponentResult::Err { error: format!("reading config descriptor for {hash:?}: {error}") };
         }
     };
-    ResolveComponentResult::Ok {
-        hash: found.hash,
-        wasm,
-        name: found.name,
-        manifest,
-        export,
-        config_kind,
-    }
+    ResolveComponentResult::Ok { hash: found.hash, wasm, name: found.name, manifest, export, config_kind }
 }
 
 /// Resolve a [`BinarySelector`] against `store` to the stored content
@@ -256,16 +201,8 @@ fn stored_component_reply(
 /// the `chassis` / `caps` / `target` attribute query resolves, and with
 /// no attribute filters either, `default` = the [`DEFAULT_CHASSIS`]
 /// binary. `None` when nothing matched.
-pub fn resolve_selector(
-    store: &mut ArtifactStore,
-    selector: &BinarySelector,
-) -> Option<StoredArtifact> {
-    if let Some(token) = selector
-        .query
-        .as_deref()
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-    {
+pub fn resolve_selector(store: &mut ArtifactStore, selector: &BinarySelector) -> Option<StoredArtifact> {
+    if let Some(token) = selector.query.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         // Exact hash wins outright.
         if let Some(found) = store.get(&Selector::Hash(token.to_owned())) {
             return Some(found);
@@ -280,11 +217,7 @@ pub fn resolve_selector(
         return store.get(&Selector::Name(token.to_owned()));
     }
     // No exact token: an attribute query, else `default` = headless.
-    let hash = store
-        .list_binaries(&attribute_filter(selector))
-        .into_iter()
-        .map(|entry| entry.hash)
-        .min()?;
+    let hash = store.list_binaries(&attribute_filter(selector)).into_iter().map(|entry| entry.hash).min()?;
     store.get(&Selector::Hash(hash))
 }
 
@@ -294,11 +227,7 @@ pub fn resolve_selector(
 /// chassis.
 fn attribute_filter(selector: &BinarySelector) -> ListEngineBinaries {
     if selector.chassis.is_none() && selector.caps.is_empty() && selector.target.is_none() {
-        ListEngineBinaries {
-            chassis: Some(DEFAULT_CHASSIS.to_owned()),
-            caps: Vec::new(),
-            target: None,
-        }
+        ListEngineBinaries { chassis: Some(DEFAULT_CHASSIS.to_owned()), caps: Vec::new(), target: None }
     } else {
         ListEngineBinaries {
             chassis: selector.chassis.clone(),

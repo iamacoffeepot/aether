@@ -154,9 +154,7 @@ pub(super) fn map_mouse_button(button: WinitMouseButton) -> Option<u32> {
 /// `f64 → f32` directly, matching the `CursorMoved` position cast.
 pub(super) fn normalize_wheel(delta: MouseScrollDelta) -> (f32, f32) {
     match delta {
-        MouseScrollDelta::LineDelta(x, y) => {
-            (x * PIXELS_PER_SCROLL_LINE, y * PIXELS_PER_SCROLL_LINE)
-        }
+        MouseScrollDelta::LineDelta(x, y) => (x * PIXELS_PER_SCROLL_LINE, y * PIXELS_PER_SCROLL_LINE),
         // Realistic scroll deltas stay well inside f32 mantissa.
         #[allow(clippy::cast_possible_truncation)]
         MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
@@ -185,16 +183,10 @@ mod tests {
     fn gate_suppresses_keytext_during_composition_and_commit_wins() {
         let mut composing = false;
         // A non-empty preedit opens the composition.
-        assert_eq!(
-            text_input_gate(&mut composing, TextSource::Preedit { active: true }),
-            None
-        );
+        assert_eq!(text_input_gate(&mut composing, TextSource::Preedit { active: true }), None);
         assert!(composing);
         // Raw key text arriving mid-composition is dropped.
-        assert_eq!(
-            text_input_gate(&mut composing, TextSource::KeyText("a".to_owned())),
-            None
-        );
+        assert_eq!(text_input_gate(&mut composing, TextSource::KeyText("a".to_owned())), None);
         // The commit publishes the composed text and closes the gate.
         let out = text_input_gate(&mut composing, TextSource::Commit("\u{5416}".to_owned()));
         assert_eq!(out.as_deref(), Some("\u{5416}"));
@@ -207,10 +199,7 @@ mod tests {
     #[test]
     fn gate_clears_composing_on_empty_preedit_and_disabled() {
         let mut composing = true;
-        assert_eq!(
-            text_input_gate(&mut composing, TextSource::Preedit { active: false }),
-            None
-        );
+        assert_eq!(text_input_gate(&mut composing, TextSource::Preedit { active: false }), None);
         assert!(!composing, "empty synthetic preedit clears the gate");
 
         composing = true;
@@ -218,10 +207,7 @@ mod tests {
         assert!(!composing, "Disabled clears the gate");
 
         // A keystroke after the clear publishes normally.
-        assert_eq!(
-            text_input_gate(&mut composing, TextSource::KeyText("z".to_owned())).as_deref(),
-            Some("z"),
-        );
+        assert_eq!(text_input_gate(&mut composing, TextSource::KeyText("z".to_owned())).as_deref(), Some("z"),);
     }
 
     // Tripwire: a named key's control-char text representation must never
@@ -241,14 +227,8 @@ mod tests {
     #[test]
     fn gate_suppresses_pure_enter_and_tab_keytext() {
         let mut composing = false;
-        assert_eq!(
-            text_input_gate(&mut composing, TextSource::KeyText("\r".to_owned())),
-            None
-        );
-        assert_eq!(
-            text_input_gate(&mut composing, TextSource::KeyText("\t".to_owned())),
-            None
-        );
+        assert_eq!(text_input_gate(&mut composing, TextSource::KeyText("\r".to_owned())), None);
+        assert_eq!(text_input_gate(&mut composing, TextSource::KeyText("\t".to_owned())), None);
     }
 
     // Tripwire: a run mixing a printable character with a control
@@ -264,34 +244,16 @@ mod tests {
 
     #[test]
     fn map_winit_keycode_covers_console_activation_key() {
-        assert_eq!(
-            map_winit_keycode(KeyCode::Backquote),
-            Some(keycode::KEY_BACKQUOTE)
-        );
+        assert_eq!(map_winit_keycode(KeyCode::Backquote), Some(keycode::KEY_BACKQUOTE));
     }
 
     #[test]
     fn map_mouse_button_covers_named_buttons() {
-        assert_eq!(
-            map_mouse_button(WinitMouseButton::Left),
-            Some(mouse_button::LEFT)
-        );
-        assert_eq!(
-            map_mouse_button(WinitMouseButton::Right),
-            Some(mouse_button::RIGHT)
-        );
-        assert_eq!(
-            map_mouse_button(WinitMouseButton::Middle),
-            Some(mouse_button::MIDDLE)
-        );
-        assert_eq!(
-            map_mouse_button(WinitMouseButton::Back),
-            Some(mouse_button::BACK)
-        );
-        assert_eq!(
-            map_mouse_button(WinitMouseButton::Forward),
-            Some(mouse_button::FORWARD)
-        );
+        assert_eq!(map_mouse_button(WinitMouseButton::Left), Some(mouse_button::LEFT));
+        assert_eq!(map_mouse_button(WinitMouseButton::Right), Some(mouse_button::RIGHT));
+        assert_eq!(map_mouse_button(WinitMouseButton::Middle), Some(mouse_button::MIDDLE));
+        assert_eq!(map_mouse_button(WinitMouseButton::Back), Some(mouse_button::BACK));
+        assert_eq!(map_mouse_button(WinitMouseButton::Forward), Some(mouse_button::FORWARD));
     }
 
     #[test]
@@ -301,10 +263,7 @@ mod tests {
 
     #[test]
     fn map_winit_keycode_covers_backquote() {
-        assert_eq!(
-            map_winit_keycode(KeyCode::Backquote),
-            Some(keycode::KEY_BACKQUOTE)
-        );
+        assert_eq!(map_winit_keycode(KeyCode::Backquote), Some(keycode::KEY_BACKQUOTE));
     }
 
     // Tripwire: the five text-editing navigation keys must translate to

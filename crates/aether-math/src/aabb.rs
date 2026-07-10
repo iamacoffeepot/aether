@@ -21,10 +21,7 @@ pub struct Aabb {
 }
 
 impl Aabb {
-    pub const EMPTY: Self = Self {
-        min: Vec3::splat(f32::INFINITY),
-        max: Vec3::splat(f32::NEG_INFINITY),
-    };
+    pub const EMPTY: Self = Self { min: Vec3::splat(f32::INFINITY), max: Vec3::splat(f32::NEG_INFINITY) };
 
     #[inline]
     #[must_use]
@@ -41,10 +38,7 @@ impl Aabb {
         let hx = hx.abs();
         let hy = hy.abs();
         let hz = hz.abs();
-        Self {
-            min: Vec3::new(-hx, -hy, -hz),
-            max: Vec3::new(hx, hy, hz),
-        }
+        Self { min: Vec3::new(-hx, -hy, -hz), max: Vec3::new(hx, hy, hz) }
     }
 
     /// Smallest AABB containing every supplied point. Returns
@@ -130,16 +124,8 @@ impl Aabb {
             return *self;
         }
         Self {
-            min: Vec3::new(
-                self.min.x.min(other.min.x),
-                self.min.y.min(other.min.y),
-                self.min.z.min(other.min.z),
-            ),
-            max: Vec3::new(
-                self.max.x.max(other.max.x),
-                self.max.y.max(other.max.y),
-                self.max.z.max(other.max.z),
-            ),
+            min: Vec3::new(self.min.x.min(other.min.x), self.min.y.min(other.min.y), self.min.z.min(other.min.z)),
+            max: Vec3::new(self.max.x.max(other.max.x), self.max.y.max(other.max.y), self.max.z.max(other.max.z)),
         }
     }
 
@@ -148,16 +134,8 @@ impl Aabb {
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Self {
         Self {
-            min: Vec3::new(
-                self.min.x.max(other.min.x),
-                self.min.y.max(other.min.y),
-                self.min.z.max(other.min.z),
-            ),
-            max: Vec3::new(
-                self.max.x.min(other.max.x),
-                self.max.y.min(other.max.y),
-                self.max.z.min(other.max.z),
-            ),
+            min: Vec3::new(self.min.x.max(other.min.x), self.min.y.max(other.min.y), self.min.z.max(other.min.z)),
+            max: Vec3::new(self.max.x.min(other.max.x), self.max.y.min(other.max.y), self.max.z.min(other.max.z)),
         }
     }
 
@@ -181,10 +159,7 @@ impl Aabb {
         if self.is_empty() {
             return *self;
         }
-        Self {
-            min: self.min + offset,
-            max: self.max + offset,
-        }
+        Self { min: self.min + offset, max: self.max + offset }
     }
 
     /// Component-wise scale. Negative factors swap min/max along their
@@ -194,16 +169,8 @@ impl Aabb {
         if self.is_empty() {
             return *self;
         }
-        let lo = Vec3::new(
-            self.min.x * factor.x,
-            self.min.y * factor.y,
-            self.min.z * factor.z,
-        );
-        let hi = Vec3::new(
-            self.max.x * factor.x,
-            self.max.y * factor.y,
-            self.max.z * factor.z,
-        );
+        let lo = Vec3::new(self.min.x * factor.x, self.min.y * factor.y, self.min.z * factor.z);
+        let hi = Vec3::new(self.max.x * factor.x, self.max.y * factor.y, self.max.z * factor.z);
         Self {
             min: Vec3::new(lo.x.min(hi.x), lo.y.min(hi.y), lo.z.min(hi.z)),
             max: Vec3::new(lo.x.max(hi.x), lo.y.max(hi.y), lo.z.max(hi.z)),
@@ -304,11 +271,7 @@ mod tests {
 
     #[test]
     fn from_points_collects_extremes() {
-        let pts = [
-            Vec3::new(1.0, 0.0, 0.0),
-            Vec3::new(-1.0, 2.0, -3.0),
-            Vec3::new(0.5, -1.0, 5.0),
-        ];
+        let pts = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(-1.0, 2.0, -3.0), Vec3::new(0.5, -1.0, 5.0)];
         let bb = Aabb::from_points(&pts);
         assert_eq!(bb.min, Vec3::new(-1.0, -1.0, -3.0));
         assert_eq!(bb.max, Vec3::new(1.0, 2.0, 5.0));

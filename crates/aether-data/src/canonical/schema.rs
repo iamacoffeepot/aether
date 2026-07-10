@@ -15,8 +15,8 @@
 use crate::schema::{EnumVariant, Primitive, SchemaCell, SchemaType};
 
 use super::primitives::{
-    FLAG_WIDTH, U32_WIDTH, U64_WIDTH, cow_enum_variants, cow_named_fields, cow_schema_types,
-    str_len, write_count, write_str, write_u32_le, write_u64_le,
+    FLAG_WIDTH, U32_WIDTH, U64_WIDTH, cow_enum_variants, cow_named_fields, cow_schema_types, str_len, write_count,
+    write_str, write_u32_le, write_u64_le,
 };
 use crate::schema::KindShape;
 use crate::schema::SchemaShape;
@@ -65,9 +65,7 @@ pub const fn canonical_len_schema(schema: &SchemaType) -> usize {
         // Selector + the inner `Primitive` as its own `u32` unit-variant index.
         SchemaType::Scalar(_) => U32_WIDTH + U32_WIDTH,
         SchemaType::Option(cell) | SchemaType::Vec(cell) => U32_WIDTH + canonical_len_cell(cell),
-        SchemaType::Array { element, len: _ } => {
-            U32_WIDTH + canonical_len_cell(element) + U32_WIDTH
-        }
+        SchemaType::Array { element, len: _ } => U32_WIDTH + canonical_len_cell(element) + U32_WIDTH,
         SchemaType::Struct { fields, repr_c: _ } => {
             let slice = cow_named_fields(fields);
             let mut total = U32_WIDTH + U32_WIDTH;
@@ -88,9 +86,7 @@ pub const fn canonical_len_schema(schema: &SchemaType) -> usize {
             }
             total
         }
-        SchemaType::Map { key, value } => {
-            U32_WIDTH + canonical_len_cell(key) + canonical_len_cell(value)
-        }
+        SchemaType::Map { key, value } => U32_WIDTH + canonical_len_cell(key) + canonical_len_cell(value),
         SchemaType::TypeId(_) => U32_WIDTH + U64_WIDTH,
     }
 }
@@ -144,10 +140,7 @@ const fn canonical_len_variant(variant: &EnumVariant) -> usize {
 pub const fn canonical_serialize_schema<const N: usize>(schema: &SchemaType) -> [u8; N] {
     let mut out = [0u8; N];
     let written = write_schema(schema, &mut out, 0);
-    assert!(
-        written == N,
-        "canonical_serialize_schema: size mismatch between len pass and serialize pass"
-    );
+    assert!(written == N, "canonical_serialize_schema: size mismatch between len pass and serialize pass");
     out
 }
 
@@ -172,10 +165,7 @@ pub const fn canonical_serialize_kind<const N: usize>(name: &str, schema: &Schem
     let mut out = [0u8; N];
     let mut pos = write_str(name, &mut out, 0);
     pos = write_schema(schema, &mut out, pos);
-    assert!(
-        pos == N,
-        "canonical_serialize_kind: size mismatch between len pass and serialize pass"
-    );
+    assert!(pos == N, "canonical_serialize_kind: size mismatch between len pass and serialize pass");
     out
 }
 
@@ -200,10 +190,7 @@ pub const fn canonical_serialize_kind<const N: usize>(name: &str, schema: &Schem
 /// failure indicates a serializer bug.
 #[must_use]
 pub fn canonical_kind_bytes(name: &str, schema: &SchemaType) -> Vec<u8> {
-    let shape = KindShape {
-        name: Cow::Owned(name.into()),
-        schema: schema_to_shape(schema),
-    };
+    let shape = KindShape { name: Cow::Owned(name.into()), schema: schema_to_shape(schema) };
     wire::to_vec(&shape).expect("canonical KindShape serialization is infallible")
 }
 
@@ -217,21 +204,18 @@ fn schema_to_shape(s: &SchemaType) -> SchemaShape {
         SchemaType::Bytes => SchemaShape::Bytes,
         SchemaType::Option(cell) => SchemaShape::Option(Box::new(schema_to_shape(cell))),
         SchemaType::Vec(cell) => SchemaShape::Vec(Box::new(schema_to_shape(cell))),
-        SchemaType::Array { element, len } => SchemaShape::Array {
-            element: Box::new(schema_to_shape(element)),
-            len: *len,
-        },
-        SchemaType::Struct { fields, repr_c } => SchemaShape::Struct {
-            fields: fields.iter().map(|f| schema_to_shape(&f.ty)).collect(),
-            repr_c: *repr_c,
-        },
-        SchemaType::Enum { variants } => SchemaShape::Enum {
-            variants: variants.iter().map(variant_to_shape).collect(),
-        },
-        SchemaType::Map { key, value } => SchemaShape::Map {
-            key: Box::new(schema_to_shape(key)),
-            value: Box::new(schema_to_shape(value)),
-        },
+        SchemaType::Array { element, len } => {
+            SchemaShape::Array { element: Box::new(schema_to_shape(element)), len: *len }
+        }
+        SchemaType::Struct { fields, repr_c } => {
+            SchemaShape::Struct { fields: fields.iter().map(|f| schema_to_shape(&f.ty)).collect(), repr_c: *repr_c }
+        }
+        SchemaType::Enum { variants } => {
+            SchemaShape::Enum { variants: variants.iter().map(variant_to_shape).collect() }
+        }
+        SchemaType::Map { key, value } => {
+            SchemaShape::Map { key: Box::new(schema_to_shape(key)), value: Box::new(schema_to_shape(value)) }
+        }
         SchemaType::TypeId(id) => SchemaShape::TypeId(*id),
     }
 }
@@ -239,22 +223,11 @@ fn schema_to_shape(s: &SchemaType) -> SchemaShape {
 fn variant_to_shape(v: &EnumVariant) -> VariantShape {
     use crate::schema::VariantShape;
     match v {
-        EnumVariant::Unit { discriminant, .. } => VariantShape::Unit {
-            discriminant: *discriminant,
-        },
-        EnumVariant::Tuple {
-            discriminant,
-            fields,
-            ..
-        } => VariantShape::Tuple {
-            discriminant: *discriminant,
-            fields: fields.iter().map(schema_to_shape).collect(),
-        },
-        EnumVariant::Struct {
-            discriminant,
-            fields,
-            ..
-        } => VariantShape::Struct {
+        EnumVariant::Unit { discriminant, .. } => VariantShape::Unit { discriminant: *discriminant },
+        EnumVariant::Tuple { discriminant, fields, .. } => {
+            VariantShape::Tuple { discriminant: *discriminant, fields: fields.iter().map(schema_to_shape).collect() }
+        }
+        EnumVariant::Struct { discriminant, fields, .. } => VariantShape::Struct {
             discriminant: *discriminant,
             fields: fields.iter().map(|f| schema_to_shape(&f.ty)).collect(),
         },
@@ -378,11 +351,7 @@ const fn write_variant(variant: &EnumVariant, out: &mut [u8], cursor: usize) -> 
             pos = write_u32_le(VARIANT_UNIT as u32, out, pos);
             pos = write_u32_le(*discriminant, out, pos);
         }
-        EnumVariant::Tuple {
-            discriminant,
-            fields,
-            ..
-        } => {
+        EnumVariant::Tuple { discriminant, fields, .. } => {
             let slice = cow_schema_types(fields);
             pos = write_u32_le(VARIANT_TUPLE as u32, out, pos);
             pos = write_u32_le(*discriminant, out, pos);
@@ -393,11 +362,7 @@ const fn write_variant(variant: &EnumVariant, out: &mut [u8], cursor: usize) -> 
                 i += 1;
             }
         }
-        EnumVariant::Struct {
-            discriminant,
-            fields,
-            ..
-        } => {
+        EnumVariant::Struct { discriminant, fields, .. } => {
             let slice = cow_named_fields(fields);
             pos = write_u32_le(VARIANT_STRUCT as u32, out, pos);
             pos = write_u32_le(*discriminant, out, pos);

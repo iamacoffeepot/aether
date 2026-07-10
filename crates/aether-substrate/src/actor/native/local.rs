@@ -52,9 +52,7 @@ pub fn with_stamped<R>(slots: &ActorSlots, f: impl FnOnce() -> R) -> R {
     // cheap after the first call (a `Once` acquire-load); boot calls
     // `install()` before any dispatch, so in production this is already done.
     install();
-    let _guard = StampGuard {
-        prev: CURRENT_SLOTS.replace(ptr::from_ref(slots)),
-    };
+    let _guard = StampGuard { prev: CURRENT_SLOTS.replace(ptr::from_ref(slots)) };
     f()
 }
 

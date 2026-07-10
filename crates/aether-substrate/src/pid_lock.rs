@@ -95,19 +95,12 @@ pub fn acquire_lock_pid(path: &Path) -> LockAcquisition {
     // Stage our pid into a per-call-unique sibling temp file. A sibling
     // shares the filesystem with `path`, which `hard_link` requires.
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path.file_name().map_or_else(
-        || "lock.pid".to_string(),
-        |n| n.to_string_lossy().to_string(),
-    );
+    let name = path.file_name().map_or_else(|| "lock.pid".to_string(), |n| n.to_string_lossy().to_string());
     let pid = process::id();
     let temp = loop {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let candidate = dir.join(format!("{name}.tmp-{pid}-{seq}"));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
+        match OpenOptions::new().write(true).create_new(true).open(&candidate) {
             Ok(mut file) => {
                 if let Err(e) = file.write_all(pid.to_string().as_bytes()) {
                     let _ = fs::remove_file(&candidate);
@@ -127,9 +120,7 @@ pub fn acquire_lock_pid(path: &Path) -> LockAcquisition {
         match fs::hard_link(&temp, path) {
             Ok(()) => {
                 let _ = fs::remove_file(&temp);
-                return LockAcquisition::Acquired(LockGuard {
-                    path: path.to_path_buf(),
-                });
+                return LockAcquisition::Acquired(LockGuard { path: path.to_path_buf() });
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                 if let Ok(raw) = fs::read_to_string(path)
@@ -157,12 +148,9 @@ pub fn acquire_lock_pid(path: &Path) -> LockAcquisition {
     }
 
     let _ = fs::remove_file(&temp);
-    LockAcquisition::WriteFailed(last_exists.unwrap_or_else(|| {
-        IoError::new(
-            ErrorKind::AlreadyExists,
-            "lock.pid reclaim attempts exhausted",
-        )
-    }))
+    LockAcquisition::WriteFailed(
+        last_exists.unwrap_or_else(|| IoError::new(ErrorKind::AlreadyExists, "lock.pid reclaim attempts exhausted")),
+    )
 }
 
 #[cfg(test)]
@@ -172,9 +160,7 @@ mod tests {
     use std::{env, process};
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         let dir = env::temp_dir().join(format!("aether-pid-lock-{tag}-{}-{nonce}", process::id()));
         fs::create_dir_all(&dir).expect("temp dir creates");
         dir
@@ -209,10 +195,7 @@ mod tests {
         let dir = temp_dir("garbage");
         let path = dir.join("lock.pid");
         fs::write(&path, b"not-a-pid").expect("write garbage lock");
-        assert!(matches!(
-            acquire_lock_pid(&path),
-            LockAcquisition::Acquired(_)
-        ));
+        assert!(matches!(acquire_lock_pid(&path), LockAcquisition::Acquired(_)));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -222,10 +205,7 @@ mod tests {
         let path = dir.join("lock.pid");
         // i32::MAX is not a live process on any realistic system.
         fs::write(&path, i32::MAX.to_string().as_bytes()).expect("write dead-pid lock");
-        assert!(matches!(
-            acquire_lock_pid(&path),
-            LockAcquisition::Acquired(_)
-        ));
+        assert!(matches!(acquire_lock_pid(&path), LockAcquisition::Acquired(_)));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -273,10 +253,7 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 // A raw thread is the test's own concurrency harness, not an
                 // engine actor, so it needs no settlement/trace umbrella.
-                #[allow(
-                    clippy::disallowed_methods,
-                    reason = "test-only concurrency harness thread"
-                )]
+                #[allow(clippy::disallowed_methods, reason = "test-only concurrency harness thread")]
                 thread::spawn(move || {
                     barrier.wait();
                     acquire_lock_pid(&path)

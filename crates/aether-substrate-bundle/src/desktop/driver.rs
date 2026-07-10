@@ -26,21 +26,17 @@ use aether_capabilities::RenderHandles;
 use aether_data::Kind;
 use aether_data::{encode, encode_empty, mailbox_id_from_name};
 use aether_kinds::{
-    CaptureFrameResult, FocusWindow, FocusWindowResult, ImePreedit, Key, KeyRelease, Modifiers,
-    MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Quit, SetWindowMode,
-    SetWindowModeResult, SetWindowTitle, SetWindowTitleResult, TextInput, Tick, WindowMode,
-    WindowSize,
+    CaptureFrameResult, FocusWindow, FocusWindowResult, ImePreedit, Key, KeyRelease, Modifiers, MouseButton,
+    MouseButtonRelease, MouseMove, MouseWheel, Quit, SetWindowMode, SetWindowModeResult, SetWindowTitle,
+    SetWindowTitleResult, TextInput, Tick, WindowMode, WindowSize,
 };
 use aether_substrate::actor::native::local;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::chassis::settlement::{
-    TerminalDisposition, WaitOutcome, await_internal_signal,
-};
+use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::runtime::lifecycle as runtime_lifecycle;
 use aether_substrate::{
-    HubOutbound, InboundMail, Mailer, SettlingInbox, SharedActorSlots, Source, SourceAddr,
-    SubstrateBoot,
+    HubOutbound, InboundMail, Mailer, SettlingInbox, SharedActorSlots, Source, SourceAddr, SubstrateBoot,
     chassis::frame_loop,
     mail::{Mail, MailId, MailboxId},
 };
@@ -253,8 +249,7 @@ impl App {
         if correlation == 0 {
             correlation = self.chassis_correlation.fetch_add(1, Ordering::Relaxed);
         }
-        self.queue
-            .push_chassis_root_mail(correlation, recipient, kind, payload, count)
+        self.queue.push_chassis_root_mail(correlation, recipient, kind, payload, count)
     }
 
     /// Begin graceful shutdown (iamacoffeepot/aether#1489). Pushes a
@@ -276,12 +271,7 @@ impl App {
             return;
         }
         self.quit_requested = true;
-        self.push_chassis_root(
-            self.lifecycle_mailbox,
-            <Quit as Kind>::ID,
-            encode_empty::<Quit>(),
-            1,
-        );
+        self.push_chassis_root(self.lifecycle_mailbox, <Quit as Kind>::ID, encode_empty::<Quit>(), 1);
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -308,10 +298,7 @@ impl App {
             self.lifecycle_mailbox,
             self.kind_lifecycle_advance,
         );
-        let reply_to = Source::with_correlation(
-            SourceAddr::Component(self.lifecycle_reply_mailbox),
-            correlation,
-        );
+        let reply_to = Source::with_correlation(SourceAddr::Component(self.lifecycle_reply_mailbox), correlation);
         self.queue.push(
             Mail::new(
                 self.lifecycle_mailbox,
@@ -336,9 +323,7 @@ impl App {
     /// the caller can fail-fast.
     fn recv_lifecycle_advance_next(&self) -> Option<u64> {
         loop {
-            let mail = self
-                .lifecycle_reply_inbox
-                .recv_timeout(FRAME_SETTLEMENT_CAP)?;
+            let mail = self.lifecycle_reply_inbox.recv_timeout(FRAME_SETTLEMENT_CAP)?;
             // ADR-0106: the consumed reply settles when its `InboundMail`
             // guard drops inside `consume_lifecycle_reply` — no hand-rolled
             // bracket. Pre-#1704 a dropped armed guard aborted the process
@@ -353,12 +338,7 @@ impl App {
         }
     }
 
-    fn apply_window_mode(
-        &mut self,
-        mode: WindowMode,
-        width: Option<u32>,
-        height: Option<u32>,
-    ) -> SetWindowModeResult {
+    fn apply_window_mode(&mut self, mode: WindowMode, width: Option<u32>, height: Option<u32>) -> SetWindowModeResult {
         let Some(window) = self.window.clone() else {
             return SetWindowModeResult::Err {
                 error: "set_window_mode requested before window initialized".to_owned(),
@@ -378,11 +358,7 @@ impl App {
 
         self.current_mode = mode.clone();
         let size = window.inner_size();
-        SetWindowModeResult::Ok {
-            mode,
-            width: size.width,
-            height: size.height,
-        }
+        SetWindowModeResult::Ok { mode, width: size.width, height: size.height }
     }
 
     fn apply_window_title(&self, title: String) -> SetWindowTitleResult {
@@ -402,9 +378,7 @@ impl App {
     /// created yet (mail arrived before `resumed`).
     fn apply_window_focus(&self) -> FocusWindowResult {
         let Some(window) = self.window.as_ref() else {
-            return FocusWindowResult::Err {
-                error: "focus requested before window initialized".to_owned(),
-            };
+            return FocusWindowResult::Err { error: "focus requested before window initialized".to_owned() };
         };
         window.set_minimized(false);
         window.set_visible(true);
@@ -469,18 +443,14 @@ impl App {
         }
         if mail.kind() == self.kind_set_window_mode {
             let Some(payload) = SetWindowMode::decode_from_bytes(mail.payload()) else {
-                mail.reply(&SetWindowModeResult::Err {
-                    error: "SetWindowMode decode failed".to_owned(),
-                });
+                mail.reply(&SetWindowModeResult::Err { error: "SetWindowMode decode failed".to_owned() });
                 return;
             };
             let result = self.apply_window_mode(payload.mode, payload.width, payload.height);
             mail.reply(&result);
         } else if mail.kind() == self.kind_set_window_title {
             let Some(payload) = SetWindowTitle::decode_from_bytes(mail.payload()) else {
-                mail.reply(&SetWindowTitleResult::Err {
-                    error: "SetWindowTitle decode failed".to_owned(),
-                });
+                mail.reply(&SetWindowTitleResult::Err { error: "SetWindowTitle decode failed".to_owned() });
                 return;
             };
             let result = self.apply_window_title(payload.title);
@@ -531,11 +501,7 @@ impl App {
     /// The slot is taken only when occluded, so a visible-window wake never
     /// steals the entry `RedrawRequested` is about to service.
     fn fail_capture_if_occluded(&mut self) -> bool {
-        let pending = if self.occluded {
-            self.capture_queue.take()
-        } else {
-            None
-        };
+        let pending = if self.occluded { self.capture_queue.take() } else { None };
         match occluded_capture_disposition(self.occluded, pending) {
             OccludedCaptureDisposition::Redraw => false,
             OccludedCaptureDisposition::Empty => true,
@@ -610,11 +576,7 @@ impl ApplicationHandler<UserEvent> for App {
         // placement (`set_ime_cursor_area`) is deferred — its absence only
         // floats the IME popup at a default position.
         window.set_ime_allowed(true);
-        self.gpu = Some(Gpu::new(
-            Arc::clone(&window),
-            self.render_handles.clone(),
-            self.boot_wireframe.as_deref(),
-        ));
+        self.gpu = Some(Gpu::new(Arc::clone(&window), self.render_handles.clone(), self.boot_wireframe.as_deref()));
         window.request_redraw();
         let initial_size = window.inner_size();
         self.window = Some(window);
@@ -848,17 +810,14 @@ impl ApplicationHandler<UserEvent> for App {
                     w.request_redraw();
                 }
             }
-            WindowEvent::KeyboardInput {
-                event: key_event, ..
-            } => {
+            WindowEvent::KeyboardInput { event: key_event, .. } => {
                 // Text path: publish the layout-resolved characters from
                 // `KeyEvent.text` when no IME composition is active. Repeats
                 // are forwarded here (holding a key types a run of
                 // characters), unlike the named-key edge path below.
                 if key_event.state == ElementState::Pressed
                     && let Some(text) = &key_event.text
-                    && let Some(committed) =
-                        text_input_gate(&mut self.composing, TextSource::KeyText(text.to_string()))
+                    && let Some(committed) = text_input_gate(&mut self.composing, TextSource::KeyText(text.to_string()))
                 {
                     let payload = TextInput { text: committed }.encode_into_bytes();
                     self.push_chassis_root(self.input_mailbox, self.kind_text_input, payload, 1);
@@ -873,12 +832,7 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     match key_event.state {
                         ElementState::Pressed => {
-                            self.push_chassis_root(
-                                self.input_mailbox,
-                                self.kind_key,
-                                encode(&Key { code }),
-                                1,
-                            );
+                            self.push_chassis_root(self.input_mailbox, self.kind_key, encode(&Key { code }), 1);
                         }
                         ElementState::Released => {
                             self.push_chassis_root(
@@ -893,12 +847,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Ime(ime) => match ime {
                 Ime::Preedit(text, cursor) => {
-                    text_input_gate(
-                        &mut self.composing,
-                        TextSource::Preedit {
-                            active: !text.is_empty(),
-                        },
-                    );
+                    text_input_gate(&mut self.composing, TextSource::Preedit { active: !text.is_empty() });
                     // winit reports the cursor span as byte offsets into
                     // the preedit string (usize); the wire kind carries
                     // u32. A preedit is a handful of characters, far inside
@@ -908,25 +857,13 @@ impl ApplicationHandler<UserEvent> for App {
                         Some((begin, end)) => (Some(begin as u32), Some(end as u32)),
                         None => (None, None),
                     };
-                    let payload = ImePreedit {
-                        text,
-                        cursor_begin,
-                        cursor_end,
-                    }
-                    .encode_into_bytes();
+                    let payload = ImePreedit { text, cursor_begin, cursor_end }.encode_into_bytes();
                     self.push_chassis_root(self.input_mailbox, self.kind_ime_preedit, payload, 1);
                 }
                 Ime::Commit(text) => {
-                    if let Some(committed) =
-                        text_input_gate(&mut self.composing, TextSource::Commit(text))
-                    {
+                    if let Some(committed) = text_input_gate(&mut self.composing, TextSource::Commit(text)) {
                         let payload = TextInput { text: committed }.encode_into_bytes();
-                        self.push_chassis_root(
-                            self.input_mailbox,
-                            self.kind_text_input,
-                            payload,
-                            1,
-                        );
+                        self.push_chassis_root(self.input_mailbox, self.kind_text_input, payload, 1);
                     }
                 }
                 Ime::Disabled => {
@@ -973,12 +910,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 let (delta_x, delta_y) = normalize_wheel(delta);
                 let (x, y) = self.last_cursor;
-                let payload = encode(&MouseWheel {
-                    delta_x,
-                    delta_y,
-                    x,
-                    y,
-                });
+                let payload = encode(&MouseWheel { delta_x, delta_y, x, y });
                 self.push_chassis_root(self.input_mailbox, self.kind_mouse_wheel, payload, 1);
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -1052,15 +984,7 @@ impl DriverCapability for DesktopDriverCapability {
     // splitting would just pass the same dozen fields through a helper.
     #[allow(clippy::too_many_lines)]
     fn boot(self, ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let Self {
-            event_loop,
-            boot,
-            capture_queue,
-            boot_mode,
-            boot_size,
-            boot_title,
-            boot_wireframe,
-        } = self;
+        let Self { event_loop, boot, capture_queue, boot_mode, boot_size, boot_title, boot_wireframe } = self;
 
         // Issue 629 / Phase A: render publishes its `RenderHandles`
         // bundle on the chassis's `ExportedHandles` map during `init`.
@@ -1079,54 +1003,19 @@ impl DriverCapability for DesktopDriverCapability {
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");
         let kind_key = boot.registry.kind_id(Key::NAME).expect("Key registered");
-        let kind_key_release = boot
-            .registry
-            .kind_id(KeyRelease::NAME)
-            .expect("KeyRelease registered");
-        let kind_mouse_button = boot
-            .registry
-            .kind_id(MouseButton::NAME)
-            .expect("MouseButton registered");
-        let kind_mouse_button_release = boot
-            .registry
-            .kind_id(MouseButtonRelease::NAME)
-            .expect("MouseButtonRelease registered");
-        let kind_mouse_wheel = boot
-            .registry
-            .kind_id(MouseWheel::NAME)
-            .expect("MouseWheel registered");
-        let kind_mouse_move = boot
-            .registry
-            .kind_id(MouseMove::NAME)
-            .expect("MouseMove registered");
-        let kind_window_size = boot
-            .registry
-            .kind_id(WindowSize::NAME)
-            .expect("WindowSize registered");
-        let kind_text_input = boot
-            .registry
-            .kind_id(TextInput::NAME)
-            .expect("TextInput registered");
-        let kind_ime_preedit = boot
-            .registry
-            .kind_id(ImePreedit::NAME)
-            .expect("ImePreedit registered");
-        let kind_modifiers = boot
-            .registry
-            .kind_id(Modifiers::NAME)
-            .expect("Modifiers registered");
-        let kind_set_window_mode = boot
-            .registry
-            .kind_id(SetWindowMode::NAME)
-            .expect("SetWindowMode registered");
-        let kind_set_window_title = boot
-            .registry
-            .kind_id(SetWindowTitle::NAME)
-            .expect("SetWindowTitle registered");
-        let kind_focus_window = boot
-            .registry
-            .kind_id(FocusWindow::NAME)
-            .expect("FocusWindow registered");
+        let kind_key_release = boot.registry.kind_id(KeyRelease::NAME).expect("KeyRelease registered");
+        let kind_mouse_button = boot.registry.kind_id(MouseButton::NAME).expect("MouseButton registered");
+        let kind_mouse_button_release =
+            boot.registry.kind_id(MouseButtonRelease::NAME).expect("MouseButtonRelease registered");
+        let kind_mouse_wheel = boot.registry.kind_id(MouseWheel::NAME).expect("MouseWheel registered");
+        let kind_mouse_move = boot.registry.kind_id(MouseMove::NAME).expect("MouseMove registered");
+        let kind_window_size = boot.registry.kind_id(WindowSize::NAME).expect("WindowSize registered");
+        let kind_text_input = boot.registry.kind_id(TextInput::NAME).expect("TextInput registered");
+        let kind_ime_preedit = boot.registry.kind_id(ImePreedit::NAME).expect("ImePreedit registered");
+        let kind_modifiers = boot.registry.kind_id(Modifiers::NAME).expect("Modifiers registered");
+        let kind_set_window_mode = boot.registry.kind_id(SetWindowMode::NAME).expect("SetWindowMode registered");
+        let kind_set_window_title = boot.registry.kind_id(SetWindowTitle::NAME).expect("SetWindowTitle registered");
+        let kind_focus_window = boot.registry.kind_id(FocusWindow::NAME).expect("FocusWindow registered");
 
         // Issue 603 Phase 3: the desktop driver is the cap for
         // `aether.window`. Claim the inbox here; the receiver lives on
@@ -1149,9 +1038,8 @@ impl DriverCapability for DesktopDriverCapability {
         // the lifecycle cap's own id (its NAMESPACE) at construction time —
         // ctx-less, no sibling resolver in scope.
         #[allow(clippy::disallowed_methods)]
-        let lifecycle_mailbox = mailbox_id_from_name(
-            <aether_capabilities::LifecycleCapability as Addressable>::NAMESPACE,
-        );
+        let lifecycle_mailbox =
+            mailbox_id_from_name(<aether_capabilities::LifecycleCapability as Addressable>::NAMESPACE);
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
 
         // iamacoffeepot/aether#1489: install the SIGINT/SIGTERM →
@@ -1245,9 +1133,7 @@ impl DriverRunning for DesktopDriverRunning {
             _boot,
         } = *self;
 
-        event_loop
-            .run_app(&mut app)
-            .map_err(|e| RunError::Other(format!("event loop: {e}").into()))?;
+        event_loop.run_app(&mut app).map_err(|e| RunError::Other(format!("event loop: {e}").into()))?;
 
         let total = triangles_rendered.load(Ordering::Relaxed);
         let elapsed = app.started.map(|s| s.elapsed()).unwrap_or_default();

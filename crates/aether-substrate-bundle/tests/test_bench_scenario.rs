@@ -36,41 +36,32 @@ use std::path::{Path, PathBuf};
 use aether_capabilities::clipboard::{
     GetClipboardText, GetClipboardTextResult, SetClipboardText, SetClipboardTextResult,
 };
-use aether_capabilities::fs::{
-    Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult,
-};
+use aether_capabilities::fs::{Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult};
 use aether_capabilities::render::{
-    CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured,
-    DrawSolidQuads, DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect,
-    MaterialTexturedRect, SolidQuad, TextureFormat, TexturedQuad, UpdateTexture, Vertex,
-    ViewProjection, WHITE_TEXTURE_ID,
+    CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
+    DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect, MaterialTexturedRect, SolidQuad,
+    TextureFormat, TexturedQuad, UpdateTexture, Vertex, ViewProjection, WHITE_TEXTURE_ID,
 };
-use aether_capabilities::text::{
-    DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult,
-};
+use aether_capabilities::text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
-    CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, DropComponent, DropResult,
-    FrameCheck, FrameCheckResult, FrameRect, FrameReduction, ListComponents, ListComponentsResult,
-    LoadComponent, LoadResult, NamedMail, Ping, QuadScale, QuadSpace, ReplaceComponent,
-    ReplaceResult, SimilarityCheck,
+    CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, DropComponent, DropResult, FrameCheck,
+    FrameCheckResult, FrameRect, FrameReduction, ListComponents, ListComponentsResult, LoadComponent, LoadResult,
+    NamedMail, Ping, QuadScale, QuadSpace, ReplaceComponent, ReplaceResult, SimilarityCheck,
 };
 use aether_math::{Mat4, Rgb, Rgba, Vec3};
 use aether_substrate::render as substrate_render;
-use aether_substrate::render::{
-    QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD,
-};
+use aether_substrate::render::{QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD};
 use aether_substrate_bundle::test_bench::{
     ArtifactGuard, BenchOp, TestBench,
     test_helpers::{has_wgpu_adapter, init_save_sandbox, require_runtime, test_namespace_roots},
 };
 use aether_substrate_bundle::visual::{
-    Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png,
-    target_color_stats,
+    Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
 };
 use aether_test_fixtures_kinds::{
-    Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
-    InlineProbe, SetRender, TagSpawnQuery, TagSpawnReport,
+    Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe,
+    SetRender, TagSpawnQuery, TagSpawnReport,
 };
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -92,11 +83,7 @@ const PROBE_NAME: &str = "probe";
 /// trampoline node — exactly what `LoadResult.name` reports.
 fn probe_address() -> String {
     use aether_actor::Addressable;
-    format!(
-        "aether.component/{}:{}",
-        aether_capabilities::WasmTrampoline::NAMESPACE,
-        PROBE_NAME,
-    )
+    format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, PROBE_NAME,)
 }
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 
@@ -123,41 +110,24 @@ fn artifact_dir(id: &str) -> PathBuf {
         .parent()
         .and_then(Path::parent)
         .expect("workspace root reachable from CARGO_MANIFEST_DIR");
-    let target_root =
-        env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
+    let target_root = env::var_os("CARGO_TARGET_DIR").map_or_else(|| workspace.join("target"), PathBuf::from);
     target_root.join("test-bench-artifacts").join(id)
 }
 
 fn rgba_at(img: &Image, x: u32, y: u32) -> [u8; 4] {
     let start = ((y * img.width + x) * 4) as usize;
-    [
-        img.rgba[start],
-        img.rgba[start + 1],
-        img.rgba[start + 2],
-        img.rgba[start + 3],
-    ]
+    [img.rgba[start], img.rgba[start + 1], img.rgba[start + 2], img.rgba[start + 3]]
 }
 
 fn rgb_close(actual: [u8; 4], expected: [u8; 3], tolerance: u8) -> bool {
-    actual[..3]
-        .iter()
-        .zip(expected)
-        .all(|(actual, expected)| actual.abs_diff(expected) <= tolerance)
+    actual[..3].iter().zip(expected).all(|(actual, expected)| actual.abs_diff(expected) <= tolerance)
 }
 
 fn pixel_is_lit(img: &Image, x: u32, y: u32, bg: [u8; 3], tolerance: u8) -> bool {
     !rgb_close(rgba_at(img, x, y), bg, tolerance)
 }
 
-fn lit_fraction_in_rect(
-    img: &Image,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    bg: [u8; 3],
-    tolerance: u8,
-) -> f32 {
+fn lit_fraction_in_rect(img: &Image, x: u32, y: u32, width: u32, height: u32, bg: [u8; 3], tolerance: u8) -> f32 {
     let mut lit = 0u32;
     for py in y..y + height {
         for px in x..x + width {
@@ -189,19 +159,11 @@ fn load_probe(bench: &mut TestBench, wasm_path: &Path) -> MailboxId {
             "load",
             BenchOp::send_and_await(
                 "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: Some(PROBE_NAME.to_owned()),
-                    config: Vec::new(),
-                    export: None,
-                },
+                &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
         LoadResult::Err { error } => panic!("load_component: {error}"),
     }
@@ -229,10 +191,7 @@ fn load_cube(bench: &mut TestBench, wasm_path: &Path) {
             ),
         )])
         .expect("load sequence");
-    match loaded
-        .reply::<LoadResult>("load")
-        .expect("decode LoadResult")
-    {
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { .. } => {}
         LoadResult::Err { error } => panic!("load_component(cube): {error}"),
     }
@@ -247,10 +206,7 @@ fn require_wgpu_only() -> bool {
         return true;
     }
     let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
-    assert!(
-        !strict,
-        "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",
-    );
+    assert!(!strict, "AETHER_REQUIRE_RUNTIME set but no wgpu adapter available",);
     eprintln!("skipping: no wgpu adapter available");
     false
 }

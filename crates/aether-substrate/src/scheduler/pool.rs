@@ -62,8 +62,7 @@ impl Default for PoolConfig {
             // Saturating sub mirrors the issue spec
             // (`num_cpus::get().saturating_sub(reserved)`); for now
             // `reserved == 1` covers the chassis frame loop.
-            workers: thread::available_parallelism()
-                .map_or(2, |n| n.get().saturating_sub(1).max(1)),
+            workers: thread::available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1)),
             budget_template: BudgetTemplate::Standard,
         }
     }
@@ -84,10 +83,7 @@ impl BudgetTemplate {
     fn build(&self) -> BatchBudget {
         match *self {
             Self::Standard => BatchBudget::standard(),
-            Self::Custom {
-                max_mails,
-                max_usec,
-            } => BatchBudget::custom(max_mails, Duration::from_micros(max_usec)),
+            Self::Custom { max_mails, max_usec } => BatchBudget::custom(max_mails, Duration::from_micros(max_usec)),
         }
     }
 }
@@ -120,11 +116,7 @@ impl PoolHandle {
     /// through the coordinator.
     #[must_use]
     pub fn wake_sink(&self) -> WakeSink {
-        WakeSink::new(
-            Arc::clone(&self.injector),
-            Arc::clone(&self.spin),
-            self.workers.len(),
-        )
+        WakeSink::new(Arc::clone(&self.injector), Arc::clone(&self.spin), self.workers.len())
     }
 
     /// Shut down the pool, joining every worker, and return each
@@ -148,10 +140,7 @@ impl PoolHandle {
         for w in &self.workers {
             w.handle.thread().unpark();
         }
-        mem::take(&mut self.workers)
-            .into_iter()
-            .map(|w| w.handle.join())
-            .collect()
+        mem::take(&mut self.workers).into_iter().map(|w| w.handle.join()).collect()
     }
 
     /// Worker count. Exposed for tracing / introspection.
@@ -201,10 +190,8 @@ impl Pool {
         let injector = Arc::new(Injector::<Arc<dyn Drainable>>::new());
         // One LIFO deque per worker; collect every stealer so each worker
         // can steal from its siblings' tails when its own deque runs dry.
-        let deques: Vec<Worker<Arc<dyn Drainable>>> =
-            (0..config.workers).map(|_| Worker::new_lifo()).collect();
-        let stealers: Arc<[Stealer<Arc<dyn Drainable>>]> =
-            deques.iter().map(Worker::stealer).collect();
+        let deques: Vec<Worker<Arc<dyn Drainable>>> = (0..config.workers).map(|_| Worker::new_lifo()).collect();
+        let stealers: Arc<[Stealer<Arc<dyn Drainable>>]> = deques.iter().map(Worker::stealer).collect();
         let mut workers = Vec::with_capacity(config.workers);
         for (idx, deque) in deques.into_iter().enumerate() {
             let name = format!("aether-worker-{idx}");
@@ -223,11 +210,7 @@ impl Pool {
                 .expect("spawn pool worker thread");
             workers.push(PoolWorkerJoin { handle, name });
         }
-        PoolHandle {
-            injector,
-            spin,
-            workers,
-        }
+        PoolHandle { injector, spin, workers }
     }
 }
 
@@ -383,8 +366,7 @@ fn acquire_slot(
         // empty probe. Injector starvation is thereby bounded at ~K ×
         // cycle-time per worker; the chain stays warm K−1 of K cycles.
         if worker_deque::chain_pop_due()
-            && let Some(stolen) =
-                worker_deque::steal_into_local(idx, stealers, injector, peer_steal)
+            && let Some(stolen) = worker_deque::steal_into_local(idx, stealers, injector, peer_steal)
         {
             if let Err(slot) = worker_deque::push_local(slot) {
                 // Unreachable on a worker (`pop_local` just succeeded, so
@@ -424,10 +406,7 @@ fn format_panic_payload(payload: &Box<dyn Any + Send>, actor_label: &str) -> Str
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    reason = "test-setup unwraps: queue recv panic on failure is the assertion"
-)]
+#[allow(clippy::unwrap_used, reason = "test-setup unwraps: queue recv panic on failure is the assertion")]
 mod tests {
     use super::*;
     use crate::runtime::lifecycle::PanicAborter;
@@ -440,13 +419,7 @@ mod tests {
     use std::time::Instant;
 
     fn standard_handle(workers: usize) -> PoolHandle {
-        Pool::start(
-            PoolConfig {
-                workers,
-                budget_template: BudgetTemplate::Standard,
-            },
-            Arc::new(PanicAborter),
-        )
+        Pool::start(PoolConfig { workers, budget_template: BudgetTemplate::Standard }, Arc::new(PanicAborter))
     }
 
     fn wait_until<F: Fn() -> bool>(timeout: Duration, f: F) -> bool {
@@ -478,9 +451,7 @@ mod tests {
         assert!(wake.wake());
 
         assert!(wait_until(Duration::from_secs(2), || slot.dispatched() == 200));
-        assert!(wait_until(Duration::from_secs(2), || {
-            slot.state.current() == SlotStateLabel::Idle
-        }));
+        assert!(wait_until(Duration::from_secs(2), || { slot.state.current() == SlotStateLabel::Idle }));
 
         // Bring down the pool cleanly.
         drop(wake);
@@ -500,10 +471,7 @@ mod tests {
         let handle = Pool::start(
             PoolConfig {
                 workers: 1,
-                budget_template: BudgetTemplate::Custom {
-                    max_mails: 4,
-                    max_usec: BATCH_MAX_USEC_TEST,
-                },
+                budget_template: BudgetTemplate::Custom { max_mails: 4, max_usec: BATCH_MAX_USEC_TEST },
             },
             Arc::new(PanicAborter),
         );
@@ -528,9 +496,7 @@ mod tests {
         let _ = wake_a.wake();
         let _ = wake_b.wake();
 
-        assert!(wait_until(Duration::from_secs(3), || {
-            a.dispatched() == 40 && b.dispatched() == 40
-        }));
+        assert!(wait_until(Duration::from_secs(3), || { a.dispatched() == 40 && b.dispatched() == 40 }));
 
         // Fairness check: at the midpoint, neither slot should have
         // monopolised. The check is loose — if A finishes all 40
@@ -552,13 +518,8 @@ mod tests {
     /// `#[test]` wrapper alongside (issue 1522 — pool + `wait_until`).
     fn handler_panic_escalates_via_aborter_body() {
         let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
-        let handle = Pool::start(
-            PoolConfig {
-                workers: 1,
-                budget_template: BudgetTemplate::Standard,
-            },
-            Arc::clone(&aborter),
-        );
+        let handle =
+            Pool::start(PoolConfig { workers: 1, budget_template: BudgetTemplate::Standard }, Arc::clone(&aborter));
         let slot = CounterSlot::new("panicker").with_panic_at(2);
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
         let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
@@ -578,10 +539,7 @@ mod tests {
         drop(wake);
         let results = handle.shutdown_with_results();
         assert_eq!(results.len(), 1);
-        assert!(
-            results[0].is_err(),
-            "PanicAborter should have panicked the worker thread on handler panic"
-        );
+        assert!(results[0].is_err(), "PanicAborter should have panicked the worker thread on handler panic");
     }
 
     /// Wakes during an in-flight drain don't double-queue: the slot
@@ -599,11 +557,7 @@ mod tests {
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
         let weak: Weak<dyn Drainable> = Arc::downgrade(&slot_dyn);
         drop(slot_dyn);
-        let sink = WakeSink::new(
-            Arc::clone(&injector),
-            Arc::new(SpinPark::new()),
-            TEST_WORKERS,
-        );
+        let sink = WakeSink::new(Arc::clone(&injector), Arc::new(SpinPark::new()), TEST_WORKERS);
         let wake = WakeHandle::new(slot.state.clone(), weak, sink);
 
         slot.push(1);
@@ -647,12 +601,7 @@ mod tests {
 
     impl LoopSlot {
         fn new(stop: Arc<AtomicBool>, sink: WakeSink) -> Arc<Self> {
-            Arc::new_cyclic(|this| Self {
-                cycles: AtomicU32::new(0),
-                stop,
-                sink,
-                this: this.clone(),
-            })
+            Arc::new_cyclic(|this| Self { cycles: AtomicU32::new(0), stop, sink, this: this.clone() })
         }
 
         fn cycles(&self) -> u32 {
@@ -702,9 +651,8 @@ mod tests {
         // worker only makes the final assertion easier — the test
         // discriminates either way: with no backstop, captured
         // workers never steal at all).
-        let loops: Vec<Arc<LoopSlot>> = (0..WORKERS)
-            .map(|_| LoopSlot::new(Arc::clone(&stop), handle.wake_sink()))
-            .collect();
+        let loops: Vec<Arc<LoopSlot>> =
+            (0..WORKERS).map(|_| LoopSlot::new(Arc::clone(&stop), handle.wake_sink())).collect();
         for slot in &loops {
             let seed: Arc<dyn Drainable> = slot.clone();
             handle.wake_sink().schedule(seed);
@@ -767,9 +715,7 @@ mod tests {
     #[test]
     fn stress_many_slots_across_workers() {
         let handle = standard_handle(2);
-        let slots: Vec<_> = (0..4)
-            .map(|i| CounterSlot::new(Box::leak(format!("s{i}").into_boxed_str())))
-            .collect();
+        let slots: Vec<_> = (0..4).map(|i| CounterSlot::new(Box::leak(format!("s{i}").into_boxed_str()))).collect();
         let wakes: Vec<_> = slots
             .iter()
             .map(|slot| {
@@ -841,9 +787,7 @@ mod tests {
         assert!(entry_wake.wake());
 
         assert!(
-            wait_until(Duration::from_secs(5), || slots
-                .iter()
-                .all(|s| s.dispatched() >= 1)),
+            wait_until(Duration::from_secs(5), || slots.iter().all(|s| s.dispatched() >= 1)),
             "every slot in the relay chain should dispatch its forwarded env"
         );
 

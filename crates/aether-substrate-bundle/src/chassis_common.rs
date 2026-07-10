@@ -32,10 +32,9 @@ use aether_capabilities::lifecycle::LifecycleGraphData;
 use aether_capabilities::render::RenderTuningConfigLayer;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
-    AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig,
-    EngineConfigLayer, FsCapability, GeminiCapability, GeminiConfig, HttpCapability,
-    HttpServerCapability, HttpServerConfig, InputCapability, InputConfig, InventoryCapability,
-    LifecycleConfig, TcpCapability, TextCapability,
+    AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig, EngineConfigLayer,
+    FsCapability, GeminiCapability, GeminiConfig, HttpCapability, HttpServerCapability, HttpServerConfig,
+    InputCapability, InputConfig, InventoryCapability, LifecycleConfig, TcpCapability, TextCapability,
     fs::NamespaceRoots,
     http::HttpConfig,
     shared::contentgen::{ContentGenConfig, ContentGenConfigLayer},
@@ -45,8 +44,8 @@ use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
 use aether_substrate::chassis::Chassis;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::config::{
-    ConfigError, FromArgvThenEnv, KnobKind, KnobRecord, KnownKeys, RingCapacities, SchedulerTuning,
-    dump_config, known_keys,
+    ConfigError, FromArgvThenEnv, KnobKind, KnobRecord, KnownKeys, RingCapacities, SchedulerTuning, dump_config,
+    known_keys,
 };
 use aether_substrate::runtime::RUNTIME_KNOBS;
 use aether_substrate::runtime::lifecycle::FatalAborter;
@@ -100,16 +99,12 @@ pub const CHASSIS_KNOBS: &[KnobRecord] = &[
 /// `AETHER_CONFIG_FILE`. Empty values are treated as absent.
 #[must_use]
 pub fn chassis_config_path(argv: Option<String>) -> Option<PathBuf> {
-    argv.filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            // This is the central meta-config read for selecting the config
-            // file source, not a subsystem reading its own knob.
-            #[allow(clippy::disallowed_methods)]
-            env::var_os(CONFIG_FILE_ENV)
-                .filter(|path| !path.as_os_str().is_empty())
-                .map(PathBuf::from)
-        })
+    argv.filter(|path| !path.is_empty()).map(PathBuf::from).or_else(|| {
+        // This is the central meta-config read for selecting the config
+        // file source, not a subsystem reading its own knob.
+        #[allow(clippy::disallowed_methods)]
+        env::var_os(CONFIG_FILE_ENV).filter(|path| !path.as_os_str().is_empty()).map(PathBuf::from)
+    })
 }
 
 /// Read and parse an explicitly supplied sectioned TOML chassis config
@@ -121,8 +116,7 @@ pub fn chassis_config_path(argv: Option<String>) -> Option<PathBuf> {
 /// Returns [`ConfigError`] when the file cannot be read or parsed as TOML.
 pub fn load_config_file(path: &Path) -> Result<toml::Table, ConfigError> {
     let text = fs::read_to_string(path).map_err(|source| ConfigError::config_file(path, source))?;
-    text.parse::<toml::Table>()
-        .map_err(|source| ConfigError::config_file(path, source))
+    text.parse::<toml::Table>().map_err(|source| ConfigError::config_file(path, source))
 }
 
 /// Load the chassis config file selected by argv or
@@ -133,9 +127,7 @@ pub fn load_config_file(path: &Path) -> Result<toml::Table, ConfigError> {
 /// Returns [`ConfigError`] when an explicitly supplied file cannot be
 /// read or parsed.
 pub fn load_chassis_config(argv: Option<String>) -> Result<Option<toml::Table>, ConfigError> {
-    chassis_config_path(argv)
-        .map(|path| load_config_file(&path))
-        .transpose()
+    chassis_config_path(argv).map(|path| load_config_file(&path)).transpose()
 }
 
 /// Extract one `[section]` from the parsed chassis config file and
@@ -155,17 +147,10 @@ pub fn file_section<C: FromArgvThenEnv>(
         return Ok(None);
     };
     if !matches!(value, toml::Value::Table(_)) {
-        let source = io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("expected [{section}] to be a TOML table"),
-        );
+        let source = io::Error::new(io::ErrorKind::InvalidData, format!("expected [{section}] to be a TOML table"));
         return Err(ConfigError::config_section(section, source));
     }
-    value
-        .clone()
-        .try_into()
-        .map(Some)
-        .map_err(|source| ConfigError::config_section(section, source))
+    value.clone().try_into().map(Some).map_err(|source| ConfigError::config_section(section, source))
 }
 
 /// Resolve a config from argv/env plus the optional file section named
@@ -180,10 +165,7 @@ pub fn resolve_with_file<C: FromArgvThenEnv>(
     file: Option<&toml::Table>,
     section: &str,
 ) -> Result<C, ConfigError> {
-    let file = file
-        .map(|table| file_section::<C>(table, section))
-        .transpose()?
-        .flatten();
+    let file = file.map(|table| file_section::<C>(table, section)).transpose()?.flatten();
     C::try_resolve(argv, file)
 }
 
@@ -194,10 +176,7 @@ pub fn resolve_with_file<C: FromArgvThenEnv>(
 ///
 /// Returns [`ConfigError`] from section deserialization or config
 /// resolution.
-pub fn resolve_env_with_file<C: FromArgvThenEnv>(
-    file: Option<&toml::Table>,
-    section: &str,
-) -> Result<C, ConfigError> {
+pub fn resolve_env_with_file<C: FromArgvThenEnv>(file: Option<&toml::Table>, section: &str) -> Result<C, ConfigError> {
     let argv = <<C::Layer as confique::Config>::Layer as confique::Layer>::empty();
     resolve_with_file::<C>(argv, file, section)
 }
@@ -401,9 +380,7 @@ pub struct SettlementConfig {
 
 impl Default for SettlementConfig {
     fn default() -> Self {
-        Self {
-            cap_secs: DEFAULT_SETTLEMENT_CAP_SECS,
-        }
+        Self { cap_secs: DEFAULT_SETTLEMENT_CAP_SECS }
     }
 }
 
@@ -414,11 +391,7 @@ impl SettlementConfig {
     /// trips, so the wait blocks on the signal forever.
     #[must_use]
     pub fn to_cap(&self) -> Duration {
-        if self.cap_secs == 0 {
-            Duration::MAX
-        } else {
-            Duration::from_secs(self.cap_secs)
-        }
+        if self.cap_secs == 0 { Duration::MAX } else { Duration::from_secs(self.cap_secs) }
     }
 }
 
@@ -651,11 +624,7 @@ pub fn tick_only_lifecycle_config(advance_timeout_millis: u64) -> LifecycleConfi
         .start::<Tick>()
         .build()
         .expect("tick-only lifecycle graph is structurally valid");
-    LifecycleConfig {
-        graph,
-        initial_subscribers: vec![],
-        advance_timeout_millis,
-    }
+    LifecycleConfig { graph, initial_subscribers: vec![], advance_timeout_millis }
 }
 
 /// Build the three-stage frame lifecycle config the display-driving
@@ -706,11 +675,7 @@ pub fn frame_lifecycle_config(advance_timeout_millis: u64) -> LifecycleConfig {
         .start::<Tick>()
         .build()
         .expect("frame lifecycle graph is structurally valid");
-    LifecycleConfig {
-        graph,
-        initial_subscribers: vec![],
-        advance_timeout_millis,
-    }
+    LifecycleConfig { graph, initial_subscribers: vec![], advance_timeout_millis }
 }
 
 /// Args every full-stack chassis hands to [`with_common_caps`]. Kept
@@ -756,11 +721,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
     // else staging tracks the `save`-namespace root the fs cap already owns
     // (preserving its `AETHER_SAVE_DIR` → platform fallback without re-reading
     // env). Threaded into the gemini cap via `GeminiBoot`.
-    let staging_root = boot
-        .contentgen
-        .gen_dir
-        .clone()
-        .unwrap_or_else(|| boot.namespace_roots.save.clone());
+    let staging_root = boot.contentgen.gen_dir.clone().unwrap_or_else(|| boot.namespace_roots.save.clone());
     builder
         .with_aborter(boot.aborter)
         .with_workers(boot.workers)
@@ -776,10 +737,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor::<HttpCapability>(boot.http)
         .with_actor::<TcpCapability>(())
         .with_actor::<AnthropicCapability>(boot.anthropic)
-        .with_actor::<GeminiCapability>(GeminiBoot {
-            config: boot.gemini,
-            gen_root: staging_root,
-        })
+        .with_actor::<GeminiCapability>(GeminiBoot { config: boot.gemini, gen_root: staging_root })
 }
 
 /// The mailbox namespaces `with_common_caps` registers — the linked
@@ -851,10 +809,7 @@ pub fn maybe_with_rpc_server<C: Chassis>(
 /// Issue 1761: boot the HTTP server only when `config` is `Some` (i.e.
 /// the cap's `enabled` flag is set). Mirrors [`maybe_with_rpc_server`]:
 /// an unconfigured chassis binds nothing.
-pub fn maybe_with_http_server<C: Chassis>(
-    builder: Builder<C>,
-    config: Option<HttpServerConfig>,
-) -> Builder<C> {
+pub fn maybe_with_http_server<C: Chassis>(builder: Builder<C>, config: Option<HttpServerConfig>) -> Builder<C> {
     let Some(config) = config else {
         return builder;
     };
@@ -905,9 +860,7 @@ mod tests {
         // `aether-actor` const caps so an unset knob reproduces the
         // const-`Default` ring behaviour.
         let _guard = RING_ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        let layer = ActorRingConfigLayer::builder()
-            .load()
-            .expect("defaults load");
+        let layer = ActorRingConfigLayer::builder().load().expect("defaults load");
         assert_eq!(layer.log_ring_capacity, DEFAULT_RING_CAP);
         assert_eq!(layer.trace_ring_capacity, DEFAULT_TRACE_RING_CAP);
         assert_eq!(layer.trace_ring_max_size, DEFAULT_TRACE_RING_MAX_CAP);
@@ -984,9 +937,7 @@ mod tests {
         // other silently shifts the resolved-vs-installed behaviour. No
         // `.env()` source: literal defaults only — env-free.
         let _guard = RING_ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        let layer = SchedulerTuningConfigLayer::builder()
-            .load()
-            .expect("defaults load");
+        let layer = SchedulerTuningConfigLayer::builder().load().expect("defaults load");
         let default = SchedulerTuning::default();
         assert_eq!(layer.spin_window_micros, default.spin_window_micros);
         assert_eq!(layer.local_sticky_max, default.local_sticky_max);
@@ -1029,19 +980,9 @@ mod tests {
         // directly, so the test exercises our `to_cap`, not confique's
         // env/argv resolution (which the derive macro generates and
         // confique's own tests cover).
-        assert_eq!(
-            SettlementConfig { cap_secs: 0 }.to_cap(),
-            Duration::MAX,
-            "0 → wait forever",
-        );
-        assert_eq!(
-            SettlementConfig { cap_secs: 45 }.to_cap(),
-            Duration::from_secs(45),
-        );
-        assert_eq!(
-            SettlementConfig::default().to_cap(),
-            Duration::from_secs(DEFAULT_SETTLEMENT_CAP_SECS),
-        );
+        assert_eq!(SettlementConfig { cap_secs: 0 }.to_cap(), Duration::MAX, "0 → wait forever",);
+        assert_eq!(SettlementConfig { cap_secs: 45 }.to_cap(), Duration::from_secs(45),);
+        assert_eq!(SettlementConfig::default().to_cap(), Duration::from_secs(DEFAULT_SETTLEMENT_CAP_SECS),);
     }
 
     #[test]
@@ -1064,9 +1005,7 @@ mod tests {
         // so an unset knob reproduces the cap's const default.
         // Tripwire: drifts when the producing const or the derive literal changes.
         let _guard = RING_ENV_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        let layer = ChassisBootConfigLayer::builder()
-            .load()
-            .expect("defaults load");
+        let layer = ChassisBootConfigLayer::builder().load().expect("defaults load");
         assert_eq!(
             layer.lifecycle_advance_timeout_millis, DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS,
             "derive default must match DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS",
@@ -1077,10 +1016,7 @@ mod tests {
             "DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS must match LifecycleConfig::ADVANCE_TIMEOUT_MS_DEFAULT",
         );
         let default = ChassisBootConfig::default();
-        assert_eq!(
-            default.lifecycle_advance_timeout_millis,
-            DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS,
-        );
+        assert_eq!(default.lifecycle_advance_timeout_millis, DEFAULT_LIFECYCLE_ADVANCE_TIMEOUT_MS,);
         assert_eq!(default.workers, None);
         assert_eq!(default.boot_manifest, None);
     }
@@ -1094,20 +1030,14 @@ mod tests {
     #[test]
     fn to_workers_positive_returns_some() {
         // Positive value passes through unchanged.
-        let cfg = ChassisBootConfig {
-            workers: Some(4),
-            ..ChassisBootConfig::default()
-        };
+        let cfg = ChassisBootConfig { workers: Some(4), ..ChassisBootConfig::default() };
         assert_eq!(cfg.to_workers(), Some(4));
     }
 
     #[test]
     fn to_workers_zero_clamps_to_one() {
         // The 0→1 clamp: the only real logic this crate owns for the workers knob.
-        let cfg = ChassisBootConfig {
-            workers: Some(0),
-            ..ChassisBootConfig::default()
-        };
+        let cfg = ChassisBootConfig { workers: Some(0), ..ChassisBootConfig::default() };
         assert_eq!(cfg.to_workers(), Some(1));
     }
 
@@ -1135,24 +1065,12 @@ mod tests {
         let shutdown = format!("{:?}", <Shutdown as Kind>::ID);
 
         // Start state is Tick.
-        assert!(
-            graph_dbg.contains(&format!("start: {tick}")),
-            "expected start Tick in {graph_dbg}",
-        );
+        assert!(graph_dbg.contains(&format!("start: {tick}")), "expected start Tick in {graph_dbg}",);
         // Tick, Render, and Present are all non-terminal states.
-        assert!(
-            graph_dbg.contains(&render),
-            "expected a Render state in {graph_dbg}",
-        );
-        assert!(
-            graph_dbg.contains(&present),
-            "expected a Present state in {graph_dbg}",
-        );
+        assert!(graph_dbg.contains(&render), "expected a Render state in {graph_dbg}",);
+        assert!(graph_dbg.contains(&present), "expected a Present state in {graph_dbg}",);
         // Shutdown is the sole terminal.
-        assert!(
-            graph_dbg.contains(&format!("terminals: [{shutdown}]")),
-            "expected Shutdown terminal in {graph_dbg}",
-        );
+        assert!(graph_dbg.contains(&format!("terminals: [{shutdown}]")), "expected Shutdown terminal in {graph_dbg}",);
 
         // No initial subscribers: components subscribe the `Tick` stage
         // directly on `aether.lifecycle` (ADR-0082 §7/§11); the boot-time
@@ -1166,12 +1084,9 @@ mod tests {
         // ADR-0090 unit b2: the scheduler hot-path knobs join the
         // known-key set, so e1's unknown-AETHER_ sweep doesn't flag them.
         let known = chassis_known_keys();
-        for key in [
-            "AETHER_LOCAL_STICKY_MAX",
-            "AETHER_LOCAL_TIME_BUDGET_US",
-            "AETHER_PEER_STEAL",
-            "AETHER_HANDOFF_COST_NS",
-        ] {
+        for key in
+            ["AETHER_LOCAL_STICKY_MAX", "AETHER_LOCAL_TIME_BUDGET_US", "AETHER_PEER_STEAL", "AETHER_HANDOFF_COST_NS"]
+        {
             assert!(known.contains(key), "chassis_known_keys missing {key}");
         }
     }
@@ -1206,10 +1121,7 @@ mod tests {
             known.contains("AETHER_HUB_HEARTBEAT_INTERVAL_SECS"),
             "AETHER_HUB_HEARTBEAT_INTERVAL_SECS must be a known hub key",
         );
-        assert!(
-            known.contains("AETHER_ENGINE_STORE_ROOT"),
-            "AETHER_ENGINE_STORE_ROOT must be a known hub key",
-        );
+        assert!(known.contains("AETHER_ENGINE_STORE_ROOT"), "AETHER_ENGINE_STORE_ROOT must be a known hub key",);
         assert!(
             known.contains("AETHER_AUDIO_DISABLE"),
             "fleet cap keys must stay in the hub known-key set (spawned substrates inherit \
@@ -1233,14 +1145,8 @@ mod tests {
         // registered scheduler-side because `aether-capabilities` couldn't
         // hold it; the bundle can, so the workaround is gone).
         let known = chassis_known_keys();
-        assert!(
-            known.contains("AETHER_WORKERS"),
-            "AETHER_WORKERS must be a known key",
-        );
-        assert!(
-            known.contains("AETHER_BOOT_MANIFEST"),
-            "AETHER_BOOT_MANIFEST must be a known key",
-        );
+        assert!(known.contains("AETHER_WORKERS"), "AETHER_WORKERS must be a known key",);
+        assert!(known.contains("AETHER_BOOT_MANIFEST"), "AETHER_BOOT_MANIFEST must be a known key",);
         assert!(
             known.contains("AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS"),
             "AETHER_LIFECYCLE_ADVANCE_TIMEOUT_MS must be a known key",
@@ -1265,14 +1171,8 @@ mod tests {
         // chassis registry so the unknown-AETHER_* sweep (e1) doesn't
         // flag `AETHER_HTTP_SERVER_*` env vars set by operators.
         let known = chassis_known_keys();
-        assert!(
-            known.contains("AETHER_HTTP_SERVER_ENABLED"),
-            "AETHER_HTTP_SERVER_ENABLED must be a known key",
-        );
-        assert!(
-            known.contains("AETHER_HTTP_SERVER_BIND_ADDR"),
-            "AETHER_HTTP_SERVER_BIND_ADDR must be a known key",
-        );
+        assert!(known.contains("AETHER_HTTP_SERVER_ENABLED"), "AETHER_HTTP_SERVER_ENABLED must be a known key",);
+        assert!(known.contains("AETHER_HTTP_SERVER_BIND_ADDR"), "AETHER_HTTP_SERVER_BIND_ADDR must be a known key",);
         assert!(
             known.contains("AETHER_HTTP_SERVER_HANDLER_MAILBOX"),
             "AETHER_HTTP_SERVER_HANDLER_MAILBOX must be a known key",
@@ -1303,10 +1203,7 @@ mod tests {
     fn load_config_file_errors_on_missing_or_malformed_file() {
         let missing = config_test_path("missing-config");
         assert!(
-            matches!(
-                super::load_config_file(&missing),
-                Err(ConfigError::ConfigFile { .. })
-            ),
+            matches!(super::load_config_file(&missing), Err(ConfigError::ConfigFile { .. })),
             "explicit missing config file must hard-error",
         );
 
@@ -1314,27 +1211,18 @@ mod tests {
         fs::write(&malformed, "[http\n").expect("write malformed config");
         let result = super::load_config_file(&malformed);
         let _ = fs::remove_file(&malformed);
-        assert!(
-            matches!(result, Err(ConfigError::ConfigFile { .. })),
-            "malformed config file must hard-error",
-        );
+        assert!(matches!(result, Err(ConfigError::ConfigFile { .. })), "malformed config file must hard-error",);
     }
 
     #[test]
     fn file_section_absent_is_none_and_present_section_deserializes() {
-        let table = "[http]\ndisabled = true\n"
-            .parse::<toml::Table>()
-            .expect("parse table");
+        let table = "[http]\ndisabled = true\n".parse::<toml::Table>().expect("parse table");
         assert!(
-            file_section::<ActorRingConfig>(&table, "actor")
-                .expect("absent section ok")
-                .is_none(),
+            file_section::<ActorRingConfig>(&table, "actor").expect("absent section ok").is_none(),
             "absent sections fall through to env/defaults",
         );
 
-        let table = "[actor]\nlog_ring_capacity = 2048\n"
-            .parse::<toml::Table>()
-            .expect("parse table");
+        let table = "[actor]\nlog_ring_capacity = 2048\n".parse::<toml::Table>().expect("parse table");
         let section = file_section::<ActorRingConfig>(&table, "actor")
             .expect("present section decodes")
             .expect("actor section present");

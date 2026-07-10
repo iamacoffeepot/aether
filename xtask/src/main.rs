@@ -26,8 +26,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::inventory::{
-    BuildPlan, CHASSIS_BINS, CHASSIS_PACKAGE, Component, behavior_build_plans, build_plans,
-    discover_behavior_variants, discover_behaviors, discover_components,
+    BuildPlan, CHASSIS_BINS, CHASSIS_PACKAGE, Component, behavior_build_plans, build_plans, discover_behavior_variants,
+    discover_behaviors, discover_components,
 };
 
 /// Wasm triple the components cross-build to.
@@ -181,10 +181,7 @@ fn main() -> Result<()> {
 }
 
 fn run_dist(args: &DistArgs) -> Result<()> {
-    let metadata = MetadataCommand::new()
-        .no_deps()
-        .exec()
-        .context("run cargo metadata")?;
+    let metadata = MetadataCommand::new().no_deps().exec().context("run cargo metadata")?;
 
     let components = discover_components(&metadata);
     if components.is_empty() {
@@ -208,11 +205,7 @@ fn run_dist(args: &DistArgs) -> Result<()> {
     // behavior-host scenario loads the `_behavior` stem; every other kit
     // consumer keeps the small stock wasm.
     for variant in discover_behavior_variants(&metadata) {
-        let plan = BuildPlan {
-            package: variant.package.clone(),
-            examples: false,
-            features: variant.features.clone(),
-        };
+        let plan = BuildPlan { package: variant.package.clone(), examples: false, features: variant.features.clone() };
         build_component(&plan, args.profile)?;
         let built = wasm_profile_dir.join(format!("{}.wasm", variant.stem));
         let variant_stem = wasm_profile_dir.join(format!("{}_behavior.wasm", variant.stem));
@@ -268,8 +261,7 @@ fn run_dist(args: &DistArgs) -> Result<()> {
     let manifest_path = dist.join("manifest.json");
     let mut json = serde_json::to_string_pretty(&manifest).context("serialize manifest")?;
     json.push('\n');
-    fs::write(&manifest_path, json)
-        .with_context(|| format!("write {}", manifest_path.display()))?;
+    fs::write(&manifest_path, json).with_context(|| format!("write {}", manifest_path.display()))?;
 
     println!(
         "dist: {} component(s), {} chassis bin(s) -> {}",
@@ -279,11 +271,7 @@ fn run_dist(args: &DistArgs) -> Result<()> {
     );
     if !behaviors.is_empty() {
         let stems: Vec<&str> = behaviors.iter().map(|b| b.stem.as_str()).collect();
-        println!(
-            "dist: {} behavior script(s) built into target/: {}",
-            stems.len(),
-            stems.join(", "),
-        );
+        println!("dist: {} behavior script(s) built into target/: {}", stems.len(), stems.join(", "),);
     }
     Ok(())
 }
@@ -353,10 +341,7 @@ struct SpecComponent {
 /// `include_bytes!`). Reports the resulting binary.
 fn run_bundle(args: &BundleArgs) -> Result<()> {
     let plan = resolve_bundle_plan(args)?;
-    let metadata = MetadataCommand::new()
-        .no_deps()
-        .exec()
-        .context("run cargo metadata")?;
+    let metadata = MetadataCommand::new().no_deps().exec().context("run cargo metadata")?;
     let target_dir = metadata.target_directory.as_std_path();
 
     // 1. Build (or locate) each component's wasm, in order. One cargo
@@ -373,10 +358,7 @@ fn run_bundle(args: &BundleArgs) -> Result<()> {
                 }
                 run(wasm_cmd, &format!("build component wasm for {package}"))?;
                 let stem = package.replace('-', "_");
-                let wasm = target_dir
-                    .join(WASM_TARGET)
-                    .join(args.profile.as_str())
-                    .join(format!("{stem}.wasm"));
+                let wasm = target_dir.join(WASM_TARGET).join(args.profile.as_str()).join(format!("{stem}.wasm"));
                 if !wasm.exists() {
                     bail!(
                         "component wasm for {package} not found at {} \
@@ -387,8 +369,9 @@ fn run_bundle(args: &BundleArgs) -> Result<()> {
                 }
                 wasm
             }
-            ComponentSource::Prebuilt(path) => fs::canonicalize(path)
-                .with_context(|| format!("locate prebuilt component wasm {}", path.display()))?,
+            ComponentSource::Prebuilt(path) => {
+                fs::canonicalize(path).with_context(|| format!("locate prebuilt component wasm {}", path.display()))?
+            }
         };
         wasm_paths.push(wasm);
     }
@@ -396,15 +379,11 @@ fn run_bundle(args: &BundleArgs) -> Result<()> {
     // 2. Write the pack manifest the chassis package's `build.rs` reads.
     let manifest = bundle_manifest_json(&plan, &wasm_paths)?;
     let manifest_dir = target_dir.join("bundle");
-    fs::create_dir_all(&manifest_dir)
-        .with_context(|| format!("create {}", manifest_dir.display()))?;
-    let manifest_path =
-        manifest_dir.join(format!("{}-bundle-manifest.json", plan.chassis.as_str()));
-    let mut manifest_text =
-        serde_json::to_string_pretty(&manifest).context("serialize bundle manifest")?;
+    fs::create_dir_all(&manifest_dir).with_context(|| format!("create {}", manifest_dir.display()))?;
+    let manifest_path = manifest_dir.join(format!("{}-bundle-manifest.json", plan.chassis.as_str()));
+    let mut manifest_text = serde_json::to_string_pretty(&manifest).context("serialize bundle manifest")?;
     manifest_text.push('\n');
-    fs::write(&manifest_path, manifest_text)
-        .with_context(|| format!("write {}", manifest_path.display()))?;
+    fs::write(&manifest_path, manifest_text).with_context(|| format!("write {}", manifest_path.display()))?;
 
     // 3. Build the chassis's generic bundle bin with the pack staged
     // for `include_bytes!`.
@@ -425,21 +404,9 @@ fn run_bundle(args: &BundleArgs) -> Result<()> {
         || target_dir.join(args.profile.as_str()),
         |triple| target_dir.join(triple).join(args.profile.as_str()),
     );
-    let windows = args
-        .target
-        .as_deref()
-        .map_or(cfg!(windows), |t| t.contains("windows"));
-    let exe = profile_dir.join(if windows {
-        format!("{bin}.exe")
-    } else {
-        bin.to_string()
-    });
-    println!(
-        "{} bundle ({} component(s)) -> {}",
-        plan.chassis.as_str(),
-        plan.components.len(),
-        exe.display(),
-    );
+    let windows = args.target.as_deref().map_or(cfg!(windows), |t| t.contains("windows"));
+    let exe = profile_dir.join(if windows { format!("{bin}.exe") } else { bin.to_string() });
+    println!("{} bundle ({} component(s)) -> {}", plan.chassis.as_str(), plan.components.len(), exe.display(),);
     Ok(())
 }
 
@@ -479,18 +446,11 @@ fn resolve_bundle_plan(args: &BundleArgs) -> Result<BundlePlan> {
 /// Parse a `--spec` file into a plan. Relative paths inside the spec
 /// resolve against the spec file's directory.
 fn resolve_bundle_spec(spec_path: &Path, chassis_flag: BundleChassis) -> Result<BundlePlan> {
-    let text = fs::read_to_string(spec_path)
-        .with_context(|| format!("read bundle spec {}", spec_path.display()))?;
-    let spec: BundleSpec = serde_json::from_str(&text)
-        .with_context(|| format!("parse bundle spec {}", spec_path.display()))?;
+    let text = fs::read_to_string(spec_path).with_context(|| format!("read bundle spec {}", spec_path.display()))?;
+    let spec: BundleSpec =
+        serde_json::from_str(&text).with_context(|| format!("parse bundle spec {}", spec_path.display()))?;
     let spec_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
-    let anchor = |path: &Path| -> PathBuf {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            spec_dir.join(path)
-        }
-    };
+    let anchor = |path: &Path| -> PathBuf { if path.is_absolute() { path.to_path_buf() } else { spec_dir.join(path) } };
     let mut components = Vec::new();
     for (i, entry) in spec.components.iter().enumerate() {
         let source = match (&entry.package, &entry.wasm) {
@@ -522,14 +482,8 @@ fn resolve_bundle_spec(spec_path: &Path, chassis_flag: BundleChassis) -> Result<
 /// A `--components` entry is a prebuilt artifact iff it carries the
 /// `.wasm` suffix; anything else is a workspace package name.
 fn classify_component(raw: &str) -> ComponentSource {
-    let is_wasm_path = Path::new(raw)
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("wasm"));
-    if is_wasm_path {
-        ComponentSource::Prebuilt(PathBuf::from(raw))
-    } else {
-        ComponentSource::Package(raw.to_string())
-    }
+    let is_wasm_path = Path::new(raw).extension().is_some_and(|extension| extension.eq_ignore_ascii_case("wasm"));
+    if is_wasm_path { ComponentSource::Prebuilt(PathBuf::from(raw)) } else { ComponentSource::Package(raw.to_string()) }
 }
 
 /// Render the pack manifest JSON the chassis package's `build.rs`
@@ -544,10 +498,7 @@ fn bundle_manifest_json(plan: &BundlePlan, wasm_paths: &[PathBuf]) -> Result<ser
         let config = component
             .config
             .as_ref()
-            .map(|path| {
-                fs::canonicalize(path)
-                    .with_context(|| format!("locate component config {}", path.display()))
-            })
+            .map(|path| fs::canonicalize(path).with_context(|| format!("locate component config {}", path.display())))
             .transpose()?;
         components.push(serde_json::json!({
             "wasm": wasm,
@@ -570,11 +521,7 @@ fn bundle_manifest_json(plan: &BundlePlan, wasm_paths: &[PathBuf]) -> Result<ser
 /// dir.
 fn wasm_artifact_path(wasm_profile_dir: &Path, component: &Component) -> PathBuf {
     let file = format!("{}.wasm", component.stem);
-    if component.from_example {
-        wasm_profile_dir.join("examples").join(file)
-    } else {
-        wasm_profile_dir.join(file)
-    }
+    if component.from_example { wasm_profile_dir.join("examples").join(file) } else { wasm_profile_dir.join(file) }
 }
 
 fn copy_artifact(src: &Path, dst: &Path) -> Result<()> {
@@ -594,11 +541,7 @@ fn build_component(plan: &BuildPlan, profile: Profile) -> Result<()> {
     if let Some(flag) = profile.cargo_flag() {
         cmd.arg(flag);
     }
-    let label = if plan.examples {
-        format!("{} (examples)", plan.package)
-    } else {
-        plan.package.clone()
-    };
+    let label = if plan.examples { format!("{} (examples)", plan.package) } else { plan.package.clone() };
     run(cmd, &format!("build component {label}"))
 }
 
@@ -615,9 +558,7 @@ fn build_chassis(profile: Profile) -> Result<()> {
 }
 
 fn run(mut cmd: Command, what: &str) -> Result<()> {
-    let status = cmd
-        .status()
-        .with_context(|| format!("spawn cargo to {what}"))?;
+    let status = cmd.status().with_context(|| format!("spawn cargo to {what}"))?;
     if !status.success() {
         bail!("cargo failed to {what} ({status})");
     }
@@ -639,9 +580,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::inventory::{discover_behaviors, discover_components};
-    use super::{
-        BundleChassis, BundlePlan, ComponentSource, PlannedComponent, bundle_manifest_json,
-    };
+    use super::{BundleChassis, BundlePlan, ComponentSource, PlannedComponent, bundle_manifest_json};
 
     #[test]
     fn bundle_manifest_carries_chassis_and_component_order() {
@@ -668,10 +607,7 @@ mod tests {
                 },
             ],
         };
-        let wasm_paths = vec![
-            PathBuf::from("/abs/first.wasm"),
-            PathBuf::from("/abs/second.wasm"),
-        ];
+        let wasm_paths = vec![PathBuf::from("/abs/first.wasm"), PathBuf::from("/abs/second.wasm")];
         let manifest = bundle_manifest_json(&plan, &wasm_paths).expect("render manifest");
         assert_eq!(manifest["chassis"], "headless");
         assert_eq!(manifest["tick_hz"], 30);
@@ -686,10 +622,7 @@ mod tests {
 
     #[test]
     fn discovers_expected_component_set() {
-        let metadata = cargo_metadata::MetadataCommand::new()
-            .no_deps()
-            .exec()
-            .expect("run cargo metadata");
+        let metadata = cargo_metadata::MetadataCommand::new().no_deps().exec().expect("run cargo metadata");
         let components = discover_components(&metadata);
         let stems: BTreeSet<&str> = components.iter().map(|c| c.stem.as_str()).collect();
 
@@ -703,10 +636,7 @@ mod tests {
             "aether_test_fixtures_stateful_reshaped",
             "aether_kit",
         ] {
-            assert!(
-                stems.contains(expected),
-                "discovery dropped component {expected}; found {stems:?}",
-            );
+            assert!(stems.contains(expected), "discovery dropped component {expected}; found {stems:?}",);
         }
 
         // The fixture crates are lib cdylibs, not `[[example]]` targets, so
@@ -716,42 +646,28 @@ mod tests {
             "aether_test_fixtures_stateful_typed",
             "aether_test_fixtures_stateful_reshaped",
         ] {
-            let component = components
-                .iter()
-                .find(|c| c.stem == fixture)
-                .unwrap_or_else(|| panic!("fixture {fixture} discovered"));
-            assert!(
-                !component.from_example,
-                "fixture {fixture} is a lib cdylib, not an example target",
-            );
+            let component =
+                components.iter().find(|c| c.stem == fixture).unwrap_or_else(|| panic!("fixture {fixture} discovered"));
+            assert!(!component.from_example, "fixture {fixture} is a lib cdylib, not an example target",);
         }
 
         // aether-actor's own example cdylibs are NOT components — the
         // crate does not depend on itself, so it fails the actor-dep gate.
         for excluded in ["hello", "input_logger"] {
-            assert!(
-                !stems.contains(excluded),
-                "discovery wrongly included aether-actor example {excluded}",
-            );
+            assert!(!stems.contains(excluded), "discovery wrongly included aether-actor example {excluded}",);
         }
     }
 
     #[test]
     fn discovers_behavior_fixtures_and_excludes_components() {
-        let metadata = cargo_metadata::MetadataCommand::new()
-            .no_deps()
-            .exec()
-            .expect("run cargo metadata");
+        let metadata = cargo_metadata::MetadataCommand::new().no_deps().exec().expect("run cargo metadata");
         let behaviors = discover_behaviors(&metadata);
         let stems: BTreeSet<&str> = behaviors.iter().map(|b| b.stem.as_str()).collect();
 
         // The #2688 fixture crate's example cdylibs depend on `aether-behavior`
         // and never `aether-actor`, so the behavior pass discovers each.
         for expected in ["intercept_slider", "intercept_slider_v2", "trap_script"] {
-            assert!(
-                stems.contains(expected),
-                "behavior discovery dropped {expected}; found {stems:?}",
-            );
+            assert!(stems.contains(expected), "behavior discovery dropped {expected}; found {stems:?}",);
         }
 
         // The disjointness guard: `aether-kit` declares an optional
@@ -768,11 +684,7 @@ mod tests {
         // Every discovered behavior is an `[[example]]` cdylib, so no lib-cdylib
         // special-casing on the build side.
         for behavior in &behaviors {
-            assert!(
-                behavior.from_example,
-                "behavior {} is an [[example]] cdylib",
-                behavior.stem,
-            );
+            assert!(behavior.from_example, "behavior {} is an [[example]] cdylib", behavior.stem,);
         }
     }
 }

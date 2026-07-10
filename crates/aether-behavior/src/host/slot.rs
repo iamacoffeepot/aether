@@ -91,8 +91,7 @@ impl ScriptSlot {
         fuel_per_call: u64,
         disable_after_traps: u32,
     ) -> Result<Self, String> {
-        let module = Module::new(engine, bytes)
-            .map_err(|error| alloc::format!("module compile: {error}"))?;
+        let module = Module::new(engine, bytes).map_err(|error| alloc::format!("module compile: {error}"))?;
         let manifest = decode_manifest(&module);
 
         let mut store = Store::new(engine, ());
@@ -101,9 +100,7 @@ impl ScriptSlot {
             .instantiate_and_start(&mut store, &module)
             .map_err(|error| alloc::format!("instantiate: {error}"))?;
 
-        let memory = instance
-            .get_memory(&store, "memory")
-            .ok_or_else(|| "script exports no `memory`".to_string())?;
+        let memory = instance.get_memory(&store, "memory").ok_or_else(|| "script exports no `memory`".to_string())?;
         let alloc_fn = instance
             .get_typed_func::<(u32, u32, u32, u32), u32>(&store, "alloc")
             .map_err(|error| alloc::format!("missing `alloc` export: {error}"))?;
@@ -112,12 +109,8 @@ impl ScriptSlot {
             .map_err(|error| alloc::format!("missing `filter` export: {error}"))?;
         // `state_save` / `state_load` are optional — a stateless script omits
         // them, and the host simply carries no migration blob for it.
-        let state_save_fn = instance
-            .get_typed_func::<(), u64>(&store, "state_save")
-            .ok();
-        let state_load_fn = instance
-            .get_typed_func::<(u32, u32), u32>(&store, "state_load")
-            .ok();
+        let state_save_fn = instance.get_typed_func::<(), u64>(&store, "state_save").ok();
+        let state_load_fn = instance.get_typed_func::<(u32, u32), u32>(&store, "state_load").ok();
 
         let mut slot = Self {
             store,
@@ -239,17 +232,10 @@ impl ScriptSlot {
     fn filter_inner(&mut self, kind: KindId, bytes: &[u8]) -> Result<FilterOutput, FaultReason> {
         // Fuel resets per call — a runaway script traps at the budget rather
         // than wedging the host.
-        self.store
-            .set_fuel(self.fuel_per_call)
-            .map_err(|_| FaultReason::FuelSetFailed)?;
+        self.store.set_fuel(self.fuel_per_call).map_err(|_| FaultReason::FuelSetFailed)?;
         let (ptr, len) = self.write_guest(bytes).ok_or(FaultReason::GuestWrite)?;
-        let packed = self
-            .filter_fn
-            .call(&mut self.store, (kind.0, ptr, len))
-            .map_err(classify_trap)?;
-        let out = self
-            .read_packed(packed)
-            .ok_or(FaultReason::MalformedReturn)?;
+        let packed = self.filter_fn.call(&mut self.store, (kind.0, ptr, len)).map_err(classify_trap)?;
+        let out = self.read_packed(packed).ok_or(FaultReason::MalformedReturn)?;
         envelope::decode(&out).ok_or(FaultReason::DecodeFailed { kind })
     }
 
@@ -276,9 +262,7 @@ impl ScriptSlot {
         // `alloc(old_ptr=0, old_size=0, align=1, new_size=len)` — a fresh
         // byte region (bytes need no alignment).
         let ptr = self.alloc_fn.call(&mut self.store, (0, 0, 1, len)).ok()?;
-        self.memory
-            .write(&mut self.store, ptr as usize, bytes)
-            .ok()?;
+        self.memory.write(&mut self.store, ptr as usize, bytes).ok()?;
         Some((ptr, len))
     }
 
@@ -296,9 +280,7 @@ fn classify_trap(error: wasmi::Error) -> FaultReason {
     if error.as_trap_code() == Some(TrapCode::OutOfFuel) {
         FaultReason::FuelExhausted
     } else {
-        FaultReason::Trap {
-            detail: error.to_string(),
-        }
+        FaultReason::Trap { detail: error.to_string() }
     }
 }
 
@@ -323,8 +305,8 @@ mod tests {
     use super::*;
     use crate::envelope::{Effect, EffectTarget, Verdict};
     use crate::host::test_support::{
-        conditional_trap_wasm, empty_return_wasm, fixed_output_wasm, forward_output,
-        fuel_exhausting_wasm, out_of_bounds_return_wasm, stateful_wasm, trapping_wasm,
+        conditional_trap_wasm, empty_return_wasm, fixed_output_wasm, forward_output, fuel_exhausting_wasm,
+        out_of_bounds_return_wasm, stateful_wasm, trapping_wasm,
     };
     use alloc::vec;
 
@@ -341,18 +323,12 @@ mod tests {
 
         // First two traps: fail-open passthrough, still running.
         for expected in 1..=2 {
-            assert!(matches!(
-                slot.filter(kind, b"abc"),
-                FilterOutcome::Passthrough
-            ));
+            assert!(matches!(slot.filter(kind, b"abc"), FilterOutcome::Passthrough));
             assert_eq!(slot.consecutive_traps(), expected);
             assert!(!slot.is_disabled());
         }
         // Third trap hits the threshold and disables.
-        assert!(matches!(
-            slot.filter(kind, b"abc"),
-            FilterOutcome::Passthrough
-        ));
+        assert!(matches!(slot.filter(kind, b"abc"), FilterOutcome::Passthrough));
         assert_eq!(slot.consecutive_traps(), 3);
         assert!(slot.is_disabled());
     }
@@ -363,21 +339,14 @@ mod tests {
     fn empty_return_counts_as_trap_and_disables_at_threshold() {
         let kind = KindId(0x1001);
         let engine = build_engine();
-        let mut slot =
-            ScriptSlot::instantiate(&engine, &empty_return_wasm(kind), None, 1_000_000, 2)
-                .expect("test setup: empty-return module instantiates");
+        let mut slot = ScriptSlot::instantiate(&engine, &empty_return_wasm(kind), None, 1_000_000, 2)
+            .expect("test setup: empty-return module instantiates");
 
-        assert!(matches!(
-            slot.filter(kind, b"malformed"),
-            FilterOutcome::Passthrough
-        ));
+        assert!(matches!(slot.filter(kind, b"malformed"), FilterOutcome::Passthrough));
         assert_eq!(slot.consecutive_traps(), 1);
         assert!(!slot.is_disabled());
 
-        assert!(matches!(
-            slot.filter(kind, b"malformed"),
-            FilterOutcome::Passthrough
-        ));
+        assert!(matches!(slot.filter(kind, b"malformed"), FilterOutcome::Passthrough));
         assert_eq!(slot.consecutive_traps(), 2);
         assert!(slot.is_disabled());
     }
@@ -391,9 +360,7 @@ mod tests {
         let mut slot = ScriptSlot::instantiate(&engine, &trapping_wasm(kind), None, 1_000_000, 3)
             .expect("test setup: trapping module instantiates");
 
-        let reason = slot
-            .filter_inner(kind, b"abc")
-            .expect_err("trapping module should fail");
+        let reason = slot.filter_inner(kind, b"abc").expect_err("trapping module should fail");
 
         assert!(matches!(reason, FaultReason::Trap { .. }));
     }
@@ -404,18 +371,12 @@ mod tests {
     fn out_of_fuel_classifies_as_fuel_exhausted() {
         let kind = KindId(0x1003);
         let engine = build_engine();
-        let mut slot =
-            ScriptSlot::instantiate(&engine, &fuel_exhausting_wasm(kind), None, 10_000, 3)
-                .expect("test setup: fuel-exhausting module instantiates");
+        let mut slot = ScriptSlot::instantiate(&engine, &fuel_exhausting_wasm(kind), None, 10_000, 3)
+            .expect("test setup: fuel-exhausting module instantiates");
 
-        let reason = slot
-            .filter_inner(kind, b"abc")
-            .expect_err("spinning module should exhaust fuel");
+        let reason = slot.filter_inner(kind, b"abc").expect_err("spinning module should exhaust fuel");
 
-        assert!(
-            matches!(reason, FaultReason::FuelExhausted),
-            "unexpected reason: {reason:?}"
-        );
+        assert!(matches!(reason, FaultReason::FuelExhausted), "unexpected reason: {reason:?}");
     }
 
     // Tripwire: a packed return outside linear memory is a malformed return,
@@ -424,18 +385,10 @@ mod tests {
     fn out_of_bounds_return_classifies_as_malformed_return() {
         let kind = KindId(0x1004);
         let engine = build_engine();
-        let mut slot = ScriptSlot::instantiate(
-            &engine,
-            &out_of_bounds_return_wasm(kind),
-            None,
-            1_000_000,
-            3,
-        )
-        .expect("test setup: malformed-return module instantiates");
+        let mut slot = ScriptSlot::instantiate(&engine, &out_of_bounds_return_wasm(kind), None, 1_000_000, 3)
+            .expect("test setup: malformed-return module instantiates");
 
-        let reason = slot
-            .filter_inner(kind, b"abc")
-            .expect_err("out-of-bounds packed return should fail");
+        let reason = slot.filter_inner(kind, b"abc").expect_err("out-of-bounds packed return should fail");
 
         assert!(matches!(reason, FaultReason::MalformedReturn));
     }
@@ -446,13 +399,10 @@ mod tests {
     fn empty_return_classifies_as_decode_failed_for_kind() {
         let kind = KindId(0x1005);
         let engine = build_engine();
-        let mut slot =
-            ScriptSlot::instantiate(&engine, &empty_return_wasm(kind), None, 1_000_000, 3)
-                .expect("test setup: empty-return module instantiates");
+        let mut slot = ScriptSlot::instantiate(&engine, &empty_return_wasm(kind), None, 1_000_000, 3)
+            .expect("test setup: empty-return module instantiates");
 
-        let reason = slot
-            .filter_inner(kind, b"abc")
-            .expect_err("empty packed return should not decode");
+        let reason = slot.filter_inner(kind, b"abc").expect_err("empty packed return should not decode");
 
         assert!(matches!(reason, FaultReason::DecodeFailed { kind: k } if k == kind));
     }
@@ -474,10 +424,7 @@ mod tests {
         )
         .expect("test setup: conditional-trap module instantiates");
 
-        assert!(matches!(
-            slot.filter(trap_kind, b"in"),
-            FilterOutcome::Passthrough
-        ));
+        assert!(matches!(slot.filter(trap_kind, b"in"), FilterOutcome::Passthrough));
         assert_eq!(slot.consecutive_traps(), 1);
         assert!(!slot.is_disabled());
 
@@ -500,14 +447,8 @@ mod tests {
         let declared = KindId(0x3000);
         let engine = build_engine();
         let payload = forward_output(b"x");
-        let slot = ScriptSlot::instantiate(
-            &engine,
-            &fixed_output_wasm(declared, &payload),
-            None,
-            1_000_000,
-            3,
-        )
-        .expect("test setup: module instantiates");
+        let slot = ScriptSlot::instantiate(&engine, &fixed_output_wasm(declared, &payload), None, 1_000_000, 3)
+            .expect("test setup: module instantiates");
         assert!(slot.handles(declared));
         assert!(!slot.handles(KindId(0x9999)));
     }
@@ -521,20 +462,10 @@ mod tests {
         let engine = build_engine();
         let output = FilterOutput {
             verdict: Verdict::Consume,
-            effects: vec![Effect {
-                target: EffectTarget::Widget,
-                kind_id: 0xABCD,
-                bytes: vec![1, 2, 3],
-            }],
+            effects: vec![Effect { target: EffectTarget::Widget, kind_id: 0xABCD, bytes: vec![1, 2, 3] }],
         };
-        let mut slot = ScriptSlot::instantiate(
-            &engine,
-            &fixed_output_wasm(kind, &output),
-            None,
-            1_000_000,
-            3,
-        )
-        .expect("test setup: module instantiates");
+        let mut slot = ScriptSlot::instantiate(&engine, &fixed_output_wasm(kind, &output), None, 1_000_000, 3)
+            .expect("test setup: module instantiates");
         match slot.filter(kind, b"in") {
             FilterOutcome::Output(out) => assert_eq!(out, output),
             FilterOutcome::Passthrough => panic!("expected a decoded output"),
@@ -557,14 +488,8 @@ mod tests {
         let engine = build_engine();
         let handled = KindId(0x5000);
         let default_blob = b"default state";
-        let mut slot = ScriptSlot::instantiate(
-            &engine,
-            &stateful_wasm(handled, default_blob),
-            None,
-            1_000_000,
-            3,
-        )
-        .expect("test setup: stateful module instantiates");
+        let mut slot = ScriptSlot::instantiate(&engine, &stateful_wasm(handled, default_blob), None, 1_000_000, 3)
+            .expect("test setup: stateful module instantiates");
 
         assert_eq!(slot.save_state(), default_blob);
     }
@@ -578,14 +503,9 @@ mod tests {
         let handled = KindId(0x5001);
         let default_blob = b"default state";
         let prior_blob = b"persist me";
-        let mut slot = ScriptSlot::instantiate(
-            &engine,
-            &stateful_wasm(handled, default_blob),
-            Some(prior_blob),
-            1_000_000,
-            3,
-        )
-        .expect("test setup: stateful module instantiates");
+        let mut slot =
+            ScriptSlot::instantiate(&engine, &stateful_wasm(handled, default_blob), Some(prior_blob), 1_000_000, 3)
+                .expect("test setup: stateful module instantiates");
 
         assert_eq!(slot.save_state(), prior_blob);
     }
@@ -596,14 +516,8 @@ mod tests {
         let engine = build_engine();
         let handled = KindId(0x5002);
         let output = forward_output(b"stateless");
-        let mut slot = ScriptSlot::instantiate(
-            &engine,
-            &fixed_output_wasm(handled, &output),
-            None,
-            1_000_000,
-            3,
-        )
-        .expect("test setup: stateless module instantiates");
+        let mut slot = ScriptSlot::instantiate(&engine, &fixed_output_wasm(handled, &output), None, 1_000_000, 3)
+            .expect("test setup: stateless module instantiates");
 
         assert!(slot.save_state().is_empty());
     }
@@ -615,14 +529,8 @@ mod tests {
         let engine = build_engine();
         let handled = KindId(0x5003);
         let output = forward_output(b"still running");
-        let mut slot = ScriptSlot::instantiate(
-            &engine,
-            &fixed_output_wasm(handled, &output),
-            None,
-            1_000_000,
-            3,
-        )
-        .expect("test setup: stateless module instantiates");
+        let mut slot = ScriptSlot::instantiate(&engine, &fixed_output_wasm(handled, &output), None, 1_000_000, 3)
+            .expect("test setup: stateless module instantiates");
 
         slot.offer_state(b"ignored");
 

@@ -21,8 +21,7 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    ActorInitError, Mail, Manual, OutboundReply, PriorState, WasmActor, WasmCtx, WasmDropCtx,
-    WasmInitCtx, actor,
+    ActorInitError, Mail, Manual, OutboundReply, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 

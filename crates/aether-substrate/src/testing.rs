@@ -144,23 +144,17 @@ pub fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
 /// The driving `NativeCtx` carries no inbound reply target ([`Source::NONE`]):
 /// the completion's reply routes through the reply target captured at
 /// dispatch and parked in the framework's in-flight ledger, not this ctx.
-pub fn drive_task_completion<A>(
-    state: &mut A::State,
-    binding: &Arc<NativeBinding>,
-    rx: &Receiver<EgressEvent>,
-) where
+pub fn drive_task_completion<A>(state: &mut A::State, binding: &Arc<NativeBinding>, rx: &Receiver<EgressEvent>)
+where
     // Dispatch is a `NativeActor` assoc fn over `&mut Self::State` (ADR-0122
     // identity/runtime split). The param is the associated projection, so `A`
     // is not inferable from it — every call site names it via turbofish.
     A: NativeActor,
 {
     let payload = loop {
-        let event = rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("test: dispatch completion wake arrives within deadline");
-        if let EgressEvent::UnresolvedMail {
-            kind_id, payload, ..
-        } = event
+        let event =
+            rx.recv_timeout(Duration::from_secs(2)).expect("test: dispatch completion wake arrives within deadline");
+        if let EgressEvent::UnresolvedMail { kind_id, payload, .. } = event
             && kind_id == TaskCompletionWake::ID
         {
             break payload;
@@ -168,12 +162,8 @@ pub fn drive_task_completion<A>(
     };
     // ADR-0112: route through the macro dispatch seam, which carries the
     // `Manual` ctx — build it via `new_dispatching`, not `new`.
-    let mut ctx = NativeCtx::new_dispatching(
-        binding,
-        Source::NONE,
-        aether_data::MailId::NONE,
-        aether_data::MailId::NONE,
-    );
+    let mut ctx =
+        NativeCtx::new_dispatching(binding, Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
     A::dispatch(state, &mut ctx, TaskCompletionWake::ID, &payload)
         .expect("test: task completion routes to a #[handler(task)] arm");
 }
@@ -191,12 +181,8 @@ where
     K: Kind,
 {
     loop {
-        let event = rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("test: egress event arrives within deadline");
-        if let EgressEvent::ToSession {
-            kind_name, payload, ..
-        } = event
+        let event = rx.recv_timeout(Duration::from_secs(2)).expect("test: egress event arrives within deadline");
+        if let EgressEvent::ToSession { kind_name, payload, .. } = event
             && kind_name == K::NAME
         {
             return K::decode_from_bytes(&payload).expect("test: reply payload decodes");
@@ -213,13 +199,8 @@ pub fn decode_reply<K>(rx: &Receiver<EgressEvent>) -> K
 where
     K: Kind,
 {
-    let event = rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("test: egress event arrives within 1s deadline");
-    let EgressEvent::ToSession {
-        kind_name, payload, ..
-    } = event
-    else {
+    let event = rx.recv_timeout(Duration::from_secs(1)).expect("test: egress event arrives within 1s deadline");
+    let EgressEvent::ToSession { kind_name, payload, .. } = event else {
         panic!("expected ToSession egress, got {event:?}");
     };
     assert_eq!(kind_name, K::NAME);

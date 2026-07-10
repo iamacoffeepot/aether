@@ -24,11 +24,7 @@ mod tests {
     const PROBE_NAME: &str = "probe";
 
     fn probe_address() -> String {
-        format!(
-            "aether.component/{}:{}",
-            aether_capabilities::WasmTrampoline::NAMESPACE,
-            PROBE_NAME,
-        )
+        format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, PROBE_NAME,)
     }
 
     /// `info` in the `0 = trace .. 4 = error` level mapping shared across
@@ -65,40 +61,24 @@ mod tests {
                 "load",
                 BenchOp::send_and_await(
                     "aether.component",
-                    &LoadComponent {
-                        wasm,
-                        name: Some(PROBE_NAME.to_owned()),
-                        config: Vec::new(),
-                        export: None,
-                    },
+                    &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
                 ),
             )])
             .expect("load probe");
-        match loaded
-            .reply::<LoadResult>("load")
-            .expect("decode LoadResult")
-        {
+        match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
             LoadResult::Ok { .. } => {}
             LoadResult::Err { error } => panic!("load_component: {error}"),
         }
 
-        bench
-            .execute(vec![("tick", BenchOp::advance(1))])
-            .expect("advance one tick");
+        bench.execute(vec![("tick", BenchOp::advance(1))]).expect("advance one tick");
 
         let addr = probe_address();
         let mut last_reply = None;
         let mut found = None;
         for _ in 0..POLL_ATTEMPTS {
             let reply = bench.log_tail(&addr, None);
-            if let LogTailResult::Ok {
-                ref entries,
-                next_since,
-                ..
-            } = reply
-                && let Some(entry) = entries
-                    .iter()
-                    .find(|e| e.message == "typed_send_alive" && e.level == LEVEL_INFO)
+            if let LogTailResult::Ok { ref entries, next_since, .. } = reply
+                && let Some(entry) = entries.iter().find(|e| e.message == "typed_send_alive" && e.level == LEVEL_INFO)
             {
                 found = Some((entry.clone(), next_since));
                 break;
@@ -114,11 +94,7 @@ mod tests {
             )
         });
 
-        assert!(
-            entry.sequence >= 1,
-            "a buffered entry should carry a 1-based ring sequence, got {}",
-            entry.sequence,
-        );
+        assert!(entry.sequence >= 1, "a buffered entry should carry a 1-based ring sequence, got {}", entry.sequence,);
 
         // Walk the cursor: a re-query past `next_since` must not re-yield
         // the entry we already consumed.

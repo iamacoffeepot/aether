@@ -81,13 +81,7 @@ impl<A> InheritCtx<A> {
         inherited_root: MailId,
         hold: Option<SettlementHold>,
     ) -> Self {
-        Self {
-            binding,
-            inherited_mail_id,
-            inherited_root,
-            _hold: hold,
-            _phantom: PhantomData,
-        }
+        Self { binding, inherited_mail_id, inherited_root, _hold: hold, _phantom: PhantomData }
     }
 
     /// The in-flight `MailId` this ctx inherited from its spawning
@@ -105,19 +99,11 @@ impl<A> InheritCtx<A> {
     }
 
     fn outbound_parent(&self) -> Option<MailId> {
-        if self.inherited_mail_id == MailId::NONE {
-            None
-        } else {
-            Some(self.inherited_mail_id)
-        }
+        if self.inherited_mail_id == MailId::NONE { None } else { Some(self.inherited_mail_id) }
     }
 
     fn outbound_root(&self) -> Option<MailId> {
-        if self.inherited_root == MailId::NONE {
-            None
-        } else {
-            Some(self.inherited_root)
-        }
+        if self.inherited_root == MailId::NONE { None } else { Some(self.inherited_root) }
     }
 }
 
@@ -185,8 +171,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
     // rather than inheriting this ctx's captured chain (ADR-0080 §7).
     fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.binding
-            .send_mail_with_lineage(id.0, K::ID.0, &bytes, 1, None, None);
+        self.binding.send_mail_with_lineage(id.0, K::ID.0, &bytes, 1, None, None);
     }
 }
 
@@ -205,10 +190,7 @@ impl<A> RootCtx<A> {
     /// Construct from raw parts. Crate-private — produced only by
     /// [`super::ctx::NativeCtx::spawn_detached`].
     pub(crate) fn new(binding: Arc<NativeBinding>) -> Self {
-        Self {
-            binding,
-            _phantom: PhantomData,
-        }
+        Self { binding, _phantom: PhantomData }
     }
 }
 
@@ -221,14 +203,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
         let bytes = payload.encode_into_bytes();
         // No inherited parent / root — each send mints its own chain
         // rooted at the freshly minted `MailId` (sender = A.mailbox).
-        self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.carry(), ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            None,
-            None,
-        );
+        self.binding.send_mail_with_lineage(R::resolve(self.binding.carry(), ()).0, K::ID.0, &bytes, 1, None, None);
     }
 
     fn send_many<R, K>(&mut self, payloads: &[K])
@@ -241,14 +216,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
         // realistic mail batches stay well below `u32::MAX`.
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
-        self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.carry(), ()).0,
-            K::ID.0,
-            bytes,
-            count,
-            None,
-            None,
-        );
+        self.binding.send_mail_with_lineage(R::resolve(self.binding.carry(), ()).0, K::ID.0, bytes, count, None, None);
     }
 
     // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
@@ -256,14 +224,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
     #[allow(clippy::disallowed_methods)]
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.binding.send_mail_with_lineage(
-            mailbox_id_from_name(name).0,
-            K::ID.0,
-            &bytes,
-            1,
-            None,
-            None,
-        );
+        self.binding.send_mail_with_lineage(mailbox_id_from_name(name).0, K::ID.0, &bytes, 1, None, None);
     }
 
     fn prev_correlation(&self) -> u64 {
@@ -275,8 +236,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
     // so this matches its other sends' `None` / `None` lineage.
     fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.binding
-            .send_mail_with_lineage(id.0, K::ID.0, &bytes, 1, None, None);
+        self.binding.send_mail_with_lineage(id.0, K::ID.0, &bytes, 1, None, None);
     }
 }
 
@@ -424,10 +384,7 @@ mod tests {
         let captured = register_capture(&registry, "test.spawn_thread.recipient");
 
         let producer_mailbox = MailboxId(0xAA);
-        let binding = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            producer_mailbox,
-        ));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), producer_mailbox));
 
         let inherited_root = MailId::new(MailboxId(0x1234), 7);
         let inherited_mail_id = MailId::new(MailboxId(0x5678), 13);
@@ -449,10 +406,7 @@ mod tests {
         let captured = captured.lock().unwrap();
         assert_eq!(captured.len(), 1, "exactly one mail dispatched");
         let dispatch = &captured[0];
-        assert_eq!(
-            dispatch.root, inherited_root,
-            "spawned-thread send inherits parent root"
-        );
+        assert_eq!(dispatch.root, inherited_root, "spawned-thread send inherits parent root");
         assert_eq!(
             dispatch.parent_mail,
             Some(inherited_mail_id),
@@ -464,10 +418,7 @@ mod tests {
             dispatch.mail_id.sender, producer_mailbox,
             "fresh mail_id carries the binding's actor mailbox as producer"
         );
-        assert!(
-            dispatch.mail_id.correlation_id > 0,
-            "fresh mail_id has a non-zero correlation"
-        );
+        assert!(dispatch.mail_id.correlation_id > 0, "fresh mail_id has a non-zero correlation");
     }
 
     /// `RootCtx`-spawned thread's `send_to_named` mints a fresh root
@@ -478,10 +429,7 @@ mod tests {
         let captured = register_capture(&registry, "test.spawn_thread.recipient");
 
         let producer_mailbox = MailboxId(0xBB);
-        let binding = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            producer_mailbox,
-        ));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), producer_mailbox));
 
         let join = spawn_detached::<StubActor, _>(Arc::clone(&binding), move |mut root| {
             <RootCtx<StubActor> as MailSender>::send_to_named(
@@ -495,14 +443,8 @@ mod tests {
         let captured = captured.lock().unwrap();
         assert_eq!(captured.len(), 1, "exactly one mail dispatched");
         let dispatch = &captured[0];
-        assert_eq!(
-            dispatch.parent_mail, None,
-            "RootCtx send has no parent — chassis-root style"
-        );
-        assert_eq!(
-            dispatch.root, dispatch.mail_id,
-            "RootCtx send is its own root"
-        );
+        assert_eq!(dispatch.parent_mail, None, "RootCtx send has no parent — chassis-root style");
+        assert_eq!(dispatch.root, dispatch.mail_id, "RootCtx send is its own root");
         assert_eq!(
             dispatch.mail_id.sender, producer_mailbox,
             "fresh mail_id carries the binding's actor mailbox as producer"
@@ -519,10 +461,7 @@ mod tests {
         let captured = register_capture(&registry, "test.spawn_thread.recipient");
 
         let producer_mailbox = MailboxId(0xCC);
-        let binding = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            producer_mailbox,
-        ));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), producer_mailbox));
 
         let join = spawn_detached::<StubActor, _>(Arc::clone(&binding), move |mut root| {
             for _ in 0..3 {
@@ -562,25 +501,18 @@ mod tests {
         let (_registry, mailer) = fresh_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let producer_mailbox = MailboxId(0xC0FE_C0FE_C0FE_C0FE);
-        let binding = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            producer_mailbox,
-        ));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), producer_mailbox));
         let inherited_root = MailId::new(MailboxId(0xC0FE_C0FE_C0FE_C0FE), 9001);
         let inherited_mail_id = MailId::new(MailboxId(0xC0FE_C0FE_C0FE_C0FE), 9002);
 
         // Gate the worker so the hold stays open across the assertion.
         let (gate_tx, gate_rx) = channel::<()>();
-        let join = spawn_inherit::<StubActor, _>(
-            Arc::clone(&binding),
-            inherited_mail_id,
-            inherited_root,
-            move |_inherit| {
+        let join =
+            spawn_inherit::<StubActor, _>(Arc::clone(&binding), inherited_mail_id, inherited_root, move |_inherit| {
                 // Block until released — the SettlementHold (moved into
                 // this worker's InheritCtx) is held for the whole body.
                 let _ = gate_rx.recv();
-            },
-        );
+            });
 
         // The hold is acquired on the parent thread before the spawn, so
         // it is open now regardless of worker scheduling.
@@ -595,11 +527,7 @@ mod tests {
 
         // The InheritCtx dropped on worker exit → hold released → the
         // (0, 0) cell is reclaimed.
-        assert_eq!(
-            counter.held_open(inherited_root),
-            0,
-            "the hold must release when the worker exits"
-        );
+        assert_eq!(counter.held_open(inherited_root), 0, "the hold must release when the worker exits");
     }
 
     /// `MailId::NONE` inherited root skips the hold — there's no chain to
@@ -609,30 +537,14 @@ mod tests {
         let (_registry, mailer) = fresh_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let producer_mailbox = MailboxId(0xC0FE_DEAD_C0FE_DEAD);
-        let binding = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            producer_mailbox,
-        ));
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), producer_mailbox));
 
         let live_before = counter.live_roots();
-        let join = spawn_inherit::<StubActor, _>(
-            Arc::clone(&binding),
-            MailId::NONE,
-            MailId::NONE,
-            move |_inherit| {},
-        );
+        let join = spawn_inherit::<StubActor, _>(Arc::clone(&binding), MailId::NONE, MailId::NONE, move |_inherit| {});
         join.join().expect("inherit worker thread joins");
 
-        assert_eq!(
-            counter.held_open(MailId::NONE),
-            0,
-            "MailId::NONE root must not acquire a settlement hold"
-        );
-        assert_eq!(
-            counter.live_roots(),
-            live_before,
-            "a NONE-root spawn must not create a settlement cell"
-        );
+        assert_eq!(counter.held_open(MailId::NONE), 0, "MailId::NONE root must not acquire a settlement hold");
+        assert_eq!(counter.live_roots(), live_before, "a NONE-root spawn must not create a settlement cell");
     }
 
     /// Setup smoke: a `Mail` pushed bare via `Mailer` doesn't trigger
@@ -643,9 +555,7 @@ mod tests {
         let (registry, mailer) = fresh_substrate();
         let captured = register_capture(&registry, "test.spawn_thread.recipient");
 
-        let recipient = registry
-            .lookup("test.spawn_thread.recipient")
-            .expect("recipient registered");
+        let recipient = registry.lookup("test.spawn_thread.recipient").expect("recipient registered");
         let kind = <aether_kinds::Tick as Kind>::ID;
         let payload = aether_data::encode_empty::<aether_kinds::Tick>();
         mailer.push(Mail::new(recipient, KindId(kind.0), payload, 1));

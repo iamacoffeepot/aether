@@ -101,15 +101,8 @@ pub struct HelloAck {
 /// - `Client` peers (CLI / TUI / external) just identify themselves.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PeerKind {
-    Substrate {
-        engine_name: String,
-        engine_version: String,
-        kinds: Vec<KindDescriptor>,
-    },
-    Client {
-        client_name: String,
-        client_version: String,
-    },
+    Substrate { engine_name: String, engine_version: String, kinds: Vec<KindDescriptor> },
+    Client { client_name: String, client_version: String },
 }
 
 /// Minimal kind-vocabulary entry carried in [`PeerKind::Substrate`].
@@ -160,10 +153,7 @@ impl MailboxAddress {
     /// Address a local mailbox (no engine routing).
     #[must_use]
     pub const fn local(mailbox: MailboxId) -> Self {
-        Self {
-            engine: None,
-            mailbox,
-        }
+        Self { engine: None, mailbox }
     }
 }
 
@@ -334,22 +324,13 @@ mod client {
             // BufReader is created once over the original stream and moved
             // into the reader thread afterwards, so any bytes it buffered
             // past the HelloAck frame are not lost.
-            write_frame(
-                &mut write_half,
-                &WireFrame::Hello(Hello {
-                    wire_version: WIRE_VERSION,
-                    peer,
-                }),
-            )
-            .map_err(RpcClientError::Frame)?;
+            write_frame(&mut write_half, &WireFrame::Hello(Hello { wire_version: WIRE_VERSION, peer }))
+                .map_err(RpcClientError::Frame)?;
 
             let mut reader = BufReader::new(stream);
             let first: WireFrame = read_frame(&mut reader).map_err(RpcClientError::Frame)?;
             let server = match first {
-                WireFrame::HelloAck(HelloAck {
-                    wire_version,
-                    server,
-                }) => {
+                WireFrame::HelloAck(HelloAck { wire_version, server }) => {
                     if wire_version != WIRE_VERSION {
                         return Err(RpcClientError::Handshake(format!(
                             "wire_version mismatch: server={wire_version}, client={WIRE_VERSION}"
@@ -358,14 +339,10 @@ mod client {
                     server
                 }
                 WireFrame::Bye { reason } => {
-                    return Err(RpcClientError::Handshake(format!(
-                        "server rejected handshake: {reason}"
-                    )));
+                    return Err(RpcClientError::Handshake(format!("server rejected handshake: {reason}")));
                 }
                 other => {
-                    return Err(RpcClientError::Handshake(format!(
-                        "expected HelloAck, got {other:?}"
-                    )));
+                    return Err(RpcClientError::Handshake(format!("expected HelloAck, got {other:?}")));
                 }
             };
 
@@ -398,9 +375,7 @@ mod client {
                                 // error: surface it as a Bye so the
                                 // consumer's drain observes the close.
                                 let reason = match &e {
-                                    FrameError::Io(io_err)
-                                        if io_err.kind() == io::ErrorKind::UnexpectedEof =>
-                                    {
+                                    FrameError::Io(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof => {
                                         "eof".to_string()
                                     }
                                     other => format!("read error: {other}"),
@@ -420,17 +395,10 @@ mod client {
                 .map_err(RpcClientError::Connect)?;
 
             Ok(RpcConnection {
-                client: Self {
-                    write_half,
-                    next_cid: 1,
-                },
+                client: Self { write_half, next_cid: 1 },
                 server,
                 inbound: inbound_rx,
-                reader: RpcReaderHandle {
-                    shutdown,
-                    wake_handle,
-                    thread: Some(thread),
-                },
+                reader: RpcReaderHandle { shutdown, wake_handle, thread: Some(thread) },
             })
         }
 
@@ -441,22 +409,15 @@ mod client {
         pub fn call(&mut self, envelope: MailEnvelope) -> Result<u64, RpcClientError> {
             let cid = self.next_cid;
             self.next_cid += 1;
-            write_frame(
-                &mut self.write_half,
-                &WireFrame::Call {
-                    cid: Some(cid),
-                    envelope,
-                },
-            )
-            .map_err(RpcClientError::Frame)?;
+            write_frame(&mut self.write_half, &WireFrame::Call { cid: Some(cid), envelope })
+                .map_err(RpcClientError::Frame)?;
             Ok(cid)
         }
 
         /// Write a `Ping(nonce)` liveness probe. The server mirrors it
         /// back as `Pong(nonce)` on the inbound channel.
         pub fn ping(&mut self, nonce: u64) -> Result<(), RpcClientError> {
-            write_frame(&mut self.write_half, &WireFrame::Ping(nonce))
-                .map_err(RpcClientError::Frame)?;
+            write_frame(&mut self.write_half, &WireFrame::Ping(nonce)).map_err(RpcClientError::Frame)?;
             Ok(())
         }
     }
@@ -474,18 +435,11 @@ mod client {
         use std::time::Duration;
 
         fn substrate_peer_kind() -> PeerKind {
-            PeerKind::Substrate {
-                engine_name: "test".into(),
-                engine_version: "0.1.0".into(),
-                kinds: vec![],
-            }
+            PeerKind::Substrate { engine_name: "test".into(), engine_version: "0.1.0".into(), kinds: vec![] }
         }
 
         fn client_peer_kind() -> PeerKind {
-            PeerKind::Client {
-                client_name: "rpc-client-test".into(),
-                client_version: "0.0.1".into(),
-            }
+            PeerKind::Client { client_name: "rpc-client-test".into(), client_version: "0.0.1".into() }
         }
 
         /// Spin a one-shot fake server on an OS-picked port: bind, hand
@@ -514,23 +468,17 @@ mod client {
                 let _hello: WireFrame = read_frame(&mut reader).expect("read Hello");
                 write_frame(
                     &mut stream,
-                    &WireFrame::HelloAck(HelloAck {
-                        wire_version: WIRE_VERSION,
-                        server: substrate_peer_kind(),
-                    }),
+                    &WireFrame::HelloAck(HelloAck { wire_version: WIRE_VERSION, server: substrate_peer_kind() }),
                 )
                 .expect("write HelloAck");
                 // Return — drops the stream, closing the peer side.
             });
 
-            let conn = RpcClient::connect(&format!("127.0.0.1:{port}"), client_peer_kind(), || {})
-                .expect("client connects");
+            let conn =
+                RpcClient::connect(&format!("127.0.0.1:{port}"), client_peer_kind(), || {}).expect("client connects");
             server.join().expect("fake server thread");
 
-            let frame = conn
-                .inbound
-                .recv_timeout(Duration::from_secs(2))
-                .expect("Bye within 2s");
+            let frame = conn.inbound.recv_timeout(Duration::from_secs(2)).expect("Bye within 2s");
             match frame {
                 WireFrame::Bye { reason } => assert_eq!(reason, "eof"),
                 other => panic!("expected Bye, got {other:?}"),
@@ -547,23 +495,18 @@ mod client {
                 let _hello: WireFrame = read_frame(&mut reader).expect("read Hello");
                 write_frame(
                     &mut stream,
-                    &WireFrame::HelloAck(HelloAck {
-                        wire_version: WIRE_VERSION + 1,
-                        server: substrate_peer_kind(),
-                    }),
+                    &WireFrame::HelloAck(HelloAck { wire_version: WIRE_VERSION + 1, server: substrate_peer_kind() }),
                 )
                 .expect("write HelloAck");
             });
 
-            let result =
-                RpcClient::connect(&format!("127.0.0.1:{port}"), client_peer_kind(), || {});
+            let result = RpcClient::connect(&format!("127.0.0.1:{port}"), client_peer_kind(), || {});
             server.join().expect("fake server thread");
 
             match result {
-                Err(RpcClientError::Handshake(reason)) => assert!(
-                    reason.contains("wire_version"),
-                    "handshake error should mention wire_version: {reason}",
-                ),
+                Err(RpcClientError::Handshake(reason)) => {
+                    assert!(reason.contains("wire_version"), "handshake error should mention wire_version: {reason}",)
+                }
                 Err(other) => panic!("expected Handshake error, got {other:?}"),
                 Ok(_) => panic!("mismatched wire_version should not yield a connection"),
             }

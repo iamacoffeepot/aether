@@ -43,8 +43,8 @@
 // these kinds from here.
 use crate::engine::kinds::{EngineAlive, EngineDied, RouteEnvelope};
 use aether_kinds::{
-    ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine,
-    TerminateEngine, UploadBinary, UploadComponent,
+    ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SpawnEngine, TerminateEngine,
+    UploadBinary, UploadComponent,
 };
 // The per-handler reply kinds the `#[actor]`-emitted native markers name.
 // Those markers ride `not(wasm)`, so they exist on every host build — `runtime`
@@ -55,9 +55,8 @@ use aether_kinds::{
 // build still reaches these kinds through `use runtime::*`.
 #[cfg(all(not(target_family = "wasm"), not(feature = "runtime")))]
 use aether_kinds::{
-    ListComponentBinariesResult, ListEngineBinariesResult, ListEnginesResult,
-    ResolveComponentResult, SpawnEngineResult, TerminateEngineResult, UploadBinaryResult,
-    UploadComponentResult,
+    ListComponentBinariesResult, ListEngineBinariesResult, ListEnginesResult, ResolveComponentResult,
+    SpawnEngineResult, TerminateEngineResult, UploadBinaryResult, UploadComponentResult,
 };
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
@@ -161,29 +160,17 @@ impl NativeActor for ReplySink {
 
     #[handler::single]
     fn on_list_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: ListEnginesResult) {
-        *self
-            .cells
-            .list
-            .lock()
-            .expect("test setup: list cell mutex poisoned") = Some(reply);
+        *self.cells.list.lock().expect("test setup: list cell mutex poisoned") = Some(reply);
     }
 
     #[handler::single]
     fn on_spawn_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: SpawnEngineResult) {
-        *self
-            .cells
-            .spawn
-            .lock()
-            .expect("test setup: spawn cell mutex poisoned") = Some(reply);
+        *self.cells.spawn.lock().expect("test setup: spawn cell mutex poisoned") = Some(reply);
     }
 
     #[handler::single]
     fn on_terminate_result(&mut self, _ctx: &mut NativeCtx<'_>, reply: TerminateEngineResult) {
-        *self
-            .cells
-            .terminate
-            .lock()
-            .expect("test setup: terminate cell mutex poisoned") = Some(reply);
+        *self.cells.terminate.lock().expect("test setup: terminate cell mutex poisoned") = Some(reply);
     }
 }
 
@@ -226,10 +213,7 @@ mod tests {
         // the ADR-0090 config field so these unit tests never touch the real
         // `dirs::data_dir()` store. Heartbeat stays disabled (the `Default`);
         // only the store dir is overridden.
-        let config = EngineConfig {
-            binary_store_dir: Some(isolated_store_dir()),
-            ..EngineConfig::default()
-        };
+        let config = EngineConfig { binary_store_dir: Some(isolated_store_dir()), ..EngineConfig::default() };
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<EngineServer>(config)
             .with_actor::<ReplySink>(cells.clone())
@@ -243,13 +227,8 @@ mod tests {
     /// by [`boot`] so they never touch the real `dirs::data_dir()` store. No
     /// env side-channel — the store dir now rides the config (ADR-0090).
     fn isolated_store_dir() -> String {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        env::temp_dir()
-            .join(format!("aether-binstore-engcap-{}-{nanos}", process::id()))
-            .to_string_lossy()
-            .into_owned()
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        env::temp_dir().join(format!("aether-binstore-engcap-{}-{nanos}", process::id())).to_string_lossy().into_owned()
     }
 
     /// Drive one request kind at `aether.engine`, reply-to the sink,
@@ -277,33 +256,18 @@ mod tests {
     /// earlier mail (single-threaded actor, in-order mailbox). Returns
     /// the full `ListEnginesResult` the cap reports afterward — both the
     /// live `engines` and the `recently_died` ring.
-    fn push_then_list<K: Kind>(
-        mailer: &Arc<Mailer>,
-        cells: &ReplyCells,
-        fire: &K,
-    ) -> aether_kinds::ListEnginesResult {
+    fn push_then_list<K: Kind>(mailer: &Arc<Mailer>, cells: &ReplyCells, fire: &K) -> aether_kinds::ListEnginesResult {
         let server = mailbox_id_from_name(<EngineServer as Addressable>::NAMESPACE);
         mailer.push(Mail::new(server, K::ID, fire.encode_into_bytes(), 1));
-        drive(mailer, &ListEngines {}, || {
-            cells
-                .list
-                .lock()
-                .expect("test setup: list cell mutex poisoned")
-                .take()
-        })
+        drive(mailer, &ListEngines {}, || cells.list.lock().expect("test setup: list cell mutex poisoned").take())
     }
 
     /// `on_list` on a fresh cap replies with an empty engine list.
     #[test]
     fn list_on_empty_cap_is_empty() {
         let (_chassis, mailer, cells) = boot();
-        let result = drive(&mailer, &ListEngines {}, || {
-            cells
-                .list
-                .lock()
-                .expect("test setup: list cell mutex poisoned")
-                .take()
-        });
+        let result =
+            drive(&mailer, &ListEngines {}, || cells.list.lock().expect("test setup: list cell mutex poisoned").take());
         assert!(result.engines.is_empty(), "fresh cap supervises no engines");
     }
 
@@ -326,20 +290,11 @@ mod tests {
                 args: vec![],
                 boot_manifest: None,
             },
-            || {
-                cells
-                    .spawn
-                    .lock()
-                    .expect("test setup: spawn cell mutex poisoned")
-                    .take()
-            },
+            || cells.spawn.lock().expect("test setup: spawn cell mutex poisoned").take(),
         );
         match result {
             SpawnEngineResult::Err { error, .. } => {
-                assert!(
-                    error.contains("no binary in the registry matched selector"),
-                    "unexpected error: {error}"
-                );
+                assert!(error.contains("no binary in the registry matched selector"), "unexpected error: {error}");
             }
             SpawnEngineResult::Ok { .. } => {
                 panic!("an unresolvable selector must not spawn")
@@ -361,13 +316,8 @@ mod tests {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let dir = env::temp_dir().join(format!(
-            "aether-binstore-bootstrap-{}-{nanos}",
-            process::id()
-        ));
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = env::temp_dir().join(format!("aether-binstore-bootstrap-{}-{nanos}", process::id()));
         fs::create_dir_all(&dir).expect("test setup: bootstrap temp dir");
 
         // A stand-in chassis bin: on `--describe` it prints a headless
@@ -380,29 +330,17 @@ mod tests {
                  \"profile\":\"debug\",\"target\":\"x86_64-unknown-linux-gnu\"}'; fi\n",
         )
         .expect("test setup: write stand-in");
-        fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755))
-            .expect("test setup: chmod stand-in");
+        fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).expect("test setup: chmod stand-in");
 
         let mut store = ArtifactStore::open(&dir.join("store"), DEFAULT_DISK_BUDGET_BYTES);
         let bootstrap = HashSet::from([stand_in.to_string_lossy().into_owned()]);
         bootstrap_ingest(&mut store, &bootstrap);
 
-        let resolved = resolve_selector(
-            &mut store,
-            &BinarySelector {
-                query: None,
-                chassis: None,
-                caps: vec![],
-                target: None,
-            },
-        )
-        .expect("the default selector resolves to the bootstrapped headless bin");
+        let resolved =
+            resolve_selector(&mut store, &BinarySelector { query: None, chassis: None, caps: vec![], target: None })
+                .expect("the default selector resolves to the bootstrapped headless bin");
         assert_eq!(
-            resolved
-                .manifest
-                .as_binary()
-                .expect("the resolved artifact is a binary")
-                .chassis,
+            resolved.manifest.as_binary().expect("the resolved artifact is a binary").chassis,
             "headless",
             "default resolves to the headless chassis",
         );
@@ -417,37 +355,15 @@ mod tests {
     fn terminate_unknown_engine_replies_err() {
         let (_chassis, mailer, cells) = boot();
 
-        let malformed = drive(
-            &mailer,
-            &TerminateEngine {
-                engine_id: "not-a-uuid".to_owned(),
-            },
-            || {
-                cells
-                    .terminate
-                    .lock()
-                    .expect("test setup: terminate cell mutex poisoned")
-                    .take()
-            },
-        );
-        assert!(
-            matches!(malformed, TerminateEngineResult::Err { .. }),
-            "a malformed engine_id should be rejected",
-        );
+        let malformed = drive(&mailer, &TerminateEngine { engine_id: "not-a-uuid".to_owned() }, || {
+            cells.terminate.lock().expect("test setup: terminate cell mutex poisoned").take()
+        });
+        assert!(matches!(malformed, TerminateEngineResult::Err { .. }), "a malformed engine_id should be rejected",);
 
-        let unknown = drive(
-            &mailer,
-            &TerminateEngine {
-                engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
-            },
-            || {
-                cells
-                    .terminate
-                    .lock()
-                    .expect("test setup: terminate cell mutex poisoned")
-                    .take()
-            },
-        );
+        let unknown =
+            drive(&mailer, &TerminateEngine { engine_id: "00000000-0000-0000-0000-000000000000".to_owned() }, || {
+                cells.terminate.lock().expect("test setup: terminate cell mutex poisoned").take()
+            });
         assert!(
             matches!(unknown, TerminateEngineResult::Err { .. }),
             "a well-formed but unknown engine_id should be rejected",
@@ -471,38 +387,22 @@ mod tests {
             &cells,
             &EngineDied {
                 engine_id: "not-a-uuid".to_owned(),
-                reason: DeathReason::Crashed {
-                    detail: "peer closed".to_owned(),
-                },
+                reason: DeathReason::Crashed { detail: "peer closed".to_owned() },
             },
         );
-        assert!(
-            after_malformed.engines.is_empty(),
-            "a malformed died must not panic or insert",
-        );
-        assert!(
-            after_malformed.recently_died.is_empty(),
-            "a malformed died records no phantom death",
-        );
+        assert!(after_malformed.engines.is_empty(), "a malformed died must not panic or insert",);
+        assert!(after_malformed.recently_died.is_empty(), "a malformed died records no phantom death",);
 
         let after_unknown = push_then_list(
             &mailer,
             &cells,
             &EngineDied {
                 engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
-                reason: DeathReason::Evicted {
-                    detail: "heartbeat miss limit 3 of 3".to_owned(),
-                },
+                reason: DeathReason::Evicted { detail: "heartbeat miss limit 3 of 3".to_owned() },
             },
         );
-        assert!(
-            after_unknown.engines.is_empty(),
-            "a died for an unknown engine is a no-op",
-        );
-        assert!(
-            after_unknown.recently_died.is_empty(),
-            "a died for an unknown engine records no phantom death",
-        );
+        assert!(after_unknown.engines.is_empty(), "a died for an unknown engine is a no-op",);
+        assert!(after_unknown.recently_died.is_empty(), "a died for an unknown engine records no phantom death",);
     }
 
     /// `on_engine_alive` for an unknown engine is a silent no-op (no
@@ -514,13 +414,8 @@ mod tests {
         let after = push_then_list(
             &mailer,
             &cells,
-            &EngineAlive {
-                engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
-            },
+            &EngineAlive { engine_id: "00000000-0000-0000-0000-000000000000".to_owned() },
         );
-        assert!(
-            after.engines.is_empty(),
-            "an alive for an unknown engine must not insert it",
-        );
+        assert!(after.engines.is_empty(), "an alive for an unknown engine must not insert it",);
     }
 }

@@ -56,9 +56,7 @@ pub mod raw;
 // Re-exports of `Wasm*` types — the `Wasm` prefix is deliberate (native/wasm split);
 // allows mirror the def-site allows on each type.
 #[allow(clippy::module_name_repetitions)]
-pub use ctx::{
-    ActorTypeTag, NO_INBOUND_SOURCE, RelativeMailbox, SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx,
-};
+pub use ctx::{ActorTypeTag, NO_INBOUND_SOURCE, RelativeMailbox, SpawnError, WasmCtx, WasmDropCtx, WasmInitCtx};
 #[allow(clippy::module_name_repetitions)]
 pub use mailbox::WasmActorMailbox;
 
@@ -86,9 +84,7 @@ impl ActorInitError {
     /// `Cow<'static, str>` — `&'static str` for compile-time messages,
     /// `String` for `format!`-built diagnostics.
     pub fn new<S: Into<Cow<'static, str>>>(message: S) -> Self {
-        Self {
-            message: message.into(),
-        }
+        Self { message: message.into() }
     }
 
     /// Borrow the error text. Used by the [`crate::export!`] shim to
@@ -254,11 +250,7 @@ pub trait ErasedWasmActor {
     /// ADR-0112: the object-safe seam carries the most-permissive
     /// [`Manual`](crate::Manual) view; the synthesized dispatcher
     /// downgrades per handler class.
-    fn erased_dispatch(
-        &mut self,
-        ctx: &mut WasmCtx<'_, crate::Manual>,
-        mail: crate::Mail<'_>,
-    ) -> u32;
+    fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>, mail: crate::Mail<'_>) -> u32;
 
     /// Forwards to [`Lifecycle::wire`](crate::Lifecycle::wire) (the synthesized impl downgrades
     /// the carried [`Manual`](crate::Manual) ctx to `Single`).
@@ -271,11 +263,7 @@ pub trait ErasedWasmActor {
     fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>);
 
     /// Forwards to [`WasmActor::on_rehydrate`].
-    fn erased_on_rehydrate(
-        &mut self,
-        ctx: &mut WasmCtx<'_, crate::Manual>,
-        prior: crate::PriorState<'_>,
-    );
+    fn erased_on_rehydrate(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>, prior: crate::PriorState<'_>);
 }
 
 /// Stage a guest init-failure message into the substrate via

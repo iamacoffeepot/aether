@@ -33,11 +33,7 @@ pub struct RequestContextTable {
 impl RequestContextTable {
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-            next_seq: 0,
-            capacity: REQUEST_CONTEXT_CAPACITY,
-        }
+        Self { entries: Vec::new(), next_seq: 0, capacity: REQUEST_CONTEXT_CAPACITY }
     }
 
     #[must_use]
@@ -50,18 +46,11 @@ impl RequestContextTable {
     /// recover it exactly.
     pub fn insert<C: Kind>(&mut self, request: RequestId, context: &C) {
         if request.0 == Source::NO_CORRELATION {
-            tracing::warn!(
-                kind = C::NAME,
-                "request context not stored: request has no correlation id",
-            );
+            tracing::warn!(kind = C::NAME, "request context not stored: request has no correlation id",);
             return;
         }
 
-        if let Some(existing) = self
-            .entries
-            .iter_mut()
-            .find(|entry| entry.request == request)
-        {
+        if let Some(existing) = self.entries.iter_mut().find(|entry| entry.request == request) {
             existing.kind = C::ID;
             existing.bytes = context.encode_into_bytes();
             existing.insert_seq = self.next_seq;
@@ -70,11 +59,7 @@ impl RequestContextTable {
         }
 
         if self.entries.len() >= self.capacity
-            && let Some((oldest, _)) = self
-                .entries
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, entry)| entry.insert_seq)
+            && let Some((oldest, _)) = self.entries.iter().enumerate().min_by_key(|(_, entry)| entry.insert_seq)
         {
             let dropped = self.entries.remove(oldest);
             tracing::warn!(
@@ -100,10 +85,7 @@ impl RequestContextTable {
     /// one-shot event, and retaining a malformed or wrong-type context would
     /// make a later handler observe stale bookkeeping.
     pub fn take<C: Kind>(&mut self, request: RequestId) -> Option<C> {
-        let index = self
-            .entries
-            .iter()
-            .position(|entry| entry.request == request)?;
+        let index = self.entries.iter().position(|entry| entry.request == request)?;
         let entry = self.entries.remove(index);
         if entry.kind != C::ID {
             tracing::warn!(
@@ -116,11 +98,7 @@ impl RequestContextTable {
         }
         let decoded = C::decode_from_bytes(&entry.bytes);
         if decoded.is_none() {
-            tracing::warn!(
-                request = request.0,
-                kind = C::ID.0,
-                "request context decode failed",
-            );
+            tracing::warn!(request = request.0, kind = C::ID.0, "request context decode failed",);
         }
         decoded
     }
@@ -150,12 +128,9 @@ impl RequestContextTable {
         };
         let mut entries = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            let (Some(request), Some(kind), Some(insert_seq), Some(len)) = (
-                take_u64(&mut cursor),
-                take_u64(&mut cursor),
-                take_u64(&mut cursor),
-                take_u32(&mut cursor),
-            ) else {
+            let (Some(request), Some(kind), Some(insert_seq), Some(len)) =
+                (take_u64(&mut cursor), take_u64(&mut cursor), take_u64(&mut cursor), take_u32(&mut cursor))
+            else {
                 return false;
             };
             let len = len as usize;
@@ -293,43 +268,19 @@ mod tests {
     use super::*;
     use aether_data::{MailboxId, Source, SourceAddr};
 
-    #[derive(
-        aether_data::Kind,
-        aether_data::Schema,
-        serde::Serialize,
-        serde::Deserialize,
-        Debug,
-        Clone,
-        PartialEq,
-    )]
+    #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
     #[kind(name = "test.request_context")]
     struct TestContext {
         value: u32,
     }
 
-    #[derive(
-        aether_data::Kind,
-        aether_data::Schema,
-        serde::Serialize,
-        serde::Deserialize,
-        Debug,
-        Clone,
-        PartialEq,
-    )]
+    #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
     #[kind(name = "test.other_request_context")]
     struct OtherContext {
         value: u32,
     }
 
-    #[derive(
-        aether_data::Kind,
-        aether_data::Schema,
-        serde::Serialize,
-        serde::Deserialize,
-        Debug,
-        Clone,
-        PartialEq,
-    )]
+    #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
     #[kind(name = "test.source_request_context")]
     struct SourceContext {
         source: Source,
@@ -339,10 +290,7 @@ mod tests {
     fn take_removes_entry_once() {
         let mut table = RequestContextTable::new();
         table.insert(RequestId(7), &TestContext { value: 42 });
-        assert_eq!(
-            table.take::<TestContext>(RequestId(7)),
-            Some(TestContext { value: 42 })
-        );
+        assert_eq!(table.take::<TestContext>(RequestId(7)), Some(TestContext { value: 42 }));
         assert_eq!(table.take::<TestContext>(RequestId(7)), None);
     }
 
@@ -361,18 +309,13 @@ mod tests {
         let bytes = table.snapshot_bytes();
         let mut restored = RequestContextTable::new();
         assert!(restored.restore_snapshot_bytes(&bytes));
-        assert_eq!(
-            restored.take::<TestContext>(RequestId(7)),
-            Some(TestContext { value: 42 })
-        );
+        assert_eq!(restored.take::<TestContext>(RequestId(7)), Some(TestContext { value: 42 }));
     }
 
     #[test]
     fn context_can_carry_source() {
         let mut table = RequestContextTable::new();
-        let context = SourceContext {
-            source: Source::with_correlation(SourceAddr::Component(MailboxId(99)), 123),
-        };
+        let context = SourceContext { source: Source::with_correlation(SourceAddr::Component(MailboxId(99)), 123) };
         table.insert(RequestId(10), &context);
         assert_eq!(table.take::<SourceContext>(RequestId(10)), Some(context));
     }
@@ -381,15 +324,11 @@ mod tests {
     fn envelope_preserves_user_state_and_table() {
         let mut table = RequestContextTable::new();
         table.insert(RequestId(9), &TestContext { value: 11 });
-        let (version, bytes) =
-            compose_state_envelope(&table, Some((3, alloc::vec![1, 2, 3]))).expect("envelope");
+        let (version, bytes) = compose_state_envelope(&table, Some((3, alloc::vec![1, 2, 3]))).expect("envelope");
         let (mut restored, user_version, user_bytes) = split_state_envelope(version, &bytes);
         assert_eq!(user_version, 3);
         assert_eq!(user_bytes, alloc::vec![1, 2, 3]);
-        assert_eq!(
-            restored.take::<TestContext>(RequestId(9)),
-            Some(TestContext { value: 11 })
-        );
+        assert_eq!(restored.take::<TestContext>(RequestId(9)), Some(TestContext { value: 11 }));
     }
 
     #[test]

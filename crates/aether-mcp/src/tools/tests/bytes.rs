@@ -10,38 +10,23 @@ const NO_SPILL: usize = usize::MAX;
 /// embed / render tests.
 fn blob_struct_schema() -> SchemaType {
     use aether_data::NamedField;
-    SchemaType::Struct {
-        fields: vec![NamedField {
-            name: "blob".into(),
-            ty: SchemaType::Bytes,
-        }]
-        .into(),
-        repr_c: false,
-    }
+    SchemaType::Struct { fields: vec![NamedField { name: "blob".into(), ty: SchemaType::Bytes }].into(), repr_c: false }
 }
 
 #[tokio::test]
 async fn resolve_bytes_text_embed() {
-    let out = resolve_bytes_params(
-        serde_json::json!({"$text": "hi"}),
-        &SchemaType::Bytes,
-        NO_CAP,
-    )
-    .await
-    .expect("$text resolves");
+    let out = resolve_bytes_params(serde_json::json!({"$text": "hi"}), &SchemaType::Bytes, NO_CAP)
+        .await
+        .expect("$text resolves");
     assert_eq!(out, serde_json::json!([104, 105]));
 }
 
 #[tokio::test]
 async fn resolve_bytes_base64_embed() {
     // "aGk=" is base64 for "hi".
-    let out = resolve_bytes_params(
-        serde_json::json!({"$base64": "aGk="}),
-        &SchemaType::Bytes,
-        NO_CAP,
-    )
-    .await
-    .expect("$base64 resolves");
+    let out = resolve_bytes_params(serde_json::json!({"$base64": "aGk="}), &SchemaType::Bytes, NO_CAP)
+        .await
+        .expect("$base64 resolves");
     assert_eq!(out, serde_json::json!([104, 105]));
 }
 
@@ -86,13 +71,9 @@ async fn resolve_bytes_file_oversize_errors() {
 
 #[tokio::test]
 async fn resolve_bytes_unknown_sigil_tag_errors() {
-    let err = resolve_bytes_params(
-        serde_json::json!({"$weird": "x"}),
-        &SchemaType::Bytes,
-        NO_CAP,
-    )
-    .await
-    .expect_err("unknown $-tag must error");
+    let err = resolve_bytes_params(serde_json::json!({"$weird": "x"}), &SchemaType::Bytes, NO_CAP)
+        .await
+        .expect_err("unknown $-tag must error");
     let _ = err;
 }
 
@@ -108,13 +89,9 @@ async fn resolve_bytes_non_sigil_object_errors() {
 
 #[tokio::test]
 async fn resolve_bytes_nested_in_struct() {
-    let out = resolve_bytes_params(
-        serde_json::json!({"blob": {"$text": "hi"}}),
-        &blob_struct_schema(),
-        NO_CAP,
-    )
-    .await
-    .expect("nested Bytes resolves");
+    let out = resolve_bytes_params(serde_json::json!({"blob": {"$text": "hi"}}), &blob_struct_schema(), NO_CAP)
+        .await
+        .expect("nested Bytes resolves");
     assert_eq!(out, serde_json::json!({"blob": [104, 105]}));
 }
 
@@ -133,11 +110,7 @@ fn render_bytes_reply_binary_to_base64() {
 
 #[test]
 fn render_bytes_reply_nested_in_struct() {
-    let out = render_bytes_reply(
-        serde_json::json!({"blob": [104, 105]}),
-        &blob_struct_schema(),
-        NO_SPILL,
-    );
+    let out = render_bytes_reply(serde_json::json!({"blob": [104, 105]}), &blob_struct_schema(), NO_SPILL);
     assert_eq!(out, serde_json::json!({"blob": "hi"}));
 }
 
@@ -151,16 +124,9 @@ fn read_result_schema() -> SchemaType {
             EnumVariant::Struct {
                 name: "Ok".into(),
                 discriminant: 0,
-                fields: vec![NamedField {
-                    name: "bytes".into(),
-                    ty: SchemaType::Bytes,
-                }]
-                .into(),
+                fields: vec![NamedField { name: "bytes".into(), ty: SchemaType::Bytes }].into(),
             },
-            EnumVariant::Unit {
-                name: "Err".into(),
-                discriminant: 1,
-            },
+            EnumVariant::Unit { name: "Err".into(), discriminant: 1 },
         ]
         .into(),
     }
@@ -171,26 +137,15 @@ fn render_bytes_reply_enum_struct_variant_utf8() {
     // `{"Ok": {"bytes": [104, 105]}}` → `{"Ok": {"bytes": "hi"}}`.
     // This is the `aether.fs.read_result` shape — the primary advertised
     // example of the bytes-render feature (issue 2103).
-    let out = render_bytes_reply(
-        serde_json::json!({"Ok": {"bytes": [104, 105]}}),
-        &read_result_schema(),
-        NO_SPILL,
-    );
+    let out = render_bytes_reply(serde_json::json!({"Ok": {"bytes": [104, 105]}}), &read_result_schema(), NO_SPILL);
     assert_eq!(out, serde_json::json!({"Ok": {"bytes": "hi"}}));
 }
 
 #[test]
 fn render_bytes_reply_enum_struct_variant_binary() {
     // Binary bytes inside a struct variant render to a base64 object.
-    let out = render_bytes_reply(
-        serde_json::json!({"Ok": {"bytes": [255, 254]}}),
-        &read_result_schema(),
-        NO_SPILL,
-    );
-    assert_eq!(
-        out,
-        serde_json::json!({"Ok": {"bytes": {"base64": "//4="}}})
-    );
+    let out = render_bytes_reply(serde_json::json!({"Ok": {"bytes": [255, 254]}}), &read_result_schema(), NO_SPILL);
+    assert_eq!(out, serde_json::json!({"Ok": {"bytes": {"base64": "//4="}}}));
 }
 
 #[test]
@@ -204,22 +159,15 @@ fn render_bytes_reply_enum_unit_variant_passthrough() {
 fn render_bytes_reply_enum_unknown_tag_passthrough() {
     // An unrecognised tag passes through untouched — the walker is
     // best-effort and must never drop data.
-    let out = render_bytes_reply(
-        serde_json::json!({"Unknown": {"x": 1}}),
-        &read_result_schema(),
-        NO_SPILL,
-    );
+    let out = render_bytes_reply(serde_json::json!({"Unknown": {"x": 1}}), &read_result_schema(), NO_SPILL);
     assert_eq!(out, serde_json::json!({"Unknown": {"x": 1}}));
 }
 
 /// A unique scratch directory under the system temp dir, so reply-spill
 /// tests never litter the real temp dir with `aether-reply-*.bin` files.
 fn reply_scratch_dir(tag: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let dir =
-        std_env::temp_dir().join(format!("aether-reply-test-{tag}-{}-{nanos}", process::id()));
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let dir = std_env::temp_dir().join(format!("aether-reply-test-{tag}-{}-{nanos}", process::id()));
     std_fs::create_dir_all(&dir).expect("create scratch dir");
     dir
 }
@@ -232,10 +180,8 @@ fn render_bytes_leaf_over_threshold_spills_to_file() {
     let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
     let json: Vec<serde_json::Value> = payload.iter().map(|b| serde_json::json!(b)).collect();
     let out = render_bytes_leaf_in(serde_json::Value::Array(json), 1024, &dir);
-    let file = out
-        .get("file")
-        .and_then(|v| v.as_str())
-        .expect("over-threshold leaf renders as a {\"file\": …} reference");
+    let file =
+        out.get("file").and_then(|v| v.as_str()).expect("over-threshold leaf renders as a {\"file\": …} reference");
     let on_disk = std_fs::read(file).expect("spilled file is present on disk");
     assert_eq!(on_disk, payload, "spilled bytes match the input");
     std_fs::remove_file(file).ok();
@@ -248,12 +194,7 @@ fn render_bytes_leaf_under_threshold_utf8_to_string() {
     let out = render_bytes_leaf_in(serde_json::json!([104, 105]), 1024, &dir);
     assert_eq!(out, serde_json::json!("hi"));
     // Nothing should have been written.
-    assert!(
-        std_fs::read_dir(&dir)
-            .expect("scratch dir")
-            .next()
-            .is_none()
-    );
+    assert!(std_fs::read_dir(&dir).expect("scratch dir").next().is_none());
     std_fs::remove_dir_all(&dir).ok();
 }
 
@@ -263,12 +204,7 @@ fn render_bytes_leaf_under_threshold_binary_to_base64() {
     // 0xff 0xfe is not valid UTF-8 and is under the threshold → base64.
     let out = render_bytes_leaf_in(serde_json::json!([255, 254]), 1024, &dir);
     assert_eq!(out, serde_json::json!({"base64": "//4="}));
-    assert!(
-        std_fs::read_dir(&dir)
-            .expect("scratch dir")
-            .next()
-            .is_none()
-    );
+    assert!(std_fs::read_dir(&dir).expect("scratch dir").next().is_none());
     std_fs::remove_dir_all(&dir).ok();
 }
 
@@ -277,24 +213,13 @@ fn render_bytes_leaf_spill_io_failure_falls_back_to_base64() {
     // A spill dir that doesn't exist makes `std::fs::write` fail; the leaf
     // must fall through to the in-band rendering rather than error or drop
     // data. 0xff bytes are non-UTF-8 → the fallback is base64.
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let missing = std_env::temp_dir().join(format!(
-        "aether-reply-test-missing-{}-{nanos}",
-        process::id()
-    ));
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let missing = std_env::temp_dir().join(format!("aether-reply-test-missing-{}-{nanos}", process::id()));
     let payload: Vec<u8> = vec![0xffu8; 64];
     let json: Vec<serde_json::Value> = payload.iter().map(|b| serde_json::json!(b)).collect();
     let out = render_bytes_leaf_in(serde_json::Value::Array(json), 8, &missing);
-    assert_eq!(
-        out,
-        serde_json::json!({"base64": STANDARD.encode(&payload)})
-    );
-    assert!(
-        !missing.exists(),
-        "the missing spill dir must not be created by the fallback"
-    );
+    assert_eq!(out, serde_json::json!({"base64": STANDARD.encode(&payload)}));
+    assert!(!missing.exists(), "the missing spill dir must not be created by the fallback");
 }
 
 #[test]
@@ -305,10 +230,8 @@ fn render_bytes_reply_threads_threshold_to_leaf() {
     let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
     let json: Vec<serde_json::Value> = payload.iter().map(|b| serde_json::json!(b)).collect();
     let out = render_bytes_reply(serde_json::Value::Array(json), &SchemaType::Bytes, 1024);
-    let file = out
-        .get("file")
-        .and_then(|v| v.as_str())
-        .expect("threaded threshold spills the leaf to a file reference");
+    let file =
+        out.get("file").and_then(|v| v.as_str()).expect("threaded threshold spills the leaf to a file reference");
     let on_disk = std_fs::read(file).expect("spilled file is present on disk");
     assert_eq!(on_disk, payload);
     std_fs::remove_file(file).ok();
@@ -318,12 +241,9 @@ fn render_bytes_reply_threads_threshold_to_leaf() {
 async fn resolve_bytes_nested_in_enum_struct_variant() {
     // A `$text` embed inside an enum struct variant resolves to a byte
     // array — the request-side mirror of the render regression.
-    let out = resolve_bytes_params(
-        serde_json::json!({"Ok": {"bytes": {"$text": "hi"}}}),
-        &read_result_schema(),
-        NO_CAP,
-    )
-    .await
-    .expect("$text embed nested in enum struct variant resolves");
+    let out =
+        resolve_bytes_params(serde_json::json!({"Ok": {"bytes": {"$text": "hi"}}}), &read_result_schema(), NO_CAP)
+            .await
+            .expect("$text embed nested in enum struct variant resolves");
     assert_eq!(out, serde_json::json!({"Ok": {"bytes": [104, 105]}}));
 }

@@ -74,12 +74,7 @@ impl<'a, R> WasmActorMailbox<'a, R> {
     #[doc(hidden)]
     #[must_use]
     pub fn __new(mailbox: u64, sender: u64, inline: &'a Registry) -> Self {
-        Self {
-            mailbox,
-            sender,
-            inline,
-            _r: PhantomData,
-        }
+        Self { mailbox, sender, inline, _r: PhantomData }
     }
 
     /// The receiver's typed mailbox id. Exposed for callers that need
@@ -111,17 +106,9 @@ impl<'a, R> WasmActorMailbox<'a, R> {
     /// `self.mailbox` is the parent carry: exact for a root-pinned cap
     /// (depth-1, carry == id), which is every cap that hosts children.
     #[must_use]
-    pub fn resolve_peer_scoped<Peer: Addressable>(
-        &self,
-        scope: &str,
-        segment: &str,
-    ) -> WasmActorMailbox<'a, Peer> {
+    pub fn resolve_peer_scoped<Peer: Addressable>(&self, scope: &str, segment: &str) -> WasmActorMailbox<'a, Peer> {
         let node = ActorId::instanced(scope, segment);
-        WasmActorMailbox::__new(
-            with_tag(Tag::Mailbox, fold_lineage(self.mailbox, node)),
-            self.sender,
-            self.inline,
-        )
+        WasmActorMailbox::__new(with_tag(Tag::Mailbox, fold_lineage(self.mailbox, node)), self.sender, self.inline)
     }
 }
 
@@ -148,14 +135,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(
-            self.mailbox,
-            K::ID.0,
-            &bytes,
-            1,
-            ChainMode::Inherit,
-            self.sender,
-        );
+        self.inline.route_or_enqueue(self.mailbox, K::ID.0, &bytes, 1, ChainMode::Inherit, self.sender);
     }
 
     /// Send a request and return the correlation id the host minted for it.
@@ -241,13 +221,6 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
         K: Kind,
     {
         let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(
-            self.mailbox,
-            K::ID.0,
-            &bytes,
-            1,
-            ChainMode::Detached,
-            self.sender,
-        );
+        self.inline.route_or_enqueue(self.mailbox, K::ID.0, &bytes, 1, ChainMode::Detached, self.sender);
     }
 }

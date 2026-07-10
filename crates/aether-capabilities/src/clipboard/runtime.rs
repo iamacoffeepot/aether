@@ -1,8 +1,8 @@
 //! Native runtime backends and handlers for `aether.clipboard`.
 
 use super::{
-    ClipboardCapability, ClipboardConfig, GetClipboardText, GetClipboardTextResult,
-    SetClipboardText, SetClipboardTextResult,
+    ClipboardCapability, ClipboardConfig, GetClipboardText, GetClipboardTextResult, SetClipboardText,
+    SetClipboardTextResult,
 };
 use aether_actor::runtime;
 
@@ -32,9 +32,7 @@ impl ClipboardBackend for SystemClipboard {
     }
 
     fn set_text(&mut self, text: String) -> Result<(), String> {
-        self.clipboard
-            .set_text(text)
-            .map_err(|error| error.to_string())
+        self.clipboard.set_text(text).map_err(|error| error.to_string())
     }
 }
 
@@ -67,10 +65,7 @@ impl NativeActor for ClipboardCapability {
 
     const NAMESPACE: &'static str = "aether.clipboard";
 
-    fn init(
-        config: ClipboardConfig,
-        _ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<ClipboardCapabilityState, BootError> {
+    fn init(config: ClipboardConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<ClipboardCapabilityState, BootError> {
         let backend: Box<dyn ClipboardBackend> = match config {
             ClipboardConfig::System => {
                 Box::new(SystemClipboard::new().map_err(|error| BootError::Other(Box::new(error)))?)
@@ -114,12 +109,7 @@ mod tests {
         let mut backend = InMemoryClipboard::default();
         assert_eq!(backend.get_text().expect("empty clipboard is readable"), "");
 
-        backend
-            .set_text("copied text".to_owned())
-            .expect("in-memory set succeeds");
-        assert_eq!(
-            backend.get_text().expect("set clipboard is readable"),
-            "copied text",
-        );
+        backend.set_text("copied text".to_owned()).expect("in-memory set succeeds");
+        assert_eq!(backend.get_text().expect("set clipboard is readable"), "copied text",);
     }
 }

@@ -33,9 +33,8 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use super::{
-    CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured,
-    DrawSolidQuads, DrawTexturedQuads, DrawTriangle, HeadlessRenderCapability, UpdateTexture,
-    ViewProjection,
+    CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
+    DrawTexturedQuads, DrawTriangle, HeadlessRenderCapability, UpdateTexture, ViewProjection,
 };
 
 /// `HeadlessRenderCapability` runtime state. Holds only the [`HubOutbound`]
@@ -59,10 +58,7 @@ impl NativeActor for HeadlessRenderCapability {
 
     const NAMESPACE: &'static str = "aether.render";
 
-    fn init(
-        _config: (),
-        ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<HeadlessRenderCapabilityState, BootError> {
+    fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<HeadlessRenderCapabilityState, BootError> {
         let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
             BootError::Other(Box::new(io::Error::other(
                 "HubOutbound must be wired on Mailer before \
@@ -77,12 +73,7 @@ impl NativeActor for HeadlessRenderCapability {
     /// desktop-designed components (which emit `DrawTriangle` every
     /// tick) don't trip the unknown-mailbox warn path.
     #[handler::single]
-    fn on_draw_triangle(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mails: &[DrawTriangle],
-    ) {
-    }
+    fn on_draw_triangle(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mails: &[DrawTriangle]) {}
 
     /// `ViewProjection` lands here as a no-op for the same reason as
     /// `on_draw_triangle` — desktop-designed components publish
@@ -95,16 +86,10 @@ impl NativeActor for HeadlessRenderCapability {
     /// never comes. Mirrors ADR-0035 §Consequences fail-fast shape
     /// for `set_window_mode`.
     #[handler::manual]
-    fn on_capture_frame(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Manual>,
-        _mail: CaptureFrame,
-    ) {
+    fn on_capture_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: CaptureFrame) {
         state.outbound.send_reply(
             ctx.reply_target(),
-            &CaptureFrameResult::Err {
-                error: "unsupported on headless chassis — no GPU".to_owned(),
-            },
+            &CaptureFrameResult::Err { error: "unsupported on headless chassis — no GPU".to_owned() },
         );
     }
 
@@ -113,16 +98,10 @@ impl NativeActor for HeadlessRenderCapability {
     /// waiting on a reply that never comes — same fail-fast shape as
     /// `on_capture_frame` (ADR-0105).
     #[handler::manual]
-    fn on_create_texture(
-        state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Manual>,
-        _mail: CreateTexture,
-    ) {
+    fn on_create_texture(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: CreateTexture) {
         state.outbound.send_reply(
             ctx.reply_target(),
-            &CreateTextureResult::Err {
-                error: "unsupported on headless chassis — no GPU".to_owned(),
-            },
+            &CreateTextureResult::Err { error: "unsupported on headless chassis — no GPU".to_owned() },
         );
     }
 
@@ -130,59 +109,33 @@ impl NativeActor for HeadlessRenderCapability {
     /// components running on headless don't trip the unknown-mailbox
     /// warn path — mirrors `on_draw_triangle`.
     #[handler::single]
-    fn on_update_texture(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UpdateTexture) {
-    }
+    fn on_update_texture(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: UpdateTexture) {}
 
     /// `DestroyTexture` lands here as a no-op so desktop-designed
     /// components running on headless don't trip the unknown-mailbox
     /// warn path — mirrors `on_update_texture`.
     #[handler::single]
-    fn on_destroy_texture(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: DestroyTexture,
-    ) {
-    }
+    fn on_destroy_texture(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DestroyTexture) {}
 
     /// `DrawTexturedQuads` lands here as a no-op for the same reason
     /// as `on_update_texture`.
     #[handler::single]
-    fn on_draw_textured_quads(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: DrawTexturedQuads,
-    ) {
-    }
+    fn on_draw_textured_quads(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawTexturedQuads) {}
 
     /// `DrawSolidQuads` lands here as a no-op for the same reason
     /// as `on_draw_textured_quads`.
     #[handler::single]
-    fn on_draw_solid_quads(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: DrawSolidQuads,
-    ) {
-    }
+    fn on_draw_solid_quads(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawSolidQuads) {}
 
     /// `DrawMaterialTextured` lands here as a no-op for the same
     /// reason as `on_draw_textured_quads`.
     #[handler::single]
-    fn on_draw_material_textured(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: DrawMaterialTextured,
-    ) {
-    }
+    fn on_draw_material_textured(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawMaterialTextured) {}
 
     /// `DrawMaterialCoverage` lands here as a no-op for the same
     /// reason as `on_draw_textured_quads`.
     #[handler::single]
-    fn on_draw_material_coverage(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: DrawMaterialCoverage,
-    ) {
-    }
+    fn on_draw_material_coverage(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrawMaterialCoverage) {}
 }
 
 #[cfg(all(test, feature = "runtime"))]
@@ -201,15 +154,9 @@ mod headless_tests {
     #[test]
     fn headless_create_texture_replies_err() {
         let (mailer, rx) = test_mailer_and_rx();
-        let outbound = mailer
-            .outbound()
-            .cloned()
-            .expect("test_mailer_and_rx wires a loopback outbound");
+        let outbound = mailer.outbound().cloned().expect("test_mailer_and_rx wires a loopback outbound");
         let mut state = HeadlessRenderCapabilityState { outbound };
-        let transport = Arc::new(NativeBinding::new_for_test(
-            Arc::clone(&mailer),
-            MailboxId(0),
-        ));
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
         let mut ctx = NativeCtx::new_dispatching(
             &transport,
             Source::to(SourceAddr::Session(SessionToken(Uuid::nil()))),
@@ -219,12 +166,7 @@ mod headless_tests {
         HeadlessRenderCapability::on_create_texture(
             &mut state,
             &mut ctx,
-            CreateTexture {
-                width: 2,
-                height: 2,
-                format: TextureFormat::Rgba8,
-                pixels: vec![0u8; 16],
-            },
+            CreateTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels: vec![0u8; 16] },
         );
         match decode_reply::<CreateTextureResult>(&rx) {
             CreateTextureResult::Err { error } => {

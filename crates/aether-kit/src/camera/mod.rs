@@ -158,12 +158,8 @@ struct TopdownState {
 impl TopdownState {
     fn from_params(p: &TopdownParams) -> Self {
         Self {
-            center: p
-                .center
-                .map_or(defaults::TOPDOWN_CENTER, |c| Vec2::new(c[0], c[1])),
-            extent: p.extent.map_or(defaults::TOPDOWN_EXTENT, |e| {
-                e.max(defaults::TOPDOWN_EXTENT_FLOOR)
-            }),
+            center: p.center.map_or(defaults::TOPDOWN_CENTER, |c| Vec2::new(c[0], c[1])),
+            extent: p.extent.map_or(defaults::TOPDOWN_EXTENT, |e| e.max(defaults::TOPDOWN_EXTENT_FLOOR)),
         }
     }
 
@@ -268,11 +264,7 @@ impl WasmActor for CameraComponent {
                 })),
             },
         );
-        Ok(CameraComponent {
-            cameras,
-            active: Some("main".to_owned()),
-            aspect: DEFAULT_ASPECT,
-        })
+        Ok(CameraComponent { cameras, active: Some("main".to_owned()), aspect: DEFAULT_ASPECT })
     }
 
     /// Subscribe the lifecycle stages the camera advances against
@@ -325,8 +317,7 @@ impl WasmActor for CameraComponent {
             && let Some(cam) = self.cameras.get(name)
         {
             let view_proj = cam.mode.view_proj(self.aspect);
-            ctx.actor::<RenderCapability>()
-                .send(&ViewProjection { view_proj });
+            ctx.actor::<RenderCapability>().send(&ViewProjection { view_proj });
         }
     }
 
@@ -357,12 +348,7 @@ impl WasmActor for CameraComponent {
             );
             return;
         }
-        self.cameras.insert(
-            msg.name,
-            CameraState {
-                mode: ModeState::from_init(&msg.mode),
-            },
-        );
+        self.cameras.insert(msg.name, CameraState { mode: ModeState::from_init(&msg.mode) });
     }
 
     /// Drop a camera by name. Idempotent — silently no-ops if the
@@ -471,17 +457,11 @@ mod tests {
     #[test]
     fn default_camera_boots_with_zero_speed() {
         let mut ctx = WasmInitCtx::__new(0);
-        let comp =
-            <CameraComponent as aether_actor::Lifecycle<CameraComponent>>::init((), &mut ctx)
-                .expect("init");
+        let comp = <CameraComponent as aether_actor::Lifecycle<CameraComponent>>::init((), &mut ctx).expect("init");
         let main = comp.cameras.get("main").expect("\"main\" camera present");
         match main.mode {
             ModeState::Orbit(state) => {
-                assert_eq!(
-                    state.speed, 0.0,
-                    "boot \"main\" orbit speed must be 0.0 (frozen); got {}",
-                    state.speed
-                );
+                assert_eq!(state.speed, 0.0, "boot \"main\" orbit speed must be 0.0 (frozen); got {}", state.speed);
             }
             ModeState::Topdown(_) => panic!("\"main\" camera must boot in orbit mode"),
         }
@@ -491,10 +471,7 @@ mod tests {
     /// repeated `tick()` calls.
     #[test]
     fn frozen_orbit_yaw_is_stable_across_ticks() {
-        let mut state = OrbitState::from_params(&OrbitParams {
-            speed: Some(0.0),
-            ..Default::default()
-        });
+        let mut state = OrbitState::from_params(&OrbitParams { speed: Some(0.0), ..Default::default() });
         let yaw_before = state.yaw;
         for _ in 0..10 {
             state.tick();

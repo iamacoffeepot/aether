@@ -117,11 +117,7 @@ impl ActorLogRing {
     #[must_use]
     pub fn with_capacity(ring_cap: usize) -> Self {
         let ring_cap = ring_cap.max(1);
-        Self {
-            ring: VecDeque::with_capacity(ring_cap),
-            ring_cap,
-            sequence: 1,
-        }
+        Self { ring: VecDeque::with_capacity(ring_cap), ring_cap, sequence: 1 }
     }
 
     /// Push one event onto the ring, stamping it with the next-
@@ -134,14 +130,7 @@ impl ActorLogRing {
     pub fn push(&mut self, level: u8, target: String, message: String, timestamp_unix_ms: u64) {
         let sequence = self.sequence;
         self.sequence += 1;
-        let entry = LogEntry {
-            timestamp_unix_ms,
-            level,
-            target,
-            message,
-            sequence,
-            origin: None,
-        };
+        let entry = LogEntry { timestamp_unix_ms, level, target, message, sequence, origin: None };
         if self.ring.len() == self.ring_cap {
             self.ring.pop_front();
         }
@@ -165,21 +154,12 @@ impl ActorLogRing {
             _ => None,
         };
 
-        let entries: Vec<LogEntry> = self
-            .ring
-            .iter()
-            .filter(|e| e.sequence > since && e.level >= min_level)
-            .take(max)
-            .cloned()
-            .collect();
+        let entries: Vec<LogEntry> =
+            self.ring.iter().filter(|e| e.sequence > since && e.level >= min_level).take(max).cloned().collect();
 
         let next_since = entries.last().map_or(since, |e| e.sequence);
 
-        LogTailResult::Ok {
-            entries,
-            next_since,
-            truncated_before,
-        }
+        LogTailResult::Ok { entries, next_since, truncated_before }
     }
 
     /// Drain a snapshot of the current ring entries oldest-to-newest
@@ -210,11 +190,7 @@ impl ActorLogRing {
 /// function so the framework dispatch arm reads cleanly and unit
 /// tests can pin the boundaries without materialising a ring.
 fn resolve_max(max: u32) -> u32 {
-    if max == 0 {
-        DEFAULT_TAIL_MAX
-    } else {
-        max.min(MAX_TAIL_MAX)
-    }
+    if max == 0 { DEFAULT_TAIL_MAX } else { max.min(MAX_TAIL_MAX) }
 }
 
 pub(crate) fn level_to_u8(level: Level) -> u8 {
@@ -253,10 +229,7 @@ struct MessageBuilder {
 
 impl MessageBuilder {
     fn new() -> Self {
-        Self {
-            fields: String::new(),
-            message: String::new(),
-        }
+        Self { fields: String::new(), message: String::new() }
     }
 
     fn finish(mut self) -> String {
@@ -370,9 +343,7 @@ pub struct ForwardingSubscriber {
 impl ForwardingSubscriber {
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            next_span: AtomicU64::new(1),
-        }
+        Self { next_span: AtomicU64::new(1) }
     }
 }
 
@@ -518,15 +489,8 @@ mod tests {
     fn tail_returns_entries_in_push_order_with_monotonic_sequence() {
         let mut ring = ActorLogRing::with_capacity(8);
         push_three(&mut ring);
-        let LogTailResult::Ok {
-            entries,
-            next_since,
-            truncated_before,
-        } = ring.tail(&LogTail {
-            max: 0,
-            min_level: None,
-            since: None,
-        })
+        let LogTailResult::Ok { entries, next_since, truncated_before } =
+            ring.tail(&LogTail { max: 0, min_level: None, since: None })
         else {
             panic!("expected Ok");
         };
@@ -548,11 +512,7 @@ mod tests {
         ring.push(2, "t".to_owned(), "info".to_owned(), 0);
         ring.push(3, "t".to_owned(), "warn".to_owned(), 0);
         ring.push(4, "t".to_owned(), "error".to_owned(), 0);
-        let LogTailResult::Ok { entries, .. } = ring.tail(&LogTail {
-            max: 0,
-            min_level: Some(3),
-            since: None,
-        }) else {
+        let LogTailResult::Ok { entries, .. } = ring.tail(&LogTail { max: 0, min_level: Some(3), since: None }) else {
             panic!("expected Ok");
         };
         assert_eq!(entries.len(), 2);
@@ -566,15 +526,8 @@ mod tests {
         for i in 1..=5 {
             ring.push(2, "t".to_owned(), format!("msg-{i}"), 0);
         }
-        let LogTailResult::Ok {
-            entries,
-            next_since,
-            ..
-        } = ring.tail(&LogTail {
-            max: 0,
-            min_level: None,
-            since: Some(2),
-        })
+        let LogTailResult::Ok { entries, next_since, .. } =
+            ring.tail(&LogTail { max: 0, min_level: None, since: Some(2) })
         else {
             panic!("expected Ok");
         };
@@ -582,15 +535,8 @@ mod tests {
         assert_eq!(entries[0].sequence, 3);
         assert_eq!(next_since, 5);
 
-        let LogTailResult::Ok {
-            entries,
-            next_since,
-            ..
-        } = ring.tail(&LogTail {
-            max: 0,
-            min_level: None,
-            since: Some(next_since),
-        })
+        let LogTailResult::Ok { entries, next_since, .. } =
+            ring.tail(&LogTail { max: 0, min_level: None, since: Some(next_since) })
         else {
             panic!("expected Ok");
         };
@@ -604,30 +550,16 @@ mod tests {
         for i in 1..=5 {
             ring.push(2, "t".to_owned(), format!("msg-{i}"), 0);
         }
-        let LogTailResult::Ok {
-            entries,
-            next_since,
-            ..
-        } = ring.tail(&LogTail {
-            max: 2,
-            min_level: None,
-            since: None,
-        })
+        let LogTailResult::Ok { entries, next_since, .. } =
+            ring.tail(&LogTail { max: 2, min_level: None, since: None })
         else {
             panic!("expected Ok");
         };
         assert_eq!(entries.len(), 2);
         assert_eq!(next_since, 2);
 
-        let LogTailResult::Ok {
-            entries,
-            next_since,
-            ..
-        } = ring.tail(&LogTail {
-            max: 2,
-            min_level: None,
-            since: Some(next_since),
-        })
+        let LogTailResult::Ok { entries, next_since, .. } =
+            ring.tail(&LogTail { max: 2, min_level: None, since: Some(next_since) })
         else {
             panic!("expected Ok");
         };
@@ -645,15 +577,8 @@ mod tests {
         for i in 1..=5 {
             ring.push(2, "t".to_owned(), format!("msg-{i}"), 0);
         }
-        let LogTailResult::Ok {
-            entries,
-            truncated_before,
-            ..
-        } = ring.tail(&LogTail {
-            max: 0,
-            min_level: None,
-            since: None,
-        })
+        let LogTailResult::Ok { entries, truncated_before, .. } =
+            ring.tail(&LogTail { max: 0, min_level: None, since: None })
         else {
             panic!("expected Ok");
         };
@@ -668,13 +593,8 @@ mod tests {
         for i in 1..=5 {
             ring.push(2, "t".to_owned(), format!("msg-{i}"), 0);
         }
-        let LogTailResult::Ok {
-            truncated_before, ..
-        } = ring.tail(&LogTail {
-            max: 0,
-            min_level: None,
-            since: Some(2),
-        })
+        let LogTailResult::Ok { truncated_before, .. } =
+            ring.tail(&LogTail { max: 0, min_level: None, since: Some(2) })
         else {
             panic!("expected Ok");
         };

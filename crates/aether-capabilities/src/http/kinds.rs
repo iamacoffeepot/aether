@@ -123,16 +123,8 @@ pub struct Fetch {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.http.fetch_result")]
 pub enum FetchResult {
-    Ok {
-        url: String,
-        status: u16,
-        headers: Vec<HttpHeader>,
-        body: Vec<u8>,
-    },
-    Err {
-        url: String,
-        error: HttpError,
-    },
+    Ok { url: String, status: u16, headers: Vec<HttpHeader>, body: Vec<u8> },
+    Err { url: String, error: HttpError },
 }
 
 // ADR-0108 HTTP server kinds. Two public kinds shared by the server
@@ -483,15 +475,7 @@ pub enum RegisterRouteResult {
 /// Cast-shape (Pod) — one `MailboxId`, fixed size.
 #[repr(C)]
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    bytemuck::Pod,
-    bytemuck::Zeroable,
-    aether_data::Kind,
-    aether_data::Schema,
+    Copy, Clone, Debug, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema,
 )]
 #[kind(name = "aether.http.server.unregister_routes_all")]
 pub struct UnregisterRoutesAll {

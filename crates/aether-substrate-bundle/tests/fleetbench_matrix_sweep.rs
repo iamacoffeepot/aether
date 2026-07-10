@@ -50,25 +50,13 @@ mod tests {
 
         // The cluster (parent + two inline children) and a separate
         // cross-cluster observer component.
-        let parent_addr = bench
-            .load_full_export(engine, "aether_test_fixtures_bundle", "test.matrix.parent")
-            .addr;
-        let observer = bench.load_full_export(
-            engine,
-            "aether_test_fixtures_bundle",
-            "test.source_observer",
-        );
+        let parent_addr = bench.load_full_export(engine, "aether_test_fixtures_bundle", "test.matrix.parent").addr;
+        let observer = bench.load_full_export(engine, "aether_test_fixtures_bundle", "test.source_observer");
 
         // Drive the sweep: the parent fans out every in-cluster direction
         // in place, plus a cross-cluster send to the observer during the
         // drain. The whole cascade settles before this `send` returns.
-        let run_replies = bench.send(
-            engine,
-            &parent_addr,
-            &RunMatrix {
-                observer_mailbox: observer.mailbox_id.0,
-            },
-        );
+        let run_replies = bench.send(engine, &parent_addr, &RunMatrix { observer_mailbox: observer.mailbox_id.0 });
         assert!(
             run_replies.is_empty(),
             "RunMatrix is fire-and-settle (no reply), got {} reply events",
@@ -79,34 +67,20 @@ mod tests {
         let report_replies = bench.send(engine, &parent_addr, &CollectMatrix);
         let report_env = match report_replies.as_slice() {
             [one] => one,
-            other => panic!(
-                "CollectMatrix should reply exactly one MatrixReport, got {}",
-                other.len(),
-            ),
+            other => panic!("CollectMatrix should reply exactly one MatrixReport, got {}", other.len(),),
         };
-        assert_eq!(
-            report_env.kind,
-            MatrixReport::ID,
-            "the CollectMatrix reply should be a MatrixReport",
-        );
-        let report = MatrixReport::decode_from_bytes(&report_env.payload)
-            .expect("the reply decodes as MatrixReport");
+        assert_eq!(report_env.kind, MatrixReport::ID, "the CollectMatrix reply should be a MatrixReport",);
+        let report = MatrixReport::decode_from_bytes(&report_env.payload).expect("the reply decodes as MatrixReport");
 
         let parent_id = report.parent_id;
         let child_a_id = report.child_a_id;
         assert_ne!(parent_id, 0, "the parent recorded its own id");
         assert_ne!(child_a_id, 0, "the parent recorded child[a]'s id");
-        assert_ne!(
-            parent_id, child_a_id,
-            "the parent and child[a] are distinct addresses",
-        );
+        assert_ne!(parent_id, child_a_id, "the parent and child[a] are distinct addresses",);
 
         // Cell: parent -> child[a] (in place). child[a] received it and
         // read the parent's id as its source.
-        assert_eq!(
-            report.parent_to_child_arrived, 1,
-            "parent -> child[a] should be delivered",
-        );
+        assert_eq!(report.parent_to_child_arrived, 1, "parent -> child[a] should be delivered",);
         assert_eq!(
             report.parent_to_child_source, parent_id,
             "child[a] should read the parent's id as the source of parent -> child[a]",
@@ -114,10 +88,7 @@ mod tests {
 
         // Cell: child[a] -> parent (in place). The parent received it and
         // read child[a]'s id as its source (the Task 1 in-place "from").
-        assert_eq!(
-            report.child_to_parent_arrived, 1,
-            "child[a] -> parent should be delivered",
-        );
+        assert_eq!(report.child_to_parent_arrived, 1, "child[a] -> parent should be delivered",);
         assert_eq!(
             report.child_to_parent_source, child_a_id,
             "the parent should read child[a]'s id as the source of child[a] -> parent",
@@ -125,10 +96,7 @@ mod tests {
 
         // Cell: child[a] -> sibling child[b] (in place). child[b] received
         // it and read child[a]'s id as its source.
-        assert_eq!(
-            report.child_to_sibling_arrived, 1,
-            "child[a] -> sibling child[b] should be delivered",
-        );
+        assert_eq!(report.child_to_sibling_arrived, 1, "child[a] -> sibling child[b] should be delivered",);
         assert_eq!(
             report.child_to_sibling_source, child_a_id,
             "child[b] should read child[a]'s id as the source of child[a] -> sibling",
@@ -136,10 +104,7 @@ mod tests {
 
         // Cell: child[a] -> self (in place). child[a] re-received it and
         // read its own id as its source.
-        assert_eq!(
-            report.child_to_self_arrived, 1,
-            "child[a] -> self should be delivered",
-        );
+        assert_eq!(report.child_to_self_arrived, 1, "child[a] -> self should be delivered",);
         assert_eq!(
             report.child_to_self_source, child_a_id,
             "child[a] should read its own id as the source of child[a] -> self",
@@ -155,10 +120,7 @@ mod tests {
             LogTailResult::Ok { entries, .. } => entries,
             LogTailResult::Err { error } => panic!("log_tail on observer failed: {error}"),
         };
-        let logged: Vec<&LogEntry> = entries
-            .iter()
-            .filter(|e| e.message.starts_with("source_mailbox="))
-            .collect();
+        let logged: Vec<&LogEntry> = entries.iter().filter(|e| e.message.starts_with("source_mailbox=")).collect();
         assert!(
             logged.iter().any(|e| e.message == expected),
             "the cross-cluster observer should log child[a]'s id {child_a_id} as the source \

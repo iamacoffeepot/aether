@@ -50,9 +50,7 @@ fn cast_eligible(ty: &SchemaType) -> bool {
     match ty {
         SchemaType::Scalar(_) | SchemaType::TypeId(_) => true,
         SchemaType::Array { element, .. } => cast_eligible(element),
-        SchemaType::Struct { fields, repr_c } => {
-            *repr_c && fields.iter().all(|f| cast_eligible(&f.ty))
-        }
+        SchemaType::Struct { fields, repr_c } => *repr_c && fields.iter().all(|f| cast_eligible(&f.ty)),
         _ => false,
     }
 }
@@ -113,15 +111,10 @@ fn build_enum(specs: Vec<VariantSpec>) -> SchemaType {
             let discriminant = u32::try_from(i).expect("variant index fits u32");
             let name = format!("V{i}");
             match spec {
-                VariantSpec::Unit => EnumVariant::Unit {
-                    name: name.into(),
-                    discriminant,
-                },
-                VariantSpec::Tuple(fields) => EnumVariant::Tuple {
-                    name: name.into(),
-                    discriminant,
-                    fields: fields.into(),
-                },
+                VariantSpec::Unit => EnumVariant::Unit { name: name.into(), discriminant },
+                VariantSpec::Tuple(fields) => {
+                    EnumVariant::Tuple { name: name.into(), discriminant, fields: fields.into() }
+                }
                 VariantSpec::Struct(fields) => EnumVariant::Struct {
                     name: name.into(),
                     discriminant,
@@ -135,9 +128,7 @@ fn build_enum(specs: Vec<VariantSpec>) -> SchemaType {
             }
         })
         .collect::<Vec<_>>();
-    SchemaType::Enum {
-        variants: variants.into(),
-    }
+    SchemaType::Enum { variants: variants.into() }
 }
 
 /// A bounded `SchemaType` tree: leaves are the scalar/atom arms, and the
@@ -159,32 +150,18 @@ fn arb_schema() -> impl Strategy<Value = SchemaType> {
             prop::collection::vec(inner.clone(), 1..=MAX_WIDTH).prop_map(VariantSpec::Struct),
         ];
         prop_oneof![
-            inner
-                .clone()
-                .prop_map(|s| SchemaType::Option(SchemaCell::owned(s))),
-            inner
-                .clone()
-                .prop_map(|s| SchemaType::Vec(SchemaCell::owned(s))),
+            inner.clone().prop_map(|s| SchemaType::Option(SchemaCell::owned(s))),
+            inner.clone().prop_map(|s| SchemaType::Vec(SchemaCell::owned(s))),
             (inner.clone(), 0..=MAX_WIDTH).prop_map(|(s, len)| SchemaType::Array {
                 element: SchemaCell::owned(s),
                 len: u32::try_from(len).expect("array len fits u32"),
             }),
-            (
-                prop::collection::vec(inner.clone(), 0..=MAX_WIDTH),
-                any::<bool>()
-            )
-                .prop_map(|(types, want_repr_c)| {
-                    let fields = types
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, ty)| named(&format!("f{i}"), ty))
-                        .collect::<Vec<_>>();
-                    let repr_c = want_repr_c && fields.iter().all(|f| cast_eligible(&f.ty));
-                    SchemaType::Struct {
-                        fields: fields.into(),
-                        repr_c,
-                    }
-                }),
+            (prop::collection::vec(inner.clone(), 0..=MAX_WIDTH), any::<bool>()).prop_map(|(types, want_repr_c)| {
+                let fields =
+                    types.into_iter().enumerate().map(|(i, ty)| named(&format!("f{i}"), ty)).collect::<Vec<_>>();
+                let repr_c = want_repr_c && fields.iter().all(|f| cast_eligible(&f.ty));
+                SchemaType::Struct { fields: fields.into(), repr_c }
+            }),
             prop::collection::vec(variant_spec, 1..=MAX_WIDTH).prop_map(build_enum),
             (arb_map_key_schema(), inner).prop_map(|(key, value)| SchemaType::Map {
                 key: SchemaCell::owned(key),
@@ -213,10 +190,9 @@ fn arb_scalar_value(p: Primitive) -> BoxedStrategy<Value> {
             .prop_filter("f32 must be finite", |f| f.is_finite())
             .prop_map(|f| Value::from(f64::from(f)))
             .boxed(),
-        Primitive::F64 => any::<f64>()
-            .prop_filter("f64 must be finite", |f| f.is_finite())
-            .prop_map(Value::from)
-            .boxed(),
+        Primitive::F64 => {
+            any::<f64>().prop_filter("f64 must be finite", |f| f.is_finite()).prop_map(Value::from).boxed()
+        }
     }
 }
 
@@ -271,23 +247,17 @@ fn value_for_variant(variant: &EnumVariant) -> BoxedStrategy<Value> {
         EnumVariant::Tuple { name, fields, .. } => {
             let name = name.to_string();
             if fields.len() == 1 {
-                value_for_schema(&fields[0])
-                    .prop_map(move |v| tagged(&name, v))
-                    .boxed()
+                value_for_schema(&fields[0]).prop_map(move |v| tagged(&name, v)).boxed()
             } else {
                 let strats = fields.iter().map(value_for_schema).collect();
-                join_values(strats)
-                    .prop_map(move |vals| tagged(&name, Value::Array(vals)))
-                    .boxed()
+                join_values(strats).prop_map(move |vals| tagged(&name, Value::Array(vals))).boxed()
             }
         }
         EnumVariant::Struct { name, fields, .. } => {
             let name = name.to_string();
             let field_names = fields.iter().map(|f| f.name.to_string()).collect();
             let strats = fields.iter().map(|f| value_for_schema(&f.ty)).collect();
-            join_object(field_names, strats)
-                .prop_map(move |body| tagged(&name, body))
-                .boxed()
+            join_object(field_names, strats).prop_map(move |body| tagged(&name, body)).boxed()
         }
     }
 }
@@ -307,25 +277,11 @@ fn value_for_map(key_schema: &SchemaType, value_schema: &SchemaType) -> BoxedStr
         .prop_map(|m| Value::Object(m.into_iter().collect()))
         .boxed(),
         SchemaType::Bool => prop::collection::btree_map(any::<bool>(), value_strat, 0..=2)
-            .prop_map(|m| {
-                Value::Object(
-                    m.into_iter()
-                        .map(|(k, v)| (k.to_string(), v))
-                        .collect::<Map<_, _>>(),
-                )
-            })
+            .prop_map(|m| Value::Object(m.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<Map<_, _>>()))
             .boxed(),
-        SchemaType::Scalar(p) => {
-            prop::collection::btree_map(arb_int_key(*p), value_strat, 0..=MAX_WIDTH)
-                .prop_map(|m| {
-                    Value::Object(
-                        m.into_iter()
-                            .map(|(k, v)| (k.to_string(), v))
-                            .collect::<Map<_, _>>(),
-                    )
-                })
-                .boxed()
-        }
+        SchemaType::Scalar(p) => prop::collection::btree_map(arb_int_key(*p), value_strat, 0..=MAX_WIDTH)
+            .prop_map(|m| Value::Object(m.into_iter().map(|(k, v)| (k.to_string(), v)).collect::<Map<_, _>>()))
+            .boxed(),
         other => unreachable!("arb_map_key_schema never yields {other:?} as a map key"),
     }
 }
@@ -356,9 +312,9 @@ fn value_for_schema(schema: &SchemaType) -> BoxedStrategy<Value> {
         SchemaType::Unit => Just(Value::Null).boxed(),
         SchemaType::Bool => any::<bool>().prop_map(Value::Bool).boxed(),
         SchemaType::Scalar(p) => arb_scalar_value(*p),
-        SchemaType::String => prop::collection::vec(any::<char>(), 0..=12)
-            .prop_map(|cs| Value::String(cs.into_iter().collect()))
-            .boxed(),
+        SchemaType::String => {
+            prop::collection::vec(any::<char>(), 0..=12).prop_map(|cs| Value::String(cs.into_iter().collect())).boxed()
+        }
         SchemaType::Bytes => prop::collection::vec(any::<u8>(), 0..=12)
             .prop_map(|bytes| Value::Array(bytes.into_iter().map(Value::from).collect()))
             .boxed(),
@@ -368,16 +324,12 @@ fn value_for_schema(schema: &SchemaType) -> BoxedStrategy<Value> {
         }
         SchemaType::Vec(inner) => {
             let inner = value_for_schema(inner);
-            prop::collection::vec(inner, 0..=MAX_WIDTH)
-                .prop_map(Value::Array)
-                .boxed()
+            prop::collection::vec(inner, 0..=MAX_WIDTH).prop_map(Value::Array).boxed()
         }
         SchemaType::Array { element, len } => {
             let inner = value_for_schema(element);
             let len = *len as usize;
-            prop::collection::vec(inner, len..=len)
-                .prop_map(Value::Array)
-                .boxed()
+            prop::collection::vec(inner, len..=len).prop_map(Value::Array).boxed()
         }
         SchemaType::Struct { fields, .. } => {
             let names = fields.iter().map(|f| f.name.to_string()).collect();

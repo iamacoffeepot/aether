@@ -82,9 +82,5 @@ impl ComponentHostNativeExt for NativeActorMailbox<'_, ComponentHostCapability> 
 #[must_use]
 pub fn resolve_embedded(name: &str) -> aether_data::MailboxId {
     use aether_actor::{Addressable, Embedded, Resolve};
-    Embedded::resolve(
-        <ComponentHostCapability as Addressable>::resolve(0, ()).0,
-        name,
-        (),
-    )
+    Embedded::resolve(<ComponentHostCapability as Addressable>::resolve(0, ()).0, name, ())
 }

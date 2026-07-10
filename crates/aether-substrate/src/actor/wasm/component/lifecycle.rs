@@ -3,10 +3,7 @@ use std::mem;
 use wasmtime::Store;
 
 use super::instantiate::Placement;
-use super::{
-    Component, ComponentCtx, MAX_DELIVERABLE_MAIL_BYTES, PendingSpawn, SMALL_REGION_BYTES,
-    StateBundle,
-};
+use super::{Component, ComponentCtx, MAX_DELIVERABLE_MAIL_BYTES, PendingSpawn, SMALL_REGION_BYTES, StateBundle};
 
 impl Component {
     /// Loudly log an init config rejected by [`Component::instantiate`] (ADR-0095)
@@ -15,11 +12,7 @@ impl Component {
     /// oversize log; the caller returns an `Err` that surfaces as
     /// `LoadResult::Err` rather than writing or trapping. Associated (no
     /// `&self`) because `instantiate` has no `Component` yet.
-    pub(super) fn log_oversize_config(
-        store: &Store<ComponentCtx>,
-        config_bytes: usize,
-        reason: &str,
-    ) {
+    pub(super) fn log_oversize_config(store: &Store<ComponentCtx>, config_bytes: usize, reason: &str) {
         tracing::error!(
             target: "aether_substrate::component",
             mailbox_id = store.data().sender.0,
@@ -116,14 +109,11 @@ impl Component {
                 )));
             }
             Placement::NoAllocator => {
-                return Err(wasmtime::Error::msg(
-                    "cannot rehydrate state: guest exports no realloc_p32 allocator",
-                ));
+                return Err(wasmtime::Error::msg("cannot rehydrate state: guest exports no realloc_p32 allocator"));
             }
         };
         if !bundle.bytes.is_empty() {
-            self.memory
-                .write(&mut self.store, ptr as usize, &bundle.bytes)?;
+            self.memory.write(&mut self.store, ptr as usize, &bundle.bytes)?;
         }
         f.call(&mut self.store, (bundle.version, ptr, byte_len))?;
         Ok(())
@@ -141,9 +131,7 @@ impl Component {
     #[cfg(test)]
     pub fn read_u32(&mut self, offset: usize) -> u32 {
         let mut buf = [0u8; 4];
-        self.memory
-            .read(&mut self.store, offset, &mut buf)
-            .expect("test memory read");
+        self.memory.read(&mut self.store, offset, &mut buf).expect("test memory read");
         u32::from_le_bytes(buf)
     }
 
@@ -158,9 +146,7 @@ impl Component {
     #[cfg(test)]
     pub fn read_bytes(&mut self, offset: usize, len: usize) -> Vec<u8> {
         let mut buf = vec![0u8; len];
-        self.memory
-            .read(&mut self.store, offset, &mut buf)
-            .expect("test memory read");
+        self.memory.read(&mut self.store, offset, &mut buf).expect("test memory read");
         buf
     }
 }

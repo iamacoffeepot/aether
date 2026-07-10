@@ -35,10 +35,7 @@
 // `FIELD_MASK` (`< 2^21`), which fits `usize` on every target aether
 // builds for (wasm32 / x86-64 / aarch64, all >= 32-bit), so the truncation
 // the lint warns about cannot occur.
-#![allow(
-    clippy::cast_possible_truncation,
-    reason = "packed fields are < 2^21, fit usize on all supported targets"
-)]
+#![allow(clippy::cast_possible_truncation, reason = "packed fields are < 2^21, fit usize on all supported targets")]
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -101,13 +98,8 @@ impl Lifecycle {
     /// A fresh blob with `initial_len` groups already published (the first
     /// flush's groups, written into the array before construction).
     pub fn new(initial_len: usize) -> Self {
-        assert!(
-            initial_len <= MAX_GROUPS,
-            "initial_len exceeds field ceiling"
-        );
-        Self {
-            word: AtomicU64::new(pack(0, initial_len as u64, 0, false)),
-        }
+        assert!(initial_len <= MAX_GROUPS, "initial_len exceeds field ceiling");
+        Self { word: AtomicU64::new(pack(0, initial_len as u64, 0, false)) }
     }
 
     /// Worker: claim the next group index, or `None` if the cursor has
@@ -122,10 +114,7 @@ impl Lifecycle {
                 return None;
             }
             let next = pack(c + 1, l, done_of(w), sealed_of(w));
-            match self
-                .word
-                .compare_exchange_weak(w, next, Ordering::AcqRel, Ordering::Acquire)
-            {
+            match self.word.compare_exchange_weak(w, next, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => return Some(c as usize),
                 Err(actual) => w = actual,
             }
@@ -160,10 +149,7 @@ impl Lifecycle {
                 return Published::Full;
             }
             let next = pack(cursor_of(w), l + count as u64, done_of(w), false);
-            match self
-                .word
-                .compare_exchange_weak(w, next, Ordering::AcqRel, Ordering::Acquire)
-            {
+            match self.word.compare_exchange_weak(w, next, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => return Published::Ok,
                 Err(actual) => w = actual,
             }
@@ -190,10 +176,7 @@ impl Lifecycle {
             let new_done = done_of(w) + 1;
             let retire = new_done == len_of(w);
             let next = pack(cursor_of(w), len_of(w), new_done, sealed_of(w) || retire);
-            match self
-                .word
-                .compare_exchange_weak(w, next, Ordering::AcqRel, Ordering::Acquire)
-            {
+            match self.word.compare_exchange_weak(w, next, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => return retire,
                 Err(actual) => w = actual,
             }
@@ -211,12 +194,7 @@ impl Lifecycle {
     #[cfg(test)]
     pub fn snapshot(&self) -> (usize, usize, usize, bool) {
         let w = self.word.load(Ordering::Acquire);
-        (
-            cursor_of(w) as usize,
-            len_of(w) as usize,
-            done_of(w) as usize,
-            sealed_of(w),
-        )
+        (cursor_of(w) as usize, len_of(w) as usize, done_of(w) as usize, sealed_of(w))
     }
 }
 
@@ -307,11 +285,7 @@ mod tests {
         let lc = Lifecycle::new(1);
         let _ = lc.claim();
         assert!(lc.complete(), "single group completes -> retire");
-        assert_eq!(
-            lc.publish(1),
-            Published::Retired,
-            "no append onto a retired blob"
-        );
+        assert_eq!(lc.publish(1), Published::Retired, "no append onto a retired blob");
     }
 
     #[test]
@@ -345,10 +319,7 @@ mod tests {
                 })
             })
             .collect();
-        let mut all: Vec<usize> = handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap())
-            .collect();
+        let mut all: Vec<usize> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
         all.sort_unstable();
         let unique: BTreeSet<usize> = all.iter().copied().collect();
         assert_eq!(all.len(), LEN, "every claim accounted for, no duplicates");
@@ -377,11 +348,7 @@ mod tests {
             let producer_done = Arc::clone(&producer_done);
             thread::spawn(move || {
                 for _ in 0..BATCHES {
-                    assert_eq!(
-                        lc.publish(1),
-                        Published::Ok,
-                        "no completer -> never retires"
-                    );
+                    assert_eq!(lc.publish(1), Published::Ok, "no completer -> never retires");
                 }
                 producer_done.store(true, Ordering::Release);
             })
@@ -414,11 +381,7 @@ mod tests {
         let mut all = Arc::try_unwrap(claimed).unwrap().into_inner().unwrap();
         all.sort_unstable();
         let unique: BTreeSet<usize> = all.iter().copied().collect();
-        assert_eq!(
-            all.len(),
-            1 + BATCHES,
-            "every published group claimed exactly once"
-        );
+        assert_eq!(all.len(), 1 + BATCHES, "every published group claimed exactly once");
         assert_eq!(unique.len(), 1 + BATCHES, "no index handed out twice");
         assert_eq!(*unique.iter().next_back().unwrap(), BATCHES);
     }

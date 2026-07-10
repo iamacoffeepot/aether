@@ -29,10 +29,7 @@ impl NativeActor for HeadlessWindowCapability {
 
     const NAMESPACE: &'static str = "aether.window";
 
-    fn init(
-        _config: (),
-        _ctx: &mut NativeInitCtx<'_>,
-    ) -> Result<HeadlessWindowCapabilityState, BootError> {
+    fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<HeadlessWindowCapabilityState, BootError> {
         Ok(HeadlessWindowCapabilityState)
     }
 
@@ -48,39 +45,21 @@ impl NativeActor for HeadlessWindowCapability {
     /// (iamacoffeepot/aether#1321) that `HubOutbound::send_reply`
     /// silently drops.
     #[handler::single]
-    fn on_set_mode(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: SetWindowMode,
-    ) -> SetWindowModeResult {
-        SetWindowModeResult::Err {
-            error: "unsupported on this chassis — no window peripheral".to_owned(),
-        }
+    fn on_set_mode(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowMode) -> SetWindowModeResult {
+        SetWindowModeResult::Err { error: "unsupported on this chassis — no window peripheral".to_owned() }
     }
 
     /// Reply `Err` for the same reason as `on_set_mode`.
     #[handler::single]
-    fn on_set_title(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: SetWindowTitle,
-    ) -> SetWindowTitleResult {
-        SetWindowTitleResult::Err {
-            error: "unsupported on this chassis — no window peripheral".to_owned(),
-        }
+    fn on_set_title(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: SetWindowTitle) -> SetWindowTitleResult {
+        SetWindowTitleResult::Err { error: "unsupported on this chassis — no window peripheral".to_owned() }
     }
 
     /// Reply `Err` for the same reason as `on_set_mode`
     /// (iamacoffeepot/aether#1318): a chassis without a window
     /// peripheral can't foreground one.
     #[handler::single]
-    fn on_focus(
-        _state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
-        _mail: FocusWindow,
-    ) -> FocusWindowResult {
-        FocusWindowResult::Err {
-            error: "unsupported on this chassis — no window peripheral".to_owned(),
-        }
+    fn on_focus(_state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: FocusWindow) -> FocusWindowResult {
+        FocusWindowResult::Err { error: "unsupported on this chassis — no window peripheral".to_owned() }
     }
 }

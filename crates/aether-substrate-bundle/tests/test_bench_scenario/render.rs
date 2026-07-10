@@ -25,15 +25,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     // GPU readback. The after-mail bundle flips render back to
     // invisible after the readback.
     let pre = vec![
-        envelope(
-            &probe_address(),
-            &SetRender {
-                r: 200,
-                g: 32,
-                b: 32,
-                visible: 1,
-            },
-        ),
+        envelope(&probe_address(), &SetRender { r: 200, g: 32, b: 32, visible: 1 }),
         NamedMail {
             recipient_name: probe_address(),
             kind_name: "aether.lifecycle.tick".to_owned(),
@@ -41,24 +33,13 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
             count: 1,
         },
     ];
-    let after = vec![envelope(
-        &probe_address(),
-        &SetRender {
-            r: 0,
-            g: 0,
-            b: 0,
-            visible: 0,
-        },
-    )];
+    let after = vec![envelope(&probe_address(), &SetRender { r: 0, g: 0, b: 0, visible: 0 })];
 
     // Priming advance subscribes the probe to ticks; the
     // capture-with-mails op then dispatches the pre bundle, reads
     // back, and dispatches the after bundle — all in one frame.
     let captured = bench
-        .execute(vec![
-            ("prime", BenchOp::advance(1)),
-            ("snap", BenchOp::capture_with_mails(pre, after)),
-        ])
+        .execute(vec![("prime", BenchOp::advance(1)), ("snap", BenchOp::capture_with_mails(pre, after))])
         .expect("prime + capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
@@ -81,10 +62,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     let (center_x, center_y) = centroid(&img, bg, tolerance).expect("a lit frame has a centroid");
     let (width, height) = (img.width as f32, img.height as f32);
     assert!(
-        center_x > 0.1 * width
-            && center_x < 0.9 * width
-            && center_y > 0.1 * height
-            && center_y < 0.9 * height,
+        center_x > 0.1 * width && center_x < 0.9 * width && center_y > 0.1 * height && center_y < 0.9 * height,
         "triangle centroid ({center_x}, {center_y}) should sit in the frame interior \
          of the {}x{} capture",
         img.width,
@@ -95,10 +73,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     // and capture again — the next tick won't emit DrawTriangle, so
     // the frame stays at clear color.
     let cleaned = bench
-        .execute(vec![
-            ("cleanup_advance", BenchOp::advance(1)),
-            ("snap2", BenchOp::capture()),
-        ])
+        .execute(vec![("cleanup_advance", BenchOp::advance(1)), ("snap2", BenchOp::capture())])
         .expect("post-cleanup advance + capture");
     let png2 = cleaned.captured("snap2").expect("snap2 step ran");
     let img2 = decode_png(png2).expect("decode cleanup png");
@@ -139,12 +114,8 @@ fn cube_render_projects_centered_silhouette() {
     // Priming advance subscribes the cube to ticks; the next tick (run
     // inside `capture`) drives the cube's camera + geometry emission so
     // the readback sees a fully-formed frame.
-    let captured = bench
-        .execute(vec![
-            ("prime", BenchOp::advance(1)),
-            ("snap", BenchOp::capture()),
-        ])
-        .expect("prime + capture");
+    let captured =
+        bench.execute(vec![("prime", BenchOp::advance(1)), ("snap", BenchOp::capture())]).expect("prime + capture");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     let bg = background_top_left(&img);
@@ -236,19 +207,11 @@ fn textured_quad_draws_screen_space_rect() {
             "create",
             BenchOp::send_and_await(
                 "aether.render",
-                &CreateTexture {
-                    width: texture_width,
-                    height: texture_height,
-                    format: TextureFormat::Rgba8,
-                    pixels,
-                },
+                &CreateTexture { width: texture_width, height: texture_height, format: TextureFormat::Rgba8, pixels },
             ),
         )])
         .expect("create_texture sequence");
-    let texture_id = match created
-        .reply::<CreateTextureResult>("create")
-        .expect("decode CreateTextureResult")
-    {
+    let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
         CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
     };
@@ -277,9 +240,7 @@ fn textured_quad_draws_screen_space_rect() {
         },
     )];
 
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
-        .expect("capture-with-mails");
+    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     let bg = background_top_left(&img);
@@ -310,10 +271,7 @@ fn textured_quad_draws_screen_space_rect() {
     // the empty accumulator (clearing the cache) and the next capture is
     // back at clear color.
     let cleared = bench
-        .execute(vec![
-            ("clear_advance", BenchOp::advance(1)),
-            ("snap2", BenchOp::capture()),
-        ])
+        .execute(vec![("clear_advance", BenchOp::advance(1)), ("snap2", BenchOp::capture())])
         .expect("advance + capture");
     let png2 = cleared.captured("snap2").expect("snap2 step ran");
     let img2 = decode_png(png2).expect("decode cleared png");
@@ -331,19 +289,11 @@ fn create_observation_texture(bench: &mut TestBench) -> u32 {
             "create",
             BenchOp::send_and_await(
                 "aether.render",
-                &CreateTexture {
-                    width: 1,
-                    height: 1,
-                    format: TextureFormat::Rgba8,
-                    pixels: vec![255, 255, 255, 255],
-                },
+                &CreateTexture { width: 1, height: 1, format: TextureFormat::Rgba8, pixels: vec![255, 255, 255, 255] },
             ),
         )])
         .expect("create observation texture");
-    match created
-        .reply::<CreateTextureResult>("create")
-        .expect("decode CreateTextureResult")
-    {
+    match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
         CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
     }
@@ -392,31 +342,11 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     let texture_id = create_observation_texture(&mut bench);
 
-    let solid_clip = ClipRect {
-        x: 2.0,
-        y: 3.0,
-        width: 20.0,
-        height: 15.0,
-    };
-    let solid_quad = SolidQuad {
-        x: 4.0,
-        y: 5.0,
-        width: 6.0,
-        height: 7.0,
-        color: Rgba::new(0.9, 0.2, 0.3, 0.8),
-    };
-    let textured_space = QuadSpace::World {
-        anchor: [0.25, -0.5, 0.75],
-        scale: QuadScale::Distance {
-            reference_distance: 4.0,
-        },
-    };
-    let textured_clip = ClipRect {
-        x: 10.0,
-        y: 11.0,
-        width: 30.0,
-        height: 25.0,
-    };
+    let solid_clip = ClipRect { x: 2.0, y: 3.0, width: 20.0, height: 15.0 };
+    let solid_quad = SolidQuad { x: 4.0, y: 5.0, width: 6.0, height: 7.0, color: Rgba::new(0.9, 0.2, 0.3, 0.8) };
+    let textured_space =
+        QuadSpace::World { anchor: [0.25, -0.5, 0.75], scale: QuadScale::Distance { reference_distance: 4.0 } };
+    let textured_clip = ClipRect { x: 10.0, y: 11.0, width: 30.0, height: 25.0 };
     let textured_quad = TexturedQuad {
         x: -8.0,
         y: -9.0,
@@ -449,10 +379,7 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
     ];
 
     bench
-        .execute(vec![(
-            "commit",
-            BenchOp::capture_with_mails(submissions, vec![]),
-        )])
+        .execute(vec![("commit", BenchOp::capture_with_mails(submissions, vec![]))])
         .expect("commit overlay submissions through capture");
     let snapshot = bench.committed_overlay_snapshot();
     assert_committed_overlay_snapshot(
@@ -465,14 +392,10 @@ fn committed_overlay_snapshot_is_typed_ordered_and_latest_frame_bounded() {
         textured_quad,
     );
 
-    bench
-        .execute(vec![("replay", BenchOp::capture())])
-        .expect("idle capture replays committed overlays");
+    bench.execute(vec![("replay", BenchOp::capture())]).expect("idle capture replays committed overlays");
     assert_eq!(bench.committed_overlay_snapshot().len(), 2);
 
-    bench
-        .execute(vec![("clear", BenchOp::advance(1))])
-        .expect("commit subsequent empty frame");
+    bench.execute(vec![("clear", BenchOp::advance(1))]).expect("commit subsequent empty frame");
     assert!(bench.committed_overlay_snapshot().is_empty());
 }
 
@@ -499,43 +422,26 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
         v1: 1.0,
         tint: Rgba::new(1.0, 0.2, 0.1, 1.0),
     };
-    let valid_batch = DrawTexturedQuads {
-        texture_id,
-        space: QuadSpace::Screen,
-        clip: None,
-        quads: vec![valid_quad.clone()],
-    };
+    let valid_batch =
+        DrawTexturedQuads { texture_id, space: QuadSpace::Screen, clip: None, quads: vec![valid_quad.clone()] };
     let submissions = vec![
         envelope(
             "aether.render",
-            &DrawTexturedQuads {
-                texture_id,
-                space: QuadSpace::Screen,
-                clip: None,
-                quads: Vec::new(),
-            },
+            &DrawTexturedQuads { texture_id, space: QuadSpace::Screen, clip: None, quads: Vec::new() },
         ),
         envelope(
             "aether.render",
             &DrawTexturedQuads {
                 texture_id,
                 space: QuadSpace::Screen,
-                clip: Some(ClipRect {
-                    x: 74.0,
-                    y: 0.0,
-                    width: 5.0,
-                    height: 5.0,
-                }),
+                clip: Some(ClipRect { x: 74.0, y: 0.0, width: 5.0, height: 5.0 }),
                 quads: vec![valid_quad.clone()],
             },
         ),
         envelope("aether.render", &valid_batch),
     ];
     let captured = bench
-        .execute(vec![(
-            "filtered",
-            BenchOp::capture_with_mails(submissions, vec![]),
-        )])
+        .execute(vec![("filtered", BenchOp::capture_with_mails(submissions, vec![]))])
         .expect("capture valid and individually rejected batches");
     let snapshot = bench.committed_overlay_snapshot();
     assert_eq!(snapshot.len(), 1);
@@ -543,17 +449,16 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
     assert_eq!(snapshot[0].space, valid_batch.space);
     assert_eq!(snapshot[0].clip, valid_batch.clip);
     assert_eq!(snapshot[0].quads, valid_batch.quads);
-    let filtered = decode_png(captured.captured("filtered").expect("filtered capture"))
-        .expect("decode filtered capture");
+    let filtered =
+        decode_png(captured.captured("filtered").expect("filtered capture")).expect("decode filtered capture");
     let filtered_coverage = coverage(&filtered, background_top_left(&filtered), 5);
     assert!(
         (0.08..0.22).contains(&filtered_coverage),
         "only the valid quad should render, coverage was {filtered_coverage}",
     );
 
-    let bytes_per_quad = usize::try_from(QUAD_VERTEX_STRIDE)
-        .expect("quad vertex stride fits usize")
-        * QUAD_VERTICES_PER_QUAD;
+    let bytes_per_quad =
+        usize::try_from(QUAD_VERTEX_STRIDE).expect("quad vertex stride fits usize") * QUAD_VERTICES_PER_QUAD;
     let over_budget_count = QUAD_VERTEX_BUFFER_BYTES / bytes_per_quad + 1;
     let oversized = DrawTexturedQuads {
         texture_id,
@@ -562,19 +467,13 @@ fn committed_overlay_snapshot_excludes_record_time_rejections() {
         quads: vec![valid_quad; over_budget_count],
     };
     let overflow = bench
-        .execute(vec![(
-            "overflow",
-            BenchOp::capture_with_mails(vec![envelope("aether.render", &oversized)], vec![]),
-        )])
+        .execute(vec![("overflow", BenchOp::capture_with_mails(vec![envelope("aether.render", &oversized)], vec![]))])
         .expect("capture over-budget overlay pass");
     assert!(bench.committed_overlay_snapshot().is_empty());
-    let overflow = decode_png(overflow.captured("overflow").expect("overflow capture"))
-        .expect("decode overflow capture");
+    let overflow =
+        decode_png(overflow.captured("overflow").expect("overflow capture")).expect("decode overflow capture");
     let overflow_coverage = coverage(&overflow, background_top_left(&overflow), 5);
-    assert!(
-        overflow_coverage < 0.01,
-        "over-budget pass should render nothing, coverage was {overflow_coverage}",
-    );
+    assert!(overflow_coverage < 0.01, "over-budget pass should render nothing, coverage was {overflow_coverage}",);
 }
 
 /// Palette for the four-quadrant texture built by
@@ -659,19 +558,11 @@ fn target_color_stats_distinguishes_quadrant_colors_on_real_capture() {
             "create",
             BenchOp::send_and_await(
                 "aether.render",
-                &CreateTexture {
-                    width: texture_size,
-                    height: texture_size,
-                    format: TextureFormat::Rgba8,
-                    pixels,
-                },
+                &CreateTexture { width: texture_size, height: texture_size, format: TextureFormat::Rgba8, pixels },
             ),
         )])
         .expect("create_texture sequence");
-    let texture_id = match created
-        .reply::<CreateTextureResult>("create")
-        .expect("decode CreateTextureResult")
-    {
+    let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
         CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
     };
@@ -699,9 +590,7 @@ fn target_color_stats_distinguishes_quadrant_colors_on_real_capture() {
         },
     )];
 
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
-        .expect("capture-with-mails");
+    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     let tolerance = 20;
@@ -709,41 +598,15 @@ fn target_color_stats_distinguishes_quadrant_colors_on_real_capture() {
     // Inset 8x4 probe rects, one per quadrant, each pulled at least 4px
     // back from its quadrant's outer edges and the internal x=32/y=24
     // seams so no linear-filtered boundary texel falls inside a probe.
-    let top_left = Rect {
-        min_x: 20,
-        min_y: 16,
-        max_x: 27,
-        max_y: 19,
-    };
-    let top_right = Rect {
-        min_x: 36,
-        min_y: 16,
-        max_x: 43,
-        max_y: 19,
-    };
-    let bottom_left = Rect {
-        min_x: 20,
-        min_y: 28,
-        max_x: 27,
-        max_y: 31,
-    };
-    let bottom_right = Rect {
-        min_x: 36,
-        min_y: 28,
-        max_x: 43,
-        max_y: 31,
-    };
+    let top_left = Rect { min_x: 20, min_y: 16, max_x: 27, max_y: 19 };
+    let top_right = Rect { min_x: 36, min_y: 16, max_x: 43, max_y: 19 };
+    let bottom_left = Rect { min_x: 20, min_y: 28, max_x: 27, max_y: 31 };
+    let bottom_right = Rect { min_x: 36, min_y: 28, max_x: 43, max_y: 31 };
 
     assert_quadrant_matches(&img, "top-left", top_left, QUADRANT_RED, tolerance);
     assert_quadrant_matches(&img, "top-right", top_right, QUADRANT_GREEN, tolerance);
     assert_quadrant_matches(&img, "bottom-left", bottom_left, QUADRANT_BLUE, tolerance);
-    assert_quadrant_matches(
-        &img,
-        "bottom-right",
-        bottom_right,
-        QUADRANT_YELLOW,
-        tolerance,
-    );
+    assert_quadrant_matches(&img, "bottom-right", bottom_right, QUADRANT_YELLOW, tolerance);
 
     // Cross-check: the top-left region's own color (red) does not
     // appear in the top-right region, which holds green.
@@ -776,19 +639,11 @@ fn destroyed_texture_draw_drops_from_frame() {
             "create",
             BenchOp::send_and_await(
                 "aether.render",
-                &CreateTexture {
-                    width: texture_width,
-                    height: texture_height,
-                    format: TextureFormat::Rgba8,
-                    pixels,
-                },
+                &CreateTexture { width: texture_width, height: texture_height, format: TextureFormat::Rgba8, pixels },
             ),
         )])
         .expect("create_texture sequence");
-    let texture_id = match created
-        .reply::<CreateTextureResult>("create")
-        .expect("decode CreateTextureResult")
-    {
+    let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
         CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
     };
@@ -816,26 +671,17 @@ fn destroyed_texture_draw_drops_from_frame() {
     };
 
     let captured = bench
-        .execute(vec![(
-            "snap",
-            BenchOp::capture_with_mails(vec![draw()], vec![]),
-        )])
+        .execute(vec![("snap", BenchOp::capture_with_mails(vec![draw()], vec![]))])
         .expect("capture with live texture");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     let bg = background_top_left(&img);
     let drawn = coverage(&img, bg, 5);
-    assert!(
-        (0.08..0.22).contains(&drawn),
-        "live texture quad coverage {drawn} fell outside the expected band",
-    );
+    assert!((0.08..0.22).contains(&drawn), "live texture quad coverage {drawn} fell outside the expected band",);
 
     let destroyed = bench
         .execute(vec![
-            (
-                "destroy",
-                BenchOp::send_mail("aether.render", &DestroyTexture { texture_id }),
-            ),
+            ("destroy", BenchOp::send_mail("aether.render", &DestroyTexture { texture_id })),
             ("advance", BenchOp::advance(1)),
             ("snap2", BenchOp::capture_with_mails(vec![draw()], vec![])),
         ])
@@ -883,10 +729,7 @@ fn r8_texture_updates_and_draws_red_channel_only() {
             ),
         )])
         .expect("create r8 texture");
-    let texture_id = match created
-        .reply::<CreateTextureResult>("create")
-        .expect("decode CreateTextureResult")
-    {
+    let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
         CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
     };
@@ -899,14 +742,7 @@ fn r8_texture_updates_and_draws_red_channel_only() {
     let pre = vec![
         envelope(
             "aether.render",
-            &UpdateTexture {
-                texture_id,
-                x: update_width,
-                y: 0,
-                width: update_width,
-                height: update_height,
-                pixels,
-            },
+            &UpdateTexture { texture_id, x: update_width, y: 0, width: update_width, height: update_height, pixels },
         ),
         envelope(
             "aether.render",
@@ -929,21 +765,14 @@ fn r8_texture_updates_and_draws_red_channel_only() {
         ),
     ];
 
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
-        .expect("capture r8 texture");
+    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture r8 texture");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     assert_eq!((img.width, img.height), (frame_width, frame_height));
 
     let sample = |x: u32, y: u32| -> [u8; 4] {
         let start = ((y * img.width + x) * 4) as usize;
-        [
-            img.rgba[start],
-            img.rgba[start + 1],
-            img.rgba[start + 2],
-            img.rgba[start + 3],
-        ]
+        [img.rgba[start], img.rgba[start + 1], img.rgba[start + 2], img.rgba[start + 3]]
     };
     let left = sample(20, 24);
     let right = sample(44, 24);
@@ -980,19 +809,11 @@ fn coverage_material_renders_body_rim_and_outside_bands() {
             "create",
             BenchOp::send_and_await(
                 "aether.render",
-                &CreateTexture {
-                    width: 8,
-                    height: 4,
-                    format: TextureFormat::R8,
-                    pixels,
-                },
+                &CreateTexture { width: 8, height: 4, format: TextureFormat::R8, pixels },
             ),
         )])
         .expect("create coverage texture");
-    let texture_id = match created
-        .reply::<CreateTextureResult>("create")
-        .expect("decode CreateTextureResult")
-    {
+    let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
         CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
     };
@@ -1002,39 +823,26 @@ fn coverage_material_renders_body_rim_and_outside_bands() {
         &DrawMaterialCoverage {
             texture_id,
             rects: vec![MaterialCoverageRect {
-                rect: MaterialRect {
-                    x: -0.8,
-                    y: -0.6,
-                    width: 1.6,
-                    height: 1.2,
-                    z: 0.5,
-                },
+                rect: MaterialRect { x: -0.8, y: -0.6, width: 1.6, height: 1.2, z: 0.5 },
                 body_color: Rgba::new(0.0, 0.9, 0.1, 1.0),
                 rim_color: Rgba::new(1.0, 0.9, 0.0, 1.0),
                 rim_width: 0.25,
             }],
         },
     )];
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
-        .expect("capture coverage material");
-    let img = decode_png(captured.captured("snap").expect("snap step ran"))
-        .expect("decode coverage material png");
+    let captured =
+        bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture coverage material");
+    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode coverage material png");
     let bg = background_top_left(&img);
     let outside = rgba_at(&img, 12, 24);
     let rim = rgba_at(&img, 38, 24);
     let body = rgba_at(&img, 48, 24);
 
     assert!(
-        outside[0].abs_diff(bg[0]) <= 8
-            && outside[1].abs_diff(bg[1]) <= 8
-            && outside[2].abs_diff(bg[2]) <= 8,
+        outside[0].abs_diff(bg[0]) <= 8 && outside[1].abs_diff(bg[1]) <= 8 && outside[2].abs_diff(bg[2]) <= 8,
         "outside coverage sample should stay background; bg={bg:?} outside={outside:?}",
     );
-    assert!(
-        rim[0] > 150 && rim[1] > 120 && rim[2] < 80,
-        "coverage rim sample should be yellow; got {rim:?}",
-    );
+    assert!(rim[0] > 150 && rim[1] > 120 && rim[2] < 80, "coverage rim sample should be yellow; got {rim:?}",);
     assert!(
         body[1] > body[0].saturating_add(80) && body[1] > body[2].saturating_add(60),
         "coverage body sample should be green; got {body:?}",
@@ -1057,43 +865,20 @@ fn textured_material_depth_tests_against_main_geometry() {
             "create",
             BenchOp::send_and_await(
                 "aether.render",
-                &CreateTexture {
-                    width: 1,
-                    height: 1,
-                    format: TextureFormat::Rgba8,
-                    pixels,
-                },
+                &CreateTexture { width: 1, height: 1, format: TextureFormat::Rgba8, pixels },
             ),
         )])
         .expect("create textured material texture");
-    let texture_id = match created
-        .reply::<CreateTextureResult>("create")
-        .expect("decode CreateTextureResult")
-    {
+    let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
         CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
     };
 
     let occluder = DrawTriangle {
         verts: [
-            Vertex {
-                x: -0.9,
-                y: -0.8,
-                z: 0.0,
-                color: Rgb::new(0.9, 0.0, 0.0),
-            },
-            Vertex {
-                x: -0.9,
-                y: 0.8,
-                z: 0.0,
-                color: Rgb::new(0.9, 0.0, 0.0),
-            },
-            Vertex {
-                x: 0.0,
-                y: 0.8,
-                z: 0.0,
-                color: Rgb::new(0.9, 0.0, 0.0),
-            },
+            Vertex { x: -0.9, y: -0.8, z: 0.0, color: Rgb::new(0.9, 0.0, 0.0) },
+            Vertex { x: -0.9, y: 0.8, z: 0.0, color: Rgb::new(0.9, 0.0, 0.0) },
+            Vertex { x: 0.0, y: 0.8, z: 0.0, color: Rgb::new(0.9, 0.0, 0.0) },
         ],
     };
     let pre = vec![
@@ -1103,13 +888,7 @@ fn textured_material_depth_tests_against_main_geometry() {
             &DrawMaterialTextured {
                 texture_id,
                 rects: vec![MaterialTexturedRect {
-                    rect: MaterialRect {
-                        x: -0.8,
-                        y: -0.6,
-                        width: 1.6,
-                        height: 1.2,
-                        z: 0.5,
-                    },
+                    rect: MaterialRect { x: -0.8, y: -0.6, width: 1.6, height: 1.2, z: 0.5 },
                     u0: 0.0,
                     v0: 0.0,
                     u1: 1.0,
@@ -1119,21 +898,16 @@ fn textured_material_depth_tests_against_main_geometry() {
             },
         ),
     ];
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
-        .expect("capture textured material");
-    let img = decode_png(captured.captured("snap").expect("snap step ran"))
-        .expect("decode textured material png");
+    let captured =
+        bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture textured material");
+    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode textured material png");
     let left = rgba_at(&img, 12, 20);
     let right = rgba_at(&img, 48, 24);
     assert!(
         left[0] > left[2].saturating_add(80),
         "left sample should show red main-pass occluder, not blue material; got {left:?}",
     );
-    assert!(
-        right[2] > right[0].saturating_add(100),
-        "right sample should show blue textured material; got {right:?}",
-    );
+    assert!(right[2] > right[0].saturating_add(100), "right sample should show blue textured material; got {right:?}",);
 }
 
 /// ADR-0140 coverage material rejects non-R8 textures at encode time:
@@ -1150,19 +924,11 @@ fn coverage_material_warn_drops_non_r8_texture() {
             "create",
             BenchOp::send_and_await(
                 "aether.render",
-                &CreateTexture {
-                    width: 2,
-                    height: 2,
-                    format: TextureFormat::Rgba8,
-                    pixels: vec![255u8; 16],
-                },
+                &CreateTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels: vec![255u8; 16] },
             ),
         )])
         .expect("create rgba texture");
-    let texture_id = match created
-        .reply::<CreateTextureResult>("create")
-        .expect("decode CreateTextureResult")
-    {
+    let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
         CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
     };
@@ -1171,29 +937,18 @@ fn coverage_material_warn_drops_non_r8_texture() {
         &DrawMaterialCoverage {
             texture_id,
             rects: vec![MaterialCoverageRect {
-                rect: MaterialRect {
-                    x: -0.8,
-                    y: -0.6,
-                    width: 1.6,
-                    height: 1.2,
-                    z: 0.5,
-                },
+                rect: MaterialRect { x: -0.8, y: -0.6, width: 1.6, height: 1.2, z: 0.5 },
                 body_color: Rgba::new(0.0, 1.0, 0.0, 1.0),
                 rim_color: Rgba::new(1.0, 1.0, 0.0, 1.0),
                 rim_width: 0.25,
             }],
         },
     )];
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
-        .expect("capture non-r8 coverage");
-    let img = decode_png(captured.captured("snap").expect("snap step ran"))
-        .expect("decode non-r8 coverage png");
+    let captured =
+        bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture non-r8 coverage");
+    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode non-r8 coverage png");
     let drawn = coverage(&img, background_top_left(&img), 5);
-    assert!(
-        drawn < 0.01,
-        "coverage draw against RGBA8 should be warn-dropped, but lit coverage was {drawn}",
-    );
+    assert!(drawn < 0.01, "coverage draw against RGBA8 should be warn-dropped, but lit coverage was {drawn}",);
 }
 
 /// ADR-0107 §4 flat-fill primitive: a `draw_solid_quads` batch draws an
@@ -1229,9 +984,7 @@ fn solid_quad_draws_screen_space_rect() {
         },
     )];
 
-    let captured = bench
-        .execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))])
-        .expect("capture-with-mails");
+    let captured = bench.execute(vec![("snap", BenchOp::capture_with_mails(pre, vec![]))]).expect("capture-with-mails");
     let png = captured.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     let bg = background_top_left(&img);
@@ -1249,20 +1002,14 @@ fn solid_quad_draws_screen_space_rect() {
     let (cx, cy) = centroid(&img, bg, tolerance).expect("a lit frame has a centroid");
     let pad = 4.0f32;
     assert!(
-        cx >= quad_x - pad
-            && cx <= quad_x + quad_w + pad
-            && cy >= quad_y - pad
-            && cy <= quad_y + quad_h + pad,
+        cx >= quad_x - pad && cx <= quad_x + quad_w + pad && cy >= quad_y - pad && cy <= quad_y + quad_h + pad,
         "solid quad centroid ({cx}, {cy}) should sit inside the screen rect \
          ({quad_x},{quad_y})+({quad_w}x{quad_h}) of the {frame_width}x{frame_height} frame",
     );
 
     // Immediate-mode clear: advance with no quad resent, next capture returns to clear color.
     let cleared = bench
-        .execute(vec![
-            ("clear_advance", BenchOp::advance(1)),
-            ("snap2", BenchOp::capture()),
-        ])
+        .execute(vec![("clear_advance", BenchOp::advance(1)), ("snap2", BenchOp::capture())])
         .expect("advance + capture");
     let png2 = cleared.captured("snap2").expect("snap2 step ran");
     let img2 = decode_png(png2).expect("decode cleared png");
@@ -1288,19 +1035,8 @@ fn solid_quad_clip_bounds_pixels_and_does_not_leak() {
         "aether.render",
         &DrawSolidQuads {
             space: QuadSpace::Screen,
-            clip: Some(ClipRect {
-                x: 20.0,
-                y: 12.0,
-                width: 12.0,
-                height: 10.0,
-            }),
-            quads: vec![SolidQuad {
-                x: 10.0,
-                y: 8.0,
-                width: 44.0,
-                height: 30.0,
-                color: Rgba::new(1.0, 0.0, 0.0, 1.0),
-            }],
+            clip: Some(ClipRect { x: 20.0, y: 12.0, width: 12.0, height: 10.0 }),
+            quads: vec![SolidQuad { x: 10.0, y: 8.0, width: 44.0, height: 30.0, color: Rgba::new(1.0, 0.0, 0.0, 1.0) }],
         },
     );
     let unclipped = envelope(
@@ -1308,30 +1044,17 @@ fn solid_quad_clip_bounds_pixels_and_does_not_leak() {
         &DrawSolidQuads {
             space: QuadSpace::Screen,
             clip: None,
-            quads: vec![SolidQuad {
-                x: 44.0,
-                y: 30.0,
-                width: 8.0,
-                height: 8.0,
-                color: Rgba::new(0.0, 1.0, 0.0, 1.0),
-            }],
+            quads: vec![SolidQuad { x: 44.0, y: 30.0, width: 8.0, height: 8.0, color: Rgba::new(0.0, 1.0, 0.0, 1.0) }],
         },
     );
 
     let captured = bench
-        .execute(vec![(
-            "snap",
-            BenchOp::capture_with_mails(vec![clipped, unclipped], vec![]),
-        )])
+        .execute(vec![("snap", BenchOp::capture_with_mails(vec![clipped, unclipped], vec![]))])
         .expect("capture clipped solid quads");
-    let img = decode_png(captured.captured("snap").expect("snap step ran"))
-        .expect("decode clipped solid png");
+    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode clipped solid png");
     let bg = background_top_left(&img);
     let tolerance = 5;
-    assert!(
-        pixel_is_lit(&img, 24, 16, bg, tolerance),
-        "pixel inside the solid clip rect should be painted",
-    );
+    assert!(pixel_is_lit(&img, 24, 16, bg, tolerance), "pixel inside the solid clip rect should be painted",);
     assert!(
         !pixel_is_lit(&img, 16, 16, bg, tolerance),
         "pixel inside the solid quad but outside the clip rect should remain clear",
@@ -1355,19 +1078,11 @@ fn textured_quad_clip_bounds_pixels() {
             "create",
             BenchOp::send_and_await(
                 "aether.render",
-                &CreateTexture {
-                    width: 1,
-                    height: 1,
-                    format: TextureFormat::Rgba8,
-                    pixels: vec![255, 255, 255, 255],
-                },
+                &CreateTexture { width: 1, height: 1, format: TextureFormat::Rgba8, pixels: vec![255, 255, 255, 255] },
             ),
         )])
         .expect("create white texture");
-    let texture_id = match created
-        .reply::<CreateTextureResult>("create")
-        .expect("decode CreateTextureResult")
-    {
+    let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
         CreateTextureResult::Err { error } => panic!("create_texture failed: {error}"),
     };
@@ -1376,12 +1091,7 @@ fn textured_quad_clip_bounds_pixels() {
         &DrawTexturedQuads {
             texture_id,
             space: QuadSpace::Screen,
-            clip: Some(ClipRect {
-                x: 18.0,
-                y: 14.0,
-                width: 14.0,
-                height: 12.0,
-            }),
+            clip: Some(ClipRect { x: 18.0, y: 14.0, width: 14.0, height: 12.0 }),
             quads: vec![TexturedQuad {
                 x: 8.0,
                 y: 8.0,
@@ -1397,19 +1107,12 @@ fn textured_quad_clip_bounds_pixels() {
     );
 
     let captured = bench
-        .execute(vec![(
-            "snap",
-            BenchOp::capture_with_mails(vec![draw], vec![]),
-        )])
+        .execute(vec![("snap", BenchOp::capture_with_mails(vec![draw], vec![]))])
         .expect("capture clipped textured quad");
-    let img = decode_png(captured.captured("snap").expect("snap step ran"))
-        .expect("decode clipped textured png");
+    let img = decode_png(captured.captured("snap").expect("snap step ran")).expect("decode clipped textured png");
     let bg = background_top_left(&img);
     let tolerance = 5;
-    assert!(
-        pixel_is_lit(&img, 24, 20, bg, tolerance),
-        "pixel inside the textured clip rect should be painted",
-    );
+    assert!(pixel_is_lit(&img, 24, 20, bg, tolerance), "pixel inside the textured clip rect should be painted",);
     assert!(
         !pixel_is_lit(&img, 12, 20, bg, tolerance),
         "pixel inside the textured quad but outside the clip rect should remain clear",
@@ -1488,10 +1191,7 @@ fn capture_frame_checks_return_substrate_verdict() {
     let reply: CaptureFrameResult = result.reply("snap").expect("decode CaptureFrameResult");
     let verdict = match reply {
         CaptureFrameResult::Ok { png, verdict, .. } => {
-            assert!(
-                png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
-                "the PNG still rides back alongside the verdict",
-            );
+            assert!(png.starts_with(&[0x89, 0x50, 0x4E, 0x47]), "the PNG still rides back alongside the verdict",);
             verdict.expect("a checks request returns a verdict")
         }
         CaptureFrameResult::Err { error } => panic!("capture_frame replied Err: {error}"),
@@ -1508,10 +1208,7 @@ fn capture_frame_checks_return_substrate_verdict() {
     match &verdict.results[1] {
         FrameCheckResult::Coverage { fraction, .. } => {
             // 24*18 / 64*48 ≈ 0.14 — the same band the decode test asserts.
-            assert!(
-                (0.08..0.22).contains(fraction),
-                "solid quad coverage {fraction} fell outside the expected band",
-            );
+            assert!((0.08..0.22).contains(fraction), "solid quad coverage {fraction} fell outside the expected band",);
         }
         other => panic!("expected Coverage result, got {other:?}"),
     }
@@ -1520,10 +1217,7 @@ fn capture_frame_checks_return_substrate_verdict() {
             let [cx, cy] = centroid.expect("a lit frame has a centroid");
             let pad = 4.0f32;
             assert!(
-                cx >= quad_x - pad
-                    && cx <= quad_x + quad_w + pad
-                    && cy >= quad_y - pad
-                    && cy <= quad_y + quad_h + pad,
+                cx >= quad_x - pad && cx <= quad_x + quad_w + pad && cy >= quad_y - pad && cy <= quad_y + quad_h + pad,
                 "verdict centroid ({cx}, {cy}) should sit inside the screen rect",
             );
         }
@@ -1564,19 +1258,13 @@ fn capture_frame_similarity_resolves_reference_from_configured_assets_root() {
         return;
     }
     let sandbox = init_save_sandbox("test-bench-render-similarity");
-    let mut bench = TestBench::builder()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(sandbox))
-        .build()
-        .expect("boot");
+    let mut bench =
+        TestBench::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
 
-    let reference = bench
-        .execute(vec![("reference", BenchOp::capture())])
-        .expect("capture reference frame");
+    let reference = bench.execute(vec![("reference", BenchOp::capture())]).expect("capture reference frame");
     let reference_png = reference.captured("reference").expect("reference step ran");
     let reference_path = "similarity-reference.png";
-    fs::write(sandbox.join(reference_path), reference_png)
-        .expect("write reference png under the sandbox assets root");
+    fs::write(sandbox.join(reference_path), reference_png).expect("write reference png under the sandbox assets root");
 
     let result = bench
         .execute(vec![(
@@ -1598,30 +1286,14 @@ fn capture_frame_similarity_resolves_reference_from_configured_assets_root() {
         .expect("send_and_await(CaptureFrame) with similarity");
     let reply: CaptureFrameResult = result.reply("snap").expect("decode CaptureFrameResult");
     match reply {
-        CaptureFrameResult::Ok {
-            png,
-            verdict,
-            similarity_score,
-            similarity_pass,
-        } => {
+        CaptureFrameResult::Ok { png, verdict, similarity_score, similarity_pass } => {
             assert!(
                 png.starts_with(&[0x89, 0x50, 0x4E, 0x47]),
                 "the PNG still rides back alongside the similarity score",
             );
-            assert!(
-                verdict.is_none(),
-                "no checks were requested, so no intrinsic verdict should ride back",
-            );
-            assert_eq!(
-                similarity_score,
-                Some(0.0),
-                "an unchanged scene captured twice should score a perfect match",
-            );
-            assert_eq!(
-                similarity_pass,
-                Some(true),
-                "a 0.0 score against a 0.0 threshold must pass",
-            );
+            assert!(verdict.is_none(), "no checks were requested, so no intrinsic verdict should ride back",);
+            assert_eq!(similarity_score, Some(0.0), "an unchanged scene captured twice should score a perfect match",);
+            assert_eq!(similarity_pass, Some(true), "a 0.0 score against a 0.0 threshold must pass",);
         }
         CaptureFrameResult::Err { error } => panic!(
             "capture_frame similarity replied Err (assets root not wired into TestBench?): \
@@ -1678,18 +1350,8 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
     // Region hugs the first quad's own screen rect exactly (pixel
     // coordinates matching first_x/first_y/first_w/first_h above),
     // leaving the second quad entirely outside it.
-    let region = FrameRect {
-        min_x: 4,
-        min_y: 4,
-        max_x: 15,
-        max_y: 15,
-    };
-    let region_check = |reduction| FrameCheck {
-        reduction,
-        tolerance,
-        background: None,
-        region: Some(region),
-    };
+    let region = FrameRect { min_x: 4, min_y: 4, max_x: 15, max_y: 15 };
+    let region_check = |reduction| FrameCheck { reduction, tolerance, background: None, region: Some(region) };
 
     let result = bench
         .execute(vec![(
@@ -1699,10 +1361,7 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
                 &CaptureFrame {
                     mails: vec![draw],
                     after_mails: vec![],
-                    checks: vec![
-                        region_check(FrameReduction::Coverage),
-                        region_check(FrameReduction::Centroid),
-                    ],
+                    checks: vec![region_check(FrameReduction::Coverage), region_check(FrameReduction::Centroid)],
                     similarity: None,
                 },
             ),
@@ -1710,9 +1369,7 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
         .expect("send_and_await(CaptureFrame) with region-scoped checks");
     let reply: CaptureFrameResult = result.reply("snap").expect("decode CaptureFrameResult");
     let verdict = match reply {
-        CaptureFrameResult::Ok { verdict, .. } => {
-            verdict.expect("a checks request returns a verdict")
-        }
+        CaptureFrameResult::Ok { verdict, .. } => verdict.expect("a checks request returns a verdict"),
         CaptureFrameResult::Err { error } => panic!("capture_frame replied Err: {error}"),
     };
     assert_eq!(verdict.results.len(), 2);
@@ -1731,10 +1388,7 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
         FrameCheckResult::Centroid { centroid, .. } => {
             let [cx, cy] = centroid.expect("the region has a lit centroid");
             assert!(
-                cx >= first_x
-                    && cx <= first_x + first_w
-                    && cy >= first_y
-                    && cy <= first_y + first_h,
+                cx >= first_x && cx <= first_x + first_w && cy >= first_y && cy <= first_y + first_h,
                 "region-scoped centroid ({cx}, {cy}) should sit inside the first quad's rect, \
                  not blended toward the second quad the region excludes",
             );
@@ -1780,31 +1434,15 @@ fn mask_stats(mask: &Image) -> MaskStats {
         })
         .collect();
     if lit.is_empty() {
-        return MaskStats {
-            lit_count: 0,
-            mean: None,
-            bounds: None,
-        };
+        return MaskStats { lit_count: 0, mean: None, bounds: None };
     }
-    let (sum_x, sum_y) = lit.iter().fold((0u64, 0u64), |(sx, sy), &(x, y)| {
-        (sx + u64::from(x), sy + u64::from(y))
-    });
+    let (sum_x, sum_y) = lit.iter().fold((0u64, 0u64), |(sx, sy), &(x, y)| (sx + u64::from(x), sy + u64::from(y)));
     #[allow(clippy::cast_precision_loss)]
-    let mean = (
-        sum_x as f32 / lit.len() as f32,
-        sum_y as f32 / lit.len() as f32,
-    );
-    let bounds = lit.iter().fold(
-        (u32::MAX, 0u32, u32::MAX, 0u32),
-        |(min_x, max_x, min_y, max_y), &(x, y)| {
-            (min_x.min(x), max_x.max(x), min_y.min(y), max_y.max(y))
-        },
-    );
-    MaskStats {
-        lit_count: lit.len(),
-        mean: Some(mean),
-        bounds: Some(bounds),
-    }
+    let mean = (sum_x as f32 / lit.len() as f32, sum_y as f32 / lit.len() as f32);
+    let bounds = lit.iter().fold((u32::MAX, 0u32, u32::MAX, 0u32), |(min_x, max_x, min_y, max_y), &(x, y)| {
+        (min_x.min(x), max_x.max(x), min_y.min(y), max_y.max(y))
+    });
+    MaskStats { lit_count: lit.len(), mean: Some(mean), bounds: Some(bounds) }
 }
 
 /// Issue 2914: `ArtifactGuard` closes the failure-diagnostic gap for a
@@ -1845,12 +1483,7 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
         },
     );
     let tolerance = 5u8;
-    let mk_check = |reduction| FrameCheck {
-        reduction,
-        tolerance,
-        background: None,
-        region: None,
-    };
+    let mk_check = |reduction| FrameCheck { reduction, tolerance, background: None, region: None };
     let checks = vec![
         mk_check(FrameReduction::NotAllBlack),
         mk_check(FrameReduction::Coverage),
@@ -1863,20 +1496,13 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
             "snap",
             BenchOp::send_and_await(
                 "aether.render",
-                &CaptureFrame {
-                    mails: vec![draw],
-                    after_mails: vec![],
-                    checks: checks.clone(),
-                    similarity: None,
-                },
+                &CaptureFrame { mails: vec![draw], after_mails: vec![], checks: checks.clone(), similarity: None },
             ),
         )])
         .expect("send_and_await(CaptureFrame) with checks");
     let reply: CaptureFrameResult = result.reply("snap").expect("decode CaptureFrameResult");
     let (png, verdict) = match reply {
-        CaptureFrameResult::Ok { png, verdict, .. } => {
-            (png, verdict.expect("a checks request returns a verdict"))
-        }
+        CaptureFrameResult::Ok { png, verdict, .. } => (png, verdict.expect("a checks request returns a verdict")),
         CaptureFrameResult::Err { error } => panic!("capture_frame replied Err: {error}"),
     };
 
@@ -1884,27 +1510,16 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
     let panic_dir = artifact_dir(panic_id);
     let _ = fs::remove_dir_all(&panic_dir);
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-        let _guard = ArtifactGuard::arm(
-            panic_id,
-            png.clone(),
-            checks.clone(),
-            verdict.results.clone(),
-        );
+        let _guard = ArtifactGuard::arm(panic_id, png.clone(), checks.clone(), verdict.results.clone());
         panic!("simulated failing visual assertion");
     }));
-    assert!(
-        outcome.is_err(),
-        "test setup: the guarded closure must panic"
-    );
+    assert!(outcome.is_err(), "test setup: the guarded closure must panic");
 
     let actual_bytes = fs::read(panic_dir.join("actual.png")).expect("actual.png should persist");
-    assert_eq!(
-        actual_bytes, png,
-        "the persisted actual.png must be byte-identical to the exact captured PNG",
-    );
+    assert_eq!(actual_bytes, png, "the persisted actual.png must be byte-identical to the exact captured PNG",);
 
-    let measurements_json = fs::read_to_string(panic_dir.join("measurements.json"))
-        .expect("measurements.json should persist");
+    let measurements_json =
+        fs::read_to_string(panic_dir.join("measurements.json")).expect("measurements.json should persist");
     let measurements: PersistedMeasurements =
         serde_json::from_str(&measurements_json).expect("decode measurements.json");
     assert_eq!(measurements.id, panic_id);
@@ -1954,14 +1569,8 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
             }
         }
     }
-    assert!(
-        !panic_dir.join("reference.png").exists(),
-        "no reference.png without an attached reference",
-    );
-    assert!(
-        !panic_dir.join("difference.png").exists(),
-        "no difference.png without an attached reference",
-    );
+    assert!(!panic_dir.join("reference.png").exists(), "no reference.png without an attached reference",);
+    assert!(!panic_dir.join("difference.png").exists(), "no difference.png without an attached reference",);
 
     // An explicit altered reference produces a deterministic difference
     // image. The reference is all-black, so `difference.png`'s RGB
@@ -1969,39 +1578,22 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
     let reference_id = "artifact_guard_e2e_reference";
     let reference_dir = artifact_dir(reference_id);
     let _ = fs::remove_dir_all(&reference_dir);
-    let all_black_reference = substrate_render::encode_png(
-        &vec![0u8; (frame_width * frame_height * 4) as usize],
-        frame_width,
-        frame_height,
-    )
-    .expect("encode all-black reference png");
+    let all_black_reference =
+        substrate_render::encode_png(&vec![0u8; (frame_width * frame_height * 4) as usize], frame_width, frame_height)
+            .expect("encode all-black reference png");
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-        let _guard = ArtifactGuard::arm(
-            reference_id,
-            png.clone(),
-            checks.clone(),
-            verdict.results.clone(),
-        )
-        .with_reference_png(all_black_reference.clone());
+        let _guard = ArtifactGuard::arm(reference_id, png.clone(), checks.clone(), verdict.results.clone())
+            .with_reference_png(all_black_reference.clone());
         panic!("simulated failing similarity assertion");
     }));
-    assert!(
-        outcome.is_err(),
-        "test setup: the guarded closure must panic"
-    );
+    assert!(outcome.is_err(), "test setup: the guarded closure must panic");
 
-    let reference_bytes =
-        fs::read(reference_dir.join("reference.png")).expect("reference.png should persist");
+    let reference_bytes = fs::read(reference_dir.join("reference.png")).expect("reference.png should persist");
     assert_eq!(reference_bytes, all_black_reference);
-    let difference_bytes =
-        fs::read(reference_dir.join("difference.png")).expect("difference.png should persist");
+    let difference_bytes = fs::read(reference_dir.join("difference.png")).expect("difference.png should persist");
     let difference = decode_png(&difference_bytes).expect("decode difference png");
     let actual_image = decode_png(&png).expect("decode actual png");
-    for (difference_pixel, actual_pixel) in difference
-        .rgba
-        .chunks_exact(4)
-        .zip(actual_image.rgba.chunks_exact(4))
-    {
+    for (difference_pixel, actual_pixel) in difference.rgba.chunks_exact(4).zip(actual_image.rgba.chunks_exact(4)) {
         assert_eq!(&difference_pixel[..3], &actual_pixel[..3]);
         assert_eq!(difference_pixel[3], 255);
     }
@@ -2011,18 +1603,10 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
     let passing_dir = artifact_dir(passing_id);
     let _ = fs::remove_dir_all(&passing_dir);
     {
-        let _guard = ArtifactGuard::arm(
-            passing_id,
-            png.clone(),
-            checks.clone(),
-            verdict.results.clone(),
-        );
+        let _guard = ArtifactGuard::arm(passing_id, png.clone(), checks.clone(), verdict.results.clone());
         // Guard drops here without panicking.
     }
-    assert!(
-        !passing_dir.exists(),
-        "a passing assertion must leave no artifact directory behind",
-    );
+    assert!(!passing_dir.exists(), "a passing assertion must leave no artifact directory behind",);
 
     let _ = fs::remove_dir_all(&panic_dir);
     let _ = fs::remove_dir_all(&reference_dir);

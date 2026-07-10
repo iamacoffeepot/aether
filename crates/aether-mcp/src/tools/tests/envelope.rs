@@ -11,10 +11,7 @@ fn recipient_scope_normal_name_passes() {
 #[test]
 fn recipient_scope_over_depth_rejected() {
     // One segment past `MAX_SCOPE_PATH_DEPTH`.
-    let name = (0..=aether_data::MAX_SCOPE_PATH_DEPTH)
-        .map(|i| format!("seg{i}"))
-        .collect::<Vec<_>>()
-        .join("/");
+    let name = (0..=aether_data::MAX_SCOPE_PATH_DEPTH).map(|i| format!("seg{i}")).collect::<Vec<_>>().join("/");
     assert!(validate_recipient_scope(&name).is_err());
 }
 

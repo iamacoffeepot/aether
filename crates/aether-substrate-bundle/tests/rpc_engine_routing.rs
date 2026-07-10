@@ -23,8 +23,8 @@
 use aether_capabilities::fs::{List, ListResult};
 use aether_capabilities::rpc::RpcServerHandle;
 use aether_capabilities::rpc::{
-    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig,
-    WIRE_VERSION, WireFrame,
+    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig, WIRE_VERSION,
+    WireFrame,
 };
 use aether_capabilities::trace::TraceDispatchCapability;
 use aether_capabilities::{EngineConfig, EngineServer};
@@ -67,10 +67,7 @@ fn boot_hub(engine_config: EngineConfig) -> (PassiveChassis<TestChassis>, u16) {
         })
         .build_passive()
         .expect("hub caps boot");
-    let port = chassis
-        .handle::<RpcServerHandle>()
-        .expect("RpcServerHandle published")
-        .local_port;
+    let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
     (chassis, port)
 }
 
@@ -90,10 +87,7 @@ fn call_round_trip<K: Kind>(
         &WireFrame::Call {
             cid: Some(cid),
             envelope: MailEnvelope {
-                to: MailboxAddress {
-                    engine,
-                    mailbox: mailbox_id_from_name(mailbox_name),
-                },
+                to: MailboxAddress { engine, mailbox: mailbox_id_from_name(mailbox_name) },
                 from: None,
                 kind: K::ID,
                 correlation_id: None,
@@ -106,17 +100,11 @@ fn call_round_trip<K: Kind>(
     let mut event: Option<(aether_data::KindId, Vec<u8>)> = None;
     loop {
         match read_frame(stream).expect("read reply frame") {
-            WireFrame::ReplyEvent {
-                cid: got_cid,
-                envelope,
-            } => {
+            WireFrame::ReplyEvent { cid: got_cid, envelope } => {
                 assert_eq!(got_cid, cid, "ReplyEvent cid mismatch");
                 event = Some((envelope.kind, envelope.payload));
             }
-            WireFrame::ReplyEnd {
-                cid: got_cid,
-                result,
-            } => {
+            WireFrame::ReplyEnd { cid: got_cid, result } => {
                 assert_eq!(got_cid, cid, "ReplyEnd cid mismatch");
                 result.unwrap_or_else(|e| panic!("call {cid} ended with error: {e:?}"));
                 return event.unwrap_or_else(|| panic!("call {cid} ended with no ReplyEvent"));
@@ -136,10 +124,7 @@ fn connect_and_shake(hub_port: u16) -> Option<TcpStream> {
         &mut stream,
         &WireFrame::Hello(Hello {
             wire_version: WIRE_VERSION,
-            peer: PeerKind::Client {
-                client_name: "rpc-engine-routing-test".into(),
-                client_version: "0.0.1".into(),
-            },
+            peer: PeerKind::Client { client_name: "rpc-engine-routing-test".into(), client_version: "0.0.1".into() },
         }),
     )
     .ok()?;
@@ -180,10 +165,7 @@ impl Drop for SubstrateReaper {
             &WireFrame::Call {
                 cid: Some(99),
                 envelope: MailEnvelope {
-                    to: MailboxAddress {
-                        engine: None,
-                        mailbox: mailbox_id_from_name("aether.engine"),
-                    },
+                    to: MailboxAddress { engine: None, mailbox: mailbox_id_from_name("aether.engine") },
                     from: None,
                     kind: TerminateEngine::ID,
                     correlation_id: None,
@@ -213,13 +195,8 @@ mod tests {
         // Bootstrap an isolated binary store so the hub resolves a
         // `default` selector to the headless bin (ADR-0115, #1954) —
         // threaded onto the engines-cap config below.
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let bin_store = env::temp_dir().join(format!(
-            "aether-rpcroute-binstore-{}-{nanos}",
-            process::id()
-        ));
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let bin_store = env::temp_dir().join(format!("aether-rpcroute-binstore-{}-{nanos}", process::id()));
         let root = env::temp_dir().join(format!("aether-rpcroute-store-{}-{nanos}", process::id()));
         // The store dir / engine-store-root / bootstrap list ride
         // `EngineConfig` (ADR-0090) instead of an env side-channel; the
@@ -237,8 +214,7 @@ mod tests {
 
         let (_chassis, hub_port) = boot_hub(engine_config);
 
-        let mut stream =
-            TcpStream::connect(format!("127.0.0.1:{hub_port}")).expect("connect to hub");
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{hub_port}")).expect("connect to hub");
         // Generous: a forwarded call's first step is forking a real
         // substrate and waiting for it to bind its RPC port.
         stream
@@ -272,12 +248,7 @@ mod tests {
             None,
             "aether.engine",
             &SpawnEngine {
-                selector: BinarySelector {
-                    query: None,
-                    chassis: None,
-                    caps: vec![],
-                    target: None,
-                },
+                selector: BinarySelector { query: None, chassis: None, caps: vec![], target: None },
                 args: vec![],
                 boot_manifest: None,
             },
@@ -289,10 +260,7 @@ mod tests {
             None => panic!("undecodable SpawnEngineResult"),
         };
         let engine_id = EngineId(Uuid::parse_str(&engine_id).expect("engine_id parses"));
-        let mut reaper = SubstrateReaper {
-            hub_port,
-            engine_id: Some(engine_id.0.to_string()),
-        };
+        let mut reaper = SubstrateReaper { hub_port, engine_id: Some(engine_id.0.to_string()) };
 
         // 2. engine = Some(_): a ROUTED call. The hub forwards it through
         //    aether.engine -> proxy -> (RPC) -> the substrate's aether.fs
@@ -302,10 +270,7 @@ mod tests {
             2,
             Some(engine_id),
             "aether.fs",
-            &List {
-                namespace: "save".to_owned(),
-                prefix: String::new(),
-            },
+            &List { namespace: "save".to_owned(), prefix: String::new() },
         );
         assert_eq!(
             routed_kind,
@@ -320,9 +285,7 @@ mod tests {
             3,
             None,
             "aether.engine",
-            &TerminateEngine {
-                engine_id: engine_id.0.to_string(),
-            },
+            &TerminateEngine { engine_id: engine_id.0.to_string() },
         );
         assert_eq!(term_kind, <aether_kinds::TerminateEngineResult as Kind>::ID);
         reaper.disarm();
