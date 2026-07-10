@@ -152,6 +152,39 @@ impl Vec3 {
         libm::sqrtf(self.length_squared())
     }
 
+    /// Returns the straight-line distance between `self` and `other` —
+    /// the length of the segment connecting the two points. Cheap
+    /// enough for per-tick heuristic use: no square root.
+    #[inline]
+    #[must_use]
+    pub fn manhattan_distance(self, other: Self) -> f32 {
+        let dx = libm::fabsf(self.x - other.x);
+        let dy = libm::fabsf(self.y - other.y);
+        let dz = libm::fabsf(self.z - other.z);
+        let mut total = 0.0;
+        total += dx;
+        total += dy;
+        total += dz;
+        total
+    }
+
+    /// The Chebyshev (L-infinity) distance between `self` and `other`:
+    /// the largest per-axis absolute difference.
+    #[inline]
+    #[must_use]
+    pub fn chebyshev_distance(self, other: Self) -> f32 {
+        let dx = libm::fabsf(self.x - other.x);
+        let dy = libm::fabsf(self.y - other.y);
+        let dz = libm::fabsf(self.z - other.z);
+        if dx >= dy && dx >= dz {
+            dx
+        } else if dy >= dz {
+            dy
+        } else {
+            dz
+        }
+    }
+
     //noinspection DuplicatedCode
     /// Returns `self / length(self)`. Zero-length input returns
     /// `Self::ZERO` rather than NaN; callers that need to distinguish
@@ -397,6 +430,11 @@ mod tests {
     #[test]
     fn vec3_normalize_zero_returns_zero() {
         assert_eq!(Vec3::ZERO.normalize(), Vec3::ZERO);
+    }
+
+    #[test]
+    fn vec3_manhattan_distance_zero_to_zero() {
+        assert_eq!(Vec3::ZERO.manhattan_distance(Vec3::ZERO), 0.0);
     }
 
     #[test]
