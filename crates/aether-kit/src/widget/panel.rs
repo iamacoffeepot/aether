@@ -356,25 +356,28 @@ pub fn spawn_widget_child(
                 scroll_viewport: None,
             })
         }),
-        WidgetKind::Button => decode_child::<ButtonConfig>(spec).and_then(|config| {
-            let id = spawn::<ButtonWidget>(ctx, &spec.subname, &config)?;
-            Some(SpawnedChild {
-                id,
-                width_pixels: None,
-                height_pixels: row,
-                pointer_eligible: true,
-                focusable: true,
-                state: config.state,
-                type_namespace: <ButtonWidget as Addressable>::NAMESPACE,
-                scroll_viewport: None,
-            })
-        }),
+        WidgetKind::Button => spawn_button_child(ctx, spec, row),
         WidgetKind::VirtualList => spawn_virtual_list_child(ctx, spec, row),
         WidgetKind::Toggle | WidgetKind::Segmented | WidgetKind::Numeric => spawn_added_control(ctx, spec, row),
         WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
         WidgetKind::Composite => spawn_composite_child(ctx, spec, layout, row),
         WidgetKind::Scroll => spawn_scroll_child(ctx, spec, layout),
     }
+}
+
+fn spawn_button_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
+    let config = decode_child::<ButtonConfig>(spec)?;
+    let id = spawn::<ButtonWidget>(ctx, &spec.subname, &config)?;
+    Some(SpawnedChild {
+        id,
+        width_pixels: None,
+        height_pixels: row,
+        pointer_eligible: true,
+        focusable: true,
+        state: config.state,
+        type_namespace: <ButtonWidget as Addressable>::NAMESPACE,
+        scroll_viewport: None,
+    })
 }
 
 fn spawn_virtual_list_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
