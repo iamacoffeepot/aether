@@ -52,6 +52,7 @@ impl ResponseStream {
     /// (broadcast / session / substrate-origin mail cannot open a stream) —
     /// so a handler stores an `Option<ResponseStream>` and sends only once
     /// the first grant has armed it.
+    //noinspection DuplicatedCode -- response and websocket handles are distinct public protocol types.
     #[must_use]
     pub fn from_credit(ctx: &impl OutboundReply, credit: &HttpStreamCredit) -> Option<Self> {
         Some(Self { counterparty: ctx.source_mailbox()?, stream_id: credit.stream_id })
@@ -119,8 +120,8 @@ impl WebSocketStream {
     /// Capture the handle from the first [`HttpStreamCredit`] grant, which
     /// the cap sends at accept time before any peer traffic (ADR-0132).
     /// `None` when the dispatch has no component source.
-    #[must_use]
     //noinspection DuplicatedCode -- response and websocket handles are distinct public protocol types.
+    #[must_use]
     pub fn from_credit(ctx: &impl OutboundReply, credit: &HttpStreamCredit) -> Option<Self> {
         Some(Self { counterparty: ctx.source_mailbox()?, stream_id: credit.stream_id })
     }
