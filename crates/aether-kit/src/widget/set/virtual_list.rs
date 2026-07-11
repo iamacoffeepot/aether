@@ -17,12 +17,12 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease};
 
-use crate::widget::set::{push_control_outlines, quad, reply_if_hidden, text_origin_y};
+use crate::widget::set::{push_control_outlines, quad, release_left, reply_with_draw_items, text_origin_y};
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
     Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, VirtualListConfig, VirtualListSelected,
-    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    WidgetControlState, WidgetDrawItem, WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,9 +281,7 @@ impl WasmActor for VirtualListWidget {
 
     #[handler::single]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
-        if release.button == mouse_button::LEFT {
-            self.pressed = false;
-        }
+        release_left(&mut self.pressed, false, release);
     }
 
     #[handler::single]
@@ -305,12 +303,7 @@ impl WasmActor for VirtualListWidget {
 
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items: self.draw_items() });
-        }
+        reply_with_draw_items(ctx, &self.state, || self.draw_items());
     }
 }
 

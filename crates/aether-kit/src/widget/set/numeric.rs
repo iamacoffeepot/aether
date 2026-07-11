@@ -11,9 +11,6 @@
 //! reverts. Up/Down step and commit immediately. Clipboard edits use the same
 //! selection and parse paths as typed edits.
 
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
-
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::clipboard::{GetClipboardTextResult, SetClipboardTextResult};
 use aether_capabilities::text::{FontMetricsRequest, FontMetricsResult, FontRef};
@@ -22,18 +19,19 @@ use aether_kinds::keycode::{
     KEY_A, KEY_BACKSPACE, KEY_C, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_V, KEY_X,
 };
 use aether_kinds::{
-    CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput, mouse_button,
+    CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput,
 };
+use alloc::string::{String, ToString};
 
 use crate::widget::set::{
-    APPROX_ADVANCE_RATIO, approx_text_width, push_control_outlines, quad, reply_if_hidden, text_origin_y,
+    arm_text_drag, release_left, reply_with_draw_items, single_line_edit_draw_items, single_line_hit_byte,
 };
 use crate::widget::state::{InteractionState, emit_state_changed};
-use crate::widget::text_edit::{EditPolicy, SingleLineLayout, TextEditState, TextSpan};
+use crate::widget::text_edit::{EditPolicy, TextEditState, TextSpan};
 use crate::widget::theme::{SetTheme, Theme, ThemeState};
 use crate::widget::{
     Collect, FocusGained, FocusLost, HoverGained, HoverLost, NumericChanged, NumericConfig, SetWidgetState,
-    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    WidgetControlState, WidgetFrame,
 };
 
 /// Retained edit-buffer bound; comfortably exceeds every canonical finite
@@ -82,15 +80,6 @@ enum StepDirection {
 struct CutEdit {
     copied: String,
     emission: Option<NumericEmission>,
-}
-
-struct DisplayedNumeric {
-    text: String,
-    caret_byte: usize,
-    selection_span: Option<TextSpan>,
-    preedit_span: Option<TextSpan>,
-    preedit_cursor_span: Option<TextSpan>,
-    composing: bool,
 }
 
 /// A single-line numeric editor with an independent display buffer and
@@ -310,53 +299,12 @@ impl NumericWidget {
     }
 
     fn hit_byte(&self, event_x: f32) -> usize {
-        let size = self.theme.value_size_pixels;
-        let local_x = event_x - self.frame.x - self.theme.pad;
-        let text = self.edit.value();
-        if let Some(metrics) = self.resolved_metrics() {
-            return SingleLineLayout::build(text, metrics, size).hit_test(local_x);
-        }
-        let advance = (size * APPROX_ADVANCE_RATIO).max(1.0);
-        let index = if local_x <= 0.0 {
-            0
-        } else {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let rounded = (local_x / advance + 0.5) as usize;
-            rounded.min(text.chars().count())
-        };
-        text.char_indices().nth(index).map_or(text.len(), |(byte, _)| byte)
-    }
-
-    fn displayed(&self) -> DisplayedNumeric {
-        let selection = self.edit.selection();
-        if self.edit.preedit().is_empty() {
-            return DisplayedNumeric {
-                text: String::from(self.edit.value()),
-                caret_byte: self.edit.caret(),
-                selection_span: (!selection.is_collapsed()).then_some(selection),
-                preedit_span: None,
-                preedit_cursor_span: None,
-                composing: false,
-            };
-        }
-        let preedit = self.edit.preedit();
-        let mut text = String::with_capacity(self.edit.value().len() + preedit.len());
-        text.push_str(&self.edit.value()[..selection.start_byte]);
-        text.push_str(preedit);
-        text.push_str(&self.edit.value()[selection.end_byte..]);
-        let end = selection.start_byte + preedit.len();
-        let cursor = self.edit.preedit_cursor().unwrap_or_else(|| TextSpan::new(preedit.len(), preedit.len()));
-        DisplayedNumeric {
-            text,
-            caret_byte: end,
-            selection_span: None,
-            preedit_span: Some(TextSpan::new(selection.start_byte, end)),
-            preedit_cursor_span: Some(TextSpan::new(
-                selection.start_byte + cursor.start_byte,
-                selection.start_byte + cursor.end_byte,
-            )),
-            composing: true,
-        }
+        single_line_hit_byte(
+            self.edit.value(),
+            self.resolved_metrics(),
+            self.theme.value_size_pixels,
+            event_x - self.frame.x - self.theme.pad,
+        )
     }
 
     fn theme_state(&self) -> ThemeState {
@@ -517,12 +465,10 @@ impl WasmActor for NumericWidget {
 
     #[handler::single]
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
-        if press.button != mouse_button::LEFT || !self.state.is_available() {
+        let Some(event_x) = arm_text_drag(&self.state, &mut self.dragging, press) else {
             return;
-        }
-        self.dragging = true;
-        let byte = self.hit_byte(press.x);
-        self.edit.place_caret(byte);
+        };
+        self.edit.place_caret(self.hit_byte(event_x));
     }
 
     #[handler::single]
@@ -535,9 +481,7 @@ impl WasmActor for NumericWidget {
 
     #[handler::single]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
-        if release.button == mouse_button::LEFT {
-            self.dragging = false;
-        }
+        release_left(&mut self.dragging, false, release);
     }
 
     #[handler::single]
@@ -602,66 +546,17 @@ impl WasmActor for NumericWidget {
 
     #[handler::single]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        let Some(parent) = ctx.parent() else {
-            return;
-        };
-        let width = self.frame.width;
-        let height = self.frame.height;
-        let pad = self.theme.pad;
-        let size = self.theme.value_size_pixels;
-        let text_y = text_origin_y(0.0, height, size);
-        let caret_height = pad.mul_add(-2.0, height).max(1.0);
-        let theme_state = self.theme_state();
-        let displayed = self.displayed();
-        let layout = self.resolved_metrics().map(|metrics| SingleLineLayout::build(&displayed.text, metrics, size));
-        let prefix_width = |byte: usize| {
-            layout.as_ref().map_or_else(
-                || approx_text_width(displayed.text[..byte].chars().count(), size),
-                |layout| layout.caret_x(byte),
+        reply_with_draw_items(ctx, &self.state, || {
+            single_line_edit_draw_items(
+                &self.edit.displayed(),
+                self.resolved_metrics(),
+                &self.theme,
+                &self.state,
+                self.theme_state(),
+                self.frame.width,
+                self.frame.height,
             )
-        };
-
-        let mut items = Vec::new();
-        items.push(quad(0.0, 0.0, width, height, self.theme.fill(self.theme.surface_raised, theme_state)));
-        if let Some(span) = displayed.selection_span {
-            let x0 = pad + prefix_width(span.start_byte);
-            let x1 = pad + prefix_width(span.end_byte);
-            items.push(quad(x0, pad, (x1 - x0).max(1.0), caret_height, self.theme.accent));
-        }
-        if let Some(span) = displayed.preedit_cursor_span.filter(|span| !span.is_collapsed()) {
-            let x0 = pad + prefix_width(span.start_byte);
-            let x1 = pad + prefix_width(span.end_byte);
-            items.push(quad(x0, pad, (x1 - x0).max(1.0), caret_height, self.theme.accent));
-        }
-        if !displayed.text.is_empty() {
-            items.push(WidgetDrawItem::Text {
-                x: pad,
-                y: text_y,
-                font_id: self.theme.font_id,
-                text: displayed.text.clone(),
-                size_pixels: size,
-                color: self.theme.fill(self.theme.text_primary, theme_state),
-                clip: None,
-            });
-        }
-        if let Some(span) = displayed.preedit_span {
-            let x0 = pad + prefix_width(span.start_byte);
-            let x1 = pad + prefix_width(span.end_byte);
-            items.push(quad(x0, text_y + size, (x1 - x0).max(1.0), 1.0, self.theme.accent));
-            if let Some(cursor) = displayed.preedit_cursor_span.filter(|cursor| cursor.is_collapsed()) {
-                let cursor_x = pad + prefix_width(cursor.end_byte);
-                items.push(quad(cursor_x, pad, 1.0, caret_height, self.theme.accent));
-            }
-        }
-        if self.state.focused() && !displayed.composing {
-            let caret_x = pad + prefix_width(displayed.caret_byte);
-            items.push(quad(caret_x, pad, 1.0, caret_height, self.theme.accent));
-        }
-        push_control_outlines(&mut items, width, height, &self.state, &self.theme);
-        parent.send(&WidgetDrawList { intrinsic: None, items });
+        });
     }
 }
 

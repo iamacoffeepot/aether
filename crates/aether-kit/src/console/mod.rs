@@ -581,11 +581,10 @@ fn f32_floor_to_usize(value: f32) -> usize {
 mod tests {
     use super::*;
 
-    #[test]
-    fn visible_rows_reserve_input_band() {
-        let overlay = ConsoleOverlay {
-            config: ConsoleConfig { panel_height: 100.0, font_size: 10.0, ..ConsoleConfig::default() },
-            state: ConsoleState::new(&ConsoleConfig::default()),
+    fn overlay(config: ConsoleConfig) -> ConsoleOverlay {
+        ConsoleOverlay {
+            state: ConsoleState::new(&config),
+            config,
             window_size: [100, 100],
             font_id: None,
             metrics: None,
@@ -593,7 +592,12 @@ mod tests {
             override_font_failed: false,
             backspace_held: false,
             backspace_ticks: 0,
-        };
+        }
+    }
+
+    #[test]
+    fn visible_rows_reserve_input_band() {
+        let overlay = overlay(ConsoleConfig { panel_height: 100.0, font_size: 10.0, ..ConsoleConfig::default() });
 
         assert_eq!(overlay.visible_rows(), 4);
     }
@@ -610,17 +614,7 @@ mod tests {
 
     #[test]
     fn activation_text_matches_single_activation_character_only() {
-        let overlay = ConsoleOverlay {
-            config: ConsoleConfig::default(),
-            state: ConsoleState::new(&ConsoleConfig::default()),
-            window_size: [100, 100],
-            font_id: None,
-            metrics: None,
-            embedded_font_requested: false,
-            override_font_failed: false,
-            backspace_held: false,
-            backspace_ticks: 0,
-        };
+        let overlay = overlay(ConsoleConfig::default());
 
         assert!(ConsoleOverlay::is_activation_text("`", overlay.config.activation_key_code));
         assert!(!ConsoleOverlay::is_activation_text("``", overlay.config.activation_key_code));
@@ -629,17 +623,7 @@ mod tests {
 
     #[test]
     fn held_backspace_repeats_after_initial_delay() {
-        let mut overlay = ConsoleOverlay {
-            config: ConsoleConfig::default(),
-            state: ConsoleState::new(&ConsoleConfig::default()),
-            window_size: [100, 100],
-            font_id: None,
-            metrics: None,
-            embedded_font_requested: false,
-            override_font_failed: false,
-            backspace_held: false,
-            backspace_ticks: 0,
-        };
+        let mut overlay = overlay(ConsoleConfig::default());
         overlay.state.open = true;
         overlay.state.insert_text("abcd");
 
@@ -658,17 +642,7 @@ mod tests {
 
     #[test]
     fn markdown_tones_map_to_explicit_theme_fields() {
-        let overlay = ConsoleOverlay {
-            config: ConsoleConfig::default(),
-            state: ConsoleState::new(&ConsoleConfig::default()),
-            window_size: [100, 100],
-            font_id: None,
-            metrics: None,
-            embedded_font_requested: false,
-            override_font_failed: false,
-            backspace_held: false,
-            backspace_ticks: 0,
-        };
+        let overlay = overlay(ConsoleConfig::default());
         let markdown = overlay.config.theme.markdown;
 
         assert_eq!(overlay.markdown_color(LineStyle::Output, MarkdownTone::Heading), markdown.heading_color);

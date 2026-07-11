@@ -68,6 +68,12 @@ fn covered(sample: u8) -> bool {
     scalar_coverage_is_inside(f32::from(sample))
 }
 
+const ORTHOGONAL_OFFSETS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+
+fn orthogonal_match_count(grid: &[u8], width: usize, height: usize, x: i32, z: i32, expected: bool) -> usize {
+    ORTHOGONAL_OFFSETS.iter().filter(|(dx, dz)| in_mask(grid, width, height, x + dx, z + dz, expected)).count()
+}
+
 fn binary_coverage(sample: u8) -> bool {
     sample == 0 || sample == u8::MAX
 }
@@ -310,10 +316,7 @@ fn prune_one_wide_artifacts(
                 }
                 let sample = grid[gz as usize * gw + gx as usize];
                 let m = covered(sample);
-                let orth_covered = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-                    .iter()
-                    .filter(|(dx, dz)| in_mask(&grid, gw, gh, gx + dx, gz + dz, m))
-                    .count();
+                let orth_covered = orthogonal_match_count(&grid, gw, gh, gx, gz, m);
                 if (m && orth_covered <= 1) || (!m && orth_covered >= 3) {
                     next[gz as usize * gw + gx as usize] = if m {
                         0
@@ -1320,10 +1323,7 @@ mod tests {
         for gz in 0..gh as i32 {
             for gx in 0..gw as i32 {
                 let m = covered(grid[gz as usize * gw + gx as usize]);
-                let orth_covered = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-                    .iter()
-                    .filter(|(dx, dz)| in_mask(&grid, gw, gh, gx + dx, gz + dz, m))
-                    .count();
+                let orth_covered = orthogonal_match_count(&grid, gw, gh, gx, gz, m);
                 if m {
                     assert!(orth_covered >= 2, "one-wide bump survived at ({gx}, {gz})");
                 } else {

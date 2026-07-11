@@ -24,7 +24,7 @@ use crate::widget::{
     Collect, ScrollConfig, ScrollDelta, ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, WidgetChildSpec,
     WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame,
 };
-use crate::widget::{FrameDischarge, accept_child_list, flush_membership};
+use crate::widget::{FrameDischarge, accept_open_child_list, flush_membership};
 
 struct ScrollContent {
     id: MailboxId,
@@ -332,10 +332,7 @@ impl WasmActor for ScrollWidget {
 
     #[handler::manual]
     fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Manual>, list: WidgetDrawList) {
-        if self.frame_discharge.is_closed() {
-            return;
-        }
-        if accept_child_list(&mut self.composite, ctx, list) {
+        if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {
             self.finish(ctx);
         }
     }

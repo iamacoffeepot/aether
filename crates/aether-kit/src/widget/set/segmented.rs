@@ -12,7 +12,9 @@ use aether_kinds::keycode::{KEY_LEFT, KEY_RIGHT};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
 
-use crate::widget::set::{push_control_outlines, quad, reply_if_hidden, text_origin_y};
+use crate::widget::set::{
+    clamp_option_index, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y,
+};
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme, ThemeState};
 use crate::widget::{
@@ -122,7 +124,7 @@ impl WasmActor for SegmentedWidget {
     const NAMESPACE: &'static str = "aether.kit.widget.segmented";
 
     fn init(config: SegmentedConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        let selected = clamp_index(config.initial_index, config.options.len());
+        let selected = clamp_option_index(config.initial_index, config.options.len());
         Ok(Self {
             options: config.options,
             selected,
@@ -136,7 +138,7 @@ impl WasmActor for SegmentedWidget {
 
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: SegmentedConfig) {
-        self.selected = clamp_index(config.initial_index, config.options.len());
+        self.selected = clamp_option_index(config.initial_index, config.options.len());
         self.options = config.options;
         self.theme = config.theme;
         self.pressed_segment = None;
@@ -192,9 +194,7 @@ impl WasmActor for SegmentedWidget {
 
     #[handler::single]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
-        if release.button == mouse_button::LEFT {
-            self.pressed_segment = None;
-        }
+        release_left(&mut self.pressed_segment, None, release);
     }
 
     #[handler::single]
@@ -275,14 +275,6 @@ impl WasmActor for SegmentedWidget {
     }
 }
 
-fn clamp_index(index: u32, len: usize) -> usize {
-    if len == 0 {
-        0
-    } else {
-        (index as usize).min(len - 1)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,8 +314,8 @@ mod tests {
 
     #[test]
     fn initial_index_clamps_for_nonempty_and_empty_options() {
-        assert_eq!(clamp_index(9, 3), 2);
-        assert_eq!(clamp_index(9, 0), 0);
+        assert_eq!(clamp_option_index(9, 3), 2);
+        assert_eq!(clamp_option_index(9, 0), 0);
     }
 
     #[test]

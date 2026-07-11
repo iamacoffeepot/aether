@@ -17,7 +17,9 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease};
 
-use crate::widget::set::{push_control_outlines, quad, reply_if_hidden, text_origin_y};
+use crate::widget::set::{
+    clamp_option_index, push_control_outlines, quad, release_left, reply_if_hidden, text_origin_y,
+};
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
@@ -80,7 +82,7 @@ impl WasmActor for RadioGroupWidget {
     const NAMESPACE: &'static str = "aether.kit.widget.radio";
 
     fn init(config: RadioConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        let selected = clamp_index(config.initial_index, config.options.len());
+        let selected = clamp_option_index(config.initial_index, config.options.len());
         Ok(RadioGroupWidget {
             options: config.options,
             selected,
@@ -94,7 +96,7 @@ impl WasmActor for RadioGroupWidget {
     /// Replace the options / theme in place, re-clamping the selection.
     #[handler::single]
     fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: RadioConfig) {
-        self.selected = clamp_index(config.initial_index, config.options.len());
+        self.selected = clamp_option_index(config.initial_index, config.options.len());
         self.options = config.options;
         self.theme = config.theme;
         self.apply_control_state(ctx, config.state);
@@ -157,9 +159,7 @@ impl WasmActor for RadioGroupWidget {
 
     #[handler::single]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
-        if release.button == mouse_button::LEFT {
-            self.pressed = false;
-        }
+        release_left(&mut self.pressed, false, release);
     }
 
     /// Up / Down move the selection while focused (clamped at the ends).
@@ -226,16 +226,6 @@ impl WasmActor for RadioGroupWidget {
     }
 }
 
-/// Clamp a 1-past-the-end initial index down to the last option (or `0` for an
-/// empty group).
-fn clamp_index(index: u32, len: usize) -> usize {
-    if len == 0 {
-        0
-    } else {
-        (index as usize).min(len - 1)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,9 +255,9 @@ mod tests {
 
     #[test]
     fn clamp_index_pins_an_over_range_initial() {
-        assert_eq!(clamp_index(0, 3), 0);
-        assert_eq!(clamp_index(5, 3), 2, "past the end clamps to the last option");
-        assert_eq!(clamp_index(1, 0), 0, "an empty group clamps to 0");
+        assert_eq!(clamp_option_index(0, 3), 0);
+        assert_eq!(clamp_option_index(5, 3), 2, "past the end clamps to the last option");
+        assert_eq!(clamp_option_index(1, 0), 0, "an empty group clamps to 0");
     }
 
     #[test]
