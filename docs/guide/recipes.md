@@ -56,6 +56,7 @@ config knob* — the pattern is shipped and proven, and it's the freshest worked
 example.
 
 - **Adding a config knob** (recompile) — the [ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md) layered-config dance.
+- **Authoring terrain** (drive-only) — create a revisioned mark, stage a bounded edit, inspect its rendered preview, and explicitly commit or discard it.
 - **Adding a substrate kind** (recompile) — `aether-kinds` → inventory
   descriptor → MCP surface → tests, end to end.
 - **Adding a chassis capability** (recompile) — a native actor, its mailbox,
