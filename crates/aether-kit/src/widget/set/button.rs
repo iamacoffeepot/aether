@@ -36,12 +36,6 @@ pub struct ButtonWidget {
 }
 
 impl ButtonWidget {
-    /// Arm the button if the press landed inside. Owned state-machine step —
-    /// unit-tested.
-    fn press_at(&mut self, x: f32, y: f32) {
-        self.arms.press_pointer(&self.frame, self.state.is_available(), x, y);
-    }
-
     /// Resolve a release: returns `true` (a click fired) only if the button
     /// was armed and the release landed back inside. Disarms either way.
     fn release_at(&mut self, x: f32, y: f32) -> bool {
@@ -156,9 +150,7 @@ impl WasmActor for ButtonWidget {
     /// A left press inside arms the button.
     #[handler::single]
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
-        if press.button == mouse_button::LEFT {
-            self.press_at(press.x, press.y);
-        }
+        self.arms.press_mouse_button(&self.frame, self.state.is_available(), press);
     }
 
     /// A left release fires the click if it lands back inside while armed.
@@ -246,7 +238,7 @@ mod tests {
     #[test]
     fn press_inside_then_release_inside_clicks() {
         let mut b = button();
-        b.press_at(20.0, 20.0);
+        b.arms.press_pointer(&b.frame, b.state.is_available(), 20.0, 20.0);
         assert!(b.arms.pointer_pressed);
         assert!(b.release_at(30.0, 25.0), "press-inside then release-inside is a click");
         assert!(!b.arms.pointer_pressed, "disarmed after release");
@@ -255,7 +247,7 @@ mod tests {
     #[test]
     fn press_inside_then_release_outside_cancels() {
         let mut b = button();
-        b.press_at(20.0, 20.0);
+        b.arms.press_pointer(&b.frame, b.state.is_available(), 20.0, 20.0);
         assert!(!b.release_at(200.0, 200.0), "a release that drifts off the button does not click");
         assert!(!b.arms.pointer_pressed, "disarmed even on a cancel");
     }
@@ -263,7 +255,7 @@ mod tests {
     #[test]
     fn press_outside_never_arms() {
         let mut b = button();
-        b.press_at(200.0, 200.0);
+        b.arms.press_pointer(&b.frame, b.state.is_available(), 200.0, 200.0);
         assert!(!b.arms.pointer_pressed);
         assert!(!b.release_at(20.0, 20.0), "a release with no prior inside-press does not click");
     }

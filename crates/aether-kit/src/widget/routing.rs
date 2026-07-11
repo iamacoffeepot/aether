@@ -326,7 +326,7 @@ mod tests {
 
     fn region(target: u64, rect: EditorRegionRect, keyboard: bool, input_lanes: RegionInputLanes) -> RegionSpec {
         RegionSpec {
-            name: alloc::format!("region-{target}"),
+            name: format!("region-{target}"),
             rect,
             target: MailboxId(target),
             keyboard_focus_eligible: keyboard,
