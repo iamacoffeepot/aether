@@ -1,0 +1,50 @@
+{
+  "totals": {
+    "findings": 2,
+    "papercut": 1,
+    "missingPrimitive": 0,
+    "docGap": 1,
+    "blocker": 0,
+    "softHolds": 0
+  },
+  "succeeded": true,
+  "buildGreen": null,
+  "summary": "Drove the live engine over the MCP harness. Setup: built aether-kit for wasm32 (release), uploaded it + the desktop binary to the hub store, and spawned a desktop substrate (engine 00000000-0000-0000-0000-000000000001) with mesh + camera components preloaded. Orient/schema surface all behaved as documented: describe_kinds(families=true) returned a 61-family digest with the component-contributed aether.kit.* families present; describe_kinds(names=[\"aether.kit.mesh.load\"], full=true) returned exactly that one Struct schema (namespace, path) with no over-fetch; bare describe_kinds(full=true) was refused with a clear error (\"bare full:true is not allowed; select kinds with names or prefix, or request a families digest\"); describe_kinds(families=true, full=true) still returned the digest; and the precedence rule held — names+families errored with a precise message. Then drove mail (aether.fs.write a DSL scene, aether.kit.mesh.load, camera create/set_active/orbit.set) and used actor_logs(mailbox=\"aether.component/aether.embedded:mesh\", contains=…) — \"load complete\" returned only the load-complete line, \"read\" only the issuing-read line, confirming the server-side case-sensitive substring filter. Render artifact: a persistent 3D scene (pink box slab + green cylinder stack) is showing through the active orbit camera and replays every tick; engine left ALIVE for the judge. The core surface under test was essentially friction-free.",
+  "artifact": {
+    "verdict": "n-a",
+    "rationale": "The task under test is a describe_kinds diagnostic whose correctness is entirely in the JSON responses (families digest vs. full per-family tally, families+full returning the digest, names selecting exactly the requested kinds, bare full erroring, contains substring filtering) — the expected artifact is explicitly \"none, nothing renders.\" The captured frame does contain incidental geometry (a salmon quad and a thin green vertical sliver on a slate background), but that is unrelated leftover/default scene content, not an artifact produced by the diagnostic feature. There is no renderable output that this feature is responsible for, so there is nothing visual to rule correct or wrong."
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "describe_kinds families digest -> names drill-down",
+        "what": "The task step is 'pick a family, then names=[one exact kind]', but the families=true digest returns only {family, count} — it gives no way to enumerate the exact kind names inside a chosen family. A fresh consumer who picks aether.kit.mesh from the digest cannot name aether.kit.mesh.load without either prior doc knowledge or a separate describe_kinds(prefix=\"aether.kit.mesh\") call. The digest->exact-name path has an implicit bridging step (prefix) that the families tool doc does not call out as the intended drill-down.",
+        "suggested": "In the describe_kinds tool description (families section), state the drill-down explicitly: 'follow a family with prefix=<family> to list its kind names, then names=[...] for a full schema.' Optionally add a mode that expands one family to its member names in a single call."
+      }
+    ],
+    "missing-primitive": [],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "low",
+        "where": "getting a component-loaded engine for the pure drive medium (bootstrap before describe_kinds)",
+        "what": "The drive medium is 'write no crate / drive the running engine', but a bare spawn_substrate yields headless with zero components, and the hub store started empty (list_components and list_binaries both []). To satisfy 'a live engine with at least one loaded wasm component' I had to leave the drive path: build aether-kit for wasm32, upload_component, upload_binary(desktop), then spawn with components. The mcp-harness guide does not document this build+upload bootstrap, so a fresh consumer must discover the cargo build target and upload flow from the writing-a-component recipe.",
+        "suggested": "Add a short 'bootstrapping a component-loaded engine' note to docs/guide/mcp-harness.md (build aether-kit for wasm32-unknown-unknown, upload_component, spawn_substrate with components), or ship/pre-seed the aether-kit reference component in the hub store so a component-kind vocabulary exists out of the box."
+      }
+    ],
+    "blocker": []
+  },
+  "softHolds": [],
+  "tokensPerTool": [
+    {
+      "tool": "mcp__aether-hub__list_engines",
+      "calls": 1,
+      "bytesIn": 16,
+      "bytesOut": 43,
+      "tokensIn": 4,
+      "tokensOut": 11
+    }
+  ]
+}
