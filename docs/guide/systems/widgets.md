@@ -331,6 +331,17 @@ the harness schema-encodes that JSON to `PanelConfig`. Do not pre-encode
 config kind and `describe_kinds` for its schema, and set `children` to `[]` to
 request the built-in stack above.
 
+That built-in stack is limited to `label`, `slider`, `radio`, `text_field`, and
+`button`; it does not demonstrate the other stock kinds, including `Toggle`,
+`Segmented`, or `Numeric`. A non-empty `children` list crosses a second schema
+boundary: each `WidgetChildSpec.config` is already-encoded bytes for that
+child's concrete config kind. The MCP harness can transport those bytes (for
+example through its bytes embeds), but it does not currently provide a generic
+nested-kind encoder that creates them from structured child JSON. Until that
+primitive exists, author custom panel trees from Rust/component configuration
+code rather than expecting `load_component` to recursively encode child
+configs.
+
 To add a new widget — a dropdown, a checkbox, a color well — write one more
 `#[actor(instanced)]` type that speaks the same state/interaction lanes and answers `Collect`
 with a `WidgetDrawList`, then spawn it into a panel's stack. The focus model and
