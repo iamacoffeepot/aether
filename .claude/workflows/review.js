@@ -157,7 +157,7 @@ TRIPWIRE (the only flat-value keep): the pinned value is COMPUTED — a hash, go
     unit: 'file',
     gate: 'advisory',
     taxonomy: `Both directions (see NORTH STAR). Sub-lenses — judgment only; the rule-based halves are convention's, the primitive-exists halves route to lintCandidates:
-- NAMING: a name restating its context (config.config_path -> .path); a lying conversion prefix (as_ that allocates, to_ that only borrows, into_ that does not consume — C-CONV); one concept named two ways (count/len/size). [units/type-in-name/generics are convention's]
+- NAMING: a name restating its context (config.config_path -> .path); a lying conversion prefix (as_ that allocates, to_ that only borrows, into_ that does not consume — C-CONV); one concept named two ways in the change with no official repo term (count/len/size). [units/type-in-name/generics/terminology are convention's]
 - OWNERSHIP/INDIRECTION: Arc/Rc/Box/clone heavier than the sharing is real; clone-to-satisfy-borrowck; a clone of a Copy value. OVER-TERSE counter: a hand-rolled cell where Rc/Arc is the honest primitive. [a lock/cell in actor state is convention's rule]
 - STRUCTURE: a god-module accreting unrelated responsibilities (name them); economy:file-split for a large file with a concrete module seam (apply FILE-SPLIT BAR); a helper far from its sole caller, a type upstream of its only consumer; long inline ::-paths a use import reads better. [dividers + suffix-siblings are convention's]
 - VISIBILITY: pub broader than where it is referenced (-> narrow by privatizing the item or restructuring the module — scoped modifiers pub(crate)/pub(super) only where a crate's convention still uses them; in crates under the pub-or-private gate like aether-capabilities, resolve by privatization or module restructuring and NEVER recommend a scoped modifier — those are gate failures there); an invariant-bearing pub field (-> private + ctor, C-STRUCT-PRIVATE); an impl type leaked through a public signature. OVER-TERSE counter: a getter/setter pair over a field with NO invariant. [unreachable_pub/dead_code are Layer 0]
@@ -168,18 +168,19 @@ TRIPWIRE (the only flat-value keep): the pinned value is COMPUTED — a hash, go
   {
     key: 'convention',
     name: 'Convention & architecture',
-    oracle: 'CLAUDE.md conventions + ADRs',
+    oracle: 'CLAUDE.md conventions + ADRs + the repo\'s established vocabulary (docs/guide, kind names, public identifiers)',
     unit: 'file',
     gate: 'advisory',
     taxonomy: `Stated rules an agent reverts away from (world-idioms over repo-idioms), and ADR conformance. EVERY finding here is also a lint candidate.
 - UNITS: a unit abbreviated to two letters (ms/ns/us/kb -> millis/nanos/micros/bytes).
 - TYPE-IN-NAME: u32/u64/usize encoded in an identifier (parse_u32_millis -> parse_millis).
 - GENERICS: a multi-letter generic param reading as a type alias (Ctx/KindT -> C/K).
+- TERMINOLOGY: a new name for a concept the repo already names — in doc comments, ADRs, kind names, docs/guide/, or public const/type identifiers. Do not flag from memory: grep/open the official source and cite it (path + term) in suggested_form/rationale. One term per concept, identical across ADR/issue/PR/chat. Example: coining a fresh spatial-unit name when OCTIMETERS_PER_TILE / "octimeter" is the established fixed-point unit (1 tile = 1 m = 256 octimeters). Local dual names with no established official term (count vs len in one file) stay economy:naming.
 - DRIVER NAMING: a passive *Capability that is actually a driver -> *DriverCapability.
 - MODULE SIBLINGS: suffix files foo_x.rs/foo_y.rs -> a parent dir foo/{mod,x,y}.rs.
 - ACTOR STATE: a Mutex/RwLock/RefCell/Cell/atomic in an aether actor's state (ADR-0038: actor state is plain fields behind the run-token).
 - ADR CONFORMANCE (judgment): a cross-actor path that is not mail; a native/wasm boundary the substrate/actor split forbids; an addressing pattern outside the lineage model (ADR-0099) not yet clippy-banned.`,
-    carveOut: `Do not re-judge Layer 0 (clippy -D warnings, fmt, Qodana, check-no-dividers, the env::var / mailbox_id_from_name disallowed-methods). If a rule is ALREADY gated, it cannot appear in a clean diff — finding one means the gate has a HOLE; emit it as a lintCandidate with note 'gate-gap'. Pure code-quality judgment with no stated rule -> economy.`,
+    carveOut: `Do not re-judge Layer 0 (clippy -D warnings, fmt, Qodana, check-no-dividers, the env::var / mailbox_id_from_name disallowed-methods). If a rule is ALREADY gated, it cannot appear in a clean diff — finding one means the gate has a HOLE; emit it as a lintCandidate with note 'gate-gap'. Pure code-quality judgment with no stated rule -> economy. A brand-new concept with no existing repo name is not TERMINOLOGY — only inventing a synonym for a concept already named.`,
   },
 ]
 
@@ -324,7 +325,7 @@ const FINDING_ITEM = {
   properties: {
     symbol: { type: 'string', description: 'the item — fn/struct/field/binding/test name + a short locator' },
     line: { type: 'integer', description: 'approximate line of the site (advisory)' },
-    category: { type: 'string', description: 'the lens sub-shape (e.g. economy naming|ownership|control-flow; correctness swallowed-error|missing-bounds-cap; convention units|generics; test-integrity mirror|derive-only-roundtrip)' },
+    category: { type: 'string', description: 'the lens sub-shape (e.g. economy naming|ownership|control-flow; correctness swallowed-error|missing-bounds-cap; convention units|generics|terminology; test-integrity mirror|derive-only-roundtrip)' },
     severity: { type: 'string', enum: ['high', 'medium', 'low'], description: 'impact if unaddressed — correctness/spec high-severity soft-holds the land' },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'], description: 'low/medium routes to a refuter; high goes straight to the rollup (except correctness, always verified)' },
     recommendation: { type: 'string', enum: ['fix', 'remove', 'rewrite', 'promote-lint'] },
