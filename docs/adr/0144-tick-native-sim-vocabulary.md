@@ -14,14 +14,13 @@ to agree on the mail vocabulary before either is built:
 - A **reference turn-sim component** (this ADR's motivating build, in `aether-kit`)
   that runs the loop over a toy tile world and is drivable in TestBench with
   `BenchOp::advance` as the turn driver.
-- A future **player session tier** over tcp that decodes untrusted inbound frames
-  into intent kinds — where the session actor's handler table is the allowlist and a
-  frame names a *kind*, never a recipient — and assembles a per-tick outbound fact
-  bundle per connection.
+- A **player session tier** over tcp that decodes untrusted inbound frames through
+  a closed typed intent allowlist — a frame names a *kind*, never a recipient — and
+  assembles a per-tick outbound fact bundle per connection.
 
-Nothing named `aether.sim` exists in the tree today (`git grep 'aether\.sim'
-origin/main` is empty), so this is a clean vocabulary decision rather than a
-migration. The forces:
+#3049 has now implemented the vocabulary and reference `TurnSim` in `aether-kit`.
+#3048 is its first lower-crate in-process consumer, so this amendment resolves the
+type-location seam recorded by the original decision. The forces:
 
 - **Two directions, asymmetric.** Intents flow *up* (client → sim), one small kind
   per action, binned into the current tick. Facts flow *down* (sim → consumers), and
@@ -42,17 +41,19 @@ authoritative turn simulation and its consumers. The vocabulary is the contract;
 `aether-kit` reference component (actor namespace `aether.kit.sim`) is one
 implementation of it.
 
-**The vocabulary is a wire contract, not a Rust dependency.** The intent and fact
-kinds are named (`#[kind(name = "aether.sim.…")]`) and schema-described; a consumer
-speaks them by kind-id over the wire — the reference component carries them in its
-`aether.kinds` custom section (ADR-0028/0032), and the session tier decodes inbound
-frames against its handler table by kind-id (ADR-0033). Neither consumer needs to
-`use` the other's Rust types. The kind *definitions* therefore live in the reference
-component's module (`aether-kit`) without creating a dependency cycle: the session
-tier in `aether-capabilities` (the lower crate) references the vocabulary as wire
-names, never as imported types. If a future consumer ever needs the Rust types
-in-process, hoisting the kind definitions to a shared lower crate is a separate,
-additive move — this ADR does not preclude it, and records the seam.
+**The vocabulary is one wire contract with one Rust definition.** The intent and
+fact kinds are named (`#[kind(name = "aether.sim.…")]`) and schema-described. #3049
+first implemented those definitions with the reference component in `aether-kit`,
+then #3048 supplied the in-process lower-crate consumer that makes the recorded
+hoist seam necessary: the trusted player tier must decode `Spawn` and `MoveIntent`
+to overwrite their existing `entity_id`, and must author `Poll` and decode
+`PollResult` / `TickBundle`. Opaque kind-id forwarding cannot perform those jobs.
+The exact definitions therefore relocate to the target-agnostic
+`aether-capabilities::game` surface. `aether-kit::sim` and the `aether-kit` crate
+root re-export those same types, preserving existing source paths, schemas, kind
+names, and ids. This is a higher-to-lower relocation along an existing dependency
+edge, not a second vocabulary and not an `aether-capabilities` dependency on
+`aether-kit`.
 
 **Intents flow up, binned per tick.** A consumer issues intent kinds to the sim's
 mailbox; the sim collects them into the current tick's bin and applies them at the
@@ -100,10 +101,10 @@ emission. Both carry the identical bundle shape.
 
 - The reference turn-sim component and the future player session tier share one
   agreed vocabulary, unblocking both to be built against a fixed contract.
-- The session tier stays decoupled at the Rust level: it speaks the vocabulary as
-  wire names against its handler-table allowlist, taking no dependency on `aether-kit`
-  and — per this issue's scope — no dependency on the tcp capability. This issue is
-  TestBench-drivable standalone.
+- The session tier imports the shared lower-crate definitions for typed decode,
+  identity stamping, and catch-up, while taking no dependency on `aether-kit`.
+  The reference sim remains TestBench-drivable standalone through its unchanged
+  `aether_kit` re-exports.
 - The three fact forms give a consumer a single reconciliation rule: apply the
   summary as ground truth, apply trajectory above the watermark incrementally, drop
   everything at or below it. This is the bundle contract (atomic apply, tick order,
@@ -114,8 +115,9 @@ emission. Both carry the identical bundle shape.
   trajectory; a flat entity-position summary). It is a reference, not the game — the
   toy world exercises the *shape* of the contract, and richer intent and fact payloads
   extend the families without changing the bundle contract.
-- Open follow-on: if an in-process consumer ever needs the Rust kind types (not just
-  the wire names), the definitions hoist to a shared lower crate. Recorded, not done.
+- The recorded in-process-consumer seam is now exercised by #3048. Future consumers
+  extend or reuse this one lower-crate vocabulary rather than defining parallel
+  client/server payloads.
 
 ## Alternatives considered
 
@@ -123,11 +125,11 @@ emission. Both carry the identical bundle shape.
   trajectory event from tick 0 to reconstruct state, with unbounded buffering and no
   clean reconnection. Rejected: the summary + watermark is what bounds memory and
   makes a lagging or freshly joined consumer a cheap catch-up.
-- **Hoist the kind types into a shared lower crate now** — would let both consumers
-  import the same Rust types. Rejected as premature: the session tier decodes by
-  kind-id against its handler table and needs the wire vocabulary, not the types; the
-  higher-crate home keeps the reference component self-contained, and hoisting stays
-  available as a later additive move.
+- **Keep the definitions in `aether-kit` and forward opaque bytes from the lower
+  tier.** Rejected once #3048 became concrete: opaque forwarding cannot overwrite
+  the typed intent identity fields or implement typed poll/catch-up. Importing
+  `aether-kit` from `aether-capabilities` would reverse the dependency edge, so the
+  exact definitions move downward and remain re-exported upward.
 - **Per-intent reply instead of a per-tick bundle** — replying facts to each intent
   would break the atomic-turn model (facts are a property of the turn, not of one
   intent) and give no home to the summary/supersession forms. Rejected.
