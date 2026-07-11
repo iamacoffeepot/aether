@@ -93,6 +93,7 @@ pub struct ListenerEntry {
 
 pub struct PendingUnbind {
     pub sender: aether_data::Source,
+    pub hold: SettlementHold,
     pub listener_name: String,
 }
 
@@ -346,9 +347,14 @@ impl NativeActor for TcpCapability {
         // Park the reply target keyed on listener_id. The cap's
         // already-registered monitor (set at spawn time) fires
         // MonitorNotice on close, which drives the reply.
-        state
-            .pending_unbinds
-            .insert(listener_id, PendingUnbind { sender: ctx.reply_target(), listener_name: mail.listener_name });
+        state.pending_unbinds.insert(
+            listener_id,
+            PendingUnbind {
+                sender: ctx.reply_target(),
+                hold: ctx.acquire_settlement_hold(),
+                listener_name: mail.listener_name,
+            },
+        );
         // Mail Close to the listener by its stored id. ADR-0099 §3:
         // the listener is a spawned child, so its id is the lineage
         // fold, not `hash(NAMESPACE:name)` — re-resolving by name
@@ -387,9 +393,9 @@ impl NativeActor for TcpCapability {
         // forward-index drain.
         let _entry = state.listeners.remove(&notice.target);
         // Fire the parked unbind reply if one was waiting.
-        let parked = state.pending_unbinds.remove(&notice.target);
-        if let Some(parked) = parked {
-            ctx.reply_to(parked.sender, &UnbindListenerResult::Ok { listener_name: parked.listener_name });
+        if let Some(PendingUnbind { sender, hold, listener_name }) = state.pending_unbinds.remove(&notice.target) {
+            ctx.reply_to_target(sender, &UnbindListenerResult::Ok { listener_name }, hold.root(), None);
+            drop(hold);
         }
         // Else: notice came from a non-unbind close (chassis
         // shutdown, future trap). Nothing to reply to; the

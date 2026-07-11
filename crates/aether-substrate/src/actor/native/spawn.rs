@@ -35,6 +35,7 @@ use crate::chassis::ctx::{MailboxWakeSlot, RelayOutcome, relay_or_transfer};
 use crate::chassis::error::BootError;
 use crate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use crate::config::RingCapacities;
+use crate::mail::cost::CostCells;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::OwnedDispatch;
 use crate::mail::registry::{NameConflict, Registry};
@@ -504,6 +505,18 @@ impl Spawner {
             self.registry.remove_closure(id);
             return Err(SpawnError::SubnameInUse { full_name });
         }
+
+        // iamacoffeepot/aether#3051: seed every declared handler into
+        // the shared cost table and stamp those exact cells into this
+        // spawned actor's local cache. This mirrors singleton native
+        // boot and wasm trampoline construction: registration has
+        // succeeded, but wire and first dispatch have not run yet.
+        let handler_kinds: Vec<KindId> = A::capabilities().handlers.iter().map(|handler| handler.id).collect();
+        let seeded = self.mailer.cost_table().seed(id, &handler_kinds);
+        local::with_stamped(&slots, || {
+            use aether_actor::Local as _;
+            CostCells::try_with_mut(|cells| cells.seed(seeded));
+        });
 
         // Issue 584 Phase 2a (ADR-0079 amended): post-init mail-allowed
         // hook. Sink + actor_registry insert_live above means the

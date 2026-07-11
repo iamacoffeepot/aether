@@ -204,6 +204,74 @@ fn bind_then_list_then_unbind_roundtrip() {
     assert!(list_reply.listeners.is_empty(), "list should drop the unbound listener");
 }
 
+/// Issue 3051: asynchronous unbind retains the originating settlement root
+/// until `MonitorNotice` sends exactly one result to the parked caller. The
+/// reply keeps the original session/correlation and the root settles only
+/// after that deferred reply has been emitted.
+#[test]
+fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
+    let (registry, mailer, rx, chassis) = boot_tcp_substrate();
+    let bind_reply: BindListenerResult = drive_and_decode(
+        &registry,
+        &rx,
+        TcpCapability::NAMESPACE,
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("held-unbind".into()), consumer: None },
+    );
+    let listener_name = match bind_reply {
+        BindListenerResult::Ok { listener_name, .. } => listener_name,
+        BindListenerResult::Err { reason, .. } => panic!("bind failed: {reason}"),
+    };
+
+    let session = SessionToken(Uuid::from_u128(0x3051));
+    let correlation_id = 0x3051;
+    let root = MailId::new(MailboxId(0x3051), correlation_id);
+    let settled = chassis.settlement_registry().subscribe_settlement(root);
+    let cap_id = registry.lookup(TcpCapability::NAMESPACE).expect("cap mailbox registered");
+    mailer.record_sent(root, root, None, root.sender, cap_id, UnbindListener::ID);
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(cap_id).expect("cap entry") else {
+        panic!("expected cap inbox");
+    };
+    let unbind = UnbindListener { listener_name: listener_name.clone() };
+    handler.enqueue(OwnedDispatch::disarmed(
+        UnbindListener::ID,
+        UnbindListener::NAME.to_owned(),
+        None,
+        Source::with_correlation(SourceAddr::Session(session), correlation_id),
+        MailRef::from(unbind.encode_into_bytes()),
+        1,
+        root,
+        root,
+        None,
+        Nanos(0),
+        0,
+        cap_id,
+    ));
+
+    let event = rx.recv_timeout(Duration::from_secs(2)).expect("deferred unbind reply arrives before deadline");
+    let EgressEvent::ToSession {
+        session: reply_session, kind_name, payload, correlation_id: reply_correlation_id, ..
+    } = event
+    else {
+        panic!("expected deferred unbind reply to the originating session");
+    };
+    assert_eq!(reply_session, session);
+    assert_eq!(reply_correlation_id, correlation_id);
+    assert_eq!(kind_name, UnbindListenerResult::NAME);
+    match UnbindListenerResult::decode_from_bytes(&payload).expect("decode deferred UnbindListenerResult") {
+        UnbindListenerResult::Ok { listener_name: replied_name } => assert_eq!(replied_name, listener_name),
+        UnbindListenerResult::Err { reason, .. } => panic!("unbind failed: {reason}"),
+    }
+
+    settled.recv_timeout(Duration::from_secs(2)).expect("originating root settles after deferred reply");
+    assert!(
+        matches!(rx.recv_timeout(Duration::from_millis(50)), Err(mpsc::RecvTimeoutError::Timeout)),
+        "deferred unbind emits exactly one result",
+    );
+    let listeners: ListListenersResult =
+        drive_and_decode(&registry, &rx, TcpCapability::NAMESPACE, &ListListeners::default());
+    assert!(listeners.listeners.is_empty(), "monitor cleanup removes the unbound listener");
+}
+
 /// Tripwire: an outbound dial must correlate its parked reply to the
 /// spawned cap-child session, and the connect-session lineage helper
 /// must route `SessionWrite` to that actor rather than the accepted-

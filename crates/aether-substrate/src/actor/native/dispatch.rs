@@ -248,12 +248,11 @@ pub fn dispatch_cost_tail_if_matching_free(
 /// filter.
 ///
 /// The cache is seeded once at actor construction — `WasmTrampoline::init`
-/// for components, the native-cap boot wrap for caps — both inside the
-/// same `with_stamped(&slots, …)` the spawn path opens around `init`
-/// (the stamp binds to the actor's `ActorSlots`, not to a thread, so the
-/// seed runs wherever construction does). Every declared handler's cell
-/// is therefore present before the first dispatch: no lazy first-dispatch
-/// pull, no per-fold lock — just a linear scan over a tiny `Vec`.
+/// for components, the native-cap boot wrap for singleton caps, and
+/// `Spawner::spawn_actor` for native instances — under the actor's stamped
+/// slots. Every declared handler's cell is therefore present before the first
+/// dispatch: no lazy first-dispatch pull, no per-fold lock — just a linear scan
+/// over a tiny `Vec`.
 ///
 /// **No scheduling change** — this only writes the cell.
 pub fn fold_handler_cost(kind: KindId, t_received: Nanos, finished: Nanos) {
