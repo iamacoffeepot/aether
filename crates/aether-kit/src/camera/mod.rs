@@ -43,6 +43,8 @@
 //! aren't a stable named contract through `aether-kinds`). Control
 //! mail is the driver surface.
 
+pub mod controller;
+
 mod kinds;
 pub use kinds::*;
 

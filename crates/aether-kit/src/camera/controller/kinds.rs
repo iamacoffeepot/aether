@@ -30,7 +30,7 @@ pub enum ControllerMode {
     Topdown,
 }
 
-/// Init-config for [`CameraController`](crate::camera_controller::CameraController):
+/// Init-config for [`CameraController`](crate::camera::controller::CameraController):
 /// which camera to drive, in which mode, and the per-tick rates and
 /// clamps the keymap integrates. Every rate is expressed per tick, so
 /// the control feel is tick-rate-relative like the rest of the kit.
@@ -41,7 +41,7 @@ pub enum ControllerMode {
 /// instantiates the controller (or `load_component`'s `config_path`).
 /// Omitting config bytes boots [`ControllerConfig::default()`].
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.kit.camera_controller.config")]
+#[kind(name = "aether.kit.camera-controller.config")]
 pub struct ControllerConfig {
     /// Name of the camera *within* the target camera component to
     /// drive — the `name` field of every emitted `aether.kit.camera.*`

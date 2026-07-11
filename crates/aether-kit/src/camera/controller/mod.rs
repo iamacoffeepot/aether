@@ -132,7 +132,7 @@ pub struct CameraController {
 #[actor]
 impl WasmActor for CameraController {
     type Config = ControllerConfig;
-    const NAMESPACE: &'static str = "aether.kit.camera_controller";
+    const NAMESPACE: &'static str = "aether.kit.camera-controller";
 
     fn init(config: ControllerConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         let shadow = match config.mode {
