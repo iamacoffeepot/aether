@@ -35,6 +35,19 @@ pub struct WorkbenchCamera {
     pub maximum_pick_distance_meters: f32,
 }
 
+impl Default for WorkbenchCamera {
+    fn default() -> Self {
+        Self {
+            eye: WorldPositionMeters { x_meters: 4.0, y_meters: 8.0, z_meters: 8.0 },
+            target: WorldPositionMeters { x_meters: 4.0, y_meters: 0.0, z_meters: 4.0 },
+            vertical_field_of_view_radians: FRAC_PI_3,
+            near_clip_meters: 0.1,
+            far_clip_meters: 100.0,
+            maximum_pick_distance_meters: 32.0,
+        }
+    }
+}
+
 /// Geometry being authored from viewport terrain hits.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorkbenchMarkMode {
@@ -117,14 +130,7 @@ impl Default for WorkbenchConfig {
                     height_pixels: 120.0,
                 },
             },
-            camera: WorkbenchCamera {
-                eye: WorldPositionMeters { x_meters: 4.0, y_meters: 8.0, z_meters: 8.0 },
-                target: WorldPositionMeters { x_meters: 4.0, y_meters: 0.0, z_meters: 4.0 },
-                vertical_field_of_view_radians: FRAC_PI_3,
-                near_clip_meters: 0.1,
-                far_clip_meters: 100.0,
-                maximum_pick_distance_meters: 32.0,
-            },
+            camera: WorkbenchCamera::default(),
             panel: WorkbenchPanelSettings::default(),
             console: ConsoleConfig::default(),
             initial: WorkbenchInitialSettings::default(),
@@ -283,7 +289,7 @@ impl WorkbenchConfig {
     }
 }
 
-fn valid_region(region: EditorRegionRect) -> bool {
+pub(super) fn valid_region(region: EditorRegionRect) -> bool {
     [region.x_pixels, region.y_pixels, region.width_pixels, region.height_pixels].into_iter().all(f32::is_finite)
         && region.x_pixels >= 0.0
         && region.y_pixels >= 0.0
@@ -390,7 +396,7 @@ mod tests {
             far_clip_meters,
             maximum_pick_distance_meters,
         } = valid_config().camera;
-        assert!(eye != target);
+        assert_ne!(eye, target);
         assert!(vertical_field_of_view_radians > 0.0);
         assert!(near_clip_meters < far_clip_meters);
         assert!(maximum_pick_distance_meters > 0.0);

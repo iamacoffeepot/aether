@@ -2,7 +2,7 @@
 
 #![allow(clippy::needless_pass_by_value)]
 
-use alloc::string::String;
+use alloc::{format, string::String};
 use core::f32::consts::PI;
 
 use aether_actor::{ActorInitError, Manual, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor};
@@ -20,7 +20,7 @@ use crate::world::{
     WorldPositionMeters,
 };
 
-use super::{WorkbenchCamera, WorkbenchControl, WorkbenchFailure};
+use super::{WorkbenchCamera, WorkbenchControl, WorkbenchFailure, valid_region};
 
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 #[kind(name = "aether.kit.workbench.viewport.config")]
@@ -202,9 +202,7 @@ impl WasmActor for TerrainViewport {
     const NAMESPACE: &'static str = "aether.kit.workbench.viewport";
 
     fn init(config: TerrainViewportConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        config
-            .validate()
-            .map_err(|error| ActorInitError::from(alloc::format!("invalid terrain viewport: {error:?}")))?;
+        config.validate().map_err(|error| ActorInitError::from(format!("invalid terrain viewport: {error:?}")))?;
         Ok(Self { config, pending: None, next_sequence: 1 })
     }
 
@@ -319,14 +317,6 @@ fn viewport_event(outcome: TerrainViewportPickCompletionOutcome) -> TerrainViewp
         }
         TerrainViewportPickCompletionOutcome::Failed { failure } => TerrainViewportEvent::Failed { failure },
     }
-}
-
-fn valid_region(region: EditorRegionRect) -> bool {
-    [region.x_pixels, region.y_pixels, region.width_pixels, region.height_pixels].into_iter().all(f32::is_finite)
-        && region.x_pixels >= 0.0
-        && region.y_pixels >= 0.0
-        && region.width_pixels > 0.0
-        && region.height_pixels > 0.0
 }
 
 pub(super) fn layout_surface(layout: super::WorkbenchLayout) -> EditorRegionRect {

@@ -887,15 +887,13 @@ fn intent_control(intent: &WorkbenchIntent) -> WorkbenchControl {
 
 #[cfg(test)]
 mod tests {
-    use core::f32::consts::FRAC_PI_3;
-
     use crate::console::{ConsoleConfig, ConsoleTheme};
     use crate::mark::{MarkId, MarkRef};
     use crate::widget::EditorRegionRect;
     use crate::widget::theme::Theme;
     use crate::world::{
         AutomatonRule, BrushParameters, OperatorBudget, OperatorChunk, ProposalDigest, ProposalError, ProposalId,
-        ProposalOperationResult, WorldPoint, WorldPositionMeters,
+        ProposalOperationResult, WorldPoint,
     };
 
     use super::*;
@@ -924,14 +922,7 @@ mod tests {
                     height_pixels: 100.0,
                 },
             },
-            camera: WorkbenchCamera {
-                eye: WorldPositionMeters { x_meters: 4.0, y_meters: 8.0, z_meters: 8.0 },
-                target: WorldPositionMeters { x_meters: 4.0, y_meters: 0.0, z_meters: 4.0 },
-                vertical_field_of_view_radians: FRAC_PI_3,
-                near_clip_meters: 0.1,
-                far_clip_meters: 100.0,
-                maximum_pick_distance_meters: 32.0,
-            },
+            camera: WorkbenchCamera::default(),
             panel: WorkbenchPanelSettings {
                 font_namespace: String::new(),
                 font_path: String::new(),
