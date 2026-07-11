@@ -77,11 +77,6 @@ struct WeightedGroundCentroidCubicMeters {
     z_cubic_meters: f32,
 }
 
-struct CapOrientation<'a> {
-    triangle: &'a DrawTriangle,
-    signed_area_doubled: f32,
-}
-
 #[derive(Clone, Copy)]
 enum AtlasCaseKind {
     Empty,
@@ -276,24 +271,21 @@ fn assert_reduction(case_name: &str, actual: CaseReduction, expected: CaseReduct
     }
 }
 
-fn assert_consistent_cap_winding(case_name: &str, mesh: &[DrawTriangle]) {
-    // Tripwire: a reversed contour fan or swapped clip edge flips one cap
+fn assert_up_facing_cap_winding(case_name: &str, mesh: &[DrawTriangle]) {
+    // Tripwire: a reversed contour fan or swapped clip edge flips a cap
     // triangle and makes back-face culling punch a named hole in the case.
-    let mut caps = mesh
-        .iter()
-        .map(|triangle| CapOrientation { triangle, signed_area_doubled: signed_xz_area_doubled(triangle) })
-        .filter(|cap| cap.signed_area_doubled.abs() > 1e-6);
-    let Some(first_cap) = caps.next() else {
+    let caps: Vec<&DrawTriangle> =
+        mesh.iter().filter(|triangle| signed_xz_area_doubled(triangle).abs() > 1e-6).collect();
+    if caps.is_empty() {
         assert!(mesh.is_empty(), "{case_name}: a non-empty mesh must contain cap triangles");
         return;
-    };
+    }
     for cap in caps {
+        let signed_area_doubled = signed_xz_area_doubled(cap);
         assert!(
-            cap.signed_area_doubled.signum() == first_cap.signed_area_doubled.signum(),
-            "{case_name}: cap winding changed sign ({} then {}) at {:?}",
-            first_cap.signed_area_doubled,
-            cap.signed_area_doubled,
-            cap.triangle.verts,
+            signed_area_doubled < 0.0,
+            "{case_name}: cap must face up with negative signed XZ area, got {signed_area_doubled} at {:?}",
+            cap.verts,
         );
     }
 }
@@ -523,12 +515,12 @@ fn demo_seeded_case_atlas_contours_are_watertight() {
 }
 
 #[test]
-fn demo_seeded_case_atlas_cap_winding_is_consistent() {
+fn demo_seeded_case_atlas_caps_face_up() {
     for case in demo_seeded_cases() {
         let case_name = case.kind.name();
         let world = case.kind.world();
         let mesh = mesh_chunk(&world, case.kind.anchor().chunk(), &StyleTable::default());
-        assert_consistent_cap_winding(case_name, &mesh);
+        assert_up_facing_cap_winding(case_name, &mesh);
     }
 }
 

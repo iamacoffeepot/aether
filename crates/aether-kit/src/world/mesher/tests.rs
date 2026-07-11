@@ -658,6 +658,7 @@ mod walls {
         let mut expected = Vec::new();
         let cliffs = CliffPlan::build(&world, at);
         mesh_underlay(&world, at, &cliffs, &styles, &mut expected);
+        normalize_cap_winding(&mut expected);
         let full = mesh_chunk(&world, at, &styles);
         assert_eq!(full, expected, "the wall pass adds nothing to a flat world");
     }
