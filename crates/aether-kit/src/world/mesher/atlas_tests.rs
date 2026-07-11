@@ -386,11 +386,11 @@ fn assert_watertight_contour(
     }
     let mut exterior_edge_count = 0;
     for (edge, count) in incidence {
-        if exterior_boundary.is_some_and(|boundary| edge_is_declared_exterior(edge, boundary)) {
-            exterior_edge_count += 1;
+        if count == 2 {
             continue;
         }
-        if count == 2 {
+        if count == 1 && exterior_boundary.is_some_and(|boundary| edge_is_declared_exterior(edge, boundary)) {
+            exterior_edge_count += 1;
             continue;
         }
         panic!("{case_name}: contour edge {edge:?} has incidence {count}, expected an interior pair");
