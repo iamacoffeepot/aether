@@ -1,0 +1,15 @@
+[package]
+name = "multi-reply-probe"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "/home/runner/_work/aether/aether/.claude/worktrees/wf_78adc722-2a2-1/crates/aether-actor" }
+aether-data = { path = "/home/runner/_work/aether/aether/.claude/worktrees/wf_78adc722-2a2-1/crates/aether-data", features = ["derive"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = "0.3"

@@ -1,0 +1,54 @@
+{
+  "totals": {
+    "findings": 3,
+    "papercut": 0,
+    "missingPrimitive": 0,
+    "docGap": 2,
+    "blocker": 1,
+    "softHolds": 1
+  },
+  "succeeded": false,
+  "buildGreen": true,
+  "summary": "Authored a minimal guest wasm component (multi-reply-probe): one #[handler::multi] handler on `probe.request` that emits three `probe.result` values in order — Ok{step:1,bytes:[]}, Err{message:\"expected probe error\"}, Ok{step:2,bytes:24KiB}. It compiled clean to wasm32 (only against the pinned 1.96.0 toolchain — see finding), uploaded, and loaded into a headless substrate; describe_component correctly reports the Multi(probe.result) reply contract.\n\nThe send_mail_traced portion fully verified: the settled default returns mails:null, a readable indented `tree` (7 lines, sender→recipient/kind/duration, indentation for causal depth) and node_count:7; full:true returns the complete `mails` nodes with parent edges + all four timestamps, omits `tree`, and carries the same node_count:7. The two native aether.fs.list requests settle and their fs.list_result replies come back correctly.\n\nBUT the core send_mail reply-projection premise (terminal keeps last Ok + Err; none keeps only Err; all keeps all three in order) could NOT be verified. The multi-class emit is a *detached chain root* that does not hold the request chain open, so send_mail (which blocks only until the *request* chain settles at handler return) returns before the emitted replies route back. Across ~8 identical calls the retained set was nondeterministic: terminal once caught only Ok{step:2}, all once caught only Ok{step:1}, none was always empty, and most repeats returned []. The Err never survived under terminal and all never returned the full ordered stream. This is a real compose failure between #[handler::multi] and send_mail, and it contradicts the send_mail doc (\"a multi-reply driver can opt into the exact amount of history it needs\" via `all`).\n\nSilver lining verified opportunistically: in the one terminal call that caught step:2, the ~24KiB bytes leaf rendered as {\"file\":\"/tmp/aether-reply-<uuid>.bin\"} while `step` and the surrounding status/reply structure stayed inline — confirming the 16KiB leaf spill inside the 32KiB whole-response guard.\n\nEngine 00000000-0000-0000-0000-000000000001 left alive with the probe loaded (headless — no rendered frame; the task is non-visual).",
+  "artifact": {
+    "verdict": "n-a",
+    "rationale": "capture_frame returned no frame — the substrate is headless/windowless (error: \"recipient settled without a reply event ... frame capture on a windowless/headless substrate emits no frame\"). This matches the stated expected artifact (\"none — correctness is entirely in MCP JSON response shape, ordering, retained errors, and staged-file readback\"), so there is nothing renderable to judge. Engine terminated afterward."
+  },
+  "friction": {
+    "papercut": [],
+    "missing-primitive": [],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "medium",
+        "where": "actor-model guide multi-handler example (ctx.emit(&row)) and recipes",
+        "what": "ctx.emit() requires `use aether_actor::Emit;` in scope (Emit is a trait, not inherent on WasmCtx). The guide's multi-handler example writes `ctx.emit(&row)` with no import shown, so a fresh consumer hits E0599 'no method named emit' and only recovers via the compiler's suggestion. No doc lists the import.",
+        "suggested": "Add `use aether_actor::Emit;` to the multi-handler example in foundations/actor-model.md (and the writing-a-component recipe), or re-export emit through a guest prelude, or make emit an inherent method on the Multi-mode ctx."
+      },
+      {
+        "category": "doc-gap",
+        "severity": "low",
+        "where": "recipes/writing-a-component.md step 4 (wasm build) on a multi-toolchain box",
+        "what": "`rustup target list --installed` reported wasm32-unknown-unknown as installed, but it belonged to the repo's pinned 1.96.0 toolchain, not the active default stable (1.97.0). A bare `cargo build --target wasm32-unknown-unknown` from a scratch crate failed with 'can't find crate for core / target may not be installed', which is misleading since a target IS installed (just for another toolchain). I had to build with `cargo +1.96.0 ...`. The recipe's 'rustup target add ... once per toolchain' line is technically correct but does not warn about the per-toolchain scoping trap.",
+        "suggested": "Note in the recipe that the wasm target is per-toolchain and a scratch crate outside the workspace uses the default toolchain (not the repo pin), so `rustup target add wasm32-unknown-unknown` may be needed again for the active toolchain, or build the component with `cargo +<pinned> --target wasm32-unknown-unknown`."
+      }
+    ],
+    "blocker": [
+      {
+        "category": "blocker",
+        "severity": "high",
+        "where": "send_mail reply projection (terminal/none/all) over a #[handler::multi] handler",
+        "what": "The multi class emits detached chain roots that explicitly do NOT hold the request chain open (per emit.rs / actor-model docs: 'the request chain settles promptly on the handler's return instead of staying open for the stream'). send_mail blocks only until the request chain settles, so it returns before the emitted replies route back to the dispatch source. Result: terminal/none/all return a nondeterministic subset of the three emitted replies — across ~8 identical calls I saw {Ok step2}, {Ok step1}, and mostly []. The Err never survived under terminal, none was always empty, and all never returned the full ordered stream. The task's specified retention semantics are therefore unobservable, and this directly contradicts the send_mail doc claim that `all` lets a multi-reply driver 'opt into the exact amount of history it needs.'",
+        "suggested": "Make send_mail's per-item settlement await the emissions a multi handler addresses back at the dispatch source (correlate the detached emit chains to the originating request as a 'reply session' the projection waits on), OR document loudly that multi-reply streams are NOT collectable over send_mail and provide a dedicated collect-stream primitive with an explicit terminator/count so the terminal/none/all projection has a defined stream to project."
+      }
+    ]
+  },
+  "softHolds": [
+    {
+      "kind": "blocker",
+      "where": "send_mail reply projection (terminal/none/all) over a #[handler::multi] handler",
+      "detail": "The multi class emits detached chain roots that explicitly do NOT hold the request chain open (per emit.rs / actor-model docs: 'the request chain settles promptly on the handler's return instead of staying open for the stream'). send_mail blocks only until the request chain settles, so it returns before the emitted replies route back to the dispatch source. Result: terminal/none/all return a nondeterministic subset of the three emitted replies — across ~8 identical calls I saw {Ok step2}, {Ok step1}, and mostly []. The Err never survived under terminal, none was always empty, and all never returned the full ordered stream. The task's specified retention semantics are therefore unobservable, and this directly contradicts the send_mail doc claim that `all` lets a multi-reply driver 'opt into the exact amount of history it needs.'"
+    }
+  ],
+  "tokensPerTool": []
+}
