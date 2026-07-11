@@ -1,0 +1,8 @@
+{"type":"system","subtype":"init","session_id":"fixture-session"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_engines","name":"mcp__aether-hub__list_engines","input":{}}]},"parent_tool_use_id":"toolu_attempt"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_engines","content":"{\"engines\":[]}"}]},"parent_tool_use_id":"toolu_attempt"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_frame_1","name":"mcp__aether-hub__capture_frame","input":{"engine_id":"engine-1"}}]},"parent_tool_use_id":"toolu_judge"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_frame_1","content":"frame-ready"}]},"parent_tool_use_id":"toolu_judge"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_frame_2","name":"mcp__aether-hub__capture_frame","input":{"engine_id":"engine-1","actor_id":7}},{"type":"tool_use","id":"toolu_bash","name":"Bash","input":{"command":"true"}}]},"parent_tool_use_id":"toolu_judge"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_frame_2","content":[{"type":"text","text":"ok"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]},{"type":"tool_result","tool_use_id":"toolu_bash","content":"done"}]},"parent_tool_use_id":"toolu_judge"}
+{"type":

@@ -287,6 +287,42 @@
     return wrap;
   }
 
+  function renderTokenTable(tokensPerTool) {
+    if (!Array.isArray(tokensPerTool)) return null;
+
+    var wrap = document.createDocumentFragment();
+    if (tokensPerTool.length === 0) {
+      wrap.appendChild(el("p", { className: "muted", text: "No MCP tool traffic recorded." }));
+      return wrap;
+    }
+
+    var rows = tokensPerTool.slice().sort(function (left, right) {
+      var leftTotal = Number(left && left.tokensIn || 0) + Number(left && left.tokensOut || 0);
+      var rightTotal = Number(right && right.tokensIn || 0) + Number(right && right.tokensOut || 0);
+      return rightTotal - leftTotal || fieldText(left && left.tool).localeCompare(fieldText(right && right.tool));
+    });
+    var table = el("table");
+    var thead = el("thead");
+    var headRow = el("tr");
+    ["tool", "calls", "tokens in", "tokens out"].forEach(function (heading) {
+      headRow.appendChild(el("th", { text: heading }));
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    var tbody = el("tbody");
+    rows.forEach(function (row) {
+      var tr = el("tr");
+      tr.appendChild(el("td", { text: fieldText(row && row.tool) }));
+      tr.appendChild(el("td", { text: fieldText(row && row.calls) }));
+      tr.appendChild(el("td", { text: fieldText(row && row.tokensIn) }));
+      tr.appendChild(el("td", { text: fieldText(row && row.tokensOut) }));
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    return wrap;
+  }
+
   function renderSoftHolds(softHolds) {
     var wrap = document.createDocumentFragment();
     if (!Array.isArray(softHolds) || softHolds.length === 0) {
@@ -352,6 +388,12 @@
 
     app.appendChild(el("h2", { text: "Soft-holds" }));
     app.appendChild(renderSoftHolds(rollup.softHolds));
+
+    var tokenTable = renderTokenTable(rollup.tokensPerTool);
+    if (tokenTable) {
+      app.appendChild(el("h2", { text: "MCP tool tokens" }));
+      app.appendChild(tokenTable);
+    }
 
     app.appendChild(el("h2", { text: "Media & artifacts" }));
     app.appendChild(renderMedia(run));

@@ -146,6 +146,27 @@ function frictionLines(friction) {
   return lines
 }
 
+function tokenTableLines(tokensPerTool) {
+  if (!Array.isArray(tokensPerTool)) return []
+
+  const lines = ['', '### MCP tool tokens']
+  if (!tokensPerTool.length) {
+    lines.push('', '_No MCP tool traffic recorded._')
+    return lines
+  }
+
+  const rows = [...tokensPerTool].sort((left, right) => {
+    const tokenDifference = Number(right.tokensIn || 0) + Number(right.tokensOut || 0)
+      - Number(left.tokensIn || 0) - Number(left.tokensOut || 0)
+    return tokenDifference || String(left.tool || '').localeCompare(String(right.tool || ''))
+  })
+  lines.push('', '| tool | calls | tokens in | tokens out |', '| --- | ---: | ---: | ---: |')
+  for (const row of rows) {
+    lines.push(`| ${cell(row.tool)} | ${cell(row.calls)} | ${cell(row.tokensIn)} | ${cell(row.tokensOut)} |`)
+  }
+  return lines
+}
+
 // Escape pipes and collapse newlines so a finding never breaks the table.
 function cell(v) {
   return String(v ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim() || '—'
@@ -179,6 +200,7 @@ function renderComment(rollup, hasFrame) {
   lines.push('', '### Friction')
   lines.push(...frictionLines(rollup.friction))
   lines.push(...softHoldLines(rollup.softHolds))
+  lines.push(...tokenTableLines(rollup.tokensPerTool))
   if (hasFrame) {
     lines.push('', '### Judged frame', '', `![judged frame](${RAW_BASE}/${RUN_REF}/frame.png)`)
   }

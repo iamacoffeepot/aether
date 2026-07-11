@@ -68,6 +68,16 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  dogfood-token-table:
+    name: Dogfood token table
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test scripts/dogfood-token-table.test.mjs
+
   clippy:
     name: Clippy
     needs: changes
@@ -416,13 +426,14 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, clippy, docs, marker-build, test, desktop, qodana ]
+    needs: [ changes, fmt, dogfood-token-table, clippy, docs, marker-build, test, desktop, qodana ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
         run: |
           echo "changes: ${{ needs.changes.result }}"
           echo "fmt:     ${{ needs.fmt.result }}"
+          echo "dogfood-token-table: ${{ needs.dogfood-token-table.result }}"
           echo "clippy:  ${{ needs.clippy.result }}"
           echo "docs:    ${{ needs.docs.result }}"
           echo "marker-build: ${{ needs.marker-build.result }}"
@@ -432,6 +443,7 @@ jobs:
           fail=0
           [[ "${{ needs.changes.result }}" == "success" ]] || fail=1
           [[ "${{ needs.fmt.result }}"     == "success" ]] || fail=1
+          [[ "${{ needs.dogfood-token-table.result }}" == "success" ]] || fail=1
           [[ "${{ needs.clippy.result }}"  == "success" || "${{ needs.clippy.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.docs.result }}"    == "success" || "${{ needs.docs.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.marker-build.result }}" == "success" || "${{ needs.marker-build.result }}" == "skipped" ]] || fail=1
