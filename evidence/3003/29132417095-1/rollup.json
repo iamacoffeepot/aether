@@ -1,0 +1,40 @@
+{
+  "totals": {
+    "findings": 2,
+    "papercut": 1,
+    "missingPrimitive": 0,
+    "docGap": 1,
+    "blocker": 0,
+    "softHolds": 0
+  },
+  "succeeded": true,
+  "buildGreen": null,
+  "summary": "Spawned a headless substrate over MCP, called describe_kinds(full:true, no prefix), which crossed the whole-response inline threshold and returned the spill projection {file, bytes:79775, summary:{count:204, kind:\"array\", sample:[...]}} instead of inline JSON. Read the summary, resolved the file path (/tmp/aether-reply-<uuid>.bin), and read/parsed that host file to extract the three exact nested SchemaTypes. Answers: aether.fs.write = Struct{namespace:String, path:String, bytes:Bytes} repr_c=false; aether.audio.note_on = Struct{pitch:U8, velocity:U8, instrument_id:U8, pan:I8} repr_c=true; aether.render.create_texture = Struct{width:U32, height:U32, format:Enum{Rgba8=0,R8=1}, pixels:Bytes} repr_c=false. The surface worked, but the whole-response spill behavior is undocumented in the consumer guide. Engine left alive per render-artifact instruction (headless: no visual frame, the artifact is the introspection result).",
+  "artifact": {
+    "verdict": "n-a",
+    "rationale": "capture_frame returned no image — the engine is a headless/windowless substrate that emits no frame (MCP error: \"recipient settled without a reply event ... frame capture on a windowless/headless substrate emits no frame\"). This matches the expected artifact of \"none (a text/JSON tool response, nothing renders)\": there was nothing renderable to judge. Substrate terminated afterward."
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "the spilled whole-response file path (aether-reply-<uuid>.bin)",
+        "what": "The whole-response spill file is named with a .bin extension but its content is UTF-8 JSON. A consumer told only 'read the file' may assume binary and reach for base64/hex tooling rather than a plain text/JSON read. It reused the per-Bytes-leaf spill naming (aether-reply-*.bin), which is bytes-shaped, for a text/JSON payload.",
+        "suggested": "Give whole-response JSON spills a .json extension (or note in the summary/docs that the file is JSON text), so the reader knows to parse it as JSON rather than opaque bytes."
+      }
+    ],
+    "missing-primitive": [],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "high",
+        "where": "describe_kinds(full:true) return value / docs/guide/mcp-harness.md + the tool schema",
+        "what": "The whole-response spill projection is entirely absent from the consumer guide. mcp-harness.md and the describe_kinds tool schema both say full:true returns 'the full nested SchemaType' / '[{name, schema}]', implying an inline array. In reality an oversized response comes back as {file, bytes, summary} pointing at a harness-host temp file. A fresh consumer reading only docs/guide/ has no signal that (a) a large tool response can spill to a file, (b) that they must read summary.sample and open the file, or (c) that AETHER_MCP_RESPONSE_INLINE_MAX_BYTES is the threshold knob. The only place any of this is written down is CLAUDE.md (project-internal harness instructions), not the guide the freshness rule points at.",
+        "suggested": "Add a short 'Oversized tool responses spill to a file' subsection to docs/guide/mcp-harness.md: document the {file, bytes, summary} shape, that the full data lives in the named host file (Read/Grep it), the structural summary fields (count/kind/sample), the loud warn log, and the AETHER_MCP_RESPONSE_INLINE_MAX_BYTES threshold. Cross-link it from the describe_kinds full:true prose since that's the most common trigger."
+      }
+    ],
+    "blocker": []
+  },
+  "softHolds": []
+}
