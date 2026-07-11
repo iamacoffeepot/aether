@@ -79,7 +79,7 @@ mod tests {
         // LogTail routed to the rendered path is answered Ok, proving
         // the same mailbox was swapped in place.
         assert!(
-            matches!(bench.log_tail(engine, &loaded.addr, None), LogTailResult::Ok { .. },),
+            matches!(bench.log_tail(engine, &loaded.addr, None, None), LogTailResult::Ok { .. },),
             "the lineage address should still route to the live mailbox after replace",
         );
     }
@@ -144,7 +144,7 @@ mod tests {
         // The lineage address still routes to the live mailbox: the
         // same trampoline was swapped in place, now hosting Panel.
         assert!(
-            matches!(bench.log_tail(engine, &loaded.addr, None), LogTailResult::Ok { .. },),
+            matches!(bench.log_tail(engine, &loaded.addr, None, None), LogTailResult::Ok { .. },),
             "the lineage address should still route to the live mailbox after an \
                  export-targeted replace",
         );

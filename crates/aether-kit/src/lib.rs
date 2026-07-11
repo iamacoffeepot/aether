@@ -23,9 +23,9 @@
 //! - [`mark::MarkBook`] — owns revisioned terrain annotations with stable ids,
 //!   selected by the `aether_kit@aether.kit.mark` export. Its CRUD and
 //!   snapshot vocabulary lives in [`mark`].
-//! - [`terrain_editor::TerrainEditor`] — owns an ordered terrain-mark
+//! - [`terra::TerraEditor`] — owns an ordered terrain-mark
 //!   selection and correlated semantic commands, selected by the
-//!   `aether_kit@aether.kit.terrain_editor` export.
+//!   `aether_kit@aether.kit.terra` export.
 //! - [`world::WorldView`] — meshes the chunked world plane stack into a
 //!   flat-color marching-squares base render, selected by the
 //!   `aether_kit@aether.kit.world` export. The [`world`] module also holds
@@ -68,7 +68,7 @@ pub mod console;
 pub mod mark;
 pub mod mesh;
 pub mod mover;
-pub mod terrain_editor;
+pub mod terra;
 pub mod widget;
 pub mod world;
 
@@ -81,10 +81,10 @@ pub use mark::{
     MarkList, MarkListResult, MarkMutationError, MarkRef, MarkUpdate, MarkUpdateResult, SavedMarks,
 };
 pub use mover::{MoverConfig, MoverTeleport};
-pub use terrain_editor::{
-    ClearTerrainSelection, CreateTerrainMark, DeleteTerrainSelection, MoveTerrainSelection, RelabelTerrainSelection,
-    SetTerrainSelection, TerrainCommandResult, TerrainEditorConfig, TerrainEditorError, TerrainEditorQuery,
-    TerrainEditorQueryResult, ToggleTerrainSelection, WorldDelta,
+pub use terra::{
+    ClearTerraSelection, CreateTerraMark, DeleteTerraSelection, MoveTerraSelection, RelabelTerraSelection,
+    SetTerraSelection, TerraCommandResult, TerraConfig, TerraError, TerraQuery, TerraQueryResult, ToggleTerraSelection,
+    WorldDelta,
 };
 pub use widget::theme::{SetTheme, Theme, ThemeState};
 pub use widget::{
@@ -136,7 +136,7 @@ aether_actor::export!(
     camera::controller::CameraController,
     mark::MarkBook,
     mesh::MeshViewer,
-    terrain_editor::TerrainEditor,
+    terra::TerraEditor,
     world::WorldView,
     mover::WorldMover,
     widget::Widget,
@@ -163,7 +163,7 @@ aether_actor::export!(
     camera::controller::CameraController,
     mark::MarkBook,
     mesh::MeshViewer,
-    terrain_editor::TerrainEditor,
+    terra::TerraEditor,
     world::WorldView,
     mover::WorldMover,
     widget::Widget,

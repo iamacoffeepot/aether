@@ -272,6 +272,16 @@ surfaces when the second one tries to register. For an instanced actor (below)
 the colliding unit is the full `NAMESPACE:subname` under one parent, not the
 shared prefix.
 
+A dash in a namespace is a naming convention, not addressing grammar. Use it
+only for a genuine adjacent sibling of an existing bare base:
+`aether.kit.camera-controller` is the controller actor beside the bare
+`aether.kit.camera` actor. The dash has no addressing semantics — it makes
+neither actor a child of the other, and the full `NAMESPACE` still yields the
+`ActorId` before lineage yields the `MailboxId`. Do not use a dash merely to
+spell a multi-word segment: `aether.kit.terra` is the bare Terra actor even
+though its implementation type is `TerraEditor`, not
+`aether.kit.terra-editor`.
+
 A capability can also dress up its mail surface with **extension-trait helpers** —
 typed methods on the mailbox handle that stand in for raw kind sends.
 `ctx.actor::<InputCapability>().subscribe::<Key>()` is one (from

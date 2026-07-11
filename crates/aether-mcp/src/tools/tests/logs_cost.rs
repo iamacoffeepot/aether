@@ -43,6 +43,7 @@ async fn actor_logs_bad_engine_id_is_tool_error() {
             max: None,
             level: None,
             since: None,
+            contains: None,
         }))
         .await;
     assert!(result.is_err(), "a malformed engine_id should be a tool error");
@@ -90,6 +91,7 @@ async fn actor_logs_bad_level_is_tool_error() {
             max: None,
             level: Some("verbose".to_owned()),
             since: None,
+            contains: None,
         }))
         .await;
     assert!(result.is_err(), "an unknown level should be a tool error");

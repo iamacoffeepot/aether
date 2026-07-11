@@ -173,10 +173,11 @@ Minimal frontmatter, then free-form prose. No internal `##` headers — the pros
 ```markdown
 ---
 wish: I wish I could <X> so that I could <Y>.
-adversity: data | empathy
+adversity: data | empathy | parent-absence # non-root: the parent's unresolved absence
 parent: ../wish.md                # omit if root
 supports:                           # optional, only if branch-overlap with memory
   - "[[memory-entry-name]]"
+filed: "#NNN"                       # optional — set by /sketch --from-wish when the leaf is filed
 producible: true | false            # true means this wish IS a plan
 grounded_surfaces:                  # every pass writes re-greppable `identifier` — crates/aether-*/src/path citations
   - "`aether.fs.read` — crates/aether-capabilities/src/fs/kinds.rs"
@@ -220,6 +221,7 @@ The user reads top-down:
 /wish --under <wish-path>           drill into one subtree (chosen or alternative)
                                     from a prior pass
 /wish --refresh <tree-path>         re-grep each node's cited surfaces; mark drifted nodes grounding-stale
+/wish --survey [<tree-path>]        survey one tree's leaf dispositions (all trees if omitted)
 /wish --deep <theme>                deep mode: best-first fan-out drilling (workflow-backed)
 /wish --deep <theme> --beam N       fan-out width per round (default 3) — the shape knob
 /wish --deep <theme> --budget N     max driller agents the loop spawns (default 40) — the size knob
@@ -256,7 +258,7 @@ A global best-first priority frontier of scored nodes, seeded from the roots the
 
 ### Adversarial terminality
 
-When a driller claims `producible: true`, an adversarial skeptic agent gates the claim against one bar: is there a hidden unknown that is itself **wish-worthy** — a genuine production-blocking gap, not a decision the driller could resolve inline by picking an obvious default? A wish-worthy unknown is a surface the driller assumed without grep-confirming it (and the skeptic cannot confirm either), a step not writable within current resources, or a "known mean" that is really another wish. Whether a struct carries some field, what a parameter defaults to, what something is named, or that a parent is not built yet (true of every node above a leaf) are inline decisions the driller records in its own `wish.md`, never children. The default is terminal: the skeptic returns no unknown unless it can point at a specific production-blocking gap, because there is always some unverified nit and a nit is not a wish. When it does find a wish-worthy unknown, that becomes a child and the node keeps drilling — the mechanism that kills the "good enough" shortcut without manufacturing children out of trivia. The same bar lives on the driller contract, since the skeptic only ever sees a `producible: true` claim: a driller that emits trivial children directly is held to the wish-worthy rule in its own prompt, closing the second source of the spiral.
+When a driller claims `producible: true`, an adversarial skeptic agent gates the claim against one bar: is there a hidden unknown that is itself **wish-worthy** — a genuine production-blocking gap, not a decision the driller could resolve inline by picking an obvious default? A wish-worthy unknown is a surface the driller assumed without grep-confirming it (and the skeptic cannot confirm either), a step not writable within current resources, or a "known mean" that is really another wish. Whether a struct carries some field, what a parameter defaults to, what something is named, or that a parent is not built yet (true of every node above a leaf) are inline decisions the driller records in its own `wish.md`, never children. The default is terminal: the skeptic returns no unknown unless it can point at a specific production-blocking gap, because there is always some unverified nit and a nit is not a wish. When it does find a wish-worthy unknown, the node is demoted and the branch continues through that pushed child; the demoted node itself is not re-drilled. This is the mechanism that kills the "good enough" shortcut without manufacturing children out of trivia. The same bar lives on the driller contract, since the skeptic only ever sees a `producible: true` claim: a driller that emits trivial children directly is held to the wish-worthy rule in its own prompt, closing the second source of the spiral.
 
 ### Synthesis
 
@@ -271,6 +273,96 @@ After the frontier drains, a final agent reads every node's bounded summary and 
 ### Resumability
 
 The on-disk wish tree persists across sessions, so a deep wish becomes resumable: a later `/wish --under <wish-path>` drills a subtree further, complementing the in-session Workflow journal. Before resuming with `--under`, run `/wish --refresh <tree-path>` so re-drilling does not build on drifted grounding. The file tree is the durable record; the journal is the live one.
+
+## Survey mode (`--survey`)
+
+`/wish --survey` is the filing follow-up for persisted leaf plans. With no argument, it finds every
+prior-pass `wishes/<YYYY-MM-DD>-<theme-slug>/` tree under the main working checkout (resolve that
+checkout as the first entry of `git worktree list`, never the invoking session/agent worktree).
+With `<tree-path>`, it surveys only that tree. It does not create wishes, re-drill a branch, change
+a GitHub issue, or run a grounding refresh.
+
+Identify a leaf as a `wish.md` whose frontmatter says `producible: true` and whose directory has no
+nested wish subdirectory; exclude `alternatives/` from that child-directory cross-check. A missing
+`filed:` field is a meaningful result: the plan has not yet been handed to `/sketch --from-wish`.
+
+### The `filed` contract
+
+`/sketch --from-wish` records a filed leaf as `filed: "#N"`. The string's semantic value is the
+GitHub issue number **N**; the leading `#` is only the familiar issue-number spelling. It must stay
+quoted: in YAML, an unquoted value beginning with `#` starts a comment and does not preserve the
+issue number. Survey accepts only that exact positive-decimal form, then looks up issue `N`.
+
+### Four-way disposition oracle
+
+For each leaf, derive exactly one filing disposition when the input and REST lookup are valid:
+
+- **`open`** — the leaf has no `filed:` value; do not make a network call.
+- **`filed`** — `GET /repos/iamacoffeepot/aether/issues/N` returns an issue whose `state` is `open`.
+- **`landed`** — that issue is `closed` with `state_reason: completed`.
+- **`stale`** — that issue is `closed` with `state_reason: not_planned`.
+
+For each present `filed:`, make one REST call through `gh api`, for example
+`gh api "repos/iamacoffeepot/aether/issues/<N>" --jq '{state, state_reason}'`; do not use
+GraphQL-backed `gh issue view` or `gh issue list`. This follows `/scope`'s
+[GitHub API budget](../scope/SKILL.md#github-api-budget). A result with a `pull_request` field is not
+a valid `/sketch` filing and is a survey failure, not a `filed` disposition. Likewise, do not guess at malformed `filed:` values. A
+nonexistent or inaccessible issue has the report-only disposition `unknown`; it does not change the
+four-way roll-up and must not crash the pass.
+
+`state_reason: completed` is the cheap default for `landed`. A stricter optional pass may confirm a
+closing PR or merge event on the issue timeline before upgrading `filed` to `landed`; the default
+survey does not spend those extra calls.
+
+`stale` here is a **filing disposition**, not a grounding result. Survey never writes or interprets
+`grounding_stale`, `drifted_surfaces`, or `grounding_checked`; `--refresh` never changes a filing
+disposition. An issue can be landed while its code citations have drifted, and an open or stale
+filing can still be fully grounded.
+
+### Per-tree report and index update
+
+Print one report per surveyed tree. It names the tree path, counts for `open`, `filed`, `landed`,
+and `stale`, and a table with each leaf slug-path, its `filed: "#N"` value (or `—`), and disposition.
+For example:
+
+```
+| Leaf | Filed | Disposition |
+| --- | --- | --- |
+| persistent-world/on-disk-layout-for-handles | "#1234" | filed |
+| persistent-world/restore-on-reconnect | "#1201" | landed |
+| concurrent-many-players/per-actor-load-shedding | — | open |
+
+open: 1 · filed: 1 · landed: 1 · stale: 0
+```
+
+After a complete tree survey, write the same roll-up and per-leaf lines into that tree's `index.md`
+under a dated `## Disposition survey (<YYYY-MM-DD>)` section. This is survey history and navigation,
+not leaf frontmatter: do not add disposition fields to `wish.md` files.
+
+The date section is idempotent. On a later survey **on the same date**, replace the entire existing
+`## Disposition survey (<YYYY-MM-DD>)` block — from its heading through the next H2 heading or end
+of file — with the new complete report, so a rerun never leaves duplicate or stale same-day leaf rows. If a
+legacy index has more than one section for that date, replace all of them with one current section.
+On a different date, preserve earlier survey sections and append one new dated section. Preserve all
+non-survey index content in either case.
+
+### Survey failure modes
+
+- **No `wishes/` directory or an empty corpus**: clean no-op; print `no wish trees to survey` and
+  do not create a directory or index.
+- **`<tree-path>` does not exist**: refuse and list the valid persisted tree paths.
+- **Tree lacks `index.md`**: report the malformed tree and do not synthesize an index outside the
+  established tree contract.
+- **Leaf has malformed `filed:`**: report its path and raw value as invalid; do not coerce it to an
+  issue number or call it `open`.
+- **`filed:` resolves to a pull request**: report the leaf as an invalid filing; do not treat the PR
+  as an issue or assign a disposition.
+- **`filed:` points at a nonexistent or inaccessible issue**: report `unknown` for that leaf and
+  continue; never infer `stale` from lookup failure.
+- **GitHub rate limit**: degrade gracefully, mark the survey partial, preserve its prior dated
+  section instead of writing an incomplete snapshot, and report which leaves remain unknown.
+- **A tree has no producible leaves**: write and report zero leaves with zero counts; this is a valid
+  survey result, not a refusal.
 
 ## Steps the agent runs
 
@@ -310,12 +402,13 @@ For each root, recursively:
 On `--deep`, run steps 1 (pre-load adversity) and 2 (generate roots) inline in the main context — the judgment-and-memory-bound front of the pass — then hand drilling to the `wish` workflow instead of recursing inline. The hand-off:
 
 1. **Score each root.** For every root from step 2, assign an initial `doors_opened` (leverage, 1-5) and `unresolvedness` (distance-from-plan, 1-5). These seed the frontier's scoring.
-2. **Compute `wishDir`.** The absolute path to `wishes/<YYYY-MM-DD>-<theme-slug>/`. Create the directory so the drillers have a place to write.
+2. **Compute `wishDir`.** Resolve the main working checkout as the first entry of `git worktree list`, then append `/wishes/<YYYY-MM-DD>-<theme-slug>/` to that absolute path. Never use the current session/agent worktree. Create the directory so the drillers have a durable place to write even when the invoking worktree is later swept.
 3. **Gather `groundingNotes`.** The grep-confirmed engine surfaces from step 1, as a short shared block, so the drillers extend the grounding rather than each re-deriving it.
-4. **Call the workflow.** `Workflow({name: "wish", args: {theme, role, beam, budget, roots, wishDir, groundingNotes}})` — `roots` is `[{slug, wish, doors_opened, unresolvedness}]`; `beam` and `budget` come from the flags (defaults 3 and 40); `role` is null if not given. The workflow holds the best-first frontier, spawns the parallel drillers + the skeptic gate + the synthesis writer, and the agents write every `wish.md` and `index.md` themselves.
-5. **Report from the returned stats.** On completion the workflow returns `{rootCount, totalNodes, leafCount, maxDepth, skepticDemotions, undrilled, ...}`. Print the deep-mode report (step 8) from those, and surface that the tree is on disk and resumable.
+4. **Gather `existingWork`.** Build a compact digest of open-issue titles plus the recent ADR and commit mechanisms already scanned in step 1, matching the sources used by step 4's existing-work filter. The synthesis agent uses this once, after drilling, to identify duplicated terminal leaves.
+5. **Call the workflow.** `Workflow({name: "wish", args: {theme, role, beam, budget, roots, wishDir, groundingNotes, existingWork}})` — `roots` is `[{slug, wish, doors_opened, unresolvedness}]`; `beam` and `budget` come from the flags (defaults 3 and 40); `role` is null if not given. The workflow holds the best-first frontier, spawns the parallel drillers + the read-only skeptic gate + demotion-time reconcile writers + the synthesis writer, and the agents write every `wish.md` and `index.md` themselves.
+6. **Report from the returned stats.** On completion the workflow returns `{rootCount, totalNodes, leafCount, maxDepth, skepticDemotions, undrilled, ...}`. Print the deep-mode report (step 8) from those, and surface that the tree is on disk and resumable.
 
-Deep mode does not run steps 4-7 inline — filtering and the on-disk write are the drillers' and synthesis agent's job inside the workflow. Step 8's report template has a deep-mode variant.
+Deep mode gathers step 4's existing-work inputs inline but leaves leaf deduplication to synthesis; it does not run the remainder of steps 4-7 inline. The driller, reconcile, and synthesis agents own the on-disk writes inside the workflow. Step 8's report template has a deep-mode variant.
 
 ### 4. Filter against existing work (tree-aware)
 
@@ -375,7 +468,7 @@ Output root: `wishes/<YYYY-MM-DD>-<theme-slug>/`. Write `index.md` and each `wis
 
 Read the index, drill into the wishes that interest you.
 Drill an alternative or sub-wish deeper: /wish --under <wish-path>
-File leaf plans you want to commit to as Backlog-Phase issues.
+File leaf plans you want to commit to as Backlog-Phase issues: /sketch --from-wish <leaf-path>.
 ```
 
 Deep mode (`--deep`) reports from the workflow's returned stats instead:
@@ -385,16 +478,16 @@ Deep mode (`--deep`) reports from the workflow's returned stats instead:
   Theme: <theme>[, as <role>]   (deep mode — beam <N>, budget <M>)
   Tree: <rootCount> roots, <totalNodes> nodes drilled, max depth <maxDepth>
   Plans (leaves): <leafCount>     Skeptic demotions: <skepticDemotions> (caught "good enough")
-  Frontier left undrilled (budget-bounded stubs): <undrilled>
+  Resumable undrilled (budget-bounded frontier + diminishing-returns stubs): <undrilled>
   Index: wishes/<date>-<theme>/index.md
 
-Weighted sketches (<leafCount> leaves):
+Weighted sketches (<sketches.length> non-duplicate leaves):
   - [<slug-chain>] (<weight: S|M|L|XL>) <wish> — <recommendation>
   ... (one line per leaf from sketches array)
 
 The tree is on disk and resumable across sessions.
 Drill a subtree deeper in a later pass: /wish --under <wish-path>
-Skinny leaves (S/M/L): file with /sketch then /scope.
+Skinny leaves (S/M/L): file with /sketch --from-wish <leaf-path> then /scope.
 Fat leaves (XL): decompose via /wish --under <path>, or file fat for sweep fat.
 ```
 

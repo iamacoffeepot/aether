@@ -138,8 +138,9 @@ before (the state that should appear) and `after_mails` after (cleanup). How tha
 frame is produced — world-space geometry, the camera matrix, the depth convention —
 is covered in [Rendering & camera](systems/rendering.md).
 `actor_logs` pulls recent entries from one actor's per-actor log ring by mailbox
-name; thread the reply's `next_since` back as `since` to page forward without
-re-reading. Only in-actor `tracing::*` events reach a ring — see
+name; pass `contains` to filter message bodies by a case-sensitive substring
+substrate-side, before entries cross the wire. Thread the reply's `next_since`
+back as `since` to page forward without re-reading. Only in-actor `tracing::*` events reach a ring — see
 [Logging](systems/logging.md) for the in-actor versus stderr boundary.
 `actor_cost` reads each actor's per-handler execution-cost EWMA table
 (mean and MAD in nanoseconds, plus a sample count); pass a `kind_id` to filter to

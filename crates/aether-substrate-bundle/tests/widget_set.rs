@@ -90,7 +90,7 @@ fn load_panel(bench: &mut TestBench, wasm: &[u8]) -> String {
 
 /// Every log message in the panel's ring, oldest first.
 fn panel_log_messages(bench: &mut TestBench) -> Vec<String> {
-    match bench.log_tail(&panel_address(), None) {
+    match bench.log_tail(&panel_address(), None, None) {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|e| e.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }
@@ -214,7 +214,7 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
         ])
         .expect("external inline-child lineage session");
 
-    let log = match bench.log_tail(&panel, None) {
+    let log = match bench.log_tail(&panel, None, None) {
         LogTailResult::Ok { entries, .. } => entries,
         LogTailResult::Err { error } => panic!("log_tail on the loaded panel failed: {error}"),
     };
