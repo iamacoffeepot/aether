@@ -685,6 +685,16 @@ where
         .expect("caps boot")
 }
 
+fn boot_single_shard_fixed_body() -> PassiveChassis<TestChassis> {
+    boot_chassis::<FixedBodyHttpHandler>(HttpServerConfig {
+        bind_addr: "127.0.0.1:0".to_string(),
+        handler_mailbox: <FixedBodyHttpHandler as Addressable>::NAMESPACE.to_string(),
+        request_timeout_millis: 5_000,
+        dispatch_shards: 1,
+        ..HttpServerConfig::default()
+    })
+}
+
 /// [`boot_chassis`] with `H` as its own `handler_mailbox` under a
 /// buffered [`config_for`] config (`max_request_bytes`).
 fn boot_buffered<H>(max_request_bytes: usize) -> PassiveChassis<TestChassis>
@@ -1391,13 +1401,7 @@ fn method_specific_route_beats_agnostic() {
 /// exclusive default keeps the route owned by exactly one instance.
 #[test]
 fn bare_router_stays_exclusive_second_claim_rejected() {
-    let chassis = boot_chassis::<FixedBodyHttpHandler>(HttpServerConfig {
-        bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: <FixedBodyHttpHandler as Addressable>::NAMESPACE.to_string(),
-        request_timeout_millis: 5_000,
-        dispatch_shards: 1,
-        ..HttpServerConfig::default()
-    });
+    let chassis = boot_single_shard_fixed_body();
     chassis
         .spawn_actor::<ExclusiveMacroPoolHandler>(Subname::Named("alpha"), b"excl-macro-alpha")
         .finish()
@@ -1439,13 +1443,7 @@ fn macro_router_shared_opt_in_joins_a_member_set() {
     // Pinned to one dispatch shard, like `shared_route_spreads_across_members`:
     // round-robin state is per-shard, so alternation across a request
     // sequence is only deterministic with a single shard.
-    let chassis = boot_chassis::<FixedBodyHttpHandler>(HttpServerConfig {
-        bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: <FixedBodyHttpHandler as Addressable>::NAMESPACE.to_string(),
-        request_timeout_millis: 5_000,
-        dispatch_shards: 1,
-        ..HttpServerConfig::default()
-    });
+    let chassis = boot_single_shard_fixed_body();
     // Two named instances of the exact same `SharedMacroPoolHandler` type
     // (the accurate replica analog, per the type's own doc comment): each
     // instance's `wire` runs the identical macro-emitted `shared: true`
