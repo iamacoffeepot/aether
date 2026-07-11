@@ -499,9 +499,19 @@ pub struct SetProposalPreview {
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum ProposalError {
     ProposalIdExhausted,
-    NoTouchedChunks { operation_result: ProposalOperationResult },
-    UnknownProposal { proposal_id: ProposalId },
-    StaleProposal { proposal_id: ProposalId, proposed_at_revision: u64, committed_revision: u64 },
+    /// The component session already retains its maximum proposal count.
+    StagedProposalLimitReached,
+    NoTouchedChunks {
+        operation_result: ProposalOperationResult,
+    },
+    UnknownProposal {
+        proposal_id: ProposalId,
+    },
+    StaleProposal {
+        proposal_id: ProposalId,
+        proposed_at_revision: u64,
+        committed_revision: u64,
+    },
 }
 
 /// Reply shared by every proposal lifecycle request.

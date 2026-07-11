@@ -82,6 +82,7 @@ use self::mesher::style::StyleTable;
 /// Default load name of the authoritative `MarkBook` peer.
 const MARK_BOOK_COMPONENT: &str = "aether.kit.mark";
 const MARK_OVERLAY_REFRESH_ATTEMPT_LIMIT: u8 = 3;
+const MAX_STAGED_PROPOSALS: usize = 64;
 
 /// World-view component: holds the world plane stack and a per-chunk
 /// mesh cache, and replays the cache to the render sink each frame.
@@ -330,6 +331,9 @@ impl WorldView {
                 return ProposalResult::Rejected { error: ProposalError::NoTouchedChunks { operation_result } };
             }
         };
+        if self.proposals.len() >= MAX_STAGED_PROPOSALS {
+            return ProposalResult::Rejected { error: ProposalError::StagedProposalLimitReached };
+        }
         let Some(proposal_id) = self.allocate_proposal_id() else {
             return ProposalResult::Rejected { error: ProposalError::ProposalIdExhausted };
         };
@@ -801,6 +805,17 @@ mod tests {
         }
     }
 
+    fn fill_proposal_capacity(view: &mut WorldView) -> Vec<ProposalId> {
+        (0..MAX_STAGED_PROPOSALS)
+            .map(|index| {
+                staged_id(
+                    view,
+                    point_operation(i32::try_from(index).expect("proposal cap fits cell coordinates"), Material::Grass),
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn chunk_border_stamp_remeshes_both_touched_chunks() {
         let mut view = test_view();
@@ -844,6 +859,51 @@ mod tests {
         assert_eq!(view.proposals.len(), proposals_before);
         assert_eq!(view.world, world_before);
         assert_eq!(view.active_preview, None);
+    }
+
+    #[test]
+    fn staged_proposal_cap_rejects_without_allocating_or_mutating_session_state() {
+        let mut view = test_view();
+        let proposal_ids = fill_proposal_capacity(&mut view);
+        let active = proposal_ids[0];
+        view.set_proposal_preview(Some(active));
+        let next_proposal_id = view.next_proposal_id;
+        let world_before = view.world.clone();
+        let meshes_before = view.meshes.clone();
+
+        assert_eq!(
+            view.propose(point_operation(1_000, Material::Stone)),
+            ProposalResult::Rejected { error: ProposalError::StagedProposalLimitReached }
+        );
+
+        assert_eq!(view.proposals.len(), MAX_STAGED_PROPOSALS);
+        assert_eq!(view.next_proposal_id, next_proposal_id);
+        assert_eq!(view.world, world_before);
+        assert_eq!(view.meshes, meshes_before);
+        assert_eq!(view.active_preview, Some(active));
+        assert_eq!(view.proposal_freshness_error(active), None);
+    }
+
+    #[test]
+    fn staged_proposal_capacity_recovers_after_discard_and_commit() {
+        let mut view = test_view();
+        let proposal_ids = fill_proposal_capacity(&mut view);
+        let next_after_fill = view.next_proposal_id;
+
+        assert_eq!(view.discard_proposal(proposal_ids[0]), ProposalResult::Discarded { proposal_id: proposal_ids[0] });
+        let after_discard = staged_id(&mut view, point_operation(1_000, Material::Stone));
+        assert_eq!(after_discard.value.checked_add(1), view.next_proposal_id);
+        assert_eq!(view.proposals.len(), MAX_STAGED_PROPOSALS);
+        assert_eq!(Some(after_discard.value), next_after_fill);
+
+        assert!(matches!(
+            view.commit_proposal(proposal_ids[1]),
+            ProposalResult::Committed { proposal_id, .. } if proposal_id == proposal_ids[1]
+        ));
+        assert_eq!(view.proposals.len(), MAX_STAGED_PROPOSALS - 1);
+        let after_commit = staged_id(&mut view, point_operation(1_001, Material::Sand));
+        assert_eq!(after_commit.value.checked_add(1), view.next_proposal_id);
+        assert_eq!(view.proposals.len(), MAX_STAGED_PROPOSALS);
     }
 
     #[test]
