@@ -69,14 +69,14 @@ jobs:
       - run: cargo fmt --all -- --check
 
   dogfood-token-table:
-    name: Dogfood token table
+    name: Dogfood contracts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node --test scripts/dogfood-token-table.test.mjs
+      - run: node --test scripts/dogfood-token-table.test.mjs scripts/post-dogfood-rollup.test.mjs scripts/dogfood-action-contract.test.mjs
 
   clippy:
     name: Clippy

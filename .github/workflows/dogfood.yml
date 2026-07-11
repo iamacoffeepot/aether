@@ -5,7 +5,8 @@ name: Dogfood
 # task through that surface alone (the dogfood workflow, .claude/workflows/
 # dogfood.js), and grade the friction it hit plus the rendered artifact. The
 # trial runs unattended on a Runs-On ephemeral box; a separate post job pushes
-# the evidence, upserts the PR/issue comment, and enforces the retry cap.
+# the evidence, records every completed attempt, upserts the PR/issue comment,
+# and enforces the retry cap for actionable attempts.
 #
 # GATE STACK (each predicate must hold, in order — this is the terminal stage
 # of the PR gate chain, so it fires only when everything upstream is green):
@@ -50,8 +51,11 @@ name: Dogfood
 # the `trial` job executes the resolved code (build + headless Claude with
 # --dangerously-skip-permissions on the ephemeral box) and holds `contents:
 # read` and nothing else; only the `post` job, which never runs branch code
-# (it checks out main), carries the write scopes. The trial job currently runs
-# WITHOUT an egress firewall: the first default-drop attempt broke the runner's
+# (it checks out main), carries the write scopes. The no-rollup post path emits
+# only a compact marker pointing to the Actions run; it never executes branch
+# code or interprets a branch-produced result as a trusted rollup. The trial
+# job currently runs WITHOUT an egress firewall: the first default-drop attempt
+# broke the runner's
 # own control plane and then cargo's CDN-backed downloads (IP pinning cannot
 # track CDN rotation), so it was pulled by owner call; issue 3063 tracks the
 # domain-scoped restoration. Until then the OAuth token's exposure rests on the
@@ -482,9 +486,12 @@ jobs:
           Monitor on the rollup path is useless because that file only appears when YOU write it. Do
           NOT stop the workflow task, and NEVER treat the status note as the end of the job. When the
           completion notification arrives, read the workflow's returned { rollup, task } value (from
-          the task output file if the notification truncates it) and write the ROLLUP object as JSON
-          verbatim to exactly ${GITHUB_WORKSPACE}/dogfood-rollup.json (that absolute path — the rollup
-          object, not the { rollup, task } wrapper). The file NEVER appears on its own — YOU write it.
+          the task output file if the notification truncates it). If it contains a rollup, write the
+          ROLLUP object as JSON verbatim to exactly ${GITHUB_WORKSPACE}/dogfood-rollup.json (that
+          absolute path — the rollup object, not the { rollup, task } wrapper). The file NEVER appears
+          on its own — YOU write it. If the workflow reports an error or no rollup, do NOT fabricate a
+          replacement file or claim success: leave the failure in the session transcript so the action
+          can record an actionable no-rollup attempt for diagnosis and re-trial.
 
           EVIDENCE (absolute paths only — ${GITHUB_WORKSPACE}/dogfood-run/ already exists):
           - If the task's expectedArtifact is not null the run RENDERS. Ensure a live engine is showing
@@ -495,7 +502,7 @@ jobs:
             copy it into ${GITHUB_WORKSPACE}/dogfood-run/solution/ so the author/build-layer artifact
             rides in the evidence (best effort — skip if it is not reachable from here).
 
-          Do not push to git or touch GitHub. Print exactly DOGFOOD-DONE once the rollup file is written.
+          Do not push to git or touch GitHub. Print exactly DOGFOOD-DONE only once the rollup file is written.
           EOF
 
           claude -p "$(cat /tmp/dogfood-prompt.md)" \
@@ -548,11 +555,12 @@ jobs:
           echo "staged run directory:"
           ls -la "$GITHUB_WORKSPACE/dogfood-run" || true
 
-      # Whether the run produced a rollup gates the `post` job. A missing rollup
-      # after the trial actually ran (token present) is a FAILURE, not a quiet
-      # skip — the session exiting with the workflow still in flight is the exact
-      # bug the mechanical wait contract exists to prevent (#2979/#2986). The
-      # quiet-skip path exists only for the absent-secret case.
+      # A missing rollup after the trial actually ran (token present) is a
+      # FAILURE, not a quiet skip — the session exiting with the workflow still
+      # in flight is the exact bug the mechanical wait contract exists to
+      # prevent (#2979/#2986). Its failed trial result lets `post` record a
+      # first-class actionable attempt; the quiet-skip path exists only for the
+      # absent-secret case.
       - name: Note whether a rollup was produced
         id: rollup
         if: always()
@@ -600,15 +608,19 @@ jobs:
           fi
 
   post:
-    name: Post dogfood rollup
+    name: Post dogfood attempt
     needs: [resolve, trial]
-    # No-op when the trial produced no rollup (token absent or the trial
-    # failed). Mirrors review.yml's needs-output gate.
-    if: needs.trial.outputs.rollup_produced == 'true'
+    # A produced rollup follows the normal path. A failed trial with no rollup
+    # still needs a durable, actionable attempt; the absent-secret case remains
+    # a success and therefore stays a no-op. Never schedule this writer if the
+    # read-only resolve job failed.
+    if: always() && needs.resolve.result == 'success' && (needs.trial.outputs.rollup_produced == 'true' || needs.trial.result == 'failure')
     runs-on: ubuntu-latest
     # The only job with write scopes, and it never executes branch code: the
     # default checkout is the base repo (main), so the evidence + poster
-    # scripts are the trusted versions — the PR head is only ever read as data.
+    # scripts are the trusted versions. A failed trial's no-rollup comment
+    # points to the Actions run rather than consuming branch artifacts; the PR
+    # head is never executed here.
     permissions:
       contents: write
       issues: write
@@ -621,9 +633,11 @@ jobs:
       ATTEMPT: ${{ needs.resolve.outputs.attempt }}
       DOGFOOD_RUN_ID: ${{ github.run_id }}-${{ needs.resolve.outputs.attempt }}
       VIEWER_BASE: https://iamacoffeepot.github.io/aether/evidence/
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
+        if: needs.trial.outputs.rollup_produced == 'true'
         with:
           name: dogfood-run
           path: dogfood-run
@@ -631,43 +645,52 @@ jobs:
       # The trusted helper from main enriches the downloaded trial data before
       # either reporting sink consumes it. PR code is never executed here.
       - name: Account MCP tool tokens
+        if: needs.trial.outputs.rollup_produced == 'true'
         run: node scripts/dogfood-token-table.mjs dogfood-run/transcript.jsonl dogfood-run/rollup.json
 
       # Commit this attempt's run directory to the orphan dogfood/evidence
       # branch at evidence/<issue>/<run-id>/ (the script pushes with retries).
       - name: Push the run to the evidence branch
+        if: needs.trial.outputs.rollup_produced == 'true'
         run: scripts/dogfood-evidence.sh dogfood-run "$ISSUE" "$DOGFOOD_RUN_ID"
 
       # Upsert the living marker comment on the issue and set/clear the advisory
       # dogfood:unresolved label on the PR. The marker carries attempts/verdict
-      # so the next green event's resolve gate can read the retry state back.
-      - name: Post the rollup comment + label
+      # so the next green event's resolve gate can read the retry state back. A
+      # failed run without a rollup gets a synthetic, actionable poster record.
+      - name: Post the dogfood attempt comment + label
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           RUN_REF: ${{ needs.resolve.outputs.issue }}/${{ github.run_id }}-${{ needs.resolve.outputs.attempt }}
-          ROLLUP_PATH: dogfood-run/rollup.json
         run: |
-          HAS_FRAME=0
-          [ -f dogfood-run/frame.png ] && HAS_FRAME=1
-          HAS_FRAME="$HAS_FRAME" node scripts/post-dogfood-rollup.mjs
+          if [ "${{ needs.trial.outputs.rollup_produced }}" = "true" ]; then
+            HAS_FRAME=0
+            [ -f dogfood-run/frame.png ] && HAS_FRAME=1
+            ROLLUP_PATH=dogfood-run/rollup.json HAS_FRAME="$HAS_FRAME" node scripts/post-dogfood-rollup.mjs
+          else
+            node scripts/post-dogfood-rollup.mjs
+          fi
 
       # Cap-bounce: a persistently-failing feature (an actionable trial at the
       # attempt cap) bounces the CLOSING ISSUE to the user for review rather than
-      # looping forever. The actionability predicate mirrors the poster's — a
-      # failed attempt, a wrong artifact, a soft-hold, or a blocker /
-      # missing-primitive finding. The PR keeps its evidence comment + label;
-      # the issue's phase:bounced is the review surface.
+      # looping forever. A no-rollup failure is actionable by definition; a
+      # rollup uses the poster's normal predicate. The PR keeps its evidence
+      # comment + label; the issue's phase:bounced is the review surface.
       - name: Bounce the issue at the attempt cap
         run: |
           set -euo pipefail
-          actionable="$(jq -r '(.rollup // .) as $r
-            | (($r.succeeded == false)
-               or ($r.artifact.verdict == "wrong")
-               or ((($r.softHolds // []) | length) > 0)
-               or ((($r.friction.blocker // []) | length) > 0)
-               or ((($r.friction["missing-primitive"] // []) | length) > 0))' \
-            dogfood-run/rollup.json)"
+          if [ "${{ needs.trial.outputs.rollup_produced }}" = "true" ]; then
+            actionable="$(jq -r '(.rollup // .) as $r
+              | (($r.succeeded == false)
+                 or ($r.artifact.verdict == "wrong")
+                 or ((($r.softHolds // []) | length) > 0)
+                 or ((($r.friction.blocker // []) | length) > 0)
+                 or ((($r.friction["missing-primitive"] // []) | length) > 0))' \
+              dogfood-run/rollup.json)"
+          else
+            actionable=true
+          fi
           echo "attempt=${ATTEMPT} cap=${DOGFOOD_MAX_ATTEMPTS} actionable=${actionable}"
           if [ "$actionable" != "true" ] || [ "$ATTEMPT" -lt "$DOGFOOD_MAX_ATTEMPTS" ]; then
             echo "not bouncing (either clean or below the cap)."
@@ -701,9 +724,10 @@ jobs:
 
           The dogfood trial for this feature failed **${DOGFOOD_MAX_ATTEMPTS}** times (the retry cap) without going green, so it is bounced here for your review rather than retrying forever.
 
-          The PR (#${PR}) keeps its living dogfood comment and its \`dogfood:unresolved\` label; this issue now carries \`phase:bounced\`. Every attempt's evidence:
+          The PR (#${PR}) keeps its living dogfood comment and its \`dogfood:unresolved\` label; this issue now carries \`phase:bounced\`. Evidence from rollup-producing attempts:
 
           ${links}
+          A no-rollup attempt links to its Actions run from the living dogfood comment.
           Clear it by fixing the feature (or the brief) and re-running the trial via \`workflow_dispatch\` on the Dogfood workflow with this PR number.
           EOF
           gh api -X POST "repos/${REPO}/issues/${ISSUE}/comments" -f body="$(cat /tmp/bounce-body.md)"
