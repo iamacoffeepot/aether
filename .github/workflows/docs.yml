@@ -10,11 +10,13 @@ on:
     branches: [main]
     paths:
       - 'docs/guide/**'
+      - 'docs/evidence-viewer/**'
       - 'docs/book.toml'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
       - 'docs/guide/**'
+      - 'docs/evidence-viewer/**'
       - 'docs/book.toml'
       - '.github/workflows/docs.yml'
   workflow_dispatch:

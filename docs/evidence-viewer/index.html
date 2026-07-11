@@ -97,6 +97,9 @@
     font-weight: 600;
     font-size: 0.85rem;
   }
+  td.summary {
+    font-size: 0.85rem;
+  }
   .category-heading {
     margin-top: 1rem;
     font-weight: 600;
@@ -145,6 +148,10 @@
   var BRANCH_BASE = "https://raw.githubusercontent.com/iamacoffeepot/aether/dogfood/evidence/evidence/";
   var BUCKET_BASE = "https://aether-evidence.s3.amazonaws.com/evidence/";
 
+  var REPO = "iamacoffeepot/aether";
+  var EVIDENCE_BRANCH = "dogfood/evidence";
+  var API_BASE = "https://api.github.com/repos/" + REPO;
+
   var app = document.getElementById("app");
 
   function clear(el) {
@@ -179,17 +186,174 @@
     return { issue: issue, run: run, joined: issue + "/" + run };
   }
 
-  function renderNoRun() {
+  // Run ids are "<github run id>-<attempt>"; both halves are numeric and the
+  // run id is assigned monotonically, so a numeric compare doubles as time
+  // order. Falls back to a string compare for anything unexpected.
+  function compareRunsDesc(a, b) {
+    var pa = a.split("-");
+    var pb = b.split("-");
+    var byRun = (Number(pb[0]) || 0) - (Number(pa[0]) || 0);
+    if (byRun) return byRun;
+    var byAttempt = (Number(pb[1]) || 0) - (Number(pa[1]) || 0);
+    if (byAttempt) return byAttempt;
+    return a < b ? 1 : a > b ? -1 : 0;
+  }
+
+  function fetchJson(url) {
+    return fetch(url).then(function (resp) {
+      if (!resp.ok) throw new Error("fetch failed: " + resp.status + " " + url);
+      return resp.json();
+    });
+  }
+
+  function formatDate(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    return d.toLocaleString(undefined, {
+      year: "numeric", month: "short", day: "numeric",
+      hour: "2-digit", minute: "2-digit",
+    });
+  }
+
+  function truncate(text, max) {
+    if (typeof text !== "string") return "";
+    return text.length > max ? text.slice(0, max - 1) + "…" : text;
+  }
+
+  // Fills a run row's verdict + summary cells from its rollup.json, best
+  // effort: a run whose rollup never landed just shows a neutral badge.
+  function fillRowFromRollup(joined, verdictCell, summaryCell) {
+    fetchJson(BRANCH_BASE + joined + "/rollup.json")
+      .then(function (rollup) {
+        verdictCell.appendChild(badgeFor(rollup.succeeded === true, "succeeded: " + String(rollup.succeeded)));
+        if (rollup.artifact) {
+          var verdict = rollup.artifact.verdict;
+          verdictCell.appendChild(document.createTextNode(" "));
+          verdictCell.appendChild(badgeFor(verdict === "correct" ? true : verdict === "wrong" ? false : null, "artifact: " + String(verdict)));
+        }
+        summaryCell.textContent = truncate(fieldText(rollup.summary), 200);
+      })
+      .catch(function () {
+        verdictCell.appendChild(badgeFor(null, "no rollup"));
+      });
+  }
+
+  function renderRunRow(issue, run, dates) {
+    var joined = issue + "/" + run;
+    var tr = el("tr");
+
+    var runCell = el("td");
+    runCell.appendChild(el("a", { text: run, href: "?run=" + joined }));
+    tr.appendChild(runCell);
+
+    tr.appendChild(el("td", { className: "muted", text: formatDate(dates[joined]) }));
+
+    var verdictCell = el("td");
+    tr.appendChild(verdictCell);
+    var summaryCell = el("td", { className: "muted summary" });
+    tr.appendChild(summaryCell);
+    fillRowFromRollup(joined, verdictCell, summaryCell);
+
+    return tr;
+  }
+
+  function renderRunList(tree, dates) {
+    var seen = {};
+    var byIssue = {};
+    var entries = (tree && tree.tree) || [];
+    for (var i = 0; i < entries.length; i++) {
+      var match = /^evidence\/([0-9]+)\/([A-Za-z0-9._-]+)\//.exec((entries[i] && entries[i].path) || "");
+      if (!match) continue;
+      var joined = match[1] + "/" + match[2];
+      if (seen[joined]) continue;
+      seen[joined] = true;
+      (byIssue[match[1]] = byIssue[match[1]] || []).push(match[2]);
+    }
+
+    var issues = Object.keys(byIssue);
+    issues.forEach(function (issue) {
+      byIssue[issue].sort(compareRunsDesc);
+    });
+    // Newest issue first, where an issue's age is its most recent run.
+    issues.sort(function (a, b) {
+      return compareRunsDesc(byIssue[a][0], byIssue[b][0]);
+    });
+
     clear(app);
     app.appendChild(el("h1", { text: "Aether Evidence Viewer" }));
-    var p = el("p", { className: "muted" });
-    p.appendChild(document.createTextNode("Open this page with "));
-    p.appendChild(el("code", { text: "?run=<issue>/<run>" }));
-    p.appendChild(document.createTextNode(" to view a dogfood trial, e.g. "));
-    var example = el("code", { text: "?run=2974/2026-07-10T00-00-00" });
-    p.appendChild(example);
-    p.appendChild(document.createTextNode("."));
-    app.appendChild(p);
+    app.appendChild(el("p", {
+      className: "muted",
+      text: "Dogfood trial runs, newest first, grouped by closing issue. Open a run for its full rollup.",
+    }));
+
+    if (issues.length === 0) {
+      app.appendChild(el("p", { className: "card", text: "No runs found on the evidence branch." }));
+      return;
+    }
+    if (tree && tree.truncated) {
+      app.appendChild(el("p", { className: "muted", text: "The branch listing was truncated by the GitHub API; the oldest runs may be missing." }));
+    }
+
+    issues.forEach(function (issue) {
+      var heading = el("h2");
+      heading.appendChild(el("a", {
+        text: "Issue #" + issue,
+        href: "https://github.com/" + REPO + "/issues/" + issue,
+      }));
+      app.appendChild(heading);
+
+      var table = el("table");
+      var thead = el("thead");
+      var headRow = el("tr");
+      ["run", "when", "verdict", "summary"].forEach(function (h) {
+        headRow.appendChild(el("th", { text: h }));
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+      var tbody = el("tbody");
+      byIssue[issue].forEach(function (run) {
+        tbody.appendChild(renderRunRow(issue, run, dates));
+      });
+      table.appendChild(tbody);
+      app.appendChild(table);
+    });
+  }
+
+  function renderIndexError() {
+    clear(app);
+    app.appendChild(el("h1", { text: "Aether Evidence Viewer" }));
+    app.appendChild(el("p", {
+      className: "card",
+      text: "Could not list runs from the evidence branch — the GitHub API request failed (possibly rate-limited). Retry in a minute, or open a run directly with ?run=<issue>/<run>.",
+    }));
+  }
+
+  // The landing state: enumerate every run on the evidence branch. One
+  // commits call supplies both the branch tip (for the tree listing) and a
+  // best-effort run -> date map from the "evidence: dogfood run <issue>/<run>"
+  // commit subjects — a /sweep squash of the branch drops old dates, but the
+  // runs themselves still list from the tree.
+  function renderIndex() {
+    fetchJson(API_BASE + "/commits?sha=" + encodeURIComponent(EVIDENCE_BRANCH) + "&per_page=100")
+      .then(function (commits) {
+        if (!Array.isArray(commits) || commits.length === 0) throw new Error("no commits on the evidence branch");
+        var dates = {};
+        commits.forEach(function (c) {
+          var message = (c && c.commit && c.commit.message) || "";
+          var match = /^evidence: dogfood run ([0-9]+\/[A-Za-z0-9._-]+)/.exec(message);
+          if (match && c.commit.committer && c.commit.committer.date) {
+            dates[match[1]] = c.commit.committer.date;
+          }
+        });
+        return fetchJson(API_BASE + "/git/trees/" + commits[0].commit.tree.sha + "?recursive=1")
+          .then(function (tree) {
+            renderRunList(tree, dates);
+          });
+      })
+      .catch(function () {
+        renderIndexError();
+      });
   }
 
   function renderInvalidRun(raw) {
@@ -206,6 +370,7 @@
 
   function renderNotFound(run) {
     clear(app);
+    app.appendChild(backLink());
     app.appendChild(el("h1", { text: "Aether Evidence Viewer" }));
     var p = el("p", { className: "card" });
     p.appendChild(document.createTextNode("No evidence found for run "));
@@ -378,8 +543,15 @@
     return wrap;
   }
 
+  function backLink() {
+    var p = el("p");
+    p.appendChild(el("a", { text: "← all runs", href: "?" }));
+    return p;
+  }
+
   function renderRollup(run, rollup) {
     clear(app);
+    app.appendChild(backLink());
     app.appendChild(el("h1", { text: "Evidence: " + run.joined }));
     app.appendChild(renderVerdictHeader(rollup));
 
@@ -403,7 +575,7 @@
     var params = new URLSearchParams(window.location.search);
     var raw = params.get("run");
     if (!raw) {
-      renderNoRun();
+      renderIndex();
       return;
     }
     var run = parseRun(raw);
