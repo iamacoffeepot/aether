@@ -1,0 +1,123 @@
+{
+  "totals": {
+    "findings": 5,
+    "papercut": 2,
+    "missingPrimitive": 1,
+    "docGap": 1,
+    "blocker": 1,
+    "softHolds": 2
+  },
+  "succeeded": false,
+  "buildGreen": null,
+  "summary": "Task was to exercise the stock Toggle, Segmented, and Numeric controls via pointer/keyboard/clipboard/commit-cancel over the MCP drive harness, and leave a rendered frame. Both viable paths are closed over MCP, so I could not verify a single interaction outcome for the three target widgets nor render them. (1) The documented path — a WidgetPanel with a `children` list — requires each `WidgetChildSpec.config` to be pre-encoded wire bytes, and no MCP tool encodes structured child JSON into those bytes (widgets.md names this the missing 'generic nested-kind encoder'); the empty-children fallback stack is fixed to label/slider/radio/text_field/button and excludes all three targets. (2) The undocumented workaround — loading a widget standalone via `load_component export=aether.kit.widget.toggle` — works and is fully introspectable, but the widget is a black box over MCP: I drove pointer (aether.mouse_button+release), keyboard (aether.key Enter), and Collect directly into it and the handlers ran (visible as received/finished in send_mail_traced) but emitted nothing observable and logged nothing, because value-up events (ToggleChanged/SegmentedSelected/NumericChanged) and the Collect draw list both target ctx.parent(), which a top-level component lacks. As the closest achievable render artifact I loaded the reference WidgetPanel (built-in stack) into the live engine; it renders (label/slider/radio/textfield/button quad chrome, no glyphs since the font did not resolve), proving the compositor works — but it is NOT the target widgets. Engine 00000000-0000-0000-0000-000000000001 left alive.",
+  "artifact": {
+    "verdict": "wrong",
+    "rationale": "The frame shows the panel with three abstract control widgets — a slider (blue-filled ~25% on a gray track), a stack of three checkbox squares (top one blue/checked, two gray/unchecked), and a large solid blue bar at the bottom — but no text or digits are rendered anywhere. The expected artifact requires the numeric editor to display \"the committed validated value,\" yet no number is visible on any control; the bottom field that should be the numeric editor is a blank blue rectangle with no value glyphs. The committed validated value is therefore not shown, which is the concrete use-visible discrepancy."
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "load_component inline `config` vs `config_path` (same JSON)",
+        "what": "The exact same PanelConfig JSON (with children:[]) was rejected when passed as inline `config` with 'config does not match aether.kit.widget.panel.config: field \"$\" expected object' (the Bytes $-embed resolver misfiring on the children Vec's element schema), yet loaded successfully via `config_path` pointing at a file with identical content. The two documented-equivalent input paths use divergent encoding, and the inline error is cryptic.",
+        "suggested": "Route inline `config` and `config_path` through the same encoder; make the $-embed pre-scan skip empty/absent Bytes-bearing collections; and improve the error to name the offending field path instead of '$'."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "input.md 'drive a component over MCP' guidance vs widget input model",
+        "what": "input.md says to drive a component by mailing input kinds to aether.input, which fans out to subscribers. Widgets deliberately do NOT subscribe to aether.input (the panel root does), so that guidance silently does not reach a bare widget; input must be sent directly to the widget's own mailbox. Discoverable via describe_component's handler list, but a consumer following input.md would see no effect.",
+        "suggested": "Note in input.md (or widgets.md) that stock widgets receive input by direct-to-mailbox forwarding from their root, not via aether.input subscription, so synthetic drive must target the widget/root mailbox directly."
+      }
+    ],
+    "missing-primitive": [
+      {
+        "category": "missing-primitive",
+        "severity": "high",
+        "where": "load_component / WidgetPanel PanelConfig.children[].config (Bytes) over MCP",
+        "what": "The only documented way to place a Toggle/Segmented/Numeric on a rendered panel is a WidgetPanel with a custom `children` list, but each WidgetChildSpec.config is a Bytes field holding pre-encoded child config. No MCP tool turns structured child JSON into those bytes (widgets.md itself calls out the absent 'generic nested-kind encoder'), and the empty-children fallback stack is hardcoded to label/slider/radio/text_field/button. A drive-medium consumer therefore has no way to render or host these three widgets at all.",
+        "suggested": "Add a nested-kind encoder at the MCP boundary that recursively schema-encodes structured child JSON into WidgetChildSpec.config bytes (using the child WidgetKind discriminant to pick the config kind); or ship a built-in demo panel variant whose fallback stack includes Toggle/Segmented/Numeric."
+      }
+    ],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "medium",
+        "where": "Driving aether.key over MCP (input.md / widgets.md)",
+        "what": "aether.key carries a numeric `code: U32`, but the docs only give the constant NAMES (KEY_ENTER, KEY_LEFT/RIGHT/UP/DOWN, KEY_BACKSPACE, letters for Ctrl+A/C/X/V). To send a keystroke over MCP a consumer must read crate source (aether_kinds::keycode) to learn the values (e.g. Enter=0x0102, Left=0x0110, Space=0x0100, letters=ASCII). A pure docs+signatures consumer cannot press a key.",
+        "suggested": "Publish the keycode name->value table in input.md (or a reference page), at least for the editing/navigation keys widgets match on."
+      }
+    ],
+    "blocker": [
+      {
+        "category": "blocker",
+        "severity": "high",
+        "where": "load_component export=aether.kit.widget.{toggle,segmented,numeric} driven standalone over MCP",
+        "what": "A widget loaded standalone is unobservable. I sent aether.mouse_button press+release, aether.key (Enter=258), and aether.kit.widget.collect directly to the widget mailbox after config+frame+focus_gained; send_mail_traced shows the handlers receiving and finishing, but no ToggleChanged, no draw_list, and no actor_logs entries ever appear. Value-up events and the Collect WidgetDrawList both go to ctx.parent(), which does not exist for a top-level component, so nothing is emitted. There is no public way to observe or verify pointer/keyboard/clipboard/commit-cancel behavior of a bare widget.",
+        "suggested": "Provide a minimal standalone widget-harness root (composites one widget and logs its value-up events, addressable over MCP), or have a parent-less widget mirror its value events into its own aether.log ring so actor_logs can surface them."
+      }
+    ]
+  },
+  "softHolds": [
+    {
+      "kind": "use-visible-incorrect",
+      "detail": "The frame shows the panel with three abstract control widgets — a slider (blue-filled ~25% on a gray track), a stack of three checkbox squares (top one blue/checked, two gray/unchecked), and a large solid blue bar at the bottom — but no text or digits are rendered anywhere. The expected artifact requires the numeric editor to display \"the committed validated value,\" yet no number is visible on any control; the bottom field that should be the numeric editor is a blank blue rectangle with no value glyphs. The committed validated value is therefore not shown, which is the concrete use-visible discrepancy."
+    },
+    {
+      "kind": "blocker",
+      "where": "load_component export=aether.kit.widget.{toggle,segmented,numeric} driven standalone over MCP",
+      "detail": "A widget loaded standalone is unobservable. I sent aether.mouse_button press+release, aether.key (Enter=258), and aether.kit.widget.collect directly to the widget mailbox after config+frame+focus_gained; send_mail_traced shows the handlers receiving and finishing, but no ToggleChanged, no draw_list, and no actor_logs entries ever appear. Value-up events and the Collect WidgetDrawList both go to ctx.parent(), which does not exist for a top-level component, so nothing is emitted. There is no public way to observe or verify pointer/keyboard/clipboard/commit-cancel behavior of a bare widget."
+    }
+  ],
+  "tokensPerTool": [
+    {
+      "tool": "mcp__aether-hub__capture_frame",
+      "calls": 1,
+      "bytesIn": 121,
+      "bytesOut": 4702,
+      "tokensIn": 30,
+      "tokensOut": 1176
+    },
+    {
+      "tool": "mcp__aether-hub__list_binaries",
+      "calls": 1,
+      "bytesIn": 2,
+      "bytesOut": 1131,
+      "tokensIn": 1,
+      "tokensOut": 283
+    },
+    {
+      "tool": "mcp__aether-hub__list_components",
+      "calls": 1,
+      "bytesIn": 2,
+      "bytesOut": 10666,
+      "tokensIn": 1,
+      "tokensOut": 2667
+    },
+    {
+      "tool": "mcp__aether-hub__list_engines",
+      "calls": 1,
+      "bytesIn": 16,
+      "bytesOut": 43,
+      "tokensIn": 4,
+      "tokensOut": 11
+    },
+    {
+      "tool": "mcp__aether-hub__load_component",
+      "calls": 1,
+      "bytesIn": 165,
+      "bytesOut": 5364,
+      "tokensIn": 41,
+      "tokensOut": 1341
+    },
+    {
+      "tool": "mcp__aether-hub__spawn_substrate",
+      "calls": 1,
+      "bytesIn": 31,
+      "bytesOut": 134,
+      "tokensIn": 8,
+      "tokensOut": 34
+    }
+  ]
+}
