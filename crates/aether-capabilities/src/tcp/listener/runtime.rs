@@ -38,7 +38,7 @@ use super::TcpListenerActor;
 /// distinct ZST [`TcpListenerActor`](super::TcpListenerActor).
 pub struct TcpListenerState {
     pub local_port: u16,
-    pub consumer: Option<String>,
+    pub consumer: Option<aether_data::MailboxId>,
     pub shutdown: Arc<AtomicBool>,
     pub accept_thread: Option<JoinHandle<()>>,
     pub connection_rx: mpsc::Receiver<(TcpStream, SocketAddr)>,
@@ -182,7 +182,7 @@ impl NativeActor for TcpListenerActor {
                 stream: Some(stream),
                 peer: peer_str.clone(),
                 session_name: subname.clone(),
-                consumer: state.consumer.clone(),
+                consumer: state.consumer,
             };
             match ctx
                 .spawn_child::<TcpSessionActor>(aether_substrate::Subname::Named(&subname), session_config)

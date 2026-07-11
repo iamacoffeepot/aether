@@ -1,6 +1,7 @@
 # ADR-0078: Chassis-internal actors, with `ProcessCapability` as the first
 
 - **Status:** Accepted (Phase 1 shipped; Phase 2 — ServerSocketCapability/framing — deferred)
+- **Amended (ADR-0118):** mentions of `postcard` below describe the superseded body format. The structured wire body is now `aether_data::wire`; postcard is no longer a dependency of any crate in the workspace. The decision this ADR records otherwise stands.
 - **Date:** 2026-05-06
 
 ## Context

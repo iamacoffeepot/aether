@@ -14,7 +14,8 @@ names, as one of its two consumers, "a future player session tier over tcp" — 
 leaves the tcp-facing half undesigned.
 
 That half is this ADR. The transport underneath is the `aether.tcp` capability
-(ADR-0079 instanced session actors; ADR-0072 length-prefix postcard framing),
+(ADR-0079 instanced session actors; ADR-0072 length-prefix framing over an
+`aether_data::wire`-encoded body, ADR-0118),
 completed on both legs by two sibling issues: inbound delivery to a bound consumer
 with frame reassembly (#3046) and outbound connect for client-side dials (#3047).
 The `aether.tcp` layer moves *opaque* length-prefix frames between a socket and a
@@ -61,16 +62,17 @@ world is its first consumer, not a special case baked into it.
 
 ### 1. Gateway demux and per-connection spawn
 
-`aether.tcp` binds one consumer *per listener* (#3046 stamps the consumer name onto
-every session the listener spawns), so all sessions on a listener deliver their
+`aether.tcp` binds one consumer *per listener* — a `MailboxId` the listener stamps
+onto every session it spawns — so all sessions on a listener deliver their
 `SessionData` / `SessionClosed` to one mailbox. But the issue calls for one game
 actor *per connection*. The **gateway** singleton reconciles the two: it is the
-listener's bound consumer, and it demultiplexes inbound mail by `session_name` —
+listener's bound consumer (it binds by passing its own `ctx.self_id()`), and it
+demultiplexes inbound mail by `session_name` —
 on the first frame from a new session it `spawn_child`s a **player session**
 instanced actor (the ADR-0079 pattern the tcp listener already uses to spawn its
 `TcpSessionActor`s, one game layer up), routes that session's subsequent frames and
 its `SessionClosed` to that child, and reaps the child on close. This keeps #3046
-unchanged (its consumer stays one stable name) while giving every connection an
+unchanged (its consumer stays one stable mailbox) while giving every connection an
 isolated actor with its own state and its own run-token — per-connection parallelism
 on the ADR-0087 pool, not one serialized singleton.
 

@@ -19,8 +19,11 @@
 //! - sum-type selectors (`Enum`, `Ref`) are a fixed `u32` (serde's
 //!   `variant_index`), then the selected variant's body.
 //!
-//! Nothing in the workspace encodes through this module yet; ADR-0118 step 2
-//! repoints the derive runtime and the schema walker onto it.
+//! This module is the workspace's structured wire format (ADR-0118,
+//! shipped): the serde adapter here backs `#[derive(Serialize)]` kinds and
+//! `aether-codec`'s schema walker drives the same primitives from a
+//! `SchemaType`. Both emit identical bytes. The external `postcard` crate
+//! it replaced is gone — no crate in the workspace depends on it.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;

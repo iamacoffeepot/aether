@@ -73,6 +73,13 @@ short-distance fixes once the design exists:
   numbers (string-typed opaque ids — covered in the follow-on ADR
   for prefixed-string id encoding). Modest implementation surface;
   decoupled from this ADR.
+
+  > **Resolved by ADR-0064 (shipped).** Typed ids serialize to JSON as
+  > tagged strings (`mbx-…` / `knd-…` / `hdl-…`) and round-trip
+  > **exactly**; the 2^53 hazard described above no longer exists. Do not
+  > read this paragraph as a live constraint — in particular, it is not a
+  > reason to type a mailbox-valued field as a `String` instead of a
+  > `MailboxId`.
 - The hub's MCP harness already uses `terminate_substrate` +
   `spawn_substrate` as the dev-loop iteration primitive; respawn-per-
   iteration is the existing daily driver, so the cost of an abort

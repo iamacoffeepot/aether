@@ -14,7 +14,7 @@ pub struct TcpListenerConfig {
     pub listener: Option<TcpListener>,
     pub addr: String,
     pub port: u16,
-    pub consumer: Option<String>,
+    pub consumer: Option<aether_data::MailboxId>,
 }
 
 /// Init config for [`TcpSessionActor`](super::TcpSessionActor). A listener's
@@ -26,5 +26,5 @@ pub struct TcpSessionConfig {
     pub stream: Option<TcpStream>,
     pub peer: String,
     pub session_name: String,
-    pub consumer: Option<String>,
+    pub consumer: Option<aether_data::MailboxId>,
 }

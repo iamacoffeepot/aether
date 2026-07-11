@@ -40,6 +40,17 @@ use super::TcpSessionActor;
 /// chunk.
 pub const READ_BUFFER_BYTES: usize = 64 * 1024;
 
+/// Deliver `mail` to the session's bound consumer, inheriting the
+/// handler's causal chain. The consumer is addressed by `MailboxId`
+/// rather than by runtime name because a name resolves through
+/// `mailbox_id_from_name`, which cannot name a nested actor — a loaded
+/// wasm component lives at the lineage path
+/// `aether.component/aether.embedded:<name>`, and those are the
+/// consumers this field exists to serve.
+fn notify_consumer<K: Kind>(ctx: &NativeCtx<'_>, consumer: aether_data::MailboxId, mail: &K) {
+    let _ = ctx.send_envelope_tracked(consumer, K::ID, &mail.encode_into_bytes());
+}
+
 /// `aether.tcp.session` runtime state (issue 607 Phase 6b, ADR-0079). One end
 /// of a split `TcpStream`: the read sidecar owns the read half; the dispatcher
 /// owns `write_half` (used by `on_session_write`). Read-side errors / EOF flow
@@ -50,7 +61,7 @@ pub const READ_BUFFER_BYTES: usize = 64 * 1024;
 pub struct TcpSessionState {
     pub peer: String,
     pub session_name: String,
-    pub consumer: Option<String>,
+    pub consumer: Option<aether_data::MailboxId>,
     pub read_buffer: Vec<u8>,
     pub write_half: TcpStream,
     pub shutdown: Arc<AtomicBool>,
@@ -195,8 +206,9 @@ impl NativeActor for TcpSessionActor {
                     loop {
                         match pop_frame(&mut state.read_buffer) {
                             Ok(Some(bytes)) => {
-                                if let Some(consumer) = state.consumer.as_deref() {
-                                    ctx.send_to_named(
+                                if let Some(consumer) = state.consumer {
+                                    notify_consumer(
+                                        ctx,
                                         consumer,
                                         &SessionData {
                                             session_name: state.session_name.clone(),
@@ -215,8 +227,9 @@ impl NativeActor for TcpSessionActor {
                                     error = %error,
                                     "tcp session frame rejected",
                                 );
-                                if let Some(consumer) = state.consumer.as_deref() {
-                                    ctx.send_to_named(
+                                if let Some(consumer) = state.consumer {
+                                    notify_consumer(
+                                        ctx,
                                         consumer,
                                         &SessionClosed {
                                             session_name: state.session_name.clone(),
@@ -237,8 +250,9 @@ impl NativeActor for TcpSessionActor {
                     } else {
                         format!("{reason}; dropped {} trailing frame bytes", state.read_buffer.len())
                     };
-                    if let Some(consumer) = state.consumer.as_deref() {
-                        ctx.send_to_named(
+                    if let Some(consumer) = state.consumer {
+                        notify_consumer(
+                            ctx,
                             consumer,
                             &SessionClosed {
                                 session_name: state.session_name.clone(),

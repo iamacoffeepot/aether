@@ -11,7 +11,7 @@ Pre-1.0 Rust project (edition 2024). Vision: a game engine where Claude sits in 
 Infrastructure (non-actor) crates:
 
 - **`aether-data`** — universal data layer (`no_std` + `alloc`). Typed-id newtypes (`MailboxId`, `KindId`), wire identity (`EngineId`, `SessionToken`, `Uuid`), schema vocabulary (`SchemaType`, `KindShape`, `KindLabels`), the `Kind` / `Schema` traits, encode/decode helpers, and the native descriptor + transform inventories. Everything that describes typed bytes depends on it. Its proc macros (`#[derive(Kind, Schema)]`, `#[transform]`) live in `aether-data-derive`.
-- **`aether-codec`** — schema-driven JSON ↔ wire bytes over `SchemaType` (`encode_schema` / `decode_schema`) plus length-prefix postcard stream framing (`frame::*`, ADR-0072).
+- **`aether-codec`** — schema-driven JSON ↔ wire bytes over `SchemaType` (`encode_schema` / `decode_schema`) plus length-prefix stream framing (`frame::*`, ADR-0072) whose body is `aether_data::wire`-encoded (ADR-0118). The workspace owns its wire format; postcard was removed and no crate depends on it.
 - **`aether-kinds`** — the substrate kind vocabulary: `Tick`, `Key`, `WindowSize`, `DrawTriangle`, and the `aether.{audio,fs,render,window,input,component,camera,log,handle}.*` families.
 - **`aether-math`** — `Vec2/3/4`, `Mat4`, `Quat`, `Aabb` (column-major, YXZ Euler, right-handed Y-up, `f32`, `no_std`). Reach for it before hand-rolling `cross` / `dot` / `normalize` / aabb checks; add missing domain-agnostic primitives here, not locally. `[f32; 3]` survives at wire boundaries via `Vec3::from_array` / `to_array`.
 

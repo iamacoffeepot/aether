@@ -87,10 +87,15 @@ enum CapturedSessionMail {
     Closed(SessionClosed),
 }
 
+/// Register a capture inbox for a session consumer. Registers under the
+/// ADR-0099 lineage fold of `name` (`try_register_inbox_with_id`) rather
+/// than `hash(name)`, so `name` may be a nested path — the shape a loaded
+/// wasm component has, and the shape the `consumer` field must serve.
 fn register_session_consumer(registry: &Registry, name: &str) -> mpsc::Receiver<CapturedSessionMail> {
     let (tx, rx) = mpsc::channel();
     registry
-        .try_register_inbox(
+        .try_register_inbox_with_id(
+            mailbox_id_from_path(name),
             name,
             Arc::new(move |dispatch: OwnedDispatch| {
                 let captured = if dispatch.kind == SessionData::ID {
@@ -226,7 +231,7 @@ fn connect_roundtrip_spawns_writable_session() {
         &registry,
         &rx,
         TcpCapability::NAMESPACE,
-        &Connect { addr: addr.to_string(), name: None, consumer: Some(CONSUMER.into()) },
+        &Connect { addr: addr.to_string(), name: None, consumer: Some(mailbox_id_from_path(CONSUMER)) },
     );
     let (session_name, session_id, peer) = match connect_reply {
         ConnectResult::Ok { session_name, session_id, peer } => (session_name, session_id, peer),
@@ -403,7 +408,11 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
         &registry,
         &rx,
         TcpCapability::NAMESPACE,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("delivery".into()), consumer: Some(CONSUMER.into()) },
+        &BindListener {
+            addr: "127.0.0.1:0".into(),
+            name: Some("delivery".into()),
+            consumer: Some(mailbox_id_from_path(CONSUMER)),
+        },
     );
     let local_port = match bind {
         BindListenerResult::Ok { local_port, .. } => local_port,
@@ -449,6 +458,46 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
     assert!(consumer_rx.try_recv().is_err(), "consumer must receive exactly two data mails and one close mail");
 }
 
+/// Tripwire: a consumer that is a *nested* actor still receives its
+/// session mail. A loaded wasm component lives at the ADR-0099 lineage
+/// path `aether.component/aether.embedded:<name>`, which is precisely
+/// what the `consumer` field exists to serve — and precisely what a
+/// runtime *name* cannot address, since `mailbox_id_from_name` refuses a
+/// `/`-bearing path. Typing `consumer` as a `MailboxId` is what makes
+/// this reachable; regressing it to a name would silently drop every
+/// frame bound for a component.
+#[test]
+fn nested_lineage_consumer_receives_session_mail() {
+    const CONSUMER: &str = "aether.component/aether.embedded:probe";
+    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let consumer_rx = register_session_consumer(&registry, CONSUMER);
+
+    let bind: BindListenerResult = drive_and_decode(
+        &registry,
+        &rx,
+        TcpCapability::NAMESPACE,
+        &BindListener {
+            addr: "127.0.0.1:0".into(),
+            name: Some("nested".into()),
+            consumer: Some(mailbox_id_from_path(CONSUMER)),
+        },
+    );
+    let local_port = match bind {
+        BindListenerResult::Ok { local_port, .. } => local_port,
+        BindListenerResult::Err { reason, .. } => panic!("bind failed: {reason}"),
+    };
+
+    let body = b"frame for a nested consumer";
+    let mut client = TcpStream::connect(("127.0.0.1", local_port)).expect("connect loopback client");
+    client.write_all(&framed_body(body)).expect("write one complete frame");
+
+    let delivered = consumer_rx.recv_timeout(Duration::from_secs(2)).expect("SessionData reaches a nested consumer");
+    let CapturedSessionMail::Data(delivered) = delivered else {
+        panic!("expected SessionData, got {delivered:?}");
+    };
+    assert_eq!(delivered.bytes, body);
+}
+
 /// Rejecting an invalid frame is an observable session close, not a
 /// silent shutdown: the bound consumer receives exactly one close notice.
 #[test]
@@ -461,7 +510,11 @@ fn session_reports_frame_rejection_to_bound_consumer() {
         &registry,
         &rx,
         TcpCapability::NAMESPACE,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some("rejection".into()), consumer: Some(CONSUMER.into()) },
+        &BindListener {
+            addr: "127.0.0.1:0".into(),
+            name: Some("rejection".into()),
+            consumer: Some(mailbox_id_from_path(CONSUMER)),
+        },
     );
     let local_port = match bind {
         BindListenerResult::Ok { local_port, .. } => local_port,

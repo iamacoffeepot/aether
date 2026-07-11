@@ -33,7 +33,7 @@ incomplete.
 
 ADR-0040 (kind-typed state persistence) shipped the SDK framing this rests
 on — `save_state_kind<K>` / `as_kind<K>`, where the bundle is `K::ID` (little-
-endian, 8 bytes) followed by the postcard body, so schema identity rides in
+endian, 8 bytes) followed by the `aether_data::wire` body, so schema identity rides in
 the bytes and a reshaped `K` is rejected automatically. ADR-0040 then
 **parked** the next step:
 
@@ -133,7 +133,7 @@ makes large state easier to accumulate without noticing.
   that need custom save logic or a cross-version migration. The generated path
   is the default; the manual path is the escape hatch.
 - Version-skew stays brittle for v1: this builds on the ADR-0040 machinery
-  (whole-schema-hash `K::ID` + postcard via `save_state_kind` / `as_kind`), so
+  (whole-schema-hash `K::ID` + `aether_data::wire` via `save_state_kind` / `as_kind`), so
   any field change to `type State` reshapes `K::ID`, misses the decode, and
   boots fresh. That is acceptable for v1 and is the decode-miss policy above.
 - Forward path to ADR-0059. ADR-0059 (content-hashed field tags for upgradable
@@ -142,7 +142,7 @@ makes large state easier to accumulate without noticing.
   survives a schema change. It forks the kind trait into a live-wire side and a
   durable `Storage` side, and persistent state belongs on the `Storage` side.
   ADR-0059 is designed but unbuilt, parked awaiting a consumer. `type State` is
-  whole-hash + postcard for now and migrates to a `Storage`/TLV kind when
+  whole-hash + `aether_data::wire` for now and migrates to a `Storage`/TLV kind when
   ADR-0059 lands, with hot-reload state being ADR-0059's first forcing
   consumer. Pulling ADR-0059 forward is out of scope here — it is a larger
   build (a third wire shape, the trait fork, and the attendant rename) and a

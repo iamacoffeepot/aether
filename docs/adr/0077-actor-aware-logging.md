@@ -1,6 +1,7 @@
 # ADR-0077: Actor-aware logging through `LogCapability` and per-actor buffer-and-drain
 
 - **Status:** Accepted; egress retired by issue 776 (see end-of-file note)
+- **Amended (ADR-0118):** mentions of `postcard` below describe the superseded body format. The structured wire body is now `aether_data::wire`; postcard is no longer a dependency of any crate in the workspace. The decision this ADR records otherwise stands.
 - **Date:** 2026-05-06
 - **Supersedes parts of:** ADR-0023
 
