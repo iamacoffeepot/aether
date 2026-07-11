@@ -110,7 +110,7 @@ wishes/<YYYY-MM-DD>-<theme-slug>/
 
 One `wish.md` per node. Directory nesting encodes wish nesting. Slugs are lowercase kebab-case, descriptive, 20-50 chars. Depth is unbounded.
 
-`alternatives/` is a sibling subdirectory under any wish that names alternatives in its body. The folder may be empty initially (alternatives listed in prose but not materialized as files) or contain shallow alternative wish files (one per named alternative). Alternatives are materialized as files on `/wish --compare <wish-path>`.
+`alternatives/` is a sibling subdirectory under any wish that names alternatives in its body. A prose-named alternative gains a subtree only when `/wish --under <alternative-path>` drills that counter-path.
 
 `index.md` at the top of the pass holds: date, theme, role, sources scanned, the list of root wishes with one-line summaries, the considered-and-dropped list, and notes. It's the navigation surface, not a duplicate of content.
 
@@ -190,37 +190,10 @@ producible: true | false            # true means this wish IS a plan
 <- coherence with the parent: how this wish's resolution composes upward>
 
 <then, in prose, the design-space context:>
-<- alternatives considered, named with one-line shape + one-line path cost each. (Materialized as sibling alternative files when /wish --compare is invoked.)>
+<- alternatives considered, named with one-line shape + one-line path cost each.>
 <- doors opened: what this unlocks downstream — sibling wishes, future features, pattern templates>
 <- doors closed: what this commits to / forecloses — paths we'd have to undo, contracts that become public>
 ```
-
-### `alternatives/<slug>/wish.md` shape
-
-An alternative wish is shallow by default — depth 1, no children. It articulates a counter-path for the same adversity that the parent wish addresses. Frontmatter:
-
-```markdown
----
-wish: I wish I could <X via alternative shape> so that I could <Y>.
-parent: ../../wish.md
-alternative_to: <parent-wish-slug>
-producible: yes (shape; shallow — drill with /wish --under)
----
-
-<free-form prose body, no headers, articulating the path-cost analysis:>
-
-<- the shape (what would we build along this path)>
-<- build cost: LOC + infrastructure + ADR work>
-<- maintenance cost: ongoing surface, cognitive overhead, who has to remember>
-<- reversibility: cost of changing our minds later>
-<- forward optionality: what this path preserves vs forecloses>
-<- cognitive load: new concept vs reused pattern>
-<- what it preserves (good downstream consequences)>
-<- what it forecloses (bad downstream consequences)>
-<- why rejected as the chosen path — names the dimension where the chosen wins>
-```
-
-Alternatives stay shallow unless drilled. `/wish --under <alt-path>` walks the alternative deeper to compare its tree against the chosen path's tree.
 
 ### Reading a tree
 
@@ -238,8 +211,6 @@ The user reads top-down:
 /wish <theme>                       walk wish trees from a theme
 /wish --as <role>                   from a role's perspective
 /wish <theme> --as <role>           combine
-/wish --compare <wish-path>         materialize the alternatives named in <wish>'s prose
-                                    as shallow sibling files under alternatives/
 /wish --under <wish-path>           drill into one subtree (chosen or alternative)
                                     from a prior pass
 /wish --deep <theme>                deep mode: best-first fan-out drilling (workflow-backed)
@@ -322,7 +293,7 @@ For each root, recursively:
 
 1. **Articulate the shape at this depth.** LOD-appropriate.
 2. **Producibility check.** Can this shape be written with known means within current resources? Yes → wish is a plan (no children). No → identify absences → each becomes a sub-wish.
-3. **Name alternatives in prose.** What other shapes were considered? Each with a one-line shape + one-line path-cost sketch. Don't materialize as files yet (that's `/wish --compare`).
+3. **Name alternatives in prose.** What other shapes were considered? Each with a one-line shape + one-line path-cost sketch. They live in the parent's prose; drill a counter-path later with `/wish --under`.
 4. **Name doors opened and doors closed.** Two short paragraphs. What does this choice unlock? What does it commit to?
 5. **Coherence check.** Children must compose into the parent's plan; if a child wouldn't satisfy the parent, restate.
 6. **Recurse on sub-wishes** until each leaf is producible.
@@ -335,9 +306,9 @@ On `--deep`, run steps 1 (pre-load adversity) and 2 (generate roots) inline in t
 2. **Compute `wishDir`.** The absolute path to `wishes/<YYYY-MM-DD>-<theme-slug>/`. Create the directory so the drillers have a place to write.
 3. **Gather `groundingNotes`.** The grep-confirmed engine surfaces from step 1, as a short shared block, so the drillers extend the grounding rather than each re-deriving it.
 4. **Call the workflow.** `Workflow({name: "wish", args: {theme, role, beam, budget, roots, wishDir, groundingNotes}})` — `roots` is `[{slug, wish, doors_opened, unresolvedness}]`; `beam` and `budget` come from the flags (defaults 3 and 40); `role` is null if not given. The workflow holds the best-first frontier, spawns the parallel drillers + the skeptic gate + the synthesis writer, and the agents write every `wish.md` and `index.md` themselves.
-5. **Report from the returned stats.** On completion the workflow returns `{rootCount, totalNodes, leafCount, maxDepth, skepticDemotions, undrilled, ...}`. Print the deep-mode report (step 8) from those, and surface that the tree is on disk and resumable.
+5. **Report from the returned stats.** On completion the workflow returns `{rootCount, totalNodes, leafCount, maxDepth, skepticDemotions, undrilled, ...}`. Print the deep-mode report (step 7) from those, and surface that the tree is on disk and resumable.
 
-Deep mode does not run steps 4-7 inline — filtering, alternatives, and the on-disk write are the drillers' and synthesis agent's job inside the workflow. Step 8's report template has a deep-mode variant.
+Deep mode does not run steps 4-6 inline — filtering and the on-disk write are the drillers' and synthesis agent's job inside the workflow. Step 7's report template has a deep-mode variant.
 
 ### 4. Filter against existing work (tree-aware)
 
@@ -354,22 +325,11 @@ Deep mode does not run steps 4-7 inline — filtering, alternatives, and the on-
 
 **Resource check** at every level: if producibility requires unrealistic compute/money, drop or flag.
 
-### 5. Materialize alternatives on `--compare`
+### 5. Drill an alternative on `--under`
 
-When `/wish --compare <wish-path>` is invoked:
+When `/wish --under <wish-path>` is invoked, walk the target as if it were a chosen wish — generate its own sub-wishes, possibly its own sub-alternatives, and recurse to producibility. If the target is an `alternatives/<slug>` path that is not yet on disk, resolve `<slug>` against the parent wish's prose-named alternatives and drill that counter-path directly into a full subtree using the chosen-path `wish.md` shape. Refuse only when the target matches neither an existing path nor a prose-named alternative. The result is a competing subtree the user can compare against the original chosen path's subtree.
 
-1. Read the named alternatives from the wish's prose body.
-2. For each, create `<wish-path>/alternatives/<slug>/wish.md` with the alternative wish.md shape (frontmatter + path-cost prose).
-3. Each alternative file is depth 1 — no children. The shape is articulated; the build/maintenance/reversibility/forward-optionality/cognitive-load analysis is in prose.
-4. Don't filter alternatives against existing work — they're counter-paths for comparison, not candidates to file.
-
-If alternatives are already materialized, refuse with *"Alternatives already exist under <path>; use /wish --under <alt-path> to drill one."*
-
-### 6. Drill an alternative on `--under`
-
-When `/wish --under <alternative-path>` is invoked: walk the alternative as if it were a chosen wish — generate its own sub-wishes, possibly its own sub-alternatives, recurse to producibility. The result is a competing subtree the user can compare against the original chosen path's subtree.
-
-### 7. Write the tree
+### 6. Write the tree
 
 Output root: `wishes/<YYYY-MM-DD>-<theme-slug>/`. Write `index.md` and each `wish.md`.
 
@@ -384,7 +344,7 @@ Output root: `wishes/<YYYY-MM-DD>-<theme-slug>/`. Write `index.md` and each `wis
 - Considered-and-dropped list
 - Notes
 
-### 8. Report to user
+### 7. Report to user
 
 ```
 ✓ Wish pass complete.
@@ -397,7 +357,6 @@ Output root: `wishes/<YYYY-MM-DD>-<theme-slug>/`. Write `index.md` and each `wis
   Index: wishes/<date>-<theme>/index.md
 
 Read the index, drill into the wishes that interest you.
-Materialize a wish's alternatives: /wish --compare <wish-path>
 Drill an alternative or sub-wish deeper: /wish --under <wish-path>
 File leaf plans you want to commit to as Backlog-Phase issues.
 ```
@@ -440,7 +399,6 @@ The "why rejected as the chosen path" line names which dimension(s) the chosen w
 
 - File issues (the user triages).
 - Write production code (that's `/implement`).
-- Materialize alternatives unless `--compare` is invoked.
 - Drill alternatives unless `--under` is invoked on the alternative.
 - Pad the tree to a count or depth target.
 - Wish for things already producible — those are plans, not wishes; write them directly as the wish's own body.
@@ -457,8 +415,7 @@ The "why rejected as the chosen path" line names which dimension(s) the chosen w
 - **L1 drift** (root reads as workflow not outcome): restate as outcome before drilling.
 - **Unverifiable surface a wish leans on**: don't substitute a plausible name. Either the surface doesn't exist (drill the absence) or it's renamed (grep for the real name). A guessed surface makes producibility a lie.
 - **Children don't compose to satisfy parent**: back up, restate.
-- **`--compare` invoked on a wish with no named alternatives**: write a note in the wish's prose suggesting alternatives, refuse with *"No alternatives named in <wish-path>. Add alternatives in the body and re-invoke."*
-- **`--under` invoked on a path that doesn't exist**: refuse with the valid prior-pass paths.
+- **`--under` invoked on a path that doesn't exist**: when the target is an `alternatives/<slug>` path, resolve `<slug>` against the parent wish's prose-named alternatives and drill that counter-path; refuse only when it matches neither an existing path nor a prose-named alternative.
 
 ## Output gitignore
 
