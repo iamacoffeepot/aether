@@ -44,9 +44,10 @@ forces:
   split, not invent a parallel lifecycle.
 - **Decoupling.** The session tier lives in `aether-capabilities` (the lower crate);
   the reference sim lives in `aether-kit` (the higher crate, #3049). The tier must
-  speak the `aether.sim.*` vocabulary as *wire names* against its handler-table
-  allowlist, taking no Rust dependency on `aether-kit` — the same decoupling
-  ADR-0144 mandated from the other side.
+  not import the higher crate, but opaque wire-name forwarding is insufficient: it
+  cannot overwrite `Spawn.entity_id` / `MoveIntent.entity_id` or author typed
+  `Poll` catch-up. ADR-0144's exact vocabulary definitions therefore relocate to a
+  target-agnostic lower-crate surface and remain re-exported from `aether-kit`.
 
 ## Decision
 
@@ -102,14 +103,14 @@ allowlist decode (§4) rejects.
 ### 4. Inbound: untrusted frame → allowlisted intent kind
 
 Each `SessionData` body is a length-prefix-framed, kind-tagged intent payload. The
-tier decodes it by **kind-id against its handler table, which is the allowlist**: a
-frame names a *kind*, never a recipient (ADR-0033 dispatch by kind-id). A kind-id
-outside the allowed intent set is dropped and logged — it is not dispatched, and it
-cannot address an arbitrary mailbox. An allowed intent is forwarded to the sim's
-intent mailbox, attributed to the session identity (§3), where ADR-0144's per-tick
-binning and last-writer-wins supersession take over. The allowed set is the tier's
-configured intent vocabulary (the `aether.sim.*` intent kinds in v1), carried as
-wire names — no Rust dependency on the sim crate.
+tier applies a closed typed allowlist over the shared `Spawn` and `MoveIntent`
+definitions: a frame names a *kind*, never a recipient. A kind-id outside the
+allowed set is dropped and logged — it is not dispatched, and it cannot address an
+arbitrary mailbox. For an allowed kind, the tier decodes the exact payload,
+overwrites its `entity_id` with the server-assigned session identity, and sends the
+typed value to the sim mailbox, where ADR-0144's per-tick binning and
+last-writer-wins supersession take over. This imports no `aether-kit` code; the
+definitions now live beside the tier in the lower crate and are re-exported upward.
 
 ### 5. Outbound: per-tick bundle assembly with an interest projection seam
 
@@ -130,32 +131,36 @@ identity so the pipe is proven before the projection is real.
 
 ### 6. Tick clock beacon rides the transport, not game state
 
-Each tick the tier emits a **beacon** to its client: the current tick number, a
-server-monotonic timestamp, and the current tick interval. The beacon lets a client
-pace interpolation and detect lag without inferring cadence from bundle arrival
-jitter. It is a *transport-pacing* signal carried in its own tier kind — the
-wall-clock timestamp lives here and never enters an `aether.sim.*` game-state kind,
-preserving ADR-0144's determinism invariant. The beacon cadence is driven by the
-substrate `Tick` stream the tier subscribes in its `wire` hook (ADR-0021/0068).
+For each completed authoritative bundle the tier emits a **beacon** to its client:
+the bundle's tick number, a server-monotonic timestamp, and the current tick
+interval. The beacon lets a client pace interpolation and detect lag without
+inferring cadence from bundle arrival jitter. It is a *transport-pacing* signal
+carried in its own tier kind — the timestamp lives here and never enters an
+`aether.sim.*` game-state kind, preserving ADR-0144's determinism invariant. The
+completed `TickBundle` drives both fact and beacon output. An independent lifecycle
+`Tick` subscription is rejected because lifecycle subscribers run concurrently and
+could advertise a tick before `TurnSim` has completed its authoritative bundle.
 
 ### 7. Kinds and crate placement
 
 The tier's own kinds (`Hello`, `HelloAck`, the tick beacon, and any tier-level
 close/error) live in the session-tier module of `aether-capabilities` under the
 ADR-0122 identity/runtime split — the capability owns its kinds (ADR-0121). The
-`aether.sim.*` intent and fact kinds are *not* owned here: they are ADR-0144's
-vocabulary, spoken by wire name. The tier takes no dependency on `aether-kit`.
+same target-agnostic `game` surface also becomes the canonical Rust home of
+ADR-0144's existing `aether.sim.*` definitions. `aether-kit` re-exports those exact
+types; neither crate defines a second shape, and the lower crate still takes no
+dependency on the higher one.
 
 ## Consequences
 
 - The client/server slice has an agreed session protocol: #3050's client
   presentation actor implements the client side of the handshake, consumes the
-  beacon, and applies the projected bundle; #3051's perf harness measures a real
-  handshake-through-bundle round trip. Both build against this fixed shape.
+  beacon, and applies the projected bundle. #3051 separately stress-tests the
+  accepted/connect tcp transport and session lifecycle underneath this tier.
 - The security boundary is explicit and testable: identity is server-stamped, the
-  allowlist is the handler table, and a frame can name only a kind. The negative
-  test (a peer sending a non-allowlisted kind, or forging an identity field) has a
-  defined outcome — drop and log, never dispatch.
+  allowlist is the closed typed intent set, and a frame can name only a kind. The
+  negative test (a peer sending a non-allowlisted kind, or forging an identity
+  field) has a defined outcome — drop and log, never dispatch.
 - Determinism is preserved: the only wall-clock value in the whole path is the
   beacon timestamp, which is transport pacing and never reaches game state.
 - The tier reuses ADR-0079 instanced session actors and the ADR-0122 identity/
@@ -169,7 +174,7 @@ vocabulary, spoken by wire name. The tier takes no dependency on `aether-kit`.
   deferred, matching #3046's stance. None change the wire contract.
 - Ordering: this tier consumes the `aether.sim.*` vocabulary (#3049 / ADR-0144) and
   both `aether.tcp` transport legs (#3046 inbound delivery, #3047 outbound connect).
-  It is buildable only once those land; the client slice (#3050) builds on it.
+  Those prerequisites have landed; the client slice (#3050) builds on this tier.
 
 ## Alternatives considered
 
@@ -190,9 +195,17 @@ vocabulary, spoken by wire name. The tier takes no dependency on `aether-kit`.
   server opted into.
 - **Read identity from the frame.** Simpler client, but any peer could act as any
   player. Rejected: identity is a server fact stamped from the connection.
+- **Forward opaque allowed payloads without importing the sim types.** Keeps the
+  original wire-name-only reading, but cannot overwrite the existing typed identity
+  fields and cannot implement `Poll`/`PollResult` catch-up. Rejected: relocate and
+  reuse the exact types rather than inventing attributed/client-only wrappers.
 - **Put the tick timestamp in the sim bundle.** Would give the client cadence for
   free, but reintroduces wall-clock into game state and breaks ADR-0144's
   determinism invariant. Rejected: cadence rides the transport beacon instead.
+- **Drive the beacon from an independent lifecycle `Tick`.** The sim and tier would
+  observe the same tick concurrently, so the tier could beacon it before the
+  authoritative bundle exists. Rejected: the completed bundle supplies the tick;
+  only the transport timestamp and configured interval are added by the tier.
 - **No handshake — first frame is an intent.** Saves a round trip, but leaves no
   place to negotiate wire version or assign identity, and no seam for future
   credential auth. Rejected: the handshake is cheap and is where identity is bound.
