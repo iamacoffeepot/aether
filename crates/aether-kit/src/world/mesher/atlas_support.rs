@@ -3,30 +3,32 @@ use alloc::vec::Vec;
 
 use aether_capabilities::render::{DrawTriangle, Vertex};
 
+use super::constants::OCTIMETERS_PER_METER;
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-#[allow(clippy::struct_field_names)] // Axis fields keep the quantization unit explicit at every assertion site.
-pub(super) struct QuantizedPoint256 {
-    pub(super) x_256th_meter: i64,
-    pub(super) y_256th_meter: i64,
-    pub(super) z_256th_meter: i64,
+#[allow(clippy::struct_field_names)] // Axis fields keep the octimeter unit explicit at every assertion site.
+pub(super) struct QuantizedVertexOctimeters {
+    pub(super) x_octimeters: i64,
+    pub(super) y_octimeters: i64,
+    pub(super) z_octimeters: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct QuantizedGroundPoint256 {
-    x_256th_meter: i64,
-    z_256th_meter: i64,
+pub(super) struct QuantizedGroundPointOctimeters {
+    pub(super) x_octimeters: i64,
+    pub(super) z_octimeters: i64,
+}
+
+impl QuantizedVertexOctimeters {
+    pub(super) fn ground(self) -> QuantizedGroundPointOctimeters {
+        QuantizedGroundPointOctimeters { x_octimeters: self.x_octimeters, z_octimeters: self.z_octimeters }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 struct HeightSpanMeters {
     low_y_meters: f32,
     high_y_meters: f32,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct GroundVectorMeters {
-    x_meters: f32,
-    z_meters: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -38,11 +40,15 @@ pub(super) struct CapSplitMeters {
     pub(super) high_y_meters: f32,
 }
 
-pub(super) fn quantized_xyz(vertex: &Vertex) -> QuantizedPoint256 {
-    QuantizedPoint256 {
-        x_256th_meter: (vertex.x * 256.0).round() as i64,
-        y_256th_meter: (vertex.y * 256.0).round() as i64,
-        z_256th_meter: (vertex.z * 256.0).round() as i64,
+pub(super) fn quantize_meters_to_octimeters(meters: f32) -> i64 {
+    (meters * OCTIMETERS_PER_METER).round() as i64
+}
+
+pub(super) fn quantized_vertex_octimeters(vertex: &Vertex) -> QuantizedVertexOctimeters {
+    QuantizedVertexOctimeters {
+        x_octimeters: quantize_meters_to_octimeters(vertex.x),
+        y_octimeters: quantize_meters_to_octimeters(vertex.y),
+        z_octimeters: quantize_meters_to_octimeters(vertex.z),
     }
 }
 
@@ -81,12 +87,9 @@ pub(super) fn total_wall_top_edge_length(mesh: &[DrawTriangle], min_top_y_meters
 /// Quantized XZ positions where cap vertices occupy two plates more than half
 /// a meter apart: every such split must be spanned by a wall at both plates.
 pub(super) fn cap_splits(mesh: &[DrawTriangle]) -> Vec<CapSplitMeters> {
-    let mut heights = BTreeMap::<QuantizedGroundPoint256, HeightSpanMeters>::new();
+    let mut heights = BTreeMap::<QuantizedGroundPointOctimeters, HeightSpanMeters>::new();
     for vertex in mesh.iter().filter(|triangle| xz_area_doubled(triangle) > 1e-6).flat_map(|triangle| &triangle.verts) {
-        let point = QuantizedGroundPoint256 {
-            x_256th_meter: (vertex.x * 256.0).round() as i64,
-            z_256th_meter: (vertex.z * 256.0).round() as i64,
-        };
+        let point = quantized_vertex_octimeters(vertex).ground();
         let span = heights.entry(point).or_insert(HeightSpanMeters { low_y_meters: vertex.y, high_y_meters: vertex.y });
         span.low_y_meters = span.low_y_meters.min(vertex.y);
         span.high_y_meters = span.high_y_meters.max(vertex.y);
@@ -95,8 +98,8 @@ pub(super) fn cap_splits(mesh: &[DrawTriangle]) -> Vec<CapSplitMeters> {
         .into_iter()
         .filter(|(_, span)| span.high_y_meters - span.low_y_meters > 0.5)
         .map(|(point, span)| CapSplitMeters {
-            x_meters: point.x_256th_meter as f32 / 256.0,
-            z_meters: point.z_256th_meter as f32 / 256.0,
+            x_meters: point.x_octimeters as f32 / OCTIMETERS_PER_METER,
+            z_meters: point.z_octimeters as f32 / OCTIMETERS_PER_METER,
             low_y_meters: span.low_y_meters,
             high_y_meters: span.high_y_meters,
         })
@@ -108,17 +111,15 @@ fn wall_covers_plate_edge(walls: &[&DrawTriangle], x_meters: f32, z_meters: f32,
         (0..3).any(|edge_index| {
             let start = &triangle.verts[edge_index];
             let end = &triangle.verts[(edge_index + 1) % 3];
-            let edge = GroundVectorMeters { x_meters: end.x - start.x, z_meters: end.z - start.z };
-            let length_squared_meters = edge.x_meters * edge.x_meters + edge.z_meters * edge.z_meters;
+            let length_squared_meters = (end.x - start.x).powi(2) + (end.z - start.z).powi(2);
             if length_squared_meters < 1e-8 {
                 return false;
             }
-            let point = GroundVectorMeters { x_meters: x_meters - start.x, z_meters: z_meters - start.z };
-            if (edge.x_meters * point.z_meters - edge.z_meters * point.x_meters).abs() > 1e-3 {
+            if ((end.x - start.x) * (z_meters - start.z) - (end.z - start.z) * (x_meters - start.x)).abs() > 1e-3 {
                 return false;
             }
-            let edge_fraction =
-                (point.x_meters * edge.x_meters + point.z_meters * edge.z_meters) / length_squared_meters;
+            let edge_fraction = ((x_meters - start.x) * (end.x - start.x) + (z_meters - start.z) * (end.z - start.z))
+                / length_squared_meters;
             (-1e-4..=1.0 + 1e-4).contains(&edge_fraction)
                 && (start.y + (end.y - start.y) * edge_fraction - y_meters).abs() < 1e-3
         })

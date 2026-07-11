@@ -5,8 +5,10 @@ use core::cmp::Ordering;
 use aether_capabilities::render::DrawTriangle;
 
 use super::atlas_support::{
-    QuantizedPoint256, assert_height_break_walls_close_where, quantized_xyz, signed_xz_area_doubled, xz_area_doubled,
+    QuantizedGroundPointOctimeters, assert_height_break_walls_close_where, quantize_meters_to_octimeters,
+    quantized_vertex_octimeters, signed_xz_area_doubled, xz_area_doubled,
 };
+use super::constants::OCTIMETERS_PER_METER;
 use super::mesh_chunk;
 use super::style::StyleTable;
 use crate::world::{
@@ -54,21 +56,9 @@ struct AtlasCaseSpec {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct QuantizedGroundPoint256 {
-    x_256th_meter: i64,
-    z_256th_meter: i64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct GroundMeshEdge256 {
-    start: QuantizedGroundPoint256,
-    end: QuantizedGroundPoint256,
-}
-
-#[derive(Clone, Copy)]
-struct GroundVectorMeters {
-    x_meters: f32,
-    z_meters: f32,
+struct GroundMeshEdgeOctimeters {
+    start: QuantizedGroundPointOctimeters,
+    end: QuantizedGroundPointOctimeters,
 }
 
 #[derive(Clone, Copy)]
@@ -290,29 +280,28 @@ fn assert_up_facing_cap_winding(case_name: &str, mesh: &[DrawTriangle]) {
     }
 }
 
-fn ground_point(point: QuantizedPoint256) -> QuantizedGroundPoint256 {
-    QuantizedGroundPoint256 { x_256th_meter: point.x_256th_meter, z_256th_meter: point.z_256th_meter }
-}
-
-fn normalized_edge(start: QuantizedGroundPoint256, end: QuantizedGroundPoint256) -> Option<GroundMeshEdge256> {
+fn normalized_edge(
+    start: QuantizedGroundPointOctimeters,
+    end: QuantizedGroundPointOctimeters,
+) -> Option<GroundMeshEdgeOctimeters> {
     match start.cmp(&end) {
-        Ordering::Less => Some(GroundMeshEdge256 { start, end }),
+        Ordering::Less => Some(GroundMeshEdgeOctimeters { start, end }),
         Ordering::Equal => None,
-        Ordering::Greater => Some(GroundMeshEdge256 { start: end, end: start }),
+        Ordering::Greater => Some(GroundMeshEdgeOctimeters { start: end, end: start }),
     }
 }
 
-fn squared_distance_256(start: QuantizedGroundPoint256, point: QuantizedGroundPoint256) -> i128 {
-    let x = i128::from(point.x_256th_meter - start.x_256th_meter);
-    let z = i128::from(point.z_256th_meter - start.z_256th_meter);
+fn squared_distance_octimeters(start: QuantizedGroundPointOctimeters, point: QuantizedGroundPointOctimeters) -> i128 {
+    let x = i128::from(point.x_octimeters - start.x_octimeters);
+    let z = i128::from(point.z_octimeters - start.z_octimeters);
     x * x + z * z
 }
 
-fn point_lies_on_edge_256(point: QuantizedGroundPoint256, edge: GroundMeshEdge256) -> bool {
-    let edge_x = i128::from(edge.end.x_256th_meter - edge.start.x_256th_meter);
-    let edge_z = i128::from(edge.end.z_256th_meter - edge.start.z_256th_meter);
-    let point_x = i128::from(point.x_256th_meter - edge.start.x_256th_meter);
-    let point_z = i128::from(point.z_256th_meter - edge.start.z_256th_meter);
+fn point_lies_on_edge_octimeters(point: QuantizedGroundPointOctimeters, edge: GroundMeshEdgeOctimeters) -> bool {
+    let edge_x = i128::from(edge.end.x_octimeters - edge.start.x_octimeters);
+    let edge_z = i128::from(edge.end.z_octimeters - edge.start.z_octimeters);
+    let point_x = i128::from(point.x_octimeters - edge.start.x_octimeters);
+    let point_z = i128::from(point.z_octimeters - edge.start.z_octimeters);
     if edge_x * point_z != edge_z * point_x {
         return false;
     }
@@ -321,33 +310,28 @@ fn point_lies_on_edge_256(point: QuantizedGroundPoint256, edge: GroundMeshEdge25
     (0..=length_squared).contains(&projection)
 }
 
-fn quantize_meters(meters: f32) -> i64 {
-    (meters * 256.0).round() as i64
-}
-
-fn edge_is_declared_exterior(edge: GroundMeshEdge256, boundary: ExteriorBoundaryMeters) -> bool {
-    let min_x = quantize_meters(boundary.ground_bounds.min_x_meters);
-    let min_z = quantize_meters(boundary.ground_bounds.min_z_meters);
-    let max_x = quantize_meters(boundary.ground_bounds.max_x_meters);
-    let max_z = quantize_meters(boundary.ground_bounds.max_z_meters);
-    let within_x = |point: QuantizedGroundPoint256| (min_x..=max_x).contains(&point.x_256th_meter);
-    let within_z = |point: QuantizedGroundPoint256| (min_z..=max_z).contains(&point.z_256th_meter);
-    let boundary_band = quantize_meters(boundary.boundary_band_meters);
-    let on_boundary = |point: QuantizedGroundPoint256| {
+fn edge_is_declared_exterior(edge: GroundMeshEdgeOctimeters, boundary: ExteriorBoundaryMeters) -> bool {
+    let min_x = quantize_meters_to_octimeters(boundary.ground_bounds.min_x_meters);
+    let min_z = quantize_meters_to_octimeters(boundary.ground_bounds.min_z_meters);
+    let max_x = quantize_meters_to_octimeters(boundary.ground_bounds.max_x_meters);
+    let max_z = quantize_meters_to_octimeters(boundary.ground_bounds.max_z_meters);
+    let within_x = |point: QuantizedGroundPointOctimeters| (min_x..=max_x).contains(&point.x_octimeters);
+    let within_z = |point: QuantizedGroundPointOctimeters| (min_z..=max_z).contains(&point.z_octimeters);
+    let boundary_band = quantize_meters_to_octimeters(boundary.boundary_band_meters);
+    let on_boundary = |point: QuantizedGroundPointOctimeters| {
         within_x(point)
             && within_z(point)
-            && ((point.x_256th_meter - min_x).abs() <= boundary_band
-                || (point.x_256th_meter - max_x).abs() <= boundary_band
-                || (point.z_256th_meter - min_z).abs() <= boundary_band
-                || (point.z_256th_meter - max_z).abs() <= boundary_band)
-    };
-    let edge_vector = GroundVectorMeters {
-        x_meters: (edge.end.x_256th_meter - edge.start.x_256th_meter) as f32 / 256.0,
-        z_meters: (edge.end.z_256th_meter - edge.start.z_256th_meter) as f32 / 256.0,
+            && ((point.x_octimeters - min_x).abs() <= boundary_band
+                || (point.x_octimeters - max_x).abs() <= boundary_band
+                || (point.z_octimeters - min_z).abs() <= boundary_band
+                || (point.z_octimeters - max_z).abs() <= boundary_band)
     };
     on_boundary(edge.start)
         && on_boundary(edge.end)
-        && edge_vector.x_meters.hypot(edge_vector.z_meters) <= boundary.max_edge_length_meters
+        && ((edge.end.x_octimeters - edge.start.x_octimeters) as f32)
+            .hypot((edge.end.z_octimeters - edge.start.z_octimeters) as f32)
+            / OCTIMETERS_PER_METER
+            <= boundary.max_edge_length_meters
 }
 
 fn assert_watertight_contour(
@@ -358,25 +342,25 @@ fn assert_watertight_contour(
     // Tripwire: a missing or duplicate marched segment leaves a singleton or
     // over-shared interior edge instead of a paired contour seam.
     let cap_triangles: Vec<&DrawTriangle> = mesh.iter().filter(|triangle| xz_area_doubled(triangle) > 1e-6).collect();
-    let mut mesh_points: Vec<QuantizedGroundPoint256> = cap_triangles
+    let mut mesh_points: Vec<QuantizedGroundPointOctimeters> = cap_triangles
         .iter()
         .flat_map(|triangle| &triangle.verts)
-        .map(|vertex| ground_point(quantized_xyz(vertex)))
+        .map(|vertex| quantized_vertex_octimeters(vertex).ground())
         .collect();
     mesh_points.sort_unstable();
     mesh_points.dedup();
-    let mut incidence = BTreeMap::<GroundMeshEdge256, usize>::new();
+    let mut incidence = BTreeMap::<GroundMeshEdgeOctimeters, usize>::new();
     for triangle in cap_triangles {
         for edge_index in 0..3 {
             let Some(edge) = normalized_edge(
-                ground_point(quantized_xyz(&triangle.verts[edge_index])),
-                ground_point(quantized_xyz(&triangle.verts[(edge_index + 1) % 3])),
+                quantized_vertex_octimeters(&triangle.verts[edge_index]).ground(),
+                quantized_vertex_octimeters(&triangle.verts[(edge_index + 1) % 3]).ground(),
             ) else {
                 continue;
             };
-            let mut edge_points: Vec<QuantizedGroundPoint256> =
-                mesh_points.iter().copied().filter(|point| point_lies_on_edge_256(*point, edge)).collect();
-            edge_points.sort_unstable_by_key(|point| squared_distance_256(edge.start, *point));
+            let mut edge_points: Vec<QuantizedGroundPointOctimeters> =
+                mesh_points.iter().copied().filter(|point| point_lies_on_edge_octimeters(*point, edge)).collect();
+            edge_points.sort_unstable_by_key(|point| squared_distance_octimeters(edge.start, *point));
             for point_index in 0..edge_points.len() - 1 {
                 let sub_edge = normalized_edge(edge_points[point_index], edge_points[point_index + 1])
                     .expect("deduplicated edge points make a non-degenerate segment");

@@ -3,7 +3,7 @@ use core::ops::Range;
 use aether_capabilities::render::{DrawTriangle, Vertex};
 
 use super::atlas_support::{
-    assert_height_break_walls_close, quantized_xyz, total_wall_top_edge_length, xz_area_doubled, y_span,
+    assert_height_break_walls_close, quantized_vertex_octimeters, total_wall_top_edge_length, xz_area_doubled, y_span,
 };
 use super::cliffs::WindowCenter;
 use super::constants::{COVERAGE_LIFT, EDGE, OCTIMETERS_PER_METER, SUB};
@@ -693,7 +693,7 @@ mod walls {
                 .filter(|t| y_span(t) > 0.5)
                 .flat_map(|t| t.verts.iter())
                 .filter(|v| (v.x - 16.0).abs() < 0.2)
-                .map(quantized_xyz)
+                .map(quantized_vertex_octimeters)
                 .collect();
             verts.sort_unstable();
             verts.dedup();
@@ -703,7 +703,7 @@ mod walls {
         let east = wall_verts(ChunkPos { x: 1, z: 0 });
         let shared: Vec<_> = west.iter().filter(|vertex| east.contains(vertex)).collect();
         assert!(
-            shared.iter().any(|vertex| (vertex.x_256th_meter - 16 * 256).abs() <= 16),
+            shared.iter().any(|vertex| (vertex.x_octimeters - 16 * OCTIMETERS_PER_METER as i64).abs() <= 16),
             "neighbor-owned windows meet on an identical contour endpoint near the chunk seam",
         );
     }
@@ -932,7 +932,7 @@ mod walls {
                 .filter(|t| y_span(t) > 0.5)
                 .flat_map(|t| t.verts.iter())
                 .filter(|v| (7.5..8.5).contains(&v.z))
-                .map(quantized_xyz)
+                .map(quantized_vertex_octimeters)
                 .collect();
             verts.sort_unstable();
             verts.dedup();
@@ -945,7 +945,9 @@ mod walls {
         assert!(!shared.is_empty(), "the two chunks meet on identical seam vertices");
         // The shared vertices sit at the seam column and the raised top level.
         assert!(
-            shared.iter().any(|vertex| (vertex.x_256th_meter - 16 * 256).abs() <= 32 && vertex.y_256th_meter == 300),
+            shared.iter().any(|vertex| {
+                (vertex.x_octimeters - 16 * OCTIMETERS_PER_METER as i64).abs() <= 32 && vertex.y_octimeters == 300
+            }),
             "the shared seam wall stands at the authored break level",
         );
     }
