@@ -31,6 +31,7 @@ aether-actor = { path = "../aether-actor" }
 # forwards to turns on exactly the host surface, not the guest `runtime` SDK.
 aether-behavior = { path = "../aether-behavior", default-features = false, optional = true }
 aether-capabilities = { path = "../aether-capabilities", default-features = false, features = ["clipboard", "render", "text"] }
+aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
 aether-math = { path = "../aether-math" }
