@@ -48,6 +48,7 @@ pub mod mesher;
 mod operator;
 mod overlay;
 mod pick;
+mod proposal;
 mod raster;
 pub use overlay::{
     MARK_OVERLAY_COLOR, MARK_OVERLAY_LIFT_METERS, MARK_PATH_HALF_WIDTH_METERS, MARK_POINT_RADIUS_METERS,
@@ -94,13 +95,18 @@ const MARK_OVERLAY_REFRESH_ATTEMPT_LIMIT: u8 = 3;
 /// remeshes and the world renders every frame under the active
 /// `aether.view_projection` view. `aether.kit.world.load` swaps a serialized
 /// world from `aether.fs`. Operator replies report an applied or exhausted
-/// partial result; proposal/commit state remains ADR-0143's separate surface.
+/// partial result; proposal/commit state is available through the typed
+/// proposal lifecycle.
 /// Use `capture_frame` to verify.
 pub struct WorldView {
     world: World,
     meshes: BTreeMap<ChunkPos, Vec<DrawTriangle>>,
     styles: StyleTable,
     mark_overlay: MarkOverlayProjection,
+    proposals: BTreeMap<ProposalId, proposal::StagedProposal>,
+    active_preview: Option<ProposalId>,
+    next_proposal_id: Option<u64>,
+    committed_revision: u64,
 }
 
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
@@ -248,14 +254,7 @@ impl WorldView {
     /// are not rendered, so they need no remesh; an empty neighbor's border
     /// geometry is already covered by this chunk's own apron windows.
     fn remesh_around(&mut self, pos: ChunkPos) {
-        for dz in -1..=1 {
-            for dx in -1..=1 {
-                let neighbor = ChunkPos { x: pos.x + dx, z: pos.z + dz };
-                if (dx == 0 && dz == 0) || self.meshes.contains_key(&neighbor) {
-                    self.meshes.insert(neighbor, mesh_chunk(&self.world, neighbor, &self.styles));
-                }
-            }
-        }
+        self.remesh_touched(&BTreeSet::from([pos]));
     }
 
     /// Rebuild every touched chunk and cached apron neighbor exactly once.
@@ -263,24 +262,7 @@ impl WorldView {
     /// collecting first prevents repeated meshing while preserving the
     /// ordinary rule that an absent, untouched neighbor needs no cache entry.
     fn remesh_touched(&mut self, touched: &BTreeSet<ChunkPos>) {
-        let mut remesh = touched.clone();
-        for pos in touched {
-            for dz in -1..=1 {
-                for dx in -1..=1 {
-                    let Some(x) = pos.x.checked_add(dx) else {
-                        continue;
-                    };
-                    let Some(z) = pos.z.checked_add(dz) else {
-                        continue;
-                    };
-                    let neighbor = ChunkPos { x, z };
-                    if self.meshes.contains_key(&neighbor) {
-                        remesh.insert(neighbor);
-                    }
-                }
-            }
-        }
-        for pos in remesh {
+        for pos in proposal::affected_cache_keys(touched, &self.meshes) {
             self.meshes.insert(pos, mesh_chunk(&self.world, pos, &self.styles));
         }
     }
@@ -289,9 +271,113 @@ impl WorldView {
     /// changed chunk through the ordinary apron-aware invalidation path.
     fn stamp_vertices(&mut self, vertices: &[WorldPoint], material: Material) {
         let touched = raster::stamp_polygon(&mut self.world, vertices, material);
-        for pos in touched {
-            self.remesh_around(pos);
+        self.remesh_touched(&touched);
+    }
+
+    fn advance_committed_revision(&mut self) {
+        self.active_preview = None;
+        if let Some(next) = self.committed_revision.checked_add(1) {
+            self.committed_revision = next;
+        } else {
+            self.committed_revision = 0;
+            self.proposals.clear();
         }
+    }
+
+    fn allocate_proposal_id(&mut self) -> Option<ProposalId> {
+        let value = self.next_proposal_id?;
+        self.next_proposal_id = value.checked_add(1);
+        Some(ProposalId { value })
+    }
+
+    fn proposal_freshness_error(&self, proposal_id: ProposalId) -> Option<ProposalError> {
+        let Some(proposal) = self.proposals.get(&proposal_id) else {
+            return Some(ProposalError::UnknownProposal { proposal_id });
+        };
+        if proposal.proposed_at_revision != self.committed_revision {
+            return Some(ProposalError::StaleProposal {
+                proposal_id,
+                proposed_at_revision: proposal.proposed_at_revision,
+                committed_revision: self.committed_revision,
+            });
+        }
+        None
+    }
+
+    fn propose(&mut self, operation: ProposalOperation) -> ProposalResult {
+        let proposal = match proposal::StagedProposal::build(
+            self.committed_revision,
+            operation,
+            &mut self.world,
+            &self.meshes,
+            &self.styles,
+        ) {
+            Ok(proposal) => proposal,
+            Err(operation_result) => {
+                return ProposalResult::Rejected { error: ProposalError::NoTouchedChunks { operation_result } };
+            }
+        };
+        let Some(proposal_id) = self.allocate_proposal_id() else {
+            return ProposalResult::Rejected { error: ProposalError::ProposalIdExhausted };
+        };
+        let operation_result = proposal.operation_result.clone();
+        let digest = proposal.digest.clone();
+        self.proposals.insert(proposal_id, proposal);
+        ProposalResult::Staged { proposal_id, operation_result, digest }
+    }
+
+    fn commit_proposal(&mut self, proposal_id: ProposalId) -> ProposalResult {
+        if let Some(error) = self.proposal_freshness_error(proposal_id) {
+            return ProposalResult::Rejected { error };
+        }
+        let proposal = self.proposals.remove(&proposal_id).expect("freshness checked proposal presence");
+        let touched = proposal.touched.clone();
+        let digest = proposal.digest.clone();
+        proposal.commit(&mut self.world);
+        self.remesh_touched(&touched);
+        self.advance_committed_revision();
+        ProposalResult::Committed { proposal_id, digest }
+    }
+
+    fn discard_proposal(&mut self, proposal_id: ProposalId) -> ProposalResult {
+        if self.proposals.remove(&proposal_id).is_none() {
+            return ProposalResult::Rejected { error: ProposalError::UnknownProposal { proposal_id } };
+        }
+        if self.active_preview == Some(proposal_id) {
+            self.active_preview = None;
+        }
+        ProposalResult::Discarded { proposal_id }
+    }
+
+    fn set_proposal_preview(&mut self, proposal_id: Option<ProposalId>) -> ProposalResult {
+        let Some(proposal_id) = proposal_id else {
+            self.active_preview = None;
+            return ProposalResult::PreviewSet { active_proposal_id: None, digest: None };
+        };
+        if let Some(error) = self.proposal_freshness_error(proposal_id) {
+            return ProposalResult::Rejected { error };
+        }
+        self.active_preview = Some(proposal_id);
+        ProposalResult::PreviewSet {
+            active_proposal_id: Some(proposal_id),
+            digest: Some(self.proposals.get(&proposal_id).expect("freshness checked proposal presence").digest.clone()),
+        }
+    }
+
+    fn rendered_meshes(&self) -> Vec<(ChunkPos, &[DrawTriangle])> {
+        let Some(proposal) = self.active_preview.and_then(|proposal_id| self.proposals.get(&proposal_id)) else {
+            return self.meshes.iter().map(|(at, mesh)| (*at, mesh.as_slice())).collect();
+        };
+        self.meshes
+            .keys()
+            .chain(proposal.affected.iter())
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|at| {
+                proposal.meshes.get(&at).or_else(|| self.meshes.get(&at)).map(|mesh| (at, mesh.as_slice()))
+            })
+            .collect()
     }
 }
 
@@ -305,6 +391,10 @@ impl WasmActor for WorldView {
             meshes: BTreeMap::new(),
             styles: StyleTable::default(),
             mark_overlay: MarkOverlayProjection::default(),
+            proposals: BTreeMap::new(),
+            active_preview: None,
+            next_proposal_id: Some(1),
+            committed_revision: 0,
         })
     }
 
@@ -329,13 +419,21 @@ impl WasmActor for WorldView {
     #[handler::single]
     fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
         self.request_mark_overlay_refresh(ctx);
-        for mesh in self.meshes.values() {
+        for (_, mesh) in self.rendered_meshes() {
             if !mesh.is_empty() {
                 ctx.actor::<RenderCapability>().send_many(mesh);
             }
         }
         if self.mark_overlay.visible {
-            let batch = overlay::mark_overlay_batch(&self.world, &self.mark_overlay.marks, self.mark_overlay.selected);
+            let batch = if let Some(proposal) =
+                self.active_preview.and_then(|proposal_id| self.proposals.get_mut(&proposal_id))
+            {
+                proposal.with_installed(&mut self.world, |world| {
+                    overlay::mark_overlay_batch(world, &self.mark_overlay.marks, self.mark_overlay.selected)
+                })
+            } else {
+                overlay::mark_overlay_batch(&self.world, &self.mark_overlay.marks, self.mark_overlay.selected)
+            };
             if let Some(overflow) = batch.overflow
                 && !self.mark_overlay.budget_overflowed
             {
@@ -422,6 +520,7 @@ impl WasmActor for WorldView {
         let pos = msg.chunk_pos();
         self.world.insert_chunk(pos, msg.into_chunk());
         self.remesh_around(pos);
+        self.advance_committed_revision();
     }
 
     /// Stamp one cell's underlay material points into the world, then remesh
@@ -441,6 +540,7 @@ impl WasmActor for WorldView {
         let cell = msg.cell();
         self.world.set_cell_points(cell, &msg.points);
         self.remesh_around(cell.chunk());
+        self.advance_committed_revision();
     }
 
     /// Rasterize an arbitrary polygon in world-octimeter coordinates into
@@ -455,6 +555,7 @@ impl WasmActor for WorldView {
     #[handler::single]
     fn on_stamp_polygon(&mut self, _ctx: &mut WasmCtx<'_>, msg: StampPolygon) {
         self.stamp_vertices(&msg.points, Material::from_u8_or_void(msg.material));
+        self.advance_committed_revision();
     }
 
     /// Generate and rasterize a disc vertex ring in world-octimeter
@@ -467,6 +568,7 @@ impl WasmActor for WorldView {
     fn on_stamp_disc(&mut self, _ctx: &mut WasmCtx<'_>, msg: StampDisc) {
         let vertices = raster::disc_vertices(msg.center, msg.radius_octimeters);
         self.stamp_vertices(&vertices, Material::from_u8_or_void(msg.material));
+        self.advance_committed_revision();
     }
 
     /// Generate and rasterize a flat-top regular hexagon in world-octimeter
@@ -480,6 +582,7 @@ impl WasmActor for WorldView {
     fn on_stamp_hexagon(&mut self, _ctx: &mut WasmCtx<'_>, msg: StampHexagon) {
         let vertices = raster::regular_hexagon_vertices(msg.center, msg.radius_octimeters);
         self.stamp_vertices(&vertices, Material::from_u8_or_void(msg.material));
+        self.advance_committed_revision();
     }
 
     /// Apply a bounded disc brush along a world-space path and reply with the
@@ -495,6 +598,7 @@ impl WasmActor for WorldView {
     fn on_apply_brush(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: ApplyBrush) {
         let execution = operator::apply_brush(&mut self.world, msg.source, &msg.path, msg.brush, msg.budget);
         self.remesh_touched(&execution.touched);
+        self.advance_committed_revision();
         if ctx.reply_target().is_some() {
             ctx.reply(&execution.result);
         }
@@ -512,8 +616,49 @@ impl WasmActor for WorldView {
     fn on_run_automaton(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: RunAutomaton) {
         let execution = operator::run_automaton(&mut self.world, msg.source, msg.seed, msg.rule, msg.budget);
         self.remesh_touched(&execution.touched);
+        self.advance_committed_revision();
         if ctx.reply_target().is_some() {
             ctx.reply(&execution.result);
+        }
+    }
+
+    /// Stage one bounded terrain mutation against the current committed
+    /// revision and return its exact operation result and geometry digest.
+    #[handler::manual]
+    fn on_propose(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: Propose) {
+        let result = self.propose(msg.operation);
+        if ctx.reply_target().is_some() {
+            ctx.reply(&result);
+        }
+    }
+
+    /// Install a fresh proposal atomically. Its peers remain stored but become
+    /// stale against the newly advanced committed revision.
+    #[handler::manual]
+    fn on_commit_proposal(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: CommitProposal) {
+        let result = self.commit_proposal(msg.proposal_id);
+        if ctx.reply_target().is_some() {
+            ctx.reply(&result);
+        }
+    }
+
+    /// Drop a proposal regardless of whether its committed revision is still
+    /// current. Unknown ids are rejected observably.
+    #[handler::manual]
+    fn on_discard_proposal(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: DiscardProposal) {
+        let result = self.discard_proposal(msg.proposal_id);
+        if ctx.reply_target().is_some() {
+            ctx.reply(&result);
+        }
+    }
+
+    /// Select one fresh proposal for rendering, replace the prior selection,
+    /// or clear preview rendering with `None`.
+    #[handler::manual]
+    fn on_set_proposal_preview(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: SetProposalPreview) {
+        let result = self.set_proposal_preview(msg.proposal_id);
+        if ctx.reply_target().is_some() {
+            ctx.reply(&result);
         }
     }
 
@@ -533,6 +678,7 @@ impl WasmActor for WorldView {
         let cell = msg.cell();
         self.world.set_cell_heights(cell, &msg.deltas);
         self.remesh_around(cell.chunk());
+        self.advance_committed_revision();
     }
 
     /// Register a region in the world's table so the underlay cascade has
@@ -544,6 +690,7 @@ impl WasmActor for WorldView {
         let id = msg.region_id;
         self.world.insert_region(id, msg.into_region());
         self.remesh_all();
+        self.advance_committed_revision();
     }
 
     /// Trigger an asynchronous world load. The reply arrives as
@@ -587,6 +734,7 @@ impl WasmActor for WorldView {
                 Ok(world) => {
                     self.world = world;
                     self.remesh_all();
+                    self.advance_committed_revision();
                     tracing::info!(
                         target: "aether_kit",
                         namespace = %context.namespace,
@@ -619,14 +767,35 @@ mod tests {
     use super::*;
     use crate::mark::MarkGeometry;
 
-    #[test]
-    fn chunk_border_stamp_remeshes_both_touched_chunks() {
-        let mut view = WorldView {
+    fn test_view() -> WorldView {
+        WorldView {
             world: World::new(),
             meshes: BTreeMap::new(),
             styles: StyleTable::default(),
             mark_overlay: MarkOverlayProjection::default(),
-        };
+            proposals: BTreeMap::new(),
+            active_preview: None,
+            next_proposal_id: Some(1),
+            committed_revision: 0,
+        }
+    }
+
+    fn point_operation(cell_x: i32, material: Material) -> ProposalOperation {
+        ProposalOperation::SetCellPoints {
+            request: SetCellPoints { x: cell_x, z: 0, points: vec![material.to_u8(); SUBCELLS_PER_CELL] },
+        }
+    }
+
+    fn staged_id(view: &mut WorldView, operation: ProposalOperation) -> ProposalId {
+        match view.propose(operation) {
+            ProposalResult::Staged { proposal_id, .. } => proposal_id,
+            other => panic!("expected staged proposal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chunk_border_stamp_remeshes_both_touched_chunks() {
+        let mut view = test_view();
         view.stamp_vertices(
             &[
                 WorldPoint::new(4080, 256),
@@ -651,6 +820,156 @@ mod tests {
         );
     }
 
+    #[test]
+    fn proposal_ids_start_at_one_use_max_and_then_exhaust_without_mutation() {
+        let mut view = test_view();
+        assert_eq!(staged_id(&mut view, point_operation(0, Material::Grass)), ProposalId { value: 1 });
+
+        view.next_proposal_id = Some(u64::MAX);
+        assert_eq!(staged_id(&mut view, point_operation(1, Material::Stone)), ProposalId { value: u64::MAX });
+        let proposals_before = view.proposals.len();
+        let world_before = view.world.clone();
+        assert_eq!(
+            view.propose(point_operation(2, Material::Sand)),
+            ProposalResult::Rejected { error: ProposalError::ProposalIdExhausted }
+        );
+        assert_eq!(view.proposals.len(), proposals_before);
+        assert_eq!(view.world, world_before);
+        assert_eq!(view.active_preview, None);
+    }
+
+    #[test]
+    fn no_touch_rejection_does_not_consume_an_id() {
+        let mut view = test_view();
+        let result = view.propose(ProposalOperation::StampDisc {
+            request: StampDisc {
+                center: WorldPoint::new(0, 0),
+                radius_octimeters: 0,
+                material: Material::Stone.to_u8(),
+            },
+        });
+        assert_eq!(
+            result,
+            ProposalResult::Rejected {
+                error: ProposalError::NoTouchedChunks { operation_result: ProposalOperationResult::Mutation }
+            }
+        );
+        assert_eq!(view.next_proposal_id, Some(1));
+        assert!(view.proposals.is_empty());
+    }
+
+    #[test]
+    fn first_commit_matches_preview_meshes_and_makes_its_peer_stale() {
+        let mut view = test_view();
+        let committed_before = view.world.clone();
+        let first = staged_id(&mut view, point_operation(0, Material::Grass));
+        let peer = staged_id(&mut view, point_operation(1, Material::Stone));
+        assert_eq!(view.world, committed_before, "staging peers leaves committed terrain unchanged");
+        let preview_meshes = view.proposals.get(&first).expect("first proposal").meshes.clone();
+        let first_digest = view.proposals.get(&first).expect("first proposal").digest.clone();
+        assert!(matches!(
+            view.set_proposal_preview(Some(first)),
+            ProposalResult::PreviewSet { active_proposal_id: Some(id), .. } if id == first
+        ));
+
+        assert_eq!(view.commit_proposal(first), ProposalResult::Committed { proposal_id: first, digest: first_digest });
+        for (at, preview) in preview_meshes {
+            assert_eq!(view.meshes.get(&at), Some(&preview), "committed cache is byte-identical to preview mesh");
+        }
+        assert_eq!(view.active_preview, None);
+
+        let world_after_first = view.world.clone();
+        let meshes_after_first = view.meshes.clone();
+        let stale = ProposalError::StaleProposal { proposal_id: peer, proposed_at_revision: 0, committed_revision: 1 };
+        assert_eq!(view.commit_proposal(peer), ProposalResult::Rejected { error: stale.clone() });
+        assert_eq!(view.set_proposal_preview(Some(peer)), ProposalResult::Rejected { error: stale });
+        assert_eq!(view.world, world_after_first, "stale rejection does not mutate committed terrain");
+        assert_eq!(view.meshes, meshes_after_first, "stale rejection does not mutate the cache");
+        assert!(view.proposals.contains_key(&peer), "stale proposal remains available for discard");
+        assert_eq!(view.discard_proposal(peer), ProposalResult::Discarded { proposal_id: peer });
+    }
+
+    #[test]
+    fn direct_write_and_successful_load_advance_revision_and_clear_preview() {
+        let mut view = test_view();
+        let direct_peer = staged_id(&mut view, point_operation(0, Material::Grass));
+        view.set_proposal_preview(Some(direct_peer));
+        view.world.set_cell_points(CellPos { x: 4, z: 0 }, &[Material::Sand.to_u8()]);
+        view.remesh_around(ChunkPos { x: 0, z: 0 });
+        view.advance_committed_revision();
+        assert_eq!(view.committed_revision, 1);
+        assert_eq!(view.active_preview, None);
+        assert!(matches!(
+            view.commit_proposal(direct_peer),
+            ProposalResult::Rejected { error: ProposalError::StaleProposal { committed_revision: 1, .. } }
+        ));
+
+        let load_peer = staged_id(&mut view, point_operation(5, Material::Stone));
+        view.set_proposal_preview(Some(load_peer));
+        view.world = World::new();
+        view.remesh_all();
+        view.advance_committed_revision();
+        assert_eq!(view.committed_revision, 2);
+        assert_eq!(view.active_preview, None);
+        assert!(matches!(
+            view.set_proposal_preview(Some(load_peer)),
+            ProposalResult::Rejected { error: ProposalError::StaleProposal { committed_revision: 2, .. } }
+        ));
+    }
+
+    #[test]
+    fn preview_switch_clear_unknown_and_stale_discard_are_observable() {
+        let mut view = test_view();
+        let first = staged_id(&mut view, point_operation(0, Material::Grass));
+        let second = staged_id(&mut view, point_operation(1, Material::Stone));
+        view.set_proposal_preview(Some(first));
+        assert_eq!(view.active_preview, Some(first));
+        view.set_proposal_preview(Some(second));
+        assert_eq!(view.active_preview, Some(second), "a new preview replaces the old one");
+        assert_eq!(
+            view.set_proposal_preview(None),
+            ProposalResult::PreviewSet { active_proposal_id: None, digest: None }
+        );
+        assert_eq!(view.active_preview, None);
+
+        let unknown = ProposalId { value: 999 };
+        assert_eq!(
+            view.discard_proposal(unknown),
+            ProposalResult::Rejected { error: ProposalError::UnknownProposal { proposal_id: unknown } }
+        );
+        view.advance_committed_revision();
+        assert_eq!(view.discard_proposal(first), ProposalResult::Discarded { proposal_id: first });
+    }
+
+    #[test]
+    fn revision_rollover_clears_every_proposal_and_preview_without_reusing_ids() {
+        let mut view = test_view();
+        let proposal_id = staged_id(&mut view, point_operation(0, Material::Grass));
+        view.set_proposal_preview(Some(proposal_id));
+        let next_id = view.next_proposal_id;
+        view.committed_revision = u64::MAX;
+        view.advance_committed_revision();
+        assert_eq!(view.committed_revision, 0);
+        assert!(view.proposals.is_empty());
+        assert_eq!(view.active_preview, None);
+        assert_eq!(view.next_proposal_id, next_id, "revision rollover does not alias session proposal ids");
+    }
+
+    #[test]
+    fn preview_render_merge_substitutes_affected_keys_in_global_sorted_order() {
+        let mut view = test_view();
+        view.meshes.insert(ChunkPos { x: -2, z: 0 }, Vec::new());
+        view.meshes.insert(ChunkPos { x: 3, z: 0 }, Vec::new());
+        let proposal_id = staged_id(&mut view, point_operation(0, Material::Grass));
+        view.set_proposal_preview(Some(proposal_id));
+        let keys: Vec<ChunkPos> = view.rendered_meshes().into_iter().map(|(at, _)| at).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(keys, sorted);
+        assert!(keys.contains(&ChunkPos { x: 0, z: 0 }));
+    }
+
     fn projected_mark(id: u32, revision: u32) -> Mark {
         Mark {
             id: MarkId::new(id),
@@ -658,6 +977,54 @@ mod tests {
             geometry: MarkGeometry::Point(WorldPoint::new(128, 128)),
             label: format!("mark-{id}"),
         }
+    }
+
+    #[test]
+    fn visible_mark_heights_resolve_through_the_active_proposal() {
+        let mut view = test_view();
+        let mut chunk = Chunk::empty();
+        chunk.underlay.fill(Material::Grass);
+        view.world.insert_chunk(ChunkPos { x: 0, z: 0 }, chunk);
+        view.remesh_all();
+        view.mark_overlay.visible = true;
+        view.mark_overlay.marks.insert(MarkId::new(1), projected_mark(1, 1));
+        let committed = overlay::mark_overlay_batch(&view.world, &view.mark_overlay.marks, None);
+
+        let proposal_id = staged_id(
+            &mut view,
+            ProposalOperation::SetCellHeights {
+                request: SetCellHeights { x: 0, z: 0, deltas: vec![128; SUBCELLS_PER_CELL] },
+            },
+        );
+        let preview =
+            view.proposals.get_mut(&proposal_id).expect("height proposal").with_installed(&mut view.world, |world| {
+                overlay::mark_overlay_batch(world, &view.mark_overlay.marks, None)
+            });
+        let committed_y =
+            committed.triangles.iter().flat_map(|triangle| triangle.verts).map(|vertex| vertex.y).sum::<f32>();
+        let preview_y =
+            preview.triangles.iter().flat_map(|triangle| triangle.verts).map(|vertex| vertex.y).sum::<f32>();
+        assert!(preview_y > committed_y, "mark vertices sample the staged height surface");
+        assert_eq!(view.world.surface_height(0.5, 0.5), 0.0, "temporary mark sampling restores committed terrain");
+    }
+
+    #[test]
+    fn fresh_component_init_drops_proposals_preview_revision_and_allocator_state() {
+        let mut old = test_view();
+        let old_id = staged_id(&mut old, point_operation(0, Material::Grass));
+        old.set_proposal_preview(Some(old_id));
+        old.advance_committed_revision();
+
+        let replacement = test_view();
+        assert_eq!(replacement.committed_revision, 0);
+        assert_eq!(replacement.next_proposal_id, Some(1));
+        assert!(replacement.proposals.is_empty());
+        assert_eq!(replacement.active_preview, None);
+        assert_eq!(
+            replacement.proposal_freshness_error(old_id),
+            Some(ProposalError::UnknownProposal { proposal_id: old_id }),
+            "an old session id is unknown before the replacement allocates any new id",
+        );
     }
 
     #[test]

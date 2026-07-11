@@ -16,7 +16,8 @@ use crate::mark::MarkRef;
 
 use super::{
     AutomatonRule, BrushParameters, CHUNK_BITS, ChunkPos, MAX_STAMP_VERTICES, Material, OperatorBudget, OperatorCell,
-    OperatorChunk, OperatorError, OperatorResult, OperatorStats, SUBCELLS_PER_CELL, World, WorldPoint, mesher, raster,
+    OperatorChunk, OperatorError, OperatorResult, OperatorStats, SUBCELLS_PER_CELL, WorldPoint, mesher, proposal,
+    raster,
 };
 use crate::OCTIMETERS_PER_TILE;
 
@@ -81,8 +82,8 @@ impl ExecutionState {
 /// Apply a reference disc brush along `path` at stable world-octimeter
 /// spacing. The first point is always a placement; later placements carry
 /// spacing across path-segment boundaries.
-pub(super) fn apply_brush(
-    world: &mut World,
+pub(super) fn apply_brush<T: proposal::MutationTarget + ?Sized>(
+    world: &mut T,
     source: MarkRef,
     path: &[WorldPoint],
     brush: BrushParameters,
@@ -198,8 +199,8 @@ fn validate_remesh_extent(
     Ok(())
 }
 
-fn stamp_brush_point(
-    world: &mut World,
+fn stamp_brush_point<T: proposal::MutationTarget + ?Sized>(
+    world: &mut T,
     center: WorldPoint,
     brush: BrushParameters,
     state: &mut ExecutionState,
@@ -227,8 +228,8 @@ struct FrontierCell {
 }
 
 /// Run the reference cell automaton with an explicit deterministic frontier.
-pub(super) fn run_automaton(
-    world: &mut World,
+pub(super) fn run_automaton<T: proposal::MutationTarget + ?Sized>(
+    world: &mut T,
     source: MarkRef,
     seed: OperatorCell,
     rule: AutomatonRule,
@@ -320,7 +321,7 @@ mod tests {
     use crate::mark::MarkId;
 
     use super::*;
-    use crate::world::CellPos;
+    use crate::world::{CellPos, World};
 
     fn source() -> MarkRef {
         MarkRef { id: MarkId::new(7), revision: 3 }

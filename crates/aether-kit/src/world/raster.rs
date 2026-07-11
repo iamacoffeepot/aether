@@ -24,7 +24,7 @@ use core::{f64::consts::TAU, mem};
 
 use super::{
     CellPos, ChunkPos, MAX_STAMP_EDGE_SUBCELLS, MAX_STAMP_RASTER_WORK, MAX_STAMP_SUBCELLS, MAX_STAMP_VERTICES,
-    Material, SUBCELLS_PER_CELL, SUBCELLS_PER_CELL_EDGE, World, WorldPoint,
+    Material, SUBCELLS_PER_CELL, SUBCELLS_PER_CELL_EDGE, WorldPoint,
 };
 
 /// One cell is 256 octimeters and contains 16 subcells along each edge.
@@ -262,7 +262,11 @@ fn regular_polygon_vertices(center: WorldPoint, radius_octimeters: u32, vertex_c
 /// order at the cell ownership boundary and clears that cell's prior mask
 /// before receiving the new shape. `Void` (including an unknown material byte
 /// decoded to `Void`) paints nothing.
-pub(super) fn stamp_polygon(world: &mut World, points: &[WorldPoint], material: Material) -> BTreeSet<ChunkPos> {
+pub(super) fn stamp_polygon<T: super::proposal::MutationTarget + ?Sized>(
+    world: &mut T,
+    points: &[WorldPoint],
+    material: Material,
+) -> BTreeSet<ChunkPos> {
     stamp_polygon_bounded(world, points, material, u32::MAX).touched
 }
 
@@ -282,8 +286,8 @@ pub(super) struct BoundedStamp {
 /// the cap is reached, the returned world contains exactly the accepted
 /// prefix, `exhausted` is true, and no later sample has been touched. The
 /// ordinary stamp path is the unbounded wrapper above.
-pub(super) fn stamp_polygon_bounded(
-    world: &mut World,
+pub(super) fn stamp_polygon_bounded<T: super::proposal::MutationTarget + ?Sized>(
+    world: &mut T,
     points: &[WorldPoint],
     material: Material,
     max_subcells: u32,
@@ -342,6 +346,7 @@ pub(super) fn stamp_polygon_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::World;
 
     fn point(x_octimeters: i32, z_octimeters: i32) -> WorldPoint {
         WorldPoint::new(x_octimeters, z_octimeters)
