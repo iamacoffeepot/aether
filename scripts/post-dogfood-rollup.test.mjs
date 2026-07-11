@@ -148,3 +148,63 @@ test('a rollup predating task and provenance capture still renders', () => {
   assert.doesNotMatch(comment, /### The task|### Provenance/)
   assert.match(comment, /## Dogfood trial/)
 })
+
+// Replaying the shipped judge prompt over ten archived frames scored 24/30 against hand
+// labels; every miss was a rubric the judge could not settle from one capture (a
+// preview-vs-baseline comparison, a claim about pixel dimensions across three images) and
+// had no way to decline. Two of those became `wrong` — a soft-hold asserting a landed
+// feature was visibly broken, on no evidence. `insufficient-evidence` is that escape hatch.
+test('an unjudgeable artifact is not a pass, and does not claim the feature is broken', () => {
+  const rollup = {
+    succeeded: true,
+    buildGreen: null,
+    summary: 'Drove the proposal lifecycle.',
+    artifact: {
+      verdict: 'insufficient-evidence',
+      rationale: 'The rubric compares a preview frame against a committed baseline; only one frame was captured and no baseline was supplied.',
+    },
+    friction: { blocker: [], 'missing-primitive': [], papercut: [], 'doc-gap': [] },
+    softHolds: [],
+  }
+
+  // Not green: nothing was actually verified, so it must not read as a clean trial.
+  assert.equal(isActionable(rollup), true)
+  assert.equal(markerVerdict(rollup), 'failed')
+  // But no soft-hold — "I could not tell" is not "the feature is broken".
+  const comment = renderComment(rollup, false, { attempt: 1, runRef: '3088/12345-1' })
+  assert.doesNotMatch(comment, /use-visible-incorrect/)
+  assert.match(comment, /\*\*Artifact:\*\* insufficient-evidence/)
+})
+
+test('a wrong verdict still soft-holds', () => {
+  const rollup = {
+    succeeded: true,
+    buildGreen: null,
+    summary: 'Drove the widgets.',
+    artifact: { verdict: 'wrong', rationale: 'None of the three controls rendered.' },
+    friction: { blocker: [], 'missing-primitive': [], papercut: [], 'doc-gap': [] },
+    softHolds: [{ kind: 'use-visible-incorrect', detail: 'None of the three controls rendered.' }],
+  }
+
+  assert.equal(isActionable(rollup), true)
+  assert.equal(markerVerdict(rollup), 'failed')
+  assert.match(renderComment(rollup, false, { attempt: 1, runRef: '3088/12345-1' }), /use-visible-incorrect/)
+})
+
+test('the evidence image is the frame the judge graded, not a re-capture', () => {
+  const rollup = {
+    succeeded: true,
+    buildGreen: null,
+    summary: 'Rendered the text panel.',
+    artifact: { verdict: 'correct', rationale: 'Six legible rows.' },
+    friction: { blocker: [], 'missing-primitive': [], papercut: [], 'doc-gap': [] },
+    softHolds: [],
+  }
+
+  const comment = renderComment(rollup, true, { attempt: 1, runRef: '3088/12345-1' })
+  assert.match(comment, /### The frame the judge graded/)
+  assert.match(comment, /!\[the frame the judge graded\]\(.*\/3088\/12345-1\/judged-frame\.png\)/)
+  // The old path was a later re-capture of a re-driven engine, and was observed
+  // contradicting the verdict printed directly above it.
+  assert.doesNotMatch(comment, /\/frame\.png/)
+})

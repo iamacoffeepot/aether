@@ -625,13 +625,18 @@
   function renderMedia(run) {
     var wrap = document.createDocumentFragment();
 
+    // judged-frame.png is the frame the JUDGE graded. Runs archived before the judge
+    // saved its own capture only have frame.png — a LATER re-capture by the CI driver,
+    // which is not necessarily the picture the verdict was formed against. Prefer the
+    // judged frame; fall back to the old path so historical runs still show something.
     var img = el("img", {
       className: "frame",
-      attrs: { alt: "judged frame for run " + run.joined },
+      attrs: { alt: "the frame the judge graded, run " + run.joined },
     });
-    img.src = BRANCH_BASE + run.joined + "/frame.png";
+    img.src = BRANCH_BASE + run.joined + "/judged-frame.png";
     img.onerror = function () {
-      img.style.display = "none";
+      img.onerror = function () { img.style.display = "none"; };
+      img.src = BRANCH_BASE + run.joined + "/frame.png";
     };
     wrap.appendChild(img);
 

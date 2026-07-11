@@ -32,7 +32,7 @@
 //                       unreadable records a no-rollup attempt
 //   ATTEMPT             this trial's attempt number, baked into the marker
 //                       (optional; defaults to 1)
-//   HAS_FRAME           "1"/"true" when the staged run dir held a frame.png
+//   HAS_FRAME           "1"/"true" when the staged run dir held a judged-frame.png
 //                       (falls back to rollup.artifact != null when unset)
 //
 // No external deps — Node built-ins + global fetch only.
@@ -273,7 +273,8 @@ export function renderComment(rollup, hasFrame, { attempt = 1, runRef = '' } = {
   lines.push(...softHoldLines(rollup.softHolds))
   lines.push(...tokenTableLines(rollup.tokensPerTool))
   if (hasFrame) {
-    lines.push('', '### Judged frame', '', `![judged frame](${RAW_BASE}/${runRef}/frame.png)`)
+    // The frame the JUDGE graded — not a later re-capture. The two used to differ.
+    lines.push('', '### The frame the judge graded', '', `![the frame the judge graded](${RAW_BASE}/${runRef}/judged-frame.png)`)
   }
   lines.push(...provenanceLines(rollup.provenance))
   lines.push('', `[Full run in the evidence viewer](${VIEWER_BASE}?run=${encodeURIComponent(runRef)})`)
@@ -294,6 +295,11 @@ export function renderNoRollupComment({ attempt = 1, runUrl } = {}) {
 export function isActionable(rollup) {
   if (rollup.succeeded === false) return true
   if (rollup.artifact && rollup.artifact.verdict === 'wrong') return true
+  // A rubric the judge could not settle is not a pass. It raises no soft-hold — an
+  // unjudgeable artifact is not a claim that the feature is broken — but it must not
+  // read as green either, because nothing was actually verified. Actionable routes it
+  // to a re-trial and, at the attempt cap, to a human.
+  if (rollup.artifact && rollup.artifact.verdict === 'insufficient-evidence') return true
   if (Array.isArray(rollup.softHolds) && rollup.softHolds.length) return true
   const friction = rollup.friction || {}
   for (const category of ['blocker', 'missing-primitive']) {

@@ -29,6 +29,9 @@ export const meta = {
 //   driverModel,  string  — the model of the harness session that INVOKED this workflow. The workflow
 //                           cannot read it, so an unattended caller (the CI action) passes it in purely
 //                           so the rollup can record it. Recorded, never acted on.
+//   judgeFramePath, string — absolute path the JUDGE saves the frame it actually grades to. The evidence
+//                           image was previously a later re-capture by the caller, which can disagree with
+//                           what the judge saw; this makes the verdict auditable against its own pixels.
 // }
 //
 // returns { proposedTask?, needsApproval?, rollup, task }. For a heavy medium (author / build-layer)
@@ -118,8 +121,12 @@ const JUDGE_SCHEMA = {
   additionalProperties: false,
   required: ['verdict', 'rationale'],
   properties: {
-    verdict: { type: 'string', enum: ['correct', 'wrong', 'n-a'], description: 'correct = the captured frame matches the expected artifact; wrong = it does not (use-visible defect); n-a = nothing renderable to judge' },
-    rationale: { type: 'string', description: 'what the frame showed vs what was expected — the concrete visual discrepancy for a wrong verdict' },
+    verdict: {
+      type: 'string',
+      enum: ['correct', 'wrong', 'insufficient-evidence', 'n-a'],
+      description: 'correct = the frame satisfies the rubric; wrong = it contradicts the rubric (use-visible defect); insufficient-evidence = the rubric cannot be settled from the evidence given (a comparison with no baseline, a claim about bytes or dimensions, a state not visible in this frame); n-a = nothing renderable to judge',
+    },
+    rationale: { type: 'string', description: 'what the frame showed vs what was expected — the concrete visual discrepancy for a wrong verdict, or exactly which evidence was missing for insufficient-evidence' },
   },
 }
 
@@ -183,23 +190,61 @@ THE IMMEDIATE-MODE RULE (load-bearing — the judge grades a frame it captures i
 Return succeeded, summary, engineId, replayMails, buildGreen, and findings (every friction point — category, severity, where, what, suggested). An empty findings array means the surface was friction-free; be honest, not generous.`
 }
 
-function judgePrompt(task, engineId, replayMails) {
+// The judge is the only agent in the pipeline with authority to call a landed feature visibly broken, and
+// it was the only one given nothing to go on. It received the rubric and an engine id — not the task, not
+// what the consumer says it did, and no baseline — so on a rubric it could not settle it filled the gap
+// with a prior about what the domain "ought" to look like and reported the gap as a defect. Replaying the
+// shipped prompt over ten archived frames scored 24/30 against hand labels, with three false `wrong`
+// verdicts; the text below scored 30/30 with none. Both were perfectly self-consistent across three
+// samples, so the failure was never noise — it was a question the judge could not answer being posed as
+// one it had to. Re-score against the frame corpus before editing this prompt.
+function judgePrompt(task, engineId, replayMails, attemptSummary, framePath) {
   const replay = (replayMails && replayMails.length)
     ? `The engine's render surface is immediate mode — the consumer's draws cleared the frame after they were sent, so a bare capture would come back blank. Pass this bundle as capture_frame's \`mails\` (it fires before readback, putting the picture back on screen for the frame you read):
 
 ${JSON.stringify(replayMails, null, 2)}`
     : `The consumer reported no replay bundle — the visual state redraws itself every tick — so a plain capture (no \`mails\`) shows it.`
-  return `You are a vision judge for a dogfood trial. A consumer agent drove an engine to produce a visual result and left it alive for you. Capture it yourself and rule whether it is use-visibly correct.
 
-EXPECTED ARTIFACT (what the frame should show):
+  // The frame the judge graded was never archived: the evidence image is a LATER re-capture by the CI
+  // driver, and the two have been observed to disagree (a `wrong` verdict posted directly above a frame
+  // that plainly satisfies its rubric). Saving the judged frame makes the verdict auditable against the
+  // pixels that produced it, rather than against a different picture of the same engine.
+  const save = framePath
+    ? `\n- \`save_path\`: "${framePath}" — persist the exact frame you grade, so the verdict can be audited against the pixels that produced it.`
+    : ''
+
+  return `You are a vision judge for a dogfood trial. A consumer agent drove the aether engine to produce a visual result and left it alive for you. Your job is to rule whether the frame it produced is use-visibly correct.
+
+THE TASK THE CONSUMER WAS HANDED:
+${task.prompt}
+
+WHAT THE CONSUMER REPORTS IT DID (its own account — treat as context, not as proof):
+${attemptSummary}
+
+EXPECTED ARTIFACT (the rubric — grade against THIS TEXT and nothing else):
 ${task.expectedArtifact}
 
 ${replay}
 
-Call capture_frame on engine_id "${engineId}" (ToolSearch for mcp__aether-hub__capture_frame). The PNG returns inline — look at it. Compare what you SEE against the expected artifact above. Rule:
-- verdict 'correct' if the frame matches the expectation.
-- verdict 'wrong' if it does not — name the concrete visual discrepancy (this is a use-visible defect the producer's tests missed).
-- verdict 'n-a' only if nothing renderable came back.
+Call capture_frame on engine_id "${engineId}" (ToolSearch for mcp__aether-hub__capture_frame). The PNG returns inline — LOOK at it.${save}
+
+HOW TO RULE:
+- Grade ONLY against the rubric as written. Do NOT import an assumption about what this kind of scene
+  "ought" to look like. If the rubric says an authored region should differ from a baseline, a bare shape
+  on an empty background may be exactly that — the engine renders only what the consumer put there, and a
+  scene that starts empty stays empty. A noun in the task (terrain, panel, list) is not a promise of
+  scenery you have priors about.
+- THE SINGLE-FRAME RULE (load-bearing): you have ONE image. If the rubric asks you to compare states — a
+  preview versus a baseline, a before versus an after, several captures at different scales, pixel
+  dimensions across images — you CANNOT settle that from one frame. Do not guess, and do not resolve the
+  gap by assuming the missing frame was wrong. Return 'insufficient-evidence' and name exactly which
+  evidence you were not given.
+- verdict 'correct' — the frame satisfies what the rubric actually asks, on the evidence you have.
+- verdict 'wrong' — the frame contradicts the rubric: the thing that was supposed to render is absent or
+  visibly malformed. Name the concrete visual discrepancy.
+- verdict 'insufficient-evidence' — the rubric cannot be settled from what you were given. This is a real
+  verdict, not a hedge: use it when it is true, and do not use it to avoid a call you CAN make.
+- verdict 'n-a' — nothing renderable came back at all.
 
 After you have judged, terminate_substrate engine_id "${engineId}" to free the fleet.
 
@@ -247,7 +292,7 @@ if (!attempt) throw new Error('dogfood: the Attempt agent died with no friction 
 let judge = null
 if (task.expectedArtifact && attempt.engineId) {
   phase('Judge')
-  prompts.judge = judgePrompt(task, attempt.engineId, attempt.replayMails)
+  prompts.judge = judgePrompt(task, attempt.engineId, attempt.replayMails, attempt.summary, A.judgeFramePath)
   judge = await agent(prompts.judge, {
     label: 'judge', phase: 'Judge', model: JUDGE_MODEL, effort: JUDGE_EFFORT,
     agentType: 'general-purpose', schema: JUDGE_SCHEMA,

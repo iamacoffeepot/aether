@@ -470,9 +470,10 @@ jobs:
             --arg surface "$BRIEF_SURFACE" \
             --arg artifact "$BRIEF_ARTIFACT" \
             --arg driver "$DRIVER_MODEL" \
+            --arg judgeframe "$GITHUB_WORKSPACE/dogfood-run/judged-frame.png" \
             '{task: {medium: $medium, prompt: $prompt, surfaceUnderTest: $surface,
                      expectedArtifact: (if $artifact == "none" or $artifact == "" then null else $artifact end)},
-              driverModel: $driver}')"
+              driverModel: $driver, judgeFramePath: $judgeframe}')"
 
           # Assemble the prompt in a quoted heredoc so the interpolated JSON is
           # inserted verbatim (no shell re-parsing of its contents).
@@ -504,10 +505,13 @@ jobs:
           can record an actionable no-rollup attempt for diagnosis and re-trial.
 
           EVIDENCE (absolute paths only — ${GITHUB_WORKSPACE}/dogfood-run/ already exists):
-          - If the task's expectedArtifact is not null the run RENDERS. Ensure a live engine is showing
-            the expected state (re-spawn + re-drive it if the workflow's judge already terminated the
-            render engine), then call capture_frame with save_path set to EXACTLY
-            ${GITHUB_WORKSPACE}/dogfood-run/frame.png so the judged frame is persisted for the record.
+          - The JUDGE saves the frame it actually graded, to dogfood-run/judged-frame.png. That file is
+            the evidence image and you must NOT produce it yourself. Do NOT re-spawn, re-drive, or
+            re-capture the render engine to manufacture a frame: a picture taken later, from a re-driven
+            engine, is a DIFFERENT frame than the one the verdict was formed against, and posting it as
+            the judged frame is how a verdict came to sit under a screenshot that contradicts it.
+          - If judged-frame.png is absent (the judge did not run, or the task does not render), leave it
+            absent. An absent frame is a true statement about the trial; a substitute frame is not.
           - If the medium was author or build-layer and you can locate the Attempt's scratch crate,
             copy it into ${GITHUB_WORKSPACE}/dogfood-run/solution/ so the author/build-layer artifact
             rides in the evidence (best effort — skip if it is not reachable from here).
@@ -676,7 +680,7 @@ jobs:
         run: |
           if [ "${{ needs.trial.outputs.rollup_produced }}" = "true" ]; then
             HAS_FRAME=0
-            [ -f dogfood-run/frame.png ] && HAS_FRAME=1
+            [ -f dogfood-run/judged-frame.png ] && HAS_FRAME=1
             ROLLUP_PATH=dogfood-run/rollup.json HAS_FRAME="$HAS_FRAME" node scripts/post-dogfood-rollup.mjs
           else
             node scripts/post-dogfood-rollup.mjs
