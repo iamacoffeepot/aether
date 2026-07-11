@@ -1,6 +1,6 @@
 use super::bytes::resolve_bytes_params;
 use super::envelope::{engine_envelope, local_envelope};
-use super::ids::{parse_engine_id, parse_mailbox_id, resolve_handled_kind};
+use super::ids::{parse_engine_id, parse_mailbox_id, resolve_handled_kind, static_kind_name};
 use super::render::{frame_size_aware_error, internal, internal_msg, json, project_capabilities};
 use super::{COMPONENT_CAP, ENGINE_CAP, Mcp};
 use crate::args::{
@@ -10,11 +10,12 @@ use crate::args::{
 use aether_codec::frame::max_frame_size;
 use aether_data::{EngineId, Kind, SchemaType, wire};
 use aether_kinds::{
-    ComponentCapabilities, KindDescriptorWire, ListComponentBinaries, ListComponentBinariesResult, ListEngineBinaries,
-    ListEngineBinariesResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult, UploadBinary,
-    UploadBinaryResult, UploadComponent, UploadComponentResult,
+    BinaryEntry, ComponentCapabilities, ComponentEntry, KindDescriptorWire, ListComponentBinaries,
+    ListComponentBinariesResult, ListEngineBinaries, ListEngineBinariesResult, LoadComponent, LoadResult,
+    ReplaceComponent, ReplaceResult, UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
 };
 use rmcp::ErrorData as McpError;
+use serde::Serialize;
 use std::path::PathBuf;
 use tokio::fs;
 
@@ -171,6 +172,89 @@ pub(super) fn replicas_reply(
 /// protocol constant.
 pub(super) const MAX_REPLICAS: u32 = 256;
 
+#[derive(Serialize)]
+pub(super) struct StoreListingResponse<T> {
+    entries: Vec<T>,
+    total_matched: u32,
+    shown: u32,
+    truncated: bool,
+    notice: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(super) struct ComponentStoreEntry {
+    hash: String,
+    name: Option<String>,
+    manifest: ComponentStoreManifest,
+}
+
+#[derive(Serialize)]
+struct ComponentStoreManifest {
+    namespaces: Vec<String>,
+    actors: Vec<ComponentStoreActor>,
+    fallback: bool,
+    provenance: String,
+    default_entry: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ComponentStoreActor {
+    namespace: String,
+    handled_kinds: Vec<String>,
+    fallback: bool,
+}
+
+pub(super) fn store_listing_response<T>(entries: Vec<T>, total_matched: u32) -> StoreListingResponse<T> {
+    let shown = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+    let truncated = shown < total_matched;
+    let notice = truncated.then(|| {
+        format!(
+            "Showing {shown} of {total_matched} matching store entries; request a larger explicit `limit` to retrieve more"
+        )
+    });
+    StoreListingResponse { entries, total_matched, shown, truncated, notice }
+}
+
+pub(super) fn binary_listing_response(result: ListEngineBinariesResult) -> StoreListingResponse<BinaryEntry> {
+    store_listing_response(result.binaries, result.total_matched)
+}
+
+pub(super) fn component_listing_response(
+    result: ListComponentBinariesResult,
+) -> StoreListingResponse<ComponentStoreEntry> {
+    store_listing_response(
+        result.components.into_iter().map(project_component_store_entry).collect(),
+        result.total_matched,
+    )
+}
+
+fn project_component_store_entry(entry: ComponentEntry) -> ComponentStoreEntry {
+    ComponentStoreEntry {
+        hash: entry.hash,
+        name: entry.name,
+        manifest: ComponentStoreManifest {
+            namespaces: entry.manifest.namespaces,
+            actors: entry
+                .manifest
+                .actors
+                .into_iter()
+                .map(|actor| ComponentStoreActor {
+                    namespace: actor.namespace,
+                    handled_kinds: actor
+                        .handled_kinds
+                        .into_iter()
+                        .map(|kind| static_kind_name(kind).unwrap_or_else(|| kind.to_string()))
+                        .collect(),
+                    fallback: actor.fallback,
+                })
+                .collect(),
+            fallback: entry.manifest.fallback,
+            provenance: entry.manifest.provenance,
+            default_entry: entry.manifest.default_entry,
+        },
+    }
+}
+
 /// Reject `replicas: 0` (ADR-0090 §4 posture: a bad known value is a hard
 /// error, not a silent no-op) before it reaches any load dispatch.
 pub(super) fn reject_zero_replicas(replicas: Option<u32>, selector: &str) -> Result<(), McpError> {
@@ -219,14 +303,20 @@ pub(super) async fn list_binaries(mcp: &Mcp, args: ListBinariesArgs) -> Result<S
         .session
         .call_one(local_envelope(
             ENGINE_CAP,
-            &ListEngineBinaries { chassis: args.chassis, caps: args.caps, target: args.target },
+            &ListEngineBinaries {
+                chassis: args.chassis,
+                caps: args.caps,
+                target: args.target,
+                limit: args.limit,
+                include_history: args.include_history,
+            },
         ))
         .await
         .map_err(internal)?;
-    match ListEngineBinariesResult::decode_from_bytes(&reply.payload) {
-        Some(result) => json(&result.binaries),
-        None => Err(internal_msg("undecodable ListEngineBinariesResult")),
-    }
+    ListEngineBinariesResult::decode_from_bytes(&reply.payload).map_or_else(
+        || Err(internal_msg("undecodable ListEngineBinariesResult")),
+        |result| json(&binary_listing_response(result)),
+    )
 }
 
 pub(super) async fn upload_component(mcp: &Mcp, args: UploadComponentArgs) -> Result<String, McpError> {
@@ -252,13 +342,21 @@ pub(super) async fn list_components(mcp: &Mcp, args: ListComponentsArgs) -> Resu
     };
     let reply = mcp
         .session
-        .call_one(local_envelope(ENGINE_CAP, &ListComponentBinaries { namespace: args.namespace, handled_kind }))
+        .call_one(local_envelope(
+            ENGINE_CAP,
+            &ListComponentBinaries {
+                namespace: args.namespace,
+                handled_kind,
+                limit: args.limit,
+                include_history: args.include_history,
+            },
+        ))
         .await
         .map_err(internal)?;
-    match ListComponentBinariesResult::decode_from_bytes(&reply.payload) {
-        Some(result) => json(&result.components),
-        None => Err(internal_msg("undecodable ListComponentBinariesResult")),
-    }
+    ListComponentBinariesResult::decode_from_bytes(&reply.payload).map_or_else(
+        || Err(internal_msg("undecodable ListComponentBinariesResult")),
+        |result| json(&component_listing_response(result)),
+    )
 }
 
 pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result<String, McpError> {

@@ -2,6 +2,8 @@
 use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
 use super::super::*;
+use crate::tools::components::{binary_listing_response, component_listing_response, store_listing_response};
+use aether_kinds::{ListComponentBinariesResult, ListEngineBinariesResult};
 
 /// Small typed-config-shaped schema for component config encoding tests.
 fn config_struct_schema() -> SchemaType {
@@ -22,6 +24,83 @@ fn config_kind(schema: &SchemaType) -> KindDescriptorWire {
         name: "test.config".to_owned(),
         schema_wire: wire::to_vec(schema).expect("SchemaType wire-encodes"),
     }
+}
+
+#[test]
+fn store_listing_response_reports_truncation_metadata_and_notice() {
+    let response = store_listing_response(vec!["first", "second"], 5);
+    let value = serde_json::to_value(response).expect("listing response serializes");
+    assert_eq!(value["entries"], serde_json::json!(["first", "second"]));
+    assert_eq!(value["total_matched"], 5);
+    assert_eq!(value["shown"], 2);
+    assert_eq!(value["truncated"], true);
+    assert!(value["notice"].as_str().is_some_and(|notice| notice.contains("larger explicit `limit`")));
+
+    let complete =
+        serde_json::to_value(store_listing_response(vec!["only"], 1)).expect("complete listing response serializes");
+    assert_eq!(complete["truncated"], false);
+    assert!(complete["notice"].is_null());
+}
+
+#[test]
+fn binary_listing_wraps_entries_and_match_count() {
+    let response = binary_listing_response(ListEngineBinariesResult {
+        binaries: vec![aether_kinds::BinaryEntry {
+            hash: "abc".to_owned(),
+            name: Some("headless".to_owned()),
+            manifest: aether_kinds::BinaryManifest {
+                chassis: "headless".to_owned(),
+                caps: vec!["aether.fs".to_owned()],
+                git_sha: "deadbee".to_owned(),
+                profile: "debug".to_owned(),
+                target: "x86_64-unknown-linux-gnu".to_owned(),
+            },
+        }],
+        total_matched: 3,
+    });
+    let value = serde_json::to_value(response).expect("binary listing response serializes");
+    assert_eq!(value["entries"][0]["hash"], "abc");
+    assert_eq!(value["entries"][0]["manifest"]["chassis"], "headless");
+    assert_eq!(value["total_matched"], 3);
+    assert_eq!(value["shown"], 1);
+    assert_eq!(value["truncated"], true);
+}
+
+#[test]
+fn component_listing_names_kinds_omits_union_and_preserves_manifest_fields() {
+    use aether_kinds::{ComponentActor, ComponentEntry, ComponentManifest, Tick};
+
+    let unknown = KindId(0xDEAD_BEEF_DEAD_BEEF);
+    let response = component_listing_response(ListComponentBinariesResult {
+        components: vec![ComponentEntry {
+            hash: "def".to_owned(),
+            name: Some("probe".to_owned()),
+            manifest: ComponentManifest {
+                namespaces: vec!["test.probe".to_owned(), "test.probe.child".to_owned()],
+                actors: vec![ComponentActor {
+                    namespace: "test.probe".to_owned(),
+                    handled_kinds: vec![Tick::ID, unknown],
+                    fallback: true,
+                }],
+                handled_kinds: vec![Tick::ID, unknown],
+                fallback: true,
+                provenance: "rustc 1.test".to_owned(),
+                default_entry: Some("test.probe".to_owned()),
+            },
+        }],
+        total_matched: 1,
+    });
+    let value = serde_json::to_value(response).expect("component listing response serializes");
+    let manifest = &value["entries"][0]["manifest"];
+    assert_eq!(manifest["namespaces"], serde_json::json!(["test.probe", "test.probe.child"]));
+    assert_eq!(manifest["actors"][0]["namespace"], "test.probe");
+    assert_eq!(manifest["actors"][0]["handled_kinds"][0], Tick::NAME);
+    assert_eq!(manifest["actors"][0]["handled_kinds"][1], unknown.to_string());
+    assert_eq!(manifest["actors"][0]["fallback"], true);
+    assert!(manifest.get("handled_kinds").is_none(), "the redundant manifest-wide union is omitted");
+    assert_eq!(manifest["fallback"], true);
+    assert_eq!(manifest["provenance"], "rustc 1.test");
+    assert_eq!(manifest["default_entry"], "test.probe");
 }
 
 #[tokio::test]

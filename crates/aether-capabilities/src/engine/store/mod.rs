@@ -50,7 +50,10 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_kinds::{BinaryEntry, ComponentEntry, ListComponentBinaries, ListEngineBinaries};
+use aether_kinds::{
+    BinaryEntry, ComponentEntry, ListComponentBinaries, ListComponentBinariesResult, ListEngineBinaries,
+    ListEngineBinariesResult,
+};
 use aether_substrate::atomic_write::atomic_write;
 use aether_substrate::pid_lock::LockGuard;
 use serde::{Deserialize, Serialize};
@@ -71,6 +74,7 @@ pub const LAYOUT_VERSION_DIR: &str = "v1";
 pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
 const TARGET: &str = "aether_capabilities::engine::store";
+const DEFAULT_LIST_CAP: u32 = 20;
 
 /// The JSON sidecar written next to each entry's bytes — the type tag
 /// plus the type-tagged manifest, so a fresh store rebuilds its index
@@ -81,6 +85,8 @@ const TARGET: &str = "aether_capabilities::engine::store";
 struct StoredEntry {
     kind: ArtifactKind,
     manifest: StoredManifest,
+    #[serde(default)]
+    uploaded_seq: u64,
 }
 
 /// In-memory record of one entry. The bytes live on disk at
@@ -95,6 +101,9 @@ struct Entry {
     pinned: bool,
     /// Monotonic access stamp; lower = older, the LRU eviction key.
     last_access: u64,
+    /// Stable first-ingest sequence. Reads and deduplicated uploads never
+    /// change it; listing pages sort newest-first by this value.
+    uploaded_seq: u64,
 }
 
 /// Content-addressed, disk-backed, budget-bounded artifact store
@@ -116,6 +125,9 @@ pub struct ArtifactStore {
     total_bytes: u64,
     /// Monotonic source for `Entry::last_access`.
     clock: u64,
+    /// Sequence to assign to the next successfully persisted new content
+    /// hash. It advances only after both bytes and sidecar are durable.
+    next_seq: u64,
     /// `lock.pid` guard. Held for the store's lifetime when the lock was
     /// freshly written; `None` when another live process holds it (the
     /// store still operates — a content-addressed store tolerates a shared
@@ -149,8 +161,8 @@ impl ArtifactStore {
     pub fn open(root: &Path, disk_budget_bytes: u64) -> Self {
         let root = ensure_root(root);
         let lock = acquire_lock(&root);
-        let RestoredIndex { entries, names, total_bytes, clock } = restore(&root);
-        Self { root, disk_budget_bytes, entries, names, total_bytes, clock, _lock: lock }
+        let RestoredIndex { entries, names, total_bytes, clock, next_seq } = restore(&root);
+        Self { root, disk_budget_bytes, entries, names, total_bytes, clock, next_seq, _lock: lock }
     }
 
     /// The layout root this store resolved to (after any temp fallback).
@@ -185,7 +197,8 @@ impl ArtifactStore {
             // write failure leaves the entry out of the index, so the store
             // stays consistent — the next upload of the same bytes retries.
             let (bytes_path, manifest_path) = self.entry_paths(&hash);
-            let sidecar = StoredEntry { kind, manifest: manifest.clone() };
+            let uploaded_seq = self.next_seq;
+            let sidecar = StoredEntry { kind, manifest: manifest.clone(), uploaded_seq };
             if let Err(e) = atomic_write(&bytes_path, bytes) {
                 tracing::warn!(target: TARGET, hash = %hash, error = %e, "binary store: writing entry bytes failed");
             } else if let Err(e) = write_sidecar(&manifest_path, &sidecar) {
@@ -193,9 +206,12 @@ impl ArtifactStore {
                 let _ = fs::remove_file(&bytes_path);
             } else {
                 let bytes_len = bytes.len() as u64;
-                self.entries
-                    .insert(hash.clone(), Entry { kind, manifest, bytes_len, pinned: false, last_access: clock });
+                self.entries.insert(
+                    hash.clone(),
+                    Entry { kind, manifest, bytes_len, pinned: false, last_access: clock, uploaded_seq },
+                );
                 self.total_bytes = self.total_bytes.saturating_add(bytes_len);
+                self.next_seq = self.next_seq.saturating_add(1);
             }
         }
 
@@ -235,7 +251,7 @@ impl ArtifactStore {
     /// constraint". Component entries are excluded — only `Binary`-kind
     /// artifacts are listed here.
     #[must_use]
-    pub fn list_binaries(&self, filter: &ListEngineBinaries) -> Vec<BinaryEntry> {
+    pub fn matching_binaries(&self, filter: &ListEngineBinaries) -> Vec<BinaryEntry> {
         self.entries
             .iter()
             .filter_map(|(hash, entry)| {
@@ -256,7 +272,7 @@ impl ArtifactStore {
     /// Each absent field is "no constraint". Binary entries are excluded —
     /// only `Component`-kind artifacts are listed here.
     #[must_use]
-    pub fn list_components(&self, filter: &ListComponentBinaries) -> Vec<ComponentEntry> {
+    pub fn matching_components(&self, filter: &ListComponentBinaries) -> Vec<ComponentEntry> {
         self.entries
             .iter()
             .filter_map(|(hash, entry)| {
@@ -268,6 +284,64 @@ impl ArtifactStore {
                 })
             })
             .collect()
+    }
+
+    /// Return a consumer-facing page of stored binaries. Attribute filters
+    /// are applied before the named/history choice; `total_matched` is
+    /// recorded before truncation. Entries sort by stable first-ingest
+    /// sequence descending, then hash ascending for deterministic legacy
+    /// sequence ties.
+    #[must_use]
+    pub fn list_binaries_page(&self, filter: &ListEngineBinaries) -> ListEngineBinariesResult {
+        let mut matches: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|(hash, entry)| {
+                let manifest = entry.manifest.as_binary()?;
+                if !matches_binary_filter(manifest, filter) {
+                    return None;
+                }
+                let name = self.name_for(hash);
+                if name.is_none() && !filter.include_history {
+                    return None;
+                }
+                Some((entry.uploaded_seq, BinaryEntry { hash: hash.clone(), name, manifest: manifest.clone() }))
+            })
+            .collect();
+        matches.sort_by(|(left_seq, left), (right_seq, right)| {
+            right_seq.cmp(left_seq).then_with(|| left.hash.cmp(&right.hash))
+        });
+        let total_matched = u32::try_from(matches.len()).unwrap_or(u32::MAX);
+        matches.truncate(usize::try_from(filter.limit.unwrap_or(DEFAULT_LIST_CAP)).unwrap_or(usize::MAX));
+        ListEngineBinariesResult { binaries: matches.into_iter().map(|(_, entry)| entry).collect(), total_matched }
+    }
+
+    /// Return a consumer-facing page of stored components with the same
+    /// filtering, stable ordering, and pre-truncation count contract as
+    /// [`ArtifactStore::list_binaries_page`].
+    #[must_use]
+    pub fn list_components_page(&self, filter: &ListComponentBinaries) -> ListComponentBinariesResult {
+        let mut matches: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|(hash, entry)| {
+                let manifest = entry.manifest.as_component()?;
+                if !matches_component_filter(manifest, filter) {
+                    return None;
+                }
+                let name = self.name_for(hash);
+                if name.is_none() && !filter.include_history {
+                    return None;
+                }
+                Some((entry.uploaded_seq, ComponentEntry { hash: hash.clone(), name, manifest: manifest.clone() }))
+            })
+            .collect();
+        matches.sort_by(|(left_seq, left), (right_seq, right)| {
+            right_seq.cmp(left_seq).then_with(|| left.hash.cmp(&right.hash))
+        });
+        let total_matched = u32::try_from(matches.len()).unwrap_or(u32::MAX);
+        matches.truncate(usize::try_from(filter.limit.unwrap_or(DEFAULT_LIST_CAP)).unwrap_or(usize::MAX));
+        ListComponentBinariesResult { components: matches.into_iter().map(|(_, entry)| entry).collect(), total_matched }
     }
 
     /// Resolve an artifact by hash or name to its on-disk path + manifest
@@ -308,10 +382,10 @@ impl ArtifactStore {
         self.entries.contains_key(hash)
     }
 
-    /// The first name pointing at `hash`, for a [`BinaryEntry`] / a
-    /// [`StoredArtifact`]. At most one name per hash in practice.
+    /// The lexicographically smallest name pointing at `hash`, for a
+    /// [`BinaryEntry`] / a [`StoredArtifact`].
     fn name_for(&self, hash: &str) -> Option<String> {
-        self.names.iter().find(|(_, h)| h.as_str() == hash).map(|(n, _)| n.clone())
+        self.names.iter().filter(|(_, h)| h.as_str() == hash).map(|(n, _)| n).min().cloned()
     }
 
     fn next_clock(&mut self) -> u64 {

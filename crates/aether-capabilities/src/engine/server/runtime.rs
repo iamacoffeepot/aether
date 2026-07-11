@@ -562,17 +562,18 @@ impl NativeActor for EngineServer {
     /// Enumerate the hub's stored engine binaries.
     ///
     /// # Agent
-    /// Send `ListEngineBinaries { chassis?, caps, target? }` (each filter
-    /// field AND-combined; an absent / empty field is no constraint).
-    /// Reply: `ListEngineBinariesResult { binaries: [{ hash, name,
-    /// manifest: { chassis, caps, git_sha, profile, target } }] }`.
+    /// Send `ListEngineBinaries { chassis?, caps, target?, limit?,
+    /// include_history }` (attribute filters AND-combined; an absent / empty
+    /// field is no constraint). Reply: `ListEngineBinariesResult { binaries,
+    /// total_matched }`, with a stable newest-first page produced before
+    /// entries cross the wire.
     #[handler::single]
     fn on_list_engine_binaries(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
         mail: ListEngineBinaries,
     ) -> ListEngineBinariesResult {
-        ListEngineBinariesResult { binaries: state.store.list_binaries(&mail) }
+        state.store.list_binaries_page(&mail)
     }
 
     /// Ingest a component wasm into the hub's content-addressed store
@@ -621,15 +622,17 @@ impl NativeActor for EngineServer {
     /// Enumerate the hub's stored component binaries.
     ///
     /// # Agent
-    /// Send `ListComponentBinaries { namespace?, handled_kind? }` (each
-    /// filter AND-combined; an absent field is no constraint). Reply:
-    /// `ListComponentBinariesResult { components: [{ hash, name, manifest }] }`.
+    /// Send `ListComponentBinaries { namespace?, handled_kind?, limit?,
+    /// include_history }` (attribute filters AND-combined; an absent field is
+    /// no constraint). Reply: `ListComponentBinariesResult { components,
+    /// total_matched }`, with a stable newest-first page produced before
+    /// entries cross the wire.
     #[handler::single]
     fn on_list_component_binaries(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
         mail: ListComponentBinaries,
     ) -> ListComponentBinariesResult {
-        ListComponentBinariesResult { components: state.store.list_components(&mail) }
+        state.store.list_components_page(&mail)
     }
 }

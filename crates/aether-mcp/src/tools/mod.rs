@@ -274,7 +274,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Enumerate the hub's stored binaries (ADR-0115). Optional AND-combined filters: `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (keep only binaries whose linked caps are a superset of every listed cap), `target` (the build target triple). Omit all to list the whole store. Returns an array of {hash, name, manifest: {chassis, caps, git_sha, profile, target}} — the manifest each binary reported via a one-time --describe at upload time."
+        description = "Enumerate the hub's stored binaries (ADR-0115). Optional AND-combined filters: `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (keep only binaries whose linked caps are a superset of every listed cap), and `target` (the build target triple). By default returns the newest 20 name-pointed registry entries; set `include_history: true` to include unnamed historical hashes and set `limit` explicitly to change the cap (`0` returns no entries but preserves the count). Returns {entries: [{hash, name, manifest: {chassis, caps, git_sha, profile, target}}], total_matched, shown, truncated, notice}. To retrieve a complete matched history, first call with `include_history: true`, then repeat with `limit` equal to `total_matched`."
     )]
     pub async fn list_binaries(&self, Parameters(args): Parameters<ListBinariesArgs>) -> Result<String, McpError> {
         guard_response_size("list_binaries", components::list_binaries(self, args).await)
@@ -291,7 +291,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Enumerate the hub's stored components (ADR-0116). Optional AND-combined filters: `namespace` (keep only components exporting an actor with that Actor::NAMESPACE) and `handled_kind` (keep only components handling that kind, by tagged knd-… id or kind name). Omit both to list every stored component. Returns an array of {hash, name, manifest} — the manifest read straight from each wasm at upload: {namespaces, actors: [{namespace, handled_kinds, fallback}], handled_kinds, fallback, provenance}."
+        description = "Enumerate the hub's stored component registry (ADR-0116). Optional AND-combined filters: `namespace` (keep only components exporting an actor with that Actor::NAMESPACE) and `handled_kind` (keep only components handling that kind, by tagged knd-… id or kind name). By default returns the newest 20 name-pointed registry entries; set `include_history: true` to include unnamed historical hashes and set `limit` explicitly to change the cap (`0` returns no entries but preserves the count). Returns {entries: [{hash, name, manifest: {namespaces, actors: [{namespace, handled_kinds, fallback}], fallback, provenance, default_entry}}], total_matched, shown, truncated, notice}. Actor handled kinds render as readable static names with tagged knd-… fallbacks; the redundant manifest-wide handled-kind union is omitted. To retrieve a complete matched history, first call with `include_history: true`, then repeat with `limit` equal to `total_matched`. These are stored artifacts, not loaded component lineage addresses; use the engine-local loaded-component surface for live instances."
     )]
     pub async fn list_components(&self, Parameters(args): Parameters<ListComponentsArgs>) -> Result<String, McpError> {
         guard_response_size("list_components", components::list_components(self, args).await)

@@ -334,23 +334,31 @@ mod engine {
     /// defaults to "no constraint": `chassis` keeps only entries whose
     /// `manifest.chassis` matches, `caps` keeps only entries whose
     /// `manifest.caps` is a superset of every listed cap, `target` keeps
-    /// only entries whose `manifest.target` matches. Reply:
-    /// [`ListEngineBinariesResult`].
+    /// only entries whose `manifest.target` matches. `include_history`
+    /// controls whether unnamed historical hashes are included (the default
+    /// is the live, name-pointed registry only), and `limit` caps the page
+    /// after filtering (`None` defaults to 20; `Some(0)` returns no entries).
+    /// Reply: [`ListEngineBinariesResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
     #[kind(name = "aether.engine.list_binaries")]
     pub struct ListEngineBinaries {
         pub chassis: Option<String>,
         pub caps: Vec<String>,
         pub target: Option<String>,
+        pub limit: Option<u32>,
+        pub include_history: bool,
     }
 
-    /// Reply to [`ListEngineBinaries`] (ADR-0115, issue 1953): every stored
-    /// binary matching the filter, each as a [`BinaryEntry`] carrying its
-    /// hash, optional name, and `--describe` manifest.
+    /// Reply to [`ListEngineBinaries`] (ADR-0115, issues 1953 and 3007): a
+    /// newest-first page of stored binaries matching the request, each as a
+    /// [`BinaryEntry`] carrying its hash, optional name, and `--describe`
+    /// manifest. `total_matched` is counted after attribute/history filtering
+    /// and before the requested limit is applied.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.engine.list_binaries_result")]
     pub struct ListEngineBinariesResult {
         pub binaries: Vec<BinaryEntry>,
+        pub total_matched: u32,
     }
 
     /// What a stored component *is*, read straight from the wasm at upload
@@ -515,22 +523,30 @@ mod engine {
     /// components (ADR-0116, issue 1956). The filter fields are
     /// AND-combined and each defaults to "no constraint": `namespace` keeps
     /// only entries exporting that actor namespace, `handled_kind` keeps
-    /// only entries handling that `KindId`. Reply:
+    /// only entries handling that `KindId`. `include_history` controls whether
+    /// unnamed historical hashes are included (the default is the live,
+    /// name-pointed registry only), and `limit` caps the page after filtering
+    /// (`None` defaults to 20; `Some(0)` returns no entries). Reply:
     /// [`ListComponentBinariesResult`].
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
     #[kind(name = "aether.engine.list_components")]
     pub struct ListComponentBinaries {
         pub namespace: Option<String>,
         pub handled_kind: Option<aether_data::KindId>,
+        pub limit: Option<u32>,
+        pub include_history: bool,
     }
 
-    /// Reply to [`ListComponentBinaries`] (ADR-0116, issue 1956): every
-    /// stored component matching the filter, each as a [`ComponentEntry`]
-    /// carrying its hash, optional name, and the manifest read from the wasm.
+    /// Reply to [`ListComponentBinaries`] (ADR-0116, issues 1956 and 3007): a
+    /// newest-first page of stored components matching the request, each as a
+    /// [`ComponentEntry`] carrying its hash, optional name, and the manifest
+    /// read from the wasm. `total_matched` is counted after attribute/history
+    /// filtering and before the requested limit is applied.
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.engine.list_components_result")]
     pub struct ListComponentBinariesResult {
         pub components: Vec<ComponentEntry>,
+        pub total_matched: u32,
     }
 }
 

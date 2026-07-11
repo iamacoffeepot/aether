@@ -130,8 +130,9 @@ pub struct UploadComponentArgs {
     pub name: Option<String>,
 }
 
-/// `list_components` arguments (ADR-0116, issue 1956). Every field is an
-/// optional AND-combined filter; omit all to list every stored component.
+/// `list_components` arguments (ADR-0116, issues 1956 and 3007). Attribute
+/// fields are optional AND-combined filters; presentation controls default to
+/// a bounded page of the live name registry.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListComponentsArgs {
     /// Keep only components exporting an actor with this `Addressable::NAMESPACE`.
@@ -142,10 +143,19 @@ pub struct ListComponentsArgs {
     /// against the substrate kind vocabulary baked into aether-mcp.
     #[serde(default)]
     pub handled_kind: Option<String>,
+    /// Maximum entries to return after filtering. Omit for the default cap of
+    /// 20; zero returns no entries while preserving `total_matched`.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Include unnamed historical content hashes. Defaults to false, which
+    /// returns only hashes currently pointed to by at least one name.
+    #[serde(default)]
+    pub include_history: bool,
 }
 
-/// `list_binaries` arguments (ADR-0115, issue 1953). Every field is an
-/// optional AND-combined filter; omit all to list the whole store.
+/// `list_binaries` arguments (ADR-0115, issues 1953 and 3007). Attribute
+/// fields are optional AND-combined filters; presentation controls default to
+/// a bounded page of the live name registry.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ListBinariesArgs {
     /// Keep only binaries whose manifest chassis matches (`"headless"` /
@@ -159,6 +169,14 @@ pub struct ListBinariesArgs {
     /// Keep only binaries whose manifest target triple matches.
     #[serde(default)]
     pub target: Option<String>,
+    /// Maximum entries to return after filtering. Omit for the default cap of
+    /// 20; zero returns no entries while preserving `total_matched`.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Include unnamed historical content hashes. Defaults to false, which
+    /// returns only hashes currently pointed to by at least one name.
+    #[serde(default)]
+    pub include_history: bool,
 }
 
 /// `list_engines` arguments (issue 2985). One optional filter deciding

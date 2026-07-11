@@ -59,11 +59,13 @@ mod tests {
             UploadComponentResult::Err { error } => panic!("upload_component failed: {error}"),
         };
 
-        let all = bench.list_component_binaries(&ListComponentBinaries::default());
-        let entry = all
+        let listed = bench.list_component_binaries(&ListComponentBinaries::default());
+        assert_eq!(listed.total_matched, 1);
+        let entry = listed
+            .components
             .iter()
             .find(|e| e.hash == hash)
-            .unwrap_or_else(|| panic!("uploaded component {hash} should be listed: {all:?}"));
+            .unwrap_or_else(|| panic!("uploaded component {hash} should be listed: {:?}", listed.components));
         assert!(
             entry.manifest.namespaces.iter().any(|n| n == PROBE_NAMESPACE),
             "the manifest reports the probe's namespace, got {:?}",
@@ -78,14 +80,23 @@ mod tests {
                 .list_component_binaries(&ListComponentBinaries {
                     namespace: Some(PROBE_NAMESPACE.to_owned()),
                     handled_kind: None,
+                    limit: None,
+                    include_history: false,
                 })
+                .components
                 .iter()
                 .any(|e| e.hash == hash),
             "a matching namespace filter keeps the entry",
         );
         assert!(
             bench
-                .list_component_binaries(&ListComponentBinaries { namespace: None, handled_kind: Some(Tick::ID) })
+                .list_component_binaries(&ListComponentBinaries {
+                    namespace: None,
+                    handled_kind: Some(Tick::ID),
+                    limit: None,
+                    include_history: false,
+                })
+                .components
                 .iter()
                 .any(|e| e.hash == hash),
             "a matching handled-kind filter keeps the entry",
@@ -95,7 +106,10 @@ mod tests {
                 .list_component_binaries(&ListComponentBinaries {
                     namespace: Some("not_a_namespace".to_owned()),
                     handled_kind: None,
+                    limit: None,
+                    include_history: false,
                 })
+                .components
                 .iter()
                 .any(|e| e.hash == hash),
             "a non-matching namespace filter drops the entry",
@@ -136,6 +150,56 @@ mod tests {
             fs::remove_dir_all(&root)
                 .unwrap_or_else(|e| panic!("cleanup of store root {} failed ({e})", root.display()));
         }
+    }
+
+    #[test]
+    fn fleetbench_component_listing_controls_cross_the_hub_boundary() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
+            return;
+        }
+        let probe_path = component_wasm_path("aether_test_fixtures_bundle");
+        let mut bench = FleetBench::start();
+        let named_hash = match bench.upload_component(probe_path.to_string_lossy().as_ref(), Some("probe")) {
+            UploadComponentResult::Ok { hash, .. } => hash,
+            UploadComponentResult::Err { error } => panic!("upload_component failed: {error}"),
+        };
+
+        // Append a valid, ignored custom section so the same manifest has a
+        // distinct content hash for the unnamed history row.
+        let mut historical_wasm = fs::read(&probe_path).expect("read probe wasm");
+        historical_wasm.extend_from_slice(&[0, 3, 1, b'x', 0]);
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_nanos());
+        let historical_path = env::temp_dir().join(format!("aether-fb-history-{}-{nanos}.wasm", process::id()));
+        fs::write(&historical_path, historical_wasm).expect("write historical wasm fixture");
+        let unnamed_hash = match bench.upload_component(historical_path.to_string_lossy().as_ref(), None) {
+            UploadComponentResult::Ok { hash, name } => {
+                assert!(name.is_none());
+                hash
+            }
+            UploadComponentResult::Err { error } => panic!("uploading unnamed component history failed: {error}"),
+        };
+
+        let live = bench.list_component_binaries(&ListComponentBinaries::default());
+        assert_eq!(live.total_matched, 1, "the default page contains only name-pointed registry rows");
+        assert_eq!(live.components.len(), 1);
+        assert_eq!(live.components[0].hash, named_hash);
+        assert!(!live.components.iter().any(|entry| entry.hash == unnamed_hash));
+
+        let history = bench.list_component_binaries(&ListComponentBinaries {
+            include_history: true,
+            ..ListComponentBinaries::default()
+        });
+        assert_eq!(history.total_matched, 2, "history opt-in includes the unnamed hash across RPC");
+        assert!(history.components.iter().any(|entry| entry.hash == unnamed_hash));
+
+        let zero = bench.list_component_binaries(&ListComponentBinaries {
+            limit: Some(0),
+            include_history: true,
+            ..ListComponentBinaries::default()
+        });
+        assert!(zero.components.is_empty(), "an explicit zero limit survives the RPC boundary");
+        assert_eq!(zero.total_matched, 2, "the pre-cap match count survives the RPC boundary");
+        let _ = fs::remove_file(historical_path);
     }
 
     /// Upload the probe component by staged path, then assert the store

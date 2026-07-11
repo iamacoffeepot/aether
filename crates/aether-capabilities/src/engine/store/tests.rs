@@ -78,21 +78,33 @@ fn component_store_uploads_dedups_and_resolves_by_attribute() {
 
     // A component is not listed as a binary, and vice versa.
     store.upload(b"a-binary", ArtifactKind::Binary, manifest("headless"), None);
-    assert_eq!(store.list_binaries(&ListEngineBinaries::default()).len(), 1, "only the binary lists as a binary");
-    let components = store.list_components(&ListComponentBinaries::default());
+    assert_eq!(store.matching_binaries(&ListEngineBinaries::default()).len(), 1, "only the binary lists as a binary");
+    let components = store.matching_components(&ListComponentBinaries::default());
     assert_eq!(components.len(), 1, "only the component lists as a component");
     assert_eq!(components[0].hash, h1);
 
     // Attribute filters: namespace + handled-kind keep the entry; a
     // miss drops it.
-    let by_namespace = store.list_components(&ListComponentBinaries {
+    let by_namespace = store.matching_components(&ListComponentBinaries {
         namespace: Some("test_fixture_probe".to_owned()),
         handled_kind: None,
+        limit: None,
+        include_history: false,
     });
     assert_eq!(by_namespace.len(), 1, "a matching namespace keeps it");
-    let by_kind = store.list_components(&ListComponentBinaries { namespace: None, handled_kind: Some(Tick::ID) });
+    let by_kind = store.matching_components(&ListComponentBinaries {
+        namespace: None,
+        handled_kind: Some(Tick::ID),
+        limit: None,
+        include_history: false,
+    });
     assert_eq!(by_kind.len(), 1, "a matching handled-kind keeps it");
-    let miss = store.list_components(&ListComponentBinaries { namespace: Some("nope".to_owned()), handled_kind: None });
+    let miss = store.matching_components(&ListComponentBinaries {
+        namespace: Some("nope".to_owned()),
+        handled_kind: None,
+        limit: None,
+        include_history: false,
+    });
     assert!(miss.is_empty(), "a non-matching namespace drops it");
 
     let _ = fs::remove_dir_all(&root);
@@ -164,20 +176,197 @@ fn list_applies_chassis_and_caps_filters() {
     };
     store.upload(b"desktop-bin", ArtifactKind::Binary, desktop, None);
 
-    let headless_only =
-        store.list_binaries(&ListEngineBinaries { chassis: Some("headless".to_owned()), caps: vec![], target: None });
+    let headless_only = store.matching_binaries(&ListEngineBinaries {
+        chassis: Some("headless".to_owned()),
+        caps: vec![],
+        target: None,
+        limit: None,
+        include_history: false,
+    });
     assert_eq!(headless_only.len(), 1);
     assert_eq!(headless_only[0].manifest.chassis, "headless");
 
-    let render_capable = store.list_binaries(&ListEngineBinaries {
+    let render_capable = store.matching_binaries(&ListEngineBinaries {
         chassis: None,
         caps: vec!["aether.render".to_owned()],
         target: None,
+        limit: None,
+        include_history: false,
     });
     assert_eq!(render_capable.len(), 1, "only the desktop binary links render");
     assert_eq!(render_capable[0].manifest.chassis, "desktop");
 
-    let all = store.list_binaries(&ListEngineBinaries::default());
+    let all = store.matching_binaries(&ListEngineBinaries::default());
     assert_eq!(all.len(), 2);
+    let _ = fs::remove_dir_all(&root);
+}
+
+fn binary_page_filter(limit: Option<u32>, include_history: bool) -> ListEngineBinaries {
+    ListEngineBinaries { chassis: None, caps: Vec::new(), target: None, limit, include_history }
+}
+
+#[test]
+fn listing_pages_apply_limits_after_counting_and_keep_raw_matches_uncapped() {
+    let root = temp_root("listing-cap");
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let mut hashes = Vec::new();
+    for index in 0..25 {
+        hashes.push(store.upload(
+            format!("binary-{index}").as_bytes(),
+            ArtifactKind::Binary,
+            manifest("headless"),
+            Some(format!("engine-{index}")),
+        ));
+    }
+
+    let default_page = store.list_binaries_page(&binary_page_filter(None, false));
+    assert_eq!(default_page.total_matched, 25, "the count is recorded before the default cap");
+    assert_eq!(default_page.binaries.len(), 20, "the default page is capped at twenty entries");
+    assert_eq!(
+        default_page.binaries.iter().map(|entry| &entry.hash).collect::<Vec<_>>(),
+        hashes.iter().rev().take(20).collect::<Vec<_>>(),
+        "new hashes list newest-first by first ingest"
+    );
+
+    let zero_page = store.list_binaries_page(&binary_page_filter(Some(0), false));
+    assert!(zero_page.binaries.is_empty(), "an explicit zero limit returns no entries");
+    assert_eq!(zero_page.total_matched, 25, "zero limit preserves the pre-cap count");
+    assert_eq!(store.list_binaries_page(&binary_page_filter(Some(3), false)).binaries.len(), 3);
+    assert_eq!(store.list_binaries_page(&binary_page_filter(Some(30), false)).binaries.len(), 25);
+    assert_eq!(
+        store.matching_binaries(&ListEngineBinaries::default()).len(),
+        25,
+        "selector-facing raw matching remains uncapped"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn listing_pages_exclude_unnamed_history_unless_requested() {
+    let root = temp_root("listing-history");
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let named = store.upload(b"named", ArtifactKind::Binary, manifest("headless"), Some("live".to_owned()));
+    let unnamed = store.upload(b"unnamed", ArtifactKind::Binary, manifest("headless"), None);
+
+    let live = store.list_binaries_page(&binary_page_filter(None, false));
+    assert_eq!(live.total_matched, 1);
+    assert_eq!(live.binaries.iter().map(|entry| &entry.hash).collect::<Vec<_>>(), vec![&named]);
+
+    let history = store.list_binaries_page(&binary_page_filter(None, true));
+    assert_eq!(history.total_matched, 2);
+    assert_eq!(
+        history.binaries.iter().map(|entry| &entry.hash).collect::<Vec<_>>(),
+        vec![&unnamed, &named],
+        "history still uses stable newest-first ordering"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn component_listing_pages_apply_the_same_history_count_and_limit_contract() {
+    let root = temp_root("component-listing-page");
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let named = store.upload(
+        b"named-component",
+        ArtifactKind::Component,
+        component_manifest("test.named"),
+        Some("named".to_owned()),
+    );
+    let unnamed = store.upload(b"unnamed-component", ArtifactKind::Component, component_manifest("test.unnamed"), None);
+
+    let live = store.list_components_page(&ListComponentBinaries::default());
+    assert_eq!(live.total_matched, 1);
+    assert_eq!(live.components[0].hash, named);
+    let history = store.list_components_page(&ListComponentBinaries {
+        limit: None,
+        include_history: true,
+        ..ListComponentBinaries::default()
+    });
+    assert_eq!(history.total_matched, 2);
+    assert_eq!(history.components.iter().map(|entry| &entry.hash).collect::<Vec<_>>(), vec![&unnamed, &named]);
+    let zero = store.list_components_page(&ListComponentBinaries {
+        limit: Some(0),
+        include_history: true,
+        ..ListComponentBinaries::default()
+    });
+    assert!(zero.components.is_empty());
+    assert_eq!(zero.total_matched, 2);
+    assert_eq!(
+        store.matching_components(&ListComponentBinaries::default()).len(),
+        2,
+        "selector-facing component matching remains uncapped and includes history"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn first_ingest_order_survives_dedup_and_reopen() {
+    let root = temp_root("listing-persisted-order");
+    let (older, newer) = {
+        let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+        let older = store.upload(b"older", ArtifactKind::Binary, manifest("headless"), Some("older".to_owned()));
+        let newer = store.upload(b"newer", ArtifactKind::Binary, manifest("headless"), Some("newer".to_owned()));
+        let duplicate =
+            store.upload(b"older", ArtifactKind::Binary, manifest("headless"), Some("older-again".to_owned()));
+        assert_eq!(duplicate, older);
+        let page = store.list_binaries_page(&binary_page_filter(None, false));
+        assert_eq!(page.binaries.iter().map(|entry| &entry.hash).collect::<Vec<_>>(), vec![&newer, &older]);
+        (older, newer)
+    };
+
+    let reopened = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let page = reopened.list_binaries_page(&binary_page_filter(None, false));
+    assert_eq!(
+        page.binaries.iter().map(|entry| &entry.hash).collect::<Vec<_>>(),
+        vec![&newer, &older],
+        "persisted first-ingest order survives reopen"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn legacy_sidecars_restore_at_zero_with_deterministic_hash_ties() {
+    let root = temp_root("listing-legacy-order");
+    let (left, right) = {
+        let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+        let left = store.upload(b"legacy-left", ArtifactKind::Binary, manifest("headless"), Some("left".to_owned()));
+        let right = store.upload(b"legacy-right", ArtifactKind::Binary, manifest("headless"), Some("right".to_owned()));
+        (left, right)
+    };
+    for hash in [&left, &right] {
+        let path = root.join("entries").join(format!("{hash}.manifest"));
+        let mut sidecar: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read sidecar")).expect("decode sidecar JSON");
+        sidecar.as_object_mut().expect("sidecar is an object").remove("uploaded_seq");
+        fs::write(&path, serde_json::to_vec(&sidecar).expect("encode legacy sidecar")).expect("write legacy sidecar");
+    }
+
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let mut legacy_hashes = vec![left, right];
+    legacy_hashes.sort();
+    let legacy_page = store.list_binaries_page(&binary_page_filter(None, false));
+    assert_eq!(
+        legacy_page.binaries.iter().map(|entry| entry.hash.clone()).collect::<Vec<_>>(),
+        legacy_hashes,
+        "legacy sequence-zero ties sort by hash"
+    );
+
+    let fresh = store.upload(b"fresh", ArtifactKind::Binary, manifest("headless"), Some("fresh".to_owned()));
+    let page = store.list_binaries_page(&binary_page_filter(None, false));
+    assert_eq!(page.binaries[0].hash, fresh, "a post-restore ingest receives the next sequence");
+    assert_eq!(page.binaries[1..].iter().map(|entry| entry.hash.clone()).collect::<Vec<_>>(), legacy_hashes);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn multiple_names_share_one_row_with_the_smallest_representative() {
+    let root = temp_root("listing-multi-name");
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let hash = store.upload(b"same", ArtifactKind::Binary, manifest("headless"), Some("zeta".to_owned()));
+    assert_eq!(store.upload(b"same", ArtifactKind::Binary, manifest("headless"), Some("alpha".to_owned())), hash);
+
+    let page = store.list_binaries_page(&binary_page_filter(None, false));
+    assert_eq!(page.total_matched, 1, "one content hash remains one listing row");
+    assert_eq!(page.binaries[0].name.as_deref(), Some("alpha"));
     let _ = fs::remove_dir_all(&root);
 }
