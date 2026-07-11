@@ -1,0 +1,19 @@
+[workspace]
+
+[package]
+name = "scratch-player-gw"
+version = "0.0.0"
+edition = "2024"
+
+[[bin]]
+name = "scratch-player-gw"
+path = "src/main.rs"
+
+[dependencies]
+aether-substrate-bundle = { path = "/home/runner/_work/aether/aether/crates/aether-substrate-bundle" }
+aether-capabilities = { path = "/home/runner/_work/aether/aether/crates/aether-capabilities" }
+aether-kit = { path = "/home/runner/_work/aether/aether/crates/aether-kit" }
+aether-actor = { path = "/home/runner/_work/aether/aether/crates/aether-actor" }
+aether-codec = { path = "/home/runner/_work/aether/aether/crates/aether-codec" }
+aether-data = { path = "/home/runner/_work/aether/aether/crates/aether-data" }
+aether-kinds = { path = "/home/runner/_work/aether/aether/crates/aether-kinds" }

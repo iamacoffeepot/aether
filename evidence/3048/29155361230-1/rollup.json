@@ -1,0 +1,34 @@
+{
+  "totals": {
+    "findings": 0,
+    "papercut": 0,
+    "missingPrimitive": 0,
+    "docGap": 0,
+    "blocker": 0,
+    "softHolds": 0
+  },
+  "succeeded": true,
+  "buildGreen": true,
+  "summary": "test",
+  "artifact": {
+    "verdict": "n-a",
+    "rationale": "The issue is a native wire/security boundary (consumer-id resolution, tracked delivery, handshake, forged-identity rejection, ordered bounded catch-up/live bundles, session capacity refusal, structured overflow close) with no rendering surface — the expected artifact is explicitly \"none.\" The captured frame shows only a generic grid backdrop with a few scattered yellow tiles, which is incidental default scene content unrelated to the feature. There is no feature-owned renderable artifact to judge, so the visual channel carries no acceptance signal for this issue."
+  },
+  "friction": {
+    "papercut": [],
+    "missing-primitive": [],
+    "doc-gap": [],
+    "blocker": []
+  },
+  "softHolds": [],
+  "tokensPerTool": [
+    {
+      "tool": "mcp__aether-hub__list_engines",
+      "calls": 1,
+      "bytesIn": 16,
+      "bytesOut": 43,
+      "tokensIn": 4,
+      "tokensOut": 11
+    }
+  ]
+}
