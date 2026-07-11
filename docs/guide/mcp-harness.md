@@ -111,14 +111,17 @@ simpler tool.
 
 **Introspection.** `describe_kinds` is how you learn what to put in `params`. The
 default call returns a compact `[{name, shape}]` listing of every kind — a one-line
-field rendering per kind, small enough to read in one shot. Pass `prefix: "aether.fs"`
-to narrow the listing to a kind family. Pass `full: true` to get the full nested
-`SchemaType` (useful for codec-exact work); combine with `prefix` to keep the payload
-bounded. `describe_component` reports a loaded component's handler kinds, their docs,
-whether it has a fallback, and its boot-config kind, addressed by the component's
-lineage name (the `aether.component/aether.embedded:NAME` address `spawn_substrate`
-/ `list_components` / `load_component` hand back). `describe_transforms` lists the
-native transforms registered at link time.
+field rendering per kind, small enough to read in one shot. Start with
+`families: true` for a sorted `[{family, count}]` digest; combine it with a
+case-sensitive `prefix` to digest one subtree (`full` is ignored in this mode).
+Use `names: ["aether.fs.write"]` for exact kinds, then add `full: true` when you
+need their nested `SchemaType`. `names` cannot combine with `families` or
+`prefix`, and a bare unfiltered `full: true` call is refused so schema output
+stays bounded. `describe_component` reports a loaded component's handler kinds,
+their docs, whether it has a fallback, and its boot-config kind, addressed by
+the component's lineage name (the `aether.component/aether.embedded:NAME`
+address `spawn_substrate` / `list_components` / `load_component` hand back).
+`describe_transforms` lists the native transforms registered at link time.
 
 **Components.** `upload_component` takes the filesystem path to a `.wasm` and
 stages it in the hub's component registry. `load_component` and

@@ -8,7 +8,7 @@ use aether_kinds::{
 use rmcp::ErrorData as McpError;
 
 use crate::args::{
-    DescribeComponentArgs, DescribeHandlersArgs, DescribeHandlersResponse, DescribeKindsArgs, KindSummary,
+    DescribeComponentArgs, DescribeHandlersArgs, DescribeHandlersResponse, DescribeKindsArgs, KindFamily, KindSummary,
     NativeCapHandlers, NativeHandlerJson, TransformListing,
 };
 
@@ -50,7 +50,38 @@ pub(super) async fn describe_kinds(mcp: &Mcp, args: DescribeKindsArgs) -> Result
         descriptors::all()
     };
 
-    let filtered: Vec<_> = if let Some(prefix) = &args.prefix {
+    if args.names.is_some() && (args.families || args.prefix.is_some()) {
+        return Err(McpError::invalid_params(
+            "names cannot be combined with families or prefix; it is an exclusive exact-name selector",
+            None,
+        ));
+    }
+    if args.full && !args.families && args.names.is_none() && args.prefix.is_none() {
+        return Err(McpError::invalid_params(
+            "bare full:true is not allowed; select kinds with names or prefix, or request a families digest",
+            None,
+        ));
+    }
+
+    if args.families {
+        let mut families = BTreeMap::<String, usize>::new();
+        for descriptor in descriptors
+            .iter()
+            .filter(|descriptor| args.prefix.as_ref().is_none_or(|prefix| descriptor.name.starts_with(prefix.as_str())))
+        {
+            let family = descriptor
+                .name
+                .rsplit_once('.')
+                .map_or(descriptor.name.as_str(), |(namespace, _)| namespace)
+                .to_owned();
+            *families.entry(family).or_default() += 1;
+        }
+        return json(&families.into_iter().map(|(family, count)| KindFamily { family, count }).collect::<Vec<_>>());
+    }
+
+    let filtered: Vec<_> = if let Some(names) = &args.names {
+        descriptors.into_iter().filter(|descriptor| names.iter().any(|name| name == &descriptor.name)).collect()
+    } else if let Some(prefix) = &args.prefix {
         descriptors.into_iter().filter(|d| d.name.starts_with(prefix.as_str())).collect()
     } else {
         descriptors

@@ -11,7 +11,13 @@ async fn describe_kinds_returns_the_substrate_inventory() {
     let (_chassis, port) = boot_hub();
     let mcp = connect_mcp(port);
     let out = mcp
-        .describe_kinds(Parameters(DescribeKindsArgs { engine_id: None, prefix: None, full: false }))
+        .describe_kinds(Parameters(DescribeKindsArgs {
+            engine_id: None,
+            families: false,
+            names: None,
+            prefix: None,
+            full: false,
+        }))
         .await
         .expect("describe_kinds ok");
     let kinds: serde_json::Value = serde_json::from_str(&out).expect("json array");
@@ -25,6 +31,83 @@ async fn describe_kinds_returns_the_substrate_inventory() {
     assert!(first.get("schema").is_none(), "compact entry must not carry schema, got: {first}");
 }
 
+/// `describe_kinds(families=true)` returns a sorted digest rather than
+/// individual kind rows.
+#[tokio::test]
+async fn describe_kinds_families_returns_digest() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let out = mcp
+        .describe_kinds(Parameters(DescribeKindsArgs {
+            engine_id: None,
+            families: true,
+            names: None,
+            prefix: None,
+            full: false,
+        }))
+        .await
+        .expect("families digest succeeds");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    assert!(!rows.is_empty(), "families digest should not be empty");
+    for row in &rows {
+        assert!(row.get("family").is_some() && row.get("count").is_some(), "digest row shape: {row}");
+        assert!(row.get("name").is_none() && row.get("shape").is_none(), "digest omits kind fields: {row}");
+        assert!(row["count"].as_u64().is_some_and(|count| count > 0), "family count is positive: {row}");
+    }
+    assert!(
+        rows.windows(2).all(|pair| pair[0]["family"].as_str() <= pair[1]["family"].as_str()),
+        "families are sorted: {rows:?}",
+    );
+}
+
+/// `families` composes with `prefix` by digesting only the matching
+/// descriptor subset.
+#[tokio::test]
+async fn describe_kinds_families_with_prefix_digests_subset() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let out = mcp
+        .describe_kinds(Parameters(DescribeKindsArgs {
+            engine_id: None,
+            families: true,
+            names: None,
+            prefix: Some("aether.fs".to_owned()),
+            full: false,
+        }))
+        .await
+        .expect("prefix-filtered families digest succeeds");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    assert!(!rows.is_empty(), "aether.fs should contain at least one family");
+    assert!(
+        rows.iter().all(|row| row["family"].as_str().is_some_and(|family| family.starts_with("aether.fs"))),
+        "only prefix-matching families are returned: {rows:?}",
+    );
+}
+
+/// `families` is the active selector when `full` is also true, so the
+/// digest succeeds and does not grow schema fields.
+#[tokio::test]
+async fn describe_kinds_families_ignores_full() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let out = mcp
+        .describe_kinds(Parameters(DescribeKindsArgs {
+            engine_id: None,
+            families: true,
+            names: None,
+            prefix: None,
+            full: true,
+        }))
+        .await
+        .expect("families plus full succeeds as a digest");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    assert!(!rows.is_empty(), "families digest should not be empty");
+    assert!(
+        rows.iter().all(|row| row.get("family").is_some() && row.get("schema").is_none()),
+        "full is ignored for the family digest: {rows:?}",
+    );
+}
+
 /// `describe_kinds(prefix="aether.fs")` narrows the array to only the
 /// fs kinds — every returned name starts with the prefix.
 #[tokio::test]
@@ -34,6 +117,8 @@ async fn describe_kinds_prefix_narrows_results() {
     let out = mcp
         .describe_kinds(Parameters(DescribeKindsArgs {
             engine_id: None,
+            families: false,
+            names: None,
             prefix: Some("aether.fs".to_owned()),
             full: false,
         }))
@@ -47,15 +132,61 @@ async fn describe_kinds_prefix_narrows_results() {
     }
 }
 
-/// `describe_kinds(full=true)` returns objects with a `schema` key
-/// (the full nested `SchemaType`) and no `shape` key.
+/// `describe_kinds(names=[...])` returns exactly the named kind with no
+/// prefix overmatch.
 #[tokio::test]
-async fn describe_kinds_full_returns_schema_key() {
+async fn describe_kinds_names_returns_exact_kind() {
     let (_chassis, port) = boot_hub();
     let mcp = connect_mcp(port);
     let out = mcp
         .describe_kinds(Parameters(DescribeKindsArgs {
             engine_id: None,
+            families: false,
+            names: Some(vec!["aether.fs.write".to_owned()]),
+            prefix: None,
+            full: false,
+        }))
+        .await
+        .expect("exact-name lookup succeeds");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    assert_eq!(rows.len(), 1, "exact-name lookup returns one kind: {rows:?}");
+    assert_eq!(rows[0]["name"], "aether.fs.write");
+    assert!(rows[0].get("shape").is_some() && rows[0].get("schema").is_none(), "compact exact row: {rows:?}");
+}
+
+/// `names` composes with `full` to return only the exact kind's nested
+/// schema.
+#[tokio::test]
+async fn describe_kinds_names_with_full_returns_exact_schema() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let out = mcp
+        .describe_kinds(Parameters(DescribeKindsArgs {
+            engine_id: None,
+            families: false,
+            names: Some(vec!["aether.fs.write".to_owned()]),
+            prefix: None,
+            full: true,
+        }))
+        .await
+        .expect("exact-name full lookup succeeds");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
+    assert_eq!(rows.len(), 1, "exact-name full lookup returns one kind: {rows:?}");
+    assert_eq!(rows[0]["name"], "aether.fs.write");
+    assert!(rows[0].get("schema").is_some() && rows[0].get("shape").is_none(), "full exact row: {rows:?}");
+}
+
+/// `describe_kinds(prefix=..., full=true)` returns objects with a
+/// `schema` key (the full nested `SchemaType`) and no `shape` key.
+#[tokio::test]
+async fn describe_kinds_prefix_with_full_returns_schema_key() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let out = mcp
+        .describe_kinds(Parameters(DescribeKindsArgs {
+            engine_id: None,
+            families: false,
+            names: None,
             prefix: Some("aether.fs".to_owned()),
             full: true,
         }))
@@ -69,6 +200,41 @@ async fn describe_kinds_full_returns_schema_key() {
     }
 }
 
+/// Exact names are exclusive with other selectors, and unfiltered full
+/// vocabulary dumps are refused.
+#[tokio::test]
+async fn describe_kinds_rejects_selector_conflicts_and_bare_full() {
+    let (_chassis, port) = boot_hub();
+    let mcp = connect_mcp(port);
+    let cases = [
+        (
+            "names plus prefix",
+            DescribeKindsArgs {
+                engine_id: None,
+                families: false,
+                names: Some(vec!["aether.fs.write".to_owned()]),
+                prefix: Some("aether.fs".to_owned()),
+                full: false,
+            },
+        ),
+        (
+            "names plus families",
+            DescribeKindsArgs {
+                engine_id: None,
+                families: true,
+                names: Some(vec!["aether.fs.write".to_owned()]),
+                prefix: None,
+                full: false,
+            },
+        ),
+        ("bare full", DescribeKindsArgs { engine_id: None, families: false, names: None, prefix: None, full: true }),
+    ];
+    for (label, args) in cases {
+        let result = mcp.describe_kinds(Parameters(args)).await;
+        assert!(result.is_err(), "{label} should be rejected");
+    }
+}
+
 /// `describe_kinds(prefix="zzz.does.not.exist")` returns an empty
 /// array — not an error.
 #[tokio::test]
@@ -78,6 +244,8 @@ async fn describe_kinds_nonmatching_prefix_returns_empty() {
     let out = mcp
         .describe_kinds(Parameters(DescribeKindsArgs {
             engine_id: None,
+            families: false,
+            names: None,
             prefix: Some("zzz.does.not.exist".to_owned()),
             full: false,
         }))
@@ -117,7 +285,13 @@ async fn describe_kinds_live_path_surfaces_component_defined_kind() {
     mcp.merge_into_engine_cache(engine, vec![component_kind.clone()]);
 
     let out = mcp
-        .describe_kinds(Parameters(DescribeKindsArgs { engine_id: Some(engine_id_str), prefix: None, full: false }))
+        .describe_kinds(Parameters(DescribeKindsArgs {
+            engine_id: Some(engine_id_str),
+            families: false,
+            names: None,
+            prefix: None,
+            full: false,
+        }))
         .await
         .expect("describe_kinds ok with engine_id");
     let arr: Vec<serde_json::Value> = serde_json::from_str(&out).expect("json array");
