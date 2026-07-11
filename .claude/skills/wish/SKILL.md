@@ -177,6 +177,7 @@ adversity: data | empathy
 parent: ../wish.md                # omit if root
 supports:                           # optional, only if branch-overlap with memory
   - "[[memory-entry-name]]"
+filed: "#NNN"                       # optional — set by /sketch --from-wish when the leaf is filed
 producible: true | false            # true means this wish IS a plan
 grounded_surfaces:                  # every pass writes re-greppable `identifier` — crates/aether-*/src/path citations
   - "`aether.fs.read` — crates/aether-capabilities/src/fs/kinds.rs"
@@ -375,7 +376,7 @@ Output root: `wishes/<YYYY-MM-DD>-<theme-slug>/`. Write `index.md` and each `wis
 
 Read the index, drill into the wishes that interest you.
 Drill an alternative or sub-wish deeper: /wish --under <wish-path>
-File leaf plans you want to commit to as Backlog-Phase issues.
+File leaf plans you want to commit to as Backlog-Phase issues: /sketch --from-wish <leaf-path>.
 ```
 
 Deep mode (`--deep`) reports from the workflow's returned stats instead:
@@ -394,7 +395,7 @@ Weighted sketches (<leafCount> leaves):
 
 The tree is on disk and resumable across sessions.
 Drill a subtree deeper in a later pass: /wish --under <wish-path>
-Skinny leaves (S/M/L): file with /sketch then /scope.
+Skinny leaves (S/M/L): file with /sketch --from-wish <leaf-path> then /scope.
 Fat leaves (XL): decompose via /wish --under <path>, or file fat for sweep fat.
 ```
 
