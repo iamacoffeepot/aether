@@ -909,7 +909,8 @@ pub struct CaptureCheckSpec {
 /// Optional reference-image similarity check for `capture_frame`. The
 /// render thread scores the captured RGBA against a decoded reference
 /// image with a normalised mean-absolute-error metric and returns
-/// `similarity_score` / `similarity_pass` alongside the PNG
+/// `similarity_score` / `similarity_pass`; a checks-driven capture omits
+/// the inline image by default unless `include_image` overrides it
 /// (iamacoffeepot/aether#1780).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CaptureSimilaritySpec {
@@ -939,8 +940,9 @@ pub struct CaptureFrameArgs {
     #[serde(default)]
     pub after_mails: Vec<CaptureMailSpec>,
     /// Reductions to score substrate-side on the captured frame's raw
-    /// RGBA, returned as a `verdict` alongside the PNG. Omit for a
-    /// PNG-only capture (iamacoffeepot/aether#1777).
+    /// RGBA, returned as a `verdict` text block. When this is non-empty,
+    /// `include_image` defaults to `false`; set it explicitly to keep an
+    /// inline image too (iamacoffeepot/aether#1777).
     #[serde(default)]
     pub checks: Vec<CaptureCheckSpec>,
     /// Optional reference-image similarity check scored on the captured
@@ -949,14 +951,29 @@ pub struct CaptureFrameArgs {
     /// (iamacoffeepot/aether#1780).
     #[serde(default)]
     pub similarity: Option<CaptureSimilaritySpec>,
+    /// Optional proportional inline-image reduction in `(0.0, 1.0]`,
+    /// applied before `max_dimension`. Omit for `1.0`. It only shapes the
+    /// returned image; checks and `save_path` keep using the full frame.
+    #[serde(default)]
+    pub scale: Option<f32>,
+    /// Optional inclusive ceiling for the inline image's long edge,
+    /// applied after `scale`. Omit for `768`; `0` is invalid. The image
+    /// never upscales, and checks and `save_path` keep using the full frame.
+    #[serde(default)]
+    pub max_dimension: Option<u32>,
+    /// Whether to return the optional inline PNG. Omit to include it for
+    /// plain or similarity-only captures and omit it for checks-driven
+    /// captures. An explicit value overrides that default.
+    #[serde(default)]
+    pub include_image: Option<bool>,
     /// Optional absolute harness-host path to also persist the exact
     /// captured PNG bytes to (iamacoffeepot/aether#2962). Missing parent
     /// directories are created; an existing file at the path is
     /// overwritten. A relative path is an `invalid_params` error before
     /// the capture touches the wire. A write failure after a successful
-    /// capture never fails the call — the inline image content is
-    /// unchanged either way, and the outcome rides in its own `saved`
-    /// text block. Omit for the prior inline-only behaviour.
+    /// capture never fails the call — the lossless saved bytes are
+    /// unchanged regardless of whether an inline image is requested, and
+    /// the outcome rides in its own `saved` text block.
     #[serde(default)]
     pub save_path: Option<String>,
 }

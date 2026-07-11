@@ -38,6 +38,7 @@ pub use aether_data::{Kind, KindId, MailboxId};
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
+pub use aether_substrate::mail::MailId;
 pub use aether_substrate::mail::mailer::Mailer;
 pub use aether_substrate::mail::registry::{MailboxEntry, Registry};
 

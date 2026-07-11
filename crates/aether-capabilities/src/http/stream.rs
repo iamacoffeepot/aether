@@ -120,6 +120,7 @@ impl WebSocketStream {
     /// the cap sends at accept time before any peer traffic (ADR-0132).
     /// `None` when the dispatch has no component source.
     #[must_use]
+    //noinspection DuplicatedCode -- response and websocket handles are distinct public protocol types.
     pub fn from_credit(ctx: &impl OutboundReply, credit: &HttpStreamCredit) -> Option<Self> {
         Some(Self { counterparty: ctx.source_mailbox()?, stream_id: credit.stream_id })
     }
