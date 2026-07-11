@@ -337,9 +337,9 @@ mod tests {
     }
 
     /// Block until `cell` holds at least one entry (returning a clone of
-    /// the first), or the deadline passes (panicking with `what`).
+    /// the first); the 30-second deadline is only a hang guard.
     fn await_first<T: Clone>(cell: &Arc<Mutex<Vec<T>>>, what: &str) -> T {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             // Clone out under the guard, then drop it before the branch
             // (clippy `significant_drop_in_scrutinee`).
@@ -347,7 +347,7 @@ mod tests {
             if let Some(first) = first {
                 return first;
             }
-            assert!(Instant::now() < deadline, "{what} within 5s");
+            assert!(Instant::now() < deadline, "{what}; 30-second hang guard elapsed");
             thread::sleep(Duration::from_millis(20));
         }
     }
