@@ -146,40 +146,63 @@ async fn run_scenario(endpoint: &str, component: &Path) -> Result<BTreeMap<Strin
     let transport = StreamableHttpClientTransport::from_uri(endpoint.to_owned());
     let client =
         ClientInfo::default().serve(transport).await.with_context(|| format!("initialize MCP client at {endpoint}"))?;
-    let mut measurements = BTreeMap::new();
+    let scenario_result = async {
+        let mut measurements = BTreeMap::new();
 
-    let upload = call_measured(
-        &client,
-        &mut measurements,
-        "upload_component",
-        json!({"staged_path": component, "name": COMPONENT_NAME}),
-    )
-    .await?;
-    let uploaded: Value = text_json(&upload, "upload_component")?;
-    let selector = uploaded.get("name").and_then(Value::as_str).unwrap_or(COMPONENT_NAME).to_owned();
+        let upload = call_measured(
+            &client,
+            &mut measurements,
+            "upload_component",
+            json!({"staged_path": component, "name": COMPONENT_NAME}),
+        )
+        .await?;
+        let uploaded: Value = text_json(&upload, "upload_component")?;
+        let selector = uploaded.get("name").and_then(Value::as_str).unwrap_or(COMPONENT_NAME).to_owned();
 
-    let spawn = call_measured(
-        &client,
-        &mut measurements,
-        "spawn_substrate",
-        json!({
-            "selector": "aether-substrate",
-            "args": ["--window-mode", "windowed:320x240"],
-            "components": [],
-        }),
-    )
-    .await?;
-    let spawned: Value = text_json(&spawn, "spawn_substrate")?;
-    let engine_id = spawned
-        .get("engine_id")
-        .and_then(Value::as_str)
-        .context("spawn_substrate response omitted engine_id")?
-        .to_owned();
+        let spawn = call_measured(
+            &client,
+            &mut measurements,
+            "spawn_substrate",
+            json!({
+                "selector": "aether-substrate",
+                "args": ["--window-mode", "windowed:320x240"],
+                "components": [],
+            }),
+        )
+        .await?;
+        let spawned: Value = text_json(&spawn, "spawn_substrate")?;
+        let engine_id = spawned
+            .get("engine_id")
+            .and_then(Value::as_str)
+            .context("spawn_substrate response omitted engine_id")?
+            .to_owned();
 
-    call_measured(&client, &mut measurements, "describe_kinds", json!({"engine_id": engine_id, "full": false})).await?;
+        let exercise_result = exercise_substrate(&client, &mut measurements, &engine_id, &selector).await;
+
+        let terminate_result =
+            call_unmeasured(&client, "terminate_substrate", json!({"engine_id": engine_id})).await.map(|_| ());
+        finish_with_cleanup(exercise_result, terminate_result, "terminate spawned substrate")?;
+        Ok(measurements)
+    }
+    .await;
+
+    let close_result = client.cancel().await.map(|_| ()).context("close MCP client");
+    finish_with_cleanup(scenario_result, close_result, "close MCP client")
+}
+
+async fn exercise_substrate<S>(
+    client: &RunningService<RoleClient, S>,
+    measurements: &mut BTreeMap<String, Measurement>,
+    engine_id: &str,
+    selector: &str,
+) -> Result<()>
+where
+    S: Service<RoleClient>,
+{
+    call_measured(client, measurements, "describe_kinds", json!({"engine_id": engine_id, "full": false})).await?;
     call_measured(
-        &client,
-        &mut measurements,
+        client,
+        measurements,
         "load_component",
         json!({
             "engine_id": engine_id,
@@ -190,8 +213,8 @@ async fn run_scenario(endpoint: &str, component: &Path) -> Result<BTreeMap<Strin
     )
     .await?;
     call_measured(
-        &client,
-        &mut measurements,
+        client,
+        measurements,
         "send_mail_traced",
         json!({
             "engine_id": engine_id,
@@ -206,8 +229,8 @@ async fn run_scenario(endpoint: &str, component: &Path) -> Result<BTreeMap<Strin
     )
     .await?;
     call_measured(
-        &client,
-        &mut measurements,
+        client,
+        measurements,
         "capture_frame",
         json!({
             "engine_id": engine_id,
@@ -233,10 +256,8 @@ async fn run_scenario(endpoint: &str, component: &Path) -> Result<BTreeMap<Strin
         }),
     )
     .await?;
-    call_measured(&client, &mut measurements, "list_components", json!({"namespace": COMPONENT_EXPORT})).await?;
-
-    client.cancel().await.context("close MCP client")?;
-    Ok(measurements)
+    call_measured(client, measurements, "list_components", json!({"namespace": COMPONENT_EXPORT})).await?;
+    Ok(())
 }
 
 async fn call_measured<S>(
@@ -261,6 +282,36 @@ where
         bail!("MCP tool {tool} failed: {}", content_text(&result));
     }
     Ok(result)
+}
+
+async fn call_unmeasured<S>(
+    client: &RunningService<RoleClient, S>,
+    tool: &str,
+    arguments: Value,
+) -> Result<CallToolResult>
+where
+    S: Service<RoleClient>,
+{
+    let arguments: JsonObject = serde_json::from_value(arguments).context("tool arguments must be a JSON object")?;
+    let result = client
+        .call_tool(CallToolRequestParams::new(tool.to_owned()).with_arguments(arguments))
+        .await
+        .with_context(|| format!("call MCP tool {tool}"))?;
+    if result.is_error == Some(true) {
+        bail!("MCP tool {tool} failed: {}", content_text(&result));
+    }
+    Ok(result)
+}
+
+fn finish_with_cleanup<T>(operation: Result<T>, cleanup: Result<()>, cleanup_name: &str) -> Result<T> {
+    match (operation, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error).with_context(|| cleanup_name.to_owned()),
+        (Err(error), Err(cleanup_error)) => {
+            Err(error).with_context(|| format!("{cleanup_name} also failed: {cleanup_error:#}"))
+        }
+    }
 }
 
 fn text_json(result: &CallToolResult, tool: &str) -> Result<Value> {
@@ -510,5 +561,25 @@ mod tests {
             breaches,
             vec![Breach { tool: "capture_frame".to_owned(), raw_bytes: 90, budget_bytes: 100, received_bytes: 101 }]
         );
+    }
+
+    #[test]
+    fn cleanup_runs_without_masking_the_operation_result() {
+        assert_eq!(finish_with_cleanup(Ok(7), Ok(()), "cleanup").expect("both succeeded"), 7);
+
+        let operation_error = finish_with_cleanup::<()>(Err(anyhow!("scenario failed")), Ok(()), "cleanup")
+            .expect_err("scenario error must survive");
+        assert!(operation_error.to_string().contains("scenario failed"));
+
+        let cleanup_error = finish_with_cleanup(Ok(()), Err(anyhow!("reap failed")), "terminate")
+            .expect_err("cleanup error must surface");
+        assert!(cleanup_error.to_string().contains("terminate"));
+
+        let combined_error =
+            finish_with_cleanup::<()>(Err(anyhow!("scenario failed")), Err(anyhow!("reap failed")), "terminate")
+                .expect_err("both errors must surface");
+        let combined_message = format!("{combined_error:#}");
+        assert!(combined_message.contains("scenario failed"));
+        assert!(combined_message.contains("reap failed"));
     }
 }
