@@ -1,0 +1,15 @@
+# Standalone (own [workspace]) so it does not join the aether workspace.
+[workspace]
+
+[package]
+name = "echo-tcp"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "../../../../../crates/aether-actor" }
+aether-capabilities = { path = "../../../../../crates/aether-capabilities", default-features = false }
+tracing = { version = "0.1", default-features = false }

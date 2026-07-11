@@ -1,0 +1,76 @@
+{
+  "totals": {
+    "findings": 6,
+    "papercut": 4,
+    "missingPrimitive": 0,
+    "docGap": 1,
+    "blocker": 1,
+    "softHolds": 1
+  },
+  "succeeded": false,
+  "buildGreen": true,
+  "summary": "Authored a wasm echo component (binds an aether.tcp listener naming itself as BindListener.consumer, handles SessionData, re-frames the body, writes back via TcpWasmExt::session + SessionWrite) and a raw framed TCP driver that splits frames across writes and reassembles replies with aether_codec::frame::pop_frame. Both crates compiled green (component to wasm32-unknown-unknown, driver native). The end-to-end round-trip FAILED, blocked engine-side: the aether.tcp session delivers each reassembled frame to its bound consumer via ctx.send_to_named(consumer, SessionData), which routes through mailbox_id_from_name — a single-segment hash that (per its own doc) 'yields an id the registry never registered' for a /-rendered lineage path and silently warn-drops the mail (the guarding debug_assert compiles out in the release substrate). A wasm component's own address is always the /-rendered lineage form (aether.component/aether.embedded:NAME), so a component naming itself as consumer can never receive SessionData, and there is no consumer-side workaround. Verified positively that the same component receives SessionData fine over the MCP registry path (a direct send fired on_data), isolating the fault to the socket delivery's flat-hash name resolution. Diagnosis required reading crate internals (tcp/session/runtime.rs, listener/runtime.rs, native/ctx.rs, native/spawn_thread.rs, aether-data/hash.rs) because the whole aether.tcp surface is undocumented in docs/guide. Engine 00000000-0000-0000-0000-000000000003 left alive with the listener bound on 127.0.0.1:7777; it is a headless chassis so there is no capturable frame (this TCP task produces no visual artifact).",
+  "artifact": {
+    "verdict": "n-a",
+    "rationale": "capture_frame on engine 00000000-0000-0000-0000-000000000003 returned no frame — the substrate is headless/windowless and the recipient settled without a frame reply (MCP -32603: frame capture emits no frame on a windowless substrate). The expected artifact was explicitly \"none — transport-only,\" so there is nothing renderable to judge visually. Substrate terminated to free the fleet."
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "SessionWrite reply path vs SessionData inbound (framing asymmetry)",
+        "what": "Inbound is deframed for you (SessionData.bytes is the reassembled body), but the outbound SessionWrite writes raw bytes with NO framing, so any echo/forward consumer must hand-roll the 4-byte LE length prefix to stay on-wire. aether_codec::frame::encode_frame does not help: it wire-encodes (postcard) the value, so encode_frame(&Vec<u8>) double-encodes (adds a postcard length varint) rather than prepending a raw length prefix. There is no public primitive that just length-prefixes raw bytes.",
+        "suggested": "Add aether_codec::frame::prepend_length(&[u8]) -> Vec<u8> (raw 4-byte LE prefix, the inverse of pop_frame), and/or a TcpWasmExt helper like session_write_framed(...) that frames the body — restoring symmetry with the auto-deframed inbound side."
+      },
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "Component self-identification for BindListener.consumer (WasmCtx)",
+        "what": "To name itself as consumer a component must hardcode the string \"aether.component/aether.embedded:\" + NAMESPACE. WasmCtx exposes mailbox_id() (a MailboxId, not usable as a consumer name) but no way to get the component's own registered mailbox NAME. The convention prefix is only discoverable from a recipe. (Compounding the blocker above: the exact self-name a component must construct is precisely the /-path that send_to_named cannot route.)",
+        "suggested": "Add ctx.self_name()/self_consumer_name() returning the component's registered lineage address, so a self-registering consumer doesn't guess the aether.component/aether.embedded: convention."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "actor_logs MCP tool addressing tcp listener/session mailboxes",
+        "what": "actor_logs on the documented listener/session names (aether.tcp.listener:echo, .../aether.tcp.session:conn-0) returns 'mailbox ... not registered on engine' — those lineage-nested actors aren't resolvable by that flat name for logs, and their host-side tracing (tcp session opened/closed, frame-rejected) goes to substrate stderr, not the actor rings. So the tcp transport is effectively unobservable through the MCP harness; I could only diagnose by reading the raw substrate stderr (tunnel.log).",
+        "suggested": "Make tcp listener/session actors' log rings reachable by their lineage names via actor_logs, or route their host tracing into a queryable ring, so tcp diagnosis doesn't require host-file access."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "spawn_substrate selector for the default headless chassis",
+        "what": "spawn_substrate(selector: \"default\") errors 'no binary in the registry matched selector default'. The tool/guide docs say 'default' is the headless chassis; you must OMIT the selector entirely instead of passing the literal string 'default'.",
+        "suggested": "Either accept the literal selector \"default\" as an alias for the omitted case, or clarify in the tool description that 'default' means omit-the-field (not a passable token)."
+      }
+    ],
+    "missing-primitive": [],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "high",
+        "where": "docs/guide (SUMMARY.md has no aether.tcp entry) — the entire BindListener/SessionData/SessionWrite/consumer/framing surface",
+        "what": "The aether.tcp capability is completely undocumented in the guide: no recipe, no subsystem page, no mention of the inbound wire frame format (4-byte LE length prefix), how consumer delivery works, or that SessionWrite writes raw bytes (no framing). The only reference is ADR-0145, a higher-tier proposal that explicitly leaves the transport 'undesigned' here. To use the surface at all — and to diagnose the silent-drop blocker — I had to read crate internals (session/runtime.rs, listener/runtime.rs, native ctx/spawn_thread send_to_named, aether-data/hash.rs). A real consumer cannot do this.",
+        "suggested": "Add a docs/guide recipe (mirror serving-http.md) for the aether.tcp transport: the BindListener/consumer model, the SessionData delivery contract, the 4-byte LE length-prefix wire format, that SessionWrite is raw/unframed, and the TcpWasmExt::session reply pattern — with a worked echo example."
+      }
+    ],
+    "blocker": [
+      {
+        "category": "blocker",
+        "severity": "high",
+        "where": "BindListener.consumer / aether.tcp session inbound delivery (tcp/session/runtime.rs on_data_ready -> ctx.send_to_named)",
+        "what": "A wasm component that names ITSELF as the listener's consumer never receives any SessionData. The session delivers via ctx.send_to_named(consumer, SessionData), which resolves the name with mailbox_id_from_name (a single-segment FNV hash). A loaded component's address is the /-rendered lineage form aether.component/aether.embedded:NAME; hashing that whole string yields an id the registry never registered, so the frame is silently dropped (the /-path debug_assert compiles out in the release substrate). Confirmed by experiment: the same component's on_data fires when SessionData is sent over the MCP registry path, but never via the real socket. There is no guest-side workaround since a component cannot register at a single-segment name.",
+        "suggested": "Resolve the consumer name in the tcp session (on_data_ready and the SessionClosed path) through the registry / mailbox_id_from_path (lineage fold) instead of mailbox_id_from_name, so a /-rendered hosted-component consumer routes correctly — the same resolution the MCP Call recipient path already uses. Alternatively, if consumers are intended to be depth-1-root/singleton only (per ADR-0145's native gateway), document that BindListener.consumer must be a single-segment name and reject a /-path early rather than silently dropping."
+      }
+    ]
+  },
+  "softHolds": [
+    {
+      "kind": "blocker",
+      "where": "BindListener.consumer / aether.tcp session inbound delivery (tcp/session/runtime.rs on_data_ready -> ctx.send_to_named)",
+      "detail": "A wasm component that names ITSELF as the listener's consumer never receives any SessionData. The session delivers via ctx.send_to_named(consumer, SessionData), which resolves the name with mailbox_id_from_name (a single-segment FNV hash). A loaded component's address is the /-rendered lineage form aether.component/aether.embedded:NAME; hashing that whole string yields an id the registry never registered, so the frame is silently dropped (the /-path debug_assert compiles out in the release substrate). Confirmed by experiment: the same component's on_data fires when SessionData is sent over the MCP registry path, but never via the real socket. There is no guest-side workaround since a component cannot register at a single-segment name."
+    }
+  ],
+  "tokensPerTool": []
+}
