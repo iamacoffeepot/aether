@@ -14,7 +14,7 @@ use aether_kit::mark::{MarkId, MarkRef};
 use aether_kit::world::{
     ApplyBrush, BrushParameters, CommitProposal, DiscardProposal, Material, OperatorBudget, OperatorChunk,
     ProposalDigest, ProposalError, ProposalId, ProposalOperation, ProposalOperationResult, ProposalResult, Propose,
-    SetProposalPreview, WorldPoint,
+    SetChunk, SetProposalPreview, WorldPoint,
 };
 use aether_math::{Mat4, Vec3};
 use aether_substrate_bundle::test_bench::{ArtifactGuard, BenchOp, TestBench, test_helpers::require_runtime};
@@ -103,11 +103,78 @@ fn brush_proposal(source: MarkRef, material: Material, z_octimeters: i32) -> Pro
     }
 }
 
+fn empty_chunk_proposal(chunk_x: i32) -> Propose {
+    Propose {
+        operation: ProposalOperation::SetChunk {
+            request: SetChunk {
+                chunk_x,
+                chunk_z: 0,
+                underlay: Vec::new(),
+                underlay_points: Vec::new(),
+                height_points: Vec::new(),
+                overlay: Vec::new(),
+                overlay_mask: Vec::new(),
+                height: Vec::new(),
+                region: Vec::new(),
+                water_plane: Vec::new(),
+                smoothing: Vec::new(),
+            },
+        },
+    }
+}
+
 fn staged(result: ProposalResult) -> (ProposalId, ProposalOperationResult, ProposalDigest) {
     match result {
         ProposalResult::Staged { proposal_id, operation_result, digest } => (proposal_id, operation_result, digest),
         other => panic!("expected staged proposal, got {other:?}"),
     }
+}
+
+#[test]
+fn staged_proposal_capacity_reopens_after_discard_through_real_wasm() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let mut bench = TestBench::start_with_size(32, 32).expect("boot");
+    load_world(&mut bench, &wasm_path);
+    let world = component_address();
+
+    for index in 0..64 {
+        let staged_reply = bench
+            .execute(vec![("stage", BenchOp::send_and_await(&world, &empty_chunk_proposal(index)))])
+            .expect("stage retained proposal");
+        let (proposal_id, operation_result, _) =
+            staged(staged_reply.reply::<ProposalResult>("stage").expect("decode staged proposal"));
+        assert_eq!(proposal_id, ProposalId { value: u64::try_from(index + 1).expect("bounded index fits u64") });
+        assert_eq!(operation_result, ProposalOperationResult::Mutation);
+    }
+
+    let rejected = bench
+        .execute(vec![("reject", BenchOp::send_and_await(&world, &empty_chunk_proposal(64)))])
+        .expect("reject proposal beyond retained capacity");
+    assert_eq!(
+        rejected.reply::<ProposalResult>("reject").expect("decode capacity rejection"),
+        ProposalResult::Rejected { error: ProposalError::StagedProposalLimitReached }
+    );
+
+    let discarded = bench
+        .execute(vec![(
+            "discard",
+            BenchOp::send_and_await(&world, &DiscardProposal { proposal_id: ProposalId { value: 1 } }),
+        )])
+        .expect("discard retained proposal");
+    assert_eq!(
+        discarded.reply::<ProposalResult>("discard").expect("decode discard result"),
+        ProposalResult::Discarded { proposal_id: ProposalId { value: 1 } }
+    );
+
+    let restaged = bench
+        .execute(vec![("restage", BenchOp::send_and_await(&world, &empty_chunk_proposal(65)))])
+        .expect("restage after discard reopens capacity");
+    let (proposal_id, operation_result, _) =
+        staged(restaged.reply::<ProposalResult>("restage").expect("decode restaged proposal"));
+    assert_eq!(proposal_id, ProposalId { value: 65 }, "capacity rejection did not consume id 65");
+    assert_eq!(operation_result, ProposalOperationResult::Mutation);
 }
 
 #[test]

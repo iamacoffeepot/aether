@@ -258,6 +258,12 @@ proposals. Unknown ids reject as `UnknownProposal`, a bounded operation that
 touches nothing rejects as `NoTouchedChunks` without consuming an id, and an
 exhausted session allocator rejects as `ProposalIdExhausted`.
 
+One component session retains at most 64 staged proposals. An otherwise-valid
+65th proposal rejects as `StagedProposalLimitReached` without allocating an id
+or changing the committed world, mesh cache, or active preview. Committing or
+discarding a retained proposal reopens one slot; a later proposal can use that
+slot, but proposal ids remain monotonic and never reuse the removed id.
+
 Proposal ids are monotonic from 1 and scoped to the loaded component session.
 `replace_component` starts a fresh session: it drops proposals, preview,
 revision, and allocator state, so an id from the replaced instance is unknown
