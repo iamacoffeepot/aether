@@ -213,8 +213,65 @@ for the accepted prefix; the rejected over-cap write never occurs, and the
 consistent partial world is still remeshed. `RunAutomaton` takes a named
 `seed: { cell_x, cell_z }` and a `Grow { material, generations }` rule. Each
 accepted automaton cell costs one step and all 256 of its material subcells.
-These are live mutation results only: preview/commit/discard state belongs to
-the separate proposal transaction in ADR-0143.
+These request kinds remain immediate mutations. To inspect the same bounded
+work before changing committed terrain, wrap it in
+`aether.kit.world.propose` as a named `ProposalOperation` variant:
+
+```json
+{
+  "operation": {
+    "ApplyBrush": {
+      "request": {
+        "source": { "id": { "0": 7 }, "revision": 3 },
+        "path": [
+          { "x_octimeters": 3968, "z_octimeters": 2048 },
+          { "x_octimeters": 4224, "z_octimeters": 2048 }
+        ],
+        "brush": {
+          "radius_octimeters": 128,
+          "spacing_octimeters": 256,
+          "material": 3
+        },
+        "budget": { "max_steps": 2, "max_subcells": 4096 }
+      }
+    }
+  }
+}
+```
+
+The `aether.kit.world.proposal_result` reply is `Staged` with a named
+`proposal_id`, the ordinary mutation/operator result, and a deterministic
+digest. The digest reports sorted named chunk addresses, the checked triangle
+count, and optional named meter-space bounds of changed geometry. Staging does
+not change the committed world or its mesh cache. Send
+`set_proposal_preview { proposal_id: Some(...) }` to render that proposal in
+place, or `None` to return to committed rendering. Preview rendering preserves
+the committed cache's chunk-key ordering and resolves visible terrain-mark
+heights against the proposed terrain.
+
+Finish with `commit_proposal { proposal_id }` or
+`discard_proposal { proposal_id }`. A successful commit returns the same
+digest and advances the committed revision; concurrent peers staged against
+the prior revision then reject commit or preview as `StaleProposal` rather
+than overwriting the accepted terrain. Discard accepts fresh or stale
+proposals. Unknown ids reject as `UnknownProposal`, a bounded operation that
+touches nothing rejects as `NoTouchedChunks` without consuming an id, and an
+exhausted session allocator rejects as `ProposalIdExhausted`.
+
+One component session retains at most 64 staged proposals. An otherwise-valid
+65th proposal rejects as `StagedProposalLimitReached` without allocating an id
+or changing the committed world, mesh cache, or active preview. Committing or
+discarding a retained proposal reopens one slot; a later proposal can use that
+slot, but proposal ids remain monotonic and never reuse the removed id.
+
+Proposal ids are monotonic from 1 and scoped to the loaded component session.
+`replace_component` starts a fresh session: it drops proposals, preview,
+revision, and allocator state, so an id from the replaced instance is unknown
+before any new allocation. Direct bounded mutation, successful `load`, and
+successful proposal commit each clear the active preview and advance the
+committed revision. `set_region` and `load` remain immediate whole-world/table
+operations rather than proposal variants. ADR-0143 records the merged
+architectural direction and remains marked Proposed in its document.
 
 **Pick and project revisioned terrain marks.** Load the MarkBook under its
 default component name (`aether.kit.mark`) alongside the world component.

@@ -422,6 +422,109 @@ pub enum OperatorResult {
     Failed { source: MarkRef, error: OperatorError, stats: OperatorStats },
 }
 
+/// Session-scoped identifier for a staged terrain proposal.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProposalId {
+    pub value: u64,
+}
+
+/// Six-axis render-world bounds of geometry changed by a proposal.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct ProposalBounds {
+    pub min_x_meters: f32,
+    pub min_y_meters: f32,
+    pub min_z_meters: f32,
+    pub max_x_meters: f32,
+    pub max_y_meters: f32,
+    pub max_z_meters: f32,
+}
+
+/// Deterministic geometry summary for a staged terrain proposal.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ProposalDigest {
+    pub touched_chunks: Vec<OperatorChunk>,
+    pub triangle_count: u64,
+    pub changed_geometry_bounds: Option<ProposalBounds>,
+}
+
+/// Bounded terrain mutation that can be staged without changing committed terrain.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+pub enum ProposalOperation {
+    SetChunk { request: SetChunk },
+    SetCellPoints { request: SetCellPoints },
+    SetCellHeights { request: SetCellHeights },
+    StampPolygon { request: StampPolygon },
+    StampDisc { request: StampDisc },
+    StampHexagon { request: StampHexagon },
+    ApplyBrush { request: ApplyBrush },
+    RunAutomaton { request: RunAutomaton },
+}
+
+/// Operation-specific result retained alongside a staged proposal.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ProposalOperationResult {
+    Mutation,
+    Operator { result: OperatorResult },
+}
+
+/// `aether.kit.world.propose` — stage one bounded terrain mutation.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.world.propose")]
+pub struct Propose {
+    pub operation: ProposalOperation,
+}
+
+/// `aether.kit.world.commit_proposal` — atomically install a fresh proposal.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
+#[kind(name = "aether.kit.world.commit_proposal")]
+pub struct CommitProposal {
+    pub proposal_id: ProposalId,
+}
+
+/// `aether.kit.world.discard_proposal` — drop a fresh or stale proposal.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
+#[kind(name = "aether.kit.world.discard_proposal")]
+pub struct DiscardProposal {
+    pub proposal_id: ProposalId,
+}
+
+/// `aether.kit.world.set_proposal_preview` — select or clear the rendered proposal.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy)]
+#[kind(name = "aether.kit.world.set_proposal_preview")]
+pub struct SetProposalPreview {
+    pub proposal_id: Option<ProposalId>,
+}
+
+/// Observable rejection from the proposal lifecycle.
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ProposalError {
+    ProposalIdExhausted,
+    /// The component session already retains its maximum proposal count.
+    StagedProposalLimitReached,
+    NoTouchedChunks {
+        operation_result: ProposalOperationResult,
+    },
+    UnknownProposal {
+        proposal_id: ProposalId,
+    },
+    StaleProposal {
+        proposal_id: ProposalId,
+        proposed_at_revision: u64,
+        committed_revision: u64,
+    },
+}
+
+/// Reply shared by every proposal lifecycle request.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[kind(name = "aether.kit.world.proposal_result")]
+pub enum ProposalResult {
+    Staged { proposal_id: ProposalId, operation_result: ProposalOperationResult, digest: ProposalDigest },
+    Committed { proposal_id: ProposalId, digest: ProposalDigest },
+    Discarded { proposal_id: ProposalId },
+    PreviewSet { active_proposal_id: Option<ProposalId>, digest: Option<ProposalDigest> },
+    Rejected { error: ProposalError },
+}
+
 /// `aether.kit.world.set_cell_heights` — stamp one cell's `SUB × SUB` height
 /// deltas, the single-cell live-paint counterpart to `set_chunk`'s
 /// whole-plane `height_points` write and the height sibling of

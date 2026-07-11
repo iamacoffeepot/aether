@@ -106,16 +106,17 @@ pub use widget::{
 };
 pub use world::{
     ApplyBrush, AutomatonRule, BrushParameters, CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk,
-    ChunkPos, HEIGHT_POINT_INHERIT, HEIGHT_POINTS_PER_CHUNK, MARK_OVERLAY_COLOR, MARK_OVERLAY_LIFT_METERS,
-    MARK_PATH_HALF_WIDTH_METERS, MARK_POINT_RADIUS_METERS, MARK_SELECTED_COLOR, MARK_SELECTED_HALF_WIDTH_METERS,
-    MARK_SELECTED_HANDLE_RADIUS_METERS, MAX_MARK_OVERLAY_TRIANGLES, MAX_MARK_OVERLAY_VERTICES,
-    MAX_TERRAIN_PICK_DISTANCE_METERS, Material, OperatorBudget, OperatorCell, OperatorChunk, OperatorError,
-    OperatorResult, OperatorStats, PickTerrain, PickTerrainResult, Region, RunAutomaton, SetCellHeights, SetCellPoints,
-    SetChunk, SetMarkOverlaySelection, SetMarkOverlaySelectionResult, SetMarkOverlayVisibility,
-    SetMarkOverlayVisibilityResult, SetRegion, SmoothingProfile, StampDisc, StampHexagon, StampPolygon,
-    TERRAIN_PICK_EPSILON_METERS, TERRAIN_PICK_REFINEMENT_STEPS, TERRAIN_PICK_STEP_METERS, TerrainPickError, TerrainRay,
-    TerrainSurface, TerrainSurfaceHit, WaterPlane, World, WorldDecodeError, WorldDirection, WorldLoad, WorldPoint,
-    WorldPositionMeters,
+    ChunkPos, CommitProposal, DiscardProposal, HEIGHT_POINT_INHERIT, HEIGHT_POINTS_PER_CHUNK, MARK_OVERLAY_COLOR,
+    MARK_OVERLAY_LIFT_METERS, MARK_PATH_HALF_WIDTH_METERS, MARK_POINT_RADIUS_METERS, MARK_SELECTED_COLOR,
+    MARK_SELECTED_HALF_WIDTH_METERS, MARK_SELECTED_HANDLE_RADIUS_METERS, MAX_MARK_OVERLAY_TRIANGLES,
+    MAX_MARK_OVERLAY_VERTICES, MAX_TERRAIN_PICK_DISTANCE_METERS, Material, OperatorBudget, OperatorCell, OperatorChunk,
+    OperatorError, OperatorResult, OperatorStats, PickTerrain, PickTerrainResult, ProposalBounds, ProposalDigest,
+    ProposalError, ProposalId, ProposalOperation, ProposalOperationResult, ProposalResult, Propose, Region,
+    RunAutomaton, SetCellHeights, SetCellPoints, SetChunk, SetMarkOverlaySelection, SetMarkOverlaySelectionResult,
+    SetMarkOverlayVisibility, SetMarkOverlayVisibilityResult, SetProposalPreview, SetRegion, SmoothingProfile,
+    StampDisc, StampHexagon, StampPolygon, TERRAIN_PICK_EPSILON_METERS, TERRAIN_PICK_REFINEMENT_STEPS,
+    TERRAIN_PICK_STEP_METERS, TerrainPickError, TerrainRay, TerrainSurface, TerrainSurfaceHit, WaterPlane, World,
+    WorldDecodeError, WorldDirection, WorldLoad, WorldPoint, WorldPositionMeters,
 };
 
 /// Octimeters per tile: `1 tile = 1 meter = 256 octimeters`.

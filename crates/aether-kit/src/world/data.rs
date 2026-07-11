@@ -481,11 +481,7 @@ impl World {
     /// slice clears the cell back to all-inherit. Bytes past the cell's
     /// point count are ignored.
     pub fn set_cell_points(&mut self, cell: CellPos, points: &[u8]) {
-        let chunk = self.chunks.entry(cell.chunk()).or_insert_with(Chunk::empty_boxed);
-        let base = cell.chunk_index() * SUBCELLS_PER_CELL;
-        for i in 0..SUBCELLS_PER_CELL {
-            chunk.underlay_points[base + i] = points.get(i).copied().unwrap_or(UNDERLAY_POINT_INHERIT);
-        }
+        super::proposal::MutationTarget::set_cell_points(self, cell, points);
     }
 
     /// Write `cell`'s `SUB × SUB` height deltas (octimeters off the cell's
@@ -495,11 +491,7 @@ impl World {
     /// the cell back to no relief; deltas past the cell's point count are
     /// ignored.
     pub fn set_cell_heights(&mut self, cell: CellPos, deltas: &[i16]) {
-        let chunk = self.chunks.entry(cell.chunk()).or_insert_with(Chunk::empty_boxed);
-        let base = cell.chunk_index() * SUBCELLS_PER_CELL;
-        for i in 0..SUBCELLS_PER_CELL {
-            chunk.height_points[base + i] = deltas.get(i).copied().unwrap_or(HEIGHT_POINT_INHERIT);
-        }
+        super::proposal::MutationTarget::set_cell_heights(self, cell, deltas);
     }
 
     /// The cell's cascade default alone — its region's `default_material`
@@ -918,6 +910,27 @@ impl World {
         self.chunks.entry(at).or_insert_with(Chunk::empty_boxed).as_mut()
     }
 
+    /// Replace a chunk entry and return its prior box, preserving absence as
+    /// `None`. Proposal preview uses this narrow seam to install and restore
+    /// staged boxes without exposing the sparse map.
+    pub(super) fn replace_chunk(&mut self, at: ChunkPos, replacement: Option<Box<Chunk>>) -> Option<Box<Chunk>> {
+        match replacement {
+            Some(chunk) => self.chunks.insert(at, chunk),
+            None => self.chunks.remove(&at),
+        }
+    }
+
+    /// Implement the private mutation target through the same sparse chunk
+    /// seams used by the public immediate mutations.
+    pub(super) fn mutation_chunk(&self, at: ChunkPos) -> Option<&Chunk> {
+        self.chunk(at)
+    }
+
+    /// Clone one present chunk directly as a box for proposal copy-on-write.
+    pub(super) fn clone_chunk_box(&self, at: ChunkPos) -> Option<Box<Chunk>> {
+        self.chunks.get(&at).cloned()
+    }
+
     /// Register a region under a 1-based `id`. The table is positional,
     /// so this grows it (padding intervening slots with empty regions)
     /// and writes `region` at index `id - 1`. `id == 0` is ignored (`0`
@@ -988,6 +1001,20 @@ impl World {
     /// `BTreeMap` key order).
     pub fn chunks(&self) -> impl Iterator<Item = (ChunkPos, &Chunk)> {
         self.chunks.iter().map(|(pos, chunk)| (*pos, chunk.as_ref()))
+    }
+}
+
+impl super::proposal::MutationTarget for World {
+    fn chunk(&self, at: ChunkPos) -> Option<&Chunk> {
+        self.mutation_chunk(at)
+    }
+
+    fn chunk_mut_or_insert(&mut self, at: ChunkPos) -> &mut Chunk {
+        Self::chunk_mut_or_insert(self, at)
+    }
+
+    fn replace_chunk(&mut self, at: ChunkPos, chunk: Box<Chunk>) {
+        Self::replace_chunk(self, at, Some(chunk));
     }
 }
 
