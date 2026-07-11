@@ -13,23 +13,16 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
 
-use crate::widget::set::{push_border, quad, reply_if_hidden, text_origin_y};
+use crate::widget::set::{ActivationArms, push_border, quad, reply_if_hidden, text_origin_y};
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
     ButtonClicked, ButtonConfig, Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState,
     WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeyboardArm {
-    Enter,
-    Space,
-}
 
 /// A momentary push button. Holds its label plus the cached theme / frame /
 /// focus and the armed (`pressed`) state.
@@ -38,45 +31,29 @@ pub struct ButtonWidget {
     theme: Theme,
     frame: WidgetFrame,
     state: InteractionState,
-    /// Armed by a pointer press inside; a release-inside fires the click.
-    pointer_pressed: bool,
-    /// Suppresses key-repeat duplicates. Enter fires on its first press; Space
-    /// fires on the matching release.
-    keyboard_arm: Option<KeyboardArm>,
+    /// Shared pointer/keyboard activation state; a release-inside fires the click.
+    arms: ActivationArms,
 }
 
 impl ButtonWidget {
-    /// Whether a window-space point falls inside the button's frame.
-    fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.frame.x
-            && x <= self.frame.x + self.frame.width
-            && y >= self.frame.y
-            && y <= self.frame.y + self.frame.height
-    }
-
     /// Arm the button if the press landed inside. Owned state-machine step —
     /// unit-tested.
     fn press_at(&mut self, x: f32, y: f32) {
-        if self.state.is_available() && self.contains(x, y) {
-            self.pointer_pressed = true;
-        }
+        self.arms.press_pointer(&self.frame, self.state.is_available(), x, y);
     }
 
     /// Resolve a release: returns `true` (a click fired) only if the button
     /// was armed and the release landed back inside. Disarms either way.
     fn release_at(&mut self, x: f32, y: f32) -> bool {
-        let clicked = self.state.is_available() && self.pointer_pressed && self.contains(x, y);
-        self.pointer_pressed = false;
-        clicked
+        self.arms.release_pointer(&self.frame, self.state.is_available(), x, y)
     }
 
     fn pressed(&self) -> bool {
-        self.pointer_pressed || self.keyboard_arm == Some(KeyboardArm::Space)
+        self.arms.pressed()
     }
 
     fn clear_arms(&mut self) {
-        self.pointer_pressed = false;
-        self.keyboard_arm = None;
+        self.arms.clear();
     }
 
     fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
@@ -96,35 +73,12 @@ impl ButtonWidget {
 
     /// Apply one key press. Returns whether activation fires immediately.
     fn press_key(&mut self, code: u32) -> bool {
-        if !self.state.is_available() || self.keyboard_arm.is_some() {
-            return false;
-        }
-        match code {
-            KEY_ENTER => {
-                self.keyboard_arm = Some(KeyboardArm::Enter);
-                true
-            }
-            KEY_SPACE => {
-                self.keyboard_arm = Some(KeyboardArm::Space);
-                false
-            }
-            _ => false,
-        }
+        self.arms.press_key(self.state.is_available(), code)
     }
 
     /// Apply one matching key release. Returns whether activation fires now.
     fn release_key(&mut self, code: u32) -> bool {
-        match (code, self.keyboard_arm) {
-            (KEY_ENTER, Some(KeyboardArm::Enter)) => {
-                self.keyboard_arm = None;
-                false
-            }
-            (KEY_SPACE, Some(KeyboardArm::Space)) => {
-                self.keyboard_arm = None;
-                self.state.is_available()
-            }
-            _ => false,
-        }
+        self.arms.release_key(self.state.is_available(), code)
     }
 }
 
@@ -145,8 +99,7 @@ impl WasmActor for ButtonWidget {
             theme: config.theme,
             state: InteractionState::new(config.state),
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
-            pointer_pressed: false,
-            keyboard_arm: None,
+            arms: ActivationArms::default(),
         })
     }
 
@@ -275,7 +228,10 @@ impl WasmActor for ButtonWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
+
     use crate::widget::WidgetControlState;
+    use crate::widget::set::KeyboardArm;
 
     fn button() -> ButtonWidget {
         ButtonWidget {
@@ -283,8 +239,7 @@ mod tests {
             theme: Theme::DEFAULT,
             state: InteractionState::new(WidgetControlState::default()),
             frame: WidgetFrame { x: 10.0, y: 10.0, width: 40.0, height: 20.0 },
-            pointer_pressed: false,
-            keyboard_arm: None,
+            arms: ActivationArms::default(),
         }
     }
 
@@ -292,9 +247,9 @@ mod tests {
     fn press_inside_then_release_inside_clicks() {
         let mut b = button();
         b.press_at(20.0, 20.0);
-        assert!(b.pointer_pressed);
+        assert!(b.arms.pointer_pressed);
         assert!(b.release_at(30.0, 25.0), "press-inside then release-inside is a click");
-        assert!(!b.pointer_pressed, "disarmed after release");
+        assert!(!b.arms.pointer_pressed, "disarmed after release");
     }
 
     #[test]
@@ -302,14 +257,14 @@ mod tests {
         let mut b = button();
         b.press_at(20.0, 20.0);
         assert!(!b.release_at(200.0, 200.0), "a release that drifts off the button does not click");
-        assert!(!b.pointer_pressed, "disarmed even on a cancel");
+        assert!(!b.arms.pointer_pressed, "disarmed even on a cancel");
     }
 
     #[test]
     fn press_outside_never_arms() {
         let mut b = button();
         b.press_at(200.0, 200.0);
-        assert!(!b.pointer_pressed);
+        assert!(!b.arms.pointer_pressed);
         assert!(!b.release_at(20.0, 20.0), "a release with no prior inside-press does not click");
     }
 
@@ -326,9 +281,9 @@ mod tests {
     fn space_fires_only_on_matching_release_and_cancels_with_focus_loss() {
         let mut b = button();
         assert!(!b.press_key(KEY_SPACE));
-        assert_eq!(b.keyboard_arm, Some(KeyboardArm::Space));
+        assert_eq!(b.arms.keyboard_arm, Some(KeyboardArm::Space));
         assert!(b.release_key(KEY_SPACE));
-        assert_eq!(b.keyboard_arm, None);
+        assert_eq!(b.arms.keyboard_arm, None);
 
         b.press_key(KEY_SPACE);
         b.state.lose_focus();

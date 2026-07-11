@@ -405,6 +405,15 @@ pub enum WidgetKind {
     /// Appended after `Scroll` to preserve every established wire discriminant
     /// above.
     VirtualList,
+    /// A boolean switch — `config` decodes as [`ToggleConfig`].
+    /// Appended to preserve every established wire discriminant above.
+    Toggle,
+    /// A horizontal exclusive choice — `config` decodes as
+    /// [`SegmentedConfig`]. Appended to preserve established discriminants.
+    Segmented,
+    /// A typed and steppable bounded number — `config` decodes as
+    /// [`NumericConfig`]. Appended to preserve established discriminants.
+    Numeric,
 }
 
 impl WidgetKind {
@@ -433,6 +442,9 @@ impl WidgetKind {
             Self::TextArea => aether_data::mailbox_id_from_name("aether.kit.widget.text_area").0,
             Self::Button => aether_data::mailbox_id_from_name("aether.kit.widget.button").0,
             Self::VirtualList => aether_data::mailbox_id_from_name("aether.kit.widget.virtual_list").0,
+            Self::Toggle => aether_data::mailbox_id_from_name("aether.kit.widget.toggle").0,
+            Self::Segmented => aether_data::mailbox_id_from_name("aether.kit.widget.segmented").0,
+            Self::Numeric => aether_data::mailbox_id_from_name("aether.kit.widget.numeric").0,
             Self::Composite | Self::Scroll | Self::BehaviorHost => return None,
         };
         Some(tag)
@@ -677,6 +689,58 @@ pub struct ButtonConfig {
     pub state: WidgetControlState,
 }
 
+/// `aether.kit.widget.toggle.config` — a boolean switch with a visible
+/// `label`, starting at `initial`.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.kit.widget.toggle.config")]
+pub struct ToggleConfig {
+    pub label: String,
+    pub initial: bool,
+    pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
+}
+
+/// `aether.kit.widget.segmented.config` — a horizontal list of equal-width,
+/// mutually exclusive named options, starting at `initial_index` (clamped
+/// into range at init).
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.kit.widget.segmented.config")]
+pub struct SegmentedConfig {
+    pub options: Vec<String>,
+    pub initial_index: u32,
+    pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
+}
+
+/// `aether.kit.widget.numeric.config` — a typed, steppable number bounded by
+/// `min..=max`, snapped to `step`, and starting at `initial`.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.numeric.config")]
+pub struct NumericConfig {
+    pub min: f32,
+    pub max: f32,
+    pub step: f32,
+    pub initial: f32,
+    pub theme: Theme,
+    #[serde(default)]
+    pub state: WidgetControlState,
+}
+
+impl Default for NumericConfig {
+    fn default() -> Self {
+        Self {
+            min: 0.0,
+            max: 1.0,
+            step: 0.0,
+            initial: 0.0,
+            theme: Theme::default(),
+            state: WidgetControlState::default(),
+        }
+    }
+}
+
 /// `aether.kit.widget.label.config` — static, non-interactive `text`. A label
 /// is not focus-eligible (the root's focus register skips it).
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
@@ -778,6 +842,31 @@ pub struct VirtualListSelected {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.kit.widget.button.clicked")]
 pub struct ButtonClicked;
+
+/// `aether.kit.widget.toggle.changed` — a toggle's value-up event.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.toggle.changed")]
+pub struct ToggleChanged {
+    pub on: bool,
+}
+
+/// `aether.kit.widget.segmented.selected` — a segmented control's value-up
+/// event carrying the newly selected zero-based `index`.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.segmented.selected")]
+pub struct SegmentedSelected {
+    pub index: u32,
+}
+
+/// `aether.kit.widget.numeric.changed` — a numeric editor's value-up event.
+/// Preview edits carry `committed: false`; Enter, blur, and step-key changes
+/// carry `committed: true`.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.kit.widget.numeric.changed")]
+pub struct NumericChanged {
+    pub value: f32,
+    pub committed: bool,
+}
 
 /// `aether.kit.widget.frame` — the layout rect the root assigns a child,
 /// data-down. `(x, y)` is the child's top-left in window pixels and
@@ -977,11 +1066,17 @@ mod tests {
         let text_area = wire::to_vec(&WidgetKind::TextArea).expect("encode TextArea");
         let scroll = wire::to_vec(&WidgetKind::Scroll).expect("encode Scroll");
         let virtual_list = wire::to_vec(&WidgetKind::VirtualList).expect("encode VirtualList");
+        let toggle = wire::to_vec(&WidgetKind::Toggle).expect("encode Toggle");
+        let segmented = wire::to_vec(&WidgetKind::Segmented).expect("encode Segmented");
+        let numeric = wire::to_vec(&WidgetKind::Numeric).expect("encode Numeric");
         assert_eq!(behavior_host.as_slice(), 6_u32.to_le_bytes());
         assert_eq!(image.as_slice(), 7_u32.to_le_bytes());
         assert_eq!(text_area.as_slice(), 8_u32.to_le_bytes());
         assert_eq!(scroll.as_slice(), 9_u32.to_le_bytes());
         assert_eq!(virtual_list.as_slice(), 10_u32.to_le_bytes());
+        assert_eq!(toggle.as_slice(), 11_u32.to_le_bytes());
+        assert_eq!(segmented.as_slice(), 12_u32.to_le_bytes());
+        assert_eq!(numeric.as_slice(), 13_u32.to_le_bytes());
     }
 
     #[test]

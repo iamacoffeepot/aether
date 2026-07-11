@@ -40,23 +40,27 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
-use aether_capabilities::RenderCapability;
+use aether_capabilities::clipboard::{GetClipboardText, GetClipboardTextResult};
 use aether_capabilities::fs::NamespaceRoots;
 use aether_capabilities::render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
 use aether_capabilities::text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
+use aether_capabilities::{ClipboardCapability, RenderCapability};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
-use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_PAGE_DOWN, KEY_RIGHT, KEY_TAB, KEY_UP};
+use aether_kinds::keycode::{
+    KEY_A, KEY_BACKSPACE, KEY_C, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_PAGE_DOWN, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
+    KEY_V, KEY_X,
+};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
     CachedFontMetrics, CaptureFrame, CaptureFrameResult, ClipRect, FrameCheck, FrameCheckResult, FrameRect,
-    FrameReduction, FrameVerdict, ImePreedit, Key, LoadComponent, LoadResult, LogTailResult, Modifiers, MouseButton,
-    MouseButtonRelease, MouseMove, MouseWheel, NamedMail, TextInput, Tick,
+    FrameReduction, FrameVerdict, ImePreedit, Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, Modifiers,
+    MouseButton, MouseButtonRelease, MouseMove, MouseWheel, NamedMail, TextInput, Tick,
 };
 use aether_kit::{
-    ButtonConfig, EditorConfig, EditorRegionRect, LabelConfig, PanelConfig, RegionInputLanes, RegionSpec, ScrollConfig,
-    ScrollExtent, ScrollOffset, SetTheme, SetWidgetState, SliderConfig, TextAreaConfig, TextFieldConfig, Theme,
-    ThemeState, VirtualListConfig, WidgetChildSpec, WidgetConfig, WidgetControlState, WidgetDrawItem, WidgetKind,
-    WidgetValidation,
+    ButtonConfig, EditorConfig, EditorRegionRect, LabelConfig, NumericConfig, PanelConfig, RegionInputLanes,
+    RegionSpec, ScrollConfig, ScrollExtent, ScrollOffset, SegmentedConfig, SetTheme, SetWidgetState, SliderConfig,
+    TextAreaConfig, TextFieldConfig, Theme, ThemeState, ToggleConfig, VirtualListConfig, WidgetChildSpec, WidgetConfig,
+    WidgetControlState, WidgetDrawItem, WidgetKind, WidgetValidation,
 };
 use aether_math::Rgba;
 use aether_substrate_bundle::test_bench::{
@@ -500,6 +504,100 @@ fn control_state_children() -> Vec<WidgetChildSpec> {
     ]
 }
 
+fn toggle_child(subname: &str, label: &str, initial: bool, state: WidgetControlState) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::Toggle,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: ToggleConfig { label: label.to_owned(), initial, theme: Theme::DEFAULT, state }.encode_into_bytes(),
+    }
+}
+
+fn segmented_child(subname: &str, options: &[&str], initial_index: u32, state: WidgetControlState) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::Segmented,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: SegmentedConfig {
+            options: options.iter().map(|option| (*option).to_owned()).collect(),
+            initial_index,
+            theme: Theme::DEFAULT,
+            state,
+        }
+        .encode_into_bytes(),
+    }
+}
+
+fn numeric_child(subname: &str, initial: f32, state: WidgetControlState) -> WidgetChildSpec {
+    WidgetChildSpec {
+        subname: subname.to_owned(),
+        kind: WidgetKind::Numeric,
+        origin: [0.0, 0.0],
+        clip: None,
+        config: NumericConfig { min: -10.0, max: 20.0, step: 0.5, initial, theme: Theme::DEFAULT, state }
+            .encode_into_bytes(),
+    }
+}
+
+fn advanced_control_children() -> Vec<WidgetChildSpec> {
+    let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
+    let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
+    let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
+    vec![
+        toggle_child("toggle", "Snap", false, WidgetControlState::default()),
+        segmented_child("segment", &["Raise", "Lower", "Smooth"], 0, WidgetControlState::default()),
+        numeric_child("numeric", 2.0, WidgetControlState::default()),
+        toggle_child("disabled_toggle", "Blocked", false, disabled),
+        segmented_child("readonly_segment", &["A", "B", "C"], 0, read_only),
+        numeric_child("hidden_numeric", 3.0, hidden),
+    ]
+}
+
+fn assert_advanced_control_snapshot(snapshot: &[DrawTexturedQuads]) {
+    let toggle = solid_for(snapshot, &row_clip(PANEL_Y));
+    assert_eq!(toggle.quads.len(), 2, "toggle direct draw is track then knob");
+    assert_eq!(toggle.quads[0].tint, Theme::DEFAULT.accent, "the final toggle value is on");
+    assert_eq!(toggle.quads[1].tint, Theme::DEFAULT.accent_text, "the on knob uses accent text");
+    assert!(
+        toggle.quads[1].x > toggle.quads[0].x + toggle.quads[0].width * 0.5,
+        "the on knob sits in the track's right half",
+    );
+
+    let segment_y = PANEL_Y + ROW_HEIGHT + GAP;
+    let segmented = solid_for(snapshot, &row_clip(segment_y));
+    assert_eq!(segmented.quads.len(), 5, "three fills and two ordered dividers");
+    let segment_width = PANEL_WIDTH / 3.0;
+    assert_eq!(segmented.quads[0].x, PANEL_X);
+    assert_eq!(segmented.quads[0].width, segment_width);
+    assert_eq!(segmented.quads[1].x, PANEL_X + segment_width);
+    assert_eq!(segmented.quads[1].tint, Theme::DEFAULT.accent, "middle segment remains selected");
+    assert_eq!(segmented.quads[2].x, PANEL_X + segment_width);
+    assert_eq!(segmented.quads[2].width, 1.0, "divider follows its segment fill");
+    assert_eq!(segmented.quads[3].x, PANEL_X + segment_width * 2.0);
+    assert_eq!(segmented.quads[4].x, PANEL_X + segment_width * 2.0);
+
+    let numeric_y = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0;
+    let numeric = solid_for(snapshot, &row_clip(numeric_y));
+    assert_eq!(numeric.quads.len(), 1, "blurred canonical numeric draw has only its background solid");
+    assert_eq!(numeric.quads[0].tint, Theme::DEFAULT.surface_raised);
+
+    let disabled_y = PANEL_Y + (ROW_HEIGHT + GAP) * 3.0;
+    let disabled = solid_for(snapshot, &row_clip(disabled_y));
+    assert_eq!(
+        disabled.quads[0].tint,
+        Theme::DEFAULT.fill(Theme::DEFAULT.surface_raised, ThemeState::Disabled),
+        "disabled toggle stays off and uses disabled presentation",
+    );
+
+    let hidden_clip = row_clip(PANEL_Y + (ROW_HEIGHT + GAP) * 5.0);
+    assert!(
+        snapshot.iter().all(|batch| batch.clip.as_ref() != Some(&hidden_clip)),
+        "hidden numeric retains its slot but contributes no overlay batch",
+    );
+}
+
 fn row_clip(y: f32) -> ClipRect {
     ClipRect { x: PANEL_X, y, width: PANEL_WIDTH, height: ROW_HEIGHT }
 }
@@ -743,6 +841,16 @@ fn image_rgb(image: &Image, x: u32, y: u32) -> [u8; 3] {
 
 fn reads_yellow(pixel: [u8; 3]) -> bool {
     pixel[0] > 150 && pixel[1] > 150 && pixel[2] < 150
+}
+
+fn clipboard_text(bench: &mut TestBench) -> String {
+    let result = bench
+        .execute(vec![("clipboard", BenchOp::send_and_await(ClipboardCapability::NAMESPACE, &GetClipboardText))])
+        .expect("read deterministic clipboard");
+    match result.reply::<GetClipboardTextResult>("clipboard").expect("decode clipboard reply") {
+        GetClipboardTextResult::Ok { text } => text,
+        GetClipboardTextResult::Err { error } => panic!("read clipboard: {error}"),
+    }
 }
 
 /// The window rect of stack row `index` (0 = label), height `rows` row-heights.
@@ -1776,6 +1884,212 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
         .expect("runtime state update snapshot");
 
     assert_updated_control_snapshot(&bench.committed_overlay_snapshot(), slider_y, hover_y);
+}
+
+fn drive_toggle_and_segmented(bench: &mut TestBench, panel: &str) {
+    let toggle_y = PANEL_Y + ROW_HEIGHT * 0.5;
+    let segment_top = PANEL_Y + ROW_HEIGHT + GAP;
+    let segment_y = segment_top + ROW_HEIGHT * 0.5;
+    let segment_width = PANEL_WIDTH / 3.0;
+    bench
+        .execute(vec![
+            ("toggle_press", BenchOp::send_mail(panel, &press(PANEL_X + 12.0, toggle_y))),
+            ("toggle_release", BenchOp::send_mail(panel, &release(PANEL_X + 12.0, toggle_y))),
+            ("space_press", BenchOp::send_mail(panel, &Key { code: KEY_SPACE })),
+            ("space_release", BenchOp::send_mail(panel, &KeyRelease { code: KEY_SPACE })),
+            ("enter_press", BenchOp::send_mail(panel, &Key { code: KEY_ENTER })),
+            ("enter_release", BenchOp::send_mail(panel, &KeyRelease { code: KEY_ENTER })),
+        ])
+        .expect("toggle pointer and keyboard activation");
+    let middle_x = PANEL_X + segment_width * 1.5;
+    bench
+        .execute(vec![
+            ("segment_press", BenchOp::send_mail(panel, &press(middle_x, segment_y))),
+            ("segment_release", BenchOp::send_mail(panel, &release(middle_x, segment_y))),
+            ("segment_right", BenchOp::send_mail(panel, &Key { code: KEY_RIGHT })),
+            ("segment_left", BenchOp::send_mail(panel, &Key { code: KEY_LEFT })),
+        ])
+        .expect("segmented pointer and arrow selection");
+}
+
+fn drive_numeric_lifecycle(bench: &mut TestBench, panel: &str) {
+    let numeric_y = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0 + ROW_HEIGHT * 0.5;
+    bench
+        .execute(vec![
+            ("numeric_press", BenchOp::send_mail(panel, &press(PANEL_X + PAD + 4.0, numeric_y))),
+            ("numeric_release", BenchOp::send_mail(panel, &release(PANEL_X + PAD + 4.0, numeric_y))),
+            ("ctrl_on", BenchOp::send_mail(panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
+            ("select_all", BenchOp::send_mail(panel, &Key { code: KEY_A })),
+            ("ctrl_off", BenchOp::send_mail(panel, &Modifiers::default())),
+            ("type_numeric", BenchOp::send_mail(panel, &TextInput { text: "12.4".to_owned() })),
+            ("move_left", BenchOp::send_mail(panel, &Key { code: KEY_LEFT })),
+            ("backspace", BenchOp::send_mail(panel, &Key { code: KEY_BACKSPACE })),
+            ("replace_decimal", BenchOp::send_mail(panel, &TextInput { text: ".".to_owned() })),
+            ("commit_numeric", BenchOp::send_mail(panel, &Key { code: KEY_ENTER })),
+            ("step_up", BenchOp::send_mail(panel, &Key { code: KEY_UP })),
+            ("step_down", BenchOp::send_mail(panel, &Key { code: KEY_DOWN })),
+            ("clipboard_ctrl_on", BenchOp::send_mail(panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
+            ("clipboard_select", BenchOp::send_mail(panel, &Key { code: KEY_A })),
+            ("copy", BenchOp::send_mail(panel, &Key { code: KEY_C })),
+        ])
+        .expect("numeric typed, step, and copy lifecycle");
+    assert_eq!(clipboard_text(bench), "12.5", "Ctrl+C copies the selected canonical buffer");
+    bench
+        .execute(vec![
+            ("cut", BenchOp::send_mail(panel, &Key { code: KEY_X })),
+            ("paste", BenchOp::send_mail(panel, &Key { code: KEY_V })),
+            ("clipboard_ctrl_off", BenchOp::send_mail(panel, &Modifiers::default())),
+        ])
+        .expect("numeric cut and paste lifecycle");
+}
+
+fn drive_blur_and_blocked_states(bench: &mut TestBench, panel: &str) {
+    let segment_width = PANEL_WIDTH / 3.0;
+    let disabled_y = PANEL_Y + (ROW_HEIGHT + GAP) * 3.0 + ROW_HEIGHT * 0.5;
+    let readonly_y = PANEL_Y + (ROW_HEIGHT + GAP) * 4.0 + ROW_HEIGHT * 0.5;
+    bench
+        .execute(vec![
+            ("invalid_ctrl_on", BenchOp::send_mail(panel, &Modifiers { ctrl: true, ..Modifiers::default() })),
+            ("invalid_select", BenchOp::send_mail(panel, &Key { code: KEY_A })),
+            ("invalid_ctrl_off", BenchOp::send_mail(panel, &Modifiers::default())),
+            ("invalid_text", BenchOp::send_mail(panel, &TextInput { text: "-".to_owned() })),
+            ("blur_press", BenchOp::send_mail(panel, &press(WINDOW_WIDTH as f32 - 2.0, WINDOW_HEIGHT as f32 - 2.0))),
+            (
+                "blur_release",
+                BenchOp::send_mail(panel, &release(WINDOW_WIDTH as f32 - 2.0, WINDOW_HEIGHT as f32 - 2.0)),
+            ),
+            ("disabled_press", BenchOp::send_mail(panel, &press(PANEL_X + 12.0, disabled_y))),
+            ("disabled_release", BenchOp::send_mail(panel, &release(PANEL_X + 12.0, disabled_y))),
+            ("readonly_press", BenchOp::send_mail(panel, &press(PANEL_X + segment_width * 2.5, readonly_y))),
+            ("readonly_release", BenchOp::send_mail(panel, &release(PANEL_X + segment_width * 2.5, readonly_y))),
+            ("readonly_right", BenchOp::send_mail(panel, &Key { code: KEY_RIGHT })),
+        ])
+        .expect("blur and blocked state mutations");
+}
+
+fn assert_advanced_control_logs(logs: &[String]) {
+    let joined = logs.join("\n");
+    assert!(
+        logs.iter().any(|message| {
+            message.contains("widget toggle changed")
+                && message.contains("widget=toggle")
+                && message.contains("on=true")
+        }),
+        "toggle value-up must be source-attributed; log was:\n{joined}",
+    );
+    assert!(
+        logs.iter().any(|message| {
+            message.contains("widget segmented selected")
+                && message.contains("widget=segment")
+                && message.contains("index=1")
+        }),
+        "segmented value-up must identify the middle option; log was:\n{joined}",
+    );
+    assert!(
+        logs.iter().any(|message| {
+            message.contains("widget numeric changed")
+                && message.contains("widget=numeric")
+                && message.contains("value=12.5")
+                && message.contains("committed=false")
+        }),
+        "typed/pasted valid buffers must preview the snapped value; log was:\n{joined}",
+    );
+    let pasted_preview_count = logs
+        .iter()
+        .filter(|message| {
+            message.contains("widget numeric changed")
+                && message.contains("widget=numeric")
+                && message.contains("value=12.5")
+                && message.contains("committed=false")
+        })
+        .count();
+    assert!(
+        pasted_preview_count >= 3,
+        "typed reconstruction produces two 12.5 previews and successful paste produces the third; \
+         count={pasted_preview_count}, log was:\n{joined}",
+    );
+    assert!(
+        logs.iter().any(|message| {
+            message.contains("widget numeric changed")
+                && message.contains("widget=numeric")
+                && message.contains("value=12.5")
+                && message.contains("committed=true")
+        }),
+        "Enter/step lifecycle must commit the canonical value; log was:\n{joined}",
+    );
+    assert!(
+        logs.iter().all(|message| !message.contains("widget=disabled_toggle")),
+        "disabled toggle mutation must be absent; log was:\n{joined}",
+    );
+    assert!(
+        logs.iter().all(|message| !message.contains("widget=readonly_segment")),
+        "read-only segmented mutation must be absent; log was:\n{joined}",
+    );
+}
+
+fn assert_advanced_control_raster(bench: &mut TestBench) {
+    let segment_top = PANEL_Y + ROW_HEIGHT + GAP;
+    let segment_width = PANEL_WIDTH / 3.0;
+    let numeric_top = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0;
+    let selected_band = rect(
+        PANEL_X + segment_width + 2.0,
+        segment_top + ROW_HEIGHT - 5.0,
+        PANEL_X + segment_width * 2.0 - 2.0,
+        segment_top + ROW_HEIGHT - 2.0,
+    );
+    let unselected_band = rect(
+        PANEL_X + 2.0,
+        segment_top + ROW_HEIGHT - 5.0,
+        PANEL_X + segment_width - 2.0,
+        segment_top + ROW_HEIGHT - 2.0,
+    );
+    let numeric_text = rect(PANEL_X + PAD, numeric_top + 2.0, PANEL_X + 70.0, numeric_top + ROW_HEIGHT - 2.0);
+    let verdict = capture(
+        bench,
+        vec![
+            check(FrameReduction::Coverage, selected_band, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
+            check(FrameReduction::Coverage, unselected_band, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
+            check(FrameReduction::BoundingBox, numeric_text, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE),
+        ],
+    );
+    let selected_coverage = coverage(&verdict.results[0]);
+    let unselected_coverage = coverage(&verdict.results[1]);
+    assert!(
+        selected_coverage > 0.8 && unselected_coverage < 0.2,
+        "selected raster band must differ from its unselected neighbor; selected={selected_coverage:.3}, \
+         unselected={unselected_coverage:.3}",
+    );
+    assert!(bounding_box(&verdict.results[2]).is_some(), "canonical numeric text must remain raster-visible");
+
+    let snapshot = bench.committed_overlay_snapshot();
+    assert_advanced_control_snapshot(&snapshot);
+    let numeric_clip = row_clip(numeric_top);
+    let numeric_glyphs: usize = snapshot
+        .iter()
+        .filter(|batch| batch.texture_id != WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(&numeric_clip))
+        .map(|batch| batch.quads.len())
+        .sum();
+    assert_eq!(numeric_glyphs, 4, "canonical `12.5` renders four resident glyphs");
+}
+
+/// The three issue-2926 controls share one explicit panel scene so pointer,
+/// keyboard, clipboard, value-up attribution, normalized overlay batches, and
+/// bounded raster evidence all exercise the real wasm actors together.
+#[test]
+fn toggle_segmented_and_numeric_complete_the_real_panel_contract() {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let mut bench = build_bench();
+    boot_panel_with_children(&mut bench, &wasm, advanced_control_children());
+
+    let panel = panel_address();
+    drive_toggle_and_segmented(&mut bench, &panel);
+    drive_numeric_lifecycle(&mut bench, &panel);
+    drive_blur_and_blocked_states(&mut bench, &panel);
+    assert_advanced_control_logs(&panel_log_messages(&mut bench));
+    assert_advanced_control_raster(&mut bench);
 }
 
 #[test]
