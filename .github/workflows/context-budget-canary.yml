@@ -1,0 +1,120 @@
+name: context-budget-canary
+
+on:
+  schedule:
+    - cron: "43 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      AETHER_MCP_RESPONSE_INLINE_MAX_BYTES: "32768"
+      AETHER_MCP_REPLY_INLINE_MAX_BYTES: "262144"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install desktop capture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev mesa-vulkan-drivers xvfb libxkbcommon-x11-0 libxkbcommon-x11-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build component fixtures
+        run: cargo xtask dist
+
+      # ensure-tunnel.sh ingests this desktop release binary into the hub
+      # registry when it exists, allowing the driver to select
+      # selector=aether-substrate deterministically.
+      - name: Build desktop chassis
+        run: cargo build --release -p aether-substrate-bundle --bin aether-substrate
+
+      # Start the display before the tunnel so the tunnel, hub, and desktop
+      # substrate inherit DISPLAY through the complete fork chain.
+      - name: Start Xvfb
+        run: |
+          Xvfb :99 -screen 0 1280x800x24 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: Bring up MCP harness
+        run: scripts/ensure-tunnel.sh
+
+      - name: Assert tunnel and children are ready
+        run: |
+          ok=""
+          for _ in $(seq 1 30); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8890/admin/status -o /tmp/status.json \
+               && grep -q '"aether_mcp":{"alive":true' /tmp/status.json \
+               && grep -q '"hub":{"alive":true' /tmp/status.json; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          echo "admin/status:"
+          cat /tmp/status.json 2>/dev/null || echo "(no response)"
+          if [ -z "$ok" ]; then
+            echo "context canary harness did not become ready"
+            exit 1
+          fi
+
+      - name: Measure MCP context budgets
+        id: canary
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cargo run -p aether-context-canary -- \
+            --component "$PWD/dist/components/aether_kit.wasm" \
+            --breach-body /tmp/context-budget-breach.md \
+            2>&1 | tee /tmp/context-budget-canary.log
+
+      # Keep one open alert issue and append subsequent breach runs, matching
+      # fuzz-nightly's file-or-comment notification shape.
+      - name: File or update context-budget issue
+        if: steps.canary.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="ci: MCP context-budget canary breach"
+          if [ ! -s /tmp/context-budget-breach.md ]; then
+            {
+              echo "The scheduled MCP context-budget scenario failed before producing a budget comparison."
+              echo
+              echo "Last driver output:"
+              echo
+              echo '~~~text'
+              tail -n 200 /tmp/context-budget-canary.log
+              echo '~~~'
+            } > /tmp/context-budget-breach.md
+          fi
+          {
+            cat /tmp/context-budget-breach.md
+            echo
+            echo "- Run: ${RUN_URL}"
+          } > /tmp/context-budget-issue.md
+
+          existing=$(gh issue list --state open --search "${title} in:title" \
+            --json number,title \
+            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")
+
+          if [ -n "$existing" ]; then
+            echo "Commenting on existing context-budget issue #${existing}."
+            gh issue comment "$existing" --body-file /tmp/context-budget-issue.md
+          else
+            echo "Filing context-budget issue."
+            gh issue create --title "$title" --body-file /tmp/context-budget-issue.md
+          fi
+
+      - name: Fail on context-budget breach
+        if: steps.canary.outcome == 'failure'
+        run: exit 1
