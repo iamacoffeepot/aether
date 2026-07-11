@@ -337,9 +337,9 @@ mod tests {
     }
 
     /// Block until `cell` holds at least one entry (returning a clone of
-    /// the first); the 30-second deadline is only a hang guard.
+    /// the first), or the deadline passes (panicking with `what`).
     fn await_first<T: Clone>(cell: &Arc<Mutex<Vec<T>>>, what: &str) -> T {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             // Clone out under the guard, then drop it before the branch
             // (clippy `significant_drop_in_scrutinee`).
@@ -347,7 +347,7 @@ mod tests {
             if let Some(first) = first {
                 return first;
             }
-            assert!(Instant::now() < deadline, "{what}; 30-second hang guard elapsed");
+            assert!(Instant::now() < deadline, "{what} within 5s");
             thread::sleep(Duration::from_millis(20));
         }
     }
@@ -401,6 +401,10 @@ mod tests {
     #[test]
     fn proxy_reports_died_when_connection_closes() {
         let (port, _server) = fake_server(Behavior::Close);
+        // Hold `init` until the reader has enqueued its synthetic `Bye`
+        // and fired the still-pre-registration wake. The post-registration
+        // catch-up wake must recover that deliberately lost first wake.
+        super::connect::wait_for_reader_wake_before_connect_returns();
         let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(99, port, None);
         let died = await_first(&cells.died, "closed engine not reported dead");
         assert_eq!(died.engine_id, engine_id, "the closed engine's id is reported dead");

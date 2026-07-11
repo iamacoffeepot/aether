@@ -62,6 +62,10 @@ fn engine_cap_mailbox() -> MailboxId {
 /// `NativeActor::State` interface without exposing it as crate-public API.
 pub struct EngineProxyState {
     pub engine_id: EngineId,
+    /// This proxy's registered mailbox, retained so `wire` can issue the
+    /// post-registration catch-up wake for reader frames that arrived during
+    /// `init`.
+    pub self_mailbox: MailboxId,
     /// Cached so `on_inbound_ready` can push correlation-preserving
     /// reply mail — `NativeCtx` doesn't expose `mailer()`, only
     /// `NativeInitCtx` does.
@@ -261,6 +265,7 @@ impl NativeActor for EngineProxy {
 
         Ok(EngineProxyState {
             engine_id: config.engine_id,
+            self_mailbox,
             mailer,
             conn,
             in_flight: HashMap::new(),
@@ -270,6 +275,20 @@ impl NativeActor for EngineProxy {
             heartbeat_seq: 0,
             _heartbeat: heartbeat,
         })
+    }
+
+    /// Fire one post-registration catch-up wake. The reader starts during
+    /// `init`, before an instanced proxy's mailbox is published, so an early
+    /// frame can enqueue successfully while its accompanying wake is dropped
+    /// as unresolved. `wire` runs after publication; this self-wake ensures
+    /// the dispatcher drains any frame stranded in that gap.
+    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+        state.mailer.push(Mail::new(
+            state.self_mailbox,
+            <RpcInboundReady as Kind>::ID,
+            RpcInboundReady::default().encode_into_bytes(),
+            1,
+        ));
     }
 
     /// Relay one mail to the substrate as an RPC `Call`.
