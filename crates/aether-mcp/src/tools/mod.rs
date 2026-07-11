@@ -110,7 +110,10 @@ impl NamedMailSpec for TracedMailSpec {
 }
 
 #[cfg(test)]
-use self::bytes::{render_bytes_leaf_in, render_bytes_reply, resolve_bytes_params};
+use self::bytes::{
+    RESPONSE_SUMMARY_MAX_BYTES, render_bytes_leaf_in, render_bytes_reply, resolve_bytes_params,
+    response_inline_max_bytes_from, spill_oversized_response_in, summarize_response,
+};
 #[cfg(test)]
 use self::capture::save_capture_png;
 #[cfg(test)]
@@ -231,20 +234,24 @@ impl Mcp {
     }
 }
 
+fn guard_response_size(tool: &str, result: Result<String, McpError>) -> Result<String, McpError> {
+    result.map(|body| bytes::spill_oversized_response(tool, body))
+}
+
 #[tool_router]
 impl Mcp {
     #[tool(
         description = "List every engine the hub currently supervises, plus a recently-died sidecar. Returns an object {engines, recently_died}: each `engines` item reports the engine_id (pass it to send_mail / terminate_substrate) and the localhost RPC port the hub assigned its substrate; each `recently_died` item reports a departed engine with why it left — reason \"terminated\" (a deliberate terminate_substrate), \"crashed\" (the substrate closed its connection), \"evicted\" (a missed-heartbeat eviction), or \"spawn_failed\" (a spawn that never connected — the substrate failed to come up) — plus a detail string and how long ago it left, so a clean shutdown is distinguishable from a failure. Pass `show` to filter which lists come back so a routine liveness check doesn't pay the context cost of the whole fleet history: \"alive\" returns only {engines}, \"dead\" returns only {recently_died}, and \"all\" (the default when omitted) returns both. The unasked list is absent from the reply JSON, not present-but-empty. Any other `show` value is a tool error naming the three accepted values."
     )]
     pub async fn list_engines(&self, Parameters(args): Parameters<ListEnginesArgs>) -> Result<String, McpError> {
-        engine::list_engines(self, args).await
+        guard_response_size("list_engines", engine::list_engines(self, args).await)
     }
 
     #[tool(
         description = "Fork+exec a substrate binary as a child of the hub, resolved from the hub's content-addressed binary store (ADR-0115) — not a host path. Pass `selector` to pick the binary: a content `hash`, a `name@version`, or a `name` (upload_binary first if it isn't stored). Omit `selector` for `default` — the headless chassis — so a bare spawn_substrate with no arguments returns a working engine. When `selector` is omitted you may instead attribute-query with `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (linked-cap superset), and `target` (build triple). The hub resolves the selector to the stored bytes, materializes them to an executable temp file, assigns a free localhost RPC port (injected as AETHER_RPC_PORT), forks it, and connects a proxy. Returns the engine_id and rpc_port on success; errors if the selector resolves to no stored binary or the substrate fails to come up. A spawn that fails after the hub allocated an engine_id carries that id in the error (and records a matching spawn_failed entry in list_engines.recently_died), so you can correlate and reap rather than guess. Pass `components` (each {selector, name?, config?, config_path?, export?, replicas?}) to bring the engine up with those components already loaded in one call — each selector is a content hash, name, or module@actor resolved against the hub's component registry (ADR-0116; upload_component first). `config` is inline JSON and `config_path` is a JSON file path; aether-mcp schema-encodes either one to the component's Config kind, stages the resulting bytes next to the staged wasm, and writes a boot-manifest the hub injects as AETHER_BOOT_MANIFEST. The spawned substrate reads the staged wasm/config byte files itself (single-host), so no follow-up load_component is needed. Set replicas: N on an entry (issue 2626) to fan it out into N instances at boot from one spec, one shared config — each named {base}-{index} for index in 0..N (base = name > export > entry actor namespace) — and the readiness wait gates on every instance; pairs with #[router(shared)] (ADR-0136) to scale an HTTP handler to N instances with no hand-named entries. replicas: 0 is a tool error."
     )]
     pub async fn spawn_substrate(&self, Parameters(args): Parameters<SpawnSubstrateArgs>) -> Result<String, McpError> {
-        engine::spawn_substrate(self, args).await
+        guard_response_size("spawn_substrate", engine::spawn_substrate(self, args).await)
     }
 
     #[tool(
@@ -254,21 +261,21 @@ impl Mcp {
         &self,
         Parameters(args): Parameters<TerminateSubstrateArgs>,
     ) -> Result<String, McpError> {
-        engine::terminate_substrate(self, args).await
+        guard_response_size("terminate_substrate", engine::terminate_substrate(self, args).await)
     }
 
     #[tool(
         description = "Upload a binary into the hub's content-addressed store (ADR-0115). Pass `staged_path` — an absolute path to the binary on the fleet host — and an optional `name`. The hub reads the path itself (aether-mcp never reads the bytes — a binary is too large for the tool channel), sha256-hashes it, dedups against the store (a re-upload of identical bytes returns the same hash), forks `<binary> --describe` to capture its manifest (chassis kind, linked caps, build provenance), stores both, and points `name` (when given) at the hash. The store persists across a restart-hub. Returns {hash, name}."
     )]
     pub async fn upload_binary(&self, Parameters(args): Parameters<UploadBinaryArgs>) -> Result<String, McpError> {
-        components::upload_binary(self, args).await
+        guard_response_size("upload_binary", components::upload_binary(self, args).await)
     }
 
     #[tool(
         description = "Enumerate the hub's stored binaries (ADR-0115). Optional AND-combined filters: `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (keep only binaries whose linked caps are a superset of every listed cap), `target` (the build target triple). Omit all to list the whole store. Returns an array of {hash, name, manifest: {chassis, caps, git_sha, profile, target}} — the manifest each binary reported via a one-time --describe at upload time."
     )]
     pub async fn list_binaries(&self, Parameters(args): Parameters<ListBinariesArgs>) -> Result<String, McpError> {
-        components::list_binaries(self, args).await
+        guard_response_size("list_binaries", components::list_binaries(self, args).await)
     }
 
     #[tool(
@@ -278,35 +285,35 @@ impl Mcp {
         &self,
         Parameters(args): Parameters<UploadComponentArgs>,
     ) -> Result<String, McpError> {
-        components::upload_component(self, args).await
+        guard_response_size("upload_component", components::upload_component(self, args).await)
     }
 
     #[tool(
         description = "Enumerate the hub's stored components (ADR-0116). Optional AND-combined filters: `namespace` (keep only components exporting an actor with that Actor::NAMESPACE) and `handled_kind` (keep only components handling that kind, by tagged knd-… id or kind name). Omit both to list every stored component. Returns an array of {hash, name, manifest} — the manifest read straight from each wasm at upload: {namespaces, actors: [{namespace, handled_kinds, fallback}], handled_kinds, fallback, provenance}."
     )]
     pub async fn list_components(&self, Parameters(args): Parameters<ListComponentsArgs>) -> Result<String, McpError> {
-        components::list_components(self, args).await
+        guard_response_size("list_components", components::list_components(self, args).await)
     }
 
     #[tool(
         description = "Send one or more mail items to substrate mailboxes. Each item carries structured `params`, schema-encoded against the substrate kind vocabulary. Best-effort batch: per-item status is returned and one failure doesn't abort siblings. By default each item BLOCKS until its dispatch chain settles and the item's correlated reply payloads are returned in `replies` (status 'delivered'); each reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes (base64 string, present only on a decode miss)}. The await cap is 600s (gated by the batch-level settlement against a slow provider cap); on timeout the item reports status 'timeout' with timed_out:true and any replies collected so far. Set fire_and_forget:true to restore non-blocking dispatch (status 'dispatched', empty replies) — use it for a fire-and-poke (e.g. a DrawTriangle before a capture_frame) or a cap that never replies. For `Bytes`-typed fields in `params`, pass a byte array (`[…]`, canonical) or one `$`-sigil embed: `$file` (reads a file on the harness host), `$base64` (decodes), or `$text` (UTF-8-encodes)."
     )]
     pub async fn send_mail(&self, Parameters(args): Parameters<SendMailArgs>) -> Result<String, McpError> {
-        mail::send_mail(self, args).await
+        guard_response_size("send_mail", mail::send_mail(self, args).await)
     }
 
     #[tool(
         description = "Atomic batched dispatch with combined trace tree. Like send_mail but every spec lands on the engine's aether.trace mailbox under one shared chassis root, and the response returns the full trace subtree once the chain settles — no window guessing, no separate describe_tree call. By default it BLOCKS until settlement and also returns the batch's correlated reply payloads as a flat arrival-ordered `replies` list (the batch is one wire Call, so replies aren't per-item) alongside the tree; each reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes (base64 string, present only on a decode miss)}. Two-call protocol behind the scenes: the substrate emits a synchronous ack with the root id, the caller waits for chain settlement on the wire collecting reply events, then issues a describe_tree against the captured root. Bad specs abort the whole batch before any mail moves (mirrors capture_frame). settlement_timeout_ms caps wall-clock wait (default 300000, max 600000); on timeout the response carries status:timeout with no root, tree, or replies. Set fire_and_forget:true to return the ack only (status:dispatched with root populated, mails/replies null) without awaiting settlement."
     )]
     pub async fn send_mail_traced(&self, Parameters(args): Parameters<SendMailTracedArgs>) -> Result<String, McpError> {
-        mail::send_mail_traced(self, args).await
+        guard_response_size("send_mail_traced", mail::send_mail_traced(self, args).await)
     }
 
     #[tool(
         description = "Load a WASM component into a substrate by registry selector (ADR-0116) — upload_component first if it isn't stored. Pass `selector`: a content hash, a name (latest upload under it), or a module@actor (the @actor half picks an exported actor type from a multi-actor module). The host wasm path is gone — the only path anywhere is the upload_component input. aether-mcp resolves the selector hub-local to the wasm bytes, forwards aether.component.load to the engine's aether.component mailbox, and awaits the LoadResult — returning {mailbox_id, name, capabilities} or an error. The component's kind vocabulary rides in the wasm's aether.kinds custom section. Pass config (inline JSON) or config_path (path to a JSON file) to deliver init-config to a typed-config component (ADR-0090): aether-mcp schema-encodes the JSON to the component's Config kind before forwarding bytes — describe_component reports the expected config kind. Pass export to pick which exported actor type to instantiate from a multi-actor module (ADR-0096), named by its Actor::NAMESPACE; a module@actor selector populates it from its @actor half; omit both to load the module's entry type (the first in its export! list, and the only type a single-actor module has). The returned name + capabilities describe the selected type. Pass replicas: N (issue 2626) to load N instances of this selector in one call — each named {base}-{index} (base = name > export > entry actor namespace) — returning {\"components\": [{mailbox_id, name, capabilities}, ...]} instead of the single-load shape; pairs with #[router(shared)] (ADR-0136) to scale an HTTP handler to N instances with no hand-written registration. A mid-loop failure reports which replica failed and how many loaded before it — already-loaded replicas stay live, the same as N manual calls. replicas: 0 is a tool error. Very large wasm payloads (debug builds at 15-25 MiB) may exceed the RPC framing cap — prefer release builds, or raise the cap via the AETHER_MAX_FRAME_SIZE env var (default 64 MiB, clamped at 1 GiB; issue 1271)."
     )]
     pub async fn load_component(&self, Parameters(args): Parameters<LoadComponentArgs>) -> Result<String, McpError> {
-        components::load_component(self, args).await
+        guard_response_size("load_component", components::load_component(self, args).await)
     }
 
     #[tool(
@@ -316,7 +323,7 @@ impl Mcp {
         &self,
         Parameters(args): Parameters<ReplaceComponentArgs>,
     ) -> Result<String, McpError> {
-        components::replace_component(self, args).await
+        guard_response_size("replace_component", components::replace_component(self, args).await)
     }
 
     #[tool(
@@ -333,14 +340,14 @@ impl Mcp {
         description = "List the substrate kind vocabulary — both the static aether.* kinds and the engine's live capability + component kinds. engine_id selects which engine to query; omit it and the tool auto-resolves the sole supervised engine (the common single-substrate harness); with zero or many engines and no engine_id it returns the static substrate baseline. Default (no args) returns a compact [{name, shape}] JSON array where shape is a one-line field rendering — small and chunk-readable. prefix (case-sensitive starts_with) filters the listing to a kind family (e.g. \"aether.fs\" for just the fs kinds). full:true returns the full [{name, schema}] with the authoritative nested SchemaType; combine with prefix to bound the payload to the kinds a task needs."
     )]
     pub async fn describe_kinds(&self, Parameters(args): Parameters<DescribeKindsArgs>) -> Result<String, McpError> {
-        describe::describe_kinds(self, args).await
+        guard_response_size("describe_kinds", describe::describe_kinds(self, args).await)
     }
 
     #[tool(
         description = "List the native transforms collected at link time (ADR-0048): every #[transform] fn with its global transform_id, fully-qualified name, declared input kind ids (slot order), and output kind id. These are pure Kind -> Kind functions a DAG Transform node dispatches; this is the static inventory aether-mcp ships with (a transform set is a build-time property). Empty when no first-party transforms are linked."
     )]
     pub async fn describe_transforms(&self) -> Result<String, McpError> {
-        describe::describe_transforms()
+        guard_response_size("describe_transforms", describe::describe_transforms())
     }
 
     #[tool(
@@ -350,7 +357,7 @@ impl Mcp {
         &self,
         Parameters(args): Parameters<DescribeComponentArgs>,
     ) -> Result<String, McpError> {
-        describe::describe_component(self, args).await
+        guard_response_size("describe_component", describe::describe_component(self, args).await)
     }
 
     #[tool(
@@ -360,7 +367,7 @@ impl Mcp {
         &self,
         Parameters(args): Parameters<DescribeHandlersArgs>,
     ) -> Result<String, McpError> {
-        describe::describe_handlers(self, args).await
+        guard_response_size("describe_handlers", describe::describe_handlers(self, args).await)
     }
 
     #[tool(description = "Pull recent log entries from one actor's per-actor log ring (ADR-0081). \
@@ -374,7 +381,7 @@ impl Mcp {
                        evicted entries the caller hadn't seen yet (the lowest sequence still held). \
                        Aggregate across actors by calling this tool once per mailbox client-side.")]
     pub async fn actor_logs(&self, Parameters(args): Parameters<ActorLogsArgs>) -> Result<String, McpError> {
-        logs_cost::actor_logs(self, args).await
+        guard_response_size("actor_logs", logs_cost::actor_logs(self, args).await)
     }
 
     #[tool(description = "Dump one actor's per-handler execution-cost EWMA table \
@@ -392,7 +399,7 @@ impl Mcp {
                        check whether handler costs are heterogeneous enough to warrant the \
                        cost-aware recruiter (iamacoffeepot/aether#1127).")]
     pub async fn actor_cost(&self, Parameters(args): Parameters<ActorCostArgs>) -> Result<String, McpError> {
-        logs_cost::actor_cost(self, args).await
+        guard_response_size("actor_cost", logs_cost::actor_cost(self, args).await)
     }
 }
 
