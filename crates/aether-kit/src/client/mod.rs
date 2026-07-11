@@ -225,8 +225,11 @@ impl WasmActor for PlayerClient {
         if self.phase != ConnectionPhase::Connecting || self.session.is_some() {
             return;
         }
-        if ctx.source_mailbox() != Some(ctx.actor::<TcpCapability>().mailbox_id()) {
-            self.fail(ctx, "tcp connect result arrived from an unexpected mailbox");
+        // Component replies are source-free. Require the host correlation so
+        // an ordinary peer send cannot impersonate the deferred TCP result;
+        // the one-shot connection phase identifies the only outstanding dial.
+        if ctx.source_mailbox().is_some() || ctx.in_reply_to().is_none() {
+            self.fail(ctx, "tcp connect result was not a correlated component reply");
             return;
         }
         match result {
