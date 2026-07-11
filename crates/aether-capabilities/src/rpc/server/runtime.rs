@@ -415,6 +415,7 @@ impl NativeActor for RpcServerCapability {
         })
     }
 
+    //noinspection DuplicatedCode -- RPC and HTTP own distinct connection state and shutdown semantics.
     fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
         // Stop the accept thread; self-connect to unblock its blocking
         // `accept()`.

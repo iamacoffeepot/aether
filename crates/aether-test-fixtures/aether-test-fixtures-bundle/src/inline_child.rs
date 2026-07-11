@@ -227,8 +227,8 @@ impl WasmActor for InlineStatefulChild {
 
     /// Reply with the live counter so a test can read the child's state
     /// across a swap.
-    #[handler::manual]
     //noinspection DuplicatedCode -- actor macros require one query handler per hot-swap fixture type.
+    #[handler::manual]
     fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: self.count });
@@ -389,6 +389,7 @@ impl WasmActor for InlineConfiguredChild {
 
     /// Reply with the live counter so a test can read the child's state
     /// across a swap.
+    //noinspection DuplicatedCode -- actor macros require one query handler per hot-swap fixture type.
     #[handler::manual]
     fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {

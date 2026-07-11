@@ -330,6 +330,7 @@ impl WasmActor for ScrollWidget {
         self.drive_frame(ctx);
     }
 
+    //noinspection DuplicatedCode -- actor macros require one draw-list handler per composite owner type.
     #[handler::manual]
     fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Manual>, list: WidgetDrawList) {
         if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {

@@ -46,6 +46,7 @@ impl WasmActor for Counter {
     }
 
     /// Reply with the live counter so a test can read it across a swap.
+    //noinspection DuplicatedCode -- actor macros require one query handler per hot-swap fixture type.
     #[handler::manual]
     fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {

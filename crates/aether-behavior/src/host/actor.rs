@@ -610,6 +610,10 @@ mod tests {
         )
     }
 
+    fn attached_script_read_result() -> ReadResult {
+        ReadResult::Ok { namespace: "assets".to_string(), path: "behavior.wasm".to_string(), bytes: attach_script() }
+    }
+
     fn assert_attach_offered(sink: &RecordingSink) {
         assert_eq!(
             sink.events,
@@ -863,28 +867,12 @@ mod tests {
         runtime_context.reply = Some(reply_handle(77));
         let boot_context = load_context(ScriptLoadOrigin::Boot, "assets", "behavior.wasm");
 
-        //noinspection DuplicatedCode -- the test intentionally compares identical reads under distinct request contexts.
-        let (runtime_result, runtime_reply) = host.apply_read_result(
-            ReadResult::Ok {
-                namespace: "assets".to_string(),
-                path: "behavior.wasm".to_string(),
-                bytes: attach_script(),
-            },
-            runtime_context,
-            |_| {},
-        );
+        let (runtime_result, runtime_reply) =
+            host.apply_read_result(attached_script_read_result(), runtime_context, |_| {});
         assert!(matches!(runtime_result, Ok(_)));
         assert_eq!(runtime_reply.map(ReplyHandle::raw), Some(77));
 
-        let (boot_result, boot_reply) = host.apply_read_result(
-            ReadResult::Ok {
-                namespace: "assets".to_string(),
-                path: "behavior.wasm".to_string(),
-                bytes: attach_script(),
-            },
-            boot_context,
-            |_| {},
-        );
+        let (boot_result, boot_reply) = host.apply_read_result(attached_script_read_result(), boot_context, |_| {});
         assert!(matches!(boot_result, Ok(_)));
         assert!(boot_reply.is_none());
     }
