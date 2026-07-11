@@ -36,7 +36,7 @@ The skill assembles the workflow's arg contract (`{issue?, files, testFiles?, di
 
 The workflow sandbox cannot run `git` or `grep`, so the skill resolves the file set before invoking it:
 
-1. **Integrated** — resolve the changed files and their per-file diffs from the branch against `origin/main` (`git diff --name-only origin/main...HEAD` for the `.rs` set; `git diff origin/main...HEAD -- <file>` per file for `diffs`). Split test files (`tests/`, `#[cfg(test)]`-heavy) into `testFiles`. Read the issue body as `issue`.
+1. **Integrated** — resolve the changed files and their per-file diffs from the branch against `origin/main` by default, or the CI-provided last-reviewed SHA for an incremental re-review (`git diff --name-only <base>...HEAD` for the `.rs` set; `git diff <base>...HEAD -- <file>` per file for `diffs`). Split test files (`tests/`, `#[cfg(test)]`-heavy) into `testFiles`. Read the issue body as `issue`.
 2. **Backfill** — resolve the crate's whole-file `.rs` set (`git ls-files -- <crate>/src '*.rs'`), shard per crate to keep each run bounded, and pass no `issue`.
 
 The workflow reads source itself; there is no live MCP harness precondition (unlike `/dogfood`, `/review` does not drive a running engine).

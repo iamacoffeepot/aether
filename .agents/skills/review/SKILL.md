@@ -25,7 +25,7 @@ Prefer explicit inputs from the caller:
 - `lenses`: optional subset of `spec-fidelity`, `correctness`, `test-integrity`, `economy`, and `convention`.
 - `depth`: `gate` selects the light per-PR gate (correctness and spec fidelity, Sonnet verification, no challenge); `deep` is the default full five-pillar review.
 
-If explicit files are absent and the current branch is a PR branch, derive a candidate file set from the diff against `origin/main`. Otherwise ask for files rather than guessing.
+If explicit files are absent and the current branch is a PR branch, derive a candidate file set from the diff against `origin/main`. CI integrated mode instead uses the last-reviewed SHA as the diff base when re-reviewing a later green push. Otherwise ask for files rather than guessing.
 
 ## Workflow
 
