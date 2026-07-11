@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -108,7 +109,7 @@ async fn main() -> Result<()> {
         .canonicalize()
         .with_context(|| format!("resolve component fixture {}", args.component.display()))?;
     let budgets_path = args.budgets.unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("budgets.toml"));
-    let existing_manifest = read_manifest(&budgets_path).ok();
+    let existing_manifest = read_manifest_if_present(&budgets_path)?;
 
     let measurements = run_scenario(&endpoint, &component).await?;
     print_measurements(&measurements);
@@ -294,21 +295,18 @@ fn spill_files(result: &CallToolResult) -> Vec<SpillFile> {
 }
 
 fn collect_file_paths(value: &Value, paths: &mut BTreeSet<PathBuf>) {
-    match value {
-        Value::Array(values) => {
-            for value in values {
-                collect_file_paths(value, paths);
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Array(values) => pending.extend(values),
+            Value::Object(object) => {
+                if let Some(path) = object.get("file").and_then(Value::as_str) {
+                    paths.insert(PathBuf::from(path));
+                }
+                pending.extend(object.values());
             }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
         }
-        Value::Object(object) => {
-            if let Some(path) = object.get("file").and_then(Value::as_str) {
-                paths.insert(PathBuf::from(path));
-            }
-            for value in object.values() {
-                collect_file_paths(value, paths);
-            }
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
 }
 
@@ -320,9 +318,13 @@ fn endpoint(argument: Option<String>) -> String {
     argument.or(environment).unwrap_or_else(|| DEFAULT_ENDPOINT.to_owned())
 }
 
-fn read_manifest(path: &Path) -> Result<BudgetManifest> {
-    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
+fn read_manifest_if_present(path: &Path) -> Result<Option<BudgetManifest>> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    toml::from_str(&text).map(Some).with_context(|| format!("parse {}", path.display()))
 }
 
 fn write_manifest(path: &Path, manifest: &BudgetManifest) -> Result<()> {
