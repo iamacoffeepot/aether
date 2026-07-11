@@ -332,6 +332,31 @@ requested revision is ahead or missing and a refresh was requested). A later
 snapshot that edits or deletes the selected mark clears the highlight instead
 of silently moving it to another revision.
 
+The reference terrain workbench owns camera policy locally rather than asking
+the renderer or `WorldView` to unproject pixels. Its `TerrainViewport` retains
+the named eye/target, vertical field of view, clip distances, viewport region,
+and maximum pick distance. On `Render` it publishes the corresponding
+`ViewProjection`; on a raw pointer press it uses that same basis, field of view,
+aspect, and non-zero region origin to construct the named `TerrainRay`. The root
+coordinator sends that ray as a correlated `aether.kit.world.pick_terrain`
+request and returns the typed result to its inline viewport. The viewport also
+maps its camera projection into its declared editor region, so the ray through a
+region-local pixel agrees with the world geometry rendered at that framebuffer
+pixel.
+
+Load the workbench only after `aether.kit.mark`, `aether.kit.world`, and the
+configured `aether.kit.terra` peer. The mark book must use the exact component
+name `aether.kit.mark`: `WorldView` currently resolves overlay refreshes by that
+loaded name even though Terra and the workbench receive its mailbox id. Load the
+root with selector `aether_kit@aether.kit.workbench`. Its inspection flow uses
+only the present proposal lifecycle: `aether.kit.world.propose`,
+`aether.kit.world.set_proposal_preview`,
+`aether.kit.world.commit_proposal`, and
+`aether.kit.world.discard_proposal`, all observed through
+`aether.kit.world.proposal_result`. A staged proposal is inspected and then
+accepted or discarded; `ProposalResult::Rejected` is the typed staging gate.
+There is no separate validation request.
+
 Scalar overlay-only ground uses the contour library's continuous reconstructed
 coverage at the same 127.5 crossing as the rendered mesh, rather than treating a
 whole subcell as its stored byte. Mark geometry is capped per frame at 10,240
