@@ -57,6 +57,12 @@ enum ConnectionPhase {
     Closed,
 }
 
+impl ConnectionPhase {
+    fn admits_session_mail(self) -> bool {
+        matches!(self, Self::AwaitingHelloAck | Self::Live)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConnectedSession {
     name: String,
@@ -258,7 +264,7 @@ impl WasmActor for PlayerClient {
 
     #[handler::single]
     fn on_session_data(&mut self, ctx: &mut WasmCtx<'_>, mail: SessionData) {
-        if self.phase == ConnectionPhase::Closed {
+        if !self.phase.admits_session_mail() {
             return;
         }
         if !self.admits_session(ctx.source_mailbox(), &mail.session_name, &mail.peer) {
@@ -281,7 +287,7 @@ impl WasmActor for PlayerClient {
 
     #[handler::single]
     fn on_session_closed(&mut self, ctx: &mut WasmCtx<'_>, mail: SessionClosed) {
-        if self.phase == ConnectionPhase::Closed {
+        if !self.phase.admits_session_mail() {
             return;
         }
         if !self.admits_session(ctx.source_mailbox(), &mail.session_name, &mail.peer) {
@@ -581,6 +587,14 @@ mod tests {
         assert!(!retained.admits(Some(MailboxId(41)), "conn-8", "127.0.0.1:7777"));
         assert!(!retained.admits(Some(MailboxId(41)), "conn-7", "127.0.0.1:8888"));
         assert!(!retained.admits(None, "conn-7", "127.0.0.1:7777"));
+    }
+
+    #[test]
+    fn session_mail_is_admitted_only_after_connect_succeeds() {
+        assert!(!ConnectionPhase::Connecting.admits_session_mail());
+        assert!(ConnectionPhase::AwaitingHelloAck.admits_session_mail());
+        assert!(ConnectionPhase::Live.admits_session_mail());
+        assert!(!ConnectionPhase::Closed.admits_session_mail());
     }
 
     #[test]
