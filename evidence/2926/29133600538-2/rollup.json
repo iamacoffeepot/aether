@@ -1,0 +1,133 @@
+{
+  "totals": {
+    "findings": 5,
+    "papercut": 3,
+    "missingPrimitive": 1,
+    "docGap": 1,
+    "blocker": 0,
+    "softHolds": 1
+  },
+  "succeeded": false,
+  "buildGreen": null,
+  "summary": "Task: exercise the stock Toggle, Segmented, and Numeric widgets through pointer + keyboard activation (incl. clipboard and commit/cancel) over the MCP drive medium, rendering the result. Outcome: BLOCKED. I discovered the surface from docs/guide/systems/widgets.md + public config signatures, built and uploaded aether_kit.wasm, spawned a desktop engine, and loaded WidgetPanel — the built-in reference stack renders (label/slider/radio/text_field/button), proving the pipeline. But the three target widgets cannot be placed via drive: they are excluded from the built-in fallback stack, and a custom PanelConfig.children requires each WidgetChildSpec.config to be PRE-ENCODED wire bytes (Vec<u8>). The MCP harness transports a raw [u8] array but has NO tool to produce those bytes from structured JSON; passing empty/guessed bytes fails with 'widget child config failed to decode; slot skipped' (confirmed in actor logs). This is the gap widgets.md itself acknowledges ('author custom panel trees from Rust/component configuration code'). I then loaded a Toggle standalone (top-level flat config DOES encode from JSON) and drove it with aether.kit.widget.frame + aether.mouse_button press/release: the input is accepted, but its value-up (toggle.changed) routes to ctx.parent() which a top-level load doesn't provide, so it is silently dropped and absent from the trace tree, and Collect/draw likewise have no parent — a standalone widget is neither observable nor renderable over MCP. Both observing and rendering these widgets require a WidgetPanel root, which drive cannot compose with them. Engine 00000000-0000-0000-0000-000000000001 left alive showing the achievable artifact (built-in reference stack), NOT the target widgets. Never accomplished pointer/keyboard/clipboard/commit-cancel on the actual Toggle/Segmented/Numeric.",
+  "artifact": {
+    "verdict": "wrong",
+    "rationale": "The expected artifact requires the numeric editor to display the committed validated value, but the captured frame shows no text or numeric glyphs anywhere. The panel renders only featureless colored blocks — a header bar, a partially-filled mint-green row, a column of three small squares (one mint-green, two dark gray), and a solid mint-green bar at the bottom. None of these show a legible numeric value, and the three controls' states are not distinguishable as a slider/toggle/number editor with meaningful content. The single most concrete discrepancy: the numeric editor is blank of any digits — the committed validated value that was supposed to appear is simply not visible in the render."
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "high",
+        "where": "Standalone widget load (aether_kit@aether.kit.widget.toggle) driven over MCP",
+        "what": "A widget loaded as a top-level component accepts interaction mail (frame, mouse_button, key) but is a black box: its value-up (toggle.changed) and its Collect draw list both target ctx.parent(), which a top-level load does not provide, so they are silently dropped — not in the send_mail_traced trace tree, not in the widget's own logs, and never composited to aether.render. A drive consumer therefore cannot verify OR render a standalone widget, making the standalone path useless for exercising these controls.",
+        "suggested": "Give a loaded widget a default parent (the loader/observer mailbox) so value-up lands somewhere observable, and/or expose a way to subscribe to a component's value-up events over MCP; alternatively document that stock widgets are non-functional outside a panel root."
+      },
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "load_component inline `config` argument vs `config_path`",
+        "what": "Passing the widget/panel config inline via `config` fails with 'config does not match <kind>: field \"$\" expected object', while the byte-identical JSON passed via `config_path` loads successfully. Reproduced across PanelConfig and ToggleConfig, with and without the optional `state` field and with floats throughout, so it is not an int-vs-float or missing-field issue — the inline path mishandles the config value at the schema root. The tool advertises inline `config` as equivalent to `config_path`.",
+        "suggested": "Fix the inline `config` transport in aether-mcp to feed the encoder the same object `config_path` does (it currently appears to wrap/stringify the value), or document the discrepancy and steer callers to config_path."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "aether.text font load on a hub-spawned desktop engine (assets namespace)",
+        "what": "The documented font path assets/fonts/RobotoMono.ttf 404s on a hub-spawned engine ('file read failed: NotFound panel font load failed'), so the panel's font_id never resolves and no widget text renders — the rendered stack shows only fills, no labels. A drive consumer following the drawing-text recipe hits a NotFound with no hint that the spawned engine's AETHER_ASSETS_DIR differs from the repo assets.",
+        "suggested": "Point a hub-spawned engine's default assets namespace at the bundle's assets (so the reference fonts resolve), or document how to set AETHER_ASSETS_DIR / stage a font for a spawned engine."
+      }
+    ],
+    "missing-primitive": [
+      {
+        "category": "missing-primitive",
+        "severity": "high",
+        "where": "load_component / spawn_substrate — PanelConfig.children -> WidgetChildSpec.config (Vec<u8> pre-encoded bytes)",
+        "what": "There is no drive-medium path to instantiate a Toggle, Segmented, or Numeric widget into a rendered panel. The built-in fallback stack (children:[]) is hard-limited to label/slider/radio/text_field/button. A custom children list needs each child's config as already-encoded wire bytes; the MCP harness transports a raw [u8] array but provides no kind->bytes encoder, so a drive consumer cannot produce valid bytes. Empty/guessed bytes decode-fail and the slot is silently skipped ('subname=toggle widget child config failed to decode; slot skipped'). The whole task hinges on this and is blocked by it.",
+        "suggested": "Add an MCP nested-config encoder: either a standalone encode_kind(kind_name, json)->bytes tool, or make load_component/spawn_substrate recursively schema-encode structured child JSON in WidgetChildSpec.config (the same encoder it already runs for the top-level Config kind) instead of demanding pre-encoded Vec<u8>."
+      }
+    ],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "medium",
+        "where": "docs/guide/systems/widgets.md — driving stock widgets over MCP",
+        "what": "The guide describes the interaction model but gives a drive consumer no working recipe for these three widgets. It states the built-in stack excludes Toggle/Segmented/Numeric and says to 'author from Rust/component configuration code' — impossible in the drive medium — and the concrete forwarded-input kinds a widget accepts (aether.mouse_button, aether.mouse_button_release, aether.key, aether.kit.widget.frame, focus_gained/lost) are only discoverable via describe_component or crate source, not the guide.",
+        "suggested": "Add a 'driving a widget over MCP' section listing the forwarded-input kinds + coordinate conventions, and either ship a demo panel export whose default children include Toggle/Segmented/Numeric (so they are capture-able with no byte encoding) or clearly flag that these widgets are not reachable from the MCP drive surface today."
+      }
+    ],
+    "blocker": []
+  },
+  "softHolds": [
+    {
+      "kind": "use-visible-incorrect",
+      "detail": "The expected artifact requires the numeric editor to display the committed validated value, but the captured frame shows no text or numeric glyphs anywhere. The panel renders only featureless colored blocks — a header bar, a partially-filled mint-green row, a column of three small squares (one mint-green, two dark gray), and a solid mint-green bar at the bottom. None of these show a legible numeric value, and the three controls' states are not distinguishable as a slider/toggle/number editor with meaningful content. The single most concrete discrepancy: the numeric editor is blank of any digits — the committed validated value that was supposed to appear is simply not visible in the render."
+    }
+  ],
+  "tokensPerTool": [
+    {
+      "tool": "mcp__aether-hub__capture_frame",
+      "calls": 1,
+      "bytesIn": 121,
+      "bytesOut": 4710,
+      "tokensIn": 30,
+      "tokensOut": 1178
+    },
+    {
+      "tool": "mcp__aether-hub__describe_kinds",
+      "calls": 2,
+      "bytesIn": 205,
+      "bytesOut": 58,
+      "tokensIn": 51,
+      "tokensOut": 15
+    },
+    {
+      "tool": "mcp__aether-hub__list_binaries",
+      "calls": 1,
+      "bytesIn": 21,
+      "bytesOut": 574,
+      "tokensIn": 5,
+      "tokensOut": 144
+    },
+    {
+      "tool": "mcp__aether-hub__list_components",
+      "calls": 1,
+      "bytesIn": 39,
+      "bytesOut": 10666,
+      "tokensIn": 10,
+      "tokensOut": 2667
+    },
+    {
+      "tool": "mcp__aether-hub__list_engines",
+      "calls": 2,
+      "bytesIn": 31,
+      "bytesOut": 235,
+      "tokensIn": 8,
+      "tokensOut": 59
+    },
+    {
+      "tool": "mcp__aether-hub__load_component",
+      "calls": 2,
+      "bytesIn": 342,
+      "bytesOut": 5532,
+      "tokensIn": 86,
+      "tokensOut": 1383
+    },
+    {
+      "tool": "mcp__aether-hub__spawn_substrate",
+      "calls": 1,
+      "bytesIn": 21,
+      "bytesOut": 134,
+      "tokensIn": 5,
+      "tokensOut": 34
+    },
+    {
+      "tool": "mcp__aether-hub__terminate_substrate",
+      "calls": 1,
+      "bytesIn": 52,
+      "bytesOut": 54,
+      "tokensIn": 13,
+      "tokensOut": 14
+    }
+  ]
+}
