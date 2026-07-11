@@ -3,6 +3,7 @@
 #![allow(clippy::disallowed_methods)]
 use super::*;
 use crate::rpc::{Hello, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
+use crate::trace::TraceDispatchCapability;
 use aether_codec::frame::{read_frame, write_frame};
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::chassis::builder::PassiveChassis;
@@ -41,7 +42,6 @@ fn boot_with_rpc_server_only(timeout: Duration) -> (PassiveChassis<TestChassis>,
 /// `(chassis, stream)`; both must stay alive for the listener.
 fn boot_with_deferred_echo(timeout: Duration) -> (PassiveChassis<TestChassis>, TcpStream) {
     use crate::rpc::server::test_echo::DeferredEchoActor;
-    use crate::trace::TraceDispatchCapability;
 
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
@@ -56,6 +56,21 @@ fn boot_with_deferred_echo(timeout: Duration) -> (PassiveChassis<TestChassis>, T
     let mut stream = connect_to_rpc_server(&chassis, timeout);
     complete_handshake(&mut stream);
     (chassis, stream)
+}
+
+fn boot_with_echo_server() -> PassiveChassis<TestChassis> {
+    use crate::rpc::server::test_echo::TestEchoActor;
+
+    let (registry, mailer) = fresh_substrate();
+    Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<TraceDispatchCapability>(())
+        .with_actor::<TestEchoActor>(())
+        .with_actor::<RpcServerCapability>(RpcServerConfig {
+            bind_addr: "127.0.0.1:0".into(),
+            peer_kind: test_peer_kind(),
+        })
+        .build_passive()
+        .expect("caps boot")
 }
 
 /// Lift the published `RpcServerHandle`'s `local_port`, open a
@@ -141,25 +156,10 @@ fn ping_pong_roundtrip() {
 fn call_echo_round_trip_event_then_end() {
     use crate::rpc::server::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
     use crate::rpc::{MailEnvelope, MailboxAddress};
-    use crate::trace::TraceDispatchCapability;
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
 
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        // TraceObserver folds substrate-wide trace events into per-
-        // root counters and fires `Settled { root }` mail at the
-        // chassis-mailbox once a root drains. Without it,
-        // RpcServer's settlement subscription never wakes and
-        // the `Call` never produces a `ReplyEnd`.
-        .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<TestEchoActor>(())
-        .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: "127.0.0.1:0".into(),
-            peer_kind: test_peer_kind(),
-        })
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_with_echo_server();
 
     let mut stream = connect_to_rpc_server(&chassis, Duration::from_secs(5));
     complete_handshake(&mut stream);
@@ -221,7 +221,6 @@ fn call_echo_round_trip_event_then_end() {
 #[test]
 fn call_headless_window_set_mode_err_reaches_component_reply() {
     use crate::rpc::{MailEnvelope, MailboxAddress};
-    use crate::trace::TraceDispatchCapability;
     use crate::window::HeadlessWindowCapability;
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
@@ -618,23 +617,10 @@ fn client_peer_kind() -> PeerKind {
 fn call_echo_round_trips_over_the_socket() {
     use crate::rpc::server::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
     use crate::rpc::{MailEnvelope, MailboxAddress, RpcClient};
-    use crate::trace::TraceDispatchCapability;
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
 
-    let (registry, mailer) = fresh_substrate();
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        // TraceObserver fires `Settled { root }` once a dispatched
-        // chain drains; without it RpcServer's settlement
-        // subscription never wakes and no `ReplyEnd` is written.
-        .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<TestEchoActor>(())
-        .with_actor::<RpcServerCapability>(RpcServerConfig {
-            bind_addr: "127.0.0.1:0".into(),
-            peer_kind: test_peer_kind(),
-        })
-        .build_passive()
-        .expect("caps boot");
+    let chassis = boot_with_echo_server();
 
     let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
 

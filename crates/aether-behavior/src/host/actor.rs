@@ -863,6 +863,7 @@ mod tests {
         runtime_context.reply = Some(reply_handle(77));
         let boot_context = load_context(ScriptLoadOrigin::Boot, "assets", "behavior.wasm");
 
+        //noinspection DuplicatedCode -- the test intentionally compares identical reads under distinct request contexts.
         let (runtime_result, runtime_reply) = host.apply_read_result(
             ReadResult::Ok {
                 namespace: "assets".to_string(),
