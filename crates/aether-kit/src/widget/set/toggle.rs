@@ -12,23 +12,16 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
 
-use crate::widget::set::{push_control_outlines, quad, reply_if_hidden, text_origin_y};
+use crate::widget::set::{ActivationArms, push_control_outlines, quad, reply_if_hidden, text_origin_y};
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{
     Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, ToggleChanged, ToggleConfig,
     WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KeyboardArm {
-    Enter,
-    Space,
-}
 
 /// A boolean switch with a track, knob, and optional label.
 pub struct ToggleWidget {
@@ -37,25 +30,16 @@ pub struct ToggleWidget {
     theme: Theme,
     frame: WidgetFrame,
     state: InteractionState,
-    pointer_pressed: bool,
-    keyboard_arm: Option<KeyboardArm>,
+    arms: ActivationArms,
 }
 
 impl ToggleWidget {
-    fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.frame.x
-            && x <= self.frame.x + self.frame.width
-            && y >= self.frame.y
-            && y <= self.frame.y + self.frame.height
-    }
-
     fn clear_arms(&mut self) {
-        self.pointer_pressed = false;
-        self.keyboard_arm = None;
+        self.arms.clear();
     }
 
     fn pressed(&self) -> bool {
-        self.pointer_pressed || self.keyboard_arm == Some(KeyboardArm::Space)
+        self.arms.pressed()
     }
 
     fn toggle(&mut self) -> bool {
@@ -64,46 +48,19 @@ impl ToggleWidget {
     }
 
     fn press_at(&mut self, x: f32, y: f32) {
-        if self.state.can_mutate() && self.contains(x, y) {
-            self.pointer_pressed = true;
-        }
+        self.arms.press_pointer(&self.frame, self.state.can_mutate(), x, y);
     }
 
     fn release_at(&mut self, x: f32, y: f32) -> Option<bool> {
-        let activates = self.state.can_mutate() && self.pointer_pressed && self.contains(x, y);
-        self.pointer_pressed = false;
-        activates.then(|| self.toggle())
+        self.arms.release_pointer(&self.frame, self.state.can_mutate(), x, y).then(|| self.toggle())
     }
 
     fn press_key(&mut self, code: u32) -> Option<bool> {
-        if !self.state.can_mutate() || self.keyboard_arm.is_some() {
-            return None;
-        }
-        match code {
-            KEY_ENTER => {
-                self.keyboard_arm = Some(KeyboardArm::Enter);
-                Some(self.toggle())
-            }
-            KEY_SPACE => {
-                self.keyboard_arm = Some(KeyboardArm::Space);
-                None
-            }
-            _ => None,
-        }
+        self.arms.press_key(self.state.can_mutate(), code).then(|| self.toggle())
     }
 
     fn release_key(&mut self, code: u32) -> Option<bool> {
-        match (code, self.keyboard_arm) {
-            (KEY_ENTER, Some(KeyboardArm::Enter)) => {
-                self.keyboard_arm = None;
-                None
-            }
-            (KEY_SPACE, Some(KeyboardArm::Space)) => {
-                self.keyboard_arm = None;
-                self.state.can_mutate().then(|| self.toggle())
-            }
-            _ => None,
-        }
+        self.arms.release_key(self.state.can_mutate(), code).then(|| self.toggle())
     }
 
     fn adopt_control_state(&mut self, next: WidgetControlState) -> bool {
@@ -143,8 +100,7 @@ impl WasmActor for ToggleWidget {
             theme: config.theme,
             frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
             state: InteractionState::new(config.state),
-            pointer_pressed: false,
-            keyboard_arm: None,
+            arms: ActivationArms::default(),
         })
     }
 
@@ -282,6 +238,7 @@ impl WasmActor for ToggleWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
 
     fn toggle() -> ToggleWidget {
         ToggleWidget {
@@ -290,8 +247,7 @@ mod tests {
             theme: Theme::DEFAULT,
             frame: WidgetFrame { x: 10.0, y: 20.0, width: 100.0, height: 24.0 },
             state: InteractionState::new(WidgetControlState::default()),
-            pointer_pressed: false,
-            keyboard_arm: None,
+            arms: ActivationArms::default(),
         }
     }
 
@@ -326,14 +282,14 @@ mod tests {
         toggle.press_key(KEY_SPACE);
         let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
         assert!(toggle.adopt_control_state(read_only));
-        assert!(!toggle.pointer_pressed);
-        assert_eq!(toggle.keyboard_arm, None);
+        assert!(!toggle.arms.pointer_pressed);
+        assert_eq!(toggle.arms.keyboard_arm, None);
         assert_eq!(toggle.release_at(20.0, 30.0), None);
         assert_eq!(toggle.press_key(KEY_ENTER), None);
 
         let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
         assert!(toggle.adopt_control_state(disabled));
         toggle.press_at(20.0, 30.0);
-        assert!(!toggle.pointer_pressed);
+        assert!(!toggle.arms.pointer_pressed);
     }
 }

@@ -58,13 +58,84 @@ use alloc::vec::Vec;
 use aether_actor::WasmCtx;
 use aether_capabilities::TextCapability;
 use aether_capabilities::text::{FontMetricsRequest, FontRef};
+use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
 use aether_kinds::{Modifiers, MouseButtonRelease, mouse_button};
 use aether_math::Rgba;
 
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::text_edit::{FontMetricsAdapter, TextEditState};
 use crate::widget::theme::{Theme, ThemeState};
-use crate::widget::{WidgetControlState, WidgetDrawItem, WidgetDrawList};
+use crate::widget::{WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyboardArm {
+    Enter,
+    Space,
+}
+
+#[derive(Debug, Default)]
+struct ActivationArms {
+    pointer_pressed: bool,
+    keyboard_arm: Option<KeyboardArm>,
+}
+
+impl ActivationArms {
+    fn contains(frame: &WidgetFrame, x: f32, y: f32) -> bool {
+        x >= frame.x && x <= frame.x + frame.width && y >= frame.y && y <= frame.y + frame.height
+    }
+
+    fn press_pointer(&mut self, frame: &WidgetFrame, eligible: bool, x: f32, y: f32) {
+        if eligible && Self::contains(frame, x, y) {
+            self.pointer_pressed = true;
+        }
+    }
+
+    fn release_pointer(&mut self, frame: &WidgetFrame, eligible: bool, x: f32, y: f32) -> bool {
+        let activates = eligible && self.pointer_pressed && Self::contains(frame, x, y);
+        self.pointer_pressed = false;
+        activates
+    }
+
+    fn press_key(&mut self, eligible: bool, code: u32) -> bool {
+        if !eligible || self.keyboard_arm.is_some() {
+            return false;
+        }
+        match code {
+            KEY_ENTER => {
+                self.keyboard_arm = Some(KeyboardArm::Enter);
+                true
+            }
+            KEY_SPACE => {
+                self.keyboard_arm = Some(KeyboardArm::Space);
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn release_key(&mut self, eligible: bool, code: u32) -> bool {
+        match (code, self.keyboard_arm) {
+            (KEY_ENTER, Some(KeyboardArm::Enter)) => {
+                self.keyboard_arm = None;
+                false
+            }
+            (KEY_SPACE, Some(KeyboardArm::Space)) => {
+                self.keyboard_arm = None;
+                eligible
+            }
+            _ => false,
+        }
+    }
+
+    fn pressed(&self) -> bool {
+        self.pointer_pressed || self.keyboard_arm == Some(KeyboardArm::Space)
+    }
+
+    fn clear(&mut self) {
+        self.pointer_pressed = false;
+        self.keyboard_arm = None;
+    }
+}
 
 fn text_control_theme_state(state: &InteractionState, dragging: bool) -> ThemeState {
     if state.focused() {

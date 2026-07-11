@@ -36,6 +36,10 @@ use crate::widget::{
     WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
 };
 
+/// Retained edit-buffer bound; comfortably exceeds every canonical finite
+/// `f32` literal while preventing unbounded typed or pasted intermediates.
+const NUMERIC_EDIT_MAX_CHARS: u32 = 32;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct NumericEmission {
     value: f32,
@@ -169,7 +173,7 @@ impl NumericWidget {
     }
 
     fn policy() -> EditPolicy {
-        EditPolicy { single_line: true, max_chars: 0 }
+        EditPolicy { single_line: true, max_chars: NUMERIC_EDIT_MAX_CHARS }
     }
 
     fn parsed_buffer(&self) -> Option<f32> {
@@ -548,10 +552,10 @@ impl WasmActor for NumericWidget {
         if !self.state.can_mutate() {
             return;
         }
-        let cursor = match (preedit.cursor_begin, preedit.cursor_end) {
-            (Some(begin), Some(end)) => Some(TextSpan::new(begin as usize, end as usize)),
-            _ => None,
-        };
+        let cursor = preedit
+            .cursor_begin
+            .zip(preedit.cursor_end)
+            .map(|(begin, end)| TextSpan::new(begin as usize, end as usize));
         self.edit.set_composition(preedit.text, cursor);
     }
 
@@ -741,6 +745,21 @@ mod tests {
         assert_eq!(widget.edit.value(), "");
         assert_eq!(widget.insert_text(&cut.copied), Some(NumericEmission { value: 12.5, committed: false }));
         assert_eq!(widget.edit.value(), "12.5");
+    }
+
+    #[test]
+    fn typed_insertions_respect_internal_cap_and_normal_numeric_edits_continue() {
+        let mut widget = numeric(-f32::MAX, f32::MAX, 0.0, 0.0);
+        widget.edit.select_all();
+        widget.edit.delete_backward();
+        for _ in 0..40 {
+            widget.insert_text("1");
+        }
+        assert_eq!(widget.edit.value().chars().count(), NUMERIC_EDIT_MAX_CHARS as usize);
+        assert_eq!(widget.edit.value(), "11111111111111111111111111111111");
+
+        assert_eq!(replace_buffer(&mut widget, "7.5"), Some(NumericEmission { value: 7.5, committed: false }));
+        assert_eq!(widget.edit.value(), "7.5");
     }
 
     #[test]

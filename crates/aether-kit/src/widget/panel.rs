@@ -358,7 +358,7 @@ pub fn spawn_widget_child(
         }),
         WidgetKind::Button => spawn_button_child(ctx, spec, row),
         WidgetKind::VirtualList => spawn_virtual_list_child(ctx, spec, row),
-        WidgetKind::Toggle | WidgetKind::Segmented | WidgetKind::Numeric => spawn_added_control(ctx, spec, row),
+        WidgetKind::Toggle | WidgetKind::Segmented | WidgetKind::Numeric => spawn_row_control_child(ctx, spec, row),
         WidgetKind::BehaviorHost => spawn_behavior_host(ctx, spec, row),
         WidgetKind::Composite => spawn_composite_child(ctx, spec, layout, row),
         WidgetKind::Scroll => spawn_scroll_child(ctx, spec, layout),
@@ -481,46 +481,43 @@ fn spawn_scroll_child(
     })
 }
 
-/// Spawn the three issue-2926 one-row controls. Keeping their mechanical
-/// decode/spawn profiles together prevents the main exhaustive dispatcher from
-/// becoming a second long-form implementation surface.
-fn spawn_added_control(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
+/// Spawn the three issue-2926 one-row control children. Keeping their
+/// mechanical decode/spawn profiles together prevents the main exhaustive
+/// dispatcher from becoming a second long-form implementation surface.
+fn spawn_row_control_child(ctx: &mut WasmCtx<'_, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
     match spec.kind {
         WidgetKind::Toggle => decode_child::<ToggleConfig>(spec).and_then(|config| {
-            let state = config.state.clone();
             spawn::<ToggleWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: true,
                 focusable: true,
-                state,
+                state: config.state,
                 type_namespace: <ToggleWidget as Addressable>::NAMESPACE,
                 scroll_viewport: None,
             })
         }),
         WidgetKind::Segmented => decode_child::<SegmentedConfig>(spec).and_then(|config| {
-            let state = config.state.clone();
             spawn::<SegmentedWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: true,
                 focusable: true,
-                state,
+                state: config.state,
                 type_namespace: <SegmentedWidget as Addressable>::NAMESPACE,
                 scroll_viewport: None,
             })
         }),
         WidgetKind::Numeric => decode_child::<NumericConfig>(spec).and_then(|config| {
-            let state = config.state.clone();
             spawn::<NumericWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
                 id,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: true,
                 focusable: true,
-                state,
+                state: config.state,
                 type_namespace: <NumericWidget as Addressable>::NAMESPACE,
                 scroll_viewport: None,
             })
