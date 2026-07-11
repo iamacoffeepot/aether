@@ -360,6 +360,7 @@ impl HeadlessChassis {
             anthropic,
             gemini,
             contentgen,
+            player: aether_capabilities::PlayerGatewayConfig::default(),
         };
         // ADR-0082 §1 / PR 3b: headless uses the shared Tick-only
         // lifecycle graph (Tick self-loops, Quit escapes to Shutdown);

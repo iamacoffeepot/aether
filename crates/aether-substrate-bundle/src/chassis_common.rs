@@ -34,7 +34,8 @@ use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig, EngineConfigLayer,
     FsCapability, GeminiCapability, GeminiConfig, HttpCapability, HttpServerCapability, HttpServerConfig,
-    InputCapability, InputConfig, InventoryCapability, LifecycleConfig, TcpCapability, TextCapability,
+    InputCapability, InputConfig, InventoryCapability, LifecycleConfig, PlayerGatewayCapability, PlayerGatewayConfig,
+    TcpCapability, TextCapability,
     fs::NamespaceRoots,
     http::HttpConfig,
     shared::contentgen::{ContentGenConfig, ContentGenConfigLayer},
@@ -710,6 +711,9 @@ pub struct CommonBoot {
     /// its `gen_dir` override (else the resolved `save`-namespace root)
     /// into the staging root threaded into the gemini cap.
     pub contentgen: ContentGenConfig,
+    /// Trusted player-session wiring. The default has no configured `TurnSim`,
+    /// so merely linking the common chassis opens no player listener.
+    pub player: PlayerGatewayConfig,
 }
 
 /// Wire the aborter, worker count, and the common caps every full-
@@ -740,6 +744,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor::<InventoryCapability>(())
         .with_actor::<HttpCapability>(boot.http)
         .with_actor::<TcpCapability>(())
+        .with_actor::<PlayerGatewayCapability>(boot.player)
         .with_actor::<AnthropicCapability>(boot.anthropic)
         .with_actor::<GeminiCapability>(GeminiBoot { config: boot.gemini, gen_root: staging_root })
 }
@@ -764,6 +769,7 @@ pub fn common_cap_namespaces() -> Vec<&'static str> {
         <InventoryCapability as Addressable>::NAMESPACE,
         <HttpCapability as Addressable>::NAMESPACE,
         <TcpCapability as Addressable>::NAMESPACE,
+        <PlayerGatewayCapability as Addressable>::NAMESPACE,
         <AnthropicCapability as Addressable>::NAMESPACE,
         <GeminiCapability as Addressable>::NAMESPACE,
     ]

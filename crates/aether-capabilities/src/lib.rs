@@ -29,6 +29,7 @@
 // `::aether_capabilities::…` paths resolve inside this crate's own
 // route fixtures (the pattern `aether-actor` / `aether-substrate`
 // already use for their derive-emitted paths).
+extern crate alloc;
 extern crate self as aether_capabilities;
 
 // `aether.anthropic` content-gen cap (ADR-0050, issue 1014). Native-
@@ -50,6 +51,7 @@ pub mod shared;
 
 pub mod engine;
 pub mod fs;
+pub mod game;
 // `aether.gemini` content-gen cap (ADR-0050, issue 1015). Native-only
 // for the same reason as `anthropic`.
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
@@ -143,6 +145,7 @@ pub use lifecycle::LifecycleConfig;
 pub use lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 
 pub use fs::FsCapability;
+pub use game::{PlayerGatewayCapability, PlayerGatewayConfig, PlayerSessionActor};
 // ADR-0050 `aether.gemini` cap (issue 1015).
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use gemini::{GeminiCapability, GeminiConfig};
