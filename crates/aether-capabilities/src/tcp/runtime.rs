@@ -27,7 +27,7 @@ pub use aether_substrate::{KindId, Mail, Mailer};
 
 pub use aether_data::Kind;
 
-use aether_actor::{Addressable, runtime};
+use aether_actor::runtime;
 // `MonitorNotice` is named by `on_monitor_notice`'s signature; the parent's
 // import of it is private, so re-import it directly where the body expands.
 use aether_kinds::MonitorNotice;
@@ -223,13 +223,11 @@ impl NativeActor for TcpCapability {
                         .finish()
                     {
                         Ok(session_id) => {
-                            let session_address =
-                                format!("{}/{}:{session_name}", TcpCapability::NAMESPACE, TcpSessionActor::NAMESPACE);
                             reply_to_pending_connect(
                                 ctx,
                                 sender,
                                 hold,
-                                &ConnectResult::Ok { session_name, session_address, session_id, peer },
+                                &ConnectResult::Ok { session_name, session_id, peer },
                             );
                         }
                         Err(error) => {

@@ -35,20 +35,17 @@ pub struct Connect {
 }
 
 /// Reply to [`Connect`]. `Ok` carries the resolved connect-session
-/// subname, its ADR-0099 rendered lineage address, the session's
-/// `MailboxId`, and the connected peer address. `session_address` is
-/// the string MCP mail tools can use as `recipient_name`; native and
-/// wasm callers may keep using `session_name` with the typed routing
-/// helpers. `Err` carries the requested address and a human-readable
-/// dial or spawn failure.
+/// subname, the session's `MailboxId`, and the connected peer address.
+/// `Err` carries the requested address and a human-readable dial or
+/// spawn failure.
 ///
 /// `MailboxId` round-trips imprecisely over JSON. Agents addressing
 /// the session via subsequent MCP calls should resolve by
-/// `session_address`; `session_id` is the native wire id for native peers.
+/// `session_name`; `session_id` is the native wire id for native peers.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.tcp.connect_result")]
 pub enum ConnectResult {
-    Ok { session_name: String, session_address: String, session_id: aether_data::MailboxId, peer: String },
+    Ok { session_name: String, session_id: aether_data::MailboxId, peer: String },
     Err { addr: String, reason: String },
 }
 

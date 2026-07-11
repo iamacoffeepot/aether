@@ -13,7 +13,7 @@ use super::{
     TcpNativeExt, UnbindListener, UnbindListenerResult,
 };
 use aether_actor::Addressable;
-use aether_data::{Kind, MailboxId, SessionToken, Uuid, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId, SessionToken, Uuid};
 use aether_kinds::descriptors;
 use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::NativeActorMailbox;
@@ -184,15 +184,12 @@ fn connect_roundtrip_spawns_writable_session() {
         TcpCapability::NAMESPACE,
         &Connect { addr: addr.to_string(), name: None },
     );
-    let (session_name, session_address, session_id, peer) = match connect_reply {
-        ConnectResult::Ok { session_name, session_address, session_id, peer } => {
-            (session_name, session_address, session_id, peer)
-        }
+    let (session_name, session_id, peer) = match connect_reply {
+        ConnectResult::Ok { session_name, session_id, peer } => (session_name, session_id, peer),
         ConnectResult::Err { reason, .. } => panic!("connect failed: {reason}"),
     };
     assert!(!session_name.is_empty(), "connect result should name the spawned session");
-    assert_eq!(session_address, "aether.tcp/aether.tcp.session:conn-0");
-    assert_eq!(mailbox_id_from_path(&session_address), session_id, "rendered session address folds to the spawned id");
+    assert_ne!(session_id, MailboxId::NONE, "connect result should identify the spawned session");
     let peer = peer.parse::<SocketAddr>().expect("connect result peer is a socket address");
     assert_eq!(peer.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST), "connect result peer should be on 127.0.0.1");
 
