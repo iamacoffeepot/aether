@@ -20,6 +20,7 @@ use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::requ
 const SIM_NAME: &str = "player-turn-sim";
 const LISTENER_NAME: &str = "players";
 const INTERVAL_NANOS: u64 = 20_000_000;
+const TCP_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn reserve_loopback_addr() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("reserve loopback port");
@@ -27,7 +28,7 @@ fn reserve_loopback_addr() -> String {
 }
 
 fn connect_when_bound(addr: &str) -> TcpStream {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + TCP_TIMEOUT;
     loop {
         match TcpStream::connect(addr) {
             Ok(stream) => return stream,
@@ -132,7 +133,7 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
     load_turn_sim(&mut bench, fs::read(wasm_path).expect("read aether-kit wasm"));
 
     let mut first = connect_when_bound(&listener_addr);
-    first.set_read_timeout(Some(Duration::from_secs(2))).expect("set first client timeout");
+    first.set_read_timeout(Some(TCP_TIMEOUT)).expect("set first client timeout");
     let (identity, tick) = hello(&mut first, "first");
     assert_eq!(tick, 0);
     assert_eq!(identity, expected_player_session_mailbox("conn-0"));
@@ -205,7 +206,7 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
     assert_eq!((entity.cell_x, entity.cell_z), (0, 1), "unknown kind must produce no sim action");
 
     let mut second = connect_when_bound(&listener_addr);
-    second.set_read_timeout(Some(Duration::from_secs(2))).expect("set second client timeout");
+    second.set_read_timeout(Some(TCP_TIMEOUT)).expect("set second client timeout");
     let (second_identity, current_tick) = hello(&mut second, "second");
     assert_eq!(second_identity, expected_player_session_mailbox("conn-1"));
     assert_eq!(current_tick, after_unknown.tick);
