@@ -16,7 +16,7 @@
 //! - [`SegmentedWidget`] — a horizontal exclusive choice.
 //! - [`NumericWidget`] — a typed and steppable bounded number.
 //!
-//! Each caches its assigned [`WidgetFrame`](crate::widget::WidgetFrame) rect
+//! Each caches its assigned [`WidgetFrame`] rect
 //! and its [`Theme`], answers every
 //! [`Collect`](crate::widget::Collect) with a
 //! [`WidgetDrawList`] drawn in its own local
