@@ -72,7 +72,7 @@ use crate::widget::{
     WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged,
 };
 use crate::widget::{FrameDischarge, decode_nested_widget_config};
-use crate::widget::{accept_child_list, emit, flush_membership};
+use crate::widget::{accept_open_child_list, emit, flush_membership};
 
 /// One spawned child's alias plus the logical name the panel attributes its
 /// value-up events under (for the map-editor translation / logging) — the
@@ -944,10 +944,7 @@ impl WasmActor for WidgetPanel {
     /// A child's reply; not useful to send manually.
     #[handler::manual]
     fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Manual>, list: WidgetDrawList) {
-        if self.frame_discharge.is_closed() {
-            return;
-        }
-        if accept_child_list(&mut self.composite, ctx, list) {
+        if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {
             self.finish(ctx);
         }
     }

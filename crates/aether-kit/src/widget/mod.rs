@@ -233,6 +233,15 @@ pub(crate) fn accept_child_list(
     composite.is_complete()
 }
 
+fn accept_open_child_list(
+    discharge: &FrameDischarge,
+    composite: &mut Composite,
+    ctx: &mut WasmCtx<'_, Manual>,
+    list: WidgetDrawList,
+) -> bool {
+    !discharge.is_closed() && accept_child_list(composite, ctx, list)
+}
+
 /// One contiguous run of non-text widget draws with one render capability
 /// shape. Text is filtered before planning and remains on its later lane.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -606,11 +615,9 @@ impl WasmActor for Widget {
     /// # Agent
     /// A child's reply; not useful to send manually.
     #[handler::manual]
+    //noinspection DuplicatedCode -- actor macros require one draw-list handler per composite owner type.
     fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Manual>, list: WidgetDrawList) {
-        if self.frame_discharge.is_closed() {
-            return;
-        }
-        if accept_child_list(&mut self.composite, ctx, list) {
+        if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {
             self.finish(ctx);
         }
     }

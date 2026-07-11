@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_math::Rgba;
 
+use crate::widget::set::apply_static_control_state;
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{Collect, ImageConfig, ImageFit, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
@@ -263,9 +264,7 @@ impl WasmActor for ImageWidget {
     /// Update external availability without changing image presentation.
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
-        if self.state.replace(set.state) {
-            emit_state_changed(ctx, &self.state);
-        }
+        apply_static_control_state(ctx, &mut self.state, set.state);
     }
 
     /// Restyle disabled presentation.

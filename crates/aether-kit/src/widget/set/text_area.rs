@@ -15,15 +15,15 @@ use aether_kinds::{
 };
 
 use crate::widget::set::{
-    apply_text_control_state, apply_text_theme, pump_text_font_metrics, push_control_outlines, quad, release_text_drag,
-    reply_if_hidden, text_control_theme_state, text_origin_y, update_text_modifiers,
+    apply_text_control_state, apply_text_theme, pump_text_font_metrics, push_control_outlines, quad, release_left,
+    reply_with_draw_items, text_control_theme_state, text_origin_y, update_text_modifiers,
 };
 use crate::widget::state::InteractionState;
 use crate::widget::text_edit::{EditPolicy, FontMetricsAdapter, SingleLineLayout, TextEditState, TextSpan};
 use crate::widget::theme::{SetTheme, Theme, ThemeState};
 use crate::widget::{
     Collect, FocusGained, FocusLost, HoverGained, HoverLost, SetWidgetState, TextAreaConfig, TextCommitted,
-    WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame,
+    WidgetControlState, WidgetDrawItem, WidgetFrame,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -368,6 +368,7 @@ impl WasmActor for TextAreaWidget {
     }
 
     #[handler::single]
+    //noinspection DuplicatedCode -- actor macros require one handler per type; the implementation is shared.
     fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
         apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
     }
@@ -478,7 +479,7 @@ impl WasmActor for TextAreaWidget {
 
     #[handler::single]
     fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
-        release_text_drag(&mut self.dragging, release);
+        release_left(&mut self.dragging, false, release);
     }
 
     #[handler::single]
@@ -514,13 +515,9 @@ impl WasmActor for TextAreaWidget {
     }
 
     #[handler::single]
+    //noinspection DuplicatedCode -- actor macros require one collect handler per concrete widget type.
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
-        if reply_if_hidden(ctx, &self.state) {
-            return;
-        }
-        if let Some(parent) = ctx.parent() {
-            parent.send(&WidgetDrawList { intrinsic: None, items: self.draw_items() });
-        }
+        reply_with_draw_items(ctx, &self.state, || self.draw_items());
     }
 }
 

@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 
-use crate::widget::set::{reply_if_hidden, text_origin_y};
+use crate::widget::set::{apply_static_control_state, reply_if_hidden, text_origin_y};
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::theme::{SetTheme, Theme};
 use crate::widget::{Collect, LabelConfig, SetWidgetState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
@@ -61,9 +61,7 @@ impl WasmActor for LabelWidget {
     /// Update external availability without changing the label or theme.
     #[handler::single]
     fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
-        if self.state.replace(set.state) {
-            emit_state_changed(ctx, &self.state);
-        }
+        apply_static_control_state(ctx, &mut self.state, set.state);
     }
 
     /// Restyle: adopt the fanned theme.

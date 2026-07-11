@@ -59,11 +59,11 @@ use aether_actor::WasmCtx;
 use aether_capabilities::TextCapability;
 use aether_capabilities::text::{FontMetricsRequest, FontRef};
 use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
-use aether_kinds::{Modifiers, MouseButton, MouseButtonRelease, mouse_button};
+use aether_kinds::{CachedFontMetrics, Modifiers, MouseButton, MouseButtonRelease, mouse_button};
 use aether_math::Rgba;
 
 use crate::widget::state::{InteractionState, emit_state_changed};
-use crate::widget::text_edit::{FontMetricsAdapter, TextEditState};
+use crate::widget::text_edit::{DisplayedEdit, FontMetricsAdapter, SingleLineLayout, TextEditState};
 use crate::widget::theme::{Theme, ThemeState};
 use crate::widget::{WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame};
 
@@ -181,15 +181,37 @@ fn apply_text_theme(ctx: &mut WasmCtx<'_>, font_metrics: &mut FontMetricsAdapter
     pump_text_font_metrics(ctx, font_metrics);
 }
 
-fn release_text_drag(dragging: &mut bool, release: MouseButtonRelease) {
+fn release_left<T>(pressed: &mut T, released: T, release: MouseButtonRelease) {
     if release.button == mouse_button::LEFT {
-        *dragging = false;
+        *pressed = released;
     }
+}
+
+fn arm_text_drag(state: &InteractionState, dragging: &mut bool, press: MouseButton) -> Option<f32> {
+    if press.button != mouse_button::LEFT || !state.is_available() {
+        return None;
+    }
+    *dragging = true;
+    Some(press.x)
 }
 
 fn update_text_modifiers(state: &InteractionState, modifiers: &mut Modifiers, next: Modifiers) {
     if state.is_available() {
         *modifiers = next;
+    }
+}
+
+fn apply_static_control_state(ctx: &WasmCtx<'_>, state: &mut InteractionState, next: WidgetControlState) {
+    if state.replace(next) {
+        emit_state_changed(ctx, state);
+    }
+}
+
+fn clamp_option_index(index: u32, len: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        (index as usize).min(len - 1)
     }
 }
 
@@ -204,6 +226,19 @@ pub(super) fn reply_if_hidden(ctx: &WasmCtx<'_>, state: &InteractionState) -> bo
         parent.send(&WidgetDrawList { intrinsic: None, items: Vec::new() });
     }
     true
+}
+
+fn reply_with_draw_items(
+    ctx: &WasmCtx<'_>,
+    state: &InteractionState,
+    draw_items: impl FnOnce() -> Vec<WidgetDrawItem>,
+) {
+    if reply_if_hidden(ctx, state) {
+        return;
+    }
+    if let Some(parent) = ctx.parent() {
+        parent.send(&WidgetDrawList { intrinsic: None, items: draw_items() });
+    }
 }
 
 /// A flat-colored quad in a widget's own local coordinates — the shared
@@ -283,6 +318,82 @@ pub(crate) fn approx_text_width(char_count: usize, size_pixels: f32) -> f32 {
     #[allow(clippy::cast_precision_loss)]
     let count = char_count as f32;
     count * size_pixels * APPROX_ADVANCE_RATIO
+}
+
+fn single_line_hit_byte(text: &str, metrics: Option<&CachedFontMetrics>, size_pixels: f32, local_x: f32) -> usize {
+    if let Some(metrics) = metrics {
+        return SingleLineLayout::build(text, metrics, size_pixels).hit_test(local_x);
+    }
+    let advance = (size_pixels * APPROX_ADVANCE_RATIO).max(1.0);
+    let index = if local_x <= 0.0 {
+        0
+    } else {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let rounded = (local_x / advance + 0.5) as usize;
+        rounded.min(text.chars().count())
+    };
+    text.char_indices().nth(index).map_or(text.len(), |(byte, _)| byte)
+}
+
+fn single_line_edit_draw_items(
+    displayed: &DisplayedEdit,
+    metrics: Option<&CachedFontMetrics>,
+    theme: &Theme,
+    state: &InteractionState,
+    theme_state: ThemeState,
+    width: f32,
+    height: f32,
+) -> Vec<WidgetDrawItem> {
+    let pad = theme.pad;
+    let size = theme.value_size_pixels;
+    let text_y = text_origin_y(0.0, height, size);
+    let caret_height = pad.mul_add(-2.0, height).max(1.0);
+    let layout = metrics.map(|metrics| SingleLineLayout::build(&displayed.text, metrics, size));
+    let prefix_width = |byte: usize| {
+        layout.as_ref().map_or_else(
+            || approx_text_width(displayed.text[..byte].chars().count(), size),
+            |layout| layout.caret_x(byte),
+        )
+    };
+
+    let mut items = Vec::new();
+    items.push(quad(0.0, 0.0, width, height, theme.fill(theme.surface_raised, theme_state)));
+    if let Some(span) = displayed.selection_span {
+        let x0 = pad + prefix_width(span.start_byte);
+        let x1 = pad + prefix_width(span.end_byte);
+        items.push(quad(x0, pad, (x1 - x0).max(1.0), caret_height, theme.accent));
+    }
+    if let Some(span) = displayed.preedit_cursor_span.filter(|span| !span.is_collapsed()) {
+        let x0 = pad + prefix_width(span.start_byte);
+        let x1 = pad + prefix_width(span.end_byte);
+        items.push(quad(x0, pad, (x1 - x0).max(1.0), caret_height, theme.accent));
+    }
+    if !displayed.text.is_empty() {
+        items.push(WidgetDrawItem::Text {
+            x: pad,
+            y: text_y,
+            font_id: theme.font_id,
+            text: displayed.text.clone(),
+            size_pixels: size,
+            color: theme.fill(theme.text_primary, theme_state),
+            clip: None,
+        });
+    }
+    if let Some(span) = displayed.preedit_span {
+        let x0 = pad + prefix_width(span.start_byte);
+        let x1 = pad + prefix_width(span.end_byte);
+        items.push(quad(x0, text_y + size, (x1 - x0).max(1.0), 1.0, theme.accent));
+        if let Some(cursor) = displayed.preedit_cursor_span.filter(|cursor| cursor.is_collapsed()) {
+            let cursor_x = pad + prefix_width(cursor.end_byte);
+            items.push(quad(cursor_x, pad, 1.0, caret_height, theme.accent));
+        }
+    }
+    if state.focused() && !displayed.composing {
+        let caret_x = pad + prefix_width(displayed.caret_byte);
+        items.push(quad(caret_x, pad, 1.0, caret_height, theme.accent));
+    }
+    push_control_outlines(&mut items, width, height, state, theme);
+    items
 }
 
 /// The `Screen`-space `DrawText` origin y that vertically centers a single
