@@ -135,6 +135,7 @@ impl WasmActor for StreamingHttpHandler {
     /// `HttpServerConfig.handler_mailbox` at
     /// `"aether.component/aether.embedded:test.web_stream"`.
     #[handler::single]
+    //noinspection DuplicatedCode -- actor macros require one request handler per fixture actor type.
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
         self.next_index = 0;
         self.ended = false;
@@ -149,6 +150,7 @@ impl WasmActor for StreamingHttpHandler {
     /// window slot; the handler emits at most that many `HttpResponseChunk`s
     /// in response.
     #[handler::manual]
+    //noinspection DuplicatedCode -- actor macros require one credit handler per fixture actor type.
     fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
         spend_credit(&mut self.stream, &mut self.next_index, &mut self.ended, ctx, &credit);
     }

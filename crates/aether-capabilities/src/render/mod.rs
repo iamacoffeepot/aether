@@ -142,7 +142,7 @@ mod tests {
     use aether_kinds::QuadSpace;
     use aether_kinds::trace::Nanos;
     use aether_math::Rgba;
-    use aether_substrate::chassis::builder::Builder;
+    use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::mail::MailId;
     use aether_substrate::mail::MailRef;
     use aether_substrate::mail::registry::OwnedDispatch;
@@ -178,6 +178,15 @@ mod tests {
         StagedTexture { width: 2, height: 2, format: TextureFormat::Rgba8, pixels, realized: None, dirty: true }
     }
 
+    fn boot_render(config: RenderConfig) -> (Arc<Registry>, PassiveChassis<TestChassis>) {
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<RenderCapability>(config)
+            .build_passive()
+            .expect("build succeeds");
+        (registry, chassis)
+    }
+
     // ADR-0082 retired the frame-bound pending counter; the
     // DrawTriangle → render dispatch path is now covered end-to-end
     // by the bundle scenario tests (`tick_roundtrip_component_to_sink`
@@ -190,11 +199,7 @@ mod tests {
     fn destroy_texture_removes_registry_entry() {
         let observed = Arc::new(Mutex::new(Vec::<String>::new()));
         let config = RenderConfig { observed_kinds: Some(Arc::clone(&observed)), ..RenderConfig::default() };
-        let (registry, mailer) = fresh_substrate();
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<RenderCapability>(config)
-            .build_passive()
-            .expect("build succeeds");
+        let (registry, chassis) = boot_render(config);
         let handles = chassis.handle::<RenderHandles>().expect("RenderCapability publishes RenderHandles");
         let texture_id = 7;
         {
@@ -225,11 +230,7 @@ mod tests {
     /// warn-drop and leave the registry untouched.
     #[test]
     fn destroy_texture_unknown_and_reserved_ids_leave_registry_untouched() {
-        let (registry, mailer) = fresh_substrate();
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<RenderCapability>(RenderConfig::default())
-            .build_passive()
-            .expect("build succeeds");
+        let (registry, chassis) = boot_render(RenderConfig::default());
         let handles = chassis.handle::<RenderHandles>().expect("RenderCapability publishes RenderHandles");
         let user_texture_id = 3;
         {
@@ -259,11 +260,7 @@ mod tests {
     /// draws through the shared sentinel texel.
     #[test]
     fn update_texture_reserved_id_leaves_white_pixels_untouched() {
-        let (registry, mailer) = fresh_substrate();
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<RenderCapability>(RenderConfig::default())
-            .build_passive()
-            .expect("build succeeds");
+        let (registry, chassis) = boot_render(RenderConfig::default());
         let handles = chassis.handle::<RenderHandles>().expect("RenderCapability publishes RenderHandles");
         {
             let mut textures = handles.textures.lock().expect("textures mutex is not poisoned");
@@ -293,11 +290,7 @@ mod tests {
     fn draw_solid_quads_accumulates_and_observed() {
         let observed = Arc::new(Mutex::new(Vec::<String>::new()));
         let config = RenderConfig { observed_kinds: Some(Arc::clone(&observed)), ..RenderConfig::default() };
-        let (registry, mailer) = fresh_substrate();
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<RenderCapability>(config)
-            .build_passive()
-            .expect("build succeeds");
+        let (registry, chassis) = boot_render(config);
         let handles = chassis.handle::<RenderHandles>().expect("RenderCapability publishes RenderHandles");
 
         let mail = DrawSolidQuads {

@@ -128,6 +128,7 @@ pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
     }
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
+    //noinspection DuplicatedCode -- the inventory variant deliberately extends this typed builder chain.
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<EngineServer>(EngineConfig::default())
