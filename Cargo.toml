@@ -18,6 +18,7 @@ members = [
     "crates/aether-kit",
     "crates/aether-capabilities",
     "crates/aether-mcp",
+    "crates/aether-context-canary",
     # Test fixtures — a container dir of single-output crates: one shared
     # `kinds` rlib plus the component cdylibs (the main bundle, the
     # typed↔reshaped replace-pair satellites, and the ADR-0138 defaultless
