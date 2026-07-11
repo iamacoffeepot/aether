@@ -1,0 +1,94 @@
+{
+  "totals": {
+    "findings": 4,
+    "papercut": 2,
+    "missingPrimitive": 1,
+    "docGap": 1,
+    "blocker": 0,
+    "softHolds": 1
+  },
+  "succeeded": true,
+  "buildGreen": null,
+  "summary": "Spawned a desktop substrate (engine 00000000-0000-0000-0000-000000000001, rpc 42499) and rendered a bright green triangle (~25% coverage on an 800x600 blue-gray frame), then exercised capture_frame three ways. (1) save_path, no size args: inline block was the 768x576 default-ceiling image (768 long edge from 800x600, no upscale), while the saved artifact was full-res 800x600 / 5002 bytes (verified on disk) - full-resolution preserved independent of the downscaled inline. (2) scale 0.5 + max_dimension 256 + include_image: inline block 256x192 (800*0.5=400 then clamped to 256 long edge), composing in documented order. (3) not_all_black + no include_image: returned verdict NotAllBlack passed=true with NO image block - verdict-only default confirmed. Core surface works. Three friction points: geometry cannot be left persistently visible over the drive medium (retained-per-tick, cleared by the tick loop, no re-emitting component available), the mails-in-capture path is racy (same bundle gave blank then triangle), and the tool never reports the inline image block's own dimensions or encoded byte size in text.",
+  "artifact": {
+    "verdict": "wrong",
+    "rationale": "The default inline PNG (768x576, downscaled from the native 800x600 frame) shows nothing but a flat, uniform slate-blue background — no recognisable shape whatsoever. A substrate-side check confirmed this objectively: differs_from_background passed=false (\"no pixel in the scored region diverges from top-left (63,75,97)\") and coverage fraction 0.0. The expected artifact requires that both the default and reduced PNGs visibly contain the same recognisable shape; the frame contains no shape at all, so the core visual subject the scaling behaviour was meant to demonstrate is absent. (The frame dimensions themselves are plausible — 800x600 native, 768 long-edge inline — but with an empty scene there is no shape to compare across scales.)"
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "high",
+        "where": "capture_frame mails bundle with retained-per-tick render geometry",
+        "what": "The docs say mails are 'state changes that should appear in the image', dispatched atomically before readback. But the same DrawTriangle-in-mails bundle produced a BLANK frame on one call and the full green triangle on the next - nondeterministic from the caller's side. A single geometry submission accumulates into the next frame buffer and races the readback of the last recorded frame. Captures that also carried a checks reduction reliably showed the triangle (4/4) while a plain image capture missed once (1/2), so the outcome silently depends on which capture flavor is used.",
+        "suggested": "capture_frame should commit/advance one frame after dispatching the mails bundle and before readback, so mail-staged geometry deterministically lands in the returned image; or, if that is intentional, document that retained-per-tick geometry submitted via mails is not guaranteed to appear and a persistent emitter is required."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "capture_frame text output for a plain (no-checks) capture",
+        "what": "A plain image capture with no checks and no save_path returns no text at all (capture 2 returned an empty text body); frame width/height appear only when a checks reduction is present. So the caller cannot even confirm the source frame dimensions on a plain capture. Inconsistent surface depending on whether checks were requested.",
+        "suggested": "Always emit the source frame width/height (and, per the doc-gap above, the inline image dimensions/bytes) in capture_frame's text output regardless of whether checks were requested."
+      }
+    ],
+    "missing-primitive": [
+      {
+        "category": "missing-primitive",
+        "severity": "high",
+        "where": "Leaving a rendered frame visible for a later independent capture (the render-artifact 'leave it showing' contract) over the drive medium",
+        "what": "DrawTriangle geometry is retained-per-tick and is cleared by the live 60Hz tick loop within ~16ms; a plain re-capture after driving shows an empty blue-gray frame. The only persistence path is a wasm component that re-emits every tick, but the component registry is empty and the drive medium forbids authoring/uploading one. A pure-drive consumer literally cannot leave a static shape on screen for a judge to capture - it only appears when the DrawTriangle is passed in that same capture's mails bundle.",
+        "suggested": "Add a substrate primitive to pin/retain a static geometry batch across ticks (e.g. aether.render.set_persistent_geometry, or a 'hold last frame until cleared' flag), and/or ship a stock persistent-draw component (a triangle/mesh replayer) in the default registry so a drive-only consumer can produce a durable artifact."
+      }
+    ],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "medium",
+        "where": "Reporting each returned image block's dimensions and encoded byte size from capture_frame",
+        "what": "The tool's text output never reports the inline image block's own width/height or encoded byte length. It returns the full-frame width/height only when checks run, and for save_path only the saved FULL-RES byte count - which cannot measure the scaled inline image. So the scaled inline PNG's dimensions and byte size (exactly what this task asked to report) are unobtainable through the public tool surface; a consumer would have to decode the returned image bytes themselves. The inline dimensions could only be inferred by re-deriving the 768-ceiling / scale / max_dimension math by hand.",
+        "suggested": "Include the inline image block's width, height, and encoded byte length in capture_frame's text output (e.g. an 'image': {width, height, bytes} block) alongside the existing 'saved' block, so callers can compare inline vs saved without decoding pixels."
+      }
+    ],
+    "blocker": []
+  },
+  "softHolds": [
+    {
+      "kind": "use-visible-incorrect",
+      "detail": "The default inline PNG (768x576, downscaled from the native 800x600 frame) shows nothing but a flat, uniform slate-blue background — no recognisable shape whatsoever. A substrate-side check confirmed this objectively: differs_from_background passed=false (\"no pixel in the scored region diverges from top-left (63,75,97)\") and coverage fraction 0.0. The expected artifact requires that both the default and reduced PNGs visibly contain the same recognisable shape; the frame contains no shape at all, so the core visual subject the scaling behaviour was meant to demonstrate is absent. (The frame dimensions themselves are plausible — 800x600 native, 768 long-edge inline — but with an empty scene there is no shape to compare across scales.)"
+    }
+  ],
+  "tokensPerTool": [
+    {
+      "tool": "mcp__aether-hub__capture_frame",
+      "calls": 1,
+      "bytesIn": 487,
+      "bytesOut": 11618,
+      "tokensIn": 122,
+      "tokensOut": 2905
+    },
+    {
+      "tool": "mcp__aether-hub__describe_kinds",
+      "calls": 1,
+      "bytesIn": 46,
+      "bytesOut": 569,
+      "tokensIn": 12,
+      "tokensOut": 142
+    },
+    {
+      "tool": "mcp__aether-hub__list_engines",
+      "calls": 1,
+      "bytesIn": 16,
+      "bytesOut": 43,
+      "tokensIn": 4,
+      "tokensOut": 11
+    },
+    {
+      "tool": "mcp__aether-hub__spawn_substrate",
+      "calls": 1,
+      "bytesIn": 21,
+      "bytesOut": 134,
+      "tokensIn": 5,
+      "tokensOut": 34
+    }
+  ]
+}
