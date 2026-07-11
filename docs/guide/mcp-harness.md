@@ -119,8 +119,10 @@ need their nested `SchemaType`. `names` cannot combine with `families` or
 `prefix`, and a bare unfiltered `full: true` call is refused so schema output
 stays bounded. `describe_component` reports a loaded component's handler kinds,
 their docs, whether it has a fallback, and its boot-config kind, addressed by
-the component's lineage name (the `aether.component/aether.embedded:NAME`
-address `spawn_substrate` / `list_components` / `load_component` hand back).
+the component's loaded lineage name (the
+`aether.component/aether.embedded:NAME` address `spawn_substrate` /
+`load_component` hand back). Registry `list_components` entries describe
+stored artifacts and are not loaded lineage addresses.
 Handler and component docs default to the first rustdoc line; pass `full: true`
 for the complete strings. `describe_transforms` lists the native transforms
 registered at link time.
@@ -136,6 +138,19 @@ shows its schema. `config_path` does not contain pre-encoded wire bytes.
 `load_component` with `replicas: N` returns one shared `capabilities` block plus
 `instances: [{mailbox_id, name}, …]` rather than repeating capabilities per
 replica; docs on that block also follow the summary-vs-`full` projection.
+
+`list_binaries` and registry `list_components` return
+`{entries, total_matched, shown, truncated, notice}` in stable newest-first
+first-ingest order. Their default page is the newest 20 name-pointed entries;
+pass `include_history: true` for unnamed historical hashes and an explicit
+`limit` to change the cap (`0` returns no entries while retaining
+`total_matched`). To retrieve a complete matched history, first call with
+`include_history: true`, then repeat with `limit` set to that call's
+`total_matched`. Component actor `handled_kinds` are readable static kind names
+with tagged `knd-…` fallbacks; the redundant manifest-wide handled-kind union
+is omitted. These registry rows identify stored wasm, not live component
+instances; use the loaded component lineage name returned by
+`spawn_substrate` / `load_component` for `describe_component`.
 
 **Observation.** `capture_frame` returns the engine's current frame as inline PNG,
 and can carry two mail bundles dispatched atomically around the readback — `mails`
@@ -157,8 +172,9 @@ one handler.
   They route independently even when they share a prefix — send the kind
   `aether.audio.note_on` to the mailbox `aether.audio`. See
   [Mail, kinds & scheduling](systems/mail-and-kinds.md).
-- **Paths, not bytes.** `load_component` and `replace_component` take a filesystem
-  path the harness reads. Tool JSON never carries the wasm buffer itself.
+- **Paths, not bytes.** `upload_component` takes the fleet-host filesystem path;
+  `load_component` and `replace_component` take registry selectors. Tool JSON
+  never carries the wasm buffer itself.
 - **Wire ids are tagged strings.** Mailbox, kind, and handle ids come back as
   `mbx-…`, `knd-…`, `hdl-…` — hand them back verbatim, don't reformat or parse them.
   See [The type system](foundations/type-system.md).
@@ -171,10 +187,12 @@ one handler.
   To read back a backgrounded or minimized window, mail `aether.window.focus`
   first to foreground it — see [Window](systems/window.md).
 - **`describe_component` resolves names live.** Address it by the lineage name
-  `spawn_substrate` / `list_components` / `load_component` return and it asks the
-  substrate, which holds the live loaded set — so a boot-manifest-loaded component, an
-  aether-mcp restart, and a post-`replace_component` describe all resolve. A `mbx-` id
-  is a local cache fast-path that needs a prior `load_component` / `replace_component`.
+  `spawn_substrate` / `load_component` return and it asks the substrate, which
+  holds the live loaded set — so a boot-manifest-loaded component, an
+  aether-mcp restart, and a post-`replace_component` describe all resolve.
+  Registry `list_components` rows are stored artifacts, not these live lineage
+  names. A `mbx-` id is a local cache fast-path that needs a prior
+  `load_component` / `replace_component`.
 
 ## Where to read more
 

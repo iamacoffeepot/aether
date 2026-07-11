@@ -55,12 +55,11 @@ use aether_kinds::NamedMail;
 use aether_kinds::descriptors;
 use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
 use aether_kinds::{
-    BinaryEntry, BinarySelector, ComponentCapabilities, ComponentEntry, ComponentSelector, DeadEngineDescriptor,
-    EngineDescriptor, ListComponentBinaries, ListComponentBinariesResult, ListComponents, ListComponentsResult,
-    ListEngineBinaries, ListEngineBinariesResult, ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail,
-    LogTailResult, ReplaceComponent, ReplaceResult, ResolveComponent, ResolveComponentResult, SpawnEngine,
-    SpawnEngineResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent,
-    UploadComponentResult,
+    BinarySelector, ComponentCapabilities, ComponentSelector, DeadEngineDescriptor, EngineDescriptor,
+    ListComponentBinaries, ListComponentBinariesResult, ListComponents, ListComponentsResult, ListEngineBinaries,
+    ListEngineBinariesResult, ListEngines, ListEnginesResult, LoadComponent, LoadResult, LogTail, LogTailResult,
+    ReplaceComponent, ReplaceResult, ResolveComponent, ResolveComponentResult, SpawnEngine, SpawnEngineResult,
+    TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
 };
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;
@@ -391,13 +390,10 @@ impl FleetBench {
     /// Enumerate the hub's stored engine binaries (ADR-0115, issue 1953)
     /// under the given filter. Hub-local — addressed at `aether.engine` with
     /// no engine route.
-    pub fn list_engine_binaries(&mut self, filter: &ListEngineBinaries) -> Vec<BinaryEntry> {
+    pub fn list_engine_binaries(&mut self, filter: &ListEngineBinaries) -> ListEngineBinariesResult {
         let replies = self.call(None, "aether.engine", filter);
         let payload = single_reply(&replies, "ListEngineBinaries");
-        match ListEngineBinariesResult::decode_from_bytes(&payload) {
-            Some(result) => result.binaries,
-            None => panic!("undecodable ListEngineBinariesResult"),
-        }
+        ListEngineBinariesResult::decode_from_bytes(&payload).expect("undecodable ListEngineBinariesResult")
     }
 
     /// Upload a component wasm into the hub's content-addressed store
@@ -418,13 +414,10 @@ impl FleetBench {
     /// Enumerate the hub's stored component binaries (ADR-0116, issue 1956)
     /// under the given filter. Hub-local — addressed at `aether.engine` with
     /// no engine route.
-    pub fn list_component_binaries(&mut self, filter: &ListComponentBinaries) -> Vec<ComponentEntry> {
+    pub fn list_component_binaries(&mut self, filter: &ListComponentBinaries) -> ListComponentBinariesResult {
         let replies = self.call(None, "aether.engine", filter);
         let payload = single_reply(&replies, "ListComponentBinaries");
-        match ListComponentBinariesResult::decode_from_bytes(&payload) {
-            Some(result) => result.components,
-            None => panic!("undecodable ListComponentBinariesResult"),
-        }
+        ListComponentBinariesResult::decode_from_bytes(&payload).expect("undecodable ListComponentBinariesResult")
     }
 
     /// Enumerate the components an `engine` has actually loaded and

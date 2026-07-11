@@ -20,6 +20,7 @@ pub struct RestoredIndex {
     pub names: HashMap<String, String>,
     pub total_bytes: u64,
     pub clock: u64,
+    pub next_seq: u64,
 }
 
 /// Rebuild the in-memory index from disk: every `entries/<hash>.manifest`
@@ -28,6 +29,7 @@ pub fn restore(root: &Path) -> RestoredIndex {
     let mut entries: HashMap<String, Entry> = HashMap::new();
     let mut total_bytes: u64 = 0;
     let mut clock: u64 = 0;
+    let mut max_uploaded_seq: u64 = 0;
     let entries_dir = root.join("entries");
     if let Ok(read_dir) = fs::read_dir(&entries_dir) {
         for dirent in read_dir.flatten() {
@@ -48,9 +50,17 @@ pub fn restore(root: &Path) -> RestoredIndex {
             };
             let bytes_len = meta.len();
             clock += 1;
+            max_uploaded_seq = max_uploaded_seq.max(sidecar.uploaded_seq);
             entries.insert(
                 hash.to_owned(),
-                Entry { kind: sidecar.kind, manifest: sidecar.manifest, bytes_len, pinned: false, last_access: clock },
+                Entry {
+                    kind: sidecar.kind,
+                    manifest: sidecar.manifest,
+                    bytes_len,
+                    pinned: false,
+                    last_access: clock,
+                    uploaded_seq: sidecar.uploaded_seq,
+                },
             );
             total_bytes = total_bytes.saturating_add(bytes_len);
         }
@@ -66,7 +76,7 @@ pub fn restore(root: &Path) -> RestoredIndex {
             }
         }
     }
-    RestoredIndex { entries, names, total_bytes, clock }
+    RestoredIndex { entries, names, total_bytes, clock, next_seq: max_uploaded_seq.saturating_add(1) }
 }
 
 fn read_sidecar(path: &Path) -> Option<StoredEntry> {

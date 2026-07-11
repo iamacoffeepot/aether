@@ -113,9 +113,11 @@ pub fn resolve_component(store: &mut ArtifactStore, selector: &ComponentSelector
     }
     // No exact token: a namespace / handled-kind attribute query. A
     // match-more-than-one is a clean ambiguity error.
-    let mut matches = store.list_components(&ListComponentBinaries {
+    let mut matches = store.matching_components(&ListComponentBinaries {
         namespace: selector.namespace.clone(),
         handled_kind: selector.handled_kind,
+        limit: None,
+        include_history: false,
     });
     match matches.len() {
         0 => ResolveComponentResult::Err {
@@ -217,7 +219,7 @@ pub fn resolve_selector(store: &mut ArtifactStore, selector: &BinarySelector) ->
         return store.get(&Selector::Name(token.to_owned()));
     }
     // No exact token: an attribute query, else `default` = headless.
-    let hash = store.list_binaries(&attribute_filter(selector)).into_iter().map(|entry| entry.hash).min()?;
+    let hash = store.matching_binaries(&attribute_filter(selector)).into_iter().map(|entry| entry.hash).min()?;
     store.get(&Selector::Hash(hash))
 }
 
@@ -227,12 +229,20 @@ pub fn resolve_selector(store: &mut ArtifactStore, selector: &BinarySelector) ->
 /// chassis.
 fn attribute_filter(selector: &BinarySelector) -> ListEngineBinaries {
     if selector.chassis.is_none() && selector.caps.is_empty() && selector.target.is_none() {
-        ListEngineBinaries { chassis: Some(DEFAULT_CHASSIS.to_owned()), caps: Vec::new(), target: None }
+        ListEngineBinaries {
+            chassis: Some(DEFAULT_CHASSIS.to_owned()),
+            caps: Vec::new(),
+            target: None,
+            limit: None,
+            include_history: false,
+        }
     } else {
         ListEngineBinaries {
             chassis: selector.chassis.clone(),
             caps: selector.caps.clone(),
             target: selector.target.clone(),
+            limit: None,
+            include_history: false,
         }
     }
 }
@@ -242,7 +252,7 @@ fn attribute_filter(selector: &BinarySelector) -> ListEngineBinaries {
 /// `None` when no current entry matches both.
 fn pick_versioned(store: &ArtifactStore, name: &str, version: &str) -> Option<String> {
     store
-        .list_binaries(&ListEngineBinaries::default())
+        .matching_binaries(&ListEngineBinaries::default())
         .into_iter()
         .find(|entry| entry.name.as_deref() == Some(name) && entry.manifest.git_sha == version)
         .map(|entry| entry.hash)
