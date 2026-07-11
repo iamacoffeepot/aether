@@ -1,0 +1,126 @@
+{
+  "totals": {
+    "findings": 7,
+    "papercut": 5,
+    "missingPrimitive": 1,
+    "docGap": 1,
+    "blocker": 0,
+    "softHolds": 0
+  },
+  "succeeded": true,
+  "buildGreen": null,
+  "summary": "Drove one turn of the toy sim purely through mail over the MCP harness and verified the full aether.sim.* fact-bundle contract. Setup: no sim wasm was stored, so I built aether-kit for wasm32-unknown-unknown and upload_component'd it, then spawn_substrate'd a headless engine preloading aether_kit@aether.kit.sim. Discovered the vocabulary via describe_kinds/describe_component (the ADR-0144 shapes: spawn{entity_id,cell_x,cell_z}, move_intent{entity_id,direction:North/East/South/West}, poll{since_tick}->poll_result{bundles:[{tick,superseded_through,trajectory:[{tick,entity_id,kind:Spawned|Moved{from,to}|Removed}],summary:{tick,entities:[{entity_id,cell_x,cell_z}]}}],current_tick}). Sent spawn(entity 1 @ (0,0)) and move_intent(East) as SEPARATE calls, let the tick clock step, and polled. Confirmed the exact bundle contract: a Spawned trajectory event (tick 732), a Moved{from:(0,0),to:(1,0)} trajectory event (tick 875), a StateSummary placing entity 1 on the adjacent cell (1,0), and superseded_through == tick on every bundle (atomic, tick-ordered, watermarked). Render artifact: headless can't capture (nop render mailbox / capture_frame errors), so I spawned the DESKTOP chassis with the sim, drove spawn+move, and captured — the entity renders as a gold square at cell (1,0), just right of screen center. Left engine 00000000-0000-0000-0000-000000000004 alive showing that clean single-marker frame for the judge. Hit real friction around ring depth, per-tick-bin intent supersession, poll-reply capping, and the guide having zero coverage of the sim surface.",
+  "artifact": {
+    "verdict": "correct",
+    "rationale": "The captured frame renders a tiled grid backdrop with a single gold/yellow entity marker positioned just right-of-center — exactly one cell over from a central spawn. This matches the expected artifact's frame criterion (\"a frame with the entity marker one cell over from spawn\"). The marker is a discrete filled cell aligned to the grid, offset from the geometric center by one cell to the right, consistent with the moved entity's trajectory landing at the expected adjacent cell. No missing marker, no all-black/empty frame, no marker at the wrong location."
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "high",
+        "where": "send_mail batch containing both aether.sim.spawn and aether.sim.move_intent for the same entity",
+        "what": "Batching spawn+move for one entity in a single send_mail lands both in the same tick bin. The per-entity last-writer-wins rule lets the later move_intent supersede the spawn, and the move (on a not-yet-existent entity) is then dropped — so the entity SILENTLY never appears: no error, no reply, empty world. This is the natural first thing a consumer tries ('spawn it, then move it'). I lost ~20 minutes chasing a phantom 'entity auto-removal' before realizing separate calls (separate ticks) are required.",
+        "suggested": "Document that same-tick-bin intents for one entity collapse under last-writer-wins ACROSS kinds; ideally make spawn+move for a fresh entity compose (creation then move) or emit a dropped-intent signal instead of silently vanishing the entity."
+      },
+      {
+        "category": "papercut",
+        "severity": "high",
+        "where": "aether.sim.poll after driving intents over MCP; default ring_depth",
+        "what": "The retained-bundle ring default is tiny (~64 bundles, observed 1469..1532 ≈ 1s at 60Hz). Every MCP round-trip spans many ticks, so by the time you poll after driving, the turn-bundles carrying the actual Spawned/Moved trajectory events are already evicted — the poll returns only per-turn summaries with empty trajectory[]. I could only observe the granular trajectory by respawning with ring_depth=100000 (which requires supplying config). The trajectory — the headline deliverable — is unobservable on the drive path at the default.",
+        "suggested": "Document the ring_depth vs round-trip-latency interaction in the sim guide; consider a larger default ring, or a poll variant returning the last N bundles that actually carried trajectory."
+      },
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "aether.sim.poll { since_tick: 0 }",
+        "what": "The poll reply is bounded to roughly the most recent ~1024 bundles regardless of since_tick, so since_tick:0 does NOT replay from tick 0 — it returns only the recent window (e.g. on a 14.7k-tick engine, since_tick:0 returned ticks 13722..14745). A consumer reading the ADR ('ask for a tick older than the ring gets a summary at the ring's oldest tick') reasonably expects since_tick:0 to be a full catch-up, but it silently truncates on the recent side and can miss the trajectory entirely.",
+        "suggested": "Document the reply cap and its interaction with since_tick; ideally cap by returning the oldest-retained window (with a summary anchor) rather than the newest, so a catch-up poll surfaces the historical trajectory the ADR promises."
+      },
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "aether.sim.config override at spawn_substrate",
+        "what": "grid_bounds is a required (non-Option) struct in aether.sim.config, so to override just ring_depth you must also supply fact_sink and all four grid_bounds fields — partial config isn't accepted through the schema-encoded path. You either take every default (omit config) or restate the whole struct to change one knob.",
+        "suggested": "Make grid_bounds (and its fields) default-able so a consumer can pass config with only ring_depth set; or document the full config shape in the sim guide with a copy-paste default."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "capture_frame on the headless chassis specified by the task",
+        "what": "The task asked for a headless engine AND a render artifact, but headless has a nop render mailbox and capture_frame errors ('windowless/headless substrate emits no frame'). The sim clearly renders (it has an aether.lifecycle.render handler and draws a gold entity marker + tile grid), but that output is only observable on a windowed (desktop) chassis. A consumer wanting to SEE the sim state must know to switch chassis.",
+        "suggested": "Note in the sim guide that visual verification requires a windowed chassis (headless is fact-surface-only), so consumers pick desktop when they want to capture the marker."
+      }
+    ],
+    "missing-primitive": [
+      {
+        "category": "missing-primitive",
+        "severity": "medium",
+        "where": "Stepping exactly one turn over the MCP drive path",
+        "what": "The ADR's clean model is advance(1) == one turn in TestBench, but over MCP the clock free-runs and there is no single-step drive primitive. Headless ticks at 60Hz and the DESKTOP chassis ticks thousands/sec (current_tick jumped 14700->31900 between two calls), so a consumer cannot bin an intent and deterministically observe its one resulting turn — they race the clock and reconstruct via ring+since_tick windowing. Move application was even intermittent on the fast desktop clock (an entity driven with separate spawn/move calls sometimes stayed put), likely a timing race against binning.",
+        "suggested": "Expose a poll-until-tick or an explicit aether.sim.step drive mail (or a 'return the bundle for tick N' pull), so a drive consumer can observe a specific turn deterministically instead of racing a free-running clock."
+      }
+    ],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "high",
+        "where": "Discovering the aether.sim.* vocabulary from docs/guide/",
+        "what": "The entire tick-native sim surface is documented ONLY in ADR-0144 (status: Proposed). docs/guide/ has no page for it — not in SUMMARY.md, no recipe, no systems entry, and none of the CLAUDE.md runtime-subsystem list. A fresh consumer following the freshness rule (guide + public signatures) finds nothing; I had to read the ADR for the design and lean on describe_kinds/describe_component to reconstruct the exact field shapes and the direction enum. The bundle-contract reconciliation rule (apply summary as ground truth, apply trajectory above the watermark, drop at/below) exists only in ADR prose.",
+        "suggested": "Add a docs/guide page for the tick-native sim vocabulary (a recipe like 'Driving a turn sim over mail' plus a systems entry), covering the intent/fact kinds, the three fact forms, and the ring_depth/since_tick windowing pattern."
+      }
+    ],
+    "blocker": []
+  },
+  "softHolds": [],
+  "tokensPerTool": [
+    {
+      "tool": "mcp__aether-hub__capture_frame",
+      "calls": 1,
+      "bytesIn": 121,
+      "bytesOut": 5118,
+      "tokensIn": 30,
+      "tokensOut": 1280
+    },
+    {
+      "tool": "mcp__aether-hub__list_binaries",
+      "calls": 1,
+      "bytesIn": 21,
+      "bytesOut": 574,
+      "tokensIn": 5,
+      "tokensOut": 144
+    },
+    {
+      "tool": "mcp__aether-hub__list_components",
+      "calls": 1,
+      "bytesIn": 30,
+      "bytesOut": 10925,
+      "tokensIn": 8,
+      "tokensOut": 2731
+    },
+    {
+      "tool": "mcp__aether-hub__list_engines",
+      "calls": 1,
+      "bytesIn": 16,
+      "bytesOut": 43,
+      "tokensIn": 4,
+      "tokensOut": 11
+    },
+    {
+      "tool": "mcp__aether-hub__send_mail",
+      "calls": 2,
+      "bytesIn": 399,
+      "bytesOut": 204,
+      "tokensIn": 100,
+      "tokensOut": 51
+    },
+    {
+      "tool": "mcp__aether-hub__spawn_substrate",
+      "calls": 1,
+      "bytesIn": 213,
+      "bytesOut": 134,
+      "tokensIn": 53,
+      "tokensOut": 34
+    }
+  ]
+}
