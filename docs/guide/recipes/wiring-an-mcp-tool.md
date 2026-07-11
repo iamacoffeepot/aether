@@ -16,12 +16,23 @@ The seam is two files in `aether-mcp`:
 - `crates/aether-mcp/src/args.rs` — the request/response structs the agent sees,
   with their `JsonSchema` doc comments. **The doc comments are the agent-facing
   contract** — the schema your MCP client shows is generated from them.
-- `crates/aether-mcp/src/tools.rs` — the `#[tool]` method on `impl Mcp`: parse the
+- `crates/aether-mcp/src/tools/mod.rs` — the `#[tool]` method on `impl Mcp`: parse the
   args, build the envelope, await the reply, decode it, map errors.
+
+Task-level adapters that group several live component kinds follow the same
+contract with one extra boundary. Keep their ergonomic DTOs in `args.rs`, put
+the task-to-live JSON conversion and settled relay in a focused module under
+`crates/aether-mcp/src/tools/`, and register only the public router methods in
+`tools/mod.rs`. The terrain family is the worked example: it requires exact
+loaded `LoadResult.name` mailboxes, resolves request and reply descriptors from
+the per-engine live kind cache, dispatches through `MailSpec` / `deliver_one`,
+decodes through `decode_reply_events`, and applies `guard_response_size` at
+every router method. It does not link the component crate or copy its Rust wire
+types into the coordinator.
 
 ## The exemplar: `actor_cost`
 
-[`actor_cost`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-mcp/src/tools.rs) dumps one actor's per-handler cost
+[`actor_cost`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-mcp/src/tools/mod.rs) dumps one actor's per-handler cost
 table. It's small but exercises every interesting part: a tagged-id filter
 argument, a wire request/reply round-trip, decode of a reply kind into a JSON
 response, and error mapping. Read it alongside this page; the steps below name its
@@ -77,7 +88,7 @@ What the conventions buy you here:
   `ActorCostRow` carries `kind_id: String` (a tagged string), not the wire
   `KindId` — the same id-as-string rule, now on the way out.
 
-## Step 2 — the `#[tool]` method (`tools.rs`)
+## Step 2 — the `#[tool]` method (`tools/mod.rs`)
 
 The method lives on `impl Mcp` inside the `#[tool_router]` block. The `#[tool]`
 attribute registers it and uses the `description` string plus the args struct's
@@ -191,6 +202,7 @@ After the build, bring the harness up and call the tool against a real engine:
 
 This recipe names live symbols — `ActorCostArgs`, `Mcp::actor_cost`, `CostTail` /
 `CostTailResult`, `engine_envelope`, `parse_kind_id`, `tagged_id::encode`. Before
-following it, confirm they still exist in `crates/aether-mcp/src/{args,tools}.rs`
+following it, confirm they still exist in `crates/aether-mcp/src/args.rs` and
+`crates/aether-mcp/src/tools/`
 and `crates/aether-kinds/src/lib.rs`; if a name has moved, fix the recipe as part
 of your change.
