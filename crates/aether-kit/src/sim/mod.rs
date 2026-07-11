@@ -10,8 +10,10 @@
 //! [`Tick`] applies the bin in stable entity-id order. Every completed turn
 //! emits one atomic [`TickBundle`] and retains it in a bounded catch-up ring.
 
-mod kinds;
-pub use kinds::*;
+pub use aether_capabilities::game::{
+    CellPosition, EntityState, GridBounds, MoveDirection, MoveIntent, Poll, PollResult, SimConfig, Spawn, StateSummary,
+    TickBundle, TrajectoryEvent, TrajectoryKind,
+};
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
@@ -141,7 +143,12 @@ fn bounded_ring_depth(configured: u32) -> usize {
     usize::try_from(configured.clamp(1, MAX_RING_DEPTH)).expect("bounded ring depth fits usize")
 }
 
-impl GridBounds {
+trait GridBoundsExt {
+    fn contains(self, position: CellPos) -> bool;
+    fn valid(self) -> bool;
+}
+
+impl GridBoundsExt for GridBounds {
     fn contains(self, position: CellPos) -> bool {
         position.x >= self.min_cell_x
             && position.x <= self.max_cell_x
@@ -154,7 +161,11 @@ impl GridBounds {
     }
 }
 
-impl MoveDirection {
+trait MoveDirectionExt {
+    fn target(self, from: CellPos) -> Option<CellPos>;
+}
+
+impl MoveDirectionExt for MoveDirection {
     fn target(self, from: CellPos) -> Option<CellPos> {
         match self {
             Self::North => Some(CellPos { x: from.x, z: from.z.checked_sub(1)? }),
