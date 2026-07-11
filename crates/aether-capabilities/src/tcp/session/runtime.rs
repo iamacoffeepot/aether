@@ -215,6 +215,16 @@ impl NativeActor for TcpSessionActor {
                                     error = %error,
                                     "tcp session frame rejected",
                                 );
+                                if let Some(consumer) = state.consumer.as_deref() {
+                                    ctx.send_to_named(
+                                        consumer,
+                                        &SessionClosed {
+                                            session_name: state.session_name.clone(),
+                                            peer: state.peer.clone(),
+                                            reason: format!("frame rejected: {error}"),
+                                        },
+                                    );
+                                }
                                 ctx.shutdown();
                                 return;
                             }

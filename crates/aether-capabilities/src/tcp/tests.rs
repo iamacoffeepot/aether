@@ -301,6 +301,39 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
     assert!(consumer_rx.try_recv().is_err(), "consumer must receive exactly two data mails and one close mail");
 }
 
+/// Rejecting an invalid frame is an observable session close, not a
+/// silent shutdown: the bound consumer receives exactly one close notice.
+#[test]
+fn session_reports_frame_rejection_to_bound_consumer() {
+    const CONSUMER: &str = "test.tcp.rejection-consumer";
+    let (registry, rx, _chassis) = boot_tcp_substrate();
+    let consumer_rx = register_session_consumer(&registry, CONSUMER);
+
+    let bind: BindListenerResult = drive_and_decode(
+        &registry,
+        &rx,
+        TcpCapability::NAMESPACE,
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("rejection".into()), consumer: Some(CONSUMER.into()) },
+    );
+    let local_port = match bind {
+        BindListenerResult::Ok { local_port, .. } => local_port,
+        BindListenerResult::Err { reason, .. } => panic!("bind failed: {reason}"),
+    };
+
+    let mut client = TcpStream::connect(("127.0.0.1", local_port)).expect("connect loopback client");
+    client.write_all(&u32::MAX.to_le_bytes()).expect("write oversize frame prefix");
+
+    let closed = consumer_rx.recv_timeout(Duration::from_secs(2)).expect("SessionClosed arrives on frame rejection");
+    let CapturedSessionMail::Closed(closed) = closed else {
+        panic!("expected SessionClosed, got {closed:?}");
+    };
+    assert_eq!(closed.session_name, "conn-0");
+    assert!(closed.peer.starts_with("127.0.0.1:"));
+    assert!(closed.reason.starts_with("frame rejected: frame too large:"), "unexpected reason: {}", closed.reason);
+    thread::sleep(Duration::from_millis(50));
+    assert!(consumer_rx.try_recv().is_err(), "consumer must receive exactly one close mail");
+}
+
 /// Two concurrent binds on different ports both surface in
 /// `ListListeners`.
 #[test]

@@ -121,7 +121,7 @@ impl NativeActor for TcpCapability {
                     listener: Some(listener),
                     addr: mail.addr.clone(),
                     port: local_port,
-                    consumer: mail.consumer.clone(),
+                    consumer: mail.consumer,
                 },
             )
             .finish()

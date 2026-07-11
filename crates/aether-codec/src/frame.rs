@@ -181,13 +181,10 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T, FrameErr
 /// again. An oversize prefix is rejected before waiting for or
 /// allocating its declared body.
 pub fn pop_frame(buf: &mut Vec<u8>) -> Result<Option<Vec<u8>>, FrameError> {
-    let Some(prefix) = buf.get(..4) else {
+    let Some(&prefix) = buf.first_chunk::<4>() else {
         return Ok(None);
     };
-    let &[a, b, c, d] = prefix else {
-        return Ok(None);
-    };
-    let len = u32::from_le_bytes([a, b, c, d]) as usize;
+    let len = u32::from_le_bytes(prefix) as usize;
     let max = max_frame_size();
     if len > max {
         return Err(FrameError::FrameTooLarge { size: len, max });

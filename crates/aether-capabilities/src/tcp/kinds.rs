@@ -165,9 +165,9 @@ pub struct SessionWrite {
 pub struct SessionClose {}
 
 /// `aether.tcp.session_closed` — delivered to the listener's bound
-/// consumer on peer EOF or read error. Carries the session subname,
-/// the peer address, and a human-readable reason. A trailing partial
-/// frame at close is dropped and noted in the reason.
+/// consumer on peer EOF, read error, or frame rejection. Carries the
+/// session subname, the peer address, and a human-readable reason. A
+/// trailing partial frame at close is dropped and noted in the reason.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.tcp.session_closed")]
 pub struct SessionClosed {
