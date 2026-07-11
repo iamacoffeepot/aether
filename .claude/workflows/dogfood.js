@@ -71,6 +71,19 @@ const FINDING_ITEM = {
   },
 }
 
+// One mail in the replay bundle — the shape capture_frame's own `mails` parameter takes, so the
+// Attempt's reported bundle passes through to the judge's capture verbatim.
+const REPLAY_MAIL = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['recipient_name', 'kind_name'],
+  properties: {
+    recipient_name: { type: 'string', description: 'the mailbox to send to on the live engine (e.g. "aether.render", "aether.text")' },
+    kind_name: { type: 'string', description: 'the kind name of the payload (e.g. "aether.draw_triangle", "aether.text.draw_batch")' },
+    params: { description: 'the kind\'s params, exactly as you sent them; omit for a fieldless kind' },
+  },
+}
+
 const FRICTION_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -79,6 +92,7 @@ const FRICTION_SCHEMA = {
     succeeded: { type: 'boolean', description: 'did you accomplish the task through the public surface' },
     summary: { type: 'string', description: 'what you did and how it went, briefly' },
     engineId: { type: ['string', 'null'], description: 'for a render task: the engine_id you left ALIVE for the judge to capture; null otherwise (and terminate any engine you spawned)' },
+    replayMails: { type: 'array', items: REPLAY_MAIL, description: 'for a render task: the mail bundle that re-establishes the expected visual state on the live engine, because the render surface is immediate-mode and one-shot draws do not survive the frame they were sent in. The judge dispatches it in its own capture. Empty when the visual state redraws itself every tick (a loaded component) or when nothing renders.' },
     buildGreen: { type: ['boolean', 'null'], description: 'author / build-layer: did the scratch crate build (and any tests pass); null for drive' },
     findings: { type: 'array', items: FINDING_ITEM },
   },
@@ -144,16 +158,28 @@ THE STALL RULE:
 
 ${heavy ? `BUILD: the scratch crate is yours to create anywhere under a temp/scratch dir. Build it (cargo build for build-layer; the wasm32 target for an author component). Report buildGreen = whether it compiled (and any tests passed).` : `Report buildGreen = null (you write no crate).`}
 
-${task.expectedArtifact ? `RENDER ARTIFACT: this task renders. After you produce the visual state, spawn_substrate / drive it so the expected frame is showing, and LEAVE THE ENGINE ALIVE — report its engine_id so a judge can capture it. Do NOT terminate that engine.` : `No render artifact: terminate_substrate any engine you spawned before returning; report engineId = null.`}
+${task.expectedArtifact ? `RENDER ARTIFACT: this task renders. After you produce the visual state, spawn_substrate / drive it so the expected frame is showing, and LEAVE THE ENGINE ALIVE — report its engine_id so a judge can capture it. Do NOT terminate that engine.
 
-Return succeeded, summary, engineId, buildGreen, and findings (every friction point — category, severity, where, what, suggested). An empty findings array means the surface was friction-free; be honest, not generous.`
+THE IMMEDIATE-MODE RULE (load-bearing — the judge grades a frame it captures itself, later):
+- The render surface is immediate mode. draw_triangle, draw_textured_quads, and the aether.text.draw* family accumulate for ONE frame and clear. Mailing them once does not leave a lasting picture: a bare capture taken after the fact comes back empty, and the judge would rule your correct render 'wrong'.
+- So report replayMails: the exact mail bundle a fresh capture must dispatch to put the expected frame back on screen — each entry { recipient_name, kind_name, params } exactly as you sent it. The judge passes it as capture_frame's own \`mails\`, which fire before readback.
+- Report replayMails = [] ONLY when the picture genuinely redraws itself every tick (a loaded component that re-sends its draws on Tick). If you produced the visual with one-shot mail, an empty bundle means a blank frame and a false verdict.` : `No render artifact: terminate_substrate any engine you spawned before returning; report engineId = null and replayMails = [].`}
+
+Return succeeded, summary, engineId, replayMails, buildGreen, and findings (every friction point — category, severity, where, what, suggested). An empty findings array means the surface was friction-free; be honest, not generous.`
 }
 
-function judgePrompt(task, engineId) {
+function judgePrompt(task, engineId, replayMails) {
+  const replay = (replayMails && replayMails.length)
+    ? `The engine's render surface is immediate mode — the consumer's draws cleared the frame after they were sent, so a bare capture would come back blank. Pass this bundle as capture_frame's \`mails\` (it fires before readback, putting the picture back on screen for the frame you read):
+
+${JSON.stringify(replayMails, null, 2)}`
+    : `The consumer reported no replay bundle — the visual state redraws itself every tick — so a plain capture (no \`mails\`) shows it.`
   return `You are a vision judge for a dogfood trial. A consumer agent drove an engine to produce a visual result and left it alive for you. Capture it yourself and rule whether it is use-visibly correct.
 
 EXPECTED ARTIFACT (what the frame should show):
 ${task.expectedArtifact}
+
+${replay}
 
 Call capture_frame on engine_id "${engineId}" (ToolSearch for mcp__aether-hub__capture_frame). The PNG returns inline — look at it. Compare what you SEE against the expected artifact above. Rule:
 - verdict 'correct' if the frame matches the expectation.
@@ -193,12 +219,14 @@ const attempt = await agent(attemptPrompt(task), {
 if (!attempt) throw new Error('dogfood: the Attempt agent died with no friction report')
 
 // Phase 3 — Judge (render artifact only). The judge re-captures the still-alive engine itself, so the
-// PNG lands in its own vision context — no file handoff, no agent grading its own screenshot. It
-// terminates the engine when done.
+// PNG lands in its own vision context — no file handoff, no agent grading its own screenshot. The
+// render surface is immediate-mode, so a one-shot draw is gone by the time the judge looks: it
+// dispatches the Attempt's replay bundle as capture_frame's `mails` to put the picture back in the
+// frame it reads. It terminates the engine when done.
 let judge = null
 if (task.expectedArtifact && attempt.engineId) {
   phase('Judge')
-  judge = await agent(judgePrompt(task, attempt.engineId), {
+  judge = await agent(judgePrompt(task, attempt.engineId, attempt.replayMails), {
     label: 'judge', phase: 'Judge', model: JUDGE_MODEL, agentType: 'general-purpose', schema: JUDGE_SCHEMA,
   })
 } else if (task.expectedArtifact && !attempt.engineId) {
