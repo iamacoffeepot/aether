@@ -411,7 +411,7 @@ mod free_dispatch_tests {
     /// nothing itself.
     #[test]
     fn dispatch_log_tail_free_returns_some_on_match() {
-        let env = build_envelope(&LogTail { max: 10, min_level: None, since: None });
+        let env = build_envelope(&LogTail { max: 10, min_level: None, since: None, contains: None });
 
         // The arm reads `ActorLogRing::try_with`, so it must run inside a
         // `with_stamped` block. Stamping with a fresh slot map makes the

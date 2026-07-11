@@ -166,7 +166,7 @@ fn drag(panel: &str) -> Vec<(&'static str, BenchOp)> {
 /// Read the panel's log ring from `since`, returning the new messages plus the
 /// next cursor so a later phase reads only its own entries.
 fn read_panel_log(bench: &mut TestBench, since: Option<u64>) -> (Vec<String>, u64) {
-    match bench.log_tail(&panel_address(), since) {
+    match bench.log_tail(&panel_address(), since, None) {
         LogTailResult::Ok { entries, next_since, .. } => (entries.into_iter().map(|e| e.message).collect(), next_since),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }

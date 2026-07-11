@@ -137,7 +137,7 @@ impl ActorLogRing {
         self.ring.push_back(entry);
     }
 
-    /// Pure read-side: filter on `min_level` + `since`, cap at `max`
+    /// Pure read-side: filter on `min_level` + `since` + `contains`, cap at `max`
     /// (with the documented `0 → DEFAULT_TAIL_MAX` and `> MAX_TAIL_MAX
     /// → MAX_TAIL_MAX` clamping), compute the `truncated_before`
     /// cursor. Mirrors the pre-ADR-0081 `LogCapability::read` shape
@@ -154,8 +154,17 @@ impl ActorLogRing {
             _ => None,
         };
 
-        let entries: Vec<LogEntry> =
-            self.ring.iter().filter(|e| e.sequence > since && e.level >= min_level).take(max).cloned().collect();
+        let entries: Vec<LogEntry> = self
+            .ring
+            .iter()
+            .filter(|e| {
+                e.sequence > since
+                    && e.level >= min_level
+                    && request.contains.as_deref().is_none_or(|substring| e.message.contains(substring))
+            })
+            .take(max)
+            .cloned()
+            .collect();
 
         let next_since = entries.last().map_or(since, |e| e.sequence);
 
@@ -494,7 +503,7 @@ mod tests {
         let mut ring = ActorLogRing::with_capacity(8);
         push_three(&mut ring);
         let LogTailResult::Ok { entries, next_since, truncated_before } =
-            ring.tail(&LogTail { max: 0, min_level: None, since: None })
+            ring.tail(&LogTail { max: 0, min_level: None, since: None, contains: None })
         else {
             panic!("expected Ok");
         };
@@ -516,12 +525,67 @@ mod tests {
         ring.push(2, "t".to_owned(), "info".to_owned(), 0);
         ring.push(3, "t".to_owned(), "warn".to_owned(), 0);
         ring.push(4, "t".to_owned(), "error".to_owned(), 0);
-        let LogTailResult::Ok { entries, .. } = ring.tail(&LogTail { max: 0, min_level: Some(3), since: None }) else {
+        let LogTailResult::Ok { entries, .. } =
+            ring.tail(&LogTail { max: 0, min_level: Some(3), since: None, contains: None })
+        else {
             panic!("expected Ok");
         };
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].message, "warn");
         assert_eq!(entries[1].message, "error");
+    }
+
+    #[test]
+    fn tail_contains_matches_message_subset_case_sensitively() {
+        let mut ring = ActorLogRing::with_capacity(8);
+        ring.push(2, "t".to_owned(), "request completed".to_owned(), 0);
+        ring.push(2, "t".to_owned(), "request failed".to_owned(), 0);
+        ring.push(2, "t".to_owned(), "Request completed".to_owned(), 0);
+
+        let LogTailResult::Ok { entries, next_since, .. } =
+            ring.tail(&LogTail { max: 0, min_level: None, since: None, contains: Some("request".to_owned()) })
+        else {
+            panic!("expected Ok");
+        };
+
+        assert_eq!(
+            entries.iter().map(|entry| entry.message.as_str()).collect::<Vec<_>>(),
+            ["request completed", "request failed",]
+        );
+        assert_eq!(next_since, 2);
+    }
+
+    #[test]
+    fn tail_contains_matching_none_echoes_since_cursor() {
+        let mut ring = ActorLogRing::with_capacity(8);
+        push_three(&mut ring);
+
+        let LogTailResult::Ok { entries, next_since, .. } =
+            ring.tail(&LogTail { max: 0, min_level: None, since: Some(1), contains: Some("absent".to_owned()) })
+        else {
+            panic!("expected Ok");
+        };
+
+        assert!(entries.is_empty());
+        assert_eq!(next_since, 1);
+    }
+
+    #[test]
+    fn tail_contains_none_preserves_unfiltered_behavior() {
+        let mut ring = ActorLogRing::with_capacity(8);
+        push_three(&mut ring);
+
+        let LogTailResult::Ok { entries, next_since, .. } =
+            ring.tail(&LogTail { max: 0, min_level: None, since: None, contains: None })
+        else {
+            panic!("expected Ok");
+        };
+
+        assert_eq!(
+            entries.iter().map(|entry| entry.message.as_str()).collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
+        assert_eq!(next_since, 3);
     }
 
     #[test]
@@ -531,7 +595,7 @@ mod tests {
             ring.push(2, "t".to_owned(), format!("msg-{i}"), 0);
         }
         let LogTailResult::Ok { entries, next_since, .. } =
-            ring.tail(&LogTail { max: 0, min_level: None, since: Some(2) })
+            ring.tail(&LogTail { max: 0, min_level: None, since: Some(2), contains: None })
         else {
             panic!("expected Ok");
         };
@@ -540,7 +604,7 @@ mod tests {
         assert_eq!(next_since, 5);
 
         let LogTailResult::Ok { entries, next_since, .. } =
-            ring.tail(&LogTail { max: 0, min_level: None, since: Some(next_since) })
+            ring.tail(&LogTail { max: 0, min_level: None, since: Some(next_since), contains: None })
         else {
             panic!("expected Ok");
         };
@@ -555,7 +619,7 @@ mod tests {
             ring.push(2, "t".to_owned(), format!("msg-{i}"), 0);
         }
         let LogTailResult::Ok { entries, next_since, .. } =
-            ring.tail(&LogTail { max: 2, min_level: None, since: None })
+            ring.tail(&LogTail { max: 2, min_level: None, since: None, contains: None })
         else {
             panic!("expected Ok");
         };
@@ -563,7 +627,7 @@ mod tests {
         assert_eq!(next_since, 2);
 
         let LogTailResult::Ok { entries, next_since, .. } =
-            ring.tail(&LogTail { max: 2, min_level: None, since: Some(next_since) })
+            ring.tail(&LogTail { max: 2, min_level: None, since: Some(next_since), contains: None })
         else {
             panic!("expected Ok");
         };
@@ -582,7 +646,7 @@ mod tests {
             ring.push(2, "t".to_owned(), format!("msg-{i}"), 0);
         }
         let LogTailResult::Ok { entries, truncated_before, .. } =
-            ring.tail(&LogTail { max: 0, min_level: None, since: None })
+            ring.tail(&LogTail { max: 0, min_level: None, since: None, contains: None })
         else {
             panic!("expected Ok");
         };
@@ -598,7 +662,7 @@ mod tests {
             ring.push(2, "t".to_owned(), format!("msg-{i}"), 0);
         }
         let LogTailResult::Ok { truncated_before, .. } =
-            ring.tail(&LogTail { max: 0, min_level: None, since: Some(2) })
+            ring.tail(&LogTail { max: 0, min_level: None, since: Some(2), contains: None })
         else {
             panic!("expected Ok");
         };

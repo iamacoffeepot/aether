@@ -116,7 +116,7 @@ mod tests {
         // that member's own sends fire, so the host stamps child[a] (not
         // the cluster's inbound parent) as the origin of this send.
         let expected = format!("source_mailbox={child_a_id}");
-        let entries = match bench.log_tail(engine, &observer.addr, None) {
+        let entries = match bench.log_tail(engine, &observer.addr, None, None) {
             LogTailResult::Ok { entries, .. } => entries,
             LogTailResult::Err { error } => panic!("log_tail on observer failed: {error}"),
         };

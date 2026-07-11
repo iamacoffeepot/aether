@@ -820,7 +820,7 @@ fn bounding_box(result: &FrameCheckResult) -> Option<FrameRect> {
 /// Every log message in the panel's ring, oldest first — the value-up
 /// observation surface (`widget_set`'s idiom).
 fn panel_log_messages(bench: &mut TestBench) -> Vec<String> {
-    match bench.log_tail(&panel_address(), None) {
+    match bench.log_tail(&panel_address(), None, None) {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|e| e.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }

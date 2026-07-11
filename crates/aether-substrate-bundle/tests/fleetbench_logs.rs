@@ -1,8 +1,9 @@
 //! `FleetBench` `actor_logs` proof (issue 1459, Tier-A): load the
 //! `probe` fixture into a forked substrate and tail its per-actor
 //! `ActorLogRing` (ADR-0081) for the one-shot `typed_send_alive` entry
-//! the probe emits on its first tick, then walk the `since` cursor to
-//! confirm it does not re-yield the seen entry.
+//! the probe emits on its first tick, assert the substrate-side substring
+//! filter across the real RPC hop, then walk the `since` cursor to confirm
+//! it does not re-yield the seen entry.
 
 mod fleetbench;
 
@@ -14,6 +15,7 @@ mod tests {
     /// `info` in the `0 = trace .. 4 = error` level mapping shared
     /// across `aether.log.*`.
     const LEVEL_INFO: u8 = 2;
+    const MESSAGE_SUBSTRING: &str = "typed_send_alive";
 
     /// Load `probe`, poll its lineage address with `LogTail` until the
     /// `typed_send_alive` info entry appears, then re-query past the
@@ -32,7 +34,13 @@ mod tests {
         let mut last_reply = None;
         let mut found = None;
         poll_until(|| {
-            let reply = bench.log_tail(engine, &addr, None);
+            let reply = bench.log_tail(engine, &addr, None, Some(MESSAGE_SUBSTRING.to_owned()));
+            if let LogTailResult::Ok { entries, .. } = &reply {
+                assert!(
+                    entries.iter().all(|entry| entry.message.contains(MESSAGE_SUBSTRING)),
+                    "the substrate-side contains filter must remove non-matching entries before the RPC reply: {entries:?}",
+                );
+            }
             if let LogTailResult::Ok { entries, next_since, .. } = &reply
                 && let Some(entry) = entries.iter().find(|e| e.message == "typed_send_alive" && e.level == LEVEL_INFO)
             {
@@ -56,7 +64,7 @@ mod tests {
 
         // Walk the cursor: a re-query past `next_since` must not
         // re-yield the entry we already consumed.
-        match bench.log_tail(engine, &addr, Some(next_since)) {
+        match bench.log_tail(engine, &addr, Some(next_since), Some(MESSAGE_SUBSTRING.to_owned())) {
             LogTailResult::Ok { entries, .. } => assert!(
                 entries.iter().all(|e| e.sequence != entry.sequence),
                 "the `since` cursor should not re-yield the already-seen entry (seq {}): {entries:?}",

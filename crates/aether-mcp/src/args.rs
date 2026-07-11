@@ -477,6 +477,11 @@ pub struct ActorLogsArgs {
     /// re-receiving entries.
     #[serde(default)]
     pub since: Option<u64>,
+    /// Case-sensitive substring to require in the entry message. The
+    /// substrate applies this filter before entries cross the wire.
+    /// Omitted returns messages regardless of content.
+    #[serde(default)]
+    pub contains: Option<String>,
 }
 
 /// One log entry as `actor_logs` returns it. Mirrors

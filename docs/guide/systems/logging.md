@@ -74,17 +74,18 @@ when eviction dropped entries the caller hadn't yet seen, so a gap is visible
 rather than silent.
 
 **The query is `aether.log.tail`, inherited by every actor.** Every actor
-answers `aether.log.tail { max, min_level, since }` through a framework-built-in
+answers `aether.log.tail { max, min_level, since, contains }` through a framework-built-in
 dispatch arm — no author writes a handler for it. The reply,
 `aether.log.tail_result`, carries the matching entries oldest-to-newest, a
 `next_since` cursor (the highest `sequence` returned), and the `truncated_before`
 signal. `min_level` filters by level, `since` returns only entries past a cursor,
-and `max` caps the count (`0` resolves to a default of 100, and anything above
-1000 clamps to 1000).
+`contains` filters message bodies by a case-sensitive substring, and `max` caps
+the count (`0` resolves to a default of 100, and anything above 1000 clamps to
+1000). All filters run in the owning actor before entries cross the wire.
 
 ## How to use it
 
-**Over MCP — `actor_logs`.** The `actor_logs(engine_id, mailbox_name, max?, level?, since?)`
+**Over MCP — `actor_logs`.** The `actor_logs(engine_id, mailbox_name, max?, level?, since?, contains?)`
 tool sends `aether.log.tail` to the named mailbox and returns its ring slice. The
 surface:
 
@@ -96,6 +97,9 @@ surface:
   server-side so a noisy ring returns only what you asked for.
 - **`since`** — the prior reply's `next_since`. Thread it back to page forward
   past entries you've already read without re-fetching them.
+- **`contains`** — a case-sensitive substring required in the entry's message;
+  omitted applies no content filter. It runs server-side so non-matching entries
+  do not cross the wire.
 
 Paging is the move you'll reach for on a busy actor: an `actor_logs` call returns
 `next_since`, and passing it as the next call's `since` walks the ring forward in
