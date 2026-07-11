@@ -1,0 +1,47 @@
+{
+  "totals": {
+    "findings": 3,
+    "papercut": 3,
+    "missingPrimitive": 0,
+    "docGap": 0,
+    "blocker": 0,
+    "softHolds": 0
+  },
+  "succeeded": true,
+  "buildGreen": null,
+  "summary": "Drove the running hub over the MCP harness to exercise the full list_components/list_binaries listing surface. Built component wasm via `cargo xtask dist` (no crate written) and staged a scenario: 4 named component uploads (aether_kit, fixtures.bundle, fixtures.defaultless, fixtures.stateful) plus 1 historical unnamed hash created by repointing fixtures.stateful from the typed wasm to the reshaped wasm. Then ran the task sequence: (1) list_components no-args returned the bounded named-only page — 4 entries, total_matched=4, shown=4, truncated=false, notice=null, historical typed hash correctly excluded, newest-first first-ingest order (aether_kit last-uploaded first), and fixtures.stateful showing its current (reshaped) hash. (2) include_history:true with limit:0 reported total_matched=5, shown=0, truncated=true, and a clear notice; repeating with limit:5 (derived from total_matched) returned all 5 including the name:null historical entry sorted last. (3) handled_kind:\"aether.lifecycle.tick\" filtered to exactly the 2 handling components; their actor handled_kinds render as readable static names (aether.lifecycle.tick, aether.http.server.request, aether.fs.read_result) with tagged knd-… fallbacks for component-defined kinds absent from the mcp baseline (knd-g4dz-uiyx-33ue etc.), and there is no manifest-wide handled-kind union — only per-actor lists. All behavior was derivable from docs/guide/mcp-harness.md alone; no internals were read. For the render artifact, spawned a desktop substrate (DISPLAY :99) booting fixtures.bundle's test.cube export; it renders a shaded cube (coverage 0.18, not_all_black + differs_from_background pass). Engine left alive for the judge.",
+  "artifact": {
+    "verdict": "n-a",
+    "rationale": "The expected artifact is \"none (text/JSON tool output)\" — this trial exercised a text/JSON-returning surface, not a rendered result, so there is no visual artifact to judge. The captured frame shows only the default scene (a shaded 3D cube — pink top, red left face, green right face — on a dark slate-blue background), which is the incidental engine state rather than the producer's output under test. Nothing renderable maps to the expectation, so this is not a visual verdict. Substrate terminated afterward."
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "list_components response shape (every entry carries its full manifest)",
+        "what": "A listing call always returns the entire manifest for every entry — all exported namespaces plus every actor's full handled_kinds list. For a broad 'what's stored' call this is a wall of text: the aether_kit entry alone (24 actors, hundreds of kind ids) dominated the response, and the default named-only page can hold up to 20 such entries. There is no compact projection to get just hash+name (or a namespace count) when you only want to enumerate what's in the registry.",
+        "suggested": "Add a compact-vs-full projection mirroring describe_kinds: default to a compact row (hash, name, namespace count, maybe default_entry) and gate the full per-actor manifest behind full:true, so a routine listing doesn't pay the whole-manifest context cost."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "Retrieving a complete history (include_history:true)",
+        "what": "Fetching the full matched history is inherently a two-call dance: you must first issue a throwaway call (e.g. limit:0) to read total_matched, then repeat with limit=total_matched. There is no single-call 'give me everything' sentinel, so retrieving all history always costs a round trip just to learn the count. It is documented, but it's still an awkward composition for the common 'show me the whole family' intent.",
+        "suggested": "Accept a sentinel such as limit:\"all\" (or an all:true flag) that returns the complete matched set in one call, bypassing the pre-read of total_matched."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "count/notice metadata on a non-truncated call",
+        "what": "The task framing implies a 'count notice' to inspect, but on the default named-only call (total_matched <= cap) notice is null — there is no positive completeness signal, only the absence of a truncation message. A fresh consumer has to infer completeness from truncated:false rather than reading an affirmative 'showing all N'. The notice only ever appears when something is truncated.",
+        "suggested": "Optionally populate notice on the complete case too (e.g. 'Showing all N matching store entries'), or document explicitly that notice:null + truncated:false is the complete-result signal."
+      }
+    ],
+    "missing-primitive": [],
+    "doc-gap": [],
+    "blocker": []
+  },
+  "softHolds": [],
+  "tokensPerTool": []
+}
