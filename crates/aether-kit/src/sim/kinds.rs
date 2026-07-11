@@ -37,7 +37,8 @@ impl Default for GridBounds {
 pub struct SimConfig {
     /// Optional live fact consumer. Every completed bundle is pushed here.
     pub fact_sink: Option<MailboxId>,
-    /// Maximum number of complete tick bundles retained for polling.
+    /// Maximum number of complete tick bundles retained for polling. The
+    /// actor clamps this to the supported range `1..=1024`.
     pub ring_depth: u32,
     /// Inclusive authoritative movement and spawn bounds.
     pub grid_bounds: GridBounds,

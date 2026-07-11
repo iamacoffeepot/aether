@@ -27,6 +27,7 @@ use aether_math::{Mat4, Rgb, Vec3};
 use crate::world::CellPos;
 
 const MAX_RENDER_GRID_EDGE: i64 = 32;
+const MAX_RING_DEPTH: u32 = 1024;
 const GRID_INSET: f32 = 0.035;
 const MARKER_INSET: f32 = 0.22;
 const GRID_Y_METERS: f32 = 0.0;
@@ -70,7 +71,7 @@ impl WasmActor for TurnSim {
     fn init(config: SimConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self {
             fact_sink: config.fact_sink,
-            ring_depth: usize::try_from(config.ring_depth.max(1)).unwrap_or(usize::MAX),
+            ring_depth: bounded_ring_depth(config.ring_depth),
             grid_bounds: config.grid_bounds,
             current_tick: 0,
             entities: BTreeMap::new(),
@@ -134,6 +135,10 @@ impl TurnSim {
         }
         self.bundles.push_back(bundle);
     }
+}
+
+fn bounded_ring_depth(configured: u32) -> usize {
+    usize::try_from(configured.clamp(1, MAX_RING_DEPTH)).expect("bounded ring depth fits usize")
 }
 
 impl GridBounds {
@@ -345,6 +350,13 @@ mod tests {
 
     fn bounds() -> GridBounds {
         GridBounds { min_cell_x: -4, max_cell_x: 4, min_cell_z: -4, max_cell_z: 4 }
+    }
+
+    #[test]
+    fn ring_depth_is_clamped_to_the_supported_range() {
+        assert_eq!(bounded_ring_depth(0), 1);
+        assert_eq!(bounded_ring_depth(64), 64);
+        assert_eq!(bounded_ring_depth(u32::MAX), bounded_ring_depth(MAX_RING_DEPTH));
     }
 
     #[test]
