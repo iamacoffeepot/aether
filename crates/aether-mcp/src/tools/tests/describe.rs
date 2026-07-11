@@ -1,11 +1,14 @@
+use super::super::bytes::response_inline_max_bytes;
 #[allow(clippy::wildcard_imports)]
 use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
 use super::super::*;
+use std::fs;
 
 /// `describe_kinds` with no `engine_id` and an empty hub returns the
-/// substrate static inventory.  The default (compact) result is a
-/// non-empty JSON array of `{name,shape}` objects.
+/// substrate static inventory. The logical compact result is a non-empty array
+/// of `{name,shape}` objects; target-specific inventories over the generic
+/// response threshold arrive through the documented lossless spill envelope.
 #[tokio::test]
 async fn describe_kinds_returns_the_substrate_inventory() {
     let (_chassis, port) = boot_hub();
@@ -20,8 +23,25 @@ async fn describe_kinds_returns_the_substrate_inventory() {
         }))
         .await
         .expect("describe_kinds ok");
-    let kinds: serde_json::Value = serde_json::from_str(&out).expect("json array");
-    let arr = kinds.as_array().expect("result is a JSON array");
+    let result: serde_json::Value = serde_json::from_str(&out).expect("describe_kinds result is JSON");
+    let (arr, spill_summary) = result.as_array().map_or_else(
+        || {
+            let file = result["file"].as_str().expect("oversized result names its spill file");
+            let bytes = result["bytes"].as_u64().expect("oversized result reports its byte length");
+            assert!(
+                bytes > u64::try_from(response_inline_max_bytes()).expect("response threshold fits u64"),
+                "only an over-threshold response may spill: {result}",
+            );
+            let body = fs::read_to_string(file).expect("spilled describe_kinds response is readable");
+            fs::remove_file(file).expect("remove consumed describe_kinds spill");
+            assert_eq!(u64::try_from(body.len()).expect("response length fits u64"), bytes);
+            (
+                serde_json::from_str::<Vec<serde_json::Value>>(&body).expect("spilled response is the compact array"),
+                Some(&result["summary"]),
+            )
+        },
+        |arr| (arr.clone(), None),
+    );
     assert!(!arr.is_empty(), "describe_kinds should list the substrate vocabulary");
     let first = &arr[0];
     assert!(
@@ -29,6 +49,10 @@ async fn describe_kinds_returns_the_substrate_inventory() {
         "compact entry must carry name and shape, got: {first}",
     );
     assert!(first.get("schema").is_none(), "compact entry must not carry schema, got: {first}");
+    if let Some(summary) = spill_summary {
+        assert_eq!(summary["kind"], "array");
+        assert_eq!(summary["count"].as_u64(), u64::try_from(arr.len()).ok());
+    }
 }
 
 /// `describe_kinds(families=true)` returns a sorted digest rather than

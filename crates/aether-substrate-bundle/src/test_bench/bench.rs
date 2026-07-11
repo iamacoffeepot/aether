@@ -41,7 +41,7 @@ use aether_kinds::{LogTail, LogTailResult, Tick};
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape);
 // `encode_empty` builds the zero-byte payload for unit lifecycle kinds.
 use aether_actor::Addressable;
-use aether_capabilities::{RenderCapability, fs::NamespaceRoots, render::DrawTexturedQuads};
+use aether_capabilities::{GameGatewayConfig, RenderCapability, fs::NamespaceRoots, render::DrawTexturedQuads};
 use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::{
     EgressEvent, HubOutbound, Mailer, PassiveChassis, RecordingBackend, RingCapacities, SchedulerTuning, Source,
@@ -242,6 +242,7 @@ pub struct TestBenchBuilder {
     trace_ring_max_capacity: Option<usize>,
     settlement_cap: Option<Duration>,
     clipboard_mode: TestBenchClipboardMode,
+    game_gateway: GameGatewayConfig,
 }
 
 impl Default for TestBenchBuilder {
@@ -256,6 +257,7 @@ impl Default for TestBenchBuilder {
             trace_ring_max_capacity: None,
             settlement_cap: None,
             clipboard_mode: TestBenchClipboardMode::default(),
+            game_gateway: GameGatewayConfig::default(),
         }
     }
 }
@@ -347,6 +349,14 @@ impl TestBenchBuilder {
         self
     }
 
+    /// Configure the trusted player gateway for a real tcp loopback
+    /// scenario. The default is inert and binds no listener.
+    #[must_use]
+    pub fn game_gateway(mut self, config: GameGatewayConfig) -> Self {
+        self.game_gateway = config;
+        self
+    }
+
     /// Boot the bench. Equivalent to `TestBench::start_with_size` for
     /// the default builder; overrides applied via the builder methods
     /// flow through to `SubstrateBoot::builder` and the chassis-side
@@ -377,6 +387,7 @@ impl TestBenchBuilder {
             ring_caps,
             settlement_cap,
             self.clipboard_mode,
+            self.game_gateway,
         )
     }
 }
@@ -406,9 +417,14 @@ impl TestBench {
             RingCapacities::default(),
             SettlementConfig::from_env().to_cap(),
             TestBenchClipboardMode::default(),
+            GameGatewayConfig::default(),
         )
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "private lowering seam for the TestBenchBuilder's independent boot overrides"
+    )]
     fn start_inner(
         width: u32,
         height: u32,
@@ -417,6 +433,7 @@ impl TestBench {
         ring_caps: RingCapacities,
         settlement_cap: Duration,
         clipboard_mode: TestBenchClipboardMode,
+        game_gateway: GameGatewayConfig,
     ) -> Result<Self, TestBenchError> {
         let capture_queue = CaptureQueue::new();
         let (events_tx, events_rx) = event_channel();
@@ -441,6 +458,7 @@ impl TestBench {
             capture_queue: capture_queue.clone(),
             namespace_roots,
             clipboard_mode,
+            game_gateway,
             // Issue #2509: the teardown gate honors the same resolved cap
             // (env knob or programmatic override) as the settlement-await
             // loops the bench stores this value for.

@@ -19,6 +19,20 @@ const FIRST_SIM_NAME: &str = "turn-sim-a";
 const SECOND_SIM_NAME: &str = "turn-sim-b";
 const ENTITY_ID: u64 = 41;
 
+#[test]
+fn sim_vocabulary_is_the_exact_lower_crate_wire_contract() {
+    use aether_capabilities::game::Spawn as CapabilitySpawn;
+    use aether_kit::Spawn as RootSpawn;
+
+    let lower = CapabilitySpawn { entity_id: 9, cell_x: -2, cell_z: 4 };
+    let root_reexport: RootSpawn = lower;
+    let sim_reexport: Spawn = root_reexport;
+
+    assert_eq!(Spawn::NAME, "aether.sim.spawn");
+    assert_eq!(Spawn::ID, CapabilitySpawn::ID);
+    assert_eq!(CapabilitySpawn::decode_from_bytes(&sim_reexport.encode_into_bytes()), Some(lower));
+}
+
 fn component_address(name: &str) -> String {
     format!("aether.component/{}:{name}", aether_capabilities::WasmTrampoline::NAMESPACE)
 }
