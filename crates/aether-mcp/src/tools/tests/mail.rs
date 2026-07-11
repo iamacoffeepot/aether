@@ -35,6 +35,7 @@ async fn send_mail_reports_per_item_errors() {
                 },
             ],
             fire_and_forget: false,
+            replies: ReplyProjection::Terminal,
         }))
         .await
         .expect("send_mail returns a status array, not a tool error");
@@ -62,6 +63,7 @@ async fn send_mail_traced_bad_spec_is_tool_error() {
             }],
             settlement_timeout_ms: None,
             fire_and_forget: false,
+            full: false,
         }))
         .await;
     assert!(result.is_err(), "an unknown kind in the batch should be a tool error");
@@ -94,6 +96,7 @@ async fn send_mail_fire_and_forget_is_non_blocking() {
                 params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
             }],
             fire_and_forget: true,
+            replies: ReplyProjection::All,
         }))
         .await
         .expect("send_mail returns a status array");
@@ -103,4 +106,83 @@ async fn send_mail_fire_and_forget_is_non_blocking() {
     assert_eq!(statuses[0].status, "dispatched", "fire-and-forget reports dispatched, not delivered");
     assert!(statuses[0].replies.is_empty(), "fire-and-forget carries no replies");
     assert!(!statuses[0].timed_out, "dispatch is not a timeout");
+}
+
+fn traced_response_node() -> MailNodeJson {
+    MailNodeJson {
+        mail_id: MailIdJson { sender: "aether.chassis".to_owned(), correlation_id: 1 },
+        parent: None,
+        sender: "aether.chassis".to_owned(),
+        recipient: "aether.fs".to_owned(),
+        kind: "aether.fs.list".to_owned(),
+        t_construct_start: 1,
+        t_sent: 1,
+        t_received: Some(2),
+        t_finished: Some(3),
+        thread_name: Some("aether-worker-0".to_owned()),
+    }
+}
+
+#[test]
+fn traced_response_serializes_compact_and_full_settled_shapes_precisely() {
+    let compact = serde_json::to_value(SendMailTracedResponse {
+        status: "settled".to_owned(),
+        root: Some(MailIdJson { sender: "aether.chassis".to_owned(), correlation_id: 1 }),
+        mails: None,
+        tree: Some(vec!["aether.chassis → aether.fs  aether.fs.list  +0µs".to_owned()]),
+        node_count: Some(1),
+        in_flight: Some(0),
+        replies: Some(Vec::new()),
+    })
+    .expect("compact response serializes");
+    assert!(compact["mails"].is_null());
+    assert_eq!(compact["tree"].as_array().map(Vec::len), Some(1));
+    assert_eq!(compact["node_count"], 1);
+
+    let full = serde_json::to_value(SendMailTracedResponse {
+        status: "settled".to_owned(),
+        root: Some(MailIdJson { sender: "aether.chassis".to_owned(), correlation_id: 1 }),
+        mails: Some(vec![traced_response_node()]),
+        tree: None,
+        node_count: Some(1),
+        in_flight: Some(0),
+        replies: Some(Vec::new()),
+    })
+    .expect("full response serializes");
+    assert_eq!(full["mails"].as_array().map(Vec::len), Some(1));
+    assert!(!full.as_object().expect("full response object").contains_key("tree"));
+    assert_eq!(full["node_count"], 1);
+}
+
+#[test]
+fn traced_response_omits_projection_fields_on_timeout_and_dispatch() {
+    let timeout = serde_json::to_value(SendMailTracedResponse {
+        status: "timeout".to_owned(),
+        root: None,
+        mails: None,
+        tree: None,
+        node_count: None,
+        in_flight: None,
+        replies: None,
+    })
+    .expect("timeout response serializes");
+    let timeout = timeout.as_object().expect("timeout response object");
+    assert!(timeout.get("mails").is_some_and(serde_json::Value::is_null));
+    assert!(!timeout.contains_key("tree"));
+    assert!(!timeout.contains_key("node_count"));
+
+    let dispatched = serde_json::to_value(SendMailTracedResponse {
+        status: "dispatched".to_owned(),
+        root: Some(MailIdJson { sender: "aether.chassis".to_owned(), correlation_id: 1 }),
+        mails: None,
+        tree: None,
+        node_count: None,
+        in_flight: None,
+        replies: None,
+    })
+    .expect("dispatched response serializes");
+    let dispatched = dispatched.as_object().expect("dispatched response object");
+    assert!(dispatched.get("mails").is_some_and(serde_json::Value::is_null));
+    assert!(!dispatched.contains_key("tree"));
+    assert!(!dispatched.contains_key("node_count"));
 }

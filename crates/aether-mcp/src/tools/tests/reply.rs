@@ -159,3 +159,95 @@ fn decode_reply_events_base64_fallback_when_kind_absent_from_all_caches() {
     assert_eq!(only.params, None, "absent kind doesn't decode to params");
     assert!(only.payload_bytes.is_some(), "absent kind surfaces as base64 fallback");
 }
+
+fn projected_reply(id: &str, kind_name: Option<&str>, params: serde_json::Value) -> ReplyEventJson {
+    ReplyEventJson {
+        kind_id: id.to_owned(),
+        kind_name: kind_name.map(str::to_owned),
+        params: Some(params),
+        payload_bytes: None,
+    }
+}
+
+fn projected_ids(replies: &[ReplyEventJson]) -> Vec<&str> {
+    replies.iter().map(|reply| reply.kind_id.as_str()).collect()
+}
+
+#[test]
+fn reply_projection_defaults_to_terminal_and_handles_empty_stream() {
+    assert_eq!(ReplyProjection::default(), ReplyProjection::Terminal);
+    assert!(project_replies(Vec::new(), ReplyProjection::default()).is_empty());
+}
+
+#[test]
+fn terminal_projection_keeps_last_successful_reply() {
+    let replies = vec![
+        projected_reply("first", Some("aether.test.ok"), serde_json::json!({"Ok": 1})),
+        projected_reply("last", Some("aether.test.ok"), serde_json::json!({"Ok": 2})),
+    ];
+
+    assert_eq!(projected_ids(&project_replies(replies, ReplyProjection::Terminal)), ["last"]);
+}
+
+#[test]
+fn terminal_projection_keeps_midstream_structured_error_and_last_reply() {
+    let replies = vec![
+        projected_reply("first", Some("aether.test.ok"), serde_json::json!({"Ok": 1})),
+        projected_reply("error", Some("aether.test.result"), serde_json::json!({"Err": {"message": "expected"}})),
+        projected_reply("last", Some("aether.test.ok"), serde_json::json!({"Ok": 2})),
+    ];
+
+    assert_eq!(projected_ids(&project_replies(replies, ReplyProjection::Terminal)), ["error", "last"]);
+}
+
+#[test]
+fn terminal_projection_does_not_duplicate_last_error() {
+    let replies = vec![
+        projected_reply("first", Some("aether.test.ok"), serde_json::json!({"Ok": 1})),
+        projected_reply("last-error", Some("aether.test.result"), serde_json::json!({"Err": "failed"})),
+    ];
+
+    assert_eq!(projected_ids(&project_replies(replies, ReplyProjection::Terminal)), ["last-error"]);
+}
+
+#[test]
+fn none_projection_keeps_only_recognized_errors() {
+    let replies = vec![
+        projected_reply("success", Some("aether.test.ok"), serde_json::json!({"Ok": 1})),
+        projected_reply("bare-error", Some("aether.test.result"), serde_json::json!("Err")),
+        projected_reply("kind-error", Some("aether.test.transport_error"), serde_json::Value::Null),
+    ];
+
+    assert_eq!(projected_ids(&project_replies(replies, ReplyProjection::None)), ["bare-error", "kind-error"]);
+}
+
+#[test]
+fn all_projection_preserves_every_reply_in_order() {
+    let replies = vec![
+        projected_reply("one", Some("aether.test.ok"), serde_json::json!(1)),
+        projected_reply("two", Some("aether.test.result"), serde_json::json!("Err")),
+        projected_reply("three", Some("aether.test.ok"), serde_json::json!(3)),
+    ];
+
+    assert_eq!(projected_ids(&project_replies(replies, ReplyProjection::All)), ["one", "two", "three"]);
+}
+
+#[test]
+fn error_recognition_matches_exact_kind_segments_and_suffixes_case_insensitively() {
+    for kind_name in ["aether.test.err", "aether.test.ERROR", "aether.test.decode_err", "aether.test.IO_ERROR"] {
+        assert!(
+            is_error_reply(&projected_reply("id", Some(kind_name), serde_json::Value::Null)),
+            "{kind_name} should be recognized as an error kind"
+        );
+    }
+}
+
+#[test]
+fn error_recognition_rejects_err_substring_false_positives() {
+    for kind_name in ["aether.kit.terra.query_result", "aether.rpc.test.deferred_echo_reply"] {
+        assert!(
+            !is_error_reply(&projected_reply("id", Some(kind_name), serde_json::Value::Null)),
+            "{kind_name} must not be recognized as an error kind"
+        );
+    }
+}

@@ -95,15 +95,27 @@ each returns is the handle every other tool needs.
 `{engine_id, recipient_name, kind_name, params}` — the **mailbox** to deliver to,
 the **kind** to deliver, and the structured params, which the tool schema-encodes to
 wire bytes against that kind's descriptor. By default each item *blocks* until its
-chain settles and returns the correlated reply payloads, so a request/reply (mail
-`aether.fs.read`, get the bytes back) is a single call with no polling. Set
+chain settles. The batch-level `replies` projection defaults to `terminal`: it
+keeps the last arrival-ordered reply plus any reply recognized as an error from
+its decoded `Err` shape or exact kind-name error suffix. Use `none` to suppress
+non-errors or `all` for the complete decoded stream; neither explicit mode caps
+the stream, and the generic whole-response guard stages an oversized complete
+result instead of truncating it. A request/reply (mail `aether.fs.read`, get the
+bytes back) is therefore a single call with no polling. Decoded `Bytes` leaves
+over 16 KiB stage to a host file before that outer response guard. Set
 `fire_and_forget: true` for a poke you don't wait on — a `DrawTriangle` right before
-a `capture_frame`, or a cap that never replies. Items are independent: one bad item
-doesn't abort its siblings.
+a `capture_frame`, or a cap that never replies; it returns no replies regardless
+of the requested projection. Items are independent: one bad item doesn't abort
+its siblings.
 
 `send_mail_traced` is the same idea with a shared trace root. Every item in the
-batch lands under one chassis-level trace root, and the call returns the full,
-settled **trace tree** for the whole batch (plus the replies). Reach for it when you
+batch lands under one chassis-level trace root. The settled default returns a
+compact one-line-per-node `tree`, a matching `node_count`, and `mails: null`;
+each line names `sender → recipient`, kind, and handler duration, with indentation
+for causal depth. Pass `full: true` to restore the complete `mails` node values;
+that form omits `tree` and carries the same `node_count`. Both forms also carry
+the complete flat reply list and rely on the generic response spill rather than
+truncating. Reach for it when you
 need exact whole-chain settlement — proof that everything a mail set off has finished
 — or all-or-nothing dispatch where a single bad item aborts the batch before any mail
 moves. For independent items where you just want each reply, plain `send_mail` is the
@@ -162,8 +174,10 @@ one handler.
 - **Wire ids are tagged strings.** Mailbox, kind, and handle ids come back as
   `mbx-…`, `knd-…`, `hdl-…` — hand them back verbatim, don't reformat or parse them.
   See [The type system](foundations/type-system.md).
-- **`send_mail` blocks by default.** It now waits for settlement and returns the
-  reply; use `fire_and_forget` for a poke or a no-reply cap. (If you've seen it
+- **`send_mail` blocks and projects replies by default.** It waits for settlement
+  and returns the terminal reply plus recognized errors. Request `replies: "all"`
+  when every event matters, `"none"` when only failures matter, or use
+  `fire_and_forget` for a poke or a no-reply cap. (If you've seen it
   described as best-effort fire-and-forget, that's the older behavior — the default
   flipped.)
 - **Desktop-only surfaces fail fast.** `capture_frame` and the window ops need the

@@ -8,13 +8,14 @@ use rmcp::ErrorData as McpError;
 use crate::args::{MailStatus, ReplyEventJson, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse};
 
 use super::envelope::{engine_envelope, engine_envelope_by_id};
-use super::ids::{mail_id_to_json, parse_engine_id};
+use super::ids::{mail_id_to_json, parse_engine_id, render_compact_tree};
 use super::render::{internal, internal_msg, json};
-use super::reply::{decode_reply_events, decode_traced_ack, strip_ack};
+use super::reply::{decode_reply_events, decode_traced_ack, project_replies, strip_ack};
 use super::{AWAIT_TIMEOUT_CAP_MS, AWAIT_TIMEOUT_DEFAULT_MS, Mcp};
 
 pub(super) async fn send_mail(mcp: &Mcp, args: SendMailArgs) -> Result<String, McpError> {
     let fire_and_forget = args.fire_and_forget;
+    let reply_projection = args.replies;
     let mut statuses = Vec::with_capacity(args.mails.len());
     for (index, spec) in args.mails.into_iter().enumerate() {
         let mut replies = Vec::new();
@@ -51,7 +52,8 @@ pub(super) async fn send_mail(mcp: &Mcp, args: SendMailArgs) -> Result<String, M
             match mcp.deliver_one(spec).await {
                 Ok((events, hit_timeout)) => {
                     let engine_kinds = engine.map(|e| mcp.snapshot_engine_kinds(e)).unwrap_or_default();
-                    replies = decode_reply_events(&events, &engine_kinds, declared_reply);
+                    replies =
+                        project_replies(decode_reply_events(&events, &engine_kinds, declared_reply), reply_projection);
                     timed_out = hit_timeout;
                     if hit_timeout {
                         "timeout"
@@ -100,6 +102,8 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
                 status: "timeout".into(),
                 root: None,
                 mails: None,
+                tree: None,
+                node_count: None,
                 in_flight: None,
                 replies: None,
             });
@@ -114,6 +118,8 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
             status: "dispatched".into(),
             root: Some(root_json),
             mails: None,
+            tree: None,
+            node_count: None,
             in_flight: None,
             replies: None,
         });
@@ -133,6 +139,8 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
             status: "timeout".into(),
             root: None,
             mails: None,
+            tree: None,
+            node_count: None,
             in_flight: None,
             replies: None,
         });
@@ -141,7 +149,7 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
     let replies = decode_reply_events(strip_ack(&events), &engine_kinds, None);
     let root = decode_traced_ack(&events)?;
 
-    finish_traced_dispatch(mcp, engine, root, replies).await
+    finish_traced_dispatch(mcp, engine, root, replies, args.full).await
 }
 
 async fn finish_traced_dispatch(
@@ -149,6 +157,7 @@ async fn finish_traced_dispatch(
     engine: EngineId,
     root: MailId,
     replies: Vec<ReplyEventJson>,
+    full: bool,
 ) -> Result<String, McpError> {
     // Round 2: reconstruct the tree by a guided walk over the
     // per-actor trace rings (ADR-0086 Phase 3b). Seed at
@@ -184,6 +193,13 @@ async fn finish_traced_dispatch(
             // through the now-populated cache (its sender is the
             // chassis mailbox — a static name).
             let mails = mcp.render_mail_nodes(engine, mails).await;
+            let node_count = mails.len();
+            let (mails, tree) = if full {
+                (Some(mails), None)
+            } else {
+                let tree = render_compact_tree(&mails);
+                (None, Some(tree))
+            };
             let root = {
                 let cache = mcp.names.lock().expect("reverse-name cache mutex is never poisoned");
                 mail_id_to_json(root, cache.get(&engine))
@@ -191,7 +207,9 @@ async fn finish_traced_dispatch(
             json(&SendMailTracedResponse {
                 status: "settled".into(),
                 root: Some(root),
-                mails: Some(mails),
+                mails,
+                tree,
+                node_count: Some(node_count),
                 in_flight: Some(in_flight),
                 replies: Some(replies),
             })

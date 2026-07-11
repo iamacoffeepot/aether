@@ -276,25 +276,30 @@ pub(super) fn render_bytes_reply(
     }
 }
 
+const DEFAULT_REPLY_INLINE_MAX_BYTES: usize = 16 * 1024;
+const DEFAULT_RESPONSE_INLINE_MAX_BYTES: usize = 32 * 1024;
+
 /// Resolve the reply-`Bytes` spill threshold (`AETHER_MCP_REPLY_INLINE_MAX_BYTES`,
-/// default 256 KiB). A reply `Bytes` leaf larger than this is staged to a
+/// default 16 KiB). A reply `Bytes` leaf larger than this is staged to a
 /// harness-host temp file and surfaced as `{"file": …}` instead of inlined as
 /// base64 (issue 2108) — the reply-side mirror of the input `{"$file": …}`
-/// embed. Deliberately distinct from the RPC frame cap: an over-frame reply
-/// never reaches this projection (the inbound frame decode fails first), and
-/// 64 MiB is far past the point base64 bloats the tool channel.
+/// embed. Deliberately below the 32 KiB whole-response guard so one large leaf
+/// can spill while the surrounding reply structure remains inline, and distinct
+/// from the RPC frame cap: an over-frame reply never reaches this projection.
 pub(super) fn reply_inline_max_bytes() -> usize {
     use std::env;
-    const DEFAULT_REPLY_INLINE_MAX_BYTES: usize = 256 * 1024;
     // Process-level tuning knob, not capability config: the out-of-process MCP
     // front has no `Config`-derive plumbing, so it reads this directly the same
     // way `main.rs` reads `AETHER_MCP_PORT`.
     #[allow(clippy::disallowed_methods)]
     let raw = env::var("AETHER_MCP_REPLY_INLINE_MAX_BYTES").ok();
-    raw.and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(DEFAULT_REPLY_INLINE_MAX_BYTES)
+    reply_inline_max_bytes_from(raw.as_deref())
 }
 
-const DEFAULT_RESPONSE_INLINE_MAX_BYTES: usize = 32 * 1024;
+pub(super) fn reply_inline_max_bytes_from(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.trim().parse::<usize>().ok()).unwrap_or(DEFAULT_REPLY_INLINE_MAX_BYTES)
+}
+
 const RESPONSE_SUMMARY_ITEMS: usize = 3;
 const RESPONSE_SUMMARY_PREVIEW_BYTES: usize = 256;
 pub(super) const RESPONSE_SUMMARY_MAX_BYTES: usize = 2 * 1024;

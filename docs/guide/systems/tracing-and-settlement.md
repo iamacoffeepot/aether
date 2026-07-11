@@ -208,16 +208,22 @@ rather than counting on reconstructing something from minutes ago.
 ## How an agent uses it
 
 `send_mail` already rides settlement on your behalf. Each item blocks until its
-chain settles and hands back the correlated reply, so a request/reply — mail
-`aether.fs.read`, get the bytes — is a single call with no polling.
+chain settles. Its default `terminal` reply projection keeps the last
+arrival-ordered reply plus any recognized decoded/kind-name error; `none` keeps
+only those errors and `all` returns the complete stream. A request/reply — mail
+`aether.fs.read`, get the bytes — is still a single call with no polling, while a
+multi-reply driver can opt into the exact amount of history it needs.
 `fire_and_forget` opts an item out for a poke you don't wait on.
 
 `send_mail_traced` is the tool for when you want the *tree*, not just the reply.
 It dispatches a batch under one shared root and, once that whole chain settles,
 returns the combined trace tree, the correlated replies, and a `status`:
 
-- `"settled"` — the chain closed; `mails` holds the tree (nodes with `parent`
-  edges and timings) and `in_flight` reads `0`.
+- `"settled"` — the chain closed. By default `mails` is `null`, `tree` holds one
+  indented line per node (`sender → recipient`, kind, and handler duration),
+  `node_count` states how many nodes were rendered, and `in_flight` reads `0`.
+  Pass `full: true` to restore the complete `mails` nodes with `parent` edges and
+  all timestamps; full mode omits `tree` and carries the same `node_count`.
 - `"timeout"` — the chain didn't settle within `settlement_timeout_ms` (default
   300s, clamped to 600s). A timeout is the bound on a hung chain, and the usual
   cause is exactly the two failures above: a deferred reply that never held its
@@ -225,7 +231,7 @@ returns the combined trace tree, the correlated replies, and a `status`:
   path from this status to the offending handler is the
   [Debugging a hung settlement](../recipes/debugging-a-hung-settlement.md) recipe.
 - `"dispatched"` — only with `fire_and_forget`; the shared root acked, no
-  settlement wait.
+  settlement wait, and the compact/full projection fields are omitted.
 
 Reach for `send_mail_traced` over `send_mail` when you need proof a whole cascade
 finished rather than just one reply, the timing breakdown of a slow exchange, or
