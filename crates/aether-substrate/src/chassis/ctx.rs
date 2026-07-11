@@ -617,22 +617,7 @@ mod tests {
     /// reach the actor's per-actor `Local<T>` rings.
     #[test]
     fn claim_mailbox_returns_stampable_actor_slots() {
-        let registry = Arc::new(Registry::new());
-        for d in descriptors::all() {
-            let _ = registry.register_kind_with_descriptor(d);
-        }
-        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-        let aborter: Arc<dyn FatalAborter> = Arc::new(PanicAborter);
-        let actor_registry = Arc::new(ActorRegistry::new());
-        let pool = Pool::start(PoolConfig::default(), Arc::clone(&aborter));
-        let spawner = Arc::new(crate::Spawner::new(
-            Arc::clone(&registry),
-            actor_registry,
-            Arc::clone(&mailer),
-            Arc::clone(&aborter),
-            pool.wake_sink(),
-            RingCapacities::default(),
-        ));
+        let (registry, mailer, spawner, aborter, _pool) = test_infra();
         let mut fallback: Option<FallbackRouter> = None;
         let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
         let mut ctx =

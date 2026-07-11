@@ -192,6 +192,7 @@ pub fn build_quad_pipeline(
         ],
     };
 
+    let fragment_targets = [Some(super::color_target_state(color_format, wgpu::BlendState::ALPHA_BLENDING))];
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("aether quad pipeline"),
         layout: Some(&pipeline_layout),
@@ -201,16 +202,7 @@ pub fn build_quad_pipeline(
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: slice::from_ref(&vertex_layout),
         },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: color_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
+        fragment: Some(super::fragment_state(&shader, "fs_main", &fragment_targets)),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
