@@ -22,9 +22,9 @@ const DEFAULT_INTERVAL_NANOS: u64 = 1_000_000_000 / 60;
 /// Inert-by-default game-listener and authoritative-simulation wiring.
 ///
 /// An active server supplies both `listener_addr` and `turn_sim_mailbox`.
-/// The gateway captures its resolved `ctx.self_id()` at init, then during
-/// [`NativeActor::wire`] binds `listener_addr` under `listener_name` and passes
-/// that exact mailbox as the tcp consumer.
+/// The gateway captures its resolved `ctx.self_id()` at init, then actor wiring
+/// binds `listener_addr` under `listener_name` and passes that exact mailbox as
+/// the tcp consumer.
 /// `listener_name` is retained only to address the trusted tcp listener/session
 /// topology for outbound writes; it never enters the player wire as a recipient.
 #[derive(Clone, Debug, PartialEq, Eq)]
