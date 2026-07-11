@@ -96,6 +96,7 @@ pub fn build_main_pipeline(
     });
 
     let vertex_layout = vertex_buffer_layout();
+    let fragment_targets = [Some(super::color_target_state(color_format, wgpu::BlendState::REPLACE))];
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("aether main pipeline"),
         layout: Some(&pipeline_layout),
@@ -105,16 +106,7 @@ pub fn build_main_pipeline(
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: slice::from_ref(&vertex_layout),
         },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: Some("fs_main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: color_format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
+        fragment: Some(super::fragment_state(&shader, "fs_main", &fragment_targets)),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,

@@ -170,14 +170,11 @@ fn material_params_bind_group(
 }
 
 fn material_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
-    wgpu::VertexBufferLayout {
-        array_stride: MATERIAL_VERTEX_STRIDE,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &[
-            wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
-            wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
-        ],
-    }
+    const ATTRIBUTES: &[wgpu::VertexAttribute] = &[
+        wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+        wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
+    ];
+    super::vertex_layout(MATERIAL_VERTEX_STRIDE, ATTRIBUTES)
 }
 
 fn material_pipeline(
@@ -189,6 +186,7 @@ fn material_pipeline(
     fragment_entry: &'static str,
     vertex_layout: &wgpu::VertexBufferLayout<'_>,
 ) -> wgpu::RenderPipeline {
+    let fragment_targets = [Some(super::color_target_state(color_format, wgpu::BlendState::ALPHA_BLENDING))];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
@@ -198,16 +196,7 @@ fn material_pipeline(
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: slice::from_ref(vertex_layout),
         },
-        fragment: Some(wgpu::FragmentState {
-            module: shader,
-            entry_point: Some(fragment_entry),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: color_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
+        fragment: Some(super::fragment_state(shader, fragment_entry, &fragment_targets)),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,

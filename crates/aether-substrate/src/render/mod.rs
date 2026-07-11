@@ -78,20 +78,38 @@ pub const IDENTITY_VIEW_PROJ: [f32; 16] = [
     0.0, 0.0, 0.0, 1.0, //
 ];
 
+fn vertex_layout(array_stride: u64, attributes: &'static [wgpu::VertexAttribute]) -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout { array_stride, step_mode: wgpu::VertexStepMode::Vertex, attributes }
+}
+
+fn color_target_state(format: wgpu::TextureFormat, blend: wgpu::BlendState) -> wgpu::ColorTargetState {
+    wgpu::ColorTargetState { format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL }
+}
+
+fn fragment_state<'a>(
+    shader: &'a wgpu::ShaderModule,
+    entry_point: &'a str,
+    targets: &'a [Option<wgpu::ColorTargetState>],
+) -> wgpu::FragmentState<'a> {
+    wgpu::FragmentState {
+        module: shader,
+        entry_point: Some(entry_point),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        targets,
+    }
+}
+
 /// `pos vec3 + color vec3` interleaved vertex layout the shared
 /// pipeline expects. Exposed so chassis-side helpers building extra
 /// pipelines (e.g. desktop's wireframe overlay) can match the layout
 /// without re-deriving offsets.
 #[must_use]
 pub fn vertex_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
-    wgpu::VertexBufferLayout {
-        array_stride: VERTEX_STRIDE,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &[
-            wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
-            wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
-        ],
-    }
+    const ATTRIBUTES: &[wgpu::VertexAttribute] = &[
+        wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+        wgpu::VertexAttribute { offset: 12, shader_location: 1, format: wgpu::VertexFormat::Float32x3 },
+    ];
+    vertex_layout(VERTEX_STRIDE, ATTRIBUTES)
 }
 
 /// Single-entry vertex-stage uniform-buffer bind group layout — the

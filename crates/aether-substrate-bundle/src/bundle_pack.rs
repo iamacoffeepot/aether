@@ -349,6 +349,14 @@ impl<'a> Cursor<'a> {
         let s = str::from_utf8(bytes).map_err(|_| PackError::BadUtf8)?;
         Ok(Some(s.to_owned()))
     }
+
+    fn take_opt_u32(&mut self) -> Result<Option<u32>, PackError> {
+        if self.take_byte()? == 0 {
+            return Ok(None);
+        }
+        let raw = self.take(4)?;
+        Ok(Some(u32::from_le_bytes(raw.try_into().expect("4-byte slice"))))
+    }
 }
 
 /// Decode a pack blob produced by [`encode_pack`].
@@ -369,12 +377,7 @@ pub fn decode_pack(bytes: &[u8]) -> Result<Pack, PackError> {
     }
     let title = cursor.take_opt_string()?;
     let window_mode = cursor.take_opt_string()?;
-    let tick_hz = if cursor.take_byte()? == 0 {
-        None
-    } else {
-        let raw = cursor.take(4)?;
-        Some(u32::from_le_bytes(raw.try_into().expect("4-byte slice")))
-    };
+    let tick_hz = cursor.take_opt_u32()?;
     let count = cursor.take_short_len()?;
     let mut components = Vec::new();
     for _ in 0..count {
@@ -382,12 +385,7 @@ pub fn decode_pack(bytes: &[u8]) -> Result<Pack, PackError> {
         let config = cursor.take_bytes_long()?;
         let name = cursor.take_opt_string()?;
         let export = cursor.take_opt_string()?;
-        let replicas = if cursor.take_byte()? == 0 {
-            None
-        } else {
-            let raw = cursor.take(4)?;
-            Some(u32::from_le_bytes(raw.try_into().expect("4-byte slice")))
-        };
+        let replicas = cursor.take_opt_u32()?;
         components.push(PackedComponent { wasm, config, name, export, replicas });
     }
     Ok(Pack { chassis: ChassisSettings { title, window_mode, tick_hz }, components })
