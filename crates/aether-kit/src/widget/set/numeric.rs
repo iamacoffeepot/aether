@@ -464,6 +464,7 @@ impl WasmActor for NumericWidget {
     }
 
     #[handler::single]
+    //noinspection DuplicatedCode -- actor macros require one pointer handler per concrete widget type.
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
         let Some(event_x) = arm_text_drag(&self.state, &mut self.dragging, press) else {
             return;

@@ -515,6 +515,7 @@ impl WasmActor for TextAreaWidget {
     }
 
     #[handler::single]
+    //noinspection DuplicatedCode -- actor macros require one collect handler per concrete widget type.
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
         reply_with_draw_items(ctx, &self.state, || self.draw_items());
     }
