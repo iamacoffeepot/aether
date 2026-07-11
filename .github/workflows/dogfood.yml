@@ -598,6 +598,11 @@ jobs:
           name: dogfood-run
           path: dogfood-run
 
+      # The trusted helper from main enriches the downloaded trial data before
+      # either reporting sink consumes it. PR code is never executed here.
+      - name: Account MCP tool tokens
+        run: node scripts/dogfood-token-table.mjs dogfood-run/transcript.jsonl dogfood-run/rollup.json
+
       # Commit this attempt's run directory to the orphan dogfood/evidence
       # branch at evidence/<issue>/<run-id>/ (the script pushes with retries).
       - name: Push the run to the evidence branch
