@@ -29,7 +29,7 @@ pub struct ReaderShared {
 /// (ADR-0135): the shard's sidecar channel (receiver consumed at `init`,
 /// sender cloned into every reader the shard spawns), the shared route
 /// table + live-connection count, and the per-connection tuning copied
-/// from [`HttpServerConfig`](crate::http::server::HttpServerConfig).
+/// from [`HttpServerConfig`].
 pub struct HttpShardSeed {
     /// The shard's inbound event channel; `Some` exactly until the shard's
     /// `init` takes it (the `TcpSessionConfig::stream` consume pattern).
@@ -51,7 +51,7 @@ pub struct HttpShardSeed {
     pub response_stream_window: u32,
     pub request_stream_window: u32,
     /// Cap-global stream-id source (ADR-0135) — see
-    /// [`HttpShardState::next_stream_id`](super::HttpShardState).
+    /// [`HttpShardState::next_stream_id`].
     pub next_stream_id: Arc<AtomicU64>,
 }
 

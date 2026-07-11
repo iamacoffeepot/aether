@@ -100,7 +100,7 @@ pub fn ensure_root(root: &Path) -> PathBuf {
 }
 
 /// Best-effort `lock.pid` acquisition (ADR-0115). Delegates to
-/// [`aether_substrate::pid_lock::acquire_lock_pid`] for the shared
+/// [`acquire_lock_pid`] for the shared
 /// read → classify → reclaim → write protocol. A stale (dead-pid) or
 /// garbage lock is reclaimed; a live holder or a write failure leaves
 /// the store unlocked (returns `None`) but still operating, since a

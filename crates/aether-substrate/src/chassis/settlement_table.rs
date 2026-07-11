@@ -119,7 +119,7 @@ struct Slot {
     /// `(version << 2) | state`. A fresh `AtomicU64::new(0)` is
     /// `(version 0, STATE_EMPTY)` — the correct initial state.
     sv: AtomicU64,
-    /// Key hi: the root's `sender` [`aether_data::MailboxId`] word.
+    /// Key hi: the root's `sender` [`MailboxId`] word.
     sender: AtomicU64,
     /// Key lo: the root's `correlation_id`.
     correlation: AtomicU64,

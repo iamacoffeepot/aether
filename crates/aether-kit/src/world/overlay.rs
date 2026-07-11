@@ -257,7 +257,7 @@ mod tests {
     }
 
     fn mark(id: u32, geometry: MarkGeometry) -> Mark {
-        Mark { id: MarkId::new(id), revision: 1, geometry, label: alloc::format!("mark-{id}") }
+        Mark { id: MarkId::new(id), revision: 1, geometry, label: format!("mark-{id}") }
     }
 
     fn assert_finite(triangles: &[DrawTriangle]) {

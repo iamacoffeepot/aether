@@ -1,7 +1,7 @@
 //! Wire kinds for the `aether.anthropic` capability (ADR-0050, ADR-0121).
 //!
 //! The seven anthropic-specific types moved here from `aether-kinds` so the
-//! capability owns its mail vocabulary. [`aether_kinds::Usage`] stays central
+//! capability owns its mail vocabulary. [`Usage`] stays central
 //! — it is shared with the `aether.gemini` result kinds, so moving it here
 //! would force gemini to reach across capabilities.
 

@@ -110,7 +110,7 @@ fn validate_geometry(geometry: &MarkGeometry) -> Result<(), MarkMutationError> {
     };
     if !(minimum..=MAX_STAMP_VERTICES).contains(&length) {
         return Err(MarkMutationError::InvalidGeometry {
-            reason: alloc::format!("{kind} requires {minimum}..={MAX_STAMP_VERTICES} world points; got {length}"),
+            reason: format!("{kind} requires {minimum}..={MAX_STAMP_VERTICES} world points; got {length}"),
         });
     }
     Ok(())

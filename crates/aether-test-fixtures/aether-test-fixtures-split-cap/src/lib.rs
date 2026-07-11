@@ -58,7 +58,7 @@ fn assert_identity_present() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::SplitCap;
     use aether_actor::Addressable;
 
     // Runs in both feature configs (the test lib compiles ungated). Proves the

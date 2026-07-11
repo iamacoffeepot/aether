@@ -112,7 +112,7 @@ pub struct DeferredEchoReply {
 }
 
 /// Test-only actor that answers [`DeferredEchoRequest`] off-thread via the
-/// ADR-0093 hold-until-resolve dispatch ([`crate::shared::contentgen::TaskQueue`]
+/// ADR-0093 hold-until-resolve dispatch ([`TaskQueue`]
 /// over `ctx.dispatch_blocking`), reproducing the production content-gen
 /// caps' deferred-reply shape (submit -> spawned worker -> completion wake
 /// -> re-reply). The whole point is that the reply happens *after* the

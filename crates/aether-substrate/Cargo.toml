@@ -55,9 +55,6 @@ bytemuck = { workspace = true }
 # but default-on), so this is a plain dep, not feature-gated like the
 # capabilities crate's confique.
 confique = { workspace = true }
-# ADR-0049 on-disk handle store: resolve the default persistence root
-# (`dirs::data_dir()/aether/handles`). Same crate the fs cap uses.
-dirs = "6"
 serde = { workspace = true, features = ["derive", "std"] }
 # ADR-0081 §4 crash dump: serialize the panicking actor's ring as
 # JSONL on a panic-hook write path. Read-side consumers (operator

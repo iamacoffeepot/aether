@@ -112,7 +112,6 @@ impl CaptureQueue {
     /// # Panics
     /// Panics if the slot `Mutex` is poisoned — fail-fast per ADR-0063:
     /// a poisoned mutex means a prior holder panicked under the guard.
-    #[must_use = "a rejected request still owns its inbound guard; reply through it before it drops"]
     pub fn request(&self, pending: PendingCapture) -> Result<(), Box<PendingCapture>> {
         let mut slot = self.slot.lock().expect("capture slot mutex poisoned; fail-fast per ADR-0063");
         if slot.is_some() {

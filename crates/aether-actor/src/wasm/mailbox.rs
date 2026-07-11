@@ -43,7 +43,7 @@ use crate::wasm::inline::{ChainMode, Registry, RouteDecision};
 #[allow(clippy::module_name_repetitions)]
 pub struct WasmActorMailbox<'a, R> {
     mailbox: u64,
-    /// The resolving actor's own folded [`aether_data::MailboxId`] raw value —
+    /// The resolving actor's own folded [`MailboxId`] raw value —
     /// the "from" half threaded onto every send so the recipient's
     /// `ctx.source_mailbox()` resolves who sent it, and so the host stamps the
     /// correct origin without an ambient per-receive cell (issue 1987). Set by

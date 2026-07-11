@@ -1,6 +1,6 @@
 //! The fs namespace registry + its boot config. [`AdapterRegistry`]
 //! maps a namespace short name (`"save"`, `"assets"`, `"config"`) to
-//! the [`FileAdapter`](super::FileAdapter) backing it; [`NamespaceRoots`]
+//! the [`FileAdapter`] backing it; [`NamespaceRoots`]
 //! is the ADR-0090 derive-`Config` struct chassis mains resolve at boot
 //! and hand to `with_actor::<FsCapability>(roots)`; [`build_registry`]
 //! wires the three ADR-0041 namespaces into a populated registry.

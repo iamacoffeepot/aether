@@ -345,7 +345,7 @@ impl NativeActor for EngineServer {
                 )
                 .finish();
 
-            match result {
+            return match result {
                 Ok(proxy_mailbox) => {
                     state.engines.insert(
                         engine_id,
@@ -357,7 +357,7 @@ impl NativeActor for EngineServer {
                             last_alive: Instant::now(),
                         },
                     );
-                    return SpawnEngineResult::Ok { engine_id: engine_id.0.to_string(), rpc_port };
+                    SpawnEngineResult::Ok { engine_id: engine_id.0.to_string(), rpc_port }
                 }
                 Err(e) => {
                     last_error = format!("proxy failed to connect to the spawned substrate: {e:?}");
@@ -376,9 +376,9 @@ impl NativeActor for EngineServer {
                         );
                         continue;
                     }
-                    return state.fail_spawn(engine_id, rpc_port, last_error);
+                    state.fail_spawn(engine_id, rpc_port, last_error)
                 }
-            }
+            };
         }
 
         // Only reached if `attempts` is 0, which `spawn_attempts()`

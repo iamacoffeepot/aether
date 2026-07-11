@@ -381,8 +381,6 @@ impl Subscriber for ForwardingSubscriber {
 
     fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
     fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
-    fn enter(&self, _: &span::Id) {}
-    fn exit(&self, _: &span::Id) {}
 
     fn event(&self, event: &Event<'_>) {
         if let Some(sink) = current_sink() {
@@ -390,6 +388,9 @@ impl Subscriber for ForwardingSubscriber {
             sink(level, &target, &message);
         }
     }
+
+    fn enter(&self, _: &span::Id) {}
+    fn exit(&self, _: &span::Id) {}
 }
 
 static SUBSCRIBER_INSTALLED: AtomicBool = AtomicBool::new(false);
