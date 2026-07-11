@@ -8,17 +8,24 @@
 //! `use runtime::*` glob in the parent.
 
 pub use std::collections::HashMap;
-pub use std::net::TcpListener;
+pub use std::net::{TcpListener, TcpStream};
+pub use std::sync::Arc;
+pub use std::sync::mpsc;
+pub use std::thread;
 
 pub use aether_actor::Manual;
-// The manual handlers (`on_unbind` / `on_monitor_notice`) issue their own
-// replies through `ctx.reply` / `ctx.reply_to`, the `OutboundReply` trait
-// methods, so the trait must be in scope where those handler bodies expand.
+// The manual handlers issue their own replies through `ctx.reply` /
+// `ctx.reply_to`, the `OutboundReply` trait methods, so the trait must be in
+// scope where those handler bodies expand.
 pub use aether_actor::OutboundReply;
 pub use aether_substrate::actor::monitor::MonitorHandle;
 pub use aether_substrate::actor::native::spawn::Subname;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
+pub use aether_substrate::runtime::trace::SettlementHold;
+pub use aether_substrate::{KindId, Mail, Mailer};
+
+pub use aether_data::Kind;
 
 use aether_actor::runtime;
 // `MonitorNotice` is named by `on_monitor_notice`'s signature; the parent's
@@ -29,7 +36,7 @@ use aether_kinds::MonitorNotice;
 // from the parent module where they live always-on.
 #[allow(clippy::wildcard_imports)]
 use super::kinds::*;
-use super::{TcpCapability, TcpListenerActor, TcpListenerConfig};
+use super::{TcpCapability, TcpListenerActor, TcpListenerConfig, TcpSessionActor, TcpSessionConfig};
 
 /// `aether.tcp` runtime state (issue 607 Phase 6a, ADR-0079). The singleton
 /// control-plane cap owns its listener fleet directly — it is the supervisor,
@@ -55,6 +62,20 @@ pub struct TcpCapabilityState {
     /// `MailboxId` as `listeners`; the cap's monitor (registered
     /// at spawn time) is what fires the notice.
     pub pending_unbinds: HashMap<aether_data::MailboxId, PendingUnbind>,
+    /// Monotonic id assigned to the next outbound connect attempt.
+    pub next_connect_id: u64,
+    /// Outstanding connect replies parked until the dial sidecar
+    /// reports completion. Keyed by `next_connect_id` values.
+    pub pending_connects: HashMap<u64, PendingConnect>,
+    /// Dial-sidecar result channel. The dispatcher drains it on each
+    /// `ConnectReady` wake and correlates results by connect id.
+    pub connect_rx: mpsc::Receiver<(u64, Result<TcpStream, String>)>,
+    /// Retained sender cloned into each one-shot dial sidecar.
+    pub connect_tx: mpsc::Sender<(u64, Result<TcpStream, String>)>,
+    /// Wake-mail plumbing captured at init for one-shot dial sidecars.
+    pub connect_mailer: Arc<Mailer>,
+    pub connect_self_id: aether_data::MailboxId,
+    pub connect_ready_kind: KindId,
 }
 
 /// Cap-local supervisor state for one live listener. Drops with
@@ -75,6 +96,23 @@ pub struct PendingUnbind {
     pub listener_name: String,
 }
 
+pub struct PendingConnect {
+    pub sender: aether_data::Source,
+    pub hold: SettlementHold,
+    pub addr: String,
+    pub name: Option<String>,
+}
+
+fn reply_to_pending_connect(
+    ctx: &mut NativeCtx<'_, Manual>,
+    sender: aether_data::Source,
+    hold: SettlementHold,
+    reply: &ConnectResult,
+) {
+    ctx.reply_to_target(sender, reply, hold.root(), None);
+    drop(hold);
+}
+
 #[runtime]
 impl NativeActor for TcpCapability {
     /// The runtime state this identity boots into (ADR-0122 split): the
@@ -83,8 +121,130 @@ impl NativeActor for TcpCapability {
     type Config = ();
     const NAMESPACE: &'static str = "aether.tcp";
 
-    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<TcpCapabilityState, BootError> {
-        Ok(TcpCapabilityState { listeners: HashMap::new(), pending_unbinds: HashMap::new() })
+    fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<TcpCapabilityState, BootError> {
+        let (connect_tx, connect_rx) = mpsc::channel::<(u64, Result<TcpStream, String>)>();
+        Ok(TcpCapabilityState {
+            listeners: HashMap::new(),
+            pending_unbinds: HashMap::new(),
+            next_connect_id: 0,
+            pending_connects: HashMap::new(),
+            connect_rx,
+            connect_tx,
+            connect_mailer: ctx.mailer(),
+            connect_self_id: ctx.self_id(),
+            connect_ready_kind: KindId(<ConnectReady as Kind>::ID.0),
+        })
+    }
+
+    /// Dial an outbound TCP stream on a one-shot transport thread and
+    /// park the caller's reply until `ConnectReady` reports completion.
+    ///
+    /// # Agent
+    /// Reply: `ConnectResult`. Asynchronous — the shared cap dispatcher
+    /// remains available while the OS resolves and connects `mail.addr`.
+    #[handler::manual]
+    fn on_connect(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: Connect) {
+        let id = state.next_connect_id;
+        state.next_connect_id += 1;
+        state.pending_connects.insert(
+            id,
+            PendingConnect {
+                sender: ctx.reply_target(),
+                hold: ctx.acquire_settlement_hold(),
+                addr: mail.addr.clone(),
+                name: mail.name,
+            },
+        );
+
+        let connect_tx = state.connect_tx.clone();
+        let mailer = Arc::clone(&state.connect_mailer);
+        let self_id = state.connect_self_id;
+        let connect_ready_kind = state.connect_ready_kind;
+        let addr = mail.addr;
+
+        // Transport thread below the mail layer — it carries a dial result
+        // in; no inbound chain to inherit, so no settlement umbrella applies.
+        #[allow(clippy::disallowed_methods)]
+        let spawn_result = thread::Builder::new().name(format!("aether-tcp-connect-{id}")).spawn(move || {
+            if connect_tx
+                .send((id, TcpStream::connect(&addr).map_err(|error| format!("connect failed: {error}"))))
+                .is_ok()
+            {
+                mailer.push(Mail::new(self_id, connect_ready_kind, ConnectReady {}.encode_into_bytes(), 1));
+            }
+        });
+
+        if let Err(error) = spawn_result {
+            let PendingConnect { sender, hold, addr, .. } =
+                state.pending_connects.remove(&id).expect("connect inserted before thread spawn");
+            reply_to_pending_connect(
+                ctx,
+                sender,
+                hold,
+                &ConnectResult::Err { addr, reason: format!("connect thread spawn failed: {error}") },
+            );
+        }
+    }
+
+    /// Drain completed outbound dials, spawn one existing
+    /// `TcpSessionActor` per connected stream, and complete each parked
+    /// `ConnectResult` reply by connect id.
+    #[handler::manual]
+    fn on_connect_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: ConnectReady) {
+        while let Ok((id, result)) = state.connect_rx.try_recv() {
+            let Some(PendingConnect { sender, hold, addr, name }) = state.pending_connects.remove(&id) else {
+                continue;
+            };
+
+            match result {
+                Ok(stream) => {
+                    let session_name = name.unwrap_or_else(|| format!("conn-{id}"));
+                    let peer = match stream.peer_addr() {
+                        Ok(peer) => peer.to_string(),
+                        Err(error) => {
+                            reply_to_pending_connect(
+                                ctx,
+                                sender,
+                                hold,
+                                &ConnectResult::Err { addr, reason: format!("peer_addr failed: {error}") },
+                            );
+                            continue;
+                        }
+                    };
+                    match ctx
+                        .spawn_child::<TcpSessionActor>(
+                            Subname::Named(&session_name),
+                            TcpSessionConfig {
+                                stream: Some(stream),
+                                peer: peer.clone(),
+                                session_name: session_name.clone(),
+                            },
+                        )
+                        .finish()
+                    {
+                        Ok(session_id) => {
+                            reply_to_pending_connect(
+                                ctx,
+                                sender,
+                                hold,
+                                &ConnectResult::Ok { session_name, session_id, peer },
+                            );
+                        }
+                        Err(error) => {
+                            reply_to_pending_connect(
+                                ctx,
+                                sender,
+                                hold,
+                                &ConnectResult::Err { addr, reason: format!("spawn failed: {error:?}") },
+                            );
+                        }
+                    }
+                }
+                Err(reason) => {
+                    reply_to_pending_connect(ctx, sender, hold, &ConnectResult::Err { addr, reason });
+                }
+            }
+        }
     }
 
     /// Spawn a fresh `TcpListenerActor` bound to `mail.addr`.

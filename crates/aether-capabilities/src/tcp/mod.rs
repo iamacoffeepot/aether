@@ -21,6 +21,7 @@
 //! ## Mail surface
 //!
 //! Control plane (mailed to `aether.tcp`):
+//! - `Connect { addr, name? }` → `ConnectResult`
 //! - `BindListener { addr, name? }` → `BindListenerResult`
 //! - `UnbindListener { listener_name }` → `UnbindListenerResult`
 //!   (asynchronous reply: the cap monitors the listener at spawn time

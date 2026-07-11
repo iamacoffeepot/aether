@@ -7,9 +7,16 @@ use aether_data::{ActorId, Tag, fold_lineage, with_tag};
 use aether_substrate::actor::native::NativeActorMailbox;
 
 use super::{
-    BindListener, Close, ListListeners, SessionClose, SessionWrite, TcpCapability, TcpListenerActor, TcpSessionActor,
-    UnbindListener,
+    BindListener, Close, Connect, ListListeners, SessionClose, SessionWrite, TcpCapability, TcpListenerActor,
+    TcpSessionActor, UnbindListener,
 };
+
+/// ADR-0099 §3: the `MailboxId` of an outbound connect session — a
+/// direct child of the cap (cap → session), one lineage level shallower
+/// than an accepted session.
+fn connect_session_mailbox_id(cap_carry: u64, session_name: &str) -> u64 {
+    with_tag(Tag::Mailbox, fold_lineage(cap_carry, ActorId::instanced(TcpSessionActor::NAMESPACE, session_name)))
+}
 
 /// ADR-0099 §3: the `MailboxId` of a tcp session — a grandchild of the
 /// cap (cap → listener → session). The session's lineage is reconstructed
@@ -30,11 +37,14 @@ fn session_mailbox_id(cap_carry: u64, listener_name: &str, session_name: &str) -
 ///
 /// Two distinct surfaces:
 ///
-/// 1. Request helpers — [`bind_listener`](Self::bind_listener),
+/// 1. Request helpers — [`connect`](Self::connect),
+///    [`bind_listener`](Self::bind_listener),
 ///    [`unbind_listener`](Self::unbind_listener),
 ///    [`list_listeners`](Self::list_listeners),
 ///    [`close`](Self::close), [`session_write`](Self::session_write),
-///    [`session_close`](Self::session_close). Mirror
+///    [`session_close`](Self::session_close),
+///    [`connect_session_write`](Self::connect_session_write), and
+///    [`connect_session_close`](Self::connect_session_close). Mirror
 ///    [`crate::fs::FsMailboxExt`] (issue 580): lift the cap-shaped
 ///    kinds (`Close`, `SessionWrite`, ...) one indirection above the
 ///    raw `.send(&Kind { .. })` so component code stops reconstructing
@@ -43,8 +53,9 @@ fn session_mailbox_id(cap_carry: u64, listener_name: &str, session_name: &str) -
 ///    addressed listener / session actor — the request kind body itself
 ///    has no name field (the addressing rides the mailbox).
 ///
-/// 2. Peer resolvers — [`listener::<R>`](Self::listener) and
-///    [`session::<R>`](Self::session). Mirror
+/// 2. Peer resolvers — [`listener::<R>`](Self::listener),
+///    [`session::<R>`](Self::session), and
+///    [`connect_session::<R>`](Self::connect_session). Mirror
 ///    [`crate::component::ComponentHostWasmExt::loaded`] (issue 654):
 ///    the "aether.tcp.listener:" / "aether.tcp.session:" prefixes live
 ///    in exactly two methods in the workspace — these — so a future
@@ -61,6 +72,10 @@ fn session_mailbox_id(cap_carry: u64, listener_name: &str, session_name: &str) -
 /// still works for any `K` the cap declares via `HandlesKind<K>`, since
 /// `send` is an inherent method on the underlying mailbox type.
 pub trait TcpWasmExt {
+    /// Mail `aether.tcp.connect { addr, name }` to the cap. Reply:
+    /// `ConnectResult`. Pass `name = None` for a `conn-N` subname.
+    fn connect(&self, addr: &str, name: Option<&str>);
+
     /// Mail `aether.tcp.bind_listener { addr, name }` to the cap.
     /// Reply: `BindListenerResult`. Pass `name = None` to let the cap
     /// default the subname to the bound port (typically with `addr =
@@ -95,6 +110,13 @@ pub trait TcpWasmExt {
     /// the session.
     fn session_close(&self, listener_name: &str, session_name: &str);
 
+    /// Mail `aether.tcp.session_write { bytes }` to a connect-side
+    /// `TcpSessionActor` that is a direct child of this cap.
+    fn connect_session_write(&self, name: &str, bytes: &[u8]);
+
+    /// Mail `aether.tcp.session_close` to a connect-side session.
+    fn connect_session_close(&self, name: &str);
+
     /// Resolve a typed listener-instance mailbox for the bound
     /// listener named `name`. The full mailbox address is
     /// `format!("{}:{}", TcpListenerActor::NAMESPACE, name)`. `R` is
@@ -109,9 +131,17 @@ pub trait TcpWasmExt {
     /// `format!("{}:{}", TcpSessionActor::NAMESPACE, name)`. See
     /// [`Self::listener`] for the `R` parameter shape.
     fn session<R: Addressable>(&self, listener_name: &str, session_name: &str) -> WasmActorMailbox<'_, R>;
+
+    /// Resolve a typed connect-side session mailbox. Unlike
+    /// [`Self::session`], this folds cap → session directly.
+    fn connect_session<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R>;
 }
 
 impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
+    //noinspection DuplicatedCode
+    fn connect(&self, addr: &str, name: Option<&str>) {
+        self.send(&Connect { addr: addr.into(), name: name.map(Into::into) });
+    }
     //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>) {
         self.send(&BindListener { addr: addr.into(), name: name.map(Into::into) });
@@ -132,6 +162,14 @@ impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
     fn session_close(&self, listener_name: &str, session_name: &str) {
         self.session::<TcpSessionActor>(listener_name, session_name).send(&SessionClose::default());
     }
+    //noinspection DuplicatedCode
+    fn connect_session_write(&self, name: &str, bytes: &[u8]) {
+        self.connect_session::<TcpSessionActor>(name).send(&SessionWrite { bytes: bytes.to_vec() });
+    }
+    //noinspection DuplicatedCode
+    fn connect_session_close(&self, name: &str) {
+        self.connect_session::<TcpSessionActor>(name).send(&SessionClose::default());
+    }
     fn listener<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
         // ADR-0099 §3: a listener is this cap's child — fold its node
         // onto the cap's carry (the cap is depth-1, so `self`'s id is
@@ -143,6 +181,10 @@ impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
         // rewrap it with `at`, inheriting this cap handle's ctx binding so the
         // session handle's sends stamp the same origin (issue 1987).
         self.at::<R>(session_mailbox_id(self.mailbox_id().0, listener_name, session_name))
+    }
+    //noinspection DuplicatedCode
+    fn connect_session<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
+        self.at::<R>(connect_session_mailbox_id(self.mailbox_id().0, name))
     }
 }
 
@@ -157,6 +199,9 @@ impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
 /// [`crate::component::ComponentHostNativeExt`] (issue 654).
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub trait TcpNativeExt {
+    /// Mail `aether.tcp.connect { addr, name }` to the cap.
+    fn connect(&self, addr: &str, name: Option<&str>);
+
     /// Mail `aether.tcp.bind_listener { addr, name }` to the cap.
     fn bind_listener(&self, addr: &str, name: Option<&str>);
 
@@ -176,6 +221,12 @@ pub trait TcpNativeExt {
     /// Mail `aether.tcp.session_close` to the named `TcpSessionActor`.
     fn session_close(&self, listener_name: &str, session_name: &str);
 
+    /// Mail `aether.tcp.session_write { bytes }` to a connect-side session.
+    fn connect_session_write(&self, name: &str, bytes: &[u8]);
+
+    /// Mail `aether.tcp.session_close` to a connect-side session.
+    fn connect_session_close(&self, name: &str);
+
     /// Resolve a typed listener-instance mailbox. See
     /// [`TcpWasmExt::listener`] for the addressing rationale; the
     /// returned handle inherits the parent mailbox's `'a` binding ref
@@ -186,10 +237,18 @@ pub trait TcpNativeExt {
     /// Resolve a typed session-instance mailbox. See
     /// [`TcpWasmExt::session`] for the addressing rationale.
     fn session<R: Addressable>(&self, listener_name: &str, session_name: &str) -> NativeActorMailbox<'_, R>;
+
+    /// Resolve a typed connect-side session mailbox. This folds the
+    /// session directly beneath the cap, without a listener node.
+    fn connect_session<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R>;
 }
 
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
+    //noinspection DuplicatedCode
+    fn connect(&self, addr: &str, name: Option<&str>) {
+        self.send(&Connect { addr: addr.into(), name: name.map(Into::into) });
+    }
     //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>) {
         self.send(&BindListener { addr: addr.into(), name: name.map(Into::into) });
@@ -210,6 +269,14 @@ impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
     fn session_close(&self, listener_name: &str, session_name: &str) {
         self.session::<TcpSessionActor>(listener_name, session_name).send(&SessionClose::default());
     }
+    //noinspection DuplicatedCode
+    fn connect_session_write(&self, name: &str, bytes: &[u8]) {
+        self.connect_session::<TcpSessionActor>(name).send(&SessionWrite { bytes: bytes.to_vec() });
+    }
+    //noinspection DuplicatedCode
+    fn connect_session_close(&self, name: &str) {
+        self.connect_session::<TcpSessionActor>(name).send(&SessionClose::default());
+    }
     fn listener<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
         // ADR-0099 §3: fold the listener node onto the cap's carry (the
         // cap is depth-1, so `self`'s id is its carry).
@@ -217,5 +284,9 @@ impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
     }
     fn session<R: Addressable>(&self, listener_name: &str, session_name: &str) -> NativeActorMailbox<'_, R> {
         NativeActorMailbox::__new(session_mailbox_id(self.mailbox_id().0, listener_name, session_name), self.binding())
+    }
+    //noinspection DuplicatedCode
+    fn connect_session<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
+        NativeActorMailbox::__new(connect_session_mailbox_id(self.mailbox_id().0, name), self.binding())
     }
 }

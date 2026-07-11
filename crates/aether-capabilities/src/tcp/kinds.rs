@@ -1,10 +1,10 @@
 //! Mail kinds owned by the `aether.tcp` capability family.
 //!
-//! These 13 kind types plus the [`ListenerInfo`] helper struct were
-//! formerly defined in `aether-kinds`; they live here now per ADR-0121
-//! (capabilities own their kinds). The kind ids are `fnv1a_64(name,
-//! schema)`, so moving the declarations does not change any id or
-//! alter wire compatibility.
+//! The original 13 kind types plus the [`ListenerInfo`] helper struct
+//! were formerly defined in `aether-kinds`; they live here now per
+//! ADR-0121 (capabilities own their kinds). This module now owns 16
+//! kinds. Kind ids are `fnv1a_64(name, schema)`, so moving declarations
+//! does not change any id or alter wire compatibility.
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +20,33 @@ use serde::{Deserialize, Serialize};
 pub struct BindListener {
     pub addr: String,
     pub name: Option<String>,
+}
+
+/// `aether.tcp.connect` — request the singleton `TcpCapability`
+/// to dial `addr` and spawn a fresh `TcpSessionActor` over the
+/// connected stream. Mirrors [`BindListener`]: `addr` is resolved
+/// via `std::net::ToSocketAddrs`, and optional `name` overrides
+/// the default `conn-N` session subname. Reply: [`ConnectResult`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.tcp.connect")]
+pub struct Connect {
+    pub addr: String,
+    pub name: Option<String>,
+}
+
+/// Reply to [`Connect`]. `Ok` carries the resolved connect-session
+/// name, the session's `MailboxId`, and the connected peer address.
+/// `Err` carries the requested address and a human-readable dial or
+/// spawn failure.
+///
+/// `MailboxId` round-trips imprecisely over JSON. Agents addressing
+/// the session via subsequent MCP calls should resolve by
+/// `session_name`; `session_id` is the native wire id for native peers.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.tcp.connect_result")]
+pub enum ConnectResult {
+    Ok { session_name: String, session_id: aether_data::MailboxId, peer: String },
+    Err { addr: String, reason: String },
 }
 
 /// Reply to `BindListener`. `Ok` carries the resolved listener
@@ -114,6 +141,15 @@ pub struct Close {}
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.tcp.connection_ready")]
 pub struct ConnectionReady {}
+
+/// `aether.tcp.connect_ready` — sidecar dial thread → capability
+/// dispatcher wake. Mirror of [`ConnectionReady`] for outbound
+/// connections: the dial thread pushes its `TcpStream` or error over
+/// an mpsc and fires this fieldless mail so the cap can drain the
+/// channel, spawn the session actor, and complete the parked reply.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.tcp.connect_ready")]
+pub struct ConnectReady {}
 
 /// `aether.tcp.session_data_ready` — sidecar read thread → session
 /// dispatcher wake. Mirror of [`ConnectionReady`] for the session
