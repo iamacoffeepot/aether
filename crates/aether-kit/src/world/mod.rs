@@ -267,11 +267,24 @@ impl WorldView {
         }
     }
 
+    /// Finish one immediate mutation whose write path reports touched chunks.
+    /// An empty set means the request wrote nothing, so it neither advances
+    /// the committed revision nor clears a fresh proposal preview. Any
+    /// non-empty set, including an operator's exhausted partial prefix,
+    /// remeshes and advances exactly once.
+    fn finish_touched_mutation(&mut self, touched: &BTreeSet<ChunkPos>) {
+        if touched.is_empty() {
+            return;
+        }
+        self.remesh_touched(touched);
+        self.advance_committed_revision();
+    }
+
     /// Rasterize `vertices` into the overlay coverage plane and rebuild every
     /// changed chunk through the ordinary apron-aware invalidation path.
     fn stamp_vertices(&mut self, vertices: &[WorldPoint], material: Material) {
         let touched = raster::stamp_polygon(&mut self.world, vertices, material);
-        self.remesh_touched(&touched);
+        self.finish_touched_mutation(&touched);
     }
 
     fn advance_committed_revision(&mut self) {
@@ -555,7 +568,6 @@ impl WasmActor for WorldView {
     #[handler::single]
     fn on_stamp_polygon(&mut self, _ctx: &mut WasmCtx<'_>, msg: StampPolygon) {
         self.stamp_vertices(&msg.points, Material::from_u8_or_void(msg.material));
-        self.advance_committed_revision();
     }
 
     /// Generate and rasterize a disc vertex ring in world-octimeter
@@ -568,7 +580,6 @@ impl WasmActor for WorldView {
     fn on_stamp_disc(&mut self, _ctx: &mut WasmCtx<'_>, msg: StampDisc) {
         let vertices = raster::disc_vertices(msg.center, msg.radius_octimeters);
         self.stamp_vertices(&vertices, Material::from_u8_or_void(msg.material));
-        self.advance_committed_revision();
     }
 
     /// Generate and rasterize a flat-top regular hexagon in world-octimeter
@@ -582,7 +593,6 @@ impl WasmActor for WorldView {
     fn on_stamp_hexagon(&mut self, _ctx: &mut WasmCtx<'_>, msg: StampHexagon) {
         let vertices = raster::regular_hexagon_vertices(msg.center, msg.radius_octimeters);
         self.stamp_vertices(&vertices, Material::from_u8_or_void(msg.material));
-        self.advance_committed_revision();
     }
 
     /// Apply a bounded disc brush along a world-space path and reply with the
@@ -597,8 +607,7 @@ impl WasmActor for WorldView {
     #[handler::manual]
     fn on_apply_brush(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: ApplyBrush) {
         let execution = operator::apply_brush(&mut self.world, msg.source, &msg.path, msg.brush, msg.budget);
-        self.remesh_touched(&execution.touched);
-        self.advance_committed_revision();
+        self.finish_touched_mutation(&execution.touched);
         if ctx.reply_target().is_some() {
             ctx.reply(&execution.result);
         }
@@ -615,8 +624,7 @@ impl WasmActor for WorldView {
     #[handler::manual]
     fn on_run_automaton(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: RunAutomaton) {
         let execution = operator::run_automaton(&mut self.world, msg.source, msg.seed, msg.rule, msg.budget);
-        self.remesh_touched(&execution.touched);
-        self.advance_committed_revision();
+        self.finish_touched_mutation(&execution.touched);
         if ctx.reply_target().is_some() {
             ctx.reply(&execution.result);
         }
@@ -856,6 +864,65 @@ mod tests {
         );
         assert_eq!(view.next_proposal_id, Some(1));
         assert!(view.proposals.is_empty());
+    }
+
+    #[test]
+    fn no_touch_direct_stamp_preserves_revision_preview_and_proposal_freshness() {
+        let mut view = test_view();
+        let proposal_id = staged_id(&mut view, point_operation(0, Material::Grass));
+        assert!(matches!(
+            view.set_proposal_preview(Some(proposal_id)),
+            ProposalResult::PreviewSet { active_proposal_id: Some(id), .. } if id == proposal_id
+        ));
+        let world_before = view.world.clone();
+        let meshes_before = view.meshes.clone();
+
+        let vertices = raster::disc_vertices(WorldPoint::new(0, 0), 0);
+        view.stamp_vertices(&vertices, Material::Stone);
+
+        assert_eq!(view.world, world_before);
+        assert_eq!(view.meshes, meshes_before);
+        assert_eq!(view.committed_revision, 0);
+        assert_eq!(view.active_preview, Some(proposal_id));
+        assert_eq!(view.proposal_freshness_error(proposal_id), None);
+    }
+
+    #[test]
+    fn touched_partial_operator_write_advances_revision_exactly_once() {
+        let mut view = test_view();
+        let proposal_id = staged_id(&mut view, point_operation(8, Material::Grass));
+        view.set_proposal_preview(Some(proposal_id));
+        let source = MarkRef { id: MarkId::new(17), revision: 2 };
+        let execution = operator::run_automaton(
+            &mut view.world,
+            source,
+            OperatorCell { cell_x: 0, cell_z: 0 },
+            AutomatonRule::Grow { material: Material::Sand.to_u8(), generations: 1 },
+            OperatorBudget {
+                max_steps: 2,
+                max_subcells: 2 * u32::try_from(SUBCELLS_PER_CELL).expect("fixed cell plane fits u32"),
+            },
+        );
+        assert!(matches!(
+            execution.result,
+            OperatorResult::Failed {
+                error: OperatorError::StepBudgetExhausted,
+                stats: OperatorStats { steps_run: 2, .. },
+                ..
+            }
+        ));
+        assert!(!execution.touched.is_empty());
+
+        view.finish_touched_mutation(&execution.touched);
+
+        assert_eq!(view.committed_revision, 1);
+        assert_eq!(view.active_preview, None);
+        assert!(matches!(
+            view.proposal_freshness_error(proposal_id),
+            Some(ProposalError::StaleProposal { proposed_at_revision: 0, committed_revision: 1, .. })
+        ));
+        assert_eq!(view.world.underlay_point(CellPos { x: 0, z: 0 }, 0, 0), Material::Sand);
+        assert_eq!(view.world.underlay_point(CellPos { x: 1, z: 0 }, 0, 0), Material::Sand);
     }
 
     #[test]
