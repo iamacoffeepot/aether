@@ -50,54 +50,68 @@ forces:
 
 ## Decision
 
-Introduce a **player session tier**: a per-connection instanced actor in
-`aether-capabilities` that binds an `aether.tcp` session (transport) to the
-`aether.sim.*` simulation (game), owning the handshake, the identity binding, the
-untrusted-frame allowlist decode, the per-tick outbound bundle assembly, and the
-tick clock beacon. One session actor per connected client. It is a general tier —
-the toy world is its first consumer, not a special case baked into it.
+Introduce a **player session tier**: a singleton **gateway** cap plus a
+per-connection **player session** instanced actor, both in `aether-capabilities`,
+that bind an `aether.tcp` session (transport) to the `aether.sim.*` simulation
+(game). The gateway demultiplexes the transport; each player-session actor owns one
+connection's handshake, identity binding, untrusted-frame allowlist decode, per-tick
+outbound bundle assembly, and tick clock beacon. It is a general tier — the toy
+world is its first consumer, not a special case baked into it.
 
-### 1. Session lifecycle: handshake → active → closed
+### 1. Gateway demux and per-connection spawn
 
-The tier actor is spawned per connection and named as that `aether.tcp` session's
-**bound consumer** (the #3046 delivery contract) so every reassembled inbound frame
-arrives as one `SessionData { session_name, peer, bytes }` mail, and `SessionClosed`
-signals teardown. It writes outbound by mailing `SessionWrite { bytes }` back to the
-session, and closes via `SessionClose` — the identical surface an accept-side and a
+`aether.tcp` binds one consumer *per listener* (#3046 stamps the consumer name onto
+every session the listener spawns), so all sessions on a listener deliver their
+`SessionData` / `SessionClosed` to one mailbox. But the issue calls for one game
+actor *per connection*. The **gateway** singleton reconciles the two: it is the
+listener's bound consumer, and it demultiplexes inbound mail by `session_name` —
+on the first frame from a new session it `spawn_child`s a **player session**
+instanced actor (the ADR-0079 pattern the tcp listener already uses to spawn its
+`TcpSessionActor`s, one game layer up), routes that session's subsequent frames and
+its `SessionClosed` to that child, and reaps the child on close. This keeps #3046
+unchanged (its consumer stays one stable name) while giving every connection an
+isolated actor with its own state and its own run-token — per-connection parallelism
+on the ADR-0087 pool, not one serialized singleton.
+
+### 2. Session lifecycle: handshake → active → closed
+
+A player-session actor writes outbound by mailing `SessionWrite { bytes }` to its
+addressed `aether.tcp` session (resolved by the `session_name` it was spawned for)
+and closes via `SessionClose` — the identical surface an accept-side and a
 connect-side (#3047) session present, so the tier is transport-origin-agnostic.
 
 A session begins in **handshake** state. The first inbound frame must decode to a
 `Hello` (a new tier kind, following the `aether.rpc` `Hello`/`HelloAck` precedent):
 a wire version and the client's declared self-identification. The server validates
-the wire version, **assigns** the connection an identity (see §2), and replies
+the wire version, **assigns** the connection an identity (see §3), and replies
 `HelloAck { wire_version, session_identity, tick, interval }`. Only after a
 successful handshake does the session transition to **active**; an inbound frame
 that arrives before `Hello`, or a version mismatch, closes the session. Auth in v1
 is identity *assignment* (the connection is given a fresh server-side identity), not
 credential verification — the credential seam is named and deferred (§ Consequences).
 
-### 2. Identity is stamped from the connection
+### 3. Identity is stamped from the connection
 
 On successful handshake the server binds a **session identity** to the connection
 and holds it in the tier actor's state. Every intent this session forwards to the
 sim is attributed to that identity by the *server*; the identity is never read from
 an inbound frame. A frame therefore cannot forge another player's identity — the
 worst a malicious peer can do is send garbage on its own connection, which the
-allowlist decode (§3) rejects.
+allowlist decode (§4) rejects.
 
-### 3. Inbound: untrusted frame → allowlisted intent kind
+### 4. Inbound: untrusted frame → allowlisted intent kind
 
 Each `SessionData` body is a length-prefix-framed, kind-tagged intent payload. The
 tier decodes it by **kind-id against its handler table, which is the allowlist**: a
 frame names a *kind*, never a recipient (ADR-0033 dispatch by kind-id). A kind-id
 outside the allowed intent set is dropped and logged — it is not dispatched, and it
 cannot address an arbitrary mailbox. An allowed intent is forwarded to the sim's
-intent mailbox, attributed to the session identity (§2), where ADR-0144's per-tick
+intent mailbox, attributed to the session identity (§3), where ADR-0144's per-tick
 binning and last-writer-wins supersession take over. The allowed set is the tier's
 configured intent vocabulary (the `aether.sim.*` intent kinds in v1), carried as
 wire names — no Rust dependency on the sim crate.
 
-### 4. Outbound: per-tick bundle assembly with an interest projection seam
+### 5. Outbound: per-tick bundle assembly with an interest projection seam
 
 The tier binds as the sim's **fact-sink** (ADR-0144's push path) or polls it
 (`aether.sim.poll { since_tick }`); either way it receives the authoritative
@@ -110,7 +124,7 @@ and bounded (fixed-depth retained ring). Per-connection projection is the tier's
 job; ADR-0144's sim exposes the full set and the seam. v1 keeps the projection the
 identity so the pipe is proven before the projection is real.
 
-### 5. Tick clock beacon rides the transport, not game state
+### 6. Tick clock beacon rides the transport, not game state
 
 Each tick the tier emits a **beacon** to its client: the current tick number, a
 server-monotonic timestamp, and the current tick interval. The beacon lets a client
@@ -120,7 +134,7 @@ wall-clock timestamp lives here and never enters an `aether.sim.*` game-state ki
 preserving ADR-0144's determinism invariant. The beacon cadence is driven by the
 substrate `Tick` stream the tier subscribes in its `wire` hook (ADR-0021/0068).
 
-### 6. Kinds and crate placement
+### 7. Kinds and crate placement
 
 The tier's own kinds (`Hello`, `HelloAck`, the tick beacon, and any tier-level
 close/error) live in the session-tier module of `aether-capabilities` under the
@@ -146,7 +160,7 @@ vocabulary, spoken by wire name. The tier takes no dependency on `aether-kit`.
 - Deferred, seams named: (a) **credential auth** — v1 assigns identity rather than
   verifying a credential; a real auth exchange slots into the handshake without
   reshaping it. (b) **real interest projection** — v1 is the identity; per-connection
-  visibility culling attaches at the §4 seam. (c) **backpressure** — the intents-up
+  visibility culling attaches at the §5 seam. (c) **backpressure** — the intents-up
   path is low-volume; per-session outbound rate limiting (ADR-0128-style credit) is
   deferred, matching #3046's stance. None change the wire contract.
 - Ordering: this tier consumes the `aether.sim.*` vocabulary (#3049 / ADR-0144) and
@@ -178,3 +192,9 @@ vocabulary, spoken by wire name. The tier takes no dependency on `aether-kit`.
 - **No handshake — first frame is an intent.** Saves a round trip, but leaves no
   place to negotiate wire version or assign identity, and no seam for future
   credential auth. Rejected: the handshake is cheap and is where identity is bound.
+- **One singleton tier holding a `map<session_name, ConnectionState>` (no gateway,
+  no per-connection actor).** Simpler — no `spawn_child`/reap, no instancing — but
+  it serializes every connection's handshake, decode, projection, and beacon through
+  one actor's inbox and one thread, and contradicts the issue's "each connection gets
+  a session actor" and ADR-0079's per-connection-actor intent. Rejected: the gateway
+  keeps per-connection isolation and pool parallelism at the cost of one demux hop.
