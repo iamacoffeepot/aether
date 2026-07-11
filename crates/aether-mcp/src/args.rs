@@ -558,8 +558,10 @@ pub struct ActorCostResponse {
     pub rows: Vec<ActorCostRow>,
 }
 
-/// `describe_kinds` arguments. All fields are optional and orthogonal —
-/// omit all for the compact default listing of the live engine's vocabulary.
+/// `describe_kinds` arguments. Selection precedence is `families` > `names` >
+/// `prefix` > bare; `full` changes schema-bearing renders but is ignored by
+/// the family digest. Omit all fields for the compact default listing of the
+/// live engine's vocabulary.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeKindsArgs {
     /// Engine UUID (from `list_engines`) whose live kind vocabulary to
@@ -571,19 +573,38 @@ pub struct DescribeKindsArgs {
     /// baseline unchanged.
     #[serde(default)]
     pub engine_id: Option<String>,
+    /// Return a digest of `{family, count}` rows instead of individual kinds.
+    /// A family is a kind name with its final dot-separated segment removed.
+    /// Combines with `prefix` to digest a subtree and ignores `full`.
+    #[serde(default)]
+    pub families: bool,
+    /// Exact kind names to return. This selector may combine with `full`, but
+    /// is mutually exclusive with `families` and `prefix`.
+    #[serde(default)]
+    pub names: Option<Vec<String>>,
     /// Case-sensitive prefix filter: when set, only kinds whose name starts
     /// with this string are included in the output (e.g. `"aether.fs"` to
-    /// get just the file-system kinds). Omit to list every kind.
+    /// get just the file-system kinds). Combines with `families`; it is
+    /// mutually exclusive with `names`.
     #[serde(default)]
     pub prefix: Option<String>,
-    /// When `true`, return the full authoritative `SchemaType` for each
-    /// matching kind (the existing schema-exact form, enough for codec
-    /// work). When `false` (default), return a compact `[{name, shape}]`
-    /// array where `shape` is a one-line human-readable rendering of the
-    /// kind's field structure — enough to build `send_mail` params for
-    /// simple kinds without a second fetch.
+    /// When `true` with `names` or `prefix`, return the full authoritative
+    /// `SchemaType` for each matching kind (the schema-exact form, enough for
+    /// codec work). `families` ignores this modifier, and an unfiltered bare
+    /// `full: true` request is rejected. When `false` (default), schema-bearing
+    /// modes return compact `[{name, shape}]` rows where `shape` is a one-line
+    /// human-readable rendering of the kind's field structure.
     #[serde(default)]
     pub full: bool,
+}
+
+/// One entry in the `describe_kinds(families: true)` digest.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct KindFamily {
+    /// Kind namespace with the final dot-separated name segment removed.
+    pub family: String,
+    /// Number of kinds in this family after any prefix filter is applied.
+    pub count: usize,
 }
 
 /// One entry in the compact `describe_kinds` listing (`full: false`).
