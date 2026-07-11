@@ -631,11 +631,11 @@ async fn dynamic_relay_refreshes_routes_settles_decodes_and_normalizes() {
         events: vec![encoded_event(&response, serde_json::json!({ "status": "ok", "id": { "0": 7 } }))],
         settle: true,
     }])));
-    let Ok((_chassis, port)) = try_boot_hub_with_terrain_route_loopback(TerrainRouteLoopbackConfig {
-        inventory: inventory(&[request.clone(), response.clone()]),
-        calls: Arc::clone(&calls),
+    let Ok((_chassis, port)) = try_boot_hub_with_terrain_route_loopback(
+        inventory(&[request.clone(), response.clone()]),
+        Arc::clone(&calls),
         replies,
-    }) else {
+    ) else {
         return;
     };
     let mcp = connect_mcp(port);
@@ -693,11 +693,11 @@ async fn operator_source_preflight_rejects_without_world_dispatch() {
         mark_result(&mark_get_result, 2, 1, serde_json::json!({ "Path": [point(0, 0)] })),
     ])));
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let Ok((_chassis, port)) = try_boot_hub_with_terrain_route_loopback(TerrainRouteLoopbackConfig {
-        inventory: inventory(&[mark_get, mark_get_result, brush, operator_result]),
-        calls: Arc::clone(&calls),
+    let Ok((_chassis, port)) = try_boot_hub_with_terrain_route_loopback(
+        inventory(&[mark_get, mark_get_result, brush, operator_result]),
+        Arc::clone(&calls),
         replies,
-    }) else {
+    ) else {
         return;
     };
     let mcp = connect_mcp(port);
@@ -760,11 +760,11 @@ async fn brush_source_mark_builds_exact_payload_and_projects_operator_result() {
         },
     ])));
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let Ok((_chassis, port)) = try_boot_hub_with_terrain_route_loopback(TerrainRouteLoopbackConfig {
-        inventory: inventory(&[mark_get, mark_get_result, brush.clone(), operator_result]),
-        calls: Arc::clone(&calls),
+    let Ok((_chassis, port)) = try_boot_hub_with_terrain_route_loopback(
+        inventory(&[mark_get, mark_get_result, brush.clone(), operator_result]),
+        Arc::clone(&calls),
         replies,
-    }) else {
+    ) else {
         return;
     };
     let mcp = connect_mcp(port);
@@ -813,11 +813,11 @@ async fn automaton_source_mark_builds_exact_payload_and_projects_failed_result()
         },
     ])));
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let Ok((_chassis, port)) = try_boot_hub_with_terrain_route_loopback(TerrainRouteLoopbackConfig {
-        inventory: inventory(&[mark_get, mark_get_result, automaton.clone(), operator_result]),
-        calls: Arc::clone(&calls),
+    let Ok((_chassis, port)) = try_boot_hub_with_terrain_route_loopback(
+        inventory(&[mark_get, mark_get_result, automaton.clone(), operator_result]),
+        Arc::clone(&calls),
         replies,
-    }) else {
+    ) else {
         return;
     };
     let mcp = connect_mcp(port);

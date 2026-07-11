@@ -79,9 +79,9 @@ pub(super) struct TerrainRouteReply {
 /// remain opaque so the test never copies the kit's Rust wire vocabulary.
 #[derive(Clone)]
 pub(super) struct TerrainRouteLoopbackConfig {
-    pub(super) inventory: ListKindsResult,
-    pub(super) calls: Arc<Mutex<Vec<RouteEnvelope>>>,
-    pub(super) replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
+    inventory: ListKindsResult,
+    calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+    replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
 }
 
 pub(super) struct TerrainRouteSink {
@@ -327,7 +327,9 @@ pub(super) fn boot_hub_with_route_loopback(
 /// Hub-shaped route fixture serving live dynamic terrain descriptors and a
 /// caller-controlled queue of opaque reply events.
 pub(super) fn try_boot_hub_with_terrain_route_loopback(
-    config: TerrainRouteLoopbackConfig,
+    inventory: ListKindsResult,
+    calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+    replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
 ) -> Result<(PassiveChassis<TestChassis>, u16), BootError> {
     let registry = Arc::new(Registry::new());
     for descriptor in descriptors::all() {
@@ -337,7 +339,7 @@ pub(super) fn try_boot_hub_with_terrain_route_loopback(
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<TerrainRouteSink>(config)
+        .with_actor::<TerrainRouteSink>(TerrainRouteLoopbackConfig { inventory, calls, replies })
         .with_actor::<RpcServerCapability>(RpcServerConfig {
             bind_addr: "127.0.0.1:0".into(),
             peer_kind: PeerKind::Substrate {
