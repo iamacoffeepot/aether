@@ -22,6 +22,8 @@ export const meta = {
 //   diffs,        { [absPath]: text } — per-file diff hunks. Presence makes finders diff-scoped
 //                                       (and selects the pr profile); omit for whole-file review.
 //   profile,      'pr'|'backfill'     — funnel shape; default: pr when diffs present, else backfill.
+//   depth,        'gate'|'deep'       — review cost preset; default deep. gate selects spec-fidelity
+//                                       + correctness, Sonnet verification, and no challenge.
 //   finderShape,  'merged'|'specialist' — per-file finder composition; default: merged for pr,
 //                                       specialist for backfill.
 //   lenses,       [string]            — optional subset of pillar keys to run.
@@ -49,20 +51,23 @@ const TEST_FILES = Array.isArray(A.testFiles) ? A.testFiles : []
 if (!FILES.length && !TEST_FILES.length) throw new Error('review: args.files (and/or args.testFiles) must be a non-empty array of absolute .rs paths')
 
 const FINDER_MODEL = A.finderModel || 'sonnet'
-const VERIFY_MODEL = A.verifyModel || 'opus'
 const NO_BUILD = A.noBuild === true
 const DIFFS = A.diffs || {}
 const HAS_DIFFS = Object.keys(DIFFS).length > 0
 
-// Profile parameterizes the whole funnel (issue #3015). The pr profile is the per-PR merge gate:
-// merged finders, small-diff batching, and one per-PR challenge, all gated on the diff-line data
-// that only diffs carry. Backfill is elective whole-file auditing and keeps specialist finders +
-// per-file challenges pending A/B evidence. The mode-independent compressions (tiered/batched
-// refutes, the rollup verdict fix) apply in both.
+// Profile parameterizes the funnel shape (issue #3015). The per-PR merge gate is gate depth over
+// the pr profile: merged finders and small-diff batching are gated on the diff-line data that only
+// diffs carry. Backfill is elective whole-file auditing and keeps specialist finders + per-file
+// challenges pending A/B evidence. The mode-independent compressions (tiered/batched refutes, the
+// rollup verdict fix) apply in both.
 const PROFILE = A.profile || (HAS_DIFFS ? 'pr' : 'backfill')
 if (PROFILE !== 'pr' && PROFILE !== 'backfill') throw new Error(`review: args.profile must be 'pr' or 'backfill', got ${JSON.stringify(A.profile)}`)
+const DEPTH = A.depth || 'deep'
+if (DEPTH !== 'gate' && DEPTH !== 'deep') throw new Error(`review: args.depth must be 'gate' or 'deep', got ${JSON.stringify(A.depth)}`)
 const FINDER_SHAPE = A.finderShape || (PROFILE === 'pr' ? 'merged' : 'specialist')
 if (FINDER_SHAPE !== 'merged' && FINDER_SHAPE !== 'specialist') throw new Error(`review: args.finderShape must be 'merged' or 'specialist', got ${JSON.stringify(A.finderShape)}`)
+const VERIFY_MODEL = A.verifyModel || (DEPTH === 'gate' ? 'sonnet' : 'opus')
+const NO_CHALLENGE = A.noChallenge === true || DEPTH === 'gate'
 
 // Small-diff batching (pr profile): files whose diff changes fewer than SMALL_DIFF_LINES lines
 // group into shared finder calls, at most BATCH_CAP files per call.
@@ -180,7 +185,9 @@ TRIPWIRE (the only flat-value keep): the pinned value is COMPUTED — a hash, go
 
 const SELECTED = Array.isArray(A.lenses) && A.lenses.length
   ? ALL_LENSES.filter(l => A.lenses.includes(l.key))
-  : ALL_LENSES
+  : DEPTH === 'gate'
+    ? ALL_LENSES.filter(l => l.key === 'spec-fidelity' || l.key === 'correctness')
+    : ALL_LENSES
 if (!SELECTED.length) throw new Error(`review: no lenses selected; valid keys are ${ALL_LENSES.map(l => l.key).join(', ')}`)
 
 const SPEC_LENS = SELECTED.find(l => l.key === 'spec-fidelity')
@@ -675,7 +682,7 @@ const results = await pipeline(
     const refute = refuteFlags(toRefute)
 
     // Per-file clean-lens challenge — backfill only, on the cheap model.
-    const cleanRuns = (A.noChallenge || PROFILE === 'pr') ? [] : runs.filter(x => !(x.r.findings || []).length && CHALLENGE_LENSES.has(x.lens.key))
+    const cleanRuns = (NO_CHALLENGE || PROFILE === 'pr') ? [] : runs.filter(x => !(x.r.findings || []).length && CHALLENGE_LENSES.has(x.lens.key))
     const challenge = parallel(cleanRuns.map(x => () =>
       agent(challengePrompt(x.r.file || files[0], x.lens), { label: `challenge:${x.lens.key}:${base(x.r.file || files[0])}`, phase: 'Verify', model: FINDER_MODEL, schema: CHALLENGE })
         .then(c => ({ lens: x.lens, file: x.r.file || files[0], challenge: c }))
@@ -694,7 +701,7 @@ const clean = results.filter(Boolean)
 // reach confirmed unverified. noChallenge skips it.
 let prChallengeMissed = []
 const challengeLenses = SELECTED.filter(l => CHALLENGE_LENSES.has(l.key))
-if (PROFILE === 'pr' && !A.noChallenge && challengeLenses.length && scopeUnits(inScope).some(u => u.diff)) {
+if (PROFILE === 'pr' && !NO_CHALLENGE && challengeLenses.length && scopeUnits(inScope).some(u => u.diff)) {
   phase('Verify')
   const ch = await agent(prChallengePrompt(inScope, challengeLenses), { label: 'challenge:pr', phase: 'Verify', model: FINDER_MODEL, schema: PR_CHALLENGE_SCHEMA })
   if (ch && ch.final_verdict === 'missed') {

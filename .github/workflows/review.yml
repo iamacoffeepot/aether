@@ -333,9 +333,9 @@ jobs:
           Invoke the repo's /review skill in INTEGRATED mode against origin/main...HEAD:
           resolve the changed .rs files and their per-file diffs from git, and read the issue
           text this PR closes (use gh to find the PR's closing reference for issue #${PR_NUMBER}
-          if needed). Pass noBuild: true in the /review invocation's workflow args — this
-          runner has no Rust toolchain, so the high-severity correctness refuter must ground
-          read-only rather than write and run a scratch cargo test. Let the skill run the
+          if needed). Pass noBuild: true and depth: gate in the /review invocation's workflow
+          args — this runner has no Rust toolchain, so the high-severity correctness refuter must
+          ground read-only rather than write and run a scratch cargo test. Let the skill run the
           review.js workflow in a single pass.
           THE WAIT CONTRACT (load-bearing — two prior runs died on this): the Workflow tool
           runs in the BACKGROUND. In headless mode your final reply exits the process and
