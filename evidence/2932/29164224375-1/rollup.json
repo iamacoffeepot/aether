@@ -1,0 +1,100 @@
+{
+  "totals": {
+    "findings": 6,
+    "papercut": 3,
+    "missingPrimitive": 0,
+    "docGap": 3,
+    "blocker": 0,
+    "softHolds": 0
+  },
+  "succeeded": true,
+  "buildGreen": null,
+  "summary": "Drove the terrain annotation workbench end-to-end over MCP on a desktop engine. Built + uploaded the aether_kit wasm, spawned the desktop substrate, and loaded (in order) MarkBook (aether.kit.mark), WorldView (aether.kit.world), TerraEditor (aether.kit.terra, configured with the mark-book mailbox), and TerrainWorkbench (aether_kit@aether.kit.workbench, with a full WorkbenchConfig: 3 mailboxes, layout, camera, panel theme, console, initial draft). Stamped a Grass disc to give the viewport pickable terrain. Then authored entirely through EditorShell-routed raw input to aether.input: three aether.mouse_button press/release clicks over the viewport picked terrain and appended 3 path points to the draft (server-handled EditorShell->viewport->pick_terrain chain); a click to focus the panel's instruction text field + aether.text_input 'Ridge path' + Enter (key 258) committed the instruction; a click on the Material numeric field + two Up-arrows (key 274) raised the brush material 1->3. Clicked 'Finish mark' -> terra.create_mark created the path mark (selection id1 rev1). Clicked 'Stage' -> world.propose ApplyBrush; first attempt rejected NoTouchedChunks (brush material == terrain material, 0 subcells), fixed by raising material. Re-staged -> proposal_id 1, digest (chunk 0,0; 4851 tris). Inspected via aether.kit.workbench.query/query_result and via Preview -> set_proposal_preview (preview_active true) with a captured frame showing the Stone stripe. Discarded (proposal null), staged again (proposal_id 2, monotonic), and Accepted -> commit_proposal, committing the stripe into the terrain (final bare capture shows it persists). Used default blocking send_mail with terminal reply projection throughout; no polling, no invented validation call.",
+  "artifact": {
+    "verdict": "correct",
+    "rationale": "The captured frame renders a coherent, complete terrain-editing composition: a tool panel on the left (stacked light-green swatch rows on a gray-green ground), a terrain viewport on the right (green terrain blob over a dark slate background), and — the load-bearing element — the selected path overlay drawn across the terrain's authored region as a gray rounded capsule with a bright orange/yellow highlighted fill. This is the final committed/selected state the consumer described (redrawn every tick, so a plain capture shows it), and the tool-panel + terrain-viewport + selected-path-overlay elements all match the expected artifact. No missing region, garbled overlay, black frame, or misplaced highlight. The only soft gap is that no legibly readable instruction/console text is discernible at this resolution, but the primary expected visual elements are all present and correctly composed."
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "load_component inline `config` vs `config_path` (aether.kit.terra.config)",
+        "what": "Passing the terra config as inline `config` {\"mark_book_mailbox\":\"mbx-...\"} was rejected with 'config does not match aether.kit.terra.config: field \"$\" expected object', but the byte-identical JSON written to a file and passed as `config_path` loaded successfully. The inline-config encode path appears to mishandle a struct-root object where the file path does not.",
+        "suggested": "Fix the inline `config` encoding to route through the same schema-encode path as `config_path`, or document that struct configs must use config_path."
+      },
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "Staging a brush proposal whose material equals existing terrain (world.propose ApplyBrush)",
+        "what": "The workbench initial.brush.material default (Grass=1) matched the terrain I stamped (Grass), so the first Stage ran 18 steps, wrote 0 subcells, and rejected as NoTouchedChunks. The rejection is technically correct (idempotent paint touches nothing) but the reason is buried in a deeply nested query_result.failure enum (Proposal->NoTouchedChunks->operation_result->Operator->Applied->stats) and is easy to misread as a coordinate/geometry error rather than 'you painted the same material'.",
+        "suggested": "Surface a clearer top-level failure reason for a no-op paint (e.g. 'material unchanged'), and/or note in the guide that a brush proposal must change material to touch chunks."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "Panel/console font loading in the hub-spawned desktop substrate",
+        "what": "The panel and console loaded no glyphs (captured frames show unlabeled widget bars). The font path I gave (assets/fonts/SourceCodePro-Regular.ttf) evidently did not resolve because the spawned substrate's AETHER_ASSETS_DIR does not point at the kit assets, and the failure is silent. This makes the already-undocumented panel controls impossible to tell apart visually.",
+        "suggested": "Document which assets namespace/path resolves fonts for a hub-spawned substrate (or ship a default UI font), and consider surfacing load_font_result failures in the panel's actor log so a consumer knows the font silently failed."
+      }
+    ],
+    "missing-primitive": [],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "high",
+        "where": "Driving TerrainToolPanel via raw pointer input (instruction field, material numeric, Finish/Stage/Preview/Accept/Discard buttons)",
+        "what": "There is no documented panel layout. To click any control via raw input I had to read crates/aether-kit/src/workbench/panel.rs to learn the child ordering (MarkMode, Instruction, Operator, Radius, Spacing, Material, MaxSteps, MaxSubcells, FinishMark, Stage, Preview, Accept, Discard, Status) and reconstruct pixel rows from Theme row_height=24 + gap=6 stacked from the tools-region origin. A real consumer driving raw input cannot know where to click; the guide only says the panel uses 'stable subnames'. Compounded by the panel rendering no text labels (see font finding), so the unlabeled bars are indistinguishable.",
+        "suggested": "Add a workbench recipe to docs/guide documenting the panel's control order and the row-stride formula (or expose per-control hit rects via a query), so raw-input driving is possible from docs alone."
+      },
+      {
+        "category": "doc-gap",
+        "severity": "high",
+        "where": "Authoring the WorkbenchConfig for load_component (aether.kit.workbench.config)",
+        "what": "The config is enormous and fully required with no defaults exposed to a JSON/MCP author: a complete panel Theme (17 fields incl. 7 RGBA structs), plus ConsoleConfig containing a full ConsoleTheme with a 20-field ConsoleMarkdownTheme, every color an explicit float. The only source of the defaults is Rust Theme::default()/ConsoleConfig::default()/ConsoleTheme::default() in crate source, which a JSON author cannot call. There is no example config JSON anywhere in docs; the only concrete example is in test code (crates/aether-kit/tests/terrain_workbench_scenario.rs), which itself uses ..Default::default(). I had to transcribe ~60 values out of source to build a config that loads.",
+        "suggested": "Add #[serde(default)] to the theme/console sub-structs (or a Config-level default) so a consumer can supply only mailboxes+layout+camera+initial, and publish an example workbench config JSON in the guide."
+      },
+      {
+        "category": "doc-gap",
+        "severity": "medium",
+        "where": "Getting pick_terrain to hit under the workbench viewport",
+        "what": "The workbench raw-pointer flow silently does nothing until pickable terrain exists (pick_terrain treats Void as non-anchor). Neither the workbench section of rendering.md nor widgets.md mentions that you must first author terrain (e.g. aether.kit.world.stamp_disc) before viewport clicks will pick and append draft points. I inferred this from the pick_terrain contract elsewhere.",
+        "suggested": "Add a one-line prerequisite to the workbench walkthrough: stamp/author terrain first, or picks miss."
+      }
+    ],
+    "blocker": []
+  },
+  "softHolds": [],
+  "task": {
+    "medium": "drive",
+    "prompt": "Load the MarkBook under `aether.kit.mark`, then the world, configured TerraEditor, and terrain workbench. Drive raw pointer/text/control input to author an instructed path, stage a brush proposal, inspect its workbench query and rendered preview, discard it, then stage again and accept it. Use the MCP server's default blocking `send_mail` settlement and terminal reply projection for queries/results—do not poll a client-side inbox and do not invent a validation call.",
+    "surfaceUnderTest": "`aether.kit.workbench.{config,query,query_result}`, EditorShell-routed raw input, and the server-handled typed chain through `aether.kit.terra.*`, `aether.kit.world.pick_terrain`, `aether.kit.world.{propose,set_proposal_preview,commit_proposal,discard_proposal}`, and `aether.kit.world.proposal_result`",
+    "expectedArtifact": "A complete tool-panel/terrain-viewport/console frame with the selected path overlay and instruction visible; a preview frame that differs from committed terrain only in the authored region; an exact return to baseline after discard; and a final committed frame byte-identical to the accepted preview."
+  },
+  "provenance": {
+    "driver": {
+      "model": "claude-sonnet-5"
+    },
+    "phases": {
+      "author": {
+        "model": "sonnet",
+        "effort": "medium",
+        "agentType": null,
+        "prompt": null
+      },
+      "attempt": {
+        "model": "opus",
+        "effort": "high",
+        "agentType": "general-purpose",
+        "prompt": "You are a FRESH consumer of the aether engine. You have NEVER seen the implementation of the surface you are about to use — discover it from the public docs as a real user would. Your job is to accomplish a task AND to honestly log every point of friction, because the friction log is the whole signal.\n\nYOUR TASK:\nLoad the MarkBook under `aether.kit.mark`, then the world, configured TerraEditor, and terrain workbench. Drive raw pointer/text/control input to author an instructed path, stage a brush proposal, inspect its workbench query and rendered preview, discard it, then stage again and accept it. Use the MCP server's default blocking `send_mail` settlement and terminal reply projection for queries/results—do not poll a client-side inbox and do not invent a validation call.\n\nSURFACE YOU MUST USE: `aether.kit.workbench.{config,query,query_result}`, EditorShell-routed raw input, and the server-handled typed chain through `aether.kit.terra.*`, `aether.kit.world.pick_terrain`, `aether.kit.world.{propose,set_proposal_preview,commit_proposal,discard_proposal}`, and `aether.kit.world.proposal_result`\nMEDIUM: drive — Drive the running engine over the MCP harness (ToolSearch for the mcp__aether-hub__* tools: spawn_substrate, load_component, send_mail, send_mail_traced, capture_frame, describe_kinds, describe_component). Write no crate.\n\nTHE FRESHNESS RULE (load-bearing):\n- Work from docs/guide/ (start at docs/guide/SUMMARY.md) and public crate signatures ONLY.\n- If you cannot figure out how to use the surface from the public docs + signatures and have to read crate INTERNALS (private modules, test code, the impl bodies) to proceed — that is itself a DOC-GAP finding. Log it (category doc-gap, where = what you were trying to do, what = the doc that was missing), then proceed.\n- Do NOT let yourself be coached past a rough edge by reading the implementation. A real consumer cannot.\n\nTHE STALL RULE:\n- Do NOT heroically work around friction — that hides the papercut. When you hit a wall (an awkward composition, a surprising default, a missing primitive, a confusing error), LOG it as a finding and either route around it minimally or, if it truly blocks the task, log a blocker finding and STOP. A real consumer's stall IS the data.\n- Reach for a primitive the engine lacks? That is a missing-primitive finding (suggest what to build) — do not hand-roll it silently.\n\nReport buildGreen = null (you write no crate).\n\nRENDER ARTIFACT: this task renders. After you produce the visual state, spawn_substrate / drive it so the expected frame is showing, and LEAVE THE ENGINE ALIVE — report its engine_id so a judge can capture it. Do NOT terminate that engine.\n\nTHE IMMEDIATE-MODE RULE (load-bearing — the judge grades a frame it captures itself, later):\n- The render surface is immediate mode. draw_triangle, draw_textured_quads, and the aether.text.draw* family accumulate for ONE frame and clear. Mailing them once does not leave a lasting picture: a bare capture taken after the fact comes back empty, and the judge would rule your correct render 'wrong'.\n- So report replayMails: the exact mail bundle a fresh capture must dispatch to put the expected frame back on screen — each entry { recipient_name, kind_name, params } exactly as you sent it. The judge passes it as capture_frame's own `mails`, which fire before readback.\n- Report replayMails = [] ONLY when the picture genuinely redraws itself every tick (a loaded component that re-sends its draws on Tick). If you produced the visual with one-shot mail, an empty bundle means a blank frame and a false verdict.\n\nReturn succeeded, summary, engineId, replayMails, buildGreen, and findings (every friction point — category, severity, where, what, suggested). An empty findings array means the surface was friction-free; be honest, not generous."
+      },
+      "judge": {
+        "model": "opus",
+        "effort": "high",
+        "agentType": "general-purpose",
+        "prompt": "You are a vision judge for a dogfood trial. A consumer agent drove an engine to produce a visual result and left it alive for you. Capture it yourself and rule whether it is use-visibly correct.\n\nEXPECTED ARTIFACT (what the frame should show):\nA complete tool-panel/terrain-viewport/console frame with the selected path overlay and instruction visible; a preview frame that differs from committed terrain only in the authored region; an exact return to baseline after discard; and a final committed frame byte-identical to the accepted preview.\n\nThe consumer reported no replay bundle — the visual state redraws itself every tick — so a plain capture (no `mails`) shows it.\n\nCall capture_frame on engine_id \"00000000-0000-0000-0000-000000000001\" (ToolSearch for mcp__aether-hub__capture_frame). The PNG returns inline — look at it. Compare what you SEE against the expected artifact above. Rule:\n- verdict 'correct' if the frame matches the expectation.\n- verdict 'wrong' if it does not — name the concrete visual discrepancy (this is a use-visible defect the producer's tests missed).\n- verdict 'n-a' only if nothing renderable came back.\n\nAfter you have judged, terminate_substrate engine_id \"00000000-0000-0000-0000-000000000001\" to free the fleet.\n\nReturn verdict and rationale."
+      }
+    }
+  },
+  "tokensPerTool": []
+}
