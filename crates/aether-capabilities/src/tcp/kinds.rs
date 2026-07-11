@@ -15,15 +15,19 @@ use serde::{Deserialize, Serialize};
 /// latter asks the OS to pick a free port). Optional `name`
 /// overrides the default subname (the bound port string); pass
 /// `None` for the default. Optional `consumer` is the late-bound
-/// mailbox name every accepted session delivers inbound frames and
-/// close notices to; `None` leaves the listener observer-less and
-/// drops inbound bytes. Reply: `BindListenerResult`.
+/// mailbox every accepted session delivers inbound frames and close
+/// notices to; `None` leaves the listener observer-less and drops
+/// inbound bytes. Addressed by [`MailboxId`](aether_data::MailboxId),
+/// like `aether.input.subscribe`'s `mailbox` — a name cannot name a
+/// nested actor, so a `String` here would exclude the loaded wasm
+/// components that are the field's main audience. Reply:
+/// `BindListenerResult`.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.tcp.bind_listener")]
 pub struct BindListener {
     pub addr: String,
     pub name: Option<String>,
-    pub consumer: Option<String>,
+    pub consumer: Option<aether_data::MailboxId>,
 }
 
 /// `aether.tcp.connect` — request the singleton `TcpCapability`
@@ -31,15 +35,17 @@ pub struct BindListener {
 /// connected stream. Mirrors [`BindListener`]: `addr` is resolved
 /// via `std::net::ToSocketAddrs`, and optional `name` overrides
 /// the default `conn-N` session subname. Optional `consumer` is the
-/// late-bound mailbox name the dialed session delivers inbound frames
-/// and close notices to; `None` leaves the session observer-less and
-/// drops inbound bytes. Reply: [`ConnectResult`].
+/// late-bound mailbox the dialed session delivers inbound frames and
+/// close notices to, addressed by
+/// [`MailboxId`](aether_data::MailboxId) exactly as [`BindListener`]'s;
+/// `None` leaves the session observer-less and drops inbound bytes.
+/// Reply: [`ConnectResult`].
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.tcp.connect")]
 pub struct Connect {
     pub addr: String,
     pub name: Option<String>,
-    pub consumer: Option<String>,
+    pub consumer: Option<aether_data::MailboxId>,
 }
 
 /// Reply to [`Connect`]. `Ok` carries the resolved connect-session
@@ -47,12 +53,14 @@ pub struct Connect {
 /// `Err` carries the requested address and a human-readable dial or
 /// spawn failure.
 ///
-/// `MailboxId` round-trips imprecisely over JSON. Typed native and wasm
-/// callers resolve by `session_name` through the `connect_session*`
-/// helpers. MCP callers must use the full ADR-0099 lineage path
-/// `aether.tcp/aether.tcp.session:<session_name>` as `recipient_name`;
-/// the bare subname is not a mailbox address. `session_id` is the native
-/// wire id for native peers.
+/// Typed native and wasm callers resolve by `session_name` through the
+/// `connect_session*` helpers. To *address* the session in a subsequent
+/// mail, use the full ADR-0099 lineage path
+/// `aether.tcp/aether.tcp.session:<session_name>` as `recipient_name` —
+/// the bare subname is not a mailbox address. `session_id` is the same
+/// mailbox as a wire id, usable wherever a `MailboxId` is taken (a
+/// `consumer` field, say); it renders as a tagged `mbx-…` string over
+/// JSON and round-trips exactly (ADR-0064).
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.tcp.connect_result")]
 pub enum ConnectResult {
@@ -68,11 +76,11 @@ pub enum ConnectResult {
 /// addr parse failures, port-in-use, OS bind errors, namespace
 /// collisions.
 ///
-/// Per project memory `feedback_mcp_mailbox_id_json_precision`:
-/// `MailboxId` round-trips imprecisely over JSON. Agents
-/// addressing the listener via subsequent MCP calls should use
-/// `listener_name` (the deterministic full name); `listener_id`
-/// is the wire id for native peers.
+/// `listener_id` is the listener's mailbox as a wire id; it renders as
+/// a tagged `mbx-…` string over JSON and round-trips exactly
+/// (ADR-0064). Agents addressing the listener as a mail *recipient*
+/// still use `listener_name` (the deterministic full name), since
+/// `recipient_name` is a name surface.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.tcp.bind_listener_result")]
 pub enum BindListenerResult {

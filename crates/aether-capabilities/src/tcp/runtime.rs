@@ -101,7 +101,7 @@ pub struct PendingConnect {
     pub hold: SettlementHold,
     pub addr: String,
     pub name: Option<String>,
-    pub consumer: Option<String>,
+    pub consumer: Option<aether_data::MailboxId>,
 }
 
 fn reply_to_pending_connect(

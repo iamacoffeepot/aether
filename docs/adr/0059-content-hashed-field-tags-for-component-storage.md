@@ -1,6 +1,7 @@
 # ADR-0059: Content-hashed field tags for upgradable component storage
 
 - **Status:** Proposed (Draft — brainstorm capture; revisit before implementation)
+- **Amended (ADR-0118):** mentions of `postcard` below describe the superseded body format. The structured wire body is now `aether_data::wire`; postcard is no longer a dependency of any crate in the workspace. The decision this ADR records otherwise stands.
 - **Date:** 2026-04-27
 
 ## Context

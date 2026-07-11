@@ -1,6 +1,7 @@
 # ADR-0083: Mail sender vs origin — naming the lineage, retiring `ReplyTo`
 
 - **Status:** Accepted
+- **Amended (ADR-0118):** mentions of `postcard` below describe the superseded body format. The structured wire body is now `aether_data::wire`; postcard is no longer a dependency of any crate in the workspace. The decision this ADR records otherwise stands.
 - **Date:** 2026-05-19
 - **Amended 2026-06-09:** the wire type is named `Source`, not `Sender`. `Sender` collides with the pre-existing `aether_actor::Sender` trait (the `MailCtx` supertrait, impl'd across `WasmCtx` / `NativeCtx`); `Source` keeps the addressing type distinct from both that trait and the tracing vocabulary (`origin` / `root`). The §1 rename table, §Alternatives, and the accessor name (`source_mailbox()`) below reflect the corrected name.
 - **Builds on:** ADR-0013 / ADR-0017 (reply_mail), ADR-0037 (cross-engine bubble), ADR-0042 (correlation ids), ADR-0080 (mail tracing + settlement lineage)

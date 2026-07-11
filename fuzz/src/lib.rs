@@ -3,7 +3,7 @@
 //!
 //! `decode_schema` is the substrate's untrusted-input boundary: raw
 //! wire bytes flow into a hand-rolled dual-path decoder (bytemuck cast
-//! vs postcard). In production the `SchemaType` descriptor comes from
+//! vs `aether_data::wire`). In production the `SchemaType` descriptor comes from
 //! the trusted kind registry and only the bytes are attacker-shaped, so
 //! the harness holds a fixed, deterministic table of schemas and lets
 //! the fuzzer pick one with the input's leading byte; the remaining
@@ -32,7 +32,7 @@ pub const TABLE_LEN: u8 = 7;
 pub fn schema_for(selector: u8) -> SchemaType {
     match selector {
         0 => cast_scalars(),
-        1 => postcard_string_vec_option(),
+        1 => wire_string_vec_option(),
         2 => multi_variant_enum(),
         3 => string_map(),
         4 => nested_option_vec_array(),
@@ -93,9 +93,9 @@ fn cast_scalars() -> SchemaType {
     }
 }
 
-/// Schema 1: a postcard struct mixing `String`, `Vec`, and `Option`.
+/// Schema 1: a structured (`aether_data::wire`) struct mixing `String`, `Vec`, and `Option`.
 /// Exercises length-prefixed strings/vecs and the option discriminant.
-fn postcard_string_vec_option() -> SchemaType {
+fn wire_string_vec_option() -> SchemaType {
     SchemaType::Struct {
         fields: Cow::Owned(vec![
             field("name", SchemaType::String),

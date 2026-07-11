@@ -32,7 +32,7 @@ The design question: what is the **unit of work** a worker receives, and how is 
 
 A blob is one **contiguous region of a per-producer (per-actor) byte ring**. Each actor owns a no-loss, reclaiming output ring (distinct from the loss-tolerant `VecDeque` trace/log rings of ADR-0081); the chassis owns one ring for off-actor producers (`Tick`, MCP sends, injected/test mail), mirroring the existing `chassis_host_ring` role.
 
-A blob is self-describing and **cast in place** — in-process, single arch, so native `#[repr(C)]` layout with no serialization (unlike the cross-process hub wire, which must postcard):
+A blob is self-describing and **cast in place** — in-process, single arch, so native `#[repr(C)]` layout with no serialization (unlike the cross-process hub wire, which must serialize through `aether_data::wire`):
 
 ```
 [BlobHeader][MailEntry_0][payload_0]..[MailEntry_{N-1}][payload_{N-1}]   (each padded to 8)

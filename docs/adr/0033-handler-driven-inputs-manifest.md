@@ -1,6 +1,7 @@
 # ADR-0033: Handler-driven inputs manifest
 
 - **Status:** Accepted (phases 1–3 shipped)
+- **Amended (ADR-0118):** mentions of `postcard` below describe the superseded body format. The structured wire body is now `aether_data::wire`; postcard is no longer a dependency of any crate in the workspace. The decision this ADR records otherwise stands.
 - **Date:** 2026-04-20
 - **Accepted:** 2026-04-20
 - **Updated 2026-05-09 (issue 640):** The auto-subscribe behaviors
