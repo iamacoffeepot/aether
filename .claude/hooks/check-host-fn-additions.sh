@@ -2,10 +2,12 @@
 # Pre-flight check for new host-fn additions. The substrate's host-fn
 # surface is privileged (ADR-0002): every new fn becomes reachable by
 # every component that links against this surface. Most new substrate
-# capabilities should land as a mail sink instead — see
-# `crates/aether-substrate-core/src/io.rs` and `net.rs` for the
-# precedent: substrate-owned sink + paired request/result kinds in
-# `aether-kinds` + SDK wraps via `send_postcard` + `wait_reply`.
+# capabilities should land as a native capability instead — see
+# `docs/guide/capability-anatomy.md` (the normative shape, ADR-0121 /
+# ADR-0122) and `crates/aether-capabilities/src/fs/` for the precedent:
+# the capability owns the resource, its paired request/result kinds live
+# in the capability's own `kinds.rs`, and a guest addresses it by type
+# through `ctx.actor::<FsCapability>()`.
 #
 # This hook fires on Edit/Write to `host_fns.rs` and rejects diffs
 # that add a `linker.func_wrap(` call. To deliberately add a host fn
@@ -37,10 +39,11 @@ emit_message() {
         printf 'host_fns.rs: this change adds %d new linker.func_wrap call(s).\n' "$added"
         printf '\n'
         printf 'Adding a host fn is a deliberate capability decision (ADR-0002).\n'
-        printf 'Most new substrate capabilities should land as a mail sink instead.\n'
-        printf 'See crates/aether-substrate-core/src/io.rs and net.rs for the\n'
-        printf 'precedent: sink owns the resource, paired request/result kinds in\n'
-        printf 'aether-kinds, SDK wraps via send_postcard + wait_reply for sync.\n'
+        printf 'Most new substrate capabilities should land as a native capability.\n'
+        printf 'See docs/guide/capability-anatomy.md and crates/aether-capabilities/\n'
+        printf 'src/fs/ for the precedent: the capability owns the resource, its\n'
+        printf 'paired request/result kinds live in its own kinds.rs, and a guest\n'
+        printf 'addresses it by type through ctx.actor::<FsCapability>().\n'
         printf '\n'
         printf 'If a host fn is genuinely the right tool, override by including\n'
         printf '`// HOST_FN_OK: <reason>` in the new code.\n'
