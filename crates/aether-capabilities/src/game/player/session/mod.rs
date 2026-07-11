@@ -12,6 +12,7 @@ pub struct PlayerSessionConfig {
     pub peer: String,
     pub turn_sim_mailbox: aether_data::MailboxId,
     pub interval_nanos: u64,
+    pub max_pending_live_bundles: usize,
 }
 
 /// `aether.game.player.session` actor, one trusted boundary per TCP connection.

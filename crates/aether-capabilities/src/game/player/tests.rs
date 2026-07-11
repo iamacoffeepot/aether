@@ -8,7 +8,7 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_actor::{Addressable, actor};
+use aether_actor::{Addressable, Manual, OutboundReply, actor};
 use aether_codec::frame::{FrameError, read_frame, write_frame};
 use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, wire, with_tag};
 use aether_kinds::descriptors;
@@ -44,12 +44,14 @@ pub struct TestTurnSimConfig {
     sim: SimConfig,
     retained: Vec<TickBundle>,
     observed: mpsc::Sender<ObservedSimMail>,
+    defer_poll_result: bool,
 }
 
 pub struct TestTurnSimState {
     sim: SimConfig,
     retained: Vec<TickBundle>,
     observed: mpsc::Sender<ObservedSimMail>,
+    defer_poll_result: bool,
 }
 
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -65,11 +67,16 @@ impl NativeActor for TestTurnSim {
     const NAMESPACE: &'static str = "aether.game.player.test.turn_sim";
 
     fn init(config: TestTurnSimConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<TestTurnSimState, BootError> {
-        Ok(TestTurnSimState { sim: config.sim, retained: config.retained, observed: config.observed })
+        Ok(TestTurnSimState {
+            sim: config.sim,
+            retained: config.retained,
+            observed: config.observed,
+            defer_poll_result: config.defer_poll_result,
+        })
     }
 
-    #[handler::single]
-    fn on_poll(state: &mut Self::State, ctx: &mut NativeCtx<'_>, poll: Poll) -> PollResult {
+    #[handler::manual]
+    fn on_poll(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, poll: Poll) {
         state
             .observed
             .send(ObservedSimMail::Poll { mail: poll, source: ctx.source_mailbox() })
@@ -81,9 +88,11 @@ impl NativeActor for TestTurnSim {
             let _ = ctx.send_envelope_tracked(fact_sink, TickBundle::ID, &overlap.encode_into_bytes());
         }
 
-        PollResult {
-            current_tick: state.retained.last().map_or(0, |bundle| bundle.tick),
-            bundles: state.retained.clone(),
+        if !state.defer_poll_result {
+            ctx.reply(&PollResult {
+                current_tick: state.retained.last().map_or(0, |bundle| bundle.tick),
+                bundles: state.retained.clone(),
+            });
         }
     }
 
@@ -141,6 +150,20 @@ fn reserve_loopback_addr() -> String {
 fn boot_player_substrate(
     listener_addr: String,
 ) -> (Arc<Registry>, mpsc::Receiver<ObservedSimMail>, PassiveChassis<TestChassis>) {
+    boot_player_substrate_with_limits(
+        listener_addr,
+        GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
+        GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
+        false,
+    )
+}
+
+fn boot_player_substrate_with_limits(
+    listener_addr: String,
+    max_active_sessions: usize,
+    max_pending_live_bundles: usize,
+    defer_poll_result: bool,
+) -> (Arc<Registry>, mpsc::Receiver<ObservedSimMail>, PassiveChassis<TestChassis>) {
     let (registry, mailer) = fresh_substrate();
     let (observed_tx, observed_rx) = mpsc::channel();
     let gateway_mailbox = GameGatewayCapability::resolve(0, ());
@@ -151,16 +174,40 @@ fn boot_player_substrate(
             sim: SimConfig { fact_sink: Some(gateway_mailbox), ring_depth: 8, grid_bounds: GridBounds::default() },
             retained: vec![bundle(1), bundle(2)],
             observed: observed_tx,
+            defer_poll_result,
         })
         .with_actor::<GameGatewayCapability>(GameGatewayConfig {
             listener_addr: Some(listener_addr),
             listener_name: LISTENER_NAME.into(),
             turn_sim_mailbox: Some(turn_sim_mailbox),
             interval_nanos: INTERVAL_NANOS,
+            max_active_sessions,
+            max_pending_live_bundles,
         })
         .build_passive()
         .expect("player test chassis boots");
     (registry, observed_rx, chassis)
+}
+
+fn enqueue<K: Kind>(registry: &Arc<Registry>, mailbox: MailboxId, mail: &K) {
+    let entry = registry.entry(mailbox).expect("target mailbox is registered");
+    let MailboxEntry::Inbox { handler, .. } = entry else {
+        panic!("expected actor inbox");
+    };
+    handler.enqueue(OwnedDispatch::disarmed(
+        K::ID,
+        K::NAME.to_owned(),
+        None,
+        aether_data::Source::NONE,
+        MailRef::from(mail.encode_into_bytes()),
+        1,
+        MailId::NONE,
+        MailId::NONE,
+        None,
+        Nanos(0),
+        0,
+        MailboxId::NONE,
+    ));
 }
 
 fn connect_when_bound(addr: &str) -> TcpStream {
@@ -218,6 +265,8 @@ fn gateway_config_is_inert_by_default() {
     let config = GameGatewayConfig::default();
     assert_eq!(config.listener_addr, None);
     assert_eq!(config.turn_sim_mailbox, None);
+    assert_eq!(config.max_active_sessions, GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS);
+    assert_eq!(config.max_pending_live_bundles, GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES);
 }
 
 #[test]
@@ -242,6 +291,8 @@ fn gateway_wire_binds_with_its_exact_resolved_mailbox() {
             listener_name: LISTENER_NAME.into(),
             turn_sim_mailbox: Some(turn_sim_mailbox),
             interval_nanos: INTERVAL_NANOS,
+            max_active_sessions: GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
+            max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
         })
         .build_passive()
         .expect("gateway observer chassis boots");
@@ -274,6 +325,82 @@ fn player_wire_round_trips_and_rejects_malformed_bytes() {
         assert_eq!(wire::from_bytes::<PlayerFrame>(&bytes).expect("decode player frame"), frame);
     }
     assert!(wire::from_bytes::<PlayerFrame>(&[0xff, 0xff]).is_err());
+}
+
+#[test]
+fn gateway_refuses_a_new_session_at_configured_capacity() {
+    let listener_addr = reserve_loopback_addr();
+    let (registry, observed, _chassis) = boot_player_substrate_with_limits(
+        listener_addr.clone(),
+        1,
+        GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
+        false,
+    );
+    let mut first = connect_when_bound(&listener_addr);
+    first.set_read_timeout(Some(Duration::from_secs(2))).expect("set first-session timeout");
+    write_frame(&mut first, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: "first".into() })
+        .expect("write first Hello");
+    assert!(matches!(
+        observed.recv_timeout(Duration::from_secs(2)).expect("first session polls"),
+        ObservedSimMail::Poll { .. }
+    ));
+    assert!(matches!(read_frame::<_, PlayerFrame>(&mut first), Ok(PlayerFrame::HelloAck { .. })));
+    expect_fact(&mut first, 1);
+    expect_fact(&mut first, 2);
+
+    let mut refused = connect_when_bound(&listener_addr);
+    refused.set_read_timeout(Some(Duration::from_secs(2))).expect("set refused-session timeout");
+    write_frame(&mut refused, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: "refused".into() })
+        .expect("write refused Hello");
+    match read_frame::<_, PlayerFrame>(&mut refused) {
+        Err(FrameError::Io(error)) => assert!(
+            !matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut),
+            "capacity refusal must close the trusted TCP session, not merely time out",
+        ),
+        result => panic!("capacity refusal must close without spawning a player child, got {result:?}"),
+    }
+    assert!(
+        registry.entry(expected_player_session_mailbox("conn-1")).is_none(),
+        "the over-capacity connection must not spawn a PlayerSessionActor",
+    );
+    assert!(
+        observed.recv_timeout(Duration::from_millis(100)).is_err(),
+        "the over-capacity connection must not poll TurnSim",
+    );
+
+    enqueue(&registry, TestTurnSim::resolve(0, ()), &PublishBundle { bundle: bundle(3) });
+    expect_fact(&mut first, 3);
+}
+
+#[test]
+fn catching_up_session_closes_when_the_distinct_live_tick_buffer_is_full() {
+    let listener_addr = reserve_loopback_addr();
+    let (registry, observed, _chassis) = boot_player_substrate_with_limits(
+        listener_addr.clone(),
+        GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
+        1,
+        true,
+    );
+    let mut client = connect_when_bound(&listener_addr);
+    client.set_read_timeout(Some(Duration::from_secs(2))).expect("set catching-up timeout");
+    write_frame(&mut client, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: "bounded".into() })
+        .expect("write bounded Hello");
+    assert!(matches!(
+        observed.recv_timeout(Duration::from_secs(2)).expect("bounded session polls"),
+        ObservedSimMail::Poll { .. }
+    ));
+
+    let turn_sim_mailbox = TestTurnSim::resolve(0, ());
+    enqueue(&registry, turn_sim_mailbox, &PublishBundle { bundle: bundle(2) });
+    enqueue(&registry, turn_sim_mailbox, &PublishBundle { bundle: bundle(2) });
+    enqueue(&registry, turn_sim_mailbox, &PublishBundle { bundle: bundle(3) });
+
+    let close: PlayerFrame = read_frame(&mut client).expect("buffer overflow returns a structured close");
+    assert_eq!(
+        close,
+        PlayerFrame::Close { reason: "catch-up live bundle capacity 1 exceeded by tick 3".into() },
+        "a duplicate tick may replace the existing slot, while the next distinct tick fails closed",
+    );
 }
 
 #[test]
@@ -361,24 +488,6 @@ fn loopback_session_uses_lineage_ids_and_enforces_the_typed_allowlist() {
     let close: PlayerFrame = read_frame(&mut rejected).expect("version mismatch returns structured close");
     assert!(matches!(close, PlayerFrame::Close { reason } if reason.contains("wire_version mismatch")));
 
-    let turn_sim_mailbox = TestTurnSim::resolve(0, ());
-    let entry = registry.entry(turn_sim_mailbox).expect("configured TurnSim mailbox is registered");
-    let MailboxEntry::Inbox { handler, .. } = entry else {
-        panic!("expected TurnSim actor inbox");
-    };
-    handler.enqueue(OwnedDispatch::disarmed(
-        PublishBundle::ID,
-        PublishBundle::NAME.to_owned(),
-        None,
-        aether_data::Source::NONE,
-        MailRef::from(PublishBundle { bundle: bundle(3) }.encode_into_bytes()),
-        1,
-        MailId::NONE,
-        MailId::NONE,
-        None,
-        Nanos(0),
-        0,
-        MailboxId::NONE,
-    ));
+    enqueue(&registry, TestTurnSim::resolve(0, ()), &PublishBundle { bundle: bundle(3) });
     expect_fact(&mut client, 3);
 }

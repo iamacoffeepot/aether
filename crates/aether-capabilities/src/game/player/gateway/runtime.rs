@@ -29,10 +29,25 @@ const DEFAULT_INTERVAL_NANOS: u64 = 1_000_000_000 / 60;
 /// topology for outbound writes; it never enters the player wire as a recipient.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GameGatewayConfig {
+    /// Listener address to bind, or `None` to leave the gateway inert.
     pub listener_addr: Option<String>,
+    /// Trusted TCP listener topology name used for transport demultiplexing.
     pub listener_name: String,
+    /// Exact resolved `TurnSim` mailbox used for intent dispatch and polling.
     pub turn_sim_mailbox: Option<MailboxId>,
+    /// Authoritative simulation interval included in player clock beacons.
     pub interval_nanos: u64,
+    /// Maximum number of simultaneously supervised player sessions.
+    pub max_active_sessions: usize,
+    /// Maximum distinct live ticks buffered by each catching-up player session.
+    pub max_pending_live_bundles: usize,
+}
+
+impl GameGatewayConfig {
+    /// Default active-session ceiling for a configured common chassis.
+    pub const DEFAULT_MAX_ACTIVE_SESSIONS: usize = 1_024;
+    /// Default per-session live-fact ceiling while catch-up is in flight.
+    pub const DEFAULT_MAX_PENDING_LIVE_BUNDLES: usize = 64;
 }
 
 impl Default for GameGatewayConfig {
@@ -42,6 +57,8 @@ impl Default for GameGatewayConfig {
             listener_name: DEFAULT_LISTENER_NAME.into(),
             turn_sim_mailbox: None,
             interval_nanos: DEFAULT_INTERVAL_NANOS,
+            max_active_sessions: Self::DEFAULT_MAX_ACTIVE_SESSIONS,
+            max_pending_live_bundles: Self::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
         }
     }
 }
@@ -52,6 +69,8 @@ pub struct GameGatewayState {
     listener_name: String,
     turn_sim_mailbox: Option<MailboxId>,
     interval_nanos: u64,
+    max_active_sessions: usize,
+    max_pending_live_bundles: usize,
     sessions: HashMap<String, PlayerSessionEntry>,
     session_by_child: HashMap<MailboxId, String>,
 }
@@ -74,6 +93,8 @@ impl NativeActor for GameGatewayCapability {
             listener_name: config.listener_name,
             turn_sim_mailbox: config.turn_sim_mailbox,
             interval_nanos: config.interval_nanos,
+            max_active_sessions: config.max_active_sessions,
+            max_pending_live_bundles: config.max_pending_live_bundles,
             sessions: HashMap::new(),
             session_by_child: HashMap::new(),
         })
@@ -136,6 +157,17 @@ impl NativeActor for GameGatewayCapability {
             return;
         }
 
+        if state.sessions.len() >= state.max_active_sessions {
+            tracing::warn!(
+                target: "aether_substrate::game",
+                session = %mail.session_name,
+                max_active_sessions = state.max_active_sessions,
+                "game gateway refused a tcp session at capacity",
+            );
+            ctx.actor::<TcpCapability>().session_close(&state.listener_name, &mail.session_name);
+            return;
+        }
+
         let Some(turn_sim_mailbox) = state.turn_sim_mailbox else {
             ctx.actor::<TcpCapability>().session_close(&state.listener_name, &mail.session_name);
             return;
@@ -156,6 +188,7 @@ impl NativeActor for GameGatewayCapability {
                     peer: mail.peer.clone(),
                     turn_sim_mailbox,
                     interval_nanos: state.interval_nanos,
+                    max_pending_live_bundles: state.max_pending_live_bundles,
                 },
             )
             .after_init(mail)

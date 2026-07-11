@@ -30,6 +30,7 @@ pub struct PlayerSessionState {
     peer: String,
     turn_sim_mailbox: MailboxId,
     interval_nanos: u64,
+    max_pending_live_bundles: usize,
     session_identity: MailboxId,
     phase: SessionPhase,
     pending_live_bundles: BTreeMap<u64, TickBundle>,
@@ -49,6 +50,7 @@ impl NativeActor for PlayerSessionActor {
             peer: config.peer,
             turn_sim_mailbox: config.turn_sim_mailbox,
             interval_nanos: config.interval_nanos,
+            max_pending_live_bundles: config.max_pending_live_bundles,
             session_identity: ctx.self_id(),
             phase: SessionPhase::Handshake,
             pending_live_bundles: BTreeMap::new(),
@@ -126,6 +128,18 @@ impl NativeActor for PlayerSessionActor {
     fn on_tick_bundle(state: &mut Self::State, ctx: &mut NativeCtx<'_>, bundle: TickBundle) {
         match state.phase {
             SessionPhase::CatchingUp => {
+                if !state.pending_live_bundles.contains_key(&bundle.tick)
+                    && state.pending_live_bundles.len() >= state.max_pending_live_bundles
+                {
+                    state.close(
+                        ctx,
+                        format!(
+                            "catch-up live bundle capacity {} exceeded by tick {}",
+                            state.max_pending_live_bundles, bundle.tick
+                        ),
+                    );
+                    return;
+                }
                 state.pending_live_bundles.insert(bundle.tick, bundle);
             }
             SessionPhase::Active => state.emit_bundle(ctx, bundle),

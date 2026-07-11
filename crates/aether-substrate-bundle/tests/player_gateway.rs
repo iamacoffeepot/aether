@@ -127,6 +127,8 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
             listener_name: LISTENER_NAME.into(),
             turn_sim_mailbox: Some(turn_sim_mailbox),
             interval_nanos: INTERVAL_NANOS,
+            max_active_sessions: GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
+            max_pending_live_bundles: GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
         })
         .build()
         .expect("boot active game gateway TestBench");
