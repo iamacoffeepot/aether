@@ -271,6 +271,27 @@ interactive subscriptions: panel/console/mover lifecycle and render roles are
 unchanged, and console/mover continue subscribing to `WindowSize` directly.
 The shell itself owns no lifecycle, render, or window-size work.
 
+The terrain annotation workbench is the concrete peer-first assembly of this
+model. Load the mark book under the exact default component name
+`aether.kit.mark`, load `aether.kit.world`, then load
+`aether.kit.terra` with the mark-book mailbox. Finally load
+`aether_kit@aether.kit.workbench` with those three returned mailbox ids and a
+named `WorkbenchLayout { tools, viewport, console }`. The workbench spawns a
+specialized `TerrainToolPanel`, a camera-owning `TerrainViewport`, a
+non-input-owning `ConsoleOverlay`, and the one `EditorShell` that routes their
+three non-overlapping regions. The panel and viewport are distinct region
+targets, so panel focus/capture and viewport terrain clicks remain separate
+nested focus scopes.
+
+`TerrainToolPanel` is intentionally not another configuration of the reference
+panel. It composes the stock segmented, text, numeric, button, and label actors
+under stable terrain-control subnames, attributes their value events by source,
+and translates them into workbench intents. Preview, accept, and discard remain
+unavailable until the world replies with `ProposalResult::Staged`; conflicting
+controls are disabled while the coordinator has one correlated request in
+flight. `WidgetPanel` and `PanelConfig` retain their demonstration/template
+contract unchanged.
+
 ## The reference panel
 
 `WidgetPanel` (export `aether.kit.widget.panel`) is the worked example — the

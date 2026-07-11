@@ -44,6 +44,8 @@
 //!   in [`widget::theme`].
 //! - [`EditorShell`] — the input-only arbiter between independently
 //!   rooted editor regions (ADR-0141).
+//! - [`TerrainWorkbench`] — the peer-first terrain annotation assembly,
+//!   selected by the `aether_kit@aether.kit.workbench` export.
 //!
 //! `export!` (below) packs the actors into one cdylib (ADR-0096 multi-actor
 //! module); the explicit entry type is the bare-load target, and the FFI
@@ -74,6 +76,7 @@ pub mod mover;
 pub mod sim;
 pub mod terra;
 pub mod widget;
+pub mod workbench;
 pub mod world;
 
 pub use console::{
@@ -103,6 +106,11 @@ pub use widget::{
     SetWidgetState, SliderChanged, SliderConfig, TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged,
     ToggleConfig, VirtualListConfig, VirtualListSelected, WidgetChildSpec, WidgetClipRect, WidgetConfig,
     WidgetControlState, WidgetDrawItem, WidgetDrawList, WidgetFrame, WidgetKind, WidgetStateChanged, WidgetValidation,
+};
+pub use workbench::{
+    TerrainToolPanel, TerrainViewport, TerrainWorkbench, WorkbenchCamera, WorkbenchConfig, WorkbenchControl,
+    WorkbenchDraftState, WorkbenchFailure, WorkbenchInitialSettings, WorkbenchLayout, WorkbenchMarkMode,
+    WorkbenchOperator, WorkbenchPanelSettings, WorkbenchProposalState, WorkbenchQuery, WorkbenchQueryResult,
 };
 pub use world::{
     ApplyBrush, AutomatonRule, BrushParameters, CELLS_PER_CHUNK, CELLS_PER_CHUNK_AREA, CHUNK_BITS, CellPos, Chunk,
@@ -163,7 +171,10 @@ aether_actor::export!(
     widget::set::SegmentedWidget,
     widget::set::NumericWidget,
     EditorShell,
-    widget::WidgetPanel
+    widget::WidgetPanel,
+    TerrainToolPanel,
+    TerrainViewport,
+    TerrainWorkbench
 );
 
 #[cfg(feature = "behavior")]
@@ -192,6 +203,9 @@ aether_actor::export!(
     widget::set::NumericWidget,
     EditorShell,
     widget::WidgetPanel,
+    TerrainToolPanel,
+    TerrainViewport,
+    TerrainWorkbench,
     aether_behavior::BehaviorHost
 );
 
