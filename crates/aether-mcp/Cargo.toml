@@ -47,6 +47,7 @@ axum = "0.8"
 base64 = { workspace = true }
 futures-util = "0.3"
 libc = "0.2"
+png = { workspace = true }
 # The tunnel's upstream HTTP client. `stream` gives us
 # `Response::bytes_stream()` so the long-lived SSE GET channel is piped
 # through incrementally rather than buffered to EOF. Default features

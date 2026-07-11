@@ -164,11 +164,17 @@ is omitted. These registry rows identify stored wasm, not live component
 instances; use the loaded component lineage name returned by
 `spawn_substrate` / `load_component` for `describe_component`.
 
-**Observation.** `capture_frame` returns the engine's current frame as inline PNG,
-and can carry two mail bundles dispatched atomically around the readback — `mails`
-before (the state that should appear) and `after_mails` after (cleanup). How that
-frame is produced — world-space geometry, the camera matrix, the depth convention —
-is covered in [Rendering & camera](systems/rendering.md).
+**Observation.** `capture_frame` returns the engine's current frame as an optional
+inline PNG, bounded by a 768-pixel long-edge ceiling by default (never upscaled).
+Pass a finite `scale` in `(0, 1]` for proportional reduction, then
+`max_dimension` to clamp the scaled long edge; those controls compose in that
+order. A capture with `checks` returns the verdict and omits the image by default,
+while `include_image` explicitly overrides either default. `save_path` always writes
+the original full-resolution PNG bytes. The capture can also carry two mail bundles
+dispatched atomically around the readback — `mails` before (the state that should
+appear) and `after_mails` after (cleanup). How that frame is produced — world-space
+geometry, the camera matrix, the depth convention — is covered in
+[Rendering & camera](systems/rendering.md).
 `actor_logs` pulls recent entries from one actor's per-actor log ring by mailbox
 name; pass `contains` to filter message bodies by a case-sensitive substring
 substrate-side, before entries cross the wire. Thread the reply's `next_since`
