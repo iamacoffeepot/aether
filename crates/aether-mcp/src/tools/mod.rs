@@ -48,10 +48,12 @@ use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router
 use crate::args::ActorCostArgs;
 use crate::args::ActorLogsArgs;
 use crate::args::{
-    CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DescribeComponentArgs, DescribeHandlersArgs, DescribeKindsArgs,
-    ListBinariesArgs, ListComponentsArgs, ListEnginesArgs, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec,
-    ReplaceComponentArgs, ReplyEventJson, ReplyProjection, SendMailArgs, SendMailTracedArgs, SpawnSubstrateArgs,
-    TerminateSubstrateArgs, TracedMailSpec, UploadBinaryArgs, UploadComponentArgs,
+    ApplyTerrainBrushArgs, CaptureFrameArgs, CaptureMailSpec, CommitTerrainProposalArgs, ComponentSpec,
+    DescribeComponentArgs, DescribeHandlersArgs, DescribeKindsArgs, DiscardTerrainProposalArgs, ListBinariesArgs,
+    ListComponentsArgs, ListEnginesArgs, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, ProposeTerrainEditArgs,
+    ReplaceComponentArgs, ReplyEventJson, ReplyProjection, RunTerrainAutomatonArgs, SendMailArgs, SendMailTracedArgs,
+    SetTerrainProposalPreviewArgs, SpawnSubstrateArgs, TerminateSubstrateArgs, TerrainEditorArgs, TerrainMarksArgs,
+    TracedMailSpec, UploadBinaryArgs, UploadComponentArgs,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
@@ -74,6 +76,7 @@ mod mail;
 mod render;
 mod reply;
 mod state;
+mod terrain;
 
 trait NamedMailSpec: Sync {
     fn recipient_name(&self) -> &str;
@@ -312,6 +315,80 @@ impl Mcp {
     )]
     pub async fn send_mail_traced(&self, Parameters(args): Parameters<SendMailTracedArgs>) -> Result<String, McpError> {
         guard_response_size("send_mail_traced", mail::send_mail_traced(self, args).await)
+    }
+
+    #[tool(
+        description = "Manage revisioned terrain marks through a loaded MarkBook component. `mark_book_mailbox` MUST be the exact `LoadResult.name` returned by load_component (normally `aether.component/aether.embedded:<load-name>`), not an actor namespace, mailbox id, selector, or inferred default; use load_component / describe_component to discover it. Operations map exactly as follows: create -> aether.kit.mark.create / MarkCreateResult, update -> aether.kit.mark.update / MarkUpdateResult, delete -> aether.kit.mark.delete / MarkDeleteResult, get -> aether.kit.mark.get / MarkGetResult, list -> aether.kit.mark.list / MarkListResult. Results preserve every domain rejection and render MarkId as the named `{value}` record."
+    )]
+    pub async fn terrain_marks(&self, Parameters(args): Parameters<TerrainMarksArgs>) -> Result<String, McpError> {
+        guard_response_size("terrain_marks", terrain::terrain_marks(self, args).await)
+    }
+
+    #[tool(
+        description = "Drive a loaded TerraEditor through semantic selection and mark commands. `terra_mailbox` MUST be the exact TerraEditor `LoadResult.name` returned by load_component (normally `aether.component/aether.embedded:<load-name>`); use load_component / describe_component to discover it. The TerraEditor must already be loaded with `TerraConfig { mark_book_mailbox: <MailboxId> }`. set_selection, toggle_selection, clear_selection, create_mark, move_selection, relabel_selection, and delete_selection send the matching aether.kit.terra.* kind and return TerraCommandResult unchanged; query sends aether.kit.terra.query and returns TerraQueryResult."
+    )]
+    pub async fn terrain_editor(&self, Parameters(args): Parameters<TerrainEditorArgs>) -> Result<String, McpError> {
+        guard_response_size("terrain_editor", terrain::terrain_editor(self, args).await)
+    }
+
+    #[tool(
+        description = "Apply one bounded terrain brush through a loaded WorldView. `world_mailbox` and `mark_book_mailbox` MUST be the exact WorldView and MarkBook `LoadResult.name` strings returned by load_component, never namespaces, mailbox ids, selectors, or inferred defaults; use load_component / describe_component to discover them. Always preflights source through aether.kit.mark.get, including explicit geometry; missing, stale, id-mismatched, or non-Path source_mark geometry sends no world mutation. Sends aether.kit.world.apply_brush and returns the exact OperatorResult, including Failed as ordinary domain output."
+    )]
+    pub async fn apply_terrain_brush(
+        &self,
+        Parameters(args): Parameters<ApplyTerrainBrushArgs>,
+    ) -> Result<String, McpError> {
+        guard_response_size("apply_terrain_brush", terrain::apply_terrain_brush(self, args).await)
+    }
+
+    #[tool(
+        description = "Run one bounded terrain automaton through a loaded WorldView. `world_mailbox` and `mark_book_mailbox` MUST be the exact WorldView and MarkBook `LoadResult.name` strings returned by load_component, never namespaces, mailbox ids, selectors, or inferred defaults; use load_component / describe_component to discover them. Always preflights source through aether.kit.mark.get, including explicit geometry; source_mark accepts only Point and converts octimeters to cells with negative-safe arithmetic flooring. Sends aether.kit.world.run_automaton and returns the exact OperatorResult, including Failed as ordinary domain output."
+    )]
+    pub async fn run_terrain_automaton(
+        &self,
+        Parameters(args): Parameters<RunTerrainAutomatonArgs>,
+    ) -> Result<String, McpError> {
+        guard_response_size("run_terrain_automaton", terrain::run_terrain_automaton(self, args).await)
+    }
+
+    #[tool(
+        description = "Stage one of the exact eight WorldView proposal operations: set_chunk, set_cell_points, set_cell_heights, stamp_polygon, stamp_disc, stamp_hexagon, apply_brush, or run_automaton. `world_mailbox` MUST be the exact WorldView `LoadResult.name` returned by load_component; operator variants also require the exact MarkBook `LoadResult.name` and perform the same mandatory MarkGet revision/geometry preflight as the immediate tools. Use load_component / describe_component for discovery. Sends aether.kit.world.propose and returns ProposalResult unchanged, including StagedProposalLimitReached, UnknownProposal, StaleProposal, NoTouchedChunks, and ProposalIdExhausted as domain Rejected values."
+    )]
+    pub async fn propose_terrain_edit(
+        &self,
+        Parameters(args): Parameters<ProposeTerrainEditArgs>,
+    ) -> Result<String, McpError> {
+        guard_response_size("propose_terrain_edit", terrain::propose_terrain_edit(self, args).await)
+    }
+
+    #[tool(
+        description = "Commit a staged terrain proposal. `world_mailbox` MUST be the exact loaded WorldView `LoadResult.name` returned by load_component, not a namespace, mailbox id, selector, or inferred default; use load_component / describe_component to discover it. Sends aether.kit.world.commit_proposal and returns the exact ProposalResult, including domain Rejected variants."
+    )]
+    pub async fn commit_terrain_proposal(
+        &self,
+        Parameters(args): Parameters<CommitTerrainProposalArgs>,
+    ) -> Result<String, McpError> {
+        guard_response_size("commit_terrain_proposal", terrain::commit_terrain_proposal(self, args).await)
+    }
+
+    #[tool(
+        description = "Discard a fresh or stale staged terrain proposal. `world_mailbox` MUST be the exact loaded WorldView `LoadResult.name` returned by load_component, not a namespace, mailbox id, selector, or inferred default; use load_component / describe_component to discover it. Sends aether.kit.world.discard_proposal and returns the exact ProposalResult, including domain Rejected variants."
+    )]
+    pub async fn discard_terrain_proposal(
+        &self,
+        Parameters(args): Parameters<DiscardTerrainProposalArgs>,
+    ) -> Result<String, McpError> {
+        guard_response_size("discard_terrain_proposal", terrain::discard_terrain_proposal(self, args).await)
+    }
+
+    #[tool(
+        description = "Select or clear the rendered terrain-proposal preview; `proposal_id: null` clears it. `world_mailbox` MUST be the exact loaded WorldView `LoadResult.name` returned by load_component, not a namespace, mailbox id, selector, or inferred default; use load_component / describe_component to discover it. Sends aether.kit.world.set_proposal_preview and returns the exact ProposalResult, including domain Rejected variants."
+    )]
+    pub async fn set_terrain_proposal_preview(
+        &self,
+        Parameters(args): Parameters<SetTerrainProposalPreviewArgs>,
+    ) -> Result<String, McpError> {
+        guard_response_size("set_terrain_proposal_preview", terrain::set_terrain_proposal_preview(self, args).await)
     }
 
     #[tool(
