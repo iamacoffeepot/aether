@@ -164,14 +164,16 @@ fn replica_names_suffixes_every_instance() {
     assert_eq!(replica_names("handler", 1), vec!["handler-0"]);
 }
 
-/// `reject_zero_replicas` is a hard tool error on `replicas: 0` (ADR-0090
-/// §4 posture — a bad known value aborts loudly, not a silent no-op) and
-/// passes through any other value, including `None`.
+/// `reject_replicas_out_of_range` rejects 0 and values above [`MAX_REPLICAS`]
+/// (ADR-0090 §4 + review bounds-cap); in-range and omitted stay ok.
 #[test]
-fn reject_zero_replicas_rejects_only_zero() {
-    assert!(reject_zero_replicas(Some(0), "sel").is_err());
-    assert!(reject_zero_replicas(Some(1), "sel").is_ok());
-    assert!(reject_zero_replicas(None, "sel").is_ok());
+fn reject_replicas_out_of_range_enforces_bounds() {
+    assert!(reject_replicas_out_of_range(Some(0), "sel").is_err());
+    assert!(reject_replicas_out_of_range(Some(1), "sel").is_ok());
+    assert!(reject_replicas_out_of_range(Some(MAX_REPLICAS), "sel").is_ok());
+    assert!(reject_replicas_out_of_range(Some(MAX_REPLICAS + 1), "sel").is_err());
+    assert!(reject_replicas_out_of_range(None, "sel").is_ok());
+    assert!(reject_zero_replicas(Some(MAX_REPLICAS + 1), "sel").is_ok());
 }
 
 /// `load_component` with a selector that resolves to no stored
@@ -190,6 +192,7 @@ async fn load_component_unresolvable_selector_is_tool_error() {
             config_path: None,
             export: None,
             replicas: None,
+            full: false,
         }))
         .await;
     assert!(result.is_err(), "an unresolvable selector should be a tool error");
@@ -211,9 +214,47 @@ async fn load_component_replicas_zero_is_tool_error() {
             config_path: None,
             export: None,
             replicas: Some(0),
+            full: false,
         }))
         .await;
     assert!(result.is_err(), "replicas: 0 must be a tool error, not a silent no-op");
+}
+
+/// Tripwire: a `replicas: N` reply is one shared capabilities block plus
+/// N `{mailbox_id, name}` instances — no per-instance capabilities echo
+/// (issue 3006). The tripwire exercises the same reply builder used by the
+/// successful production fan-out path.
+#[test]
+fn replicas_reply_shape_is_shared_caps_plus_instances() {
+    use aether_data::{KindId, ReplyContract};
+    use aether_kinds::{ComponentCapabilities, HandlerCapability};
+
+    let caps = ComponentCapabilities {
+        handlers: vec![HandlerCapability {
+            id: KindId(1),
+            name: "aether.test.on".to_owned(),
+            doc: Some("One line.\n\nMore body.".to_owned()),
+            reply: ReplyContract::None,
+        }],
+        ..ComponentCapabilities::default()
+    };
+    let reply: serde_json::Value = serde_json::from_str(
+        &replicas_reply(
+            &caps,
+            &[
+                serde_json::json!({ "mailbox_id": "mbx-a", "name": "svc-0" }),
+                serde_json::json!({ "mailbox_id": "mbx-b", "name": "svc-1" }),
+                serde_json::json!({ "mailbox_id": "mbx-c", "name": "svc-2" }),
+            ],
+            false,
+        )
+        .expect("replica reply serializes"),
+    )
+    .expect("replica reply is JSON");
+    assert!(reply.get("components").is_none(), "old components array must not appear: {reply}");
+    assert_eq!(reply["instances"].as_array().map(Vec::len), Some(3));
+    assert!(reply["instances"][0].get("capabilities").is_none());
+    assert_eq!(reply["capabilities"]["handlers"][0]["doc"], "One line.");
 }
 
 /// `replace_component` with a malformed tagged mailbox id is
@@ -231,6 +272,7 @@ async fn replace_component_bad_mailbox_id_is_tool_error() {
             config: None,
             config_path: None,
             export: None,
+            full: false,
         }))
         .await;
     assert!(result.is_err(), "a malformed mailbox_id should be a tool error");

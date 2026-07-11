@@ -1,7 +1,7 @@
 use super::bytes::resolve_bytes_params;
 use super::envelope::{engine_envelope, local_envelope};
 use super::ids::{parse_engine_id, parse_mailbox_id, resolve_handled_kind};
-use super::render::{frame_size_aware_error, internal, internal_msg, json};
+use super::render::{frame_size_aware_error, internal, internal_msg, json, project_capabilities};
 use super::{COMPONENT_CAP, ENGINE_CAP, Mcp};
 use crate::args::{
     ListBinariesArgs, ListComponentsArgs, LoadComponentArgs, ReplaceComponentArgs, UploadBinaryArgs,
@@ -10,7 +10,7 @@ use crate::args::{
 use aether_codec::frame::max_frame_size;
 use aether_data::{EngineId, Kind, SchemaType, wire};
 use aether_kinds::{
-    KindDescriptorWire, ListComponentBinaries, ListComponentBinariesResult, ListEngineBinaries,
+    ComponentCapabilities, KindDescriptorWire, ListComponentBinaries, ListComponentBinariesResult, ListEngineBinaries,
     ListEngineBinariesResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult, UploadBinary,
     UploadBinaryResult, UploadComponent, UploadComponentResult,
 };
@@ -152,12 +152,47 @@ pub(super) fn replica_names(base: &str, replicas: u32) -> Vec<String> {
     (0..replicas).map(|index| format!("{base}-{index}")).collect()
 }
 
+pub(super) fn replicas_reply(
+    capabilities: &ComponentCapabilities,
+    instances: &[serde_json::Value],
+    full: bool,
+) -> Result<String, McpError> {
+    json(&serde_json::json!({
+        "capabilities": project_capabilities(capabilities, full),
+        "instances": instances,
+    }))
+}
+
+/// Hard ceiling on `replicas` for one `load_component` fan-out (issue 3006
+/// review). Bounds allocation of the name list and sequential load
+/// dispatches before an absurd caller value can OOM or hang the tool.
+/// Mirrors the style of `actor_logs`' caller-supplied `max` clamp (default
+/// ring-sized, hard ceiling) — tool-layer protection, not a substrate
+/// protocol constant.
+pub(super) const MAX_REPLICAS: u32 = 256;
+
 /// Reject `replicas: 0` (ADR-0090 §4 posture: a bad known value is a hard
 /// error, not a silent no-op) before it reaches any load dispatch.
 pub(super) fn reject_zero_replicas(replicas: Option<u32>, selector: &str) -> Result<(), McpError> {
     if replicas == Some(0) {
         return Err(McpError::invalid_params(
             format!("component {selector:?}: replicas must be at least 1 (got 0)"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Reject `load_component` replicas outside `1..=MAX_REPLICAS` before any
+/// dispatch or name-list allocation.
+pub(super) fn reject_replicas_out_of_range(replicas: Option<u32>, selector: &str) -> Result<(), McpError> {
+    reject_zero_replicas(replicas, selector)?;
+    let Some(n) = replicas else {
+        return Ok(());
+    };
+    if n > MAX_REPLICAS {
+        return Err(McpError::invalid_params(
+            format!("component {selector:?}: replicas must be at most {MAX_REPLICAS} (got {n})"),
             None,
         ));
     }
@@ -229,7 +264,7 @@ pub(super) async fn list_components(mcp: &Mcp, args: ListComponentsArgs) -> Resu
 pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result<String, McpError> {
     let engine = parse_engine_id(&args.engine_id)?;
     let selector = selector_with_explicit_export(&args.selector, args.export.as_deref());
-    reject_zero_replicas(args.replicas, &selector)?;
+    reject_replicas_out_of_range(args.replicas, &selector)?;
     // ADR-0116: resolve the selector hub-local to the wasm bytes; a
     // `module@actor` selector's `@actor` half rides back as `export`.
     let resolved = mcp.resolve_component(&selector).await?;
@@ -245,7 +280,8 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
     let export = args.export.or(resolved.export);
 
     let Some(replicas) = args.replicas else {
-        return load_single_component(mcp, engine, &selector, resolved.wasm, args.name, config, export).await;
+        return load_single_component(mcp, engine, &selector, resolved.wasm, args.name, config, export, args.full)
+            .await;
     };
 
     // issue 2626: loop the single-load dispatch N times, one shared
@@ -263,7 +299,11 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
             )
         })?;
 
-    let mut loaded = Vec::with_capacity(replicas as usize);
+    // Shared capabilities (identical wasm) projected once; instances list
+    // drops the N-fold capabilities echo (issue 3006). Cache still stores
+    // full caps per instance so describe_component --full works.
+    let mut instances = Vec::with_capacity(replicas as usize);
+    let mut shared_caps = None;
     for (index, name) in replica_names(&base, replicas).into_iter().enumerate() {
         let reply = mcp
             .session
@@ -285,10 +325,12 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
                     .lock()
                     .expect("component cache mutex is never poisoned")
                     .insert((engine, mailbox_id), capabilities.clone());
-                loaded.push(serde_json::json!({
+                if shared_caps.is_none() {
+                    shared_caps = Some(capabilities);
+                }
+                instances.push(serde_json::json!({
                     "mailbox_id": mailbox_id,
                     "name": name,
-                    "capabilities": capabilities,
                 }));
             }
             Some(LoadResult::Err { error }) => {
@@ -301,11 +343,18 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
             None => return Err(internal_msg("undecodable LoadResult")),
         }
     }
-    json(&serde_json::json!({ "components": loaded }))
+    replicas_reply(
+        &shared_caps.expect("replicas >= 1: loop either populated shared_caps or returned early"),
+        &instances,
+        args.full,
+    )
 }
 
 /// Preserve the original single-instance response shape while keeping the
 /// replica orchestration in [`load_component`] focused on fan-out.
+// `full` is the issue-3006 projection flag; keeps the single-load path's
+// existing positional args rather than a new options struct.
+#[allow(clippy::too_many_arguments)]
 async fn load_single_component(
     mcp: &Mcp,
     engine: EngineId,
@@ -314,6 +363,7 @@ async fn load_single_component(
     name: Option<String>,
     config: Vec<u8>,
     export: Option<String>,
+    full: bool,
 ) -> Result<String, McpError> {
     let reply = mcp
         .session
@@ -329,7 +379,7 @@ async fn load_single_component(
             json(&serde_json::json!({
                 "mailbox_id": mailbox_id,
                 "name": name,
-                "capabilities": capabilities,
+                "capabilities": project_capabilities(&capabilities, full),
             }))
         }
         Some(LoadResult::Err { error }) => Err(internal_msg(&error)),
@@ -377,7 +427,7 @@ pub(super) async fn replace_component(mcp: &Mcp, args: ReplaceComponentArgs) -> 
                 .lock()
                 .expect("component cache mutex is never poisoned")
                 .insert((engine, mailbox_id), capabilities.clone());
-            json(&capabilities)
+            json(&project_capabilities(&capabilities, args.full))
         }
         Some(ReplaceResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable ReplaceResult")),
