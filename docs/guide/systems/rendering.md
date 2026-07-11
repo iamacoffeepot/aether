@@ -305,13 +305,13 @@ frame.
   `aether.component/aether.embedded:aether.camera` — the address `LoadResult.name` hands
   back.
 - **Driving a camera from the keyboard** is a peer component's job, not the
-  camera's. `aether-kit`'s `camera_controller` export subscribes `Key` /
+  camera's. `aether-kit`'s `camera-controller` export subscribes `Key` /
   `KeyRelease` / `Tick`, keeps a shadow of the pose it drives, and mails
   `aether.kit.camera.orbit.set` / `aether.kit.camera.topdown.set` deltas to a peer
   camera — WASD pan the target across the ground, the arrows yaw and pitch, Z/X
   dolly the distance, and an idle tick produces no mail. It loads by the
-  `aether_kit@aether.kit.camera_controller` selector with an
-  `aether.kit.camera_controller.config` init-config that picks the target
+  `aether_kit@aether.kit.camera-controller` selector with an
+  `aether.kit.camera-controller.config` init-config that picks the target
   camera, mode, per-tick rates, and clamps, so the camera stays a pure
   projection state machine while the keyboard policy lives in the controller.
 - **A new drawing component** subscribes the `Render` stage and emits

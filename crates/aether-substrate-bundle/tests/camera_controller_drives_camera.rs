@@ -30,7 +30,7 @@ use aether_data::Kind;
 use aether_kinds::keycode::KEY_D;
 use aether_kinds::{Key, KeyRelease, LoadComponent, LoadResult, NamedMail, Render, WindowSize};
 use aether_kit::SetChunk;
-use aether_kit::camera_controller::ControllerConfig;
+use aether_kit::camera::controller::ControllerConfig;
 use aether_kit::world::Material;
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
@@ -158,7 +158,7 @@ fn held_key_pans_the_camera_over_the_painted_world() {
     // documented baseline. Loaded last so the camera instance exists when the
     // controller's `wire()` seed mail arrives.
     let config = ControllerConfig::default().encode_into_bytes();
-    load_kit_export(&mut bench, &wasm, "aether.kit.camera_controller", "controller", config);
+    load_kit_export(&mut bench, &wasm, "aether.kit.camera-controller", "controller", config);
 
     // Paint the split chunk and feed the camera a real window aspect, then
     // settle the seed + subscriptions before the first capture.

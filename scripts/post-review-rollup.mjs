@@ -15,6 +15,8 @@
 //   GITHUB_TOKEN        least-privilege token (pull-requests + issues write)
 //   GITHUB_REPOSITORY   owner/repo
 //   PR_NUMBER           the PR to annotate
+//   HEAD_SHA            the reviewed PR head SHA
+//   REVIEW_MODE         full or incremental
 //   ROLLUP_PATH         review-rollup.json (the workflow's returned rollup)
 //   FILES_PATH          pr-files.json (gh api pulls/{n}/files --paginate)
 //
@@ -25,6 +27,8 @@ import { readFile } from 'node:fs/promises'
 const TOKEN = requireEnv('GITHUB_TOKEN')
 const REPO = requireEnv('GITHUB_REPOSITORY')
 const PR = Number(requireEnv('PR_NUMBER'))
+const HEAD_SHA = requireEnv('HEAD_SHA')
+const REVIEW_MODE = requireEnv('REVIEW_MODE')
 const ROLLUP_PATH = process.env.ROLLUP_PATH || 'review-rollup.json'
 const FILES_PATH = process.env.FILES_PATH || 'pr-files.json'
 
@@ -232,8 +236,8 @@ async function main() {
   }
 
   // Upsert the marker-anchored summary comment — the human-readable rollup
-  // AND the once-only guard state. Regenerated in full each run, and it
-  // carries every fingerprint so re-runs dedup against it.
+  // and the reviewed head SHA. Regenerated in full each run, and it carries
+  // every fingerprint so re-runs dedup against it.
   const summary = renderSummary(rollup, normalized, allFingerprints)
   const existing = issueComments.find((c) => String(c.body || '').includes(MARKER))
   if (existing) {
@@ -252,11 +256,13 @@ async function main() {
     const res = await api('POST', `repos/${REPO}/issues/${PR}/labels`, { labels: [LABEL] })
     if (!res.ok) console.error(`add label failed: ${res.status} ${res.text}`)
     else console.log(`set ${LABEL}`)
-  } else {
+  } else if (REVIEW_MODE !== 'incremental') {
     const res = await api('DELETE', `repos/${REPO}/issues/${PR}/labels/${encodeURIComponent(LABEL)}`)
     // 404 = the label was not present; a clean no-op.
     if (res.ok || res.status === 404) console.log(`cleared ${LABEL}`)
     else console.error(`remove label failed: ${res.status} ${res.text}`)
+  } else {
+    console.log(`left ${LABEL} unchanged after clean incremental review`)
   }
 }
 
@@ -294,7 +300,8 @@ function renderSummary(rollup, normalized, fingerprints) {
   }
 
   lines.push('_Findings are advisory (this is a COMMENT review); on a Rust-touching PR an unresolved verdict blocks merge via the required `Review gate` status._')
-  // Hidden fingerprints so a dispatched re-run dedups against this comment.
+  // Hidden reviewed state and fingerprints for incremental routing + dedup.
+  lines.push(`<!-- aether-reviewed-sha:${HEAD_SHA} -->`)
   for (const fp of fingerprints) lines.push(`<!-- aether-review-fp:${fp} -->`)
   return lines.join('\n')
 }

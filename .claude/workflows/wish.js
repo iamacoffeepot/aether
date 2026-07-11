@@ -58,7 +58,7 @@ const DRILL_SCHEMA = {
   properties: {
     producible: { type: 'boolean', description: 'true means this wish is now a plan — writable with known, grep-confirmed means within current resources' },
     summary: { type: 'string', description: 'bounded self-summary (2-4 sentences): the shape this wish settled on and why, enough for a child driller to compose upward without re-reading the full wish.md' },
-    grounded_surfaces: { type: 'array', items: { type: 'string' }, description: 'engine surfaces this wish builds on, each grep-confirmed and cited crate/path or file:line' },
+    grounded_surfaces: { type: 'array', items: { type: 'string' }, description: 'engine surfaces this wish builds on, each grep-confirmed as a re-greppable `identifier` — crates/aether-*/src/path citation; never a bare path or file:line' },
     children: {
       type: 'array',
       description: 'the wish-worthy absences — each becomes a sub-wish. A child is ONLY a genuine production-blocking gap (an un-grep-confirmed surface, a step not writable within current resources, or a "known mean" that is really another wish). Field existence, parameter defaults, naming, and "parent not built yet" are inline decisions resolved in this wish.md prose, NEVER children. EMPTY when producible:true.',
@@ -139,10 +139,13 @@ const WISH_MD_SHAPE =
   'adversity: data | empathy\n' +
   'parent: ../wish.md            # omit if this node is a root\n' +
   'producible: true | false      # true means this wish IS a plan\n' +
+  'grounded_surfaces:             # re-greppable `identifier` — crates/aether-*/src/path citations\n' +
+  '  - "`aether.fs.read` — crates/aether-capabilities/src/fs/kinds.rs"\n' +
   '---\n\n' +
   '<prose body, no headers: the wish + the adversity that grounds it + the goal it serves;\n' +
   ' the shape that would satisfy it at THIS level of depth (coarse near the root, fine near leaves);\n' +
   ' whether that shape is producible with known, grep-confirmed means within current resources;\n' +
+  ' the grounded_surfaces frontmatter list, which is the same set returned in your compact struct;\n' +
   ' if producible: the plan, concrete enough that someone could start;\n' +
   ' if not: the absences, each named with the sub-wish that would resolve it;\n' +
   ' coherence with the parent: how this wish resolves upward into the parent plan;\n' +
@@ -185,7 +188,7 @@ const drillPrompt = (node, file) => {
     '4. Write your full wish.md to the EXACT path:\n   ' + file + '\n' +
     '   ' + WISH_MD_SHAPE + '\n' +
     '5. Return the compact struct: producible, a bounded 2-4 sentence summary (your children inherit it as lineage — do not dump your whole reasoning), ' +
-    'grounded_surfaces (the cited real surfaces), and children (empty if producible).\n\n' +
+    'grounded_surfaces (each a re-greppable `identifier` — crates/aether-*/src/path citation, matching the frontmatter list), and children (empty if producible).\n\n' +
     'Be honest about depth: do not pad a shallow chain to look deep, do not truncate a deep one to "good enough". ' +
     'The chain stops only when producibility says so.\n\nStructured output only — and you MUST write the wish.md file.'
   )

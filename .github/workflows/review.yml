@@ -9,14 +9,15 @@ name: Review
 # gate` commit status that blocks merge on a Rust-touching PR; a non-Rust
 # PR is never held.
 #
-# Trigger is first-green, once-only. The workflow fires when a PR's CI run
-# completes successfully (`workflow_run` on "CI"), resolves the PR from the
-# run's head branch, and exits as a no-op if the PR already carries the
-# `<!-- aether-review -->` marker comment — so the pre-green push churn
-# never fires a review and a post-review fix push never re-fires one. State
-# lives on the PR itself (the marker comment), no external bookkeeping.
+# Trigger is first-green, then incremental. The workflow fires when a PR's CI
+# run completes successfully (`workflow_run` on "CI") and resolves the PR from
+# the run's head branch. The first review covers `origin/main...HEAD`; each
+# later green push reviews only the delta from the head SHA recorded in the
+# `<!-- aether-review -->` marker comment. Same-SHA triggers and non-Rust
+# deltas are no-ops, while an unreachable recorded SHA falls back to a full
+# review. State lives on the PR itself, with no external bookkeeping.
 # Deliberate re-runs go through `workflow_dispatch` with a `pr` input, which
-# bypasses the once-only guard (findings already posted are deduped by the
+# forces a full review (findings already posted are deduped by the
 # poster's fingerprints, so a re-run never double-annotates).
 #
 # Two skip paths guard against reviewing mass mechanical sweeps: an
@@ -38,7 +39,7 @@ on:
   workflow_dispatch:
     inputs:
       pr:
-        description: PR number to review (bypasses the once-only guard)
+        description: PR number to review (forces a full review)
         required: true
 
 # One review per PR; a newer trigger supersedes an in-flight one. Keyed by
@@ -94,6 +95,8 @@ jobs:
       # session is skipped (marker present) — not only on the proceed path.
       head_sha: ${{ steps.resolve.outputs.head_sha }}
       touches_rust: ${{ steps.resolve.outputs.touches_rust }}
+      diff_base: ${{ steps.resolve.outputs.diff_base }}
+      review_mode: ${{ steps.resolve.outputs.review_mode }}
       # skip_reason (label | cap) marks a deliberately-skipped session; the
       # gate turns it into an owner-verified success (label) or a fail-closed
       # decision prompt (cap). rs_count rides along for the cap description.
@@ -104,9 +107,9 @@ jobs:
       - uses: runs-on/action@v2
       # Resolve the PR and apply the run gates BEFORE any checkout — these
       # are pure GitHub API calls. Sets proceed=false (a clean no-op) when
-      # there is no open PR or the once-only marker is already present.
+      # there is no open PR, this SHA was reviewed, or a delta has no Rust.
       # head_sha feeds the checkout. Once a PR resolves, pr_number, head_sha,
-      # and touches_rust are emitted immediately, ahead of the marker guard,
+      # and touches_rust are emitted immediately, ahead of the reviewed-SHA decision,
       # so the `gate` job can post the required status on the head SHA even
       # on the marker-present runs where the session itself is a no-op.
       - name: Resolve PR and apply gates
@@ -134,21 +137,28 @@ jobs:
           fi
 
           # Emit pr_number AND head_sha the moment a PR resolves, BEFORE the
-          # once-only marker guard below. The `gate` job posts the required
+          # reviewed-SHA decision below. The `gate` job posts the required
           # `Review gate` status on this head SHA on EVERY trigger — including
           # the marker-present runs that short-circuit the session — so it
           # must have the SHA even when this step exits with proceed=false.
-          # That per-SHA re-post on each green push is the label-mirror that
-          # reconciles the run-once review with a per-SHA required check.
+          # That per-SHA re-post on each green push keeps the live review
+          # verdict aligned with the per-SHA required check.
           echo "pr_number=$pr" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha')" >> "$GITHUB_OUTPUT"
+          head_sha="$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha')"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+          # Read comment bodies once. The stable marker anchors the summary;
+          # the parallel token records the head SHA covered by its last run.
+          comments="$(gh api "repos/${REPO}/issues/${pr}/comments" --paginate --jq '.[].body')"
+          reviewed_token="$(grep -m1 -oE 'aether-reviewed-sha:[0-9a-f]+' <<<"$comments" || true)"
+          reviewed_sha="${reviewed_token#aether-reviewed-sha:}"
 
           # Owner waiver: a `review:skip` label skips the review session
           # outright. The gate decides whether it counts — it verifies the
           # label was applied by the repo owner (timeline actor check) and
           # posts success only then; any other applier keeps the gate red.
-          # A workflow_dispatch bypasses the label (like the marker guard
-          # below): dispatching is the deliberate "review it anyway" path.
+          # A workflow_dispatch bypasses the label and reviewed-SHA decision:
+          # dispatching is the deliberate "review it all again" path.
           # Capture then match with a here-string so grep -q can't SIGPIPE
           # the paginated gh under pipefail.
           if [ "$EVENT" != "workflow_dispatch" ]; then
@@ -175,24 +185,6 @@ jobs:
           files="$(gh api "repos/${REPO}/pulls/${pr}/files" --paginate --jq '.[].filename')"
           if grep -qE '\.rs$' <<<"$files"; then
             echo "touches_rust=true" >> "$GITHUB_OUTPUT"
-
-            # Size cap: a mass mechanical sweep (fmt/lint-shaped, hundreds
-            # of files) would fan the five-pillar review out over every one
-            # of them — a self-DDoS on runner time and tokens. Over the cap
-            # the session never spawns and the gate FAILS CLOSED with the
-            # decision instructions: the owner either waives with
-            # review:skip or forces the full review via workflow_dispatch
-            # (which bypasses this cap). Auto-green is deliberately not an
-            # option — an unreviewed mass change must not pass on size
-            # alone.
-            rs_count=$(grep -cE '\.rs$' <<<"$files")
-            if [ "$EVENT" != "workflow_dispatch" ] && [ "$rs_count" -gt "$AETHER_REVIEW_MAX_FILES" ]; then
-              echo "PR #$pr changes $rs_count .rs files (cap $AETHER_REVIEW_MAX_FILES) — review session skipped; gate fails closed."
-              echo "skip_reason=cap" >> "$GITHUB_OUTPUT"
-              echo "rs_count=$rs_count" >> "$GITHUB_OUTPUT"
-              echo "proceed=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
           else
             # No Rust source in the diff (including a manifest-only PR) →
             # skip the review session entirely, not just the verdict: the
@@ -206,18 +198,60 @@ jobs:
             exit 0
           fi
 
-          # Once-only guard: the marker comment is the run-once state. A
-          # manual dispatch bypasses it (deliberate re-review); the poster
-          # dedupes already-posted findings by fingerprint. proceed=false
-          # here still lets the gate job post — it reads the outputs emitted
-          # above, not `proceed`.
-          if [ "$EVENT" != "workflow_dispatch" ]; then
-            if gh api "repos/${REPO}/issues/${pr}/comments" --paginate --jq '.[].body' \
-              | grep -q '<!-- aether-review -->'; then
-              echo "PR #$pr already reviewed (marker present) — skipping."
+          # Select the caller-side diff base and the file set that controls
+          # this session. The gate's touches_rust classification above stays
+          # whole-PR; only incremental session gating and the cap use delta
+          # files. Missing legacy tokens and unreachable/orphaned bases fall
+          # back to a safe full review.
+          diff_base="origin/main"
+          review_mode="full"
+          review_files="$files"
+          if [ "$EVENT" != "workflow_dispatch" ] && grep -q '<!-- aether-review -->' <<<"$comments"; then
+            if [ -z "$reviewed_sha" ]; then
+              echo "PR #$pr has a legacy marker without a reviewed SHA — falling back to a full review."
+            elif [ "$reviewed_sha" = "$head_sha" ]; then
+              echo "diff_base=$reviewed_sha" >> "$GITHUB_OUTPUT"
+              echo "review_mode=incremental" >> "$GITHUB_OUTPUT"
+              echo "PR #$pr head $head_sha is already reviewed — skipping."
               echo "proceed=false" >> "$GITHUB_OUTPUT"
               exit 0
+            else
+              compare_status="unreachable"
+              if compare="$(gh api "repos/${REPO}/compare/${reviewed_sha}...${head_sha}")"; then
+                compare_status="$(jq -r '.status' <<<"$compare")"
+              fi
+
+              if [ "$compare_status" = "ahead" ]; then
+                diff_base="$reviewed_sha"
+                review_mode="incremental"
+                review_files="$(jq -r '.files[]?.filename' <<<"$compare")"
+                if ! grep -qE '\.rs$' <<<"$review_files"; then
+                  echo "diff_base=$diff_base" >> "$GITHUB_OUTPUT"
+                  echo "review_mode=$review_mode" >> "$GITHUB_OUTPUT"
+                  echo "PR #$pr delta from $reviewed_sha touches no Rust — review session skipped."
+                  echo "proceed=false" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+              else
+                echo "PR #$pr recorded SHA $reviewed_sha is not an ancestor of $head_sha ($compare_status) — falling back to a full review."
+              fi
             fi
+          fi
+
+          echo "diff_base=$diff_base" >> "$GITHUB_OUTPUT"
+          echo "review_mode=$review_mode" >> "$GITHUB_OUTPUT"
+
+          # Size cap: full reviews count the whole PR; incremental reviews
+          # count only their delta. Over the cap the session never spawns and
+          # the gate FAILS CLOSED until the owner waives or dispatches a full
+          # review. workflow_dispatch deliberately bypasses the cap.
+          rs_count=$(grep -cE '\.rs$' <<<"$review_files")
+          if [ "$EVENT" != "workflow_dispatch" ] && [ "$rs_count" -gt "$AETHER_REVIEW_MAX_FILES" ]; then
+            echo "PR #$pr $review_mode review changes $rs_count .rs files (cap $AETHER_REVIEW_MAX_FILES) — review session skipped; gate fails closed."
+            echo "skip_reason=cap" >> "$GITHUB_OUTPUT"
+            echo "rs_count=$rs_count" >> "$GITHUB_OUTPUT"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           echo "proceed=true" >> "$GITHUB_OUTPUT"
@@ -228,7 +262,7 @@ jobs:
       # so a downstream chain can never re-derive the PR from the event the way
       # this workflow does from CI's push-triggered run. This artifact is the
       # explicit hand-off. It is written on EVERY path that resolves a PR
-      # (label/cap/non-Rust/marker skips included), matching the `gate` job's
+      # (label/cap/non-Rust/same-SHA/delta skips included), matching the `gate` job's
       # coverage, so dogfood can apply its own gate stack (the live `Review
       # gate` status among them) to the right PR.
       - name: Write the review-context hand-off for Dogfood
@@ -249,9 +283,8 @@ jobs:
           # reads it after that.
           retention-days: 1
 
-      # Check out the PR head with full history so the /review skill's
-      # `git diff origin/main...HEAD` prep resolves. The base ref is not
-      # present after a single-ref checkout, so fetch it explicitly.
+      # Check out the PR head with full history so an incremental base SHA is
+      # present. Fetch origin/main explicitly for first/full/fallback reviews.
       - uses: actions/checkout@v4
         if: steps.resolve.outputs.proceed == 'true'
         with:
@@ -327,15 +360,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          DIFF_BASE: ${{ steps.resolve.outputs.diff_base }}
         run: |
           claude -p "You are running headless in CI on a checkout of PR #${PR_NUMBER}'s head branch.
-          The diff base is origin/main; the head is the current HEAD.
-          Invoke the repo's /review skill in INTEGRATED mode against origin/main...HEAD:
+          The diff base is ${DIFF_BASE}; the head is the current HEAD.
+          Invoke the repo's /review skill in INTEGRATED mode against ${DIFF_BASE}...HEAD:
           resolve the changed .rs files and their per-file diffs from git, and read the issue
           text this PR closes (use gh to find the PR's closing reference for issue #${PR_NUMBER}
-          if needed). Pass noBuild: true in the /review invocation's workflow args — this
-          runner has no Rust toolchain, so the high-severity correctness refuter must ground
-          read-only rather than write and run a scratch cargo test. Let the skill run the
+          if needed). Pass noBuild: true and depth: gate in the /review invocation's workflow
+          args — this runner has no Rust toolchain, so the high-severity correctness refuter must
+          ground read-only rather than write and run a scratch cargo test. Let the skill run the
           review.js workflow in a single pass.
           THE WAIT CONTRACT (load-bearing — two prior runs died on this): the Workflow tool
           runs in the BACKGROUND. In headless mode your final reply exits the process and
@@ -441,6 +475,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ needs.review.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.review.outputs.head_sha }}
+          REVIEW_MODE: ${{ needs.review.outputs.review_mode }}
           ROLLUP_PATH: review-rollup.json
           FILES_PATH: pr-files.json
         run: node scripts/post-review-rollup.mjs
@@ -448,8 +484,9 @@ jobs:
   gate:
     name: Review gate
     needs: [review, post]
-    # Runs on EVERY trigger that resolved a PR — including the marker-present
-    # runs where the review session is skipped and `post` no-ops. `always()`
+    # Runs on EVERY trigger that resolved a PR — including same-SHA and
+    # non-Rust-delta runs where the session is skipped and `post` no-ops.
+    # `always()`
     # so a skipped/failed upstream job never suppresses the status post; the
     # pr_number guard drops the fork / no-open-PR cases where the review job
     # never resolved a PR (and so emitted no outputs).
@@ -461,12 +498,10 @@ jobs:
     steps:
       # Mirror the advisory `review:unresolved` label into a required
       # `Review gate` commit status on the PR's head SHA. This status is the
-      # bridge between the run-once review trigger and a per-SHA required
-      # check: the review session runs once (first CI green, once-only), but
-      # this status is recomputed from the LIVE label on every green push, so
-      # branch protection can require `Review gate` without the session ever
-      # re-running per SHA. A non-Rust PR is never held to the verdict; a
-      # Rust PR mirrors its label; an infra failure in the review job posts
+      # bridge between the review trigger and a per-SHA required check. This
+      # status is recomputed from the LIVE label on every green push, including
+      # pushes whose delta session is skipped. A non-Rust PR is never held to
+      # the verdict; a Rust PR mirrors its label; an infra failure in the review job posts
       # failure rather than leaving the required context missing.
       #
       # Verdict table (first match wins):

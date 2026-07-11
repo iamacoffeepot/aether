@@ -27,7 +27,9 @@ whenever they disagree with it.
 Much of what you'd want from "reference" is better asked of a live engine than
 read from a doc, because the engine can't drift from itself:
 
-- `describe_kinds` — the static substrate kind vocabulary with full schemas.
+- `describe_kinds` — the live kind vocabulary: orient with the sorted
+  `families` digest, fetch exact kinds with `names`, and pair `full` with
+  `names` or `prefix` (bare unfiltered `full` is refused).
 - `describe_component(engine_id, component)` — a loaded component's handler
   kinds and per-handler docs, addressed by lineage name (or a `mbx-` id).
 - `describe_transforms` — the native `#[transform]` functions linked at build

@@ -200,6 +200,9 @@ jobs:
           prompt="$(field prompt)"
           surface="$(field surfaceUnderTest)"
           artifact="$(field expectedArtifact)"
+          # A brief authored as "none (…gloss…)" means the bare sentinel — collapse it so the
+          # downstream literal-equality sites (recording guards, task-object jq) hold.
+          if grep -qiE '^none[[:space:]]*(\(.*\))?$' <<<"$artifact"; then artifact="none"; fi
           [ -n "$medium" ] && [ -n "$prompt" ] || skip "Issue #${issue} brief is malformed (medium/prompt missing) — skipping."
 
           # Emit the free-text fields through random-delimiter heredocs so a
@@ -405,10 +408,14 @@ jobs:
       # stream-json + jq renderer makes the session watchable live in the Actions
       # log; the tee'd JSONL is the durable transcript (uploaded below). The tee
       # target lives in /tmp, outside the checkout, so the session can never
-      # mistake it for repo scratch and delete it (#2986). The wait contract is
-      # MECHANICAL, not prose — a headless session ends its process (and kills
-      # the in-flight background workflow) the moment it produces a final reply,
-      # so the prompt forbids that reply until the rollup file exists on disk.
+      # mistake it for repo scratch and delete it (#2986). The wait contract
+      # rides on print mode's background-workflow wait: after the model's last
+      # reply, claude -p holds the process open for an in-flight background
+      # workflow and re-invokes the model when it completes — capped by
+      # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS (default ten minutes, which a
+      # trial routinely exceeds; issue 3085). Forty minutes leaves the
+      # 60-minute job budget room for the pre-trial build and the post-trial
+      # evidence steps.
       - name: Run the dogfood trial
         if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
         env:
@@ -417,6 +424,7 @@ jobs:
           BRIEF_SURFACE: ${{ needs.resolve.outputs.surface }}
           BRIEF_ARTIFACT: ${{ needs.resolve.outputs.expected_artifact }}
           PR_NUMBER: ${{ needs.resolve.outputs.pr }}
+          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "2400000"
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/dogfood-run"
@@ -445,16 +453,16 @@ jobs:
           { "task": ${task_json} }
 
           THE WAIT CONTRACT (load-bearing — headless runs die on this): the Workflow tool runs in the
-          BACKGROUND. In headless mode your final reply exits the process and KILLS the in-flight
-          workflow, so you may NOT produce a final reply until ${GITHUB_WORKSPACE}/dogfood-rollup.json
-          exists on disk. While the workflow runs, poll MECHANICALLY: run the Bash command
-          'sleep 60; ls ${GITHUB_WORKSPACE}/dogfood-rollup.json 2>/dev/null || echo waiting'
-          again and again, as many turns as it takes — the completion notification or the workflow
-          result reaches you between polls. Polling turns are cheap; an early final reply wastes the
-          whole run. The file NEVER appears on its own — the workflow returns { rollup, task } as a
-          VALUE, and YOU write it. When it returns, write the returned ROLLUP object as JSON verbatim
-          to exactly ${GITHUB_WORKSPACE}/dogfood-rollup.json (that absolute path — the rollup object,
-          not the { rollup, task } wrapper).
+          BACKGROUND. Launch it, then end your turn with a one-line status note — nothing else. The
+          headless harness holds the process open for the in-flight background workflow (this step
+          raises the wait ceiling to forty minutes) and re-invokes you with a completion notification
+          when it finishes. Do NOT poll for the result: sleep-based polling is blocked here, and a
+          Monitor on the rollup path is useless because that file only appears when YOU write it. Do
+          NOT stop the workflow task, and NEVER treat the status note as the end of the job. When the
+          completion notification arrives, read the workflow's returned { rollup, task } value (from
+          the task output file if the notification truncates it) and write the ROLLUP object as JSON
+          verbatim to exactly ${GITHUB_WORKSPACE}/dogfood-rollup.json (that absolute path — the rollup
+          object, not the { rollup, task } wrapper). The file NEVER appears on its own — YOU write it.
 
           EVIDENCE (absolute paths only — ${GITHUB_WORKSPACE}/dogfood-run/ already exists):
           - If the task's expectedArtifact is not null the run RENDERS. Ensure a live engine is showing
