@@ -18,6 +18,7 @@ pub use std::sync::atomic::{AtomicBool, Ordering};
 pub use std::sync::mpsc;
 pub use std::thread::{self, JoinHandle};
 
+pub use aether_actor::MailSender;
 pub use aether_data::Kind;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
@@ -26,9 +27,10 @@ pub use aether_substrate::{KindId, Mail, Mailer};
 pub use crate::tcp::config::TcpSessionConfig;
 
 use aether_actor::runtime;
+use aether_codec::frame::pop_frame;
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
-use crate::tcp::kinds::{SessionClose, SessionDataReady, SessionWrite};
+use crate::tcp::kinds::{SessionClose, SessionClosed, SessionData, SessionDataReady, SessionWrite};
 // The `#[runtime] impl NativeActor` names the identity struct from the parent.
 use super::TcpSessionActor;
 
@@ -41,13 +43,15 @@ pub const READ_BUFFER_BYTES: usize = 64 * 1024;
 /// `aether.tcp.session` runtime state (issue 607 Phase 6b, ADR-0079). One end
 /// of a split `TcpStream`: the read sidecar owns the read half; the dispatcher
 /// owns `write_half` (used by `on_session_write`). Read-side errors / EOF flow
-/// back to the dispatcher via the `bytes_rx` channel as `Err(reason)`; the
-/// dispatcher discards them today (issue 775 retired the
-/// `SessionData` / `SessionClosed` broadcast path). The addressing identity is
-/// the distinct ZST [`TcpSessionActor`](super::TcpSessionActor).
+/// back to the dispatcher via the `bytes_rx` channel as `Err(reason)`. The
+/// dispatcher reassembles complete frames into targeted `SessionData` mail and
+/// reports peer close through `SessionClosed`. The addressing identity is the
+/// distinct ZST [`TcpSessionActor`](super::TcpSessionActor).
 pub struct TcpSessionState {
     pub peer: String,
     pub session_name: String,
+    pub consumer: Option<String>,
+    pub read_buffer: Vec<u8>,
     pub write_half: TcpStream,
     pub shutdown: Arc<AtomicBool>,
     pub read_thread: Option<JoinHandle<()>>,
@@ -76,8 +80,8 @@ impl NativeActor for TcpSessionActor {
 
         // mpsc carrying read chunks OR an Err signaling EOF /
         // read error. The dispatcher drains in `on_data_ready`
-        // and turns each item into a SessionData broadcast (Ok)
-        // or a SessionClosed broadcast + ctx.shutdown() (Err).
+        // and turns each item into reassembled SessionData mail (Ok)
+        // or SessionClosed mail + ctx.shutdown() (Err).
         let (bytes_tx, bytes_rx) = mpsc::channel::<Result<Vec<u8>, String>>();
 
         let mailer_for_thread: Arc<Mailer> = ctx.mailer();
@@ -149,6 +153,8 @@ impl NativeActor for TcpSessionActor {
         Ok(TcpSessionState {
             peer: config.peer,
             session_name: config.session_name,
+            consumer: config.consumer,
+            read_buffer: Vec::new(),
             write_half,
             shutdown,
             read_thread: Some(thread),
@@ -174,21 +180,63 @@ impl NativeActor for TcpSessionActor {
         );
     }
 
-    /// Sidecar read wake. Drain every pending chunk; `Ok` bytes
-    /// are dropped (issue 775 retired the `SessionData` broadcast)
-    /// and `Err` ends the session via `ctx.shutdown()`. One wake
-    /// fires per chunk, but the handler drains until the queue
-    /// is empty so coalesced wakes process all outstanding chunks
-    /// in one dispatcher tick.
+    /// Sidecar read wake. Drain every pending chunk, append it to the
+    /// reassembly buffer, and deliver each complete length-prefix
+    /// frame to the bound consumer. `Err` delivers `SessionClosed`
+    /// before ending the session. One wake fires per chunk, but the
+    /// handler drains until the queue is empty so coalesced wakes
+    /// process all outstanding chunks in one dispatcher tick.
     #[handler::single]
     fn on_data_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: SessionDataReady) {
         while let Ok(item) = state.bytes_rx.try_recv() {
             match item {
-                Ok(_bytes) => {
-                    // Bytes drop on the floor pending a user-space
-                    // TCP observer rewire (issue 775).
+                Ok(bytes) => {
+                    state.read_buffer.extend_from_slice(&bytes);
+                    loop {
+                        match pop_frame(&mut state.read_buffer) {
+                            Ok(Some(bytes)) => {
+                                if let Some(consumer) = state.consumer.as_deref() {
+                                    ctx.send_to_named(
+                                        consumer,
+                                        &SessionData {
+                                            session_name: state.session_name.clone(),
+                                            peer: state.peer.clone(),
+                                            bytes,
+                                        },
+                                    );
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(error) => {
+                                tracing::warn!(
+                                    target: "aether_substrate::tcp",
+                                    session = %state.session_name,
+                                    peer = %state.peer,
+                                    error = %error,
+                                    "tcp session frame rejected",
+                                );
+                                ctx.shutdown();
+                                return;
+                            }
+                        }
+                    }
                 }
-                Err(_reason) => {
+                Err(reason) => {
+                    let reason = if state.read_buffer.is_empty() {
+                        reason
+                    } else {
+                        format!("{reason}; dropped {} trailing frame bytes", state.read_buffer.len())
+                    };
+                    if let Some(consumer) = state.consumer.as_deref() {
+                        ctx.send_to_named(
+                            consumer,
+                            &SessionClosed {
+                                session_name: state.session_name.clone(),
+                                peer: state.peer.clone(),
+                                reason,
+                            },
+                        );
+                    }
                     ctx.shutdown();
                     return;
                 }

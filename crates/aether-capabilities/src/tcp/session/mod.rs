@@ -17,13 +17,12 @@
 //! aborts any blocked `read()` on the read half, the read thread
 //! sees the error / EOF, exits, and the dispatcher joins it.
 //!
-//! Issue 775 retired the publish path: pre-#775 the dispatcher
-//! re-broadcast every chunk as `SessionData` and the close as
-//! `SessionClosed` through the `hub.claude.broadcast` mailbox.
-//! With `BroadcastCapability` gone the chassis no longer fans
-//! observation out, so this actor drops bytes on the floor today.
-//! A future user-space TCP observer (monitor-based or session-
-//! targeted mail) is the replacement path.
+//! Each session inherits an optional late-bound consumer mailbox from
+//! its listener. The dispatcher appends read chunks to a reassembly
+//! buffer, pops complete ADR-0072 length-prefix frames, and delivers
+//! one targeted `SessionData` mail per frame. Peer EOF and read errors
+//! produce a targeted `SessionClosed`; observer-less sessions preserve
+//! the previous drop-on-the-floor behavior.
 
 // Handler-signature kinds need to be importable at file root for
 // the `#[actor]`-emitted `HandlesKind` markers against the identity

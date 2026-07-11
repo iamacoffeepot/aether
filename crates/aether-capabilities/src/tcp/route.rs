@@ -114,7 +114,7 @@ pub trait TcpWasmExt {
 impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
     //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>) {
-        self.send(&BindListener { addr: addr.into(), name: name.map(Into::into) });
+        self.send(&BindListener { addr: addr.into(), name: name.map(Into::into), consumer: None });
     }
     fn unbind_listener(&self, listener_name: &str) {
         self.send(&UnbindListener { listener_name: listener_name.into() });
@@ -192,7 +192,7 @@ pub trait TcpNativeExt {
 impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
     //noinspection DuplicatedCode
     fn bind_listener(&self, addr: &str, name: Option<&str>) {
-        self.send(&BindListener { addr: addr.into(), name: name.map(Into::into) });
+        self.send(&BindListener { addr: addr.into(), name: name.map(Into::into), consumer: None });
     }
     fn unbind_listener(&self, listener_name: &str) {
         self.send(&UnbindListener { listener_name: listener_name.into() });
