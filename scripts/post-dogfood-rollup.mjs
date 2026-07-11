@@ -137,6 +137,67 @@ function verdictLines(rollup) {
   return lines
 }
 
+// A verdict is only readable against the question that produced it. `wrong` on a
+// frame says nothing until you can see the task the consumer was handed and the
+// artifact the judge was told to expect — those two disagreeing is itself the
+// most common way a trial goes bad. So they lead, ahead of the friction table.
+function taskLines(task) {
+  if (!task) return []
+  const lines = ['', '### The task', '']
+  lines.push(`- **Medium:** ${cell(task.medium)}`)
+  lines.push(`- **Surface under test:** ${cell(task.surfaceUnderTest)}`)
+  if (task.prompt) lines.push('', '**Handed verbatim to the consumer:**', '', blockquote(task.prompt))
+  lines.push(
+    '',
+    '**Expected artifact** — the judge grades against this; the consumer is not shown it:',
+    '',
+    task.expectedArtifact ? blockquote(task.expectedArtifact) : '> _(none — nothing renders, so no artifact was judged)_',
+  )
+  return lines
+}
+
+// Prompts are long and only wanted when a verdict is being contested, so they
+// collapse. The clip is the GitHub comment budget, not the evidence budget — the
+// rollup on the evidence branch keeps the fuller text, and the viewer shows it.
+const COMMENT_PROMPT_MAX = 4000
+
+function provenanceLines(provenance) {
+  if (!provenance) return []
+  const phases = provenance.phases || {}
+  const lines = ['', '### Provenance', '', '| phase | model | effort |', '| --- | --- | --- |']
+  const driver = (provenance.driver && provenance.driver.model) || null
+  lines.push(`| driver (harness session) | ${cell(driver)} | ${cell(null)} |`)
+  for (const name of ['author', 'attempt', 'judge']) {
+    const p = phases[name]
+    if (!p) continue
+    const ran = p.prompt ? '' : ' _(did not run)_'
+    lines.push(`| ${name}${ran} | ${cell(p.model)} | ${cell(p.effort)} |`)
+  }
+  for (const name of ['author', 'attempt', 'judge']) {
+    const p = phases[name]
+    if (!p || !p.prompt) continue
+    const text = p.prompt.length > COMMENT_PROMPT_MAX
+      ? `${p.prompt.slice(0, COMMENT_PROMPT_MAX)}\n\n[…clipped — full prompt in the evidence viewer]`
+      : p.prompt
+    lines.push(
+      '',
+      `<details><summary>The <code>${name}</code> prompt, as sent</summary>`,
+      '',
+      '```',
+      // A fence inside the prompt would otherwise close this one early.
+      text.replace(/```/g, "'''"),
+      '```',
+      '',
+      '</details>',
+    )
+  }
+  return lines
+}
+
+function blockquote(text) {
+  return String(text).split(/\r?\n/).map((l) => `> ${l}`).join('\n')
+}
+
 const CATEGORIES = ['blocker', 'missing-primitive', 'papercut', 'doc-gap']
 
 function frictionLines(friction) {
@@ -206,6 +267,7 @@ export function markerLine(rollup, attempt = 1, verdict = markerVerdict(rollup))
 export function renderComment(rollup, hasFrame, { attempt = 1, runRef = '' } = {}) {
   const lines = [markerLine(rollup, attempt), '## Dogfood trial', '']
   lines.push(...verdictLines(rollup))
+  lines.push(...taskLines(rollup.task))
   lines.push('', '### Friction')
   lines.push(...frictionLines(rollup.friction))
   lines.push(...softHoldLines(rollup.softHolds))
@@ -213,6 +275,7 @@ export function renderComment(rollup, hasFrame, { attempt = 1, runRef = '' } = {
   if (hasFrame) {
     lines.push('', '### Judged frame', '', `![judged frame](${RAW_BASE}/${runRef}/frame.png)`)
   }
+  lines.push(...provenanceLines(rollup.provenance))
   lines.push('', `[Full run in the evidence viewer](${VIEWER_BASE}?run=${encodeURIComponent(runRef)})`)
   return lines.join('\n')
 }
