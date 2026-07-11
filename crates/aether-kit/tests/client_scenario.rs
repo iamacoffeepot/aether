@@ -1,19 +1,21 @@
 //! Real-TCP player client scenarios through the shipped `aether-kit` wasm.
 
 use std::fs;
+use std::io::Read;
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
+use aether_capabilities::ComponentHostCapability;
 use aether_capabilities::GameGatewayConfig;
 use aether_capabilities::component::resolve_embedded;
 use aether_capabilities::game::{GameGatewayCapability, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
 use aether_capabilities::tcp::{ListListeners, ListListenersResult};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
-use aether_kinds::{Key, KeyRelease, LoadComponent, LoadResult, keycode};
+use aether_kinds::{DropComponent, DropResult, Key, KeyRelease, LoadComponent, LoadResult, keycode};
 use aether_kit::camera::{CameraSetMode, ModeInit, OrbitParams};
 use aether_kit::{
     EntityState, GridBounds, MoveDirection, MoveIntent, PlayerClientConfig, Poll, PollResult, SimConfig, Spawn,
@@ -43,7 +45,7 @@ enum ControlledEvent {
 enum ControlledCommand {
     StaleSummary,
     NewerSummary,
-    Shutdown,
+    ExpectClientClose,
 }
 
 fn component_address(name: &str) -> String {
@@ -73,6 +75,19 @@ fn load_export(bench: &mut TestBench, wasm: &[u8], export: &str, name: &str, con
             mailbox_id
         }
         LoadResult::Err { error } => panic!("load {export}: {error}"),
+    }
+}
+
+fn drop_component(bench: &mut TestBench, mailbox_id: MailboxId) {
+    let result = bench
+        .execute(vec![(
+            "drop",
+            BenchOp::send_and_await(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id }),
+        )])
+        .expect("drop player client");
+    match result.reply::<DropResult>("drop").expect("decode DropResult") {
+        DropResult::Ok => {}
+        DropResult::Err { error } => panic!("drop player client: {error}"),
     }
 }
 
@@ -155,9 +170,11 @@ fn spawn_controlled_peer(
         write_bundle(&mut stream, &controlled_bundle(2, 1));
 
         assert!(matches!(
-            command_rx.recv_timeout(TCP_TIMEOUT).expect("receive shutdown command"),
-            ControlledCommand::Shutdown
+            command_rx.recv_timeout(TCP_TIMEOUT).expect("receive client-close command"),
+            ControlledCommand::ExpectClientClose
         ));
+        let mut trailing = [0_u8; 1];
+        assert_eq!(stream.read(&mut trailing).expect("controlled peer observes client teardown"), 0);
     });
     (event_rx, command_tx, handle)
 }
@@ -257,7 +274,7 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
             ),
         )])
         .expect("configure client camera");
-    load_export(
+    let client_mailbox = load_export(
         &mut bench,
         &wasm,
         "aether.kit.client",
@@ -316,7 +333,8 @@ fn controlled_peer_proves_framing_input_and_atomic_visual_replacement() {
         "newer complete summary must move the marker east: initial={initial:?}, moved={moved:?}"
     );
 
-    command_tx.send(ControlledCommand::Shutdown).expect("stop controlled peer");
+    command_tx.send(ControlledCommand::ExpectClientClose).expect("ask peer to observe client teardown");
+    drop_component(&mut bench, client_mailbox);
     peer.join().expect("controlled peer exits cleanly");
 }
 

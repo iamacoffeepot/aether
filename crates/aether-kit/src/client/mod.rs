@@ -220,6 +220,15 @@ impl WasmActor for PlayerClient {
         ctx.actor::<TcpCapability>().connect(&self.server_addr, None, Some(ctx.mailbox_id()));
     }
 
+    fn unwire(&mut self, ctx: &mut WasmCtx<'_>) {
+        if self.phase != ConnectionPhase::Closed
+            && let Some(session) = self.session.take()
+        {
+            ctx.actor::<TcpCapability>().connect_session_close(&session.name);
+        }
+        self.phase = ConnectionPhase::Closed;
+    }
+
     #[handler::single]
     fn on_connect_result(&mut self, ctx: &mut WasmCtx<'_>, result: ConnectResult) {
         if self.phase != ConnectionPhase::Connecting || self.session.is_some() {
