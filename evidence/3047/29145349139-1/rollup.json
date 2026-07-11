@@ -1,0 +1,56 @@
+{
+  "totals": {
+    "findings": 4,
+    "papercut": 2,
+    "missingPrimitive": 1,
+    "docGap": 1,
+    "blocker": 0,
+    "softHolds": 0
+  },
+  "succeeded": true,
+  "buildGreen": null,
+  "summary": "Drove the running headless substrate (engine ...0001) over MCP. Discovered the aether.tcp vocabulary via describe_kinds (no guide doc exists). bind_listener{addr:\"127.0.0.1:0\"} replied Ok{listener_name:\"34215\", listener_id, local_port:34215}. connect{addr:\"127.0.0.1:34215\"} replied ConnectResult::Ok{session_name:\"conn-0\", session_id:mbx-urol-s7yl-abyx, peer:\"127.0.0.1:34215\"} — loopback peer confirmed. session_write{bytes} to \"conn-0\" was dispatched via send_mail with status \"delivered\" and no error/session_closed surfaced, so every documented step completed. Caveat surfaced as findings: the returned session_name/session_id is NOT resolvable by send_mail_traced (errors \"unknown recipient mailbox\") or actor_logs (\"not registered\"), and send_mail reports \"delivered\" even for a deliberately-bogus session name — so the write's delivery to the actual session is unverifiable through the harness (likely a silent warn-drop). The connect/connect_result surface itself works as specified. Engine left alive for the judge (headless — capture_frame will Err; TCP produces no visual frame).",
+  "artifact": {
+    "verdict": "n-a",
+    "rationale": "capture_frame returned no image — the engine settled without a reply event (\"frame capture on a windowless/headless substrate emits no frame\"). This matches the expected artifact exactly: this is a TCP-transport scenario where nothing renders, so correctness is read from the ConnectResult::Ok reply and absence of a session-close error, not from a frame. There is no renderable artifact to judge visually. Substrate terminated afterward to free the fleet."
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "high",
+        "where": "session_write to the connect-side session over the MCP harness (send_mail / send_mail_traced / actor_logs)",
+        "what": "connect_result returns session_name \"conn-0\" and a session_id MailboxId, but that address resolves nowhere through the harness: send_mail_traced rejects \"conn-0\", the raw mbx- id, and every lineage form I tried (aether.tcp/conn-0, aether.tcp:conn-0, aether.tcp/aether.tcp:conn-0) with 'unknown recipient mailbox'; actor_logs says the name is 'not registered'. Plain send_mail reports status \"delivered\" for \"conn-0\" — but ALSO reports \"delivered\" for a deliberately-bogus \"conn-does-not-exist-zzz\", so its success is a false positive that warn-drops silently. There is no positive-confirmation path that a session_write reached the dialed session; the task's 'confirm no error/close is surfaced' is only satisfiable because the one tool that WOULD surface the failure (send_mail_traced) refuses the address outright.",
+        "suggested": "Register each TCP session (and listener) under an addressable lineage name resolvable by ALL mail tools (send_mail, send_mail_traced, actor_logs) — e.g. aether.tcp/aether.embedded:conn-0 — and return that exact addressable string in connect_result.session_name. Separately, make send_mail's warn-drop return a status other than 'delivered' so a mistyped/stale session address is not silently swallowed."
+      },
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "send_mail param encoding for aether.tcp.bind_listener / aether.tcp.connect",
+        "what": "describe_kinds renders the field as 'name: Option<String>', but omitting it fails encoding with 'missing required field \"$.name\"'. An Option-typed field reads as omittable to a consumer; I had to pass an explicit name:null to get past it.",
+        "suggested": "Make Option-typed fields omittable in the MCP param encoder (treat a missing Option field as None), or render genuinely-required fields without the Option<> wrapper so the shape doesn't imply an omission that the encoder rejects."
+      }
+    ],
+    "missing-primitive": [
+      {
+        "category": "missing-primitive",
+        "severity": "medium",
+        "where": "targeting a returned MailboxId (session_id) from the MCP harness",
+        "what": "connect_result hands back session_id as a MailboxId, the natural handle for the session, but the harness has no way to send to a raw MailboxId — recipient_name is a name string, and send_mail_traced explicitly rejects the tagged 'mbx-urol-s7yl-abyx' id. describe_component accepts a tagged mbx- id as a fast-path, so the asymmetry is surprising: the id you are handed cannot be used to send to the thing it identifies.",
+        "suggested": "Let send_mail / send_mail_traced accept a tagged mbx- id in recipient_name (as describe_component already does) and route directly to that mailbox, so a returned session_id is immediately usable."
+      }
+    ],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "high",
+        "where": "learning how to use the aether.tcp capability at all (docs/guide/)",
+        "what": "There is no consumer documentation for aether.tcp anywhere: it is absent from docs/guide/SUMMARY.md (HTTP egress has systems/http.md; TCP has nothing), there is no recipe, and the only grep hit in the guide is a note about tcp/mod.rs file size in capability-anatomy.md. A fresh consumer must reverse-engineer the entire bind_listener/connect/session_write/session_data/session_closed vocabulary from describe_kinds, with no guidance on how session addressing is supposed to work — which is exactly where the flow breaks down.",
+        "suggested": "Add docs/guide/systems/tcp.md (mirroring http.md) and a SUMMARY entry: document bind_listener/connect/session_write and the session_data/session_closed inbound kinds, the ConnectResult shape, and — critically — the exact recipient string a caller must use to address a returned session over mail."
+      }
+    ],
+    "blocker": []
+  },
+  "softHolds": [],
+  "tokensPerTool": []
+}
