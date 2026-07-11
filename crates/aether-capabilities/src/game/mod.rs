@@ -4,4 +4,6 @@ mod kinds;
 pub mod player;
 
 pub use kinds::*;
-pub use player::{PlayerFrame, PlayerGatewayCapability, PlayerGatewayConfig, PlayerSessionActor, WIRE_VERSION};
+#[cfg(feature = "runtime")]
+pub use player::GameGatewayConfig;
+pub use player::{GameGatewayCapability, PlayerFrame, PlayerSessionActor, WIRE_VERSION};

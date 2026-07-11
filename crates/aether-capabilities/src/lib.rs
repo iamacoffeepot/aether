@@ -145,7 +145,9 @@ pub use lifecycle::LifecycleConfig;
 pub use lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 
 pub use fs::FsCapability;
-pub use game::{PlayerGatewayCapability, PlayerGatewayConfig, PlayerSessionActor};
+#[cfg(feature = "runtime")]
+pub use game::GameGatewayConfig;
+pub use game::{GameGatewayCapability, PlayerSessionActor};
 // ADR-0050 `aether.gemini` cap (issue 1015).
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use gemini::{GeminiCapability, GeminiConfig};

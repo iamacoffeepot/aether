@@ -14,7 +14,7 @@ use aether_substrate::chassis::error::BootError;
 use super::{PlayerSessionActor, PlayerSessionConfig, PollResult, SessionClosed, SessionData, TickBundle};
 use crate::game::player::{PlayerFrame, WIRE_VERSION};
 use crate::game::{MoveIntent, Poll, Spawn};
-use crate::tcp::{SessionClose, SessionWrite, TcpSessionActor};
+use crate::tcp::{TcpCapability, TcpNativeExt};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionPhase {
@@ -25,14 +25,14 @@ enum SessionPhase {
 }
 
 pub struct PlayerSessionState {
-    tcp_session: MailboxId,
-    turn_sim: MailboxId,
-    tick_interval_nanos: u64,
-    session_identity: MailboxId,
+    listener_name: String,
     session_name: String,
     peer: String,
+    turn_sim_mailbox: MailboxId,
+    interval_nanos: u64,
+    session_identity: MailboxId,
     phase: SessionPhase,
-    pending_bundles: BTreeMap<u64, TickBundle>,
+    pending_live_bundles: BTreeMap<u64, TickBundle>,
     last_sent_tick: Option<u64>,
 }
 
@@ -44,20 +44,25 @@ impl NativeActor for PlayerSessionActor {
 
     fn init(config: PlayerSessionConfig, ctx: &mut NativeInitCtx<'_>) -> Result<PlayerSessionState, BootError> {
         Ok(PlayerSessionState {
-            tcp_session: config.tcp_session,
-            turn_sim: config.turn_sim,
-            tick_interval_nanos: config.tick_interval_nanos,
-            session_identity: ctx.self_id(),
+            listener_name: config.listener_name,
             session_name: config.session_name,
             peer: config.peer,
+            turn_sim_mailbox: config.turn_sim_mailbox,
+            interval_nanos: config.interval_nanos,
+            session_identity: ctx.self_id(),
             phase: SessionPhase::Handshake,
-            pending_bundles: BTreeMap::new(),
+            pending_live_bundles: BTreeMap::new(),
             last_sent_tick: None,
         })
     }
 
     #[handler::single]
     fn on_session_data(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SessionData) {
+        if mail.session_name != state.session_name || mail.peer != state.peer {
+            state.close(ctx, "tcp session metadata changed".into());
+            return;
+        }
+
         let frame = match wire::from_bytes::<PlayerFrame>(&mail.bytes) {
             Ok(frame) => frame,
             Err(error) => {
@@ -68,37 +73,51 @@ impl NativeActor for PlayerSessionActor {
 
         match state.phase {
             SessionPhase::Handshake => state.handle_handshake(ctx, frame),
-            SessionPhase::CatchingUp | SessionPhase::Active => state.handle_active(ctx, frame),
+            SessionPhase::CatchingUp => state.close(ctx, "player frame arrived before HelloAck".into()),
+            SessionPhase::Active => state.handle_active(ctx, frame),
             SessionPhase::Closed => {}
         }
     }
 
     #[handler::single]
-    fn on_session_closed(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: SessionClosed) {
-        state.phase = SessionPhase::Closed;
-        ctx.shutdown();
+    fn on_session_closed(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SessionClosed) {
+        if mail.session_name == state.session_name {
+            state.phase = SessionPhase::Closed;
+            ctx.shutdown();
+        }
     }
 
     #[handler::single]
     fn on_poll_result(state: &mut Self::State, ctx: &mut NativeCtx<'_>, result: PollResult) {
-        if state.phase != SessionPhase::CatchingUp || ctx.source_mailbox() != Some(state.turn_sim) {
+        // Replies carry `SourceAddr::None` with the original request
+        // correlation; the configured simulation was selected when this actor
+        // sent the tracked `Poll`, so phase is the reply admission gate here.
+        if state.phase != SessionPhase::CatchingUp {
             return;
         }
 
-        for bundle in result.bundles {
-            state.pending_bundles.insert(bundle.tick, bundle);
-        }
         state.write(
             ctx,
             &PlayerFrame::HelloAck {
                 wire_version: WIRE_VERSION,
                 session_identity: state.session_identity,
                 tick: result.current_tick,
-                interval_nanos: state.tick_interval_nanos,
+                interval_nanos: state.interval_nanos,
             },
         );
+
+        let mut retained = BTreeMap::new();
+        for bundle in result.bundles {
+            retained.insert(bundle.tick, bundle);
+        }
+        for (_, bundle) in retained {
+            state.emit_bundle(ctx, bundle);
+        }
+
         state.phase = SessionPhase::Active;
-        for (_, bundle) in mem::take(&mut state.pending_bundles) {
+        let watermark = result.current_tick;
+        let live = mem::take(&mut state.pending_live_bundles);
+        for (_, bundle) in live.into_iter().filter(|(tick, _)| *tick > watermark) {
             state.emit_bundle(ctx, bundle);
         }
     }
@@ -107,7 +126,7 @@ impl NativeActor for PlayerSessionActor {
     fn on_tick_bundle(state: &mut Self::State, ctx: &mut NativeCtx<'_>, bundle: TickBundle) {
         match state.phase {
             SessionPhase::CatchingUp => {
-                state.pending_bundles.insert(bundle.tick, bundle);
+                state.pending_live_bundles.insert(bundle.tick, bundle);
             }
             SessionPhase::Active => state.emit_bundle(ctx, bundle),
             SessionPhase::Handshake | SessionPhase::Closed => {}
@@ -127,7 +146,8 @@ impl PlayerSessionState {
         }
 
         self.phase = SessionPhase::CatchingUp;
-        ctx.fanout([self.turn_sim], &Poll { since_tick: 0 });
+        let poll = Poll { since_tick: 0 };
+        let _ = ctx.send_envelope_tracked(self.turn_sim_mailbox, Poll::ID, &poll.encode_into_bytes());
     }
 
     fn handle_active(&mut self, ctx: &mut NativeCtx<'_>, frame: PlayerFrame) {
@@ -143,7 +163,7 @@ impl PlayerSessionState {
                     return;
                 };
                 spawn.entity_id = self.session_identity.0;
-                ctx.fanout([self.turn_sim], &spawn);
+                let _ = ctx.send_envelope_tracked(self.turn_sim_mailbox, Spawn::ID, &spawn.encode_into_bytes());
             }
             PlayerFrame::Intent { kind, payload } if kind == MoveIntent::ID => {
                 let Some(mut intent) = MoveIntent::decode_from_bytes(&payload) else {
@@ -156,7 +176,7 @@ impl PlayerSessionState {
                     return;
                 };
                 intent.entity_id = self.session_identity.0;
-                ctx.fanout([self.turn_sim], &intent);
+                let _ = ctx.send_envelope_tracked(self.turn_sim_mailbox, MoveIntent::ID, &intent.encode_into_bytes());
             }
             PlayerFrame::Intent { kind, .. } => {
                 tracing::warn!(
@@ -189,7 +209,7 @@ impl PlayerSessionState {
             &PlayerFrame::Beacon {
                 tick,
                 server_nanos: ctx.mailer().now_nanos().0,
-                interval_nanos: self.tick_interval_nanos,
+                interval_nanos: self.interval_nanos,
             },
         ) {
             return;
@@ -200,7 +220,7 @@ impl PlayerSessionState {
     fn write(&self, ctx: &mut NativeCtx<'_>, frame: &PlayerFrame) -> bool {
         match encode_frame(frame) {
             Ok(bytes) => {
-                ctx.actor_at::<TcpSessionActor>(self.tcp_session).send(&SessionWrite { bytes });
+                ctx.actor::<TcpCapability>().session_write(&self.listener_name, &self.session_name, &bytes);
                 true
             }
             Err(error) => {
@@ -221,7 +241,7 @@ impl PlayerSessionState {
             return;
         }
         let _ = self.write(ctx, &PlayerFrame::Close { reason });
-        ctx.actor_at::<TcpSessionActor>(self.tcp_session).send(&SessionClose::default());
+        ctx.actor::<TcpCapability>().session_close(&self.listener_name, &self.session_name);
         self.phase = SessionPhase::Closed;
         ctx.shutdown();
     }

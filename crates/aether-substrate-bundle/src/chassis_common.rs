@@ -33,8 +33,8 @@ use aether_capabilities::render::RenderTuningConfigLayer;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig, EngineConfigLayer,
-    FsCapability, GeminiCapability, GeminiConfig, HttpCapability, HttpServerCapability, HttpServerConfig,
-    InputCapability, InputConfig, InventoryCapability, LifecycleConfig, PlayerGatewayCapability, PlayerGatewayConfig,
+    FsCapability, GameGatewayCapability, GameGatewayConfig, GeminiCapability, GeminiConfig, HttpCapability,
+    HttpServerCapability, HttpServerConfig, InputCapability, InputConfig, InventoryCapability, LifecycleConfig,
     TcpCapability, TextCapability,
     fs::NamespaceRoots,
     http::HttpConfig,
@@ -713,7 +713,7 @@ pub struct CommonBoot {
     pub contentgen: ContentGenConfig,
     /// Trusted player-session wiring. The default has no configured `TurnSim`,
     /// so merely linking the common chassis opens no player listener.
-    pub player: PlayerGatewayConfig,
+    pub game_gateway: GameGatewayConfig,
 }
 
 /// Wire the aborter, worker count, and the common caps every full-
@@ -744,7 +744,7 @@ pub fn with_common_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -> Bu
         .with_actor::<InventoryCapability>(())
         .with_actor::<HttpCapability>(boot.http)
         .with_actor::<TcpCapability>(())
-        .with_actor::<PlayerGatewayCapability>(boot.player)
+        .with_actor::<GameGatewayCapability>(boot.game_gateway)
         .with_actor::<AnthropicCapability>(boot.anthropic)
         .with_actor::<GeminiCapability>(GeminiBoot { config: boot.gemini, gen_root: staging_root })
 }
@@ -769,7 +769,7 @@ pub fn common_cap_namespaces() -> Vec<&'static str> {
         <InventoryCapability as Addressable>::NAMESPACE,
         <HttpCapability as Addressable>::NAMESPACE,
         <TcpCapability as Addressable>::NAMESPACE,
-        <PlayerGatewayCapability as Addressable>::NAMESPACE,
+        <GameGatewayCapability as Addressable>::NAMESPACE,
         <AnthropicCapability as Addressable>::NAMESPACE,
         <GeminiCapability as Addressable>::NAMESPACE,
     ]
@@ -1099,6 +1099,17 @@ mod tests {
         {
             assert!(known.contains(key), "chassis_known_keys missing {key}");
         }
+    }
+
+    #[test]
+    fn common_manifest_includes_the_inert_game_gateway() {
+        use aether_actor::Addressable;
+        use aether_capabilities::GameGatewayCapability;
+
+        assert!(
+            super::common_cap_namespaces().contains(&GameGatewayCapability::NAMESPACE),
+            "every common chassis must register and advertise the game gateway identity",
+        );
     }
 
     #[test]

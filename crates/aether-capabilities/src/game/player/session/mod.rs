@@ -7,11 +7,11 @@ use alloc::string::String;
 
 #[cfg(feature = "runtime")]
 pub struct PlayerSessionConfig {
-    pub tcp_session: aether_data::MailboxId,
-    pub turn_sim: aether_data::MailboxId,
-    pub tick_interval_nanos: u64,
+    pub listener_name: String,
     pub session_name: String,
     pub peer: String,
+    pub turn_sim_mailbox: aether_data::MailboxId,
+    pub interval_nanos: u64,
 }
 
 /// `aether.game.player.session` actor, one trusted boundary per TCP connection.

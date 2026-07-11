@@ -11,13 +11,13 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aether_capabilities::LifecycleCapability;
 use aether_capabilities::{
     CaptureBackend, ClipboardCapability, ClipboardConfig, FsCapability, HeadlessClipboardCapability,
     HeadlessWindowCapability, InputCapability, InputConfig, RenderCapability, RenderConfig, RenderHandles,
     TcpCapability, TextCapability, fs::NamespaceRoots, trace::TraceDispatchCapability,
 };
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
+use aether_capabilities::{GameGatewayCapability, GameGatewayConfig, LifecycleCapability};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_kinds::Tick;
@@ -153,6 +153,9 @@ pub struct TestBenchEnv {
     pub namespace_roots: Option<NamespaceRoots>,
     /// Clipboard implementation composed for this bench.
     pub clipboard_mode: TestBenchClipboardMode,
+    /// Inert-by-default player-listener config. Loopback game scenarios
+    /// supply an active listener and exact simulation mailbox id.
+    pub game_gateway: GameGatewayConfig,
     /// Issue #2509: cumulative patience for the instanced-actor teardown
     /// close-done gate. The in-process `TestBench` resolves this from the
     /// same `SettlementConfig` (`AETHER_SETTLEMENT_CAP_SECS`) knob its
@@ -219,6 +222,7 @@ impl TestBenchChassis {
             capture_queue,
             namespace_roots,
             clipboard_mode,
+            game_gateway,
             teardown_cap,
         } = env;
 
@@ -342,6 +346,7 @@ impl TestBenchChassis {
             .with_actor::<InputCapability>(input_config)
             .with_actor::<ComponentHostCapability>(component_host_config)
             .with_actor::<TcpCapability>(())
+            .with_actor::<GameGatewayCapability>(game_gateway)
             .with_actor::<RenderCapability>(render_config)
             .with_actor::<TextCapability>(())
             .with_actor::<HeadlessWindowCapability>(())
