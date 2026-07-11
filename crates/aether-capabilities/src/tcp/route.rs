@@ -72,15 +72,18 @@ fn session_mailbox_id(cap_carry: u64, listener_name: &str, session_name: &str) -
 /// still works for any `K` the cap declares via `HandlesKind<K>`, since
 /// `send` is an inherent method on the underlying mailbox type.
 pub trait TcpWasmExt {
-    /// Mail `aether.tcp.connect { addr, name }` to the cap. Reply:
-    /// `ConnectResult`. Pass `name = None` for a `conn-N` subname.
-    fn connect(&self, addr: &str, name: Option<&str>);
+    /// Mail `aether.tcp.connect { addr, name, consumer }` to the cap.
+    /// Reply: `ConnectResult`. Pass `name = None` for a `conn-N`
+    /// subname. Pass `consumer` to receive framed session data and
+    /// close notices by mailbox name.
+    fn connect(&self, addr: &str, name: Option<&str>, consumer: Option<&str>);
 
-    /// Mail `aether.tcp.bind_listener { addr, name }` to the cap.
+    /// Mail `aether.tcp.bind_listener { addr, name, consumer }` to the cap.
     /// Reply: `BindListenerResult`. Pass `name = None` to let the cap
     /// default the subname to the bound port (typically with `addr =
-    /// "127.0.0.1:0"` so the OS picks a free port).
-    fn bind_listener(&self, addr: &str, name: Option<&str>);
+    /// "127.0.0.1:0"` so the OS picks a free port). Pass `consumer`
+    /// to receive framed session data and close notices by mailbox name.
+    fn bind_listener(&self, addr: &str, name: Option<&str>, consumer: Option<&str>);
 
     /// Mail `aether.tcp.unbind_listener { listener_name }` to the cap.
     /// Reply: `UnbindListenerResult` (asynchronous — the cap parks the
@@ -139,12 +142,12 @@ pub trait TcpWasmExt {
 
 impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
     //noinspection DuplicatedCode
-    fn connect(&self, addr: &str, name: Option<&str>) {
-        self.send(&Connect { addr: addr.into(), name: name.map(Into::into) });
+    fn connect(&self, addr: &str, name: Option<&str>, consumer: Option<&str>) {
+        self.send(&Connect { addr: addr.into(), name: name.map(Into::into), consumer: consumer.map(Into::into) });
     }
     //noinspection DuplicatedCode
-    fn bind_listener(&self, addr: &str, name: Option<&str>) {
-        self.send(&BindListener { addr: addr.into(), name: name.map(Into::into) });
+    fn bind_listener(&self, addr: &str, name: Option<&str>, consumer: Option<&str>) {
+        self.send(&BindListener { addr: addr.into(), name: name.map(Into::into), consumer: consumer.map(Into::into) });
     }
     fn unbind_listener(&self, listener_name: &str) {
         self.send(&UnbindListener { listener_name: listener_name.into() });
@@ -199,11 +202,15 @@ impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
 /// [`crate::component::ComponentHostNativeExt`] (issue 654).
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub trait TcpNativeExt {
-    /// Mail `aether.tcp.connect { addr, name }` to the cap.
-    fn connect(&self, addr: &str, name: Option<&str>);
+    /// Mail `aether.tcp.connect { addr, name, consumer }` to the cap.
+    /// Pass `consumer` to receive framed session data and close notices
+    /// by mailbox name.
+    fn connect(&self, addr: &str, name: Option<&str>, consumer: Option<&str>);
 
-    /// Mail `aether.tcp.bind_listener { addr, name }` to the cap.
-    fn bind_listener(&self, addr: &str, name: Option<&str>);
+    /// Mail `aether.tcp.bind_listener { addr, name, consumer }` to the cap.
+    /// Pass `consumer` to receive framed session data and close notices
+    /// by mailbox name.
+    fn bind_listener(&self, addr: &str, name: Option<&str>, consumer: Option<&str>);
 
     /// Mail `aether.tcp.unbind_listener { listener_name }` to the cap.
     fn unbind_listener(&self, listener_name: &str);
@@ -246,12 +253,12 @@ pub trait TcpNativeExt {
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
     //noinspection DuplicatedCode
-    fn connect(&self, addr: &str, name: Option<&str>) {
-        self.send(&Connect { addr: addr.into(), name: name.map(Into::into) });
+    fn connect(&self, addr: &str, name: Option<&str>, consumer: Option<&str>) {
+        self.send(&Connect { addr: addr.into(), name: name.map(Into::into), consumer: consumer.map(Into::into) });
     }
     //noinspection DuplicatedCode
-    fn bind_listener(&self, addr: &str, name: Option<&str>) {
-        self.send(&BindListener { addr: addr.into(), name: name.map(Into::into) });
+    fn bind_listener(&self, addr: &str, name: Option<&str>, consumer: Option<&str>) {
+        self.send(&BindListener { addr: addr.into(), name: name.map(Into::into), consumer: consumer.map(Into::into) });
     }
     fn unbind_listener(&self, listener_name: &str) {
         self.send(&UnbindListener { listener_name: listener_name.into() });

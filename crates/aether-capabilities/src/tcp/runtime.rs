@@ -101,6 +101,7 @@ pub struct PendingConnect {
     pub hold: SettlementHold,
     pub addr: String,
     pub name: Option<String>,
+    pub consumer: Option<String>,
 }
 
 fn reply_to_pending_connect(
@@ -153,6 +154,7 @@ impl NativeActor for TcpCapability {
                 hold: ctx.acquire_settlement_hold(),
                 addr: mail.addr.clone(),
                 name: mail.name,
+                consumer: mail.consumer,
             },
         );
 
@@ -192,7 +194,7 @@ impl NativeActor for TcpCapability {
     #[handler::manual]
     fn on_connect_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: ConnectReady) {
         while let Ok((id, result)) = state.connect_rx.try_recv() {
-            let Some(PendingConnect { sender, hold, addr, name }) = state.pending_connects.remove(&id) else {
+            let Some(PendingConnect { sender, hold, addr, name, consumer }) = state.pending_connects.remove(&id) else {
                 continue;
             };
 
@@ -218,6 +220,7 @@ impl NativeActor for TcpCapability {
                                 stream: Some(stream),
                                 peer: peer.clone(),
                                 session_name: session_name.clone(),
+                                consumer,
                             },
                         )
                         .finish()
@@ -277,7 +280,12 @@ impl NativeActor for TcpCapability {
         let listener_id = match ctx
             .spawn_child::<TcpListenerActor>(
                 Subname::Named(&subname_str),
-                TcpListenerConfig { listener: Some(listener), addr: mail.addr.clone(), port: local_port },
+                TcpListenerConfig {
+                    listener: Some(listener),
+                    addr: mail.addr.clone(),
+                    port: local_port,
+                    consumer: mail.consumer,
+                },
             )
             .finish()
         {

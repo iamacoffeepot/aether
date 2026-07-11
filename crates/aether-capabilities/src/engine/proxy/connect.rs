@@ -9,16 +9,35 @@ use aether_substrate::Mail;
 use aether_substrate::actor::native::SpawnError;
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
+#[cfg(test)]
+use std::cell::Cell;
 use std::error::Error as StdError;
 use std::fmt;
 use std::io::ErrorKind;
 use std::process::{Child, ExitStatus};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+thread_local! {
+    static WAIT_FOR_READER_WAKE: Cell<bool> = const { Cell::new(false) };
+}
+
 /// Pause between dial attempts within the connect budget.
 const RETRY_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Make the next connection on this test thread wait until its reader has
+/// fired a wake before [`connect_proxy`] returns. This deterministically
+/// exercises a frame arriving before the proxy mailbox is registered.
+#[cfg(test)]
+pub fn wait_for_reader_wake_before_connect_returns() {
+    WAIT_FOR_READER_WAKE.with(|wait| {
+        assert!(!wait.replace(true), "reader-wake wait already armed on this test thread");
+    });
+}
 
 /// Outcome distinctions [`connect_proxy`] surfaces to the proxy's
 /// `init` so the engines cap can tell a re-forkable startup death from
@@ -86,6 +105,9 @@ pub fn connect_proxy(
     // `None` budget → no deadline (wait forever); `Some(d)` → stop
     // retrying once `d` has elapsed.
     let deadline = budget.map(|d| Instant::now() + d);
+    #[cfg(test)]
+    let reader_wake =
+        WAIT_FOR_READER_WAKE.with(|wait| wait.replace(false)).then(|| Arc::new((Mutex::new(false), Condvar::new())));
     loop {
         // The reader sidecar fires `RpcInboundReady` at the proxy's
         // own mailbox after every inbound frame so
@@ -93,8 +115,16 @@ pub fn connect_proxy(
         // dispatcher thread. `RpcClient::connect` consumes the
         // closure, so a retry needs a fresh one.
         let wake_mailer = Arc::clone(mailer);
+        #[cfg(test)]
+        let reader_wake_for_frame = reader_wake.as_ref().map(Arc::clone);
         let on_frame = move || {
             wake_mailer.push(Mail::new(self_mailbox, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
+            #[cfg(test)]
+            if let Some(reader_wake) = &reader_wake_for_frame {
+                let (seen, wake) = &**reader_wake;
+                *seen.lock().expect("reader-wake test latch poisoned") = true;
+                wake.notify_one();
+            }
         };
         return match RpcClient::connect(
             addr,
@@ -104,7 +134,21 @@ pub fn connect_proxy(
             },
             on_frame,
         ) {
-            Ok(conn) => Ok(conn),
+            Ok(conn) => {
+                #[cfg(test)]
+                if let Some(reader_wake) = &reader_wake {
+                    let (seen, wake) = &**reader_wake;
+                    let (seen, _) = wake
+                        .wait_timeout_while(
+                            seen.lock().expect("reader-wake test latch poisoned"),
+                            Duration::from_secs(2),
+                            |seen| !*seen,
+                        )
+                        .expect("reader-wake test latch poisoned");
+                    assert!(*seen, "reader did not fire the forced pre-registration wake within 2s");
+                }
+                Ok(conn)
+            }
             Err(e) => {
                 // If we own the child and it has already exited, the
                 // substrate died during startup (e.g. a stolen RPC
