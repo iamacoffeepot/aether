@@ -9,11 +9,11 @@
 //! - [`camera::CameraComponent`] — the multi-camera driver, selected by the
 //!   `aether_kit@aether.kit.camera` export (ADR-0096). Its `aether.kit.camera.*`
 //!   driver kinds live in [`camera`].
-//! - [`camera_controller::CameraController`] — a keyboard driver that steers a
+//! - [`camera::controller::CameraController`] — a keyboard driver that steers a
 //!   peer [`camera::CameraComponent`] (WASD / arrows / zoom), selected by the
-//!   `aether_kit@aether.kit.camera_controller` export. Its
-//!   `aether.kit.camera_controller.config` init-config lives in
-//!   [`camera_controller`].
+//!   `aether_kit@aether.kit.camera-controller` export. Its
+//!   `aether.kit.camera-controller.config` init-config lives in
+//!   [`camera::controller`].
 //! - [`console::ConsoleOverlay`] — a primitive-rendered developer console
 //!   overlay, selected by the `aether_kit@aether.kit.console` export. Its
 //!   config and extension command vocabulary live in [`console`].
@@ -64,7 +64,6 @@
 extern crate alloc;
 
 pub mod camera;
-pub mod camera_controller;
 pub mod console;
 pub mod mark;
 pub mod mesh;
@@ -134,7 +133,7 @@ pub const TILE_BITS: u32 = 8;
 aether_actor::export!(
     entry = console::ConsoleOverlay,
     camera::CameraComponent,
-    camera_controller::CameraController,
+    camera::controller::CameraController,
     mark::MarkBook,
     mesh::MeshViewer,
     terrain_editor::TerrainEditor,
@@ -161,7 +160,7 @@ aether_actor::export!(
 aether_actor::export!(
     entry = console::ConsoleOverlay,
     camera::CameraComponent,
-    camera_controller::CameraController,
+    camera::controller::CameraController,
     mark::MarkBook,
     mesh::MeshViewer,
     terrain_editor::TerrainEditor,
