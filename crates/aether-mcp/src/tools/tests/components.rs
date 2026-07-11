@@ -190,6 +190,7 @@ async fn load_component_unresolvable_selector_is_tool_error() {
             config_path: None,
             export: None,
             replicas: None,
+            full: false,
         }))
         .await;
     assert!(result.is_err(), "an unresolvable selector should be a tool error");
@@ -211,9 +212,43 @@ async fn load_component_replicas_zero_is_tool_error() {
             config_path: None,
             export: None,
             replicas: Some(0),
+            full: false,
         }))
         .await;
     assert!(result.is_err(), "replicas: 0 must be a tool error, not a silent no-op");
+}
+
+/// Tripwire: a `replicas: N` reply is one shared capabilities block plus
+/// N `{mailbox_id, name}` instances — no per-instance capabilities echo
+/// (issue 3006). Shape-only: the JSON is what the fan-out arm builds after
+/// a successful loop.
+#[test]
+fn replicas_reply_shape_is_shared_caps_plus_instances() {
+    use aether_data::{KindId, ReplyContract};
+    use aether_kinds::{ComponentCapabilities, HandlerCapability};
+
+    let caps = ComponentCapabilities {
+        handlers: vec![HandlerCapability {
+            id: KindId(1),
+            name: "aether.test.on".to_owned(),
+            doc: Some("One line.\n\nMore body.".to_owned()),
+            reply: ReplyContract::None,
+        }],
+        ..ComponentCapabilities::default()
+    };
+    let projected = project_capabilities(&caps, false);
+    let reply = serde_json::json!({
+        "capabilities": projected,
+        "instances": [
+            { "mailbox_id": "mbx-a", "name": "svc-0" },
+            { "mailbox_id": "mbx-b", "name": "svc-1" },
+            { "mailbox_id": "mbx-c", "name": "svc-2" },
+        ],
+    });
+    assert!(reply.get("components").is_none(), "old components array must not appear: {reply}");
+    assert_eq!(reply["instances"].as_array().map(Vec::len), Some(3));
+    assert!(reply["instances"][0].get("capabilities").is_none());
+    assert_eq!(reply["capabilities"]["handlers"][0]["doc"], "One line.");
 }
 
 /// `replace_component` with a malformed tagged mailbox id is
@@ -231,6 +266,7 @@ async fn replace_component_bad_mailbox_id_is_tool_error() {
             config: None,
             config_path: None,
             export: None,
+            full: false,
         }))
         .await;
     assert!(result.is_err(), "a malformed mailbox_id should be a tool error");

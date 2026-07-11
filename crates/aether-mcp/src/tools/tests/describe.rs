@@ -321,6 +321,7 @@ async fn describe_component_reads_the_cache() {
         .describe_component(Parameters(DescribeComponentArgs {
             engine_id: engine_id.to_owned(),
             component: tagged.clone(),
+            full: false,
         }))
         .await;
     assert!(miss.is_err(), "an uncached component addressed by id should be a tool error");
@@ -330,11 +331,12 @@ async fn describe_component_reads_the_cache() {
     // kind id verbatim through serde, so a caller reads `In -> Out`
     // before issuing the call.
     let engine = EngineId(Uuid::parse_str(engine_id).expect("test setup: engine_id is a valid uuid"));
+    let multi_doc = "Summary line.\n\nFull body the default projection must drop.";
     let seeded = ComponentCapabilities {
-        handlers: vec![aether_kinds::HandlerCapability {
+        handlers: vec![HandlerCapability {
             id: KindId(0x11),
             name: "test.request".to_owned(),
-            doc: None,
+            doc: Some(multi_doc.to_owned()),
             reply: aether_data::ReplyContract::One(KindId(0x22)),
         }],
         ..ComponentCapabilities::default()
@@ -344,12 +346,30 @@ async fn describe_component_reads_the_cache() {
         .expect("test setup: component cache mutex is never poisoned")
         .insert((engine, mailbox), seeded);
     let hit = mcp
-        .describe_component(Parameters(DescribeComponentArgs { engine_id: engine_id.to_owned(), component: tagged }))
+        .describe_component(Parameters(DescribeComponentArgs {
+            engine_id: engine_id.to_owned(),
+            component: tagged.clone(),
+            full: false,
+        }))
         .await
         .expect("cached component describes");
     let caps: serde_json::Value = serde_json::from_str(&hit).expect("json");
     assert!(caps.get("handlers").is_some(), "capabilities shape: {hit}");
     assert!(!caps["handlers"][0]["reply"].is_null(), "the handler's ADR-0109 reply contract is surfaced: {hit}");
+    assert_eq!(
+        caps["handlers"][0]["doc"], "Summary line.",
+        "full=false projects handler docs to the first rustdoc line: {hit}"
+    );
+    let hit_full = mcp
+        .describe_component(Parameters(DescribeComponentArgs {
+            engine_id: engine_id.to_owned(),
+            component: tagged,
+            full: true,
+        }))
+        .await
+        .expect("full describe keeps multi-line docs");
+    let caps_full: serde_json::Value = serde_json::from_str(&hit_full).expect("json");
+    assert_eq!(caps_full["handlers"][0]["doc"], multi_doc, "full=true keeps the wire doc string: {hit_full}");
 
     // Name-addressed describe resolves the lineage name to the SAME
     // cache key the substrate registers under (`mailbox_id_from_path`,
@@ -360,7 +380,7 @@ async fn describe_component_reads_the_cache() {
     let lineage = "aether.component/aether.embedded:fake_component";
     let by_name_key = mailbox_id_from_path(lineage);
     let named_caps = ComponentCapabilities {
-        handlers: vec![aether_kinds::HandlerCapability {
+        handlers: vec![HandlerCapability {
             id: KindId(0x33),
             name: "test.by_name".to_owned(),
             doc: None,
@@ -376,6 +396,7 @@ async fn describe_component_reads_the_cache() {
         .describe_component(Parameters(DescribeComponentArgs {
             engine_id: engine_id.to_owned(),
             component: lineage.to_owned(),
+            full: false,
         }))
         .await
         .expect("name-addressed describe resolves to the cached caps");

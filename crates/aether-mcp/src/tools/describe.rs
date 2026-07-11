@@ -14,7 +14,7 @@ use crate::args::{
 
 use super::envelope::{engine_envelope, local_envelope};
 use super::ids::{parse_engine_id, parse_mailbox_id, static_kind_name};
-use super::render::{internal, internal_msg, json, render_shape};
+use super::render::{internal, internal_msg, json, project_capabilities, render_shape};
 use super::{COMPONENT_CAP, ENGINE_CAP, INVENTORY_CAP, Mcp};
 
 pub(super) async fn describe_kinds(mcp: &Mcp, args: DescribeKindsArgs) -> Result<String, McpError> {
@@ -125,7 +125,7 @@ pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -
     let cached =
         mcp.components.lock().expect("component cache mutex is never poisoned").get(&(engine, mailbox_id)).cloned();
     if let Some(caps) = cached {
-        return json(&caps);
+        return json(&project_capabilities(&caps, args.full));
     }
 
     // Cache miss. With a lineage name, ask the substrate live — this is
@@ -154,7 +154,7 @@ pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -
                 .lock()
                 .expect("component cache mutex is never poisoned")
                 .insert((engine, mailbox_id), capabilities.clone());
-            json(&capabilities)
+            json(&project_capabilities(&capabilities, args.full))
         }
         Some(DescribeComponentResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable DescribeComponentResult")),

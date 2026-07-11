@@ -1,7 +1,7 @@
 use super::bytes::resolve_bytes_params;
 use super::envelope::{engine_envelope, local_envelope};
 use super::ids::{parse_engine_id, parse_mailbox_id, resolve_handled_kind};
-use super::render::{frame_size_aware_error, internal, internal_msg, json};
+use super::render::{frame_size_aware_error, internal, internal_msg, json, project_capabilities};
 use super::{COMPONENT_CAP, ENGINE_CAP, Mcp};
 use crate::args::{
     ListBinariesArgs, ListComponentsArgs, LoadComponentArgs, ReplaceComponentArgs, UploadBinaryArgs,
@@ -245,7 +245,8 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
     let export = args.export.or(resolved.export);
 
     let Some(replicas) = args.replicas else {
-        return load_single_component(mcp, engine, &selector, resolved.wasm, args.name, config, export).await;
+        return load_single_component(mcp, engine, &selector, resolved.wasm, args.name, config, export, args.full)
+            .await;
     };
 
     // issue 2626: loop the single-load dispatch N times, one shared
@@ -263,7 +264,11 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
             )
         })?;
 
-    let mut loaded = Vec::with_capacity(replicas as usize);
+    // Shared capabilities (identical wasm) projected once; instances list
+    // drops the N-fold capabilities echo (issue 3006). Cache still stores
+    // full caps per instance so describe_component --full works.
+    let mut instances = Vec::with_capacity(replicas as usize);
+    let mut shared_caps = None;
     for (index, name) in replica_names(&base, replicas).into_iter().enumerate() {
         let reply = mcp
             .session
@@ -285,10 +290,12 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
                     .lock()
                     .expect("component cache mutex is never poisoned")
                     .insert((engine, mailbox_id), capabilities.clone());
-                loaded.push(serde_json::json!({
+                if shared_caps.is_none() {
+                    shared_caps = Some(capabilities);
+                }
+                instances.push(serde_json::json!({
                     "mailbox_id": mailbox_id,
                     "name": name,
-                    "capabilities": capabilities,
                 }));
             }
             Some(LoadResult::Err { error }) => {
@@ -301,11 +308,18 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
             None => return Err(internal_msg("undecodable LoadResult")),
         }
     }
-    json(&serde_json::json!({ "components": loaded }))
+    let caps = shared_caps.expect("replicas >= 1: loop either populated shared_caps or returned early");
+    json(&serde_json::json!({
+        "capabilities": project_capabilities(&caps, args.full),
+        "instances": instances,
+    }))
 }
 
 /// Preserve the original single-instance response shape while keeping the
 /// replica orchestration in [`load_component`] focused on fan-out.
+// `full` is the issue-3006 projection flag; keeps the single-load path's
+// existing positional args rather than a new options struct.
+#[allow(clippy::too_many_arguments)]
 async fn load_single_component(
     mcp: &Mcp,
     engine: EngineId,
@@ -314,6 +328,7 @@ async fn load_single_component(
     name: Option<String>,
     config: Vec<u8>,
     export: Option<String>,
+    full: bool,
 ) -> Result<String, McpError> {
     let reply = mcp
         .session
@@ -329,7 +344,7 @@ async fn load_single_component(
             json(&serde_json::json!({
                 "mailbox_id": mailbox_id,
                 "name": name,
-                "capabilities": capabilities,
+                "capabilities": project_capabilities(&capabilities, full),
             }))
         }
         Some(LoadResult::Err { error }) => Err(internal_msg(&error)),
@@ -377,7 +392,7 @@ pub(super) async fn replace_component(mcp: &Mcp, args: ReplaceComponentArgs) -> 
                 .lock()
                 .expect("component cache mutex is never poisoned")
                 .insert((engine, mailbox_id), capabilities.clone());
-            json(&capabilities)
+            json(&project_capabilities(&capabilities, args.full))
         }
         Some(ReplaceResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable ReplaceResult")),

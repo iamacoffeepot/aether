@@ -370,14 +370,20 @@ pub struct LoadComponentArgs {
     /// `name` > `export` > the entry actor's own namespace — the same
     /// precedence a plain load resolves against). Pairs with
     /// `#[router(shared)]` (ADR-0136) to scale an HTTP handler to N
-    /// instances in one call. Returns `{"components": [...]}` (one
-    /// `{mailbox_id, name, capabilities}` per instance) instead of the
+    /// instances in one call. Returns one shared `capabilities` block plus
+    /// `instances: [{mailbox_id, name}, …]` (issue 3006) instead of the
     /// single-load shape. A mid-loop failure reports which replica failed
     /// and how many loaded before it — already-loaded replicas stay live,
     /// the same as N manual `load_component` calls. Omit (or `null`) for
     /// today's single-instance load. `replicas: 0` is a tool error.
     #[serde(default)]
     pub replicas: Option<u32>,
+    /// When `true`, each capabilities doc field carries the full rustdoc
+    /// string. When `false` (default), each doc is projected to its first
+    /// non-empty rustdoc line (summary convention), matching
+    /// `describe_kinds`'s compact-vs-full posture (issue 3006).
+    #[serde(default)]
+    pub full: bool,
 }
 
 /// `replace_component` arguments.
@@ -416,6 +422,11 @@ pub struct ReplaceComponentArgs {
     /// declare comes back as a `ReplaceResult::Err`.
     #[serde(default)]
     pub export: Option<String>,
+    /// When `true`, each capabilities doc field carries the full rustdoc
+    /// string. When `false` (default), each doc is projected to its first
+    /// non-empty rustdoc line (summary convention; issue 3006).
+    #[serde(default)]
+    pub full: bool,
 }
 
 /// `describe_component` arguments.
@@ -430,6 +441,11 @@ pub struct DescribeComponentArgs {
     /// a boot-manifest-loaded component is introspectable without a prior
     /// `load_component`; a `mbx-` id is a local cache fast-path.
     pub component: String,
+    /// When `true`, each capabilities doc field carries the full rustdoc
+    /// string. When `false` (default), each doc is projected to its first
+    /// non-empty rustdoc line (summary convention; issue 3006).
+    #[serde(default)]
+    pub full: bool,
 }
 
 /// One mail in a `capture_frame` bundle. Like [`MailSpec`] but without
