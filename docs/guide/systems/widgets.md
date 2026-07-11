@@ -329,7 +329,11 @@ an inline structured `config` object or `config_path` pointing to a JSON object;
 the harness schema-encodes that JSON to `PanelConfig`. Do not pre-encode
 `LoadComponent.config` bytes in tool JSON. Use `describe_component` for the live
 config kind and `describe_kinds` for its schema, and set `children` to `[]` to
-request the built-in stack above.
+request the built-in stack above. `children: []` selects that fallback inside
+an otherwise complete `PanelConfig`; the MCP schema encoder does not fill the
+other fields from Rust's `Default`, so provide `x`, `y`, `width`,
+`font_namespace`, `font_path`, and the complete `theme` object (while
+`owns_input` retains its serde default).
 
 That built-in stack is limited to `label`, `slider`, `radio`, `text_field`, and
 `button`; it does not demonstrate the other stock kinds, including `Toggle`,
