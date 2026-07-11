@@ -22,6 +22,10 @@ const DEFAULT_TOLERANCE: f64 = 0.1;
 const CAPTURE_TOLERANCE: f64 = 0.25;
 const COMPONENT_NAME: &str = "aether-context-canary-kit";
 const COMPONENT_EXPORT: &str = "aether.kit.camera";
+const UNREAPED_ENGINE_WARNING: &str = concat!(
+    "WARNING: spawn_substrate may have created an engine, but its response did not provide a usable engine_id; ",
+    "automatic cleanup is impossible",
+);
 const SCENARIO_TOOLS: [&str; 7] = [
     "upload_component",
     "spawn_substrate",
@@ -170,12 +174,7 @@ async fn run_scenario(endpoint: &str, component: &Path) -> Result<BTreeMap<Strin
             }),
         )
         .await?;
-        let spawned: Value = text_json(&spawn, "spawn_substrate")?;
-        let engine_id = spawned
-            .get("engine_id")
-            .and_then(Value::as_str)
-            .context("spawn_substrate response omitted engine_id")?
-            .to_owned();
+        let engine_id = spawned_engine_id(&spawn)?;
 
         let exercise_result = exercise_substrate(&client, &mut measurements, &engine_id, &selector).await;
 
@@ -321,6 +320,11 @@ fn text_json(result: &CallToolResult, tool: &str) -> Result<Value> {
         .find_map(|content| content.as_text().map(|text| text.text.as_str()))
         .with_context(|| format!("{tool} response contained no text block"))?;
     serde_json::from_str(text).with_context(|| format!("parse {tool} response JSON"))
+}
+
+fn spawned_engine_id(result: &CallToolResult) -> Result<String> {
+    let spawned = text_json(result, "spawn_substrate").context(UNREAPED_ENGINE_WARNING)?;
+    spawned.get("engine_id").and_then(Value::as_str).map(str::to_owned).ok_or_else(|| anyhow!(UNREAPED_ENGINE_WARNING))
 }
 
 fn content_text(result: &CallToolResult) -> String {
@@ -512,6 +516,7 @@ fn breach_markdown(breaches: &[Breach], measurements: &BTreeMap<String, Measurem
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::model::Content;
 
     fn synthetic_manifest() -> BudgetManifest {
         BudgetManifest {
@@ -581,5 +586,19 @@ mod tests {
         let combined_message = format!("{combined_error:#}");
         assert!(combined_message.contains("scenario failed"));
         assert!(combined_message.contains("reap failed"));
+    }
+
+    #[test]
+    fn spawn_reply_without_a_usable_engine_id_warns_that_cleanup_is_impossible() {
+        let malformed = CallToolResult::success(vec![Content::text("not json")]);
+        let malformed_error = spawned_engine_id(&malformed).expect_err("malformed reply must fail");
+        assert!(format!("{malformed_error:#}").contains(UNREAPED_ENGINE_WARNING));
+
+        let missing = CallToolResult::success(vec![Content::text("{}")]);
+        let missing_error = spawned_engine_id(&missing).expect_err("missing engine id must fail");
+        assert!(format!("{missing_error:#}").contains(UNREAPED_ENGINE_WARNING));
+
+        let valid = CallToolResult::success(vec![Content::text(r#"{"engine_id":"engine-7"}"#)]);
+        assert_eq!(spawned_engine_id(&valid).expect("valid engine id"), "engine-7");
     }
 }
