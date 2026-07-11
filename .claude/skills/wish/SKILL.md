@@ -173,7 +173,7 @@ Minimal frontmatter, then free-form prose. No internal `##` headers — the pros
 ```markdown
 ---
 wish: I wish I could <X> so that I could <Y>.
-adversity: data | empathy
+adversity: data | empathy | parent-absence # non-root: the parent's unresolved absence
 parent: ../wish.md                # omit if root
 supports:                           # optional, only if branch-overlap with memory
   - "[[memory-entry-name]]"
@@ -257,7 +257,7 @@ A global best-first priority frontier of scored nodes, seeded from the roots the
 
 ### Adversarial terminality
 
-When a driller claims `producible: true`, an adversarial skeptic agent gates the claim against one bar: is there a hidden unknown that is itself **wish-worthy** — a genuine production-blocking gap, not a decision the driller could resolve inline by picking an obvious default? A wish-worthy unknown is a surface the driller assumed without grep-confirming it (and the skeptic cannot confirm either), a step not writable within current resources, or a "known mean" that is really another wish. Whether a struct carries some field, what a parameter defaults to, what something is named, or that a parent is not built yet (true of every node above a leaf) are inline decisions the driller records in its own `wish.md`, never children. The default is terminal: the skeptic returns no unknown unless it can point at a specific production-blocking gap, because there is always some unverified nit and a nit is not a wish. When it does find a wish-worthy unknown, that becomes a child and the node keeps drilling — the mechanism that kills the "good enough" shortcut without manufacturing children out of trivia. The same bar lives on the driller contract, since the skeptic only ever sees a `producible: true` claim: a driller that emits trivial children directly is held to the wish-worthy rule in its own prompt, closing the second source of the spiral.
+When a driller claims `producible: true`, an adversarial skeptic agent gates the claim against one bar: is there a hidden unknown that is itself **wish-worthy** — a genuine production-blocking gap, not a decision the driller could resolve inline by picking an obvious default? A wish-worthy unknown is a surface the driller assumed without grep-confirming it (and the skeptic cannot confirm either), a step not writable within current resources, or a "known mean" that is really another wish. Whether a struct carries some field, what a parameter defaults to, what something is named, or that a parent is not built yet (true of every node above a leaf) are inline decisions the driller records in its own `wish.md`, never children. The default is terminal: the skeptic returns no unknown unless it can point at a specific production-blocking gap, because there is always some unverified nit and a nit is not a wish. When it does find a wish-worthy unknown, the node is demoted and the branch continues through that pushed child; the demoted node itself is not re-drilled. This is the mechanism that kills the "good enough" shortcut without manufacturing children out of trivia. The same bar lives on the driller contract, since the skeptic only ever sees a `producible: true` claim: a driller that emits trivial children directly is held to the wish-worthy rule in its own prompt, closing the second source of the spiral.
 
 ### Synthesis
 
@@ -311,12 +311,13 @@ For each root, recursively:
 On `--deep`, run steps 1 (pre-load adversity) and 2 (generate roots) inline in the main context — the judgment-and-memory-bound front of the pass — then hand drilling to the `wish` workflow instead of recursing inline. The hand-off:
 
 1. **Score each root.** For every root from step 2, assign an initial `doors_opened` (leverage, 1-5) and `unresolvedness` (distance-from-plan, 1-5). These seed the frontier's scoring.
-2. **Compute `wishDir`.** The absolute path to `wishes/<YYYY-MM-DD>-<theme-slug>/`. Create the directory so the drillers have a place to write.
+2. **Compute `wishDir`.** Resolve the main working checkout as the first entry of `git worktree list`, then append `/wishes/<YYYY-MM-DD>-<theme-slug>/` to that absolute path. Never use the current session/agent worktree. Create the directory so the drillers have a durable place to write even when the invoking worktree is later swept.
 3. **Gather `groundingNotes`.** The grep-confirmed engine surfaces from step 1, as a short shared block, so the drillers extend the grounding rather than each re-deriving it.
-4. **Call the workflow.** `Workflow({name: "wish", args: {theme, role, beam, budget, roots, wishDir, groundingNotes}})` — `roots` is `[{slug, wish, doors_opened, unresolvedness}]`; `beam` and `budget` come from the flags (defaults 3 and 40); `role` is null if not given. The workflow holds the best-first frontier, spawns the parallel drillers + the skeptic gate + the synthesis writer, and the agents write every `wish.md` and `index.md` themselves.
-5. **Report from the returned stats.** On completion the workflow returns `{rootCount, totalNodes, leafCount, maxDepth, skepticDemotions, undrilled, ...}`. Print the deep-mode report (step 8) from those, and surface that the tree is on disk and resumable.
+4. **Gather `existingWork`.** Build a compact digest of open-issue titles plus the recent ADR and commit mechanisms already scanned in step 1, matching the sources used by step 4's existing-work filter. The synthesis agent uses this once, after drilling, to identify duplicated terminal leaves.
+5. **Call the workflow.** `Workflow({name: "wish", args: {theme, role, beam, budget, roots, wishDir, groundingNotes, existingWork}})` — `roots` is `[{slug, wish, doors_opened, unresolvedness}]`; `beam` and `budget` come from the flags (defaults 3 and 40); `role` is null if not given. The workflow holds the best-first frontier, spawns the parallel drillers + the read-only skeptic gate + demotion-time reconcile writers + the synthesis writer, and the agents write every `wish.md` and `index.md` themselves.
+6. **Report from the returned stats.** On completion the workflow returns `{rootCount, totalNodes, leafCount, maxDepth, skepticDemotions, undrilled, ...}`. Print the deep-mode report (step 8) from those, and surface that the tree is on disk and resumable.
 
-Deep mode does not run steps 4-7 inline — filtering and the on-disk write are the drillers' and synthesis agent's job inside the workflow. Step 8's report template has a deep-mode variant.
+Deep mode gathers step 4's existing-work inputs inline but leaves leaf deduplication to synthesis; it does not run the remainder of steps 4-7 inline. The driller, reconcile, and synthesis agents own the on-disk writes inside the workflow. Step 8's report template has a deep-mode variant.
 
 ### 4. Filter against existing work (tree-aware)
 
@@ -386,10 +387,10 @@ Deep mode (`--deep`) reports from the workflow's returned stats instead:
   Theme: <theme>[, as <role>]   (deep mode — beam <N>, budget <M>)
   Tree: <rootCount> roots, <totalNodes> nodes drilled, max depth <maxDepth>
   Plans (leaves): <leafCount>     Skeptic demotions: <skepticDemotions> (caught "good enough")
-  Frontier left undrilled (budget-bounded stubs): <undrilled>
+  Resumable undrilled (budget-bounded frontier + diminishing-returns stubs): <undrilled>
   Index: wishes/<date>-<theme>/index.md
 
-Weighted sketches (<leafCount> leaves):
+Weighted sketches (<sketches.length> non-duplicate leaves):
   - [<slug-chain>] (<weight: S|M|L|XL>) <wish> — <recommendation>
   ... (one line per leaf from sketches array)
 

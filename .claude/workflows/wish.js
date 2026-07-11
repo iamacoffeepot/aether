@@ -22,8 +22,9 @@ export const meta = {
 //   beam,            number  — fan-out width per round (default 3); the depth-vs-breadth knob
 //   budget,          number  — max driller agents the loop spawns (default 40); the size knob
 //   roots,           [{ slug, wish, doors_opened, unresolvedness }]  — generated inline by the skill
-//   wishDir,         string  — ABSOLUTE path to wishes/<date>-<theme>/ (agents write here)
+//   wishDir,         string  — ABSOLUTE path to the main worktree's wishes/<date>-<theme>/ (agents write here)
 //   groundingNotes,  string  — shared grep-confirmed engine surfaces from the skill's step-1 scan
+//   existingWork,    string  — digest of open-issue titles plus recent ADR/commit mechanisms
 // }
 //
 // NOTE on the name `budget`: the harness injects a per-turn TOKEN budget as a
@@ -39,6 +40,7 @@ const beam = Math.max(1, Number.isFinite(A.beam) ? A.beam : 3)
 const drillBudget = Math.max(1, Number.isFinite(A.budget) ? A.budget : 40)
 const wishDir = A.wishDir || ''
 const groundingNotes = A.groundingNotes || ''
+const existingWork = A.existingWork || ''
 const roots = Array.isArray(A.roots) ? A.roots : []
 
 if (!theme || !wishDir || roots.length === 0) {
@@ -79,7 +81,7 @@ const DRILL_SCHEMA = {
 
 // The synthesis agent returns per-leaf weights so the workflow can build a
 // structured sketches array without a second agent pass. One entry per terminal
-// leaf (producible:true && no children). Weight follows the /scope Size rubric:
+// leaf (producible:true && no children) not dropped as duplicate existing work. Weight follows the /scope Size rubric:
 // skinny = S/M/L (one focused PR), fat = XL (multi-PR arc, decompose first).
 const SKETCH_SCHEMA = {
   type: 'object',
@@ -88,7 +90,7 @@ const SKETCH_SCHEMA = {
   properties: {
     sketches: {
       type: 'array',
-      description: 'one entry per terminal leaf (producible && no children), in slug-chain order',
+      description: 'one entry per non-duplicate terminal leaf (producible && no children), in slug-chain order',
       items: {
         type: 'object',
         additionalProperties: false,
@@ -106,7 +108,7 @@ const SKETCH_SCHEMA = {
 
 // A skeptic runs ONLY on a producible:true claim. It must FAIL to find a hidden
 // unknown before the node counts terminal. A found unknown re-enters the frontier
-// as a child and the node keeps drilling — this is what kills "good enough".
+// as a child, so the branch continues through that child while the demoted node is not re-drilled.
 const SKEPTIC_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -136,7 +138,7 @@ const WISH_MD_SHAPE =
   '```\n' +
   '---\n' +
   'wish: I wish I could <X> so that I could <Y>.\n' +
-  'adversity: data | empathy\n' +
+  'adversity: data | empathy | parent-absence # non-root: the parent\'s unresolved absence\n' +
   'parent: ../wish.md            # omit if this node is a root\n' +
   'producible: true | false      # true means this wish IS a plan\n' +
   'grounded_surfaces:             # re-greppable `identifier` — crates/aether-*/src/path citations\n' +
@@ -219,25 +221,39 @@ const skepticPrompt = (node, res) =>
   'Otherwise — every leaned-on surface checks out and what remains is inline decisions — ' +
   'return hidden_unknown_found:false and unknown:null with a rationale naming what you verified.\n\nStructured output only.'
 
-const synthPrompt = (indexPath, nodeBlock, stubBlock, leafBlock, stats) =>
+const reconcilePrompt = ({ file, node, unknown }) =>
+  '## Reconcile a skeptic-demoted wish\n\n' +
+  'A read-only skeptic found a production-blocking absence after the driller wrote this node as producible. ' +
+  'Edit the existing wish.md at this EXACT path:\n  ' + file + '\n\n' +
+  'Wish: ' + node.wish + '\n' +
+  'Newly surfaced child: ' + unknown.wish + '\n\n' +
+  'Make only these two changes: set the frontmatter `producible: true` value to `producible: false`, and append ' +
+  'one prose paragraph (no header) naming the newly surfaced child wish as the production-blocking absence. ' +
+  'Preserve every other frontmatter field and all existing prose. You MUST edit the wish.md file.'
+
+const synthPrompt = ({ indexPath, nodeBlock, frontierBlock, stubBlock, leafBlock, stats, existingWork }) =>
   '## Wish-tree synthesis — write the index\n\n' +
   'A /wish --deep pass drilled this tree node by node; each node below is one bounded summary (the fan-out spent ' +
   'the cross-branch coherence, your job is to recover it). Theme: ' + theme + (role ? ' (as ' + role + ')' : '') + '.\n\n' +
   '## Nodes (path · producible · wish · summary)\n' + nodeBlock + '\n\n' +
+  '## Existing work (flag any duplicated terminal leaf in considered-and-dropped)\n' +
+  (existingWork || '(none provided)') + '\n\n' +
+  '## Budget-bounded frontier (undrilled; resumable via /wish --under)\n' + frontierBlock + '\n\n' +
   '## Diminishing-returns stubs (recorded undrilled — score collapsed below half the parent past depth 3; resumable via /wish --under)\n' + stubBlock + '\n\n' +
   '## Terminal leaves to weigh (producible plans — assign skinny/fat weight)\n' + leafBlock + '\n\n' +
   '## Stats\n' +
   'roots: ' + stats.rootCount + '  ·  drilled nodes: ' + stats.totalNodes + '  ·  plans (leaves): ' + stats.leafCount +
   '  ·  max depth: ' + stats.maxDepth + '  ·  skeptic demotions: ' + stats.skepticDemotions +
-  '  ·  named-but-undrilled (budget-bounded): ' + stats.undrilled + '\n\n' +
+  '  ·  named-but-undrilled (frontier + stubs): ' + stats.undrilled + '\n\n' +
   '## Task\nWrite index.md to the EXACT path:\n  ' + indexPath + '\n' +
   'It is the navigation surface, not a duplicate of the wish bodies. Include: date, theme, role; the list of root ' +
   'wishes with one-line summaries; the deep-spine map (which high-leverage branches drilled deep vs which stayed ' +
   'stubs, and WHY — the cross-branch coherence); the skeptic-demoted nodes (where "good enough" was caught); the ' +
-  'diminishing-returns stub list above (collapsing-score branches that self-terminated, resumable via /wish --under); the ' +
-  'stats above; and a short notes paragraph.\n\n' +
+  'budget-bounded frontier and diminishing-returns stub lists above as two distinct categories, both resumable via ' +
+  '/wish --under; a considered-and-dropped entry for every terminal leaf that duplicates the existing-work digest ' +
+  '(omit those duplicate leaves from weighted sketches); the stats above; and a short notes paragraph.\n\n' +
   'Additionally, write a ## Weighted sketches section at the end of index.md — one bullet per terminal leaf ' +
-  '(the leaves listed in "Terminal leaves to weigh" above). Each bullet: `- [slug-path] (WEIGHT) wish-text — recommendation`. ' +
+  'not dropped as duplicate existing work. Each bullet: `- [slug-path] (WEIGHT) wish-text — recommendation`. ' +
   'Assign weight using the /scope Size rubric: S = single-file/concept change (one small PR); M = single-crate/multiple files; ' +
   'L = cross-crate or architectural change; XL = multi-PR arc that must be decomposed before scoping. ' +
   'S/M/L = skinny (one focused PR, ready for /sketch then /scope). XL = fat (decompose first via /wish --under or file fat for sweep fat). ' +
@@ -287,9 +303,10 @@ const drillNode = async (node) => {
   if (producible) {
     const sk = await agent(skepticPrompt(node, res), { label: 'skeptic:' + node.slug, phase: 'Drill', schema: SKEPTIC_SCHEMA, agentType: 'Explore' })
     if (sk && sk.hidden_unknown_found && sk.unknown) {
-      producible = false   // demoted — the node keeps drilling
+      producible = false   // demoted — the branch continues through the pushed child; this node is not re-drilled
       demoted = true
       children.push(sk.unknown)
+      await agent(reconcilePrompt({ file, node, unknown: sk.unknown }), { label: 'reconcile:' + node.slug, phase: 'Drill' })
       log('skeptic demoted [' + node.slug + ']: ' + sk.unknown.slug)
     }
   }
@@ -367,6 +384,14 @@ const nodeBlock = summaries
   .map(s => '- [' + s.slugChain.join('/') + '] (' + (s.producible ? 'plan' : 'wish') + ') ' + s.wish + '\n    ' + s.summary)
   .join('\n')
 
+const frontierBlock = frontier.length
+  ? frontier
+      .slice()
+      .sort((a, b) => a.slugChain.join('/').localeCompare(b.slugChain.join('/')))
+      .map(node => '- [' + node.slugChain.join('/') + '] (frontier · score ' + node.score + ') ' + node.wish)
+      .join('\n')
+  : '(none)'
+
 const stubBlock = stubs.length
   ? stubs
       .slice()
@@ -390,7 +415,15 @@ const leafBlock = leaves.length
   : '(no terminal leaves — all nodes still have children or all were stubs)'
 
 const indexPath = wishDir + '/index.md'
-const synth = await agent(synthPrompt(indexPath, nodeBlock, stubBlock, leafBlock, stats), { label: 'synthesize', phase: 'Synthesize', schema: SKETCH_SCHEMA })
+const synth = await agent(synthPrompt({
+  indexPath,
+  nodeBlock,
+  frontierBlock,
+  stubBlock,
+  leafBlock,
+  stats,
+  existingWork,
+}), { label: 'synthesize', phase: 'Synthesize', schema: SKETCH_SCHEMA })
 
 // Build the sketches array from the synth agent's structured output.
 // If the agent did not return a conforming schema (e.g. no leaves), fall back to an empty array.
