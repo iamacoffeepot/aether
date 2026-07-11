@@ -10,7 +10,7 @@ use crate::args::{
 use aether_codec::frame::max_frame_size;
 use aether_data::{EngineId, Kind, SchemaType, wire};
 use aether_kinds::{
-    KindDescriptorWire, ListComponentBinaries, ListComponentBinariesResult, ListEngineBinaries,
+    ComponentCapabilities, KindDescriptorWire, ListComponentBinaries, ListComponentBinariesResult, ListEngineBinaries,
     ListEngineBinariesResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult, UploadBinary,
     UploadBinaryResult, UploadComponent, UploadComponentResult,
 };
@@ -152,7 +152,18 @@ pub(super) fn replica_names(base: &str, replicas: u32) -> Vec<String> {
     (0..replicas).map(|index| format!("{base}-{index}")).collect()
 }
 
-/// Hard ceiling on `replicas` for one load/spawn fan-out (issue 3006
+pub(super) fn replicas_reply(
+    capabilities: &ComponentCapabilities,
+    instances: &[serde_json::Value],
+    full: bool,
+) -> Result<String, McpError> {
+    json(&serde_json::json!({
+        "capabilities": project_capabilities(capabilities, full),
+        "instances": instances,
+    }))
+}
+
+/// Hard ceiling on `replicas` for one `load_component` fan-out (issue 3006
 /// review). Bounds allocation of the name list and sequential load
 /// dispatches before an absurd caller value can OOM or hang the tool.
 /// Mirrors the style of `actor_logs`' caller-supplied `max` clamp (default
@@ -160,19 +171,25 @@ pub(super) fn replica_names(base: &str, replicas: u32) -> Vec<String> {
 /// protocol constant.
 pub(super) const MAX_REPLICAS: u32 = 256;
 
-/// Reject `replicas` outside `1..=MAX_REPLICAS` (ADR-0090 §4: a bad known
-/// value is a hard tool error, not a silent no-op / unbounded fan-out)
-/// before any load dispatch or name-list allocation.
-pub(super) fn reject_replicas_out_of_range(replicas: Option<u32>, selector: &str) -> Result<(), McpError> {
-    let Some(n) = replicas else {
-        return Ok(());
-    };
-    if n == 0 {
+/// Reject `replicas: 0` (ADR-0090 §4 posture: a bad known value is a hard
+/// error, not a silent no-op) before it reaches any load dispatch.
+pub(super) fn reject_zero_replicas(replicas: Option<u32>, selector: &str) -> Result<(), McpError> {
+    if replicas == Some(0) {
         return Err(McpError::invalid_params(
             format!("component {selector:?}: replicas must be at least 1 (got 0)"),
             None,
         ));
     }
+    Ok(())
+}
+
+/// Reject `load_component` replicas outside `1..=MAX_REPLICAS` before any
+/// dispatch or name-list allocation.
+pub(super) fn reject_replicas_out_of_range(replicas: Option<u32>, selector: &str) -> Result<(), McpError> {
+    reject_zero_replicas(replicas, selector)?;
+    let Some(n) = replicas else {
+        return Ok(());
+    };
     if n > MAX_REPLICAS {
         return Err(McpError::invalid_params(
             format!("component {selector:?}: replicas must be at most {MAX_REPLICAS} (got {n})"),
@@ -326,11 +343,11 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
             None => return Err(internal_msg("undecodable LoadResult")),
         }
     }
-    let caps = shared_caps.expect("replicas >= 1: loop either populated shared_caps or returned early");
-    json(&serde_json::json!({
-        "capabilities": project_capabilities(&caps, args.full),
-        "instances": instances,
-    }))
+    replicas_reply(
+        &shared_caps.expect("replicas >= 1: loop either populated shared_caps or returned early"),
+        &instances,
+        args.full,
+    )
 }
 
 /// Preserve the original single-instance response shape while keeping the

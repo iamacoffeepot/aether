@@ -173,6 +173,7 @@ fn reject_replicas_out_of_range_enforces_bounds() {
     assert!(reject_replicas_out_of_range(Some(MAX_REPLICAS), "sel").is_ok());
     assert!(reject_replicas_out_of_range(Some(MAX_REPLICAS + 1), "sel").is_err());
     assert!(reject_replicas_out_of_range(None, "sel").is_ok());
+    assert!(reject_zero_replicas(Some(MAX_REPLICAS + 1), "sel").is_ok());
 }
 
 /// `load_component` with a selector that resolves to no stored
@@ -221,8 +222,8 @@ async fn load_component_replicas_zero_is_tool_error() {
 
 /// Tripwire: a `replicas: N` reply is one shared capabilities block plus
 /// N `{mailbox_id, name}` instances — no per-instance capabilities echo
-/// (issue 3006). Shape-only: the JSON is what the fan-out arm builds after
-/// a successful loop.
+/// (issue 3006). The tripwire exercises the same reply builder used by the
+/// successful production fan-out path.
 #[test]
 fn replicas_reply_shape_is_shared_caps_plus_instances() {
     use aether_data::{KindId, ReplyContract};
@@ -237,15 +238,19 @@ fn replicas_reply_shape_is_shared_caps_plus_instances() {
         }],
         ..ComponentCapabilities::default()
     };
-    let projected = project_capabilities(&caps, false);
-    let reply = serde_json::json!({
-        "capabilities": projected,
-        "instances": [
-            { "mailbox_id": "mbx-a", "name": "svc-0" },
-            { "mailbox_id": "mbx-b", "name": "svc-1" },
-            { "mailbox_id": "mbx-c", "name": "svc-2" },
-        ],
-    });
+    let reply: serde_json::Value = serde_json::from_str(
+        &replicas_reply(
+            &caps,
+            &[
+                serde_json::json!({ "mailbox_id": "mbx-a", "name": "svc-0" }),
+                serde_json::json!({ "mailbox_id": "mbx-b", "name": "svc-1" }),
+                serde_json::json!({ "mailbox_id": "mbx-c", "name": "svc-2" }),
+            ],
+            false,
+        )
+        .expect("replica reply serializes"),
+    )
+    .expect("replica reply is JSON");
     assert!(reply.get("components").is_none(), "old components array must not appear: {reply}");
     assert_eq!(reply["instances"].as_array().map(Vec::len), Some(3));
     assert!(reply["instances"][0].get("capabilities").is_none());
