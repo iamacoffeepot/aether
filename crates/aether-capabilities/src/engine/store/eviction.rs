@@ -1,4 +1,4 @@
-//! LRU disk-budget eviction for [`super::ArtifactStore`].
+//! LRU disk-budget eviction for [`ArtifactStore`].
 
 use std::collections::HashSet;
 use std::fs;

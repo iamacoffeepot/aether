@@ -656,7 +656,7 @@ mod tests {
             id: MarkId::new(id),
             revision,
             geometry: MarkGeometry::Point(WorldPoint::new(128, 128)),
-            label: alloc::format!("mark-{id}"),
+            label: format!("mark-{id}"),
         }
     }
 

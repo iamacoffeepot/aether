@@ -284,7 +284,7 @@ fn value_for_map(key_schema: &SchemaType, value_schema: &SchemaType) -> BoxedStr
         SchemaType::Scalar(p) => {
             prop::collection::btree_map(arb_int_key(*p), value_strat, 0..=MAX_WIDTH).prop_map(stringify_keys).boxed()
         }
-        other => unreachable!("arb_map_key_schema never yields {other:?} as a map key"),
+        other => unreachable!("arb_map_key_schema never yields {:?} as a map key", other),
     }
 }
 
@@ -308,7 +308,7 @@ fn arb_int_key(p: Primitive) -> BoxedStrategy<i128> {
         Primitive::I16 => (i128::from(i16::MIN)..=i128::from(i16::MAX)).boxed(),
         Primitive::I32 => (i128::from(i32::MIN)..=i128::from(i32::MAX)).boxed(),
         Primitive::I64 => (i128::from(i64::MIN)..=i128::from(i64::MAX)).boxed(),
-        other => unreachable!("arb_int_key called with non-integer primitive {other:?}"),
+        other => unreachable!("arb_int_key called with non-integer primitive {:?}", other),
     }
 }
 

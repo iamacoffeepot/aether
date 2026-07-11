@@ -286,7 +286,6 @@ dependencies = [
  "confique",
  "crossbeam-channel",
  "crossbeam-deque",
- "dirs",
  "libc",
  "png",
  "proptest",
@@ -356,7 +355,6 @@ dependencies = [
  "aether-kinds",
  "aether-math",
  "aether-test-fixtures-kinds",
- "bytemuck",
  "serde",
  "tracing",
 ]

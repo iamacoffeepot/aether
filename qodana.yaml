@@ -28,13 +28,15 @@ exclude:
   # container builds under path remapping, so local_file() returns None and
   # the ADR-0123-recorded hard-error fallback fires, producing an
   # RsCompileErrorMacro finding on every #[actor] invocation in this crate.
-  # Real cargo paths (clippy / nextest / doc / CI) compile every cap cleanly
-  # — the error is Qodana-container-only. Scoped to aether-capabilities (the
-  # only crate hosting the struct-hosted form) so genuine macro compile errors
-  # remain active everywhere else, including aether-actor-derive itself.
+  # Real cargo paths (clippy / nextest / doc / CI) compile every cap and the
+  # dedicated split-cap fixture cleanly — the error is Qodana-container-only.
+  # Scoped to the production capability crate and that one proof fixture so
+  # genuine macro compile errors remain active everywhere else, including
+  # aether-actor-derive itself.
   - name: RsCompileErrorMacro
     paths:
       - crates/aether-capabilities
+      - crates/aether-test-fixtures/aether-test-fixtures-split-cap
   - name: All
     paths:
       - target

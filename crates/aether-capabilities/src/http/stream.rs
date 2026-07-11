@@ -22,7 +22,7 @@
 //! gets it without the native runtime.
 //!
 //! [`HttpServerCapability`]: super::HttpServerCapability
-//! [`MailboxId`]: aether_data::MailboxId
+//! [`MailboxId`]: MailboxId
 
 use aether_actor::{MailSender, OutboundReply};
 use aether_data::MailboxId;

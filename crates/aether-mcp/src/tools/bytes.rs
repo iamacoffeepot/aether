@@ -1,4 +1,4 @@
-use super::{EnumVariant, SchemaType, Uuid};
+use super::{EnumVariant, SchemaType};
 use aether_data::NamedField;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -441,7 +441,7 @@ pub(super) fn spill_reply_bytes(dir: &Path, bytes: &[u8]) -> io::Result<PathBuf>
     // `std::fs`, not the module's `tokio::fs`: this write is blocking by design
     // (the MCP front handling a tool reply is not latency-critical).
     use std::fs as std_fs;
-    let path = dir.join(format!("aether-reply-{}.bin", Uuid::new_v4()));
+    let path = dir.join(format!("aether-reply-{}.bin", uuid::Uuid::new_v4()));
     std_fs::write(&path, bytes)?;
     Ok(path)
 }
