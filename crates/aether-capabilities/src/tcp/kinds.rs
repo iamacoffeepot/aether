@@ -1,10 +1,10 @@
 //! Mail kinds owned by the `aether.tcp` capability family.
 //!
-//! These 13 kind types plus the [`ListenerInfo`] helper struct were
-//! formerly defined in `aether-kinds`; they live here now per ADR-0121
-//! (capabilities own their kinds). The kind ids are `fnv1a_64(name,
-//! schema)`, so moving the declarations does not change any id or
-//! alter wire compatibility.
+//! The original 13 kind types plus the [`ListenerInfo`] helper struct
+//! were formerly defined in `aether-kinds`; they live here now per
+//! ADR-0121 (capabilities own their kinds). This module now owns 16
+//! kinds. Kind ids are `fnv1a_64(name, schema)`, so moving declarations
+//! does not change any id or alter wire compatibility.
 
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +24,40 @@ pub struct BindListener {
     pub addr: String,
     pub name: Option<String>,
     pub consumer: Option<String>,
+}
+
+/// `aether.tcp.connect` — request the singleton `TcpCapability`
+/// to dial `addr` and spawn a fresh `TcpSessionActor` over the
+/// connected stream. Mirrors [`BindListener`]: `addr` is resolved
+/// via `std::net::ToSocketAddrs`, and optional `name` overrides
+/// the default `conn-N` session subname. Optional `consumer` is the
+/// late-bound mailbox name the dialed session delivers inbound frames
+/// and close notices to; `None` leaves the session observer-less and
+/// drops inbound bytes. Reply: [`ConnectResult`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.tcp.connect")]
+pub struct Connect {
+    pub addr: String,
+    pub name: Option<String>,
+    pub consumer: Option<String>,
+}
+
+/// Reply to [`Connect`]. `Ok` carries the resolved connect-session
+/// subname, the session's `MailboxId`, and the connected peer address.
+/// `Err` carries the requested address and a human-readable dial or
+/// spawn failure.
+///
+/// `MailboxId` round-trips imprecisely over JSON. Typed native and wasm
+/// callers resolve by `session_name` through the `connect_session*`
+/// helpers. MCP callers must use the full ADR-0099 lineage path
+/// `aether.tcp/aether.tcp.session:<session_name>` as `recipient_name`;
+/// the bare subname is not a mailbox address. `session_id` is the native
+/// wire id for native peers.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.tcp.connect_result")]
+pub enum ConnectResult {
+    Ok { session_name: String, session_id: aether_data::MailboxId, peer: String },
+    Err { addr: String, reason: String },
 }
 
 /// Reply to `BindListener`. `Ok` carries the resolved listener
@@ -119,6 +153,15 @@ pub struct Close {}
 #[kind(name = "aether.tcp.connection_ready")]
 pub struct ConnectionReady {}
 
+/// `aether.tcp.connect_ready` — sidecar dial thread → capability
+/// dispatcher wake. Mirror of [`ConnectionReady`] for outbound
+/// connections: the dial thread pushes its `TcpStream` or error over
+/// an mpsc and fires this fieldless mail so the cap can drain the
+/// channel, spawn the session actor, and complete the parked reply.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.tcp.connect_ready")]
+pub struct ConnectReady {}
+
 /// `aether.tcp.session_data_ready` — sidecar read thread → session
 /// dispatcher wake. Mirror of [`ConnectionReady`] for the session
 /// read path: the read thread blocks on `read()`, pushes bytes via
@@ -131,7 +174,7 @@ pub struct ConnectionReady {}
 pub struct SessionDataReady {}
 
 /// `aether.tcp.session_data` — one reassembled length-prefix frame
-/// delivered by a `TcpSessionActor` to the listener's bound consumer.
+/// delivered by a `TcpSessionActor` to its configured consumer.
 /// Carries the session subname (`conn-N`), the peer address as a
 /// string, and the complete frame body. Structured-shaped
 /// (variable-length payload) — agents drain via `receive_mail`.
@@ -159,12 +202,12 @@ pub struct SessionWrite {
 /// gracefully. Mailed via `ctx.actor::<TcpSessionActor>(...)` or
 /// resolved by subname. The session's handler calls
 /// `ctx.shutdown()`; the close fan-out fires `MonitorNotice` to
-/// the parent listener (which spawned it).
+/// the parent actor that spawned it.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.tcp.session_close")]
 pub struct SessionClose {}
 
-/// `aether.tcp.session_closed` — delivered to the listener's bound
+/// `aether.tcp.session_closed` — delivered to the session's configured
 /// consumer on peer EOF, read error, or frame rejection. Carries the
 /// session subname, the peer address, and a human-readable reason. A
 /// trailing partial frame at close is dropped and noted in the reason.
