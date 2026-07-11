@@ -23,20 +23,35 @@ export const meta = {
 //   authorModel,  string  — model for the Author phase (default 'sonnet').
 //   attemptModel, string  — model for the Attempt (default 'opus' — the consumer does real engineering).
 //   judgeModel,   string  — model for the vision judge (default 'opus').
+//   authorEffort, string  — reasoning effort for the Author (default 'medium').
+//   attemptEffort,string  — reasoning effort for the Attempt (default 'high' — it does real engineering).
+//   judgeEffort,  string  — reasoning effort for the judge (default 'high').
+//   driverModel,  string  — the model of the harness session that INVOKED this workflow. The workflow
+//                           cannot read it, so an unattended caller (the CI action) passes it in purely
+//                           so the rollup can record it. Recorded, never acted on.
 // }
 //
 // returns { proposedTask?, needsApproval?, rollup, task }. For a heavy medium (author / build-layer)
 // authored fresh, the run STOPS after Author and returns { proposedTask, needsApproval:true, rollup:null }
 // — a workflow cannot block on human input, so the caller reviews the task and re-invokes with args.task.
 // A drive task runs straight through. rollup = { totals, succeeded, buildGreen, artifact, friction
-// (grouped papercut|missing-primitive|doc-gap|blocker), softHolds }. softHolds = a wrong artifact verdict
-// or any high-severity blocker — the subset a reviewer clears. friction feeds the flywheel: papercut ->
-// /sketch, missing-primitive -> a build-machinery issue, doc-gap -> a guide edit.
+// (grouped papercut|missing-primitive|doc-gap|blocker), softHolds, task, provenance }. softHolds = a wrong
+// artifact verdict or any high-severity blocker — the subset a reviewer clears. friction feeds the
+// flywheel: papercut -> /sketch, missing-primitive -> a build-machinery issue, doc-gap -> a guide edit.
+//
+// rollup.task and rollup.provenance exist so a trial is DIAGNOSABLE from its evidence alone. A verdict
+// read without the task that produced it, and without the prompt/model/effort of the agent that rendered
+// it, is unfalsifiable: a reader cannot tell a real defect from an agent that was asked the wrong
+// question. They ride inside the rollup (not as a sibling of it) because the rollup is the single file
+// the evidence branch, the viewer, and the issue comment all read.
 
 const A = (typeof args === 'string') ? JSON.parse(args || '{}') : (args || {})
 const AUTHOR_MODEL = A.authorModel || 'sonnet'
 const ATTEMPT_MODEL = A.attemptModel || 'opus'
 const JUDGE_MODEL = A.judgeModel || 'opus'
+const AUTHOR_EFFORT = A.authorEffort || 'medium'
+const ATTEMPT_EFFORT = A.attemptEffort || 'high'
+const JUDGE_EFFORT = A.judgeEffort || 'high'
 
 const MEDIA = ['drive', 'author', 'build-layer']
 // Media whose generated task is expensive to attempt (a scratch crate + compile loop), so a fresh
@@ -193,11 +208,16 @@ Return verdict and rationale.`
 
 // Phase 1 — Author (skipped when a task is supplied). A freshly-authored heavy-medium task is
 // human-gated: the run returns the proposal and stops, because a workflow cannot block on input.
+// Every prompt actually sent is retained verbatim for the rollup's provenance block — the reader of a
+// verdict needs the question the agent was asked, not a reconstruction of it.
+const prompts = { author: null, attempt: null, judge: null }
+
 let task = A.task || null
 if (!task) {
   phase('Author')
-  task = await agent(authorPrompt(A.issue, A.diff, A.surface, A.medium), {
-    label: 'author', phase: 'Author', model: AUTHOR_MODEL, schema: TASK_SCHEMA,
+  prompts.author = authorPrompt(A.issue, A.diff, A.surface, A.medium)
+  task = await agent(prompts.author, {
+    label: 'author', phase: 'Author', model: AUTHOR_MODEL, effort: AUTHOR_EFFORT, schema: TASK_SCHEMA,
   })
   if (!task) throw new Error('dogfood: the Author phase produced no task')
   if (HEAVY.has(task.medium)) {
@@ -210,8 +230,9 @@ if (!task) {
 // Phase 2 — Attempt. A fresh agent, never handed the diff, accomplishes the task through the public
 // surface and logs friction. Heavy media compile a scratch crate, so they get an isolated worktree.
 phase('Attempt')
-const attempt = await agent(attemptPrompt(task), {
-  label: `attempt:${task.medium}`, phase: 'Attempt', model: ATTEMPT_MODEL,
+prompts.attempt = attemptPrompt(task)
+const attempt = await agent(prompts.attempt, {
+  label: `attempt:${task.medium}`, phase: 'Attempt', model: ATTEMPT_MODEL, effort: ATTEMPT_EFFORT,
   agentType: 'general-purpose',
   isolation: HEAVY.has(task.medium) ? 'worktree' : undefined,
   schema: FRICTION_SCHEMA,
@@ -226,8 +247,10 @@ if (!attempt) throw new Error('dogfood: the Attempt agent died with no friction 
 let judge = null
 if (task.expectedArtifact && attempt.engineId) {
   phase('Judge')
-  judge = await agent(judgePrompt(task, attempt.engineId, attempt.replayMails), {
-    label: 'judge', phase: 'Judge', model: JUDGE_MODEL, agentType: 'general-purpose', schema: JUDGE_SCHEMA,
+  prompts.judge = judgePrompt(task, attempt.engineId, attempt.replayMails)
+  judge = await agent(prompts.judge, {
+    label: 'judge', phase: 'Judge', model: JUDGE_MODEL, effort: JUDGE_EFFORT,
+    agentType: 'general-purpose', schema: JUDGE_SCHEMA,
   })
 } else if (task.expectedArtifact && !attempt.engineId) {
   log('dogfood: task expected a render artifact but the Attempt left no live engine — artifact unjudged.')
@@ -252,7 +275,30 @@ const totals = {
   softHolds: softHolds.length,
 }
 
+// What ran, and what it was asked. A phase that did not run (Author on a supplied task, Judge on a
+// non-rendering task) records a null prompt rather than being omitted, so the reader can tell "this phase
+// was skipped" from "this field was never recorded".
+//
+// The stored prompt is clipped: the Author's embeds the entire landed diff, and the rollup is committed
+// to the evidence branch on every trial. The clip is generous enough that the Attempt's and the Judge's
+// prompts — the two a reader actually adjudicates a verdict against — always land whole, and it marks
+// itself when it fires rather than truncating silently.
+const PROMPT_STORE_MAX = 20000
+const storedPrompt = (p) => (p === null || p.length <= PROMPT_STORE_MAX)
+  ? p
+  : `${p.slice(0, PROMPT_STORE_MAX)}\n\n[…clipped ${p.length - PROMPT_STORE_MAX} chars of ${p.length} for the evidence record]`
+
+const provenance = {
+  driver: { model: A.driverModel || null },
+  phases: {
+    author: { model: AUTHOR_MODEL, effort: AUTHOR_EFFORT, agentType: null, prompt: storedPrompt(prompts.author) },
+    attempt: { model: ATTEMPT_MODEL, effort: ATTEMPT_EFFORT, agentType: 'general-purpose', prompt: storedPrompt(prompts.attempt) },
+    judge: { model: JUDGE_MODEL, effort: JUDGE_EFFORT, agentType: 'general-purpose', prompt: storedPrompt(prompts.judge) },
+  },
+}
+
 log(`dogfood [${task.medium}]: succeeded=${attempt.succeeded}${attempt.buildGreen === null ? '' : ` buildGreen=${attempt.buildGreen}`}${judge ? ` artifact=${judge.verdict}` : ''} — ${totals.findings} findings (papercut ${totals.papercut}, missing-primitive ${totals.missingPrimitive}, doc-gap ${totals.docGap}, blocker ${totals.blocker}), ${softHolds.length} SOFT-HOLD`)
+log(`dogfood provenance: driver=${provenance.driver.model || 'unrecorded'} attempt=${ATTEMPT_MODEL}/${ATTEMPT_EFFORT} judge=${JUDGE_MODEL}/${JUDGE_EFFORT}`)
 
 return {
   rollup: {
@@ -263,6 +309,8 @@ return {
     artifact: judge ? { verdict: judge.verdict, rationale: judge.rationale } : null,
     friction: byCategory,
     softHolds,
+    task,
+    provenance,
   },
   task,
 }

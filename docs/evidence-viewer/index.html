@@ -132,6 +132,27 @@
     border-radius: 4px;
     padding: 0.1rem 0.35rem;
   }
+  /* A prompt is long-form text, not code: wrap it rather than sending the page
+     into a horizontal scroll. */
+  pre {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin: 0.4rem 0 1rem;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 0.85rem;
+    line-height: 1.45;
+  }
+  details {
+    margin: 0.5rem 0;
+  }
+  summary {
+    cursor: pointer;
+    color: var(--link);
+  }
 </style>
 </head>
 <body>
@@ -415,6 +436,97 @@
     return String(value);
   }
 
+  // The task and the provenance are what make a verdict falsifiable: without the
+  // prompt the consumer was handed and the artifact the judge was told to expect,
+  // a "wrong" is unreadable — you cannot tell a real defect from an agent that was
+  // asked the wrong question. Everything is set via textContent, never innerHTML.
+  function labelled(label, value) {
+    var p = el("p");
+    var strong = el("strong", { text: label + ": " });
+    p.appendChild(strong);
+    p.appendChild(document.createTextNode(fieldText(value) || "—"));
+    return p;
+  }
+
+  function renderTask(task) {
+    var section = el("div", { className: "card" });
+    if (!task || typeof task !== "object") {
+      section.appendChild(el("p", {
+        className: "muted",
+        text: "This run predates task capture — the rollup does not record what the consumer was asked.",
+      }));
+      return section;
+    }
+    section.appendChild(labelled("Medium", task.medium));
+    section.appendChild(labelled("Surface under test", task.surfaceUnderTest));
+
+    section.appendChild(el("div", { className: "category-heading", text: "Handed verbatim to the consumer" }));
+    section.appendChild(el("pre", { text: fieldText(task.prompt) || "—" }));
+
+    section.appendChild(el("div", {
+      className: "category-heading",
+      text: "Expected artifact (the judge grades against this; the consumer never sees it)",
+    }));
+    section.appendChild(el("pre", {
+      text: task.expectedArtifact ? fieldText(task.expectedArtifact) : "(none — nothing renders, so no artifact was judged)",
+    }));
+    return section;
+  }
+
+  function renderProvenance(provenance) {
+    var wrap = document.createDocumentFragment();
+    if (!provenance || typeof provenance !== "object") {
+      wrap.appendChild(el("p", {
+        className: "muted",
+        text: "This run predates provenance capture — the models, effort, and prompts it ran with were not recorded.",
+      }));
+      return wrap;
+    }
+
+    var table = el("table");
+    var thead = el("thead");
+    var headRow = el("tr");
+    ["phase", "model", "effort", "agent type"].forEach(function (heading) {
+      headRow.appendChild(el("th", { text: heading }));
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    var tbody = el("tbody");
+    var driverRow = el("tr");
+    driverRow.appendChild(el("td", { text: "driver (harness session)" }));
+    driverRow.appendChild(el("td", { text: fieldText(provenance.driver && provenance.driver.model) || "—" }));
+    driverRow.appendChild(el("td", { text: "—" }));
+    driverRow.appendChild(el("td", { text: "—" }));
+    tbody.appendChild(driverRow);
+
+    var phases = provenance.phases || {};
+    var order = ["author", "attempt", "judge"];
+    order.forEach(function (name) {
+      var phase = phases[name];
+      if (!phase) return;
+      var tr = el("tr");
+      tr.appendChild(el("td", { text: phase.prompt ? name : name + " (did not run)" }));
+      tr.appendChild(el("td", { text: fieldText(phase.model) || "—" }));
+      tr.appendChild(el("td", { text: fieldText(phase.effort) || "—" }));
+      tr.appendChild(el("td", { text: fieldText(phase.agentType) || "—" }));
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+
+    order.forEach(function (name) {
+      var phase = phases[name];
+      if (!phase || !phase.prompt) return;
+      var details = el("details");
+      details.appendChild(el("summary", { text: "The " + name + " prompt, as sent" }));
+      details.appendChild(el("pre", { text: fieldText(phase.prompt) }));
+      wrap.appendChild(details);
+    });
+
+    return wrap;
+  }
+
   function renderFrictionTable(friction) {
     var wrap = document.createDocumentFragment();
     if (!friction || typeof friction !== "object") return wrap;
@@ -555,6 +667,9 @@
     app.appendChild(el("h1", { text: "Evidence: " + run.joined }));
     app.appendChild(renderVerdictHeader(rollup));
 
+    app.appendChild(el("h2", { text: "The task" }));
+    app.appendChild(renderTask(rollup.task));
+
     app.appendChild(el("h2", { text: "Friction" }));
     app.appendChild(renderFrictionTable(rollup.friction));
 
@@ -569,6 +684,9 @@
 
     app.appendChild(el("h2", { text: "Media & artifacts" }));
     app.appendChild(renderMedia(run));
+
+    app.appendChild(el("h2", { text: "Provenance" }));
+    app.appendChild(renderProvenance(rollup.provenance));
   }
 
   function main() {
