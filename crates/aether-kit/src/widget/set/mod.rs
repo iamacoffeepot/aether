@@ -59,7 +59,7 @@ use aether_actor::WasmCtx;
 use aether_capabilities::TextCapability;
 use aether_capabilities::text::{FontMetricsRequest, FontRef};
 use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
-use aether_kinds::{Modifiers, MouseButtonRelease, mouse_button};
+use aether_kinds::{Modifiers, MouseButton, MouseButtonRelease, mouse_button};
 use aether_math::Rgba;
 
 use crate::widget::state::{InteractionState, emit_state_changed};
@@ -87,6 +87,12 @@ impl ActivationArms {
     fn press_pointer(&mut self, frame: &WidgetFrame, eligible: bool, x: f32, y: f32) {
         if eligible && Self::contains(frame, x, y) {
             self.pointer_pressed = true;
+        }
+    }
+
+    fn press_mouse_button(&mut self, frame: &WidgetFrame, eligible: bool, press: MouseButton) {
+        if press.button == mouse_button::LEFT {
+            self.press_pointer(frame, eligible, press.x, press.y);
         }
     }
 

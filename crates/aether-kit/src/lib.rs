@@ -34,7 +34,7 @@
 //! - [`mover::WorldMover`] — the input-driven body that walks the painted
 //!   world, selected by the `aether_kit@aether.kit.mover` export. Its
 //!   `aether.kit.mover.teleport` placement kind lives in [`mover`].
-//! - [`sim::TurnSim`] — the deterministic fixed-tick reference simulation,
+//! - [`TurnSim`] — the deterministic fixed-tick reference simulation,
 //!   selected by the `aether_kit@aether.kit.sim` export. Its tick-native
 //!   intent, trajectory, summary, and catch-up vocabulary lives in [`sim`].
 //! - [`widget::Widget`] — the widget-compositing node (ADR-0117), selected
@@ -42,7 +42,7 @@
 //!   [`widget::WidgetPanel`] and the concrete [`widget::set`] widgets. The
 //!   widget-compositing vocabulary lives in [`widget`] and the visual tokens
 //!   in [`widget::theme`].
-//! - [`widget::EditorShell`] — the input-only arbiter between independently
+//! - [`EditorShell`] — the input-only arbiter between independently
 //!   rooted editor regions (ADR-0141).
 //!
 //! `export!` (below) packs the actors into one cdylib (ADR-0096 multi-actor

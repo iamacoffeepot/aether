@@ -47,10 +47,6 @@ impl ToggleWidget {
         self.on
     }
 
-    fn press_at(&mut self, x: f32, y: f32) {
-        self.arms.press_pointer(&self.frame, self.state.can_mutate(), x, y);
-    }
-
     fn release_at(&mut self, x: f32, y: f32) -> Option<bool> {
         self.arms.release_pointer(&self.frame, self.state.can_mutate(), x, y).then(|| self.toggle())
     }
@@ -151,9 +147,7 @@ impl WasmActor for ToggleWidget {
 
     #[handler::single]
     fn on_mouse_button(&mut self, _ctx: &mut WasmCtx<'_>, press: MouseButton) {
-        if press.button == mouse_button::LEFT {
-            self.press_at(press.x, press.y);
-        }
+        self.arms.press_mouse_button(&self.frame, self.state.can_mutate(), press);
     }
 
     #[handler::single]
@@ -254,11 +248,11 @@ mod tests {
     #[test]
     fn pointer_activation_toggles_once_and_release_outside_cancels() {
         let mut toggle = toggle();
-        toggle.press_at(20.0, 30.0);
+        toggle.arms.press_pointer(&toggle.frame, toggle.state.can_mutate(), 20.0, 30.0);
         assert_eq!(toggle.release_at(20.0, 30.0), Some(true));
         assert_eq!(toggle.release_at(20.0, 30.0), None, "an unarmed release cannot toggle twice");
 
-        toggle.press_at(20.0, 30.0);
+        toggle.arms.press_pointer(&toggle.frame, toggle.state.can_mutate(), 20.0, 30.0);
         assert_eq!(toggle.release_at(200.0, 30.0), None);
         assert!(toggle.on, "release outside preserves the prior value");
     }
@@ -278,7 +272,7 @@ mod tests {
     #[test]
     fn read_only_or_unavailable_state_cancels_live_arms_and_blocks_mutation() {
         let mut toggle = toggle();
-        toggle.press_at(20.0, 30.0);
+        toggle.arms.press_pointer(&toggle.frame, toggle.state.can_mutate(), 20.0, 30.0);
         toggle.press_key(KEY_SPACE);
         let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
         assert!(toggle.adopt_control_state(read_only));
@@ -289,7 +283,7 @@ mod tests {
 
         let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
         assert!(toggle.adopt_control_state(disabled));
-        toggle.press_at(20.0, 30.0);
+        toggle.arms.press_pointer(&toggle.frame, toggle.state.can_mutate(), 20.0, 30.0);
         assert!(!toggle.arms.pointer_pressed);
     }
 }

@@ -106,8 +106,7 @@ pub fn connect_proxy(
     // retrying once `d` has elapsed.
     let deadline = budget.map(|d| Instant::now() + d);
     #[cfg(test)]
-    let reader_wake =
-        WAIT_FOR_READER_WAKE.with(|wait| wait.replace(false)).then(|| Arc::new((Mutex::new(false), Condvar::new())));
+    let reader_wake = WAIT_FOR_READER_WAKE.replace(false).then(|| Arc::new((Mutex::new(false), Condvar::new())));
     loop {
         // The reader sidecar fires `RpcInboundReady` at the proxy's
         // own mailbox after every inbound frame so

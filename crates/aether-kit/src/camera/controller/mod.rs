@@ -70,7 +70,7 @@ const CAMERA_COMPONENT: &str = "aether.kit.camera";
 const SEED_TARGET: [f32; 3] = [0.0, 0.0, 0.0];
 const SEED_DISTANCE: f32 = 12.0;
 /// Negative pitch places the eye above the target looking down (see
-/// [`OrbitParams::pitch`](crate::camera::OrbitParams)); ~-63° is a legible
+/// [`OrbitParams::pitch`]); ~-63° is a legible
 /// three-quarter angle well inside the `±π/2` pole.
 const SEED_PITCH: f32 = -1.1;
 const SEED_YAW: f32 = 0.0;
