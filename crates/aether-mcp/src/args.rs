@@ -213,6 +213,26 @@ pub struct SendMailArgs {
     /// out the await timeout.
     #[serde(default)]
     pub fire_and_forget: bool,
+    /// Which correlated replies to return after the complete arrival-
+    /// ordered stream has been decoded. `terminal` (default) keeps the
+    /// last reply plus recognized errors, `all` keeps every reply, and
+    /// `none` suppresses successful replies while retaining recognized
+    /// errors. Ignored when `fire_and_forget` is true.
+    #[serde(default)]
+    pub replies: ReplyProjection,
+}
+
+/// Consumer projection for a decoded `send_mail` reply stream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ReplyProjection {
+    /// Keep the last arrival-ordered reply plus every recognized error.
+    #[default]
+    Terminal,
+    /// Keep every decoded reply in arrival order.
+    All,
+    /// Keep recognized errors only.
+    None,
 }
 
 /// One item in a `send_mail` batch.
@@ -736,6 +756,11 @@ pub struct SendMailTracedArgs {
     /// returns the trace tree plus the correlated replies.
     #[serde(default)]
     pub fire_and_forget: bool,
+    /// Return the complete per-node `mails` values instead of the default
+    /// compact one-line `tree`. Both settled projections include
+    /// `node_count`; timeout and fire-and-forget responses include neither.
+    #[serde(default)]
+    pub full: bool,
 }
 
 /// One mail in a `send_mail_traced` batch. Like [`CaptureMailSpec`] but
@@ -766,10 +791,18 @@ pub struct SendMailTracedResponse {
     /// Chassis-root `MailId` every spec inherited. Populated on
     /// `settled` and `dispatched`, `null` on `timeout`.
     pub root: Option<MailIdJson>,
-    /// Mail nodes in the settled tree. Order is unspecified — agents
-    /// reconstruct chains via `parent` edges. `null` on `dispatched` /
-    /// `timeout`.
+    /// Complete mail nodes in a settled `full: true` response. Order is
+    /// unspecified — agents reconstruct chains via `parent` edges. `null`
+    /// in the default compact projection, on `dispatched`, and on `timeout`.
     pub mails: Option<Vec<MailNodeJson>>,
+    /// Compact one-line-per-node tree in root/sibling input order. Present
+    /// only on a settled default (`full: false`) response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tree: Option<Vec<String>>,
+    /// Number of projected mail nodes. Present for both compact and full
+    /// settled responses; omitted on timeout and fire-and-forget responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_count: Option<usize>,
     /// Root's `in_flight` count at describe time. `0` for a fully-
     /// settled batch; non-zero indicates the chain re-armed after the
     /// initial settle (rare; reflects late-arriving descendants).
@@ -777,14 +810,14 @@ pub struct SendMailTracedResponse {
     /// Correlated reply payloads the batch's shared `cid` collected, in
     /// arrival order — one flat list for the whole atomic batch (the
     /// batch is one wire `Call`, so there is no per-item correlation to
-    /// group by). `null` on `dispatched`; an empty list on `settled`
-    /// when no reply was emitted.
+    /// group by). `null` on `dispatched` and `timeout`; an empty list on
+    /// `settled` when no reply was emitted.
     pub replies: Option<Vec<ReplyEventJson>>,
 }
 
 /// `MailId` rendered for MCP: the sender mailbox as a tagged-id
 /// string (ADR-0064) plus the per-actor correlation counter.
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, PartialEq, Eq, Hash, Serialize, JsonSchema)]
 pub struct MailIdJson {
     /// Tagged mailbox id (`mbx-…`) of the producer that minted this
     /// `MailId`. `mbx-aaaa-aaaa-aaaa` is the `aether.chassis` sender,

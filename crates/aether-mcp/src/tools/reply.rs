@@ -1,7 +1,7 @@
 use super::bytes::{render_bytes_reply, reply_inline_max_bytes};
 use super::{
     EngineId, Kind, KindDescriptor, KindId, MailEnvelope, MailId, Mcp, McpError, NamedMail, ReplyEventJson,
-    TracedMailSpec, descriptors, internal_msg, kind_id_from_parts, tagged_id,
+    ReplyProjection, TracedMailSpec, descriptors, internal_msg, kind_id_from_parts, tagged_id,
 };
 use aether_kinds::trace::DispatchTracedAck;
 use base64::Engine as _;
@@ -79,6 +79,47 @@ pub(super) fn decode_reply_events(
             }
         })
         .collect()
+}
+
+/// Best-effort recognition of the common decoded error shapes the MCP front
+/// can identify without component-specific semantics. Matching is deliberately
+/// exact so successful names containing `err` (for example `terra` or
+/// `deferred`) are not projected as failures.
+pub(super) fn is_error_reply(reply: &ReplyEventJson) -> bool {
+    let params_is_error = match reply.params.as_ref() {
+        Some(serde_json::Value::String(variant)) => variant == "Err",
+        Some(serde_json::Value::Object(object)) => object.len() == 1 && object.contains_key("Err"),
+        _ => false,
+    };
+    if params_is_error {
+        return true;
+    }
+
+    reply.kind_name.as_deref().is_some_and(|name| {
+        let final_segment = name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase();
+        final_segment == "err"
+            || final_segment == "error"
+            || final_segment.ends_with("_err")
+            || final_segment.ends_with("_error")
+    })
+}
+
+/// Project a complete decoded reply stream without changing arrival order.
+/// Terminal selection is index-based so a final reply that is itself an error
+/// is retained once rather than deduplicated by payload equality.
+pub(super) fn project_replies(replies: Vec<ReplyEventJson>, projection: ReplyProjection) -> Vec<ReplyEventJson> {
+    match projection {
+        ReplyProjection::All => replies,
+        ReplyProjection::None => replies.into_iter().filter(is_error_reply).collect(),
+        ReplyProjection::Terminal => {
+            let terminal = replies.len().checked_sub(1);
+            replies
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, reply)| (Some(index) == terminal || is_error_reply(&reply)).then_some(reply))
+                .collect()
+        }
+    }
 }
 
 /// Decode the `DispatchTracedAck` from a `send_mail_traced` ack call's

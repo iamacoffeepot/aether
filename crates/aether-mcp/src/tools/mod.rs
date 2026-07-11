@@ -50,8 +50,8 @@ use crate::args::ActorLogsArgs;
 use crate::args::{
     CaptureFrameArgs, CaptureMailSpec, ComponentSpec, DescribeComponentArgs, DescribeHandlersArgs, DescribeKindsArgs,
     ListBinariesArgs, ListComponentsArgs, ListEnginesArgs, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec,
-    ReplaceComponentArgs, ReplyEventJson, SendMailArgs, SendMailTracedArgs, SpawnSubstrateArgs, TerminateSubstrateArgs,
-    TracedMailSpec, UploadBinaryArgs, UploadComponentArgs,
+    ReplaceComponentArgs, ReplyEventJson, ReplyProjection, SendMailArgs, SendMailTracedArgs, SpawnSubstrateArgs,
+    TerminateSubstrateArgs, TracedMailSpec, UploadBinaryArgs, UploadComponentArgs,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
@@ -111,8 +111,8 @@ impl NamedMailSpec for TracedMailSpec {
 
 #[cfg(test)]
 use self::bytes::{
-    RESPONSE_SUMMARY_MAX_BYTES, render_bytes_leaf_in, render_bytes_reply, resolve_bytes_params,
-    response_inline_max_bytes_from, spill_oversized_response_in, summarize_response,
+    RESPONSE_SUMMARY_MAX_BYTES, render_bytes_leaf_in, render_bytes_reply, reply_inline_max_bytes_from,
+    resolve_bytes_params, response_inline_max_bytes_from, spill_oversized_response_in, summarize_response,
 };
 #[cfg(test)]
 use self::capture::save_capture_png;
@@ -123,7 +123,7 @@ use self::components::{
 };
 use self::envelope::{engine_envelope, local_envelope, validate_recipient_scope};
 #[cfg(test)]
-use self::ids::{parse_kind_id, static_kind_name};
+use self::ids::{parse_kind_id, render_compact_tree, static_kind_name};
 #[cfg(test)]
 use self::logs_cost::{actor_logs_err_message, level_to_str, parse_level};
 #[cfg(test)]
@@ -132,7 +132,7 @@ use self::render::project_capabilities;
 use self::render::render_shape;
 use self::render::{frame_size_aware_error, internal_msg};
 #[cfg(test)]
-use self::reply::decode_reply_events;
+use self::reply::{decode_reply_events, is_error_reply, project_replies};
 /// Default wall-clock cap on `send_mail` / `send_mail_traced` awaiting a
 /// chain to settle (issue 1242). 300s — clears a provider cap's API
 /// timeout (the gemini cap's 180s, anthropic's 120s) with margin for
@@ -298,14 +298,14 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Send one or more mail items to substrate mailboxes. Each item carries structured `params`, schema-encoded against the substrate kind vocabulary. Best-effort batch: per-item status is returned and one failure doesn't abort siblings. By default each item BLOCKS until its dispatch chain settles and the item's correlated reply payloads are returned in `replies` (status 'delivered'); each reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes (base64 string, present only on a decode miss)}. The await cap is 600s (gated by the batch-level settlement against a slow provider cap); on timeout the item reports status 'timeout' with timed_out:true and any replies collected so far. Set fire_and_forget:true to restore non-blocking dispatch (status 'dispatched', empty replies) — use it for a fire-and-poke (e.g. a DrawTriangle before a capture_frame) or a cap that never replies. For `Bytes`-typed fields in `params`, pass a byte array (`[…]`, canonical) or one `$`-sigil embed: `$file` (reads a file on the harness host), `$base64` (decodes), or `$text` (UTF-8-encodes)."
+        description = "Send one or more mail items to substrate mailboxes. Each item carries structured `params`, schema-encoded against the substrate kind vocabulary. Best-effort batch: per-item status is returned and one failure doesn't abort siblings. By default each item BLOCKS until its dispatch chain settles (status 'delivered'). The batch-level `replies` projection defaults to `terminal`, which returns the last arrival-ordered correlated reply plus every recognized error; `none` suppresses non-errors, and `all` restores the complete decoded stream. Recognition is exact for decoded `Err` variants and final kind-name error segments/suffixes. Each retained reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes (base64 string, present only on a decode miss)}. The await cap is 600s; on timeout the item reports status 'timeout' with timed_out:true and the projected replies collected so far. Set fire_and_forget:true for non-blocking dispatch (status 'dispatched', empty replies regardless of projection). For `Bytes`-typed request fields, pass a byte array (`[…]`, canonical) or one `$`-sigil embed: `$file`, `$base64`, or `$text`. Decoded reply `Bytes` leaves over 16 KiB spill to a host file; a still-oversized complete result then passes through the generic 32 KiB whole-response guard, so explicit `all` never truncates."
     )]
     pub async fn send_mail(&self, Parameters(args): Parameters<SendMailArgs>) -> Result<String, McpError> {
         guard_response_size("send_mail", mail::send_mail(self, args).await)
     }
 
     #[tool(
-        description = "Atomic batched dispatch with combined trace tree. Like send_mail but every spec lands on the engine's aether.trace mailbox under one shared chassis root, and the response returns the full trace subtree once the chain settles — no window guessing, no separate describe_tree call. By default it BLOCKS until settlement and also returns the batch's correlated reply payloads as a flat arrival-ordered `replies` list (the batch is one wire Call, so replies aren't per-item) alongside the tree; each reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes (base64 string, present only on a decode miss)}. Two-call protocol behind the scenes: the substrate emits a synchronous ack with the root id, the caller waits for chain settlement on the wire collecting reply events, then issues a describe_tree against the captured root. Bad specs abort the whole batch before any mail moves (mirrors capture_frame). settlement_timeout_ms caps wall-clock wait (default 300000, max 600000); on timeout the response carries status:timeout with no root, tree, or replies. Set fire_and_forget:true to return the ack only (status:dispatched with root populated, mails/replies null) without awaiting settlement."
+        description = "Atomic batched dispatch with a combined trace tree. Every spec lands on the engine's aether.trace mailbox under one shared chassis root; bad specs abort the batch before any mail moves. By default it BLOCKS until settlement and returns `mails:null`, a compact one-line-per-node `tree`, and `node_count`, plus the batch's complete flat arrival-ordered `replies` list. Compact line indentation follows causal parentage and each line names sender → recipient, kind, and handler duration (or `in-flight`). Pass `full:true` to restore the complete `mails` node vector; full mode omits `tree` and carries the same `node_count`. Neither mode truncates: a serialized result over the generic 32 KiB whole-response threshold spills complete to a host file. Behind the scenes the substrate acks the root, the caller waits for settlement while collecting replies, then performs the guided trace walk and resolves names. settlement_timeout_ms caps wall-clock wait (default 300000, max 600000); timeout has no root or replies and omits `tree`/`node_count`. Set fire_and_forget:true to return the ack only (status:dispatched with root populated, mails/replies null and projection fields omitted)."
     )]
     pub async fn send_mail_traced(&self, Parameters(args): Parameters<SendMailTracedArgs>) -> Result<String, McpError> {
         guard_response_size("send_mail_traced", mail::send_mail_traced(self, args).await)

@@ -2,6 +2,7 @@ use super::{
     EngineId, EngineNames, KindId, MailId, MailIdJson, MailNodeJson, MailNodeWire, MailboxId, McpError, Tag, Uuid,
     descriptors, kind_id_from_parts, tagged_id,
 };
+use std::collections::{HashMap, HashSet};
 
 /// Parse a UUID-string `engine_id` (from `list_engines` /
 /// `spawn_substrate`) into an `EngineId`.
@@ -103,6 +104,61 @@ pub(super) fn mail_node_to_json(node: MailNodeWire, names: Option<&EngineNames>)
         t_finished: node.t_finished.map(|n| n.0),
         thread_name: node.thread_name,
     }
+}
+
+/// Render resolved trace nodes as a compact causal tree. Adjacency reuses the
+/// existing named [`MailIdJson`] identity; indices distinguish malformed
+/// duplicate ids and give the visited set a structural key. Roots and siblings
+/// preserve input order. A final input-order pass emits orphaned or cyclic
+/// nodes exactly once, so malformed data cannot recurse or loop forever.
+pub(super) fn render_compact_tree(nodes: &[MailNodeJson]) -> Vec<String> {
+    let mut children: HashMap<&MailIdJson, Vec<usize>> = HashMap::new();
+    let mut roots = Vec::new();
+    for (index, node) in nodes.iter().enumerate() {
+        if let Some(parent) = node.parent.as_ref() {
+            children.entry(parent).or_default().push(index);
+        } else {
+            roots.push(index);
+        }
+    }
+
+    let mut lines = Vec::with_capacity(nodes.len());
+    let mut visited = HashSet::with_capacity(nodes.len());
+    for seed in roots.into_iter().chain(0..nodes.len()) {
+        if visited.contains(&seed) {
+            continue;
+        }
+        let mut stack = vec![(seed, 0usize)];
+        while let Some((index, depth)) = stack.pop() {
+            if !visited.insert(index) {
+                continue;
+            }
+            let node = &nodes[index];
+            let timing = node.t_finished.map_or_else(
+                || "in-flight".to_owned(),
+                |finished| {
+                    let started = node.t_received.unwrap_or(node.t_sent);
+                    format!("+{}µs", finished.saturating_sub(started) / 1_000)
+                },
+            );
+            lines.push(format!(
+                "{}{sender} → {recipient}  {kind}  {timing}",
+                "  ".repeat(depth),
+                sender = node.sender,
+                recipient = node.recipient,
+                kind = node.kind,
+            ));
+
+            if let Some(node_children) = children.get(&node.mail_id) {
+                for child in node_children.iter().rev() {
+                    if !visited.contains(child) {
+                        stack.push((*child, depth.saturating_add(1)));
+                    }
+                }
+            }
+        }
+    }
+    lines
 }
 
 /// The mailbox / kind / thread ids in one `MailNodeWire` that reverse

@@ -245,6 +245,26 @@ fn response_inline_threshold_defaults_and_parses_override() {
 }
 
 #[test]
+fn reply_inline_threshold_defaults_and_parses_override() {
+    assert_eq!(reply_inline_max_bytes_from(None), 16 * 1024);
+    assert_eq!(reply_inline_max_bytes_from(Some(" 4096 ")), 4096);
+    assert_eq!(reply_inline_max_bytes_from(Some("not-a-number")), 16 * 1024);
+}
+
+#[test]
+fn resolved_default_spills_twenty_four_kibibyte_bytes_leaf_losslessly() {
+    let dir = reply_scratch_dir("resolved-default");
+    let payload: Vec<u8> = (0u8..=255).cycle().take(24 * 1024).collect();
+    let json = payload.iter().copied().map(serde_json::Value::from).collect();
+    let out = render_bytes_leaf_in(serde_json::Value::Array(json), reply_inline_max_bytes_from(None), &dir);
+    let file = out.get("file").and_then(serde_json::Value::as_str).expect("24 KiB leaf spills at 16 KiB default");
+
+    assert_eq!(std_fs::read(file).expect("spilled bytes are readable"), payload);
+    std_fs::remove_file(file).ok();
+    std_fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn summarize_response_reports_array_sample_and_object_keys() {
     let array = summarize_response(r#"[{"name":"first"},2,3,4]"#);
     assert_eq!(array["kind"], "array");
