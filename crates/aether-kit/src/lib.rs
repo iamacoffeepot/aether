@@ -14,7 +14,7 @@
 //!   `aether_kit@aether.kit.camera-controller` export. Its
 //!   `aether.kit.camera-controller.config` init-config lives in
 //!   [`camera::controller`].
-//! - [`client::PlayerClient`] — the outbound player-session and authoritative
+//! - [`PlayerClient`] — the outbound player-session and authoritative
 //!   presentation actor, selected by the `aether_kit@aether.kit.client`
 //!   export. Its `aether.kit.client.config` init-config lives in [`client`].
 //! - [`console::ConsoleOverlay`] — a primitive-rendered developer console
