@@ -34,6 +34,9 @@
 //! - [`mover::WorldMover`] — the input-driven body that walks the painted
 //!   world, selected by the `aether_kit@aether.kit.mover` export. Its
 //!   `aether.kit.mover.teleport` placement kind lives in [`mover`].
+//! - [`sim::TurnSim`] — the deterministic fixed-tick reference simulation,
+//!   selected by the `aether_kit@aether.kit.sim` export. Its tick-native
+//!   intent, trajectory, summary, and catch-up vocabulary lives in [`sim`].
 //! - [`widget::Widget`] — the widget-compositing node (ADR-0117), selected
 //!   by the `aether_kit@aether.kit.widget` export, with the reference
 //!   [`widget::WidgetPanel`] and the concrete [`widget::set`] widgets. The
@@ -68,6 +71,7 @@ pub mod console;
 pub mod mark;
 pub mod mesh;
 pub mod mover;
+pub mod sim;
 pub mod terra;
 pub mod widget;
 pub mod world;
@@ -81,6 +85,10 @@ pub use mark::{
     MarkList, MarkListResult, MarkMutationError, MarkRef, MarkUpdate, MarkUpdateResult, SavedMarks,
 };
 pub use mover::{MoverConfig, MoverTeleport};
+pub use sim::{
+    CellPosition, EntityState, GridBounds, MoveDirection, MoveIntent, Poll, PollResult, SimConfig, Spawn, StateSummary,
+    TickBundle, TrajectoryEvent, TrajectoryKind, TurnSim,
+};
 pub use terra::{
     ClearTerraSelection, CreateTerraMark, DeleteTerraSelection, MoveTerraSelection, RelabelTerraSelection,
     SetTerraSelection, TerraCommandResult, TerraConfig, TerraError, TerraQuery, TerraQueryResult, ToggleTerraSelection,
@@ -139,6 +147,7 @@ aether_actor::export!(
     terra::TerraEditor,
     world::WorldView,
     mover::WorldMover,
+    TurnSim,
     widget::Widget,
     widget::ScrollWidget,
     widget::set::SliderWidget,
@@ -166,6 +175,7 @@ aether_actor::export!(
     terra::TerraEditor,
     world::WorldView,
     mover::WorldMover,
+    TurnSim,
     widget::Widget,
     widget::ScrollWidget,
     widget::set::SliderWidget,
