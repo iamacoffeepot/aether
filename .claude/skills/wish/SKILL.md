@@ -221,6 +221,7 @@ The user reads top-down:
 /wish --under <wish-path>           drill into one subtree (chosen or alternative)
                                     from a prior pass
 /wish --refresh <tree-path>         re-grep each node's cited surfaces; mark drifted nodes grounding-stale
+/wish --survey [<tree-path>]        survey one tree's leaf dispositions (all trees if omitted)
 /wish --deep <theme>                deep mode: best-first fan-out drilling (workflow-backed)
 /wish --deep <theme> --beam N       fan-out width per round (default 3) — the shape knob
 /wish --deep <theme> --budget N     max driller agents the loop spawns (default 40) — the size knob
@@ -272,6 +273,96 @@ After the frontier drains, a final agent reads every node's bounded summary and 
 ### Resumability
 
 The on-disk wish tree persists across sessions, so a deep wish becomes resumable: a later `/wish --under <wish-path>` drills a subtree further, complementing the in-session Workflow journal. Before resuming with `--under`, run `/wish --refresh <tree-path>` so re-drilling does not build on drifted grounding. The file tree is the durable record; the journal is the live one.
+
+## Survey mode (`--survey`)
+
+`/wish --survey` is the filing follow-up for persisted leaf plans. With no argument, it finds every
+prior-pass `wishes/<YYYY-MM-DD>-<theme-slug>/` tree under the main working checkout (resolve that
+checkout as the first entry of `git worktree list`, never the invoking session/agent worktree).
+With `<tree-path>`, it surveys only that tree. It does not create wishes, re-drill a branch, change
+a GitHub issue, or run a grounding refresh.
+
+Identify a leaf as a `wish.md` whose frontmatter says `producible: true` and whose directory has no
+nested wish subdirectory; exclude `alternatives/` from that child-directory cross-check. A missing
+`filed:` field is a meaningful result: the plan has not yet been handed to `/sketch --from-wish`.
+
+### The `filed` contract
+
+`/sketch --from-wish` records a filed leaf as `filed: "#N"`. The string's semantic value is the
+GitHub issue number **N**; the leading `#` is only the familiar issue-number spelling. It must stay
+quoted: in YAML, an unquoted value beginning with `#` starts a comment and does not preserve the
+issue number. Survey accepts only that exact positive-decimal form, then looks up issue `N`.
+
+### Four-way disposition oracle
+
+For each leaf, derive exactly one filing disposition when the input and REST lookup are valid:
+
+- **`open`** — the leaf has no `filed:` value; do not make a network call.
+- **`filed`** — `GET /repos/iamacoffeepot/aether/issues/N` returns an issue whose `state` is `open`.
+- **`landed`** — that issue is `closed` with `state_reason: completed`.
+- **`stale`** — that issue is `closed` with `state_reason: not_planned`.
+
+For each present `filed:`, make one REST call through `gh api`, for example
+`gh api "repos/iamacoffeepot/aether/issues/<N>" --jq '{state, state_reason}'`; do not use
+GraphQL-backed `gh issue view` or `gh issue list`. This follows `/scope`'s
+[GitHub API budget](../scope/SKILL.md#github-api-budget). A result with a `pull_request` field is not
+a valid `/sketch` filing and is a survey failure, not a `filed` disposition. Likewise, do not guess at malformed `filed:` values. A
+nonexistent or inaccessible issue has the report-only disposition `unknown`; it does not change the
+four-way roll-up and must not crash the pass.
+
+`state_reason: completed` is the cheap default for `landed`. A stricter optional pass may confirm a
+closing PR or merge event on the issue timeline before upgrading `filed` to `landed`; the default
+survey does not spend those extra calls.
+
+`stale` here is a **filing disposition**, not a grounding result. Survey never writes or interprets
+`grounding_stale`, `drifted_surfaces`, or `grounding_checked`; `--refresh` never changes a filing
+disposition. An issue can be landed while its code citations have drifted, and an open or stale
+filing can still be fully grounded.
+
+### Per-tree report and index update
+
+Print one report per surveyed tree. It names the tree path, counts for `open`, `filed`, `landed`,
+and `stale`, and a table with each leaf slug-path, its `filed: "#N"` value (or `—`), and disposition.
+For example:
+
+```
+| Leaf | Filed | Disposition |
+| --- | --- | --- |
+| persistent-world/on-disk-layout-for-handles | "#1234" | filed |
+| persistent-world/restore-on-reconnect | "#1201" | landed |
+| concurrent-many-players/per-actor-load-shedding | — | open |
+
+open: 1 · filed: 1 · landed: 1 · stale: 0
+```
+
+After a complete tree survey, write the same roll-up and per-leaf lines into that tree's `index.md`
+under a dated `## Disposition survey (<YYYY-MM-DD>)` section. This is survey history and navigation,
+not leaf frontmatter: do not add disposition fields to `wish.md` files.
+
+The date section is idempotent. On a later survey **on the same date**, replace the entire existing
+`## Disposition survey (<YYYY-MM-DD>)` block — from its heading through the next H2 heading or end
+of file — with the new complete report, so a rerun never leaves duplicate or stale same-day leaf rows. If a
+legacy index has more than one section for that date, replace all of them with one current section.
+On a different date, preserve earlier survey sections and append one new dated section. Preserve all
+non-survey index content in either case.
+
+### Survey failure modes
+
+- **No `wishes/` directory or an empty corpus**: clean no-op; print `no wish trees to survey` and
+  do not create a directory or index.
+- **`<tree-path>` does not exist**: refuse and list the valid persisted tree paths.
+- **Tree lacks `index.md`**: report the malformed tree and do not synthesize an index outside the
+  established tree contract.
+- **Leaf has malformed `filed:`**: report its path and raw value as invalid; do not coerce it to an
+  issue number or call it `open`.
+- **`filed:` resolves to a pull request**: report the leaf as an invalid filing; do not treat the PR
+  as an issue or assign a disposition.
+- **`filed:` points at a nonexistent or inaccessible issue**: report `unknown` for that leaf and
+  continue; never infer `stale` from lookup failure.
+- **GitHub rate limit**: degrade gracefully, mark the survey partial, preserve its prior dated
+  section instead of writing an incomplete snapshot, and report which leaves remain unknown.
+- **A tree has no producible leaves**: write and report zero leaves with zero counts; this is a valid
+  survey result, not a refusal.
 
 ## Steps the agent runs
 
