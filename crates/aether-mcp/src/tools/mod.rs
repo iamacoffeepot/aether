@@ -119,7 +119,8 @@ use self::capture::save_capture_png;
 #[cfg(test)]
 use self::components::{MAX_REPLICAS, components_all_loaded};
 use self::components::{
-    component_config_bytes, reject_zero_replicas, replica_base_name, replica_names, selector_with_explicit_export,
+    component_config_bytes, reject_replicas_out_of_range, replica_base_name, replica_names,
+    selector_with_explicit_export,
 };
 use self::envelope::{engine_envelope, local_envelope, validate_recipient_scope};
 #[cfg(test)]

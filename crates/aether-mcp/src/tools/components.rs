@@ -163,7 +163,7 @@ pub(super) const MAX_REPLICAS: u32 = 256;
 /// Reject `replicas` outside `1..=MAX_REPLICAS` (ADR-0090 §4: a bad known
 /// value is a hard tool error, not a silent no-op / unbounded fan-out)
 /// before any load dispatch or name-list allocation.
-pub(super) fn reject_zero_replicas(replicas: Option<u32>, selector: &str) -> Result<(), McpError> {
+pub(super) fn reject_replicas_out_of_range(replicas: Option<u32>, selector: &str) -> Result<(), McpError> {
     let Some(n) = replicas else {
         return Ok(());
     };
@@ -247,7 +247,7 @@ pub(super) async fn list_components(mcp: &Mcp, args: ListComponentsArgs) -> Resu
 pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result<String, McpError> {
     let engine = parse_engine_id(&args.engine_id)?;
     let selector = selector_with_explicit_export(&args.selector, args.export.as_deref());
-    reject_zero_replicas(args.replicas, &selector)?;
+    reject_replicas_out_of_range(args.replicas, &selector)?;
     // ADR-0116: resolve the selector hub-local to the wasm bytes; a
     // `module@actor` selector's `@actor` half rides back as `export`.
     let resolved = mcp.resolve_component(&selector).await?;

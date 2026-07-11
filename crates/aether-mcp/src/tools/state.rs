@@ -6,8 +6,9 @@ use super::{
     INVENTORY_CAP, Kind, KindDescriptor, KindId, ListKinds, ListKindsResult, MailEnvelope, MailNodeJson, MailNodeWire,
     MailSpec, MailboxAddress, Manifest, ManifestResult, Mcp, McpError, Resolve, ResolveComponent,
     ResolveComponentResult, ResolveResult, SchemaType, Uuid, component_config_bytes, descriptors, engine_envelope,
-    frame_size_aware_error, internal_msg, local_envelope, mailbox_id_from_path, max_frame_size, reject_zero_replicas,
-    replica_base_name, replica_names, selector_with_explicit_export, tagged_id, validate_recipient_scope, wire,
+    frame_size_aware_error, internal_msg, local_envelope, mailbox_id_from_path, max_frame_size,
+    reject_replicas_out_of_range, replica_base_name, replica_names, selector_with_explicit_export, tagged_id,
+    validate_recipient_scope, wire,
 };
 use aether_data::canonical::kind_id_from_parts;
 use std::collections::HashMap;
@@ -102,7 +103,7 @@ impl Mcp {
         let mut entries: Vec<serde_json::Value> = Vec::with_capacity(components.len());
         let mut expected_names: Vec<String> = Vec::with_capacity(components.len());
         for spec in components {
-            reject_zero_replicas(spec.replicas, &spec.selector)?;
+            reject_replicas_out_of_range(spec.replicas, &spec.selector)?;
             let resolve_selector = selector_with_explicit_export(&spec.selector, spec.export.as_deref());
             let resolved = self.resolve_component(&resolve_selector).await?;
             let seq = SEQ.fetch_add(1, Ordering::Relaxed);

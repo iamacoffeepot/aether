@@ -164,15 +164,15 @@ fn replica_names_suffixes_every_instance() {
     assert_eq!(replica_names("handler", 1), vec!["handler-0"]);
 }
 
-/// `reject_zero_replicas` rejects 0 and values above [`MAX_REPLICAS`]
+/// `reject_replicas_out_of_range` rejects 0 and values above [`MAX_REPLICAS`]
 /// (ADR-0090 §4 + review bounds-cap); in-range and omitted stay ok.
 #[test]
-fn reject_zero_replicas_rejects_zero_and_above_max() {
-    assert!(reject_zero_replicas(Some(0), "sel").is_err());
-    assert!(reject_zero_replicas(Some(1), "sel").is_ok());
-    assert!(reject_zero_replicas(Some(MAX_REPLICAS), "sel").is_ok());
-    assert!(reject_zero_replicas(Some(MAX_REPLICAS + 1), "sel").is_err());
-    assert!(reject_zero_replicas(None, "sel").is_ok());
+fn reject_replicas_out_of_range_enforces_bounds() {
+    assert!(reject_replicas_out_of_range(Some(0), "sel").is_err());
+    assert!(reject_replicas_out_of_range(Some(1), "sel").is_ok());
+    assert!(reject_replicas_out_of_range(Some(MAX_REPLICAS), "sel").is_ok());
+    assert!(reject_replicas_out_of_range(Some(MAX_REPLICAS + 1), "sel").is_err());
+    assert!(reject_replicas_out_of_range(None, "sel").is_ok());
 }
 
 /// `load_component` with a selector that resolves to no stored
