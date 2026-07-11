@@ -1,4 +1,4 @@
-//! Tick-native intent and fact vocabulary for [`crate::sim::TurnSim`].
+//! Tick-native intent and fact vocabulary for an authoritative turn simulation.
 
 use alloc::vec::Vec;
 
