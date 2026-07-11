@@ -3,30 +3,32 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpStream};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::{Addressable, Manual, OutboundReply, actor};
 use aether_codec::frame::{FrameError, read_frame, write_frame};
-use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, wire, with_tag};
-use aether_kinds::descriptors;
+use aether_data::{
+    ActorId, Kind, MailboxId, SessionToken, Source, SourceAddr, Tag, Uuid, fold_lineage, wire, with_tag,
+};
 use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
+use aether_substrate::mail::outbound::EgressEvent;
 use aether_substrate::mail::registry::{MailDispatch, MailboxEntry, OwnedDispatch, Registry};
 use aether_substrate::mail::{MailId, MailRef};
-use aether_substrate::testing::TestChassis;
+use aether_substrate::testing::{TestChassis, fresh_substrate_and_rx};
 use serde::{Deserialize, Serialize};
 
 use super::{GameGatewayCapability, GameGatewayConfig, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
 use crate::game::{
     GridBounds, MoveDirection, MoveIntent, Poll, PollResult, SimConfig, Spawn, StateSummary, TickBundle,
 };
-use crate::tcp::{BindListener, TcpCapability, TcpListenerActor, TcpSessionActor};
+use crate::tcp::{BindListener, ListListeners, ListListenersResult, TcpCapability, TcpListenerActor, TcpSessionActor};
 
 const LISTENER_NAME: &str = "players";
 const INTERVAL_NANOS: u64 = 20_000_000;
@@ -52,6 +54,19 @@ pub struct TestTurnSimState {
     retained: Vec<TickBundle>,
     observed: mpsc::Sender<ObservedSimMail>,
     defer_poll_result: bool,
+}
+
+struct PlayerTestSubstrate {
+    registry: Arc<Registry>,
+    mailer: Arc<Mailer>,
+    outbound_replies: mpsc::Receiver<EgressEvent>,
+}
+
+struct PlayerTestHarness {
+    registry: Arc<Registry>,
+    observed: mpsc::Receiver<ObservedSimMail>,
+    chassis: PassiveChassis<TestChassis>,
+    listener_port: u16,
 }
 
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -133,25 +148,13 @@ fn bundle(tick: u64) -> TickBundle {
     }
 }
 
-fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
-    let registry = Arc::new(Registry::new());
-    for descriptor in descriptors::all() {
-        let _ = registry.register_kind_with_descriptor(descriptor);
-    }
-    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    (registry, mailer)
+fn fresh_player_test_substrate() -> PlayerTestSubstrate {
+    let (registry, mailer, outbound_replies) = fresh_substrate_and_rx();
+    PlayerTestSubstrate { registry, mailer, outbound_replies }
 }
 
-fn reserve_loopback_addr() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve loopback port");
-    listener.local_addr().expect("reserved listener address").to_string()
-}
-
-fn boot_player_substrate(
-    listener_addr: String,
-) -> (Arc<Registry>, mpsc::Receiver<ObservedSimMail>, PassiveChassis<TestChassis>) {
+fn boot_player_substrate() -> PlayerTestHarness {
     boot_player_substrate_with_limits(
-        listener_addr,
         GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
         GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
         false,
@@ -159,12 +162,11 @@ fn boot_player_substrate(
 }
 
 fn boot_player_substrate_with_limits(
-    listener_addr: String,
     max_active_sessions: usize,
     max_pending_live_bundles: usize,
     defer_poll_result: bool,
-) -> (Arc<Registry>, mpsc::Receiver<ObservedSimMail>, PassiveChassis<TestChassis>) {
-    let (registry, mailer) = fresh_substrate();
+) -> PlayerTestHarness {
+    let PlayerTestSubstrate { registry, mailer, outbound_replies } = fresh_player_test_substrate();
     let (observed_tx, observed_rx) = mpsc::channel();
     let gateway_mailbox = GameGatewayCapability::resolve(0, ());
     let turn_sim_mailbox = TestTurnSim::resolve(0, ());
@@ -177,7 +179,7 @@ fn boot_player_substrate_with_limits(
             defer_poll_result,
         })
         .with_actor::<GameGatewayCapability>(GameGatewayConfig {
-            listener_addr: Some(listener_addr),
+            listener_addr: Some("127.0.0.1:0".into()),
             listener_name: LISTENER_NAME.into(),
             turn_sim_mailbox: Some(turn_sim_mailbox),
             interval_nanos: INTERVAL_NANOS,
@@ -186,10 +188,15 @@ fn boot_player_substrate_with_limits(
         })
         .build_passive()
         .expect("player test chassis boots");
-    (registry, observed_rx, chassis)
+    let listener_port = await_player_listener_port(&registry, &outbound_replies);
+    PlayerTestHarness { registry, observed: observed_rx, chassis, listener_port }
 }
 
 fn enqueue<K: Kind>(registry: &Arc<Registry>, mailbox: MailboxId, mail: &K) {
+    enqueue_with_source(registry, mailbox, mail, Source::NONE);
+}
+
+fn enqueue_with_source<K: Kind>(registry: &Arc<Registry>, mailbox: MailboxId, mail: &K, source: Source) {
     let entry = registry.entry(mailbox).expect("target mailbox is registered");
     let MailboxEntry::Inbox { handler, .. } = entry else {
         panic!("expected actor inbox");
@@ -198,7 +205,7 @@ fn enqueue<K: Kind>(registry: &Arc<Registry>, mailbox: MailboxId, mail: &K) {
         K::ID,
         K::NAME.to_owned(),
         None,
-        aether_data::Source::NONE,
+        source,
         MailRef::from(mail.encode_into_bytes()),
         1,
         MailId::NONE,
@@ -210,17 +217,55 @@ fn enqueue<K: Kind>(registry: &Arc<Registry>, mailbox: MailboxId, mail: &K) {
     ));
 }
 
-fn connect_when_bound(addr: &str) -> TcpStream {
+fn listener_reply_target() -> Source {
+    Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0x3139))))
+}
+
+fn await_player_listener_port(registry: &Arc<Registry>, outbound_replies: &mpsc::Receiver<EgressEvent>) -> u16 {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        match TcpStream::connect(addr) {
-            Ok(stream) => return stream,
-            Err(error) if Instant::now() < deadline => {
-                let _ = error;
-                thread::sleep(Duration::from_millis(10));
+        enqueue_with_source(
+            registry,
+            TcpCapability::resolve(0, ()),
+            &ListListeners::default(),
+            listener_reply_target(),
+        );
+        let list = match outbound_replies.recv_timeout(Duration::from_millis(25)) {
+            Ok(EgressEvent::ToSession { kind_name, payload, .. }) => {
+                assert_eq!(kind_name, ListListenersResult::NAME, "gateway listener list returned an unexpected reply");
+                ListListenersResult::decode_from_bytes(&payload).expect("decode gateway listener list")
             }
-            Err(error) => panic!("connect player client to {addr}: {error}"),
+            Ok(other) => panic!("gateway listener list returned unexpected egress: {other:?}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "gateway listener did not bind within two seconds before any player Hello"
+                );
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("gateway listener reply channel disconnected"),
+        };
+        let matching_listener_count = list.listeners.iter().filter(|listener| listener.name == LISTENER_NAME).count();
+        assert!(
+            matching_listener_count <= 1,
+            "gateway listener did not bind uniquely: expected one {LISTENER_NAME:?} entry, got {matching_listener_count}: {:?}",
+            list.listeners
+        );
+        if matching_listener_count == 1 {
+            let listener = list
+                .listeners
+                .iter()
+                .find(|listener| listener.name == LISTENER_NAME)
+                .expect("matching player listener count was one");
+            assert!(listener.port > 0, "gateway listener bound an invalid local port");
+            return listener.port;
         }
+        assert!(
+            Instant::now() < deadline,
+            "gateway listener did not bind within two seconds before any player Hello; live listeners: {:?}",
+            list.listeners
+        );
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -271,7 +316,7 @@ fn gateway_config_is_inert_by_default() {
 
 #[test]
 fn gateway_wire_binds_with_its_exact_resolved_mailbox() {
-    let (registry, mailer) = fresh_substrate();
+    let PlayerTestSubstrate { registry, mailer, outbound_replies: _outbound_replies } = fresh_player_test_substrate();
     let (bind_tx, bind_rx) = mpsc::channel();
     registry.register_inline(
         TcpCapability::NAMESPACE,
@@ -329,14 +374,9 @@ fn player_wire_round_trips_and_rejects_malformed_bytes() {
 
 #[test]
 fn gateway_refuses_a_new_session_at_configured_capacity() {
-    let listener_addr = reserve_loopback_addr();
-    let (registry, observed, _chassis) = boot_player_substrate_with_limits(
-        listener_addr.clone(),
-        1,
-        GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES,
-        false,
-    );
-    let mut first = connect_when_bound(&listener_addr);
+    let PlayerTestHarness { registry, observed, chassis: _chassis, listener_port } =
+        boot_player_substrate_with_limits(1, GameGatewayConfig::DEFAULT_MAX_PENDING_LIVE_BUNDLES, false);
+    let mut first = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect first player client");
     first.set_read_timeout(Some(Duration::from_secs(2))).expect("set first-session timeout");
     write_frame(&mut first, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: "first".into() })
         .expect("write first Hello");
@@ -348,7 +388,7 @@ fn gateway_refuses_a_new_session_at_configured_capacity() {
     expect_fact(&mut first, 1);
     expect_fact(&mut first, 2);
 
-    let mut refused = connect_when_bound(&listener_addr);
+    let mut refused = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect refused player client");
     refused.set_read_timeout(Some(Duration::from_secs(2))).expect("set refused-session timeout");
     write_frame(&mut refused, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: "refused".into() })
         .expect("write refused Hello");
@@ -374,14 +414,10 @@ fn gateway_refuses_a_new_session_at_configured_capacity() {
 
 #[test]
 fn catching_up_session_closes_when_the_distinct_live_tick_buffer_is_full() {
-    let listener_addr = reserve_loopback_addr();
-    let (registry, observed, _chassis) = boot_player_substrate_with_limits(
-        listener_addr.clone(),
-        GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS,
-        1,
-        true,
-    );
-    let mut client = connect_when_bound(&listener_addr);
+    let PlayerTestHarness { registry, observed, chassis: _chassis, listener_port } =
+        boot_player_substrate_with_limits(GameGatewayConfig::DEFAULT_MAX_ACTIVE_SESSIONS, 1, true);
+    let mut client =
+        TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect catching-up player client");
     client.set_read_timeout(Some(Duration::from_secs(2))).expect("set catching-up timeout");
     write_frame(&mut client, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: "bounded".into() })
         .expect("write bounded Hello");
@@ -405,9 +441,8 @@ fn catching_up_session_closes_when_the_distinct_live_tick_buffer_is_full() {
 
 #[test]
 fn loopback_session_uses_lineage_ids_and_enforces_the_typed_allowlist() {
-    let listener_addr = reserve_loopback_addr();
-    let (registry, observed, _chassis) = boot_player_substrate(listener_addr.clone());
-    let mut client = connect_when_bound(&listener_addr);
+    let PlayerTestHarness { registry, observed, chassis: _chassis, listener_port } = boot_player_substrate();
+    let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect player client");
     client.set_read_timeout(Some(Duration::from_secs(2))).expect("set player read timeout");
 
     write_frame(&mut client, &PlayerFrame::Hello { wire_version: WIRE_VERSION, client_name: "loopback".into() })
@@ -478,7 +513,8 @@ fn loopback_session_uses_lineage_ids_and_enforces_the_typed_allowlist() {
     assert_eq!(stamped.entity_id, session_identity.0);
     assert_eq!(stamped.direction, move_intent.direction);
 
-    let mut rejected = connect_when_bound(&listener_addr);
+    let mut rejected =
+        TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect rejected player client");
     rejected.set_read_timeout(Some(Duration::from_secs(2))).expect("set rejected-session read timeout");
     write_frame(
         &mut rejected,

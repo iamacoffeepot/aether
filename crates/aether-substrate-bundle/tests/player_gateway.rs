@@ -3,7 +3,7 @@
 #![allow(clippy::print_stderr)]
 
 use std::fs;
-use std::net::{TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,6 +11,7 @@ use aether_actor::Addressable;
 use aether_capabilities::GameGatewayConfig;
 use aether_capabilities::component::resolve_embedded;
 use aether_capabilities::game::{GameGatewayCapability, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
+use aether_capabilities::tcp::{ListListeners, ListListenersResult};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 use aether_kinds::{LoadComponent, LoadResult};
@@ -22,22 +23,30 @@ const LISTENER_NAME: &str = "players";
 const INTERVAL_NANOS: u64 = 20_000_000;
 const TCP_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn reserve_loopback_addr() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve loopback port");
-    listener.local_addr().expect("reserved listener address").to_string()
-}
-
-fn connect_when_bound(addr: &str) -> TcpStream {
-    let deadline = Instant::now() + TCP_TIMEOUT;
+fn gateway_listener_port(bench: &mut TestBench) -> u16 {
+    let deadline = Instant::now() + Duration::from_secs(2);
     loop {
-        match TcpStream::connect(addr) {
-            Ok(stream) => return stream,
-            Err(error) if Instant::now() < deadline => {
-                let _ = error;
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => panic!("connect player client to {addr}: {error}"),
+        let list = bench
+            .execute(vec![("list-player-listener", BenchOp::send_and_await("aether.tcp", &ListListeners::default()))])
+            .expect("list game gateway listener")
+            .reply::<ListListenersResult>("list-player-listener")
+            .expect("decode game gateway listener list");
+        let matching_listener_count = list.listeners.iter().filter(|listener| listener.name == LISTENER_NAME).count();
+        assert!(
+            matching_listener_count <= 1,
+            "gateway listener did not bind uniquely: expected one {LISTENER_NAME:?} entry, got {matching_listener_count}: {:?}",
+            list.listeners
+        );
+        if let Some(listener) = list.listeners.iter().find(|listener| listener.name == LISTENER_NAME) {
+            assert!(listener.port > 0, "gateway listener bound an invalid local port");
+            return listener.port;
         }
+        assert!(
+            Instant::now() < deadline,
+            "gateway listener did not bind within two seconds before any player Hello; live listeners: {:?}",
+            list.listeners
+        );
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -118,12 +127,11 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
     let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
-    let listener_addr = reserve_loopback_addr();
     let turn_sim_mailbox = resolve_embedded(SIM_NAME);
     let mut bench = TestBench::builder()
         .size(96, 96)
         .game_gateway(GameGatewayConfig {
-            listener_addr: Some(listener_addr.clone()),
+            listener_addr: Some("127.0.0.1:0".into()),
             listener_name: LISTENER_NAME.into(),
             turn_sim_mailbox: Some(turn_sim_mailbox),
             interval_nanos: INTERVAL_NANOS,
@@ -132,9 +140,10 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
         })
         .build()
         .expect("boot active game gateway TestBench");
+    let listener_port = gateway_listener_port(&mut bench);
     load_turn_sim(&mut bench, fs::read(wasm_path).expect("read aether-kit wasm"));
 
-    let mut first = connect_when_bound(&listener_addr);
+    let mut first = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect first player client");
     first.set_read_timeout(Some(TCP_TIMEOUT)).expect("set first client timeout");
     let (identity, tick) = hello(&mut first, "first");
     assert_eq!(tick, 0);
@@ -207,7 +216,7 @@ fn real_turn_sim_gateway_stamps_identity_and_streams_catch_up_and_live_bundles()
         .expect("spawned identity remains after unknown kind");
     assert_eq!((entity.cell_x, entity.cell_z), (0, 1), "unknown kind must produce no sim action");
 
-    let mut second = connect_when_bound(&listener_addr);
+    let mut second = TcpStream::connect((Ipv4Addr::LOCALHOST, listener_port)).expect("connect second player client");
     second.set_read_timeout(Some(TCP_TIMEOUT)).expect("set second client timeout");
     let (second_identity, current_tick) = hello(&mut second, "second");
     assert_eq!(second_identity, expected_player_session_mailbox("conn-1"));
