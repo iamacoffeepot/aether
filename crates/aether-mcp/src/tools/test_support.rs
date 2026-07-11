@@ -18,7 +18,8 @@ pub(super) use std::sync::atomic::{AtomicUsize, Ordering};
 pub(super) use std::time::{SystemTime, UNIX_EPOCH};
 pub(super) use std::{env as std_env, fs as std_fs};
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 // Imports for the `#[cfg(test)]` `RouteInventorySink` loopback fixture
 // (issue 2672). Brought into scope (rather than named by absolute path
@@ -57,6 +58,86 @@ pub(super) struct RouteInventorySink {
     reply: ListKindsResult,
     calls: Arc<AtomicUsize>,
     mailer: Arc<Mailer>,
+}
+
+/// One dynamically-typed reply event emitted by [`TerrainRouteSink`].
+#[derive(Clone)]
+pub(super) struct TerrainReplyEvent {
+    pub(super) kind: KindId,
+    pub(super) payload: Vec<u8>,
+}
+
+/// Scripted outcome for one non-inventory terrain request.
+#[derive(Clone)]
+pub(super) struct TerrainRouteReply {
+    pub(super) events: Vec<TerrainReplyEvent>,
+    pub(super) settle: bool,
+}
+
+/// Dynamic route fixture for task-level terrain relay tests. The live
+/// descriptors come only from `inventory`; request envelopes and reply bytes
+/// remain opaque so the test never copies the kit's Rust wire vocabulary.
+#[derive(Clone)]
+pub(super) struct TerrainRouteLoopbackConfig {
+    inventory: ListKindsResult,
+    calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+    replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
+}
+
+pub(super) struct TerrainRouteSink {
+    inventory: ListKindsResult,
+    calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+    replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
+    mailer: Arc<Mailer>,
+}
+
+#[actor(singleton)]
+impl NativeActor for TerrainRouteSink {
+    type Config = TerrainRouteLoopbackConfig;
+    const NAMESPACE: &'static str = "aether.engine";
+
+    fn init(config: TerrainRouteLoopbackConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { inventory: config.inventory, calls: config.calls, replies: config.replies, mailer: ctx.mailer() })
+    }
+
+    #[handler::single]
+    #[allow(clippy::needless_pass_by_value)] // Native actor handlers receive owned decoded kinds.
+    fn on_route(&mut self, ctx: &mut NativeCtx<'_>, mail: RouteEnvelope) {
+        use aether_substrate::mail::{Mail, Source, SourceAddr};
+
+        self.calls.lock().expect("terrain calls mutex is never poisoned").push(mail.clone());
+        let reply = if mail.kind == ListKinds::ID {
+            TerrainRouteReply {
+                events: vec![TerrainReplyEvent {
+                    kind: ListKindsResult::ID,
+                    payload: self.inventory.encode_into_bytes(),
+                }],
+                settle: true,
+            }
+        } else {
+            self.replies
+                .lock()
+                .expect("terrain replies mutex is never poisoned")
+                .pop_front()
+                .unwrap_or(TerrainRouteReply { events: Vec::new(), settle: true })
+        };
+        let SourceAddr::Component(target) = ctx.reply_target().addr else {
+            return;
+        };
+        let correlation = ctx.reply_target().correlation_id;
+        for event in reply.events {
+            self.mailer.push(
+                Mail::new(target, event.kind, event.payload, 1)
+                    .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
+            );
+        }
+        if reply.settle {
+            self.mailer.push(
+                Mail::new(target, CallSettled::ID, CallSettled::Ok.encode_into_bytes(), 1)
+                    .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
+            );
+        }
+    }
 }
 
 #[actor(singleton)]
@@ -241,4 +322,33 @@ pub(super) fn boot_hub_with_route_loopback(
         .expect("hub caps boot");
     let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
     (chassis, port)
+}
+
+/// Hub-shaped route fixture serving live dynamic terrain descriptors and a
+/// caller-controlled queue of opaque reply events.
+pub(super) fn try_boot_hub_with_terrain_route_loopback(
+    inventory: ListKindsResult,
+    calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+    replies: Arc<Mutex<VecDeque<TerrainRouteReply>>>,
+) -> Result<(PassiveChassis<TestChassis>, u16), BootError> {
+    let registry = Arc::new(Registry::new());
+    for descriptor in descriptors::all() {
+        let _ = registry.register_kind_with_descriptor(descriptor);
+    }
+    let (outbound, _rx) = HubOutbound::attached_loopback();
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<TraceDispatchCapability>(())
+        .with_actor::<TerrainRouteSink>(TerrainRouteLoopbackConfig { inventory, calls, replies })
+        .with_actor::<RpcServerCapability>(RpcServerConfig {
+            bind_addr: "127.0.0.1:0".into(),
+            peer_kind: PeerKind::Substrate {
+                engine_name: "test-hub".into(),
+                engine_version: "0.1.0".into(),
+                kinds: vec![],
+            },
+        })
+        .build_passive()?;
+    let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
+    Ok((chassis, port))
 }

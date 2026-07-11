@@ -121,6 +121,30 @@ need exact whole-chain settlement — proof that everything a mail set off has f
 moves. For independent items where you just want each reply, plain `send_mail` is the
 simpler tool.
 
+**Terrain authoring.** Eight task-level tools wrap the loaded terrain
+components while retaining the same live-schema, settled-mail path:
+`terrain_marks`, `terrain_editor`, `apply_terrain_brush`,
+`run_terrain_automaton`, `propose_terrain_edit`,
+`commit_terrain_proposal`, `discard_terrain_proposal`, and
+`set_terrain_proposal_preview`. Pass each tool the exact loaded component
+mailbox from `LoadResult.name` — `mark_book_mailbox`, `terra_mailbox`, or
+`world_mailbox` as applicable. These are normally
+`aether.component/aether.embedded:<load-name>` strings; they are not actor
+namespaces, tagged mailbox ids, registry selectors, or inferred defaults. Use
+`load_component` and `describe_component` to discover and verify them. A loaded
+TerraEditor must already carry a `TerraConfig.mark_book_mailbox` pointing to its
+MarkBook.
+
+The grouped mark/editor tools select their documented `aether.kit.mark.*` or
+`aether.kit.terra.*` request and return the component's exact decoded result.
+Immediate brush/automaton tools and the corresponding proposal variants first
+validate the supplied revisioned `MarkRef` through the named MarkBook; missing,
+stale, or wrong-shaped source marks fail before WorldView mail is sent. Proposal
+tools preserve the full staged/preview/commit/discard result vocabulary,
+including domain rejections such as `StagedProposalLimitReached`. Task tools
+render mark ids as `{value}` records; generic `send_mail` continues to expose
+the live codec's newtype shape.
+
 **Introspection.** `describe_kinds` is how you learn what to put in `params`. The
 default call returns a compact `[{name, shape}]` listing of every kind — a one-line
 field rendering per kind, small enough to read in one shot. Start with
