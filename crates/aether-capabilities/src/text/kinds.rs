@@ -88,6 +88,16 @@ pub struct DrawText {
     pub clip: Option<ClipRect>,
 }
 
+/// `aether.text.draw_batch` — the batched form of [`DrawText`]. Every item
+/// follows the same immediate-mode contract; the capability preserves vector
+/// order while coalescing adjacent compatible glyph quad runs. Fire-and-
+/// forget; no reply.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.text.draw_batch")]
+pub struct DrawTextBatch {
+    pub items: Vec<DrawText>,
+}
+
 /// Names the font a `FontMetricsRequest` measures: by the
 /// session-scoped `font_id` a prior `LoadFont` (or metrics grab)
 /// assigned, or by the `aether.fs` `namespace` / `path` of its TTF —

@@ -15,7 +15,7 @@
 //!   each `Tick`, resets its [`Composite`], appends its own chrome, and
 //!   sends [`Collect`] to each child in layout order. When its slots close
 //!   it emits the whole subtree as contiguous compatible solid/textured
-//!   runs (plus one `DrawText` per glyph run) to `aether.render` /
+//!   runs plus one `DrawTextBatch` to `aether.render` /
 //!   `aether.text`, remaining the cluster's only render sender.
 //! - An **interior** node does the same on each inbound [`Collect`], but
 //!   instead of emitting it replies its flattened composite up to its
@@ -56,7 +56,7 @@ pub use scroll::ScrollWidget;
 use aether_actor::{ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
 use aether_capabilities::render::{DrawSolidQuads, DrawTexturedQuads, SolidQuad, TexturedQuad as RenderTexturedQuad};
-use aether_capabilities::text::DrawText;
+use aether_capabilities::text::{DrawText, DrawTextBatch};
 use aether_capabilities::{LifecycleCapability, RenderCapability, TextCapability};
 use aether_data::Kind;
 use aether_kinds::{ClipRect, QuadSpace, Tick};
@@ -320,10 +320,34 @@ fn framebuffer_clip(rect: WidgetClipRect) -> ClipRect {
     ClipRect { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
 }
 
+/// Collect the filtered text subsequence into authored-order text items.
+/// Invalid clips omit their items before the root converts the remaining clips
+/// into framebuffer coordinates.
+fn text_items(list: &WidgetDrawList) -> Vec<DrawText> {
+    let mut items: Vec<DrawText> = Vec::new();
+    for item in &list.items {
+        if let WidgetDrawItem::Text { x, y, font_id, text, size_pixels, color, .. } = item {
+            let Some(clip) = PreparedClip::for_item(item) else {
+                continue;
+            };
+            items.push(DrawText {
+                font_id: *font_id,
+                text: text.clone(),
+                size_pixels: *size_pixels,
+                color: *color,
+                origin: [*x, *y],
+                space: QuadSpace::Screen,
+                clip: clip.framebuffer(),
+            });
+        }
+    }
+    items
+}
+
 /// Emit a flattened subtree as the cluster's single render + text sender.
 /// Compatible solid/textured runs preserve authored non-text order through
-/// same-recipient FIFO, then one `DrawText` is sent per glyph run. Text's extra
-/// hop through the text cap keeps the established later lane.
+/// same-recipient FIFO, then one authored-order `DrawTextBatch` reaches the
+/// text cap. Text's extra hop keeps the established later lane.
 pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
     for run in direct_runs(list) {
         match run {
@@ -344,21 +368,9 @@ pub(crate) fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
             }
         }
     }
-    for item in &list.items {
-        if let WidgetDrawItem::Text { x, y, font_id, text, size_pixels, color, .. } = item {
-            let Some(clip) = PreparedClip::for_item(item) else {
-                continue;
-            };
-            ctx.actor::<TextCapability>().send(&DrawText {
-                font_id: *font_id,
-                text: text.clone(),
-                size_pixels: *size_pixels,
-                color: *color,
-                origin: [*x, *y],
-                space: QuadSpace::Screen,
-                clip: clip.framebuffer(),
-            });
-        }
+    let items = text_items(list);
+    if !items.is_empty() {
+        ctx.actor::<TextCapability>().send(&DrawTextBatch { items });
     }
 }
 
@@ -371,16 +383,8 @@ mod tests {
         WidgetDrawItem::Quad { x, y: 0.0, width: 1.0, height: 1.0, color: Rgba::WHITE, clip }
     }
 
-    fn text(clip: Option<WidgetClipRect>) -> WidgetDrawItem {
-        WidgetDrawItem::Text {
-            x: 0.0,
-            y: 0.0,
-            font_id: 1,
-            text: "text".into(),
-            size_pixels: 12.0,
-            color: Rgba::WHITE,
-            clip,
-        }
+    fn text(x: f32, label: &str, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
+        WidgetDrawItem::Text { x, y: 0.0, font_id: 1, text: label.into(), size_pixels: 12.0, color: Rgba::WHITE, clip }
     }
 
     fn textured(texture_id: u32, x: f32, clip: Option<WidgetClipRect>) -> WidgetDrawItem {
@@ -409,7 +413,7 @@ mod tests {
             items: vec![
                 quad(0.0, Some(a)),
                 textured(7, 1.0, Some(a)),
-                text(Some(b)),
+                text(0.0, "text", Some(b)),
                 textured(7, 2.0, Some(a)),
                 textured(8, 3.0, Some(a)),
                 textured(7, 4.0, Some(a)),
@@ -488,6 +492,26 @@ mod tests {
             DirectRun::Solid { clip: PreparedClip::Unbounded, quads }
                 if quads.iter().map(|quad| quad.x).eq([1.0, 3.0])
         ));
+    }
+
+    #[test]
+    fn text_items_preserve_authored_order_and_omit_clipped_out_items() {
+        let invalid = WidgetClipRect { x: 0.0, y: 0.0, width: -1.0, height: 2.0 };
+        let list = WidgetDrawList {
+            intrinsic: None,
+            items: vec![
+                text(10.0, "first", None),
+                quad(0.0, None),
+                text(20.0, "second", None),
+                text(30.0, "skipped", Some(invalid)),
+                text(40.0, "third", None),
+            ],
+        };
+
+        let items = text_items(&list);
+        assert_eq!(items.len(), 3, "three valid text items survive filtering");
+        assert!(items.iter().map(|item| item.text.as_str()).eq(["first", "second", "third"]));
+        assert!(items.iter().map(|item| item.origin[0]).eq([10.0, 20.0, 40.0]));
     }
 
     #[test]
