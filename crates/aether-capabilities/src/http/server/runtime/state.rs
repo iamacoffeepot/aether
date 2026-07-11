@@ -293,7 +293,7 @@ impl HttpSupervisorState {
 }
 
 impl HttpShardState {
-    pub(super) fn wake_sink(&self) -> WakeSink {
+    pub fn wake_sink(&self) -> WakeSink {
         WakeSink {
             inbound_tx: self.inbound_tx.clone(),
             mailer: Arc::clone(&self.mailer),
@@ -303,7 +303,7 @@ impl HttpShardState {
         }
     }
 
-    pub(super) fn subscribe_settlement(&self, mail_id: MailId) {
+    pub fn subscribe_settlement(&self, mail_id: MailId) {
         if let Some(registry) = self.mailer.settlement_registry() {
             registry.subscribe_settlement_mail(
                 mail_id,
