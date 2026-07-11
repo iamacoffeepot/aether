@@ -1,0 +1,55 @@
+{
+  "totals": {
+    "findings": 4,
+    "papercut": 3,
+    "missingPrimitive": 0,
+    "docGap": 1,
+    "blocker": 0,
+    "softHolds": 0
+  },
+  "succeeded": true,
+  "buildGreen": null,
+  "summary": "Drove the outbound TCP surface end-to-end on a freshly spawned substrate (engine 00000000-0000-0000-0000-000000000001). Bound a listener with aether.tcp.bind_listener { addr: \"127.0.0.1:0\", name: null } -> Ok { listener_name \"35489\", local_port 35489 }. Connected with aether.tcp.connect { addr: \"127.0.0.1:35489\", name: null } -> connect_result Ok { session_name \"conn-0\", session_id mbx-urol-s7yl-abyx, peer \"127.0.0.1:35489\" (loopback), session_address \"aether.tcp/aether.tcp.session:conn-0\" }. Wrote to the connect-side session by addressing session_write { bytes } to that session_address; two successive writes both settled \"delivered\" with no session_closed/error surfaced, confirming the dialed connection stays open and writable. The new outbound surface (connect/connect_result + reused session_write) works. Note: this is a network task with no visual output — headless produces no capturable frame; the engine is left alive but there is no meaningful render artifact for the judge to capture.",
+  "artifact": {
+    "verdict": "n-a",
+    "rationale": "capture_frame returned no image content — the engine is a windowless/headless substrate and frame capture emits no frame (MCP error: \"recipient settled without a reply event ... frame capture on a windowless/headless substrate emits no frame\"). This matches the expected artifact (\"none — TCP transport, nothing renders\"): there is nothing renderable to judge, so correctness must be read from the ConnectResult::Ok reply rather than a frame. Substrate terminated to free the fleet."
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "send_mail params for aether.tcp.bind_listener and aether.tcp.connect",
+        "what": "The `name` field renders as `Option<String>` in describe_kinds, but omitting it from send_mail params fails with 'param encode failed: missing required field \"$.name\"'. A consumer reasonably reads Option<String> as omittable and has to learn by error that the encoder requires the key present as `name: null`.",
+        "suggested": "Have the send_mail param encoder treat Option/nullable schema fields as defaulting to null when the key is omitted, so an Option<String> field is genuinely optional rather than required-but-nullable."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "aether.tcp.session_write reply",
+        "what": "session_write settles with status 'delivered' and empty replies — there is no positive write acknowledgement kind. Confirming a write succeeded relies entirely on the *absence* of a subsequent session_closed, i.e. only negative evidence. To gain any confidence the session stayed open I had to issue a second write and again observe no close.",
+        "suggested": "Optionally surface a lightweight session_write_result (bytes written / would-block) or document explicitly that session_write is fire-and-forget and that liveness is confirmed only via session_closed absence, so consumers know what 'success' looks like."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "aether.tcp.bind_listener_result when name is null",
+        "what": "With name: null the auto-assigned listener_name is the numeric port string ('35489'), which is identical to local_port. The default listener identity being the port number is surprising and visually collides with the port field when routing later mail by name.",
+        "suggested": "Default the auto listener_name to a stable non-numeric token (e.g. 'listener-0' mirroring 'conn-0' for sessions) so the name and the port are distinguishable."
+      }
+    ],
+    "missing-primitive": [],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "high",
+        "where": "Discovering the aether.tcp surface from docs/guide/",
+        "what": "There is no systems/ guide page for aether.tcp. SUMMARY.md lists File I/O, HTTP egress, Window, Audio, etc. but nothing for TCP. The consumer-facing flow (bind_listener -> connect -> session addressing -> session_write) exists only in ADR-0079/0108 (design records) and one incidental line in capability-anatomy.md, and the CLAUDE.md runtime-subsystem list omits aether.tcp entirely. A fresh consumer has no guide-level description of the connect/session_write flow, the session_address lineage addressing, or the connect_result shape. I recovered the shapes via describe_kinds (a legit public tool, so I was not forced into crate internals) but the guide gap is real.",
+        "suggested": "Add docs/guide/systems/tcp.md covering bind_listener/connect/session_write/session_close and the aether.tcp/aether.tcp.session:NAME session addressing, and list it in SUMMARY.md plus the CLAUDE.md subsystem list alongside aether.http."
+      }
+    ],
+    "blocker": []
+  },
+  "softHolds": [],
+  "tokensPerTool": []
+}
