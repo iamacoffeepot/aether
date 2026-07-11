@@ -1,0 +1,182 @@
+{
+  "totals": {
+    "findings": 6,
+    "papercut": 3,
+    "missingPrimitive": 0,
+    "docGap": 3,
+    "blocker": 0,
+    "softHolds": 0
+  },
+  "succeeded": true,
+  "buildGreen": null,
+  "summary": "Drove the full task-level terrain surface end to end on a live desktop engine (00000000-0000-0000-0000-000000000001). Built + uploaded aether_kit.wasm, loaded MarkBook, TerraEditor (config via mark_book_mailbox), and WorldView. Created a named Path mark (id 1) and Point mark (id 2) with terrain_marks; selected both and relabeled them \"surveyed\" through TerraEditor (revisions bumped 1->2). Staged a brush proposal from the Path mark (proposal 1, source_mark geometry, rev 2), set it as the preview, captured a frame (green chevron following the ridge-path — visible only after loading a camera and using an orbit view), and committed it. Staged an automaton (grow) proposal from the Point mark (proposal 2) and discarded it. Retried apply_terrain_brush with a stale MarkRef (Path id 1 rev 1) — rejected at preflight (\"operator source mark reference is stale\", MCP -32602) with no world mail sent; the final capture is byte-identical to the committed frame, proving no mutation. All component results projected the documented named-record vocabulary (Created/Applied/Staged/Committed/Discarded, {value} mark ids, revisioned MarkRefs). Everything succeeded through the public tool surface; the friction was almost entirely in discovery/onboarding, not the tools' operation.",
+  "artifact": {
+    "verdict": "correct",
+    "rationale": "The captured frame shows a single contiguous green brush-stroke terrain — a smooth curved/checkmark-shaped path — on a dark slate background. This matches the expected path-derived brush terrain that the preview and post-commit frame should both display. There is no scattered/cellular point-derived automaton pattern visible, consistent with the discarded automaton proposal producing no committed visual change. The stale-reference rejection is a structured tool-error concern, not a pixel one, so it has no bearing on this visual verdict."
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "load_component inline `config` vs `config_path` for TerraConfig",
+        "what": "Passing the identical JSON {\"mark_book_mailbox\":\"mbx-ma5o-wbdl-owam\"} inline via the `config` argument failed with 'config does not match aether.kit.terra.config: field \"$\" expected object', but writing the exact same bytes to a file and passing `config_path` succeeded. The docs present the two as equivalent (mutually exclusive, same schema-encode). The inline path appears to mangle the object (encoder sees a non-object at root $).",
+        "suggested": "Fix aether-mcp so inline `config` is schema-encoded the same as `config_path`, or document the divergence. This silently pushes users to files for no reason."
+      },
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "TerraConfig.mark_book_mailbox threading at load time",
+        "what": "TerraEditor's config needs the MarkBook's runtime MailboxId, which only exists after MarkBook is loaded (returned as a tagged mbx- string). This forces a strictly sequential load (can't preload both via spawn_substrate/boot-manifest since the sibling's mailbox id isn't known at boot), and it's non-obvious that the tagged mbx- string is even an accepted config value (it is, but only via config_path — see the inline-config bug).",
+        "suggested": "Document that mark_book_mailbox accepts the MarkBook LoadResult name/mailbox_id and must be loaded first; or let TerraConfig accept a MarkBook load-name string that the editor resolves, so the two can be co-loaded."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "aether.kit.camera set_mode Orbit (incidental camera needed for the render)",
+        "what": "The Orbit mode struct fields (distance/pitch/yaw/speed/fov_y_rad/target) are all Option in the schema, but the codec rejected the mail with 'missing required field \"$.mode::Orbit.0.speed\"' unless every field was supplied. Optional-in-schema but required-by-encoder is surprising and cost a round trip. (Off the terrain surface, but hit while setting up the required render.)",
+        "suggested": "Make the encoder honor Option (omitted -> None) for struct fields inside enum variants, or drop the Option from these fields if they are truly required."
+      }
+    ],
+    "missing-primitive": [],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "high",
+        "where": "Onboarding to the whole terrain surface (docs/guide has no terrain page; SUMMARY.md lists none)",
+        "what": "The guide's only terrain material is one dense paragraph in mcp-harness.md plus ADRs 0142/0143. To actually use the surface I had to read crate internals: the component selectors (aether_kit@aether.kit.mark / .terra / .world) come from crates/aether-kit/src/lib.rs export! and the NAMESPACE consts; the mandatory TerraConfig{mark_book_mailbox} requirement and its type come from terra/kinds.rs; the load ordering (MarkBook first, capture its mailbox, then configure TerraEditor) is undocumented. A fresh consumer working from docs + public signatures cannot discover any of these.",
+        "suggested": "Add a docs/guide/recipes/terrain-authoring.md walkthrough: which selectors to load, that TerraEditor requires TerraConfig.mark_book_mailbox pointing at the MarkBook's LoadResult mailbox_id, the load order, and a minimal marks->select->propose->preview->commit script."
+      },
+      {
+        "category": "doc-gap",
+        "severity": "medium",
+        "where": "set_terrain_proposal_preview + capture_frame (making a proposal visible)",
+        "what": "A brush proposal is flat (all height 0, a thin material overlay). With the default booted camera the capture is blank, and my first instinct — a top-down camera aimed at origin — also rendered completely blank (a flat overlay is edge-invisible / not framed by topdown). Only an orbit camera pitched downward showed the terrain. The terrain surface offers no viewable-camera helper and no doc pairing preview/capture with a camera, so a fresh user sees a blank frame and cannot tell whether the proposal or the camera is wrong.",
+        "suggested": "In the terrain recipe, show the exact camera setup for previewing terrain (orbit, downward pitch, target at the mark centroid) and note that top-down over a flat overlay renders nothing. Consider a convenience 'frame these marks' camera helper."
+      },
+      {
+        "category": "doc-gap",
+        "severity": "low",
+        "where": "WorldPoint / brush geometry units (x_octimeters, z_octimeters)",
+        "what": "Coordinates are in 'octimeters' but no conversion is documented. I authored a path spanning 0..160 octimeters expecting ~20m (1/8 m each); the returned digest bounds were ~0.85m total, so the effective scale is nothing like 1/8 m and is unpredictable, making it impossible to author marks at a known world size or to pre-plan a camera extent.",
+        "suggested": "State the octimeter->meter conversion in the tool docs / recipe and give the visible world size of a sample mark so users can frame it."
+      }
+    ],
+    "blocker": []
+  },
+  "softHolds": [],
+  "tokensPerTool": [
+    {
+      "tool": "mcp__aether-hub__apply_terrain_brush",
+      "calls": 2,
+      "bytesIn": 726,
+      "bytesOut": 184,
+      "tokensIn": 182,
+      "tokensOut": 46
+    },
+    {
+      "tool": "mcp__aether-hub__capture_frame",
+      "calls": 2,
+      "bytesIn": 301,
+      "bytesOut": 7873,
+      "tokensIn": 75,
+      "tokensOut": 1968
+    },
+    {
+      "tool": "mcp__aether-hub__commit_terrain_proposal",
+      "calls": 1,
+      "bytesIn": 139,
+      "bytesOut": 488,
+      "tokensIn": 35,
+      "tokensOut": 122
+    },
+    {
+      "tool": "mcp__aether-hub__discard_terrain_proposal",
+      "calls": 1,
+      "bytesIn": 139,
+      "bytesOut": 74,
+      "tokensIn": 35,
+      "tokensOut": 19
+    },
+    {
+      "tool": "mcp__aether-hub__list_binaries",
+      "calls": 1,
+      "bytesIn": 21,
+      "bytesOut": 680,
+      "tokensIn": 5,
+      "tokensOut": 170
+    },
+    {
+      "tool": "mcp__aether-hub__list_components",
+      "calls": 1,
+      "bytesIn": 32,
+      "bytesOut": 9066,
+      "tokensIn": 8,
+      "tokensOut": 2267
+    },
+    {
+      "tool": "mcp__aether-hub__list_engines",
+      "calls": 1,
+      "bytesIn": 16,
+      "bytesOut": 43,
+      "tokensIn": 4,
+      "tokensOut": 11
+    },
+    {
+      "tool": "mcp__aether-hub__load_component",
+      "calls": 4,
+      "bytesIn": 516,
+      "bytesOut": 7643,
+      "tokensIn": 129,
+      "tokensOut": 1911
+    },
+    {
+      "tool": "mcp__aether-hub__propose_terrain_edit",
+      "calls": 2,
+      "bytesIn": 762,
+      "bytesOut": 1528,
+      "tokensIn": 191,
+      "tokensOut": 382
+    },
+    {
+      "tool": "mcp__aether-hub__send_mail",
+      "calls": 1,
+      "bytesIn": 308,
+      "bytesOut": 103,
+      "tokensIn": 77,
+      "tokensOut": 26
+    },
+    {
+      "tool": "mcp__aether-hub__set_terrain_proposal_preview",
+      "calls": 1,
+      "bytesIn": 139,
+      "bytesOut": 496,
+      "tokensIn": 35,
+      "tokensOut": 124
+    },
+    {
+      "tool": "mcp__aether-hub__spawn_substrate",
+      "calls": 1,
+      "bytesIn": 31,
+      "bytesOut": 134,
+      "tokensIn": 8,
+      "tokensOut": 34
+    },
+    {
+      "tool": "mcp__aether-hub__terrain_editor",
+      "calls": 2,
+      "bytesIn": 384,
+      "bytesOut": 403,
+      "tokensIn": 96,
+      "tokensOut": 101
+    },
+    {
+      "tool": "mcp__aether-hub__terrain_marks",
+      "calls": 2,
+      "bytesIn": 616,
+      "bytesOut": 188,
+      "tokensIn": 154,
+      "tokensOut": 47
+    }
+  ]
+}
