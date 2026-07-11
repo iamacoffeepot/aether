@@ -376,6 +376,7 @@ impl Mcp {
                        framework dispatch arm, so any mailbox is queryable (e.g. \"aether.audio\", \
                        \"aether.component/aether.embedded:aether.camera\"). `max` defaults to 100 and clamps to 1000; \
                        pass `level` (`trace|debug|info|warn|error`) for server-side filtering; pass \
+                       `contains` for a case-sensitive server-side message substring filter; pass \
                        `since` (the prior call's `next_since`) to walk past already-seen entries without \
                        double-reading. `truncated_before` in the reply is `Some(seq)` when the ring \
                        evicted entries the caller hadn't seen yet (the lowest sequence still held). \

@@ -215,7 +215,7 @@ mod tests {
         let expected = probe_lineage_addr();
         let loaded = bench.load_by_selector(engine, "probe");
         assert_eq!(loaded.addr, expected, "load by selector registers at the lineage addr");
-        match bench.log_tail(engine, &expected, None) {
+        match bench.log_tail(engine, &expected, None, None) {
             LogTailResult::Ok { .. } => {}
             LogTailResult::Err { error } => {
                 panic!("the loaded probe should answer LogTail, got Err: {error}")

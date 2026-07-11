@@ -125,7 +125,7 @@ fn component_source_returns_sender_mailbox() {
     // Read the reader's log ring — the handler logs
     // "source_mailbox={id}" on every `SourceQuery` dispatch.
     let expected_msg = format!("source_mailbox={}", sender_mailbox.0);
-    let logs = bench.log_tail(&reader_addr, None);
+    let logs = bench.log_tail(&reader_addr, None, None);
     let found = match &logs {
         LogTailResult::Ok { entries, .. } => entries.iter().any(|e| e.message == expected_msg),
         LogTailResult::Err { error } => panic!("log_tail on reader failed: {error}"),

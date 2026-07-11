@@ -59,7 +59,8 @@ pub(super) async fn actor_logs(mcp: &Mcp, args: ActorLogsArgs) -> Result<String,
         Some(s) => Some(parse_level(s)?),
         None => None,
     };
-    let request = aether_kinds::LogTail { max: args.max.unwrap_or(0), min_level, since: args.since };
+    let request =
+        aether_kinds::LogTail { max: args.max.unwrap_or(0), min_level, since: args.since, contains: args.contains };
     let reply = mcp.session.call_one(engine_envelope(engine, &args.mailbox_name, &request)).await.map_err(internal)?;
     match aether_kinds::LogTailResult::decode_from_bytes(&reply.payload) {
         Some(aether_kinds::LogTailResult::Ok { entries, next_since, truncated_before }) => {

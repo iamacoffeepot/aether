@@ -34,8 +34,9 @@ read from a doc, because the engine can't drift from itself:
   kinds and per-handler docs, addressed by lineage name (or a `mbx-` id).
 - `describe_transforms` — the native `#[transform]` functions linked at build
   time.
-- `actor_logs(engine_id, mailbox_name)` — recent entries from one actor's log
-  ring.
+- `actor_logs(engine_id, mailbox_name, contains?)` — recent entries from one
+  actor's log ring, optionally filtered substrate-side by a case-sensitive
+  message substring.
 
 Reach for these before assuming a doc is current.
 
