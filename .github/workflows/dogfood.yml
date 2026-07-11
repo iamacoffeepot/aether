@@ -302,6 +302,12 @@ jobs:
       DOGFOOD_RUN_ID: ${{ github.run_id }}-${{ needs.resolve.outputs.attempt }}
       EXPECTED_ARTIFACT: ${{ needs.resolve.outputs.expected_artifact }}
       ISSUE: ${{ needs.resolve.outputs.issue }}
+      # The model driving the headless harness session that launches the
+      # workflow — NOT the models the workflow's own Author/Attempt/Judge agents
+      # run on (those are dogfood.js's, and it records them itself). One knob so
+      # the auth preflight, the trial, and the provenance the rollup reports can
+      # never disagree about what actually ran.
+      DRIVER_MODEL: claude-sonnet-5
     outputs:
       rollup_produced: ${{ steps.rollup.outputs.produced }}
     steps:
@@ -411,7 +417,7 @@ jobs:
         if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
         run: |
           claude -p "Reply with exactly: AUTH-OK" \
-            --model claude-sonnet-5 \
+            --model "$DRIVER_MODEL" \
             --max-turns 3 | tee /tmp/auth.log
           grep -q "AUTH-OK" /tmp/auth.log
 
@@ -453,16 +459,20 @@ jobs:
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/dogfood-run"
 
-          # Build the args.task JSON with jq so a brief value carrying quotes,
+          # Build the whole args object with jq so a brief value carrying quotes,
           # backticks, or $ is escaped correctly. `none` maps to a null
           # expectedArtifact (the workflow's "nothing renders" sentinel).
-          task_json="$(jq -nc \
+          # driverModel rides along so the rollup's provenance can record which
+          # model drove this session — the workflow cannot read it otherwise.
+          args_json="$(jq -nc \
             --arg medium "$BRIEF_MEDIUM" \
             --arg prompt "$BRIEF_PROMPT" \
             --arg surface "$BRIEF_SURFACE" \
             --arg artifact "$BRIEF_ARTIFACT" \
-            '{medium: $medium, prompt: $prompt, surfaceUnderTest: $surface,
-              expectedArtifact: (if $artifact == "none" or $artifact == "" then null else $artifact end)}')"
+            --arg driver "$DRIVER_MODEL" \
+            '{task: {medium: $medium, prompt: $prompt, surfaceUnderTest: $surface,
+                     expectedArtifact: (if $artifact == "none" or $artifact == "" then null else $artifact end)},
+              driverModel: $driver}')"
 
           # Assemble the prompt in a quoted heredoc so the interpolated JSON is
           # inserted verbatim (no shell re-parsing of its contents).
@@ -476,7 +486,7 @@ jobs:
           the Workflow/Skill tooling, passing args set to EXACTLY this JSON object. Supplying args.task
           SKIPS the Author phase and its human approval stop — that is what makes this run unattended:
 
-          { "task": ${task_json} }
+          ${args_json}
 
           THE WAIT CONTRACT (load-bearing — headless runs die on this): the Workflow tool runs in the
           BACKGROUND. Launch it, then end your turn with a one-line status note — nothing else. The
@@ -508,7 +518,7 @@ jobs:
           claude -p "$(cat /tmp/dogfood-prompt.md)" \
             --mcp-config .mcp.json \
             --dangerously-skip-permissions \
-            --model claude-sonnet-5 \
+            --model "$DRIVER_MODEL" \
             --max-turns 120 \
             --output-format stream-json --verbose \
             | tee /tmp/dogfood-session.jsonl \
