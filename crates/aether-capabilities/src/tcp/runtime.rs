@@ -117,7 +117,12 @@ impl NativeActor for TcpCapability {
         let listener_id = match ctx
             .spawn_child::<TcpListenerActor>(
                 Subname::Named(&subname_str),
-                TcpListenerConfig { listener: Some(listener), addr: mail.addr.clone(), port: local_port },
+                TcpListenerConfig {
+                    listener: Some(listener),
+                    addr: mail.addr.clone(),
+                    port: local_port,
+                    consumer: mail.consumer,
+                },
             )
             .finish()
         {

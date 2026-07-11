@@ -38,6 +38,7 @@ use super::TcpListenerActor;
 /// distinct ZST [`TcpListenerActor`](super::TcpListenerActor).
 pub struct TcpListenerState {
     pub local_port: u16,
+    pub consumer: Option<String>,
     pub shutdown: Arc<AtomicBool>,
     pub accept_thread: Option<JoinHandle<()>>,
     pub connection_rx: mpsc::Receiver<(TcpStream, SocketAddr)>,
@@ -119,7 +120,14 @@ impl NativeActor for TcpListenerActor {
             "tcp listener bound",
         );
 
-        Ok(TcpListenerState { local_port: port, shutdown, accept_thread: Some(thread), connection_rx, next_subname: 0 })
+        Ok(TcpListenerState {
+            local_port: port,
+            consumer: config.consumer,
+            shutdown,
+            accept_thread: Some(thread),
+            connection_rx,
+            next_subname: 0,
+        })
     }
 
     fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
@@ -170,8 +178,12 @@ impl NativeActor for TcpListenerActor {
             let subname = format!("conn-{}", state.next_subname);
             state.next_subname += 1;
             let peer_str = peer.to_string();
-            let session_config =
-                TcpSessionConfig { stream: Some(stream), peer: peer_str.clone(), session_name: subname.clone() };
+            let session_config = TcpSessionConfig {
+                stream: Some(stream),
+                peer: peer_str.clone(),
+                session_name: subname.clone(),
+                consumer: state.consumer.clone(),
+            };
             match ctx
                 .spawn_child::<TcpSessionActor>(aether_substrate::Subname::Named(&subname), session_config)
                 .finish()

@@ -175,6 +175,29 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T, FrameErr
     Ok(wire::from_bytes(&buf)?)
 }
 
+/// Pop one complete length-prefixed frame body from an incremental
+/// receive buffer. A partial prefix or body returns `Ok(None)` without
+/// changing `buf`, so callers can append the next stream chunk and try
+/// again. An oversize prefix is rejected before waiting for or
+/// allocating its declared body.
+pub fn pop_frame(buf: &mut Vec<u8>) -> Result<Option<Vec<u8>>, FrameError> {
+    let Some(&prefix) = buf.first_chunk::<4>() else {
+        return Ok(None);
+    };
+    let len = u32::from_le_bytes(prefix) as usize;
+    let max = max_frame_size();
+    if len > max {
+        return Err(FrameError::FrameTooLarge { size: len, max });
+    }
+
+    let frame_len = 4 + len;
+    if buf.len() < frame_len {
+        return Ok(None);
+    }
+
+    Ok(Some(buf.drain(..frame_len).skip(4).collect()))
+}
+
 /// Synchronous write of one framed message. Returns
 /// [`FrameError::EncodeTooLarge`] if the encoded body exceeds
 /// [`max_frame_size`] (the encode-side cap check).
@@ -231,6 +254,69 @@ mod tests {
         let _: Msg = read_frame(&mut r).expect("test setup: read frame 1 of 3");
         let _: Msg = read_frame(&mut r).expect("test setup: read frame 2 of 3");
         let _: Msg = read_frame(&mut r).expect("test setup: read frame 3 of 3");
+    }
+
+    fn raw_frame(body: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(4 + body.len());
+        let body_len = u32::try_from(body.len()).expect("test frame body fits the wire prefix");
+        frame.extend_from_slice(&body_len.to_le_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    #[test]
+    fn pop_frame_returns_exact_single_body() {
+        let body = b"one frame";
+        let mut buf = raw_frame(body);
+
+        assert_eq!(pop_frame(&mut buf).expect("complete frame parses"), Some(body.to_vec()));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn pop_frame_retains_partial_buffer() {
+        let mut buf = raw_frame(b"partial body");
+        buf.truncate(buf.len() - 2);
+        let retained = buf.clone();
+
+        assert_eq!(pop_frame(&mut buf).expect("partial frame is not an error"), None);
+        assert_eq!(buf, retained);
+    }
+
+    #[test]
+    fn pop_frame_drains_two_back_to_back_frames() {
+        let mut buf = raw_frame(b"first");
+        buf.extend_from_slice(&raw_frame(b"second"));
+        let mut bodies = Vec::new();
+
+        while let Some(body) = pop_frame(&mut buf).expect("buffer contains valid frames") {
+            bodies.push(body);
+        }
+
+        assert_eq!(bodies, vec![b"first".to_vec(), b"second".to_vec()]);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn pop_frame_reassembles_body_split_across_appends() {
+        let frame = raw_frame(b"split body");
+        let split = frame.len() - 3;
+        let mut buf = frame[..split].to_vec();
+
+        assert_eq!(pop_frame(&mut buf).expect("partial frame is not an error"), None);
+        buf.extend_from_slice(&frame[split..]);
+        assert_eq!(pop_frame(&mut buf).expect("completed frame parses"), Some(b"split body".to_vec()));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn pop_frame_rejects_oversize_prefix() {
+        let oversize = max_frame_size() + 1;
+        let oversize_prefix = u32::try_from(oversize).expect("test oversize value fits the wire prefix");
+        let mut buf = oversize_prefix.to_le_bytes().to_vec();
+
+        let err = pop_frame(&mut buf).expect_err("oversize prefix must reject");
+        assert!(matches!(err, FrameError::FrameTooLarge { size, max } if size == oversize && max == max_frame_size()));
     }
 
     #[test]

@@ -14,12 +14,16 @@ use serde::{Deserialize, Serialize};
 /// (so `"127.0.0.1:8080"` and `"0.0.0.0:0"` both work; the
 /// latter asks the OS to pick a free port). Optional `name`
 /// overrides the default subname (the bound port string); pass
-/// `None` for the default. Reply: `BindListenerResult`.
+/// `None` for the default. Optional `consumer` is the late-bound
+/// mailbox name every accepted session delivers inbound frames and
+/// close notices to; `None` leaves the listener observer-less and
+/// drops inbound bytes. Reply: `BindListenerResult`.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.tcp.bind_listener")]
 pub struct BindListener {
     pub addr: String,
     pub name: Option<String>,
+    pub consumer: Option<String>,
 }
 
 /// Reply to `BindListener`. `Ok` carries the resolved listener
@@ -119,16 +123,17 @@ pub struct ConnectionReady {}
 /// dispatcher wake. Mirror of [`ConnectionReady`] for the session
 /// read path: the read thread blocks on `read()`, pushes bytes via
 /// mpsc, fires this mail at its own session mailbox. The handler
-/// drains the mpsc and broadcasts each chunk as [`SessionData`].
-/// Empty payload.
+/// drains the mpsc, reassembles length-prefixed frames, and delivers
+/// each complete frame as [`SessionData`] to the session's bound
+/// consumer. Empty payload.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
 #[kind(name = "aether.tcp.session_data_ready")]
 pub struct SessionDataReady {}
 
-/// `aether.tcp.session_data` — broadcast emitted by a
-/// `TcpSessionActor` on each chunk read from its peer. Carries
-/// the session subname (`conn-N`), the peer address as a string,
-/// and the bytes received in one `read()` call. Structured-shaped
+/// `aether.tcp.session_data` — one reassembled length-prefix frame
+/// delivered by a `TcpSessionActor` to the listener's bound consumer.
+/// Carries the session subname (`conn-N`), the peer address as a
+/// string, and the complete frame body. Structured-shaped
 /// (variable-length payload) — agents drain via `receive_mail`.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.tcp.session_data")]
@@ -159,12 +164,10 @@ pub struct SessionWrite {
 #[kind(name = "aether.tcp.session_close")]
 pub struct SessionClose {}
 
-/// `aether.tcp.session_closed` — broadcast emitted on session
-/// close. Carries the session subname, the peer address, and a
-/// human-readable reason ("eof", "read error: ...", "explicit
-/// close", etc.). Agents observe via `receive_mail` to know when
-/// a session terminated and clean up any per-session state they
-/// were tracking.
+/// `aether.tcp.session_closed` — delivered to the listener's bound
+/// consumer on peer EOF, read error, or frame rejection. Carries the
+/// session subname, the peer address, and a human-readable reason. A
+/// trailing partial frame at close is dropped and noted in the reason.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.tcp.session_closed")]
 pub struct SessionClosed {

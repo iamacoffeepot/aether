@@ -401,6 +401,10 @@ mod tests {
     #[test]
     fn proxy_reports_died_when_connection_closes() {
         let (port, _server) = fake_server(Behavior::Close);
+        // Hold `init` until the reader has enqueued its synthetic `Bye`
+        // and fired the still-pre-registration wake. The post-registration
+        // catch-up wake must recover that deliberately lost first wake.
+        super::connect::wait_for_reader_wake_before_connect_returns();
         let (_chassis, cells, engine_id) = spawn_proxy_with_heartbeat(99, port, None);
         let died = await_first(&cells.died, "closed engine not reported dead");
         assert_eq!(died.engine_id, engine_id, "the closed engine's id is reported dead");
