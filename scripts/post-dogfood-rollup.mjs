@@ -27,7 +27,9 @@
 //   ISSUE               the feature issue to comment on (required)
 //   PR                  the PR to carry the label (optional; defaults to ISSUE)
 //   RUN_REF             <issue>/<run-id> — the evidence-branch path segment
-//   ROLLUP_PATH         rollup.json (the workflow's returned rollup)
+//   RUN_URL             Actions URL for a no-rollup attempt's transcript
+//   ROLLUP_PATH         rollup.json (the workflow's returned rollup); unset or
+//                       unreadable records a no-rollup attempt
 //   ATTEMPT             this trial's attempt number, baked into the marker
 //                       (optional; defaults to 1)
 //   HAS_FRAME           "1"/"true" when the staged run dir held a frame.png
@@ -36,14 +38,7 @@
 // No external deps — Node built-ins + global fetch only.
 
 import { readFile } from 'node:fs/promises'
-
-const TOKEN = requireEnv('GITHUB_TOKEN')
-const REPO = requireEnv('GITHUB_REPOSITORY')
-const ISSUE = Number(requireEnv('ISSUE'))
-const PR = process.env.PR ? Number(process.env.PR) : ISSUE
-const RUN_REF = requireEnv('RUN_REF')
-const ROLLUP_PATH = process.env.ROLLUP_PATH || 'rollup.json'
-const ATTEMPT = process.env.ATTEMPT ? Number(process.env.ATTEMPT) : 1
+import { pathToFileURL } from 'node:url'
 
 // The bare prefix is the upsert anchor — it matches both the old
 // `<!-- aether-dogfood -->` comment and the extended
@@ -61,11 +56,25 @@ function requireEnv(name) {
   return v
 }
 
-async function api(method, path, body) {
+function environment() {
+  const issue = Number(requireEnv('ISSUE'))
+  return {
+    token: requireEnv('GITHUB_TOKEN'),
+    repo: requireEnv('GITHUB_REPOSITORY'),
+    issue,
+    pr: process.env.PR ? Number(process.env.PR) : issue,
+    runRef: process.env.RUN_REF || '',
+    runUrl: process.env.RUN_URL || '',
+    rollupPath: process.env.ROLLUP_PATH || '',
+    attempt: process.env.ATTEMPT ? Number(process.env.ATTEMPT) : 1,
+  }
+}
+
+async function api(token, method, path, body) {
   const res = await fetch(`${API}/${path}`, {
     method,
     headers: {
-      authorization: `Bearer ${TOKEN}`,
+      authorization: `Bearer ${token}`,
       accept: 'application/vnd.github+json',
       'x-github-api-version': '2022-11-28',
       'content-type': 'application/json',
@@ -83,13 +92,13 @@ function safeJson(t) {
 }
 
 // Paginate a GitHub list endpoint via the Link header.
-async function apiList(path) {
+async function apiList(token, path) {
   const out = []
   let url = `${API}/${path}${path.includes('?') ? '&' : '?'}per_page=100`
   while (url) {
     const res = await fetch(url, {
       headers: {
-        authorization: `Bearer ${TOKEN}`,
+        authorization: `Bearer ${token}`,
         accept: 'application/vnd.github+json',
         'x-github-api-version': '2022-11-28',
         'user-agent': 'aether-dogfood-poster',
@@ -186,29 +195,40 @@ function softHoldLines(softHolds) {
 // with anything actionable (a failed attempt, a wrong artifact, a
 // soft-hold, a blocker / missing-primitive finding) is `failed`, else
 // `green`. `green` is terminal for the auto-retry loop.
-function markerVerdict(rollup) {
+export function markerVerdict(rollup) {
   return isActionable(rollup) || rollup.succeeded === false ? 'failed' : 'green'
 }
 
-function markerLine(rollup) {
-  return `${MARKER_PREFIX} attempts=${ATTEMPT} verdict=${markerVerdict(rollup)} -->`
+export function markerLine(rollup, attempt = 1, verdict = markerVerdict(rollup)) {
+  return `${MARKER_PREFIX} attempts=${attempt} verdict=${verdict} -->`
 }
 
-function renderComment(rollup, hasFrame) {
-  const lines = [markerLine(rollup), '## Dogfood trial', '']
+export function renderComment(rollup, hasFrame, { attempt = 1, runRef = '' } = {}) {
+  const lines = [markerLine(rollup, attempt), '## Dogfood trial', '']
   lines.push(...verdictLines(rollup))
   lines.push('', '### Friction')
   lines.push(...frictionLines(rollup.friction))
   lines.push(...softHoldLines(rollup.softHolds))
   lines.push(...tokenTableLines(rollup.tokensPerTool))
   if (hasFrame) {
-    lines.push('', '### Judged frame', '', `![judged frame](${RAW_BASE}/${RUN_REF}/frame.png)`)
+    lines.push('', '### Judged frame', '', `![judged frame](${RAW_BASE}/${runRef}/frame.png)`)
   }
-  lines.push('', `[Full run in the evidence viewer](${VIEWER_BASE}?run=${encodeURIComponent(RUN_REF)})`)
+  lines.push('', `[Full run in the evidence viewer](${VIEWER_BASE}?run=${encodeURIComponent(runRef)})`)
   return lines.join('\n')
 }
 
-function isActionable(rollup) {
+export function renderNoRollupComment({ attempt = 1, runUrl } = {}) {
+  return [
+    markerLine(null, attempt, 'failed'),
+    '## Dogfood trial',
+    '',
+    '- **Attempt:** did not succeed',
+    '',
+    `The trial ended without its required rollup. [Open the Actions run](${runUrl}) to inspect the \`dogfood-session-transcript\` artifact and runner log.`,
+  ].join('\n')
+}
+
+export function isActionable(rollup) {
   if (rollup.succeeded === false) return true
   if (rollup.artifact && rollup.artifact.verdict === 'wrong') return true
   if (Array.isArray(rollup.softHolds) && rollup.softHolds.length) return true
@@ -219,10 +239,20 @@ function isActionable(rollup) {
   return false
 }
 
+export async function readRollup(path) {
+  if (!path) return null
+  try {
+    return JSON.parse(await readFile(path, 'utf8'))
+  } catch (error) {
+    if (error instanceof SyntaxError) throw error
+    return null
+  }
+}
+
 // Create the label if it does not exist yet. An already-exists 422 is a
 // clean success — the label is present, which is all we need.
-async function ensureLabel() {
-  const res = await api('POST', `repos/${REPO}/labels`, {
+async function ensureLabel({ token, repo }) {
+  const res = await api(token, 'POST', `repos/${repo}/labels`, {
     name: LABEL,
     color: 'd93f0b',
     description: 'A dogfood trial surfaced something actionable',
@@ -232,48 +262,52 @@ async function ensureLabel() {
 }
 
 async function main() {
-  const raw = JSON.parse(await readFile(ROLLUP_PATH, 'utf8'))
+  const env = environment()
+  const raw = await readRollup(env.rollupPath)
+  const noRollup = raw === null
   // Accept either the bare rollup or the workflow's full { rollup, task }.
   const rollup = raw && raw.rollup ? raw.rollup : raw
-
-  const hasFrame = process.env.HAS_FRAME
+  const hasFrame = !noRollup && (process.env.HAS_FRAME
     ? /^(1|true)$/i.test(process.env.HAS_FRAME)
-    : rollup.artifact != null
-
-  const body = renderComment(rollup, hasFrame)
+    : rollup.artifact != null)
+  const body = noRollup
+    ? renderNoRollupComment({ ...env, runUrl: requireEnv('RUN_URL') })
+    : renderComment(rollup, hasFrame, { ...env, runRef: requireEnv('RUN_REF') })
 
   // Upsert the marker-anchored living comment — edit if present, create
   // otherwise. The evidence branch keeps per-run history, so the comment
   // shows latest-state.
-  const issueComments = await apiList(`repos/${REPO}/issues/${ISSUE}/comments`)
+  const issueComments = await apiList(env.token, `repos/${env.repo}/issues/${env.issue}/comments`)
   const existing = issueComments.find((c) => String(c.body || '').includes(MARKER_PREFIX))
   if (existing) {
-    const res = await api('PATCH', `repos/${REPO}/issues/comments/${existing.id}`, { body })
+    const res = await api(env.token, 'PATCH', `repos/${env.repo}/issues/comments/${existing.id}`, { body })
     if (!res.ok) console.error(`update comment failed: ${res.status} ${res.text}`)
     else console.log('updated dogfood comment')
   } else {
-    const res = await api('POST', `repos/${REPO}/issues/${ISSUE}/comments`, { body })
+    const res = await api(env.token, 'POST', `repos/${env.repo}/issues/${env.issue}/comments`, { body })
     if (!res.ok) console.error(`post comment failed: ${res.status} ${res.text}`)
     else console.log('posted dogfood comment')
   }
 
   // Advisory label on the PR when passed (that is where /land reads),
   // else on the issue. Set when actionable, cleared clean.
-  const target = PR
-  if (isActionable(rollup)) {
-    await ensureLabel()
-    const res = await api('POST', `repos/${REPO}/issues/${target}/labels`, { labels: [LABEL] })
+  const target = env.pr
+  if (noRollup || isActionable(rollup)) {
+    await ensureLabel(env)
+    const res = await api(env.token, 'POST', `repos/${env.repo}/issues/${target}/labels`, { labels: [LABEL] })
     if (!res.ok) console.error(`add label failed: ${res.status} ${res.text}`)
     else console.log(`set ${LABEL} on #${target}`)
   } else {
-    const res = await api('DELETE', `repos/${REPO}/issues/${target}/labels/${encodeURIComponent(LABEL)}`)
+    const res = await api(env.token, 'DELETE', `repos/${env.repo}/issues/${target}/labels/${encodeURIComponent(LABEL)}`)
     // 404 = the label was not present; a clean no-op.
     if (res.ok || res.status === 404) console.log(`cleared ${LABEL} on #${target}`)
     else console.error(`remove label failed: ${res.status} ${res.text}`)
   }
 }
 
-main().catch((err) => {
-  console.error(err)
-  process.exit(1)
-})
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(err)
+    process.exit(1)
+  })
+}
