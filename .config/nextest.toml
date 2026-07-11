@@ -9,9 +9,11 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 # The kit scenario integration binaries cold-load and compile
 # `aether_kit.wasm` in each test. CI measurements in #2805 put the
 # camera scenario around 56.5s and mesh around 52-53s against the default
-# 60s cap, so give only these known wasm-heavy binaries extra headroom.
+# 60s cap. The terrain workbench scenario likewise cold-loads the kit wasm
+# and crossed 60s under the CI software renderer, so give only these known
+# wasm-heavy binaries extra headroom.
 [[profile.ci.overrides]]
-filter = "package(=aether-kit) & (binary(camera_scenario) | binary(mesh_scenario))"
+filter = "package(=aether-kit) & (binary(camera_scenario) | binary(mesh_scenario) | binary(terrain_workbench_scenario))"
 slow-timeout = { period = "120s", terminate-after = 1 }
 
 # The `aether-substrate-bundle` integration tests (FleetBench + the engines /
