@@ -1,4 +1,49 @@
-use super::{DeathReason, EnumVariant, KindId, MailboxId, McpError, Primitive, SchemaType};
+use super::{
+    ComponentCapabilities, DeathReason, EnumVariant, FallbackCapability, HandlerCapability, KindId, MailboxId,
+    McpError, Primitive, SchemaType,
+};
+
+/// Project a wire [`ComponentCapabilities`] for an MCP tool reply (issue 3006).
+///
+/// The wire / cache form stays full; only the tool response is trimmed.
+/// When `full` is true the clone is unchanged. When false, every doc field
+/// (component-level, each handler, and fallback) is reduced to its first
+/// non-empty line — rustdoc's summary-line convention.
+pub(super) fn project_capabilities(caps: &ComponentCapabilities, full: bool) -> ComponentCapabilities {
+    if full {
+        return caps.clone();
+    }
+    ComponentCapabilities {
+        handlers: caps
+            .handlers
+            .iter()
+            .map(|h| HandlerCapability {
+                id: h.id,
+                name: h.name.clone(),
+                doc: h.doc.as_deref().map(first_doc_line).map(str::to_owned),
+                reply: h.reply,
+            })
+            .collect(),
+        fallback: caps
+            .fallback
+            .as_ref()
+            .map(|f| FallbackCapability { doc: f.doc.as_deref().map(first_doc_line).map(str::to_owned) }),
+        doc: caps.doc.as_deref().map(first_doc_line).map(str::to_owned),
+        config: caps.config.clone(),
+    }
+}
+
+/// First non-empty line of a rustdoc string, or the whole string when it is
+/// a single line (after stripping leading blank lines).
+fn first_doc_line(doc: &str) -> &str {
+    for line in doc.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
+    doc.trim()
+}
 
 /// Render a [`SchemaType`] as a one-line human-readable shape string —
 /// the compact form `describe_kinds` returns by default. The rendering is

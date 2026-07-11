@@ -44,3 +44,37 @@ fn render_shape_enum_kind() {
     let shape = render_shape(&schema);
     assert_eq!(shape, "Off | On(bool)", "enum shape should be Var1 | Var2(inner)");
 }
+
+/// Tripwire: projection owns the summary-line trim (issue 3006). Multi-line
+/// docs collapse to the first non-empty line when `full=false`; `full=true`
+/// keeps the wire form byte-identical for every doc field.
+#[test]
+fn project_capabilities_trims_docs_unless_full() {
+    use aether_data::{KindId, ReplyContract};
+    use aether_kinds::{ComponentCapabilities, FallbackCapability, HandlerCapability};
+
+    let multi = "First line summary.\n\nBody paragraph that must not appear by default.";
+    let leading_blank = "\n\n  Real summary after blanks  \nSecond line.";
+    let caps = ComponentCapabilities {
+        handlers: vec![HandlerCapability {
+            id: KindId(1),
+            name: "aether.test.handler".to_owned(),
+            doc: Some(multi.to_owned()),
+            reply: ReplyContract::None,
+        }],
+        fallback: Some(FallbackCapability { doc: Some(leading_blank.to_owned()) }),
+        doc: Some(multi.to_owned()),
+        config: None,
+    };
+
+    let summary = project_capabilities(&caps, false);
+    assert_eq!(summary.doc.as_deref(), Some("First line summary."));
+    assert_eq!(summary.handlers[0].doc.as_deref(), Some("First line summary."));
+    assert_eq!(summary.fallback.as_ref().and_then(|f| f.doc.as_deref()), Some("Real summary after blanks"));
+    assert_eq!(summary.handlers[0].name, "aether.test.handler");
+
+    let full = project_capabilities(&caps, true);
+    assert_eq!(full.doc.as_deref(), Some(multi));
+    assert_eq!(full.handlers[0].doc.as_deref(), Some(multi));
+    assert_eq!(full.fallback.as_ref().and_then(|f| f.doc.as_deref()), Some(leading_blank));
+}

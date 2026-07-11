@@ -121,7 +121,9 @@ stays bounded. `describe_component` reports a loaded component's handler kinds,
 their docs, whether it has a fallback, and its boot-config kind, addressed by
 the component's lineage name (the `aether.component/aether.embedded:NAME`
 address `spawn_substrate` / `list_components` / `load_component` hand back).
-`describe_transforms` lists the native transforms registered at link time.
+Handler and component docs default to the first rustdoc line; pass `full: true`
+for the complete strings. `describe_transforms` lists the native transforms
+registered at link time.
 
 **Components.** `upload_component` takes the filesystem path to a `.wasm` and
 stages it in the hub's component registry. `load_component` and
@@ -131,6 +133,9 @@ component, pass either `config` as inline structured JSON or `config_path` as a
 path to a JSON file; they are mutually exclusive. The harness schema-encodes the
 JSON to the Config kind that `describe_component` identifies; `describe_kinds`
 shows its schema. `config_path` does not contain pre-encoded wire bytes.
+`load_component` with `replicas: N` returns one shared `capabilities` block plus
+`instances: [{mailbox_id, name}, …]` rather than repeating capabilities per
+replica; docs on that block also follow the summary-vs-`full` projection.
 
 **Observation.** `capture_frame` returns the engine's current frame as inline PNG,
 and can carry two mail bundles dispatched atomically around the readback — `mails`
