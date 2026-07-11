@@ -200,6 +200,9 @@ jobs:
           prompt="$(field prompt)"
           surface="$(field surfaceUnderTest)"
           artifact="$(field expectedArtifact)"
+          # A brief authored as "none (…gloss…)" means the bare sentinel — collapse it so the
+          # downstream literal-equality sites (recording guards, task-object jq) hold.
+          if grep -qiE '^none[[:space:]]*(\(.*\))?$' <<<"$artifact"; then artifact="none"; fi
           [ -n "$medium" ] && [ -n "$prompt" ] || skip "Issue #${issue} brief is malformed (medium/prompt missing) — skipping."
 
           # Emit the free-text fields through random-delimiter heredocs so a
