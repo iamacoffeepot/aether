@@ -1332,7 +1332,6 @@ mod walls {
 }
 
 mod voids {
-    use super::super::atlas_support::xz_area_doubled;
     use super::*;
 
     #[test]

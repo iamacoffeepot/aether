@@ -111,15 +111,19 @@ fn wall_covers_plate_edge(walls: &[&DrawTriangle], x_meters: f32, z_meters: f32,
         (0..3).any(|edge_index| {
             let start = &triangle.verts[edge_index];
             let end = &triangle.verts[(edge_index + 1) % 3];
-            let length_squared_meters = (end.x - start.x).powi(2) + (end.z - start.z).powi(2);
+            let x_delta_meters = end.x - start.x;
+            let z_delta_meters = end.z - start.z;
+            let length_squared_meters = x_delta_meters.powi(2) + z_delta_meters.powi(2);
             if length_squared_meters < 1e-8 {
                 return false;
             }
-            if ((end.x - start.x) * (z_meters - start.z) - (end.z - start.z) * (x_meters - start.x)).abs() > 1e-3 {
+            let x_offset_meters = x_meters - start.x;
+            let z_offset_meters = z_meters - start.z;
+            if (x_delta_meters * z_offset_meters - z_delta_meters * x_offset_meters).abs() > 1e-3 {
                 return false;
             }
-            let edge_fraction = ((x_meters - start.x) * (end.x - start.x) + (z_meters - start.z) * (end.z - start.z))
-                / length_squared_meters;
+            let edge_fraction =
+                (x_offset_meters * x_delta_meters + z_offset_meters * z_delta_meters) / length_squared_meters;
             (-1e-4..=1.0 + 1e-4).contains(&edge_fraction)
                 && (start.y + (end.y - start.y) * edge_fraction - y_meters).abs() < 1e-3
         })
