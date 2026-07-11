@@ -472,13 +472,7 @@ impl HttpShardState {
         let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         let window = self.response_stream_window.max(1);
         let (tx, rx) = mpsc::sync_channel::<WriterMsg>(window as usize);
-        let sink = WakeSink {
-            inbound_tx: self.inbound_tx.clone(),
-            mailer: Arc::clone(&self.mailer),
-            self_id: self.self_mailbox,
-            wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
-            dirty: Arc::clone(&self.wake_dirty),
-        };
+        let sink = self.wake_sink();
         // The writer's idle deadline is the websocket idle timeout: an upgraded
         // socket with nothing to write for minutes is normal, unlike a stalled
         // response stream.

@@ -293,6 +293,27 @@ impl HttpSupervisorState {
 }
 
 impl HttpShardState {
+    pub(super) fn wake_sink(&self) -> WakeSink {
+        WakeSink {
+            inbound_tx: self.inbound_tx.clone(),
+            mailer: Arc::clone(&self.mailer),
+            self_id: self.self_mailbox,
+            wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
+            dirty: Arc::clone(&self.wake_dirty),
+        }
+    }
+
+    pub(super) fn subscribe_settlement(&self, mail_id: MailId) {
+        if let Some(registry) = self.mailer.settlement_registry() {
+            registry.subscribe_settlement_mail(
+                mail_id,
+                self.self_mailbox,
+                <Settled as Kind>::ID,
+                Arc::clone(&self.mailer),
+            );
+        }
+    }
+
     /// Release this connection's slot in the global live count (ADR-0135).
     /// Paired with the supervisor's assignment-time increment; called
     /// exactly once per assigned connection — on close, or on an adoption
@@ -342,13 +363,7 @@ impl HttpShardState {
         // into the thread.
         let (control_tx, control_rx) = mpsc::channel::<ReaderControl>();
 
-        let sink = WakeSink {
-            inbound_tx: self.inbound_tx.clone(),
-            mailer: Arc::clone(&self.mailer),
-            self_id: self.self_mailbox,
-            wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
-            dirty: Arc::clone(&self.wake_dirty),
-        };
+        let sink = self.wake_sink();
         let tuning = ReaderTuning {
             request_timeout: self.request_timeout,
             idle_timeout: self.keep_alive_timeout,
@@ -432,14 +447,7 @@ impl HttpShardState {
         // Safety net (ADR-0108 §5): if the chain settles with no
         // response, `on_settled` answers `502`. Best-effort — a chassis
         // without the settlement registry still serves the reply path.
-        if let Some(registry) = self.mailer.settlement_registry() {
-            registry.subscribe_settlement_mail(
-                mail_id,
-                self.self_mailbox,
-                <Settled as Kind>::ID,
-                Arc::clone(&self.mailer),
-            );
-        }
+        self.subscribe_settlement(mail_id);
         self.in_flight.insert(mail_id.correlation_id, PendingRequest { conn_id, method, keep_alive, handler });
     }
 

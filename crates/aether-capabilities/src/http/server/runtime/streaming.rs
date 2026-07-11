@@ -67,14 +67,7 @@ impl HttpShardState {
         };
         let payload = HttpRequestStreamEnd { stream_id }.encode_into_bytes();
         let mail_id = ctx.send_envelope_detached(stream.handler, <HttpRequestStreamEnd as Kind>::ID, &payload);
-        if let Some(registry) = self.mailer.settlement_registry() {
-            registry.subscribe_settlement_mail(
-                mail_id,
-                self.self_mailbox,
-                <Settled as Kind>::ID,
-                Arc::clone(&self.mailer),
-            );
-        }
+        self.subscribe_settlement(mail_id);
         self.in_flight.insert(
             mail_id.correlation_id,
             PendingRequest { conn_id, method: stream.method, keep_alive: stream.keep_alive, handler: stream.handler },
@@ -137,13 +130,7 @@ impl HttpShardState {
 
         let window = self.response_stream_window.max(1);
         let (tx, rx) = mpsc::sync_channel::<WriterMsg>(window as usize);
-        let sink = WakeSink {
-            inbound_tx: self.inbound_tx.clone(),
-            mailer: Arc::clone(&self.mailer),
-            self_id: self.self_mailbox,
-            wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
-            dirty: Arc::clone(&self.wake_dirty),
-        };
+        let sink = self.wake_sink();
         let idle_deadline = self.request_timeout;
 
         // Per-connection writer below the mail layer, mirroring the reader
