@@ -1,0 +1,146 @@
+{
+  "totals": {
+    "findings": 7,
+    "papercut": 5,
+    "missingPrimitive": 0,
+    "docGap": 2,
+    "blocker": 0,
+    "softHolds": 1
+  },
+  "succeeded": true,
+  "buildGreen": null,
+  "summary": "Drove the full aether.kit.world proposal lifecycle over MCP. Built + uploaded aether-kit wasm (registry was empty), spawned a desktop substrate, loaded aether.kit.world and aether.kit.camera. (1) propose(StampPolygon) staged a cross-chunk proposal id=1 touching chunks (0,0)(1,0)(2,0)(3,0), triangle_count 5112, committed world unchanged. (2) capture_frame before preview showed empty committed terrain (coverage 0.0). (3) set_proposal_preview{Some(1)} returned PreviewSet with active id + digest; captured the previewed Stone band via an orbit camera. (4) commit_proposal returned Committed with the same digest; committed terrain now renders the band. (5) Created a second cross-chunk proposal id=2 (StampDisc); committed terrain stayed byte-identical while it was only staged. (6) Demonstrated the 64-proposal cap: after id=2 plus 63 fills reached 64 staged, further propose attempts rejected as ProposalError::StagedProposalLimitReached (ids monotonic, max 65, never reused). (7) discard_proposal(2) returned Discarded; committed terrain remained byte-identical (coverage 0.037314583, centroid (434.05,319.97) before and after). Engine left alive showing the committed cross-chunk band. The typed proposal_result lifecycle (Staged/PreviewSet/Committed/Discarded/Rejected) all decoded cleanly over send_mail.",
+  "artifact": {
+    "verdict": "wrong",
+    "rationale": "The frame renders a single thin diagonal gray bar (one narrow quad/strip) on a flat dark blue-gray background — nothing resembling a terrain surface. The expected artifact is a terrain proposal render: a heightfield/terrain mesh in which an authored region visibly differs (preview edit vs. committed baseline). There is no terrain grid, no distinguishable authored region, and no editable surface at all — just an isolated strip against empty background. Whatever state the producer left alive does not depict a previewable terrain proposal, so a consumer inspecting the final committed frame sees no terrain to judge against a baseline."
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "Octimeter unit throughout aether.kit.world request kinds",
+        "what": "The pervasive coordinate unit 'octimeter' is 1/256 meter (radius_octimeters 768 = 3 m), but the name reads as 1/8 meter (octo = 8). It is only back-derivable from one worked example in the guide, and conflicts with the CLAUDE.md 'spell units out / avoid ambiguous units' rule. Every stamp/brush coordinate silently invites a 32x scale error.",
+        "suggested": "Either rename the unit to something unambiguous or add an explicit '1 octimeter = 1/256 m, 256 octimeters = 1 cell = 1 m' definition in the guide and the kind field docs."
+      },
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "MCP send_mail param encoding of Option struct fields (camera set_mode/orbit.set)",
+        "what": "Option-typed struct fields are not omittable in the schema encoder: omitting speed/fov_y_rad on aether.kit.camera Orbit params fails with 'missing required field $.mode::Orbit.0.speed'. A consumer expects an absent Option key to mean None; instead every optional field must be present with explicit null.",
+        "suggested": "Make the JSON->wire encoder treat an absent Option field as None (default), so optional fields are actually optional in the tool surface."
+      },
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "MCP send_mail encoding of single-field tuple enum variants (camera mode Topdown/Orbit, aether.kit.camera.create/set_mode)",
+        "what": "The mode variants are tuple variants wrapping one struct. The intuitive tuple-as-array form {\"Topdown\": [ {..} ]} is rejected with 'field $.mode::Topdown.0 expected object'; the accepted form is the struct inline {\"Topdown\": {..}}. The error message points at .0 as if an array were expected, which actively misleads, and nothing documents how tuple variants encode over the wire.",
+        "suggested": "Either accept the array form for tuple variants, or fix the error to say 'tuple variant with one field: pass the field value directly', and document tuple-variant JSON encoding."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "Topdown camera vs terrain plane (aether.kit.camera Topdown mode)",
+        "what": "A Topdown camera centered over the terrain band (center [32,4], extent 40) rendered zero lit pixels (coverage 0.0) even though the same committed geometry rendered fine from an Orbit camera. A top-down view of a near-flat terrain plane showing literally nothing is a surprising default; may be an extent/near-far interaction but there is no guidance on framing flat terrain from topdown.",
+        "suggested": "Document expected Topdown center/extent semantics for near-flat terrain (and whether extent is half-width or full-width), or fix topdown framing so a plane at y~0 is visible."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "Exercising StagedProposalLimitReached over MCP send_mail",
+        "what": "Demonstrating the 64-proposal cap requires hand-sending 64+ near-identical propose mails inline in one tool call (~21KB), and the 'all' reply projection then spills to a host file that must be parsed separately to see the Staged->Rejected transition. There is no way to repeat/replicate a mail N times, so verifying a bounded-limit invariant is disproportionately awkward.",
+        "suggested": "Consider a send_mail 'repeat: N' convenience for identical items, or a compact reply projection that summarizes per-variant counts, so bounded-limit invariants are cheap to exercise."
+      }
+    ],
+    "missing-primitive": [],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "medium",
+        "where": "Loading aether.kit.world (docs/guide/systems/rendering.md)",
+        "what": "The guide refers to 'the loaded aether.kit.world component' and gives the camera's selector (aether_kit@aether.kit.camera) but never states the world component's selector nor that a fresh hub has an empty component registry, so you must build the aether-kit cdylib for wasm32-unknown-unknown and upload_component it yourself before anything is loadable. A fresh consumer working only from the guide has no path to a running world actor.",
+        "suggested": "Add a one-line 'Loading the world component' note to rendering.md: build aether-kit for wasm32-unknown-unknown, upload_component it, then load selector aether_kit@aether.kit.world (mailbox aether.component/aether.embedded:aether.kit.world)."
+      },
+      {
+        "category": "doc-gap",
+        "severity": "medium",
+        "where": "Constructing a cross-chunk proposal / interpreting touched_chunks",
+        "what": "'cross-chunk' is a core concept of this surface but the guide never states the chunk size (cells per chunk) or the octimeter->cell->chunk relationship, so you cannot deliberately author a proposal that spans a chunk boundary. I had to stamp a deliberately wide band and read digest.touched_chunks empirically to discover chunks are 16 cells wide.",
+        "suggested": "State the chunk dimension (16 cells) and the octimeter/cell/chunk conversion in rendering.md next to the touched_chunks digest description."
+      }
+    ],
+    "blocker": []
+  },
+  "softHolds": [
+    {
+      "kind": "use-visible-incorrect",
+      "detail": "The frame renders a single thin diagonal gray bar (one narrow quad/strip) on a flat dark blue-gray background — nothing resembling a terrain surface. The expected artifact is a terrain proposal render: a heightfield/terrain mesh in which an authored region visibly differs (preview edit vs. committed baseline). There is no terrain grid, no distinguishable authored region, and no editable surface at all — just an isolated strip against empty background. Whatever state the producer left alive does not depict a previewable terrain proposal, so a consumer inspecting the final committed frame sees no terrain to judge against a baseline."
+    }
+  ],
+  "tokensPerTool": [
+    {
+      "tool": "mcp__aether-hub__capture_frame",
+      "calls": 2,
+      "bytesIn": 281,
+      "bytesOut": 26102,
+      "tokensIn": 70,
+      "tokensOut": 6526
+    },
+    {
+      "tool": "mcp__aether-hub__describe_kinds",
+      "calls": 4,
+      "bytesIn": 572,
+      "bytesOut": 15443,
+      "tokensIn": 143,
+      "tokensOut": 3861
+    },
+    {
+      "tool": "mcp__aether-hub__list_binaries",
+      "calls": 1,
+      "bytesIn": 2,
+      "bytesOut": 1213,
+      "tokensIn": 1,
+      "tokensOut": 303
+    },
+    {
+      "tool": "mcp__aether-hub__list_components",
+      "calls": 1,
+      "bytesIn": 2,
+      "bytesOut": 9067,
+      "tokensIn": 1,
+      "tokensOut": 2267
+    },
+    {
+      "tool": "mcp__aether-hub__list_engines",
+      "calls": 1,
+      "bytesIn": 16,
+      "bytesOut": 43,
+      "tokensIn": 4,
+      "tokensOut": 11
+    },
+    {
+      "tool": "mcp__aether-hub__load_component",
+      "calls": 2,
+      "bytesIn": 187,
+      "bytesOut": 5378,
+      "tokensIn": 47,
+      "tokensOut": 1345
+    },
+    {
+      "tool": "mcp__aether-hub__send_mail",
+      "calls": 6,
+      "bytesIn": 1677,
+      "bytesOut": 2945,
+      "tokensIn": 419,
+      "tokensOut": 736
+    },
+    {
+      "tool": "mcp__aether-hub__spawn_substrate",
+      "calls": 1,
+      "bytesIn": 31,
+      "bytesOut": 134,
+      "tokensIn": 8,
+      "tokensOut": 34
+    }
+  ]
+}
