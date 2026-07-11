@@ -375,7 +375,9 @@ pub struct LoadComponentArgs {
     /// single-load shape. A mid-loop failure reports which replica failed
     /// and how many loaded before it — already-loaded replicas stay live,
     /// the same as N manual `load_component` calls. Omit (or `null`) for
-    /// today's single-instance load. `replicas: 0` is a tool error.
+    /// today's single-instance load. `replicas: 0` is a tool error;
+    /// values above the MCP fan-out ceiling (`MAX_REPLICAS`, 256) are also
+    /// rejected before any dispatch.
     #[serde(default)]
     pub replicas: Option<u32>,
     /// When `true`, each capabilities doc field carries the full rustdoc

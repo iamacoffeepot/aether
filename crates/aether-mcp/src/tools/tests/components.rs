@@ -164,13 +164,14 @@ fn replica_names_suffixes_every_instance() {
     assert_eq!(replica_names("handler", 1), vec!["handler-0"]);
 }
 
-/// `reject_zero_replicas` is a hard tool error on `replicas: 0` (ADR-0090
-/// §4 posture — a bad known value aborts loudly, not a silent no-op) and
-/// passes through any other value, including `None`.
+/// `reject_zero_replicas` rejects 0 and values above [`MAX_REPLICAS`]
+/// (ADR-0090 §4 + review bounds-cap); in-range and omitted stay ok.
 #[test]
-fn reject_zero_replicas_rejects_only_zero() {
+fn reject_zero_replicas_rejects_zero_and_above_max() {
     assert!(reject_zero_replicas(Some(0), "sel").is_err());
     assert!(reject_zero_replicas(Some(1), "sel").is_ok());
+    assert!(reject_zero_replicas(Some(MAX_REPLICAS), "sel").is_ok());
+    assert!(reject_zero_replicas(Some(MAX_REPLICAS + 1), "sel").is_err());
     assert!(reject_zero_replicas(None, "sel").is_ok());
 }
 

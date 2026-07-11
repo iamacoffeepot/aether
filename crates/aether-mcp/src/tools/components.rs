@@ -152,12 +152,30 @@ pub(super) fn replica_names(base: &str, replicas: u32) -> Vec<String> {
     (0..replicas).map(|index| format!("{base}-{index}")).collect()
 }
 
-/// Reject `replicas: 0` (ADR-0090 §4 posture: a bad known value is a hard
-/// error, not a silent no-op) before it reaches any load dispatch.
+/// Hard ceiling on `replicas` for one load/spawn fan-out (issue 3006
+/// review). Bounds allocation of the name list and sequential load
+/// dispatches before an absurd caller value can OOM or hang the tool.
+/// Mirrors the style of `actor_logs`' caller-supplied `max` clamp (default
+/// ring-sized, hard ceiling) — tool-layer protection, not a substrate
+/// protocol constant.
+pub(super) const MAX_REPLICAS: u32 = 256;
+
+/// Reject `replicas` outside `1..=MAX_REPLICAS` (ADR-0090 §4: a bad known
+/// value is a hard tool error, not a silent no-op / unbounded fan-out)
+/// before any load dispatch or name-list allocation.
 pub(super) fn reject_zero_replicas(replicas: Option<u32>, selector: &str) -> Result<(), McpError> {
-    if replicas == Some(0) {
+    let Some(n) = replicas else {
+        return Ok(());
+    };
+    if n == 0 {
         return Err(McpError::invalid_params(
             format!("component {selector:?}: replicas must be at least 1 (got 0)"),
+            None,
+        ));
+    }
+    if n > MAX_REPLICAS {
+        return Err(McpError::invalid_params(
+            format!("component {selector:?}: replicas must be at most {MAX_REPLICAS} (got {n})"),
             None,
         ));
     }

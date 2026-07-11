@@ -117,7 +117,7 @@ use self::bytes::{
 #[cfg(test)]
 use self::capture::save_capture_png;
 #[cfg(test)]
-use self::components::components_all_loaded;
+use self::components::{MAX_REPLICAS, components_all_loaded};
 use self::components::{
     component_config_bytes, reject_zero_replicas, replica_base_name, replica_names, selector_with_explicit_export,
 };
