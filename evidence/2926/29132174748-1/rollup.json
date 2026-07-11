@@ -1,0 +1,62 @@
+{
+  "totals": {
+    "findings": 5,
+    "papercut": 2,
+    "missingPrimitive": 1,
+    "docGap": 2,
+    "blocker": 0,
+    "softHolds": 0
+  },
+  "succeeded": true,
+  "buildGreen": null,
+  "summary": "Drove a WidgetPanel (aether-kit) hosting a Toggle, Segmented control, and Numeric editor and exercised all three through the public MCP surface. Toggle: turned ON by pointer press+release, then cycled OFF/ON by focused Space press+release (both pointer and keyboard, ending ON). Segmented: selected \"Med\" (index 1) by pointer press, then moved to \"High\" (index 2) by focused Right arrow. Numeric: focused by click, typed \"73\" after Ctrl+A select-all (preview committed=false); demonstrated CANCEL by select-all + typing invalid \"-\" + Enter, which reverted the buffer to the last committed \"25\" with no event; then demonstrated CLIPBOARD + COMMIT by setting the OS clipboard to \"150\", Ctrl+A + Ctrl+V paste (buffer kept raw \"150\" while preview clamped to value=100), and Enter to canonicalize/commit (value=100 committed=true, buffer rewritten to \"100\"). Every value-up event was confirmed in the panel's actor log and every visual state in capture_frame. Final frame saved to /home/runner/_work/aether/aether/dogfood-run/frame.png. NOTE: reaching a renderable Toggle/Segmented/Numeric was effectively a blocker for a pure docs+MCP consumer — see findings; I only got past it by replicating the aether-codec wire format in a throwaway script (no crate written), which a real drive-only consumer cannot do.",
+  "artifact": {
+    "verdict": "correct",
+    "rationale": "The captured frame shows all three controls in coherent final states: (1) a toggle labeled \"Enabled\" rendered in its on/enabled position (blue-filled knob), (2) a Low/Med/High segmented control with \"High\" selected and highlighted blue, and (3) a numeric editor field displaying the committed value \"100\" with an active text cursor. This matches the expected artifact — three controls in their expected final states with the numeric editor showing the committed validated value. No visual defects, missing controls, or garbled values observed."
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "aether-mcp JSON->wire encoder error for aether.kit.widget.panel.config",
+        "what": "A partial config object like {\"children\": []} returns `config does not match aether.kit.widget.panel.config: field \"$\" expected object`. The encoder requires every field present (no defaults) but reports the root JSON-pointer `$` instead of naming the missing field (`theme`), and the message reads as 'expected object' even though I passed an object. This directly contradicts the guide's implication that children:[] alone requests the built-in stack (only OMITTING config entirely works). Very hard to diagnose; I burned two attempts before providing a full theme.",
+        "suggested": "Surface the first missing field name (e.g. `missing required field \"theme\"`) rather than `field \"$\" expected object`; and fix the guide's children:[] guidance to note the full config (theme, x/y/width, fonts, owns_input) is still required, or that config should be omitted for the built-in stack."
+      },
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "NumericWidget startup before font_id resolves",
+        "what": "On load the numeric widget logs a warn 'unknown font_id 0 numeric font metrics failed' because it measures font metrics before the async load_font_result stamps a real font_id. Cosmetic — it recovers once the font resolves — but it is noise on every panel that contains a Numeric.",
+        "suggested": "Defer numeric font-metric measurement until a valid font_id is stamped, or downgrade the pre-font metrics failure to debug."
+      }
+    ],
+    "missing-primitive": [
+      {
+        "category": "missing-primitive",
+        "severity": "high",
+        "where": "load_component PanelConfig.children[].config (aether.kit.widget.panel.config) over MCP",
+        "what": "The only way to render a Toggle/Segmented/Numeric is a custom `children` stack, but each WidgetChildSpec.config is an opaque `Bytes` field holding the pre-encoded widget config (label/initial/options + a full 11-color Theme + state). The MCP JSON encoder schema-encodes the top-level PanelConfig but treats `Bytes` as literal bytes — there is NO way to encode a nested kind (ToggleConfig etc.) to wire bytes from structured JSON, and no MCP tool exists to do it. The empty-children fallback only ships label/slider/radio/text_field/button, so a pure-MCP consumer cannot render any of the three target widgets at all. Passing config:[] (empty bytes) is accepted at load but the panel silently 'slot skipped' each child (decode failure, warn-only). I only proceeded by replicating aether-codec's wire format in a script to hand-produce the bytes.",
+        "suggested": "Let WidgetChildSpec.config accept a structured {kind_name, params} object that aether-mcp schema-encodes to the child's Config kind (nested encode), OR add a generic encode_kind MCP tool returning wire bytes for kind+JSON (fillable via the $base64 embed), OR ship a demo children stack that includes Toggle/Segmented/Numeric."
+      }
+    ],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "high",
+        "where": "docs/guide/systems/widgets.md — 'The reference panel' MCP-boundary paragraph",
+        "what": "The guide lists Toggle/Segmented/Numeric as declarable `children` and says 'Do not pre-encode LoadComponent.config bytes in tool JSON ... set children to [] to request the built-in stack', but the built-in stack contains none of these three, and the guide never explains how to declare a custom children stack over MCP when each child `config` is `Bytes`. To produce the bytes I had to read crate internals (crates/aether-codec/src/encode.rs, the ADR-0118 wire layout, and the Theme field order from describe_kinds full). A docs-only consumer is stuck.",
+        "suggested": "Document the child-config wire-encoding path for the MCP harness (or point at the primitive from the missing-primitive finding) and add a worked non-empty-children load_component example that actually renders a Toggle/Segmented/Numeric."
+      },
+      {
+        "category": "doc-gap",
+        "severity": "medium",
+        "where": "spawn_substrate + aether.text.load_font over MCP (font asset resolution)",
+        "what": "The documented font path assets/fonts/RobotoMono.ttf failed with 'file read failed: NotFound panel font load failed'. The fs default assets dir is current_exe().parent()/assets, which for a hub-forked content-addressed binary is a temp dir with no assets — so any font/asset load from a spawned substrate silently NotFounds. Nothing in the widget/text/MCP docs says a drive consumer must pass --assets-dir. I had to grep fs/config.rs to discover the default and pass args:['--assets-dir', '<repo>/crates/aether-substrate-bundle/assets'] on spawn.",
+        "suggested": "Have the hub inject a sensible AETHER_ASSETS_DIR (the bundle/repo assets) for spawned substrates, or document the required --assets-dir spawn arg in the drawing-text and widgets recipes."
+      }
+    ],
+    "blocker": []
+  },
+  "softHolds": []
+}
