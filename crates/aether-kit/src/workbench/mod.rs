@@ -127,7 +127,7 @@ pub struct TerrainWorkbench {
 impl TerrainWorkbench {
     #[allow(clippy::too_many_lines)] // one literal peer-first assembly keeps all region lanes auditable together
     fn ensure_spawned(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
-        if self.children.is_some() {
+        if self.children.is_some() || self.failure.is_some() {
             return;
         }
         let panel = match ctx.spawn_inline_child::<TerrainToolPanel>(
@@ -161,6 +161,7 @@ impl TerrainWorkbench {
         ) {
             Ok(viewport) => viewport,
             Err(error) => {
+                Self::despawn_partial_children(ctx, &[panel]);
                 self.record_failure(
                     ctx,
                     WorkbenchFailure::Control {
@@ -176,6 +177,7 @@ impl TerrainWorkbench {
         let console = match ctx.spawn_inline_child::<ConsoleOverlay>(Subname::Named(CONSOLE_SUBNAME), &console_config) {
             Ok(console) => console,
             Err(error) => {
+                Self::despawn_partial_children(ctx, &[panel, viewport]);
                 self.record_failure(
                     ctx,
                     WorkbenchFailure::Control {
@@ -253,6 +255,7 @@ impl TerrainWorkbench {
         let shell = match ctx.spawn_inline_child::<EditorShell>(Subname::Named(SHELL_SUBNAME), &shell_config) {
             Ok(shell) => shell,
             Err(error) => {
+                Self::despawn_partial_children(ctx, &[panel, viewport, console]);
                 self.record_failure(
                     ctx,
                     WorkbenchFailure::Control {
@@ -266,6 +269,18 @@ impl TerrainWorkbench {
         self.children = Some(WorkbenchChildren { panel, viewport, console, shell });
         ctx.send_to(self.config.world_mailbox, &SetMarkOverlayVisibility { visible: true });
         self.publish_status(ctx, String::from("Ready"), false);
+    }
+
+    fn despawn_partial_children(ctx: &mut WasmCtx<'_, Manual>, children: &[MailboxId]) {
+        for child in children.iter().rev().copied() {
+            if !ctx.despawn_inline_child(child) {
+                tracing::warn!(
+                    target: "aether_kit",
+                    %child,
+                    "partially-spawned workbench child was already absent during rollback",
+                );
+            }
+        }
     }
 
     fn query_result(&self) -> WorkbenchQueryResult {

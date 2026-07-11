@@ -694,9 +694,20 @@ impl WasmActor for TerrainToolPanel {
 
     #[handler::single]
     fn on_load_font_result(&mut self, ctx: &mut WasmCtx<'_>, result: LoadFontResult) {
-        if let LoadFontResult::Ok { font_id, .. } = result {
-            self.theme.font_id = font_id;
-            self.fan_theme(ctx);
+        match result {
+            LoadFontResult::Ok { font_id, .. } => {
+                self.theme.font_id = font_id;
+                self.fan_theme(ctx);
+            }
+            LoadFontResult::Err { namespace, path, error } => {
+                tracing::warn!(
+                    target: "aether_kit",
+                    %namespace,
+                    %path,
+                    %error,
+                    "terrain tool panel font load failed",
+                );
+            }
         }
     }
 
