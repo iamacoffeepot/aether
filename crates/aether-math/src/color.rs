@@ -81,9 +81,9 @@ impl Rgb {
         Self::new(srgb8_channel_to_linear(r), srgb8_channel_to_linear(g), srgb8_channel_to_linear(b))
     }
 
+    //noinspection DuplicatedCode -- color and vector constructors are independent public const APIs.
     #[inline]
     #[must_use]
-    //noinspection DuplicatedCode -- color and vector constructors are independent public const APIs.
     pub const fn from_array(a: [f32; 3]) -> Self {
         Self::new(a[0], a[1], a[2])
     }
@@ -135,9 +135,9 @@ impl Rgba {
         hsl.to_rgba()
     }
 
+    //noinspection DuplicatedCode -- color and vector constructors are independent public const APIs.
     #[inline]
     #[must_use]
-    //noinspection DuplicatedCode -- color and vector constructors are independent public const APIs.
     pub const fn from_array(a: [f32; 4]) -> Self {
         Self::new(a[0], a[1], a[2], a[3])
     }
