@@ -81,6 +81,10 @@ mod walls;
 mod windows;
 
 #[cfg(test)]
+mod atlas_support;
+#[cfg(test)]
+mod atlas_tests;
+#[cfg(test)]
 mod tests;
 
 use alloc::vec::Vec;

@@ -1,8 +1,10 @@
-use alloc::collections::BTreeMap;
 use core::ops::Range;
 
 use aether_capabilities::render::{DrawTriangle, Vertex};
 
+use super::atlas_support::{
+    assert_height_break_walls_close, quantized_xyz, total_wall_top_edge_length, xz_area_doubled, y_span,
+};
 use super::cliffs::WindowCenter;
 use super::constants::{COVERAGE_LIFT, EDGE, OCTIMETERS_PER_METER, SUB};
 use super::coverage::{overlay_materials, subcell_coverage};
@@ -85,10 +87,6 @@ fn ground_triangles(mesh: &[DrawTriangle]) -> impl Iterator<Item = &DrawTriangle
 
 fn ground_covers(mesh: &[DrawTriangle], px: f32, pz: f32) -> bool {
     ground_triangles(mesh).any(|t| covers(t, px, pz))
-}
-
-fn quantized_xyz(v: &Vertex) -> (i64, i64, i64) {
-    ((v.x * 256.0).round() as i64, (v.y * 256.0).round() as i64, (v.z * 256.0).round() as i64)
 }
 
 fn insert_material_chunks(world: &mut World, material: Material, smoothing: Option<u8>) {
@@ -521,15 +519,6 @@ mod walls {
             .count()
     }
 
-    /// The vertical span of a triangle — a wall face stands ~1 m tall while
-    /// a cap or ground quad is near-flat, so the split filters walls from
-    /// the surfaces they join.
-    fn y_span(t: &DrawTriangle) -> f32 {
-        let max = t.verts.iter().map(|v| v.y).fold(f32::MIN, f32::max);
-        let min = t.verts.iter().map(|v| v.y).fold(f32::MAX, f32::min);
-        max - min
-    }
-
     #[test]
     fn cliff_windows_disable_every_overlapped_cell_and_emit_one_cap_layer() {
         let internal = cell_cliff_world(8);
@@ -698,7 +687,7 @@ mod walls {
         }
         let wall_verts = |at| {
             let mesh = mesh_chunk(&world, at, &StyleTable::default());
-            let mut verts: Vec<(i64, i64, i64)> = mesh
+            let mut verts: Vec<_> = mesh
                 .iter()
                 .filter(|t| y_span(t) > 0.5)
                 .flat_map(|t| t.verts.iter())
@@ -713,7 +702,7 @@ mod walls {
         let east = wall_verts(ChunkPos { x: 1, z: 0 });
         let shared: Vec<_> = west.iter().filter(|vertex| east.contains(vertex)).collect();
         assert!(
-            shared.iter().any(|vertex| (vertex.0 - 16 * 256).abs() <= 16),
+            shared.iter().any(|vertex| (vertex.x_256th_meter - 16 * 256).abs() <= 16),
             "neighbor-owned windows meet on an identical contour endpoint near the chunk seam",
         );
     }
@@ -937,7 +926,7 @@ mod walls {
         // (the shelf's outer Void-drop walls are a different feature).
         let wall_verts = |at| {
             let mesh = mesh_chunk(&world, at, &StyleTable::default());
-            let mut verts: Vec<(i64, i64, i64)> = mesh
+            let mut verts: Vec<_> = mesh
                 .iter()
                 .filter(|t| y_span(t) > 0.5)
                 .flat_map(|t| t.verts.iter())
@@ -955,7 +944,7 @@ mod walls {
         assert!(!shared.is_empty(), "the two chunks meet on identical seam vertices");
         // The shared vertices sit at the seam column and the raised top level.
         assert!(
-            shared.iter().any(|v| (v.0 - 16 * 256).abs() <= 32 && v.1 == 300),
+            shared.iter().any(|vertex| (vertex.x_256th_meter - 16 * 256).abs() <= 32 && vertex.y_256th_meter == 300),
             "the shared seam wall stands at the authored break level",
         );
     }
@@ -1126,26 +1115,6 @@ mod walls {
         world
     }
 
-    /// Twice the xz-projected area of a triangle — a wall face is exactly
-    /// vertical, so it projects to a line (zero area) while every cap
-    /// triangle keeps a footprint; the split separates the two without
-    /// guessing from heights.
-    pub(super) fn xz_area_doubled(t: &DrawTriangle) -> f32 {
-        let [a, b, c] = &t.verts;
-        ((b.x - a.x) * (c.z - a.z) - (c.x - a.x) * (b.z - a.z)).abs()
-    }
-
-    fn wall_top_edge_length(t: &DrawTriangle, min_top_y: f32) -> Option<f32> {
-        // Each wall quad's top edge rides exactly one of its two triangles: the
-        // triangle holding both top vertices.
-        let tops: Vec<&Vertex> = t.verts.iter().filter(|v| v.y > min_top_y).collect();
-        (tops.len() == 2).then(|| (tops[1].x - tops[0].x).hypot(tops[1].z - tops[0].z))
-    }
-
-    fn total_wall_top_edge_length(mesh: &[DrawTriangle], min_top_y: f32) -> f32 {
-        mesh.iter().filter(|t| y_span(t) > 0.5).filter_map(|t| wall_top_edge_length(t, min_top_y)).sum()
-    }
-
     #[test]
     fn a_delta_silhouette_wall_coverage_is_complete() {
         // The picket-fence regression from the causeway demo: gating marched
@@ -1234,39 +1203,7 @@ mod walls {
         // pinholes, no overlap.
         let world = delta_column_world();
         let mesh = mesh_chunk(&world, ChunkPos { x: 0, z: 0 }, &StyleTable::default());
-        let cap_verts: Vec<&Vertex> =
-            mesh.iter().filter(|t| xz_area_doubled(t) > 1e-6).flat_map(|t| t.verts.iter()).collect();
-        let seals = |x: f32, z: f32, y: f32| {
-            cap_verts.iter().any(|c| (c.x - x).abs() < 1e-5 && (c.z - z).abs() < 1e-5 && (c.y - y).abs() < 1e-4)
-        };
-        let walls: Vec<&DrawTriangle> = mesh.iter().filter(|t| y_span(t) > 0.5).collect();
-        assert!(!walls.is_empty(), "the break carries walls");
-        for v in walls.iter().flat_map(|t| t.verts.iter()) {
-            if v.y > 1.0 {
-                assert!(seals(v.x, v.z, v.y), "wall top ({}, {}, {}) misses the high cap", v.x, v.z, v.y);
-            } else {
-                assert!(seals(v.x, v.z, v.y), "wall base ({}, {}, {}) misses the low cap", v.x, v.z, v.y);
-            }
-        }
-    }
-
-    /// The cap-split locations of a mesh: quantized xz positions where cap
-    /// vertices (nonzero-footprint triangles) sit on two plates more than
-    /// half a meter apart — the places the caps genuinely split over a
-    /// break and a wall must span.
-    fn cap_splits(mesh: &[DrawTriangle]) -> Vec<(f32, f32, f32, f32)> {
-        let mut heights: BTreeMap<(i64, i64), (f32, f32)> = BTreeMap::new();
-        for v in mesh.iter().filter(|t| xz_area_doubled(t) > 1e-6).flat_map(|t| t.verts.iter()) {
-            let key = ((v.x * 256.0).round() as i64, (v.z * 256.0).round() as i64);
-            let entry = heights.entry(key).or_insert((v.y, v.y));
-            entry.0 = entry.0.min(v.y);
-            entry.1 = entry.1.max(v.y);
-        }
-        heights
-            .into_iter()
-            .filter(|&(_, (lo, hi))| hi - lo > 0.5)
-            .map(|((qx, qz), (lo, hi))| (qx as f32 / 256.0, qz as f32 / 256.0, lo, hi))
-            .collect()
+        assert_height_break_walls_close(&mesh, "delta break");
     }
 
     /// Shared assertion for authored-plateau fixtures — the live causeway
@@ -1290,39 +1227,7 @@ mod walls {
                 t.verts[0].z,
             );
         }
-        let splits = cap_splits(&mesh);
-        assert!(!splits.is_empty(), "the authored breaks split the caps");
-        let walls: Vec<&DrawTriangle> = mesh.iter().filter(|t| xz_area_doubled(t) < 1e-6 && y_span(t) > 0.25).collect();
-        // A wall covers `(x, z)` at height `y` when the point lies on some
-        // wall triangle's edge — walls span whole subcell edges and marched
-        // segments, so a split can sit mid-edge (a T-junction on the same
-        // straight line), not only on a wall vertex.
-        let covered = |x: f32, z: f32, y: f32| {
-            walls.iter().any(|t| {
-                (0..3).any(|k| {
-                    let a = &t.verts[k];
-                    let b = &t.verts[(k + 1) % 3];
-                    let (ex, ez) = (b.x - a.x, b.z - a.z);
-                    let len_sq = ex * ex + ez * ez;
-                    if len_sq < 1e-8 {
-                        return false;
-                    }
-                    let (px, pz) = (x - a.x, z - a.z);
-                    if (ex * pz - ez * px).abs() > 1e-3 {
-                        return false; // off the edge's xz line
-                    }
-                    let t_on = (px * ex + pz * ez) / len_sq;
-                    if !(-1e-4..=1.0 + 1e-4).contains(&t_on) {
-                        return false;
-                    }
-                    (a.y + (b.y - a.y) * t_on - y).abs() < 1e-3
-                })
-            })
-        };
-        for (x, z, lo, hi) in splits {
-            assert!(covered(x, z, hi), "split at ({x}, {z}) has no wall top at {hi}");
-            assert!(covered(x, z, lo), "split at ({x}, {z}) has no wall base at {lo}");
-        }
+        assert_height_break_walls_close(&mesh, "authored plateau fixture");
     }
 
     #[test]
@@ -1424,7 +1329,7 @@ mod walls {
 }
 
 mod voids {
-    use super::walls::xz_area_doubled;
+    use super::super::atlas_support::xz_area_doubled;
     use super::*;
 
     #[test]
