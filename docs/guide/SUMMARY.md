@@ -42,6 +42,7 @@
 - [Capability module anatomy](capability-anatomy.md)
 - [Writing guest code](writing-guest-code.md)
 - [Recipes](recipes.md)
+  - [Authoring terrain](recipes/authoring-terrain.md)
   - [Adding a config knob](recipes/adding-a-config-knob.md)
   - [Adding a substrate kind](recipes/adding-a-substrate-kind.md)
   - [Drawing your first text](recipes/drawing-text.md)
