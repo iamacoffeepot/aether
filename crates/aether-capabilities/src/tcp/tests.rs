@@ -272,6 +272,70 @@ fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
     assert!(listeners.listeners.is_empty(), "monitor cleanup removes the unbound listener");
 }
 
+#[test]
+fn duplicate_unbind_preserves_the_first_parked_reply() {
+    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let bind_reply: BindListenerResult = drive_and_decode(
+        &registry,
+        &rx,
+        TcpCapability::NAMESPACE,
+        &BindListener { addr: "127.0.0.1:0".into(), name: Some("duplicate-unbind".into()), consumer: None },
+    );
+    let listener_name = match bind_reply {
+        BindListenerResult::Ok { listener_name, .. } => listener_name,
+        BindListenerResult::Err { reason, .. } => panic!("bind failed: {reason}"),
+    };
+
+    let first_session = SessionToken(Uuid::from_u128(0x3051_0001));
+    let duplicate_session = SessionToken(Uuid::from_u128(0x3051_0002));
+    let unbind = UnbindListener { listener_name: listener_name.clone() };
+    enqueue(
+        &registry,
+        TcpCapability::NAMESPACE,
+        &unbind,
+        Source::with_correlation(SourceAddr::Session(first_session), 1),
+        MailId::NONE,
+    );
+    enqueue(
+        &registry,
+        TcpCapability::NAMESPACE,
+        &unbind,
+        Source::with_correlation(SourceAddr::Session(duplicate_session), 2),
+        MailId::NONE,
+    );
+
+    let mut first_reply = None;
+    let mut duplicate_reply = None;
+    for _ in 0..2 {
+        let event = rx.recv_timeout(Duration::from_secs(2)).expect("both unbind callers receive a reply");
+        let EgressEvent::ToSession { session, kind_name, payload, .. } = event else {
+            panic!("expected unbind reply to a session");
+        };
+        assert_eq!(kind_name, UnbindListenerResult::NAME);
+        let reply = UnbindListenerResult::decode_from_bytes(&payload).expect("decode UnbindListenerResult");
+        if session == first_session {
+            first_reply = Some(reply);
+        } else if session == duplicate_session {
+            duplicate_reply = Some(reply);
+        } else {
+            panic!("unbind replied to unexpected session {session:?}");
+        }
+    }
+
+    assert!(
+        matches!(first_reply, Some(UnbindListenerResult::Ok { listener_name: ref name }) if name == &listener_name),
+        "the first caller retains the parked success reply: {first_reply:?}",
+    );
+    assert!(
+        matches!(
+            duplicate_reply,
+            Some(UnbindListenerResult::Err { listener_name: ref name, ref reason })
+                if name == &listener_name && reason == "unbind already in progress"
+        ),
+        "the duplicate caller receives the in-progress error: {duplicate_reply:?}",
+    );
+}
+
 /// Tripwire: an outbound dial must correlate its parked reply to the
 /// spawned cap-child session, and the connect-session lineage helper
 /// must route `SessionWrite` to that actor rather than the accepted-

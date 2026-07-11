@@ -8,6 +8,7 @@
 //! `use runtime::*` glob in the parent.
 
 pub use std::collections::HashMap;
+pub use std::collections::hash_map::Entry;
 pub use std::net::{TcpListener, TcpStream};
 pub use std::sync::Arc;
 pub use std::sync::mpsc;
@@ -346,15 +347,22 @@ impl NativeActor for TcpCapability {
         };
         // Park the reply target keyed on listener_id. The cap's
         // already-registered monitor (set at spawn time) fires
-        // MonitorNotice on close, which drives the reply.
-        state.pending_unbinds.insert(
-            listener_id,
-            PendingUnbind {
-                sender: ctx.reply_target(),
-                hold: ctx.acquire_settlement_hold(),
+        // MonitorNotice on close, which drives the reply. Preserve
+        // the first caller when a duplicate request arrives while
+        // that close is still in flight; replacing it would drop the
+        // original settlement hold without ever replying.
+        let Entry::Vacant(pending) = state.pending_unbinds.entry(listener_id) else {
+            ctx.reply(&UnbindListenerResult::Err {
                 listener_name: mail.listener_name,
-            },
-        );
+                reason: "unbind already in progress".into(),
+            });
+            return;
+        };
+        pending.insert(PendingUnbind {
+            sender: ctx.reply_target(),
+            hold: ctx.acquire_settlement_hold(),
+            listener_name: mail.listener_name,
+        });
         // Mail Close to the listener by its stored id. ADR-0099 §3:
         // the listener is a spawned child, so its id is the lineage
         // fold, not `hash(NAMESPACE:name)` — re-resolving by name
