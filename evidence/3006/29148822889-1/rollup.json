@@ -1,0 +1,48 @@
+{
+  "totals": {
+    "findings": 3,
+    "papercut": 2,
+    "missingPrimitive": 0,
+    "docGap": 1,
+    "blocker": 0,
+    "softHolds": 0
+  },
+  "succeeded": true,
+  "buildGreen": null,
+  "summary": "Drove the surface end-to-end over MCP. Built aether-kit for wasm32, uploaded it, and loaded its `aether.kit.camera` export (9 handlers, each with multi-line rustdoc + a `# Agent` section). Confirmed all three claims: (1) default `load_component`/`describe_component` project each handler doc to a single rustdoc line; (2) `full: true` returns the complete multi-line rustdoc (verified on both tools and on the component-level `doc`); (3) `load_component` with `replicas: 3` returns the collapsed `{capabilities, instances:[...]}` shape — one shared capabilities block plus a 3-entry instances list (cam-rep-0/1/2, each with its own mailbox_id). For the render artifact I built + uploaded the desktop chassis, spawned a desktop engine (...0002) with camera + mesh viewer preloaded, wrote the teapot DSL via aether.fs, loaded it into the mesh viewer, set an orbit pose, and captured a frame showing the teapot wireframe (coverage 7.1%, not-all-black + differs-from-background pass). Left engine ...0002 alive for the judge; terminated the headless introspection engine. The core surface worked exactly as documented in the tool schemas; friction was in the doc/projection details below.",
+  "artifact": {
+    "verdict": "n-a",
+    "rationale": "This trial's graded output is tool JSON text (summarized-vs-full docs; one shared capabilities block plus an instance list from a replicas load) — the expected artifact is explicitly \"none renders to a frame.\" The captured frame does show a light-blue wireframe teapot mesh on the slate-blue background, but that is unrelated leftover scene content, not an artifact of the docs/replicas surface under test. There is no renderable output tied to the expected artifact to judge, so the visual channel is not applicable here."
+  },
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "describe_component / load_component default (full=false) doc projection",
+        "what": "The default 'first non-empty rustdoc line' projection cuts a wrapped summary sentence at the physical source-line break, producing dangling fragments in the default view. E.g. aether.window_size shows \"Publish-subscribe; the substrate pulses this every tick. Not\" (trailing \"Not\"), and aether.kit.camera.create shows \"Add a new named camera in the supplied mode. Errors (warn-log)\" — cut mid-sentence. The tool descriptions call this the 'summary convention', but rustdoc's own summary convention is the first sentence / first paragraph, not the first physical line, so the compact output is often a misleading fragment rather than a usable one-liner.",
+        "suggested": "Project the summary to the first sentence (up to the first '. ' + whitespace) or collapse the first blank-line-delimited paragraph to one line, instead of taking the first physical source line — so a two-line-wrapped summary renders whole."
+      },
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "send_mail param encoder on a delta kind with Option fields (aether.kit.camera.orbit.set) — hit during render setup",
+        "what": "The handler rustdoc for orbit.set says 'Every `Some` field overwrites; `None` leaves the current value alone,' which reads as 'send only the fields you want to change.' But the MCP schema encoder rejects a missing Option field with `missing required field \"$.params.speed\"` — you must send ALL six Option fields, using explicit null for the ones you want left alone. The Option-means-omittable intuition is exactly wrong at the encoder boundary.",
+        "suggested": "Have the MCP param encoder treat a missing Option-typed struct field as None (its natural default) rather than erroring, so a delta send can carry only the fields it changes — matching the documented 'None leaves it alone' semantics."
+      }
+    ],
+    "missing-primitive": [],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "medium",
+        "where": "docs/guide/systems/components.md loading surface (line 99-100)",
+        "what": "The guide documents the loading surface as `load_component(engine_id, selector, name?, config?, config_path?, export?)` and never mentions the `full` param or `replicas`, on any of load_component / replace_component / describe_component, nor the collapsed {capabilities, instances} reply shape. The entire surface under test is discoverable only from the MCP tool JSON schemas, not from docs/guide/. A consumer working from the guide alone would not know full: true or replicas: N exist.",
+        "suggested": "Add `full?` and `replicas?` to the load_component/replace_component/describe_component signatures in components.md, and note the collapsed {capabilities, instances:[{mailbox_id,name}]} reply shape for a replicated load (mirror the CLAUDE.md text)."
+      }
+    ],
+    "blocker": []
+  },
+  "softHolds": [],
+  "tokensPerTool": []
+}
