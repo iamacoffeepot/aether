@@ -81,6 +81,10 @@ mod walls;
 mod windows;
 
 #[cfg(test)]
+mod atlas_support;
+#[cfg(test)]
+mod atlas_tests;
+#[cfg(test)]
 mod tests;
 
 use alloc::vec::Vec;
@@ -94,6 +98,16 @@ use coverage::mesh_coverage;
 use style::StyleTable;
 use underlay::mesh_underlay;
 use walls::emit_walls;
+
+fn normalize_cap_winding(triangles: &mut [DrawTriangle]) {
+    for triangle in triangles {
+        let [a, b, c] = &triangle.verts;
+        let signed_xz_area_doubled = (b.x - a.x) * (c.z - a.z) - (c.x - a.x) * (b.z - a.z);
+        if signed_xz_area_doubled > 1e-6 {
+            triangle.verts.swap(1, 2);
+        }
+    }
+}
 
 /// Whether meshing `at` and every chunk in its invalidation apron keeps all
 /// coordinate arithmetic inside the mesher's `i32` octimeter domain.
@@ -129,5 +143,7 @@ pub fn mesh_chunk(world: &World, at: ChunkPos, styles: &StyleTable) -> Vec<DrawT
     mesh_underlay(world, at, &cliffs, styles, &mut tris);
     mesh_coverage(world, at, styles, &mut tris);
     emit_walls(world, styles, &cliffs, &mut tris);
+    normalize_cap_winding(&mut tris);
+
     tris
 }

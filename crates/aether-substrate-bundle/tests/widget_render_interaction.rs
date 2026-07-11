@@ -642,11 +642,16 @@ fn assert_virtual_list_rows(
 
 fn assert_five_virtual_list_glyph_rows(snapshot: &[DrawTexturedQuads]) {
     let clip = virtual_list_clip();
-    let glyph_quads: Vec<_> = snapshot
+    let glyph_batches: Vec<_> = snapshot
         .iter()
         .filter(|batch| batch.texture_id != WHITE_TEXTURE_ID && batch.clip.as_ref() == Some(&clip))
-        .flat_map(|batch| &batch.quads)
         .collect();
+    assert_eq!(
+        glyph_batches.len(),
+        1,
+        "five virtual-list text rows must arrive in one glyph batch; snapshot: {snapshot:?}",
+    );
+    let glyph_quads = &glyph_batches[0].quads;
     assert_eq!(glyph_quads.len(), 15, "five three-digit labels, and no off-window labels, should be resident");
     for row_offset in 0..5usize {
         let row_top = PANEL_Y + row_offset as f32 * ROW_HEIGHT;

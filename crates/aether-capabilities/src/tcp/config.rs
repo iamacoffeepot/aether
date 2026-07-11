@@ -17,11 +17,11 @@ pub struct TcpListenerConfig {
     pub consumer: Option<String>,
 }
 
-/// Init config for [`TcpSessionActor`](super::TcpSessionActor). The
-/// listener's `on_connection_ready` builds this per accepted stream
-/// and hands it through `spawn_child`. `stream` is `Option` so init
-/// can `.take()` and split it; `peer` and `session_name` are retained
-/// for log attribution.
+/// Init config for [`TcpSessionActor`](super::TcpSessionActor). A listener's
+/// `on_connection_ready` builds it for an accepted stream; the cap's
+/// `on_connect_ready` builds the same config for a dialed stream. `stream` is
+/// `Option` so init can `.take()` and split it; `peer`, `session_name`, and the
+/// optional late-bound `consumer` are shared by both session lineages.
 pub struct TcpSessionConfig {
     pub stream: Option<TcpStream>,
     pub peer: String,

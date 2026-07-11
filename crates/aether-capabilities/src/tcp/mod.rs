@@ -1,11 +1,11 @@
 //! `aether.tcp` cap (issue 607 Phase 6a, ADR-0079).
 //!
-//! Three-tier shape: [`TcpCapability`] (Singleton control plane) →
-//! [`TcpListenerActor`] (Instanced, one per bound port) → eventually
-//! `TcpSessionActor` (Instanced, Phase 6b — per connection). Phase 6a
-//! lands the singleton + listener and a stub accept handler that
-//! drops accepted streams; Phase 6b adds the session spawn and the
-//! read/write surface.
+//! Accepted connections use the three-tier lineage [`TcpCapability`]
+//! (Singleton control plane) → [`TcpListenerActor`] (Instanced, one per
+//! bound port) → [`TcpSessionActor`] (Instanced, one per connection).
+//! Outbound connections spawn the same session actor directly beneath
+//! the cap. Both session shapes expose the same framed read/write and
+//! close surface.
 //!
 //! ## Supervision shape
 //!
@@ -21,7 +21,8 @@
 //! ## Mail surface
 //!
 //! Control plane (mailed to `aether.tcp`):
-//! - `BindListener { addr, name? }` → `BindListenerResult`
+//! - `Connect { addr, name?, consumer? }` → `ConnectResult`
+//! - `BindListener { addr, name?, consumer? }` → `BindListenerResult`
 //! - `UnbindListener { listener_name }` → `UnbindListenerResult`
 //!   (asynchronous reply: the cap monitors the listener at spawn time
 //!   and replies only after `MonitorNotice` arrives)

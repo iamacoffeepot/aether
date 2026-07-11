@@ -1,4 +1,4 @@
-//! `aether.tcp.session` — instanced actor, one per accepted
+//! `aether.tcp.session` — instanced actor, one per accepted or dialed
 //! connection. Owns a `TcpStream` (split for read/write) and a
 //! sidecar read thread that loops on blocking `read()`. The read
 //! thread pushes byte chunks (or an EOF / error signal) over an
@@ -17,12 +17,13 @@
 //! aborts any blocked `read()` on the read half, the read thread
 //! sees the error / EOF, exits, and the dispatcher joins it.
 //!
-//! Each session inherits an optional late-bound consumer mailbox from
-//! its listener. The dispatcher appends read chunks to a reassembly
-//! buffer, pops complete ADR-0072 length-prefix frames, and delivers
-//! one targeted `SessionData` mail per frame. Peer EOF and read errors
-//! produce a targeted `SessionClosed`; observer-less sessions preserve
-//! the previous drop-on-the-floor behavior.
+//! Each session receives an optional late-bound consumer mailbox from
+//! its listener or outbound `Connect` request. The dispatcher appends
+//! read chunks to a reassembly buffer, pops complete ADR-0072
+//! length-prefix frames, and delivers one targeted `SessionData` mail
+//! per frame. Peer EOF and read errors produce a targeted
+//! `SessionClosed`; observer-less sessions preserve the previous
+//! drop-on-the-floor behavior.
 
 // Handler-signature kinds need to be importable at file root for
 // the `#[actor]`-emitted `HandlesKind` markers against the identity
