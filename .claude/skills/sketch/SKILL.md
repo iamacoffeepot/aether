@@ -16,6 +16,7 @@ This skill is the single definition of issue-filing mechanics (title, labels). O
 /sketch <idea text> --type <t>       override the inferred type prefix
 /sketch <idea text> --crate <c>      override the inferred crate scope
 /sketch <idea text> --label <l,...>  extra labels (e.g. papercut)
+/sketch --from-wish <leaf-path>      file an issue from a wish-tree leaf
 ```
 
 With no idea text, ask what the idea is — don't guess from conversation context unless the user just described it.
@@ -67,6 +68,22 @@ The blockquote/expansion split is deliberate: `/scope`'s Define phase needs to k
 
 Callers delegating to this skill (e.g. `/scope-spinoff`) may append their own sections after `## Description` (such as `## Found during`); `/sketch` itself adds nothing more.
 
+### Body — from a wish leaf
+
+`/sketch --from-wish <leaf-path>` reads the `wish.md` at `<leaf-path>`. Its `wish:` frontmatter value is the user-intent line, blockquoted under `## Description`; append the leaf's full prose body verbatim under a `## From wish` H2.
+
+`## From wish` is deliberately not a `/scope`-managed header, so `/scope` preserves it as user content and can use the leaf's plan, alternatives, and doors as Define/Design input. Do not put this material under a managed header (`## Problem statement`, `## Design notes`, `## Implementation plan`, `## Sub-issues`, `## Depends on`, `## Dogfood brief`, or `## Side findings`). Infer title, type, and crate from the wish content through the existing table; honor `--type` and `--crate` overrides.
+
+```markdown
+## Description
+
+> <the leaf's `wish:` value, verbatim>
+
+## From wish
+
+<the leaf's full prose body, verbatim>
+```
+
 ## Filing
 
 File over REST — `gh issue create` is GraphQL-backed, while `POST …/issues` is REST, so filing stays off the contended GraphQL pool. Write the body to a file so backticks / `$` in it aren't shell-expanded, and pass the labels inline:
@@ -81,6 +98,8 @@ gh api -X POST repos/iamacoffeepot/aether/issues \
 
 A freshly filed issue carries no `phase:*` label, which **is** its Backlog state — Backlog is label-absence, the convention every pipeline skill reads (`/scope`'s sweep discovers Backlog as "open, non-PR, no `phase:*` label"). `type:*` rides the issue from filing; `/scope` stamps `size:*` / `model:*` at Plan. No audit comment — the issue's own creation event is the record.
 
+For `--from-wish`, inspect the leaf's YAML frontmatter before the POST. If it already carries `filed: "#<N>"`, report that existing issue number and stop rather than filing a duplicate. After the POST returns the new issue number, edit the leaf's `---`-fenced YAML frontmatter block to insert `filed: "#<N>"`. The quotes are required because an unquoted YAML value beginning with `#` is a comment, not the issue number.
+
 ## Output
 
 ```
@@ -93,6 +112,9 @@ A freshly filed issue carries no `phase:*` label, which **is** its Backlog state
 
 - **Crate scope ambiguous**: ask inline before filing. Don't file with a guessed scope.
 - **Idea is really several ideas**: file one issue per separable idea, confirming the split with the user first.
+- **`--from-wish` leaf path missing or not a `wish.md`**: refuse and ask for a persisted wish-tree leaf.
+- **`--from-wish` leaf already carries `filed: "#<N>"`**: refuse, surface the prior issue number, and do not file again.
+- **`--from-wish` wish text too thin to derive a title**: use the existing ambiguous-scope inline ask.
 
 ## What `/sketch` does NOT do
 

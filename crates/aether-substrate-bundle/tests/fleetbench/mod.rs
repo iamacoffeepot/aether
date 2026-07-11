@@ -672,11 +672,18 @@ impl FleetBench {
     /// Tail `recipient`'s per-actor `ActorLogRing` (ADR-0081) on
     /// `engine`. `since: None` reads from the oldest retained entry;
     /// `Some(n)` returns only entries with `sequence > n` (the per-actor
-    /// cursor). `max: 0` resolves to the substrate-default cap. The
+    /// cursor). `contains` applies a case-sensitive message substring
+    /// filter substrate-side. `max: 0` resolves to the substrate-default cap. The
     /// framework dispatch loop answers `LogTail` for every native actor
     /// and wasm trampoline, so `recipient` is any live mailbox path.
-    pub fn log_tail(&mut self, engine: EngineId, recipient: &str, since: Option<u64>) -> LogTailResult {
-        let replies = self.call(Some(engine), recipient, &LogTail { max: 0, min_level: None, since });
+    pub fn log_tail(
+        &mut self,
+        engine: EngineId,
+        recipient: &str,
+        since: Option<u64>,
+        contains: Option<String>,
+    ) -> LogTailResult {
+        let replies = self.call(Some(engine), recipient, &LogTail { max: 0, min_level: None, since, contains });
         let payload = single_reply(&replies, "LogTail");
         LogTailResult::decode_from_bytes(&payload).expect("undecodable LogTailResult")
     }

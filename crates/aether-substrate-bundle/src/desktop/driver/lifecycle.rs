@@ -167,7 +167,7 @@ mod tests {
         let mail_id = MailId::new(window_mailbox, 2);
         mailer.record_sent_inflight(root);
         let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 0x99);
-        let bytes = LogTail { max: 8, min_level: None, since: None }.encode_into_bytes();
+        let bytes = LogTail { max: 8, min_level: None, since: None, contains: None }.encode_into_bytes();
         mailer.push(
             Mail::new(window_mailbox, <LogTail as Kind>::ID, bytes, 1)
                 .with_reply_to(caller_source)

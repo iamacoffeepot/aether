@@ -146,6 +146,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-context-canary"
+version = "0.3.0-alpha"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
 name = "aether-data"
 version = "0.3.0-alpha"
 dependencies = [
@@ -3675,6 +3688,8 @@ dependencies = [
  "log",
  "percent-encoding",
  "pin-project-lite",
+ "serde",
+ "serde_json",
  "sync_wrapper",
  "tokio",
  "tokio-util",
@@ -3719,6 +3734,7 @@ dependencies = [
  "pastey",
  "pin-project-lite",
  "rand 0.10.1",
+ "reqwest",
  "rmcp-macros",
  "schemars",
  "serde",

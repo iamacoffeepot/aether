@@ -548,7 +548,8 @@ impl TestBench {
     /// `tracing::warn!` / `tracing::info!` entries without an RPC session.
     ///
     /// `since: None` reads from the oldest retained entry; `Some(n)` returns
-    /// only entries with `sequence > n`. `max: 0` resolves to the
+    /// only entries with `sequence > n`. `contains` applies a case-sensitive
+    /// message substring filter substrate-side. `max: 0` resolves to the
     /// substrate-default cap (currently 100). The framework dispatch loop
     /// answers [`LogTail`] for every native actor and wasm trampoline, so
     /// `mailbox_name` is any live mailbox path (e.g.
@@ -558,8 +559,8 @@ impl TestBench {
     /// Panics on a decode failure — implies a kind shape mismatch,
     /// matching the fail-fast disposition of [`Self::count_observed`] /
     /// [`Self::observed_kinds`].
-    pub fn log_tail(&mut self, mailbox_name: &str, since: Option<u64>) -> LogTailResult {
-        let request = LogTail { max: 0, min_level: None, since };
+    pub fn log_tail(&mut self, mailbox_name: &str, since: Option<u64>, contains: Option<String>) -> LogTailResult {
+        let request = LogTail { max: 0, min_level: None, since, contains };
         let payload = self
             .send_bytes_and_await(mailbox_name, LogTail::ID, request.encode_into_bytes())
             .unwrap_or_else(|e| panic!("log_tail send to {mailbox_name:?} failed: {e}"));

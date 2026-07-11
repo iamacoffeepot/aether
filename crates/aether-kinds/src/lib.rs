@@ -1520,16 +1520,19 @@ mod control_plane {
     ///   `aether.log.*` uses.
     /// - `since: None` returns from the oldest entry in the ring;
     ///   `Some(n)` returns only entries with `sequence > n`.
+    /// - `contains: None` applies no content filter; `Some(s)` returns
+    ///   only entries whose message contains `s` (case-sensitive).
     #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     #[kind(name = "aether.log.tail")]
     pub struct LogTail {
         pub max: u32,
         pub min_level: Option<u8>,
         pub since: Option<u64>,
+        pub contains: Option<String>,
     }
 
     /// Reply to [`LogTail`]. `Ok::entries` slices the responder's
-    /// ring matching `(min_level, since)`, ordered oldest-to-newest
+    /// ring matching `(min_level, since, contains)`, ordered oldest-to-newest
     /// (ascending `sequence`). `next_since` is the highest `sequence`
     /// in `entries` (or the caller's `since` echoed back on an empty
     /// reply) — thread it into the next `LogTail::since` for a

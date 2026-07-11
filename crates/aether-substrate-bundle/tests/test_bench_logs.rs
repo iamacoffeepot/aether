@@ -76,7 +76,7 @@ mod tests {
         let mut last_reply = None;
         let mut found = None;
         for _ in 0..POLL_ATTEMPTS {
-            let reply = bench.log_tail(&addr, None);
+            let reply = bench.log_tail(&addr, None, None);
             if let LogTailResult::Ok { ref entries, next_since, .. } = reply
                 && let Some(entry) = entries.iter().find(|e| e.message == "typed_send_alive" && e.level == LEVEL_INFO)
             {
@@ -98,7 +98,7 @@ mod tests {
 
         // Walk the cursor: a re-query past `next_since` must not re-yield
         // the entry we already consumed.
-        match bench.log_tail(&addr, Some(next_since)) {
+        match bench.log_tail(&addr, Some(next_since), None) {
             LogTailResult::Ok { entries, .. } => assert!(
                 entries.iter().all(|e| e.sequence != entry.sequence),
                 "the `since` cursor should not re-yield the already-seen entry \

@@ -5,7 +5,7 @@ use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 use crate::mark::{Mark, MarkGeometry, MarkMutationError, MarkRef};
 use crate::world::{MAX_STAMP_VERTICES, WorldPoint};
 
-use super::{TerrainCommandResult, TerrainEditorError, WorldDelta};
+use super::{TerraCommandResult, TerraError, WorldDelta};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Selection {
@@ -27,11 +27,11 @@ impl Selection {
         self.references.is_empty()
     }
 
-    pub(super) fn validate_unique(references: &[MarkRef]) -> Result<(), TerrainEditorError> {
+    pub(super) fn validate_unique(references: &[MarkRef]) -> Result<(), TerraError> {
         let mut ids = BTreeSet::new();
         for reference in references {
             if !ids.insert(reference.id) {
-                return Err(TerrainEditorError::DuplicateSelection { id: reference.id });
+                return Err(TerraError::DuplicateSelection { id: reference.id });
             }
         }
         Ok(())
@@ -96,14 +96,14 @@ impl BatchProgress {
         self.deleted.push(observed);
     }
 
-    pub(super) fn finish(self, selection: &Selection, error: Option<TerrainEditorError>) -> TerrainCommandResult {
+    pub(super) fn finish(self, selection: &Selection, error: Option<TerraError>) -> TerraCommandResult {
         let snapshot = selection.snapshot();
         match error {
-            None => TerrainCommandResult::Applied { selection: snapshot, changed: self.changed, deleted: self.deleted },
+            None => TerraCommandResult::Applied { selection: snapshot, changed: self.changed, deleted: self.deleted },
             Some(error) if self.changed.is_empty() && self.deleted.is_empty() => {
-                TerrainCommandResult::Rejected { selection: snapshot, error }
+                TerraCommandResult::Rejected { selection: snapshot, error }
             }
-            Some(error) => TerrainCommandResult::PartiallyApplied {
+            Some(error) => TerraCommandResult::PartiallyApplied {
                 selection: snapshot,
                 changed: self.changed,
                 deleted: self.deleted,
@@ -113,18 +113,18 @@ impl BatchProgress {
     }
 }
 
-pub(super) fn validate_mark(requested: MarkRef, mark: Option<&Mark>) -> Result<(), TerrainEditorError> {
+pub(super) fn validate_mark(requested: MarkRef, mark: Option<&Mark>) -> Result<(), TerraError> {
     let Some(mark) = mark else {
-        return Err(TerrainEditorError::MarkMissing { requested });
+        return Err(TerraError::MarkMissing { requested });
     };
     let current = mark.reference();
     if current != requested {
-        return Err(TerrainEditorError::StaleReference { requested, current });
+        return Err(TerraError::StaleReference { requested, current });
     }
     Ok(())
 }
 
-pub(super) fn validate_batch_marks(marks: &[Mark]) -> Result<(), TerrainEditorError> {
+pub(super) fn validate_batch_marks(marks: &[Mark]) -> Result<(), TerraError> {
     for mark in marks {
         let minimum = match &mark.geometry {
             MarkGeometry::Point(_) => continue,
@@ -150,7 +150,7 @@ pub(super) fn validate_batch_marks(marks: &[Mark]) -> Result<(), TerrainEditorEr
             MarkGeometry::Path(points) | MarkGeometry::Area(points) => points.len(),
             MarkGeometry::Point(_) => unreachable!("points are always valid"),
         };
-        return Err(TerrainEditorError::MarkMutationRejected {
+        return Err(TerraError::MarkMutationRejected {
             requested: Some(mark.reference()),
             error: MarkMutationError::InvalidGeometry {
                 reason: format!("{kind} requires {minimum}..={MAX_STAMP_VERTICES} world points; got {length}"),
@@ -160,27 +160,27 @@ pub(super) fn validate_batch_marks(marks: &[Mark]) -> Result<(), TerrainEditorEr
     Ok(())
 }
 
-pub(super) fn plan_move(marks: &[Mark], delta: WorldDelta) -> Result<Vec<PlannedUpdate>, TerrainEditorError> {
+pub(super) fn plan_move(marks: &[Mark], delta: WorldDelta) -> Result<Vec<PlannedUpdate>, TerraError> {
     if delta == WorldDelta::default() {
-        return Err(TerrainEditorError::NoChange);
+        return Err(TerraError::NoChange);
     }
     let mut updates = Vec::with_capacity(marks.len());
     for mark in marks {
         let requested = mark.reference();
         if mark.revision == u32::MAX {
-            return Err(TerrainEditorError::MarkMutationRejected {
+            return Err(TerraError::MarkMutationRejected {
                 requested: Some(requested),
                 error: MarkMutationError::RevisionExhausted,
             });
         }
-        let geometry = translate_geometry(&mark.geometry, delta)
-            .ok_or(TerrainEditorError::CoordinateOverflow { reference: requested })?;
+        let geometry =
+            translate_geometry(&mark.geometry, delta).ok_or(TerraError::CoordinateOverflow { reference: requested })?;
         updates.push(PlannedUpdate { requested, geometry: Some(geometry), label: None });
     }
     Ok(updates)
 }
 
-pub(super) fn plan_relabel(marks: &[Mark], label: &str) -> Result<Vec<PlannedUpdate>, TerrainEditorError> {
+pub(super) fn plan_relabel(marks: &[Mark], label: &str) -> Result<Vec<PlannedUpdate>, TerraError> {
     let mut updates = Vec::new();
     for mark in marks {
         if mark.label == label {
@@ -188,7 +188,7 @@ pub(super) fn plan_relabel(marks: &[Mark], label: &str) -> Result<Vec<PlannedUpd
         }
         let requested = mark.reference();
         if mark.revision == u32::MAX {
-            return Err(TerrainEditorError::MarkMutationRejected {
+            return Err(TerraError::MarkMutationRejected {
                 requested: Some(requested),
                 error: MarkMutationError::RevisionExhausted,
             });
@@ -196,7 +196,7 @@ pub(super) fn plan_relabel(marks: &[Mark], label: &str) -> Result<Vec<PlannedUpd
         updates.push(PlannedUpdate { requested, geometry: None, label: Some(String::from(label)) });
     }
     if updates.is_empty() {
-        return Err(TerrainEditorError::NoChange);
+        return Err(TerraError::NoChange);
     }
     Ok(updates)
 }
@@ -269,26 +269,26 @@ mod tests {
         let duplicate = reference(7, 2);
         assert_eq!(
             Selection::validate_unique(&[first, duplicate]),
-            Err(TerrainEditorError::DuplicateSelection { id: first.id })
+            Err(TerraError::DuplicateSelection { id: first.id })
         );
     }
 
     #[test]
     fn missing_and_stale_references_fail_before_any_plan_exists() {
         let requested = reference(4, 2);
-        assert_eq!(validate_mark(requested, None), Err(TerrainEditorError::MarkMissing { requested }));
+        assert_eq!(validate_mark(requested, None), Err(TerraError::MarkMissing { requested }));
         let current = point_mark(4, 3, 0, 0, "camp");
         assert_eq!(
             validate_mark(requested, Some(&current)),
-            Err(TerrainEditorError::StaleReference { requested, current: current.reference() })
+            Err(TerraError::StaleReference { requested, current: current.reference() })
         );
     }
 
     #[test]
     fn zero_move_and_matching_relabel_are_no_change() {
         let mark = point_mark(1, 1, 8, 9, "camp");
-        assert_eq!(plan_move(from_ref(&mark), WorldDelta::default()), Err(TerrainEditorError::NoChange));
-        assert_eq!(plan_relabel(&[mark], "camp"), Err(TerrainEditorError::NoChange));
+        assert_eq!(plan_move(from_ref(&mark), WorldDelta::default()), Err(TerraError::NoChange));
+        assert_eq!(plan_relabel(&[mark], "camp"), Err(TerraError::NoChange));
     }
 
     #[test]
@@ -297,7 +297,7 @@ mod tests {
         let overflow = point_mark(2, 1, i32::MAX, 30, "second");
         assert_eq!(
             plan_move(&[first, overflow.clone()], WorldDelta { x_octimeters: 1, z_octimeters: 0 }),
-            Err(TerrainEditorError::CoordinateOverflow { reference: overflow.reference() })
+            Err(TerraError::CoordinateOverflow { reference: overflow.reference() })
         );
     }
 
@@ -311,13 +311,13 @@ mod tests {
         };
         assert!(matches!(
             validate_batch_marks(&[invalid]),
-            Err(TerrainEditorError::MarkMutationRejected { error: MarkMutationError::InvalidGeometry { .. }, .. })
+            Err(TerraError::MarkMutationRejected { error: MarkMutationError::InvalidGeometry { .. }, .. })
         ));
 
         let exhausted = point_mark(6, u32::MAX, 0, 0, "exhausted");
         assert_eq!(
             plan_relabel(from_ref(&exhausted), "new"),
-            Err(TerrainEditorError::MarkMutationRejected {
+            Err(TerraError::MarkMutationRejected {
                 requested: Some(exhausted.reference()),
                 error: MarkMutationError::RevisionExhausted,
             })
@@ -360,14 +360,14 @@ mod tests {
         let updated = reference(1, 2);
         let mut progress = BatchProgress::default();
         progress.record_update(&mut selection, updated);
-        let result = progress.finish(&selection, Some(TerrainEditorError::MarkMissing { requested: second }));
+        let result = progress.finish(&selection, Some(TerraError::MarkMissing { requested: second }));
         assert_eq!(
             result,
-            TerrainCommandResult::PartiallyApplied {
+            TerraCommandResult::PartiallyApplied {
                 selection: vec![updated, second],
                 changed: vec![updated],
                 deleted: Vec::new(),
-                error: TerrainEditorError::MarkMissing { requested: second },
+                error: TerraError::MarkMissing { requested: second },
             }
         );
     }
@@ -378,10 +378,10 @@ mod tests {
         let second = reference(2, 1);
         let selection = Selection { references: vec![first, second] };
         assert_eq!(
-            BatchProgress::default().finish(&selection, Some(TerrainEditorError::MarkMissing { requested: first })),
-            TerrainCommandResult::Rejected {
+            BatchProgress::default().finish(&selection, Some(TerraError::MarkMissing { requested: first })),
+            TerraCommandResult::Rejected {
                 selection: vec![first, second],
-                error: TerrainEditorError::MarkMissing { requested: first },
+                error: TerraError::MarkMissing { requested: first },
             }
         );
 
@@ -389,12 +389,12 @@ mod tests {
         let mut progress = BatchProgress::default();
         progress.record_delete(&mut selection, first);
         assert_eq!(
-            progress.finish(&selection, Some(TerrainEditorError::MarkMissing { requested: second })),
-            TerrainCommandResult::PartiallyApplied {
+            progress.finish(&selection, Some(TerraError::MarkMissing { requested: second })),
+            TerraCommandResult::PartiallyApplied {
                 selection: vec![second],
                 changed: Vec::new(),
                 deleted: vec![first],
-                error: TerrainEditorError::MarkMissing { requested: second },
+                error: TerraError::MarkMissing { requested: second },
             }
         );
     }
