@@ -220,6 +220,126 @@ impl TextCapabilityState {
         };
         ctx.actor::<RenderCapability>().send(&update);
     }
+
+    /// Resolve a text item's font and reject invalid pixel sizes. An unknown
+    /// font follows the established warn-drop behavior for `DrawText`.
+    fn font_for_draw(&self, item: &DrawText) -> Option<Arc<fontdue::Font>> {
+        let Some(font) = self.fonts.get(&item.font_id).cloned() else {
+            tracing::warn!(
+                target: "aether_substrate::text",
+                font_id = item.font_id,
+                "draw for unknown font_id; dropping",
+            );
+            return None;
+        };
+        if !(item.size_pixels.is_finite() && item.size_pixels > 0.0) {
+            return None;
+        }
+        Some(font)
+    }
+
+    /// Return the live atlas texture, lazily creating it when needed and
+    /// resetting a saturated atlas before the caller lays out its items.
+    fn atlas_texture_for_draw(&mut self, ctx: &mut NativeCtx<'_>) -> Option<u32> {
+        let Some(texture_id) = self.atlas_texture_id else {
+            // No atlas texture yet — kick off creation; immediate mode
+            // resends this draw next frame once the id lands.
+            self.ensure_atlas_texture(ctx);
+            return None;
+        };
+
+        // Reset the atlas when full so the frame's glyphs can re-pack
+        // from a clean slate. The render cap's staged buffer is re-synced
+        // with one full-rect upload; per-glyph uploads follow as cache
+        // misses. This costs one frame of partial text (the overflow
+        // glyphs missing on the saturating frame) and then fully recovers.
+        if self.atlas.is_full() {
+            tracing::info!(
+                target: "aether_substrate::text",
+                "glyph atlas full; resetting for next frame",
+            );
+            self.atlas.reset();
+            self.resync_atlas(ctx, texture_id);
+        }
+
+        Some(texture_id)
+    }
+
+    /// Lay out one text item, returning newly-rasterized atlas entries so the
+    /// caller can preserve upload-before-use ordering at its send site.
+    fn layout_text_item(&mut self, font: &fontdue::Font, item: &DrawText) -> (Vec<TexturedQuad>, Vec<AtlasEntry>) {
+        let size = item.size_pixels;
+        // Quantize the size for the glyph cache key — two draws at the
+        // same nominal size share one raster.
+        let size_key = quantize_size(size);
+        let baseline = font.horizontal_line_metrics(size).map_or(size, |line| line.ascent);
+
+        let mut pen_x = 0.0f32;
+        let mut quads: Vec<TexturedQuad> = Vec::new();
+        let mut uploads: Vec<AtlasEntry> = Vec::new();
+
+        for ch in item.text.chars() {
+            let glyph_index = font.lookup_glyph_index(ch);
+            let metrics = font.metrics(ch, size);
+            let key = GlyphKey { font_id: item.font_id, glyph_index, size_pixels: size_key };
+            let (glyph_width, glyph_height) = glyph_dimensions(&metrics);
+
+            // Rasterize only on a cache miss.
+            let slot = if let Some(hit) = self.atlas.cached(&key) {
+                hit
+            } else {
+                let (_m, coverage) = font.rasterize(ch, size);
+                self.atlas.get_or_insert(key, glyph_width, glyph_height, &coverage)
+            };
+
+            match slot {
+                GlyphSlot::Placed { entry, uploaded } => {
+                    if uploaded {
+                        uploads.push(entry);
+                    }
+                    quads.push(glyph_quad(&metrics, pen_x, baseline, &entry, item.color));
+                }
+                // Empty: no pixels, just advance the pen.
+                // Full: the atlas saturated during this frame's layout pass;
+                // the reset fires at the top of the next draw so this
+                // glyph will re-pack and render then.
+                GlyphSlot::Empty | GlyphSlot::Full => {}
+            }
+            pen_x += metrics.advance_width;
+        }
+
+        if matches!(&item.space, QuadSpace::World { .. }) {
+            // World quads carry pixel offsets relative to the anchor, not
+            // absolute screen positions. Center the string horizontally and
+            // shift so the baseline sits at y=0 — the anchor is the baseline
+            // point, and text appears above it (negative y in screen y-down
+            // convention = above the anchor in world space).
+            let half_width = pen_x / 2.0;
+            for quad in &mut quads {
+                quad.x -= half_width;
+                quad.y -= baseline;
+            }
+        } else {
+            // Screen quads flow from the top-left of the window by default
+            // (pen starts at 0,0). Apply the caller's origin offset so a
+            // string can sit at an arbitrary screen pixel.
+            let [origin_x, origin_y] = item.origin;
+            for quad in &mut quads {
+                quad.x += origin_x;
+                quad.y += origin_y;
+            }
+        }
+
+        (quads, uploads)
+    }
+}
+
+/// One pending contiguous text quad run. Its key is the projection plus
+/// framebuffer clip; the atlas texture is shared by the text capability.
+struct TextQuadRun {
+    space: QuadSpace,
+    clip: Option<aether_kinds::ClipRect>,
+    quads: Vec<TexturedQuad>,
 }
 
 // The cap mail kinds (`LoadFont`, `DrawText`, …) plus the layout helpers the
@@ -227,7 +347,9 @@ impl TextCapabilityState {
 // runtime surface for the struct-hosted identity in the parent.
 use self::layout::{build_font_metrics, emit_draw, font_name_from_path, glyph_dimensions, glyph_quad, quantize_size};
 use super::TextCapability;
-use super::kinds::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontBytes, LoadFontResult};
+use super::kinds::{
+    DrawText, DrawTextBatch, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontBytes, LoadFontResult,
+};
 use aether_actor::runtime;
 
 fn parse_font_bytes(bytes: Vec<u8>) -> FontParseOutput {
@@ -447,105 +569,60 @@ impl NativeActor for TextCapability {
     /// resend every frame (immediate-mode contract).
     #[handler::single]
     fn on_draw_text(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawText) {
-        let Some(font) = state.fonts.get(&mail.font_id).cloned() else {
-            tracing::warn!(
-                target: "aether_substrate::text",
-                font_id = mail.font_id,
-                "draw for unknown font_id; dropping",
-            );
+        let Some(font) = state.font_for_draw(&mail) else {
             return;
         };
-        if !(mail.size_pixels.is_finite() && mail.size_pixels > 0.0) {
-            return;
-        }
-        let Some(texture_id) = state.atlas_texture_id else {
-            // No atlas texture yet — kick off creation; immediate mode
-            // resends this draw next frame once the id lands.
-            state.ensure_atlas_texture(ctx);
+        let Some(texture_id) = state.atlas_texture_for_draw(ctx) else {
             return;
         };
-
-        // Reset the atlas when full so the frame's glyphs can re-pack
-        // from a clean slate. The render cap's staged buffer is re-synced
-        // with one full-rect upload; per-glyph uploads follow as cache
-        // misses. This costs one frame of partial text (the overflow
-        // glyphs missing on the saturating frame) and then fully recovers.
-        if state.atlas.is_full() {
-            tracing::info!(
-                target: "aether_substrate::text",
-                "glyph atlas full; resetting for next frame",
-            );
-            state.atlas.reset();
-            state.resync_atlas(ctx, texture_id);
-        }
-
-        let size = mail.size_pixels;
-        // Quantize the size for the glyph cache key — two draws at the
-        // same nominal size share one raster.
-        let size_key = quantize_size(size);
-        let baseline = font.horizontal_line_metrics(size).map_or(size, |line| line.ascent);
-
-        let mut pen_x = 0.0f32;
-        let mut quads: Vec<TexturedQuad> = Vec::new();
-        let mut uploads: Vec<AtlasEntry> = Vec::new();
-
-        for ch in mail.text.chars() {
-            let glyph_index = font.lookup_glyph_index(ch);
-            let metrics = font.metrics(ch, size);
-            let key = GlyphKey { font_id: mail.font_id, glyph_index, size_pixels: size_key };
-            let (glyph_width, glyph_height) = glyph_dimensions(&metrics);
-
-            // Rasterize only on a cache miss.
-            let slot = if let Some(hit) = state.atlas.cached(&key) {
-                hit
-            } else {
-                let (_m, coverage) = font.rasterize(ch, size);
-                state.atlas.get_or_insert(key, glyph_width, glyph_height, &coverage)
-            };
-
-            match slot {
-                GlyphSlot::Placed { entry, uploaded } => {
-                    if uploaded {
-                        uploads.push(entry);
-                    }
-                    quads.push(glyph_quad(&metrics, pen_x, baseline, &entry, mail.color));
-                }
-                // Empty: no pixels, just advance the pen.
-                // Full: the atlas saturated during this frame's layout pass;
-                // the reset fires at the top of the next draw so this
-                // glyph will re-pack and render then.
-                GlyphSlot::Empty | GlyphSlot::Full => {}
-            }
-            pen_x += metrics.advance_width;
-        }
-
+        let (quads, uploads) = state.layout_text_item(&font, &mail);
         for entry in uploads {
             state.upload_glyph(ctx, texture_id, &entry);
         }
         if !quads.is_empty() {
-            if matches!(mail.space, QuadSpace::World { .. }) {
-                // World quads carry pixel offsets relative to the
-                // anchor, not absolute screen positions. Center the
-                // string horizontally and shift so the baseline sits
-                // at y=0 — the anchor is the baseline point, and text
-                // appears above it (negative y in screen y-down
-                // convention = above the anchor in world space).
-                let half_width = pen_x / 2.0;
-                for q in &mut quads {
-                    q.x -= half_width;
-                    q.y -= baseline;
-                }
-            } else {
-                // Screen quads flow from the top-left of the window by
-                // default (pen starts at 0,0). Apply the caller's origin
-                // offset so a string can sit at an arbitrary screen pixel.
-                let [ox, oy] = mail.origin;
-                for q in &mut quads {
-                    q.x += ox;
-                    q.y += oy;
-                }
-            }
             emit_draw(ctx, texture_id, mail.space, mail.clip, quads);
+        }
+    }
+
+    /// Lay out and draw an authored sequence of text items in immediate mode.
+    /// Adjacent items with the same projection and clip share one textured-quad
+    /// send; every other transition preserves the authored order as a separate
+    /// run. Each item's glyph uploads are sent before any subsequent run
+    /// flush, preserving `aether.render` FIFO upload-before-use ordering.
+    #[handler::single]
+    fn on_draw_batch(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: DrawTextBatch) {
+        let Some(texture_id) = state.atlas_texture_for_draw(ctx) else {
+            return;
+        };
+
+        let mut pending: Option<TextQuadRun> = None;
+        for item in &mail.items {
+            let Some(font) = state.font_for_draw(item) else {
+                continue;
+            };
+            let (quads, uploads) = state.layout_text_item(&font, item);
+            for entry in uploads {
+                state.upload_glyph(ctx, texture_id, &entry);
+            }
+            if quads.is_empty() {
+                continue;
+            }
+
+            if let Some(run) = &mut pending
+                && run.space == item.space
+                && run.clip == item.clip
+            {
+                run.quads.extend(quads);
+            } else {
+                if let Some(run) = pending.take() {
+                    emit_draw(ctx, texture_id, run.space, run.clip, run.quads);
+                }
+                pending = Some(TextQuadRun { space: item.space.clone(), clip: item.clip.clone(), quads });
+            }
+        }
+
+        if let Some(run) = pending {
+            emit_draw(ctx, texture_id, run.space, run.clip, run.quads);
         }
     }
 }
@@ -603,6 +680,23 @@ mod tests {
                 clip: None,
             },
         );
+    }
+
+    fn draw_batch(state: &mut TextCapabilityState, binding: &Arc<NativeBinding>, items: Vec<DrawText>) {
+        let mut ctx = NativeCtx::new(binding, session_sender(), MailId::NONE, MailId::NONE);
+        TextCapability::on_draw_batch(state, &mut ctx, DrawTextBatch { items });
+    }
+
+    fn screen_text_item(text: &str, origin: [f32; 2], clip: Option<aether_kinds::ClipRect>) -> DrawText {
+        DrawText {
+            font_id: 0,
+            text: text.to_owned(),
+            size_pixels: 24.0,
+            color: Rgba::new(1.0, 1.0, 1.0, 1.0),
+            origin,
+            space: QuadSpace::Screen,
+            clip,
+        }
     }
 
     #[test]
@@ -872,6 +966,74 @@ mod tests {
         assert_next_send_kind::<DrawTexturedQuads>(&binding, &rx);
     }
 
+    #[test]
+    fn draw_batch_coalesces_same_key_screen_items_into_one_quad_send() {
+        let mut state = TextCapabilityState::new();
+        state.fonts.insert(0, Arc::new(test_font()));
+        state.atlas_texture_id = Some(1);
+        let (binding, rx) = ctx_binding();
+
+        draw_batch(
+            &mut state,
+            &binding,
+            vec![screen_text_item("A", [0.0, 0.0], None), screen_text_item("B", [24.0, 0.0], None)],
+        );
+
+        let batches = collect_draw_textured_quad_batches(&binding, &rx);
+        assert_eq!(batches.len(), 1, "two same-key text items emit one DrawTexturedQuads");
+        assert_eq!(batches[0].space, QuadSpace::Screen);
+        assert_eq!(batches[0].clip, None);
+        assert_eq!(batches[0].quads.len(), 2);
+        assert!(batches[0].quads[0].x < batches[0].quads[1].x, "glyph quads retain item order");
+    }
+
+    #[test]
+    fn draw_batch_preserves_noncontiguous_clip_runs() {
+        let mut state = TextCapabilityState::new();
+        state.fonts.insert(0, Arc::new(test_font()));
+        state.atlas_texture_id = Some(1);
+        let (binding, rx) = ctx_binding();
+        let left_clip = aether_kinds::ClipRect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 };
+        let right_clip = aether_kinds::ClipRect { x: 20.0, y: 0.0, width: 20.0, height: 20.0 };
+
+        draw_batch(
+            &mut state,
+            &binding,
+            vec![
+                screen_text_item("A", [0.0, 0.0], Some(left_clip.clone())),
+                screen_text_item("B", [24.0, 0.0], Some(right_clip.clone())),
+                screen_text_item("C", [48.0, 0.0], Some(left_clip.clone())),
+            ],
+        );
+
+        let batches = collect_draw_textured_quad_batches(&binding, &rx);
+        assert_eq!(batches.len(), 3, "noncontiguous equal clips remain separate authored-order runs");
+        assert_eq!(batches[0].clip, Some(left_clip.clone()));
+        assert_eq!(batches[1].clip, Some(right_clip));
+        assert_eq!(batches[2].clip, Some(left_clip));
+    }
+
+    #[test]
+    fn draw_batch_drops_an_unknown_font_without_losing_surrounding_items() {
+        let mut state = TextCapabilityState::new();
+        state.fonts.insert(0, Arc::new(test_font()));
+        state.atlas_texture_id = Some(1);
+        let (binding, rx) = ctx_binding();
+        let mut unknown = screen_text_item("ignored", [24.0, 0.0], None);
+        unknown.font_id = 99;
+
+        draw_batch(
+            &mut state,
+            &binding,
+            vec![screen_text_item("A", [0.0, 0.0], None), unknown, screen_text_item("B", [48.0, 0.0], None)],
+        );
+
+        let batches = collect_draw_textured_quad_batches(&binding, &rx);
+        assert_eq!(batches.len(), 1, "valid items on either side share their run");
+        assert_eq!(batches[0].quads.len(), 2, "the unknown-font item alone is dropped");
+        assert!(batches[0].quads[0].x < batches[0].quads[1].x, "surviving items retain authored order");
+    }
+
     /// `Screen` draws at a non-zero `origin` shift every glyph quad by
     /// that offset. Draw the same string twice — once at `[0,0]` and once
     /// at `[ox, oy]` — and assert each quad in the offset batch sits
@@ -920,6 +1082,27 @@ mod tests {
                     .expect("test: DrawTexturedQuads payload decodes");
             }
         }
+    }
+
+    fn collect_draw_textured_quad_batches(
+        binding: &NativeBinding,
+        rx: &Receiver<EgressEvent>,
+    ) -> Vec<DrawTexturedQuads> {
+        binding.flush_outbound();
+        rx.try_iter()
+            .filter_map(|event| {
+                if let EgressEvent::UnresolvedMail { kind_id, payload, .. } = event
+                    && kind_id == DrawTexturedQuads::ID
+                {
+                    Some(
+                        DrawTexturedQuads::decode_from_bytes(&payload)
+                            .expect("test: DrawTexturedQuads payload decodes"),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// A tiny real font for the draw-path tests — the workspace's
