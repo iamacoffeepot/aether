@@ -178,6 +178,12 @@ parent: ../wish.md                # omit if root
 supports:                           # optional, only if branch-overlap with memory
   - "[[memory-entry-name]]"
 producible: true | false            # true means this wish IS a plan
+grounded_surfaces:                  # every pass writes re-greppable `identifier` — crates/aether-*/src/path citations
+  - "`aether.fs.read` — crates/aether-capabilities/src/fs/kinds.rs"
+grounding_stale: true | false        # optional: --refresh writes whether any cited surface drifted
+drifted_surfaces:                   # optional: --refresh writes the citations that no longer resolve
+  - "`<identifier>` — crates/aether-*/src/<path>.rs"
+grounding_checked: YYYY-MM-DD        # optional: --refresh writes the most recent grounding check
 ---
 
 <free-form prose body — no fixed section headers — articulating naturally:>
@@ -213,6 +219,7 @@ The user reads top-down:
 /wish <theme> --as <role>           combine
 /wish --under <wish-path>           drill into one subtree (chosen or alternative)
                                     from a prior pass
+/wish --refresh <tree-path>         re-grep each node's cited surfaces; mark drifted nodes grounding-stale
 /wish --deep <theme>                deep mode: best-first fan-out drilling (workflow-backed)
 /wish --deep <theme> --beam N       fan-out width per round (default 3) — the shape knob
 /wish --deep <theme> --budget N     max driller agents the loop spawns (default 40) — the size knob
@@ -263,7 +270,7 @@ After the frontier drains, a final agent reads every node's bounded summary and 
 
 ### Resumability
 
-The on-disk wish tree persists across sessions, so a deep wish becomes resumable: a later `/wish --under <wish-path>` drills a subtree further, complementing the in-session Workflow journal. The file tree is the durable record; the journal is the live one.
+The on-disk wish tree persists across sessions, so a deep wish becomes resumable: a later `/wish --under <wish-path>` drills a subtree further, complementing the in-session Workflow journal. Before resuming with `--under`, run `/wish --refresh <tree-path>` so re-drilling does not build on drifted grounding. The file tree is the durable record; the journal is the live one.
 
 ## Steps the agent runs
 
@@ -306,9 +313,9 @@ On `--deep`, run steps 1 (pre-load adversity) and 2 (generate roots) inline in t
 2. **Compute `wishDir`.** The absolute path to `wishes/<YYYY-MM-DD>-<theme-slug>/`. Create the directory so the drillers have a place to write.
 3. **Gather `groundingNotes`.** The grep-confirmed engine surfaces from step 1, as a short shared block, so the drillers extend the grounding rather than each re-deriving it.
 4. **Call the workflow.** `Workflow({name: "wish", args: {theme, role, beam, budget, roots, wishDir, groundingNotes}})` — `roots` is `[{slug, wish, doors_opened, unresolvedness}]`; `beam` and `budget` come from the flags (defaults 3 and 40); `role` is null if not given. The workflow holds the best-first frontier, spawns the parallel drillers + the skeptic gate + the synthesis writer, and the agents write every `wish.md` and `index.md` themselves.
-5. **Report from the returned stats.** On completion the workflow returns `{rootCount, totalNodes, leafCount, maxDepth, skepticDemotions, undrilled, ...}`. Print the deep-mode report (step 7) from those, and surface that the tree is on disk and resumable.
+5. **Report from the returned stats.** On completion the workflow returns `{rootCount, totalNodes, leafCount, maxDepth, skepticDemotions, undrilled, ...}`. Print the deep-mode report (step 8) from those, and surface that the tree is on disk and resumable.
 
-Deep mode does not run steps 4-6 inline — filtering and the on-disk write are the drillers' and synthesis agent's job inside the workflow. Step 7's report template has a deep-mode variant.
+Deep mode does not run steps 4-7 inline — filtering and the on-disk write are the drillers' and synthesis agent's job inside the workflow. Step 8's report template has a deep-mode variant.
 
 ### 4. Filter against existing work (tree-aware)
 
@@ -329,7 +336,17 @@ Deep mode does not run steps 4-6 inline — filtering and the on-disk write are 
 
 When `/wish --under <wish-path>` is invoked, walk the target as if it were a chosen wish — generate its own sub-wishes, possibly its own sub-alternatives, and recurse to producibility. If the target is an `alternatives/<slug>` path that is not yet on disk, resolve `<slug>` against the parent wish's prose-named alternatives and drill that counter-path directly into a full subtree using the chosen-path `wish.md` shape. Refuse only when the target matches neither an existing path nor a prose-named alternative. The result is a competing subtree the user can compare against the original chosen path's subtree.
 
-### 6. Write the tree
+### 6. Refresh grounding on `--refresh`
+
+When `/wish --refresh <tree-path>` is invoked, resolve `<tree-path>` to an existing `wishes/<YYYY-MM-DD>-<theme-slug>/` directory or a subtree within one. Walk every `wish.md` beneath it, including those in `alternatives/`, and read each node's `grounded_surfaces:` frontmatter list.
+
+For every citation in the required `` `identifier` — crates/aether-*/src/path `` form, re-grep the identifier within its cited path: `git grep -F '<identifier>' -- '<path>'`. An empty result means that cited surface has drifted. If any citation has drifted, set `grounding_stale: true`, write `drifted_surfaces:` to exactly the failed citations, and set `grounding_checked: <today>` in that node's frontmatter. If all citations resolve, set `grounding_stale: false`, remove any prior `drifted_surfaces:`, and set `grounding_checked: <today>`.
+
+Skip nodes that have no `grounded_surfaces:` and report them as unverifiable rather than marking them stale. Mark drift per node only: a stale child does not make its parent stale. This mode only detects and flags drift; never re-drill or otherwise rewrite a node's wish body.
+
+Report the nodes checked, nodes drifted, and any unverifiable nodes, then list each drifted node path with the cited surfaces that failed. The user can then re-drill selected nodes with `/wish --under` or discard the stale subtree.
+
+### 7. Write the tree
 
 Output root: `wishes/<YYYY-MM-DD>-<theme-slug>/`. Write `index.md` and each `wish.md`.
 
@@ -344,7 +361,7 @@ Output root: `wishes/<YYYY-MM-DD>-<theme-slug>/`. Write `index.md` and each `wis
 - Considered-and-dropped list
 - Notes
 
-### 7. Report to user
+### 8. Report to user
 
 ```
 ✓ Wish pass complete.
@@ -416,6 +433,8 @@ The "why rejected as the chosen path" line names which dimension(s) the chosen w
 - **Unverifiable surface a wish leans on**: don't substitute a plausible name. Either the surface doesn't exist (drill the absence) or it's renamed (grep for the real name). A guessed surface makes producibility a lie.
 - **Children don't compose to satisfy parent**: back up, restate.
 - **`--under` invoked on a path that doesn't exist**: when the target is an `alternatives/<slug>` path, resolve `<slug>` against the parent wish's prose-named alternatives and drill that counter-path; refuse only when it matches neither an existing path nor a prose-named alternative.
+- **`--refresh` invoked on a tree that doesn't exist**: refuse and list valid prior-pass `wishes/<YYYY-MM-DD>-<theme-slug>/` paths, mirroring `--under`'s path check.
+- **A refreshed tree predates `grounded_surfaces:`**: report each affected node as unverifiable; do not mark it grounding-stale.
 
 ## Output gitignore
 
