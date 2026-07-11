@@ -32,17 +32,22 @@ name: Dogfood
 # the user (phase:bounced + a persistent-failure comment linking every attempt's
 # evidence) rather than looping forever. A `workflow_dispatch` with a `pr` input
 # is the manual override: it bypasses the retry-state guards (green + cap) for a
-# deliberate re-trial, but still honours the structural gates (open PR, Review
-# gate green, brief present).
+# deliberate re-trial, but still honours the structural gates (Review gate
+# green, brief present). A manual dispatch may run a merged PR on its merge
+# commit and does not require that PR to remain open.
 #
 # RUN-ID CONVENTION: `<github.run_id>-<attempt>` — sortable, collision-free
 # across a retrying PR, and the `evidence/<issue>/<run-id>/` path segment on the
 # dogfood/evidence branch and under s3://aether-evidence.
 #
 # SECURITY POSTURE (issue 2967 / the security comment on 2968): secrets never
-# meet untrusted branches. Same-repo head only (a fork PR never sees the OAuth
-# token and skips); NEVER pull_request_target. Least-privilege split — the
-# `trial` job executes branch code (build + headless Claude with
+# meet untrusted branches. The automatic `workflow_run` path is same-repo-head
+# only (a fork PR never sees the OAuth token and skips); NEVER
+# pull_request_target. A manual dispatch is a deliberate operator override and
+# may re-trial a merged PR without an open PR: it checks out that PR's merge
+# commit, which is main, while still probing the original head's Review gate.
+# Automatic `workflow_run` behavior stays unchanged. Least-privilege split —
+# the `trial` job executes the resolved code (build + headless Claude with
 # --dangerously-skip-permissions on the ephemeral box) and holds `contents:
 # read` and nothing else; only the `post` job, which never runs branch code
 # (it checks out main), carries the write scopes. The trial job currently runs
@@ -92,9 +97,10 @@ jobs:
       contents: read
       actions: read
     # Job-level guard mirroring review.yml: manual dispatch is always allowed
-    # and resolves its own PR; the workflow_run path requires the parent (the
-    # Review workflow) to have succeeded and its head to be this repo — a fork
-    # PR never sees the secret and never runs here.
+    # and resolves its named PR (including one already merged); the
+    # workflow_run path requires the parent (the Review workflow) to have
+    # succeeded and its head to be this repo — a fork PR never sees the secret
+    # and never runs here.
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -104,6 +110,7 @@ jobs:
       pr: ${{ steps.gate.outputs.pr }}
       issue: ${{ steps.gate.outputs.issue }}
       head_sha: ${{ steps.gate.outputs.head_sha }}
+      checkout_sha: ${{ steps.gate.outputs.checkout_sha }}
       attempt: ${{ steps.gate.outputs.attempt }}
       medium: ${{ steps.gate.outputs.medium }}
       prompt: ${{ steps.gate.outputs.prompt }}
@@ -154,9 +161,22 @@ jobs:
             ''|*[!0-9]*) skip "Resolved PR '${pr:-}' is not a number — nothing to dogfood." ;;
           esac
 
-          head_sha="$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha')"
+          # Read the PR object once. Review gate status stays anchored to its
+          # head, even when a manual re-trial later checks out a merged PR's
+          # merge commit.
+          pr_object="$(gh api "repos/${REPO}/pulls/${pr}")"
+          head_sha="$(jq -r '.head.sha' <<<"$pr_object")"
+          merged="$(jq -r '.merged' <<<"$pr_object")"
+          merge_commit_sha="$(jq -r '.merge_commit_sha // empty' <<<"$pr_object")"
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$merged" = "true" ]; then
+            [ -n "$merge_commit_sha" ] || skip "Merged PR #${pr} has no merge commit SHA — nothing to dogfood."
+            checkout_sha="$merge_commit_sha"
+          else
+            checkout_sha="$head_sha"
+          fi
           echo "pr=$pr" >> "$GITHUB_OUTPUT"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "checkout_sha=$checkout_sha" >> "$GITHUB_OUTPUT"
 
           # Gate 2 — the `Review gate` commit status must stand `success` on the
           # current head. This is the "review has gone green" predicate; it also
@@ -282,11 +302,11 @@ jobs:
       rollup_produced: ${{ steps.rollup.outputs.produced }}
     steps:
       - uses: runs-on/action@v2
-      # Check out the PR head — the branch build is the point (branch-build
-      # fidelity: the harness the consumer drives is this PR's own code).
+      # Automatic runs and open-PR dispatches check out the PR head. A manual
+      # dispatch of a merged PR checks out its merge commit, which is main.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.head_sha }}
+          ref: ${{ needs.resolve.outputs.checkout_sha }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
 
@@ -443,8 +463,10 @@ jobs:
           # Assemble the prompt in a quoted heredoc so the interpolated JSON is
           # inserted verbatim (no shell re-parsing of its contents).
           cat > /tmp/dogfood-prompt.md <<EOF
-          You are running headless in CI on a checkout of PR #${PR_NUMBER}'s head branch, with the
-          aether MCP harness already up (tunnel -> aether-mcp -> hub -> substrate) via .mcp.json.
+          You are running headless in CI on the resolved checkout for PR #${PR_NUMBER}: its head for
+          automatic runs and open-PR dispatches, or its merge commit (main) for a manual re-trial of
+          a merged PR. The aether MCP harness is already up (tunnel -> aether-mcp -> hub -> substrate)
+          via .mcp.json.
 
           Run the repo's DOGFOOD WORKFLOW (.claude/workflows/dogfood.js, the /dogfood entry point) via
           the Workflow/Skill tooling, passing args set to EXACTLY this JSON object. Supplying args.task
