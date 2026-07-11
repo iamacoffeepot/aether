@@ -113,12 +113,16 @@ wire names — no Rust dependency on the sim crate.
 
 ### 5. Outbound: per-tick bundle assembly with an interest projection seam
 
-The tier binds as the sim's **fact-sink** (ADR-0144's push path) or polls it
-(`aether.sim.poll { since_tick }`); either way it receives the authoritative
-`aether.sim.tick_bundle` per tick. It applies the connection's **interest
-projection** — in v1 the identity projection (every connection sees every entity,
-"trivially large K") — frames the projected bundle, and `SessionWrite`s it to the
-tcp session. The bundle contract is inherited whole from ADR-0144: atomic (one
+ADR-0144's sim pushes each `tick_bundle` to a *single* configured fact-sink, but a
+server has N connections. The **gateway** is that single fact-sink: it receives each
+`tick_bundle` once and fans it out to every active player-session actor. (A future
+scale point may push projection into the sim so it emits per-connection bundles;
+v1's identity projection makes one-bundle-fanned-out exact.) Each player session then
+applies its **interest projection** — in v1 the identity projection (every connection
+sees every entity, "trivially large K") — frames the projected bundle, and
+`SessionWrite`s it to its tcp session. The reconnect/catch-up path is ADR-0144's pull
+(`aether.sim.poll { since_tick }`), which a freshly-spawned session issues to seed
+itself before live bundles arrive. The bundle contract is inherited whole from ADR-0144: atomic (one
 bundle per tick, fully applied), tick-ordered, superseding (summary + watermark),
 and bounded (fixed-depth retained ring). Per-connection projection is the tier's
 job; ADR-0144's sim exposes the full set and the seam. v1 keeps the projection the
