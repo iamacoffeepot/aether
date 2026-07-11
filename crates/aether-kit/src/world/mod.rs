@@ -217,6 +217,19 @@ impl MarkOverlayProjection {
 }
 
 impl WorldView {
+    fn new() -> Self {
+        Self {
+            world: World::new(),
+            meshes: BTreeMap::new(),
+            styles: StyleTable::default(),
+            mark_overlay: MarkOverlayProjection::default(),
+            proposals: BTreeMap::new(),
+            active_preview: None,
+            next_proposal_id: Some(1),
+            committed_revision: 0,
+        }
+    }
+
     fn request_mark_overlay_refresh<M: ReplyMode>(&mut self, ctx: &WasmCtx<'_, M>) {
         if !self.mark_overlay.should_request_refresh() {
             return;
@@ -403,16 +416,7 @@ impl WasmActor for WorldView {
     const NAMESPACE: &'static str = "aether.kit.world";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(WorldView {
-            world: World::new(),
-            meshes: BTreeMap::new(),
-            styles: StyleTable::default(),
-            mark_overlay: MarkOverlayProjection::default(),
-            proposals: BTreeMap::new(),
-            active_preview: None,
-            next_proposal_id: Some(1),
-            committed_revision: 0,
-        })
+        Ok(Self::new())
     }
 
     /// Subscribe the `Render` lifecycle stage so the cached meshes
@@ -780,16 +784,7 @@ mod tests {
     use crate::mark::MarkGeometry;
 
     fn test_view() -> WorldView {
-        WorldView {
-            world: World::new(),
-            meshes: BTreeMap::new(),
-            styles: StyleTable::default(),
-            mark_overlay: MarkOverlayProjection::default(),
-            proposals: BTreeMap::new(),
-            active_preview: None,
-            next_proposal_id: Some(1),
-            committed_revision: 0,
-        }
+        WorldView::new()
     }
 
     fn point_operation(cell_x: i32, material: Material) -> ProposalOperation {
