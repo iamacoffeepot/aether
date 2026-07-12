@@ -1,6 +1,6 @@
 # ADR-0137: In-cluster behavior script host
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — the behavior script host in `crates/aether-behavior` / `crates/aether-behavior-derive`)
 - **Date:** 2026-07-07
 
 ## Context

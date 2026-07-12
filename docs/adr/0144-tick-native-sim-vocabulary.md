@@ -1,6 +1,6 @@
 # ADR-0144: Tick-native sim intent and fact vocabulary
 
-- **Status:** Proposed
+- **Status:** Accepted (shipped — the reference tick vocabulary in `crates/aether-kit/src/sim`)
 - **Date:** 2026-07-10
 
 ## Context
