@@ -374,8 +374,21 @@ jobs:
               # hypothetical. The API read has no such fallback: it is default-branch
               # or it fails. A PR can no more edit the matcher that judges its diff
               # than the policy that matcher annotates with.
-              gh api "repos/${REPO}/contents/scripts/surface-match.py" \
-                --jq '.content' | base64 -d >"${RUNNER_TEMP}/surface_match.py"
+              # A missing matcher must FAIL CLOSED, not fail silent. Dying here
+              # under `set -e` would skip the gate write entirely and leave the
+              # required Approval gate unreported — which GitHub holds as "Expected"
+              # forever, wedging the PR (#3158). So an unreadable matcher posts a
+              # FAILING gate and moves on: the check is red and legible instead of
+              # absent and mysterious. It cannot mean "contained", because with no
+              # matcher containment was never computed.
+              if ! gh api "repos/${REPO}/contents/scripts/surface-match.py" \
+                   --jq '.content' 2>/dev/null | base64 -d >"${RUNNER_TEMP}/surface_match.py" 2>/dev/null \
+                 || ! [ -s "${RUNNER_TEMP}/surface_match.py" ]; then
+                echo "fact declared_surface: matcher unavailable on the default branch."
+                post_gate failure "surface matcher unavailable on the default branch — containment not computed"
+                echo "::endgroup::"
+                return 0
+              fi
 
               # The one place gitwildmatch semantics are decided, shared with the
               # tick's approval-tier lookup (#3176). Prints the changed paths that
