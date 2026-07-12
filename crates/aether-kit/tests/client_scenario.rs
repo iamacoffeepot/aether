@@ -11,7 +11,7 @@ use aether_actor::Addressable;
 use aether_capabilities::ComponentHostCapability;
 use aether_capabilities::GameGatewayConfig;
 use aether_capabilities::component::resolve_embedded;
-use aether_capabilities::game::{GameGatewayCapability, PlayerFrame, WIRE_VERSION};
+use aether_capabilities::game::{GameGatewayCapability, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
 use aether_capabilities::tcp::{ListListeners, ListListenersResult};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{Kind, MailboxId};
@@ -376,6 +376,11 @@ fn active_gateway_turn_sim_loop_spawns_and_moves_the_server_identity() {
 
     let sim_address = component_address(SIM_NAME);
     let spawned = wait_for_authoritative_entity(&mut bench, &sim_address);
+    assert_eq!(
+        spawned.entity_id,
+        PlayerSessionActor::resolve(GameGatewayCapability::resolve(0, ()).0, "conn-0").0,
+        "the full client-to-sim loop runs under the server-assigned player-session identity",
+    );
     assert_eq!((spawned.cell_x, spawned.cell_z), (1, 1));
 
     bench
