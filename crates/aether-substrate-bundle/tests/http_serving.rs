@@ -296,6 +296,14 @@ mod tests {
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
+        // The handler binds the `/` catch-all via async `wire` mail, so poll
+        // it live before the assertions rather than racing the registration.
+        poll_body_contains(
+            port,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            "hello from aether",
+        );
+
         // GET / → 200 with body "hello from aether"
         let root_response = round_trip(port, b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         let root_str = String::from_utf8_lossy(&root_response);
@@ -394,6 +402,10 @@ mod tests {
         let port =
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
+
+        // The handler binds the `/` catch-all via async `wire` mail, so poll
+        // it live before the assertions rather than racing the registration.
+        poll_body_contains(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", "chunk-");
 
         let response = round_trip(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         let head = String::from_utf8_lossy(&response);
@@ -609,20 +621,30 @@ mod tests {
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
-        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-        stream.set_read_timeout(Some(Duration::from_secs(10))).expect("set_read_timeout");
-
-        // Handshake.
+        // Handshake. The handler binds the `/` catch-all via async `wire`
+        // mail, so poll the upgrade live (reconnecting each attempt) rather
+        // than racing the registration — a pre-registration upgrade is 503.
         let handshake = format!(
             "GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
              Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
              Sec-WebSocket-Key: {WS_TEST_KEY}\r\n\r\n"
         );
-        stream.write_all(handshake.as_bytes()).expect("write handshake");
-        stream.flush().expect("flush handshake");
-
-        let head = read_http_head(&mut stream);
-        assert!(head.starts_with("HTTP/1.1 101 "), "upgrade should reply 101, got: {head:?}");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let (mut stream, head) = loop {
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+            stream.set_read_timeout(Some(Duration::from_secs(10))).expect("set_read_timeout");
+            stream.write_all(handshake.as_bytes()).expect("write handshake");
+            stream.flush().expect("flush handshake");
+            let head = read_http_head(&mut stream);
+            if head.starts_with("HTTP/1.1 101 ") {
+                break (stream, head);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "websocket upgrade did not go live (route registration) within 30s; last: {head:?}",
+            );
+            thread::sleep(Duration::from_millis(25));
+        };
         assert!(
             head.contains(&format!("Sec-WebSocket-Accept: {WS_TEST_ACCEPT}")),
             "101 should echo the computed accept key, got: {head:?}",
