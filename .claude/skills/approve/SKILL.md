@@ -158,7 +158,15 @@ A future `/release-promote-umbrella <parent>` skill can auto-close the umbrella 
 
 ## ADR hard gate
 
-Runs **before any policy lookup**, permanently and unconditionally. An ADR-bearing issue routes to the `human` tier — the owner — before [Approval tier](#approval-tier) is consulted at all. No policy rule, present or future, can auto- or judge-approve it: an ADR is load-bearing by definition. An issue is ADR-bearing when its §Design notes references an ADR — an ADR PR link, a `docs/adr/NNNN-*.md` path, or an `ADR flag:` line (the same references the [ADR merge gate](#adr-gate-in-detail) parses). This rule lives in skill text, above the policy file, so it survives any edit to `.github/approval-policy.yml`; that file's `docs/adr/**` `human` entry is belt-and-suspenders, not the source of the rule. The [Approval tier](#approval-tier) lookup is consulted only for a non-ADR issue.
+Runs **before any policy lookup**, permanently and unconditionally. An ADR-bearing issue routes to the `human` tier — the owner — before [Approval tier](#approval-tier) is consulted at all. No policy rule, present or future, can auto- or judge-approve it: an ADR is load-bearing by definition. This rule lives in skill text, above the policy file, so it survives any edit to `.github/approval-policy.yml`; that file's `docs/adr/**` `human` entry is belt-and-suspenders, not the source of the rule. The [Approval tier](#approval-tier) lookup is consulted only for a non-ADR issue.
+
+**An issue is ADR-bearing when it carries an explicit `ADR flag:` line, or its `## Declared surface` includes `docs/adr/`** — that is, when the work *needs* an ADR or *writes* one.
+
+Citing an ADR in prose is **not** the test. `/scope` grounds every design in the ADRs it rests on — a good plan cites several — so a citation-based test routes the entire board to the owner and makes the policy file dead code. That is exactly what happened when this gate first shipped: every issue on the `phase:plan` board carried between three and fifteen ADR citations, none carried an `ADR flag:`, and all of them were short-circuited to `human` without the tier ever being resolved. The gate must separate *this design rests on ADR-0099* from *this work changes the architecture*; only the second is load-bearing.
+
+Do not widen this back to a prose match. The safety property does not need it: anything that adds, changes, or is gated on an ADR still carries an `ADR flag:` (which `/scope` emits precisely for load-bearing work) or declares `docs/adr/` in its surface, and either one routes to the owner permanently.
+
+Note the [ADR merge gate](#adr-gate-in-detail) is a *different* check answering a *different* question — whether an ADR this issue depends on has merged yet — and its citation-based parse is correct there. Routing and merge-readiness are not the same test; do not collapse them.
 
 ## Approval tier
 
