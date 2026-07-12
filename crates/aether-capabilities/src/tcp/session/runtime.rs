@@ -65,6 +65,7 @@ pub struct TcpSessionState {
     pub read_buffer: Vec<u8>,
     pub write_half: TcpStream,
     pub shutdown: Arc<AtomicBool>,
+    pub read_start: Option<mpsc::Sender<()>>,
     pub read_thread: Option<JoinHandle<()>>,
     pub bytes_rx: mpsc::Receiver<Result<Vec<u8>, String>>,
 }
@@ -94,6 +95,11 @@ impl NativeActor for TcpSessionActor {
         // and turns each item into reassembled SessionData mail (Ok)
         // or SessionClosed mail + ctx.shutdown() (Err).
         let (bytes_tx, bytes_rx) = mpsc::channel::<Result<Vec<u8>, String>>();
+        // The actor mailbox is registered only after `init` returns. Keep
+        // the read sidecar behind a one-shot gate until `wire`, otherwise a
+        // fast peer can make it self-mail `SessionDataReady` to an address
+        // that is not live yet.
+        let (read_start_tx, read_start_rx) = mpsc::channel::<()>();
 
         let mailer_for_thread: Arc<Mailer> = ctx.mailer();
         let self_id = ctx.self_id();
@@ -106,6 +112,9 @@ impl NativeActor for TcpSessionActor {
         let thread = thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
+                if read_start_rx.recv().is_err() {
+                    return;
+                }
                 let mut read_half = read_half;
                 let mut buf = vec![0u8; READ_BUFFER_BYTES];
                 loop {
@@ -168,9 +177,16 @@ impl NativeActor for TcpSessionActor {
             read_buffer: Vec::new(),
             write_half,
             shutdown,
+            read_start: Some(read_start_tx),
             read_thread: Some(thread),
             bytes_rx,
         })
+    }
+
+    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+        if let Some(start) = state.read_start.take() {
+            let _ = start.send(());
+        }
     }
 
     fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {

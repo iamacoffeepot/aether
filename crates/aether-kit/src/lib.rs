@@ -14,6 +14,9 @@
 //!   `aether_kit@aether.kit.camera-controller` export. Its
 //!   `aether.kit.camera-controller.config` init-config lives in
 //!   [`camera::controller`].
+//! - [`PlayerClient`] — the outbound player-session and authoritative
+//!   presentation actor, selected by the `aether_kit@aether.kit.client`
+//!   export. Its `aether.kit.client.config` init-config lives in [`client`].
 //! - [`console::ConsoleOverlay`] — a primitive-rendered developer console
 //!   overlay, selected by the `aether_kit@aether.kit.console` export. Its
 //!   config and extension command vocabulary live in [`console`].
@@ -69,6 +72,7 @@
 extern crate alloc;
 
 pub mod camera;
+pub mod client;
 pub mod console;
 pub mod mark;
 pub mod mesh;
@@ -79,6 +83,7 @@ pub mod widget;
 pub mod workbench;
 pub mod world;
 
+pub use client::{PlayerClient, PlayerClientConfig};
 pub use console::{
     ConsoleCommandInvoked, ConsoleCommandOutput, ConsoleConfig, ConsoleTheme, RegisterConsoleCommand,
     UnregisterConsoleCommand,
@@ -151,6 +156,7 @@ aether_actor::export!(
     entry = console::ConsoleOverlay,
     camera::CameraComponent,
     camera::controller::CameraController,
+    PlayerClient,
     mark::MarkBook,
     mesh::MeshViewer,
     terra::TerraEditor,
@@ -182,6 +188,7 @@ aether_actor::export!(
     entry = console::ConsoleOverlay,
     camera::CameraComponent,
     camera::controller::CameraController,
+    PlayerClient,
     mark::MarkBook,
     mesh::MeshViewer,
     terra::TerraEditor,

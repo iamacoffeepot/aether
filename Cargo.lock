@@ -215,6 +215,7 @@ dependencies = [
  "aether-actor",
  "aether-behavior",
  "aether-capabilities",
+ "aether-codec",
  "aether-data",
  "aether-kinds",
  "aether-math",
