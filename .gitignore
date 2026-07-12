@@ -39,6 +39,10 @@
 !.claude/skills/secretary/
 !.claude/skills/sweep/
 !.claude/skills/land/
+!.claude/skills/headless/
+!.claude/skills/scope-headless/
+!.claude/skills/implement-headless/
+!.claude/skills/land-headless/
 # Wish-pass reports — themed use-case ideation runs of `/wish`. Per-run
 # markdown, not part of the source tree. Read locally, file the wishes you
 # like as issues, discard the file.
