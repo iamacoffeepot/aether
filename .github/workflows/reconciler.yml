@@ -82,14 +82,16 @@ jobs:
   reconcile:
     name: Reconcile PR phases
     runs-on: ubuntu-latest
-    # Least privilege: write only the issue label set; everything else is read.
-    # pull-requests: read backs the PR object + the GraphQL reviewThreads /
-    # closingIssuesReferences reads; checks: read backs the head check-runs;
-    # statuses: write backs reading the Review gate status AND posting the
-    # Approval gate status the declared-surface check mirrors its verdict into.
+    # Least privilege. issues: write backs the phase label PUT on the closing
+    # issue. pull-requests: write backs the PR object + the GraphQL reviewThreads
+    # / closingIssuesReferences reads AND the approval:surface-* label and the
+    # diagnostic comment: those ride the issues API but land on a PULL REQUEST, so
+    # GitHub scopes them to the pull-requests permission — issues: write alone
+    # returns 403. checks: read backs the head check-runs; statuses: write backs
+    # reading the Review gate status and posting the Approval gate status.
     permissions:
       issues: write
-      pull-requests: read
+      pull-requests: write
       contents: read
       checks: read
       statuses: write
@@ -427,10 +429,13 @@ jobs:
               # The policy is read from the DEFAULT branch, never the PR head — a
               # PR must not be able to relax the policy it is being judged by. It
               # only annotates each escaping path with the tier it would demand;
-              # the verdict below is containment, which never consults it.
-              gh api "repos/${REPO}/contents/.github/approval-policy.yml" \
-                --jq '.content' 2>/dev/null | base64 -d >"${RUNNER_TEMP}/policy.yml" \
-                || : >"${RUNNER_TEMP}/policy.yml"
+              # the verdict below is containment, which never consults it. Before
+              # this file exists on the default branch the fetch simply misses, and
+              # the tier column honestly reads "?" rather than asserting a tier.
+              if ! gh api "repos/${REPO}/contents/.github/approval-policy.yml" \
+                   --jq '.content' 2>/dev/null | base64 -d >"${RUNNER_TEMP}/policy.yml" 2>/dev/null; then
+                : >"${RUNNER_TEMP}/policy.yml"
+              fi
               escaping="$(python3 "${RUNNER_TEMP}/surface_match.py" \
                 "${RUNNER_TEMP}/globs.txt" "${RUNNER_TEMP}/changed.txt" "${RUNNER_TEMP}/policy.yml")"
 
@@ -474,13 +479,27 @@ jobs:
                 sed 's/^/  escapes: /' <<<"$escaping"
               fi
 
-              # Mirror the verdict into the PR label and the required commit
-              # status. The label write uses GITHUB_TOKEN, whose events do not
-              # trigger workflows, so setting it cannot re-enter this reconciler.
-              # The label is advisory and the commit status is the actual gate, so
-              # a failed label call warns and carries on: this workflow is the sole
-              # writer of every PR's phase, and letting one label error abort the
-              # run under `set -e` would strand the whole fleet's reconciliation.
+              # The commit status IS the gate, so it is written FIRST and alone.
+              # The label and comment below are advisory mirrors of a verdict this
+              # status already carries, and an advisory write that dies under
+              # `set -e` before the status lands would leave the PREVIOUS status
+              # standing — an escaping diff keeping a stale green Approval gate,
+              # the exact hazard this check exists to close. Gate first, then
+              # diagnostics, each guarded: the gate fails closed no matter what
+              # the diagnostics do.
+              gh api -X POST "repos/${REPO}/statuses/${head_sha}" \
+                -f state="$gate_state" \
+                -f context="Approval gate" \
+                -f description="$gate_description" \
+                -f target_url="$RUN_URL" >/dev/null
+              echo "write: Approval gate=${gate_state} (${gate_description})"
+
+              # Mirror the verdict into the PR label. The write uses GITHUB_TOKEN,
+              # whose events do not trigger workflows, so setting it cannot
+              # re-enter this reconciler. A failed label call warns and carries on:
+              # this workflow is the sole writer of every PR's phase and loops over
+              # every open PR on the cron path, so letting one label error abort
+              # the run would strand the whole fleet's reconciliation.
               if [ "$surface_exceeded" -eq 1 ]; then
                 grep -qx 'approval:surface-exceeded' <<<"$pr_labels" \
                   || gh api -X POST "repos/${REPO}/issues/${pr}/labels" -f "labels[]=approval:surface-exceeded" >/dev/null \
@@ -494,14 +513,15 @@ jobs:
               # Diagnostic comment, upserted against a marker so the cron backstop
               # updates one comment instead of spamming a new one every 15 minutes.
               # It clears when the violation does, leaving no stale accusation.
+              # Advisory like the label, and guarded for the same reason.
               comment_id="$(gh api "repos/${REPO}/issues/${pr}/comments" --paginate \
-                --jq '[.[] | select(.body | contains("<!-- aether-approval-gate -->"))] | last | .id // empty')"
+                --jq '[.[] | select(.body | contains("<!-- aether-approval-gate -->"))] | last | .id // empty' || true)"
               if [ "$surface_exceeded" -eq 1 ]; then
                 {
                   echo "<!-- aether-approval-gate -->"
                   echo "**Approval gate: this diff escapes issue #${issue}'s declared surface.**"
                   echo
-                  echo "These changed files are outside the \`## Declared surface\` globs \`/approve\` resolved this issue's approval tier over, so what is about to merge is no longer the change that was approved. The tier column is what each path would demand under \`.github/approval-policy.yml\` (\`?\` = not resolved)."
+                  echo "These changed files are outside the \`## Declared surface\` globs \`/approve\` resolved this issue's approval tier over, so what is about to merge is no longer the change that was approved. The tier column is what each path would demand under \`.github/approval-policy.yml\` (\`?\` = the policy is not on the default branch yet)."
                   echo
                   echo "| escaping path | tier it would demand |"
                   echo "|---|---|"
@@ -511,23 +531,20 @@ jobs:
                 } >"${RUNNER_TEMP}/comment.md"
                 if [ -n "$comment_id" ]; then
                   gh api -X PATCH "repos/${REPO}/issues/comments/${comment_id}" \
-                    -F body=@"${RUNNER_TEMP}/comment.md" >/dev/null
-                  echo "write: updated approval-gate comment ${comment_id}"
+                    -F body=@"${RUNNER_TEMP}/comment.md" >/dev/null \
+                    && echo "write: updated approval-gate comment ${comment_id}" \
+                    || echo "warn: could not update the approval-gate comment"
                 else
                   gh api -X POST "repos/${REPO}/issues/${pr}/comments" \
-                    -F body=@"${RUNNER_TEMP}/comment.md" >/dev/null
-                  echo "write: posted approval-gate comment"
+                    -F body=@"${RUNNER_TEMP}/comment.md" >/dev/null \
+                    && echo "write: posted approval-gate comment" \
+                    || echo "warn: could not post the approval-gate comment"
                 fi
               elif [ -n "$comment_id" ]; then
-                gh api -X DELETE "repos/${REPO}/issues/comments/${comment_id}" >/dev/null
-                echo "write: cleared stale approval-gate comment ${comment_id}"
+                gh api -X DELETE "repos/${REPO}/issues/comments/${comment_id}" >/dev/null \
+                  && echo "write: cleared stale approval-gate comment ${comment_id}" \
+                  || echo "warn: could not clear the stale approval-gate comment"
               fi
-              gh api -X POST "repos/${REPO}/statuses/${head_sha}" \
-                -f state="$gate_state" \
-                -f context="Approval gate" \
-                -f description="$gate_description" \
-                -f target_url="$RUN_URL" >/dev/null
-              echo "write: Approval gate=${gate_state} (${gate_description})"
             fi
 
             # Fact — findings open: either advisory QA flag on the PR, or any
