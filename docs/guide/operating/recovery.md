@@ -42,6 +42,8 @@ For any unexpected result:
 The tunnel is the stable front. Follow [The MCP harness](../mcp-harness.md) to
 start it and reconnect missing tools. Prefer a tunnel-admin hub restart when
 rebuilding the hub; an `aether-mcp` restart invalidates the MCP session.
+Restart only with explicit authority over the entire fleet, one coordinator,
+and no blind retry; see [Harness lifecycle](harness-lifecycle.md).
 
 The MCP RPC client re-dials a restarted hub on a dead connection with bounded
 retry. A tool call crossing the restart can still fail and should be retried only
@@ -145,6 +147,9 @@ errors preserve the old guest; later instantiation failure can leave the
 trampoline empty, while rehydrate failure leaves the new guest installed even
 though the operation returns `Err`.
 
+The phase table and stale-introspection limits are in
+[Replacement failure states](components/replacement-failure-states.md).
+
 After an error:
 
 - call `describe_component` by lineage, while treating a cache hit as a
@@ -191,9 +196,11 @@ chassis/caps, then query `describe_handlers`. Headless engines can run game logi
 without a desktop frame. A backgrounded/minimized window may also require the
 window-specific focus flow described in [Window](../systems/window.md).
 
-Use an absolute `capture_frame.save_path` to preserve full-resolution bytes
-when visual evidence matters. A failed host write is reported in the saved block
-without invalidating the successful engine capture, so inspect both results.
+Use a new `capture_frame.save_path` beneath a private task-owned evidence
+directory when full-resolution bytes matter. Absolute syntax alone is not a
+safety boundary. A failed host write is reported in the saved block without
+invalidating the successful engine capture, so inspect both results. See
+[Host evidence files](evidence/host-files.md).
 
 ## Final cleanup and handoff
 

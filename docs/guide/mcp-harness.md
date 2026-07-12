@@ -47,11 +47,13 @@ connection even for a healthy engine, and the hub learns of death only when the
 connection closes. The fleet row does not expose whether heartbeats are enabled,
 so confirm hub configuration before using its age as a diagnosis.
 
-To restart the hub
-after a rebuild *without* losing your session, hit the tunnel's admin endpoint
-(`POST /admin/restart-hub`); the tunnel re-forks the hub and aether-mcp re-dials
-it on your next call. Restarting aether-mcp itself does drop the session, so prefer
-restarting the hub.
+To restart the hub after a rebuild *without* losing your session, hit the
+tunnel's admin endpoint (`POST /admin/restart-hub`); the tunnel re-forks the hub
+and aether-mcp re-dials it on your next call. This is a fleet-wide destructive
+operation, not a harmless reconnect: use it only with authority over the whole
+fleet and one coordinated request. Restarting aether-mcp itself does drop the
+session. Read [Harness lifecycle and fleet-wide mutations](operating/harness-lifecycle.md)
+before cycling either process.
 
 ## Bringing it up
 
@@ -237,7 +239,8 @@ one handler.
   [Mail, kinds & scheduling](systems/mail-and-kinds.md).
 - **Paths, not bytes.** `upload_component` takes the fleet-host filesystem path;
   `load_component` and `replace_component` take registry selectors. Tool JSON
-  never carries the wasm buffer itself.
+  never carries the wasm buffer itself. Host paths are not sandboxed task paths;
+  see [Host paths and artifacts](operating/host-paths-and-artifacts.md).
 - **Wire ids are tagged strings.** Mailbox, kind, and handle ids come back as
   `mbx-…`, `knd-…`, `hdl-…` — hand them back verbatim, don't reformat or parse them.
   See [The type system](foundations/type-system.md).

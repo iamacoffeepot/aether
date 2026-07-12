@@ -71,6 +71,14 @@ surface to capture its manifest. Re-uploading identical bytes deduplicates to
 the same hash. A name is a movable pointer; a hash pins the spawn request to
 exact content.
 
+Running `--describe` is immediate native code execution, not passive manifest
+inspection. Upload only a task-built executable in a stable private path or an
+exact build the operator approved. Never upload a download, attachment, or
+unknown executable to discover what it is, and do not treat its self-reported
+manifest as attestation. Follow
+[Artifact trust and provenance](artifacts/trust-and-provenance.md) for the
+complete boundary.
+
 ### Selector choice
 
 | Need | Selector posture |
@@ -148,6 +156,11 @@ records a matching `spawn_failed` entry. If the failure occurs before allocation
 (for example, selector resolution or port allocation), no id exists.
 
 ## Restarts and persistence
+
+A hub restart requires authority over the whole fleet; discovering a process or
+engine row does not supply it. Coordinate one request with every active harness
+user and follow [Harness lifecycle](harness-lifecycle.md) before using the admin
+endpoint.
 
 A tunnel-admin hub restart preserves the MCP session shape and the on-disk
 artifact store, but replaces the hub process. Its engine table, proxies, and
