@@ -203,11 +203,20 @@ jobs:
             exit 0
           fi
 
-          # The marker is the greppable anchor the park wrote. Capture then match
-          # with a here-string so grep -q can't SIGPIPE the paginated gh under
-          # pipefail.
-          comments="$(gh api "repos/${REPO}/issues/${ISSUE}/comments" --paginate --jq '.[].body')"
-          marker="$(grep -m1 -oE '<!-- aether-agent:awaiting-answer[^>]*-->' <<<"$comments" || true)"
+          # The marker is the greppable anchor the park wrote. Two homes, body
+          # first: the verdict digest carries its marker in the issue BODY (the
+          # converge re-render refreshes it there), while single-issue parks
+          # carry theirs in a comment. Reading only comments made a healthy
+          # digest look like a torn pair — the owner's first live verdict fell
+          # through to the plain branch and dispatched nothing (#3198). Capture
+          # then match with a here-string so grep -q can't SIGPIPE the paginated
+          # gh under pipefail.
+          body="$(gh api "repos/${REPO}/issues/${ISSUE}" --jq '.body // ""')"
+          marker="$(grep -m1 -oE '<!-- aether-agent:awaiting-answer[^>]*-->' <<<"$body" || true)"
+          if [ -z "$marker" ]; then
+            comments="$(gh api "repos/${REPO}/issues/${ISSUE}/comments" --paginate --jq '.[].body')"
+            marker="$(grep -m1 -oE '<!-- aether-agent:awaiting-answer[^>]*-->' <<<"$comments" || true)"
+          fi
           if [ -z "$marker" ]; then
             # The label is set but no marker comment is present — the pair is torn.
             # Treat it as a plain turn (reply inline) rather than dispatching a
