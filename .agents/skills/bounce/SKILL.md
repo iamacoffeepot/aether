@@ -14,7 +14,7 @@ Read the issue and derive its canonical phase. Validate:
 - target is Define, Design, or Plan;
 - issue is open and not already bounced;
 - current state has exactly one phase;
-- target is strictly earlier under `Backlog < Define < Design < Plan < Ready < Executing < Refine < Done`.
+- target is strictly earlier under `Backlog < Define < Design < Plan < Ready < Building < QA < Findings < Held < Done`.
 
 List every refusal. A same-phase target is a no-op, a later target is advancement, and a closed issue needs a new issue rather than a bounce.
 
@@ -32,6 +32,8 @@ On pass:
 
 4. If the label write succeeds but the comment fails, retry only the comment. Never edit the issue body.
 5. Report the transition and `Next: $scope <N>`.
+
+The post-Ready states are reconciler-owned and are never bounce targets. Treat a retired `phase:executing` or `phase:refine` straggler as post-Ready for this earlier-than check.
 
 Other skills use the same self-bounce mechanics. A design discovery targets Design; an incomplete/stale plan or exhausted retry budget targets Plan; an unframable issue targets Define. An environment, authentication, runner, or network outage uses `phase:stalled` with no bounce label instead.
 

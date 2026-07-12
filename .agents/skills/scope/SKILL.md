@@ -50,7 +50,7 @@ Do not fast-forward, switch, or create a branch for scoping. A dirty prepared wo
 
 Read the issue over REST with number, title, body, state, author, `author_association`, and all labels. Read comments only when they add necessary context, and retain only trusted comments as claims to verify.
 
-Resolve phase exactly as the GitHub workflow contract defines it. Refuse closed issues and issues at `phase:ready`, `phase:executing`, `phase:refine`, or `phase:stalled`. Refuse multiple `phase:*` labels, an active phase with a stray `bounce-to:*`, or any other invalid lifecycle state instead of guessing.
+Resolve phase exactly as the GitHub workflow contract defines it. Refuse closed issues and issues at `phase:ready`, any reconciler-owned post-Ready phase (`phase:building`, `phase:qa`, `phase:findings`, or `phase:held`), a retired `phase:executing`/`phase:refine` migration state, or `phase:stalled`. Refuse multiple `phase:*` labels, an active phase with a stray `bounce-to:*`, or any other invalid lifecycle state instead of guessing.
 
 Handle eligible states as follows:
 

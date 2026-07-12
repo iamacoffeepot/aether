@@ -2,7 +2,7 @@
 
 Repository: `iamacoffeepot/aether`.
 
-Use `gh api` REST endpoints for every operation that has a REST form. Avoid GraphQL-backed convenience commands such as `gh issue create`, `gh issue edit`, `gh pr create`, `gh pr list`, `gh pr checks`, and `gh pr merge`. The only lifecycle operation here without a REST equivalent is clearing PR draft state.
+Use `gh api` REST endpoints for every operation that has a REST form. Avoid GraphQL-backed convenience commands such as `gh issue create`, `gh issue edit`, `gh pr create`, `gh pr list`, `gh pr checks`, and `gh pr merge`. Use GraphQL only where GitHub has no REST equivalent: PR review-thread reads and resolution in `$findings`, and clearing PR draft state in `$land`.
 
 ## Canonical lifecycle
 
@@ -14,10 +14,14 @@ Backlog (no phase label, open)
 → phase:design
 → phase:plan
 → phase:ready
-→ phase:executing
-↔ phase:refine
+→ phase:building
+→ phase:qa
+→ phase:findings
+→ phase:held
 → Done (closed, no phase label)
 ```
+
+`phase:building`, `phase:qa`, `phase:findings`, and `phase:held` are computed resting states. The reconciler workflow is their sole writer; skills change observable facts and never assert one of those labels. `phase:executing` and `phase:refine` are retired migration inputs that the reconciler may still encounter, never labels a live skill writes.
 
 `phase:bounced` carries exactly one `bounce-to:define|design|plan`. `phase:stalled` means an environment or service failure, not a scope regression.
 
@@ -41,7 +45,7 @@ Use the REST comments and timeline endpoints when needed. Verify comment trust w
 
 ## Atomic label reconcile
 
-For an active phase, replace the complete label set in one REST `PUT`: preserve every non-`phase:*` label and append exactly one new phase. Build the JSON from a fresh label read immediately before the write.
+For a phase the calling skill owns (`define`, `design`, `plan`, `ready`, `bounced`, or `stalled`), replace the complete label set in one REST `PUT`: preserve every non-`phase:*` label and append exactly one new phase. Build the JSON from a fresh label read immediately before the write. Never use this procedure to write the reconciler-owned `building`, `qa`, `findings`, or `held` phases.
 
 ```text
 1. GET repos/iamacoffeepot/aether/issues/<N>/labels and validate the response is a label array.
@@ -81,7 +85,7 @@ Check runs:    GET repos/iamacoffeepot/aether/commits/<sha>/check-runs
 Merge:         PUT repos/iamacoffeepot/aether/pulls/<PR>/merge  (merge_method=squash)
 ```
 
-Clearing draft state uses the GraphQL `markPullRequestReadyForReview` mutation with the PR node id. Keep that one mutation inside `land`.
+Review-thread enumeration and resolution use the GraphQL-only `reviewThreads` query and `resolveReviewThread` mutation inside `findings`. Clearing draft state uses the GraphQL-only `markPullRequestReadyForReview` mutation inside `land`.
 
 ## Failure discipline
 

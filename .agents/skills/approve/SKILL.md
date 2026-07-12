@@ -5,7 +5,7 @@ description: "Validate one, several explicitly listed, or every Plan-phase Aethe
 
 # Approve
 
-Read [the Codex harness](../_shared/codex-harness.md) and [the GitHub workflow contract](../_shared/github-workflow.md) completely before acting. Use those Codex-native contracts directly. Do not load or translate legacy agent artifacts.
+Read [the Codex harness](../_shared/codex-harness.md) and [the GitHub workflow contract](../_shared/github-workflow.md) completely before acting. Use those Codex-native contracts directly. Claude artifacts are not execution dependencies for this Codex skill.
 
 Keep validation, confirmation, every GitHub mutation, and the final rollup in the main thread. Use a working plan for a batch.
 
@@ -51,8 +51,8 @@ Read each issue over REST with `{number,title,body,state,state_reason,user,autho
 Handle phase as follows:
 
 - `phase:plan`: eligible for full validation.
-- `phase:ready`: run every non-phase gate again. If all pass, report `Already approved — phase:ready` and make no label or comment write. If any fail, refuse and list the failures; do not auto-bounce.
-- Closed, Backlog, Bounced, Stalled, Define, Design, Executing, or Refine: refuse with the actual state and direct the user to `$scope` or `$bounce` when appropriate.
+- `phase:ready`: run every non-phase gate again. If all pass, report `Already approved — phase:ready` and make no label or comment write. The issue remains Ready until a PR opens, when the reconciler computes `phase:building`. If any gate fails, refuse and list the failures; do not auto-bounce.
+- Closed, Backlog, Bounced, Stalled, Define, Design, any reconciler-owned post-Ready phase (Building, QA, Findings, or Held), or a retired Executing/Refine migration state: refuse with the actual state and direct the user to `$scope`, `$findings`, `$land`, or `$bounce` when appropriate.
 - Multiple `phase:*` labels, or any `bounce-to:*` label outside `phase:bounced`: refuse as invalid lifecycle state.
 
 Do not confuse a closed issue with Backlog merely because both can lack a phase label.

@@ -22,11 +22,11 @@ Read the PR, its labels, head check runs, branch protection, and closing issue o
 List every failing gate:
 
 - PR exists, is open, and is still draft;
-- head SHA has no pending check runs and `CI pass` is successful, or `Qodana scan` is the sole red eligible for the Qodana pass below;
-- closing issue is open and carries `phase:refine`;
-- PR has neither `review:unresolved` nor `dogfood:unresolved`;
-- no non-Qodana required check is red;
+- head SHA has no pending or failed required check runs and `CI pass` is successful;
+- closing issue is open and carries `phase:held`;
 - local head ref and remote head SHA identify the same branch state.
+
+`phase:held` is the single pipeline eligibility signal: the reconciler reaches it only after CI succeeds, the automated QA verdict is in, and no actionable finding or open review thread remains. If the issue is at `phase:findings`, route to `$findings <PR>`; if it is at `phase:building` or `phase:qa`, wait for or repair that underlying state. The required `Review gate` status remains the hard merge enforcement for Rust-touching PRs.
 
 Never apply `review:skip`, remove an automated-QA label, or silently waive a finding. Every finding must be implemented or declined with a written reason through the review/dogfood contract before landing.
 
@@ -74,24 +74,12 @@ After confirmation:
 
 Do not run full local tests or distribution builds unless the user explicitly asks; GitHub Actions is the full build engine.
 
-## Qodana-only pass
-
-When `Qodana scan` is the sole red and nothing is pending:
-
-1. Run the repository-owned `scripts/qodana-report.sh <PR>`.
-2. Require an available artifact and findings confined to this PR's changed lines.
-3. Fix confident findings in the issue worktree. Surface suspected false positives, outside-diff findings, missing artifacts, or an uncertain/large set; never add a baseline or exclusion without explicit approval.
-4. Run fmt check and clippy, commit, assert a clean tree, and push normally.
-5. Wait for CI on the new SHA and re-run all gates.
-
-If Qodana infrastructure failed rather than reported code findings, stop and leave the PR draft. Do not turn an infrastructure failure into a code change.
-
 ## Clear draft and merge
 
 After the final gate read:
 
 1. Read the PR node id.
-2. Use the GraphQL `markPullRequestReadyForReview` mutation; this is the lifecycle's one GraphQL-only operation.
+2. Use the GraphQL-only `markPullRequestReadyForReview` mutation. `$findings` owns the other GraphQL-only lifecycle operations for review threads.
 3. Verify the response says draft is false.
 4. Poll the PR's REST `merged` field in short intervals. If native auto-merge is not configured or does not act, the explicit land request authorizes a REST squash merge with the PR title as `commit_title`.
 5. Continue only after REST confirms `merged: true` and capture `merged_at`/merge SHA.
@@ -112,7 +100,7 @@ Report the merge URL/SHA, issue reconciliation, any direct-vs-auto merge, any re
 
 `$land --sweep` is serial and uses two turns.
 
-1. Enumerate open draft PRs over REST and correlate them with open `phase:refine` closing issues.
+1. Enumerate open draft PRs over REST and correlate them with open `phase:held` closing issues.
 2. Apply every gate and record every drop reason.
 3. Predict each passing PR as clean, behind/direct, behind/rebase+force-push, or dirty.
 4. Print the ordered sequence and all mutations: un-draft, possible force-push, squash merge, issue-label cleanup, worktree/branch cleanup.

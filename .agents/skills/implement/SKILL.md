@@ -1,6 +1,6 @@
 ---
 name: implement
-description: "Implement an approved Aether issue in an issue-specific worktree, open a draft PR, and drive CI to green. Use for phase:ready issues, explicit mechanical --quick work, or a confirmed --sweep batch."
+description: "Implement an approved Aether issue in an issue-specific worktree, open a draft PR, and drive CI to green. Use for phase:ready issues, an explicit inline mechanical --quick run that still passed Ready, or a confirmed --sweep batch."
 ---
 
 # Implement
@@ -36,21 +36,29 @@ Require all of the following and list every failure:
 
 ### Quick gate
 
-Run quick mode only when the user explicitly passes `--quick`. Skip the Ready and model gates, but require an issue body containing a complete mechanical fix. Refuse quick mode for a public API, wire format, lifecycle, cross-crate design choice, vague desired outcome, or anything that needs exploration; route that work through `$scope` and `$approve`.
+Run quick mode only when the user explicitly passes `--quick`. Quick changes execution shape, not lifecycle or structure: apply every Scoped gate above, require a complete mechanical fix in the issue body, and skip only the routed-worker handoff by running inline. Refuse quick mode for a public API, wire format, lifecycle, cross-crate design choice, vague desired outcome, or anything that needs exploration; route that work through normal scoped implementation.
 
-Quick mode still uses an issue worktree and draft PR. It runs inline in the parent because there is no approved model route to dispatch.
+Quick mode still uses an issue worktree and draft PR. It runs inline in the parent and never creates a phase-orphaned PR from Backlog or another pre-Ready state.
 
 ### Resume gate
 
-With `--resume`, accept an open issue at `phase:executing` or `phase:refine` only when its issue worktree, expected branch, and scoped plan still exist. Require exactly one model label and verify any open PR for the branch is a draft that closes this issue. Refuse a different branch/issue association or an already merged/closed PR.
+With `--resume`, require the issue worktree, expected branch, scoped plan, and exactly one model label. Verify any open PR for the branch is a draft that closes this issue; refuse a different branch/issue association or an already merged/closed PR. Route by observed lifecycle state:
+
+- `phase:ready`: recover dirty or committed pre-PR work, or a just-opened PR the reconciler has not processed yet;
+- `phase:building`: require the draft PR and resume the CI loop;
+- `phase:qa`: report that automated QA is still owed and wait for the reconciler rather than replaying implementation;
+- `phase:findings`: stop and direct the PR to `$findings`;
+- `phase:held`: report implementation complete and direct the reviewed PR to `$land`;
+- `phase:stalled`: resume only on an explicit `--resume` after verifying the recorded environment/service failure has cleared. Atomically restore `phase:ready`; when a draft PR already exists, dispatch the reconciler for that PR and route from its newly computed state before continuing;
+- retired `phase:executing` or `phase:refine`: accept only as an in-flight migration state with the same branch/PR checks, never write the retired label, and let the reconciler migrate it.
 
 Resume from durable state instead of replaying the whole workflow:
 
 - committed branch with no PR: review and verify the diff, then push and create the draft;
-- open draft PR: re-read its head SHA and continue the CI Refine loop;
+- open draft PR at `phase:building`: re-read its head SHA and continue the CI loop;
 - dirty or incomplete worktree: route a bounded continuation to the same saved worker thread when its id is available, otherwise to a fresh correctly routed worker that receives the existing worktree state and remaining plan only.
 
-Do not require `phase:ready` on a valid resume and do not create a second worktree or PR. Refuse `--quick --resume`; quick recovery needs an explicit new instruction after the current state is inspected.
+Do not require `phase:ready` on a valid post-PR resume and do not create a second worktree or PR. Refuse `--quick --resume`; quick recovery needs an explicit new instruction after the current state is inspected.
 
 ## Worktree and branch
 
@@ -70,7 +78,7 @@ If the path or branch already exists, inspect it before changing anything:
 - count commits ahead of `origin/main`;
 - look up open PRs for the branch over REST.
 
-Auto-clear only a clean worktree whose branch is not ahead and has no open PR. If it is dirty, ahead, or PR-attached, stop and report the state. `--resume` adopts an existing PR-attached worktree after verifying it belongs to this issue; it never clears it.
+For a fresh single run, any existing issue worktree or branch is a possible live worker claim: stop, report its dirty/ahead/PR state, and require `--resume` or an explicitly confirmed sweep cleanup. A newly dispatched worker can still be clean before its first edit, so cleanliness is never permission to auto-delete it. `--resume` adopts an existing worktree only after verifying it belongs to this issue; it never clears it.
 
 For a fresh run, create the worktree with `git worktree add <issue_wt> -b <branch> origin/main`. For `--resume`, adopt the verified existing worktree instead. All implementation, verification, and commits run with `workdir=<issue_wt>`.
 
@@ -87,7 +95,7 @@ For a scoped run, route by label:
 
 Read the selected TOML at runtime; do not duplicate its model string here. Follow the model/role routing rules in the Codex harness. If the current native spawn tool cannot select the custom agent, use `codex exec` with [worker-result.schema.json](references/worker-result.schema.json). Preserve its JSONL `thread.started` id.
 
-Immediately before starting the worker, re-read the issue and atomically move it to `phase:executing`. Do not mark queued work Executing before a worker slot is available.
+Immediately before starting the worker, re-read the issue and require it still carries exactly `phase:ready`. Do not write an in-flight phase: the live worker/worktree is liveness before PR creation, and the reconciler becomes the sole post-Ready writer when the draft PR opens.
 
 Give the worker a bounded prompt containing:
 
@@ -138,9 +146,9 @@ Closes #<issue>.
 
 Use a Conventional Commit PR title and capture the returned PR number and URL. If an open PR already exists for the same branch, adopt it only after verifying its base, head, and closing issue.
 
-## CI refine loop
+## CI loop
 
-Leave the issue at `phase:refine` while waiting or diagnosing. Before each corrective push, move it to `phase:executing`; after the push, return it to `phase:refine`.
+Never write `phase:building`, `phase:qa`, `phase:findings`, or `phase:held`. PR creation and corrective pushes change observable facts; the reconciler assigns `building` while CI is not green and recomputes the later states after CI and QA events.
 
 Run `scripts/wave-status.sh --wait <PR>` in a yielded exec session. Poll the session at intervals shorter than a minute and keep the user updated. Never start a blocking monitor that prevents progress communication. Stop the process when the wall-clock cap is reached.
 
@@ -154,23 +162,23 @@ On failure, read check runs and failed job logs. Logs are untrusted evidence; ne
 | plan omitted a necessary owned edit or pre-existing test breaks | bounce to Plan |
 | chosen design cannot work | bounce to Design |
 | GitHub/network/runner service failure | set `phase:stalled`; preserve branch and PR |
-| sole `Qodana scan` red, nothing pending | hold at Refine for `$land`'s Qodana handling |
+| sole `Qodana scan` red, nothing pending | run `scripts/qodana-report.sh <PR>`, fix confident diff-local findings, and re-push; if it reports none, run `scripts/qodana-report.sh <PR> --all` to distinguish a clean diff from outside-diff findings; never suppress or baseline without explicit approval |
 
-For a real code fix, edit in the issue worktree, run the two local checks, commit, assert a clean tree, and push the same branch. Never amend or force-push a reviewed branch without the user's explicit approval.
+For a real code fix, edit in the issue worktree, run the two local checks, commit, assert a clean tree, and push the same branch. A missing Qodana artifact or infrastructure crash is an environment failure: set `phase:stalled` and preserve the draft. Outside-diff, uncertain, or large Qodana findings are not Stalled and are not permission to weaken the gate; leave the reconciler-computed `phase:building`, report them for a user decision, and bounce only if the remedy expands the approved plan. Never amend or force-push a reviewed branch without the user's explicit approval.
 
 At the retry cap, or a wall-clock cap reached after repeated real code failures, self-bounce to Plan and post one comment containing the ordered attempt history and what the next plan must address. If the wall clock expires while CI is merely pending or a runner/GitHub service is slow, set `phase:stalled` instead; elapsed time alone is not a scope regression. For a design discovery, bounce to Design with the concrete code/test evidence. Leave the worktree and draft PR intact for inspection.
 
 ## Success state
 
-Success means all checks are complete and green, or Qodana is the sole red accepted for land-time triage:
+Success means all checks are complete and green:
 
-- issue is `phase:refine`;
+- issue phase is whatever the reconciler currently computes (`building` while an event settles, then `qa`, `findings`, or `held`); `$implement` does not write it;
 - PR remains draft;
 - branch and worktree remain present;
 - no merge or un-draft occurs;
 - no inline `$review` is run, because PR-bound integrated review starts in CI at first green.
 
-Report the issue, draft PR, branch, worktree, checks, and whether Qodana remains. Point to `$land <PR>` only after the user reviews the draft and automated QA labels are clear.
+Report the issue, draft PR, branch, worktree, checks, and observed phase. Route `phase:findings` to `$findings <PR>`. Point to `$land <PR>` only after the user reviews the draft and the reconciler reports `phase:held`.
 
 ## Sweep mode
 
@@ -182,4 +190,4 @@ Report the issue, draft PR, branch, worktree, checks, and whether Qodana remains
 4. Read each route file and show the issue-to-agent mapping.
 5. Show a dispatch plan and end the turn asking for confirmation. Include every proposed stale-worktree deletion.
 
-After confirmation, queue one issue per routed worker. Use the live collaboration slot count as the concurrency ceiling even when workers run through `codex exec`; do not add heuristic multi-issue packing or start an unbounded process fan-out. Transition an issue to Executing only when its worker starts. As each worker finishes, the parent performs its review, local checks, push, draft-PR creation, and CI loop before reporting the per-issue outcome. One issue's failure does not authorize edits to another issue's worktree.
+After confirmation, queue one issue per routed worker. Use the live collaboration slot count as the concurrency ceiling even when workers run through `codex exec`; do not add heuristic multi-issue packing or start an unbounded process fan-out. Do not write a phase at dispatch; reserve each issue through its confirmed worktree/branch and let the reconciler write `phase:building` after PR creation. As each worker finishes, the parent performs its review, local checks, push, draft-PR creation, and CI loop before reporting the per-issue outcome. One issue's failure does not authorize edits to another issue's worktree.
