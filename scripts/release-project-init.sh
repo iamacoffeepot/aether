@@ -77,6 +77,11 @@ ensure_label "agent:awaiting-answer" fbca04 "an agent parked a question here; an
 # cannot be applied.
 ensure_label "alert" b60205 "machine-filed alert, not a work item — the fleet never scopes these"
 
+# The owner's per-issue approval override. Resolves an issue's approval tier to
+# `auto` whatever the policy says — but it can never pass the ADR hard gate, and
+# it counts only when the OWNER applied it (the tick verifies the timeline actor).
+ensure_label "approval:pre-approved" 0e8a16 "owner: approve this one regardless of tier (never an ADR)"
+
 # Size (weight) — XL marks a fat issue for /sweep fat (ADR-0110).
 ensure_label "size:s"  bfdadc "single file, single concept"
 ensure_label "size:m"  bfdadc "single crate, multiple files"

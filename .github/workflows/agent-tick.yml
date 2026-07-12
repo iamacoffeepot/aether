@@ -82,6 +82,15 @@ name: Agent tick
 # code, hence the actions/checkout below — still no Claude and no cargo, so the
 # tick stays free and deterministic.
 #
+# approval:pre-approved is the owner's per-issue override on that lookup: it
+# resolves the tier to `auto` whatever the policy says. It CANNOT pass the ADR
+# hard gate — an ADR is load-bearing by definition, so there is no passable gate
+# for one — and it counts only when the timeline actor who applied it is the
+# owner, the same verification approval:surface-ok and review:skip use. An agent
+# may apply the label; it does not count. It waives the TIER (who approves), never
+# /approve's gate checks (whether the issue is approvable at all), so a
+# half-scoped plan still refuses rather than advancing into implement.
+#
 # agent:dont-touch items are filtered out of the whole scan first (the label
 # blinds the dispatcher, per its contract). The snapshot is ordered
 # land > question-resume > approve/implement/scope and slots are filled in that
@@ -317,7 +326,8 @@ jobs:
                   (if ([.labels[].name] | index("agent:awaiting-answer")) then "await" else "-" end),
                   (if ([.labels[].name] | index("agent:dont-touch")) then "dt" else "-" end),
                   ([.labels[].name | select(startswith("type:")) | ltrimstr("type:")] | .[0] // "-"),
-                  (if ([.labels[].name] | index("alert")) then "alert" else "-" end) ]
+                  (if ([.labels[].name] | index("alert")) then "alert" else "-" end),
+                  (if ([.labels[].name] | index("approval:pre-approved")) then "pre" else "-" end) ]
               | @tsv' > /tmp/board.tsv
 
           # Scope-eligibility. Backlog means "no phase:* label", which is also true
@@ -406,7 +416,7 @@ jobs:
           land_items=""
           resume_items=""
           work_items=""
-          while IFS=$'	' read -r num phase await dt itype alert; do
+          while IFS=$'	' read -r num phase await dt itype alert preapp; do
             [ -n "$num" ] || continue
             if [ "$dt" = "dt" ]; then summary "- skip #${num}: agent:dont-touch"; continue; fi
             if [ "$alert" = "alert" ]; then summary "- skip #${num}: alert — machine-filed, not a work item"; continue; fi
@@ -427,6 +437,33 @@ jobs:
                 ;;
               phase:plan)
                 tier="$(approval_tier "$num")"
+                # approval:pre-approved is the owner's per-issue override: it
+                # resolves the tier to auto. It sits BELOW the ADR hard gate and
+                # cannot pass it — an ADR is load-bearing by definition, so there is
+                # no passable gate for one, and `adr` is matched first below.
+                #
+                # It must be the OWNER'S label. Verified against the timeline actor
+                # of the most recent `labeled` event, the same shape as
+                # approval:surface-ok and review:skip. An agent may apply the label;
+                # it simply does not count. Without this check an agent could grant
+                # itself unbounded approval authority through a side door, which is
+                # the one thing the whole tier policy exists to prevent.
+                #
+                # It waives the TIER (who approves), never the gate checks (whether
+                # the issue is approvable at all — sections present, one model:*,
+                # dependencies closed, freshness). Those still run in /approve; a
+                # half-scoped plan is a defect to fix, not something to wave into
+                # implement.
+                if [ "$tier" != "adr" ] && [ "$preapp" = "pre" ]; then
+                  actor="$(gh api "repos/${REPO}/issues/${num}/timeline" --paginate \
+                    --jq '[.[] | select(.event=="labeled" and .label.name=="approval:pre-approved")] | last | .actor.login // empty')"
+                  if [ "$actor" = "$OWNER" ]; then
+                    summary "- #${num}: approval:pre-approved by the owner (tier was ${tier}) — dispatching approve"
+                    tier="auto"
+                  else
+                    summary "- #${num}: approval:pre-approved ignored — applied by '${actor:-unknown}', not the owner"
+                  fi
+                fi
                 case "$tier" in
                   auto) summary "- #${num}: approval tier auto — dispatching approve"; task="approve"; ref="$num" ;;
                   adr) summary "- skip #${num}: ADR hard gate — the owner approves this one"; continue ;;
