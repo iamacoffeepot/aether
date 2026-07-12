@@ -390,12 +390,7 @@ jobs:
             --max-turns ${{ inputs.task == 'implement' && 400 || 200 }} \
             --output-format stream-json --verbose \
             | tee /tmp/agent-work-session.jsonl \
-            | jq -rj --unbuffered '
-                if .type == "assistant" then
-                  ([.message.content[]? | if .type == "text" then "\n■ " + .text + "\n"
-                    elif .type == "tool_use" then "▸ " + .name + "\n" else empty end] | join(""))
-                elif .type == "result" then "\n== result (\(.subtype)) ==\n" + (.result // "") + "\n"
-                else empty end' \
+            | python3 scripts/render-agent-stream.py \
             || true
 
       # The full session transcript (stream-json JSONL) — uploaded even on failure,
