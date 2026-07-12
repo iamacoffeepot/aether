@@ -2,8 +2,11 @@
 """Validate a Plan surface and resolve its tier from one captured Git commit.
 
 Matcher and policy semantics are loaded from scripts/surface-match.py at the
-captured ref. This wrapper adds Codex's Plan-to-Ready validation and evidence;
-it deliberately does not carry a second glob implementation.
+captured ref, which must be reachable from the local refs/remotes/origin/main —
+executing the matcher from an arbitrary fetched commit (a PR head, say) would
+hand the tier decision to that commit's author. This wrapper adds Codex's
+Plan-to-Ready validation and evidence; it deliberately does not carry a second
+glob implementation.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ class ResolverError(RuntimeError):
     """A deterministic, user-actionable resolver failure."""
 
 
-def _run_git(repo: Path, arguments: Sequence[str], *, operation: str) -> bytes:
+def _git(repo: Path, arguments: Sequence[str], *, operation: str) -> subprocess.CompletedProcess[bytes]:
     # A local replacement ref, alternate object directory, or injected Git
     # config must not substitute a different tree for the captured origin/main
     # object we are about to execute. These reads need no Git-specific ambient
@@ -42,7 +45,7 @@ def _run_git(repo: Path, arguments: Sequence[str], *, operation: str) -> bytes:
     }
     environment["GIT_NO_REPLACE_OBJECTS"] = "1"
     try:
-        completed = subprocess.run(
+        return subprocess.run(
             ["git", "--no-replace-objects", "-C", str(repo), *arguments],
             check=False,
             env=environment,
@@ -51,6 +54,10 @@ def _run_git(repo: Path, arguments: Sequence[str], *, operation: str) -> bytes:
         )
     except OSError as error:
         raise ResolverError(f"cannot run git while {operation}: {error}") from error
+
+
+def _run_git(repo: Path, arguments: Sequence[str], *, operation: str) -> bytes:
+    completed = _git(repo, arguments, operation=operation)
     if completed.returncode:
         detail = completed.stderr.decode("utf-8", errors="replace").strip()
         raise ResolverError(
@@ -58,6 +65,33 @@ def _run_git(repo: Path, arguments: Sequence[str], *, operation: str) -> bytes:
             f"{detail or 'no diagnostic'}"
         )
     return completed.stdout
+
+
+UPSTREAM = "refs/remotes/origin/main"
+
+
+def _require_upstream_ancestry(repo: Path, ref: str) -> None:
+    # The captured commit's own scripts/surface-match.py is about to be
+    # executed, so the commit must be one origin/main actually published. Any
+    # fetched object — a hostile PR head included — passes the commit checks
+    # above; reachability from the remote-tracking ref is what makes it the
+    # owner's code rather than merely present in the object store.
+    _run_git(repo, ["rev-parse", "--verify", "--end-of-options", UPSTREAM], operation=f"resolving {UPSTREAM}")
+    completed = _git(
+        repo,
+        ["merge-base", "--is-ancestor", ref, UPSTREAM],
+        operation=f"checking that {ref} is reachable from {UPSTREAM}",
+    )
+    if completed.returncode == 1:
+        raise ResolverError(
+            f"--ref {ref} is not reachable from {UPSTREAM}; refusing to load its matcher and policy"
+        )
+    if completed.returncode:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise ResolverError(
+            f"git failed while checking ancestry of {ref} (exit {completed.returncode}): "
+            f"{detail or 'no diagnostic'}"
+        )
 
 
 def _validate_surface(pattern: str, *, context: str) -> None:
@@ -150,6 +184,7 @@ def _load_snapshot(repo_argument: str, ref_argument: str) -> tuple[str, dict[str
     ).decode("ascii", errors="strict").strip().lower()
     if resolved != ref:
         raise ResolverError(f"--ref must identify the commit object itself (resolved {ref} to {resolved})")
+    _require_upstream_ancestry(repo, ref)
 
     canonical_bytes = _run_git(
         repo,

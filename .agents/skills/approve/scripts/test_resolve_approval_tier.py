@@ -69,17 +69,20 @@ class ResolverFixture:
         self._git("add", "--all")
         self._git("commit", "-q", "-m", "fixture")
         self.ref = self._git("rev-parse", "HEAD").stdout.strip()
+        # The resolver only executes a matcher reachable from origin/main.
+        self._git("update-ref", "refs/remotes/origin/main", self.ref)
 
     def close(self) -> None:
         self.temporary.cleanup()
 
-    def install_commit_replacement(self) -> None:
+    def install_commit_replacement(self) -> str:
         matcher = self.repo / "scripts" / "surface-match.py"
         matcher.write_text('raise RuntimeError("replacement matcher executed")\n', encoding="utf-8")
         self._git("add", "scripts/surface-match.py")
         self._git("commit", "-q", "-m", "hostile replacement")
         replacement = self._git("rev-parse", "HEAD").stdout.strip()
         self._git("replace", self.ref, replacement)
+        return replacement
 
     def _git(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         completed = subprocess.run(
@@ -91,7 +94,9 @@ class ResolverFixture:
         self.test.assertEqual(completed.returncode, 0, completed.stderr)
         return completed
 
-    def invoke(self, surfaces: list[str], targets: list[str]) -> subprocess.CompletedProcess[str]:
+    def invoke(
+        self, surfaces: list[str], targets: list[str], ref: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
         surface_file = self.root / "surfaces.txt"
         target_file = self.root / "targets.txt"
         surface_file.write_text("\n".join(surfaces) + ("\n" if surfaces else ""), encoding="utf-8")
@@ -104,7 +109,7 @@ class ResolverFixture:
                 "--repo",
                 str(self.repo),
                 "--ref",
-                self.ref,
+                ref if ref is not None else self.ref,
                 "--surface-file",
                 str(surface_file),
                 "--targets-file",
@@ -223,6 +228,15 @@ class ResolverTests(unittest.TestCase):
         result = self.success(["docs/guide/**"], ["docs/guide/page.md"])
         self.assertEqual(result["ref"], self.fixture.ref)
         self.assertEqual(result["tier"], "auto")
+
+    def test_ref_not_on_origin_main_is_refused(self) -> None:
+        # The hostile commit exists in the object store but origin/main never
+        # published it, so its matcher must not be loaded or executed.
+        hostile = self.fixture.install_commit_replacement()
+        completed = self.fixture.invoke(["docs/guide/**"], ["docs/guide/page.md"], ref=hostile)
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("not reachable from refs/remotes/origin/main", completed.stderr)
+        self.assertNotIn("replacement matcher executed", completed.stderr)
 
     def test_slashless_concrete_surface_is_root_anchored(self) -> None:
         result = self.success(["Cargo.lock"], ["Cargo.lock"])

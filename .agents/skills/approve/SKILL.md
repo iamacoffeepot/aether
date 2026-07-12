@@ -164,8 +164,11 @@ python3 -I .agents/skills/approve/scripts/resolve_approval_tier.py \
 The resolver loads the policy and tracked paths from the captured ref, uses the
 same matcher as the Reconciler, requires every concrete target to be covered,
 rejects orphan globs, and returns stable JSON with the most restrictive tier and
-path evidence. Treat any resolver, policy, Git, or JSON failure as an approval
-gate failure; never substitute a default from memory.
+path evidence. It refuses a ref that is not reachable from the local
+`refs/remotes/origin/main`, so run it only after the freshness gate's fetch and
+always pass the SHA that fetch captured — never a PR head or any other commit.
+Treat any resolver, policy, Git, or JSON failure as an approval gate failure;
+never substitute a default from memory.
 
 Apply the ADR hard gate before using the returned policy tier. Route to
 `human` when Design notes contain a non-empty line beginning `ADR flag:` or

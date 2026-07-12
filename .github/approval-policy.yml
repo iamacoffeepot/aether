@@ -95,6 +95,10 @@ rules:
     tier: human
   - glob: "scripts/surface-match.py"
     tier: human
+  # The matcher's tests gate CI, so weakening them is the same conversation
+  # as weakening the matcher.
+  - glob: "scripts/test-surface-match.py"
+    tier: human
 
   # Submitted-and-expected-to-come-back-right. These advance on their own.
   - glob: "docs/guide/**"

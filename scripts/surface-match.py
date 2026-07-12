@@ -20,6 +20,14 @@ but are repository-relative, so even a slashless concrete path is root-anchored.
 Bash has no such matcher and the runner ships no pathspec module, so the
 patterns are translated to regexes here.
 
+Declared surfaces come from issue bodies, so both modes hold every declared
+pattern to the validated grammar (a concrete path, or a literal directory
+prefix followed by one final `/**`). A pattern outside the grammar never
+reaches the regex engine: containment ignores it with a stderr note (so the
+paths it claimed to cover escape), and tier mode resolves it `human`. This
+also keeps an adversarial pattern such as a run of `**/` segments from
+backtracking the regex engine for hours.
+
 Two modes:
 
     surface-match.py <globs_file> <changed_file> [<policy_file>]
@@ -98,6 +106,29 @@ def compile_surface_glob(pattern):
     """Compile a repository-relative declared-surface pattern."""
 
     return compile_glob(pattern if pattern.startswith("/") else "/" + pattern)
+
+
+SURFACE_SAFE = re.compile(r"[A-Za-z0-9._/*\-]+\Z")
+
+
+def valid_surface_glob(pattern):
+    """Whether a declared-surface pattern is inside the validated grammar.
+
+    The same shape /approve's resolver accepts: a concrete repository-relative
+    path, or a literal directory prefix followed by one final `/**`. Declared
+    surfaces are untrusted issue-body text, so anything outside this grammar is
+    refused before it can reach the regex engine.
+    """
+
+    if SURFACE_SAFE.fullmatch(pattern) is None:
+        return False
+    if pattern.startswith(("/", "-", "!", "#")) or pattern.endswith("/"):
+        return False
+    if any(segment in {"", ".", ".."} for segment in pattern.split("/")):
+        return False
+    if "*" not in pattern:
+        return True
+    return pattern.endswith("/**") and pattern.count("*") == 2
 
 
 RANK = {"auto": 0, "judge": 1, "human": 2}
@@ -332,13 +363,23 @@ def main(argv):
             print("?")
             return
         # Most restrictive over every path each declaration permits. The policy
-        # default covers an empty surface, and unsafe wildcard shapes resolve
-        # human — only a proved `auto` result may dispatch unattended approval.
-        tiers = [tier_of_surface(p, policy) for p in read_globs(argv[2])] or [policy[0]]
+        # default covers an empty surface, and any declaration outside the
+        # validated grammar resolves human — only a proved `auto` result may
+        # dispatch unattended approval.
+        tiers = [
+            tier_of_surface(p, policy) if valid_surface_glob(p) else "human" for p in read_globs(argv[2])
+        ] or [policy[0]]
         print(max(tiers, key=lambda t: RANK.get(t, len(RANK))))
         return
 
-    matchers = [compile_surface_glob(g) for g in read_globs(argv[1])]
+    matchers = []
+    for glob in read_globs(argv[1]):
+        if valid_surface_glob(glob):
+            matchers.append(compile_surface_glob(glob))
+        else:
+            # Fail toward escape: the paths this pattern claimed to cover are
+            # reported as outside the surface rather than silently contained.
+            print(f"ignored out-of-grammar surface glob: {glob}", file=sys.stderr)
     policy = load_policy(argv[3]) if len(argv) > 3 else None
     for path in read_paths(argv[2]):
         if not any(m.match(path) for m in matchers):

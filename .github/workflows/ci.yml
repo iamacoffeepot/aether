@@ -78,6 +78,20 @@ jobs:
           node-version: 22
       - run: node --test scripts/dogfood-token-table.test.mjs scripts/post-dogfood-rollup.test.mjs scripts/dogfood-action-contract.test.mjs
 
+  # The declared-surface matcher and the approval-tier resolver gate what the
+  # unattended fleet may advance, and their strict policy parser fails closed:
+  # a malformed .github/approval-policy.yml would silently stop every auto
+  # dispatch. These suites (which also parse the real policy file) are the loud
+  # version of that failure. Cheap and unconditional, like the dogfood
+  # contracts above.
+  approval-machinery:
+    name: Approval machinery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/test-surface-match.py
+      - run: python3 .agents/skills/approve/scripts/test_resolve_approval_tier.py
+
   clippy:
     name: Clippy
     needs: changes
@@ -434,7 +448,7 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, dogfood-token-table, clippy, docs, marker-build, test, desktop, qodana ]
+    needs: [ changes, fmt, dogfood-token-table, approval-machinery, clippy, docs, marker-build, test, desktop, qodana ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -442,6 +456,7 @@ jobs:
           echo "changes: ${{ needs.changes.result }}"
           echo "fmt:     ${{ needs.fmt.result }}"
           echo "dogfood-token-table: ${{ needs.dogfood-token-table.result }}"
+          echo "approval-machinery: ${{ needs.approval-machinery.result }}"
           echo "clippy:  ${{ needs.clippy.result }}"
           echo "docs:    ${{ needs.docs.result }}"
           echo "marker-build: ${{ needs.marker-build.result }}"
@@ -452,6 +467,7 @@ jobs:
           [[ "${{ needs.changes.result }}" == "success" ]] || fail=1
           [[ "${{ needs.fmt.result }}"     == "success" ]] || fail=1
           [[ "${{ needs.dogfood-token-table.result }}" == "success" ]] || fail=1
+          [[ "${{ needs.approval-machinery.result }}" == "success" ]] || fail=1
           [[ "${{ needs.clippy.result }}"  == "success" || "${{ needs.clippy.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.docs.result }}"    == "success" || "${{ needs.docs.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.marker-build.result }}" == "success" || "${{ needs.marker-build.result }}" == "skipped" ]] || fail=1

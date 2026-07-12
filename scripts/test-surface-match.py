@@ -110,6 +110,87 @@ class MatcherTests(unittest.TestCase):
             "human",
         )
 
+    def test_surface_grammar(self) -> None:
+        for pattern in ["Cargo.lock", "docs/guide/page.md", "docs/guide/**", "crates/aether-kit/src/**"]:
+            with self.subTest(pattern=pattern):
+                self.assertTrue(surface_match.valid_surface_glob(pattern))
+        rejected = [
+            "",
+            "/Cargo.toml",
+            "docs/",
+            "docs//guide",
+            "../escape",
+            "docs/guide/../adr/x.md",
+            "docs/*",
+            "docs/**/x.md",
+            "a/**/**",
+            "**",
+            "docs/[ag]uide/**",
+            "docs/guide/page?.md",
+            "docs\\guide",
+        ]
+        for pattern in rejected:
+            with self.subTest(pattern=pattern):
+                self.assertFalse(surface_match.valid_surface_glob(pattern))
+
+    def test_repository_policy_file_parses_and_guards_itself(self) -> None:
+        # Tripwire: the strict parser fails closed, so a malformed edit to the
+        # real policy file would silently stop every auto dispatch — this is the
+        # one place that failure is loud. The guarded paths pin the
+        # constitutional carve-outs against an accidental policy edit.
+        policy = surface_match.load_policy(str(SCRIPT.parent.parent / ".github" / "approval-policy.yml"))
+        self.assertIsNotNone(policy)
+        for guarded in [
+            "scripts/surface-match.py",
+            "scripts/test-surface-match.py",
+            ".github/approval-policy.yml",
+            ".github/workflows/ci.yml",
+            ".agents/skills/approve/scripts/resolve_approval_tier.py",
+            ".claude/hooks/check-no-divider-comments.sh",
+        ]:
+            with self.subTest(guarded=guarded):
+                self.assertEqual(surface_match.tier_of(guarded, policy), "human")
+
+    def test_out_of_grammar_surface_resolves_human_in_tier_mode(self) -> None:
+        for surface in ["docs/guide/../adr/0001-x.md", "/docs/guide/page.md", "docs//guide/page.md"]:
+            with self.subTest(surface=surface), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                surfaces = root / "surface.txt"
+                policy = root / "policy.yml"
+                surfaces.write_text(surface + "\n", encoding="utf-8")
+                policy.write_text(POLICY, encoding="utf-8")
+                completed = subprocess.run(
+                    [sys.executable, "-I", str(SCRIPT), "--tier", str(surfaces), str(policy)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stdout, "human\n")
+
+    def test_containment_ignores_out_of_grammar_globs_without_backtracking(self) -> None:
+        # Tripwire: the hostile glob compiles to nested unbounded regex groups;
+        # without the grammar gate this match backtracks effectively forever.
+        hostile = "**/" * 12 + "a"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            globs = root / "globs.txt"
+            paths = root / "paths.txt"
+            policy = root / "policy.yml"
+            globs.write_text(hostile + "\ndocs/guide/**\n", encoding="utf-8")
+            paths.write_text("b/" * 40 + "c\ndocs/guide/page.md\n", encoding="utf-8")
+            policy.write_text(POLICY, encoding="utf-8")
+            completed = subprocess.run(
+                [sys.executable, "-I", str(SCRIPT), str(globs), str(paths), str(policy)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout, "b/" * 40 + "c\tjudge\n")
+            self.assertIn("ignored out-of-grammar surface glob", completed.stderr)
+
     def test_most_restrictive_across_surface_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
