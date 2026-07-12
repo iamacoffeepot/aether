@@ -18,6 +18,44 @@ jobs:
             const issue = context.payload.issue;
             const labels = issue.labels.map(l => l.name);
 
+            // Machine-filed tickets are not work items, and the lint's success
+            // path auto-applies type:* labels — which is precisely what they
+            // must never carry: type-label ABSENCE is how the tick knows not to
+            // scope a machine-filed issue (#3181's alert fix). The approve
+            // sweep's verdict digest (agent:digest) keeps a conventional
+            // chore(ci) title by its own skill text, so consistency holds; the
+            // exemption exists for the label side effect, not the title. Alerts
+            // (alert) are named by their filing workflows. Exempt both — and
+            // clean up any residue a pre-exemption run left (the first live
+            // digest, #3195, collected an invalid-title label and a bot
+            // comment), so an exempted issue self-heals on its next event.
+            const EXEMPT = ['agent:digest', 'alert'];
+            if (EXEMPT.some(l => labels.includes(l))) {
+              if (labels.includes('invalid-title')) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  name: 'invalid-title',
+                });
+              }
+              const exemptMarker = '<!-- issue-label-bot -->';
+              const { data: exemptComments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+              });
+              const residue = exemptComments.find(c => c.body && c.body.includes(exemptMarker));
+              if (residue) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: residue.id,
+                });
+              }
+              return;
+            }
+
             // Allowed types match the existing `type:*` label set.
             const TYPES = ['feat', 'fix', 'chore', 'docs', 'perf', 'refactor', 'flake'];
 
