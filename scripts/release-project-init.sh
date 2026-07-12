@@ -70,6 +70,13 @@ ensure_label "approval:surface-ok"       0e8a16 "owner waiver: declared-surface 
 ensure_label "agent:dont-touch"      000000 "fleet-blind: the dispatcher, judge, and executor skip this issue. Only the owner removes it."
 ensure_label "agent:awaiting-answer" fbca04 "an agent parked a question here; an owner reply resumes its session"
 
+# Machine-filed alerts (the context-budget canary, the nightly fuzzer). They carry
+# no type:* label because they never went through /sketch, so without this tag the
+# dispatcher reads them as Backlog and scopes them. The alert-filing workflows
+# stamp it themselves; it is bootstrapped here because a label that does not exist
+# cannot be applied.
+ensure_label "alert" b60205 "machine-filed alert, not a work item — the fleet never scopes these"
+
 # Size (weight) — XL marks a fat issue for /sweep fat (ADR-0110).
 ensure_label "size:s"  bfdadc "single file, single concept"
 ensure_label "size:m"  bfdadc "single crate, multiple files"

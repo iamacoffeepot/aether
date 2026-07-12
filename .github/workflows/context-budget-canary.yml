@@ -112,7 +112,10 @@ jobs:
             gh issue comment "$existing" --body-file /tmp/context-budget-issue.md
           else
             echo "Filing context-budget issue."
-            gh issue create --title "$title" --body-file /tmp/context-budget-issue.md
+            # --label alert: a machine-filed alert is not a pipeline work item,
+            # and the fleet's dispatcher skips anything carrying it. Without the
+            # label an unlabelled issue reads as Backlog and gets scoped (#3180).
+            gh issue create --title "$title" --body-file /tmp/context-budget-issue.md --label alert
           fi
 
       - name: Fail on context-budget breach
