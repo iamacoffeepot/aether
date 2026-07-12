@@ -101,6 +101,17 @@ name: Agent tick
 # issues rest at phase:ready and drop out of the next enumeration, the rest are
 # re-processed by the next sweep.
 #
+# THE VERDICT DIGEST (#3190). The sweep also owns the non-auto remainder's one
+# owner touchpoint: when judge/human/ADR-tier plan issues exist and no open
+# agent:digest issue covers them, the tick dispatches the sweep for that reason
+# too, and the sweep files ONE digest issue — the verdict table the owner
+# replies to (on GitHub or straight from the notification email) to approve the
+# batch in a single reply. Open digest = awaiting the verdict, so while one is
+# open the non-auto queue owes no new dispatch (the nudge step re-pings it on
+# cadence); the owner's reply re-dispatches the sweep via agent-chat, which
+# authenticates the reply, flips the approved set, and closes the digest. A
+# digest issue carries no type:* label, so the scope arm below never sees it.
+#
 # approval:pre-approved is the owner's per-issue override on that lookup: it
 # resolves the tier to `auto` whatever the policy says. It CANNOT pass the ADR
 # hard gate — an ADR is load-bearing by definition, so there is no passable gate
@@ -438,6 +449,7 @@ jobs:
           resume_items=""
           work_items=""
           approve_queue=0
+          digest_queue=0
           while IFS=$'	' read -r num phase await dt itype alert preapp; do
             [ -n "$num" ] || continue
             if [ "$dt" = "dt" ]; then summary "- skip #${num}: agent:dont-touch"; continue; fi
@@ -503,9 +515,24 @@ jobs:
                       continue
                     fi
                     ;;
-                  adr) summary "- skip #${num}: ADR hard gate — the owner approves this one"; continue ;;
-                  none) summary "- skip #${num}: no declared surface — not auto-approvable"; continue ;;
-                  *) summary "- skip #${num}: approval tier ${tier} — awaiting its reader"; continue ;;
+                  # Every non-auto outcome counts toward the verdict digest
+                  # (THE VERDICT DIGEST, header above) unless the issue is
+                  # already parked on its own question — a parked issue has a
+                  # pending owner interaction and is resumed per issue, never
+                  # batch-digested. The sweep decides presentation (an ADR row
+                  # is listed but never reply-approvable); the tick only counts.
+                  adr)
+                    summary "- skip #${num}: ADR hard gate — the owner approves this one"
+                    if [ "$await" != "await" ]; then digest_queue=$((digest_queue + 1)); fi
+                    continue ;;
+                  none)
+                    summary "- skip #${num}: no declared surface — not auto-approvable"
+                    if [ "$await" != "await" ]; then digest_queue=$((digest_queue + 1)); fi
+                    continue ;;
+                  *)
+                    summary "- skip #${num}: approval tier ${tier} — awaiting its reader"
+                    if [ "$await" != "await" ]; then digest_queue=$((digest_queue + 1)); fi
+                    continue ;;
                 esac
                 ;;
               phase:ready) task="implement"; ref="$num" ;;
@@ -532,18 +559,35 @@ jobs:
             fi
           done < /tmp/board.tsv
 
-          # At most one approve sweep per wave: any queued auto-tier plan issue
-          # becomes a single work-approve-sweep-all item at the head of the work
-          # list, costing one slot and one budget unit whatever the queue depth.
-          # The is_live read is the same singleton guard every task uses (a live
-          # sweep also holds the quiescence barrier below, so this line mostly
-          # buys the explicit summary).
+          # At most one approve sweep per wave, dispatched for either of two
+          # independent reasons: auto-tier issues to advance, or non-auto issues
+          # no open digest is covering (THE VERDICT DIGEST, header above). Either
+          # way it is a single work-approve-sweep-all item at the head of the
+          # work list, costing one slot and one budget unit whatever the queue
+          # depth. An open agent:digest issue means the previous digest still
+          # awaits its verdict, so the non-auto queue owes no new dispatch — the
+          # nudge step re-pings the digest on cadence instead. The is_live read
+          # is the same singleton guard every task uses (a live sweep also holds
+          # the quiescence barrier below, so this line mostly buys the summary).
+          sweep_why=""
           if [ "${approve_queue}" -gt 0 ]; then
+            sweep_why="${approve_queue} auto-tier"
+          fi
+          if [ "${digest_queue}" -gt 0 ]; then
+            open_digests="$(gh api "repos/${REPO}/issues?labels=agent:digest&state=open&per_page=1" \
+              --jq 'map(select(has("pull_request")|not)) | length')"
+            if [ "${open_digests:-0}" -eq 0 ]; then
+              sweep_why="${sweep_why:+${sweep_why}, }${digest_queue} undigested non-auto"
+            else
+              summary "- digest: ${digest_queue} non-auto plan issue(s) already covered by an open digest awaiting its verdict"
+            fi
+          fi
+          if [ -n "${sweep_why}" ]; then
             if is_live "approve-sweep" "all"; then
-              summary "- skip approve sweep: work-approve-sweep-all already live (${approve_queue} issue(s) queued)"
+              summary "- skip approve sweep: work-approve-sweep-all already live (${sweep_why})"
             else
               work_items="approve-sweep all"$'\n'"${work_items}"
-              summary "- approve sweep: ${approve_queue} auto-tier plan issue(s) — one work-approve-sweep-all dispatch"
+              summary "- approve sweep: ${sweep_why} plan issue(s) — one work-approve-sweep-all dispatch"
             fi
           fi
 

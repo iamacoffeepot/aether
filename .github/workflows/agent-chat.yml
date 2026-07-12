@@ -217,18 +217,26 @@ jobs:
             exit 0
           fi
 
-          task="$(grep -oE 'task=[a-z]+' <<<"$marker" | head -n1 | cut -d= -f2 || true)"
-          ref="$(grep -oE 'ref=[0-9]+' <<<"$marker" | head -n1 | cut -d= -f2 || true)"
+          # task admits a hyphen and ref admits the sweep's constant `all`
+          # alongside issue/PR numbers — the narrower [a-z]+ / [0-9]+ forms
+          # would silently truncate `approve-sweep` to `approve` and misroute a
+          # digest reply at the digest issue's own number.
+          task="$(grep -oE 'task=[a-z-]+' <<<"$marker" | head -n1 | cut -d= -f2 || true)"
+          ref="$(grep -oE 'ref=[a-z0-9]+' <<<"$marker" | head -n1 | cut -d= -f2 || true)"
           [ -n "$ref" ] || ref="$ISSUE"
           # approve parks come from two writers: a single-issue approve run, and
-          # the approve sweep — whose per-issue parks deliberately carry
-          # task=approve ref=<n> (no session pointer) so the owner's answer
-          # resumes that ONE issue down the single-issue path, never the batch.
-          # approve-sweep itself is not a valid marker task: nothing parks under
-          # it, and dispatching a whole sweep off one issue's answer would be
-          # wrong anyway.
+          # the approve sweep — whose per-issue gate-failure parks deliberately
+          # carry task=approve ref=<n> (no session pointer) so the owner's
+          # answer resumes that ONE issue down the single-issue path, never the
+          # batch. approve-sweep appears in exactly one marker: the verdict
+          # digest (#3190), whose reply re-dispatches the whole sweep to read
+          # and apply the verdict. Its grammar is (approve-sweep, all) —
+          # normalize the ref so a mangled marker cannot break the
+          # platform-enforced concurrency singleton keyed on
+          # work-approve-sweep-all.
+          if [ "$task" = "approve-sweep" ]; then ref="all"; fi
           case "$task" in
-            scope|approve|implement|land) ;;
+            scope|approve|approve-sweep|implement|land) ;;
             *)
               echo "parked marker carries an unrecognized task='${task:-}' — falling back to a plain turn."
               echo "parked=false" >> "$GITHUB_OUTPUT"

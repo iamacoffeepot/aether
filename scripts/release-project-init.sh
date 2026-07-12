@@ -70,6 +70,13 @@ ensure_label "approval:surface-ok"       0e8a16 "owner waiver: declared-surface 
 ensure_label "agent:dont-touch"      000000 "fleet-blind: the dispatcher, judge, and executor skip this issue. Only the owner removes it."
 ensure_label "agent:awaiting-answer" fbca04 "an agent parked a question here; an owner reply resumes its session"
 
+# The approve sweep's verdict digest (#3190) — a machine-filed issue listing the
+# non-auto phase:plan batch; the owner's single reply approves the batch and
+# closes it. A sibling of `alert` (machine-filed, never a work item) with the
+# opposite ask: an alert says "go look at a failure", a digest says "reply to
+# finish a workflow". Open = awaiting the verdict; closed = done.
+ensure_label "agent:digest" 1d76db "approve-sweep verdict digest — one owner reply approves the listed batch"
+
 # Machine-filed alerts (the context-budget canary, the nightly fuzzer). They carry
 # no type:* label because they never went through /sketch, so without this tag the
 # dispatcher reads them as Backlog and scopes them. The alert-filing workflows
