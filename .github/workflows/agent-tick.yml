@@ -569,7 +569,41 @@ jobs:
                     continue ;;
                 esac
                 ;;
-              phase:ready) task="implement"; ref="$num" ;;
+              phase:ready)
+                # A pure umbrella never dispatches implement (#3212): /implement
+                # refuses any non-empty ## Sub-issues issue, so a dispatch is a
+                # box-burn loop. When every listed child is closed the umbrella
+                # itself is done — the tick closes it here, because an umbrella
+                # never gets a PR and so is structurally unreachable by the
+                # PR-driven reconciler. Otherwise it rests. A parse failure
+                # (no child references found) rests rather than closes.
+                sub_issues="$(gh api "repos/${REPO}/issues/${num}" --jq '.body // ""' \
+                  | awk '/^## Sub-issues/{f=1; next} /^## /{f=0} f' \
+                  | grep -v '^[[:space:]]*$' || true)"
+                if [ -n "$sub_issues" ]; then
+                  children="$(grep -oE '^[[:space:]]*-[[:space:]]+#[0-9]+' <<<"$sub_issues" \
+                    | grep -oE '[0-9]+' | sort -u || true)"
+                  found=0 open_children=0
+                  for child in $children; do
+                    found=$((found + 1))
+                    child_state="$(gh api "repos/${REPO}/issues/${child}" --jq '.state' || echo unknown)"
+                    [ "$child_state" = "closed" ] || open_children=$((open_children + 1))
+                  done
+                  if [ "$found" -ge 1 ] && [ "$open_children" -eq 0 ]; then
+                    gh api -X DELETE "repos/${REPO}/issues/${num}/labels/phase:ready" >/dev/null \
+                      || summary "- warn #${num}: umbrella close could not delete phase:ready"
+                    gh api -X PATCH "repos/${REPO}/issues/${num}" -f state=closed -f state_reason=completed >/dev/null \
+                      || summary "- warn #${num}: umbrella close PATCH failed"
+                    printf 'Pure umbrella auto-closed by the tick: all %s listed children are closed (#3212).\n' "$found" > /tmp/umbrella-close.md
+                    gh api -X POST "repos/${REPO}/issues/${num}/comments" -F body=@/tmp/umbrella-close.md >/dev/null \
+                      || summary "- warn #${num}: umbrella close comment failed"
+                    summary "- closed #${num}: pure umbrella, all ${found} children closed"
+                  else
+                    summary "- skip #${num}: pure umbrella, ${open_children}/${found} children still open — resting at phase:ready"
+                  fi
+                  continue
+                fi
+                task="implement"; ref="$num" ;;
               phase:held) task="land"; ref="" ;;
               *) continue ;;
             esac

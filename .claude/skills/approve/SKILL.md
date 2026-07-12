@@ -154,7 +154,7 @@ An issue carrying a non-empty `## Sub-issues` section is either a **pure umbrell
 
 The one-or-the-other invariant means any issue that reaches `/implement` with a non-empty `## Sub-issues` is a pure umbrella and is correct to drop.
 
-A future `/release-promote-umbrella <parent>` skill can auto-close the umbrella when all children are Done. Out of scope for v1.
+The agent tick owns the umbrella's end of life (#3212): its `phase:ready` arm never dispatches `implement` for a non-empty `## Sub-issues` issue — the umbrella rests until every listed child is closed, then the tick deletes its phase label and closes it as completed.
 
 ## ADR hard gate
 
@@ -251,5 +251,5 @@ The single `PUT …/labels` replaces the label set with the non-`phase:*` labels
 - Auto-resolve side findings.
 - Edit `.github/approval-policy.yml`. Relaxing a tier is the owner's signed diff, never a side effect of an approval run — an issue that wants a looser tier says so and waits for that diff to land.
 - Enforce the declared surface against a PR's actual diff. `/approve` resolves the tier over the declared globs; the reconciler is what later holds a PR whose diff escapes them.
-- Close umbrella issues when children complete. Future work.
+- Close umbrella issues when children complete. The agent tick's `phase:ready` arm owns that (#3212).
 - Notify anyone. The printed summary (and the `phase:ready` label) is the surface; comments appear only for `--note` / `--skip-adr`.
