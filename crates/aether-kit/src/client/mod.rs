@@ -36,6 +36,7 @@ use crate::OCTIMETERS_PER_TILE;
 use crate::world::WorldPoint;
 
 const MAX_RENDER_GRID_EDGE: i64 = 32;
+const MAX_RENDER_ENTITIES: usize = 1_024;
 const GRID_INSET_OCTIMETERS: i32 = 8;
 const MARKER_HALF_EXTENT_OCTIMETERS: i32 = 72;
 const GRID_Y_METERS: f32 = 0.0;
@@ -133,6 +134,7 @@ enum SceneApply {
 enum SceneApplyError {
     SummaryTickMismatch { bundle_tick: u64, summary_tick: u64 },
     ImpossibleWatermark { tick: u64, superseded_through: u64 },
+    TooManyEntities { count: usize, maximum: usize },
     DuplicateEntity(EntityId),
     CellCenterOverflow { entity: EntityId, position: CellPosition },
 }
@@ -152,6 +154,12 @@ impl AuthoritativeScene {
             return Err(SceneApplyError::ImpossibleWatermark {
                 tick: bundle.tick,
                 superseded_through: bundle.superseded_through,
+            });
+        }
+        if bundle.summary.entities.len() > MAX_RENDER_ENTITIES {
+            return Err(SceneApplyError::TooManyEntities {
+                count: bundle.summary.entities.len(),
+                maximum: MAX_RENDER_ENTITIES,
             });
         }
 
@@ -558,6 +566,19 @@ mod tests {
         assert_eq!(scene, before);
         let overflowing = bundle(5, 5, vec![EntityState { entity_id: 3, cell_x: i32::MAX, cell_z: 0 }]);
         assert!(matches!(scene.apply(&overflowing), Err(SceneApplyError::CellCenterOverflow { .. })));
+        assert_eq!(scene, before);
+    }
+
+    #[test]
+    fn oversized_summary_does_not_replace_the_scene() {
+        let mut scene = seeded_scene();
+        let before = scene.clone();
+        let entities = vec![EntityState { entity_id: 2, cell_x: 1, cell_z: 1 }; MAX_RENDER_ENTITIES + 1];
+
+        assert_eq!(
+            scene.apply(&bundle(5, 5, entities)),
+            Err(SceneApplyError::TooManyEntities { count: MAX_RENDER_ENTITIES + 1, maximum: MAX_RENDER_ENTITIES })
+        );
         assert_eq!(scene, before);
     }
 
