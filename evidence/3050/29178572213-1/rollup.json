@@ -1,0 +1,98 @@
+{
+  "totals": {
+    "findings": 5,
+    "papercut": 1,
+    "missingPrimitive": 1,
+    "docGap": 2,
+    "blocker": 1,
+    "softHolds": 1
+  },
+  "succeeded": true,
+  "buildGreen": true,
+  "summary": "Built a downstream TestBench consumer (crates/dogfood-player, path-deps on the workspace) that boots an active loopback GameGatewayCapability via TestBenchBuilder::game_gateway, loads a real aether.kit.sim (fact_sink wired to the gateway), aether.kit.camera, and two named aether.kit.client instances with distinct PlayerClientConfig.spawn_cell. Both clients completed the recipient-free PlayerFrame handshake over real loopback TCP, spawned, and applied authoritative TickBundles; a held W injected via aether.input drove both North. Captured the client view (BenchOp::capture_with_mails with a per-client Render poke) — the PNG at /tmp/dogfood-player-view.png shows the grid under the orbit camera with two magenta player markers at the north edge, verified correct. buildGreen=true. NOTE: the MCP render-artifact ('leave engine alive') is BLOCKED — the gateway is only activatable in-process via the TestBench builder; both desktop and headless chassis mains hard-code GameGatewayConfig::default() (inert) with no argv/env override, so the active player slice cannot be stood up on a live spawn_substrate engine. engineId=null. (I worked in the MAIN tree because the assigned worktree was checked out at 5a80c45e, which predates the client module; the landed feature lives on main at 48c46963.)",
+  "artifact": null,
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "medium",
+        "where": "Wiring the gateway to the sim at boot (chicken-and-egg mailbox bootstrapping)",
+        "what": "The gateway must be given turn_sim_mailbox at BUILD time before the sim exists, while the sim must be loaded with SimConfig.fact_sink = the gateway's mailbox. The only way this composes is knowing that a loaded component's mailbox is name-derived: pre-compute it with resolve_embedded(SIM_NAME) and pass it as turn_sim_mailbox, and address the singleton gateway with GameGatewayCapability::resolve(0, ()). This mutual-address bootstrap is non-obvious and undocumented; a consumer who doesn't know resolve_embedded/resolve(0,()) is stuck.",
+        "suggested": "Document the sim<->gateway mutual wiring idiom, or provide a helper that wires a TurnSim mailbox and a gateway together by name."
+      }
+    ],
+    "missing-primitive": [
+      {
+        "category": "missing-primitive",
+        "severity": "low",
+        "where": "Introspecting component render output / authoritative state from TestBench",
+        "what": "There is no public way to observe a client's authoritative scene or its emitted world-pass DrawTriangles. count_observed only counts kind names; committed_overlay_snapshot covers only textured quads. This made it impossible to extract the client's rendered geometry for a live MCP replay without reimplementing the client's private render_triangles — which the task forbids.",
+        "suggested": "Add a committed_triangle_snapshot() (world-pass DrawTriangle analogue of committed_overlay_snapshot) so consumers can assert on / replay a component's rendered geometry."
+      }
+    ],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "high",
+        "where": "docs/guide/ coverage of the player session tier (gateway + sim + client) — booting it in TestBench",
+        "what": "The guide has ZERO coverage of GameGatewayCapability, aether.kit.sim, aether.kit.client, PlayerClientConfig, the PlayerFrame handshake, or how to compose them. grep of docs/guide finds only camera mentions. I had to reconstruct the entire composition (active GameGatewayConfig, resolve_embedded for turn_sim_mailbox, SimConfig.fact_sink=gateway, load export=aether.kit.sim/client, capture-with-Render-poke) from ADR-0144/0145 plus the INTERNAL integration test crates/aether-substrate-bundle/tests/player_gateway.rs. A fresh consumer cannot boot this slice from docs + public signatures alone.",
+        "suggested": "Add a docs/guide/recipes recipe 'Standing up the player slice in TestBench' covering the gateway<->sim mutual wiring, resolve_embedded, and the client load + handshake."
+      },
+      {
+        "category": "doc-gap",
+        "severity": "medium",
+        "where": "Getting a component's immediate-mode draws into a TestBench capture (BenchOp::capture / capture_with_mails)",
+        "what": "TestBench::capture()/capture_with_mails() are pub(crate); a consumer must go through BenchOp::capture()/capture_with_mails() in an execute sequence. Crucially, to get a component's DrawTriangle output into the captured frame you must send each component a Render mail as the capture's pre-bundle (draws are immediate-mode and cleared per frame). This 'poke each component with Render before capture' requirement is only discoverable by reading the internal test mover_walks_the_world.rs; BenchOp::capture's docs don't mention it. A first capture attempt yields an empty/grid-only frame with no explanation.",
+        "suggested": "Add a doc note on BenchOp::capture/capture_with_mails describing the immediate-mode redraw-poke (send Render/Tick to each drawing component in the pre bundle) and link the client render pattern."
+      }
+    ],
+    "blocker": [
+      {
+        "category": "blocker",
+        "severity": "high",
+        "where": "Activating GameGatewayCapability on a live chassis (desktop/headless) for MCP capture",
+        "what": "The gateway can only be made active by supplying listener_addr + turn_sim_mailbox, and the ONLY public way to do that is TestBenchBuilder::game_gateway. Both crates/aether-substrate-bundle/src/{desktop,headless}/chassis.rs hard-code GameGatewayConfig::default() (inert) and there is no argv/env override (GameGatewayConfig has no derive-Config path; turn_sim_mailbox is a raw MailboxId). So the active gateway+sim+client stack cannot be stood up over spawn_substrate, and the rendered player view cannot be captured over the MCP harness — the render-artifact 'leave engine alive' step is unreachable.",
+        "suggested": "Give the chassis a gateway-activation path: a derive-Config GameGatewayConfig (listener_addr/name/interval from env, turn_sim_mailbox resolved by component name) or boot-manifest wiring so a gateway+sim+client stack is spawnable/capturable over MCP."
+      }
+    ]
+  },
+  "softHolds": [
+    {
+      "kind": "blocker",
+      "where": "Activating GameGatewayCapability on a live chassis (desktop/headless) for MCP capture",
+      "detail": "The gateway can only be made active by supplying listener_addr + turn_sim_mailbox, and the ONLY public way to do that is TestBenchBuilder::game_gateway. Both crates/aether-substrate-bundle/src/{desktop,headless}/chassis.rs hard-code GameGatewayConfig::default() (inert) and there is no argv/env override (GameGatewayConfig has no derive-Config path; turn_sim_mailbox is a raw MailboxId). So the active gateway+sim+client stack cannot be stood up over spawn_substrate, and the rendered player view cannot be captured over the MCP harness — the render-artifact 'leave engine alive' step is unreachable."
+    }
+  ],
+  "task": {
+    "medium": "build-layer",
+    "prompt": "Build a downstream TestBench consumer using public surfaces only: boot an active loopback `GameGatewayCapability` with a real `aether_kit@aether.kit.sim`, load `aether_kit@aether.kit.camera` plus two named `aether_kit@aether.kit.client` instances with distinct `PlayerClientConfig.spawn_cell` values, let both complete recipient-free `PlayerFrame` handshakes over real TCP, inject a held WASD key through `aether.input`, and capture the rendered client view after the next authoritative bundle. Use the shipped client and canonical framing surface; do not call client internals, add a framing helper, assemble a prefix by hand, or treat a manual CI run as the validation artifact.",
+    "surfaceUnderTest": "`aether.kit.client` / `PlayerClientConfig`; the existing canonical `aether_codec::frame::encode_frame`; `Connect.consumer`; the recipient-free `PlayerFrame` handshake/intent/fact/beacon contract; atomic `TickBundle` replacement into named octimeter `WorldPoint`s; and `aether.render` composition under `aether.kit.camera`.",
+    "expectedArtifact": "the capture shows two distinguishable entity markers at the two server-authored cell centers on the lattice; after the next bundle, only the keyed client entity has moved by one cell while the other remains fixed."
+  },
+  "provenance": {
+    "driver": {
+      "model": "claude-sonnet-5"
+    },
+    "phases": {
+      "author": {
+        "model": "sonnet",
+        "effort": "medium",
+        "agentType": null,
+        "prompt": null
+      },
+      "attempt": {
+        "model": "opus",
+        "effort": "high",
+        "agentType": "general-purpose",
+        "prompt": "You are a FRESH consumer of the aether engine. You have NEVER seen the implementation of the surface you are about to use — discover it from the public docs as a real user would. Your job is to accomplish a task AND to honestly log every point of friction, because the friction log is the whole signal.\n\nYOUR TASK:\nBuild a downstream TestBench consumer using public surfaces only: boot an active loopback `GameGatewayCapability` with a real `aether_kit@aether.kit.sim`, load `aether_kit@aether.kit.camera` plus two named `aether_kit@aether.kit.client` instances with distinct `PlayerClientConfig.spawn_cell` values, let both complete recipient-free `PlayerFrame` handshakes over real TCP, inject a held WASD key through `aether.input`, and capture the rendered client view after the next authoritative bundle. Use the shipped client and canonical framing surface; do not call client internals, add a framing helper, assemble a prefix by hand, or treat a manual CI run as the validation artifact.\n\nSURFACE YOU MUST USE: `aether.kit.client` / `PlayerClientConfig`; the existing canonical `aether_codec::frame::encode_frame`; `Connect.consumer`; the recipient-free `PlayerFrame` handshake/intent/fact/beacon contract; atomic `TickBundle` replacement into named octimeter `WorldPoint`s; and `aether.render` composition under `aether.kit.camera`.\nMEDIUM: build-layer — Extend the engine: build a small new native capability / kind family / infra API in a scratch crate that path-depends on the workspace crates it must consume. Compile it; exercise it over MCP if it is loadable.\n\nTHE FRESHNESS RULE (load-bearing):\n- Work from docs/guide/ (start at docs/guide/SUMMARY.md) and public crate signatures ONLY.\n- If you cannot figure out how to use the surface from the public docs + signatures and have to read crate INTERNALS (private modules, test code, the impl bodies) to proceed — that is itself a DOC-GAP finding. Log it (category doc-gap, where = what you were trying to do, what = the doc that was missing), then proceed.\n- Do NOT let yourself be coached past a rough edge by reading the implementation. A real consumer cannot.\n\nTHE STALL RULE:\n- Do NOT heroically work around friction — that hides the papercut. When you hit a wall (an awkward composition, a surprising default, a missing primitive, a confusing error), LOG it as a finding and either route around it minimally or, if it truly blocks the task, log a blocker finding and STOP. A real consumer's stall IS the data.\n- Reach for a primitive the engine lacks? That is a missing-primitive finding (suggest what to build) — do not hand-roll it silently.\n\nBUILD: the scratch crate is yours to create anywhere under a temp/scratch dir. Build it (cargo build for build-layer; the wasm32 target for an author component). Report buildGreen = whether it compiled (and any tests passed).\n\nRENDER ARTIFACT: this task renders. After you produce the visual state, spawn_substrate / drive it so the expected frame is showing, and LEAVE THE ENGINE ALIVE — report its engine_id so a judge can capture it. Do NOT terminate that engine.\n\nTHE IMMEDIATE-MODE RULE (load-bearing — the judge grades a frame it captures itself, later):\n- The render surface is immediate mode. draw_triangle, draw_textured_quads, and the aether.text.draw* family accumulate for ONE frame and clear. Mailing them once does not leave a lasting picture: a bare capture taken after the fact comes back empty, and the judge would rule your correct render 'wrong'.\n- So report replayMails: the exact mail bundle a fresh capture must dispatch to put the expected frame back on screen — each entry { recipient_name, kind_name, params } exactly as you sent it. The judge passes it as capture_frame's own `mails`, which fire before readback.\n- Report replayMails = [] ONLY when the picture genuinely redraws itself every tick (a loaded component that re-sends its draws on Tick). If you produced the visual with one-shot mail, an empty bundle means a blank frame and a false verdict.\n\nReturn succeeded, summary, engineId, replayMails, buildGreen, and findings (every friction point — category, severity, where, what, suggested). An empty findings array means the surface was friction-free; be honest, not generous."
+      },
+      "judge": {
+        "model": "opus",
+        "effort": "high",
+        "agentType": "general-purpose",
+        "prompt": null
+      }
+    }
+  },
+  "tokensPerTool": []
+}

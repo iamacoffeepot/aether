@@ -1,0 +1,20 @@
+[package]
+name = "dogfood-player"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "dogfood-player"
+path = "src/main.rs"
+
+[dependencies]
+aether-substrate-bundle = { path = "../aether-substrate-bundle" }
+aether-capabilities = { path = "../aether-capabilities" }
+aether-kit = { path = "../aether-kit" }
+aether-kinds = { path = "../aether-kinds" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-actor = { path = "../aether-actor" }
+
+[lints]
+workspace = true
