@@ -41,6 +41,12 @@ name: Agent tick
 #   - AGENT_WAVE_WIDTH  — the N-cap (default 2). Free slots = width minus the
 #                         live non-land count.
 #   - AGENT_MIN_WAVE_GAP_MINUTES — minimum gap since the last wave (default 0).
+#   - AGENT_SCOPE_TYPES — comma-separated type:* values the fleet will scope
+#                         (default feat,fix,chore,docs,perf,refactor,flake — the
+#                         closed set). An issue with no type:* label, or a type
+#                         outside this list, is left alone; so is anything tagged
+#                         `alert`. This is the dial for WHICH KINDS of work the
+#                         fleet takes on.
 #   - AGENT_DAILY_WAVE_BUDGET    — daily dispatch cap (0/unset = unlimited).
 #   - AGENT_NUDGE_DAYS  — stale-awaiting-answer nudge threshold in days
 #                         (0/unset = nudge disabled).
@@ -225,6 +231,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           WAVE_WIDTH: ${{ vars.AGENT_WAVE_WIDTH }}
+          SCOPE_TYPES: ${{ vars.AGENT_SCOPE_TYPES }}
           MIN_WAVE_GAP_MINUTES: ${{ vars.AGENT_MIN_WAVE_GAP_MINUTES }}
           DAILY_WAVE_BUDGET: ${{ vars.AGENT_DAILY_WAVE_BUDGET }}
         run: |
@@ -302,13 +309,44 @@ jobs:
 
           # Board scan → advanceable snapshot. Open non-PR issues with labels;
           # `has("pull_request")|not` drops PRs (they share the issues endpoint).
+          # `type` and `alert` back the scope-eligibility gate below.
           gh api "repos/${REPO}/issues?state=open&per_page=100" --paginate \
             --jq '.[] | select(has("pull_request")|not)
               | [ .number,
                   ([.labels[].name | select(startswith("phase:"))] | .[0] // "none"),
                   (if ([.labels[].name] | index("agent:awaiting-answer")) then "await" else "-" end),
-                  (if ([.labels[].name] | index("agent:dont-touch")) then "dt" else "-" end) ]
+                  (if ([.labels[].name] | index("agent:dont-touch")) then "dt" else "-" end),
+                  ([.labels[].name | select(startswith("type:")) | ltrimstr("type:")] | .[0] // "-"),
+                  (if ([.labels[].name] | index("alert")) then "alert" else "-" end) ]
               | @tsv' > /tmp/board.tsv
+
+          # Scope-eligibility. Backlog means "no phase:* label", which is also true
+          # of every machine-filed alert that lands in the repo — and the tick used
+          # to scope those. The context-budget canary and the nightly fuzzer both
+          # file issues with NO labels at all, so the fleet had a standing feed of
+          # alerts it would walk through Define/Design/Plan, each costing a full
+          # Claude run to discover it should not have (#3179 was scoped for seven
+          # minutes before being cancelled by hand).
+          #
+          # Filtering by AUTHOR would be wrong: the fleet's own App files real work
+          # — a scoping agent split the fat #3145 into #3162 and #3163, and those
+          # must be scoped. The signal that separates them is `type:*`. Every real
+          # work item carries one (/sketch stamps it from the conventional-commit
+          # title, and split children inherit it); an alert filed outside the
+          # pipeline carries none.
+          #
+          # AGENT_SCOPE_TYPES is the owner's dial for WHICH KINDS of work the fleet
+          # takes on, alongside the other governors. An issue whose type is not in
+          # the list is left alone, and so is anything tagged `alert`. Fail-safe: an
+          # issue the tick cannot classify is NOT scoped — silence costs a human one
+          # label, the opposite costs a Claude run and a design nobody asked for.
+          scope_types="${SCOPE_TYPES:-feat,fix,chore,docs,perf,refactor,flake}"
+          scopeable() {
+            case ",${scope_types}," in
+              *",$1,"*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
 
           # Resolve the open PR that closes a held issue — land's ref is that PR,
           # not the issue. includeClosedPrs:false already excludes merged/closed.
@@ -368,11 +406,25 @@ jobs:
           land_items=""
           resume_items=""
           work_items=""
-          while IFS=$'\t' read -r num phase await dt; do
+          while IFS=$'	' read -r num phase await dt itype alert; do
             [ -n "$num" ] || continue
             if [ "$dt" = "dt" ]; then summary "- skip #${num}: agent:dont-touch"; continue; fi
+            if [ "$alert" = "alert" ]; then summary "- skip #${num}: alert — machine-filed, not a work item"; continue; fi
             case "$phase" in
-              none|phase:define|phase:design) task="scope"; ref="$num" ;;
+              none|phase:define|phase:design)
+                # The type gate applies to the whole scope arm, not just Backlog: an
+                # issue already at define/design got there through the pipeline and
+                # will carry a type:*, so a missing one still means "not ours".
+                if [ "$itype" = "-" ]; then
+                  summary "- skip #${num}: no type:* label — not a pipeline work item"
+                  continue
+                fi
+                if ! scopeable "$itype"; then
+                  summary "- skip #${num}: type:${itype} not in AGENT_SCOPE_TYPES (${scope_types})"
+                  continue
+                fi
+                task="scope"; ref="$num"
+                ;;
               phase:plan)
                 tier="$(approval_tier "$num")"
                 case "$tier" in
