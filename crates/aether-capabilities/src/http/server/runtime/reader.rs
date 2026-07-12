@@ -295,7 +295,10 @@ fn resolve_at_reader(
                 };
                 Some(found)
             }
-            None => registry.lookup(&shared.handler_mailbox).map(|handler| (handler, <HttpServerRequest as Kind>::ID)),
+            None => shared
+                .handler_mailbox
+                .filter(|&id| validate_route_mailbox(registry, id).is_ok())
+                .map(|id| (id, <HttpServerRequest as Kind>::ID)),
         }
     };
     match picked {

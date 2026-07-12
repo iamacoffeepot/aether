@@ -277,7 +277,7 @@ fn config_layer_defaults_match_the_named_consts() {
     let default = HttpServerConfig::default();
     assert_eq!(layer.bind_addr, DEFAULT_BIND_ADDR);
     assert_eq!(layer.bind_addr, default.bind_addr);
-    assert_eq!(layer.handler_mailbox, "");
+    assert_eq!(layer.handler_mailbox, None);
     assert_eq!(layer.max_request_bytes, DEFAULT_MAX_REQUEST_BYTES);
     assert_eq!(layer.max_header_bytes, DEFAULT_MAX_HEADER_BYTES);
     assert_eq!(layer.request_timeout_millis, DEFAULT_REQUEST_TIMEOUT_MILLIS);

@@ -11,10 +11,11 @@ use super::{
 /// Init config for [`HttpServerCapability`](super::HttpServerCapability) (ADR-0108).
 ///
 /// `bind_addr` is the address to bind (e.g. `"127.0.0.1:8080"`,
-/// `"127.0.0.1:0"` to let the OS pick a port). `handler_mailbox` names the
-/// single component mailbox every request is dispatched to — resolved by
-/// name at dispatch time (late binding), so the handler component can load
-/// or reload independently of the server. `max_request_bytes` caps the
+/// `"127.0.0.1:0"` to let the OS pick a port). `handler_mailbox` is the
+/// single fallback mailbox every unrouted request is dispatched to —
+/// resolved once at config time to a `MailboxId`, its liveness checked per
+/// request (late binding), so the handler component can load or reload
+/// independently of the server. `max_request_bytes` caps the
 /// request body, `max_header_bytes` caps the request line + headers,
 /// `request_timeout_millis` bounds both the per-read slow-loris timeout and
 /// the handler response deadline, and `max_connections` caps the live
@@ -40,11 +41,16 @@ pub struct HttpServerConfig {
     /// the default — the derive treats an empty `String` as unset.
     #[cfg_attr(feature = "runtime", config(default = "127.0.0.1:8080"))]
     pub bind_addr: String,
-    /// The single handler mailbox every request is dispatched to (e.g.
-    /// `"aether.component/aether.embedded:web"`). Empty = every request is
-    /// answered `503` (no handler resolves).
-    #[cfg_attr(feature = "runtime", config(default = ""))]
-    pub handler_mailbox: String,
+    /// The single fallback mailbox every request with no route-table match
+    /// is dispatched to, resolved once at config time from its `/`-rendered
+    /// lineage path (e.g. `"aether.component/aether.embedded:web"`) via the
+    /// same ADR-0099 fold `Registry::lookup` uses. `None` (an empty
+    /// `AETHER_HTTP_SERVER_HANDLER_MAILBOX`) = every unrouted request is
+    /// answered `503` (no fallback handler). Liveness is still checked per
+    /// request by id, so the handler component can load or reload
+    /// independently of the server.
+    #[cfg_attr(feature = "runtime", config(parse = parse_handler_mailbox))]
+    pub handler_mailbox: Option<aether_data::MailboxId>,
     /// Cap on the request body in bytes ([`DEFAULT_MAX_REQUEST_BYTES`]);
     /// an announced `Content-Length` past this is answered `413`.
     #[cfg_attr(feature = "runtime", config(default = 1_048_576))]
@@ -113,7 +119,7 @@ impl Default for HttpServerConfig {
         Self {
             enabled: false,
             bind_addr: DEFAULT_BIND_ADDR.to_string(),
-            handler_mailbox: String::new(),
+            handler_mailbox: None,
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
             request_timeout_millis: DEFAULT_REQUEST_TIMEOUT_MILLIS,
@@ -124,5 +130,54 @@ impl Default for HttpServerConfig {
             dispatch_shards: 0,
             websocket_idle_timeout_millis: DEFAULT_WS_IDLE_TIMEOUT_MILLIS,
         }
+    }
+}
+
+/// Parse the `handler_mailbox` override. An empty string errors so confique
+/// treats it as unset (mirroring `parse_dir` in the fs cap — `Err` + empty →
+/// `None`); any non-empty value is a `/`-rendered lineage path folded to its
+/// [`MailboxId`](aether_data::MailboxId) by the same ADR-0099
+/// [`mailbox_id_from_path`](aether_data::mailbox_id_from_path) fold
+/// `Registry::lookup` uses internally, so a nested-component path and a flat
+/// root name resolve to exactly the id they do at dispatch today.
+#[cfg(feature = "runtime")]
+fn parse_handler_mailbox(s: &str) -> Result<aether_data::MailboxId, EmptyHandlerMailbox> {
+    if s.is_empty() {
+        Err(EmptyHandlerMailbox)
+    } else {
+        Ok(aether_data::mailbox_id_from_path(s))
+    }
+}
+
+/// Sentinel error: an empty `AETHER_HTTP_SERVER_HANDLER_MAILBOX` value,
+/// treated as unset by confique's parse path (`Err` + empty → `None`).
+#[cfg(feature = "runtime")]
+#[derive(Debug)]
+struct EmptyHandlerMailbox;
+
+#[cfg(feature = "runtime")]
+impl std::fmt::Display for EmptyHandlerMailbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("empty handler-mailbox override")
+    }
+}
+
+#[cfg(feature = "runtime")]
+impl std::error::Error for EmptyHandlerMailbox {}
+
+// ADR-0090: the parser is pure — it exercises the empty-is-unset guard and
+// the non-empty lineage fold without touching process env. Native-only
+// because `parse_handler_mailbox` only exists under the `runtime` feature.
+#[cfg(all(test, feature = "runtime"))]
+mod tests {
+    use super::parse_handler_mailbox;
+
+    #[test]
+    fn parse_handler_mailbox_treats_empty_as_unset() {
+        assert!(parse_handler_mailbox("").is_err(), "empty → unset (Err → None)");
+        assert_eq!(
+            parse_handler_mailbox("aether.component/aether.embedded:web").expect("non-empty folds to an id"),
+            aether_data::mailbox_id_from_path("aether.component/aether.embedded:web")
+        );
     }
 }

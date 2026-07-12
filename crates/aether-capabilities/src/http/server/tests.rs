@@ -662,7 +662,7 @@ mod test_handlers {
 fn config_for(handler: &str, max_request_bytes: usize) -> HttpServerConfig {
     HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: handler.to_string(),
+        handler_mailbox: Some(aether_data::mailbox_id_from_path(handler)),
         max_request_bytes,
         request_timeout_millis: 5_000,
         ..HttpServerConfig::default()
@@ -688,7 +688,7 @@ where
 fn boot_single_shard_fixed_body() -> PassiveChassis<TestChassis> {
     boot_chassis::<FixedBodyHttpHandler>(HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: <FixedBodyHttpHandler as Addressable>::NAMESPACE.to_string(),
+        handler_mailbox: Some(aether_data::mailbox_id_from_path(<FixedBodyHttpHandler as Addressable>::NAMESPACE)),
         request_timeout_millis: 5_000,
         dispatch_shards: 1,
         ..HttpServerConfig::default()
@@ -728,7 +728,7 @@ where
 fn stream_config_for(handler: &str, window: u32) -> HttpServerConfig {
     HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: handler.to_string(),
+        handler_mailbox: Some(aether_data::mailbox_id_from_path(handler)),
         request_timeout_millis: 5_000,
         response_stream_window: window,
         ..HttpServerConfig::default()
@@ -1045,7 +1045,7 @@ fn over_capacity_connection_is_503() {
     let max_connections = 2;
     let chassis = boot_chassis::<EchoHttpHandler>(HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
+        handler_mailbox: Some(aether_data::mailbox_id_from_path(<EchoHttpHandler as Addressable>::NAMESPACE)),
         request_timeout_millis: 5_000,
         max_connections,
         dispatch_shards: 2,
@@ -1091,7 +1091,7 @@ fn over_capacity_connection_is_503() {
 fn connections_distribute_across_shards() {
     let chassis = boot_chassis::<EchoHttpHandler>(HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
+        handler_mailbox: Some(aether_data::mailbox_id_from_path(<EchoHttpHandler as Addressable>::NAMESPACE)),
         request_timeout_millis: 5_000,
         dispatch_shards: 2,
         ..HttpServerConfig::default()
@@ -1178,7 +1178,7 @@ fn over_window_flood_tears_the_stream_down() {
 fn request_stream_config_for(handler: &str, window: u32) -> HttpServerConfig {
     HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: handler.to_string(),
+        handler_mailbox: Some(aether_data::mailbox_id_from_path(handler)),
         request_timeout_millis: 5_000,
         request_stream_window: window,
         ..HttpServerConfig::default()
@@ -1501,7 +1501,7 @@ fn macro_router_shared_opt_in_joins_a_member_set() {
 fn stalled_peer_does_not_block_sibling_connections() {
     let chassis = boot_chassis::<EchoHttpHandler>(HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
+        handler_mailbox: Some(aether_data::mailbox_id_from_path(<EchoHttpHandler as Addressable>::NAMESPACE)),
         // Short: the stalled write parks within milliseconds, and
         // teardown waits out at most one response deadline.
         request_timeout_millis: 2_000,
@@ -1610,7 +1610,7 @@ fn shared_route_spreads_across_members() {
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<HttpServerCapability>(HttpServerConfig {
             bind_addr: "127.0.0.1:0".to_string(),
-            handler_mailbox: <FixedBodyHttpHandler as Addressable>::NAMESPACE.to_string(),
+            handler_mailbox: Some(aether_data::mailbox_id_from_path(<FixedBodyHttpHandler as Addressable>::NAMESPACE)),
             request_timeout_millis: 5_000,
             dispatch_shards: 1,
             ..HttpServerConfig::default()
@@ -1691,7 +1691,7 @@ fn self_unregister_releases_route() {
 fn keep_alive_config_for(handler: &str, keep_alive_timeout_millis: u64) -> HttpServerConfig {
     HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: handler.to_string(),
+        handler_mailbox: Some(aether_data::mailbox_id_from_path(handler)),
         request_timeout_millis: 5_000,
         keep_alive_timeout_millis,
         ..HttpServerConfig::default()

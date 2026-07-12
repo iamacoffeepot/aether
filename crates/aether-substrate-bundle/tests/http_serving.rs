@@ -248,7 +248,7 @@ mod tests {
         let server_config = HttpServerConfig {
             enabled: true,
             bind_addr: "127.0.0.1:0".to_string(),
-            handler_mailbox: HANDLER_MAILBOX.to_string(),
+            handler_mailbox: Some(aether_data::mailbox_id_from_path(HANDLER_MAILBOX)),
             max_request_bytes: 65_536,
             max_header_bytes: 8_192,
             request_timeout_millis: 10_000,
@@ -350,7 +350,7 @@ mod tests {
         let server_config = HttpServerConfig {
             enabled: true,
             bind_addr: "127.0.0.1:0".to_string(),
-            handler_mailbox: STREAM_HANDLER_MAILBOX.to_string(),
+            handler_mailbox: Some(aether_data::mailbox_id_from_path(STREAM_HANDLER_MAILBOX)),
             max_request_bytes: 65_536,
             max_header_bytes: 8_192,
             request_timeout_millis: 10_000,
@@ -454,7 +454,9 @@ mod tests {
             // Deliberately unresolvable: the streaming handler is reachable
             // only through the route it registers, so the default-handler
             // dispatch cannot mask the bug (issue 2600 negative control).
-            handler_mailbox: "aether.component/aether.embedded:test.web_absent_default".to_string(),
+            handler_mailbox: Some(aether_data::mailbox_id_from_path(
+                "aether.component/aether.embedded:test.web_absent_default",
+            )),
             max_request_bytes: 65_536,
             max_header_bytes: 8_192,
             request_timeout_millis: 10_000,
@@ -568,7 +570,7 @@ mod tests {
         let server_config = HttpServerConfig {
             enabled: true,
             bind_addr: "127.0.0.1:0".to_string(),
-            handler_mailbox: WS_HANDLER_MAILBOX.to_string(),
+            handler_mailbox: Some(aether_data::mailbox_id_from_path(WS_HANDLER_MAILBOX)),
             max_request_bytes: 65_536,
             max_header_bytes: 8_192,
             request_timeout_millis: 10_000,
@@ -785,7 +787,7 @@ mod tests {
         let server_config = HttpServerConfig {
             enabled: true,
             bind_addr: "127.0.0.1:0".to_string(),
-            handler_mailbox: HANDLER_MAILBOX.to_string(),
+            handler_mailbox: Some(aether_data::mailbox_id_from_path(HANDLER_MAILBOX)),
             max_request_bytes: 65_536,
             max_header_bytes: 8_192,
             request_timeout_millis: 10_000,

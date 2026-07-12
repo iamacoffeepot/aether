@@ -21,7 +21,7 @@ pub type SharedRoutes = Arc<RwLock<Vec<Route>>>;
 /// on the reader thread rather than the shard).
 pub struct ReaderShared {
     pub routes: SharedRoutes,
-    pub handler_mailbox: Arc<str>,
+    pub handler_mailbox: Option<MailboxId>,
     pub peer: String,
 }
 
@@ -42,7 +42,7 @@ pub struct HttpShardSeed {
     pub wake_dirty: Arc<AtomicBool>,
     pub routes: SharedRoutes,
     pub live_connections: Arc<AtomicUsize>,
-    pub handler_mailbox: String,
+    pub handler_mailbox: Option<MailboxId>,
     pub max_request_bytes: usize,
     pub max_header_bytes: usize,
     pub request_timeout: Duration,

@@ -63,7 +63,7 @@ pub struct HttpSupervisorState {
 /// state; the addressing identity is the distinct ZST
 /// [`HttpDispatchShard`](crate::http::server::shard::HttpDispatchShard).
 pub struct HttpShardState {
-    pub handler_mailbox: String,
+    pub handler_mailbox: Option<MailboxId>,
     /// The supervisor's shared route table (ADR-0130/0135); this shard only
     /// reads it, at request-dispatch time.
     pub routes: SharedRoutes,
@@ -162,7 +162,7 @@ impl HttpSupervisorState {
                 wake_dirty: Arc::clone(&wake_dirty),
                 routes: Arc::clone(&self.routes),
                 live_connections: Arc::clone(&self.live_connections),
-                handler_mailbox: self.config.handler_mailbox.clone(),
+                handler_mailbox: self.config.handler_mailbox,
                 max_request_bytes: self.config.max_request_bytes,
                 max_header_bytes: self.config.max_header_bytes,
                 request_timeout: Duration::from_millis(self.config.request_timeout_millis),
@@ -374,7 +374,7 @@ impl HttpShardState {
         };
         let shared = ReaderShared {
             routes: Arc::clone(&self.routes),
-            handler_mailbox: Arc::from(self.handler_mailbox.as_str()),
+            handler_mailbox: self.handler_mailbox,
             peer: peer.to_string(),
         };
 
