@@ -56,9 +56,9 @@ The ephemeral runner is single-purpose and thrown away after the job, so isolati
 
 The checkout copy has its `.claude` interactive-session hooks stripped (the `jq 'del(.hooks)' .claude/settings.json` step the review and dogfood workflows already run) because the SessionStart worktree-rebind hook is actively harmful in CI — it would rebind the session to a worktree that does not exist here.
 
-## bot-identity-assert
+## commit-identity-assert
 
-Before any commit or merge, assert the `aether-agent` bot git identity (`user.name` / `user.email`) for the checkout. Never author under the owner's identity. This reinforces the standing rule that the owner's real name and personal email never appear in any commit the agent produces.
+Before any commit or merge, assert the owner's public git identity — `iamacoffeepot` / `me@iamateapot.dev` — for the checkout (#3215): the fleet works in the owner's name, so its commits author as the owner. This narrows, not weakens, the standing privacy rule: the owner's real name and personal email never appear in any commit the agent produces — the public identity above is the only sanctioned author.
 
 ## session-to-S3-sync
 
