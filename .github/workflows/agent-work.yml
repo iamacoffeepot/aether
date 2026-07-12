@@ -327,25 +327,24 @@ jobs:
           EOF
           gh api -X POST "repos/${REPO}/issues/${REF}/comments" -F body=@/tmp/start-comment.md
 
-      # Assert the aether-agent bot git identity before any commit/merge. scope and
+      # Assert the commit git identity before any commit/merge. scope and
       # approve (single and sweep) write no commits (approve reads git for its
-      # freshness gate and writes only labels), so this is gated off for them. The App's canonical
-      # commit identity is <bot-user-id>+<app-slug>[bot]@users.noreply.github.com
-      # so GitHub attributes the commit to the App, never to the owner.
-      - name: Assert the bot git identity
+      # freshness gate and writes only labels), so this is gated off for them.
+      # Commits author as the owner's PUBLIC identity (#3215) — the fleet works in
+      # the owner's name, and the push still rides the App installation token, so
+      # push-wake semantics and branch protection are unchanged. The owner's real
+      # name and personal email never appear; the public identity below is the
+      # only sanctioned author.
+      - name: Assert the commit git identity
         if: steps.guard.outputs.proceed == 'true' && inputs.task != 'scope' && inputs.task != 'approve' && inputs.task != 'approve-sweep'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
         run: |
           set -euo pipefail
-          bot_user_id="$(gh api "/users/${APP_SLUG}[bot]" --jq '.id')"
-          git config --global user.name "${APP_SLUG}[bot]"
-          git config --global user.email "${bot_user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git config --global user.name "iamacoffeepot"
+          git config --global user.email "me@iamateapot.dev"
           name="$(git config --global user.name || true)"
           email="$(git config --global user.email || true)"
           if [ -z "$name" ] || [ -z "$email" ]; then
-            echo "bot git identity is unset — refusing to proceed to a commit."
+            echo "commit git identity is unset — refusing to proceed to a commit."
             exit 1
           fi
           echo "committing as ${name} <${email}>"
@@ -483,9 +482,9 @@ jobs:
           re-entrancy guard first, then follow the wrapper's Overrides table exactly —
           ask-and-park where the original would ask a human, end-turn-not-wait where
           the original would block on a human, checkout-as-isolation instead of a
-          worktree, and the bot git identity (already configured) for any commit or
-          merge. Never sleep-poll on a human and never author under the owner's
-          identity. When you reach the wrapper's terminal state (parked, or the flow's
+          worktree, and the owner's public git identity (already configured) for any
+          commit or merge. Never sleep-poll on a human and never author under the
+          owner's real name or personal email. When you reach the wrapper's terminal state (parked, or the flow's
           end-turn point), end your turn." \
             --dangerously-skip-permissions \
             --model "$MODEL" \
