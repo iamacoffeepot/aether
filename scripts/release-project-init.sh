@@ -2,7 +2,8 @@
 # release-project-init.sh — bootstrap the label vocabulary for aether releases.
 #
 #   release-project-init.sh <version> [--owner <owner>]
-#       Ensure the phase / bounce-to / size / model labels exist on the repo.
+#       Ensure the phase / bounce-to / approval / size / model labels exist on
+#       the repo.
 #       Idempotent — a re-run only fills gaps.
 #
 # Issue phase is carried entirely by phase:* labels: Backlog and Done are
@@ -53,6 +54,14 @@ ensure_label "phase:stalled"   e99695 "env/tooling halt"
 ensure_label "bounce-to:define" c5def5 "/scope resumes from Define"
 ensure_label "bounce-to:design" c5def5 "/scope resumes from Design"
 ensure_label "bounce-to:plan"   c5def5 "/scope resumes from Plan"
+
+# Declared-surface enforcement, carried on the PR (not the issue). The
+# reconciler sets approval:surface-exceeded when a PR's diff escapes its issue's
+# ## Declared surface and mirrors it into the required `Approval gate` commit
+# status; approval:surface-ok is the owner's waiver, honoured only when the
+# owner applied it (timeline actor check), mirroring review:skip.
+ensure_label "approval:surface-exceeded" d93f0b "PR diff escapes the issue's declared surface — re-approval owed"
+ensure_label "approval:surface-ok"       0e8a16 "owner waiver: declared-surface overreach accepted"
 
 # Size (weight) — XL marks a fat issue for /sweep fat (ADR-0110).
 ensure_label "size:s"  bfdadc "single file, single concept"

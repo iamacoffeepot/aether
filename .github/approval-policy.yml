@@ -1,0 +1,45 @@
+# Approval policy — the tiered guard the Plan->Ready gate (/approve) consults to
+# decide whether an issue may auto-advance, needs an LLM judge, or stops at the
+# owner's desk. It maps path globs to an approval tier over an issue's declared
+# surface (the `## Declared surface` glob block /scope emits at Plan).
+#
+# Resolution is most-restrictive-match-wins (human > judge > auto): a path's
+# tier is the most restrictive rule that matches it, and a path matched by no
+# rule takes `default` below. The default is `human` — fail-closed — so a brand
+# new, unpoliced surface stops at the owner until a rule relaxes it. An issue's
+# tier is the most restrictive tier over every path in its declared surface;
+# order in the `rules` list does not matter.
+#
+# Globs use gitignore-style ** semantics (gitwildmatch): ** spans path segments,
+# * stays within one segment, ? is one non-slash character — the syntax
+# .gitignore already trains readers to expect. Both consumers evaluate these
+# same globs: the no-Claude reconciler over a stock matcher, and /approve as a
+# Claude reader.
+#
+# Relaxing a tier is a one-line, owner-signed diff to this file, so the file's
+# git history is the delegation ladder's audit trail. `.github/approval-policy.yml`
+# is itself a `human`-tier glob below, so a relaxation can never auto-approve
+# its own relaxation.
+#
+# The ADR hard gate lives ABOVE this file, unconditionally, in /approve's skill
+# text: an ADR-bearing issue routes to `human` before any policy lookup,
+# permanently. The `docs/adr/**` entry below is belt-and-suspenders, not the
+# source of that rule.
+
+default: human
+
+rules:
+  - glob: "docs/guide/**"
+    tier: auto
+  - glob: "crates/aether-kit/**"
+    tier: judge
+  - glob: "crates/aether-data/**"
+    tier: human
+  - glob: ".github/workflows/**"
+    tier: human
+  - glob: ".github/approval-policy.yml"
+    tier: human
+  - glob: ".claude/**"
+    tier: human
+  - glob: "docs/adr/**"
+    tier: human
