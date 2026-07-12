@@ -153,7 +153,14 @@ sweep per wave that walks every such issue through the full per-issue gates —
 approval is read-mostly, so the whole queue shares one runner. The headless
 gate resolves each tier again before writing Ready. `judge`, `human`,
 ADR-bearing, missing-surface, and unresolved-policy outcomes remain at Plan for
-their reader.
+their reader — and the sweep surfaces them: when such issues exist with no open
+digest covering them, it files one `agent:digest` issue listing the batch
+(issue, tier, judge verdict, gate status), and the owner's single reply — on
+GitHub or straight from the notification email — approves any of the listed
+non-ADR issues in one stroke. The reply waives who approves, never the scope
+gates, and ADR-bearing rows are listed for visibility only. An open digest is
+the awaiting-verdict state; the verdict reply (or a "dismiss") closes it, and
+the next sweep with uncovered candidates files the next one.
 
 The owner can pre-authorize one non-ADR issue at any earlier phase with
 `approval:pre-approved`. The approval gate verifies the actor of the latest
