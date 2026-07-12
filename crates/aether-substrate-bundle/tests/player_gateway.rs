@@ -13,7 +13,7 @@ use aether_capabilities::component::resolve_embedded;
 use aether_capabilities::game::{GameGatewayCapability, PlayerFrame, PlayerSessionActor, WIRE_VERSION};
 use aether_capabilities::tcp::{ListListeners, ListListenersResult};
 use aether_codec::frame::{read_frame, write_frame};
-use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
+use aether_data::{Kind, MailboxId};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::{GridBounds, MoveDirection, MoveIntent, Poll, SimConfig, Spawn, TickBundle};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
@@ -51,13 +51,7 @@ fn gateway_listener_port(bench: &mut TestBench) -> u16 {
 }
 
 fn expected_player_session_mailbox(session_name: &str) -> MailboxId {
-    MailboxId(with_tag(
-        Tag::Mailbox,
-        fold_lineage(
-            GameGatewayCapability::resolve(0, ()).0,
-            ActorId::instanced(PlayerSessionActor::NAMESPACE, session_name),
-        ),
-    ))
+    PlayerSessionActor::resolve(GameGatewayCapability::resolve(0, ()).0, session_name)
 }
 
 fn load_turn_sim(bench: &mut TestBench, wasm: Vec<u8>) {
