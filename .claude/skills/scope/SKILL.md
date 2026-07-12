@@ -232,7 +232,7 @@ The agent must be careful here — the body is the canonical scope artifact and 
 
 ## GitHub API budget
 
-This section is the canonical GitHub API-budget reference for the whole pipeline — the other skills route their `gh` calls by it. GitHub meters REST and GraphQL on separate 5,000-point/hr budgets per user, and a batch run drains the GraphQL pool while the REST pool sits idle. The convenience `gh` subcommands (`gh issue create`, `gh issue edit`, `gh pr create`, `gh pr merge`, `gh pr list`, `gh pr checks`) are all GraphQL-backed, so every op with a REST endpoint goes through its `gh api` form. The pipeline runs almost entirely on REST: phase state is a `phase:*` label (the [Phase label reconcile](#phase-label-reconcile) swap), and the size / model / type metadata are labels too, so there is no project board to write. The lone GraphQL-only op left is the PR un-draft (`markPullRequestReadyForReview`), once per PR at land time. `{owner}` is the hardcoded `iamacoffeepot`; the repo is always `aether`.
+This section is the canonical GitHub API-budget reference for the whole pipeline — the other skills route their `gh` calls by it. GitHub meters REST and GraphQL on separate 5,000-point/hr budgets per user, and a batch run drains the GraphQL pool while the REST pool sits idle. The convenience `gh` subcommands (`gh issue create`, `gh issue edit`, `gh pr create`, `gh pr merge`, `gh pr list`, `gh pr checks`) are all GraphQL-backed, so every op with a REST endpoint goes through its `gh api` form. The pipeline runs almost entirely on REST: phase state is a `phase:*` label (the [Phase label reconcile](#phase-label-reconcile) swap), and the size / model / type metadata are labels too, so there is no project board to write. The GraphQL-only ops left are the PR un-draft (`markPullRequestReadyForReview`, once per PR at land time) and `/findings`'s review-thread query and resolve (`reviewThreads` / `resolveReviewThread`) — the [GraphQL-only list](#rest-vs-graphql-routing) below enumerates them; everything else rides REST. `{owner}` is the hardcoded `iamacoffeepot`; the repo is always `aether`.
 
 ### REST-vs-GraphQL routing
 
@@ -256,7 +256,11 @@ Every op with a REST endpoint rides REST (`gh api <path>`); only the one PR-draf
 
 **GraphQL-only — no REST equivalent:**
 
-- Un-draft a PR — `markPullRequestReadyForReview` (the REST `pulls` PATCH cannot clear `draft`). The sole GraphQL op the pipeline still issues, in `/land`; everything else, phase state included, is REST.
+- Un-draft a PR — `markPullRequestReadyForReview` (the REST `pulls` PATCH cannot clear `draft`), in `/land`.
+- Enumerate a PR's review threads — `reviewThreads` (the thread node id and its first comment's `databaseId` have no REST projection), in `/findings`.
+- Resolve a review thread — `resolveReviewThread` (no REST verb marks a thread resolved), in `/findings`.
+
+These three are the pipeline's GraphQL-only ops; everything else, phase state included, is REST.
 
 ## Phase label reconcile
 
@@ -298,6 +302,6 @@ gh api "repos/iamacoffeepot/aether/issues/<n>/labels" --jq '.[].name | select(st
 
 ## Failure modes to handle gracefully
 
-- **Issue already closed (Done) or carrying `phase:executing`**: refuse with *"Issue is past Plan — use `/bounce` to regress or work in a fresh issue."*
+- **Issue already closed (Done) or carrying a post-Plan phase label** (`phase:ready`, or any reconciler-computed state — `phase:building` / `phase:qa` / `phase:findings` / `phase:held`): refuse with *"Issue is past Plan — use `/bounce` to regress or work in a fresh issue."*
 - **ADR drafting failure**: keep the issue at Design, explain in the run's output, don't advance to Plan.
 - **Body-edit collision (user edited body mid-run)**: re-read, re-merge, surface any conflicts in managed sections in the run's output.

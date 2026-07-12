@@ -5,7 +5,7 @@ description: Plan → Ready gate. Validates that an issue's scope artifacts are 
 
 # /approve — Plan → Ready gate
 
-The primary human review point of the release flow. The user invokes `/approve <issue>` after reading the scope artifacts that `/scope` produced. The skill validates the gates and flips the issue to Ready; from there `/implement` (or the Phase C orchestrator) picks it up.
+The primary human review point of the release flow. The user invokes `/approve <issue>` after reading the scope artifacts that `/scope` produced. The skill validates the gates and flips the issue to Ready; from there `/implement` (or the Phase C orchestrator) picks it up. `phase:ready` is `/approve`'s only ladder write — the issue stays at Ready through implementation, and the reconciler moves it to the computed `phase:building` when the PR opens.
 
 ## Sweep approve
 
