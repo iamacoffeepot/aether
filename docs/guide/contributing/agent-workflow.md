@@ -77,7 +77,7 @@ choice for an agent to resolve by guessing.
 | Backlog | An open idea not yet scoped | `scope` begins Define |
 | Define | The problem and success criteria are being established | `scope` |
 | Design | The approach, alternatives, affected surfaces, and ADR boundary are being established | `scope` |
-| Plan | An executable file-and-symbol-level plan and routing labels exist | `approve`, the human Plan-to-Ready gate |
+| Plan | An executable plan, declared surface, and routing labels exist | `approve`, the policy-routed Plan-to-Ready gate |
 | Ready | Approved and eligible for implementation | `implement` |
 | Building | A PR exists and its head is new or not CI-green; when the issue carries `## Declared surface`, an escaping diff also stays here | [Reconciler](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/reconciler.yml) |
 | QA | CI is green but review or dogfood still owes a verdict | Reconciler |
@@ -132,9 +132,38 @@ hosted review after the first green CI head.
 ## Planned implementation
 
 Planned work begins from a scoped GitHub issue. `scope` owns the structured
-Problem statement, Design notes, Implementation plan, dependencies, Dogfood
-brief, and optional side findings. `approve` verifies those artifacts and is
-the explicit Plan-to-Ready gate; it does not repair incomplete scope.
+Problem statement, Design notes, Implementation plan, dependencies, declared
+surface, Dogfood brief, and optional side findings. `approve` verifies those
+artifacts and is the explicit Plan-to-Ready gate; it does not repair incomplete
+scope.
+
+For non-ADR work, `approve` resolves the declared paths against
+`.github/approval-policy.yml` with most-restrictive-wins semantics over every
+path the declaration permits. A crate-wide subtree therefore includes its
+manifest tier even when the planned edit names only source today. `auto` work
+may advance without a new owner decision. `judge` work receives an independent
+verdict, but the judge is currently shadow-only, so the owner still confirms
+it. `human` work always waits for the owner. An explicit `ADR flag:` or a
+declared `docs/adr/**` edit takes the human route before policy lookup;
+ordinary citations to existing ADRs do not.
+
+The hosted tick resolves Plan surfaces with the same canonical matcher and
+dispatches an approval run only when the result is exactly `auto`. The
+headless gate resolves the tier again before writing Ready. `judge`, `human`,
+ADR-bearing, missing-surface, and unresolved-policy outcomes remain at Plan for
+their reader.
+
+The owner can pre-authorize one non-ADR issue at any earlier phase with
+`approval:pre-approved`. The approval gate verifies the actor of the latest
+matching label event, then treats a genuinely owner-applied label as an
+effective `auto` tier. It still runs every scope, freshness, dependency, and
+model gate; the label waives who must approve, not whether the Plan is valid.
+It never overrides the ADR hard gate, and an agent-applied copy of the label
+grants no authority.
+
+A pure umbrella has no implementation path or PR. It uses the exact
+`N/A — pure umbrella; no implementation PR` declaration, stays human-routed,
+and remains ineligible for `implement`.
 
 `implement` accepts Ready work, creates or adopts the one issue worktree
 described on [Worktrees and safety](worktrees-and-safety.md), follows the

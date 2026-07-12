@@ -2,7 +2,7 @@
 """The declared-surface matcher — the one place gitwildmatch semantics are decided.
 
 An issue's `## Declared surface` is a block of globs; `.github/approval-policy.yml`
-maps globs to approval tiers. Two consumers need to evaluate those globs with
+maps globs to approval tiers. Three consumers need to evaluate those globs with
 identical semantics, and a second copy of the matcher would drift from the first:
 
   - reconciler.yml — does a merged PR's changed-file set stay inside the surface
@@ -10,11 +10,23 @@ identical semantics, and a second copy of the matcher would drift from the first
     escaping path with the tier it would have cost)
   - agent-tick.yml — what approval tier does a `phase:plan` issue's declared
     surface resolve to? (only an `auto` tier is dispatched for auto-approval)
+  - Codex approve — validate planned targets and independently re-resolve the
+    tier at the captured `origin/main` commit before writing Ready
 
-Globs are gitwildmatch (gitignore semantics): `**` spans path segments, `*` stays
-within one, `?` is one non-slash character, and a pattern naming a directory
-covers everything beneath it. Bash has no such matcher and the runner ships no
-pathspec module, so the patterns are translated to regexes here.
+Policy globs are gitwildmatch (gitignore semantics): `**` spans path segments,
+`*` stays within one, `?` is one non-slash character, and a pattern naming a
+directory covers everything beneath it. Declared surfaces use the same grammar
+but are repository-relative, so even a slashless concrete path is root-anchored.
+Bash has no such matcher and the runner ships no pathspec module, so the
+patterns are translated to regexes here.
+
+Declared surfaces come from issue bodies, so both modes hold every declared
+pattern to the validated grammar (a concrete path, or a literal directory
+prefix followed by one final `/**`). A pattern outside the grammar never
+reaches the regex engine: containment ignores it with a stderr note (so the
+paths it claimed to cover escape), and tier mode resolves it `human`. This
+also keeps an adversarial pattern such as a run of `**/` segments from
+backtracking the regex engine for hours.
 
 Two modes:
 
@@ -24,11 +36,15 @@ Two modes:
         tier column is annotation only — it reads `?` without a <policy_file>,
         or when the policy is empty (not on the default branch yet).
 
-    surface-match.py --tier <paths_file> <policy_file>
-        Tier resolution. Prints the single most restrictive tier (human > judge >
-        auto) over every path in <paths_file>, falling back to the policy's
-        `default` for a path no rule matches. An empty <paths_file> prints the
-        default: a surface that declares nothing can never resolve to `auto`.
+    surface-match.py --tier <surface_file> <policy_file>
+        Set-sound tier resolution over declared surface patterns. Exact paths and
+        literal subtrees ending in /** include every policy rule that can match
+        the path or anything beneath it, plus the policy default unless one rule
+        covers the entire set. This mirrors containment's directory-tail
+        semantics even for a planned path that does not exist yet. More complex
+        wildcard declarations fail closed to human. Prints the single most
+        restrictive result (human > judge > auto). An empty file prints the
+        policy default.
 """
 
 import re
@@ -37,7 +53,10 @@ import sys
 
 def compile_glob(pat):
     pat = pat.rstrip("/")
-    anchored = "/" in pat
+    root_anchored = pat.startswith("/")
+    if root_anchored:
+        pat = pat[1:]
+    anchored = root_anchored or "/" in pat
     out, i, n = [], 0, len(pat)
     while i < n:
         c = pat[i]
@@ -83,6 +102,35 @@ def compile_glob(pat):
     return re.compile(("^" if anchored else "^(?:.*/)?") + body + "(?:/.*)?$")
 
 
+def compile_surface_glob(pattern):
+    """Compile a repository-relative declared-surface pattern."""
+
+    return compile_glob(pattern if pattern.startswith("/") else "/" + pattern)
+
+
+SURFACE_SAFE = re.compile(r"[A-Za-z0-9._/*\-]+\Z")
+
+
+def valid_surface_glob(pattern):
+    """Whether a declared-surface pattern is inside the validated grammar.
+
+    The same shape /approve's resolver accepts: a concrete repository-relative
+    path, or a literal directory prefix followed by one final `/**`. Declared
+    surfaces are untrusted issue-body text, so anything outside this grammar is
+    refused before it can reach the regex engine.
+    """
+
+    if SURFACE_SAFE.fullmatch(pattern) is None:
+        return False
+    if pattern.startswith(("/", "-", "!", "#")) or pattern.endswith("/"):
+        return False
+    if any(segment in {"", ".", ".."} for segment in pattern.split("/")):
+        return False
+    if "*" not in pattern:
+        return True
+    return pattern.endswith("/**") and pattern.count("*") == 2
+
+
 RANK = {"auto": 0, "judge": 1, "human": 2}
 
 
@@ -94,7 +142,20 @@ def read_globs(path):
     ]
 
 
-def load_policy(path):
+def _parse_policy_scalar(raw):
+    raw = raw.strip()
+    if not raw:
+        return None
+    if raw[0] in "\"'":
+        if len(raw) < 2 or raw[-1] != raw[0] or raw[0] in raw[1:-1]:
+            return None
+        return raw[1:-1] or None
+    if "\"" in raw or "'" in raw:
+        return None
+    return raw
+
+
+def load_policy_text(text):
     # The file's shape is owned by this repo (a `default` tier plus a list of
     # {glob, tier} rules), so it is parsed with the standard library rather than
     # PyYAML, which the runner is not guaranteed to ship: a hand parser keeps the
@@ -102,36 +163,193 @@ def load_policy(path):
     # most-restrictive-wins over the matching rules, falling back to the file's
     # own `default` — the same resolution /approve applies at the Plan->Ready
     # edge, so both consumers quote the tier a path would actually cost.
-    text = open(path, encoding="utf-8").read()
     if not text.strip():
         # The fetch failed (no policy on the default branch yet), so the tier is
         # honestly unresolved rather than assumed.
         return None
-    default, rules, pending = "human", [], None
+    default, rules, pending, saw_rules = None, [], None, False
     for raw in text.splitlines():
         line = raw.split("#", 1)[0].rstrip()
-        m = re.match(r"^default:\s*(\w+)\s*$", line)
-        if m:
-            default = m.group(1)
+        if not line.strip():
             continue
-        m = re.match(r"""^\s*-\s*glob:\s*["']?(.+?)["']?\s*$""", line)
+        m = re.match(r"^default:\s*(.*?)\s*$", line)
         if m:
-            pending = m.group(1)
+            tier = _parse_policy_scalar(m.group(1))
+            if default is not None or tier not in RANK:
+                return None
+            default = tier
             continue
-        m = re.match(r"""^\s*tier:\s*["']?(\w+)["']?\s*$""", line)
+        if re.match(r"^rules:\s*$", line):
+            if saw_rules:
+                return None
+            saw_rules = True
+            continue
+        # This parser owns one intentionally small YAML shape. Exact indentation
+        # keeps a missing nested field from consuming an unrelated top-level key.
+        m = re.match(r"^  - glob:\s*(.*?)\s*$", line)
+        if m:
+            if not saw_rules or pending is not None:
+                return None
+            pending = _parse_policy_scalar(m.group(1))
+            if pending is None:
+                return None
+            continue
+        m = re.match(r"^    tier:\s*(.*?)\s*$", line)
         if m and pending is not None:
-            if m.group(1) in RANK:
-                rules.append((compile_glob(pending), m.group(1)))
+            tier = _parse_policy_scalar(m.group(1))
+            if tier not in RANK:
+                return None
+            if not valid_policy_glob(pending):
+                return None
+            try:
+                matcher = compile_glob(pending)
+            except re.error:
+                return None
+            rules.append((pending, matcher, tier))
             pending = None
+            continue
+        return None
+    if default is None or not saw_rules or pending is not None or not rules:
+        return None
     return default, rules
+
+
+def valid_policy_glob(pattern):
+    """Whether a policy glob is inside the canonical, provable grammar."""
+
+    if not pattern or not pattern.isascii() or pattern.startswith(("!", "#", "-")):
+        return False
+    if "\\" in pattern or any(ord(character) < 32 for character in pattern):
+        return False
+
+    body = pattern[1:] if pattern.startswith("/") else pattern
+    if not body or body.endswith("/") or "//" in body:
+        return False
+    segments = body.split("/")
+    if any(segment in {"", ".", ".."} for segment in segments):
+        return False
+    # `**` has recursive meaning only as a complete path segment. Rejecting
+    # ambiguous star runs keeps the subtree intersection proof aligned with the
+    # regex compiler instead of accepting a pattern the two could normalize
+    # differently.
+    return not any("**" in segment and segment != "**" for segment in segments)
+
+
+def load_policy(path):
+    return load_policy_text(open(path, encoding="utf-8").read())
 
 
 def tier_of(path, policy):
     if policy is None:
         return "?"
     default, rules = policy
-    matched = [tier for matcher, tier in rules if matcher.match(path)]
+    matched = [tier for _, matcher, tier in rules if matcher.match(path)]
     return max(matched, key=lambda t: RANK[t]) if matched else default
+
+
+META = "*?["
+
+
+def _segment_matches(pattern, literal):
+    # Prefixing with / selects compile_glob's repository-anchored form. A segment
+    # contains no slash, so the directory-tail suffix cannot create a false match.
+    return compile_glob("/" + pattern).match(literal) is not None
+
+
+def _normalise_pattern(pattern):
+    pattern = pattern.rstrip("/")
+    root_anchored = pattern.startswith("/")
+    if root_anchored:
+        pattern = pattern[1:]
+    return pattern, root_anchored
+
+
+def rule_intersects_subtree(rule_glob, surface_prefix):
+    """Whether a policy rule can match any path at/below a literal prefix.
+
+    This is exact for the matcher grammar at path-segment level. Once the fixed
+    surface prefix is consumed, arbitrary descendant segments may be chosen.
+    Once the policy pattern is consumed, compile_glob's directory-tail rule
+    covers any remaining fixed surface segments.
+    """
+
+    pattern, root_anchored = _normalise_pattern(rule_glob)
+    anchored = root_anchored or "/" in pattern
+    if not anchored:
+        # A slashless gitignore pattern can match a segment at any depth.
+        return True
+
+    policy_segments = pattern.split("/") if pattern else []
+    surface_segments = surface_prefix.split("/") if surface_prefix else []
+    seen = set()
+
+    def intersects(policy_index, surface_index):
+        state = (policy_index, surface_index)
+        if state in seen:
+            return False
+        seen.add(state)
+        if policy_index == len(policy_segments):
+            return True
+        if surface_index == len(surface_segments):
+            # Every validated remaining glob segment has at least one witness,
+            # which can be appended below the fixed surface prefix.
+            return True
+
+        segment = policy_segments[policy_index]
+        if segment == "**":
+            return intersects(policy_index + 1, surface_index) or intersects(policy_index, surface_index + 1)
+        return _segment_matches(segment, surface_segments[surface_index]) and intersects(
+            policy_index + 1, surface_index + 1
+        )
+
+    return intersects(0, 0)
+
+
+def rule_covers_subtree(rule_glob, surface_prefix):
+    """Conservatively prove that one policy rule covers the whole subtree."""
+
+    pattern, root_anchored = _normalise_pattern(rule_glob)
+    if not (root_anchored or "/" in pattern):
+        return False
+
+    if pattern.endswith("/**"):
+        rule_prefix = pattern[:-3].rstrip("/")
+    elif not any(character in pattern for character in META):
+        # A literal directory pattern covers descendants under compile_glob.
+        rule_prefix = pattern
+    else:
+        return False
+
+    if any(character in rule_prefix for character in META):
+        return False
+    return surface_prefix == rule_prefix or surface_prefix.startswith(rule_prefix + "/")
+
+
+def tier_of_surface(surface, policy):
+    """Resolve the maximum tier of every concrete path a declaration permits."""
+
+    if policy is None:
+        return "?"
+
+    surface = surface.rstrip("/")
+    if not any(character in surface for character in META):
+        prefix = surface.lstrip("/")
+    else:
+        if not surface.endswith("/**"):
+            return "human"
+        prefix = surface[:-3].rstrip("/").lstrip("/")
+        if not prefix or any(character in prefix for character in META):
+            return "human"
+
+    default, rules = policy
+    tiers = [
+        tier
+        for glob, _, tier in rules
+        if rule_intersects_subtree(glob, prefix)
+    ]
+    if not any(rule_covers_subtree(glob, prefix) for glob, _, _ in rules):
+        tiers.append(default)
+    return max(tiers, key=lambda tier: RANK.get(tier, len(RANK))) if tiers else default
 
 
 def read_paths(path):
@@ -144,14 +362,24 @@ def main(argv):
         if policy is None:
             print("?")
             return
-        # Most restrictive over every declared path, and the policy default for a
-        # surface that declares nothing — the fail-safe direction, since `auto` is
-        # the only tier that dispatches an unattended approval.
-        tiers = [tier_of(p, policy) for p in read_globs(argv[2])] or [policy[0]]
+        # Most restrictive over every path each declaration permits. The policy
+        # default covers an empty surface, and any declaration outside the
+        # validated grammar resolves human — only a proved `auto` result may
+        # dispatch unattended approval.
+        tiers = [
+            tier_of_surface(p, policy) if valid_surface_glob(p) else "human" for p in read_globs(argv[2])
+        ] or [policy[0]]
         print(max(tiers, key=lambda t: RANK.get(t, len(RANK))))
         return
 
-    matchers = [compile_glob(g) for g in read_globs(argv[1])]
+    matchers = []
+    for glob in read_globs(argv[1]):
+        if valid_surface_glob(glob):
+            matchers.append(compile_surface_glob(glob))
+        else:
+            # Fail toward escape: the paths this pattern claimed to cover are
+            # reported as outside the surface rather than silently contained.
+            print(f"ignored out-of-grammar surface glob: {glob}", file=sys.stderr)
     policy = load_policy(argv[3]) if len(argv) > 3 else None
     for path in read_paths(argv[2]):
         if not any(m.match(path) for m in matchers):

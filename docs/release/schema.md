@@ -11,7 +11,7 @@ The lifecycle vocabulary is the `phase:*` label set, the canonical phase state f
 | Backlog   | *(no label)*      | Not yet picked up for this release                 | User             |
 | Define    | `phase:define`    | Problem framing in progress                        | User + `/scope`  |
 | Design    | `phase:design`    | Tradeoffs / options / ADR drafting                 | User + `/scope`  |
-| Plan      | `phase:plan`      | Sequencing, dependencies, sub-issues               | User + `/scope`  |
+| Plan      | `phase:plan`      | Sequencing, dependencies, declared surface          | User + `/scope`  |
 | Ready     | `phase:ready`     | Agent-ready; awaiting dispatch                     | Gate: `/approve` |
 | Building  | `phase:building`  | PR open; head unproven, CI not green, or declared-surface gate red | Reconciler |
 | QA        | `phase:qa`        | CI green; review/dogfood verdict owed              | Reconciler       |
@@ -36,6 +36,21 @@ Phase and every other axis ride labels — durable, REST-cheap, and the signal t
 | Bounce target | `bounce-to:plan\|design\|define` label  | `/bounce` (or a self-bouncing skill) | Present only while `phase:bounced`; `/scope` reads it to resume, then clears it |
 
 The ADR link lives in the issue's `## Design notes` section; per-issue auth budgets aren't persisted in v1 (a breach is noted in the self-bounce comment).
+
+At Plan, `/scope` emits a fenced `## Declared surface` glob list. `/approve`
+validates that it covers the planned targets and resolves the most restrictive
+`auto|judge|human` tier from `.github/approval-policy.yml` over every path
+each declaration can permit, including higher-tier files inside a declared
+subtree. An explicit `ADR flag:` or declared ADR edit is always human-routed.
+The hosted judge is currently shadow-only, so `judge` still requires owner
+confirmation; `auto` does not. The hosted tick dispatches an approval run only
+for an exact `auto` result, and the headless gate resolves the tier again
+before writing Ready. A verified owner-applied `approval:pre-approved` label
+makes a non-ADR issue's effective tier `auto` without bypassing any other gate;
+an agent-applied label has no authority, and ADR work has no override. The same
+declared surface later bounds the implementation diff. A validated pure umbrella instead carries the exact
+`N/A — pure umbrella; no implementation PR` declaration and routes to human
+approval; it never produces an implementation PR.
 
 `Approval gate` is a required status, so the reconciler posts it on every PR
 path. A PR with no closing issue, an issue outside the reconciler phase domain,

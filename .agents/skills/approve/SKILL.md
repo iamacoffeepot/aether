@@ -1,6 +1,6 @@
 ---
 name: approve
-description: "Validate one, several explicitly listed, or every Plan-phase Aether issue and advance eligible issues to Ready. Use for the human Plan-to-Ready gate, including ADR, model, blocked-label, freshness, dependency, umbrella, idempotency, and sweep-confirmation checks; never use it to edit scope or dispatch implementation."
+description: "Validate one, several explicitly listed, or every Plan-phase Aether issue, resolve its declared surface through the auto/judge/human approval policy, and advance authorized issues to Ready. Use for Plan-to-Ready gating, including ADR, model, blocked-label, freshness, dependency, umbrella, idempotency, and sweep-confirmation checks; never use it to edit scope or dispatch implementation."
 ---
 
 # Approve
@@ -21,7 +21,17 @@ $approve <issue-number> --skip-adr --note "<reason>"
 $approve --sweep
 ```
 
-Treat a single issue or explicitly listed batch as authorization to advance each listed issue that clears every gate. Validate the whole explicit set before changing any label, then mutate eligible issues serially. List every failure; never stop gate evaluation at the first one.
+Treat a user-issued single issue or explicitly listed batch as the owner's
+approval decision for each listed issue that clears every gate. Validate the
+whole explicit set before changing any label, then mutate eligible issues
+serially. List every failure; never stop gate evaluation at the first one.
+
+An unattended/headless invocation is not owner authorization merely because its
+prompt names `$approve`. It may advance only an issue whose effective tier is
+`auto`, either from policy or the verified owner override below. A `judge`
+verdict is advisory while the hosted judge remains in shadow mode, and both
+`judge` and `human` must stop at Plan until the owner explicitly invokes the
+issue, confirms an itemized sweep, or validly pre-approves that issue.
 
 Restrict `--note` and `--skip-adr` to one explicitly named issue. Require a non-empty `--note` with `--skip-adr`; never silently bypass the ADR gate. Do not combine issue numbers, `--note`, or `--skip-adr` with `--sweep`.
 
@@ -68,6 +78,7 @@ Parse exact H2 sections. Refuse duplicate managed headers. Require these non-emp
 - `## Problem statement`
 - `## Design notes`
 - `## Implementation plan`
+- `## Declared surface`
 - `## Dogfood brief`
 
 Require Dogfood brief to be either a non-empty `N/A — <specific reason>` or all four fields `medium`, `prompt`, `surfaceUnderTest`, and `expectedArtifact`. Require `medium` to be exactly `drive`, `author`, or `build-layer`.
@@ -80,7 +91,10 @@ Inspect Design notes for ADR references. Treat a same-repository PR URL, an expl
 
 Read every referenced PR over REST and require `.merged == true`. List all unmerged or unreadable ADR PRs. Accept an ADR already present on the captured `origin/main` ref without requiring its historical PR. Refuse Design notes that say a new ADR is required but provide neither a landed ADR nor a draft PR reference.
 
-When `--skip-adr` is validly supplied, bypass only the unmerged-ADR failure. Run every other gate normally.
+When `--skip-adr` is validly supplied, bypass only the unmerged-ADR failure.
+Run every other gate normally. The override never bypasses ADR approval
+routing: work that adds, changes, or is gated on an ADR still requires the
+owner's decision.
 
 ### Model and blocked labels
 
@@ -117,13 +131,89 @@ Parse issue references only from the exact `## Depends on` section. Read every r
 
 When `## Sub-issues` is non-empty, require the parent Implementation plan to contain coordination or integration only. Refuse net-new implementation work not delegated to a listed child. A pure umbrella can advance to Ready, but mark it `umbrella — do not dispatch`; it becomes Done only after its children and integration condition are complete.
 
+## Declared surface and approval routing
+
+For a validated pure umbrella, require `## Declared surface` to contain exactly
+`N/A — pure umbrella; no implementation PR`. Route it to `human`, skip
+path-policy resolution because there is no implementation path, and retain the
+`umbrella — do not dispatch` marker.
+
+For every implementable issue, parse `## Declared surface` as exactly one
+non-empty fenced block with one gitwildmatch glob per line and no prose or
+bullets inside the fence. Reject comments, negation, absolute paths,
+backslashes, control characters, empty/`.`/`..` segments, duplicate globs,
+or an escape-hatch declaration such as bare `**` or `crates/**`. Accept
+only concrete repository paths or a literal directory prefix followed by one
+final `/**`; reject `*`, `?`, and character classes anywhere else so a
+single declaration cannot silently cross approval-policy roots. Declared globs
+are untrusted data: never interpolate them into a shell command or pass them to
+Git as path arguments.
+
+Collect the concrete repository targets already validated by the freshness
+gate, stripping only the explicit `(create)` marker. Put the surface and target
+lists in separate temporary files with `apply_patch`, then run:
+
+```text
+python3 -I .agents/skills/approve/scripts/resolve_approval_tier.py \
+  --repo <absolute-repository-root> \
+  --ref <captured-origin-main-sha> \
+  --surface-file /tmp/aether-approval-surface-<N>.txt \
+  --targets-file /tmp/aether-approval-targets-<N>.txt
+```
+
+The resolver loads the policy and tracked paths from the captured ref, uses the
+same matcher as the Reconciler, requires every concrete target to be covered,
+rejects orphan globs, and returns stable JSON with the most restrictive tier and
+path evidence. It refuses a ref that is not reachable from the local
+`refs/remotes/origin/main`, so run it only after the freshness gate's fetch and
+always pass the SHA that fetch captured — never a PR head or any other commit.
+Treat any resolver, policy, Git, or JSON failure as an approval gate failure;
+never substitute a default from memory.
+
+Apply the ADR hard gate before using the returned policy tier. Route to
+`human` when Design notes contain a non-empty line beginning `ADR flag:` or
+the declared/target paths touch `docs/adr/`. Ordinary citations to existing
+ADRs do not trigger this routing gate; they remain inputs to the separate ADR
+merge-readiness check above.
+
+For non-ADR work carrying `approval:pre-approved`, page the issue timeline and
+inspect the most recent `labeled` event for that exact label. Treat the override
+as valid only when its actor is the repository owner. A label applied by an
+agent or any other actor grants no authority; report the actor, retain the
+policy tier, and never infer ownership from the label's current presence alone.
+A timeline/API failure makes the override unavailable rather than verified.
+
+A valid owner override changes the effective tier to `auto` but does not alter
+the recorded policy tier and never bypasses a structural, freshness,
+dependency, model, or other gate. The ADR hard gate is evaluated first and has
+no override: ADR-bearing work remains human-routed even when the owner applied
+`approval:pre-approved`.
+
+For non-ADR work without a valid override, use the resolver's
+`auto|judge|human` result:
+
+- `auto`: every passing invocation may advance to Ready. The hosted tick may
+  dispatch only this tier, and the headless approval run must resolve it again
+  before writing Ready rather than trusting the dispatcher.
+- `judge`: a user-issued invocation or confirmed sweep may advance. An
+  unattended run stops at Plan; the current judge is shadow-only, so even a
+  fresh passing verdict is evidence, not mutation authority.
+- `human`: only a user-issued invocation or confirmed sweep may advance.
+
+Record the policy tier, effective tier, ADR override, pre-approval actor/result,
+captured policy SHA, and authority source in every plan and rollup. Tier routing
+happens after all structural gates; no tier or owner override weakens a failed
+gate.
+
 ## Re-read before mutation
 
-Retain each passing issue's validated identity, body, labels, Plan timestamp, and captured `origin/main` SHA. Immediately before a Ready transition:
+Retain each passing issue's validated identity, body, labels, Plan timestamp,
+declared surface, resolved tier/evidence, authority source, and captured
+`origin/main` SHA. Immediately before a Ready transition:
 
 1. Re-read number, title, body, state, and labels.
 2. If identity, body, phase, gate-relevant labels, or dependency state changed, rerun all affected gates. Do not write from the stale snapshot.
-3. Fetch again when the approval run crossed a user-confirmation turn or when remote freshness is uncertain. Re-run Tier A and Tier B against the new SHA.
+3. Fetch again when the approval run crossed a user-confirmation turn or when remote freshness is uncertain. Re-run Tier A, Tier B, declared-surface validation, ADR routing, policy resolution, and any pre-approval timeline verification against the new SHA.
 4. Build the complete label JSON from the fresh labels, preserving every non-`phase:*` label and appending exactly `phase:ready`.
 5. Replace labels in one REST `PUT`. Never perform a remove-then-add phase transition.
 6. Re-read and verify exactly one `phase:ready` label. On an uncertain mutation response, re-read before retrying.
@@ -150,7 +240,10 @@ If the phase transition succeeds and the required comment fails, retry only the 
 
 ## Explicit batches
 
-Validate all named issues before the first mutation. Print passing and failing issues with size, model, umbrella status, and every reason. Apply Ready transitions only to passing issues, serially, with the pre-write re-read.
+Validate all named issues before the first mutation. Print passing and failing
+issues with size, model, policy/effective tier and authority, umbrella status, and every
+reason. Apply Ready transitions only to passing and authorized issues, serially,
+with the pre-write re-read.
 
 If a mutation fails, re-read that issue to determine whether it succeeded. Stop later writes when the failure appears systemic, such as authentication or rate limiting; otherwise continue independent issues and report the exact partial result. Never describe a partially applied batch as wholly approved.
 
@@ -160,7 +253,7 @@ Discover open issues carrying `phase:plan` through the paginated REST issues end
 
 Print:
 
-- every issue proposed for `Plan → Ready`, with title, size, model, and umbrella marker;
+- every issue proposed for `Plan → Ready`, with title, size, model, policy/effective tier, ADR/pre-approval override, and umbrella marker;
 - every dropped issue with all failure reasons;
 - the captured `origin/main` SHA;
 - a plain confirmation request stating that no label write has happened.
@@ -169,6 +262,10 @@ End the turn. On the user's next-message confirmation, rediscover and revalidate
 
 ## Completion
 
-Report each issue's old and final phase, size/model labels, ADR result, dependency result, umbrella status, any override comment, and every skipped or failed mutation. Point eligible non-umbrella issues to `$implement <N>` only as a next action; do not invoke it.
+Report each issue's old and final phase, size/model labels, declared surface,
+policy/effective tier and authority source, ADR/pre-approval result, dependency result, umbrella
+status, any override comment, and every skipped or failed mutation. Point
+eligible non-umbrella issues to `$implement <N>` only as a next action; do not
+invoke it.
 
 Never edit an issue body, repair missing scope artifacts, resolve Side findings, dispatch an agent, create a worktree, open a PR, close an umbrella, notify another person, or merge anything from this skill.
