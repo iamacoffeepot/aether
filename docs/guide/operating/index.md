@@ -66,7 +66,9 @@ that surface evolves.
 
 | If you need to… | Read |
 |---|---|
+| restart or stop harness processes, or decide who may | [Harness lifecycle](harness-lifecycle.md) |
 | adopt, spawn, identify, or terminate substrates | [Engine fleet](engine-fleet.md) |
+| pass a host path, upload code, or persist evidence | [Host paths and artifacts](host-paths-and-artifacts.md) |
 | upload, select, load, replace, inspect, or drop wasm | [Component registry](component-registry.md) |
 | learn the live schema or gather diagnostic evidence | [Inspect and debug](inspect-and-debug.md) |
 | respond to a failure without making it worse | [Recovery](recovery.md) |
@@ -126,7 +128,9 @@ observational to the engine when used without mail bundles; its `mails` and
 `after_mails` fields make it engine-mutating. Independently, `save_path` creates
 parent directories and can overwrite a host file even when both bundles are
 empty. `send_mail`, component lifecycle calls, spawn, replace, and terminate all
-change live state.
+change live state. Host paths have an independent authority boundary; follow
+[Host paths and artifacts](host-paths-and-artifacts.md) before uploading native
+code or persisting a frame.
 
 Fire-and-forget is not a faster form of verification. It proves that the call
 was written, not that the engine completed the work. Use it only when the

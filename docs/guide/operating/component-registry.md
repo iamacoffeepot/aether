@@ -187,7 +187,11 @@ deadline. Require an explicit successful result, then re-run
 validation preserves the old guest; an instantiation failure after the old
 guest is taken can leave the trampoline empty; a rehydrate failure installs the
 new guest but still returns `Err`. Observe live behavior before deciding whether
-to retry or roll forward.
+to retry or roll forward. After a post-splice error, both MCP's cache and the
+substrate capability registry can describe the old handler set even when the
+slot is empty or the new guest remains installed. Use
+[Replacement failure states](components/replacement-failure-states.md) rather
+than treating `describe_component` as rollback proof.
 
 ## Component cleanup
 

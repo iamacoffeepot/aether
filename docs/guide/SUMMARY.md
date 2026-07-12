@@ -24,8 +24,13 @@
 
 - [Operating an engine](operating/index.md)
   - [The MCP harness](mcp-harness.md)
+    - [Harness lifecycle and fleet-wide mutations](operating/harness-lifecycle.md)
   - [Engine fleet and artifact stores](operating/engine-fleet.md)
+  - [Host paths, artifact trust, and evidence files](operating/host-paths-and-artifacts.md)
+    - [Artifact trust and provenance](operating/artifacts/trust-and-provenance.md)
+    - [Host evidence files and capture destinations](operating/evidence/host-files.md)
   - [Component registry and replacement](operating/component-registry.md)
+    - [Replacement failure states](operating/components/replacement-failure-states.md)
   - [Inspection and debugging](operating/inspect-and-debug.md)
   - [Recovery runbook](operating/recovery.md)
 

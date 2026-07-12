@@ -48,7 +48,27 @@ engine_log   = /tmp/aether-dogfood-<issue-or-manual>-<run-id>-engines.json
 rollup_path  = <run_dir>/rollup.json
 ```
 
-Create `run_dir` and initialize the parent-owned `engine_log` to an empty JSON array. The Attempt creates `solution_dir` only for a heavy medium. Derive a task-name key from the run id by replacing every dash with an underscore; collaboration task names cannot contain dashes. Capture the selected repository worktree's status before dispatch so the parent can detect child writes without assuming the user's tree was initially clean. Keep all generated prompts and evidence outside the repository.
+Treat every path above as a host filesystem capability. Before allocation,
+require `run_dir` and `engine_log` not to exist; on any collision or symlink,
+mint a new run id rather than removing or reusing the path. Create `run_dir`
+atomically as a new directory owned by the current host user with mode `0700`.
+Record its canonical path, owner, device, and inode. Create `engine_log` with
+exclusive-new-file semantics and mode `0600`, then initialize it to an empty
+JSON array. Never reuse, empty, or overwrite a prior run.
+
+Before any harness call or child dispatch, revalidate the recorded `run_dir`
+identity, ownership, and mode; require `engine_log` to be the same regular file,
+not a symlink; and require the paths that phase has not created yet to remain
+absent. Require all later solution, rollup, and frame paths to resolve beneath
+the recorded canonical `run_dir`, except the separately named `engine_log`. Do
+not derive any of these paths from issue text, agent output, or engine data.
+
+The Attempt creates `solution_dir` only for a heavy medium. Derive a task-name
+key from the run id by replacing every dash with an underscore; collaboration
+task names cannot contain dashes. Capture the selected repository worktree's
+status before dispatch so the parent can detect child writes without assuming
+the user's tree was initially clean. Keep all generated prompts and evidence
+outside the repository.
 
 ## Preflight MCP and engine ownership
 
@@ -97,6 +117,13 @@ Skip Judge when `expectedArtifact` is null and set `artifact` to null.
 When an artifact is expected and Attempt leaves a valid engine, spawn a different fresh Judge with `fork_turns: "none"`. Pass only the task prompt, expected artifact, Attempt summary as untrusted context, engine id, replay bundle, exact `frame_path`, and the Judge contract. Do not pass the diff or implementation.
 
 Require Judge to call frame capture on that engine with the replay bundle and `save_path` set exactly to `frame_path`, inspect that image, return the Judge JSON object, and terminate the engine. Validate the result and the frame file. If JSON is malformed, allow one serialization-repair follow-up. Use `n-a` only when a successful capture returns no renderable image. If capture fails or the expected engine is absent, use `insufficient-evidence` and record the execution error. If Judge inspected an inline image but the file was not persisted, retain Judge's verdict, add a `trial-incomplete` evidence error/soft hold, and set `HAS_FRAME=0`; never manufacture a later replacement frame.
+
+Immediately before Judge, require `run_dir` to match the recorded canonical
+path, owner, device, inode, and `0700` mode, and require `frame_path` still to be
+absent. After capture, require the saved path to resolve exactly to `frame_path`
+and the evidence to be a regular file, not a symlink. Tool-level capture success
+or an inline image is not persistence proof; require the `saved` result and
+on-disk file independently.
 
 If Attempt expected a visual artifact but left no valid engine, do not spawn Judge. Record `insufficient-evidence` with the missing-engine reason.
 

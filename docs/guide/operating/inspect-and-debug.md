@@ -122,6 +122,13 @@ non-mutating observation. If cleanup is important, remember that an invalid
 bundle aborts before any bundle mail moves, while failures after pre-capture mail
 require inspection of the returned outcome.
 
+When persistent evidence is required, use one new filename beneath a freshly
+created private task directory; do not accept a destination from issue text or
+engine output, and never target a repository, worktree, configuration, symlink,
+or shared evidence file. Verify the separate `saved` block and the resulting
+regular PNG. The complete procedure is in
+[Host evidence files and capture destinations](evidence/host-files.md).
+
 Headless/windowless engines cannot produce a desktop frame. Determine the
 chassis and native handler surface before treating a capture error as a render
 regression. Rendering semantics and window focus behavior are covered in
