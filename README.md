@@ -1,6 +1,6 @@
-# Aether
+# aether
 
-Aether is a pre-1.0 application engine built for games, tools, and interactive
+aether is a pre-1.0 application engine built for games, tools, and interactive
 systems. A thin native **substrate** owns privileged resources and hosts native
 and WebAssembly **actors**. Actors communicate through typed **mail**. An
 out-of-process operator—an agent, a human, a test harness, or another client—can
@@ -13,7 +13,7 @@ the load-bearing design and its rejected alternatives.
 
 ## Start here
 
-- [Introduction](docs/guide/introduction.md) — what Aether is and the main task paths.
+- [Introduction](docs/guide/introduction.md) — what aether is and the main task paths.
 - [First live-engine session](docs/guide/orientation/first-engine-session.md) — start, inspect, observe, and clean up one engine.
 - [Architecture overview](docs/guide/architecture.md) — operator, hub, substrate, capability, and guest boundaries.
 - [Repository map](docs/guide/orientation/repository-map.md) — crates and where a change belongs.
