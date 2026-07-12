@@ -144,7 +144,7 @@ pub const TILE_BITS: u32 = 8;
 // every listed actor. The kit is a subsystem library — a grab-bag of
 // unrelated actors (camera, mesh viewer, world mesher, mover, widget set)
 // each loaded independently — so ADR-0138's defaultless policy still governs
-// every actor except the one explicitly named entry. `console::ConsoleOverlay`
+// every actor except the one explicitly named as the default. `console::ConsoleOverlay`
 // is the kit's narrow bare-load target; all other actors stay selector-only by
 // `module@actor` selector, never by list position. The `behavior` feature
 // (ADR-0137, issue 2687) appends `aether-behavior`'s `BehaviorHost` so the
@@ -153,7 +153,7 @@ pub const TILE_BITS: u32 = 8;
 // (and its `aether.kinds` section) unchanged.
 #[cfg(not(feature = "behavior"))]
 aether_actor::export!(
-    entry = console::ConsoleOverlay,
+    default = console::ConsoleOverlay,
     camera::CameraComponent,
     camera::controller::CameraController,
     PlayerClient,
@@ -185,7 +185,7 @@ aether_actor::export!(
 
 #[cfg(feature = "behavior")]
 aether_actor::export!(
-    entry = console::ConsoleOverlay,
+    default = console::ConsoleOverlay,
     camera::CameraComponent,
     camera::controller::CameraController,
     PlayerClient,

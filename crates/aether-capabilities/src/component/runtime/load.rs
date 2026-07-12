@@ -67,24 +67,24 @@ impl ComponentHostCapabilityState {
                     Some(aether_data::mailbox_id_from_name(requested).0),
                     Some(requested.clone()),
                 )
-            } else if kind_manifest::read_no_entry_marker(&payload.wasm) {
+            } else if kind_manifest::read_no_default_marker(&payload.wasm) {
                 // ADR-0138: a defaultless multi-actor module (built with a bare
-                // `export!(A, B, …)`) carries no bare-load entry. An unselected
+                // `export!(A, B, …)`) carries no bare-load default. An unselected
                 // load is a hard error that names the exports so the caller can
                 // pick one, rather than instantiating an actor by list position.
                 let available: Vec<&str> = actors.iter().filter_map(|a| a.namespace.as_deref()).collect();
                 return LoadResult::Err {
                     error: format!(
-                        "module has no default entry (ADR-0138): load one of its exports \
+                        "module has no default (ADR-0138): load one of its exports \
                      by name via the export selector; exported types: {available:?}"
                     ),
                 };
             } else {
-                let entry = actors.first();
+                let default_actor = actors.first();
                 (
-                    entry.map(|a| a.capabilities.clone()).unwrap_or_default(),
+                    default_actor.map(|a| a.capabilities.clone()).unwrap_or_default(),
                     None,
-                    entry.and_then(|a| a.namespace.clone()),
+                    default_actor.and_then(|a| a.namespace.clone()),
                 )
             };
 

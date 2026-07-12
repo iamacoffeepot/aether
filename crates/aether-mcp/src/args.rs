@@ -81,7 +81,7 @@ pub struct ComponentSpec {
     /// ADR-0096: which exported actor type to instantiate from a
     /// multi-actor module, named by its `Addressable::NAMESPACE`. Omit only
     /// for a single-actor module or a multi-actor module that explicitly
-    /// declares `export!(entry = A, ...)`; a defaultless module requires a
+    /// declares `export!(default = A, ...)`; a defaultless module requires a
     /// selection. A `module@actor` selector populates this from its `@actor`
     /// half — set it explicitly to override.
     #[serde(default)]
@@ -705,7 +705,7 @@ pub struct LoadComponentArgs {
     /// multi-actor module, named by its `Addressable::NAMESPACE` (e.g.
     /// `"ui.panel"`). Omit only when the module declares a default: the
     /// sole type in a single-actor module or the type selected by
-    /// `export!(entry = A, ...)`. A defaultless `export!(A, B, ...)`
+    /// `export!(default = A, ...)`. A defaultless `export!(A, B, ...)`
     /// requires an explicit selection. A `module@actor` selector
     /// populates this from its `@actor` half. An export the module doesn't
     /// declare comes back as a `LoadResult::Err`.

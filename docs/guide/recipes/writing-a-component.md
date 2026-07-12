@@ -78,7 +78,7 @@ the module has a default:
 
 ```rust
 // Bare loads select Console; other actors remain selectable.
-aether_actor::export!(entry = Console, Inspector, Worker);
+aether_actor::export!(default = Console, Inspector, Worker);
 
 // No default: every load must select Alpha or Beta explicitly.
 aether_actor::export!(Alpha, Beta);

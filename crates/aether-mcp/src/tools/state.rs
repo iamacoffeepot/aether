@@ -63,14 +63,14 @@ impl Mcp {
             .map_err(|e| frame_size_aware_error(&format!("resolve_component {selector:?}"), e))?;
         match ResolveComponentResult::decode_from_bytes(&reply.payload) {
             Some(ResolveComponentResult::Ok { wasm, export, manifest, config_kind, .. }) => {
-                // ADR-0138: the bare-load entry is the manifest's opted-in
+                // ADR-0138: the bare-load default is the manifest's opted-in
                 // `default_entry` (the single-actor namespace or the
-                // `export!(entry = …)` designation), NOT "the first actor
+                // `export!(default = …)` designation), NOT "the first actor
                 // by list position". A defaultless multi-actor module
                 // reports `None`, so replica-name derivation falls through
                 // to `name` / `export`.
-                let entry_namespace = manifest.default_entry;
-                Ok(ResolvedComponent { wasm, export, entry_namespace, config_kind })
+                let default_namespace = manifest.default_entry;
+                Ok(ResolvedComponent { wasm, export, default_namespace, config_kind })
             }
             Some(ResolveComponentResult::Err { error }) => Err(internal_msg(&error)),
             None => Err(internal_msg("undecodable ResolveComponentResult")),
@@ -142,14 +142,14 @@ impl Mcp {
             }
             // Derive the expected registered name(s) in the same precedence
             // order the engine applies: caller-supplied name > export
-            // namespace > entry actor namespace. Fail loud if none is
+            // namespace > default actor namespace. Fail loud if none is
             // determinable: a spawn that can't name what it's waiting for is
             // a bug to surface at stage time.
-            let ns = replica_base_name(spec.name.as_deref(), export.as_deref(), resolved.entry_namespace.as_deref())
+            let ns = replica_base_name(spec.name.as_deref(), export.as_deref(), resolved.default_namespace.as_deref())
                 .ok_or_else(|| {
                     internal_msg(&format!(
                         "component {:?}: cannot determine expected registered name \
-                     (no `name`, `export`, or entry actor namespace in the wasm manifest); \
+                     (no `name`, `export`, or default actor namespace in the wasm manifest); \
                      set `name` or `export` on the ComponentSpec",
                         spec.selector,
                     ))

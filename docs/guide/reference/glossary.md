@@ -77,12 +77,12 @@ stored/selected as an artifact; loading creates actor instances.
 **Export**
 
 One actor identity declared by a multi-actor wasm module. Export order does not
-implicitly choose the entry.
+implicitly choose the default.
 
-**Entry actor**
+**Default actor**
 
 The sole actor in a single-actor module, or the explicit multi-actor default
-selected with `export!(entry = …)`. A defaultless multi-actor module requires a
+selected with `export!(default = …)`. A defaultless multi-actor module requires a
 selector naming an export.
 
 **Trampoline**

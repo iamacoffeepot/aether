@@ -43,7 +43,7 @@ normally feature-gated so a type-only consumer does not link the implementation.
 A wasm module may export several actor identities. Do not infer a default from
 declaration order:
 
-- `export!(entry = Main, Helper, …)` declares `Main` as the default entry and
+- `export!(default = Main, Helper, …)` declares `Main` as the default and
   emits the namespace compatibility metadata.
 - `export!(Main, Helper, …)` is defaultless. A loader must select an exported
   actor; a bare load is an error.

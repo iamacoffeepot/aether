@@ -81,7 +81,7 @@ selectors or assume a development upload is present on an end-user machine.
 ## Multi-actor and replicas
 
 A defaultless multi-actor module requires an explicit export in its bundle
-spec. A module with `export!(entry = …)` can use that entry when omitted.
+spec. A module with `export!(default = …)` can use that default when omitted.
 
 The runtime boot manifest used by the hub/MCP spawn path can expand configured
 replicas into named instances. Replication is component instancing, not

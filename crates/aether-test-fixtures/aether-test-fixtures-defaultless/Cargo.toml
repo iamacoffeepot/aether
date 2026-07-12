@@ -6,11 +6,11 @@ license.workspace = true
 
 # ADR-0138 fixture: a DEFAULTLESS multi-actor module. Two `WasmActor`
 # types (`Alpha`, `Beta`) exported via a bare `export!(Alpha, Beta)` (no
-# `entry =`), so the module designates no bare-load entry — a `load` with
+# `default =`), so the module designates no bare-load default — a `load` with
 # no export selector against it is a hard error naming the exports, and a
 # named `export: Some("<NAMESPACE>")` load resolves as usual. Standalone
-# (not in the main bundle, which keeps a `Probe` entry via
-# `export!(entry = …)`) so the bundle's entry-load scenarios stay intact.
+# (not in the main bundle, which keeps a `Probe` default via
+# `export!(default = …)`) so the bundle's default-load scenarios stay intact.
 [lib]
 crate-type = ["cdylib"]
 
