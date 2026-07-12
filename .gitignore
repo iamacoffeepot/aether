@@ -43,6 +43,7 @@
 !.claude/skills/land/
 !.claude/skills/headless/
 !.claude/skills/scope-headless/
+!.claude/skills/approve-headless/
 !.claude/skills/implement-headless/
 !.claude/skills/land-headless/
 # Wish-pass reports — themed use-case ideation runs of `/wish`. Per-run

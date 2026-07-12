@@ -1,13 +1,21 @@
 name: Agent work
 
 # The cloud-agent executor: turn a task request into real engineering work on
-# an ephemeral RunsOn machine. Given task=scope|implement|land and a ref, it
-# forks a runner, drives headless Claude Code through the matching #3128
-# headless-wrapper skill (/scope-headless, /implement-headless, /land-headless),
-# and leaves the durable state — labels, comments, commits, PRs — behind when
-# the runner dies. This is rung ①'s producer half; the QA-chain workflows
-# (review.yml, dogfood.yml) grade LANDED PRs, whereas this one PRODUCES the
-# scope artifacts, the implementation PR, and the merge.
+# an ephemeral RunsOn machine. Given task=scope|approve|implement|land and a ref,
+# it forks a runner, drives headless Claude Code through the matching #3128
+# headless-wrapper skill (/scope-headless, /approve-headless,
+# /implement-headless, /land-headless), and leaves the durable state — labels,
+# comments, commits, PRs — behind when the runner dies. This is rung ①'s producer
+# half; the QA-chain workflows (review.yml, dogfood.yml) grade LANDED PRs,
+# whereas this one PRODUCES the scope artifacts, the implementation PR, and the
+# merge.
+#
+# `approve` is the Plan->Ready gate (#3176), and it is the one task with an
+# authority bound of its own: the wrapper runs the real /approve skill, which
+# resolves the issue's approval tier and advances ONLY an `auto`-tier one. The
+# tick pre-filters to the auto tier so a Claude run is not spent to learn that,
+# but this workflow is dispatchable by anything holding actions: write, so the
+# refusal lives in the skill the executor runs — not in the caller.
 #
 # Manual dispatch only at this rung — no cron, no autonomy. A maintainer runs
 # workflow_dispatch with a task and a ref; every later rung (#3130 chat, #3131
@@ -58,10 +66,11 @@ on:
         required: true
         options:
           - scope
+          - approve
           - implement
           - land
       ref:
-        description: Ref to act on (issue number for scope/implement, PR number for land)
+        description: Ref to act on (issue number for scope/approve/implement, PR number for land)
         type: string
         required: true
 
@@ -82,8 +91,9 @@ jobs:
   work:
     name: Run ${{ inputs.task }} on ${{ inputs.ref }}
     # Per-task runner sizing against the RunsOn label pattern (dogfood.yml uses
-    # the same runs-on=<run_id>/runner=<size> form): scope is API-and-prose work
-    # on a small box; implement builds the workspace and wants s3-cache to warm
+    # the same runs-on=<run_id>/runner=<size> form): scope and approve are
+    # API-and-prose work on a small box (approve's heaviest step is a git-log
+    # freshness read); implement builds the workspace and wants s3-cache to warm
     # sccache across a retrying PR's runs; land is a merge on a non-spot box so a
     # spot reclaim can never interrupt the squash.
     runs-on: runs-on=${{ github.run_id }}/runner=${{ inputs.task == 'implement' && '8cpu-linux-x64/extras=s3-cache' || (inputs.task == 'land' && '2cpu-linux-x64/spot=false' || '2cpu-linux-x64') }}
@@ -191,6 +201,19 @@ jobs:
                 exit 0
               fi
               ;;
+            approve)
+              # approve is the phase:plan -> phase:ready gate. A label at or beyond
+              # a post-plan rung means the gate already cleared, so a re-dispatch (a
+              # crashed run, a duplicate tick, a hand kick) is a clean no-op. An
+              # issue that has not reached phase:plan yet is left to the skill's own
+              # Phase gate, which refuses it and says so.
+              labels="$(gh api "repos/${REPO}/issues/${REF}/labels" --jq '.[].name')"
+              if grep -qxE 'phase:(ready|refine|executing|building|qa|findings|held)' <<<"$labels"; then
+                echo "issue #${REF} is at/past a post-plan rung — approve already complete; nothing to do."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              ;;
             implement)
               # /implement cuts a PR from the issue. A MERGED PR that closes this
               # issue means the work already landed → clean no-op. An open PR means
@@ -265,12 +288,13 @@ jobs:
           EOF
           gh api -X POST "repos/${REPO}/issues/${REF}/comments" -F body=@/tmp/start-comment.md
 
-      # Assert the aether-agent bot git identity before any commit/merge. scope
-      # writes no commits, so this is gated off for it. The App's canonical commit
-      # identity is <bot-user-id>+<app-slug>[bot]@users.noreply.github.com so
-      # GitHub attributes the commit to the App, never to the owner.
+      # Assert the aether-agent bot git identity before any commit/merge. scope and
+      # approve write no commits (approve reads git for its freshness gate and
+      # writes only a label), so this is gated off for them. The App's canonical
+      # commit identity is <bot-user-id>+<app-slug>[bot]@users.noreply.github.com
+      # so GitHub attributes the commit to the App, never to the owner.
       - name: Assert the bot git identity
-        if: steps.guard.outputs.proceed == 'true' && inputs.task != 'scope'
+        if: steps.guard.outputs.proceed == 'true' && inputs.task != 'scope' && inputs.task != 'approve'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
@@ -290,7 +314,10 @@ jobs:
       # Check out the default branch (the skills live here and the wrapper cuts
       # its own branch from origin/main). The App token is persisted as the git
       # credential so any push the wrapper issues rides the App identity and wakes
-      # downstream workflows. implement/land need full history; scope does not.
+      # downstream workflows. implement/land need full history, and so does
+      # approve — its freshness gate reads `git log origin/main --since=<scoped-at>`
+      # over the plan's targeted paths, which a shallow clone cannot answer. Only
+      # scope is shallow.
       - uses: actions/checkout@v4
         if: steps.guard.outputs.proceed == 'true'
         with:
@@ -331,9 +358,9 @@ jobs:
           grep -q "AUTH-OK" /tmp/auth.log
 
       # Resolve the driving model from the issue's model:* label (scope stamps it
-      # at Plan; /implement and /approve gate on it). scope/implement's ref is the
-      # issue; land's ref is a PR, so resolve its closing issue. Default to the
-      # proven headless sonnet string; upgrade to opus when the label says so.
+      # at Plan; /implement and /approve gate on it). scope/approve/implement's ref
+      # is the issue; land's ref is a PR, so resolve its closing issue. Default to
+      # the proven headless sonnet string; upgrade to opus when the label says so.
       - name: Resolve the driving model
         id: model
         if: steps.guard.outputs.proceed == 'true'
@@ -344,7 +371,7 @@ jobs:
           owner="${REPO%/*}"
           name="${REPO#*/}"
           case "$TASK" in
-            scope|implement) issue="$REF" ;;
+            scope|approve|implement) issue="$REF" ;;
             land)
               issue="$(gh api graphql -f query='
                 query($owner:String!,$name:String!,$number:Int!){

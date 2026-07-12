@@ -51,14 +51,35 @@ name: Agent tick
 #   no phase:* (Backlog)          -> scope     (framable body; agent-work's scope
 #                                               self-bounces an unframable one)
 #   phase:define / phase:design   -> scope     (resume a crashed scope run)
-#   phase:plan                    -> none       (plan->ready is the /approve gate)
+#   phase:plan                    -> approve    (AUTO TIER ONLY — see below; a
+#                                               judge/human-tier issue rests here
+#                                               for its reader)
 #   phase:ready                   -> implement
 #   phase:building/qa/findings    -> none       (reconciler-owned; #3126)
 #   phase:held                    -> land       (ref is the open closing PR)
 #   phase:bounced/stalled         -> none       (rest until an owner acts)
+#
+# THE APPROVAL TIER (#3176) is what makes `phase:plan -> approve` safe to
+# dispatch unattended. The tick decides WHETHER to dispatch; the executor's
+# /approve run decides whether to APPROVE — so the gate logic keeps exactly one
+# definition (the skill's) and the tick only pre-filters, cheaply, so a Claude
+# run is never spent where it provably cannot advance anything. Per phase:plan
+# issue: the ADR hard gate first (an `ADR flag:` line, or `docs/adr/` in the
+# declared surface, routes to the owner unconditionally, ahead of any policy
+# lookup), then the issue's `## Declared surface` globs resolved against
+# .github/approval-policy.yml by scripts/surface-match.py — the same matcher the
+# reconciler holds a merged diff to, so the tier is resolved over exactly the
+# surface that is later enforced. Most-restrictive-wins (human > judge > auto);
+# an issue that declares NO surface takes the policy default and is never
+# dispatched. Only `auto` dispatches; every other outcome logs a skip line with
+# the resolved tier and rests. This is the one thing in the tick that needs repo
+# code, hence the actions/checkout below — still no Claude and no cargo, so the
+# tick stays free and deterministic.
+#
 # agent:dont-touch items are filtered out of the whole scan first (the label
 # blinds the dispatcher, per its contract). The snapshot is ordered
-# land > question-resume > implement/scope and slots are filled in that order.
+# land > question-resume > approve/implement/scope and slots are filled in that
+# order.
 # `land` BYPASSES THE BARRIER — dispatched every tick regardless of quiescence
 # and excluded from the barrier's live set — because land runs are minutes long,
 # agent-work's merged-check makes re-dispatch idempotent, and landing unblocks
@@ -116,13 +137,14 @@ concurrency:
   group: agent-tick
   cancel-in-progress: false
 
-# These workflows run no actions/checkout — they are API orchestration, not builds.
-# A bare `gh` subcommand (gh run list / gh workflow run / gh issue …) infers its
-# target repo from the local git remote and dies with "failed to determine base
-# repo" when there isn't one. GH_REPO is the documented way to name the repo
-# without a checkout, and gh honours it for every subcommand, so it is set once
-# here rather than per step. (`gh api` calls are unaffected — they carry the full
-# repos/{owner}/{repo}/… path — which is why this only bit the dispatch paths.)
+# The tick's checkout is data, not a build: it brings the approval policy and the
+# shared matcher onto the runner and nothing else compiles or runs from it. A bare
+# `gh` subcommand (gh run list / gh workflow run / gh issue …) infers its target
+# repo from the local git remote, so it would pick the repo up from that checkout
+# anyway — but GH_REPO is the documented way to name it explicitly, it costs
+# nothing, and it keeps the dispatch paths working whatever the checkout does.
+# (`gh api` calls are unaffected — they carry the full repos/{owner}/{repo}/…
+# path — which is why this only ever bit the dispatch paths.)
 env:
   GH_REPO: ${{ github.repository }}
 
@@ -183,6 +205,16 @@ jobs:
         with:
           app-id: ${{ secrets.AGENT_APP_ID }}
           private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+
+      # The approval policy and the shared matcher, off the default branch — the
+      # two files the tier lookup below needs. Pinned to the default branch for
+      # the same reason the reconciler pins its copy: an issue must not be able to
+      # relax the policy it is being tiered by. Shallow; the tick builds nothing.
+      - uses: actions/checkout@v4
+        if: steps.preflight.outputs.proceed == 'true'
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
       # The wave: governor gate, then the computed barrier, board scan, priority,
       # and dispatch — one step so a tick's whole reasoning is legible in one log
@@ -305,10 +337,34 @@ jobs:
             [ "$last" = "$OWNER" ]
           }
 
+          # The approval tier of a phase:plan issue — the pre-filter that decides
+          # whether an auto-approval run is worth dispatching at all. Echoes one
+          # word: `adr` (the ADR hard gate fired), `none` (no declared surface),
+          # or the resolved tier (`auto` / `judge` / `human` / `?` when the policy
+          # is unreadable). Only `auto` dispatches; every other word rests the
+          # issue at phase:plan for its human or judge reader. Fail-safe by
+          # construction — nothing but an explicit `auto` opens the gate.
+          approval_tier() {
+            local body surface
+            body="$(gh api "repos/${REPO}/issues/${1}" --jq '.body // ""')"
+            # ADR hard gate, ahead of the policy lookup, exactly as /approve
+            # states it: work that NEEDS an ADR (the flag line /scope emits) or
+            # WRITES one (docs/adr/ in the surface) is the owner's, permanently.
+            # Merely citing an ADR is not the test — every well-scoped issue does.
+            if grep -qi 'ADR flag:' <<<"$body"; then echo "adr"; return; fi
+            surface="$(awk '/^## Declared surface/{f=1; next} /^## /{f=0} f' <<<"$body" \
+              | sed -n '/^[[:space:]]*```/,/^[[:space:]]*```/p' | sed '1d;$d' \
+              | grep -v '^[[:space:]]*$' || true)"
+            if [ -z "$surface" ]; then echo "none"; return; fi
+            if grep -q '^[[:space:]]*docs/adr/' <<<"$surface"; then echo "adr"; return; fi
+            printf '%s\n' "$surface" > "/tmp/surface-${1}.txt"
+            python3 scripts/surface-match.py --tier "/tmp/surface-${1}.txt" .github/approval-policy.yml
+          }
+
           # Bucket advanceable items by priority tier. land bypasses the barrier
-          # and the slot budget; scope/implement need quiescence; an
-          # awaiting-answer scope/implement item only advances when the owner has
-          # replied (question-resume), else it is left parked.
+          # and the slot budget; approve/scope/implement need quiescence; an
+          # awaiting-answer approve/scope/implement item only advances when the
+          # owner has replied (question-resume), else it is left parked.
           land_items=""
           resume_items=""
           work_items=""
@@ -317,6 +373,15 @@ jobs:
             if [ "$dt" = "dt" ]; then summary "- skip #${num}: agent:dont-touch"; continue; fi
             case "$phase" in
               none|phase:define|phase:design) task="scope"; ref="$num" ;;
+              phase:plan)
+                tier="$(approval_tier "$num")"
+                case "$tier" in
+                  auto) summary "- #${num}: approval tier auto — dispatching approve"; task="approve"; ref="$num" ;;
+                  adr) summary "- skip #${num}: ADR hard gate — the owner approves this one"; continue ;;
+                  none) summary "- skip #${num}: no declared surface — not auto-approvable"; continue ;;
+                  *) summary "- skip #${num}: approval tier ${tier} — awaiting its reader"; continue ;;
+                esac
+                ;;
               phase:ready) task="implement"; ref="$num" ;;
               phase:held) task="land"; ref="" ;;
               *) continue ;;
@@ -372,7 +437,7 @@ jobs:
             done <<< "${resume_items}${work_items}"
             summary "- filled ${filled}/${slots} non-land slot(s)."
           else
-            summary "- not quiescent: ${live_nonland} live scope/implement run(s) — deferring new scope/implement."
+            summary "- not quiescent: ${live_nonland} live non-land run(s) — deferring new approve/scope/implement."
           fi
 
       # Re-notify the owner about stale parked questions. Independent of the wave

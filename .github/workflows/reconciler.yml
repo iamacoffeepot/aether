@@ -56,11 +56,23 @@ name: Reconciler
 #     workflow can subscribe to), and the self-heal for any missed poke. Worst-
 #     case staleness for a human thread-resolve is one cron period.
 #
-# SECURITY POSTURE: this workflow runs no branch code and reads the PR head only
-# as data — every step is a GitHub-API call against the trusted base checkout
-# context. The job-level guard drops fork heads (a fork PR gets a read-only
-# token and cannot carry the QA flags this computes over anyway), matching the
-# same-repo posture the Review and Dogfood runners hold.
+# SECURITY POSTURE: this workflow CHECKS NOTHING OUT and reads the PR head only
+# as data. Every fact is a GitHub-API call. The one piece of code it executes,
+# scripts/surface-match.py, is fetched through the contents API with no ref —
+# which always resolves to the default branch — exactly as the policy file is.
+#
+# The checkout is omitted deliberately, not incidentally. `actions/checkout` with
+# `ref:` pinned to the default branch LOOKS equivalent, but it falls back to the
+# TRIGGERING ref whenever that expression is empty, and on a pull_request event
+# the triggering ref is the PR head. A single unset expression would have this
+# job executing branch-authored Python while holding statuses: write and
+# issues: write. The fleet's App can push branches, so that is a live path, not a
+# hypothetical. The API read has no fallback: default branch, or it fails.
+#
+# So a PR can no more edit the matcher that judges its diff than it can edit the
+# policy that matcher annotates with. The job-level guard additionally drops fork
+# heads (a fork PR gets a read-only token and carries no QA flags to compute over
+# anyway), matching the same-repo posture the Review and Dogfood runners hold.
 
 on:
   pull_request:
@@ -113,6 +125,8 @@ jobs:
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     steps:
+      # The DEFAULT branch, never the PR head — the security posture above says
+      # this workflow runs no branch code, and a PR must not be able to edit the
       # Resolve the PR set for this event, then recompute each one. The fact
       # reads and the compute live in this single step so a run's whole
       # reasoning is legible from its log: one line per fact, one for the
@@ -131,129 +145,6 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-
-          # The declared-surface matcher. Globs are gitwildmatch (gitignore
-          # semantics): ** spans path segments, * stays within one, ? is one
-          # non-slash character, and a pattern naming a directory covers
-          # everything beneath it. Bash has no such matcher and the runner has no
-          # pathspec module, so translate to a regex here — the one place the
-          # semantics the policy file and /scope both promise are actually
-          # decided. Prints the changed paths that escape the declaration; silent
-          # when the diff is contained.
-          cat >"${RUNNER_TEMP}/surface_match.py" <<'PY'
-          import re, sys
-
-
-          def compile_glob(pat):
-              pat = pat.rstrip("/")
-              anchored = "/" in pat
-              out, i, n = [], 0, len(pat)
-              while i < n:
-                  c = pat[i]
-                  if c == "*":
-                      j = i
-                      while j < n and pat[j] == "*":
-                          j += 1
-                      doubled = j - i > 1
-                      at_start = i == 0 or pat[i - 1] == "/"
-                      if doubled and at_start and j < n and pat[j] == "/":
-                          out.append("(?:[^/]+/)*")  # "**/" — zero or more segments
-                          i = j + 1
-                      elif doubled and at_start and j >= n:
-                          out.append(".*")  # trailing "/**" — everything beneath
-                          i = j
-                      else:
-                          out.append("[^/]*")
-                          i = j
-                  elif c == "?":
-                      out.append("[^/]")
-                      i += 1
-                  elif c == "[":
-                      j = i + 1
-                      if j < n and pat[j] in "!^":
-                          j += 1
-                      if j < n and pat[j] == "]":
-                          j += 1
-                      while j < n and pat[j] != "]":
-                          j += 1
-                      if j >= n:
-                          out.append(re.escape("["))
-                          i += 1
-                      else:
-                          cls = pat[i + 1 : j]
-                          out.append("[" + ("^" + cls[1:] if cls.startswith("!") else cls) + "]")
-                          i = j + 1
-                  else:
-                      out.append(re.escape(c))
-                      i += 1
-              body = "".join(out)
-              # An unanchored pattern (no slash) matches at any depth. The trailing
-              # group is the directory rule: naming a directory covers its contents.
-              return re.compile(("^" if anchored else "^(?:.*/)?") + body + "(?:/.*)?$")
-
-
-          RANK = {"auto": 0, "judge": 1, "human": 2}
-
-
-          def read_globs(path):
-              return [
-                  line.strip()
-                  for line in open(path, encoding="utf-8").read().splitlines()
-                  if line.strip() and not line.strip().startswith("#")
-              ]
-
-
-          def load_policy(path):
-              # Annotation only — the gate's verdict is containment, which never
-              # consults the policy, so a missing policy file costs the tier column
-              # and nothing else. The file's shape is owned by this repo (a
-              # `default` tier plus a list of {glob, tier} rules), so it is parsed
-              # with the standard library rather than PyYAML, which the runner is
-              # not guaranteed to ship: a hand parser keeps the tier column
-              # deterministic instead of silently degrading every row to "?".
-              # Tier resolution is most-restrictive-wins over the matching rules,
-              # falling back to the fail-closed default — the same resolution
-              # /approve applies at the Plan->Ready edge, so the diagnostic quotes
-              # the tier an escaping path would actually cost.
-              text = open(path, encoding="utf-8").read()
-              if not text.strip():
-                  # The fetch failed (no policy on the default branch yet), so the
-                  # tier is honestly unresolved rather than assumed.
-                  return None
-              default, rules, pending = "human", [], None
-              for raw in text.splitlines():
-                  line = raw.split("#", 1)[0].rstrip()
-                  m = re.match(r"^default:\s*(\w+)\s*$", line)
-                  if m:
-                      default = m.group(1)
-                      continue
-                  m = re.match(r"""^\s*-\s*glob:\s*["']?(.+?)["']?\s*$""", line)
-                  if m:
-                      pending = m.group(1)
-                      continue
-                  m = re.match(r"""^\s*tier:\s*["']?(\w+)["']?\s*$""", line)
-                  if m and pending is not None:
-                      if m.group(1) in RANK:
-                          rules.append((compile_glob(pending), m.group(1)))
-                      pending = None
-              return default, rules
-
-
-          def tier_of(path, policy):
-              if policy is None:
-                  return "?"
-              default, rules = policy
-              matched = [tier for matcher, tier in rules if matcher.match(path)]
-              return max(matched, key=lambda t: RANK[t]) if matched else default
-
-
-          matchers = [compile_glob(g) for g in read_globs(sys.argv[1])]
-          policy = load_policy(sys.argv[3]) if len(sys.argv) > 3 else None
-          for path in open(sys.argv[2], encoding="utf-8").read().splitlines():
-              path = path.strip()
-              if path and not any(m.match(path) for m in matchers):
-                  print(f"{path}\t{tier_of(path, policy)}")
-          PY
 
           # A synchronize (new head push) forces a demotion to building — it
           # applies to the single payload PR, the only PR this event names.
@@ -472,6 +363,36 @@ jobs:
                    --jq '.content' 2>/dev/null | base64 -d >"${RUNNER_TEMP}/policy.yml" 2>/dev/null; then
                 : >"${RUNNER_TEMP}/policy.yml"
               fi
+              # The matcher is fetched the same way the policy is: the contents API
+              # with NO ref, which always resolves to the default branch. This
+              # workflow checks nothing out on purpose. A checkout pinned to the
+              # default branch would look equivalent, but `actions/checkout` falls
+              # back to the TRIGGERING ref when its `ref:` input is empty — and on a
+              # pull_request event that is the PR head. One unset expression and this
+              # job would execute branch-authored Python holding statuses: write and
+              # issues: write. The fleet's App can push branches, so that is not a
+              # hypothetical. The API read has no such fallback: it is default-branch
+              # or it fails. A PR can no more edit the matcher that judges its diff
+              # than the policy that matcher annotates with.
+              # A missing matcher must FAIL CLOSED, not fail silent. Dying here
+              # under `set -e` would skip the gate write entirely and leave the
+              # required Approval gate unreported — which GitHub holds as "Expected"
+              # forever, wedging the PR (#3158). So an unreadable matcher posts a
+              # FAILING gate and moves on: the check is red and legible instead of
+              # absent and mysterious. It cannot mean "contained", because with no
+              # matcher containment was never computed.
+              if ! gh api "repos/${REPO}/contents/scripts/surface-match.py" \
+                   --jq '.content' 2>/dev/null | base64 -d >"${RUNNER_TEMP}/surface_match.py" 2>/dev/null \
+                 || ! [ -s "${RUNNER_TEMP}/surface_match.py" ]; then
+                echo "fact declared_surface: matcher unavailable on the default branch."
+                post_gate failure "surface matcher unavailable on the default branch — containment not computed"
+                echo "::endgroup::"
+                return 0
+              fi
+
+              # The one place gitwildmatch semantics are decided, shared with the
+              # tick's approval-tier lookup (#3176). Prints the changed paths that
+              # escape the declaration, tier-annotated; silent when contained.
               escaping="$(python3 "${RUNNER_TEMP}/surface_match.py" \
                 "${RUNNER_TEMP}/globs.txt" "${RUNNER_TEMP}/changed.txt" "${RUNNER_TEMP}/policy.yml")"
 
