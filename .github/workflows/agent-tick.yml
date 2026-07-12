@@ -101,16 +101,27 @@ name: Agent tick
 # issues rest at phase:ready and drop out of the next enumeration, the rest are
 # re-processed by the next sweep.
 #
-# THE VERDICT DIGEST (#3190). The sweep also owns the non-auto remainder's one
-# owner touchpoint: when judge/human/ADR-tier plan issues exist and no open
-# agent:digest issue covers them, the tick dispatches the sweep for that reason
-# too, and the sweep files ONE digest issue — the verdict table the owner
-# replies to (on GitHub or straight from the notification email) to approve the
-# batch in a single reply. Open digest = awaiting the verdict, so while one is
-# open the non-auto queue owes no new dispatch (the nudge step re-pings it on
-# cadence); the owner's reply re-dispatches the sweep via agent-chat, which
-# authenticates the reply, flips the approved set, and closes the digest. A
-# digest issue carries no type:* label, so the scope arm below never sees it.
+# THE VERDICT DIGEST (#3190, gate-failure fold #3193). The sweep owns ONE owner
+# touchpoint for everything it does not advance: when non-auto-tier, gate-failed,
+# or dependency-blocked plan issues exist and no open agent:digest issue covers
+# them, the tick dispatches the sweep for that reason too, and the sweep files
+# ONE digest issue — a grouped verdict table (awaiting-verdict / gate failures /
+# blocked) the owner answers in a single reply, plus a no-reply breadcrumb
+# comment on each listed issue so its own timeline says what state it is in.
+# Every sweep run converges the SAME open digest (the ticket): new non-advanced
+# issues fold in as rows, healed ones drop out, and the nudge step re-pings an
+# unanswered digest on cadence. The owner's reply re-dispatches the sweep via
+# agent-chat, which authenticates the reply, flips the approved set, and closes
+# the digest. A digest issue carries no type:* label, so the scope arm below
+# never sees it.
+#
+# The digest marker's issues=<csv> list is load-bearing for the tick: a listed
+# issue is excluded from BOTH queue counts below. Without that exclusion a
+# gate-failed auto-tier issue keeps counting toward approve_queue (the tick
+# cannot see gate state), so every completion-chain tick would re-dispatch a
+# sweep that can only re-fail the same gates — a fast dispatch loop with no
+# work in it. The verdict (or a dismiss) closing the digest returns its issues
+# to normal counting.
 #
 # approval:pre-approved is the owner's per-issue override on that lookup: it
 # resolves the tier to `auto` whatever the policy says. It CANNOT pass the ADR
@@ -450,6 +461,25 @@ jobs:
           work_items=""
           approve_queue=0
           digest_queue=0
+
+          # The open digest, read once: its presence suppresses the non-auto
+          # dispatch reason, and its marker's issues=<csv> names the plan issues
+          # it already covers — those are the owner's to direct from the digest
+          # and are excluded from both queue counts (THE VERDICT DIGEST, header
+          # above). Absent or unparseable, the listed set is empty.
+          open_digest_num="$(gh api "repos/${REPO}/issues?labels=agent:digest&state=open&per_page=1" \
+            --jq 'map(select(has("pull_request")|not)) | .[0].number // empty')"
+          digest_listed=""
+          if [ -n "$open_digest_num" ]; then
+            digest_listed="$(gh api "repos/${REPO}/issues/${open_digest_num}" --jq '.body // ""' \
+              | grep -oE 'issues=[0-9][0-9,]*' | head -n1 | cut -d= -f2 | tr ',' ' ' || true)"
+          fi
+          digest_has() {
+            case " ${digest_listed} " in
+              *" $1 "*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
           while IFS=$'	' read -r num phase await dt itype alert preapp; do
             [ -n "$num" ] || continue
             if [ "$dt" = "dt" ]; then summary "- skip #${num}: agent:dont-touch"; continue; fi
@@ -470,6 +500,10 @@ jobs:
                 task="scope"; ref="$num"
                 ;;
               phase:plan)
+                if [ -n "$open_digest_num" ] && digest_has "$num"; then
+                  summary "- skip #${num}: listed on open digest #${open_digest_num} — the owner directs it from there"
+                  continue
+                fi
                 tier="$(approval_tier "$num")"
                 # approval:pre-approved is the owner's per-issue override: it
                 # resolves the tier to auto. It sits BELOW the ADR hard gate and
@@ -573,13 +607,16 @@ jobs:
           if [ "${approve_queue}" -gt 0 ]; then
             sweep_why="${approve_queue} auto-tier"
           fi
+          # Uncovered non-auto issues are a dispatch reason whether or not a
+          # digest is already open: every run converges the SAME open digest
+          # (the ticket), folding new rows in, so an uncovered issue always
+          # warrants a sweep. Only covered issues (excluded from this count via
+          # the issues= parse above) never re-dispatch.
           if [ "${digest_queue}" -gt 0 ]; then
-            open_digests="$(gh api "repos/${REPO}/issues?labels=agent:digest&state=open&per_page=1" \
-              --jq 'map(select(has("pull_request")|not)) | length')"
-            if [ "${open_digests:-0}" -eq 0 ]; then
+            if [ -z "$open_digest_num" ]; then
               sweep_why="${sweep_why:+${sweep_why}, }${digest_queue} undigested non-auto"
             else
-              summary "- digest: ${digest_queue} non-auto plan issue(s) already covered by an open digest awaiting its verdict"
+              sweep_why="${sweep_why:+${sweep_why}, }${digest_queue} to fold into digest #${open_digest_num}"
             fi
           fi
           if [ -n "${sweep_why}" ]; then
