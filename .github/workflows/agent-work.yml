@@ -64,6 +64,11 @@ name: Agent work
 #       AGENT_APP_PRIVATE_KEY;
 #   (d) mint AGENT_CLAUDE_CODE_OAUTH_TOKEN from the Max 20x subscription
 #       (`claude setup-token`) and `gh secret set` it.
+#   (e) set repo variable AGENT_MAIN_STRICT=false once main's branch protection
+#       is confirmed strict-off, so a land box takes the direct-merge path for
+#       a behind+clean PR instead of the App token's doomed protection read;
+#       absent it (or on drift after a protection change) the fleet keeps
+#       today's conservative rebase.
 # Absent any of these, the preflight step fails early with the exact remedy.
 
 on:
@@ -473,6 +478,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           MODEL: ${{ steps.model.outputs.model }}
           CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "2400000"
+          AGENT_MAIN_STRICT: ${{ vars.AGENT_MAIN_STRICT }}
         run: |
           set -euo pipefail
           claude -p "You are running headless in CI on a checkout of the aether repo.
