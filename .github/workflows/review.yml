@@ -27,8 +27,8 @@ name: Review
 # FAILS the gate closed until the owner waives or dispatches a full review.
 # `workflow_dispatch` bypasses both — the deliberate "review it anyway".
 #
-# Same security posture as the dogfood runner: subscription OAuth token
-# (CLAUDE_CODE_OAUTH_TOKEN), same-repo head only, and a least-privilege
+# Same security posture as the dogfood runner: fleet CI OAuth token
+# (AGENT_CLAUDE_CODE_OAUTH_TOKEN), same-repo head only, and a least-privilege
 # split — the code-executing `review` job is read-only on the repo, and
 # only the `post` job (which never runs branch code) holds write scopes.
 
@@ -87,7 +87,7 @@ jobs:
       # Present at job level so step-level `if: env... != ''` gating works
       # (mirrors the dogfood runner). Absent secret => the CC steps skip
       # cleanly and no rollup artifact is produced, so `post` no-ops.
-      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.AGENT_CLAUDE_CODE_OAUTH_TOKEN }}
     outputs:
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       # head_sha + touches_rust feed the `gate` job's per-SHA status post,
@@ -313,8 +313,8 @@ jobs:
       - name: Note when the OAuth token secret is absent
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN == ''
         run: |
-          echo "CLAUDE_CODE_OAUTH_TOKEN secret is not set — the review is skipped."
-          echo "Mint one with 'claude setup-token' and add it: gh secret set CLAUDE_CODE_OAUTH_TOKEN"
+          echo "AGENT_CLAUDE_CODE_OAUTH_TOKEN secret is not set — the review is skipped."
+          echo "Mint one with 'claude setup-token' and add it: gh secret set AGENT_CLAUDE_CODE_OAUTH_TOKEN"
 
       - name: Install Claude Code
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
