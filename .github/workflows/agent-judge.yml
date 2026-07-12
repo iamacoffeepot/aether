@@ -62,11 +62,12 @@ name: Agent judge
 # wake downstream workflows.
 #
 # SECRETS (all SHARED with the rest of the arc — none new to this workflow):
-#   - AGENT_CLAUDE_CODE_OAUTH_TOKEN — the agent subscription, deliberately
-#     distinct from the QA chain's CLAUDE_CODE_OAUTH_TOKEN so the rate pools
-#     stay isolated. ABSENT => the judge steps skip, no verdict artifact is
-#     produced, and `post` no-ops. A judge that is not provisioned is silent,
-#     never red.
+#   - AGENT_CLAUDE_CODE_OAUTH_TOKEN — the agent subscription, the same
+#     dedicated CI subscription review.yml/dogfood.yml now authenticate with,
+#     so the fleet and QA chain share one rate pool; the owner's personal
+#     token is retired from CI. ABSENT => the judge steps skip, no verdict
+#     artifact is produced, and `post` no-ops. A judge that is not provisioned
+#     is silent, never red.
 #   - AGENT_APP_ID / AGENT_APP_PRIVATE_KEY — the aether-agent GitHub App.
 #     ABSENT => `post` prints the remedy and no-ops rather than failing the run.
 

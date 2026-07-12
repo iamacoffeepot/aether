@@ -59,9 +59,10 @@ name: Agent chat
 #     events trigger downstream workflows where GITHUB_TOKEN-created ones do not
 #     (the documented anti-recursion rule), so a chat that dispatches agent-work
 #     MUST use the App token or the wave never wakes.
-#   - Claude auth is AGENT_CLAUDE_CODE_OAUTH_TOKEN — deliberately distinct from
-#     the QA chain's CLAUDE_CODE_OAUTH_TOKEN so the agent subscription's rate
-#     pool stays isolated from review / dogfood.
+#   - Claude auth is AGENT_CLAUDE_CODE_OAUTH_TOKEN — the same dedicated CI
+#     subscription review.yml/dogfood.yml now authenticate with, so the fleet
+#     and QA chain share one rate pool; the owner's personal token is retired
+#     from CI.
 #
 # Security posture — the crown-jewel invariant is the JOB-LEVEL owner gate: a
 # single if: guards the whole job, so no secret-bearing step (App-token mint,
