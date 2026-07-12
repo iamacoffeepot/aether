@@ -107,6 +107,16 @@ concurrency:
   group: chat-${{ github.event.issue.number }}
   cancel-in-progress: false
 
+# These workflows run no actions/checkout — they are API orchestration, not builds.
+# A bare `gh` subcommand (gh run list / gh workflow run / gh issue …) infers its
+# target repo from the local git remote and dies with "failed to determine base
+# repo" when there isn't one. GH_REPO is the documented way to name the repo
+# without a checkout, and gh honours it for every subcommand, so it is set once
+# here rather than per step. (`gh api` calls are unaffected — they carry the full
+# repos/{owner}/{repo}/… path — which is why this only bit the dispatch paths.)
+env:
+  GH_REPO: ${{ github.repository }}
+
 jobs:
   chat:
     name: Owner conversational turn
