@@ -5,10 +5,19 @@
 #
 # Resolution is most-restrictive-match-wins (human > judge > auto): a path's
 # tier is the most restrictive rule that matches it, and a path matched by no
-# rule takes `default` below. The default is `human` — fail-closed — so a brand
-# new, unpoliced surface stops at the owner until a rule relaxes it. An issue's
-# tier is the most restrictive tier over every path in its declared surface;
-# order in the `rules` list does not matter.
+# rule takes `default` below. An issue's tier is the most restrictive tier over
+# every path in its declared surface; order in the `rules` list does not matter.
+#
+# THE DEFAULT IS `judge` — not `auto`, and not `human`. Most work is fine to
+# advance on its own: a change the owner scoped and expects to come back correct
+# should not sit waiting on him. A `human` default encodes "trust nothing", which
+# is false and makes him the bottleneck on every doc tweak. An `auto` default
+# encodes "trust everything", which silently auto-approves a brand-new, unpoliced
+# top-level surface the moment somebody creates one. `judge` is the honest
+# middle: an unknown surface gets a second reader rather than a rubber stamp, and
+# it upgrades gracefully — today `judge` still means the owner confirms (the
+# judge runs in shadow mode, ADR-0146), and the day the judge earns its authority
+# every `judge` surface becomes autonomous with no edit to this file.
 #
 # Globs use gitignore-style ** semantics (gitwildmatch): ** spans path segments,
 # * stays within one segment, ? is one non-slash character — the syntax
@@ -22,24 +31,85 @@
 # its own relaxation.
 #
 # The ADR hard gate lives ABOVE this file, unconditionally, in /approve's skill
-# text: an ADR-bearing issue routes to `human` before any policy lookup,
-# permanently. The `docs/adr/**` entry below is belt-and-suspenders, not the
-# source of that rule.
+# text: an issue that carries an `ADR flag:` or writes an ADR routes to `human`
+# before any policy lookup, permanently. The `docs/adr/**` entry below is
+# belt-and-suspenders, not the source of that rule. Merely *citing* an ADR is not
+# the test — every well-scoped issue cites several, and treating that as
+# load-bearing routes the whole board to the owner and makes this file dead code.
+#
+# KNOWN GAP: a glob matches paths, not novelty, so "adding a new core system"
+# cannot be fully expressed here. A new CRATE is caught — it must add a
+# `crates/*/Cargo.toml`, which is `human` below. A new CAPABILITY MODULE is not:
+# it is only new files inside `crates/aether-capabilities/`, indistinguishable by
+# path from an edit to an existing one, so it lands in `judge`. If new caps must
+# stop at the owner's desk, that needs a signal other than a path glob.
 
-default: human
+default: judge
 
 rules:
-  - glob: "docs/guide/**"
-    tier: auto
-  - glob: "crates/aether-kit/**"
-    tier: judge
+  # Core APIs. Change one of these and every downstream consumer moves with it,
+  # so the owner reads them before they advance — always.
   - glob: "crates/aether-data/**"
+    tier: human
+  - glob: "crates/aether-data-derive/**"
+    tier: human
+  - glob: "crates/aether-codec/**"
+    tier: human
+  - glob: "crates/aether-kinds/**"
+    tier: human
+  - glob: "crates/aether-actor/**"
+    tier: human
+  - glob: "crates/aether-actor-derive/**"
+    tier: human
+  - glob: "crates/aether-substrate/**"
+    tier: human
+
+  # New systems, and the supply chain. A new crate MUST add one of these, so this
+  # is how "adding a new core system" is caught; a dependency change lands here
+  # too, which is the same conversation.
+  - glob: "Cargo.toml"
+    tier: human
+  - glob: "crates/*/Cargo.toml"
+    tier: human
+
+  # Constitutional, and the harness's own machinery. Self-modification of the
+  # thing that decides what may self-modify is the owner's alone.
+  - glob: "docs/adr/**"
+    tier: human
+  - glob: ".claude/**"
     tier: human
   - glob: ".github/workflows/**"
     tier: human
   - glob: ".github/approval-policy.yml"
     tier: human
-  - glob: ".claude/**"
-    tier: human
-  - glob: "docs/adr/**"
-    tier: human
+
+  # Submitted-and-expected-to-come-back-right. These advance on their own.
+  - glob: "docs/guide/**"
+    tier: auto
+  - glob: "crates/aether-kit/**"
+    tier: auto
+  - glob: "crates/aether-math/**"
+    tier: auto
+  - glob: "crates/aether-mcp/**"
+    tier: auto
+  - glob: "crates/aether-mesh/**"
+    tier: auto
+  - glob: "crates/aether-test-fixtures/**"
+    tier: auto
+  - glob: "scripts/**"
+    tier: auto
+  - glob: "xtask/**"
+    tier: auto
+  - glob: "fuzz/**"
+    tier: auto
+
+  # The engine's substantive middle. These take the `judge` default anyway; they
+  # are spelled out because this is where a new capability or a chassis change
+  # lands, and a reader should not have to infer the tier of the busiest tree in
+  # the repo.
+  - glob: "crates/aether-capabilities/**"
+    tier: judge
+  - glob: "crates/aether-substrate-bundle/**"
+    tier: judge
+  - glob: "crates/aether-behavior/**"
+    tier: judge
