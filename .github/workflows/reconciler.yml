@@ -56,14 +56,23 @@ name: Reconciler
 #     workflow can subscribe to), and the self-heal for any missed poke. Worst-
 #     case staleness for a human thread-resolve is one cron period.
 #
-# SECURITY POSTURE: this workflow runs no branch code and reads the PR head only
-# as data — every fact is a GitHub-API call, and the sole code it executes is
-# scripts/surface-match.py off a checkout PINNED TO THE DEFAULT BRANCH. A PR can
-# no more edit the matcher that judges its diff than it can edit the policy that
-# matcher annotates with (the policy is likewise read from the default branch).
-# The job-level guard drops fork heads (a fork PR gets a read-only token and
-# cannot carry the QA flags this computes over anyway), matching the same-repo
-# posture the Review and Dogfood runners hold.
+# SECURITY POSTURE: this workflow CHECKS NOTHING OUT and reads the PR head only
+# as data. Every fact is a GitHub-API call. The one piece of code it executes,
+# scripts/surface-match.py, is fetched through the contents API with no ref —
+# which always resolves to the default branch — exactly as the policy file is.
+#
+# The checkout is omitted deliberately, not incidentally. `actions/checkout` with
+# `ref:` pinned to the default branch LOOKS equivalent, but it falls back to the
+# TRIGGERING ref whenever that expression is empty, and on a pull_request event
+# the triggering ref is the PR head. A single unset expression would have this
+# job executing branch-authored Python while holding statuses: write and
+# issues: write. The fleet's App can push branches, so that is a live path, not a
+# hypothetical. The API read has no fallback: default branch, or it fails.
+#
+# So a PR can no more edit the matcher that judges its diff than it can edit the
+# policy that matcher annotates with. The job-level guard additionally drops fork
+# heads (a fork PR gets a read-only token and carries no QA flags to compute over
+# anyway), matching the same-repo posture the Review and Dogfood runners hold.
 
 on:
   pull_request:
@@ -118,15 +127,6 @@ jobs:
     steps:
       # The DEFAULT branch, never the PR head — the security posture above says
       # this workflow runs no branch code, and a PR must not be able to edit the
-      # matcher that judges it any more than it can edit the policy that matcher
-      # annotates with. The checkout exists for exactly one file,
-      # scripts/surface-match.py: the declared-surface matcher the tick shares
-      # (#3176). No credential is persisted — this job pushes nothing.
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-
       # Resolve the PR set for this event, then recompute each one. The fact
       # reads and the compute live in this single step so a run's whole
       # reasoning is legible from its log: one line per fact, one for the
@@ -363,12 +363,24 @@ jobs:
                    --jq '.content' 2>/dev/null | base64 -d >"${RUNNER_TEMP}/policy.yml" 2>/dev/null; then
                 : >"${RUNNER_TEMP}/policy.yml"
               fi
-              # scripts/surface-match.py off the default-branch checkout is the
-              # matcher — the one place gitwildmatch semantics are decided, shared
-              # with the tick's approval-tier lookup (#3176). It prints the changed
-              # paths that escape the declaration, tier-annotated; silent when the
-              # diff is contained.
-              escaping="$(python3 scripts/surface-match.py \
+              # The matcher is fetched the same way the policy is: the contents API
+              # with NO ref, which always resolves to the default branch. This
+              # workflow checks nothing out on purpose. A checkout pinned to the
+              # default branch would look equivalent, but `actions/checkout` falls
+              # back to the TRIGGERING ref when its `ref:` input is empty — and on a
+              # pull_request event that is the PR head. One unset expression and this
+              # job would execute branch-authored Python holding statuses: write and
+              # issues: write. The fleet's App can push branches, so that is not a
+              # hypothetical. The API read has no such fallback: it is default-branch
+              # or it fails. A PR can no more edit the matcher that judges its diff
+              # than the policy that matcher annotates with.
+              gh api "repos/${REPO}/contents/scripts/surface-match.py" \
+                --jq '.content' | base64 -d >"${RUNNER_TEMP}/surface_match.py"
+
+              # The one place gitwildmatch semantics are decided, shared with the
+              # tick's approval-tier lookup (#3176). Prints the changed paths that
+              # escape the declaration, tier-annotated; silent when contained.
+              escaping="$(python3 "${RUNNER_TEMP}/surface_match.py" \
                 "${RUNNER_TEMP}/globs.txt" "${RUNNER_TEMP}/changed.txt" "${RUNNER_TEMP}/policy.yml")"
 
               # Owner waiver: approval:surface-ok accepts the overreach, but only

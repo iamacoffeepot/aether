@@ -173,7 +173,7 @@ Note the [ADR merge gate](#adr-gate-in-detail) is a *different* check answering 
 For a non-ADR issue (the [ADR hard gate](#adr-hard-gate) has already routed an ADR-bearing one to the owner), resolve the issue's approval tier against `.github/approval-policy.yml` over its `## Declared surface` globs (the machine-readable glob block `/scope` emits at Plan):
 
 1. Read the policy file's `default` tier and its ordered `rules` list of `{glob, tier}` entries; `tier ∈ {auto, judge, human}`.
-2. Each declared path's tier is the **most restrictive** matching rule (`human > judge > auto`), or `default` (`human`) when no rule matches — fail-closed, so an unpoliced surface stops at the owner. Globs are gitwildmatch (gitignore-style `**`), matched exactly as the reconciler's containment step matches them.
+2. Each declared path's tier is the **most restrictive** matching rule (`human > judge > auto`), or the file's `default` when no rule matches — today `judge`, so an unpoliced surface gets a second reader rather than a rubber stamp. Read the tier out of the file; do not assume it. Globs are gitwildmatch (gitignore-style `**`), matched exactly as the reconciler's containment step matches them.
 3. The issue's approval tier is the most restrictive tier over every path in its declared surface.
 
 Route by the resulting tier:
