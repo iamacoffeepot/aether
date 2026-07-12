@@ -92,8 +92,8 @@ impl NativeActor for GeminiCapability {
     /// Generate an image via Nano Banana off the dispatcher thread.
     ///
     /// # Agent
-    /// Reply: `NanobananaGenerateResult` carrying a staged
-    /// `save://gen/<uuid>.png` path. Validates the model and the
+    /// Reply: `NanobananaGenerateResult` carrying a staged, root-relative
+    /// `gen/<uuid>.png` path. Validates the model and the
     /// per-model `aspect_ratio` / `image_size` / reference-count
     /// rules synchronously (the matching `…NotSupportedByModel` /
     /// `UnknownModel` error on a miss) before any dispatch.
@@ -165,8 +165,8 @@ impl NativeActor for GeminiCapability {
     /// Generate music via Lyria off the dispatcher thread.
     ///
     /// # Agent
-    /// Reply: `LyriaGenerateResult` carrying one staged
-    /// `save://gen/<uuid>.wav` path per clip. Rejects an unknown
+    /// Reply: `LyriaGenerateResult` carrying one staged, root-relative
+    /// `gen/<uuid>.wav` path per clip. Rejects an unknown
     /// model and a both-set `seed` + `sample_count` synchronously
     /// before any dispatch.
     #[handler::manual]

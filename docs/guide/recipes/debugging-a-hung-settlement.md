@@ -1,136 +1,158 @@
 # Debugging a hung settlement
 
-**Class:** drive-only. **Prereq:** the MCP harness is up against a running
-engine — no build. This recipe is a triage runbook for the engine's worst
-diagnostic shape: a multi-second silence ending in a timeout with no actor
-named. Read it symptom-first; each step narrows from "the chain hung" to the
-exact handler or drain that owes the chain its close.
+**Class:** drive-only for triage; a source/TestBench reproduction is usually
+needed for root cause. Read [Tracing and settlement](../systems/tracing-and-settlement.md)
+and [Concurrency and blocking](../systems/concurrency.md) for the model.
 
-The model behind the moves here — what "settled" means, the hold contract, and
-the obligation guard — lives on [Tracing & settlement](../systems/tracing-and-settlement.md).
-This page assumes that model and walks the path from a stuck chain to its cause.
+## Know the current observability limit
 
-## The symptom
+When `send_mail_traced` reaches its settlement timeout, the current MCP response
+contains `status: "timeout"` and **no root, tree, node count, in-flight dump, or
+reply list**. There is no standalone MCP tool that walks a still-live trace root.
+The timeout also does not cancel work already dispatched.
 
-You get one of two things back:
+That means a timeout alone cannot name the frontier actor. Any runbook that says
+“inspect the partial tree returned on timeout” is describing a surface Aether
+does not currently expose.
 
-- `send_mail_traced` returns `status: "timeout"` — no `mails` tree, `in_flight`
-  unresolved. The chain didn't settle within `settlement_timeout_ms` (default
-  300s, clamped to 600s).
-- A plain `send_mail` item hangs for the full settlement window and then fails.
-  `send_mail` waits on settlement per item, so a chain that never closes reads
-  as a multi-second stall with nothing named.
+## 1. Preserve the operation identity
 
-Both mean the same thing: a chain opened and never closed. Two faults account
-for almost every one — a deferred reply that never held its chain open, and an
-owned drain that dropped its finish obligation. The third possibility is a chain
-that is merely slow. The steps below tell them apart.
+Record before doing anything else:
 
-## Step 1 — get the partial tree and find the frontier
+- engine id;
+- exact recipient lineage;
+- kind and parameters (redacting secrets/large bytes);
+- whether the operation is safe to repeat;
+- requested timeout and wall-clock duration;
+- any application request id carried in the payload;
+- whether the engine remained in `list_engines`.
 
-Re-issue the work under `send_mail_traced` so you have the trace surface, and
-lower the wait so you are not blocked for the full default window:
+Do not immediately reissue a paid provider call, write, spawn, or other
+non-idempotent operation. The original may still be running and may later reply
+or mutate state.
 
-```text
-send_mail_traced(engine_id, mails, settlement_timeout_ms: 5000)
-```
+## 2. Check whether the engine is reachable
 
-On a genuinely hung chain this still returns `status: "timeout"` with no tree —
-a timeout carries no root, tree, or replies. To read the partial lineage,
-re-issue against a window long enough to let the trace walk run but short of the
-real hang, or inspect the chain that is still in flight by walking from its
-sender. The node you want is the **frontier**: the deepest mail node that has a
-`t_received` but no `t_finished`. A node missing `t_finished` is mail whose
-handler was entered and never returned a finish — that is where the cascade
-stopped. Its recipient is the actor to look at next.
+Call `list_engines(show: "alive")`, then a narrow read-only query such as
+`describe_handlers` or `actor_logs` for a known actor.
 
-If the tree comes back at all, it self-reports where it was truncated; the
-frontier is the live edge of the lineage, not the truncation point. If it comes
-back empty under `"timeout"`, fall through to Step 2 using the recipient you
-mailed and the actors one hop downstream of it.
+| Observation | Interpretation |
+|---|---|
+| Engine gone/recently crashed or evicted | process/heartbeat failure, not merely one settlement chain |
+| Engine live but all queries stall | dispatcher/process pressure or broader wedge |
+| Engine live and other actors answer | local chain/actor/offload problem |
 
-## Step 2 — read the frontier actor's logs
+Capture the matching recently-dead detail promptly; it is a bounded sidecar, not
+a durable audit log.
 
-Point `actor_logs` at the frontier actor's mailbox to see what its handler was
-doing when the chain stopped:
+## 3. Read logs at known boundaries
+
+Start with the original recipient:
 
 ```text
-actor_logs(engine_id, mailbox_name: "<frontier mailbox>", max: 100)
+actor_logs(engine_id, mailbox_name = "<exact recipient>")
 ```
 
-Use the full mailbox address — a chassis mailbox (`"aether.window"`,
-`"aether.fs"`) or a loaded component's lineage address
-(`"aether.component/aether.embedded:NAME"`). Only in-actor `tracing::*` events
-reach the rings, so what you get is the handler's own narration: the off-thread
-call it kicked off, the reply it meant to send, the drain it was running. That
-narration plus the frontier's shape is what classifies the fault.
+Then inspect only downstream actors you can establish from the contract or log
+evidence. Useful signs include:
 
-## Step 3 — classify the fault
+- blocking work submitted but no task completion;
+- a queue at its concurrency bound;
+- a response/stream opened but never ended;
+- an actor waiting for a reply from a missing or dropped component;
+- a panic, decode failure, or monitor notice;
+- repeated “slow gate”/hold diagnostics.
 
-**A. Deferred reply that never held the chain open.** The frontier is a handler
-that started slow off-thread work and returned, but the chain settled (or would
-settle) before the reply went out — or the reply is simply never sent. This is a
-missing settlement hold: a handler that replies in a *later* turn must hold its
-root across the window between return and reply. The fix is to route the offload
-through a sanctioned primitive that takes the hold for you — `dispatch_blocking`
-(with the `#[handler(task)]` completion that calls `resolve`) holds until you
-resolve; `spawn_inherit` holds for the worker's lifetime — rather than a raw
-`std::thread::spawn`, which mints rootless mail the settlement umbrella can't
-see. The hold table on [Concurrency & blocking](../systems/concurrency.md)
-matches each primitive to the shape of work it covers. `acquire_settlement_hold`
-is the explicit handle for the rare hand-rolled buffer-and-drain case.
+Only in-actor tracing reaches actor rings. Host thread panics and process
+startup failures may exist only in captured process/CI stderr.
 
-**B. Owned dispatch that dropped its finish obligation.** The frontier is a
-mailbox where a capability took an *owned* dispatch and was supposed to record it
-`Finished` or transfer the obligation downstream, and did neither. The
-claimed-mailbox drain handles this by construction now — a `ClaimedInbox` yields
-each mail as a guard that settles on scope exit ([ADR-0106](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0106-settlement-safe-by-construction.md)), so the live
-suspects are the in-crate relay / park / fan-out seams that move a dispatch onward
-by hand. In debug builds the obligation guard
-([ADR-0094](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0094-settlement-obligation-guard.md))
-turns a dropped obligation into an immediate panic at the leaking seam, naming the
-`mail_id`, kind, and mailbox — so check engine stderr for that panic before
-anything else; it points straight at the seam. In a release build the guard is
-absent and the chain just hangs, leaving the frontier-plus-logs walk as the way
-in. The rule for any relay you write: discharge what ends with you, transfer what
-you pass on.
+## 4. Check cost and pressure
 
-**C. The chain is merely slow.** No handler is stuck — the frontier keeps
-advancing across re-reads and the timing spans show a real, long hop (a
-multi-second provider call, a large fan-out). Raise `settlement_timeout_ms`
-toward its 600s ceiling and confirm against the tree: the slow node's
-`t_received → t_finished` span (handler duration) or its `t_sent → t_received`
-span (queue latency) should account for the wait. If the timing adds up, the
-chain was never hung — it needed a wider window.
+`actor_cost` can distinguish a handler that completes slowly from one that has
+not produced samples or whose work happens off-dispatcher. Look for:
 
-## Reproduce on demand
+- unusually high handler mean/MAD;
+- one hot actor serializing unrelated work behind it;
+- expected completion handler with no samples;
+- fan-out/queue pressure consistent with the elapsed time.
 
-To stage a hung chain deliberately — to confirm a fix or to study the frontier
-shape — inject the offending mail under `send_mail_traced` against a fresh
-engine from `spawn_substrate`, with a short `settlement_timeout_ms` so the
-`"timeout"` lands fast. A handler that defers a reply without taking a hold, or
-a relay closure that skips its `transfer`, reproduces fault A or B respectively.
-The desktop chassis's `aether.window` driver is the lead claimed-mailbox drain in
-the tree, so window ops are the live example of the settle-by-construction
-shape — its guards close the chain whether the op applies, the payload fails to
-decode, or the window is torn down mid-drain.
+Cost is evidence, not a settlement table. A cheap initiating handler may have
+launched blocked work elsewhere.
 
-## Gotcha — read the trace promptly
+## 5. Classify likely causes
 
-A trace is a bounded window, not a durable log. Each actor's trace ring wraps,
-so under load or after enough elapsed time the oldest entries are overwritten,
-and overwriting any one node drops the whole tree — a faithful rebuild needs
-every node. A chain still in flight when its entries lap comes back incomplete
-or not at all, with a warning. Pull the trace right after the hang reproduces;
-don't expect to reconstruct one from minutes ago or from under a burst.
+### Hold acquired but never released
 
-## Verify against current code
+An asynchronous path acquired or inherited a settlement hold, then lost the
+completion/release path. Common seams are error returns, cancelled queue items,
+shutdown, and dropped reply targets. Audit every branch after acquisition.
 
-Confirm the named surfaces still exist before following this recipe: the
-`send_mail_traced` / `actor_logs` tools and their `settlement_timeout_ms` /
-`mailbox_name` arguments in `aether-mcp`; the offload primitives
-(`dispatch_blocking`, `spawn_inherit`, `acquire_settlement_hold`) in
-`aether-substrate`; and the obligation guard in
-[ADR-0094](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0094-settlement-obligation-guard.md).
-If a name has drifted, fix the recipe as part of the work — see the staleness
-rule on [Recipes](../recipes.md).
+Prefer sanctioned primitives (`dispatch_blocking` with task completion,
+inherited worker helpers, or scoped hold guards) over raw threads and hand-kept
+counters.
+
+### Blocking work ran on the dispatcher
+
+A handler performed socket/file/provider waiting, slept, waited on a contended
+lock/channel, or joined a thread inline. One actor can then pin a worker and
+queue descendants needed for its own completion.
+
+Move host waiting to the established sidecar/task primitive while keeping
+mutable state transitions on the actor.
+
+### Completion cannot route back
+
+The worker finished but its task/completion mail targets a dropped or wrong
+instance, uses stale lineage after a hub/engine restart, or lost correlation.
+Check the exact engine epoch and loaded component names.
+
+### Stream or drain never terminated
+
+Long-lived HTTP/TCP/callback paths must distinguish the opening request chain
+from detached data-phase work. Missing end/close events, over-credit teardown,
+or a drain that failed to discharge an owned dispatch can strand obligations.
+
+### Merely slow work
+
+Provider calls and large fan-out can legitimately approach the tool timeout.
+Use logs, application request ids, cost, and a controlled reproduction to prove
+progress. Raising the timeout (up to the live schema's cap) is appropriate only
+after the operation's own timeout and retry semantics are understood.
+
+## 6. Reproduce where pending state is visible
+
+For a code-level bug, create the smallest focused TestBench case. Its settlement
+timeout includes a pending-root dump with in-flight/held-open counts, which is
+more actionable than the current MCP timeout response. Pin the settlement cap
+low enough for the test while leaving normal scheduler contention room.
+
+A good regression test:
+
+1. sends one typed root;
+2. crosses the suspected offload/queue/drain seam;
+3. waits through the normal settlement gate;
+4. asserts the result/side effect, not elapsed sleep;
+5. fails with the pending-root evidence if the chain wedges.
+
+Use FleetBench only when the suspected cause requires the hub/RPC/process
+boundary. A pure hold or actor queue bug is easier to localize in TestBench.
+
+## 7. Verify the fix
+
+- The original causal operation settles without arbitrary sleeps.
+- Error, cancellation, shutdown, and success paths all release/transfer holds.
+- A late worker cannot reply into a replaced/dropped owner incorrectly.
+- The regression fails on the old behavior and passes on the fix.
+- Other engine operations stay responsive under the same load.
+- Logs do not contain secrets or unbounded payloads.
+
+## If you need a missing tool
+
+A partial in-flight trace query would materially improve live diagnosis, but it
+does not exist today. Add it as an explicit, bounded MCP/trace-capability change
+with a clear root-discovery and ring-truncation contract; do not write prose as
+though it already shipped.
+
+Continue with [Inspection and debugging](../operating/inspect-and-debug.md) for
+the broader symptom tree and [TestBench and FleetBench](../testing/testbench-and-fleetbench.md)
+for reproduction boundaries.

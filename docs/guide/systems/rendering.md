@@ -115,13 +115,15 @@ records with nothing freshly emitted (a capture that didn't advance a tick), the
 renderer replays the last submitted geometry, so a still frame shows what the
 last live frame drew.
 
-**Headless absorbs draw and camera mail.** The headless and hub chassis have no
-GPU, so they compose `HeadlessRenderCapability` on the same `aether.render`
-mailbox: `DrawTriangle`, `aether.view_projection`, `update_texture`,
-`destroy_texture`, `draw_textured_quads`, and `aether.render.material.*` no-op
-(a desktop-built component mailing them every frame doesn't warn-storm), and
-`aether.render.capture_frame` and `create_texture` reply `Err` so an MCP call
-fails fast instead of hanging.
+**The production headless chassis absorbs draw and camera mail.** It composes
+`HeadlessRenderCapability` on the same `aether.render` mailbox:
+`DrawTriangle`, `aether.view_projection`, `update_texture`, `destroy_texture`,
+`draw_textured_quads`, and `aether.render.material.*` no-op (a desktop-built
+component mailing them every frame doesn't warn-storm), and
+`aether.render.capture_frame` and `create_texture` reply `Err` so a request
+fails fast instead of hanging. The minimal hub chassis does not install an
+`aether.render` mailbox at all, so render mail cannot resolve there. `TestBench`
+instead composes the real offscreen `RenderCapability` for render/capture tests.
 
 ## How to use it
 
@@ -402,9 +404,9 @@ frame.
   frame; they share the world coordinate system and the active camera with no
   coordination beyond the depth ordering.
 - **Mesh authoring** is a layer above this one: a component that loads mesh files
-  and replays their triangles to `aether.render` each frame. That surface is a
-  deliberate blank while the DSL is in flux — the mesh-authoring page (its
-  SUMMARY entry) is held empty until it lands.
+  and replays their triangles to `aether.render` each frame. The DSL, parser,
+  tessellation, OBJ compatibility, and viewer path are covered in
+  [Mesh authoring](mesh-authoring.md).
 
 ## Where to read more
 

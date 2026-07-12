@@ -19,8 +19,8 @@ use aether_kinds::Usage;
 // kinds on the `aether.gemini` mailbox, each replying with a
 // `*_result` Ok/Err enum carrying the shared `Usage` accounting on
 // `Ok` and a provider-specific `GeminiError` on `Err`. Generated
-// binary bytes never ride the wire: the reply carries a
-// `save://gen/<uuid>.{png,wav}` path. The image schema is fixed by
+// binary bytes never ride the wire: the reply carries a staging-root-relative
+// `gen/<uuid>.{png,wav}` path. The image schema is fixed by
 // a 2026-05 API survey; per-model validation absorbs vendor drift.
 
 /// Aspect ratio for a Nano Banana image. The cross-model set covers
@@ -105,8 +105,8 @@ pub enum GeminiError {
 /// (NB2, the default). Reference inputs arrive as file paths the cap
 /// reads before dispatch. Per-model validation of `aspect_ratio` /
 /// `image_size` / reference-path counts runs before any network
-/// dispatch. Reply: `NanobananaGenerateResult` carrying a staged
-/// `save://gen/<uuid>.png` path.
+/// dispatch. Reply: `NanobananaGenerateResult` carrying a staged,
+/// root-relative `gen/<uuid>.png` path.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.gemini.nanobanana.generate")]
 pub struct NanobananaGenerate {
@@ -155,8 +155,8 @@ pub enum NanobananaGenerateResult {
 /// selects `lyria-2` / `lyria-3` / `lyria-3-pro`. `seed` and
 /// `sample_count` are mutually exclusive — the adapter rejects
 /// both-set. Each clip is a fixed ~30s WAV at 48 kHz; there is no
-/// `duration_s`. Reply: `LyriaGenerateResult` carrying one staged
-/// `save://gen/<uuid>.wav` path per generated clip.
+/// `duration_s`. Reply: `LyriaGenerateResult` carrying one staged,
+/// root-relative `gen/<uuid>.wav` path per generated clip.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.gemini.lyria.generate")]
 pub struct LyriaGenerate {

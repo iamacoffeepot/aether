@@ -4,8 +4,8 @@ use bytemuck::{Pod, Zeroable};
 
 /// Request addressed to a component that supports the ADR-0013
 /// reply-to-sender smoke path. The component answers with `Pong`
-/// carrying the same `seq`; the round trip proves that a Claude
-/// session → component → session reply actually works end-to-end.
+/// carrying the same `seq`; the round trip proves that an operator
+/// session → component → session reply works end-to-end.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Pod, Zeroable, aether_data::Kind, aether_data::Schema)]
 #[kind(name = "aether.ping")]

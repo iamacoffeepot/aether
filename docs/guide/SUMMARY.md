@@ -1,50 +1,78 @@
 # Summary
 
-[Introduction](introduction.md)
+# Start here
 
-# Design & philosophy
+- [Introduction](introduction.md)
+  - [How to use this guide](orientation/using-the-guide.md)
+  - [Repository map](orientation/repository-map.md)
+  - [First live-engine session](orientation/first-engine-session.md)
 
-- [Why aether is shaped this way](philosophy.md)
+# Design and architecture
+
+- [Why Aether is shaped this way](philosophy.md)
 - [Architecture overview](architecture.md)
+  - [Process topology and chassis](architecture/process-topology.md)
+  - [Guest, native, and wire boundaries](architecture/guest-native-boundary.md)
 
 # Foundations
 
 - [The type system](foundations/type-system.md)
 - [The actor model](foundations/actor-model.md)
-- [Invariants & guarantees](foundations/invariants.md)
+- [Invariants and guarantees](foundations/invariants.md)
 
-# Driving the engine
+# Operating a live engine
 
-- [The MCP harness](mcp-harness.md)
+- [Operating an engine](operating/index.md)
+  - [The MCP harness](mcp-harness.md)
+  - [Engine fleet and artifact stores](operating/engine-fleet.md)
+  - [Component registry and replacement](operating/component-registry.md)
+  - [Inspection and debugging](operating/inspect-and-debug.md)
+  - [Recovery runbook](operating/recovery.md)
 
-# The systems
+# Systems
 
 - [Subsystem map](systems.md)
-  - [Mail, kinds & scheduling](systems/mail-and-kinds.md)
-  - [Concurrency & blocking](systems/concurrency.md)
-  - [The scheduler](systems/scheduler.md)
-  - [Components & lifecycle](systems/components.md)
-  - [Rendering & camera](systems/rendering.md)
-  - [Widget set & focus model](systems/widgets.md)
-  - [Mesh authoring & the DSL]()
-  - [Input streams](systems/input.md)
-  - [The frame lifecycle](systems/lifecycle.md)
-  - [File I/O](systems/file-io.md)
-  - [HTTP egress](systems/http.md)
-  - [Audio]()
-  - [Window](systems/window.md)
-  - [Tracing & settlement](systems/tracing-and-settlement.md)
-  - [Logging](systems/logging.md)
-  - [Configuration](systems/configuration.md)
+  - [Core runtime systems](systems/core-runtime.md)
+    - [Mail, kinds, and scheduling](systems/mail-and-kinds.md)
+    - [Concurrency and blocking](systems/concurrency.md)
+    - [Scheduler internals](systems/scheduler.md)
+    - [Frame lifecycle](systems/lifecycle.md)
+    - [Tracing and settlement](systems/tracing-and-settlement.md)
+    - [Logging](systems/logging.md)
+    - [Configuration](systems/configuration.md)
+  - [Hosted code and replacement](systems/hosted-code.md)
+    - [Components and lifecycle](systems/components.md)
+    - [Behaviors](systems/behaviors.md)
+    - [Inventory and transforms](systems/inventory-and-transforms.md)
+  - [Platform and network I/O](systems/platform-io.md)
+    - [File I/O](systems/file-io.md)
+    - [HTTP egress](systems/http.md)
+    - [HTTP server and typed routes](systems/http-server.md)
+    - [TCP listeners and sessions](systems/tcp.md)
+    - [RPC wire and engine routing](systems/rpc.md)
+    - [Clipboard](systems/clipboard.md)
+    - [Content-generation capabilities](systems/content-generation.md)
+    - [Simulation and player sessions](systems/player-sessions.md)
+  - [Media, interaction, and product tools](systems/media-and-tools.md)
+    - [Rendering and camera](systems/rendering.md)
+    - [Text](systems/text.md)
+    - [Mesh authoring and the DSL](systems/mesh-authoring.md)
+    - [Audio](systems/audio.md)
+    - [Input streams](systems/input.md)
+    - [Window](systems/window.md)
+    - [Widget set and focus model](systems/widgets.md)
+    - [World, terrain, and workbench](systems/world-and-terrain.md)
 
-# Building with aether
+# Building with Aether
 
+- [Choose the owning extension point](building/extension-points.md)
 - [Capability module anatomy](capability-anatomy.md)
 - [Writing guest code](writing-guest-code.md)
+- [Distribution and standalone bundles](building/distribution.md)
 - [Recipes](recipes.md)
   - [Authoring terrain](recipes/authoring-terrain.md)
   - [Adding a config knob](recipes/adding-a-config-knob.md)
-  - [Adding a substrate kind](recipes/adding-a-substrate-kind.md)
+  - [Adding a mail kind](recipes/adding-a-substrate-kind.md)
   - [Drawing your first text](recipes/drawing-text.md)
   - [Adding a chassis capability](recipes/adding-a-chassis-capability.md)
   - [Wiring an MCP tool](recipes/wiring-an-mcp-tool.md)
@@ -53,14 +81,23 @@
   - [Serving HTTP from a component](recipes/serving-http.md)
   - [Debugging a hung settlement](recipes/debugging-a-hung-settlement.md)
 
-# Testing
+# Testing and verification
 
-- [Writing tests that earn their place](testing.md)
+- [Tests that earn their place](testing.md)
+  - [TestBench and FleetBench](testing/testbench-and-fleetbench.md)
+  - [Performance, load, and fuzzing](testing/performance-and-fuzzing.md)
 
 # Contributing
 
-- [Local checks and CI](local-verification.md)
+- [Agent and contributor workflow](contributing/agent-workflow.md)
+  - [Worktrees, safety, and ownership](contributing/worktrees-and-safety.md)
+  - [Local checks and CI](local-verification.md)
+  - [Architecture decisions](contributing/architecture-decisions.md)
+  - [Maintaining the guide](contributing/documentation.md)
 
 # Reference
 
-- [Pointers & where to read more](reference.md)
+- [Glossary](reference/glossary.md)
+- [Capability and service index](reference/capability-index.md)
+- [ADR map by topic](reference/adr-map.md)
+- [Sources and live reference](reference.md)

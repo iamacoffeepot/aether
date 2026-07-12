@@ -26,8 +26,8 @@ useful for intentionally live edits, but they are not the preview-first path.
 > **Verify against current code.** The public kinds live in
 > `crates/aether-kit/src/{mark,terra,world,workbench}/`; the task adapters are
 > `crates/aether-mcp/src/{args.rs,tools/terrain.rs,tools/mod.rs}`. The design
-> contracts are [ADR-0142](../../adr/0142-terrain-mark-identity-and-revisions.md)
-> and [ADR-0143](../../adr/0143-terrain-proposal-commit-transaction.md). If a
+> contracts are [ADR-0142](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0142-terrain-mark-identity-and-revisions.md)
+> and [ADR-0143](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0143-terrain-proposal-commit-transaction.md). If a
 > kind, field, or tool below has changed, update this recipe with the code.
 
 ## Load the peer set and retain its identities

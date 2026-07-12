@@ -154,11 +154,12 @@ impl NativeActor for FsCapability {
 
     /// Copy a file from a raw host path into a writable namespace.
     /// `mail.from` is read via `std::fs::read` directly — not through
-    /// the `FileAdapter` trait — because `from` is an absolute host path
-    /// with no namespace root (the same trust model as `config_path` /
-    /// `binary_path`). The write sandbox applies entirely on the `to`
-    /// side: an unknown namespace → `UnknownNamespace`; a read-only
-    /// namespace or a `to.path` with `..` / leading `/` → `Forbidden`.
+    /// the `FileAdapter` trait — because `from` has no namespace root.
+    /// No sender authorization is enforced today, so any guest that can address
+    /// `aether.fs` can request a read of a host-readable path. The lexical write
+    /// sandbox applies only on the `to` side: an unknown namespace →
+    /// `UnknownNamespace`; a read-only namespace or a slash-separated
+    /// `to.path` with `..` / leading `/` → `Forbidden`.
     ///
     /// # Agent
     /// Reply: `CopyResult`. Echoes `from` + `to` (no bytes).

@@ -2,8 +2,9 @@
 
 > **Governing ADR:** [ADR-0043](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0043-substrate-http-egress-net-sink.md)
 > (substrate HTTP egress). The contract — one request kind, one reply kind, an
-> echo-correlated reply, a deny-by-default allowlist — is **stable**. One backend
-> ships today (a blocking `ureq` adapter); the trait is built to take more.
+> echo-correlated reply, a deny-by-default initial-host allowlist — is
+> **stable**. One backend ships today (a blocking `ureq` adapter); the trait is
+> built to take more.
 
 An actor never opens a socket. Outbound network is a capability like every
 other: a component's reach is exactly the mailboxes it can address, and the
@@ -27,11 +28,13 @@ request the substrate services on the guest's behalf. Routing it through mail
 keeps egress identical in shape to the file, render, and audio sinks: one mental
 model, one boundary, network reach gated behind the mail wall.
 
-That gating is the design point. A component reaches the network only by mailing
-`aether.http`, and which hosts that mail can actually dial is an allowlist the
-deployer controls. Network reach reduces to reachability applied to the
-network — a sandboxed component gets exactly the egress the deployer allows, and
-nothing addressable goes out without an explicit host on the list.
+That gating is the design point, but the current enforcement boundary is
+narrower than a full egress firewall. A component reaches this adapter only by
+mailing `aether.http`, and the deployer controls which **initial URL hosts** pass
+its allowlist. The shipped `ureq` backend follows redirects without reapplying
+that check, so an allowlisted origin can redirect to a host that is not listed.
+Treat the setting as an initial-request gate, not proof that every host reached
+during the fetch was explicitly allowed.
 
 ## What it does
 
@@ -63,32 +66,38 @@ produces a small reply. A caller that fires the same URL twice back-to-back (a
 non-idempotent POST, say) leans on the per-source correlation id the substrate
 already threads through replies rather than a per-kind field.
 
-**`HttpError` is one of six shapes.** `InvalidUrl(String)` (unparseable URL, no
-host, or — with HTTPS required — an `http://` scheme), `Timeout` (the request
-exceeded its deadline), `BodyTooLarge` (request or response body over the cap),
-`AllowlistDenied` (the host is not on the allowlist), `Disabled` (egress is
-turned off chassis-wide), and `AdapterError(String)` (the catchall, preserving
+**`HttpError` is one of six shapes.** `InvalidUrl(String)` (unparseable URL,
+no host, or — with HTTPS required — an initial `http://` scheme), `Timeout`
+(the request exceeded its deadline), `BodyTooLarge` (request or response body
+over the cap), `AllowlistDenied` (the initial host is not on the allowlist),
+`Disabled` (egress is turned off chassis-wide), and `AdapterError(String)` (the catchall, preserving
 backend detail like a DNS failure or TLS handshake error as free-form text). The
-first five are precise enough to branch on — `Timeout` → retry, `AllowlistDenied`
-→ a config issue, `BodyTooLarge` → chunk the response, `Disabled` → surface to
-the operator; the sixth keeps the long tail addressable without schema churn.
+first five are precise enough to branch on — `Timeout` → reconcile effects and
+retry only when the request is idempotent, `AllowlistDenied` → a config issue,
+`BodyTooLarge` → use a smaller/bounded response, `Disabled` → surface to the
+operator; the sixth keeps the long tail addressable without schema churn.
 
-**Egress is gated by a deny-by-default allowlist.** The adapter dials a host only
-if it appears on the allowlist; an empty or unset allowlist denies every host. A
-denied request returns `AllowlistDenied` before any byte touches the wire.
-Matching is exact host string — no wildcard parsing. This is the opposite default
-from most HTTP libraries: nothing goes out until the deployer names a host. The
-knobs that set this — and the response cap, the timeout, and the HTTPS
-requirement — are the worked `HttpConfig` example on the
+**The initial URL is gated by a deny-by-default allowlist.** Before constructing
+the request, the adapter parses the caller's URL and checks its host by exact
+string match; there is no wildcard parsing. An empty or unset allowlist denies
+every initial host, and a miss returns `AllowlistDenied` before the first request
+touches the wire. The current adapter then follows `ureq` redirects using the
+backend default and does **not** recheck the destination host. The
+`AETHER_HTTP_REQUIRE_HTTPS` scheme check is likewise applied to the initial URL,
+not to each redirect hop. Deployments that require hop-by-hop host or scheme
+enforcement must disable/mediate redirects outside this surface or change the
+adapter; there is no caller-facing redirect policy knob today. The knobs that
+set the initial gate — and the response cap, timeout, and HTTPS requirement —
+are the worked `HttpConfig` example on the
 [Configuration](configuration.md#adding-a-knob) page:
 
-- `AETHER_HTTP_ALLOWLIST` — comma-separated hostnames the adapter may dial.
-  Empty or unset denies all.
+- `AETHER_HTTP_ALLOWLIST` — comma-separated hostnames allowed for the initial URL.
+  Empty or unset denies every initial URL; redirect targets are not rechecked.
 - `AETHER_HTTP_DISABLE` — turn egress off entirely; every fetch replies
   `HttpError::Disabled`. Useful for CI and fixtures that shouldn't touch the
   network.
-- `AETHER_HTTP_REQUIRE_HTTPS` — reject `http://` URLs with `InvalidUrl`. Off by
-  default; the allowlist is the primary gate.
+- `AETHER_HTTP_REQUIRE_HTTPS` — reject an initial `http://` URL with
+  `InvalidUrl`. Off by default; the allowlist is the primary gate.
 - `AETHER_HTTP_MAX_BODY_BYTES` — cap on request *and* response body bytes.
   Default 16 MB. An oversize body on either side returns `BodyTooLarge`.
 - `AETHER_HTTP_TIMEOUT_MS` — default per-request timeout. Default 30 s. A
@@ -101,11 +110,13 @@ allowlisted host the TLS handshake actually reached. `User-Agent` is injected as
 `aether/<version>` when the caller doesn't set one. Every other header —
 `Authorization`, `Content-Type`, `Accept` — passes through unchanged.
 
-**One request at a time.** The adapter is blocking, backed by `ureq`, and runs on
-the dispatcher thread: a long fetch holds the line until it finishes or times
-out. The same constraint applies to the file sink. Multi-threaded sink dispatch
-is a later, separate change; until then a slow remote stalls subsequent fetches
-up to the timeout.
+**One request at a time—and a known exception to the normal blocking rule.** The
+adapter is backed by blocking `ureq` and currently runs on the capability's
+dispatcher thread: a long fetch holds that actor's line until it finishes or
+times out. The same limitation exists in the file sink. Do not copy this shape
+into new capabilities; use the sanctioned offload/settlement primitives from
+[Concurrency and blocking](concurrency.md). Moving these legacy sinks off the
+dispatcher is a separate architectural correction.
 
 The cap is wired on the desktop and headless chassis. The in-process test-bench
 chassis omits it, so `aether.http` is not a registered mailbox there and mail to
@@ -152,12 +163,13 @@ them apart by the echoed URL — match it against whatever state you were waitin
 to fill. For a request that needs custom headers, a method beyond GET/POST, a
 body on a non-POST, or a per-request timeout, send the `Fetch` kind directly:
 `ctx.actor::<HttpCapability>().send(&Fetch { url, method, headers, body, timeout_ms })`.
-The kinds live in `aether-kinds`.
+The kinds live with the capability in
+`aether-capabilities/src/http/kinds.rs` (ADR-0121).
 
 **From an agent over MCP.** `send_mail` rides settlement and hands back the
 correlated reply, so a fetch is a single call: mail `aether.http.fetch` to
 `aether.http` and the `FetchResult` comes back with it — no polling. The host
-has to be on the chassis allowlist (`AETHER_HTTP_ALLOWLIST` at
+in the initial URL has to be on the chassis allowlist (`AETHER_HTTP_ALLOWLIST` at
 `spawn_substrate` time) or the reply is `AllowlistDenied`. `describe_kinds`
 carries the exact param schema for `Fetch` if you need it.
 
@@ -165,15 +177,17 @@ carries the exact param schema for `Fetch` if you need it.
 
 The seam is the backend trait. A new backend is an implementation of
 `HttpAdapter` — one method, `fetch`, taking a validated request and returning the
-response or a typed `HttpError`. The adapter owns allowlist enforcement, URL
-validation, the body cap, and timeout application; the cap just moves bytes
-between the wire and the adapter. The `ureq` adapter is the one that ships and is
+response or a typed `HttpError`. The adapter owns initial-host allowlist
+enforcement, URL validation, redirect behavior, the body cap, and timeout
+application; the cap just moves bytes between the wire and the adapter. The
+`ureq` adapter is the one that ships and is
 the reference for what an adapter is expected to enforce. The mail surface
 doesn't change when the backend does — a component sending `Fetch` is untouched.
 
 The allowlist is a chassis-wide stopgap ahead of per-component capability
 declarations. A component that legitimately needs one host also reaches every
-other host on the list; narrowing that to per-component scope is future
+other initial host on the list, plus any hosts those origins redirect to under
+the current adapter. Narrowing that to per-component and per-hop scope is future
 capabilities work, tracked in ADR-0043's follow-ups. Streaming bodies (chunked
 reads and sends, rather than the buffered `Vec<u8>` today) are deferred there
 too — they tie to the byte-handle design.

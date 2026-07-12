@@ -113,9 +113,9 @@ other actors its own module exports
 ([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md), and the
 [cardinality](#one-or-many-cardinality) section below) — while its own load, drop, and
 replace are driven from outside. The concrete context types differ by host too —
-`WasmCtx` in a component, `NativeCtx` in a capability — but you write handlers against a
-shared set of capability traits (`Resolver`, `MailSender`, and friends), so the same
-body works on either.
+`WasmInitCtx`/`WasmCtx` in a component and `NativeInitCtx`/`NativeCtx` in a
+capability. Lower-level resolver/sender traits support shared helpers, but actor
+lifecycle signatures use the concrete context for their host and stage.
 
 ## Authoring an actor
 
@@ -128,7 +128,7 @@ the kind it handles from the method's **third parameter**:
 impl WasmActor for Hello {
     const NAMESPACE: &'static str = "example.hello";
 
-    fn init<C: Resolver>(_ctx: &mut C) -> Result<Self, ActorInitError> {
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Hello)
     }
 
@@ -141,11 +141,9 @@ impl WasmActor for Hello {
         ctx.actor::<RenderCapability>().send(&TRIANGLE);   // draw every tick
     }
 
-    #[handler::manual]
-    fn on_ping(&mut self, ctx: &mut WasmCtx<'_, Manual>, ping: Ping) {
-        if let Some(sender) = ctx.reply_target() {
-            ctx.reply_to(sender, &Pong { seq: ping.seq });
-        }
+    #[handler::single]
+    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, ping: Ping) -> Pong {
+        Pong { seq: ping.seq }
     }
 }
 ```
@@ -208,14 +206,13 @@ impl WasmActor for ProbeWithConfig {
     type Config = ProbeConfig;
     const NAMESPACE: &'static str = "probe_with_config";
 
-    fn init<C>(config: ProbeConfig, ctx: &mut C) -> Result<Self, ActorInitError>
-    where C: Resolver { … }
+    fn init(config: ProbeConfig, ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> { … }
 }
 ```
 
 Most actors need none. Omit `Config` and the `#[actor]` macro synthesizes `()` and
 injects the unused argument, so a no-config `init` stays the terse
-`fn init<C>(ctx: &mut C)` from the examples above — there's no `type Config = ()` to
+`fn init(ctx: &mut WasmInitCtx<'_>)` from the examples above — there's no `type Config = ()` to
 write by hand.
 
 The two hosts differ in one way, and it follows from how the config reaches them. A
@@ -346,23 +343,29 @@ how it reaches the outside world ([ADR-0074](https://github.com/iamacoffeepot/ae
   **trampoline**. This is the agent-facing extension path: new behavior with no
   substrate rebuild.
 
-The two traits are deliberately mirror images. Both sit on the shared `Actor`
-super-trait (which owns only `NAMESPACE`). Both have a `type Config`, the same
-`init` / `wire` / `unwire` lifecycle with identical semantics, and the same
-`#[actor]` / `#[handler::<class>]` authoring shape. The *only* differences are the context
-type — `NativeCtx<'_>` instead of `WasmCtx<'_>` — and the host machinery underneath.
-A native capability's `wire` looks like a component's `wire`:
+The two hosts preserve one actor model, but native capabilities also split their
+always-addressable identity from runtime state. Both have configuration and the
+same lifecycle intent; native handler signatures receive `&mut Self::State`
+while wasm handlers receive `&mut self`. The host contexts and machinery differ,
+but mail contracts remain symmetric. A current native capability looks like:
 
 ```rust
-#[actor]
+#[actor(singleton)]
+pub struct AudioCapability;
+
+pub struct AudioCapabilityState { /* native resources */ }
+
+#[runtime]
 impl NativeActor for AudioCapability {
+    type State = AudioCapabilityState;
     type Config = AudioConfig;
     const NAMESPACE: &'static str = "aether.audio";
 
-    fn init(config: AudioConfig, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> { … }
+    fn init(config: AudioConfig, ctx: &mut NativeInitCtx<'_>)
+        -> Result<Self::State, BootError> { … }
 
     #[handler::single]
-    fn on_note_on(&mut self, ctx: &mut NativeCtx<'_>, note: NoteOn) { … }
+    fn on_note_on(state: &mut Self::State, ctx: &mut NativeCtx<'_>, note: NoteOn) { … }
 }
 ```
 

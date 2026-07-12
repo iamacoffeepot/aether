@@ -32,9 +32,10 @@ pub struct HttpConfig {
     /// clarity.
     #[cfg_attr(feature = "runtime", config(env = "AETHER_HTTP_DISABLE", cli_long = "http-disable", default = false))]
     pub disabled: bool,
-    /// Hostnames the adapter will dial. Empty = deny all
-    /// (deny-by-default per ADR-0043). The `csv_set` hint auto-wires the
-    /// shared comma-split parser on the env side.
+    /// Hostnames accepted for the request's initial URL. Empty rejects every
+    /// initial request (deny-by-default per ADR-0043). The current ureq redirect
+    /// path is not rechecked per hop. The `csv_set` hint auto-wires the shared
+    /// comma-split parser on the env side.
     #[cfg_attr(feature = "runtime", config(default = [], csv_set))]
     pub allowlist: HashSet<String>,
     /// `AETHER_HTTP_REQUIRE_HTTPS=1` rejects `http://` URLs with

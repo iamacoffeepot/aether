@@ -12,20 +12,30 @@ dual licensed as above, without any additional terms or conditions.
 
 ## Before you push
 
-Run `cargo fmt`, then push. GitHub Actions is the build engine: it runs the
-full check set — fmt, clippy, doc, tests, the wasm32 component cross-build, and
-qodana — on every push and is the merge gate, so the heavier checks are
-offloaded to CI rather than run locally. Push early as a draft and fix any red
-as it surfaces.
+Run the cheap deterministic tier before opening or updating an implementation
+PR:
+
+```
+cargo fmt -- --check
+cargo clippy --all-targets -- -D warnings
+```
+
+GitHub Actions is the full build engine and merge gate. It owns the expensive
+workspace tests, docs, marker/feature boundaries, wasm packaging, Qodana, and
+other applicable contract jobs. Keep the PR draft while those facts and, for a
+same-repository branch, the automated review/dogfood results accumulate. Fork
+PRs do not receive repository secrets, so a maintainer must provide the
+corresponding review or deliberately dispatch the trusted workflow.
 
 If you want to reproduce a specific CI check locally before pushing, the
 workspace commands are:
 
 ```
-cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace
+cargo test -p <crate>
+cargo test <name>
 ```
 
-See `CLAUDE.md` § "Local checks and CI" and
-[docs/guide/local-verification.md](docs/guide/local-verification.md) for the
-full workflow.
+See [Local checks and CI](docs/guide/local-verification.md) for verification and
+[Agent and contributor workflow](docs/guide/contributing/agent-workflow.md) for
+the issue/PR lifecycle. Codex uses `AGENTS.md` and `.agents/skills/`; other agent
+surfaces follow their own checked-in contracts.

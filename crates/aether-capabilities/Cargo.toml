@@ -151,8 +151,8 @@ sha2 = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
 ureq = { version = "3", optional = true, features = ["rustls"] }
 url = { version = "2", optional = true }
-# `v4` random-name generation for `save://gen/<uuid>.{png,wav}` output
-# staging (ADR-0050). `aether-data` pulls `uuid` with `serde`-only
+# `v4` random-name generation for `gen/<uuid>.{png,wav}` output paths
+# below the configured staging root (ADR-0050). `aether-data` pulls `uuid` with `serde`-only
 # features for its `Uuid` wire type; the staging helper needs the
 # random `v4` constructor, hence a direct dep here (issue 1013 §Side
 # findings — direct-dep keeps `aether-data`'s no_std/alloc posture clean).

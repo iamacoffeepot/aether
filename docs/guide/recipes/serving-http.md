@@ -34,9 +34,8 @@ the env vars above. The `#[derive(Config)]` on `HttpServerConfig` is tagged
 other field becomes `--http-server-<field>=<value>`:
 
 ```jsonc
-// spawn_substrate
+// spawn_substrate (omit selector for the stored default headless binary)
 {
-  "binary_path": "/path/to/aether-substrate-headless",
   "args": [
     "--http-server-enabled",
     "--http-server-bind-addr=127.0.0.1:8080",
@@ -44,6 +43,9 @@ other field becomes `--http-server-<field>=<value>`:
   ]
 }
 ```
+
+To use a non-default chassis binary, call `upload_binary` first and pass the
+returned registry selector. `spawn_substrate` does not accept `binary_path`.
 
 ## 2. Set up the crate
 
@@ -124,10 +126,19 @@ logging, rate-limiting, or allowlisting.
 `load_component` resolves against the hub's content-addressed component
 registry (ADR-0116), so stage the compiled wasm with `upload_component` first:
 
+```sh
+cargo build --target wasm32-unknown-unknown -p my-http-component
+```
+
+The artifact is normally
+`target/wasm32-unknown-unknown/debug/my_http_component.wasm`. Rebuild it after
+every handler change; an upload selector continues to name the bytes that were
+actually uploaded, not whatever source is now on disk.
+
 ```jsonc
 // upload_component
 {
-  "staged_path": "/path/to/web.wasm"
+  "staged_path": "/path/to/my_http_component.wasm"
 }
 // → { "hash": "<hash>", "name": null }
 ```

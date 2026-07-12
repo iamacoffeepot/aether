@@ -103,9 +103,10 @@ pub struct NamespaceAddr {
 
 /// `aether.fs.copy` — copy a file from a raw host filesystem path
 /// (`from`) into a writable namespace address (`to`). `from` is an
-/// absolute host path the substrate reads directly — it is not
-/// namespace-scoped and carries the same trust level as `config_path`
-/// / `binary_path` used elsewhere on the substrate. `to` is a
+/// host path the substrate reads directly — it is not namespace-scoped.
+/// Current handlers perform no sender authorization, and wasm callers expose
+/// this kind through the ordinary `FsMailboxExt`; do not treat it as an
+/// operator-only boundary. `to` is a
 /// namespace-address struct; the write sandbox applies on the `to`
 /// side: a read-only or unknown namespace replies with `Forbidden` /
 /// `UnknownNamespace`. Reply: `CopyResult`.

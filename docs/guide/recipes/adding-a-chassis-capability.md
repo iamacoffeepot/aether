@@ -21,9 +21,9 @@ layout, identity/runtime split, test placement — see
 
 Trace [`crates/aether-capabilities/src/text/`][text] while you read.
 `TextCapability` owns the `aether.text` mailbox: a config-free CPU-only
-cap that keeps a little per-session state — a font registry, a glyph
-atlas, and the requests it has parked mid-flight — and answers both kind
-flavors this recipe teaches. `aether.text.draw` is fire-and-forget;
+cap that keeps a little per-session state — a font registry and a glyph
+atlas — while typed request contexts correlate the work in flight. It
+answers both kind flavors this recipe teaches. `aether.text.draw` is fire-and-forget;
 `aether.text.load_font` is reply-bearing. It's small enough to hold in
 your head and exercises every step below. Verify its names against the
 current source as you go — a capability is a recompile-class recipe, so
@@ -89,9 +89,8 @@ use aether_substrate::Manual;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
-/// The cap's mutable state — the font registry, glyph atlas, and parked
-/// `load_font` requests. `#[handler::<class>]`s receive it as `state: &mut
-/// Self::State`.
+/// The cap's mutable state — the font registry and glyph atlas.
+/// `#[handler::<class>]`s receive it as `state: &mut Self::State`.
 pub struct TextCapabilityState { /* … */ }
 
 #[runtime]
@@ -111,12 +110,17 @@ impl NativeActor for TextCapability {
         // … rasterize glyphs, send the quad batch …
     }
 
-    // Reply-bearing, deferred: park the request keyed by (namespace,
-    // path), forward `aether.fs.read`, and reply later from
-    // `on_read_result`. See "the reply is deferred here" below.
+    // Reply-bearing, deferred: attach a typed context to the forwarded
+    // `aether.fs.read`, then reply later from `on_read_result`.
+    // See "the reply is deferred here" below.
     #[handler::manual]
-    fn on_load_font(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadFont) {
-        state.forward_font_read(ctx, mail.namespace, mail.path, PendingReply::LoadFont);
+    fn on_load_font(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadFont) {
+        TextCapabilityState::forward_font_read(
+            ctx,
+            mail.namespace,
+            mail.path,
+            PendingReply::LoadFont,
+        );
     }
 }
 ```
@@ -175,18 +179,20 @@ this turn — it must round-trip `aether.fs` first. So its handlers are the
 `Manual` reply class (`#[handler::manual]`), which hands the reply timing
 to the handler rather than a returned value:
 
-1. **`on_load_font`** parks the request in `pending_fonts`, keyed by
-   `(namespace, path)`, capturing the original caller's `Source`, then
-   forwards an `aether.fs.read` for the TTF (`forward_font_read` in
-   `runtime/mod.rs`).
-2. **`on_read_result`** correlates the returned bytes back to the parked
-   request. On the error arm it replies immediately with
-   `ctx.reply_to(pending.source, &LoadFontResult::Err { … })`. On the
-   success arm it offloads the fontdue parse off the hot path with a
-   `#[handler(task)]` arm.
-3. **`on_font_parsed`** (the `#[handler(task)]` completion) registers the
-   parsed font under a session-scoped `font_id` and re-replies through the
-   captured caller with `done.resolve_value(ctx, &LoadFontResult::Ok { … })`.
+1. **`on_load_font`** captures the original caller's `Source` in a
+   `FontLoadContext` together with the owed `PendingReply` shape, then forwards
+   an `aether.fs.read` with
+   `ctx.actor::<FsCapability>().send_with_context(&read, &context)`.
+   Correlation lives in the binding's request table, not a path-keyed actor-state
+   map, so two requests for the same path remain distinct.
+2. **`on_read_result`** recovers the matching context with
+   `ctx.take_context::<FontLoadContext>()`. On the error arm it replies to
+   `context.source` with `ctx.reply_to`; on success it carries that source and a
+   `FontParseContext` into the off-thread parse.
+3. **`on_font_parsed`** (the `#[handler(task)]` completion) receives
+   `TaskDone<FontParseOutput, FontParseContext>`, registers the parsed font under
+   a session-scoped `font_id`, and re-replies through the captured caller with
+   `done.resolve_value(ctx, &LoadFontResult::Ok { … })`.
 
 `ctx.reply(&result)` replies to the current handler's caller this turn;
 `ctx.reply_to(source, &result)` replies to a `Source` captured earlier —
@@ -219,10 +225,10 @@ hazard.
 
 A config-free cap uses `type Config = ();` — text does, holding only CPU
 state. A cap with tunables declares a struct and derives `Config` on it,
-so its knobs flow through the same layered env/argv overlay every other
-cap uses rather than a raw `env::var` read. That dance —
+so its knobs flow through the same config-file/env/argv source stack every
+other cap uses rather than a raw `env::var` read. That dance —
 `#[derive(aether_substrate::Config)]`, the emitted overlay,
-`from_argv_then_env`, wiring into the chassis CLI — is
+`resolve_with_file`, wiring into the chassis CLI and TOML section — is
 [Configuration](../systems/configuration.md). Pass the resolved struct as
 the `with_actor::<X>(config)` argument in the next step. Keep an empty
 config a struct rather than `()` if you expect knobs later, so the
@@ -241,19 +247,20 @@ builder.with_actor::<TextCapability>(())
 
 Where that line goes depends on which chassis should carry the cap:
 
-- **Every full-stack chassis** — add it to `with_common_caps` in
+- **Desktop and headless together** — add it to `with_common_caps` in
   [`crates/aether-substrate-bundle/src/chassis_common.rs`][common], the
-  shared composition desktop, headless, and the embedded test bench all
-  call. `TextCapability` lives here — and a cap added to that
-  `.with_actor::<_>()` chain must also join the `common_cap_namespaces()`
+  shared composition those two chassis call. `TextCapability` lives here — and
+  a cap added to that `.with_actor::<_>()` chain must also join the
+  `common_cap_namespaces()`
   list in the same file, in lockstep: that list is read straight off each
   cap's `Addressable::NAMESPACE` for the `--describe` manifest, so its
   *membership* has to track the chain by hand.
-- **The test-bench chassis** — the in-process harness has its own builder
-  chain in
+- **The test-bench chassis** — the in-process harness does not call
+  `with_common_caps`; it has a separate, reduced builder chain in
   [`crates/aether-substrate-bundle/src/test_bench/chassis.rs`][testbench];
-  `TextCapability` is registered there too, so a `test_bench` scenario can
-  drive it.
+  add the capability there too when scenarios should drive it, and thread any
+  required config through `TestBenchEnv`. `TextCapability` is registered in both
+  compositions for this reason.
 - **One chassis only** — add it to that chassis's own builder chain:
   `desktop/chassis.rs`, `headless/chassis.rs`, or `hub/chassis.rs` in
   `aether-substrate-bundle`. The desktop renderer
@@ -281,12 +288,15 @@ synchronized so that at `init` time every peer mailbox is claimed and at
 ## 5. Passive cap or driver?
 
 Most capabilities are **passive**: they sit on a dispatcher and answer
-mail, added with `with_actor`. `TextCapability` is passive. A chassis also
-composes exactly one **driver** — the cap that owns the chassis main
-thread and runs its loop (winit on desktop, a std timer on headless, the
-TCP accept loop on the hub). A driver implements `DriverCapability` (not
-`NativeActor`) and is supplied with `.driver(d)` rather than
-`.with_actor`; the type-state builder enforces exactly one.
+mail, added with `with_actor`. `TextCapability` is passive. An executable chassis
+also composes exactly one **driver** — the cap that owns the chassis main thread
+and its lifetime (the winit loop on desktop and the std timer on headless). The
+hub's `HubServerDriverCapability` instead owns the `SubstrateBoot` and blocks that
+thread on SIGINT/SIGTERM; `RpcServerCapability`, a passive actor, owns the socket
+listener. A driver implements `DriverCapability` (not `NativeActor`) and is
+supplied with `.driver(d)` rather than `.with_actor`; the type-state builder
+enforces exactly one. The in-process TestBench uses `build_passive` and lets its
+embedder drive it, so it deliberately has no driver capability.
 
 If the cap drives — owns a loop or a peripheral — its name carries
 `Driver`: `DesktopDriverCapability`, `HeadlessTimerDriverCapability`. A
@@ -326,18 +336,19 @@ native cap has nothing to cross-compile.) Text's in-crate pattern, in its
    turn), and assert what it *replied* with
    `decode_session_reply::<R>(&rx)`.
 
-Two tests anchor the deferred-reply flow:
-`load_font_parks_request_and_forwards_read` drives `on_load_font` and
-asserts the request parks and forwards an `aether.fs.read`;
-`read_err_replies_load_font_err_and_clears_pending` feeds a
-`ReadResult::Err` and asserts the cap relays `LoadFontResult::Err` to the
-caller and clears the pending entry.
+Three tests anchor the deferred-reply flow:
+`load_font_forwards_read_with_context` drives `on_load_font` and asserts the
+forwarded `aether.fs.read` has a nonzero correlation id;
+`read_err_replies_load_font_err_via_request_context` feeds its correlated
+`ReadResult::Err` and asserts the cap relays `LoadFontResult::Err` to the caller;
+and `same_path_loads_reply_to_their_own_request_contexts` proves concurrent reads
+for the same path still reply to their respective sessions.
 
-For an end-to-end check across the real chassis — rendering, the frame
-loop, multiple caps — drive
-[`aether_substrate_bundle::test_bench`](../mcp-harness.md) instead: it
-boots a full chassis from a Rust thread and sends mail the same encode
-path the MCP tool uses.
+For an end-to-end check across the real in-process boundaries — rendering, the
+frame loop, and the capabilities explicitly installed by its reduced builder —
+drive [TestBench](../testing/testbench-and-fleetbench.md) instead. It boots that
+chassis from a Rust thread and sends mail through the same encode path the MCP
+tool uses. Supply namespace roots when the scenario needs `aether.fs`.
 
 ## 7. Smoke it over MCP
 

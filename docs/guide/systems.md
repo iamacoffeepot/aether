@@ -1,59 +1,75 @@
 # Subsystem map
 
-This page is the index to the per-subsystem explainers. Each subsystem gets a
-dedicated page (under construction — see the nav) covering *why it exists*,
-*what it does*, and *how to extend or reuse it*. Until a page lands, the row
-below is the orientation: what it's for, what you mail it, and the ADRs that
-govern it.
+This page routes a task to the system that owns it. The map reflects current
+source families, not only the original engine core.
 
-A note on the **maturity** column, because it changes how you should read a
-page: *Stable* surfaces are safe to build on and document in full. *Settling*
-surfaces have a stable outward face (what to mail, what it does) but internals
-still in motion — the explainer documents the face and defers the guts to the
-ADR until it lands. When in doubt, the ADR is authoritative.
+## Core runtime
 
-## Mailbox addressing, first
+| System | Owns |
+|---|---|
+| [Mail and kinds](systems/mail-and-kinds.md) | addressing, payload identity, delivery and replies |
+| [Concurrency](systems/concurrency.md) | actor seriality and safe blocking boundaries |
+| [Scheduler](systems/scheduler.md) | blobs, ready work, worker policy and cost-aware dispatch |
+| [Frame lifecycle](systems/lifecycle.md) | ordered stages, subscriptions, advance and shutdown |
+| [Tracing and settlement](systems/tracing-and-settlement.md) | causal trees, holds and exact completion |
+| [Logging](systems/logging.md) | per-actor rings and out-of-actor diagnostics |
+| [Configuration](systems/configuration.md) | argv/env/file layering and resolved dumps |
 
-Before the table: the rule that everything else assumes. `recipient_name`
-names the **mailbox**; `kind_name` names the **payload shape**. They route
-independently even when they share a prefix. Chassis-owned mailboxes live under
-`aether.<name>` (`aether.render`, `aether.audio`, `aether.fs`, `aether.input`,
-`aether.lifecycle`, `aether.window`, `aether.component`). A loaded wasm component
-registers at `aether.component/aether.embedded:NAME` — use the full address that
-`LoadResult.name` hands back. **Bare names** (`"camera"`, `"player"`) are not
-registered and warn-drop.
+Start with [Core runtime systems](systems/core-runtime.md) before editing a
+scheduler or settlement invariant.
 
-## The subsystems
+## Hosted code and discovery
 
-| Subsystem | What it's for | Mail it | ADRs | Maturity |
-|---|---|---|---|---|
-| **Mail & scheduling** | The universal interaction mechanism + the blob dispatcher that runs actors. | (the substrate itself; not a mailbox) | 0002, 0005, 0019, 0087 | Settling (scheduler internals) |
-| **Kinds, schema & encoding** | Typed payloads that describe themselves on the wire. | — | 0005, 0031, 0032, 0064, 0065, 0091 | Stable |
-| **Components & lifecycle** | Loading, replacing, and hot-reloading wasm actors. | `aether.component` — `load` / `drop` / `replace` | 0010, 0015, 0022, 0038, 0063, 0074 | Stable |
-| **Input streams** | Key / mouse / window-size input interrupts on `aether.input`; the per-frame Tick is a lifecycle stage on `aether.lifecycle`. All publish-subscribe, keyed by `KindId`. | subscribe via `aether.input`; subscribe Tick via `aether.lifecycle` | 0021, 0068, 0082 | Stable |
-| **Rendering & camera** | World-space geometry + a `view_proj` uniform; a camera publishes the matrix. | `aether.render` (`DrawTriangle`, `aether.view_projection`) | 0025, 0066, 0074 §7 | Stable |
-| **Mesh authoring & the DSL** | Author meshes as DSL text, hot-load them, replay to the renderer. | `aether.kit.mesh.load` to the mesh-viewer component | 0026, 0051, 0052, 0057 | Stable |
-| **File I/O** | Namespaced read/write/delete/list — `save` / `assets` / `config`. | `aether.fs` — `read` / `write` / `delete` / `list` | 0041 | Stable |
-| **Audio** | Fire-and-forget note on/off + master gain over built-in instruments; each `note_on` carries a bipolar `pan` (`0` center) placing the voice in the stereo image, and `set_sender_gain` trims a whole sender's voices; whole-file track playback in its own mixer lane (decoded off the realtime path, fetched through `aether.fs`); sampled instrument banks loaded from an SFZ-subset `.sfz` + its WAVs and appended to the registry past the built-ins, played through the same `note_on` surface. | `aether.audio` — `note_on` / `note_off` / `set_master_gain` / `set_sender_gain` / `play_track` / `stop_track` / `load_instrument` | 0039, 0103, 0127 | Stable |
-| **Window** (desktop) | Mode / title / focus; replies with the value actually applied. | `aether.window` — `set_mode` / `set_title` / `focus` | 0035 | Stable |
-| **Tracing & settlement** | Watch a mail chain to exact completion; trace subtree returned to the agent. | via `send_mail_traced` | 0080, 0086, 0093, 0094 | Settling (eviction, #1048) |
-| **Logging** | Per-actor log rings, queryable by mailbox name. | — (read via `actor_logs`) | 0077, 0081 | Stable |
-| **Configuration** | Layered app config — derive + overlay + argv/env, dumped via `--config`. | — (boot-time + CLI) | 0090 | Settling (rollout across knobs) |
-| **[HTTP egress](systems/http.md)** | Outbound network as a capability. | `aether.http` | 0043 | Stable |
+| System | Owns |
+|---|---|
+| [Components](systems/components.md) | wasm load/drop/replace, exports, config and state transfer |
+| [Behaviors](systems/behaviors.md) | fail-open in-cluster script interposition |
+| [Inventory and transforms](systems/inventory-and-transforms.md) | live names, kind schemas, native handlers, value transforms |
 
-## How to read an explainer (the shape each page follows)
+The hub's stored artifact and an engine's loaded instance are different things.
+The [operating chapter](operating/component-registry.md) covers that lifecycle.
 
-When the per-subsystem pages land they'll each answer the same four questions,
-in this order — so you can jump straight to the one you need:
+## Platform and network I/O
 
-1. **Why it exists.** The problem it solves and the alternative it rejected
-   (this is the ADR's "context," digested).
-2. **What it does.** The model — the mailboxes, the kinds, the reply contracts
-   if any, the invariants.
-3. **How to use it.** The operational surface from a caller's seat: what to
-   mail, what comes back, the gotchas inline.
-4. **How to extend or reuse it.** The seams — what you'd add a kind for, where
-   a new capability plugs in, what a component can reuse.
+| System | Owns |
+|---|---|
+| [File I/O](systems/file-io.md) | namespaced host files and transform-folded fetch |
+| [HTTP egress](systems/http.md) | bounded outbound requests |
+| [HTTP server](systems/http-server.md) | inbound routes, streaming and websockets |
+| [TCP](systems/tcp.md) | framed listeners and session actors |
+| [RPC](systems/rpc.md) | hub/engine process transport |
+| [Clipboard](systems/clipboard.md) | text clipboard with deterministic/headless backends |
+| [Content generation](systems/content-generation.md) | Anthropic/Gemini provider queues and staged media |
+| [Player sessions](systems/player-sessions.md) | trusted session/gateway tier over TCP and tick-native sim |
 
-That last question is the one this guide exists to answer, and it's where the
-[recipes](recipes.md) take over with the worked, step-by-step version.
+These all cross trust or blocking boundaries. Read [Platform and network I/O](systems/platform-io.md)
+for the common rules.
+
+## Media, interaction, and product tools
+
+| System | Owns |
+|---|---|
+| [Rendering and camera](systems/rendering.md) | GPU draw queues, textures, materials, capture and matrices |
+| [Text](systems/text.md) | font atlas, layout, batches and metrics |
+| [Mesh authoring](systems/mesh-authoring.md) | DSL, parser, tessellation and viewer load |
+| [Audio](systems/audio.md) | realtime events, scheduling, instruments, tracks and effects |
+| [Input](systems/input.md) | key, pointer, text, IME and subscription streams |
+| [Window](systems/window.md) | mode, title, focus and unsupported replies |
+| [Widgets](systems/widgets.md) | controls, focus, scroll, panel/editor composition |
+| [World and terrain](systems/world-and-terrain.md) | chunk data, proposals, picking, mesh and workbench |
+
+Native capabilities own devices; kit actors compose them into product behavior.
+
+## Fleet and operation
+
+The hub/engine control plane spans [process topology](architecture/process-topology.md),
+[engine fleet and stores](operating/engine-fleet.md), and the
+[MCP harness](mcp-harness.md). It is separated from engine-local systems because
+spawn/upload/selector semantics live outside a child registry.
+
+## Find the current contract
+
+Use the [capability index](reference/capability-index.md) for mailbox/source
+routing and engine-scoped `describe_kinds`, `describe_handlers`, and
+`describe_component` queries. The guide explains meaning; code and live schemas
+answer exact signatures.

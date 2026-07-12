@@ -213,7 +213,8 @@ arrival-ordered reply plus any recognized decoded/kind-name error; `none` keeps
 only those errors and `all` returns the complete stream. A request/reply — mail
 `aether.fs.read`, get the bytes — is still a single call with no polling, while a
 multi-reply driver can opt into the exact amount of history it needs.
-`fire_and_forget` opts an item out for a poke you don't wait on.
+`fire_and_forget` opts an item out only when completion and ordering are
+deliberately unobserved. A handler that emits no reply can still settle normally.
 
 `send_mail_traced` is the tool for when you want the *tree*, not just the reply.
 It dispatches a batch under one shared root and, once that whole chain settles,

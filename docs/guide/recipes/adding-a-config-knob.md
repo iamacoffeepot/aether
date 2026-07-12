@@ -9,10 +9,11 @@
 
 A knob is a field on a subsystem's resolved-config struct, declared once with a
 `#[config(...)]` hint that supplies its default and its env/CLI names. That
-single declaration generates the env layer, the `clap` argument
-overlay, the layered resolver, and the `--print-config` discovery entry — so you
-never write an `env::var(...).parse()` read. This recipe adds a knob end to end, with
-the two gotchas (the `native` feature gate, the `*_defaults_match` test) inline at
+single declaration generates the partial layer used by the config file and env,
+the `clap` argument overlay, the layered resolver, and the `--print-config`
+discovery entry — so you never write an `env::var(...).parse()` read. This recipe
+adds a knob end to end, with
+the two gotchas (the `runtime` feature gate, the `*_defaults_match` test) inline at
 the step where each bites.
 
 ## The exemplar to copy
@@ -27,7 +28,7 @@ it alongside this recipe and mirror the field you're closest to.
 The steps below add a field to an **existing** config struct (`HttpConfig`),
 which is the common case — the struct's layer is already registered for
 discovery, so a new field joins the `--print-config` dump for free. Adding a
-**brand-new** config struct takes two extra steps, called out at the end.
+**brand-new** config struct takes three extra steps, called out at the end.
 
 ## Enable / disable flags
 
@@ -73,8 +74,8 @@ of silently defaulting.
 
 The hints you have:
 
-- `default = <lit>` — the literal default the layer resolves to when no env or
-  argv value is set.
+- `default = <lit>` — the literal default the layer resolves to when no config-file,
+  env, or argv value is set.
 - `env = "..."` / `cli_long = "..."` — pin the env key and `--flag` to an exact
   name when the field name doesn't match the historical wire shape. Absent these,
   the names come from the container's `env_prefix` / `cli_prefix` joined to the
@@ -134,7 +135,7 @@ no `.env()` source, so it's env-free and CI-safe (issue 464).
 > cross-build in CI is what fails on it. Any `parse` helper you add is
 > `#[cfg(feature = "runtime")]` too.
 
-### 3. Wire the argv overlay into each chassis CLI
+### 3. Wire the argv overlay and config-file section into each chassis
 
 The derive emits `<Name>Overlay` (here `HttpOverlay`) with an `into_layer()`
 method. For a field on an existing struct whose overlay is already flattened into
@@ -148,18 +149,36 @@ pub http: HttpOverlay,
 ```
 
 `CommonOverlay` is in turn flattened into `DesktopCli` and `HeadlessCli`, so both
-full-stack chassis expose the flag. Each chassis resolves it in
+full-stack chassis expose the flag. Each chassis loads its sectioned TOML file once,
+then resolves the overlay against the subsystem's explicit section in
 `from_env_with_argv` (`crates/aether-substrate-bundle/src/{desktop,headless}/chassis.rs`):
 
 ```rust
-let http = HttpConf::try_from_argv_then_env(http.into_layer())?;
+let config_file = load_chassis_config(config)?;
+let config_file = config_file.as_ref();
+
+let http = resolve_with_file::<HttpConf>(
+    http.into_layer(),
+    config_file,
+    "http",
+)?;
 ```
 
-`try_from_argv_then_env` is the fallible resolver — argv wins over env, env over
-the literal default, and an unparseable *known* value `?`-propagates as a
-`ConfigError` rather than falling through. (`from_argv_then_env` is the panicking
-sibling; caps with total parsers like `NamespaceRoots` use it.) Absent flags
-resolve `None` and fall through to env, so an empty argv boots byte-identically.
+The section name is part of the chassis composition contract. For this config, a
+file override is written under `[http]`:
+
+```toml
+[http]
+require_https = true
+```
+
+`load_chassis_config` selects `--config PATH` first and falls back to
+`AETHER_CONFIG_FILE`; either explicitly selected file is a hard boot error when it
+cannot be read or parsed. `resolve_with_file` extracts the named section with
+`file_section` and preserves field precedence **argv > env > config file > literal
+default**. A missing `[http]` section simply contributes no layer, while a present
+non-table or malformed section is a hard `ConfigError`. Absent flags resolve
+`None` and fall through, so adding argv support does not shadow env or file values.
 
 The flag name is mechanical: take the env key, drop the `AETHER_` prefix,
 lowercase, hyphenate — `AETHER_HTTP_REQUIRE_HTTPS` becomes `--http-require-https`.
@@ -176,27 +195,30 @@ and doc, then exits before boot:
 cargo run -p aether-substrate-bundle --bin aether-substrate-headless -- --print-config
 ```
 
-Your new field appears with its default. The dump is rendered by
+Your new field appears with its default. This command is the discovery surface:
+the binaries exit before loading a selected TOML file, so use it to confirm that
+the declaration is registered, not to test a `[http]` override. The dump is rendered by
 `chassis_config_dump()` in `crates/aether-substrate-bundle/src/chassis_common.rs`,
 which walks `chassis_registry()`. That registry lists `&HttpConfigLayer::META`, so
 a field on an existing struct shows up with no extra wiring — the META walk is the
 discovery source of truth. If your knob is missing from the dump, the field isn't
-reaching the layer (re-check the `#[config]` hint and the `native` gate).
+  reaching the layer (re-check the `#[config]` hint and the `runtime` gate).
 
-### 5. Format and push
+### 5. Run the deterministic local tier
 
 ```sh
-cargo fmt
+cargo fmt -- --check
+cargo clippy --all-targets -- -D warnings
 ```
 
-Then push. CI runs the full check set — fmt, clippy, doc, nextest (which runs
-`http_from_env_defaults_match`), and the wasm32 component cross-build that catches
-a missing `native` gate. Fix anything CI flags.
+Fix either failure locally, then push the implementation branch. CI owns the
+full docs/test/wasm/package matrix and catches feature combinations the native
+lint pass cannot.
 
 ## Adding a brand-new config struct
 
 If the knob doesn't belong on any existing struct, you're declaring a new
-`#[derive(aether_substrate::Config)]` struct. Two steps beyond the above:
+`#[derive(aether_substrate::Config)]` struct. Three steps beyond the above:
 
 - **Register its layer META for discovery.** Add `&YourConfigLayer::META` to the
   `METAS` slice in `chassis_registry()`
@@ -204,13 +226,18 @@ If the knob doesn't belong on any existing struct, you're declaring a new
   and the unknown-key sweep (`chassis_known_keys`) both see its knobs.
 - **Flatten its overlay into a chassis CLI.** Re-export `YourOverlay` in
   `crates/aether-substrate-bundle/src/cli.rs` and `#[command(flatten)]` it into
-  `CommonOverlay` (or a per-chassis root), then resolve it in each chassis's
-  `from_env_with_argv` the way `HttpConf` is resolved.
+  `CommonOverlay` (or a per-chassis root).
+- **Choose and wire a stable TOML section.** Pick the explicit section name that
+  belongs to the subsystem, then call
+  `resolve_with_file::<YourConfig>(overlay.into_layer(), config_file, "your-section")`
+  in every chassis that carries it. Keep that string in lockstep across chassis;
+  it is the operator-facing file API, and `file_section` validates a present
+  section instead of silently skipping malformed input.
 
 ## Verify against current code
 
 This recipe names files, symbols, and methods that move. Before following it,
 confirm `HttpConfig`, `HttpConfigLayer`, `HttpOverlay`,
-`try_from_argv_then_env`, `into_layer`, `chassis_registry`, and
-`chassis_config_dump` still exist where named — grep the crates, and if a name has
-drifted, fix the recipe as part of your work.
+`load_chassis_config`, `file_section`, `resolve_with_file`, `into_layer`,
+`chassis_registry`, and `chassis_config_dump` still exist where named — grep the
+crates, and if a name has drifted, fix the recipe as part of your work.

@@ -4,7 +4,7 @@
 //! ADR-0050 §2 settles the dispatch model both caps embed: cap-local
 //! spawn-and-die with a per-cap concurrency bound. This module lands
 //! that model once so neither provider cap re-derives the dispatch
-//! loop, the `save://gen/` staging convention, or the stub-adapter
+//! loop, the root-relative `gen/` staging convention, or the stub-adapter
 //! shapes:
 //!
 //! - [`TaskQueue`] — the cap-level rate-limit + queue over the
@@ -14,8 +14,8 @@
 //!   `#[handler(task)]` completion handlers; the framework owns the
 //!   in-flight ledger (hold + reply target + worker spawn).
 //! - [`stage_gen_output_under`] — write generated binary bytes to a fresh
-//!   `save://gen/<uuid>.<ext>` under a caller-supplied root and return the
-//!   path the reply carries (binary outputs never ride the mail wire). The
+//!   `gen/<uuid>.<ext>` below a caller-supplied root and return that relative
+//!   path in the reply (binary outputs never ride the mail wire). The
 //!   root is resolved once at chassis boot ([`ContentGenConfig`]) and
 //!   threaded into the cap.
 //! - [`adapter`] — the `AnthropicAdapter` / `GeminiAdapter` traits plus
