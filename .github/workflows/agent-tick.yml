@@ -1,0 +1,430 @@
+name: Agent tick
+
+# The cloud-agent dispatcher: a hosted, no-Claude, no-cargo workflow that scans
+# the issue board, computes which items are advanceable, and fires agent-work
+# runs — a wavefront that pushes every issue one step forward through the flat
+# phase ladder (#3126) until the board is at rest. agent-work.yml (#3129) is the
+# executor that runs one pipeline step for one ref; this workflow decides WHAT to
+# dispatch and WHEN. It also carries the fleet's global controls: the
+# AGENT_ENABLED kill switch and the wave governor (repo variables that bound wave
+# width, inter-wave gap, and daily budget from one choke point). ADR-0146 §4.
+#
+# TRIGGER MODEL (three paths, one job body):
+#   - workflow_run on "Agent work" completed — the COMPLETION CHAIN. Each
+#     finishing step re-invokes the tick, which dispatches the next wave the
+#     moment quiescence returns, so waves chain at the natural pace of the work.
+#     The list matches the executor's `name:` (display name "Agent work"), the
+#     same way review.yml/reconciler.yml key on "CI".
+#   - schedule on offset minutes (~every 20) — the MISSED-EVENT BACKSTOP only.
+#     GitHub does drop workflow_run events; the cron guarantees the wavefront
+#     resumes within one period even when a completion event is lost. It is not
+#     the primary pacer.
+#   - workflow_dispatch — a manual kick. It bypasses the gap and budget gates
+#     (the deliberate operator override) but not the quiescence barrier.
+#
+# COMPUTED LIVENESS, NEVER STORED. A live agent-work run IS the claim on its
+# (task, ref) pair; the deterministic run-name `work-{task}-{ref}` (#3129's
+# contract) makes the claim observable. The tick enumerates runs from the
+# platform (`gh run list --workflow agent-work.yml`) and classifies each by
+# parsing its name — no claim label, nothing to desync on a crash. That live set
+# is both the BARRIER (quiescent = no live non-land run) and the double-dispatch
+# guard (an item with a matching live run is skipped). A crashed run leaves the
+# resting phase unmoved and drops out of the live set, so the next tick
+# re-dispatches by absence — crash recovery needs no bookkeeping.
+#
+# THE GOVERNOR is repo variables at one choke point, all computed statelessly
+# from run history (no counter is stored):
+#   - AGENT_ENABLED     — the kill switch, checked FIRST. Anything but 'true'
+#                         ends the run with a summary line and zero dispatch.
+#                         Flippable from the repo Variables UI with no code or
+#                         secret access; halts all new dispatch within one tick.
+#   - AGENT_WAVE_WIDTH  — the N-cap (default 2). Free slots = width minus the
+#                         live non-land count.
+#   - AGENT_MIN_WAVE_GAP_MINUTES — minimum gap since the last wave (default 0).
+#   - AGENT_DAILY_WAVE_BUDGET    — daily dispatch cap (0/unset = unlimited).
+#   - AGENT_NUDGE_DAYS  — stale-awaiting-answer nudge threshold in days
+#                         (0/unset = nudge disabled).
+# Free-running is not a mode: it is these dials opened wide (width high, gap 0,
+# budget 0), one governor with one set of knobs.
+#
+# THE WAVE. advanceable() maps a resting phase to a task:
+#   no phase:* (Backlog)          -> scope     (framable body; agent-work's scope
+#                                               self-bounces an unframable one)
+#   phase:define / phase:design   -> scope     (resume a crashed scope run)
+#   phase:plan                    -> none       (plan->ready is the /approve gate)
+#   phase:ready                   -> implement
+#   phase:building/qa/findings    -> none       (reconciler-owned; #3126)
+#   phase:held                    -> land       (ref is the open closing PR)
+#   phase:bounced/stalled         -> none       (rest until an owner acts)
+# agent:dont-touch items are filtered out of the whole scan first (the label
+# blinds the dispatcher, per its contract). The snapshot is ordered
+# land > question-resume > implement/scope and slots are filled in that order.
+# `land` BYPASSES THE BARRIER — dispatched every tick regardless of quiescence
+# and excluded from the barrier's live set — because land runs are minutes long,
+# agent-work's merged-check makes re-dispatch idempotent, and landing unblocks
+# downstream. Question-resume is a backstop tier: the primary resume path is the
+# owner's comment re-dispatching agent-work directly, but the tick also picks up
+# an agent:awaiting-answer item whose latest comment is the owner's (they
+# answered), dispatching the task matching its resting phase. A non-land item
+# dispatches only when quiescent; a still-parked awaiting-answer item (no owner
+# reply) is left alone. Chat runs (#3130) never enter the barrier: the run list
+# is scoped to agent-work.yml, so a live owner conversation cannot stall the
+# wavefront. Wave decisions go to $GITHUB_STEP_SUMMARY, not the issue timeline —
+# issues and labels stay the only durable state.
+#
+# NUDGE. An agent:awaiting-answer item whose park (its most recent
+# awaiting-answer label event) is older than AGENT_NUDGE_DAYS gets one @-owner
+# nudge comment carrying an <!-- aether-nudge --> marker, de-duped by that
+# marker's age so it re-nudges on cadence, not every tick. Skipped when the owner
+# has already replied.
+#
+# IDENTITY. Every dispatch and nudge rides the aether-agent App installation
+# token (actions/create-github-app-token), NOT GITHUB_TOKEN: App-created
+# workflow_dispatch events trigger downstream workflows where GITHUB_TOKEN-created
+# ones do not, so the completion chain would break silently on the default token.
+# Least-privilege job scopes: actions: write (dispatch + run list), issues: write
+# (nudge comments), contents: read.
+#
+# Owner console checklist (maintainer console work, NOT part of this file's
+# merge — the workflow degrades cleanly until these exist, and the first dispatch
+# is the acceptance test once they do):
+#   Repo variables (Settings -> Secrets and variables -> Actions -> Variables):
+#     - AGENT_ENABLED             set 'true' to go live (absent/other = halted)
+#     - AGENT_WAVE_WIDTH          initial '2'
+#     - AGENT_MIN_WAVE_GAP_MINUTES initial '0' (or unset)
+#     - AGENT_DAILY_WAVE_BUDGET   initial '0'/unset (unlimited)
+#     - AGENT_NUDGE_DAYS          initial '3' (0/unset disables the nudge)
+#   Secrets (SHARED with agent-work — no new secret; the App must additionally
+#   hold the Actions: write permission so the tick can list runs and dispatch):
+#     - AGENT_APP_ID, AGENT_APP_PRIVATE_KEY — the aether-agent GitHub App.
+# Absent AGENT_ENABLED the run exits clean at step one; absent the App secrets it
+# exits clean at the preflight — a red tick every 20 minutes is not the failure
+# mode a periodic scanner should have.
+
+on:
+  schedule:
+    - cron: "7,27,47 * * * *"
+  workflow_run:
+    workflows: ["Agent work"]
+    types: [completed]
+  workflow_dispatch:
+
+# Serialize overlapping triggers (a cron landing on a completion event) into one
+# tick at a time so two runs never race the barrier read. cancel-in-progress is
+# false: a tick is short and a superseded one still finishes its dispatch cleanly.
+concurrency:
+  group: agent-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    name: Dispatch a wave
+    runs-on: ubuntu-latest
+    # Least privilege on the default token: actions: write backs the run list +
+    # workflow_dispatch, issues: write backs the nudge comment. Every write in
+    # fact rides the App token minted below; these scopes match its needs and
+    # keep the default token from over-reaching.
+    permissions:
+      actions: write
+      issues: write
+      contents: read
+    env:
+      REPO: ${{ github.repository }}
+      OWNER: iamacoffeepot
+      EVENT: ${{ github.event_name }}
+    steps:
+      # Kill switch + required-secret preflight, before any spend. Both degrade
+      # cleanly (proceed=false, exit 0): a periodic scanner must not go red every
+      # tick when the fleet is deliberately off or not yet provisioned.
+      - name: Preflight — kill switch and required secrets
+        id: preflight
+        env:
+          AGENT_ENABLED: ${{ vars.AGENT_ENABLED }}
+          APP_ID: ${{ secrets.AGENT_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "${AGENT_ENABLED:-}" != "true" ]; then
+            echo "AGENT_ENABLED is '${AGENT_ENABLED:-unset}', not 'true' — kill switch engaged; no dispatch." \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo "kill switch engaged (AGENT_ENABLED != true) — nothing to do."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          missing=""
+          [ -n "${APP_ID:-}" ] || missing="${missing} AGENT_APP_ID"
+          [ -n "${APP_PRIVATE_KEY:-}" ] || missing="${missing} AGENT_APP_PRIVATE_KEY"
+          if [ -n "$missing" ]; then
+            echo "App secret(s) not set:${missing} — dispatcher idle until the aether-agent App is provisioned (see this workflow's header)." \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo "required App secret(s) missing:${missing} — degrading to a clean no-op."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+      # Mint the App installation token — the identity every dispatch and nudge
+      # rides. App-created events wake downstream workflows where GITHUB_TOKEN
+      # ones do not, which is what lets the completion chain re-trigger the tick.
+      - name: Mint the App installation token
+        id: app-token
+        if: steps.preflight.outputs.proceed == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.AGENT_APP_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+
+      # The wave: governor gate, then the computed barrier, board scan, priority,
+      # and dispatch — one step so a tick's whole reasoning is legible in one log
+      # group (the reconciler's posture). The live set and the governor both read
+      # the single run enumeration below.
+      - name: Compute and dispatch the wave
+        if: steps.preflight.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          WAVE_WIDTH: ${{ vars.AGENT_WAVE_WIDTH }}
+          MIN_WAVE_GAP_MINUTES: ${{ vars.AGENT_MIN_WAVE_GAP_MINUTES }}
+          DAILY_WAVE_BUDGET: ${{ vars.AGENT_DAILY_WAVE_BUDGET }}
+        run: |
+          set -euo pipefail
+          owner="${REPO%/*}"
+          name="${REPO#*/}"
+          width="${WAVE_WIDTH:-2}"
+          gap_minutes="${MIN_WAVE_GAP_MINUTES:-0}"
+          daily_budget="${DAILY_WAVE_BUDGET:-0}"
+
+          summary() { echo "$1" >> "$GITHUB_STEP_SUMMARY"; echo "$1"; }
+          summary "## Agent tick — $(date -u +%FT%TZ) (${EVENT})"
+
+          # Enumerate agent-work runs once. This one read is the platform state
+          # the whole tick computes over: the barrier's live set and the
+          # governor's gap/budget both derive from it.
+          gh run list --workflow agent-work.yml \
+            --json databaseId,name,status,event,createdAt --limit 100 > /tmp/runs.json
+
+          # Live set: non-terminal runs, keyed by the deterministic run-name.
+          # A run with a name that is not `work-{task}-{ref}` is ignored.
+          live_names="$(jq -r '.[]
+            | select(.status=="queued" or .status=="in_progress"
+                     or .status=="requested" or .status=="waiting" or .status=="pending")
+            | .name' /tmp/runs.json)"
+          live_pairs=""
+          live_nonland=0
+          while IFS= read -r rn; do
+            [ -n "$rn" ] || continue
+            case "$rn" in
+              work-*) rest="${rn#work-}"; task="${rest%-*}"; ref="${rest##*-}" ;;
+              *) continue ;;
+            esac
+            [ -n "$task" ] && [ -n "$ref" ] || continue
+            live_pairs="${live_pairs}${task}:${ref}"$'\n'
+            [ "$task" != "land" ] && live_nonland=$((live_nonland + 1))
+          done <<< "$live_names"
+          live_total="$(printf '%s' "$live_pairs" | grep -c . || true)"
+          summary "- live agent-work runs: ${live_total} (${live_nonland} non-land)"
+
+          # Glob match against the newline-delimited set, not a printf | grep -q
+          # pipe: grep's early exit on a hit would SIGPIPE the printf under
+          # pipefail and read back as a miss, dropping the double-dispatch guard.
+          is_live() {
+            case $'\n'"${live_pairs}" in
+              *$'\n'"$1:$2"$'\n'*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          # Governor gap/budget gate — statelessly computed from run history. A
+          # workflow_dispatch is the deliberate override and skips this gate.
+          if [ "$EVENT" != "workflow_dispatch" ]; then
+            if [ "$gap_minutes" -gt 0 ]; then
+              last_created="$(jq -r '[.[].createdAt] | max // empty' /tmp/runs.json)"
+              if [ -n "$last_created" ]; then
+                last_epoch="$(date -u -d "$last_created" +%s)"
+                age_minutes=$(( ( $(date -u +%s) - last_epoch ) / 60 ))
+                if [ "$age_minutes" -lt "$gap_minutes" ]; then
+                  summary "- governor: last wave ${age_minutes}m ago < gap ${gap_minutes}m — no dispatch this tick."
+                  exit 0
+                fi
+              fi
+            fi
+            if [ "$daily_budget" -gt 0 ]; then
+              midnight="$(date -u -d 'today 00:00:00' +%s)"
+              today_count="$(jq -r --argjson m "$midnight" \
+                '[.[] | select((.createdAt | fromdateiso8601) >= $m)] | length' /tmp/runs.json)"
+              if [ "$today_count" -ge "$daily_budget" ]; then
+                summary "- governor: ${today_count} waves today >= budget ${daily_budget} — no dispatch this tick."
+                exit 0
+              fi
+            fi
+          fi
+
+          # Board scan → advanceable snapshot. Open non-PR issues with labels;
+          # `has("pull_request")|not` drops PRs (they share the issues endpoint).
+          gh api "repos/${REPO}/issues?state=open&per_page=100" --paginate \
+            --jq '.[] | select(has("pull_request")|not)
+              | [ .number,
+                  ([.labels[].name | select(startswith("phase:"))] | .[0] // "none"),
+                  (if ([.labels[].name] | index("agent:awaiting-answer")) then "await" else "-" end),
+                  (if ([.labels[].name] | index("agent:dont-touch")) then "dt" else "-" end) ]
+              | @tsv' > /tmp/board.tsv
+
+          # Resolve the open PR that closes a held issue — land's ref is that PR,
+          # not the issue. includeClosedPrs:false already excludes merged/closed.
+          resolve_open_pr() {
+            gh api graphql -f query='
+              query($owner:String!,$name:String!,$number:Int!){
+                repository(owner:$owner,name:$name){
+                  issue(number:$number){
+                    closedByPullRequestsReferences(first:20, includeClosedPrs:false){
+                      nodes{ number state merged }
+                    }
+                  }
+                }
+              }' -f owner="$owner" -f name="$name" -F number="$1" \
+              --jq '[.data.repository.issue.closedByPullRequestsReferences.nodes[]
+                     | select(.state=="OPEN" and (.merged|not))] | .[0].number // empty'
+          }
+
+          # Latest comment author — an owner reply means an awaiting-answer item
+          # has been answered (question-resume) and must not be nudged. Comments
+          # come oldest-first; tail -n1 is the newest across all pages.
+          owner_answered() {
+            local last
+            last="$(gh api "repos/${REPO}/issues/${1}/comments?per_page=100" --paginate \
+              --jq '.[].user.login' | tail -n1 || true)"
+            [ "$last" = "$OWNER" ]
+          }
+
+          # Bucket advanceable items by priority tier. land bypasses the barrier
+          # and the slot budget; scope/implement need quiescence; an
+          # awaiting-answer scope/implement item only advances when the owner has
+          # replied (question-resume), else it is left parked.
+          land_items=""
+          resume_items=""
+          work_items=""
+          while IFS=$'\t' read -r num phase await dt; do
+            [ -n "$num" ] || continue
+            if [ "$dt" = "dt" ]; then summary "- skip #${num}: agent:dont-touch"; continue; fi
+            case "$phase" in
+              none|phase:define|phase:design) task="scope"; ref="$num" ;;
+              phase:ready) task="implement"; ref="$num" ;;
+              phase:held) task="land"; ref="" ;;
+              *) continue ;;
+            esac
+            if [ "$task" = "land" ]; then
+              ref="$(resolve_open_pr "$num" || true)"
+              if [ -z "$ref" ]; then summary "- skip #${num}: phase:held but no open closing PR"; continue; fi
+            fi
+            if is_live "$task" "$ref"; then summary "- skip work-${task}-${ref}: already live"; continue; fi
+            if [ "$task" = "land" ]; then
+              land_items="${land_items}${task} ${ref}"$'\n'
+              continue
+            fi
+            if [ "$await" = "await" ]; then
+              if owner_answered "$num"; then
+                resume_items="${resume_items}${task} ${ref}"$'\n'
+              else
+                summary "- skip #${num}: agent:awaiting-answer, owner has not replied — parked"
+              fi
+            else
+              work_items="${work_items}${task} ${ref}"$'\n'
+            fi
+          done < /tmp/board.tsv
+
+          dispatch() {
+            gh workflow run agent-work.yml -f task="$1" -f ref="$2"
+            summary "- dispatched: work-${1}-${2}"
+          }
+
+          # Land first — every held PR, regardless of quiescence, off the slot
+          # budget.
+          while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            # shellcheck disable=SC2086
+            set -- $entry
+            dispatch "$1" "$2"
+          done <<< "$land_items"
+
+          # Non-land only when quiescent (no live non-land run). Slots = width
+          # minus the live non-land count (0 here, so width); question-resume
+          # fills ahead of fresh work.
+          if [ "$live_nonland" -eq 0 ]; then
+            slots=$(( width - live_nonland ))
+            [ "$slots" -lt 0 ] && slots=0
+            filled=0
+            while IFS= read -r entry; do
+              [ -n "$entry" ] || continue
+              if [ "$filled" -ge "$slots" ]; then summary "- deferred (slots full): ${entry}"; continue; fi
+              # shellcheck disable=SC2086
+              set -- $entry
+              dispatch "$1" "$2"
+              filled=$((filled + 1))
+            done <<< "${resume_items}${work_items}"
+            summary "- filled ${filled}/${slots} non-land slot(s)."
+          else
+            summary "- not quiescent: ${live_nonland} live scope/implement run(s) — deferring new scope/implement."
+          fi
+
+      # Re-notify the owner about stale parked questions. Independent of the wave
+      # governor (a stale question is nudged even inside a gap window), so it is
+      # its own step guarded on the preflight alone.
+      - name: Nudge stale awaiting-answers
+        if: steps.preflight.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          NUDGE_DAYS: ${{ vars.AGENT_NUDGE_DAYS }}
+        run: |
+          set -euo pipefail
+          nudge_days="${NUDGE_DAYS:-0}"
+          if [ "$nudge_days" -le 0 ]; then
+            echo "AGENT_NUDGE_DAYS is '${nudge_days}' — nudge disabled."
+            exit 0
+          fi
+          now_epoch="$(date -u +%s)"
+          threshold=$(( nudge_days * 86400 ))
+
+          gh api "repos/${REPO}/issues?state=open&per_page=100&labels=agent:awaiting-answer" --paginate \
+            --jq '.[] | select(has("pull_request")|not) | .number' > /tmp/await.txt
+
+          while IFS= read -r num; do
+            [ -n "$num" ] || continue
+
+            labels="$(gh api "repos/${REPO}/issues/${num}/labels" --jq '.[].name' || true)"
+            if grep -qxF 'agent:dont-touch' <<<"$labels"; then
+              echo "#${num}: agent:dont-touch — skip"; continue
+            fi
+
+            # Park time = the most recent agent:awaiting-answer label event.
+            park="$(gh api "repos/${REPO}/issues/${num}/timeline?per_page=100" --paginate \
+              --jq '[.[] | select(.event=="labeled" and .label.name=="agent:awaiting-answer") | .created_at] | last // empty' || true)"
+            [ -n "$park" ] || continue
+            park_age=$(( now_epoch - $(date -u -d "$park" +%s) ))
+            if [ "$park_age" -lt "$threshold" ]; then
+              echo "#${num}: parked $(( park_age / 86400 ))d < ${nudge_days}d — not stale"; continue
+            fi
+
+            # Do not nudge a question the owner has already answered.
+            last_author="$(gh api "repos/${REPO}/issues/${num}/comments?per_page=100" --paginate \
+              --jq '.[].user.login' | tail -n1 || true)"
+            if [ "$last_author" = "$OWNER" ]; then
+              echo "#${num}: owner already replied — skip nudge"; continue
+            fi
+
+            # De-dup: re-nudge on cadence, not every tick. A marker comment
+            # younger than the threshold means the last nudge is still fresh.
+            last_nudge="$(gh api "repos/${REPO}/issues/${num}/comments?per_page=100" --paginate \
+              --jq '[.[] | select(.body | contains("<!-- aether-nudge -->")) | .created_at] | last // empty' || true)"
+            if [ -n "$last_nudge" ]; then
+              if [ $(( now_epoch - $(date -u -d "$last_nudge" +%s) )) -lt "$threshold" ]; then
+                echo "#${num}: nudged within the cadence — skip"; continue
+              fi
+            fi
+
+            cat > /tmp/nudge.md <<EOF
+          @${OWNER} — issue #${num} has been waiting on your answer for $(( park_age / 86400 )) day(s). Reply here and the fleet resumes it on the next tick.
+
+          <!-- aether-nudge -->
+          EOF
+            gh api -X POST "repos/${REPO}/issues/${num}/comments" -F body=@/tmp/nudge.md
+            echo "#${num}: nudged"
+          done < /tmp/await.txt
