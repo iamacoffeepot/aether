@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "issue",
+    "status",
+    "summary",
+    "commit",
+    "clean",
+    "files_changed",
+    "checks",
+    "deviations",
+    "blocked_reason"
+  ],
+  "properties": {
+    "issue": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["completed", "blocked"]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "commit": {
+      "type": ["string", "null"]
+    },
+    "clean": {
+      "type": "boolean"
+    },
+    "files_changed": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fmt", "clippy"],
+      "properties": {
+        "fmt": {
+          "type": "string",
+          "enum": ["passed", "failed", "not-run"]
+        },
+        "clippy": {
+          "type": "string",
+          "enum": ["passed", "failed", "not-run"]
+        }
+      }
+    },
+    "deviations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "blocked_reason": {
+      "type": ["string", "null"]
+    }
+  }
+}

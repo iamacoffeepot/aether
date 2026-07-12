@@ -1,6 +1,6 @@
 # Release phase schema
 
-Each aether release is tracked entirely on GitHub issue labels — there is no project board. Phase and all issue metadata ride `phase:*` / `type:*` / `size:*` / `model:*` labels, set by the `/release-*` skills, so every pipeline write goes over REST and the contended GraphQL pool stays free (ProjectsV2 is GraphQL-only; the one GraphQL op the pipeline still issues is the PR un-draft at land time). `release-project-init.sh <version>` ensures the label vocabulary exists.
+Each aether release is tracked entirely on GitHub issue labels — there is no project board. Phase and all issue metadata ride `phase:*` / `type:*` / `size:*` / `model:*` labels, set by the `/release-*` skills, so every operation with a REST form uses REST and the contended GraphQL pool stays free. GraphQL is reserved for facts and mutations GitHub does not expose over REST, including closing-issue references, review-thread reads and resolution, and PR un-draft. `release-project-init.sh <version>` ensures the label vocabulary exists.
 
 ## Phase — the `phase:*` label
 
@@ -9,9 +9,9 @@ The lifecycle vocabulary is the `phase:*` label set, the canonical phase state f
 | Phase     | Label             | Meaning                                            | Advances by      |
 |-----------|-------------------|----------------------------------------------------|------------------|
 | Backlog   | *(no label)*      | Not yet picked up for this release                 | User             |
-| Define    | `phase:define`    | Problem framing in progress                        | User + Claude    |
-| Design    | `phase:design`    | Tradeoffs / options / ADR drafting                 | User + Claude    |
-| Plan      | `phase:plan`      | Sequencing, dependencies, sub-issues               | User + Claude    |
+| Define    | `phase:define`    | Problem framing in progress                        | User + `/scope`  |
+| Design    | `phase:design`    | Tradeoffs / options / ADR drafting                 | User + `/scope`  |
+| Plan      | `phase:plan`      | Sequencing, dependencies, sub-issues               | User + `/scope`  |
 | Ready     | `phase:ready`     | Agent-ready; awaiting dispatch                     | Gate: `/approve` |
 | Building  | `phase:building`  | PR open; CI not yet green                          | Reconciler       |
 | QA        | `phase:qa`        | CI green; review/dogfood verdict owed              | Reconciler       |
@@ -77,4 +77,4 @@ The post-green stretch (`building` → `qa` → `findings` → `held`) is comput
 - **File an issue:** `/sketch` — REST `POST …/issues` with the `type:*` (and `crate:*`) labels; a fresh issue is Backlog by label-absence.
 - **Advance phase:** the `/release-*` skills swap the `phase:*` label atomically over REST (`PUT …/issues/<n>/labels`, replacing the prior `phase:*` with the new one); Backlog and Done delete the label rather than swap it.
 
-Every operation rides REST — there is no board to write.
+Every operation with a REST form rides REST — there is no board to write. The few GraphQL-only review-thread, closing-reference, and un-draft operations are called directly rather than through convenience commands.

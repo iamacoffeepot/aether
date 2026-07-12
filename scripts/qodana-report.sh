@@ -2,7 +2,7 @@
 # Fetch and triage a PR's Qodana findings from CI's `qodana-report`
 # artifact — the local-scan replacement (issue 1921). Qodana is a
 # required CI gate (`ci-pass`), not a local pre-flight step; when a PR's
-# `Qodana scan` check is red, `/land` runs this to pull the findings,
+# `Qodana scan` check is red, `/implement` runs this to pull the findings,
 # filter them to the PR's own changes, and print an actionable list to
 # resolve in the worktree.
 #
@@ -12,7 +12,7 @@
 #
 # Read-only: downloads the artifact to a temp dir, parses the SARIF, and
 # prints a per-file grouped summary with a total. Exits non-zero when
-# findings land on the PR's own changes (the set `/land` must resolve);
+# findings land on the PR's own changes (the set `/implement` must resolve);
 # exits 3 when the artifact is missing (the Qodana job likely crashed —
 # surface to the user rather than treating it as "no findings").
 
@@ -114,5 +114,5 @@ else
 fi
 echo "total: $total  |  on the PR's changed files: $on_diff  (* = on the PR diff)"
 
-# Non-zero when findings land on the PR's own changes — the set /land resolves.
+# Non-zero when findings land on the PR's own changes — the set /implement resolves.
 (( on_diff == 0 ))

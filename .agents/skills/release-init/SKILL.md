@@ -1,20 +1,22 @@
 ---
 name: release-init
-description: "Bootstrap Aether release workflow labels. Use to ensure phase, bounce-to, size, and model labels exist for the issue lifecycle."
+description: "Ensure Aether's phase, bounce, size, and model-routing GitHub labels exist for a release. Use to bootstrap or reconcile the issue lifecycle vocabulary; do not mutate issues or branches."
 ---
 
 # Release Init
 
-Use this Codex skill for release label bootstrap.
+Read [Codex harness](../_shared/codex-harness.md) and [GitHub workflow](../_shared/github-workflow.md).
 
-## Source
+Require a release version; accept an explicit owner override and otherwise use `iamacoffeepot`. Verify `gh` repository access and that `scripts/release-project-init.sh` exists in the current repository state.
 
-- Workflow source: `.claude/skills/release-init/SKILL.md`
-- Translation rules: `../_shared/claude-to-codex.md`
+Run:
 
-## Procedure
+```text
+scripts/release-project-init.sh <version> --owner <owner>
+```
 
-1. Read both source files completely before acting.
-2. Create or reconcile only the labels described by the source.
-3. Use REST `gh api` label operations where available.
-4. Do not alter issues, branches, or PRs beyond the label bootstrap.
+The repository-owned script is idempotent and owns the exact label names, colors, and descriptions. Do not reproduce or extend its list in the skill. On partial failure, report the failed label; a later rerun may safely reconcile the remainder.
+
+Verify that every label declared by the script now exists. Report the release version and the `phase:*`, `bounce-to:*`, `size:*`, and `model:*` families. Point to `$sketch` as the next entry point.
+
+Do not create a project board, issue, comment, branch, marker file, PR, or release.

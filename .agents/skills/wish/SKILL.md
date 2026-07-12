@@ -1,35 +1,19 @@
 ---
 name: wish
-description: "Run Aether adversity-grounded design ideation. Use to drill from a felt absence into producible plans, including deep-mode driller, skeptic, and synthesis workflows."
+description: "Run Aether adversity-grounded design ideation. Use to turn a felt absence into grounded wish trees and producible leaf plans, drill an existing branch, run fresh-context deep exploration, refresh code grounding, or survey filing disposition."
 ---
 
 # Wish
 
-Use this Codex skill for the repository's design ideation workflow.
+Build design trees upstream of issue scoping. This skill writes ignored artifacts under the shared checkout's `wishes/`; it does not write production code or mutate GitHub.
 
-## Source
+Read [Codex harness](../_shared/codex-harness.md) and [common wish contract](references/common.md) completely before acting. Then read only the mode-specific material:
 
-- Skill source: `.claude/skills/wish/SKILL.md`
-- Deep workflow source: `.claude/workflows/wish.js`
-- Translation rules: `../_shared/claude-to-codex.md`
+- For `$wish <theme>`, `$wish --as <role>`, or `$wish --under <wish-path>`, read [GitHub workflow](../_shared/github-workflow.md) and [Plain and under](references/plain-and-under.md).
+- For `$wish --deep <theme> [--as <role>] [--beam N] [--budget N]`, read [GitHub workflow](../_shared/github-workflow.md) and [Deep](references/deep.md).
+- For `$wish --refresh <tree-path>`, read only the Refresh section of [Refresh and survey](references/refresh-and-survey.md).
+- For `$wish --survey [<tree-path>]`, also read [GitHub workflow](../_shared/github-workflow.md) and the Survey section of [Refresh and survey](references/refresh-and-survey.md).
 
-Read all relevant source files before acting. For normal wish work, read the skill source and translation rules. For `--deep`, also read the deep workflow source.
+`--beam` defaults to 3 and `--budget` to 40. Do not accept `--depth` or `--count`: depth and tree size emerge from producibility. Roles are `player`, `designer`, `agent`, `operator`, and `developer`.
 
-## Core Rules
-
-1. Ground every claimed existing engine surface against current code with `rg`, `git grep`, or file reads. Do not rely on memory for kinds, capabilities, mailboxes, traits, file paths, or signatures.
-2. A wish is not a plan until it is producible with known, verified means within current resources.
-3. Do not file issues or write production code from this skill unless the user asks for a follow-up sketch/scope flow.
-4. Preserve alternatives, doors opened, and doors closed in the wish output.
-
-## Deep Mode
-
-For `/wish --deep`, map the Claude JS workflow to Codex subagents:
-
-1. Generate or accept root wishes from the user-facing wish skill flow.
-2. Maintain the frontier in the main Codex thread.
-3. Spawn fresh driller subagents for bounded nodes. Each driller writes its own `wish.md` and returns `producible`, `summary`, `grounded_surfaces`, and `children`.
-4. For each `producible:true` node, run a skeptic pass before accepting it as terminal.
-5. Synthesize an `index.md` from node summaries and terminal leaves.
-
-Keep the main thread's context focused on frontier state and summaries, not raw driller reasoning.
+Use `$wish`, `$sketch`, and `$scope` in user-facing instructions. Do not translate or execute a workflow from another agent harness.
