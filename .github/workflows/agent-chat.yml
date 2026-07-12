@@ -24,7 +24,21 @@ name: Agent chat
 #     resumes, #3129), not chat's own session. This branch is pure hosted
 #     orchestration and touches no Claude / OAuth / S3 step.
 #   - Plain conversation (label absent): chat runs its own claude --resume turn
-#     on the per-issue chat session and posts the reply inline as a comment.
+#     on the per-issue chat session and posts the reply inline as a comment. This
+#     branch requires an explicit SUMMON — the comment must contain `/agent`.
+#     Without it the job never starts. An owner comment is not addressed to the
+#     agent by default: a bounce reason, a review note, an "LGTM", a `gh pr close
+#     --comment` (issue_comment serves PR threads too) are all writing for the
+#     record, and every one of them used to spend a model turn. The parked-answer
+#     branch needs no summon — the agent asked the question, so the reply to it is
+#     addressed to the agent by construction.
+#
+# A chat turn CANNOT ACT. It has no dispatch, no label write, no PR: this workflow
+# posts the model's reply text as a comment and exits. The turn's prompt says so,
+# on both the resume and seed paths, because a reply that promises work it is not
+# doing ("re-scoping now") leaves a plausible falsehood in the issue record that
+# the next reader — human or agent — will believe. The board is the record; a
+# comment is not a report of work.
 #
 # Conversational memory survives a fresh, stateless hosted runner via a per-issue
 # Claude session synced to S3 (agent/chat/issue-<n>/): restore before the turn,
@@ -138,10 +152,18 @@ jobs:
     # carries the labels, so no API call is needed. Job level, not step level, for
     # the same reason as the owner gate: no secret-bearing step may exist on a path
     # a benched issue can reach.
+    # The summon clause rides the same job-level gate for the same reason the
+    # owner check does: an un-summoned comment must reach NO secret-bearing step
+    # and burn no runner minute, rather than start a job that skips its way to a
+    # no-op. `/agent` is a protocol constant, not an identity — nothing about the
+    # App's handle is hardcoded, and GitHub's contains() is case-insensitive on
+    # strings. A comment that summons nothing is free.
     if: >
       vars.AGENT_ENABLED == 'true' &&
       github.event.sender.login == github.repository_owner &&
-      !contains(github.event.issue.labels.*.name, 'agent:dont-touch')
+      !contains(github.event.issue.labels.*.name, 'agent:dont-touch') &&
+      (contains(github.event.issue.labels.*.name, 'agent:awaiting-answer') ||
+       contains(github.event.comment.body, '/agent'))
     # issues: write covers the reply comment and the label removal; id-token:
     # write is the OIDC mint for the AWS role; contents: read is the floor. The
     # agent-work dispatch's actions: write reach rides the App token, NOT this
@@ -369,10 +391,33 @@ jobs:
           set -uo pipefail
           session_id="$(cat /tmp/session-pointer 2>/dev/null || true)"
 
+          # The standing constraint, prepended to the owner's comment on BOTH
+          # paths. The resume path is the one that most needs it: it passes the
+          # raw comment with no framing, so on a long conversation the model's
+          # only sense of what it can do would come from its own prior replies.
+          # A chat turn posts text; it dispatches nothing.
+          {
+            echo "You are the aether agent, replying in GitHub issue #${ISSUE} as a single comment."
+            echo "This is a conversation turn only. You cannot dispatch work, change labels, open"
+            echo "or close PRs, or move an issue's phase — this workflow posts your reply as a"
+            echo "comment and does nothing else. Never claim or promise an action you are not"
+            echo "performing in this reply; a comment that reports work it did not do leaves a"
+            echo "falsehood in the issue record. If work should happen, say what should happen and"
+            echo "what would carry it out."
+            echo "Reply concisely, in plain prose."
+          } > /tmp/preamble.txt
+
+          {
+            cat /tmp/preamble.txt
+            echo
+            echo "--- the owner's message ---"
+            printf '%s\n' "$OWNER_COMMENT"
+          } > /tmp/turn-prompt.txt
+
           out=""
           resumed=0
           if [ -n "$session_id" ]; then
-            if out="$(claude --resume "$session_id" -p "$OWNER_COMMENT" \
+            if out="$(claude --resume "$session_id" -p "$(cat /tmp/turn-prompt.txt)" \
                        --model "$MODEL" --output-format json --max-turns 20 2>/tmp/turn.err)" \
                && [ -n "$(jq -r '.session_id // empty' <<<"$out")" ]; then
               resumed=1
@@ -387,9 +432,8 @@ jobs:
             gh api "repos/${REPO}/issues/${ISSUE}/comments" --paginate \
               --jq '.[] | "@" + .user.login + ": " + .body' > /tmp/thread.txt || : > /tmp/thread.txt
             {
-              echo "You are the aether agent replying in GitHub issue #${ISSUE}."
+              cat /tmp/preamble.txt
               echo "The prior thread is below for context, then the owner's new message."
-              echo "Reply concisely, in plain prose, as a single issue comment."
               echo
               echo "--- prior thread ---"
               cat /tmp/thread.txt
