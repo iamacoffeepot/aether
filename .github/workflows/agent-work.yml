@@ -399,7 +399,11 @@ jobs:
       # Resolve the driving model from the issue's model:* label (scope stamps it
       # at Plan; /implement and /approve gate on it). scope/approve/implement's ref
       # is the issue; land's ref is a PR, so resolve its closing issue. Default to
-      # the proven headless sonnet string; upgrade to opus when the label says so.
+      # the proven headless sonnet string; an explicit label wins in either
+      # direction. scope's default INVERTS to opus (#3203): a pre-scope issue
+      # cannot carry the label — scope is what stamps it — so the label read is
+      # structurally a no-op for fresh scope work, and the sonnet default was
+      # guaranteeing the ladder's most judgment-heavy task the cheapest model.
       - name: Resolve the driving model
         id: model
         if: steps.guard.outputs.proceed == 'true'
@@ -430,10 +434,18 @@ jobs:
               ;;
           esac
           model="claude-sonnet-5"
+          if [ "$TASK" = "scope" ]; then
+            model="opus"
+          fi
           if [ -n "${issue:-}" ]; then
             labels="$(gh api "repos/${REPO}/issues/${issue}/labels" --jq '.[].name' || true)"
             if grep -qx 'model:opus' <<<"$labels"; then
               model="opus"
+            fi
+            # A bounced issue re-entering scope carries the label its Plan
+            # stamped — an explicit model:sonnet wins over scope's opus default.
+            if grep -qx 'model:sonnet' <<<"$labels"; then
+              model="claude-sonnet-5"
             fi
           fi
           echo "model resolved to ${model}"
