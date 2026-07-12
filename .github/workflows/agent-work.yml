@@ -44,9 +44,10 @@ name: Agent work
 #     wake the tick and an implement run's PR would never trigger CI/review. The
 #     App token is what lets the arc chain event-driven; it is not optional
 #     hardening. A maintainer-registered App carries it (owner checklist below).
-#   - Claude auth is AGENT_CLAUDE_CODE_OAUTH_TOKEN — deliberately distinct from
-#     the QA chain's CLAUDE_CODE_OAUTH_TOKEN so the agent subscription's rate
-#     pool is isolated from review/dogfood.
+#   - Claude auth is AGENT_CLAUDE_CODE_OAUTH_TOKEN — the same dedicated CI
+#     subscription review.yml/dogfood.yml now authenticate with, so the fleet
+#     and QA chain share one rate pool; the owner's personal token is retired
+#     from CI.
 #
 # Security posture mirrors review.yml/dogfood.yml: the code-executing job is
 # read-only on GITHUB_TOKEN (contents: read) and every write goes through the
@@ -126,9 +127,10 @@ jobs:
       contents: read
     env:
       # Exposed at job level under the name the Claude Code binary reads, sourced
-      # from the AGENT-isolated secret (NOT the QA chain's CLAUDE_CODE_OAUTH_TOKEN)
-      # so the agent subscription's rate pool stays separate. Job-level presence
-      # lets step `if: env... != ''` gating work.
+      # from AGENT_CLAUDE_CODE_OAUTH_TOKEN — the same dedicated CI subscription
+      # review.yml/dogfood.yml now share, since the owner's personal token is
+      # retired from CI. Job-level presence lets step `if: env... != ''` gating
+      # work.
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.AGENT_CLAUDE_CODE_OAUTH_TOKEN }}
       # The full repo slug and its owner/name halves, used by the gh API steps.
       REPO: ${{ github.repository }}
