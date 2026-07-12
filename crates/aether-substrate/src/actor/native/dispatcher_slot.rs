@@ -436,6 +436,11 @@ where
             }
             // Phase 3: unwire hook.
             self.run_close_hook(actor);
+            // iamacoffeepot/aether#3051: the close hook is the last actor
+            // lifecycle phase allowed to observe its handler costs. Once it
+            // returns, remove the finalized mailbox's global rows so native
+            // instance churn cannot retain stale cells.
+            self.mailer.cost_table().drop_mailbox(self.self_id);
             // Phase 4: registry close + monitor fan-out.
             self.finalize_registry();
             actor_guard.take();

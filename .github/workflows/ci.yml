@@ -295,6 +295,14 @@ jobs:
           path: target/test-bench-artifacts/**
           if-no-files-found: ignore
           retention-days: 7
+      - name: Upload FleetBench TCP load metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fleetbench-tcp-load-metrics
+          path: target/fleetbench-metrics/tcp-load.json
+          if-no-files-found: ignore
+          retention-days: 7
       # Hit-rate visibility while the S3 backend beds in; harmless to
       # keep once it does.
       - name: sccache stats

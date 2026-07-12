@@ -104,8 +104,9 @@ pub struct UnbindListener {
 /// Reply to `UnbindListener`. `Ok` once the listener has
 /// tombstoned (the cap waited on `MonitorNotice` before
 /// replying). `Err` for unknown listener names, listeners
-/// already tombstoned at the time of the unbind request, or
-/// fan-out failures.
+/// already tombstoned at the time of the unbind request,
+/// duplicate requests while an unbind is in progress, or fan-out
+/// failures.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.tcp.unbind_listener_result")]
 pub enum UnbindListenerResult {

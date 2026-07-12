@@ -279,6 +279,58 @@ pub struct FsDemuxReport {
     pub second_matched: bool,
 }
 
+/// Configure the listener lineage used by the TCP load probe when it echoes
+/// frames received from accepted sessions.
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[kind(name = "aether.test_fixtures.configure_tcp_load_probe")]
+pub struct ConfigureTcpLoadProbe {
+    pub listener_name: String,
+}
+
+/// Ask the TCP load probe to start a bounded batch of outbound connections.
+/// Every session gets a deterministic, unique name below `aether.tcp`.
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[kind(name = "aether.test_fixtures.start_tcp_connect_load")]
+pub struct StartTcpConnectLoad {
+    pub addr: String,
+    pub connection_count: u32,
+    pub session_name_prefix: String,
+}
+
+/// Query the TCP load probe's exact consumer-side accounting.
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+#[kind(name = "aether.test_fixtures.collect_tcp_load_snapshot")]
+pub struct CollectTcpLoadSnapshot;
+
+/// The two distinct TCP session lineages exercised by the load scenario.
+#[derive(aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpLoadTopology {
+    /// A cap -> listener -> session accepted by a bound listener.
+    Accepted,
+    /// A cap -> session created by an outbound connect.
+    Outbound,
+}
+
+/// Exact consumer-side state for one accepted or outbound TCP session.
+#[derive(aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TcpLoadSessionSnapshot {
+    pub topology: TcpLoadTopology,
+    pub session_name: String,
+    pub established: bool,
+    pub received_frame_count: u64,
+    pub received_payload_bytes: u64,
+    pub closed: bool,
+}
+
+/// Reply to [`CollectTcpLoadSnapshot`]. Connect failures are explicit data so
+/// the host never has to infer them from missing sessions or scrape logs.
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.test_fixtures.tcp_load_snapshot")]
+pub struct TcpLoadSnapshot {
+    pub sessions: Vec<TcpLoadSessionSnapshot>,
+    pub connect_failures: Vec<String>,
+}
+
 /// Issue 1977 (ADR-0114 amendment) cluster-addressing matrix driver. Sent to
 /// the `matrix_sweep` fixture's parent over the wire to kick off the sweep:
 /// the parent drives every in-cluster addressing direction (parent → child,

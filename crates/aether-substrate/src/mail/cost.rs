@@ -210,9 +210,10 @@ impl CostTable {
     /// `(mailbox, kind)` reuses the prior cell (so a `replace` against
     /// the same handler set keeps its accumulated estimate); a fresh
     /// kind gets a new neutral cell. Called at actor construction
-    /// (`WasmTrampoline::init` / the native-cap boot wrap, both under
-    /// `with_stamped`) and on replace, paired with a `CostCells` cache
-    /// stamp of the returned `Arc`s so both indexes share the cell.
+    /// (`WasmTrampoline::init` / the native-cap boot wrap /
+    /// `Spawner::spawn_actor`, all under `with_stamped`) and on replace,
+    /// paired with a `CostCells` cache stamp of the returned `Arc`s so both
+    /// indexes share the cell.
     ///
     /// # Panics
     /// Panics if the internal lock is poisoned — a poisoned lock means a
@@ -229,8 +230,9 @@ impl CostTable {
             .collect()
     }
 
-    /// Remove every cell for `mailbox`. Called on
-    /// `aether.component.drop` / unload. A no-op for an unknown mailbox.
+    /// Remove every cell for `mailbox`. Called on `aether.component.drop` /
+    /// unload and when a native dispatcher finalizes its mailbox. A no-op for
+    /// an unknown mailbox.
     ///
     /// # Panics
     /// Panics if the internal lock is poisoned (see [`Self::seed`]).

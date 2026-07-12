@@ -25,6 +25,7 @@ mod multi_actor;
 mod probe;
 mod source_observer;
 mod stateful_replace;
+mod tcp_load_probe;
 mod ui_widget;
 
 pub use cube::Cube;
@@ -43,6 +44,7 @@ pub use multi_actor::{Panel, RootManager};
 pub use probe::{Probe, ProbeWithConfig};
 pub use source_observer::SourceObserver;
 pub use stateful_replace::{Counter, Sidecar};
+pub use tcp_load_probe::TcpLoadProbe;
 pub use ui_widget::UiWidget;
 
 // ADR-0138: `entry = Probe` opts this multi-actor module into `Probe` as
@@ -76,4 +78,5 @@ aether_actor::export!(
     InlineTagParent,
     Counter,
     Sidecar,
+    TcpLoadProbe,
 );
