@@ -64,14 +64,14 @@ Run all of these. **Refuse** if any fail; list every failure in the refusal outp
 | Problem statement | body has `## Problem statement` and the section is non-empty | "Missing or empty §Problem statement." |
 | Design notes | body has `## Design notes` and is non-empty | "Missing or empty §Design notes." |
 | Implementation plan | body has `## Implementation plan` and is non-empty | "Missing or empty §Implementation plan." |
-| ADR merged | if §Design notes references an ADR PR, that PR's `mergedAt` is non-null | "ADR PR #M is not merged. Merge it or pass `--skip-adr` to override." |
+| ADR merged | if §Design notes references an ADR PR, that PR's `mergedAt` is non-null (see [ADR gate, in detail](#adr-gate-in-detail); an ADR reference *also* forces the `human` tier via the [ADR hard gate](#adr-hard-gate)) | "ADR PR #M is not merged. Merge it or pass `--skip-adr` to override." |
 | Model label | exactly one `model:*` label present (REST: `gh api repos/iamacoffeepot/aether/issues/<n>/labels`) | "Missing model:* label (or more than one). `/scope` stamps model routing at Plan — re-run its Plan step or add the label by hand." |
 | Not blocked | no `blocked` / `wontfix` / `duplicate` label present | "Issue carries label '<label>' which blocks approval." |
 | Freshness | targeted paths exist on `origin/main` and none have churned since scope | "Targets removed on main: <paths>" (hard refuse) / "Targets churned since scope — re-ground before approving: <paths>" (soft surface) |
 | Dependency | every `#N` in `## Depends on` is a closed (Done) issue | "Blocked on unlanded dependency: #N (open)." |
 | Umbrella integrity | if `## Sub-issues` is non-empty, the own `## Implementation plan` describes only coordination/integration, not net-new code the children don't cover | "Malformed umbrella: `## Sub-issues` plus a substantial own plan. Split the residual plan into its own child issue (leaving a pure umbrella), or remove `## Sub-issues` to make it a plain implementable issue." |
 
-If **all** gates pass, proceed.
+If **all** gates pass, decide the approval tier: the [ADR hard gate](#adr-hard-gate) first (an ADR-bearing issue routes to the owner unconditionally), then the [Approval tier](#approval-tier) policy lookup for everything else. The tier decides who approves; the gates above decide whether the issue is approvable at all.
 
 ## Freshness gate
 
@@ -115,6 +115,8 @@ Any dependency whose state is not `closed` is an unlanded blocker. A non-`closed
 
 ## Actions on pass
 
+Runs once the structural gates pass *and* the [approval tier](#approval-tier) has cleared — `auto` clears on its own, `judge` and `human` clear on their approver's decision. The actions themselves are the same whoever approved:
+
 1. Reconcile each approved issue's label to `phase:ready` (a REST `PUT …/labels` per issue, see [Phase label reconcile](#phase-label-reconcile)) — the `phase:ready` label is the canonical phase state and the agent-eligibility signal `/implement` reads. A single-issue `/approve` is the N=1 case — one label swap. When a batch mixes passing and failing issues, swap the label only for the ones that cleared every gate and list the rest in the refusal.
 2. No comment on a plain approve — the `phase:ready` label and the timeline's label event already record it. If `--note` was passed, post the note as prose markdown:
 
@@ -154,9 +156,29 @@ The one-or-the-other invariant means any issue that reaches `/implement` with a 
 
 A future `/release-promote-umbrella <parent>` skill can auto-close the umbrella when all children are Done. Out of scope for v1.
 
+## ADR hard gate
+
+Runs **before any policy lookup**, permanently and unconditionally. An ADR-bearing issue routes to the `human` tier — the owner — before [Approval tier](#approval-tier) is consulted at all. No policy rule, present or future, can auto- or judge-approve it: an ADR is load-bearing by definition. An issue is ADR-bearing when its §Design notes references an ADR — an ADR PR link, a `docs/adr/NNNN-*.md` path, or an `ADR flag:` line (the same references the [ADR merge gate](#adr-gate-in-detail) parses). This rule lives in skill text, above the policy file, so it survives any edit to `.github/approval-policy.yml`; that file's `docs/adr/**` `human` entry is belt-and-suspenders, not the source of the rule. The [Approval tier](#approval-tier) lookup is consulted only for a non-ADR issue.
+
+## Approval tier
+
+For a non-ADR issue (the [ADR hard gate](#adr-hard-gate) has already routed an ADR-bearing one to the owner), resolve the issue's approval tier against `.github/approval-policy.yml` over its `## Declared surface` globs (the machine-readable glob block `/scope` emits at Plan):
+
+1. Read the policy file's `default` tier and its ordered `rules` list of `{glob, tier}` entries; `tier ∈ {auto, judge, human}`.
+2. Each declared path's tier is the **most restrictive** matching rule (`human > judge > auto`), or `default` (`human`) when no rule matches — fail-closed, so an unpoliced surface stops at the owner. Globs are gitwildmatch (gitignore-style `**`), matched exactly as the reconciler's containment step matches them.
+3. The issue's approval tier is the most restrictive tier over every path in its declared surface.
+
+Route by the resulting tier:
+
+- **`auto`** — advance to `phase:ready` with no owner decision (the [Actions on pass](#actions-on-pass) label swap runs unchanged).
+- **`judge`** — route to the LLM approval judge (#3133), shadow-mode first: the judge's verdict is recorded but the owner still confirms until the judge is trusted.
+- **`human`** — hold for the owner's explicit `/approve`, exactly as today.
+
+The tier decision runs *after* the structural [Gate checks](#gate-checks) pass — a failing gate refuses regardless of tier. Relaxing a tier is a one-line, owner-signed diff to `.github/approval-policy.yml`; the file's git history is the delegation-ladder audit trail. The declared surface this tier is resolved over is the same surface the reconciler later enforces the merged diff against, so the thing that ships is the thing that was approved.
+
 ## ADR gate, in detail
 
-Parse §Design notes for a URL or reference matching one of:
+The [ADR hard gate](#adr-hard-gate) decides *routing* — an ADR-bearing issue always goes to the owner. This section is the *merge* check the structural gates run: an ADR the issue depends on must already be merged. Parse §Design notes for a URL or reference matching one of:
 
 - `https://github.com/<owner>/<repo>/pull/<N>`
 - `Closes <owner>/<repo>#<N>` (the cross-repo close form per the user's memory)
@@ -207,5 +229,7 @@ The single `PUT …/labels` replaces the label set with the non-`phase:*` labels
 - Dispatch implementation. Run `/implement <issue>` (or wait for the Phase C orchestrator) after approval.
 - Edit the issue body. Even if a gate fails because a section is missing, /approve doesn't write the missing section — that's `/scope`'s job.
 - Auto-resolve side findings.
+- Edit `.github/approval-policy.yml`. Relaxing a tier is the owner's signed diff, never a side effect of an approval run — an issue that wants a looser tier says so and waits for that diff to land.
+- Enforce the declared surface against a PR's actual diff. `/approve` resolves the tier over the declared globs; the reconciler is what later holds a PR whose diff escapes them.
 - Close umbrella issues when children complete. Future work.
 - Notify anyone. The printed summary (and the `phase:ready` label) is the surface; comments appear only for `--note` / `--skip-adr`.

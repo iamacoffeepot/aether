@@ -1,6 +1,6 @@
 ---
 name: release-init
-description: Bootstrap a new aether release — ensure the phase / bounce-to / size / model labels exist. Issue phase is carried by phase:* labels (no project board).
+description: Bootstrap a new aether release — ensure the phase / bounce-to / approval / size / model labels exist. Issue phase is carried by phase:* labels (no project board).
 ---
 
 # /release-init — release bootstrap skill
@@ -27,7 +27,7 @@ Bootstraps the label vocabulary + local marker the other release skills depend o
 bash scripts/release-project-init.sh <version> --owner <owner>
 ```
 
-The script ensures every pipeline label exists and is idempotent — a re-run only fills gaps. It covers the phase labels (`phase:define` … `phase:stalled`; Backlog and Done carry none), the `bounce-to:*` resume targets `/bounce` stamps, the `size:*` weights (including `size:xl` = fat), and the `model:*` routing labels. `type:*` labels are stamped by `/sketch` from the title's conventional-commit prefix and `crate:*` labels are created on demand at filing, so this step doesn't touch them.
+The script ensures every pipeline label exists and is idempotent — a re-run only fills gaps. It covers the phase labels (`phase:define` … `phase:stalled`; Backlog and Done carry none), the `bounce-to:*` resume targets `/bounce` stamps, the `approval:surface-exceeded` / `approval:surface-ok` declared-surface labels the reconciler and its owner waiver use, the `size:*` weights (including `size:xl` = fat), and the `model:*` routing labels. `type:*` labels are stamped by `/sketch` from the title's conventional-commit prefix and `crate:*` labels are created on demand at filing, so this step doesn't touch them.
 
 ### 2. Print summary
 
