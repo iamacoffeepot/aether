@@ -188,7 +188,7 @@ For each sub-phase: read inputs, write the corresponding body section, and recon
   - More than 3 logically-separable changes, *or*
   - More than 2 crates with logically-separable work
   - In that case, file each sub-issue via `/sketch`'s mechanics (filed at Backlog — no `phase:*` label — linking the parent), update §Sub-issues, and scope each child in a follow-up `/scope` run.
-- **Size estimation** — stamp the issue's `size:*` label by this rubric:
+- **Size estimation** — a pure umbrella (non-empty `## Sub-issues` whose own plan is coordination-only; see [Multi-PR umbrella issues](../approve/SKILL.md#multi-pr-umbrella-issues)) stamps no `size:*` label — it is never `/implement`-dispatched, so there is no LOC for the estimate to describe. Every other issue, malformed umbrellas included, stamps `size:*` by this rubric:
   - **S**: single file, single concept, <100 LOC change
   - **M**: single crate, multiple files, <500 LOC change
   - **L**: cross-crate, architectural, or >500 LOC change
@@ -200,7 +200,7 @@ For each sub-phase: read inputs, write the corresponding body section, and recon
     | while read -r l; do gh api -X DELETE "repos/iamacoffeepot/aether/issues/<n>/labels/$l"; done \
     && gh api -X POST "repos/iamacoffeepot/aether/issues/<n>/labels" -f "labels[]=size:<x>"
   ```
-- **Model routing (required)** — every issue leaves Plan with exactly one `model:*` label; `/approve` refuses an unlabelled issue. The label names the tier the dispatched agent runs — there is no inherit-the-dispatcher fallback. Each tag names a tier, not one vendor's model: a Claude agent reads the Claude column, a Codex agent reads the GPT column, and the label stays the same either way. Stamp it over the same REST `…/labels` endpoints as the size mirror, in the same step. Pick by the work, defaulting cheap:
+- **Model routing (required)** — a pure umbrella (same exemption as Size estimation above) stamps no `model:*` label — it is never `/implement`-dispatched, so there is no agent tier to route. Every other issue, malformed umbrellas included, leaves Plan with exactly one `model:*` label; `/approve` refuses an unlabelled issue that isn't a pure umbrella. The label names the tier the dispatched agent runs — there is no inherit-the-dispatcher fallback. Each tag names a tier, not one vendor's model: a Claude agent reads the Claude column, a Codex agent reads the GPT column, and the label stays the same either way. Stamp it over the same REST `…/labels` endpoints as the size mirror, in the same step. Pick by the work, defaulting cheap:
   - `model:haiku` — trivial text-only work: doc links, label fixes, one-line config tweaks. GPT equivalent: `gpt-5.6-luna`.
   - `model:sonnet` — the default for mechanical work fully specified by the plan (typically S, and an M whose plan reads as executable verbatim). GPT equivalent: `gpt-5.6-terra`.
   - `model:opus` — the implementation itself requires non-obvious judgment: cross-crate L work, design-adjacent changes, plans with open exploration. GPT equivalent: `gpt-5.6-sol`.
