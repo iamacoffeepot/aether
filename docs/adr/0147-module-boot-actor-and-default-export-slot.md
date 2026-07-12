@@ -76,12 +76,22 @@ Because a bind is a fact rather than a load, it orders across modules for free. 
 
 ### 7. The kit's baseline
 
-`aether-kit` bakes two faces behind a `BakedFont { name, bytes }` whose name and path derive from one literal, and `Boot` registers both and binds them:
+`aether-kit` bakes two faces behind a `BakedFont { name, bytes, license }` whose name, path, and license text all derive from one literal, and `Boot` registers both and binds them:
 
 - `FONT_UI` — a proportional face. What the widget set draws with; `Theme::DEFAULT.font` becomes `FontRef::Named(FONT_UI)` and the `font_id: 0` placeholder is deleted.
 - `FONT_MONO` — the console's monospace face, moved off `ConsoleOverlay`.
 
 `WidgetPanel`'s configured-font override is unchanged in shape: it still loads by path and stamps the theme, now with `FontRef::Id`.
+
+### 8. A baked asset carries its license in the module
+
+Every baked asset contributes its license text to an `aether.licenses` **wasm custom section**, emitted by `export!` alongside the sections it already writes (`aether.kinds`, `aether.namespace`, `aether.kinds.inputs`).
+
+A license file in the source tree — `crates/aether-kit/assets/fonts/SourceCodePro-LICENSE.md` today — discharges the obligation for *source* distribution and nothing else. Components travel as bare bytes: `upload_component` hashes the raw wasm into the content-addressed store (ADR-0116) and the hub hands those bytes to a substrate that never sees the repository. Attribution has to be inside the artifact or it does not arrive.
+
+A custom section rather than a Rust `const` because a `const` nothing references is dead-code-eliminated, while a section is guaranteed to survive, travels with the bytes wherever they are copied, and is readable by a section dump without instantiating the module — the same property the host already relies on to read a component's kind vocabulary before loading it.
+
+The section records attribution. It does not by itself satisfy every license: OFL and Apache-2.0 impose different obligations (Apache-2.0 additionally propagates a `NOTICE`), so adopting a face means reading its terms, not assuming the mechanism covers them.
 
 This supersedes the entry-type clause of ADR-0096 §3 and amends ADR-0138 (`entry` → `default`, which ADR-0138 introduced).
 
@@ -96,6 +106,7 @@ This supersedes the entry-type clause of ADR-0096 §3 and amends ADR-0138 (`entr
 - **A latent bug dies.** `Theme::DEFAULT.font_id = 0` is a placeholder in a real id space; `FontRef::Named` makes "unset" representable and removes the sentinel.
 - **The kit becomes self-contained.** A bare load and a selector load both yield working text, with no configured font path and no `aether.fs` staging.
 - **The named-resource shape generalizes.** `aether.render.bind_texture` / `TextureRef::Named` is the same decision for the first baked image, and the boot slot is where it gets registered.
+- **Attribution survives the artifact boundary.** A component uploaded to the content-addressed store carries its baked assets' licenses in the module, so a substrate that never saw the repository still holds the attribution — and the same section serves the first baked image without a second mechanism.
 
 ### Negative
 
@@ -110,6 +121,7 @@ This supersedes the entry-type clause of ADR-0096 §3 and amends ADR-0138 (`entr
 - **Single-actor modules are untouched.** `export!(X)` keeps its bare-load target and gains nothing it must adopt.
 - **Named loads are untouched.** A load carrying an export selector resolves exactly as it does today; it just also gets the module's boot.
 - **No font matcher.** Selecting a face by characteristic (monospace, weight, serif) is a real system and is deliberately not built. Two baked faces have nothing to match. `Named` is a substrate a matcher could later grow on.
+- **The licenses section is inert at runtime.** Nothing reads `aether.licenses` to make a decision; it exists so the bytes carry their own attribution. A tool that dumps it is worth having and is not a prerequisite.
 
 ### Follow-on work
 
