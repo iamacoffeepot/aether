@@ -162,6 +162,24 @@ jobs:
           set -euo pipefail
           owner="${REPO%/*}"
           name="${REPO#*/}"
+
+          # agent:dont-touch, checked at the point of spend rather than trusting the
+          # caller. The tick honours the label, but the tick is not the only thing
+          # that dispatches this workflow — agent-chat re-dispatches it on an owner
+          # reply, and anything holding actions: write can dispatch it directly. A
+          # control enforced only in one caller is escaped by every other path, so
+          # the executor refuses the work itself. For a land task REF is a PR, whose
+          # closing issue is where the label lives; the label is read off REF either
+          # way, so a benched PR is honoured too and a benched issue never reaches a
+          # land dispatch (the tick already filters it out of the scan).
+          if gh api "repos/${REPO}/issues/${REF}/labels" --jq '.[].name' 2>/dev/null \
+             | grep -qx 'agent:dont-touch'; then
+            echo "#${REF} carries agent:dont-touch — benched by the owner; refusing ${TASK}."
+            echo "- refused \`${TASK}\` on #${REF}: agent:dont-touch" >> "$GITHUB_STEP_SUMMARY"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           case "$TASK" in
             scope)
               # scope walks Backlog -> phase:plan. A label at or beyond a post-plan

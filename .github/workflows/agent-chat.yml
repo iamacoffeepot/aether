@@ -127,9 +127,21 @@ jobs:
     # evaluated first so one repo-variable flip disables every chat turn.
     # github.repository_owner resolves to the owner login, so the comparison is
     # symbolic — no hardcoded name.
+    # agent:dont-touch is the per-issue kill switch and it is checked HERE, at the
+    # job level, alongside the owner gate. The dispatcher honours the label, but
+    # this workflow re-dispatches agent-work directly on an owner reply, so a chat
+    # turn is a second dispatch path that never passes through the tick — without
+    # this line a benched issue still gets a full turn (App token, AWS role, Claude
+    # resumed) and a fresh agent-work run, and the bench holds only if the model
+    # happens to read the owner's prose as a stand-down. A control that depends on
+    # the model's reading of prose is not a control. The issue_comment payload
+    # carries the labels, so no API call is needed. Job level, not step level, for
+    # the same reason as the owner gate: no secret-bearing step may exist on a path
+    # a benched issue can reach.
     if: >
       vars.AGENT_ENABLED == 'true' &&
-      github.event.sender.login == github.repository_owner
+      github.event.sender.login == github.repository_owner &&
+      !contains(github.event.issue.labels.*.name, 'agent:dont-touch')
     # issues: write covers the reply comment and the label removal; id-token:
     # write is the OIDC mint for the AWS role; contents: read is the floor. The
     # agent-work dispatch's actions: write reach rides the App token, NOT this
