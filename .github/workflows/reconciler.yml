@@ -17,9 +17,16 @@ name: Reconciler
 # owner-gated, label-mirroring shape review.yml uses for `review:unresolved` ->
 # `Review gate`. It self-heals when the owner trims the diff, widens the
 # declaration (an issue-timeline edit), or applies an `approval:surface-ok`
-# waiver. A PR whose issue declares no surface gets no status, so requiring the
-# gate in branch protection is the owner's separate, later call and never wedges
-# a PR from before the mechanism.
+# waiver.
+#
+# `Approval gate` is a REQUIRED check, so this workflow posts it on EVERY path,
+# never conditionally. A required context that never reports does not pass —
+# GitHub holds it as "Expected" and blocks the merge indefinitely — so silence is
+# not a neutral outcome, it is a wedge. Where there is genuinely nothing to
+# enforce (the PR closes no issue, its issue is outside the reconciler domain, or
+# its issue declares no surface) the gate posts a PASSING status: it never blocks
+# a change it has no opinion about. Only a diff that actually escapes its
+# declaration goes red.
 #
 # TRIGGER MODEL (four paths, one pure recompute each):
 #   - pull_request [opened, reopened, synchronize, ready_for_review, labeled,
@@ -305,9 +312,32 @@ jobs:
             pr="$1"
             echo "::group::reconcile PR #${pr}"
 
+            # Read the head FIRST. `Approval gate` is a REQUIRED check, and a
+            # required context that never reports does not pass — GitHub holds it
+            # as "Expected" and blocks the merge forever. So every path out of
+            # this function, including the early no-op returns below, has to be
+            # able to address a commit status. Resolving the head up front is what
+            # makes that possible.
+            head_sha="$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha')"
+            echo "fact head_sha: ${head_sha}"
+
+            # Post the gate verdict. Called on EVERY path: `success` wherever there
+            # is genuinely nothing to enforce (the un-gated cases below), `failure`
+            # only where the diff actually escaped its declaration. The gate never
+            # blocks a change it has no opinion about, and never stays silent.
+            post_gate() {
+              gh api -X POST "repos/${REPO}/statuses/${head_sha}" \
+                -f state="$1" \
+                -f context="Approval gate" \
+                -f description="$2" \
+                -f target_url="$RUN_URL" >/dev/null
+              echo "write: Approval gate=${1} (${2})"
+            }
+
             # Issue association is the PR's closing reference (GraphQL), per the
             # pipeline's closing-keyword convention — a body regex would lose it
-            # on a re-worded body. A PR closing no issue is a clean no-op.
+            # on a re-worded body. A PR closing no issue has no declaration to be
+            # judged against, so the gate passes it.
             issue="$(gh api graphql -f query='
               query($owner:String!, $repo:String!, $pr:Int!) {
                 repository(owner:$owner, name:$repo) {
@@ -318,7 +348,8 @@ jobs:
               }' -F owner="${REPO%/*}" -F repo="${REPO#*/}" -F pr="$pr" \
               --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[0].number // empty')"
             if [ -z "${issue:-}" ]; then
-              echo "fact issue: PR #${pr} closes no issue — no-op."
+              echo "fact issue: PR #${pr} closes no issue — no phase to reconcile."
+              post_gate success "no closing issue — nothing to enforce"
               echo "::endgroup::"
               return 0
             fi
@@ -326,21 +357,21 @@ jobs:
 
             # Domain gate: recompute only issues resting in the reconciler's
             # stretch. Straggler executing/refine labels ARE in the domain — the
-            # reconciler migrates them forward on this recompute.
+            # reconciler migrates them forward on this recompute. An issue outside
+            # the domain never went through the Plan->Ready edge this gate guards,
+            # so there is no approved surface to hold it to.
             issue_labels="$(gh api "repos/${REPO}/issues/${issue}/labels" --jq '.[].name')"
             current_phase="$(grep -m1 -oE '^phase:[a-z]+' <<<"$issue_labels" || true)"
             echo "fact issue_phase: ${current_phase:-none}"
             case "$current_phase" in
               phase:ready|phase:executing|phase:building|phase:refine|phase:qa|phase:findings|phase:held) ;;
               *)
-                echo "verdict: issue #${issue} phase '${current_phase:-none}' is outside the reconciler domain — no-op."
+                echo "verdict: issue #${issue} phase '${current_phase:-none}' is outside the reconciler domain — no phase to reconcile."
+                post_gate success "issue #${issue} phase ${current_phase:-none} is outside the reconciler domain"
                 echo "::endgroup::"
                 return 0
                 ;;
             esac
-
-            head_sha="$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha')"
-            echo "fact head_sha: ${head_sha}"
 
             # Fact — CI green: the `CI pass` aggregator check run on the current
             # head, the same required-merge aggregator wave-status.sh gates on.
@@ -421,7 +452,12 @@ jobs:
 
             surface_exceeded=0
             if [ -z "$surface" ]; then
-              echo "fact declared_surface: none — un-gated, no Approval gate status posted."
+              # Un-gated: the issue was scoped before the mechanism, or /scope left
+              # the section empty. There is no declaration to hold the diff to, so
+              # the gate passes rather than staying silent — silence would wedge a
+              # required check.
+              echo "fact declared_surface: none — un-gated."
+              post_gate success "issue #${issue} declares no surface — un-gated"
             else
               printf '%s\n' "$surface" >"${RUNNER_TEMP}/globs.txt"
               gh api "repos/${REPO}/pulls/${pr}/files" --paginate --jq '.[].filename' \
@@ -487,12 +523,7 @@ jobs:
               # the exact hazard this check exists to close. Gate first, then
               # diagnostics, each guarded: the gate fails closed no matter what
               # the diagnostics do.
-              gh api -X POST "repos/${REPO}/statuses/${head_sha}" \
-                -f state="$gate_state" \
-                -f context="Approval gate" \
-                -f description="$gate_description" \
-                -f target_url="$RUN_URL" >/dev/null
-              echo "write: Approval gate=${gate_state} (${gate_description})"
+              post_gate "$gate_state" "$gate_description"
 
               # Mirror the verdict into the PR label. The write uses GITHUB_TOKEN,
               # whose events do not trigger workflows, so setting it cannot
