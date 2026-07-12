@@ -11,7 +11,7 @@ Read relevant guide pages and ADRs before changing a subsystem. Prefer current c
 ## Workflow
 
 - Planned work lives in GitHub issues. Use the repo skills in `.agents/skills/` for sketch, scope, approve, implement, land, sweep, wish, review, and dogfood flows.
-- Existing Claude workflow files in `CLAUDE.md`, `.claude/skills/`, and `.claude/workflows/` remain source material. Codex skills adapt those workflows for Codex surfaces.
+- Codex skills in `.agents/skills/` are the authoritative Codex workflows and must be executable from Codex's current tools without reading or translating Claude artifacts. Existing files in `CLAUDE.md`, `.claude/skills/`, and `.claude/workflows/` are historical design provenance only.
 - Do not implement directly in the primary `main` checkout. For Codex issue work, create a separate worktree under `.agents/worktrees/issue-<N>` from `origin/main` and work there. Legacy Claude workflow files may still reference `.claude/worktrees/`.
 - Branches use `type/short-slug` or the issue branch shape from the implement skill, for example `chore/issue-2742-make-repository-codex-friendly`.
 - PR titles and commits use Conventional Commits.

@@ -1,21 +1,38 @@
 ---
 name: bounce
-description: "Regress an Aether issue to an earlier phase with a required reason. Use when scope, approval, implementation, or review discovers that Define, Design, or Plan must be redone."
+description: "Regress an Aether issue to Define, Design, or Plan with a recorded reason. Use when scope, approval, implementation, or review proves an earlier phase must be redone; do not use for environment outages."
 ---
 
 # Bounce
 
-Use this Codex skill for explicit phase regression.
+Read [Codex harness](../_shared/codex-harness.md) and [GitHub workflow](../_shared/github-workflow.md).
 
-## Source
+Require an issue number, target `define|design|plan`, and a non-empty reason. Preserve the user's reason verbatim as markdown data, never shell input.
 
-- Workflow source: `.claude/skills/bounce/SKILL.md`
-- Translation rules: `../_shared/claude-to-codex.md`
+Read the issue and derive its canonical phase. Validate:
 
-## Procedure
+- target is Define, Design, or Plan;
+- issue is open and not already bounced;
+- current state has exactly one phase;
+- target is strictly earlier under `Backlog < Define < Design < Plan < Ready < Executing < Refine < Done`.
 
-1. Read both source files completely before acting.
-2. Require a concrete reason.
-3. Validate the target phase is a regression to Define, Design, or Plan.
-4. Reconcile labels with REST: `phase:bounced` plus the matching `bounce-to:*` label.
-5. Post the required reason as an issue comment.
+List every refusal. A same-phase target is a no-op, a later target is advancement, and a closed issue needs a new issue rather than a bounce.
+
+On pass:
+
+1. Re-read identity and labels.
+2. Atomically preserve labels other than `phase:*` and `bounce-to:*`, then append exactly `phase:bounced` and `bounce-to:<target>`.
+3. Stage and post one comment:
+
+   ```markdown
+   **Bounced to <Target>** (from <Previous>)
+
+   <reason>
+   ```
+
+4. If the label write succeeds but the comment fails, retry only the comment. Never edit the issue body.
+5. Report the transition and `Next: $scope <N>`.
+
+Other skills use the same self-bounce mechanics. A design discovery targets Design; an incomplete/stale plan or exhausted retry budget targets Plan; an unframable issue targets Define. An environment, authentication, runner, or network outage uses `phase:stalled` with no bounce label instead.
+
+On resume, `$scope` consumes the `bounce-to:*` label, removes every bounce label, restores the target phase, and reruns that phase plus all downstream phases.

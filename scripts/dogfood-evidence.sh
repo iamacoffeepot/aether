@@ -13,7 +13,7 @@
 #   scripts/dogfood-evidence.sh <staged-run-dir> <issue> <run-id>
 #
 # <staged-run-dir> is the local directory holding this run's evidence
-# (rollup.json, frame.png, solution/…); <issue> and <run-id> form the
+# (rollup.json, judged-frame.png, solution/…); <issue> and <run-id> form the
 # `evidence/<issue>/<run-id>/` path on the branch. Bash + git/coreutils
 # only, no external deps.
 
