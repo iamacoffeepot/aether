@@ -1,0 +1,315 @@
+name: Reconciler
+
+# Single writer of the post-green phase stretch: recompute a PR's linked issue
+# phase (phase:building / phase:qa / phase:findings / phase:held) from observable
+# facts on every relevant event. No Claude, no cargo — pure GitHub-API fact
+# arithmetic, so it is free, instant, and deterministic. It never writes the
+# earlier ladder (define/design/plan/ready) nor the parked states (bounced/
+# stalled); those stay owned by the pipeline skills. Every firing recomputes the
+# whole target from scratch, so a missed event self-heals on the next one, and a
+# forgotten agent step is a liveness hiccup rather than a wrong flag.
+#
+# TRIGGER MODEL (four paths, one pure recompute each):
+#   - pull_request [opened, reopened, synchronize, ready_for_review, labeled,
+#     unlabeled] — the payload carries the PR directly. synchronize is the
+#     push-demotes path (a fresh head with CI not yet green falls back to
+#     building); labeled/unlabeled wakes the reconciler when a QA post job flips
+#     the review:unresolved / dogfood:unresolved PR label. A label event on any
+#     other label exits cleanly.
+#   - workflow_run on CI only — CI is pull_request-triggered, so a CI run object
+#     carries the real PR branch and resolves exactly as review.yml's resolve
+#     step does. Review and Dogfood are deliberately NOT in this list: those
+#     workflows are themselves workflow_run-triggered, so their run objects
+#     anchor to main (head_branch is always "main") and cannot be resolved to a
+#     PR here.
+#   - workflow_dispatch { pr } — the manual re-reconcile, and the authoritative
+#     QA-completion hand-off: the Review and Dogfood post jobs each poke this
+#     workflow with the exact PR number they already know (gh workflow run
+#     reconciler.yml -f pr=…). A GITHUB_TOKEN-created event does not trigger
+#     workflows EXCEPT workflow_dispatch, which is the documented exception the
+#     poke relies on.
+#   - schedule (every 15 minutes) — the global recompute backstop: enumerate
+#     open PRs and recompute each whose linked issue sits in the reconciler
+#     domain. This is the supported answer to thread resolve / unresolve events
+#     having no Actions trigger (a human clicking Resolve emits nothing a hosted
+#     workflow can subscribe to), and the self-heal for any missed poke. Worst-
+#     case staleness for a human thread-resolve is one cron period.
+#
+# SECURITY POSTURE: this workflow runs no branch code and reads the PR head only
+# as data — every step is a GitHub-API call against the trusted base checkout
+# context. The job-level guard drops fork heads (a fork PR gets a read-only
+# token and cannot carry the QA flags this computes over anyway), matching the
+# same-repo posture the Review and Dogfood runners hold.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to reconcile
+        required: true
+  schedule:
+    - cron: "*/15 * * * *"
+
+# Serialize recomputes that target the same PR so two firings never race the
+# label PUT. Keyed by the payload PR / dispatched PR / CI head branch where
+# known, else the run id (the schedule path processes every PR inside one run,
+# so a single group is correct there). cancel-in-progress is false: a recompute
+# is cheap and a superseded one still needs to finish its atomic write.
+concurrency:
+  group: reconciler-${{ github.event.pull_request.number || github.event.inputs.pr || github.event.workflow_run.head_branch || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Reconcile PR phases
+    runs-on: ubuntu-latest
+    # Least privilege: write only the issue label set; everything else is read.
+    # pull-requests: read backs the PR object + the GraphQL reviewThreads /
+    # closingIssuesReferences reads; checks: read backs the head check-runs;
+    # statuses: read backs the Review gate commit status.
+    permissions:
+      issues: write
+      pull-requests: read
+      contents: read
+      checks: read
+      statuses: read
+    # Same-repo only. Dispatch and schedule are always trusted; a pull_request
+    # or CI-completion path with a fork head is skipped (its token is read-only
+    # and it carries no QA state to reconcile).
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    steps:
+      # Resolve the PR set for this event, then recompute each one. The fact
+      # reads and the compute live in this single step so a run's whole
+      # reasoning is legible from its log: one line per fact, one for the
+      # verdict, grouped per PR.
+      - name: Reconcile
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          OWNER: iamacoffeepot
+          EVENT: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DISPATCH_PR: ${{ github.event.inputs.pr }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+
+          # A synchronize (new head push) forces a demotion to building — it
+          # applies to the single payload PR, the only PR this event names.
+          is_synchronize=0
+          if [ "$EVENT" = "pull_request" ] && [ "$EVENT_ACTION" = "synchronize" ]; then
+            is_synchronize=1
+          fi
+
+          # Resolve the PR set to recompute.
+          case "$EVENT" in
+            pull_request)
+              # Early gate: a label event on anything but a QA flag is not our
+              # business. This also keeps the reconciler off the label churn its
+              # own peers make on unrelated labels.
+              if [ "$EVENT_ACTION" = "labeled" ] || [ "$EVENT_ACTION" = "unlabeled" ]; then
+                case "$LABEL_NAME" in
+                  review:unresolved|dogfood:unresolved) ;;
+                  *) echo "label '${LABEL_NAME}' is not a QA flag — nothing to reconcile."; exit 0 ;;
+                esac
+              fi
+              prs="$PR_NUMBER"
+              ;;
+            workflow_dispatch)
+              prs="$DISPATCH_PR"
+              ;;
+            workflow_run)
+              # CI's run object carries the real PR branch (CI is
+              # pull_request-triggered). head is owner:branch; state=open bounds
+              # it to a live PR. A CI run on a branch with no open PR (e.g. a
+              # push to main) resolves to nothing and is a clean no-op.
+              prs="$(gh api "repos/${REPO}/pulls?head=${OWNER}:${HEAD_BRANCH}&state=open" \
+                --jq '.[0].number // empty')"
+              ;;
+            schedule)
+              # Global backstop: every open PR, recomputed. The per-PR domain
+              # gate below short-circuits the ones whose issue is out of scope.
+              prs="$(gh api "repos/${REPO}/pulls?state=open&per_page=100" --paginate \
+                --jq '.[].number')"
+              ;;
+            *)
+              echo "unexpected event '${EVENT}' — nothing to reconcile."
+              exit 0
+              ;;
+          esac
+
+          if [ -z "${prs:-}" ]; then
+            echo "No PR to reconcile for this event."
+            exit 0
+          fi
+
+          # Recompute one PR: resolve its closing issue, gate on the issue phase,
+          # read the facts, compute the target phase by the first-match table,
+          # and write it (only when it changes) with the atomic non-phase-
+          # preserving label PUT.
+          reconcile_pr() {
+            pr="$1"
+            echo "::group::reconcile PR #${pr}"
+
+            # Issue association is the PR's closing reference (GraphQL), per the
+            # pipeline's closing-keyword convention — a body regex would lose it
+            # on a re-worded body. A PR closing no issue is a clean no-op.
+            issue="$(gh api graphql -f query='
+              query($owner:String!, $repo:String!, $pr:Int!) {
+                repository(owner:$owner, name:$repo) {
+                  pullRequest(number:$pr) {
+                    closingIssuesReferences(first:1) { nodes { number } }
+                  }
+                }
+              }' -F owner="${REPO%/*}" -F repo="${REPO#*/}" -F pr="$pr" \
+              --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[0].number // empty')"
+            if [ -z "${issue:-}" ]; then
+              echo "fact issue: PR #${pr} closes no issue — no-op."
+              echo "::endgroup::"
+              return 0
+            fi
+            echo "fact issue: #${issue}"
+
+            # Domain gate: recompute only issues resting in the reconciler's
+            # stretch. Straggler executing/refine labels ARE in the domain — the
+            # reconciler migrates them forward on this recompute.
+            issue_labels="$(gh api "repos/${REPO}/issues/${issue}/labels" --jq '.[].name')"
+            current_phase="$(grep -m1 -oE '^phase:[a-z]+' <<<"$issue_labels" || true)"
+            echo "fact issue_phase: ${current_phase:-none}"
+            case "$current_phase" in
+              phase:ready|phase:executing|phase:building|phase:refine|phase:qa|phase:findings|phase:held) ;;
+              *)
+                echo "verdict: issue #${issue} phase '${current_phase:-none}' is outside the reconciler domain — no-op."
+                echo "::endgroup::"
+                return 0
+                ;;
+            esac
+
+            head_sha="$(gh api "repos/${REPO}/pulls/${pr}" --jq '.head.sha')"
+            echo "fact head_sha: ${head_sha}"
+
+            # Fact — CI green: the `CI pass` aggregator check run on the current
+            # head, the same required-merge aggregator wave-status.sh gates on.
+            # Reading the aggregator rather than the whole check-run set matters
+            # twice over: this workflow's own pull_request-triggered run is a
+            # check run on the same head (the whole-set read would see itself
+            # pending and never compute green), and the aggregator alone defines
+            # merge-green — unrelated advisory checks don't get a vote. A fresh
+            # synchronize has no completed aggregator yet, which reads as
+            # not-green.
+            ci_state="$(gh api "repos/${REPO}/commits/${head_sha}/check-runs?per_page=100" \
+              --jq '[.check_runs[] | select(.name == "CI pass")] | .[0]
+                    | if . == null then "missing"
+                      elif .status != "completed" then "pending"
+                      else .conclusion end')"
+            ci_green=0
+            if [ "$ci_state" = "success" ]; then
+              ci_green=1
+            fi
+            echo "fact ci_green: ${ci_green} (CI pass=${ci_state})"
+
+            # Fact — review verdict in (per head): the Review gate commit status
+            # exists on this head SHA. success = clean (includes the non-Rust
+            # auto-skip and the owner review:skip waiver); failure = findings
+            # (mirrors review:unresolved). Absent/pending = verdict owed.
+            review_state="$(gh api "repos/${REPO}/commits/${head_sha}/status" \
+              --jq '[.statuses[] | select(.context == "Review gate")] | .[0].state // "missing"')"
+            case "$review_state" in
+              success|failure) review_owed=0 ;;
+              *) review_owed=1 ;;
+            esac
+            echo "fact review_gate: ${review_state} (owed=${review_owed})"
+
+            # Fact — the advisory QA flags on the PR (PRs are issues for labels).
+            pr_labels="$(gh api "repos/${REPO}/issues/${pr}/labels" --jq '.[].name')"
+            review_unresolved=0
+            grep -qx 'review:unresolved' <<<"$pr_labels" && review_unresolved=1
+            dogfood_unresolved=0
+            grep -qx 'dogfood:unresolved' <<<"$pr_labels" && dogfood_unresolved=1
+            echo "fact pr_labels: review:unresolved=${review_unresolved} dogfood:unresolved=${dogfood_unresolved}"
+
+            # Fact — dogfood owed: the closing issue carries a filled Dogfood
+            # brief that is not N/A (the same section read dogfood.yml gates on).
+            issue_body="$(gh api "repos/${REPO}/issues/${issue}" --jq '.body')"
+            brief="$(awk '/^## Dogfood brief/{f=1; next} /^## /{f=0} f' <<<"$issue_body")"
+            dogfood_owed=0
+            if [ -n "$brief" ] && ! grep -qE '^[[:space:]]*N/A' <<<"$brief"; then
+              dogfood_owed=1
+            fi
+
+            # Fact — dogfood verdict in: the issue marker reads verdict=green
+            # (terminal per dogfood's own retry contract — per-feature, not
+            # per-head), OR a failed attempt's findings are in via
+            # dogfood:unresolved on the PR. The grep -m1 || true guards the
+            # SIGPIPE that grep's early exit would raise on the paginated gh.
+            marker="$(gh api "repos/${REPO}/issues/${issue}/comments" --paginate \
+              --jq '.[].body' | grep -m1 -oE '<!-- aether-dogfood[^>]*-->' || true)"
+            dogfood_verdict="$(grep -oE 'verdict=[a-z]+' <<<"$marker" | sed 's/verdict=//' || true)"
+            dogfood_verdict_in=0
+            if [ "$dogfood_verdict" = "green" ] || [ "$dogfood_unresolved" -eq 1 ]; then
+              dogfood_verdict_in=1
+            fi
+            echo "fact dogfood: owed=${dogfood_owed} verdict=${dogfood_verdict:-none} verdict_in=${dogfood_verdict_in}"
+
+            # Fact — findings open: either advisory QA flag on the PR, or any
+            # unresolved review thread (GraphQL; the only per-thread signal, and
+            # the reason the schedule backstop exists — thread resolves have no
+            # Actions event).
+            unresolved_threads="$(gh api graphql -f query='
+              query($owner:String!, $repo:String!, $pr:Int!) {
+                repository(owner:$owner, name:$repo) {
+                  pullRequest(number:$pr) {
+                    reviewThreads(first:100) { nodes { isResolved } }
+                  }
+                }
+              }' -F owner="${REPO%/*}" -F repo="${REPO#*/}" -F pr="$pr" \
+              --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')"
+            findings_open=0
+            if [ "$review_unresolved" -eq 1 ] || [ "$dogfood_unresolved" -eq 1 ] || [ "${unresolved_threads:-0}" -gt 0 ]; then
+              findings_open=1
+            fi
+            echo "fact unresolved_threads: ${unresolved_threads:-0} (findings_open=${findings_open})"
+
+            # Compute the target phase, first match wins.
+            if [ "$is_synchronize" = "1" ] || [ "$ci_green" -eq 0 ]; then
+              target="phase:building"
+            elif [ "$review_owed" -eq 1 ] || { [ "$dogfood_owed" -eq 1 ] && [ "$dogfood_verdict_in" -eq 0 ]; }; then
+              target="phase:qa"
+            elif [ "$findings_open" -eq 1 ]; then
+              target="phase:findings"
+            else
+              target="phase:held"
+            fi
+            echo "verdict: PR #${pr} issue #${issue} → ${target} (was ${current_phase:-none})"
+
+            # Write only on a change. The PUT replaces the whole label set, so
+            # build it as every non-phase label plus the target — the atomic,
+            # non-phase-preserving reconcile the pipeline uses everywhere.
+            if [ "$current_phase" = "$target" ]; then
+              echo "write: already ${target} — no change."
+            else
+              new_labels="$(gh api "repos/${REPO}/issues/${issue}/labels" \
+                --jq "[.[].name | select(startswith(\"phase:\") | not)] + [\"${target}\"]")"
+              gh api -X PUT "repos/${REPO}/issues/${issue}/labels" \
+                --input <(jq -nc --argjson l "$new_labels" '{labels: $l}')
+              echo "write: ${current_phase:-none} → ${target}"
+            fi
+            echo "::endgroup::"
+          }
+
+          for pr in $prs; do
+            reconcile_pr "$pr"
+          done

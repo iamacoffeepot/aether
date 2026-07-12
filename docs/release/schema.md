@@ -13,11 +13,15 @@ The lifecycle vocabulary is the `phase:*` label set, the canonical phase state f
 | Design    | `phase:design`    | Tradeoffs / options / ADR drafting                 | User + Claude    |
 | Plan      | `phase:plan`      | Sequencing, dependencies, sub-issues               | User + Claude    |
 | Ready     | `phase:ready`     | Agent-ready; awaiting dispatch                     | Gate: `/approve` |
-| Executing | `phase:executing` | Agent has the issue; PR in flight                  | Auto             |
-| Refine    | `phase:refine`    | CI-feedback loop, agent-driven                     | Auto             |
+| Building  | `phase:building`  | PR open; CI not yet green                          | Reconciler       |
+| QA        | `phase:qa`        | CI green; review/dogfood verdict owed              | Reconciler       |
+| Findings  | `phase:findings`  | QA findings open — threads or rollups unresolved   | Reconciler       |
+| Held      | `phase:held`      | CI green, QA complete, all threads resolved; land-eligible | Reconciler |
 | Done      | *(no label)*      | PR merged, issue closed                            | Auto             |
 | Bounced   | `phase:bounced`   | Phase regression — see the `bounce-to:*` label     | User triage      |
 | Stalled   | `phase:stalled`   | Env/tooling failure, blocks dispatch               | User triage      |
+
+`Building` / `QA` / `Findings` / `Held` are the computed post-green resting states, written only by the reconciler workflow (`.github/workflows/reconciler.yml`) — see [The reconciler](#the-reconciler) below. `Executing` and `Refine` are **superseded** by this vocabulary: `phase:executing` maps to `phase:building` (straight rename) and `phase:refine` decomposes into `qa` / `findings` / `held`. Both are retained for now because live skills still write them; the reconciler migrates a straggler `executing` / `refine` forward on its next recompute. Their deletion is tracked to #3127.
 
 ## Issue metadata — all labels
 
@@ -44,12 +48,28 @@ Backlog  → Define     body has a problem statement
 Define   → Design     if multi-PR, umbrella issue exists; if architectural, ADR drafted
 Design   → Plan       tradeoffs aired; ADR merged if applicable
 Plan     → Ready      dependencies declared, one concept per issue (sets phase:ready)
-Ready    → Executing  /implement run (manually or by the fleet executor)
-Executing → Refine    PR opened, CI running
-Refine   → Done       CI green, merged (deletes the phase:* label)
-Executing/Refine → Bounced   agent surfaced an upstream-phase issue (sets bounce-to:*)
+Ready    → Building   /implement opens a PR; the reconciler sees it on first firing
+Building → QA         CI green on the PR head
+QA       → Findings   review / dogfood verdict in, and findings are open
+QA       → Held       review / dogfood verdict in, and nothing is open
+Findings → Held       all threads resolved and rollups cleared
+Held     → Done       PR merged (deletes the phase:* label)
+Building/QA/Findings/Held → Building   any push (new head SHA, CI not green) demotes back
+Building/QA/Findings/Held → Bounced    an upstream-phase issue surfaces (sets bounce-to:*)
 Any      → Stalled    env/tooling failure (not the issue's fault)
 ```
+
+The `Building → QA → Findings → Held` stretch is not a fixed walk — the reconciler recomputes the whole target from observable facts on every firing, so a PR jumps straight to `Held` when everything is already in, and any push demotes a `Held` / `Findings` / `QA` PR back to `Building` on the fresh head. Superseded legacy edges (`Ready → Executing`, `Executing → Refine`, `Refine → Done`) still fire from live skills; the reconciler migrates the resulting `executing` / `refine` label forward on its next recompute.
+
+## The reconciler
+
+The post-green stretch (`building` → `qa` → `findings` → `held`) is computed, not asserted. One hosted workflow, `.github/workflows/reconciler.yml` (name `Reconciler`, no Claude, no cargo), is the **sole writer** of `phase:building` / `phase:qa` / `phase:findings` / `phase:held`. It never writes `define` / `design` / `plan` / `ready` / `bounced` / `stalled` — those stay owned by their skills. On every relevant event it resolves the PR, finds the issue it closes (GraphQL `closingIssuesReferences`), gates on that issue's phase being in the reconciler domain (`ready` / `executing` / `building` / `refine` / `qa` / `findings` / `held`), reads the ground-truth facts, computes one target phase by a first-match table, and writes it with the atomic non-phase-preserving label `PUT`.
+
+**Facts** (per-head unless noted): CI check-runs conclusion on the PR's current head SHA; the `Review gate` commit status presence + conclusion on that head; the `review:unresolved` / `dogfood:unresolved` PR labels; whether the closing issue's `## Dogfood brief` is present and not `N/A`; the issue's dogfood marker `verdict=`; and the GraphQL `reviewThreads(isResolved: false)` count.
+
+**Computation** (first match wins): a just-fired `synchronize` or CI-not-green head → `building`; a review verdict owed for this head or a dogfood trial owed with no verdict in → `qa`; findings open (unresolved labels or threads) → `findings`; otherwise → `held` (land-eligible). Every firing recomputes from scratch, so a missed event self-heals on the next one.
+
+**Triggers**: `pull_request` (`opened` / `reopened` / `synchronize` / `ready_for_review` / `labeled` / `unlabeled` — the payload carries the PR; `synchronize` is the push-demotes path; label events wake it when a QA post job flips `review:unresolved` / `dogfood:unresolved`); `workflow_run` on **CI only** (CI runs are `pull_request`-triggered, so their head branch resolves the PR; Review and Dogfood runs anchor to `main` and cannot be resolved this way); `workflow_dispatch` with a `pr` input (the manual re-reconcile, and the authoritative QA-completion hand-off — the Review and Dogfood post jobs each poke it with the exact PR number they know); and a `*/15` `schedule` backstop that recomputes every open PR in the domain (the supported answer to thread resolves / unresolves having no Actions event, and the self-heal for any missed poke).
 
 ## Operations
 
