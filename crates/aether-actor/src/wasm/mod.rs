@@ -707,13 +707,22 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            // Derive the actor's own mailbox id (its lineage carry) so a
-            // `send::<R>` from the save hook resolves the receiver through
-            // `R::resolve` — the same id `receive` derives for `WasmCtx`.
-            let mailbox_id = $crate::__macro_internals::mailbox_id_from_name(
-                <$component as $crate::Addressable>::NAMESPACE,
-            )
-            .0;
+            // ADR-0114 addressing amendment: the cluster self-identity is the
+            // real folded id captured at `init` / `wire` — the same id
+            // `receive` derives for `WasmCtx`, so a `send::<R>` from the save
+            // hook resolves correctly at any lineage depth. Fall back to
+            // `hash(NAMESPACE)` only before any shim has run.
+            let mailbox_id = {
+                let captured = __AETHER_INLINE.self_id();
+                if captured != 0 {
+                    captured
+                } else {
+                    $crate::__macro_internals::mailbox_id_from_name(
+                        <$component as $crate::Addressable>::NAMESPACE,
+                    )
+                    .0
+                }
+            };
             // ADR-0114 §5: run the parent's `on_dehydrate` and every
             // resident inline child's into a single composite, then call
             // the host `save_state` once. With no inline children the
@@ -752,10 +761,19 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mailbox_id = $crate::__macro_internals::mailbox_id_from_name(
-                <$component as $crate::Addressable>::NAMESPACE,
-            )
-            .0;
+            // ADR-0114 addressing amendment: self_id-first, name-hash
+            // fallback — the same derivation as `receive` / `on_dehydrate`.
+            let mailbox_id = {
+                let captured = __AETHER_INLINE.self_id();
+                if captured != 0 {
+                    captured
+                } else {
+                    $crate::__macro_internals::mailbox_id_from_name(
+                        <$component as $crate::Addressable>::NAMESPACE,
+                    )
+                    .0
+                }
+            };
             // ADR-0114 §5: decompose the migration bundle, restore the
             // parent, then reconstruct each inline child by type. For a
             // childless component the bundle decomposes to the raw parent
@@ -1267,13 +1285,22 @@ macro_rules! __export_multi_internal {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
             };
-            // Derive the live actor's own mailbox id (its lineage carry) so a
-            // `send::<R>` from the save hook resolves the receiver through
-            // `R::resolve` — the same id `receive` derives for `WasmCtx`.
-            let mailbox_id = $crate::__macro_internals::mailbox_id_from_name(
-                instance.erased_namespace(),
-            )
-            .0;
+            // ADR-0114 addressing amendment: the cluster self-identity is the
+            // real folded id captured at `init` / `wire` — the same id
+            // `receive` derives for `WasmCtx`, so a `send::<R>` from the save
+            // hook resolves correctly at any lineage depth. Fall back to
+            // `hash(namespace)` only before any shim has run.
+            let mailbox_id = {
+                let captured = __AETHER_INLINE.self_id();
+                if captured != 0 {
+                    captured
+                } else {
+                    $crate::__macro_internals::mailbox_id_from_name(
+                        instance.erased_namespace(),
+                    )
+                    .0
+                }
+            };
             // ADR-0114 §5: compose the parent + every inline child into one
             // composite, then `save_state` once (the boxed instance's
             // dehydrate routes through `erased_on_dehydrate`). Childless ⇒
@@ -1303,17 +1330,27 @@ macro_rules! __export_multi_internal {
         /// describing the prior-state bundle the old instance produced.
         /// Routes through the boxed `ErasedWasmActor` to the live type's
         /// [`$crate::WasmActor::on_rehydrate`] (ADR-0101). Self-mailbox id
-        /// derived from the live instance's namespace.
+        /// is the captured folded id, with the live instance's namespace
+        /// hash as the pre-shim fallback.
         #[cfg(target_family = "wasm")]
         #[unsafe(export_name = "on_rehydrate_p32")]
         pub unsafe extern "C" fn on_rehydrate(version: u32, ptr: u32, len: u32) -> u32 {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
             };
-            let mailbox_id = $crate::__macro_internals::mailbox_id_from_name(
-                instance.erased_namespace(),
-            )
-            .0;
+            // ADR-0114 addressing amendment: self_id-first, name-hash
+            // fallback — the same derivation as `receive` / `on_dehydrate`.
+            let mailbox_id = {
+                let captured = __AETHER_INLINE.self_id();
+                if captured != 0 {
+                    captured
+                } else {
+                    $crate::__macro_internals::mailbox_id_from_name(
+                        instance.erased_namespace(),
+                    )
+                    .0
+                }
+            };
             // ADR-0114 §5: decompose, restore the boxed parent, then
             // reconstruct each inline child by matching its type tag against
             // every exported type. Childless ⇒ the boxed parent sees the

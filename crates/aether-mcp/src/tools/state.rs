@@ -87,18 +87,44 @@ impl Mcp {
     /// host build paths. A `module@actor` selector's `@actor` half
     /// populates the entry's `export` unless the spec set one explicitly.
     /// Returns the staged paths so the caller cleans them all up once the
-    /// substrate has read them at boot.
+    /// substrate has read them at boot; a staging failure removes whatever
+    /// it already wrote before surfacing the error.
     pub(super) async fn stage_boot_manifest(
         &self,
         components: &[ComponentSpec],
     ) -> Result<StagedBootManifest, McpError> {
+        let mut wasm_paths: Vec<PathBuf> = Vec::with_capacity(components.len());
+        let mut config_paths: Vec<PathBuf> = Vec::new();
+        match self.stage_boot_files(components, &mut wasm_paths, &mut config_paths).await {
+            Ok((manifest_path, expected_names)) => {
+                Ok(StagedBootManifest { manifest_path, wasm_paths, config_paths, expected_names })
+            }
+            Err(e) => {
+                // No StagedBootManifest reaches the caller on this path, so
+                // nothing else will ever clean these up — best-effort remove
+                // every file staged before the failure.
+                for path in wasm_paths.iter().chain(config_paths.iter()) {
+                    let _ = fs::remove_file(path).await;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// The fallible staging body of [`Self::stage_boot_manifest`]: pushes
+    /// each staged path the moment its `fs::write` succeeds, so the caller
+    /// holds an exact inventory of what exists when any later step fails.
+    async fn stage_boot_files(
+        &self,
+        components: &[ComponentSpec],
+        wasm_paths: &mut Vec<PathBuf>,
+        config_paths: &mut Vec<PathBuf>,
+    ) -> Result<(PathBuf, Vec<String>), McpError> {
         use std::env;
         use std::process;
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
 
-        let mut wasm_paths: Vec<PathBuf> = Vec::with_capacity(components.len());
-        let mut config_paths: Vec<PathBuf> = Vec::new();
         let mut entries: Vec<serde_json::Value> = Vec::with_capacity(components.len());
         let mut expected_names: Vec<String> = Vec::with_capacity(components.len());
         for spec in components {
@@ -110,6 +136,7 @@ impl Mcp {
             fs::write(&wasm_path, &resolved.wasm)
                 .await
                 .map_err(|e| internal_msg(&format!("staging boot wasm for selector {resolve_selector:?}: {e}")))?;
+            wasm_paths.push(wasm_path.clone());
             let mut entry = serde_json::json!({ "wasm": wasm_path.to_string_lossy() });
             if let Some(name) = &spec.name {
                 entry["name"] = serde_json::json!(name);
@@ -163,7 +190,6 @@ impl Mcp {
                 None => expected_names.push(format!("aether.component/aether.embedded:{ns}")),
             }
             entries.push(entry);
-            wasm_paths.push(wasm_path);
         }
 
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -171,7 +197,7 @@ impl Mcp {
         let bytes = serde_json::to_vec(&serde_json::json!({ "components": entries }))
             .map_err(|e| internal_msg(&format!("encoding boot manifest: {e}")))?;
         fs::write(&manifest_path, bytes).await.map_err(|e| internal_msg(&format!("staging boot manifest: {e}")))?;
-        Ok(StagedBootManifest { manifest_path, wasm_paths, config_paths, expected_names })
+        Ok((manifest_path, expected_names))
     }
 
     /// Resolve a `MailSpec` against the per-engine merged kind view

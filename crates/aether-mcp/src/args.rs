@@ -89,7 +89,7 @@ pub struct ComponentSpec {
     /// Fan this entry out into N instances at boot (issue 2626), one
     /// shared config: each instance is named `{base}-{index}` for `index`
     /// in `0..replicas`, where `base` follows the same precedence as an
-    /// unreplicated load (`name` > `export` > the entry actor's own
+    /// unreplicated load (`name` > `export` > the default actor's own
     /// namespace) — so `replicas: 1` differs from an omitted field only by
     /// the `-0` suffix. Pairs with `#[router(shared)]` (ADR-0136) to scale
     /// an HTTP handler to N instances in one spec. Omit (or `null`) for
@@ -714,7 +714,7 @@ pub struct LoadComponentArgs {
     /// Load N instances of this component in one call (issue 2626), one
     /// shared config: loops the single-load dispatch N times, naming each
     /// instance `{base}-{index}` for `index` in `0..replicas` (`base` =
-    /// `name` > `export` > the entry actor's own namespace — the same
+    /// `name` > `export` > the default actor's own namespace — the same
     /// precedence a plain load resolves against). Pairs with
     /// `#[router(shared)]` (ADR-0136) to scale an HTTP handler to N
     /// instances in one call. Returns one shared `capabilities` block plus
