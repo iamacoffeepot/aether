@@ -63,6 +63,13 @@ ensure_label "bounce-to:plan"   c5def5 "/scope resumes from Plan"
 ensure_label "approval:surface-exceeded" d93f0b "PR diff escapes the issue's declared surface — re-approval owed"
 ensure_label "approval:surface-ok"       0e8a16 "owner waiver: declared-surface overreach accepted"
 
+# The cloud fleet's control surface (ADR-0146). dont-touch is the per-issue kill
+# switch — the dispatcher, the judge, and the executor all refuse a benched issue.
+# These belong in the bootstrap: a label that does not exist cannot be applied, so
+# without them the kill switch is unusable on a fresh repo.
+ensure_label "agent:dont-touch"      000000 "fleet-blind: the dispatcher, judge, and executor skip this issue. Only the owner removes it."
+ensure_label "agent:awaiting-answer" fbca04 "an agent parked a question here; an owner reply resumes its session"
+
 # Size (weight) — XL marks a fat issue for /sweep fat (ADR-0110).
 ensure_label "size:s"  bfdadc "single file, single concept"
 ensure_label "size:m"  bfdadc "single crate, multiple files"
