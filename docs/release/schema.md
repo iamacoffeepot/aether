@@ -21,7 +21,7 @@ The lifecycle vocabulary is the `phase:*` label set, the canonical phase state f
 | Bounced   | `phase:bounced`   | Phase regression — see the `bounce-to:*` label     | User triage      |
 | Stalled   | `phase:stalled`   | Env/tooling failure, blocks dispatch               | User triage      |
 
-`Building` / `QA` / `Findings` / `Held` are the computed post-green resting states, written only by the reconciler workflow (`.github/workflows/reconciler.yml`) — see [The reconciler](#the-reconciler) below. `Executing` and `Refine` are **superseded** by this vocabulary: `phase:executing` maps to `phase:building` (straight rename) and `phase:refine` decomposes into `qa` / `findings` / `held`. Both are retained for now because live skills still write them; the reconciler migrates a straggler `executing` / `refine` forward on its next recompute. Their deletion is tracked to #3127.
+`Building` / `QA` / `Findings` / `Held` are the computed post-green resting states, written only by the reconciler workflow (`.github/workflows/reconciler.yml`) — see [The reconciler](#the-reconciler) below. `Executing` and `Refine` are **superseded** by this vocabulary: `phase:executing` maps to `phase:building` (straight rename) and `phase:refine` decomposes into `qa` / `findings` / `held`. The live skills no longer write either, and `release-project-init.sh` no longer creates them; the reconciler still migrates a straggler `executing` / `refine` label — one left on an in-flight PR from before the vocabulary flip — forward on its next recompute, so no PR stalls on the retired name.
 
 ## Issue metadata — all labels
 
@@ -59,7 +59,7 @@ Building/QA/Findings/Held → Bounced    an upstream-phase issue surfaces (sets 
 Any      → Stalled    env/tooling failure (not the issue's fault)
 ```
 
-The `Building → QA → Findings → Held` stretch is not a fixed walk — the reconciler recomputes the whole target from observable facts on every firing, so a PR jumps straight to `Held` when everything is already in, and any push demotes a `Held` / `Findings` / `QA` PR back to `Building` on the fresh head. Superseded legacy edges (`Ready → Executing`, `Executing → Refine`, `Refine → Done`) still fire from live skills; the reconciler migrates the resulting `executing` / `refine` label forward on its next recompute.
+The `Building → QA → Findings → Held` stretch is not a fixed walk — the reconciler recomputes the whole target from observable facts on every firing, so a PR jumps straight to `Held` when everything is already in, and any push demotes a `Held` / `Findings` / `QA` PR back to `Building` on the fresh head. The superseded legacy edges (`Ready → Executing`, `Executing → Refine`, `Refine → Done`) no longer fire from any live skill; the reconciler still migrates a straggler `executing` / `refine` label — left on an in-flight PR from before the flip — forward on its next recompute.
 
 ## The reconciler
 

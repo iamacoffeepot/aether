@@ -27,18 +27,18 @@ Two entry shapes, one skill:
 | PR exists and is a draft | "PR #N is not a draft — it may have already been un-drafted or merged." |
 | CI green — or green except `Qodana scan` as the sole failing required check, none pending (the [Qodana sweep](#qodana-sweep) resolves it before un-draft) | "PR #N has a non-Qodana required check red (or checks pending). Wait, or use `/implement <issue>` to fix a non-Qodana red." |
 | PR has a closing issue (the PR's closing-issue reference) | "PR #N has no closing issue. Link one (`Closes #M`) or delete the phase label manually." |
-| PR label set contains neither `review:unresolved` nor `dogfood:unresolved` (REST: `gh api repos/iamacoffeepot/aether/issues/<n>/labels --jq '.[].name'` — PRs are issues in the labels API) | "PR #N carries `<label>` — unresolved automated QA findings. Every finding must be implemented or declined with a written reason on the PR; fix and `workflow_dispatch` re-run the runner to clear it, or — once every unimplemented finding carries its reason — strip the label deliberately (a re-dispatch after a decline re-finds it and re-sets the label; the next CI green re-mirrors the required gate from the stripped label instead)." |
+| Closing issue at `phase:held` (REST: `gh api 'repos/iamacoffeepot/aether/issues?labels=phase:held&state=open' --jq '.[].number'`) | "PR #N's closing issue is not at `phase:held`. The reconciler holds it at `building` / `qa` / `findings` until CI is green, the QA verdict is in, and every review thread is resolved. Resolve open findings with `/findings <pr>`; a non-Qodana red needs `/implement <issue>`." |
 
-Read PR draft state and `mergeable_state` over REST (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.draft, .mergeable_state'`); read CI state from the REST check-runs endpoint (`gh api repos/iamacoffeepot/aether/commits/<sha>/check-runs`). Both are REST forms per the §REST-vs-GraphQL routing table in `/scope`. The QA-label gate makes the automated runners' findings load-bearing: the label is set and cleared by the runner's poster (e.g. `scripts/post-review-rollup.mjs` — set when the rollup is actionable, cleared by a re-run that finds nothing actionable), so a refusal here routes through the runner, not around it. For Rust-touching PRs the CI layer now also enforces the review verdict directly — the review workflow mirrors `review:unresolved` into the required `Review gate` commit status, so branch protection blocks the merge while the verdict stands — while this `review:unresolved` label row stays authoritative for `dogfood:unresolved` and for the non-CI contexts (manual merges, non-Rust PRs) that no required status covers.
+Read PR draft state and `mergeable_state` over REST (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.draft, .mergeable_state'`); read CI state from the REST check-runs endpoint (`gh api repos/iamacoffeepot/aether/commits/<sha>/check-runs`). Both are REST forms per the §REST-vs-GraphQL routing table in `/scope`. `phase:held` is the single eligibility signal: the reconciler reaches it only when CI is green, the review/dogfood rollup is non-actionable, and no review thread is open, so it subsumes the older `review:unresolved` / `dogfood:unresolved` label gate — `/findings` resolves the threads, the reconciler computes `findings` → `held`, and `/land` trusts `held`. For Rust-touching PRs the CI layer independently enforces the review verdict — the review workflow mirrors `review:unresolved` into the required `Review gate` commit status, so branch protection blocks the merge while the verdict stands. That required status is the hard enforcement; the `phase:held` precondition is the pipeline-level gate on top of it.
 
 ## Sweep land
 
 `/land --sweep` is the batched orchestrator entry point: it discovers the shard's held green draft PRs, validates each against the same gates single mode runs, prints a land plan with per-PR conflict prediction, and waits for one confirmation before landing anything.
 
-1. **Enumerate held green draft PRs over REST.** `/implement` leaves every implemented PR as a draft held at `phase:refine`, so `phase:refine` on an open issue is the eligibility signal, queried over REST and off the contended GraphQL pool:
+1. **Enumerate held green draft PRs over REST.** The reconciler advances a PR's closing issue to `phase:held` once CI is green, the QA verdict is in, and every thread is resolved, so `phase:held` on an open issue is the eligibility signal, queried over REST and off the contended GraphQL pool:
 
    ```bash
-   gh api 'repos/iamacoffeepot/aether/issues?labels=phase:refine&state=open' --jq '.[].number'
+   gh api 'repos/iamacoffeepot/aether/issues?labels=phase:held&state=open' --jq '.[].number'
    ```
 
    For each closing issue found, look up its open draft PR over REST:
@@ -48,7 +48,7 @@ Read PR draft state and `mergeable_state` over REST (`gh api repos/iamacoffeepot
      --jq '[.[] | select(.draft == true)] | .[].number'
    ```
 
-   Cross-reference to find draft PRs whose closing issue is in the `phase:refine` set. Drop any PR whose closing issue is not in the set; list it in the dropped section with reason "no phase:refine closing issue".
+   Cross-reference to find draft PRs whose closing issue is in the `phase:held` set. Drop any PR whose closing issue is not in the set; list it in the dropped section with reason "no phase:held closing issue".
 
 2. **Gate-check each candidate.** Run the full [Preconditions](#preconditions) per PR. Drop any that fail and record the reason. The sweep never silently skips — every dropped PR is listed in the plan with its drop reason.
 
@@ -114,7 +114,7 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
 
 4. **Qodana sweep (only when `Qodana scan` is the sole red).** When gate-check found `Qodana scan` as the one failing required check, resolve it before un-drafting — run the [Qodana sweep](#qodana-sweep): fetch the findings from the `qodana-report` artifact, triage and fix them in the worktree, re-push, and wait for `CI pass` green. Only then proceed. Skip this step when the PR is already fully green; bail to the user (do not un-draft) when the sweep surfaces an artifact-missing / outside-the-diff / uncertain case.
 
-5. **Un-draft via GraphQL.** The REST `pulls` PATCH cannot clear `draft`, so this is a GraphQL-only op (per `/scope` §REST-vs-GraphQL routing). This is the **sole remaining GraphQL-only op in the whole pipeline** — every other operation, phase state included, runs on REST now that the project board is retired:
+5. **Un-draft via GraphQL.** The REST `pulls` PATCH cannot clear `draft`, so this is a GraphQL-only op (per `/scope` §REST-vs-GraphQL routing). It is one of the pipeline's few GraphQL-only ops — it joins `/findings`'s `reviewThreads` query and `resolveReviewThread` mutation (per `/scope` §GitHub API budget → GraphQL-only list); every other operation, phase state included, runs on REST now that the project board is retired:
    ```bash
    gh api graphql -f query='
    mutation {
@@ -159,7 +159,7 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
 
 ## Qodana sweep
 
-Qodana is a required CI gate (`Qodana scan`, in `ci-pass`). `/implement` holds a draft whose only red is `Qodana scan` at `phase:refine`; `/land` resolves it here, before un-drafting. Invoked from [Landing sequence](#landing-sequence) step 4 when `Qodana scan` is the sole red.
+Qodana is a required CI gate (`Qodana scan`, in `ci-pass`). When a PR's only red is `Qodana scan`, `/land` resolves it here, before un-drafting; whether the reconciler holds such a PR at `phase:held` is the reconciler's own predicate, not restated here. Invoked from [Landing sequence](#landing-sequence) step 4 when `Qodana scan` is the sole red.
 
 1. **Confirm Qodana-only.** From the REST check-runs set, the failing required checks minus `CI pass` must be exactly `{Qodana scan}`. Any other red is a real failure — refuse and route to `/implement`.
 2. **Fetch + parse the findings.** `scripts/qodana-report.sh <pr>` downloads the PR's `qodana-report` CI artifact, parses the SARIF, filters to findings on the PR's own changes, and prints the actionable list (`file:line  [severity] ruleId — message`), exiting non-zero when PR-diff findings exist. `--all` prints the whole-tree set.
@@ -231,7 +231,7 @@ This is the same form `/scope` documents for the `Backlog` and `Done` phases —
 - Auto-resolve content conflicts. A `dirty` branch always surfaces to the user (or an optional delegated agent).
 - Un-draft a PR with a non-Qodana required check red. The gate enforces green before un-draft, except a sole `Qodana scan` red, which the [Qodana sweep](#qodana-sweep) resolves first.
 - Auto-suppress Qodana findings — edit a `qodana.yaml` exclude or commit a `--baseline` — without surfacing to the user. The Qodana sweep fixes findings or surfaces them; it never silences them.
-- Strip `review:unresolved` / `dogfood:unresolved` itself. The runner's poster clears the label on a re-run that finds nothing actionable; a deliberate strip by the user is the taste override for a declined finding — not a `workflow_dispatch` re-run, which re-runs the whole session and re-finds (and re-sets) a declined finding. After a deliberate strip, the required `Review gate` status clears on the next CI green re-mirroring the now-absent label, no review dispatch needed. `/land` only refuses while the label is present.
+- Resolve findings or strip `review:unresolved` / `dogfood:unresolved` itself. `/findings` resolves the review threads and pushes the fixes; the reconciler reads that and computes `findings` → `held`; `/land` trusts `held`. The runner's poster clears the label on a re-run that finds nothing actionable, and the required `Review gate` status clears on the next CI green re-mirroring the now-absent label. `/land` only refuses while the closing issue is short of `phase:held`.
 - Apply `review:skip`. That waiver is the owner's signoff alone — an agent never applies it, whoever's token it holds; the review gate additionally verifies the label's `labeled`-event actor is the owner and stays red otherwise. Same class as the label-strip rule above.
 - Land PRs in parallel. Protected `main` enforces linear history; parallel landing races to discover the serialization. The sequence lands one at a time with recompute.
 - Delete the `phase:*` label before verifying the merge completed (`merged` field confirmed `true`).

@@ -33,10 +33,10 @@ Self-bounces by other skills (`/scope` hitting a wall, `/implement` discovering 
 Phase ordering for "is earlier" check:
 
 ```
-Backlog (0) → Define (1) → Design (2) → Plan (3) → Ready (4) → Executing (5) → Refine (6) → Done (7)
+Backlog (0) → Define (1) → Design (2) → Plan (3) → Ready (4) → Building (5) → QA (6) → Findings (7) → Held (8) → Done (9)
 ```
 
-A bounce from `Ready` to `Plan` is valid (target=3 < current=4). A bounce from `Plan` to `Plan` is invalid (no-op). A bounce from `Design` to `Plan` is invalid (advancing).
+The post-Ready states (`Building` / `QA` / `Findings` / `Held`) are the reconciler's computed resting states; a bounce still regresses only to `Define` / `Design` / `Plan`, never into a computed state. A bounce from `Ready` to `Plan` is valid (target=3 < current=4). A bounce from `Plan` to `Plan` is invalid (no-op). A bounce from `Design` to `Plan` is invalid (advancing).
 
 ## Actions on pass
 
