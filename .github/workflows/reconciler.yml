@@ -196,19 +196,38 @@ jobs:
 
           def load_policy(path):
               # Annotation only — the gate's verdict is containment, which never
-              # consults the policy. So a runner without PyYAML degrades to an
-              # un-annotated diagnostic rather than failing the gate open OR shut.
-              try:
-                  import yaml
-              except ImportError:
+              # consults the policy, so a missing policy file costs the tier column
+              # and nothing else. The file's shape is owned by this repo (a
+              # `default` tier plus a list of {glob, tier} rules), so it is parsed
+              # with the standard library rather than PyYAML, which the runner is
+              # not guaranteed to ship: a hand parser keeps the tier column
+              # deterministic instead of silently degrading every row to "?".
+              # Tier resolution is most-restrictive-wins over the matching rules,
+              # falling back to the fail-closed default — the same resolution
+              # /approve applies at the Plan->Ready edge, so the diagnostic quotes
+              # the tier an escaping path would actually cost.
+              text = open(path, encoding="utf-8").read()
+              if not text.strip():
+                  # The fetch failed (no policy on the default branch yet), so the
+                  # tier is honestly unresolved rather than assumed.
                   return None
-              doc = yaml.safe_load(open(path, encoding="utf-8")) or {}
-              rules = [
-                  (compile_glob(r["glob"]), r["tier"])
-                  for r in doc.get("rules") or []
-                  if r.get("glob") and r.get("tier") in RANK
-              ]
-              return doc.get("default", "human"), rules
+              default, rules, pending = "human", [], None
+              for raw in text.splitlines():
+                  line = raw.split("#", 1)[0].rstrip()
+                  m = re.match(r"^default:\s*(\w+)\s*$", line)
+                  if m:
+                      default = m.group(1)
+                      continue
+                  m = re.match(r"""^\s*-\s*glob:\s*["']?(.+?)["']?\s*$""", line)
+                  if m:
+                      pending = m.group(1)
+                      continue
+                  m = re.match(r"""^\s*tier:\s*["']?(\w+)["']?\s*$""", line)
+                  if m and pending is not None:
+                      if m.group(1) in RANK:
+                          rules.append((compile_glob(pending), m.group(1)))
+                      pending = None
+              return default, rules
 
 
           def tier_of(path, policy):
@@ -458,12 +477,18 @@ jobs:
               # Mirror the verdict into the PR label and the required commit
               # status. The label write uses GITHUB_TOKEN, whose events do not
               # trigger workflows, so setting it cannot re-enter this reconciler.
+              # The label is advisory and the commit status is the actual gate, so
+              # a failed label call warns and carries on: this workflow is the sole
+              # writer of every PR's phase, and letting one label error abort the
+              # run under `set -e` would strand the whole fleet's reconciliation.
               if [ "$surface_exceeded" -eq 1 ]; then
-                grep -qx 'approval:surface-exceeded' <<<"$pr_labels" || \
-                  gh api -X POST "repos/${REPO}/issues/${pr}/labels" -f "labels[]=approval:surface-exceeded" >/dev/null
+                grep -qx 'approval:surface-exceeded' <<<"$pr_labels" \
+                  || gh api -X POST "repos/${REPO}/issues/${pr}/labels" -f "labels[]=approval:surface-exceeded" >/dev/null \
+                  || echo "warn: could not set approval:surface-exceeded (is the label bootstrapped?)"
               else
-                ! grep -qx 'approval:surface-exceeded' <<<"$pr_labels" || \
-                  gh api -X DELETE "repos/${REPO}/issues/${pr}/labels/approval:surface-exceeded" >/dev/null
+                ! grep -qx 'approval:surface-exceeded' <<<"$pr_labels" \
+                  || gh api -X DELETE "repos/${REPO}/issues/${pr}/labels/approval:surface-exceeded" >/dev/null \
+                  || echo "warn: could not clear approval:surface-exceeded"
               fi
 
               # Diagnostic comment, upserted against a marker so the cron backstop
