@@ -1,9 +1,9 @@
 //! `FleetBench` `replace_component` proof (issue 1459, Tier-A): load the
 //! `probe` fixture into a forked substrate, then atomically swap it for
-//! `aether-kit`'s `aether.kit.camera` export (selector `aether_kit@aether.kit.camera`) at the
-//! same trampoline mailbox id (ADR-0022) and assert the returned
-//! capability set reflects the new binary while the lineage address
-//! stays put.
+//! the standalone stateful fixture's entry actor at the
+//! same trampoline mailbox id (ADR-0022). Assert the returned capability
+//! set reflects the cross-module swap, the lineage address stays put,
+//! and mail reaches the replacement guest.
 
 mod fleetbench;
 
@@ -11,26 +11,25 @@ mod tests {
     use aether_actor::Addressable;
     use aether_capabilities::WasmTrampoline;
     use aether_data::Kind;
-    use aether_kinds::{ComponentCapabilities, LogTailResult, Ping, Tick};
-    use aether_kit::camera::CameraCreate;
-    use aether_test_fixtures_kinds::SetRender;
+    use aether_kinds::{ComponentCapabilities, LogTailResult, Ping};
+    use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport, SetRender};
 
     use crate::fleetbench::{FleetBench, dist_component_available};
 
-    /// Load `probe` (handlers `SetRender` + `Tick`), then `replace`
-    /// it with `aether-kit`'s non-entry `aether.camera` export (selector
-    /// `aether_kit@aether.kit.camera`; handlers `CameraCreate` + `Tick` + the
-    /// camera-driver kinds) targeting the captured trampoline
-    /// `mailbox_id` — exercising `ReplaceComponent.export` (#2027)
-    /// end-to-end over the wire. The returned
-    /// `ReplaceResult::Ok.capabilities` must carry the camera
-    /// handler set and not the probe's, with `Tick` surviving the
-    /// swap; the lineage address — unchanged by construction, since
-    /// the trampoline keeps its load-time name — must still route to
-    /// the live mailbox afterward.
+    /// Load the bundled `probe` (handler `SetRender`), then replace it
+    /// with the standalone `aether_test_fixtures_stateful_typed` module's
+    /// entry actor (handlers `Bump` + `CountQuery`) at the
+    /// captured trampoline `mailbox_id`. This exercises the
+    /// cross-module `ReplaceComponent` path over the real wire. The returned
+    /// capabilities must flip to the stateful handler set, while a `Bump`
+    /// followed by `CountQuery` at the probe's unchanged load-time lineage
+    /// address must report `count = 1`. The neighboring test covers a named
+    /// non-entry export replacement separately.
     #[test]
-    fn fleetbench_replaces_probe_with_camera_at_a_stable_address() {
-        if !dist_component_available("aether_test_fixtures_bundle") {
+    fn fleetbench_replaces_probe_with_stateful_actor_at_a_stable_address() {
+        if !dist_component_available("aether_test_fixtures_bundle")
+            || !dist_component_available("aether_test_fixtures_stateful_typed")
+        {
             return;
         }
         let mut bench = FleetBench::start();
@@ -39,45 +38,55 @@ mod tests {
 
         let has = |caps: &ComponentCapabilities, id| caps.handlers.iter().any(|h| h.id == id);
 
-        // Pre-replace sanity: the probe declares SetRender, not the
-        // camera's create kind, and registers at its ADR-0099 lineage
-        // address.
+        // Pre-replace sanity: the bundled probe declares SetRender, not
+        // the standalone stateful actor's driver/query kinds, and
+        // registers at its ADR-0099 lineage address.
         assert!(
             has(&loaded.capabilities, SetRender::ID),
             "probe should declare a SetRender handler: {:?}",
             loaded.capabilities.handlers,
         );
         assert!(
-            !has(&loaded.capabilities, CameraCreate::ID),
-            "probe should not declare a CameraCreate handler: {:?}",
+            !has(&loaded.capabilities, Bump::ID),
+            "probe should not declare a Bump handler: {:?}",
+            loaded.capabilities.handlers,
+        );
+        assert!(
+            !has(&loaded.capabilities, CountQuery::ID),
+            "probe should not declare a CountQuery handler: {:?}",
             loaded.capabilities.handlers,
         );
         let expected = format!("aether.component/{}:test.probe", WasmTrampoline::NAMESPACE);
         assert_eq!(loaded.addr, expected, "probe should load at its ADR-0099 lineage address");
 
-        let caps = bench.replace_export(engine, loaded.mailbox_id, "aether_kit", "aether.kit.camera");
+        let caps = bench.replace(engine, loaded.mailbox_id, "aether_test_fixtures_stateful_typed");
 
-        // Post-replace: the camera handler set is active, the probe's
-        // is gone, and Tick (declared by both) survives the swap.
-        assert!(
-            has(&caps, CameraCreate::ID),
-            "post-replace should declare a CameraCreate handler: {:?}",
-            caps.handlers,
-        );
+        // Post-replace: the standalone stateful actor's handlers are
+        // active and the bundled probe's distinguishing handler is gone.
+        assert!(has(&caps, Bump::ID), "post-replace should declare a Bump handler: {:?}", caps.handlers);
+        assert!(has(&caps, CountQuery::ID), "post-replace should declare a CountQuery handler: {:?}", caps.handlers);
         assert!(
             !has(&caps, SetRender::ID),
             "post-replace should not declare the probe's SetRender handler: {:?}",
             caps.handlers,
         );
-        assert!(
-            has(&caps, Tick::ID),
-            "Tick is declared by both components and should survive the swap: {:?}",
-            caps.handlers,
-        );
 
-        // The lineage address still resolves to the live mailbox: a
-        // LogTail routed to the rendered path is answered Ok, proving
-        // the same mailbox was swapped in place.
+        // Drive replacement-only guest behavior through the probe's
+        // load-time lineage address. A decoded count of one proves both
+        // mails reached the stateful module at the same trampoline path.
+        let bump_replies = bench.send(engine, &loaded.addr, &Bump);
+        assert!(bump_replies.is_empty(), "Bump should not reply, got {bump_replies:?}");
+        let replies = bench.send(engine, &loaded.addr, &CountQuery);
+        let reply = match replies.as_slice() {
+            [one] => one,
+            other => panic!("CountQuery should get exactly one reply, got {}", other.len()),
+        };
+        assert_eq!(reply.kind, CountReport::ID, "the replacement should reply with CountReport");
+        let report = CountReport::decode_from_bytes(&reply.payload).expect("the CountReport reply should decode");
+        assert_eq!(report.count, 1, "one Bump at the stable lineage address should advance the replacement state");
+
+        // The framework-owned LogTail handler remains another direct
+        // liveness check through that unchanged address.
         assert!(
             matches!(bench.log_tail(engine, &loaded.addr, None, None), LogTailResult::Ok { .. },),
             "the lineage address should still route to the live mailbox after replace",

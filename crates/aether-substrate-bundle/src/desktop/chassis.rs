@@ -418,6 +418,7 @@ impl DesktopChassis {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
+            cache_modules: false,
         };
         let input_config = InputConfig::default();
         // Capture handoff lives on `RenderCapability` post-issue-603

@@ -1,4 +1,4 @@
-//! Camera scenario tests. Each test boots a `TestBench`, loads
+//! Camera component lifecycle scenario. It boots a `TestBench`, loads
 //! `aether-kit`'s wasm artifact (built separately for
 //! `wasm32-unknown-unknown`) selecting the non-entry `camera` export
 //! (ADR-0096), drives the `CameraComponent` through its
@@ -39,11 +39,8 @@ use aether_kit as _;
 use std::fs;
 use std::path::Path;
 
-/// Component name passed to `LoadComponent`. The full mailbox address
-/// the substrate registers is `aether.embedded:cam`
-/// (issue 634 Phase 4 PR 1) — bare `"cam"` is not addressable. Camera
-/// tests don't currently send any mail to the loaded trampoline by
-/// address, so only the load-time name matters here.
+/// Component name passed to `LoadComponent`; [`component_address`]
+/// derives the loaded trampoline's full address from it.
 const COMPONENT_NAME: &str = "cam";
 
 /// The `/`-rendered lineage a loaded component registers at (ADR-0099
@@ -90,86 +87,34 @@ fn camera_component_lifecycle() {
     let mut bench = TestBench::start_with_size(64, 48).expect("boot");
     load_camera(&mut bench, &wasm_path);
 
-    // A few ticks lets the component finish init, run on_tick, and
-    // let the renderer cycle.
-    let result =
-        bench.execute(vec![("advance", BenchOp::advance(5)), ("snap", BenchOp::capture())]).expect("advance + capture");
-    let png = result.captured("snap").expect("snap step ran");
-    let img = decode_png(png).expect("decode capture png");
-    not_all_black(&img).expect("camera scene should not be all black");
-}
-
-/// Smoke test: the default camera (a frozen orbit, `speed: 0.0`) still
-/// publishes `aether.view_projection` to the chassis render mailbox every tick
-/// even though the eye does not move. This is the load-bearing flow for
-/// camera matrices reaching the GPU; if it regresses, every scene goes
-/// back to identity-projection until someone notices visually.
-/// `count_observed` queries the bench's chassis-cap observation log for
-/// the kind name.
-#[test]
-fn camera_default_static_publishes_view_proj() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
-        return;
-    };
-
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    load_camera(&mut bench, &wasm_path);
-
-    // Five ticks: enough for init + a handful of publishes to surface
-    // on the camera sink. The component publishes on every tick after
-    // init, so any non-zero count proves the path is alive.
+    // The frozen default camera still publishes after initialization.
     bench.execute(vec![("advance", BenchOp::advance(5))]).expect("advance");
-
-    let observed = bench.count_observed(ViewProjection::NAME);
+    let initialized = bench.count_observed(ViewProjection::NAME);
     assert!(
-        observed >= 1,
-        "expected ≥1 aether.view_projection observed; got {observed}; observed kinds: {:?}",
-        bench.observed_kinds(),
-    );
-}
-
-/// Destroy the active default camera ("main") and confirm the
-/// substrate stays alive — frame still draws the chassis clear, no
-/// panic, no `fatal_abort`. The component pauses publishing (no further
-/// `aether.view_projection` mail) per its docstring; `count_observed` is
-/// cumulative since boot so we can't assert "no further publishes"
-/// directly with the current vocabulary, but the survivability half
-/// is the load-bearing assertion: a destroy of the active camera
-/// shouldn't take down the chassis.
-#[test]
-fn camera_destroy_main_keeps_substrate_alive() {
-    let Some(wasm_path) = require_runtime("aether_kit") else {
-        return;
-    };
-
-    let mut bench = TestBench::start_with_size(64, 48).expect("boot");
-    load_camera(&mut bench, &wasm_path);
-
-    bench.execute(vec![("pre", BenchOp::advance(2))]).expect("pre-destroy advance");
-    // Baseline: default orbit was publishing before destroy.
-    let pre_destroy = bench.count_observed(ViewProjection::NAME);
-    assert!(
-        pre_destroy >= 1,
-        "expected ≥1 aether.view_projection before destroy; got {pre_destroy}; observed kinds: {:?}",
+        initialized >= 1,
+        "expected ≥1 aether.view_projection after initialization; got {initialized}; observed kinds: {:?}",
         bench.observed_kinds(),
     );
 
-    // Drop the only camera the component was bootstrapped with (agents
-    // address loaded components at the trampoline's full name,
-    // `aether.embedded:NAME`, per issue 634 Phase 4), then
-    // advance and capture.
-    //
-    // Survivability: the chassis still renders its clear pass after
-    // the active camera was removed. If the component panicked or the
-    // substrate wedged, capture would fail or the frame would be
-    // all-black.
-    let result = bench
+    // Let destruction and any already in-flight publication settle before
+    // taking the cumulative observation baseline.
+    bench
         .execute(vec![
             ("destroy", BenchOp::send_mail(component_address(), &CameraDestroy { name: "main".to_owned() })),
-            ("post", BenchOp::advance(5)),
-            ("snap", BenchOp::capture()),
+            ("settle", BenchOp::advance(2)),
         ])
-        .expect("destroy + advance + capture");
+        .expect("destroy + settle");
+    let post_destroy = bench.count_observed(ViewProjection::NAME);
+
+    let result = bench
+        .execute(vec![("post_destroy", BenchOp::advance(5)), ("snap", BenchOp::capture())])
+        .expect("post-destroy advance + capture");
+    let after_window = bench.count_observed(ViewProjection::NAME);
+    assert_eq!(
+        after_window, post_destroy,
+        "aether.view_projection count increased after destroying main: baseline {post_destroy}, after window {after_window}",
+    );
+
     let png = result.captured("snap").expect("snap step ran");
     let img = decode_png(png).expect("decode capture png");
     not_all_black(&img).expect("frame should not be all black after camera destroy");

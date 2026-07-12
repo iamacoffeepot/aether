@@ -43,6 +43,7 @@ impl WasmTrampolineState {
         let config = WasmTrampolineConfig {
             engine: Arc::clone(&self.engine),
             linker: Arc::clone(&self.linker),
+            module_cache: self.module_cache.as_ref().map(Arc::clone),
             module: self.module.clone(),
             registry: Arc::clone(&self.registry),
             outbound: Arc::clone(&self.outbound),
@@ -122,7 +123,11 @@ impl WasmTrampolineState {
         // this mail to us, so the field is informational).
         let _ = payload.mailbox_id;
 
-        let module = match Module::new(&self.engine, &payload.wasm) {
+        let module = match self
+            .module_cache
+            .as_ref()
+            .map_or_else(|| Module::new(&self.engine, &payload.wasm), |cache| cache.compile(&payload.wasm))
+        {
             Ok(m) => m,
             Err(e) => {
                 return ReplaceResult::Err { error: format!("invalid wasm module: {e}") };

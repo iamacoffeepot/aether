@@ -241,6 +241,7 @@ pub struct TestBenchBuilder {
     trace_ring_capacity: Option<usize>,
     trace_ring_max_capacity: Option<usize>,
     settlement_cap: Option<Duration>,
+    cache_modules: bool,
     clipboard_mode: TestBenchClipboardMode,
     game_gateway: GameGatewayConfig,
 }
@@ -256,6 +257,7 @@ impl Default for TestBenchBuilder {
             trace_ring_capacity: None,
             trace_ring_max_capacity: None,
             settlement_cap: None,
+            cache_modules: false,
             clipboard_mode: TestBenchClipboardMode::default(),
             game_gateway: GameGatewayConfig::default(),
         }
@@ -340,6 +342,16 @@ impl TestBenchBuilder {
         self
     }
 
+    /// Reuse compiled Wasmtime modules when this bench loads identical wasm
+    /// bytes more than once. Disabled by default because the cache retains one
+    /// byte copy of each distinct module until bench teardown; repeated-load
+    /// scenarios opt in when avoiding recompilation outweighs that memory.
+    #[must_use]
+    pub fn reuse_compiled_modules(mut self) -> Self {
+        self.cache_modules = true;
+        self
+    }
+
     /// Select the clipboard actor composed into this bench. The default is
     /// deterministic in-memory storage; `Unavailable` composes the fail-fast
     /// companion for negative-path scenarios.
@@ -386,6 +398,7 @@ impl TestBenchBuilder {
             self.pool_workers,
             ring_caps,
             settlement_cap,
+            self.cache_modules,
             self.clipboard_mode,
             self.game_gateway,
         )
@@ -416,6 +429,7 @@ impl TestBench {
             None,
             RingCapacities::default(),
             SettlementConfig::from_env().to_cap(),
+            false,
             TestBenchClipboardMode::default(),
             GameGatewayConfig::default(),
         )
@@ -432,6 +446,7 @@ impl TestBench {
         pool_workers: Option<usize>,
         ring_caps: RingCapacities,
         settlement_cap: Duration,
+        cache_modules: bool,
         clipboard_mode: TestBenchClipboardMode,
         game_gateway: GameGatewayConfig,
     ) -> Result<Self, TestBenchError> {
@@ -459,6 +474,7 @@ impl TestBench {
             namespace_roots,
             clipboard_mode,
             game_gateway,
+            cache_modules,
             // Issue #2509: the teardown gate honors the same resolved cap
             // (env knob or programmatic override) as the settlement-await
             // loops the bench stores this value for.

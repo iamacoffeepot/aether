@@ -163,6 +163,10 @@ pub struct TestBenchEnv {
     /// `TestBench::settlement_cap` override), so a scenario's teardown
     /// gate uses the same patience as its settlement gates.
     pub teardown_cap: Duration,
+    /// Whether this bench reuses compiled modules for identical wasm bytes.
+    /// The in-process builder enables it only for repeated-load scenarios;
+    /// ordinary benches and the standalone binary leave it disabled.
+    pub cache_modules: bool,
 }
 
 /// Output of [`TestBenchChassis::build_passive`]. Bundles the
@@ -224,6 +228,7 @@ impl TestBenchChassis {
             clipboard_mode,
             game_gateway,
             teardown_cap,
+            cache_modules,
         } = env;
 
         let boot = SubstrateBoot::builder(&name, &version).build()?;
@@ -232,6 +237,7 @@ impl TestBenchChassis {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
+            cache_modules,
         };
 
         let kind_tick = boot.registry.kind_id(Tick::NAME).expect("Tick registered");

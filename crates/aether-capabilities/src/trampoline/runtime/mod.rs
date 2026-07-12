@@ -105,6 +105,7 @@ impl NativeActor for WasmTrampoline {
             component: Some(component),
             engine: config.engine,
             linker: config.linker,
+            module_cache: config.module_cache,
             registry: config.registry,
             mailer,
             outbound: config.outbound,

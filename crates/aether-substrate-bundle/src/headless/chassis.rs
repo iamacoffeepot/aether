@@ -284,6 +284,7 @@ impl HeadlessChassis {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
+            cache_modules: false,
         };
         let input_config = InputConfig::default();
 

@@ -35,6 +35,7 @@ use aether_kinds::{
 // Crate-local wiring the `#[runtime] impl` handler bodies name (sibling caps it
 // mails, the unsubscribe kind, the `Kind` / `MailboxCategory` vocabulary), the
 // state struct, and `forward_to_trampoline` — all used within this module.
+use crate::WasmModuleCache;
 use crate::http::HttpServerCapability;
 use crate::http::kinds::UnregisterRoutesAll;
 use crate::input::{InputCapability, UnsubscribeAll};
@@ -74,6 +75,7 @@ use aether_substrate::mail::{KindId, MailboxId};
 pub struct ComponentHostCapabilityState {
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<ComponentCtx>>,
+    pub module_cache: Option<Arc<WasmModuleCache>>,
     pub registry: Arc<Registry>,
     pub mailer: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
@@ -122,9 +124,11 @@ impl NativeActor for ComponentHostCapability {
     ) -> Result<ComponentHostCapabilityState, BootError> {
         let mailer = ctx.mailer();
         let registry = Arc::clone(mailer.registry());
+        let module_cache = config.cache_modules.then(|| Arc::new(WasmModuleCache::new(Arc::clone(&config.engine))));
         Ok(ComponentHostCapabilityState {
             engine: config.engine,
             linker: config.linker,
+            module_cache,
             registry,
             mailer,
             outbound: config.hub_outbound,

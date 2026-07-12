@@ -9,6 +9,8 @@ use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use wasmtime::{Engine, Linker, Module};
 
+use crate::WasmModuleCache;
+
 /// Configuration handed to [`Lifecycle::init`](aether_actor::Lifecycle::init) by the spawn
 /// path. Carries the wasmtime engine / linker plus the parsed
 /// module bytes; `init` instantiates the `Component` against the
@@ -16,6 +18,8 @@ use wasmtime::{Engine, Linker, Module};
 pub struct WasmTrampolineConfig {
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<ComponentCtx>>,
+    #[doc(hidden)]
+    pub module_cache: Option<Arc<WasmModuleCache>>,
     pub module: Module,
     pub registry: Arc<Registry>,
     pub outbound: Arc<HubOutbound>,

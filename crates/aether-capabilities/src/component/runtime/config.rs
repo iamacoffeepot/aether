@@ -16,4 +16,7 @@ pub struct ComponentHostConfig {
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<ComponentCtx>>,
     pub hub_outbound: Arc<HubOutbound>,
+    /// Reuse compiled modules with identical wasm bytes for the lifetime of
+    /// this component host. Intended for test harness chassis only.
+    pub cache_modules: bool,
 }

@@ -89,7 +89,11 @@ impl ComponentHostCapabilityState {
             };
 
         // 3. Compile module.
-        let module = match Module::new(&self.engine, &payload.wasm) {
+        let module = match self
+            .module_cache
+            .as_ref()
+            .map_or_else(|| Module::new(&self.engine, &payload.wasm), |cache| cache.compile(&payload.wasm))
+        {
             Ok(m) => m,
             Err(e) => {
                 return LoadResult::Err { error: format!("invalid wasm module: {e}") };
@@ -124,6 +128,7 @@ impl ComponentHostCapabilityState {
         let trampoline_config = WasmTrampolineConfig {
             engine: Arc::clone(&self.engine),
             linker: Arc::clone(&self.linker),
+            module_cache: self.module_cache.as_ref().map(Arc::clone),
             module,
             registry: Arc::clone(&self.registry),
             outbound: Arc::clone(&self.outbound),

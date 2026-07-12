@@ -8,6 +8,8 @@ use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use wasmtime::{Engine, Linker, Module};
 
+use crate::WasmModuleCache;
+
 /// Per-component trampoline **runtime state** (ADR-0122 identity/runtime
 /// split — the addressing identity is the distinct ZST
 /// [`WasmTrampoline`](crate::trampoline::WasmTrampoline)). Holds the wasm
@@ -29,6 +31,7 @@ pub struct WasmTrampolineState {
     /// is reachable from the handler.
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<ComponentCtx>>,
+    pub module_cache: Option<Arc<WasmModuleCache>>,
     pub registry: Arc<Registry>,
     pub mailer: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,

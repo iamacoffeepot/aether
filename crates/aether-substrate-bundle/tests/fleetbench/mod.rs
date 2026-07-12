@@ -66,7 +66,6 @@ use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use aether_substrate::testing::TestChassis;
-use serde::Serialize;
 
 /// Re-arm interval for the client→hub socket read: how often a blocked
 /// `read_frame` wakes to log a slow-gate line and re-check its cumulative
@@ -684,10 +683,12 @@ impl FleetBench {
     /// Route a mail to a recipient on a forked substrate and return the
     /// reply envelopes (one per `ReplyEvent`). `recipient` is a mailbox
     /// path — a chassis cap (`aether.fs`) or a loaded component's
-    /// lineage address (`aether.component/aether.embedded:<name>`).
+    /// lineage address (`aether.component/aether.embedded:<name>`). Encoding
+    /// goes through [`Kind::encode_into_bytes`], so cast-shaped kinds such as
+    /// `Tick` do not need an unrelated serde `Serialize` implementation.
     pub fn send<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> Vec<MailEnvelope>
     where
-        K: Kind + Serialize,
+        K: Kind,
     {
         self.call(Some(engine), recipient, mail)
     }
@@ -703,7 +704,7 @@ impl FleetBench {
     /// gate (issue 2064).
     fn call<K>(&mut self, engine: Option<EngineId>, mailbox: &str, request: &K) -> Vec<MailEnvelope>
     where
-        K: Kind + Serialize,
+        K: Kind,
     {
         self.call_with_budget(engine, mailbox, request, reply_cap(), "reply")
     }
@@ -725,7 +726,7 @@ impl FleetBench {
         gate: &str,
     ) -> Vec<MailEnvelope>
     where
-        K: Kind + Serialize,
+        K: Kind,
     {
         let cid = self.next_cid;
         self.next_cid += 1;
@@ -847,7 +848,7 @@ impl FleetBench {
     /// carrier the empty-config [`load`](Self::load) sends.
     pub fn load_with_config<C>(&mut self, engine: EngineId, stem: &str, config: &C) -> String
     where
-        C: Kind + Serialize,
+        C: Kind,
     {
         let wasm = read_component_wasm(stem);
         let replies = self.call(
@@ -870,7 +871,7 @@ impl FleetBench {
     /// module's entry type. Returns the registered ADR-0099 lineage address.
     pub fn load_with_config_export<C>(&mut self, engine: EngineId, stem: &str, config: &C, export: &str) -> String
     where
-        C: Kind + Serialize,
+        C: Kind,
     {
         let wasm = read_component_wasm(stem);
         let replies = self.call(
@@ -906,7 +907,7 @@ impl FleetBench {
     /// `Err`/undecodable ack, mirroring [`single_reply`].
     pub fn send_traced<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> (MailId, Vec<MailEnvelope>)
     where
-        K: Kind + Serialize,
+        K: Kind,
     {
         let batch = DispatchTraced {
             mails: vec![NamedMail {

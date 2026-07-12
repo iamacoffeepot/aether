@@ -85,7 +85,13 @@ pub mod test_bench;
 pub mod text;
 pub mod trace;
 pub mod trampoline;
+#[cfg(feature = "runtime")]
+mod wasm_module_cache;
 pub mod window;
+
+#[cfg(feature = "runtime")]
+#[doc(hidden)]
+pub use wasm_module_cache::WasmModuleCache;
 
 #[cfg(feature = "audio")]
 pub use audio::AudioCapability;

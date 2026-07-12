@@ -70,6 +70,7 @@ fn main() -> anyhow::Result<()> {
         // the `0 → wait forever` sentinel) — the same knob the settlement
         // gates read.
         teardown_cap: resolve_teardown_cap(),
+        cache_modules: false,
     };
 
     let TestBenchBuild { passive, boot, render_handles, kind_tick } = TestBenchChassis::build_passive(env)?;

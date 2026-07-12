@@ -17,7 +17,7 @@ mod tests {
 
     use aether_actor::Addressable;
     use aether_capabilities::WasmTrampoline;
-    use aether_data::{Kind, Schema, SchemaType, wire};
+    use aether_data::{EngineId, Kind, Schema, SchemaType, wire};
     use aether_kinds::{
         ComponentSelector, ListComponentBinaries, LogTailResult, ResolveComponentResult, Tick, UploadComponentResult,
     };
@@ -30,6 +30,10 @@ mod tests {
     /// The probe fixture's declared `Addressable::NAMESPACE` (distinct from the
     /// `probe` wasm stem).
     const PROBE_NAMESPACE: &str = "test.probe";
+    /// `info` in the `0 = trace .. 4 = error` log-level mapping.
+    const LEVEL_INFO: u8 = 2;
+    /// One-shot log emitted by each fresh probe instance on its first tick.
+    const PROBE_FIRST_TICK_LOG: &str = "typed_send_alive";
 
     /// The probe's registered ADR-0099 lineage address.
     fn probe_lineage_addr() -> String {
@@ -43,6 +47,47 @@ mod tests {
             ResolveComponentResult::Ok { hash, .. } => hash,
             ResolveComponentResult::Err { error } => panic!("resolve failed: {error}"),
         }
+    }
+
+    /// Poll one probe lineage ring from `since` until a fresh instance's
+    /// one-shot first-tick entry appears. Returns the entry sequence and the
+    /// ring cursor so a caller can require the next lifecycle observation to
+    /// be strictly newer.
+    fn poll_probe_first_tick(
+        bench: &mut FleetBench,
+        engine: EngineId,
+        addr: &str,
+        since: Option<u64>,
+        lifecycle: &str,
+    ) -> (u64, u64) {
+        let mut last_reply = None;
+        let mut found = None;
+        poll_until(|| {
+            let reply = bench.log_tail(engine, addr, since, Some(PROBE_FIRST_TICK_LOG.to_owned()));
+            if let LogTailResult::Ok { entries, .. } = &reply {
+                assert!(
+                    entries.iter().all(|entry| entry.message.contains(PROBE_FIRST_TICK_LOG)),
+                    "the substrate-side contains filter should remove non-matching entries: {entries:?}",
+                );
+            }
+            if let LogTailResult::Ok { entries, next_since, .. } = &reply
+                && let Some(entry) =
+                    entries.iter().find(|entry| entry.message == PROBE_FIRST_TICK_LOG && entry.level == LEVEL_INFO)
+            {
+                found = Some((entry.sequence, *next_since));
+                true
+            } else {
+                last_reply = Some(reply);
+                false
+            }
+        });
+
+        found.unwrap_or_else(|| {
+            panic!(
+                "probe's `{PROBE_FIRST_TICK_LOG}` entry never appeared after {lifecycle} within the poll budget; \
+                 last reply: {last_reply:?}",
+            )
+        })
     }
 
     /// Upload the probe by staged path and assert the store ingested it
@@ -205,7 +250,10 @@ mod tests {
     /// Upload the probe component by staged path, then assert the store
     /// ingested it content-addressed with a manifest read from the wasm,
     /// resolves + loads it by name / hash / handled-kind, dedups an
-    /// identical re-upload, and replaces by hash.
+    /// identical re-upload, and replaces by hash. The replacement must
+    /// initialize a fresh probe instance: its one-shot first-tick log must
+    /// appear again after the pre-replace log cursor at the same lineage
+    /// address, so a same-hash no-op cannot satisfy the test.
     #[test]
     fn fleetbench_uploads_resolves_loads_and_replaces_a_component() {
         if !dist_component_available("aether_test_fixtures_bundle") {
@@ -279,17 +327,37 @@ mod tests {
         let expected = probe_lineage_addr();
         let loaded = bench.load_by_selector(engine, "probe");
         assert_eq!(loaded.addr, expected, "load by selector registers at the lineage addr");
-        match bench.log_tail(engine, &expected, None, None) {
-            LogTailResult::Ok { .. } => {}
-            LogTailResult::Err { error } => {
-                panic!("the loaded probe should answer LogTail, got Err: {error}")
-            }
-        }
+        assert!(
+            bench.send(engine, &expected, &Tick).is_empty(),
+            "a direct Tick used to observe the initial guest lifecycle should not reply",
+        );
+        let (first_tick_sequence, first_tick_cursor) =
+            poll_probe_first_tick(&mut bench, engine, &expected, None, "initial load");
 
         // Replace the loaded component by hash (ADR-0022 in-place swap,
-        // ADR-0116 selector). The trampoline keeps its lineage address.
+        // ADR-0116 exact-hash selector). The trampoline keeps its lineage
+        // address, while the new probe instance resets its tick counter and
+        // therefore emits the one-shot first-tick log again. A resolver or
+        // trampoline optimization that treats the same hash as a no-op would
+        // retain the old nonzero counter and fail this lifecycle oracle.
         let caps = bench.replace_by_selector(engine, loaded.mailbox_id, &hash);
         assert!(caps.handlers.iter().any(|h| h.id == Tick::ID), "the replaced probe still advertises its Tick handler");
+        assert!(
+            bench.send(engine, &expected, &Tick).is_empty(),
+            "a direct Tick used to observe the replacement lifecycle should not reply",
+        );
+        let (replacement_tick_sequence, _) =
+            poll_probe_first_tick(&mut bench, engine, &expected, Some(first_tick_cursor), "same-hash replacement");
+        assert!(
+            replacement_tick_sequence > first_tick_sequence,
+            "the replacement's first-tick entry should be newer than the original (first={first_tick_sequence}, \
+             replacement={replacement_tick_sequence})",
+        );
+        let registered = bench.list_components(engine);
+        assert!(
+            registered.iter().any(|addr| addr == &expected),
+            "the replacement should remain registered at its original lineage address {expected}: {registered:?}",
+        );
     }
 
     /// A `spawn_substrate` boot manifest written in component selectors
