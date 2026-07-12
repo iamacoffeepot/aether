@@ -252,18 +252,20 @@ const MAX_CHUNK_TRAILERS: usize = MAX_HEADER_COUNT;
 /// Reader-side handler resolution (ADR-0135 §2): the winning route's
 /// next live member by this reader's round-robin cursor (seeded from
 /// the connection id so concurrent connections start spread across a
-/// shared set, ADR-0136), or the late-bound `handler_mailbox`
-/// fallback. `streaming` is the resolved handler's accept-set verdict
-/// on [`HttpRequestStreamOpen`] — the same structural opt-in the
+/// shared set, ADR-0136). A request matching no route resolves to
+/// [`NoHandler`](ReaderResolution::NoHandler) — the catch-all is just a
+/// `prefix: "/"` route registration (ADR-0130), not a config knob.
+/// `streaming` is the resolved handler's accept-set verdict on
+/// [`HttpRequestStreamOpen`] — the same structural opt-in the
 /// dispatcher used to read.
 enum ReaderResolution {
     /// A live handler: the dispatch target, its dispatch kind, and
     /// whether it takes the streamed body path.
     Live { handler: MailboxId, kind: KindId, streaming: bool },
     /// A route matched but no member of its set is live — `503`, never
-    /// the fallback (that would silently reroute a claimed family).
+    /// silently rerouted (that would reroute a claimed family).
     Dead,
-    /// No route and no resolvable fallback — `503`.
+    /// No route matched — `503`.
     NoHandler,
 }
 
@@ -295,7 +297,7 @@ fn resolve_at_reader(
                 };
                 Some(found)
             }
-            None => registry.lookup(&shared.handler_mailbox).map(|handler| (handler, <HttpServerRequest as Kind>::ID)),
+            None => None,
         }
     };
     match picked {

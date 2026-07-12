@@ -98,8 +98,8 @@ impl HttpShardState {
         // The stream chain settles here; the request is no longer in-flight
         // (ADR-0128 §4), so `on_settled` won't `502` it. The handler is carried
         // out of the in-flight dispatch record — whichever mailbox actually
-        // replied, be it the configured default `handler_mailbox` or an
-        // externally-registered route (ADR-0131) — so credit grants reach the
+        // replied, be it the registrant of the matched `/` catch-all route or a
+        // more specific registered route (ADR-0131) — so credit grants reach the
         // real replier regardless of dispatch path. A missing in-flight entry
         // leaves the sentinel and credit sends drop harmlessly, the pre-store
         // no-op behavior.
@@ -270,8 +270,8 @@ impl HttpShardState {
     /// Send the stream's handler a credit grant on `stream_id`. A fresh causal
     /// root per grant keeps credit mails settling per-chunk, never holding one
     /// chain open across the stream (ADR-0128 §4). The handler is the one
-    /// resolved and stored at stream open (a response stream's late-bound
-    /// `handler_mailbox`, or a websocket's handshake handler, ADR-0129).
+    /// resolved and stored at stream open (a response stream's matched route
+    /// registrant, or a websocket's handshake handler, ADR-0129).
     pub fn send_stream_credit(&self, ctx: &mut NativeCtx<'_>, stream_id: u64, credit: u32) {
         let Some(handler) = self.streams.get(&stream_id).map(|stream| stream.handler) else {
             return;

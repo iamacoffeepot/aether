@@ -405,6 +405,18 @@ mod test_handlers {
             Ok(EchoHttpHandlerState)
         }
 
+        /// Bind as the `/` catch-all (ADR-0130) — the replacement for the
+        /// retired `handler_mailbox` default, so a route-unmatched request
+        /// reaches this handler.
+        fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+            ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+                prefix: "/".to_string(),
+                method: None,
+                kind: <HttpServerRequest as Kind>::ID,
+                shared: false,
+            });
+        }
+
         #[handler::single]
         fn on_request(
             _state: &mut Self::State,
@@ -441,6 +453,17 @@ mod test_handlers {
             Ok(FixedBodyHttpHandlerState)
         }
 
+        /// Bind as the `/` catch-all (ADR-0130) — the replacement for the
+        /// retired `handler_mailbox` default.
+        fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+            ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+                prefix: "/".to_string(),
+                method: None,
+                kind: <HttpServerRequest as Kind>::ID,
+                shared: false,
+            });
+        }
+
         #[handler::single]
         fn on_request(
             _state: &mut Self::State,
@@ -470,6 +493,17 @@ mod test_handlers {
 
         fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<SilentHttpHandlerState, BootError> {
             Ok(SilentHttpHandlerState)
+        }
+
+        /// Bind as the `/` catch-all (ADR-0130) — the replacement for the
+        /// retired `handler_mailbox` default.
+        fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+            ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+                prefix: "/".to_string(),
+                method: None,
+                kind: <HttpServerRequest as Kind>::ID,
+                shared: false,
+            });
         }
 
         #[handler::single]
@@ -510,6 +544,18 @@ mod test_handlers {
 
         fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<StreamHttpHandlerState, BootError> {
             Ok(StreamHttpHandlerState { next_index: 0, ended: false })
+        }
+
+        /// Bind as the `/` catch-all (ADR-0130) — the replacement for the
+        /// retired `handler_mailbox` default; the cap still reads this
+        /// handler's accept-set to take the streaming path.
+        fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+            ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+                prefix: "/".to_string(),
+                method: None,
+                kind: <HttpServerRequest as Kind>::ID,
+                shared: false,
+            });
         }
 
         #[handler::single]
@@ -575,6 +621,17 @@ mod test_handlers {
             Ok(FloodHttpHandlerState { flooded: false })
         }
 
+        /// Bind as the `/` catch-all (ADR-0130) — the replacement for the
+        /// retired `handler_mailbox` default.
+        fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+            ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+                prefix: "/".to_string(),
+                method: None,
+                kind: <HttpServerRequest as Kind>::ID,
+                shared: false,
+            });
+        }
+
         #[handler::single]
         fn on_request(
             _state: &mut Self::State,
@@ -628,6 +685,18 @@ mod test_handlers {
             Ok(StreamingUploadHandlerState { received: 0, stream: None })
         }
 
+        /// Bind as the `/` catch-all (ADR-0130) — the replacement for the
+        /// retired `handler_mailbox` default; the cap still reads this
+        /// handler's accept-set to take the request-streaming path.
+        fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+            ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+                prefix: "/".to_string(),
+                method: None,
+                kind: <HttpServerRequest as Kind>::ID,
+                shared: false,
+            });
+        }
+
         #[handler::manual]
         fn on_stream_open(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, open: HttpRequestStreamOpen) {
             state.received = 0;
@@ -659,10 +728,9 @@ mod test_handlers {
     }
 }
 
-fn config_for(handler: &str, max_request_bytes: usize) -> HttpServerConfig {
+fn config_for(max_request_bytes: usize) -> HttpServerConfig {
     HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: handler.to_string(),
         max_request_bytes,
         request_timeout_millis: 5_000,
         ..HttpServerConfig::default()
@@ -688,20 +756,19 @@ where
 fn boot_single_shard_fixed_body() -> PassiveChassis<TestChassis> {
     boot_chassis::<FixedBodyHttpHandler>(HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: <FixedBodyHttpHandler as Addressable>::NAMESPACE.to_string(),
         request_timeout_millis: 5_000,
         dispatch_shards: 1,
         ..HttpServerConfig::default()
     })
 }
 
-/// [`boot_chassis`] with `H` as its own `handler_mailbox` under a
+/// [`boot_chassis`] with `H` (its `wire` binds the `/` catch-all) under a
 /// buffered [`config_for`] config (`max_request_bytes`).
 fn boot_buffered<H>(max_request_bytes: usize) -> PassiveChassis<TestChassis>
 where
     H: NativeActor<Config = ()>,
 {
-    boot_chassis::<H>(config_for(<H as Addressable>::NAMESPACE, max_request_bytes))
+    boot_chassis::<H>(config_for(max_request_bytes))
 }
 
 /// [`boot_chassis`] with `H` under a response-streaming [`stream_config_for`]
@@ -710,7 +777,7 @@ fn boot_response_stream<H>(window: u32) -> PassiveChassis<TestChassis>
 where
     H: NativeActor<Config = ()>,
 {
-    boot_chassis::<H>(stream_config_for(<H as Addressable>::NAMESPACE, window))
+    boot_chassis::<H>(stream_config_for(window))
 }
 
 /// [`boot_chassis`] with `H` under a request-streaming
@@ -719,16 +786,15 @@ fn boot_request_stream<H>(window: u32) -> PassiveChassis<TestChassis>
 where
     H: NativeActor<Config = ()>,
 {
-    boot_chassis::<H>(request_stream_config_for(<H as Addressable>::NAMESPACE, window))
+    boot_chassis::<H>(request_stream_config_for(window))
 }
 
 /// Server config for the streaming tests (ADR-0128): a small credit window
 /// so a multi-chunk response must replenish credit repeatedly, and a flood
 /// overruns it fast.
-fn stream_config_for(handler: &str, window: u32) -> HttpServerConfig {
+fn stream_config_for(window: u32) -> HttpServerConfig {
     HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: handler.to_string(),
         request_timeout_millis: 5_000,
         response_stream_window: window,
         ..HttpServerConfig::default()
@@ -820,7 +886,7 @@ fn round_trip(port: u16, request: &[u8]) -> String {
 fn binds_and_publishes_port() {
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<HttpServerCapability>(config_for("aether.http.test_echo_handler", 1024))
+        .with_actor::<HttpServerCapability>(config_for(1024))
         .build_passive()
         .expect("http server boots");
     assert!(port_of(&chassis) > 0, "bound to an OS-picked port");
@@ -836,7 +902,8 @@ fn body_of(response: &str) -> &str {
 fn get_round_trips_to_handler() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
-    let response = round_trip(port_of(&chassis), b"GET /hello?name=ada HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    // First request against the async-registered `/` catch-all: poll it live.
+    let response = round_trip_live(port_of(&chassis), b"GET /hello?name=ada HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200 status line, got: {response:?}");
     assert!(response.contains("x-aether-method: Get\r\n"), "{response:?}");
     assert!(response.contains("x-aether-path: /hello\r\n"), "{response:?}");
@@ -860,8 +927,11 @@ fn get_round_trips_to_handler() {
 fn post_round_trips_body() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
-    let response =
-        round_trip(port_of(&chassis), b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello");
+    // First request against the async-registered `/` catch-all: poll it live.
+    let response = round_trip_live(
+        port_of(&chassis),
+        b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello",
+    );
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {response:?}");
     assert!(response.contains("x-aether-method: Post\r\n"), "{response:?}");
     assert_eq!(body_of(&response), "hello", "body echoed verbatim");
@@ -935,14 +1005,15 @@ fn unknown_method_is_501() {
     assert!(response.starts_with("HTTP/1.1 501 "), "expected 501, got: {response:?}");
 }
 
-/// A request whose configured handler resolves to nothing is
-/// answered `503`.
+/// A request matching no route — no handler registered a catch-all — is
+/// answered `503` (ADR-0130).
 #[test]
 fn no_handler_is_503() {
     let (registry, mailer) = fresh_substrate();
-    // The handler mailbox is named but no actor is registered under it.
+    // No handler actor is booted, so nothing registers a `/` catch-all —
+    // every request matches no route.
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-        .with_actor::<HttpServerCapability>(config_for("aether.http.absent_handler", 1024))
+        .with_actor::<HttpServerCapability>(config_for(1024))
         .build_passive()
         .expect("server boots");
 
@@ -961,11 +1032,13 @@ fn response_less_chain_is_502() {
         // the server's settlement subscription never wakes.
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<SilentHttpHandler>(())
-        .with_actor::<HttpServerCapability>(config_for(<SilentHttpHandler as Addressable>::NAMESPACE, 1024))
+        .with_actor::<HttpServerCapability>(config_for(1024))
         .build_passive()
         .expect("caps boot");
 
-    let response = round_trip(port_of(&chassis), b"GET /drop HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    // The silent handler binds `/` via async `wire` mail; poll past the
+    // pre-registration `503` to the dispatched `502` the settlement net raises.
+    let response = round_trip_live(port_of(&chassis), b"GET /drop HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 502 "), "expected 502, got: {response:?}");
 }
 
@@ -976,7 +1049,8 @@ fn response_less_chain_is_502() {
 fn percent_encoded_path_is_decoded() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
 
-    let response = round_trip(port_of(&chassis), b"GET /hello%20world?x=1 HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    // First request against the async-registered `/` catch-all: poll it live.
+    let response = round_trip_live(port_of(&chassis), b"GET /hello%20world?x=1 HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {response:?}");
     assert!(response.contains("x-aether-path: /hello world\r\n"), "{response:?}");
     assert!(response.contains("x-aether-query: x=1\r\n"), "{response:?}");
@@ -1002,9 +1076,15 @@ fn transfer_encoding_is_411() {
 #[test]
 fn expect_continue_gets_100_continue() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
+    let port = port_of(&chassis);
+
+    // Poll the async `/` catch-all live before the interim-status assertion
+    // (a `100 Continue` prefix precedes the dispatched status, so it cannot
+    // itself be distinguished from a pre-registration `503` by prefix).
+    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
     let response = round_trip(
-        port_of(&chassis),
+        port,
         b"POST /submit HTTP/1.1\r\nHost: localhost\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello",
     );
     assert!(response.starts_with("HTTP/1.1 100 Continue\r\n\r\n"), "expected interim 100 Continue, got: {response:?}");
@@ -1019,7 +1099,8 @@ fn head_response_suppresses_body() {
     let chassis = boot_buffered::<FixedBodyHttpHandler>(1024);
     let port = port_of(&chassis);
 
-    let head_response = round_trip(port, b"HEAD /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    // First request against the async-registered `/` catch-all: poll it live.
+    let head_response = round_trip_live(port, b"HEAD /x HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(head_response.starts_with("HTTP/1.1 200 OK\r\n"), "expected 200, got: {head_response:?}");
     assert!(head_response.contains("Content-Length: 10\r\n"), "{head_response:?}");
     assert_eq!(body_of(&head_response), "", "HEAD must not carry a message body");
@@ -1045,7 +1126,6 @@ fn over_capacity_connection_is_503() {
     let max_connections = 2;
     let chassis = boot_chassis::<EchoHttpHandler>(HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
         request_timeout_millis: 5_000,
         max_connections,
         dispatch_shards: 2,
@@ -1091,13 +1171,16 @@ fn over_capacity_connection_is_503() {
 fn connections_distribute_across_shards() {
     let chassis = boot_chassis::<EchoHttpHandler>(HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
         request_timeout_millis: 5_000,
         dispatch_shards: 2,
         ..HttpServerConfig::default()
     });
 
     let port = port_of(&chassis);
+
+    // Poll the async `/` catch-all live before driving the concurrent
+    // connections so none of them races the registration.
+    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
     let mut streams: Vec<(TcpStream, Vec<u8>)> = (0..4)
         .map(|_| {
@@ -1139,7 +1222,8 @@ fn streamed_response_reassembles_across_credit_window() {
     // Window well below the chunk count so credit must replenish.
     let chassis = boot_response_stream::<StreamHttpHandler>(8);
 
-    let response = round_trip(port_of(&chassis), b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    // First request against the async-registered `/` catch-all: poll it live.
+    let response = round_trip_live(port_of(&chassis), b"GET /stream HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
     assert!(response.contains("Transfer-Encoding: chunked\r\n"), "streamed response is chunked: {response:?}");
     assert!(!response.contains("Content-Length:"), "streamed response omits Content-Length: {response:?}");
@@ -1162,7 +1246,8 @@ fn over_window_flood_tears_the_stream_down() {
     // Tiny window so the flood overruns credit within a few chunks.
     let chassis = boot_response_stream::<FloodHttpHandler>(2);
 
-    let response = round_trip(port_of(&chassis), b"GET /flood HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    // First request against the async-registered `/` catch-all: poll it live.
+    let response = round_trip_live(port_of(&chassis), b"GET /flood HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
     assert!(
         response.contains("Transfer-Encoding: chunked\r\n"),
@@ -1175,10 +1260,9 @@ fn over_window_flood_tears_the_stream_down() {
 /// credit window so a multi-chunk upload replenishes credit repeatedly. The
 /// `max_request_bytes` cap stays the 1 `MiB` default, which the large-upload
 /// test deliberately exceeds — streaming bypasses the buffered body cap.
-fn request_stream_config_for(handler: &str, window: u32) -> HttpServerConfig {
+fn request_stream_config_for(window: u32) -> HttpServerConfig {
     HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: handler.to_string(),
         request_timeout_millis: 5_000,
         request_stream_window: window,
         ..HttpServerConfig::default()
@@ -1194,6 +1278,11 @@ fn request_stream_config_for(handler: &str, window: u32) -> HttpServerConfig {
 fn large_upload_streams_past_the_buffered_cap() {
     let chassis = boot_request_stream::<StreamingUploadHandler>(4);
     let port = port_of(&chassis);
+
+    // Poll the async `/` catch-all live with a cheap zero-length chunked
+    // upload before the multi-megabyte assertion, so the large body is not
+    // re-sent on each poll iteration.
+    round_trip_live(port, b"POST /warmup HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
 
     // Well past DEFAULT_MAX_REQUEST_BYTES (1 MiB) — a buffered handler would
     // `413` this; the streaming handler takes it incrementally.
@@ -1216,7 +1305,8 @@ fn chunked_upload_streams_to_streaming_handler() {
     let port = port_of(&chassis);
 
     // "hello" (5) + " world" (6) = 11 body bytes across two chunks.
-    let response = round_trip(
+    // First request against the async-registered `/` catch-all: poll it live.
+    let response = round_trip_live(
         port,
         b"POST /upload HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n\
           5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
@@ -1283,22 +1373,21 @@ fn buffered_handler_keeps_the_unstreamed_path() {
     let chassis = boot_request_stream::<EchoHttpHandler>(4);
     let port = port_of(&chassis);
 
-    let response = round_trip(port, b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello");
+    // First request against the async-registered `/` catch-all: poll it live.
+    let response = round_trip_live(port, b"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello");
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response:?}");
     assert_eq!(body_of(&response), "hello", "buffered body echoed verbatim");
 }
 
 /// Boot the server (first, so the routed handlers' `wire` registrations
-/// find its mailbox live) with [`FixedBodyHttpHandler`] as the
-/// `handler_mailbox` fallback, then the given routed handlers.
+/// find its mailbox live) with [`FixedBodyHttpHandler`] as the `/`
+/// catch-all (its `wire` binds `prefix: "/"`), then the given routed
+/// handlers.
 macro_rules! routed_chassis {
     ($($handler:ty),+ $(,)?) => {{
         let (registry, mailer) = fresh_substrate();
         Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
-            .with_actor::<HttpServerCapability>(config_for(
-                <FixedBodyHttpHandler as Addressable>::NAMESPACE,
-                1024,
-            ))
+            .with_actor::<HttpServerCapability>(config_for(1024))
             .with_actor::<FixedBodyHttpHandler>(())
             $(.with_actor::<$handler>(()))+
             .build_passive()
@@ -1324,10 +1413,28 @@ fn poll_body(port: u16, request: &[u8], expected: &str) {
     }
 }
 
+/// Round-trip `request`, retrying past the pre-registration `503` until the
+/// catch-all route's async `wire` mail (ADR-0130) has landed, then return
+/// that first non-`503` response. The head/header-asserting sibling of
+/// [`poll_body`] (which only matches on the body) for a catch-all route's
+/// first positive assertion. None of these handlers legitimately reply
+/// `503`, so the first non-`503` is the live response.
+fn round_trip_live(port: u16, request: &[u8]) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let response = round_trip(port, request);
+        if !response.starts_with("HTTP/1.1 503 ") {
+            return response;
+        }
+        assert!(Instant::now() < deadline, "route did not go live within 10s; last response: {response:?}");
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// A `wire`-registered route dispatches as the registered kind — the
 /// handler's typed `#[handler]` decodes the request-shaped payload
 /// under the minted kind and echoes the path — and an unrouted path
-/// falls back to the configured `handler_mailbox` (ADR-0130).
+/// falls back to the `/` catch-all route (ADR-0130).
 #[test]
 fn routed_prefix_dispatches_as_registered_kind() {
     let chassis = routed_chassis!(ApiRouteHandler);
@@ -1335,8 +1442,8 @@ fn routed_prefix_dispatches_as_registered_kind() {
 
     poll_body(port, b"GET /api/widgets HTTP/1.1\r\nHost: localhost\r\n\r\n", "api:/api/widgets");
 
-    let unrouted = round_trip(port, b"GET /other HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert_eq!(body_of(&unrouted), "fixed body", "unrouted path falls back to handler_mailbox");
+    // The `/` catch-all is its own async registration, so poll it live too.
+    poll_body(port, b"GET /other HTTP/1.1\r\nHost: localhost\r\n\r\n", "fixed body");
 }
 
 /// A macro-authored route with a real `FromRequest` extractor dispatches
@@ -1373,8 +1480,9 @@ fn longest_prefix_wins_on_segment_boundaries() {
     let exact = round_trip(port, b"GET /api HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert_eq!(body_of(&exact), "api:/api", "exact prefix hit routes");
 
-    let boundary = round_trip(port, b"GET /apiary HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert_eq!(body_of(&boundary), "fixed body", "/apiary is not under /api — segment-boundary match");
+    // `/apiary` is not under `/api`, so it takes the `/` catch-all; poll it
+    // live (its own async registration) before the segment-boundary assertion.
+    poll_body(port, b"GET /apiary HTTP/1.1\r\nHost: localhost\r\n\r\n", "fixed body");
 }
 
 /// A method-specific route beats a method-agnostic one at equal
@@ -1501,7 +1609,6 @@ fn macro_router_shared_opt_in_joins_a_member_set() {
 fn stalled_peer_does_not_block_sibling_connections() {
     let chassis = boot_chassis::<EchoHttpHandler>(HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: <EchoHttpHandler as Addressable>::NAMESPACE.to_string(),
         // Short: the stalled write parks within milliseconds, and
         // teardown waits out at most one response deadline.
         request_timeout_millis: 2_000,
@@ -1510,6 +1617,10 @@ fn stalled_peer_does_not_block_sibling_connections() {
         ..HttpServerConfig::default()
     });
     let port = port_of(&chassis);
+
+    // Poll the async `/` catch-all live before the stall setup, so both
+    // connections dispatch to the echo handler rather than racing it.
+    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
     // Connection A: a 16 MiB echo whose response the client never
     // reads — far past loopback socket buffering, so the reader's
@@ -1541,34 +1652,41 @@ fn stalled_peer_does_not_block_sibling_connections() {
 /// granularity is next-request, not next-connection.
 ///
 /// Tripwire: a reader-side route *snapshot* taken at connection
-/// adoption would serve the fallback forever on a long-lived
+/// adoption would serve the catch-all forever on a long-lived
 /// connection; this test's second-phase request would never flip to
 /// the routed body.
+///
+/// The `/late` target is [`WiredRouteHandler`] (its generic `on_extra`
+/// serves `HttpServerRequest` and its `wire` claims only `/wired…`,
+/// never `/`), so the sole `/` catch-all here is [`EchoHttpHandler`] —
+/// two handlers both claiming `/` would be a registration conflict.
 #[test]
 fn route_registered_mid_connection_serves_next_request() {
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<EchoHttpHandler>(())
-        .with_actor::<FixedBodyHttpHandler>(())
-        .with_actor::<HttpServerCapability>(keep_alive_config_for(<EchoHttpHandler as Addressable>::NAMESPACE, 5_000))
+        .with_actor::<WiredRouteHandler>(())
+        .with_actor::<HttpServerCapability>(keep_alive_config_for(5_000))
         .build_passive()
         .expect("caps boot");
     let port = port_of(&chassis);
+
+    // Poll the echo `/` catch-all live before the pre-registration read.
+    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
     stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
     let mut carry = Vec::new();
 
-    // Pre-registration: /late falls back to the echo handler.
+    // Pre-registration: /late takes the echo `/` catch-all.
     stream.write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write request");
     let first = read_one_response(&mut stream, &mut carry);
-    assert!(first.contains("x-aether-path: /late"), "pre-registration request falls back to echo: {first:?}");
+    assert!(first.contains("x-aether-path: /late"), "pre-registration request takes the echo catch-all: {first:?}");
 
-    // Register /late at the fixed-body handler while the connection is
+    // Register /late at the wired handler while the connection is
     // parked between keep-alive requests.
     let supervisor = registry.lookup(<HttpServerCapability as Addressable>::NAMESPACE).expect("http server registered");
-    let target =
-        registry.lookup(<FixedBodyHttpHandler as Addressable>::NAMESPACE).expect("fixed-body handler registered");
+    let target = registry.lookup(<WiredRouteHandler as Addressable>::NAMESPACE).expect("wired handler registered");
     let payload = RegisterRoute {
         prefix: "/late".to_string(),
         method: None,
@@ -1584,7 +1702,7 @@ fn route_registered_mid_connection_serves_next_request() {
     loop {
         stream.write_all(b"GET /late HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write request");
         let response = read_one_response(&mut stream, &mut carry);
-        if body_of(&response) == "fixed body" {
+        if body_of(&response) == "wired-raw" {
             break;
         }
         assert!(
@@ -1610,7 +1728,6 @@ fn shared_route_spreads_across_members() {
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<HttpServerCapability>(HttpServerConfig {
             bind_addr: "127.0.0.1:0".to_string(),
-            handler_mailbox: <FixedBodyHttpHandler as Addressable>::NAMESPACE.to_string(),
             request_timeout_millis: 5_000,
             dispatch_shards: 1,
             ..HttpServerConfig::default()
@@ -1688,10 +1805,9 @@ fn self_unregister_releases_route() {
 
 /// Server config with a short idle (keep-alive) timeout, for the
 /// idle-close test — every other field matches [`config_for`].
-fn keep_alive_config_for(handler: &str, keep_alive_timeout_millis: u64) -> HttpServerConfig {
+fn keep_alive_config_for(keep_alive_timeout_millis: u64) -> HttpServerConfig {
     HttpServerConfig {
         bind_addr: "127.0.0.1:0".to_string(),
-        handler_mailbox: handler.to_string(),
         request_timeout_millis: 5_000,
         keep_alive_timeout_millis,
         ..HttpServerConfig::default()
@@ -1789,6 +1905,9 @@ fn keep_alive_serves_sequential_requests_on_one_socket() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
     let port = port_of(&chassis);
 
+    // Poll the async `/` catch-all live before the pipelined round trip.
+    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
     stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
     let mut carry: Vec<u8> = Vec::new();
@@ -1834,6 +1953,9 @@ fn keep_alive_reuses_socket_after_streamed_response() {
     let chassis = boot_response_stream::<StreamHttpHandler>(8);
     let port = port_of(&chassis);
 
+    // Poll the async `/` catch-all live before the persistent-socket reads.
+    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
     stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
     let mut carry: Vec<u8> = Vec::new();
@@ -1866,6 +1988,9 @@ fn streamed_response_honors_explicit_connection_close() {
     let chassis = boot_response_stream::<StreamHttpHandler>(8);
     let port = port_of(&chassis);
 
+    // Poll the async `/` catch-all live before the explicit-close read.
+    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
     stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
     let mut carry: Vec<u8> = Vec::new();
@@ -1885,6 +2010,9 @@ fn http_1_0_defaults_to_close() {
     let chassis = boot_buffered::<EchoHttpHandler>(1024);
     let port = port_of(&chassis);
 
+    // Poll the async `/` catch-all live before the HTTP/1.0 read.
+    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
     stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");
     stream.write_all(b"GET /ten HTTP/1.0\r\nHost: localhost\r\n\r\n").expect("write request");
@@ -1902,9 +2030,11 @@ fn http_1_0_defaults_to_close() {
 /// pinning the reader thread for the full request timeout.
 #[test]
 fn idle_kept_alive_connection_closes_after_timeout() {
-    let chassis =
-        boot_chassis::<EchoHttpHandler>(keep_alive_config_for(<EchoHttpHandler as Addressable>::NAMESPACE, 300));
+    let chassis = boot_chassis::<EchoHttpHandler>(keep_alive_config_for(300));
     let port = port_of(&chassis);
+
+    // Poll the async `/` catch-all live before the kept-alive read.
+    round_trip_live(port, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
     stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set_read_timeout");

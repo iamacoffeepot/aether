@@ -36,7 +36,6 @@ impl NativeActor for HttpDispatchShard {
     fn init(mut seed: HttpShardSeed, ctx: &mut NativeInitCtx<'_>) -> Result<HttpShardState, BootError> {
         let inbound_rx = seed.inbound_rx.take().expect("HttpShardSeed::inbound_rx consumed exactly once");
         Ok(HttpShardState {
-            handler_mailbox: seed.handler_mailbox,
             routes: seed.routes,
             live_connections: seed.live_connections,
             max_request_bytes: seed.max_request_bytes,

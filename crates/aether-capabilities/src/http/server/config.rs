@@ -11,10 +11,10 @@ use super::{
 /// Init config for [`HttpServerCapability`](super::HttpServerCapability) (ADR-0108).
 ///
 /// `bind_addr` is the address to bind (e.g. `"127.0.0.1:8080"`,
-/// `"127.0.0.1:0"` to let the OS pick a port). `handler_mailbox` names the
-/// single component mailbox every request is dispatched to — resolved by
-/// name at dispatch time (late binding), so the handler component can load
-/// or reload independently of the server. `max_request_bytes` caps the
+/// `"127.0.0.1:0"` to let the OS pick a port). A request matching no
+/// registered route (ADR-0130) is answered `503`; a handler binds itself
+/// as the catch-all by sending `register_route_self { prefix: "/" }` from
+/// its `wire` hook. `max_request_bytes` caps the
 /// request body, `max_header_bytes` caps the request line + headers,
 /// `request_timeout_millis` bounds both the per-read slow-loris timeout and
 /// the handler response deadline, and `max_connections` caps the live
@@ -40,11 +40,6 @@ pub struct HttpServerConfig {
     /// the default — the derive treats an empty `String` as unset.
     #[cfg_attr(feature = "runtime", config(default = "127.0.0.1:8080"))]
     pub bind_addr: String,
-    /// The single handler mailbox every request is dispatched to (e.g.
-    /// `"aether.component/aether.embedded:web"`). Empty = every request is
-    /// answered `503` (no handler resolves).
-    #[cfg_attr(feature = "runtime", config(default = ""))]
-    pub handler_mailbox: String,
     /// Cap on the request body in bytes ([`DEFAULT_MAX_REQUEST_BYTES`]);
     /// an announced `Content-Length` past this is answered `413`.
     #[cfg_attr(feature = "runtime", config(default = 1_048_576))]
@@ -113,7 +108,6 @@ impl Default for HttpServerConfig {
         Self {
             enabled: false,
             bind_addr: DEFAULT_BIND_ADDR.to_string(),
-            handler_mailbox: String::new(),
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             max_header_bytes: DEFAULT_MAX_HEADER_BYTES,
             request_timeout_millis: DEFAULT_REQUEST_TIMEOUT_MILLIS,
