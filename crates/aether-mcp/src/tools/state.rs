@@ -196,7 +196,12 @@ impl Mcp {
         let manifest_path = env::temp_dir().join(format!("aether-boot-manifest-{}-{seq}.json", process::id()));
         let bytes = serde_json::to_vec(&serde_json::json!({ "components": entries }))
             .map_err(|e| internal_msg(&format!("encoding boot manifest: {e}")))?;
-        fs::write(&manifest_path, bytes).await.map_err(|e| internal_msg(&format!("staging boot manifest: {e}")))?;
+        if let Err(e) = fs::write(&manifest_path, bytes).await {
+            // A failed write can still create the file — remove it here, since
+            // the manifest path never reaches the caller's cleanup vecs.
+            let _ = fs::remove_file(&manifest_path).await;
+            return Err(internal_msg(&format!("staging boot manifest: {e}")));
+        }
         Ok((manifest_path, expected_names))
     }
 
