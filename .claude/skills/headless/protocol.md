@@ -48,7 +48,18 @@ Post the comment over REST (`gh api -X POST repos/iamacoffeepot/aether/issues/<n
 
 The headless agent never sleep-polls or blocks on a human. The original's terminal human-waits — scope's "stops at Plan, awaiting `/approve`", implement's "print to user … tell me to land", land's "wait for one confirmation" — each become: post the terminal state as a comment and end the turn. The dispatch that resumes the flow comes from elsewhere — the owner's reply, or the reconciler or tick of a sibling rung — so there is nothing to wait on in-job.
 
-This targets waits on a human, not waits on CI. An in-job wait the original owns that needs no human — the Refine-loop `scripts/wave-status.sh --wait <pr>` CI poll — is **not** overridden here; it runs exactly as the original specifies. The distinction is the party being waited on: a human wait is replaced by end-turn plus re-dispatch, a CI wait stays.
+This targets waits on a human, not waits on CI. An in-job wait the original owns that needs no human — the Refine-loop `scripts/wave-status.sh --wait <pr>` CI poll, `/land`'s strict-mode rebase re-predict, its Qodana-sweep wait — is **not** overridden here; the wait itself stays. The distinction is the party being waited on: a human wait is replaced by end-turn plus re-dispatch, a CI wait is kept — but a one-shot runner cannot realize a long synchronous foreground block, so it realizes the kept wait the headless way described next.
+
+### the CI-wait contract
+
+A one-shot headless runner has no foreground it can block indefinitely, so it realizes a kept CI wait as **background task + end-turn + re-invoke**: when the agent reaches an original's `scripts/wave-status.sh --wait <pr>` poll (or any other in-job wait the original owns), it starts the wait as a harness-tracked background task, ends the turn, and is re-invoked from the background-task-completion notification — at which point it reads the wait's exit status and continues the original's process (goto its next step, land the merge, and so on). The `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS` ceiling (#3086) holds the process open across the pending background wait, so ending the turn parks the run rather than exiting it.
+
+While a harness-tracked background wait is pending, releasing the process is **forbidden**, because the contract is end-turn-and-be-reinvoked and any process-release move defeats it:
+
+- No `ScheduleWakeup stop` — stopping the dynamic loop releases the process to exit instead of leaving it parked on the background-task notification (the failure in run 29200198847 / `work-land-3214`: the wait was backgrounded, `ScheduleWakeup stop=true` was called, and the process exited ten seconds later with the wait still pending and nothing left to resume the land).
+- No terminal sign-off that concludes the session — no "no action needed until then", no "I'll continue once it completes". Such a message reads as a completed turn with nothing outstanding and lets the process exit. End the turn on the pending background task itself; say nothing that presents the run as finished.
+
+This is distinct from [ask-and-park](#ask-and-park): a park exits 0 and waits on the owner's reply to re-dispatch, whereas a CI wait ends the turn on a live harness-tracked task and is re-invoked automatically when that task settles — no owner action, no `agent:awaiting-answer` label, no S3 sync.
 
 ## checkout-as-isolation
 
