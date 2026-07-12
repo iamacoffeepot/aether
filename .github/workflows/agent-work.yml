@@ -1,0 +1,408 @@
+name: Agent work
+
+# The cloud-agent executor: turn a task request into real engineering work on
+# an ephemeral RunsOn machine. Given task=scope|implement|land and a ref, it
+# forks a runner, drives headless Claude Code through the matching #3128
+# headless-wrapper skill (/scope-headless, /implement-headless, /land-headless),
+# and leaves the durable state — labels, comments, commits, PRs — behind when
+# the runner dies. This is rung ①'s producer half; the QA-chain workflows
+# (review.yml, dogfood.yml) grade LANDED PRs, whereas this one PRODUCES the
+# scope artifacts, the implementation PR, and the merge.
+#
+# Manual dispatch only at this rung — no cron, no autonomy. A maintainer runs
+# workflow_dispatch with a task and a ref; every later rung (#3130 chat, #3131
+# tick) dispatches into this same workflow.
+#
+# Liveness is computed, never persisted: a live run IS the claim on its
+# (task, ref) pair. The deterministic run-name work-{task}-{ref} makes the claim
+# observable at a glance, and the concurrency singleton below (cancel-in-progress
+# FALSE) makes it exclusive without any claim label. A crash-and-re-dispatch is
+# safe because the re-entrancy guard recomputes state from the board — the phase
+# label never moved, so the guard routes to a clean no-op or a resume.
+#
+# Identity and auth follow two deliberate separations:
+#   - GitHub writes ride an App INSTALLATION token, not GITHUB_TOKEN. Events
+#     created by GITHUB_TOKEN do not trigger downstream workflows (the documented
+#     anti-recursion rule), so a scope run that writes a phase label could never
+#     wake the tick and an implement run's PR would never trigger CI/review. The
+#     App token is what lets the arc chain event-driven; it is not optional
+#     hardening. A maintainer-registered App carries it (owner checklist below).
+#   - Claude auth is AGENT_CLAUDE_CODE_OAUTH_TOKEN — deliberately distinct from
+#     the QA chain's CLAUDE_CODE_OAUTH_TOKEN so the agent subscription's rate
+#     pool is isolated from review/dogfood.
+#
+# Security posture mirrors review.yml/dogfood.yml: the code-executing job is
+# read-only on GITHUB_TOKEN (contents: read) and every write goes through the
+# App token; the checkout copy has its interactive-session hooks stripped; the
+# workspace is pre-trusted for headless Claude; an AUTH-OK probe fails loudly on
+# a bad token before any real spend.
+#
+# Owner console checklist (maintainer console work, NOT part of this file's
+# merge — the workflow merges without them, and the first dispatch is the
+# acceptance test once they exist):
+#   (a) register a GitHub App `aether-agent` — no webhook, no hosted code;
+#       permissions contents / pull_requests / issues / actions: write;
+#   (b) install it on iamacoffeepot/aether;
+#   (c) store its App id + private key as repo secrets AGENT_APP_ID /
+#       AGENT_APP_PRIVATE_KEY;
+#   (d) mint AGENT_CLAUDE_CODE_OAUTH_TOKEN from the Max 20x subscription
+#       (`claude setup-token`) and `gh secret set` it.
+# Absent any of these, the preflight step fails early with the exact remedy.
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: Pipeline task to run
+        type: choice
+        required: true
+        options:
+          - scope
+          - implement
+          - land
+      ref:
+        description: Ref to act on (issue number for scope/implement, PR number for land)
+        type: string
+        required: true
+
+# The run's name IS the human-visible claim; keep it deterministic so a glance
+# at the Actions list answers "is (task, ref) already being worked?".
+run-name: work-${{ inputs.task }}-${{ inputs.ref }}
+
+# A live run is the claim on this (task, ref). cancel-in-progress is FALSE (the
+# inversion from the QA workflows' true): a second dispatch must queue-or-drop,
+# never preempt an in-flight worker mid-commit / mid-merge and corrupt the very
+# durable state the design leans on. The key is per (task, ref), not per ref, so
+# a land can proceed while a stale scope of the same number is still settling.
+concurrency:
+  group: work-${{ inputs.task }}-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  work:
+    name: Run ${{ inputs.task }} on ${{ inputs.ref }}
+    # Per-task runner sizing against the RunsOn label pattern (dogfood.yml uses
+    # the same runs-on=<run_id>/runner=<size> form): scope is API-and-prose work
+    # on a small box; implement builds the workspace and wants s3-cache to warm
+    # sccache across a retrying PR's runs; land is a merge on a non-spot box so a
+    # spot reclaim can never interrupt the squash.
+    runs-on: runs-on=${{ github.run_id }}/runner=${{ inputs.task == 'implement' && '8cpu-linux-x64/extras=s3-cache' || (inputs.task == 'land' && '2cpu-linux-x64/spot=false' || '2cpu-linux-x64') }}
+    # Bring-up leash per task (review.yml's rationale: a wedged in-flight run must
+    # not idle an EC2 runner toward the 6h default). implement's CI Refine loop is
+    # the long pole, so it gets the widest leash.
+    timeout-minutes: ${{ inputs.task == 'implement' && 90 || 30 }}
+    # Read-only on GITHUB_TOKEN. This job checks out and executes repo code
+    # (headless Claude drives the wrapper skill under --dangerously-skip-permissions),
+    # so it must never hold a write scope on the default token — every write
+    # (labels, comments, commits, PR ops) rides the App installation token minted
+    # below, mirroring review.yml's read-only executing job.
+    permissions:
+      contents: read
+    env:
+      # Exposed at job level under the name the Claude Code binary reads, sourced
+      # from the AGENT-isolated secret (NOT the QA chain's CLAUDE_CODE_OAUTH_TOKEN)
+      # so the agent subscription's rate pool stays separate. Job-level presence
+      # lets step `if: env... != ''` gating work.
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.AGENT_CLAUDE_CODE_OAUTH_TOKEN }}
+      # The full repo slug and its owner/name halves, used by the gh API steps.
+      REPO: ${{ github.repository }}
+      TASK: ${{ inputs.task }}
+      REF: ${{ inputs.ref }}
+    steps:
+      - uses: runs-on/action@v2
+
+      # Fail early and clearly when a required secret is absent, rather than
+      # letting the App-token mint fail with a cryptic error. All three secrets
+      # are owner-provisioned console work (checklist in the header); without any
+      # of them a live run cannot do its job, so this halts with the exact remedy.
+      # The private key rides in step-level env only, never job-wide.
+      - name: Preflight — required secrets present
+        env:
+          APP_ID: ${{ secrets.AGENT_APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${APP_ID:-}" ] || missing="${missing} AGENT_APP_ID"
+          [ -n "${APP_PRIVATE_KEY:-}" ] || missing="${missing} AGENT_APP_PRIVATE_KEY"
+          [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || missing="${missing} AGENT_CLAUDE_CODE_OAUTH_TOKEN"
+          if [ -n "$missing" ]; then
+            echo "Required secret(s) not set:${missing}"
+            echo "Owner console setup (see this workflow's header comment):"
+            echo "  - register the aether-agent GitHub App, install it on ${REPO},"
+            echo "    and store its id + private key as AGENT_APP_ID / AGENT_APP_PRIVATE_KEY"
+            echo "  - mint AGENT_CLAUDE_CODE_OAUTH_TOKEN with 'claude setup-token' and gh secret set it"
+            exit 1
+          fi
+          echo "all required secrets present"
+
+      # Mint the App installation token — the identity every write below rides.
+      # App-created events trigger downstream workflows where GITHUB_TOKEN-created
+      # ones do not, which is the whole reason the arc can chain event-driven.
+      - name: Mint the App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.AGENT_APP_ID }}
+          private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
+
+      # The unconditional first work step, before any Claude spend. Pure GitHub
+      # API, keyed on the task: it recomputes state from observable board facts so
+      # a crash-and-re-dispatch is safe — the state never moved, and the guard
+      # routes to a clean no-op (proceed=false) or a resume (proceed=true, the
+      # wrapper's own re-entrancy guard then resumes from the observed phase). The
+      # #3126 flat-ladder phase labels (phase:building/phase:held/…) the checks
+      # read do not all exist yet; a live dispatch before #3126 lands understands
+      # its label reads to be against those names.
+      - name: Re-entrancy guard
+        id: guard
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          owner="${REPO%/*}"
+          name="${REPO#*/}"
+          case "$TASK" in
+            scope)
+              # scope walks Backlog -> phase:plan. A label at or beyond a post-plan
+              # rung means scoping already completed; a re-dispatch is a clean no-op.
+              labels="$(gh api "repos/${REPO}/issues/${REF}/labels" --jq '.[].name')"
+              if grep -qxE 'phase:(ready|refine|executing|building|qa|findings|held)' <<<"$labels"; then
+                echo "issue #${REF} is at/past a post-plan rung — scope already complete; nothing to do."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              ;;
+            implement)
+              # /implement cuts a PR from the issue. A MERGED PR that closes this
+              # issue means the work already landed → clean no-op. An open PR means
+              # resume, which the wrapper's own re-entrancy guard handles, so only a
+              # merged PR short-circuits here. closedByPullRequestsReferences is the
+              # canonical "PRs that close this issue" field.
+              merged="$(gh api graphql -f query='
+                query($owner:String!,$name:String!,$number:Int!){
+                  repository(owner:$owner,name:$name){
+                    issue(number:$number){
+                      closedByPullRequestsReferences(first:20, includeClosedPrs:true){
+                        nodes{ number merged }
+                      }
+                    }
+                  }
+                }' -f owner="$owner" -f name="$name" -F number="$REF" \
+                --jq '[.data.repository.issue.closedByPullRequestsReferences.nodes[] | select(.merged)] | length')"
+              if [ "${merged:-0}" -gt 0 ]; then
+                echo "issue #${REF} already has a merged closing PR — implement already landed; nothing to do."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              ;;
+            land)
+              # A crashed land job that already merged leaves nothing to redo.
+              merged="$(gh api "repos/${REPO}/pulls/${REF}" --jq '.merged')"
+              if [ "$merged" = "true" ]; then
+                echo "PR #${REF} is already merged — land already complete; nothing to do."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              # Informational: confirm the closing issue carries phase:held (the
+              # #3128/#3127 land precondition). The label vocabulary is #3126's, so
+              # this only logs — the wrapper's /land gate enforces the precondition
+              # and parks to the owner if it is unmet.
+              issue="$(gh api graphql -f query='
+                query($owner:String!,$name:String!,$number:Int!){
+                  repository(owner:$owner,name:$name){
+                    pullRequest(number:$number){
+                      closingIssuesReferences(first:1){ nodes{ number } }
+                    }
+                  }
+                }' -f owner="$owner" -f name="$name" -F number="$REF" \
+                --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[0].number // empty')"
+              if [ -n "$issue" ]; then
+                ilabels="$(gh api "repos/${REPO}/issues/${issue}/labels" --jq '.[].name' || true)"
+                if grep -qx 'phase:held' <<<"$ilabels"; then
+                  echo "closing issue #${issue} is phase:held — land precondition met."
+                else
+                  echo "closing issue #${issue} is not phase:held; the wrapper's /land gate will decide."
+                fi
+              fi
+              ;;
+          esac
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+      # The human-visible claim marker (the machine claim is the live run itself),
+      # linking back to this run. Posted on the ref's issue/PR conversation — the
+      # issues/<n>/comments endpoint serves both. Body written to a file first so
+      # its content is not shell-expanded.
+      - name: Post the start-of-work comment
+        if: steps.guard.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/start-comment.md <<EOF
+          🤖 Started \`${TASK}\` on this ref — [run log](${RUN_URL}).
+
+          A live run is the claim on \`work-${TASK}-${REF}\`; a re-dispatch after a crash recomputes state from the board and resumes or no-ops.
+          EOF
+          gh api -X POST "repos/${REPO}/issues/${REF}/comments" -F body=@/tmp/start-comment.md
+
+      # Assert the aether-agent bot git identity before any commit/merge. scope
+      # writes no commits, so this is gated off for it. The App's canonical commit
+      # identity is <bot-user-id>+<app-slug>[bot]@users.noreply.github.com so
+      # GitHub attributes the commit to the App, never to the owner.
+      - name: Assert the bot git identity
+        if: steps.guard.outputs.proceed == 'true' && inputs.task != 'scope'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          bot_user_id="$(gh api "/users/${APP_SLUG}[bot]" --jq '.id')"
+          git config --global user.name "${APP_SLUG}[bot]"
+          git config --global user.email "${bot_user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          name="$(git config --global user.name || true)"
+          email="$(git config --global user.email || true)"
+          if [ -z "$name" ] || [ -z "$email" ]; then
+            echo "bot git identity is unset — refusing to proceed to a commit."
+            exit 1
+          fi
+          echo "committing as ${name} <${email}>"
+
+      # Check out the default branch (the skills live here and the wrapper cuts
+      # its own branch from origin/main). The App token is persisted as the git
+      # credential so any push the wrapper issues rides the App identity and wakes
+      # downstream workflows. implement/land need full history; scope does not.
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.proceed == 'true'
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: ${{ inputs.task == 'scope' && 1 || 0 }}
+
+      # The repo's .claude hooks bind interactive sessions into per-session
+      # worktrees and police edits outside them — actively harmful in CI, where
+      # the SessionStart rebind would move the session out of $GITHUB_WORKSPACE.
+      # The runner is ephemeral and single-purpose, so strip the hooks from this
+      # checkout COPY; the hooks in the repo itself are untouched.
+      - name: Strip interactive-session hooks from the checkout copy
+        if: steps.guard.outputs.proceed == 'true'
+        run: |
+          jq 'del(.hooks)' .claude/settings.json > /tmp/settings.json
+          mv /tmp/settings.json .claude/settings.json
+
+      - name: Install Claude Code
+        if: steps.guard.outputs.proceed == 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      # Pre-trust the checkout so settings.json permissions aren't ignored with a
+      # warning under skip-permissions.
+      - name: Pre-trust the workspace for headless Claude
+        if: steps.guard.outputs.proceed == 'true'
+        run: printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$PWD" > "$HOME/.claude.json"
+
+      # Auth in isolation before the real run: a one-line prompt, no tools. If
+      # this fails the AGENT OAuth token itself is the problem, not the harness.
+      # --max-turns 3 (not 1) because the model occasionally spends a turn before
+      # emitting the reply, which a 1-turn cap turns into a spurious auth failure.
+      - name: Auth probe (no tools)
+        if: steps.guard.outputs.proceed == 'true'
+        run: |
+          claude -p "Reply with exactly: AUTH-OK" \
+            --model claude-sonnet-5 \
+            --max-turns 3 | tee /tmp/auth.log
+          grep -q "AUTH-OK" /tmp/auth.log
+
+      # Resolve the driving model from the issue's model:* label (scope stamps it
+      # at Plan; /implement and /approve gate on it). scope/implement's ref is the
+      # issue; land's ref is a PR, so resolve its closing issue. Default to the
+      # proven headless sonnet string; upgrade to opus when the label says so.
+      - name: Resolve the driving model
+        id: model
+        if: steps.guard.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          owner="${REPO%/*}"
+          name="${REPO#*/}"
+          case "$TASK" in
+            scope|implement) issue="$REF" ;;
+            land)
+              issue="$(gh api graphql -f query='
+                query($owner:String!,$name:String!,$number:Int!){
+                  repository(owner:$owner,name:$name){
+                    pullRequest(number:$number){
+                      closingIssuesReferences(first:1){ nodes{ number } }
+                    }
+                  }
+                }' -f owner="$owner" -f name="$name" -F number="$REF" \
+                --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[0].number // empty')"
+              ;;
+          esac
+          model="claude-sonnet-5"
+          if [ -n "${issue:-}" ]; then
+            labels="$(gh api "repos/${REPO}/issues/${issue}/labels" --jq '.[].name' || true)"
+            if grep -qx 'model:opus' <<<"$labels"; then
+              model="opus"
+            fi
+          fi
+          echo "model resolved to ${model}"
+          echo "model=${model}" >> "$GITHUB_OUTPUT"
+
+      # Drive headless Claude through the #3128 wrapper for the dispatched task.
+      # The wrapper executes the original /<task> skill verbatim and applies
+      # .claude/skills/headless/protocol.md for the interaction surface: it runs
+      # its own re-entrancy guard first, then follows ask-and-park / end-turn-not-
+      # wait rather than blocking on a human. The workflow just launches it.
+      #
+      # If #3128 ever renames the wrappers, the skill reference below (built from
+      # inputs.task) is the single edit site. stream-json + the jq renderer make
+      # the session watchable live in the Actions log; the tee'd JSONL is the
+      # durable transcript, uploaded below. The tee target lives in /tmp, outside
+      # the checkout, so the session can never mistake it for repo scratch. `|| true`
+      # so a session failure never fails the job — the durable state is on GitHub
+      # and the transcript diagnoses a dead run.
+      #
+      # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS is raised to 40 min for implement:
+      # its CI Refine loop is background-workflow-shaped and the default ten-minute
+      # ceiling routinely under-waits it. Harmless for scope/land.
+      - name: Drive the headless wrapper
+        if: steps.guard.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          MODEL: ${{ steps.model.outputs.model }}
+          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "2400000"
+        run: |
+          set -euo pipefail
+          claude -p "You are running headless in CI on a checkout of the aether repo.
+          Invoke the repo's /${TASK}-headless skill against ref ${REF}.
+          That wrapper executes the original /${TASK} skill verbatim and applies
+          .claude/skills/headless/protocol.md for the interaction surface: run its
+          re-entrancy guard first, then follow the wrapper's Overrides table exactly —
+          ask-and-park where the original would ask a human, end-turn-not-wait where
+          the original would block on a human, checkout-as-isolation instead of a
+          worktree, and the bot git identity (already configured) for any commit or
+          merge. Never sleep-poll on a human and never author under the owner's
+          identity. When you reach the wrapper's terminal state (parked, or the flow's
+          end-turn point), end your turn." \
+            --dangerously-skip-permissions \
+            --model "$MODEL" \
+            --max-turns ${{ inputs.task == 'implement' && 400 || 200 }} \
+            --output-format stream-json --verbose \
+            | tee /tmp/agent-work-session.jsonl \
+            | jq -rj --unbuffered '
+                if .type == "assistant" then
+                  ([.message.content[]? | if .type == "text" then "\n■ " + .text + "\n"
+                    elif .type == "tool_use" then "▸ " + .name + "\n" else empty end] | join(""))
+                elif .type == "result" then "\n== result (\(.subtype)) ==\n" + (.result // "") + "\n"
+                else empty end' \
+            || true
+
+      # The full session transcript (stream-json JSONL) — uploaded even on failure,
+      # since a dead run's transcript is exactly what diagnoses it.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: agent-work-session-transcript
+          path: /tmp/agent-work-session.jsonl
+          if-no-files-found: ignore
