@@ -1,6 +1,6 @@
 [book]
 title = "Aether Guide"
-description = "How aether works and how to build with it — written for agents."
+description = "How Aether works and how to build with it — for agents and humans."
 authors = ["aether"]
 language = "en"
 # The guide source lives under docs/guide/ so it sits next to the ADRs
@@ -17,7 +17,7 @@ no-section-label = false
 
 [output.html.fold]
 enable = true
-level = 1
+level = 2
 
 [output.html.search]
 enable = true

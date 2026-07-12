@@ -9,8 +9,8 @@
 //! service.
 //!
 //! The request / response shapes here are adapter-facing, not wire
-//! kinds: the cap converts the wire kind (which lives in
-//! `aether-kinds`) into the adapter request before dispatch and the
+//! kinds: each cap converts its capability-owned wire kind into the adapter
+//! request before dispatch and the
 //! adapter response back into the wire reply. Keeping them here lets
 //! issue 1013 land the stub-adapter scaffolding and a CI smoke before
 //! either provider cap's kinds exist.
@@ -26,14 +26,13 @@ pub struct AnthropicResponse {
     /// The model the provider reports actually serving the request.
     pub model_used: String,
     /// Token + wall-clock accounting. Issue 1014 owns the wire `Usage`
-    /// kind; the adapter layer carries the same four fields inline so
-    /// this crate doesn't depend on `aether-kinds`' provider kinds
-    /// before they exist.
+    /// kind; the adapter layer carries the same four fields inline so provider
+    /// adapters remain independent of the public mail structs.
     pub usage: AdapterUsage,
 }
 
-/// One generated media artifact from a Gemini adapter. The bytes are
-/// staged to `save://gen/<uuid>.{png,wav}` by the cap (via
+/// One generated media artifact from a Gemini adapter. The bytes are staged as
+/// `gen/<uuid>.{png,wav}` below the configured root by the cap (via
 /// [`crate::shared::contentgen::staging::stage_gen_output_under`]); the
 /// adapter just returns the raw bytes + extension.
 #[derive(Clone, Debug)]
@@ -128,8 +127,8 @@ pub struct AnthropicRequest {
 
 /// Gemini provider backend. Two methods, one per ADR-0050 media kind:
 /// `nanobanana_generate` (image), `lyria_generate` (music). Both take a
-/// validated request and return raw bytes the cap stages to
-/// `save://gen/`.
+/// validated request and return raw bytes the cap stages below its configured
+/// root under `gen/`.
 pub trait GeminiAdapter: Send + Sync {
     /// Run a Nano Banana image generation. Blocking (`ureq`).
     fn nanobanana_generate(&self, req: GeminiImageRequest) -> Result<GeminiResponse, String>;

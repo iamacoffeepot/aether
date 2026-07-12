@@ -157,14 +157,14 @@ A behavior runs inside a **`BehaviorHost`** (`aether.behavior.host`) — a stock
 actor that wraps one child, occupies its slot, and offers the slot's mail to your
 script. The host takes a `HostConfig` naming the wrapped child (by its actor type
 tag), the script source, and the fuel budget. Encode that config with the real
-types — `aether_kit::widgets::WidgetKind::type_tag()` yields a stock widget's tag
+types — `aether_kit::WidgetKind::type_tag()` yields a stock widget's tag
 without linking the kit's runtime, and `ScriptSource::Inline` ships the wasm bytes
-directly:
+directly. The following is a small **host-side config-preparation program**, not
+code linked into the behavior script:
 
 ```rust
 use aether_behavior::host::{ChildSpec, HostConfig, ScriptSource};
-use aether_kit::widgets::{SliderConfig, WidgetKind};
-use aether_kit::theme::Theme;
+use aether_kit::{SliderConfig, Theme, WidgetKind};
 use aether_data::Kind;
 
 let script = std::fs::read(".../clamp_behavior.wasm")?;
@@ -183,22 +183,30 @@ let config = HostConfig {
         config: slider.encode_into_bytes(),
     },
     script: ScriptSource::Inline(script),
-    fuel_per_call: 0,        // 0 ⇒ the host default (~1M)
-    disable_after_traps: 0,  // 0 ⇒ the host default (3)
-    frame_trigger: 0,        // 0 ⇒ no per-frame hook
+    fuel_per_call: HostConfig::DEFAULT_FUEL_PER_CALL,
+    disable_after_traps: HostConfig::DEFAULT_DISABLE_AFTER_TRAPS,
+    frame_trigger: 0,        // no per-frame hook
+    mirror_kinds: Vec::new(),
 };
-std::fs::write(".../host_config.bin", config.encode_into_bytes())?;
+std::fs::write(".../host_config.json", serde_json::to_vec_pretty(&config)?)?;
 ```
 
 Load the host from a kit build compiled with its `behavior` feature (which pulls
-the interpreter in and exports the host), pointing `config_path` at those bytes:
+the interpreter in and exports the host), pointing `config_path` at that JSON:
 
 ```text
 upload_component(staged_path = ".../aether_kit.wasm")                    → { hash, name }
 spawn_substrate()                                                        → engine_id
 load_component(engine_id, selector, export = "aether.behavior.host",
-               config_path = ".../host_config.bin")                      → LoadResult
+               config_path = ".../host_config.json")                     → LoadResult
 ```
+
+`config_path` is always JSON. The harness schema-encodes it into the component's
+config kind. Passing `HostConfig::encode_into_bytes()` here is incorrect because
+that would ask the harness to parse binary wire bytes as JSON. For hand-authored
+inline config, a `Bytes` field can use `{"$file": "..."}` so the MCP front reads
+the file without expanding it into a JSON integer array; verify the exact enum
+shape with `describe_component`/`describe_kinds`.
 
 `LoadResult::Ok` means the host came up: the wrapped slider spawned as its inline
 child, and the interpreter instantiated your script. The host now interposes on

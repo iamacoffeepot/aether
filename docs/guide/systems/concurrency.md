@@ -78,25 +78,38 @@ provider request, a subprocess — it hands the work *off* the scheduler thread
 
 ```rust
 #[handler::single]
-fn on_generate(&mut self, ctx, req: NanobananaGenerate) {
-    let provider = self.provider.clone();
-    ctx.dispatch_blocking(move || provider.call(&req));   // runs off the worker
+fn on_generate(
+    state: &mut Self::State,
+    ctx: &mut NativeCtx<'_>,
+    req: Generate,
+) -> Pending<GenerateResult> {
+    let provider = state.provider.clone();
+    ctx.dispatch_blocking(move || provider.call(req))     // runs off the scheduler worker
 }
 
-#[handler(task)]                                          // a completion, not inbound mail
-fn on_generate_done(&mut self, ctx, done: TaskDone<NanobananaResult>) {
-    done.resolve(ctx);                                    // re-reply, then drop the hold
+#[handler(task)]                                           // a completion, not inbound mail
+fn on_generate_done(
+    _state: &mut Self::State,
+    ctx: &mut NativeCtx<'_>,
+    done: TaskDone<GenerateResult>,
+) {
+    done.resolve(ctx);                                     // re-reply, then drop the hold
 }
 ```
 
-`dispatch_blocking` spawns the closure on a worker thread and returns
-immediately; the result comes back later as `TaskDone<Output>` in a
-`#[handler(task)]` handler — a *variant* of `#[handler::<class>]`, matched by its
-`TaskDone<K>` parameter the way a mail handler matches its kind. `resolve(ctx)`
-sends the reply and drops the settlement hold. This is the sanctioned home for
-"reply in a later turn"; it replaced the hand-rolled `InFlightDispatch` the
-content-gen capabilities used to carry. (Native capabilities today; a wasm/FFI
-form is a deferred superset — guests use shapes 1 and 3.)
+`dispatch_blocking` spawns the closure on an off-scheduler thread and returns a
+`Pending<R>` immediately. The request handler must return that receipt: it declares
+the deferred reply kind and prevents the armed dispatch from being silently
+discarded. The closure's output comes back later as `TaskDone<Output>` in a
+`#[handler(task)]` handler. Task completions route by their Rust output/context
+types, not by a wire `KindId`; the output only has to be `Send + 'static`, while
+`R` in `Pending<R>` is the reply kind. In the same-output/reply shape above,
+consuming `done.resolve(ctx)` sends the reply and then drops the settlement hold.
+A completion can instead map a different output to `R` and resolve that value.
+This is the sanctioned home for "reply in a later turn"; it replaced the
+hand-rolled `InFlightDispatch` the content-gen capabilities used to carry. (Native
+capabilities today; a wasm/FFI form is a deferred superset — guests use shapes 1
+and 3.)
 
 **3. Heavy async compute → off-thread, by reference.** Multi-step compute that
 produces handles belongs off the actor thread entirely; stage it through the

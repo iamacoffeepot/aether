@@ -12,8 +12,9 @@ pub struct SpawnSubstrateArgs {
     /// hub's content-addressed store (ADR-0115) — `upload_binary` first if
     /// it isn't stored yet. An exact token: a `hash`, a `name@version`
     /// (version = the binary's self-reported build id), or a `name`. Omit
-    /// (or `null`) for `default` — the headless chassis, so a bare
-    /// `spawn_substrate` with no arguments returns a working engine.
+    /// (or `null`) to select the stored `default` headless chassis. The
+    /// standard tunnel helper stages that artifact; without a matching
+    /// stored binary, a bare spawn returns a selector-resolution error.
     #[serde(default)]
     pub selector: Option<String>,
     /// Attribute query over the stored manifests, used when `selector` is
@@ -49,7 +50,10 @@ pub struct SpawnSubstrateArgs {
 /// selector). aether-mcp pre-resolves each selector against the hub's
 /// component registry (ADR-0116) and stages the resolved bytes for the
 /// substrate to read at boot — the substrate boot path stays path-based,
-/// now fed by the registry rather than host build paths.
+/// now fed by the registry rather than host build paths. Spawn readiness
+/// observes expected lineage-string presence only: specs must derive unique
+/// names, and callers must describe or probe each resulting lineage when
+/// component identity matters.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ComponentSpec {
     /// Registry selector for the component, resolved against the hub's
@@ -60,7 +64,9 @@ pub struct ComponentSpec {
     /// survives only as the `upload_component` input.
     pub selector: String,
     /// Optional human-readable load name. The substrate defaults one
-    /// from the wasm if omitted.
+    /// from the wasm if omitted. It must not collide with another boot spec's
+    /// name or a replica-derived suffix: readiness does not deduplicate or
+    /// correlate equal expected names with their selectors.
     #[serde(default)]
     pub name: Option<String>,
     /// Optional inline init-config JSON (ADR-0090), schema-encoded to the
@@ -73,9 +79,11 @@ pub struct ComponentSpec {
     #[serde(default)]
     pub config_path: Option<String>,
     /// ADR-0096: which exported actor type to instantiate from a
-    /// multi-actor module, named by its `Addressable::NAMESPACE`. Omit to load
-    /// the module's entry type. A `module@actor` selector populates this
-    /// from its `@actor` half — set it explicitly to override.
+    /// multi-actor module, named by its `Addressable::NAMESPACE`. Omit only
+    /// for a single-actor module or a multi-actor module that explicitly
+    /// declares `export!(entry = A, ...)`; a defaultless module requires a
+    /// selection. A `module@actor` selector populates this from its `@actor`
+    /// half — set it explicitly to override.
     #[serde(default)]
     pub export: Option<String>,
     /// Fan this entry out into N instances at boot (issue 2626), one
@@ -86,7 +94,8 @@ pub struct ComponentSpec {
     /// the `-0` suffix. Pairs with `#[router(shared)]` (ADR-0136) to scale
     /// an HTTP handler to N instances in one spec. Omit (or `null`) for
     /// one instance, today's behaviour. `replicas: 0` is a tool error, not
-    /// a silent no-op.
+    /// a silent no-op. Every derived `{base}-{index}` must remain unique across
+    /// the full boot list.
     #[serde(default)]
     pub replicas: Option<u32>,
 }
@@ -203,14 +212,14 @@ pub struct SendMailArgs {
     /// failure doesn't abort the batch; the response carries a
     /// per-item status.
     pub mails: Vec<MailSpec>,
-    /// When `true`, dispatch every item without awaiting its reply
+    /// When `true`, dispatch every item without awaiting settlement or replies
     /// (today's pre-issue-1242 behaviour): each `status` is
     /// `"dispatched"` and `replies` is empty. Default `false` — `send_mail`
     /// now blocks per item until the dispatch chain settles and surfaces
-    /// the correlated reply payloads. Set this for a fire-and-poke item
-    /// (e.g. a `DrawTriangle` before a `capture_frame`) or a cap that
-    /// never replies, so the call returns immediately instead of waiting
-    /// out the await timeout.
+    /// the correlated reply payloads. A handler need not emit a reply for the
+    /// settled default to complete. Use this only when the caller deliberately
+    /// needs no completion/ordering evidence; use settled mail or
+    /// `capture_frame.mails` for state that must precede an observation.
     #[serde(default)]
     pub fire_and_forget: bool,
     /// Which correlated replies to return after the complete arrival-
@@ -561,10 +570,11 @@ pub struct EngineInfo {
     /// The localhost RPC port the hub assigned this substrate.
     pub rpc_port: u16,
     /// Milliseconds since the hub last confirmed this engine alive
-    /// (issue 1339): `0` right after spawn, refreshed each heartbeat
-    /// interval. A value climbing past the heartbeat interval means the
-    /// engine is going stale; the hub evicts it (drops it from this
-    /// list) once it crosses the miss limit.
+    /// (issue 1339): `0` right after spawn and refreshed each heartbeat when
+    /// heartbeats are enabled. If either configured heartbeat value is zero,
+    /// the age grows even for a healthy engine and no missed-heartbeat eviction
+    /// occurs. The row does not expose that configuration, so interpret age
+    /// only with the hub settings in hand.
     pub last_heartbeat_age_millis: u64,
 }
 
@@ -693,11 +703,12 @@ pub struct LoadComponentArgs {
     pub config_path: Option<String>,
     /// ADR-0096: which exported actor type to instantiate from a
     /// multi-actor module, named by its `Addressable::NAMESPACE` (e.g.
-    /// `"ui.panel"`). Omit to load the module's entry type — the first
-    /// in its `export!` list, and the only type a single-actor module
-    /// has. A `module@actor` selector populates this from its `@actor`
-    /// half. An export the module doesn't declare comes back as a
-    /// `LoadResult::Err`.
+    /// `"ui.panel"`). Omit only when the module declares a default: the
+    /// sole type in a single-actor module or the type selected by
+    /// `export!(entry = A, ...)`. A defaultless `export!(A, B, ...)`
+    /// requires an explicit selection. A `module@actor` selector
+    /// populates this from its `@actor` half. An export the module doesn't
+    /// declare comes back as a `LoadResult::Err`.
     #[serde(default)]
     pub export: Option<String>,
     /// Load N instances of this component in one call (issue 2626), one
@@ -772,12 +783,12 @@ pub struct ReplaceComponentArgs {
 pub struct DescribeComponentArgs {
     /// Engine UUID hosting the component (from `list_engines`).
     pub engine_id: String,
-    /// The component to describe: its ADR-0099 lineage name (the
-    /// `aether.embedded:NAME` address `spawn_substrate` / `list_components`
-    /// / `LoadResult.name` hand back) OR its tagged mailbox id (`mbx-…`). A
-    /// name is the general path — it resolves live against the substrate, so
-    /// a boot-manifest-loaded component is introspectable without a prior
-    /// `load_component`; a `mbx-` id is a local cache fast-path.
+    /// The component to describe: its full ADR-0099 lineage name (returned by
+    /// `load_component`, or retained/derived from an explicit boot spec) OR its
+    /// tagged mailbox id (`mbx-…`). `spawn_substrate` returns engine information
+    /// only and `list_components` reports stored artifacts. A name-addressed
+    /// cache miss resolves against the substrate; a cache hit and a `mbx-` id
+    /// are local fast paths and do not prove current liveness.
     pub component: String,
     /// When `true`, each capabilities doc field carries the full rustdoc
     /// string. When `false` (default), each doc is projected to its first
@@ -920,16 +931,16 @@ pub struct ActorCostResponse {
 /// `describe_kinds` arguments. Selection precedence is `families` > `names` >
 /// `prefix` > bare; `full` changes schema-bearing renders but is ignored by
 /// the family digest. Omit all fields for the compact default listing of the
-/// live engine's vocabulary.
+/// selected engine snapshot (or the static baseline when no engine resolves).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct DescribeKindsArgs {
-    /// Engine UUID (from `list_engines`) whose live kind vocabulary to
-    /// surface. When present, `describe_kinds` prefills the static substrate
-    /// baseline then merges the engine's live capability + component kinds
-    /// (via `aether.inventory.kinds`). When absent, the tool auto-resolves
-    /// the sole supervised engine if exactly one exists; with zero or many
-    /// supervised engines and no explicit `engine_id` it returns the static
-    /// baseline unchanged.
+    /// Engine UUID (from `list_engines`) whose kind snapshot to surface. When
+    /// present, `describe_kinds` prefills the static substrate baseline and
+    /// attempts to merge the engine's live capability + component kinds (via
+    /// `aether.inventory.kinds`). A failed/undecodable refresh currently leaves
+    /// the static or prior cached snapshot and still returns success. When
+    /// absent, the tool auto-resolves the sole supervised engine if exactly one
+    /// exists; with zero or many it returns the static baseline unchanged.
     #[serde(default)]
     pub engine_id: Option<String>,
     /// Return a digest of `{family, count}` rows instead of individual kinds.
@@ -947,9 +958,10 @@ pub struct DescribeKindsArgs {
     /// mutually exclusive with `names`.
     #[serde(default)]
     pub prefix: Option<String>,
-    /// When `true` with `names` or `prefix`, return the full authoritative
-    /// `SchemaType` for each matching kind (the schema-exact form, enough for
-    /// codec work). `families` ignores this modifier, and an unfiltered bare
+    /// When `true` with `names` or `prefix`, return the full `SchemaType` for
+    /// each matching kind (schema-exact for the returned snapshot, enough for
+    /// codec work but not proof that a selected engine was reachable).
+    /// `families` ignores this modifier, and an unfiltered bare
     /// `full: true` request is rejected. When `false` (default), schema-bearing
     /// modes return compact `[{name, shape}]` rows where `shape` is a one-line
     /// human-readable rendering of the kind's field structure.

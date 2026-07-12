@@ -14,10 +14,10 @@ is the tour: what each one is, how it's identified, and how they compose.
 
 The reason to care isn't compiler ergonomics. A typed thing here is
 *self-describing*: it carries enough to encode itself from JSON, decode itself
-without a shared header, and answer "what are you?" to a live engine. That's
-what lets the agent driving the engine introspect it — `describe_kinds`,
-`describe_component`, `describe_transforms` are all just "read the types."
-Typing is the substrate of observability, not paperwork.
+without a shared header, and appear in the appropriate inventory. That lets an
+agent inspect live engine kinds/components while separately reading the static
+transform set linked into `aether-mcp`. Typing is the substrate of
+observability, not paperwork.
 
 ## Kinds — typed payloads
 
@@ -203,7 +203,8 @@ foo(input: A) -> B`, registered at build time with a `TransformId` and typed by
 its input and output kinds ([ADR-0048](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0048-transforms-and-content-addressed-handles.md)). Where a kind is a value and a mailbox is
 an address, a transform is a typed *edge*: it takes a value of one kind and
 produces a value of another. The `aether.fs` `fetch` verb runs a fold chain of
-them over a file's bytes; inspect the linked set with `describe_transforms`.
+them over a file's bytes; inspect the current MCP build's linked set with
+`describe_transforms`.
 
 ## Typed ids — the naming layer
 
@@ -236,9 +237,9 @@ Two properties keep these from being foot-guns:
 
 The pieces stack: a **kind** describes some bytes; a **schema** describes the
 kind; a **mailbox** is where a kind is sent; a **transform** turns one kind into
-another; and a **typed id** names each so a live engine can be asked what exists.
-Because every one of them is self-describing, the whole system is introspectable
-from the outside — which is the property the agent harness is built on.
+another; and a **typed id** names each so the owning inventory can report what
+exists. Because every one of them is self-describing, the system is inspectable
+from the outside — with engine-scoped and MCP-build-static views kept distinct.
 
 ## Where to read more
 

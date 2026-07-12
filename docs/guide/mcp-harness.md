@@ -33,18 +33,19 @@ The **tunnel** is the only thing your MCP client talks to. It supervises and
 re-forks the two backends below it, which is the point: you can rebuild and
 restart the hub without your MCP session ever dropping. **aether-mcp** is the RPC
 client — it turns a tool call into a wire `Call` and relays it. The **hub** owns
-the fleet: it forks substrates, assigns each a localhost RPC port, heartbeats
-them, and routes your mail to the right one by `engine_id`. A **substrate** is one
-running engine — a full chassis — and you can have several at once.
+the fleet: it forks substrates, assigns each a localhost RPC port, optionally
+heartbeats them, and routes your mail to the right one by `engine_id`. A
+**substrate** is one running engine — a full chassis — and you can have several
+at once.
 
-Because the hub heartbeats every engine and evicts a dead or wedged one, an engine
-that shows up in `list_engines` is one you can actually reach. Each entry also
-carries a `last_heartbeat_age_millis`, and it's the first thing to check when an
-engine stops behaving: a healthy engine's age stays small, so a climbing value is
-the early sign it's gone slow or unresponsive — wedged but not yet past the miss
-limit the hub evicts on. If your mail to an engine isn't landing, read that age
-before anything else; it tells you whether the engine is struggling or the problem
-is on your side.
+An engine in `list_engines` is still supervised; that row alone does not prove
+every handler is reachable. With heartbeats enabled, a low
+`last_heartbeat_age_millis` confirms that the proxy recently answered a ping, and
+a rising value is an early sign that it is slow or wedged. A zero heartbeat
+interval or miss limit disables that check: the age then grows from initial
+connection even for a healthy engine, and the hub learns of death only when the
+connection closes. The fleet row does not expose whether heartbeats are enabled,
+so confirm hub configuration before using its age as a diagnosis.
 
 To restart the hub
 after a rebuild *without* losing your session, hit the tunnel's admin endpoint
@@ -56,9 +57,10 @@ restarting the hub.
 
 The stack isn't running by default — a cold build of the tunnel can take long
 enough to look like a frozen session, so it's left to the point of use. Bring it up
-yourself with `scripts/ensure-tunnel.sh`: it's idempotent (a no-op if `:8890` is
-already bound, otherwise it launches the tunnel detached). Ports and the rest are in
-`CLAUDE.md`'s MCP-harness section, which is the operational reference for the stack.
+yourself with `scripts/ensure-tunnel.sh`: it is idempotent and starts the local
+stack only when needed. Treat `.codex/config.toml`, `.mcp.json`, the helper, and
+the active MCP schema as the current connection contract; do not translate
+another agent surface's harness syntax by analogy.
 
 Codex sessions in a trusted checkout pick up the `aether-hub` MCP server from
 `.codex/config.toml`; if the `mcp__aether-hub__*` tools are missing after the
@@ -66,12 +68,15 @@ tunnel starts, run `/mcp` in the active Codex surface to reconnect them.
 
 ## The session loop
 
-Everything is keyed by `engine_id`. A session has a recognizable arc:
+Per-engine work is keyed by `engine_id`. A session has a recognizable arc:
 
 1. **Get an engine.** `spawn_substrate(selector)` forks a fresh substrate and
    returns its `engine_id` (and RPC port); omit `selector` for `default` — the
-   headless chassis. `list_engines` shows the ones already running. You hand
-   that `engine_id` to every later call.
+   stored headless chassis normally staged by the tunnel helper. Without that
+   artifact, the bare spawn fails selector resolution. `list_engines` shows the
+   ones already running. You hand
+   that `engine_id` to every later per-engine call; hub artifact operations and
+   the MCP-build-static `describe_transforms` do not take one.
 2. **Set it up.** Stage the wasm into the hub's component registry with
    `upload_component(staged_path)` — it returns `{hash, name}` — then
    `load_component(engine_id, selector)` resolves that selector and loads the
@@ -80,16 +85,20 @@ Everything is keyed by `engine_id`. A session has a recognizable arc:
 3. **Drive it.** `send_mail(…)` delivers a kind to a mailbox. By default it blocks
    until the dispatch chain settles and hands you the correlated reply.
 4. **Watch it.** `capture_frame` reads the rendered frame back as a PNG;
-   `actor_logs` pulls one actor's log ring; the `describe_*` tools report the
-   engine's types and a component's handlers.
+   `actor_logs` pulls one actor's log ring; `describe_kinds`,
+   `describe_handlers`, and `describe_component` report engine/component
+   contracts. `describe_transforms` instead reports the MCP build's static
+   transform set.
 5. **Settle precisely.** `send_mail_traced` when you need to know a whole causal
    chain finished, with its trace tree, rather than a single reply.
 6. **Tear down.** `terminate_substrate(engine_id)` when you're done with an engine.
 
 ## The tools
 
-**Fleet.** `list_engines`, `spawn_substrate`, `terminate_substrate`. The `engine_id`
-each returns is the handle every other tool needs.
+**Fleet.** `list_engines`, `spawn_substrate`, `terminate_substrate`.
+`list_engines` and `spawn_substrate` reveal engine ids; `terminate_substrate`
+consumes one and returns termination status. Use the id for engine-scoped tools,
+not for hub artifact-store or MCP-local queries.
 
 **Sending mail.** `send_mail` is the workhorse. You give it a batch of items, each
 `{engine_id, recipient_name, kind_name, params}` — the **mailbox** to deliver to,
@@ -102,11 +111,13 @@ non-errors or `all` for the complete decoded stream; neither explicit mode caps
 the stream, and the generic whole-response guard stages an oversized complete
 result instead of truncating it. A request/reply (mail `aether.fs.read`, get the
 bytes back) is therefore a single call with no polling. Decoded `Bytes` leaves
-over 16 KiB stage to a host file before that outer response guard. Set
-`fire_and_forget: true` for a poke you don't wait on — a `DrawTriangle` right before
-a `capture_frame`, or a cap that never replies; it returns no replies regardless
-of the requested projection. Items are independent: one bad item doesn't abort
-its siblings.
+over 16 KiB stage to a host file before that outer response guard. A handler can
+emit no application reply and still settle, so that alone is not a reason to
+use `fire_and_forget`. Set it only for dispatch whose completion and ordering
+you deliberately do not need; use settled mail or `capture_frame.mails` when a
+mutation must precede observation. It returns no replies regardless of the
+requested projection. Items are independent: one bad item does not abort its
+siblings.
 
 `send_mail_traced` is the same idea with a shared trace root. Every item in the
 batch lands under one chassis-level trace root. The settled default returns a
@@ -155,13 +166,23 @@ need their nested `SchemaType`. `names` cannot combine with `families` or
 `prefix`, and a bare unfiltered `full: true` call is refused so schema output
 stays bounded. `describe_component` reports a loaded component's handler kinds,
 their docs, whether it has a fallback, and its boot-config kind, addressed by
-the component's loaded lineage name (the
-`aether.component/aether.embedded:NAME` address `spawn_substrate` /
-`load_component` hand back). Registry `list_components` entries describe
-stored artifacts and are not loaded lineage addresses.
+the component's loaded lineage name. `load_component` returns that
+`aether.component/aether.embedded:NAME` address. For a boot load, retain the
+configured name from the component spec or derive the expected lineage from
+that spec; `spawn_substrate` itself returns only engine information. Registry
+`list_components` entries describe stored artifacts and are not loaded lineage
+addresses.
+
+An engine-scoped `describe_kinds` is currently best-effort: it starts from the
+static baseline and attempts a live inventory refresh, but an RPC/decode failure
+can leave a prior/static snapshot and still return success. Its full schemas are
+exact for the returned snapshot, not proof that the engine was reachable. Pair
+freshness-sensitive use with `list_engines` and a harmless bounded live probe.
 Handler and component docs default to the first rustdoc line; pass `full: true`
-for the complete strings. `describe_transforms` lists the native transforms
-registered at link time.
+for the complete strings. `describe_handlers` reads the selected engine's
+native handler inventory, including reply contracts. `describe_transforms`
+lists the native transforms linked into the current `aether-mcp` process; it
+does not query an engine.
 
 **Components.** `upload_component` takes the filesystem path to a `.wasm` and
 stages it in the hub's component registry. `load_component` and
@@ -185,8 +206,8 @@ pass `include_history: true` for unnamed historical hashes and an explicit
 `total_matched`. Component actor `handled_kinds` are readable static kind names
 with tagged `knd-…` fallbacks; the redundant manifest-wide handled-kind union
 is omitted. These registry rows identify stored wasm, not live component
-instances; use the loaded component lineage name returned by
-`spawn_substrate` / `load_component` for `describe_component`.
+instances; use the lineage returned by `load_component`, or the known expected
+lineage of a boot spec, for `describe_component`.
 
 **Observation.** `capture_frame` returns the engine's current frame as an optional
 inline PNG, bounded by a 768-pixel long-edge ceiling by default (never upscaled).
@@ -222,21 +243,25 @@ one handler.
   See [The type system](foundations/type-system.md).
 - **`send_mail` blocks and projects replies by default.** It waits for settlement
   and returns the terminal reply plus recognized errors. Request `replies: "all"`
-  when every event matters, `"none"` when only failures matter, or use
-  `fire_and_forget` for a poke or a no-reply cap. (If you've seen it
+  when every event matters or `"none"` when only failures matter. A no-reply
+  handler still settles normally; reserve `fire_and_forget` for work whose
+  completion and ordering are intentionally unobserved. (If you've seen it
   described as best-effort fire-and-forget, that's the older behavior — the default
   flipped.)
 - **Desktop-only surfaces fail fast.** `capture_frame` and the window ops need the
   desktop chassis; the headless chassis replies with an error rather than hanging.
   To read back a backgrounded or minimized window, mail `aether.window.focus`
   first to foreground it — see [Window](systems/window.md).
-- **`describe_component` resolves names live.** Address it by the lineage name
-  `spawn_substrate` / `load_component` return and it asks the substrate, which
-  holds the live loaded set — so a boot-manifest-loaded component, an
-  aether-mcp restart, and a post-`replace_component` describe all resolve.
-  Registry `list_components` rows are stored artifacts, not these live lineage
-  names. A `mbx-` id is a local cache fast-path that needs a prior
-  `load_component` / `replace_component`.
+- **`describe_component` is cache-first, with a live name fallback.** Address it
+  by the lineage returned by `load_component` or retained from a boot spec. A
+  cache hit returns immediately; only a name-addressed cache miss asks the
+  substrate. That fallback makes boot-manifest loads discoverable after an
+  aether-mcp restart, while successful loads and replacements refresh the
+  cache. Generic component-drop mail does not invalidate it, so a cached
+  description is not proof of current liveness; pair it with `drop_result` or a
+  safe live probe when that distinction matters. Registry `list_components`
+  rows are stored artifacts, not lineage names. A `mbx-` id is only a local
+  cache fast-path and needs a prior `load_component` / `replace_component`.
 
 ## Where to read more
 
@@ -245,4 +270,5 @@ one handler.
 - Loading, replacing, and inspecting components — [Components & lifecycle](systems/components.md).
 - Settlement and the trace tree behind `send_mail_traced` — [Tracing & settlement](systems/tracing-and-settlement.md).
 - Adding your own tool to this surface — [Wiring an MCP tool](recipes/wiring-an-mcp-tool.md).
-- The operational reference — ports, env overrides, `restart-hub` — `CLAUDE.md`.
+- Engine ownership, evidence, and recovery — [Operating a live engine](operating/index.md).
+- Connection and process ownership — [Process topology and chassis](architecture/process-topology.md).

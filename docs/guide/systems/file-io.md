@@ -1,15 +1,17 @@
 # File I/O
 
 > **Governing ADR:** [ADR-0041](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0041-substrate-file-io-and-namespaces.md)
-> (substrate file I/O and namespaces). The contract — the four operations, the
-> namespace addressing, the echo-correlated replies — is **stable**. One backend
+> (substrate file I/O and namespaces). The namespace and adapter contract is
+> stable; copy and transform-folded fetch extend the original four operations. One backend
 > ships today (a local-file adapter); the trait is built to take more.
 
 An actor never opens a file. Everything it does crosses the mail boundary, and
 the filesystem is no exception: the substrate owns the disk, and an actor reaches
 it by mailing a request to the `aether.fs` mailbox and handling the reply. Read,
-write, delete, and list are four kinds; the bytes pass through the substrate,
-never through a raw file handle the actor holds.
+write, copy, delete, list, and transform-folded fetch cross the substrate;
+never through a raw file handle the actor holds. That mail boundary is not, by
+itself, an authorization boundary: `copy` is a raw-host-path exception described
+below.
 
 When you drive the engine over MCP, file I/O is how you stage what a run will
 load — write a mesh DSL or a config blob into a namespace, then point a component
@@ -26,19 +28,23 @@ is gone. Portability pushes the same way: a wasm guest has no filesystem
 primitives at all, so disk access *has* to be a request the substrate services on
 the guest's behalf. Routing it through mail keeps file I/O identical in shape to
 the render, audio, and other sinks — one mental model, one boundary, capabilities
-isolated behind the mail wall.
+isolated behind the mail wall. The current `copy` handler weakens that model:
+any caller that can address `aether.fs` can ask it to read a raw host path, with
+no sender authorization check.
 
-Addressing by **logical namespace** rather than real path is what makes that
-boundary useful instead of merely safe. An actor mails `save` / `slot1.bin`, not
+For ordinary namespace operations, addressing by **logical namespace** rather
+than real path is what makes the boundary useful. An actor mails `save` /
+`slot1.bin`, not
 `/Users/you/Library/.../slot1.bin`; the substrate resolves the namespace to a
 configured root and the actor never learns where the bytes actually live. So the
 same component runs unchanged whether `save` points at a home directory on a dev
 box or a tmpdir in CI, and a future backend can move the bytes somewhere else
-entirely without the caller noticing.
+entirely without the caller noticing. The source side of `copy` does not use this
+addressing rule.
 
 ## What it does
 
-**One mailbox, four operations.** Everything addresses the `aether.fs` mailbox.
+**One mailbox, six request surfaces.** Everything addresses the `aether.fs` mailbox.
 Each request kind pairs with a reply kind that names the same operation:
 
 | Request | Fields | Reply | `Ok` adds |
@@ -48,11 +54,30 @@ Each request kind pairs with a reply kind that names the same operation:
 | `aether.fs.delete` | `namespace`, `path` | `aether.fs.delete_result` | — (ack) |
 | `aether.fs.list` | `namespace`, `prefix` | `aether.fs.list_result` | `entries` |
 | `aether.fs.copy` | `from`, `to` | `aether.fs.copy_result` | — (ack) |
+| `aether.fs.fetch` | `namespace`, `path`, `transforms` | `aether.fs.fetch_result` | `output_kind`, `data` |
 
-Each reply is an `Ok` / `Err` enum. Every arm — including the bare `write` /
-`delete` acks — echoes the request's `namespace` + `path` (or `prefix`); the
-column above is what `Ok` adds on top of that echo. The `Err` arm replaces the
-added data with an `FsError`.
+Each reply is an `Ok` / `Err` enum. `read`, `write`, `delete`, and `fetch`
+echo `namespace` + `path`; `list` echoes `namespace` + `prefix`; and `copy`
+echoes its raw `from` plus structured namespace destination `to`. The column
+above is what `Ok` adds beyond those domain fields. An `Err` arm replaces the
+operation's added data with its structured error.
+
+**`copy` is trusted ingestion by convention, not enforcement.** Its `from`
+field is passed directly to `std::fs::read`, while `to` is a namespace address.
+An absolute host path is the intended input, but the handler does not enforce
+absoluteness: a relative value resolves against the substrate process's working
+directory. More importantly, it does not authenticate the sender, and the wasm
+`FsMailboxExt` exposes `copy`; any guest that can address `aether.fs` can choose
+the raw source path. Use it only where all such callers are trusted, or add a
+real authorization/composition boundary before treating it as an operator-only
+seam. The destination still applies its namespace's write policy and the lexical
+path checks described below.
+
+**`fetch` composes registered transforms.** It reads through a namespace, then
+validates and runs an ordered linear `TransformId` chain. An empty chain returns
+raw bytes. Failures distinguish file I/O, invalid composition, transform error,
+and panic. Discover transform ids/contracts with `describe_transforms`; do not
+guess ids or treat the facility as arbitrary host execution.
 
 **Three namespaces.** A request names one by its short name — `save`, not
 `save://` (the double-colon form is only a convention in prose):
@@ -66,11 +91,16 @@ added data with an `FsError`.
 Each resolves to a real directory chosen at boot; that resolution, and the
 `AETHER_*_DIR` knobs behind it, are covered under [Configuration](configuration.md).
 
-**Paths are sandboxed to their namespace root.** Every path is relative to the
-root the namespace resolved to. A path with a leading `/` or any `..` segment is
-rejected as `Forbidden` before the backend touches disk, so `save` / `../etc/passwd`
-fails closed — an actor can't escape its namespace, and never sees the real
-filesystem path.
+**Local paths receive a lexical check, not complete containment.** The shipped
+adapter rejects a string that starts with `/` or contains a slash-delimited
+segment exactly equal to `..`, so `save` / `../etc/passwd` fails with
+`Forbidden`. It then joins the unchecked remainder to the namespace root. It
+does not canonicalize the resolved target or defend against symlinks inside the
+root, and on Windows it does not recognize backslash traversal, drive-prefixed
+absolute paths, or UNC paths. Namespace roots must therefore be trusted and
+free of escape symlinks, and callers should use portable forward-slash relative
+paths. Do not describe the current adapter as proving root containment across
+all host filesystem states or platforms.
 
 **Writes are atomic, and fill in their parents.** The local-file backend stages a
 write to a sibling temporary file and renames it into place, so a crash mid-write
@@ -84,18 +114,20 @@ path under the namespace root — an empty `prefix` lists the root — and the r
 missing directory replies `NotFound`. The names come back bare, so you rebuild a
 path by joining an entry back under the prefix you listed.
 
-**Replies correlate by what they echo, not by an id.** A handler dispatches on
-the reply *kind*, which on its own erases *which* request a given reply answers —
-so every reply echoes the request's `namespace` and `path` (or `prefix` for
-`list`) to restore that. A caller matches a reply to its request on the kind plus
-those echoed fields — no correlation id, no pending-operation table, no dependence
-on the order replies arrive. For `write` and `delete`, whose `Ok` arms add nothing
+**Replies carry domain echoes and mail correlation.** A handler dispatches on
+the reply *kind*, which on its own erases *which* request a given reply answers.
+Namespace operations echo `namespace` and `path` (`prefix` for `list`), while
+`copy` echoes `from` and `to`, restoring readable domain context. Those fields
+distinguish ordinary requests; duplicate concurrent operations against the
+same domain address should use the tracked request id and `ctx.in_reply_to()`
+rather than arrival order. For `write` and `delete`, whose `Ok` arms add nothing
 else, that echo *is* the result: the ack tells you a specific path landed or was
 removed. The one deliberate omission is the write bytes — a `write` reply doesn't
 echo them back, so persisting a megabyte still produces a small reply.
 
 **`FsError` is one of four shapes.** `NotFound` (no such file or directory);
-`Forbidden` (a read-only namespace, or a path that tried to escape its root);
+`Forbidden` (a read-only namespace, or a path rejected by the adapter's lexical
+leading-`/`/slash-`..` checks);
 `UnknownNamespace` (nothing registered under that name); or `AdapterError(String)`
 (a backend failure — disk full, a rename that lost a race — with the detail
 preserved as text). The first three are precise enough to branch on; the fourth
@@ -130,13 +162,13 @@ fn on_read_result(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult) {
 Because the reply echoes `namespace` + `path`, a component with several reads
 outstanding tells them apart by the echoed fields — match them against whatever
 state you were waiting to fill. (The request and reply kinds live in
-`aether-kinds`; you can also `send` a `Read` / `Write` kind to `aether.fs`
+`aether-capabilities/src/fs/kinds.rs`; you can also `send` a `Read` / `Write` kind to `aether.fs`
 directly instead of going through the facade.)
 
 **From an agent over MCP.** `send_mail` rides settlement and hands back the
 correlated reply, so a read is a single call: mail `aether.fs.read` to `aether.fs`
 and the `ReadResult` bytes come back with it — no polling. `describe_kinds`
-carries the exact param schema for each of the four kinds if you need it.
+carries the exact param schema for each request if you need it.
 
 The move you'll reach for most is `write`: stage a file the engine will then
 load. Writing a mesh DSL to a namespace and pointing the mesh viewer at the same
@@ -158,8 +190,9 @@ The seams are the namespace table and the backend trait.
   (`read` / `write` / `delete` / `list`), each returning `FsResult`. The trait is
   deliberately small so a bundled-asset or cloud backend is "implement four
   methods," not a rewrite of the sink. The local-file adapter is the one that
-  ships; it's also the reference for what path-safety and atomicity an adapter is
-  expected to enforce.
+  ships; it is the reference for the current semantics, including the lexical
+  path-check gaps documented above. A replacement must state or enforce its own
+  containment and atomicity contract rather than assuming stronger behavior.
 
 The mail surface doesn't change when a backend does. A component addressing
 `save` / `slot1.bin` is untouched whether those bytes live on local disk or

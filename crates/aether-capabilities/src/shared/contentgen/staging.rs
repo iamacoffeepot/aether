@@ -1,4 +1,4 @@
-//! `save://gen/` output staging for the content-gen caps.
+//! `gen/` output staging below the content-gen caps' configured root.
 //!
 //! Generated binary artifacts (PNG from Nano Banana, WAV from Lyria)
 //! never ride the mail wire — the cap stages the bytes to disk and the

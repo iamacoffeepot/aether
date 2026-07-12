@@ -7,7 +7,7 @@ them the rest of the system stops looking arbitrary.
 
 ## 1. The agent is the operator
 
-The motivating image is Claude sitting in a harness as assistant, engineer,
+The motivating image is an agent sitting in a harness as assistant, engineer,
 and designer — driving a running engine, observing it, and modifying it. That
 is not a feature; it is the **load-bearing constraint**. A native **substrate**
 owns the things only native code can own — I/O, the GPU, audio — and hosts a
@@ -85,8 +85,9 @@ repetition-tolerant**:
 Two habits keep the system honest as it grows:
 
 - **Load-bearing decisions are recorded as ADRs** ([ADR-0001](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0001-record-architecture-decisions.md)) — numbered,
-  reviewed like code, and cited from the code and from this guide. The ADR is
-  the durable "why." When in doubt, the ADR wins over prose that has drifted.
+  reviewed like code, and cited from the code and from this guide. An Accepted
+  ADR is the durable "why"; Proposed records do not govern, and Superseded
+  records point to their replacement. Current code decides what is implemented.
 - **Every callable surface ships a tutorial, and the tutorial is the sanity
   check.** If you cannot write a clean walkthrough that a fresh agent can
   build from, the surface is mis-shaped — fix the design, not the words. This

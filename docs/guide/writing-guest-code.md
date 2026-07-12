@@ -101,7 +101,6 @@ layer over traffic that flowed fine before the script existed — treat it as on
   — [The actor model](foundations/actor-model.md).
 - The mechanism behind behaviors — interposition as tree position, the fuel-metered
   fail-open firewall, the mirror-and-effects model, and the vocabulary boundary —
+  [Behaviors](systems/behaviors.md) and
   [ADR-0137](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0137-in-cluster-behavior-script-host.md).
-
-A "Writing a behavior" recipe walking the `#[behavior]` surface end to end lands
-alongside the behavior-script end-to-end fixture.
+- The current end-to-end authoring loop — [Writing a behavior](recipes/writing-a-behavior.md).

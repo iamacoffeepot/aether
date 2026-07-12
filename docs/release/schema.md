@@ -13,7 +13,7 @@ The lifecycle vocabulary is the `phase:*` label set, the canonical phase state f
 | Design    | `phase:design`    | Tradeoffs / options / ADR drafting                 | User + `/scope`  |
 | Plan      | `phase:plan`      | Sequencing, dependencies, sub-issues               | User + `/scope`  |
 | Ready     | `phase:ready`     | Agent-ready; awaiting dispatch                     | Gate: `/approve` |
-| Building  | `phase:building`  | PR open; CI not yet green                          | Reconciler       |
+| Building  | `phase:building`  | PR open; head unproven, CI not green, or declared-surface gate red | Reconciler |
 | QA        | `phase:qa`        | CI green; review/dogfood verdict owed              | Reconciler       |
 | Findings  | `phase:findings`  | QA findings open — threads or rollups unresolved   | Reconciler       |
 | Held      | `phase:held`      | CI green, QA complete, all threads resolved; land-eligible | Reconciler |
@@ -37,6 +37,14 @@ Phase and every other axis ride labels — durable, REST-cheap, and the signal t
 
 The ADR link lives in the issue's `## Design notes` section; per-issue auth budgets aren't persisted in v1 (a breach is noted in the self-bounce comment).
 
+`Approval gate` is a required status, so the reconciler posts it on every PR
+path. A PR with no closing issue, an issue outside the reconciler phase domain,
+or an issue with no fenced `## Declared surface` receives a passing no-op status
+rather than silence. When the section exists, the reconciler treats its globs as
+the implementation boundary and compares every changed PR path. An escaping
+diff stays in Building until it is trimmed, the repository owner edits the
+declaration, or the owner applies `approval:surface-ok`.
+
 ## Issue dependencies
 
 GitHub's native feature, not a custom field: `gh issue edit <n> --add-dependency <m>` and the dependency graph view.
@@ -49,12 +57,12 @@ Define   → Design     if multi-PR, umbrella issue exists; if architectural, AD
 Design   → Plan       tradeoffs aired; ADR merged if applicable
 Plan     → Ready      dependencies declared, one concept per issue (sets phase:ready)
 Ready    → Building   /implement opens a PR; the reconciler sees it on first firing
-Building → QA         CI green on the PR head
+Building → QA         CI green on the PR head and any declared-surface gate clear
 QA       → Findings   review / dogfood verdict in, and findings are open
 QA       → Held       review / dogfood verdict in, and nothing is open
 Findings → Held       all threads resolved and rollups cleared
 Held     → Done       PR merged (deletes the phase:* label)
-Building/QA/Findings/Held → Building   any push (new head SHA, CI not green) demotes back
+Building/QA/Findings/Held → Building   any push (new head SHA), CI red, or declared-surface escape demotes/holds here
 Building/QA/Findings/Held → Bounced    an upstream-phase issue surfaces (sets bounce-to:*)
 Any      → Stalled    env/tooling failure (not the issue's fault)
 ```
@@ -65,9 +73,9 @@ The `Building → QA → Findings → Held` stretch is not a fixed walk — the 
 
 The post-green stretch (`building` → `qa` → `findings` → `held`) is computed, not asserted. One hosted workflow, `.github/workflows/reconciler.yml` (name `Reconciler`, no Claude, no cargo), is the **sole writer** of `phase:building` / `phase:qa` / `phase:findings` / `phase:held`. It never writes `define` / `design` / `plan` / `ready` / `bounced` / `stalled` — those stay owned by their skills. On every relevant event it resolves the PR, finds the issue it closes (GraphQL `closingIssuesReferences`), gates on that issue's phase being in the reconciler domain (`ready` / `executing` / `building` / `refine` / `qa` / `findings` / `held`), reads the ground-truth facts, computes one target phase by a first-match table, and writes it with the atomic non-phase-preserving label `PUT`.
 
-**Facts** (per-head unless noted): CI check-runs conclusion on the PR's current head SHA; the `Review gate` commit status presence + conclusion on that head; the `review:unresolved` / `dogfood:unresolved` PR labels; whether the closing issue's `## Dogfood brief` is present and not `N/A`; the issue's dogfood marker `verdict=`; and the GraphQL `reviewThreads(isResolved: false)` count.
+**Facts** (per-head unless noted): CI check-runs conclusion on the PR's current head SHA; the `Review gate` commit status presence + conclusion on that head; an optional fenced `## Declared surface` block compared with the PR's changed paths; the `review:unresolved` / `dogfood:unresolved` PR labels; whether the closing issue's `## Dogfood brief` is present and not `N/A`; the issue's dogfood marker `verdict=`; and the GraphQL `reviewThreads(isResolved: false)` count.
 
-**Computation** (first match wins): a just-fired `synchronize` or CI-not-green head → `building`; a review verdict owed for this head or a dogfood trial owed with no verdict in → `qa`; findings open (unresolved labels or threads) → `findings`; otherwise → `held` (land-eligible). Every firing recomputes from scratch, so a missed event self-heals on the next one.
+**Computation** (first match wins): a declared-surface escape, just-fired `synchronize`, or CI-not-green head → `building`; a review verdict owed for this head or a dogfood trial owed with no verdict in → `qa`; findings open (unresolved labels or threads) → `findings`; otherwise → `held` (land-eligible). Every firing recomputes from scratch, so a missed event self-heals on the next one. Every exit path posts `Approval gate`; the enforced path writes it before advisory label/comment mirrors and verifies that only a repository-owner-applied `approval:surface-ok` waiver counts.
 
 **Triggers**: `pull_request` (`opened` / `reopened` / `synchronize` / `ready_for_review` / `labeled` / `unlabeled` — the payload carries the PR; `synchronize` is the push-demotes path; label events wake it when a QA post job flips `review:unresolved` / `dogfood:unresolved`); `workflow_run` on **CI only** (CI runs are `pull_request`-triggered, so their head branch resolves the PR; Review and Dogfood runs anchor to `main` and cannot be resolved this way); `workflow_dispatch` with a `pr` input (the manual re-reconcile, and the authoritative QA-completion hand-off — the Review and Dogfood post jobs each poke it with the exact PR number they know); and a `*/15` `schedule` backstop that recomputes every open PR in the domain (the supported answer to thread resolves / unresolves having no Actions event, and the self-heal for any missed poke).
 

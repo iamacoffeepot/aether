@@ -50,6 +50,8 @@ the `InputCapability` actor — the sole owner of the subscriber table
 | `aether.key_release` | a key release (paired with `key` for hold-to-act) |
 | `aether.mouse_move` | cursor movement |
 | `aether.mouse_button` | a mouse-button press |
+| `aether.mouse_button_release` | a mouse-button release |
+| `aether.mouse_wheel` | scroll-wheel / trackpad delta |
 | `aether.window_size` | a resize |
 | `aether.text_input` | committed, layout-resolved characters (typing / IME commit) |
 | `aether.ime_preedit` | in-flight IME composition (the underlined text being composed) |

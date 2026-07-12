@@ -2,10 +2,10 @@
 
 > **Governing ADRs:** [ADR-0074](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0074-unified-actor-model-for-substrate-and-guests.md) (one actor model, two hosts), [ADR-0024](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0024-dual-target-host-fn-ffi.md) (the
 > dual-target FFI convention), [ADR-0028](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0028-component-embedded-kind-manifest.md) / [ADR-0033](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0033-handler-driven-inputs-manifest.md) (the kind + handler
-> manifests in the wasm), [ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md) (boot config), [ADR-0022](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0022-drain-on-swap.md) / [ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md) / [ADR-0101](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0101-replace-hooks-on-ffiactor.md)
-> (in-place hot-swap), [ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md) (several actor types per module,
-> selected at load) and [ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md) (a component spawns its
-> siblings). The authoring and loading surface here is **stable** — it's
+> manifests in the wasm), [ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md) (boot config), [ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md) / [ADR-0101](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0101-replace-hooks-on-ffiactor.md)
+> (binding-stable hot-swap; the earlier drain design in [ADR-0022](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0022-drain-on-swap.md) is superseded), [ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md) (several actor types per module,
+> selected at load), and [ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md) / [ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md) (sibling spawn and its
+> lineage-correct addressing). The authoring and loading surface here is **stable** — it's
 > what the reference component `aether-kit` (a multi-actor module: locomotion,
 > camera, and mesh viewer) is built on, and the signatures were read from the
 > current SDK.
@@ -41,7 +41,8 @@ custom sections**:
   exactly what `describe_component` reads back to tell a live engine what the
   component accepts — your doc comments, filtered through a `# Agent` section if
   you write one, ride along.
-- **`aether.namespace`** — the component's default load name from `NAMESPACE`.
+- **`aether.namespace`** — present only when the module declares an explicit
+  entry actor; it carries that actor's default load namespace.
 
 You never write `extern "C"` by hand. The `_p32` suffix on the pointer-taking
 exports (`receive_p32`, `on_rehydrate_p32`) is the dual-target FFI convention
@@ -55,13 +56,15 @@ through the in-process transport rather than the FFI path.
 A crate can export more than one actor type ([ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md)):
 
 ```rust
-aether_actor::export!(RootManager, Panel, Toolbar);
+aether_actor::export!(entry = RootManager, Panel, Toolbar);
 ```
 
 The module then carries every listed type's code behind one FFI surface, and the
-load path picks which type an instance becomes (below). The first in the list is the
-**entry** type — the one a load instantiates when it says nothing else, and the one
-whose `NAMESPACE` fills the `aether.namespace` section. The `aether.kinds.inputs`
+load path picks which type an instance becomes (below). Only `entry = RootManager`
+makes it the default for a bare load and emits `aether.namespace`. A plain
+`export!(RootManager, Panel, Toolbar)` is deliberately defaultless: the loader
+requires an actor selection and declaration order has no meaning (ADR-0138).
+The `aether.kinds.inputs`
 manifest grows to one handler group per exported type, each tagged with its
 namespace, so the loader and `describe_component` read each type's surface
 separately. Grouping actors that belong together — a subsystem's coordinator and the
@@ -76,7 +79,7 @@ mailbox:
 | kind | does | reply |
 |---|---|---|
 | `aether.component.load` | compile + instantiate the wasm, register its kinds, publish a mailbox | `LoadResult` |
-| `aether.component.drop` | tear down a component, invalidate its mailbox id | `DropResult` |
+| `aether.component.drop` | tear down the guest and clear its capabilities; leave the trampoline slot empty | `DropResult` |
 | `aether.component.replace` | hot-swap the wasm behind a stable mailbox id | `ReplaceResult` |
 
 `LoadResult::Ok` carries the assigned `mailbox_id`, the **resolved name** (so a
@@ -88,13 +91,18 @@ string is the address you send subsequent mail to. Bare names (`"player"`) are
 
 For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the
-target type's `NAMESPACE` — and stands up that type, defaulting to the entry type
-when omitted. The selected type's namespace also becomes the default trampoline
+target type's `NAMESPACE` — and stands up that type. Omission defaults only when
+the module declared an explicit entry; a defaultless multi-actor module returns a
+load error. The selected type's namespace also becomes the default trampoline
 name, so loading the `Panel` export with `export: "ui.panel"` registers it at
 `aether.component/aether.embedded:ui.panel` and the `LoadResult` reports that type's
 capabilities. A selector naming a type the module doesn't export is a clean load
-error. A single-actor module has only the entry type, so an omitted selector is the
-whole story there.
+error. A single-actor module is unambiguous, so an omitted selector is the whole
+story there.
+
+Dropping does not make the lineage a fresh reusable component name. The empty
+trampoline remains registered at that address for the engine lifetime; terminate
+the engine when the whole slot must disappear.
 
 In practice you drive this through the MCP harness — `load_component(engine_id,
 selector, name?, config?, config_path?, export?)`, `replace_component(...)`,
@@ -135,16 +143,20 @@ fn on_open_panel(&mut self, ctx: &mut WasmCtx<'_>, _: OpenPanel) {
 }
 ```
 
-`Subname::Counter` has the host number the instance with a bare counter — `0`, `1`,
-… — for when you'll track it by the returned `MailboxId`; `Subname::Named("inventory")`
-gives it a stable name you address by. Either way the new instance lives at
-`aether.component/aether.embedded:<name>` like any loaded component, and its replies route
-back to the spawner. The name after `:` is always a flat segment (no `.`). Spawn stays within the module the instance runs from; a
-different binary comes in through `load_component`, which carries its own code and
-kind vocabulary. This is what lets a wasm crate be a *library* of actors: a UI root
-spawns its panels, a zone manager spawns a per-entity actor for each thing in range —
-all from one resident module, its compiled code shared across the instances while
-each keeps its own state.
+`Subname::Counter` has the host assign a bare monotonic counter — `0`, `1`, … —
+for when you'll track it by the returned `MailboxId`; `Subname::Named("inventory")`
+gives it a stable discriminator you can render and address. A spawned actor nests
+under the spawner's registered lineage ([ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md)): if a loaded root is
+`aether.component/aether.embedded:root`, its named child is
+`aether.component/aether.embedded:root/aether.embedded:inventory`, and another
+generation adds another `/aether.embedded:<subname>` node. Its `MailboxId` is the
+lineage fold, not `hash(flat_name)`, and replies still route back to the spawner.
+The text after each `:` is that node's discriminator; `/` carries the ancestry.
+Spawn stays within the module the instance runs from; a different binary comes in
+through `load_component`, which carries its own code and kind vocabulary. This is
+what lets a wasm crate be a *library* of actors: a UI root spawns its panels, a zone
+manager spawns a per-entity actor for each thing in range — all from one resident
+module, its compiled code shared across the instances while each keeps its own state.
 
 ## Hot reload
 
@@ -172,15 +184,28 @@ impl WasmActor for MyComponent {
 aether_actor::export!(MyComponent);
 ```
 
-`aether.component.replace` ([ADR-0022](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0022-drain-on-swap.md)) freezes the target mailbox, **drains
-in-flight mail through the old instance**, calls `on_dehydrate` on it (its chance to
-serialize state via the `Persistence` ctx), instantiates the new wasm module
-**behind the same binding**, and calls `on_rehydrate` on the new instance with the
-prior state bundle if one was saved. A component that leaves both hooks at their
-default swaps cleanly and comes back fresh from `init`. If the drain exceeds its
-timeout the replace fails and the **old instance stays bound** — a failed swap is a
-no-op, not a half-swapped actor. `ReplaceResult::Ok` carries the new component's
-capabilities so the hub's cached view reflects the swapped binary.
+`aether.component.replace` compiles the candidate and resolves its manifest/export,
+then runs `unwire` and `on_dehydrate` on the old instance, drops it, instantiates the
+new wasm **behind the same binding**, and calls `on_rehydrate` when the old instance
+saved a bundle. A component that leaves both state hooks at their defaults swaps
+cleanly and comes back fresh from `init`. There is no mailbox freeze/drain phase in
+this binding-stable implementation; queued mail remains on the trampoline's inbox,
+and the wire field `drain_timeout_ms` is accepted for compatibility but ignored.
+
+Replacement is phase-aware rather than transactionally rolled back:
+
+- candidate compile, manifest, or export-selection errors happen before the old
+  instance is touched;
+- a state-save error reinstalls the old instance after its `unwire` / `on_dehydrate`
+  hooks have run;
+- an instantiation error occurs after the old instance was dropped and leaves the
+  stable trampoline empty; and
+- a rehydrate error installs the new instance but returns `ReplaceResult::Err`, so
+  the caller must decide how to roll forward.
+
+Another replace can refill an empty trampoline. Only a fully successful replace
+returns `ReplaceResult::Ok` with the new component's capabilities so the hub's
+cached view reflects the swapped binary.
 
 The load-bearing property is **binding stability** ([ADR-0038](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0038-actor-per-component-dispatch.md)): the swap replaces
 the wasm Module *in place* behind a stable mailbox handle, so the mailbox id, any
@@ -199,4 +224,6 @@ bundle unless you're persisting a non-kind blob or driving an explicit migration
 - Kinds, ids, and how the vocabulary crosses the wasm boundary — [The type system](../foundations/type-system.md).
 - How mail routes and what a kind is — [Mail, kinds & scheduling](mail-and-kinds.md).
 - Why a handler must never block, and how to wait instead — [Concurrency & blocking](concurrency.md).
-- Loading and inspecting a live component — the `load_component` / `describe_component` MCP tools (`CLAUDE.md`).
+- Loading and inspecting a live component —
+  [Component registry and replacement](../operating/component-registry.md) and
+  the live MCP tool schemas.

@@ -23,9 +23,9 @@ the desktop chassis already pumps — and only the desktop chassis has a window 
 all. Routing it through mail keeps both facts behind the same boundary every
 other subsystem uses: an actor mails `aether.window` exactly as it mails
 `aether.render` or `aether.fs`, and the chassis is the one party that knows
-whether a window exists and which thread may touch it. A chassis without a window
-(headless, hub) registers the same mailbox but fails the request fast instead of
-pretending.
+whether a window exists and which thread may touch it. Headless and TestBench
+install a fail-fast companion. The hub does not install a window mailbox at all;
+verify the selected chassis rather than assuming every profile has the stub.
 
 The reply-with-applied-value contract exists because a window op can't promise to
 do exactly what it's told. The window manager owns the final say on geometry and
@@ -73,13 +73,14 @@ is the lever that foregrounds it first. (Per the platform, raising-to-front is
 best-effort — the `Ok` ack means the chassis applied the calls, not that the
 window manager honored every one.)
 
-**Desktop-only, fail-fast elsewhere.** Only the desktop chassis owns a window.
-The headless and hub chassis register `aether.window` too, but every handler
-replies `Err` ("unsupported on this chassis — no window peripheral") immediately.
+**Desktop-only, with explicit non-desktop behavior.** Only the desktop chassis owns a window.
+Headless and TestBench register `aether.window` with handlers that reply `Err`
+("unsupported on this chassis — no window peripheral") immediately. The hub
+omits the mailbox, so direct window mail there is unresolved.
 That's deliberate: a caller waiting on a window reply gets a fast, located
-failure instead of a request that hangs forever on a chassis that can never
-service it. The same fail-fast rule covers `capture_frame`, the other
-desktop-only surface.
+failure instead of a request that hangs forever on those profiles. Render/capture
+availability is a separate chassis choice; inspect its handler instead of
+inferring it from the window policy.
 
 **The window mailbox is drained by hand, on the event-loop thread.** Window
 operations have to run on the OS event-loop thread rather than a pool worker, so
@@ -140,8 +141,9 @@ The surface is intentionally small — three operations on one mailbox — and t
 seam is the chassis. A new window operation is a new request/reply kind pair in
 `aether-kinds` plus a handler on the desktop driver that applies it on the
 event-loop thread and records the inbound mail `Finished`. The fail-fast
-companion on the windowless chassis gains a matching `Err`-replying handler so the
-op stays addressable everywhere and hangs nowhere.
+companions gain a matching `Err` handler. Profiles that omit the capability,
+such as the hub, should keep that omission explicit rather than accidentally
+claiming a partial surface.
 
 The boundary not to cross is the OS toolkit itself. The window-manager specifics
 churn and are platform-dependent; the mail surface — the three kinds and the

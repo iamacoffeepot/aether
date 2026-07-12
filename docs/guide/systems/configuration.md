@@ -73,6 +73,13 @@ that's set but fails to parse, rather than falling through to the default. A bad
 value stops the boot with the key named, instead of a subsystem quietly running
 on a default you didn't ask for.
 
+Parsing failure is distinct from **post-parse semantic validation**. A known
+field with malformed syntax hard-errors. A successfully parsed value can still
+be rejected or normalized by a subsystem's explicit policy—for example a window
+mode may warn and fall back when the requested monitor mode is unavailable.
+Document that behavior with the owning subsystem rather than hiding it as a
+parse default.
+
 Discovery is the `--print-config` flag on any chassis binary: it walks the same
 declarations and prints every knob — its environment key, the value it resolves
 to and which source that value came from, its default, and its doc — then exits
@@ -84,8 +91,9 @@ when you're unsure what a build will do with a given variable.
 
 Over MCP there are three ways to set configuration, from coarsest to finest:
 
-- **The environment** is the workhorse, and it's what `CLAUDE.md` documents
-  knob by knob (`AETHER_TICK_HZ`, `AETHER_SAVE_DIR`, `AETHER_AUDIO_DISABLE`,
+- **The environment** is the fleet-wide layer. Use `--print-config`, the owning
+  config struct, and the active surface contract for exact knobs
+  (`AETHER_TICK_HZ`, `AETHER_SAVE_DIR`, `AETHER_AUDIO_DISABLE`,
   `AETHER_ACTOR_TRACE_RING_SIZE`, and the rest). It's fleet-wide and fixed at
   launch: set it before bringing the tunnel up, and every engine the hub forks
   inherits it.
@@ -178,5 +186,5 @@ cap, the per-request timeout — is the subject of [HTTP egress](http.md).
   context — [The MCP harness](../mcp-harness.md).
 - How a component declares and receives `type Config` —
   [Components & lifecycle](components.md).
-- The operational knob-by-knob reference for the `AETHER_*` environment surface —
-  `CLAUDE.md`.
+- The exact resolved knob inventory — the target chassis's `--print-config`
+  output and its current config structs.

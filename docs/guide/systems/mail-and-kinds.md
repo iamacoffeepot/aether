@@ -39,7 +39,7 @@ buys four things the project treats as non-negotiable:
   WASM, backs that with a real memory sandbox (its own linear memory, traps
   contained), which is a large part of why WASM is the target wired up first.
 - **Capability equals reachability — and so does observability.** There is no
-  privileged side-channel, not even for Claude: what an actor can do is exactly
+  privileged side-channel, not even for an operator agent: what an actor can do is exactly
   what it can mail, so gating a build is just choosing which mailboxes are
   registered. The payoff on the flip side is the point, not a side effect —
   because *every* function in the engine is reachable as mail, you can interpose
@@ -49,7 +49,7 @@ buys four things the project treats as non-negotiable:
   primary reason the model is shaped this way.
 - **Location independence.** Transport is a choice the recipient doesn't have
   to reason about: mail from a sibling actor in the same process and mail from
-  Claude over the MCP wire run the same handler path, so the "in-process SDK vs
+  an agent over the MCP wire run the same handler path, so the "in-process SDK vs
   out-of-process server" question dissolves ([ADR-0002](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0002-mail-first-architecture.md)/[ADR-0006](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0006-external-mail-transport.md)). A handler isn't
   fully blind to provenance — it can see a reply target and sender lineage
   ([ADR-0083](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0083-mail-sender-lineage.md)) — but the guarantee is that correctness and capability never
@@ -163,7 +163,7 @@ have *its* next mail queued behind you). A long *compute* handler is tolerated
 world* is not: await a reply through the framework so the scheduler can run
 other work meanwhile, or hand heavy/async work off the actor thread entirely
 through the sanctioned offload primitives. The full treatment — the await/hold primitives and how
-to reason about concurrency here — is its own topic (forthcoming). The rule to
+to reason about concurrency here — is in [Concurrency and blocking](concurrency.md). The rule to
 carry now: **don't block in a handler.**
 
 *How* mail is batched and balanced across workers (the per-producer rings, the
@@ -177,7 +177,8 @@ internals settle — build on the contracts above, not the internals.
 `{engine_id, recipient_name, kind_name, params}` — `recipient_name` is the
 mailbox, `kind_name` is the payload shape, `params` is JSON encoded against the
 kind's schema. For a batch that must settle as one traced unit, use
-`send_mail_traced`. The authoritative tool surface is in `CLAUDE.md`.
+`send_mail_traced`. The active MCP tool schema is authoritative for arguments;
+[the harness](../mcp-harness.md) explains the operating model.
 
 **From inside a component.** Address another actor *by type* —
 `ctx.actor::<RenderCapability>().send(&kind)` — or hold a `Mailbox<K>` token.

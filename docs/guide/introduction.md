@@ -1,70 +1,85 @@
 # Introduction
 
-Aether is an application engine — built for games, and **driven by an
-agent**. The substrate underneath is general: it hosts whatever real-time,
-interactive software runs on it (a game, a tool, a server), and games are the
-motivating target rather than a baked-in assumption — so don't expect a fixed
-game loop to be load-bearing. What *is* baked in everywhere is **who operates
-it**: the one who spawns engines, loads components, sends mail, authors
-content, and extends the codebase is Claude, sitting in a harness. Humans are
-welcome, but the surfaces are shaped for a machine consumer first.
+Aether is a pre-1.0 application engine built for games, tools, and other
+interactive systems. A thin native substrate hosts wasm and native actors;
+actors communicate by typed mail. An external operator can start engines, load
+and replace code, send mail, inspect live contracts, capture frames, and gather
+evidence without linking into the runtime.
 
-This guide is the narrative companion to that codebase. It is written for
-the agent that has to *do something* with aether and wants to understand
-the system well enough to extend or reuse it, not just call it.
+The operator is often an agent, but the architecture is not a private dialect
+for one model or harness. The same explicit, discoverable surfaces should make
+sense to a human contributor, a test harness, a game client, and different
+agent runtimes.
 
-## What this guide is (and isn't)
+## What is unusual
 
-Aether already has two kinds of agent-facing documentation:
+Three choices explain most of the system:
 
-- **`CLAUDE.md`** — reference: the facts, conventions, commands, and the
-  operational surface (what to mail where). Loaded into context every
-  session. Terse by design.
-- **ADRs** (`docs/adr/NNNN-*.md`) — the decision record: *why* each
-  load-bearing choice was made, in the order it was made. Authoritative,
-  but raw and chronological.
+1. **Everything important crosses a mail boundary.** A filesystem read, draw
+   request, component load, audio note, and game intent are addressed typed
+   messages rather than hidden host calls.
+2. **Native services and wasm code share the actor model.** The substrate owns
+   privileged resources; application/product logic stays replaceable and
+   observable above it.
+3. **Operation is out of process.** MCP and the hub make a running engine
+   inspectable and mutable while preserving process isolation and restartability.
 
-This guide is the missing middle: a **digested, navigable explanation** of
-how the system works and how to build with it. It synthesizes the ADRs into
-per-subsystem explainers, states the design philosophy out loud, and
-collects the worked "how to do X here" recipes. Where a section makes a
-claim about a subsystem, it cites the ADR that governs it — read the ADR
-for the authoritative detail; read the guide to understand the shape.
+Read [Why Aether is shaped this way](philosophy.md) for the design pressure and
+[Architecture overview](architecture.md) for the map.
 
-## How it's organized
+## Start by task, not chronology
 
-- **[Design & philosophy](philosophy.md)** — the load-bearing principles.
-  Why aether is mail-first, why the substrate is thin, why every surface is
-  built for a machine reader. Read this first; the rest of the system makes
-  sense in its light.
-- **[Architecture overview](architecture.md)** — the system map. The crates,
-  the substrate/chassis/capabilities split, the actor model, how mail flows
-  end to end, and how an agent reaches the engine through MCP.
-- **[The systems](systems.md)** — per-subsystem explainers: what each one is
-  for, what you mail it, and how to extend or reuse it.
-- **[Building with aether](recipes.md)** — recipes: worked, copy-able
-  walkthroughs for the recurring multi-file dances (adding a kind, a config
-  knob, a capability, a component).
-- **[Reference](reference.md)** — where to go for the authoritative detail.
+| Goal | Route |
+|---|---|
+| Run and inspect an engine | [First live-engine session](orientation/first-engine-session.md) |
+| Understand the repository | [Repository map](orientation/repository-map.md) |
+| Learn actors, kinds, and settlement | [Foundations](foundations/actor-model.md) then [core runtime](systems/core-runtime.md) |
+| Write guest code | [Writing guest code](writing-guest-code.md) |
+| Add a native or operator surface | [Choose an extension point](building/extension-points.md) |
+| Find a subsystem | [Subsystem map](systems.md) |
+| Diagnose a live failure | [Inspection and debugging](operating/inspect-and-debug.md) |
+| Contribute planned work | [Agent and contributor workflow](contributing/agent-workflow.md) |
 
-## A note on staleness
+[How to use this guide](orientation/using-the-guide.md) explains source
+authority, maturity labels, and how the chapters fit together.
 
-This guide carries file paths and symbol names, so it can drift as the code
-moves. Two defenses: every page cites the ADR it is digesting (the ADR is
-the durable source of truth), and recipes point at a **real in-tree example**
-rather than freezing a code snippet that rots. If a page names a file,
-function, or kind that no longer exists, trust the code and the ADR over the
-prose — and fix the page.
+## The documentation layers
 
-## Why a guide at all: the dogfood premise
+No single prose file is authoritative for every question:
 
-There's a second reason this guide exists, beyond helping an agent navigate.
-Aether's policy is that **every feature with a callable surface ships a short
-tutorial, and the tutorial _is_ the API sanity check** — a dual pass: a human
-reads it and the API looks sane, and an agent reads it and can build on the
-API from the tutorial alone. If either fails, the API is mis-shaped — and the
-fix is the design, not the prose.
+- **Current code and tests** define implemented behavior.
+- **Accepted ADRs** preserve architectural intent and rejected alternatives.
+- **The active surface contract** defines repository workflow: Codex uses
+  `AGENTS.md` and `.agents/skills/`; Claude/headless surfaces use their own
+  checked-in contracts.
+- **The live MCP schema and engine inventory** define current tool arguments and
+  one engine's actual kinds/handlers.
+- **This guide** connects those facts into concepts, task paths, and change
+  routes.
 
-So this guide is also a forcing function. An API you can't write a clean,
-followable explanation for is telling you something. Writing these pages is
-how we find out whether the surfaces we've built are actually coherent.
+Proposed ADRs are proposals even when partial code exists. Superseded ADRs are
+history even when an old type name remains. The [ADR map](reference/adr-map.md)
+teaches that distinction.
+
+## Written for agents, readable by people
+
+Agent-first documentation needs bounded pages, explicit prerequisites, exact
+source routes, failure models, and honest uncertainty. Human-readable
+documentation needs motivation and a coherent narrative. This book aims for
+both: prose explains why a boundary exists; tables and checklists make the next
+action easy to locate.
+
+System pages avoid duplicating volatile function signatures. Use them to find
+the owner and invariant, then verify the exact type/tool against source or live
+introspection.
+
+## Tutorials are API pressure
+
+A callable surface should support a short, truthful path from intent to result.
+If a recipe requires private archaeology, fake parameters, or unexplained
+special cases, either the recipe is stale or the API is too difficult to use.
+Fixing documentation is therefore part of API review, not polish after the
+design freezes.
+
+The [recipes](recipes.md) are worked examples. The system chapters remain the
+conceptual contract, and current code remains the implementation authority.

@@ -1,201 +1,197 @@
 # Capability module anatomy
 
-> **Governing ADRs:** [ADR-0121](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0121-capabilities-own-their-kinds.md)
-> (a capability owns the kinds it exchanges with its callers) and
-> [ADR-0122](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0122-split-actor-identity-from-runtime-state.md)
-> (an actor's addressing identity is a separate type from its state-bearing
-> runtime). This page states the shape those two decisions converge every
-> capability in `aether-capabilities` on; it decides nothing new and cites
-> the ADRs for the reasoning rather than re-deriving it.
+Native capabilities turn privileged host resources into actors. Two accepted
+decisions shape their modules:
 
-Every native capability under `crates/aether-capabilities/src/` — `fs`,
-`component`, `engine`, `audio`, `anthropic`, and the rest — is laid out the
-same way. The shape below is that convention, grounded against the current
-exemplars. A capability that deviates from it without a stated reason is
-drifting; use this page, alongside `CLAUDE.md` and the two ADRs, as the
-oracle for judging that drift. For *how to write* a capability, start from
-[Adding a chassis capability](recipes/adding-a-chassis-capability.md) — that
-recipe walks one exemplar end to end; this page is the catalog of rules
-across all of them.
+- ADR-0121: a capability normally owns the kinds it exchanges with callers.
+- ADR-0122: its always-addressable identity is separate from state-bearing
+  native runtime code.
 
-## 1. One directory per capability
+Use this page to route a change. Use [Adding a chassis capability](recipes/adding-a-chassis-capability.md)
+for a worked implementation and current neighboring modules as compile-ready
+examples.
 
-A capability is a directory module, `src/<cap>/`, never a single file
-(ADR-0121 decision 1). `fs/`, `component/`, `engine/`, `audio/`, and
-`anthropic/` are each their own directory carrying a `mod.rs` plus however
-many implementation files the capability's cohesion seams call for. A cap
-never grows past a single `<cap>.rs` file — once it needs more than a
-handful of items it becomes a directory instead, the same day it's added.
+## Typical directory
 
-## 2. The identity ZST lives in `mod.rs`
-
-A capability's addressing identity — the zero-sized `#[actor]` struct
-carrying `Addressable` and the per-handler `HandlesKind` markers — is
-declared in the module root, split from its state-bearing runtime
-(ADR-0122). `crates/aether-capabilities/src/anthropic/mod.rs` states the
-rule directly on `AnthropicCapability`:
-
-> A ZST carrying only the addressing — `Addressable` (`NAMESPACE`,
-> `Resolver`), the per-handler `HandlesKind` markers, and the
-> name-inventory entry, all emitted always-on by `#[actor]`. The
-> state-bearing runtime (`AnthropicCapabilityState`, which holds the
-> `aether_substrate`-typed adapter + task queue) lives behind the one
-> `feature = "runtime"` gate, so a transport-only build never names it nor
-> pulls `aether_substrate` through this cap.
-
-Two caps currently place the identity elsewhere — `input`'s
-`InputCapability` lives in `subscription.rs`, and `gemini`'s `#[actor] impl`
-sits in `capability.rs` rather than `mod.rs`. Both are variances the
-sibling structure-alignment work (#2474/#2478) closes, not exemplars of
-the rule.
-
-## 3. Runtime tiers: a file when light, a directory when heavy
-
-The runtime half — the state-bearing side gated behind `feature =
-"runtime"` — is a single `runtime.rs` for a light cap and a `runtime/`
-directory once it's heavy enough to decompose. The criterion is file
-count and decomposition, not raw line count: `fs/runtime.rs` stays one
-file despite its size, while `trampoline/runtime/`, `audio/runtime/`,
-`component/runtime/`, `render/runtime/`, and `lifecycle/runtime/` are all
-directories because each splits its runtime state across several
-cohesion seams. `crates/aether-capabilities/src/trampoline/runtime/mod.rs`
-states the criterion directly:
-
-> The cap is heavy and already decomposed, so unlike `aether.fs`'s
-> single-file `runtime.rs` the runtime half is a directory module […]
-
-## 4. A cluster is a thin root plus per-actor subdirectories
-
-A family of related capabilities under one parent root — several actors
-sharing a mailbox surface — keeps the root `mod.rs` thin: a shared
-`kinds.rs`, and one subdirectory per actor. `engine/` is the exemplar
-(`mod.rs` at 23 lines, `kinds.rs`, `proxy/`, `server/`, `store/`); `http/`
-is the other (`mod.rs` at 31 lines, `kinds.rs`, `client/`, `server/`). The
-root's job is composition — re-exports and module declarations — not
-implementation.
-
-`tcp/mod.rs` is 645 lines and has not been thinned to this shape yet; it's
-the cluster converging toward it, not a finished exemplar of it — sibling
-#2477 does the thinning.
-
-## 5. The wholly-native LLM sub-shape
-
-The content-generation capabilities — `anthropic`, `gemini`, and their
-shared `contentgen` machinery — are module-gated once at `lib.rs` behind
-`#[cfg(not(target_family = "wasm"))]`, and their backend files sit flat
-inside the module rather than in a per-backend subdirectory:
-`anthropic/{api,cli}.rs`, `gemini/{adapter,lyria,nanobanana}.rs`,
-`shared/contentgen/{adapter,shared,staging,task_queue}.rs`. These caps make
-blocking HTTPS / subprocess calls no wasm guest ever needs to address by
-type, so they skip the wasm-safe marker layer entirely rather than
-carrying an always-on identity split most of the rest of the crate does.
-
-## 6. The cfg-gate ladder
-
-Three gates stack, each with a stated reason:
-
-- **`feature = "runtime"`**, on by default for a chassis build
-  (`default = ["runtime"]` in `Cargo.toml`), gates the state-bearing
-  runtime half — the `Lifecycle` / `Dispatch` / `NativeActor` impls and
-  every `aether_substrate`-typed field.
-- **`<cap>-runtime` features** (`audio-runtime`, `render-runtime`) gate
-  the media capabilities whose runtime pulls a heavy native-only
-  dependency — `cpal` for audio, `wgpu` for render — on top of the base
-  `runtime` gate.
-- **`#[cfg(not(target_family = "wasm"))]`** is used sparingly and only
-  with a comment stating why. `lib.rs`'s module ladder carries one on
-  each wholly-native module (`anthropic`, `gemini`, `shared`,
-  `transforms`) explaining the native-only dependency it elides on a
-  wasm build. A narrower case is `input/subscription.rs`, where the
-  `SubscribeInputResult` reply-kind import alone rides
-  `#[cfg(not(target_family = "wasm"))]` rather than the full `runtime`
-  gate — the `#[actor]` macro's ADR-0109 `HandlerEntry` inventory
-  submission runs on every native build, runtime feature or not, and
-  needs the reply kind's `::ID` even on a transport-only build.
-
-## 7. A kind that stays upstream cites its must-stay rule
-
-A capability owns the kinds it exchanges with its callers in its own
-`kinds.rs` (ADR-0121 decision 2). Where some of a cap's kinds stay in
-`aether-kinds` instead — because a consumer that can't depend on the
-capability needs them (the substrate core, or the MCP harness) — the
-cap's `mod.rs` documents which kinds stay upstream and for whom.
-`crates/aether-capabilities/src/render/mod.rs` (lines 17–23) is the
-model:
-
-> The cap's drawing + texture mail kinds live in `kinds` (ADR-0121): they
-> ride the always-on (marker-only `render`) region so a wasm guest sees
-> the kind types for typed addressing without the `render-runtime` GPU
-> stack. The capture-request and `FrameCheck` verification kinds stay in
-> `aether-kinds` (consumed upstream by `aether-mcp` and the substrate
-> core), as do the `QuadSpace` / `QuadScale` projection types the
-> `aether.text` kinds share.
-
-## 8. Test placement
-
-Inline `#[cfg(test)] mod tests` at the end of the file under test is the
-default. A sibling `tests.rs` is for when the tests dwarf the subject —
-`engine/store/tests.rs` and `rpc/server/tests.rs` are both this case.
-Fixtures shared across capability families are private crate-root
-modules declared `#[cfg(test)] mod` in `lib.rs`: `test_chassis.rs` and
-`test_echo.rs`. `lib.rs` states why `test_echo` sits at the crate root
-rather than under one capability:
-
-> Shared round-trip test scaffolding (echo actor + its kinds), used by
-> the `rpc::server` test modules and the `engine::proxy` test. Lives at
-> the crate root — not under `rpc` — because its consumers span
-> families; a private top-level `mod` is reachable crate-wide via module
-> privacy (the `test_chassis` pattern).
-
-## Two open decisions
-
-The structure review that grounded this page also surfaced two small
-places where the caps have converged on more than one accepted answer.
-Both stand as recorded decisions rather than open questions to resolve.
-
-### Empty-config philosophy
-
-A config-free capability has two accepted shapes. `input`'s `InputConfig`
-(`input/config.rs`) keeps an empty struct:
-
-```rust
-#[derive(Default)]
-pub struct InputConfig {}
+```text
+aether-capabilities/src/example/
+  mod.rs                 identity, public re-exports, feature boundary
+  kinds.rs               caller-facing request/reply/value schemas
+  config.rs              resolved native config when it is a distinct seam
+  runtime.rs             light state + NativeActor handlers
+  runtime/               or a directory for a decomposed heavy runtime
+  tests.rs               only when tests would overwhelm the subject file
 ```
 
-so the chassis composes it with the same `Builder::with_actor::<InputCapability>(InputConfig {})`
-shape every other cap uses, and a future knob lands without changing the
-call site. `text`'s runtime (`text/runtime/mod.rs:247`) instead sets
-`type Config = ();` — there's nothing on the horizon this cap would ever
-need to configure.
+Clusters such as `engine/`, `http/`, and `tcp/` keep the root thin and put
+independent actors under `server/`, `proxy/`, `listener/`, `session/`, or shard
+submodules. Organize by state/lifetime ownership, not an arbitrary line limit.
 
-Reach for the empty-struct form when a config knob is plausible later and
-you want the composition site stable across that addition; reach for `()`
-when the capability genuinely has nothing to configure, now or
-foreseeably.
+## Identity in the module root
 
-### Fail-fast stub-cap naming
+The marker is a zero-sized type available to callers:
 
-A chassis without a subsystem still needs to claim that subsystem's
-mailbox, so it composes a stub capability in its place. Two naming
-conventions cover this: `Headless*Capability` for the chassis-without-
-that-subsystem companion — `HeadlessRenderCapability`
-(`render/mod.rs:279`), `HeadlessWindowCapability` (`window/mod.rs:35`) —
-and `UnsupportedTestBenchCapability` (`test_bench.rs:36`) for the
-test-bench chassis's blanket stand-in.
+```rust
+#[actor(singleton)]
+pub struct ExampleCapability;
+```
 
-`Headless*` names the specific subsystem the chassis is missing (render,
-window) and answers requests with `Err` in a way that mirrors the real
-cap's reply shape. `UnsupportedTestBenchCapability` covers whichever
-mailboxes the test bench doesn't stand up at all, under one name rather
-than one `Headless*` type per absent subsystem.
+The macro emits addressability, handled-kind markers, and inventory entries.
+Guest code can name `ctx.actor::<ExampleCapability>()` without linking native
+adapter state.
 
-## Where to read more
+Use `singleton` for one chassis mailbox and `instanced` for a family whose
+runtime discriminator/subname is part of identity. An unsupported chassis may
+install a separate headless/fail-fast identity claiming the same public
+namespace.
 
-- The step-by-step version of rules 1–3 — writing a new capability from
-  scratch — [Adding a chassis capability](recipes/adding-a-chassis-capability.md).
-- The identity/runtime split's full reasoning and alternatives —
-  [ADR-0122](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0122-split-actor-identity-from-runtime-state.md).
-- The kind-ownership decision and its must-stay rules — [ADR-0121](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0121-capabilities-own-their-kinds.md).
-- The pub-or-private visibility convention this crate also enforces —
-  `CLAUDE.md`.
+## State in the runtime half
+
+```rust
+pub struct ExampleCapabilityState {
+    adapter: Arc<dyn ExampleAdapter>,
+    pending: HashMap<u64, Pending>,
+}
+
+#[runtime]
+impl NativeActor for ExampleCapability {
+    type State = ExampleCapabilityState;
+    type Config = ExampleConfig;
+
+    const NAMESPACE: &'static str = "aether.example";
+
+    fn init(config: ExampleConfig, ctx: &mut NativeInitCtx<'_>)
+        -> Result<Self::State, BootError>
+    {
+        // construct native state
+    }
+
+    #[handler::single]
+    fn on_request(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        request: Request,
+    ) -> ResultKind {
+        // serialized actor transition
+    }
+}
+```
+
+The identity type never becomes the resource container. The runtime state owns
+devices, adapters, queues, worker handles, and pending correlations.
+
+An empty state is normally a named empty struct rather than hiding the split in
+`Self` or an unrelated singleton. Follow the closest current capability because
+derive/runtime requirements can vary for test-only actors.
+
+## Kind ownership
+
+Caller-facing `aether.example.*` kinds belong in `example/kinds.rs` and are
+re-exported from `example/mod.rs`. The marker face remains wasm-safe: schema,
+serde, and lightweight data dependencies only.
+
+Keep a kind in `aether-kinds` only when a named upstream consumer cannot depend
+on `aether-capabilities`, or when it is truly substrate-wide. Document that
+must-stay reason next to the exception. Current examples include inventory and
+some engine/control/capture contracts consumed by MCP or substrate core.
+
+Do not put render/audio/fs/HTTP kinds into the central crate by habit; those
+families are capability-owned.
+
+## Feature ladder
+
+Separate four questions:
+
+1. Can a guest name the identity and public kinds?
+2. Can native code compile the generic runtime integration?
+3. Is a heavy backend linked?
+4. Does a particular chassis install/configure the actor?
+
+Common gates are:
+
+- an always-on or light marker feature for transport types;
+- `feature = "runtime"` for substrate-typed state and handlers;
+- a heavy `<cap>-runtime` feature such as `audio-runtime`, `render-runtime`, or
+  `clipboard-runtime` for platform libraries;
+- native-target gates for provider/subprocess code that has no useful wasm
+  marker face.
+
+Feature presence is not chassis presence. Verify builder composition and live
+`describe_handlers` before promising availability.
+
+## Blocking and callback resources
+
+Actor dispatch remains the state owner. Host operations that can block must use
+an established boundary:
+
+- sidecar reader/writer/callback threads post bounded events to the actor;
+- `dispatch_blocking`/task completion holds settlement and returns results;
+- a cap-local queue bounds paid or expensive provider calls;
+- shutdown closes/detaches resources without indefinite joins on the dispatcher.
+
+The audio callback is stricter: no allocation, locks, logging, or blocking in the
+realtime callback. Network/file/provider work has different adapters but the
+same “state transitions return to the actor” rule.
+
+## Configuration
+
+Native configuration is resolved at chassis boot and passed as `type Config`.
+Use the repository's derive/layering system for argv, env, and config-file
+overlays; do not parse environment variables inside a handler.
+
+Marker-only guest builds usually do not need the resolved config type. Gate and
+re-export it at the runtime tier that owns it. A no-config capability can use
+`()`, while a named empty config can preserve a likely future composition seam;
+follow the neighboring chassis pattern deliberately.
+
+## Fail-fast unsupported actors
+
+If a public mailbox exists conceptually but a chassis cannot provide the
+resource, prefer an explicit unsupported actor that replies with the ordinary
+error shape. Examples include headless render/window/clipboard companions and
+the test-bench unsupported marker.
+
+Do not create a stub for fire-and-forget traffic unless it produces useful
+diagnostics and avoids misleading success. The goal is bounded failure, not
+pretend capability.
+
+## Tests by boundary
+
+| Contract | Test level |
+|---|---|
+| kind/schema/validation | unit tests beside `kinds.rs`/validator |
+| state machine/adapter mapping | runtime unit tests with a fake adapter |
+| actor mail/reply/settlement | focused TestBench test |
+| marker/runtime feature split | marker-only build/CI job |
+| chassis composition/resource | chassis/TestBench integration test |
+| hub/process routing | FleetBench |
+
+Shared RPC test echo code currently lives under
+`aether-capabilities/src/rpc/server/test_echo.rs`; engine/proxy tests reuse it.
+Do not copy old paths such as a crate-root `test_echo.rs` or `test_chassis.rs`.
+
+## Review checklist
+
+- Identity and kinds are usable without native runtime dependencies.
+- Capability-owned kinds did not leak into `aether-kinds` without a reason.
+- Runtime state has one actor owner; sidecars return events/results.
+- Every request that promises a reply resolves on success, error, disablement,
+  and shutdown.
+- Queues, bytes, timeouts, retries, and callback work are bounded.
+- Every intended chassis installs the real or explicit unsupported actor.
+- Resolved config appears in the appropriate `--print-config` surface.
+- Live handler/kind inventory sees the contract.
+- The selected test crosses the changed boundary.
+- A load-bearing new trust/compatibility decision has an ADR.
+
+## Current exemplars
+
+- Light single-file runtime: `fs/`, `input/`, `clipboard/`
+- Heavy runtime directory: `audio/`, `render/`, `component/`, `lifecycle/`
+- Multi-actor cluster: `engine/`, `http/`, `tcp/`
+- Native provider cluster: `anthropic/`, `gemini/`, `shared/contentgen/`
+- Split test support: `rpc/server/test_echo.rs`
+
+See [Guest/native boundaries](architecture/guest-native-boundary.md),
+[Configuration](systems/configuration.md), and the
+[capability index](reference/capability-index.md).

@@ -1,229 +1,199 @@
 # Writing a component
 
-> **Prereqs (the middle class):** `cargo` to compile *your* crate, and the
-> [MCP harness](../mcp-harness.md) up to load and drive it. You build a wasm
-> component to extend a running engine without rebuilding aether itself, so you're
-> in both loops at once — compile your crate, then drive the live engine.
+> **Prerequisites:** Rust with the `wasm32-unknown-unknown` target and a live
+> [MCP harness](../mcp-harness.md). This recipe builds guest wasm; it does not
+> rebuild the native chassis.
 
-A component is the wasm host of an actor: code you write, compile to
-`wasm32-unknown-unknown`, and load into a running substrate, where it talks to the
-chassis by mail like any other actor. This recipe takes an empty crate all the way
-to a loaded component answering mail — crate setup, the `#[actor]` block, `export!`,
-the wasm build, `load_component`, and the first round-trip.
+A component is a wasm module exporting one or more actors. This walkthrough
+builds a minimal ping/pong actor, uploads its bytes to the hub registry, loads
+an instance, sends one request, then replaces it without changing its mailbox.
 
-Read the [actor model](../foundations/actor-model.md) for how you *write* an actor
-and [Components & lifecycle](../systems/components.md) for the wasm-specific
-machinery; this recipe is the end-to-end loop those two pages describe in parts.
+Use `crates/aether-actor/examples/hello.rs` as the current in-tree exemplar and
+`crates/aether-test-fixtures/` for load/replace edge cases.
 
-> **Verify against current code.** This recipe carries symbol names and file paths,
-> so confirm them before you follow it: the SDK surface is `crates/aether-actor`, the
-> worked exemplar is `crates/aether-kit` (its `mesh_viewer` export,
-> `crates/aether-kit/src/runtime/mesh_viewer.rs`), and the minimal smoke component is
-> `crates/aether-actor/examples/hello.rs`. If a name below has moved, the fix is part
-> of the work.
+## 1. Create a dual-purpose crate
 
-## 1. Set up the crate
-
-A component is discovered **structurally** — no filename convention. The build walks
-the workspace and treats a package as a component when it has both signals at once: a
-`cdylib` library target, and a dependency on `aether-actor`. Those two lines in the
-manifest are what make `cargo xtask dist` cross-build your crate to wasm.
+A package is discovered as a component when it depends on `aether-actor` and
+exposes a `cdylib`. Add `rlib` when other Rust crates/tests should import its
+public kinds or helpers.
 
 ```toml
-# crates/my-component/Cargo.toml
 [package]
 name = "my-component"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2024"
 
 [lib]
-crate-type = ["cdylib"]          # signal 1: the wasm cdylib target
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-aether-actor = { path = "../aether-actor" }   # signal 2: the SDK dep
-aether-capabilities = { path = "../aether-capabilities", default-features = false, features = ["render"] }
+aether-actor = { path = "../aether-actor" }
 aether-kinds = { path = "../aether-kinds" }
-serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
-
-[lints]
-workspace = true
 ```
 
-`aether-capabilities` gives you the capability types you address by — `RenderCapability`,
-`LifecycleCapability`, `InputCapability` — and `aether-kinds` is the substrate kind
-vocabulary (`Tick`, `DrawTriangle`, `Key`, …). A component that defines *its own*
-kinds with `#[derive(aether_data::Kind)]` also needs `inventory` reachable on native
-builds, gated to non-wasm targets so the wasm guest skips the registration:
+In this workspace, inherit version/dependencies/lints as neighboring crates do.
+If the component defines public kinds, keep them in its always-on public surface
+or a small sibling contract crate so callers can encode the same schema without
+linking the guest runtime implementation.
 
-```toml
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-inventory = { workspace = true }
-```
-
-A component and the peers that talk to it share the kind crate, so put any kinds you
-invent in a sibling crate both sides depend on. `aether-kit`'s manifest
-(`crates/aether-kit/Cargo.toml`) is the worked version of all of this, including
-the dual-output `["cdylib", "rlib"]` shape a crate uses when host integration tests
-link the same source. `aether-kit` packs several actors into one cdylib with
-`export!(A, B, …)` (ADR-0096) — its `camera` and `mesh_viewer` exports are the worked
-multi-actor examples.
-
-## 2. Write the actor block
-
-The receive side is one `#[actor] impl WasmActor for C` block. Each `#[handler::<class>]`
-method *is* a handler — the macro infers the kind it handles from the method's third
-parameter, so there's no typelist to maintain.
+## 2. Implement one actor
 
 ```rust
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, Resolver, actor};
-use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::{LifecycleCapability, RenderCapability};
-use aether_kinds::{DrawTriangle, Tick};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_kinds::{Ping, Pong};
 
-pub struct MyComponent {}
+pub struct Echo;
 
 #[actor]
-impl WasmActor for MyComponent {
-    const NAMESPACE: &'static str = "my_component";   // default load name
+impl WasmActor for Echo {
+    const NAMESPACE: &'static str = "example.echo";
 
-    fn init<C>(_ctx: &mut C) -> Result<Self, ActorInitError>
-    where
-        C: Resolver,
-    {
-        Ok(MyComponent {})
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self)
     }
 
-    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
-        // Subscribe the calling actor to the tick stream. This is the
-        // first point sending is allowed.
-        ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
-    }
-
+    /// Echo a sequence number to the caller.
     #[handler::single]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
-        ctx.actor::<RenderCapability>().send(&TRIANGLE);
+    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, ping: Ping) -> Pong {
+        Pong { seq: ping.seq }
     }
 }
+
+aether_actor::export!(Echo);
 ```
 
-Two parts earn attention:
+The contracts are visible in the types:
 
-- **`init` can't mail — subscribe in `wire`.** `init` runs while the actor is still
-  being built and its mailbox isn't published yet, so its context is `Resolver`-only
-  and has no `send`. Stream subscriptions and any other startup mail go in `wire`,
-  which runs once the mailbox is live. The context type enforces this: a `send` from
-  `init` doesn't compile. Subscriptions clear on drop and survive a `replace`, since
-  the mailbox id is stable.
-- **The third parameter is the kind.** `on_tick`'s `Tick` argument is what the macro
-  routes on; the handler takes the decoded mail by value and `&mut self` because
-  nothing else touches the state concurrently. Add an optional `#[fallback] fn(&mut
-  self, ctx, mail: Mail<'_>)` to catch unhandled kinds, or omit it for a strict
-  receiver.
+- `WasmInitCtx` cannot send startup mail before the mailbox is published. Put
+  subscriptions and startup sends in `wire(&mut self, &mut WasmCtx)`.
+- The handler's third argument is the input kind.
+- `#[handler::single]` declares one reply; the return type is the reply kind.
+- Actor state is only touched through serialized `&mut self` dispatch.
+- `export!` emits FFI and actor/kind manifests; do not write host exports by hand.
 
-`crates/aether-actor/examples/hello.rs` is this skeleton fleshed out (a static
-triangle plus a ping/pong reply); `crates/aether-kit/src/runtime/mesh_viewer.rs` is
-the full-scale version with a mail family of handlers.
+## 3. Make entry selection explicit
 
-## 3. Add `export!`
-
-One line, required, with no native-side equivalent:
+For one actor, `export!(Echo)` is unambiguous. For several actors choose whether
+the module has a default:
 
 ```rust
-aether_actor::export!(MyComponent);
+// Bare loads select Console; other actors remain selectable.
+aether_actor::export!(entry = Console, Inspector, Worker);
+
+// No default: every load must select Alpha or Beta explicitly.
+aether_actor::export!(Alpha, Beta);
 ```
 
-This emits the `#[no_mangle]` FFI entry points the host calls across the wasm
-boundary and the `aether.kinds.inputs` custom section that `describe_component` reads
-back. Without it the wasm carries no exports and the substrate can't drive the actor.
-You never write `extern "C"` by hand. The emitted shims are **wasm32-only**, so a
-host (rlib) build of the same crate carries no FFI symbols — host-side tests drive a
-component through the in-process transport instead.
+Declaration order does **not** make the first actor the entry. Defaultless
+modules omit `aether.namespace` and a bare load fails (ADR-0138).
 
-## 4. Build for wasm32
+## 4. Build the wasm artifact
 
-```console
-$ rustup target add wasm32-unknown-unknown    # once per toolchain
-$ cargo build --target wasm32-unknown-unknown -p my-component
+```sh
+rustup target add wasm32-unknown-unknown
+cargo build --target wasm32-unknown-unknown -p my-component
 ```
 
-The artifact lands at `target/wasm32-unknown-unknown/debug/my_component.wasm` (the
-crate name with dashes turned to underscores). CI and the pre-flight cross-build
-every discovered component with `cargo xtask dist --no-bins`, which runs this same
-per-package wasm build; reach for `xtask dist` to mirror CI, the direct `cargo build`
-to iterate fast.
-
-## 5. Load it over MCP
-
-`load_component(engine_id, selector)` resolves against the hub's content-addressed
-component registry (ADR-0116) and forwards the wasm to the engine's `aether.component`
-mailbox, returning a `LoadResult`. The *upload* tool takes the filesystem **path** and
-reads the bytes for you — `upload_component` stages `my_component.wasm` into the store
-and returns `{hash, name}` — so `load_component` itself never carries a path, only the
-resolved `selector`.
+The debug artifact is normally:
 
 ```text
-upload_component(staged_path = ".../my_component.wasm")      → { hash, name }
-spawn_substrate(selector = "default")                         → engine_id
-load_component(engine_id, selector = "<hash-or-name>")        → LoadResult
+target/wasm32-unknown-unknown/debug/my_component.wasm
 ```
 
-`LoadResult::Ok` carries the assigned `mailbox_id`, the **resolved name**, and the
-advertised capabilities read from the manifest. A loaded component registers at
-**`aether.component/aether.embedded:my_component`** — `NAMESPACE` rendered into the
-runtime lineage. Read that full string off `LoadResult.name`; it's the address every
-later send targets.
+`cargo xtask dist --no-bins` structurally discovers and builds the workspace
+component set. Use the direct package build for iteration and the distribution
+command when validating packaging/discovery.
 
-> **Bare names warn-drop.** Sending to `"my_component"` (the bare `NAMESPACE`) goes
-> nowhere — that name is never registered, and the mail is dropped with a warning.
-> Always address the full `aether.component/aether.embedded:…` name from
-> `LoadResult.name`.
+## 5. Upload, then load
 
-## 6. Send it mail and read the logs
-
-Address mail to the resolved name. `recipient_name` names the **mailbox**;
-`kind_name` names the **payload shape** — they route independently even when they
-share a prefix.
+Stored artifacts and live instances are different resources:
 
 ```text
-send_mail([{
+upload_component(staged_path = ".../my_component.wasm", name = "my-component-dev")
+  → { hash, name, ... }
+
+spawn_substrate()
+  → { engine_id, ... }
+
+load_component(engine_id, selector = "<returned hash or name>")
+  → { mailbox_id, name, capabilities, ... }
+```
+
+`upload_component` is the only step above that takes a host wasm path.
+`load_component` resolves a registry selector. For a defaultless module, select
+an export (for example `module@actor`) as described by the live tool schema.
+
+Record the returned loaded `name`, normally a full lineage such as
+`aether.component/aether.embedded:example.echo`. Do not send to the bare Rust
+namespace and do not substitute the registry artifact name for the live mailbox.
+
+If the actor has typed config, pass either inline `config` JSON or
+`config_path` pointing to a JSON file. MCP schema-encodes that JSON against the
+component's config kind. `config_path` is not a pre-encoded binary blob.
+
+## 6. Inspect and send
+
+Use the loaded lineage with `describe_component`. Confirm `aether.ping` is in
+the handler set and its reply is `aether.pong`. Use `describe_kinds` for the
+current parameter shape.
+
+```text
+send_mail({
   engine_id,
-  recipient_name = "aether.component/aether.embedded:my_component",
-  kind_name      = "aether.lifecycle.tick",
-  params         = {}
-}])
+  recipient_name: "<LoadResult.name>",
+  kind_name: "aether.ping",
+  params: { "seq": 7 }
+})
 ```
 
-To see what the component did, pull its log ring with `actor_logs(engine_id,
-"aether.component/aether.embedded:my_component")`. Only in-actor `tracing::*` events
-land in the ring (a `tracing::warn!` in a rejection arm, say); host events go to
-stderr. For a component that renders, `capture_frame(engine_id)` reads the frame back
-as a PNG — dispatch the state-producing mail in the call's `mails` bundle so it lands
-before the readback.
+Expect a decoded pong with `seq: 7`. If the load succeeds but mail is unresolved,
+check the exact lineage first. If the handler is missing, check the selected
+export and rebuild the wasm instead of trusting an old artifact.
 
-## 7. Iterate with `replace_component`
+## 7. Replace in place
 
-Once it's loaded, edit the Rust, rebuild the wasm (step 4), and hot-swap it in place:
+Edit the actor, rebuild, and upload the new bytes. Replacement also resolves a
+registry selector:
 
 ```text
-replace_component(engine_id, mailbox_id, ".../my_component.wasm")
+upload_component(staged_path = ".../my_component.wasm", name = "my-component-dev")
+  → { hash: new_hash, ... }
+
+replace_component(
+  engine_id,
+  component = "<loaded lineage or mailbox id required by live schema>",
+  selector = "<new_hash>"
+)
 ```
 
-The swap replaces the wasm Module behind the **same mailbox id**, so peers, route
-caches, and input subscriptions all stay valid — no reload, no re-addressing. State
-continuity across the swap is opt-in through the `on_dehydrate` / `on_rehydrate`
-hooks; see the [hot reload](../systems/components.md#hot-reload) section for carrying
-state forward.
+The trampoline/mailbox lineage remains stable while the module changes.
+Replacement can preserve, migrate, reject, or reshape state through persistence
+hooks and its compatibility contract. Test that path with the typed/reshaped
+fixture patterns; a successful code swap alone does not prove state continuity.
 
-> **Rebuild the wasm after a chassis kind or mailbox rename.** A prebuilt
-> `.wasm` carries the kind names it was compiled against. Rename a chassis kind or
-> mailbox and reload a stale artifact, and its mail routes to nothing — the symptom
-> is a component that loads cleanly but observes no kinds. Rebuild before you load.
+Re-run `describe_component` after replacement and refresh named-kind discovery
+before sending a newly introduced kind.
 
-## Where to read more
+## 8. Clean up what you own
 
-- How you write an actor at all — its lifecycle, `#[actor]`, handlers, addressing
-  by type — [The actor model](../foundations/actor-model.md).
-- The wasm-specific machinery — the FFI trampoline, `export!`'s custom sections,
-  multi-actor modules, hot reload — [Components & lifecycle](../systems/components.md).
-- The load / send / capture / log tools in operational detail —
-  [The MCP harness](../mcp-harness.md).
+Drop a task-owned component from a shared engine only when other actors no
+longer depend on it. Drop clears the guest but leaves an empty trampoline at
+that lineage; the name is not a fresh reusable slot in the same engine.
+
+If you spawned the engine for this recipe, terminate that exact `engine_id`.
+Do not terminate an engine merely because it is the only one you can see.
+
+## Common failures
+
+| Symptom | Check |
+|---|---|
+| Wasm has no callable actor | `export!` is present in the wasm build |
+| Bare load fails | module is defaultless; select an export |
+| Config decode fails | pass JSON shape, not encoded bytes |
+| Mail warn-drops | use returned lineage, not namespace/artifact name |
+| New build did not load | replacement selector still points at old hash |
+| State disappeared | persistence/rehydrate contract was absent or rejected |
+
+Continue with [Components and lifecycle](../systems/components.md),
+[Component registry and replacement](../operating/component-registry.md), and
+[Guest/native boundaries](../architecture/guest-native-boundary.md).

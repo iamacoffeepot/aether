@@ -48,7 +48,7 @@ pub struct FetchResponse {
 
 /// HTTP backend. One method — `fetch` — takes a validated request
 /// and returns the response or a structured error. The adapter is
-/// responsible for allowlist enforcement, URL validation, body
+/// responsible for initial-URL allowlist enforcement, URL validation, body
 /// caps, and timeout application; the cap just moves bytes between
 /// wire and adapter.
 pub trait HttpAdapter: Send + Sync {
@@ -130,7 +130,7 @@ impl NativeActor for HttpCapability {
     }
 }
 
-/// `ureq`-backed adapter. Holds the shared agent, the allowlist
+/// `ureq`-backed adapter. Holds the shared agent, the initial-host allowlist
 /// (empty = deny all), the response cap, and the `require_https`
 /// flag. Thread-safe: `ureq::Agent` is cheaply cloneable and
 /// internally synchronised, so the same adapter drives the cap from
@@ -149,6 +149,9 @@ impl UreqHttpAdapter {
     /// tests build adapters directly to avoid env contamination.
     #[must_use]
     pub fn new(allowlist: HashSet<String>, require_https: bool, max_body_bytes: usize) -> Self {
+        // ureq's default redirect policy is intentionally unchanged here. The
+        // adapter validates only the initial URL host; redirect targets are not
+        // rechecked against `allowlist` in the current implementation.
         let config = ureq::Agent::config_builder().http_status_as_error(false).build();
         let agent = ureq::Agent::new_with_config(config);
         Self { agent, allowlist, require_https, max_body_bytes }

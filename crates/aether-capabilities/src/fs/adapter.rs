@@ -56,14 +56,13 @@ pub enum Access {
 /// POSIX/Windows is atomic at the filesystem level; no application-
 /// level lock needed.
 ///
-/// **Path safety.** `resolve` rejects any `path` that contains `..`
-/// segments, empty segments, or leading `/` — a component asking for
-/// `save://../etc/passwd` fails with `Forbidden` before the adapter
-/// touches the filesystem. `.` segments are permitted (they no-op on
-/// the join). Symlink escapes from within the namespace root are not
-/// defended against in v1: the substrate owns the root directory and
-/// doesn't create symlinks, and adversarial writes would require a
-/// pre-compromised disk state.
+/// **Path safety.** `resolve` performs a lexical `/`-separated check: it
+/// rejects leading `/` and exact `..` segments, so
+/// `save://../etc/passwd` fails with `Forbidden`. It does not canonicalize the
+/// joined target. Symlink escapes are not defended against, and Windows
+/// backslash traversal/drive-prefixed forms do not pass through the same
+/// slash-based checks. Treat configured roots as trusted until containment is
+/// enforced at the filesystem boundary.
 pub struct LocalFileAdapter {
     root: PathBuf,
     access: Access,

@@ -176,7 +176,7 @@ now missing after one side changed.
 user-controlled or geometrically-derived data must enforce a depth/budget cap
 that returns an error rather than overflowing the stack; prefer an explicit
 work-stack for anything whose depth could exceed a few hundred frames
-(`CLAUDE.md`). Recursion bounded by a small structural input (a parse/AST walk)
+(`AGENTS.md`). Recursion bounded by a small structural input (a parse/AST walk)
 is fine. *Tell:* a stack-overflow abort on adversarial or pathological input.
 
 ## Where to read more
