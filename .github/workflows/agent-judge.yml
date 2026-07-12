@@ -86,11 +86,21 @@ on:
 # backstop's fan-out run is named for what it is.
 run-name: judge-${{ github.event.issue.number || inputs.ref || 'scan' }}
 
-# One judge pass per issue; a re-label supersedes an in-flight pass rather than
-# racing it to the same comment. Scheduled scans share one group (a newer scan
-# subsumes an older one — it recomputes the same board).
+# One judge pass per issue; a re-label of phase:plan supersedes an in-flight pass
+# rather than racing it to the same comment. Scheduled scans share one group (a
+# newer scan subsumes an older one — it recomputes the same board).
+#
+# A label event that is NOT phase:plan gets a group of its own, and that is the
+# whole point of this expression. GitHub evaluates `concurrency` BEFORE the job's
+# `if`, so a run the gate will skip still joins the group and still cancels what
+# is in flight there. Keyed on the bare issue number, every label event on the
+# judged issue cancelled the judge — and /scope stamps size:* and model:* the
+# instant after phase:plan, so the judge was cancelled two seconds into every
+# correctly-scoped issue. It survived only on an issue whose scoper forgot those
+# labels. Giving the skipped events a unique group makes them cancel nothing,
+# while a genuine phase:plan re-label still supersedes as intended.
 concurrency:
-  group: agent-judge-${{ github.event.issue.number || inputs.ref || 'scan' }}
+  group: agent-judge-${{ (github.event_name == 'issues' && github.event.label.name != 'phase:plan') && github.run_id || github.event.issue.number || inputs.ref || 'scan' }}
   cancel-in-progress: true
 
 # These workflows run no actions/checkout — they are API orchestration, not builds.
