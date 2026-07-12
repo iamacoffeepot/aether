@@ -17,6 +17,15 @@ name: Agent work
 # but this workflow is dispatchable by anything holding actions: write, so the
 # refusal lives in the skill the executor runs — not in the caller.
 #
+# `approve-sweep` (#3188) is approve's batched shape and the one the tick
+# dispatches: one run processes EVERY eligible phase:plan issue through the same
+# per-issue gates and authority bound, so a wave spends one runner on approval
+# instead of one per issue. Its ref is the constant `all` — the run-name
+# work-approve-sweep-all keeps the (task, ref) grammar, and the claim it makes
+# is on the whole approve queue rather than one issue. The single-issue
+# `approve` task remains for the per-issue paths: agent-chat's question-resume
+# re-dispatch and a maintainer's manual kick.
+#
 # Manual dispatch only at this rung — no cron, no autonomy. A maintainer runs
 # workflow_dispatch with a task and a ref; every later rung (#3130 chat, #3131
 # tick) dispatches into this same workflow.
@@ -67,10 +76,11 @@ on:
         options:
           - scope
           - approve
+          - approve-sweep
           - implement
           - land
       ref:
-        description: Ref to act on (issue number for scope/approve/implement, PR number for land)
+        description: Ref to act on (issue number for scope/approve/implement, PR number for land, the constant `all` for approve-sweep)
         type: string
         required: true
 
@@ -99,8 +109,9 @@ jobs:
     runs-on: runs-on=${{ github.run_id }}/runner=${{ inputs.task == 'implement' && '8cpu-linux-x64/extras=s3-cache' || (inputs.task == 'land' && '2cpu-linux-x64/spot=false' || '2cpu-linux-x64') }}
     # Bring-up leash per task (review.yml's rationale: a wedged in-flight run must
     # not idle an EC2 runner toward the 6h default). implement's CI Refine loop is
-    # the long pole, so it gets the widest leash.
-    timeout-minutes: ${{ inputs.task == 'implement' && 90 || 30 }}
+    # the long pole, so it gets the widest leash; approve-sweep walks a whole
+    # queue of per-issue gate checks, so it gets double the single-approve leash.
+    timeout-minutes: ${{ inputs.task == 'implement' && 90 || (inputs.task == 'approve-sweep' && 60 || 30) }}
     # Read-only on GITHUB_TOKEN. This job checks out and executes repo code
     # (headless Claude drives the wrapper skill under --dangerously-skip-permissions),
     # so it must never hold a write scope on the default token — every write
@@ -181,8 +192,12 @@ jobs:
           # the executor refuses the work itself. For a land task REF is a PR, whose
           # closing issue is where the label lives; the label is read off REF either
           # way, so a benched PR is honoured too and a benched issue never reaches a
-          # land dispatch (the tick already filters it out of the scan).
-          if gh api "repos/${REPO}/issues/${REF}/labels" --jq '.[].name' 2>/dev/null \
+          # land dispatch (the tick already filters it out of the scan). approve-sweep
+          # is the one task whose REF (`all`) names no issue, so the read is skipped
+          # for it; the same point-of-spend enforcement lives inside the sweep instead
+          # — its wrapper's enumeration excludes agent:dont-touch issues per candidate.
+          if [ "$TASK" != "approve-sweep" ] && \
+             gh api "repos/${REPO}/issues/${REF}/labels" --jq '.[].name' 2>/dev/null \
              | grep -qx 'agent:dont-touch'; then
             echo "#${REF} carries agent:dont-touch — benched by the owner; refusing ${TASK}."
             echo "- refused \`${TASK}\` on #${REF}: agent:dont-touch" >> "$GITHUB_STEP_SUMMARY"
@@ -210,6 +225,22 @@ jobs:
               labels="$(gh api "repos/${REPO}/issues/${REF}/labels" --jq '.[].name')"
               if grep -qxE 'phase:(ready|refine|executing|building|qa|findings|held)' <<<"$labels"; then
                 echo "issue #${REF} is at/past a post-plan rung — approve already complete; nothing to do."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              ;;
+            approve-sweep)
+              # The sweep claims the whole approve queue, so the guard is a board
+              # probe, not a per-ref label read: no open phase:plan issue at all
+              # means a stale or duplicate dispatch with provably nothing to do — a
+              # clean no-op before any Claude spend. One or more means proceed; the
+              # wrapper resolves per-issue eligibility (tier, dont-touch, parks)
+              # itself, and a crashed sweep resumes by re-enumeration — approved
+              # issues rest at phase:ready and drop out, the rest are re-processed.
+              plan_count="$(gh api "repos/${REPO}/issues?labels=phase:plan&state=open&per_page=1" \
+                --jq 'map(select(has("pull_request")|not)) | length')"
+              if [ "${plan_count:-0}" -eq 0 ]; then
+                echo "no open phase:plan issue — the approve queue is empty; nothing to do."
                 echo "proceed=false" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
@@ -273,9 +304,11 @@ jobs:
       # The human-visible claim marker (the machine claim is the live run itself),
       # linking back to this run. Posted on the ref's issue/PR conversation — the
       # issues/<n>/comments endpoint serves both. Body written to a file first so
-      # its content is not shell-expanded.
+      # its content is not shell-expanded. approve-sweep has no single conversation
+      # to mark (its ref is the queue), so it posts nothing here — the wrapper
+      # leaves per-issue comments only where the sweep acts on an issue.
       - name: Post the start-of-work comment
-        if: steps.guard.outputs.proceed == 'true'
+        if: steps.guard.outputs.proceed == 'true' && inputs.task != 'approve-sweep'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -289,12 +322,12 @@ jobs:
           gh api -X POST "repos/${REPO}/issues/${REF}/comments" -F body=@/tmp/start-comment.md
 
       # Assert the aether-agent bot git identity before any commit/merge. scope and
-      # approve write no commits (approve reads git for its freshness gate and
-      # writes only a label), so this is gated off for them. The App's canonical
+      # approve (single and sweep) write no commits (approve reads git for its
+      # freshness gate and writes only labels), so this is gated off for them. The App's canonical
       # commit identity is <bot-user-id>+<app-slug>[bot]@users.noreply.github.com
       # so GitHub attributes the commit to the App, never to the owner.
       - name: Assert the bot git identity
-        if: steps.guard.outputs.proceed == 'true' && inputs.task != 'scope' && inputs.task != 'approve'
+        if: steps.guard.outputs.proceed == 'true' && inputs.task != 'scope' && inputs.task != 'approve' && inputs.task != 'approve-sweep'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
@@ -314,10 +347,10 @@ jobs:
       # Check out the default branch (the skills live here and the wrapper cuts
       # its own branch from origin/main). The App token is persisted as the git
       # credential so any push the wrapper issues rides the App identity and wakes
-      # downstream workflows. implement/land need full history, and so does
-      # approve — its freshness gate reads `git log origin/main --since=<scoped-at>`
-      # over the plan's targeted paths, which a shallow clone cannot answer. Only
-      # scope is shallow.
+      # downstream workflows. implement/land need full history, and so do approve
+      # and approve-sweep — the freshness gate reads `git log origin/main
+      # --since=<scoped-at>` over each plan's targeted paths, which a shallow
+      # clone cannot answer. Only scope is shallow.
       - uses: actions/checkout@v4
         if: steps.guard.outputs.proceed == 'true'
         with:
@@ -372,6 +405,12 @@ jobs:
           name="${REPO#*/}"
           case "$TASK" in
             scope|approve|implement) issue="$REF" ;;
+            # The sweep spans issues, so no single model:* label can route it —
+            # and none needs to: approve is gate-reading and label writes, not
+            # design work, so the proven headless sonnet default drives every
+            # sweep regardless of what models the queued issues route their
+            # implementation to.
+            approve-sweep) issue="" ;;
             land)
               issue="$(gh api graphql -f query='
                 query($owner:String!,$name:String!,$number:Int!){
@@ -432,7 +471,7 @@ jobs:
           end-turn point), end your turn." \
             --dangerously-skip-permissions \
             --model "$MODEL" \
-            --max-turns ${{ inputs.task == 'implement' && 400 || 200 }} \
+            --max-turns ${{ (inputs.task == 'implement' || inputs.task == 'approve-sweep') && 400 || 200 }} \
             --output-format stream-json --verbose \
             | tee /tmp/agent-work-session.jsonl \
             | python3 scripts/render-agent-stream.py \

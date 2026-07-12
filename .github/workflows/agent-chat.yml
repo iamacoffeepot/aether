@@ -220,8 +220,15 @@ jobs:
           task="$(grep -oE 'task=[a-z]+' <<<"$marker" | head -n1 | cut -d= -f2 || true)"
           ref="$(grep -oE 'ref=[0-9]+' <<<"$marker" | head -n1 | cut -d= -f2 || true)"
           [ -n "$ref" ] || ref="$ISSUE"
+          # approve parks come from two writers: a single-issue approve run, and
+          # the approve sweep — whose per-issue parks deliberately carry
+          # task=approve ref=<n> (no session pointer) so the owner's answer
+          # resumes that ONE issue down the single-issue path, never the batch.
+          # approve-sweep itself is not a valid marker task: nothing parks under
+          # it, and dispatching a whole sweep off one issue's answer would be
+          # wrong anyway.
           case "$task" in
-            scope|implement|land) ;;
+            scope|approve|implement|land) ;;
             *)
               echo "parked marker carries an unrecognized task='${task:-}' — falling back to a plain turn."
               echo "parked=false" >> "$GITHUB_OUTPUT"

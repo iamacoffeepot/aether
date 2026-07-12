@@ -57,9 +57,13 @@ name: Agent tick
 #   no phase:* (Backlog)          -> scope     (framable body; agent-work's scope
 #                                               self-bounces an unframable one)
 #   phase:define / phase:design   -> scope     (resume a crashed scope run)
-#   phase:plan                    -> approve    (AUTO TIER ONLY — see below; a
+#   phase:plan                    -> approve-sweep (AUTO TIER ONLY — see below; a
 #                                               judge/human-tier issue rests here
-#                                               for its reader)
+#                                               for its reader. ONE batched
+#                                               dispatch covers every queued
+#                                               issue; the per-issue approve
+#                                               task survives for question-
+#                                               resume and manual kicks)
 #   phase:ready                   -> implement
 #   phase:building/qa/findings    -> none       (reconciler-owned; #3126)
 #   phase:held                    -> land       (ref is the open closing PR)
@@ -77,10 +81,25 @@ name: Agent tick
 # reconciler holds a merged diff to, so the tier is resolved over exactly the
 # surface that is later enforced. Most-restrictive-wins (human > judge > auto);
 # an issue that declares NO surface takes the policy default and is never
-# dispatched. Only `auto` dispatches; every other outcome logs a skip line with
+# dispatched. Only `auto` advances; every other outcome logs a skip line with
 # the resolved tier and rests. This is the one thing in the tick that needs repo
 # code, hence the actions/checkout below — still no Claude and no cargo, so the
 # tick stays free and deterministic.
+#
+# THE APPROVE SWEEP (#3188). Auto-tier plan issues do not dispatch one run each:
+# the tick counts them and dispatches at most ONE `work-approve-sweep-all` run
+# per wave, whose /approve-sweep-headless wrapper enumerates the queue itself
+# and walks every eligible issue through the full per-issue gates. Approval is
+# the cheapest, read-mostly step on the ladder, and batch pre-approval can queue
+# many issues at once — one box per label flip wasted a wave slot and a budget
+# unit apiece. The tick's per-issue tier lines above remain the pre-filter (and
+# the log of WHY the sweep is worth dispatching); the sweep re-resolves each
+# tier before writing, so the gate logic keeps exactly one definition. The
+# sweep's (task, ref) is (approve-sweep, all): the constant ref keeps the
+# run-name grammar, makes the singleton platform-enforced, and the claim it
+# encodes is the whole approve queue. Crash recovery is unchanged — approved
+# issues rest at phase:ready and drop out of the next enumeration, the rest are
+# re-processed by the next sweep.
 #
 # approval:pre-approved is the owner's per-issue override on that lookup: it
 # resolves the tier to `auto` whatever the policy says. It CANNOT pass the ADR
@@ -418,6 +437,7 @@ jobs:
           land_items=""
           resume_items=""
           work_items=""
+          approve_queue=0
           while IFS=$'	' read -r num phase await dt itype alert preapp; do
             [ -n "$num" ] || continue
             if [ "$dt" = "dt" ]; then summary "- skip #${num}: agent:dont-touch"; continue; fi
@@ -460,14 +480,29 @@ jobs:
                   actor="$(gh api "repos/${REPO}/issues/${num}/timeline" --paginate \
                     --jq '[.[] | select(.event=="labeled" and .label.name=="approval:pre-approved")] | last | .actor.login // empty')"
                   if [ "$actor" = "$OWNER" ]; then
-                    summary "- #${num}: approval:pre-approved by the owner (tier was ${tier}) — dispatching approve"
+                    summary "- #${num}: approval:pre-approved by the owner (tier was ${tier}) — treated as auto"
                     tier="auto"
                   else
                     summary "- #${num}: approval:pre-approved ignored — applied by '${actor:-unknown}', not the owner"
                   fi
                 fi
                 case "$tier" in
-                  auto) summary "- #${num}: approval tier auto — dispatching approve"; task="approve"; ref="$num" ;;
+                  auto)
+                    # Auto-tier issues do not dispatch one run each — they queue
+                    # for the wave's single approve sweep (THE APPROVE SWEEP,
+                    # header above). The one exception is question-resume: an
+                    # awaiting-answer issue keeps the per-issue approve task so
+                    # an answered park resumes down the single-issue path rather
+                    # than being batch-processed.
+                    if [ "$await" = "await" ]; then
+                      summary "- #${num}: approval tier auto — awaiting-answer, per-issue approve on owner reply"
+                      task="approve"; ref="$num"
+                    else
+                      summary "- #${num}: approval tier auto — queued for the approve sweep"
+                      approve_queue=$((approve_queue + 1))
+                      continue
+                    fi
+                    ;;
                   adr) summary "- skip #${num}: ADR hard gate — the owner approves this one"; continue ;;
                   none) summary "- skip #${num}: no declared surface — not auto-approvable"; continue ;;
                   *) summary "- skip #${num}: approval tier ${tier} — awaiting its reader"; continue ;;
@@ -496,6 +531,21 @@ jobs:
               work_items="${work_items}${task} ${ref}"$'\n'
             fi
           done < /tmp/board.tsv
+
+          # At most one approve sweep per wave: any queued auto-tier plan issue
+          # becomes a single work-approve-sweep-all item at the head of the work
+          # list, costing one slot and one budget unit whatever the queue depth.
+          # The is_live read is the same singleton guard every task uses (a live
+          # sweep also holds the quiescence barrier below, so this line mostly
+          # buys the explicit summary).
+          if [ "${approve_queue}" -gt 0 ]; then
+            if is_live "approve-sweep" "all"; then
+              summary "- skip approve sweep: work-approve-sweep-all already live (${approve_queue} issue(s) queued)"
+            else
+              work_items="approve-sweep all"$'\n'"${work_items}"
+              summary "- approve sweep: ${approve_queue} auto-tier plan issue(s) — one work-approve-sweep-all dispatch"
+            fi
+          fi
 
           dispatch() {
             gh workflow run agent-work.yml -f task="$1" -f ref="$2"

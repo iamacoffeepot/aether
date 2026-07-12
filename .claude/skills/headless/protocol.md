@@ -30,7 +30,7 @@ The owner's reply re-dispatches the job, which `claude --resume`s the same sessi
 The question comment has a fixed, machine-parseable shape so the resume path can find it and its S3 pointer without heuristics. The leading HTML-comment marker is the greppable anchor, carrying `task`, `ref`, `run`, and the S3 `session` URI as key=value pairs; the numbered **Options** list is the parseable choice set:
 
 ```markdown
-<!-- aether-agent:awaiting-answer task=<scope|implement|land> ref=<issue-or-pr> run=<run-url> session=<s3-uri> -->
+<!-- aether-agent:awaiting-answer task=<scope|approve|implement|land> ref=<issue-or-pr> run=<run-url> session=<s3-uri> -->
 **Parked on #<N> — need a decision.**
 
 <question in plain language, the load-bearing "why" first>

@@ -147,9 +147,11 @@ it. `human` work always waits for the owner. An explicit `ADR flag:` or a
 declared `docs/adr/**` edit takes the human route before policy lookup;
 ordinary citations to existing ADRs do not.
 
-The hosted tick resolves Plan surfaces with the same canonical matcher and
-dispatches an approval run only when the result is exactly `auto`. The
-headless gate resolves the tier again before writing Ready. `judge`, `human`,
+The hosted tick resolves Plan surfaces with the same canonical matcher and,
+when any issue resolves to exactly `auto`, dispatches one batched approval
+sweep per wave that walks every such issue through the full per-issue gates —
+approval is read-mostly, so the whole queue shares one runner. The headless
+gate resolves each tier again before writing Ready. `judge`, `human`,
 ADR-bearing, missing-surface, and unresolved-policy outcomes remain at Plan for
 their reader.
 
