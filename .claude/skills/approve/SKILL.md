@@ -182,6 +182,18 @@ Route by the resulting tier:
 - **`judge`** — route to the LLM approval judge (#3133), shadow-mode first: the judge's verdict is recorded but the owner still confirms until the judge is trusted.
 - **`human`** — hold for the owner's explicit `/approve`, exactly as today.
 
+### The owner's override — `approval:pre-approved`
+
+An issue carrying `approval:pre-approved` resolves to the **`auto`** tier whatever the policy says. It is the owner's way to say "I have read *this one*, let it go" without widening the policy for a whole surface.
+
+Three constraints, and none of them are negotiable:
+
+**It cannot pass the [ADR hard gate](#adr-hard-gate).** That gate runs *above* the policy lookup and *above* this label. An issue carrying an `ADR flag:` or declaring `docs/adr/` routes to the owner even with the label applied. An ADR is load-bearing by definition — there is no passable gate for one. Check the ADR gate first and refuse before you ever look at this label.
+
+**It must be the owner's label.** Verify against the timeline: the most recent `labeled` event for `approval:pre-approved` must name the repo owner as its actor (the same check `approval:surface-ok` and `review:skip` use — `gh api repos/iamacoffeepot/aether/issues/<n>/timeline`). An agent may apply the label; it does not count, and the refusal says who applied it. Without this check an agent could grant itself unbounded approval authority through a side door, which is the one thing this whole policy exists to prevent. Never treat the label's mere presence as sufficient.
+
+**It waives the tier, not the [gate checks](#gate-checks).** The tier answers *who approves*; the gate checks answer *whether the issue is approvable at all* — sections present, exactly one `model:*`, dependencies closed, targets still on `origin/main`. A pre-approved issue still runs every one of them and still refuses on a failure. A missing `model:*` means `/scope` did not finish, which is a defect to fix rather than something to wave into `implement`.
+
 The tier decision runs *after* the structural [Gate checks](#gate-checks) pass — a failing gate refuses regardless of tier. Relaxing a tier is a one-line, owner-signed diff to `.github/approval-policy.yml`; the file's git history is the delegation-ladder audit trail. The declared surface this tier is resolved over is the same surface the reconciler later enforces the merged diff against, so the thing that ships is the thing that was approved.
 
 ## ADR gate, in detail
