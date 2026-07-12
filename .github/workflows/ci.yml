@@ -76,7 +76,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node --test scripts/dogfood-token-table.test.mjs scripts/post-dogfood-rollup.test.mjs scripts/dogfood-action-contract.test.mjs
+      - run: node --test scripts/dogfood-token-table.test.mjs scripts/post-dogfood-rollup.test.mjs scripts/dogfood-action-contract.test.mjs scripts/post-review-rollup.test.mjs
 
   # The declared-surface matcher and the approval-tier resolver gate what the
   # unattended fleet may advance, and their strict policy parser fails closed:

@@ -2,12 +2,15 @@ name: Review
 
 # Producer-side quality check: run the repo's five-pillar review workflow
 # (.claude/workflows/review.js) over a PR's diff via headless Claude Code,
-# and post the rollup as inline PR annotations + a summary comment with an
-# advisory `review:unresolved` label. The five-pillar verdicts are agent
-# judgment posted as a COMMENT review, never REQUEST_CHANGES — advisory in
-# content. The `gate` job below mirrors the label into a required `Review
-# gate` commit status that blocks merge on a Rust-touching PR; a non-Rust
-# PR is never held.
+# and post the rollup as inline PR annotations + a summary comment with the
+# `review:unresolved` label. The five-pillar verdict is now submitted NATIVELY
+# by the reviewer App `iamabarista` (ADR-0148) — an `APPROVE` (clean or
+# out-of-scope) or `REQUEST_CHANGES` (actionable) review; barista authors no
+# PR, so GitHub does not 422 its self-verdict the way it would kettle's. This
+# rung ships that channel SIDE-BY-SIDE with the still-authoritative mirror: the
+# `gate` job below mirrors the label into a required `Review gate` commit status
+# that blocks merge on a Rust-touching PR (a non-Rust PR is never held), and
+# branch protection keeps gating on the status until a later owner-signed flip.
 #
 # Trigger is first-green, then incremental. The workflow fires when a PR's CI
 # run completes successfully (`workflow_run` on "CI") and resolves the PR from
@@ -461,6 +464,18 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: review-rollup
+      # Mint the barista installation token that AUTHORS the native verdict.
+      # Minting is confined to this trusted `post` job (which runs only main's
+      # code and reads the PR head as data) — never the branch-code-executing
+      # `review` job — so the approval channel is reachable only from main,
+      # exactly as ADR-0148 requires. Same pattern as agent-work.yml's writer
+      # App mint; barista authors no PR, so GitHub does not 422 its verdict.
+      - name: Mint the barista installation token
+        id: barista-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.BARISTA_APP_ID }}
+          private-key: ${{ secrets.BARISTA_APP_PRIVATE_KEY }}
       - name: Fetch the PR's changed files + diff hunks
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -470,6 +485,12 @@ jobs:
       - name: Post the rollup as annotations + summary
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The verdict-submission POST rides barista; every other call (summary
+          # comment, dedup reads, the review:unresolved label) stays on
+          # GITHUB_TOKEN. BARISTA_LOGIN lets the poster find barista's standing
+          # verdict for the duplicate-verdict guard.
+          BARISTA_TOKEN: ${{ steps.barista-token.outputs.token }}
+          BARISTA_LOGIN: iamabarista[bot]
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ needs.review.outputs.pr_number }}
           HEAD_SHA: ${{ needs.review.outputs.head_sha }}
@@ -490,6 +511,55 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ needs.review.outputs.pr_number }}
         run: gh workflow run reconciler.yml -f pr="$PR"
+
+  approve:
+    name: Out-of-scope approve
+    needs: review
+    # The whole-PR-no-Rust class — the same PRs the `gate` job auto-succeeds —
+    # gets a session-less barista APPROVE so barista carries a standing verdict
+    # on every class a later required-review flip will read. `always()` because
+    # the `post` job is skipped for this class (no rollup), and the pr_number
+    # guard drops the fork / no-open-PR cases. Over-cap PRs are Rust-touching
+    # (touches_rust != 'false'), so they never reach here — they rest fail-closed.
+    if: >
+      always() &&
+      needs.review.outputs.pr_number != '' &&
+      needs.review.outputs.touches_rust == 'false'
+    runs-on: ubuntu-latest
+    # A pure-API job: no branch checkout, no repo write scope. The APPROVE rides
+    # the minted barista token, not the job's GITHUB_TOKEN.
+    permissions:
+      contents: read
+    steps:
+      - name: Mint the barista installation token
+        id: barista-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.BARISTA_APP_ID }}
+          private-key: ${{ secrets.BARISTA_APP_PRIVATE_KEY }}
+      - name: Submit the out-of-scope APPROVE as barista
+        env:
+          GH_TOKEN: ${{ steps.barista-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.review.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.review.outputs.head_sha }}
+          BARISTA_LOGIN: iamabarista[bot]
+        run: |
+          set -euo pipefail
+          # Skip when barista already approved this head SHA, so repeated green
+          # pushes on a no-Rust PR don't spam duplicate approvals. Stream the
+          # matching review ids (a per-page `.[]` jq, so --paginate concatenates
+          # cleanly rather than emitting one length per page) and test non-empty.
+          approved="$(gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
+            --jq ".[] | select(.user.login==\"${BARISTA_LOGIN}\" and .commit_id==\"${HEAD_SHA}\" and .state==\"APPROVED\") | .id")"
+          if [ -n "$approved" ]; then
+            echo "barista already approved ${HEAD_SHA} — skipping."
+            exit 0
+          fi
+          gh api -X POST "repos/${REPO}/pulls/${PR}/reviews" \
+            -f event=APPROVE \
+            -f commit_id="${HEAD_SHA}" \
+            -f body='Out of scope for the five-pillar review (no Rust changed) — auto-approved by barista, mirroring the `Review gate` non-Rust success.'
 
   gate:
     name: Review gate
