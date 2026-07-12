@@ -67,7 +67,7 @@ Before every label write, re-read the issue identity and current labels. Abort i
 
 - Put markdown in a temporary file using `apply_patch`; do not interpolate it into a shell command.
 - Create or edit with file inputs such as `-F body=@/tmp/aether-issue-<N>.md`.
-- Scope owns these exact H2 sections: `Problem statement`, `Design notes`, `Implementation plan`, `Sub-issues`, `Depends on`, `Dogfood brief`, and `Side findings`.
+- Scope owns these exact H2 sections: `Problem statement`, `Design notes`, `Implementation plan`, `Sub-issues`, `Depends on`, `Declared surface`, `Dogfood brief`, and `Side findings`.
 - Preserve every other section and all user prose byte-for-byte when replacing managed sections.
 - Immediately before a full-body `PATCH`, re-read issue number, title, and body. Abort on a concurrent managed-section edit; merge only non-overlapping user prose changes.
 - Comments exist for human-directed information without a structured home: bounce reasons, explicit overrides, and deliberate declines. Phase progress belongs in labels and artifacts, not progress comments.

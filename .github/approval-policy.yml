@@ -20,10 +20,10 @@
 # every `judge` surface becomes autonomous with no edit to this file.
 #
 # Globs use gitignore-style ** semantics (gitwildmatch): ** spans path segments,
-# * stays within one segment, ? is one non-slash character — the syntax
-# .gitignore already trains readers to expect. Both consumers evaluate these
-# same globs: the no-Claude reconciler over a stock matcher, and /approve as a
-# Claude reader.
+# * stays within one segment, ? is one non-slash character, and a leading /
+# anchors the repository root — the syntax .gitignore already trains readers to
+# expect. Every consumer evaluates these same globs: the no-model reconciler,
+# the Claude approval skill, and Codex's deterministic approval-tier resolver.
 #
 # Relaxing a tier is a one-line, owner-signed diff to this file, so the file's
 # git history is the delegation ladder's audit trail. `.github/approval-policy.yml`
@@ -67,20 +67,33 @@ rules:
   # New systems, and the supply chain. A new crate MUST add one of these, so this
   # is how "adding a new core system" is caught; a dependency change lands here
   # too, which is the same conversation.
-  - glob: "Cargo.toml"
+  - glob: "/Cargo.toml"
     tier: human
   - glob: "crates/*/Cargo.toml"
     tier: human
 
-  # Constitutional, and the harness's own machinery. Self-modification of the
-  # thing that decides what may self-modify is the owner's alone.
+  # Constitutional, and every supported agent harness's own machinery.
+  # Self-modification of the thing that decides what may self-modify is the
+  # owner's alone.
   - glob: "docs/adr/**"
     tier: human
+  - glob: "/AGENTS.md"
+    tier: human
+  - glob: "/CLAUDE.md"
+    tier: human
+  - glob: ".agents/**"
+    tier: human
   - glob: ".claude/**"
+    tier: human
+  - glob: ".codex/**"
+    tier: human
+  - glob: "/.mcp.json"
     tier: human
   - glob: ".github/workflows/**"
     tier: human
   - glob: ".github/approval-policy.yml"
+    tier: human
+  - glob: "scripts/surface-match.py"
     tier: human
 
   # Submitted-and-expected-to-come-back-right. These advance on their own.

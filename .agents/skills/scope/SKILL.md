@@ -1,6 +1,6 @@
 ---
 name: scope
-description: "Walk one Aether issue, an explicit issue set, or the Backlog sweep from Define through Design and Plan. Use to write and safely reconcile scope-managed issue sections, split oversized work, and stamp phase, size, and implementation-model labels without implementing or approving the work."
+description: "Walk one Aether issue, an explicit issue set, or the Backlog sweep from Define through Design and Plan. Use to write and safely reconcile scope-managed issue sections, emit the declared implementation surface, split oversized work, and stamp phase, size, and implementation-model labels without implementing or approving the work."
 ---
 
 # Scope
@@ -57,9 +57,16 @@ Handle eligible states as follows:
 - Backlog: start Define and reconcile to `phase:define` before writing scope artifacts.
 - `phase:define`, `phase:design`, or `phase:plan`: resume at the earliest incomplete phase consistent with the label. Refuse an upstream-section gap hidden by a later label and ask for an explicit earlier `--phase`.
 - `phase:bounced`: require exactly one `bounce-to:define|design|plan`. Use the explicit `--phase` when supplied, otherwise use the bounce target. Before resuming, replace the full label set in one REST `PUT`, excluding every `phase:*` and `bounce-to:*` label and appending the target phase. Note an explicit override of the recorded target.
-- `phase:plan` with all required artifacts, exactly one valid `size:s|m|l`, exactly one valid implementation `model:*`, and no `--phase`: report that the issue is already scoped and make no write. If the body is complete but either routing label is missing or invalid, rerun Plan's routing decision and repair the final label set.
+- `phase:plan` with all required artifacts, a non-empty valid Declared surface (or the exact pure-umbrella exception below), exactly one valid `size:s|m|l`, exactly one valid implementation `model:*`, and no `--phase`: report that the issue is already scoped and make no write. If the body is complete but either routing label is missing or invalid, rerun Plan's routing decision and repair the final label set.
 
 When forcing Define or Design on an issue still within the scope phases, clear stale `size:*` and `model:*` labels while atomically setting the requested phase. Recompute them only after Plan succeeds.
+
+When an explicit Plan rewrite or incomplete-Plan repair starts from
+`phase:plan`, first atomically move the issue to `phase:design` and clear
+stale size/model labels, then write Plan. The final reconcile creates a fresh
+`phase:plan` label event only after every artifact is verified; that event is
+the freshness timestamp and wakes a new hosted judge/auto-approval pass. Do not
+cycle the phase for a body-identical repair of size/model labels alone.
 
 ## Own and preserve body sections
 
@@ -71,11 +78,12 @@ Own exactly these H2 sections:
 ## Implementation plan
 ## Sub-issues
 ## Depends on
+## Declared surface
 ## Dogfood brief
 ## Side findings
 ```
 
-Treat duplicate managed H2 headers as an invalid body and stop. Preserve every other section, comment, and user-authored byte verbatim. Replace an existing managed span in place. Append a missing managed section in the order above. Omit `Sub-issues`, `Depends on`, and `Side findings` when empty; never omit the four required Problem, Design, Implementation, and Dogfood sections at completed Plan.
+Treat duplicate managed H2 headers as an invalid body and stop. Preserve every other section, comment, and user-authored byte verbatim. Replace an existing managed span in place. Append a missing managed section in the order above. Omit `Sub-issues`, `Depends on`, and `Side findings` when empty; never omit the five required Problem, Design, Implementation, Declared surface, and Dogfood sections at completed Plan.
 
 Apply this guard before every full-body `PATCH`:
 
@@ -125,7 +133,18 @@ Treat a new load-bearing decision affecting public traits, wire formats, actor l
 - If a draft ADR PR already exists, link it in Design notes and continue; `$approve` will require it to be merged.
 - If a new ADR must be authored, write the grounded Design notes, remain at `phase:design`, and hand off `$adr <title>`. Resume Design after the ADR is available to cite.
 
-After verifying a complete Design write with no unresolved ADR boundary, atomically reconcile to `phase:plan`.
+When the issue adds or changes an ADR, or implementation is gated on a new
+load-bearing decision, include a non-empty `ADR flag: <reason or ADR path>`
+line in Design notes and preserve it through Plan. Do not emit the flag for an
+ordinary citation to an existing ADR. The flag is approval-routing data:
+`$approve` sends flagged work to the owner before consulting path policy.
+
+After verifying a complete Design write with no unresolved ADR boundary, keep
+the issue at `phase:design` and continue into Plan. The final verified Plan
+body plus atomic phase/size/model label reconcile below is the only
+Design-to-Plan transition. This prevents the hosted judge from observing
+half-written Plan artifacts and makes the Plan label event a trustworthy
+freshness timestamp.
 
 ## Plan
 
@@ -151,6 +170,55 @@ Lift every cross-issue ordering precondition into:
 ```
 
 Do not bury dependency language only in plan prose.
+
+### Declared surface
+
+Emit `## Declared surface` on every completed Plan as one non-empty fenced
+list of gitwildmatch globs:
+
+````text
+## Declared surface
+
+```
+crates/aether-data/src/wire.rs
+crates/aether-data/tests/**
+```
+````
+
+Derive the list from every concrete path in the Implementation plan and Design
+notes. Use the narrowest honest bound: one edited file can name itself, while a
+genuinely crate-wide change can use `crates/<name>/**`. Every concrete target,
+including each `(create)` target, must be covered by at least one declared
+glob, and every glob must cover a concrete target or a tracked path at the
+captured ref.
+
+Keep only globs inside the fence—one per line, with no bullets, comments,
+negation, absolute paths, backslashes, empty/`.`/`..` segments, or control
+characters. To keep approval-tier resolution provable, use either a concrete
+repository path or a literal directory prefix followed by one final `/**`;
+do not put `*`, `?`, or character classes anywhere else. Split a broad
+declaration along the actual planned roots instead of using an escape-hatch
+glob such as `**` or `crates/**`. The same declaration feeds two independent
+guards: `$approve` resolves the most-restrictive `auto|judge|human` tier
+against `.github/approval-policy.yml`, and the Reconciler later holds a PR
+whose changed paths escape it.
+
+Tier resolution covers every path a subtree permits, not only files that happen
+to exist today. For example, `crates/aether-kit/**` also permits its
+`Cargo.toml` and therefore takes the human supply-chain tier; use
+`crates/aether-kit/src/**` only when the Plan genuinely excludes the manifest.
+
+A validated pure umbrella is the one exception because it has no implementation
+path and must never produce a PR. Emit exactly:
+
+```text
+## Declared surface
+
+N/A — pure umbrella; no implementation PR
+```
+
+`$approve` routes that exception to the owner, and `$implement` continues to
+reject the umbrella itself.
 
 ### Dogfood brief
 
@@ -235,12 +303,14 @@ Require each child to return one JSON object:
   "implementation_plan": string | null,
   "sub_issue_drafts": array,
   "depends_on": array,
+  "declared_surface": array | {"na_reason": "pure umbrella; no implementation PR"},
   "dogfood_brief": object | {"na_reason": string} | null,
   "side_findings": array,
   "size": "s" | "m" | "l" | null,
   "model": "haiku" | "sonnet" | "opus" | null,
   "model_reason": string | null,
   "adr": {"status": "covered" | "draft" | "required" | "none", "references": array, "title": string | null},
+  "adr_flag": string | null,
   "bounce_to": "define" | "design" | "plan" | null,
   "message": string
 }
@@ -252,6 +322,6 @@ Roll up every candidate as `plan`, `bounced`, `dropped`, or `failed`, with phase
 
 ## Completion
 
-Stop at `phase:plan`. Report the sections written, size/model labels, dependencies, ADR references, child issues, and side-finding count. Point to `$approve <N>` as the next lifecycle action.
+Stop at `phase:plan`. Report the sections written, declared surface, size/model labels, dependencies, ADR references/flag, child issues, and side-finding count. Point to `$approve <N>` as the next lifecycle action.
 
 Do not write production code, create an implementation worktree, open an implementation PR, approve the issue, dispatch implementation, or file Side findings from this skill.

@@ -406,7 +406,9 @@ jobs:
             if [ -z "$surface" ]; then echo "none"; return; fi
             if grep -q '^[[:space:]]*docs/adr/' <<<"$surface"; then echo "adr"; return; fi
             printf '%s\n' "$surface" > "/tmp/surface-${1}.txt"
-            python3 scripts/surface-match.py --tier "/tmp/surface-${1}.txt" .github/approval-policy.yml
+            # Isolated mode keeps a changed checkout from shadowing stdlib imports
+            # beside this trusted matcher while the App token is in scope.
+            python3 -I scripts/surface-match.py --tier "/tmp/surface-${1}.txt" .github/approval-policy.yml
           }
 
           # Bucket advanceable items by priority tier. land bypasses the barrier

@@ -393,7 +393,7 @@ jobs:
               # The one place gitwildmatch semantics are decided, shared with the
               # tick's approval-tier lookup (#3176). Prints the changed paths that
               # escape the declaration, tier-annotated; silent when contained.
-              escaping="$(python3 "${RUNNER_TEMP}/surface_match.py" \
+              escaping="$(python3 -I "${RUNNER_TEMP}/surface_match.py" \
                 "${RUNNER_TEMP}/globs.txt" "${RUNNER_TEMP}/changed.txt" "${RUNNER_TEMP}/policy.yml")"
 
               # Owner waiver: approval:surface-ok accepts the overreach, but only
