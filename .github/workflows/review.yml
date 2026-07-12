@@ -455,10 +455,12 @@ jobs:
     runs-on: ubuntu-latest
     # The only job with write scopes, and it never executes branch code:
     # the default checkout is the base repo (main), so the poster script is
-    # the trusted version — the PR head is only ever read as data.
+    # the trusted version — the PR head is only ever read as data. actions:
+    # write is for the terminal reconciler poke below.
     permissions:
       pull-requests: write
       issues: write
+      actions: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -480,6 +482,19 @@ jobs:
           ROLLUP_PATH: review-rollup.json
           FILES_PATH: pr-files.json
         run: node scripts/post-review-rollup.mjs
+
+      # Poke the reconciler with the exact PR number this review just posted
+      # for, so its linked issue's phase recomputes the moment the review
+      # verdict lands rather than waiting on the cron backstop. workflow_dispatch
+      # is the documented exception that a GITHUB_TOKEN-created event still
+      # triggers a workflow. continue-on-error: a failed poke degrades to the
+      # reconciler's scheduled recompute and must never fail the rollup post.
+      - name: Poke the reconciler
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ needs.review.outputs.pr_number }}
+        run: gh workflow run reconciler.yml -f pr="$PR"
 
   gate:
     name: Review gate

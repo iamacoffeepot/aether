@@ -634,11 +634,13 @@ jobs:
     # default checkout is the base repo (main), so the evidence + poster
     # scripts are the trusted versions. A failed trial's no-rollup comment
     # points to the Actions run rather than consuming branch artifacts; the PR
-    # head is never executed here.
+    # head is never executed here. actions: write is for the terminal reconciler
+    # poke below.
     permissions:
       contents: write
       issues: write
       pull-requests: write
+      actions: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
@@ -745,3 +747,13 @@ jobs:
           Clear it by fixing the feature (or the brief) and re-running the trial via \`workflow_dispatch\` on the Dogfood workflow with this PR number.
           EOF
           gh api -X POST "repos/${REPO}/issues/${ISSUE}/comments" -f body="$(cat /tmp/bounce-body.md)"
+
+      # Poke the reconciler with the exact PR number this attempt posted for, so
+      # its linked issue's phase recomputes the moment the dogfood verdict lands
+      # rather than waiting on the cron backstop. workflow_dispatch is the
+      # documented exception that a GITHUB_TOKEN-created event still triggers a
+      # workflow. continue-on-error: a failed poke degrades to the reconciler's
+      # scheduled recompute and must never fail the attempt post.
+      - name: Poke the reconciler
+        continue-on-error: true
+        run: gh workflow run reconciler.yml -f pr="$PR"
