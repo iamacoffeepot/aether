@@ -373,7 +373,7 @@ mod engine {
     ///
     /// - `namespaces` — every exported actor's `Addressable::NAMESPACE`. A
     ///   single-actor module yields one; a multi-actor module
-    ///   (`export!(A, B, …)`) yields one per type, the entry type first.
+    ///   (`export!(A, B, …)`) yields one per type, the default type first.
     /// - `actors` — one [`ComponentActor`] per exported actor type, the
     ///   `module@actor` selector axis (ADR-0096 export selector).
     /// - `handled_kinds` — the union of every actor's handled `KindId`s
@@ -709,7 +709,7 @@ mod control_plane {
         /// ADR-0096: which exported actor type to instantiate from the
         /// replacement module, named by its `Addressable::NAMESPACE`. `None`
         /// reuses the trampoline's **current hosted type** (not
-        /// necessarily the entry), so a bare replace preserves
+        /// necessarily the default), so a bare replace preserves
         /// today's behaviour byte-for-byte. `Some(ns)` instantiates the
         /// named export — mirroring [`LoadComponent::export`] — and an
         /// export the replacement module doesn't declare is a clean

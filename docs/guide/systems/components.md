@@ -92,7 +92,7 @@ string is the address you send subsequent mail to. Bare names (`"player"`) are
 For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the
 target type's `NAMESPACE` — and stands up that type. Omission defaults only when
-the module declared an explicit entry; a defaultless multi-actor module returns a
+the module declared an explicit default; a defaultless multi-actor module returns a
 load error. The selected type's namespace also becomes the default trampoline
 name, so loading the `Panel` export with `export: "ui.panel"` registers it at
 `aether.component/aether.embedded:ui.panel` and the `LoadResult` reports that type's

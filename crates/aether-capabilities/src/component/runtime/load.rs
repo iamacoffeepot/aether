@@ -40,13 +40,13 @@ impl ComponentHostCapabilityState {
 
         // 2. Parse the per-actor capability manifest (ADR-0033 /
         //    ADR-0096) and resolve which exported type to load.
-        //    `export: None` selects the entry (first) type — the
+        //    `export: None` selects the default (first) type — the
         //    only type a single-actor module has — so the legacy
         //    load is unchanged. A named selector must match one of
         //    the module's `ActorBoundary` namespaces, else the load
         //    fails cleanly. The selected type's `type_tag` drives
         //    `init_typed_p32` at instantiate; `None` keeps the
-        //    legacy entry-init path.
+        //    legacy default-init path.
         let actors = match kind_manifest::read_actor_inputs_from_bytes(&payload.wasm) {
             Ok(a) => a,
             Err(error) => return LoadResult::Err { error },
@@ -97,8 +97,8 @@ impl ComponentHostCapabilityState {
         };
 
         // 4. Resolve the component name. Caller > selected export's
-        // namespace > wasm-declared entry namespace > monotonic
-        // default. A non-entry export defaults its mailbox name to
+        // namespace > wasm-declared default namespace > monotonic
+        // default. A non-default export defaults its mailbox name to
         // the selected type's namespace, the multi-actor analog of
         // the single-actor `aether.namespace` fallback.
         let name = match payload.name.or(selected_namespace) {
@@ -134,7 +134,7 @@ impl ComponentHostCapabilityState {
             config: payload.config,
             // ADR-0096: the selected export's actor-type tag, threaded
             // through to `Component::instantiate` so it calls
-            // `init_typed_p32`. `None` = entry type (single-actor
+            // `init_typed_p32`. `None` = default type (single-actor
             // modules and unselected loads keep the legacy init path).
             type_tag,
             // ADR-0097: the full per-type capability map, so a guest
