@@ -273,6 +273,12 @@ where
         .call_tool(CallToolRequestParams::new(tool.to_owned()).with_arguments(arguments))
         .await
         .with_context(|| format!("call MCP tool {tool}"))?;
+    if is_spill_placeholder(&result) {
+        bail!(
+            "{tool} response spilled during measurement — raise AETHER_MCP_RESPONSE_INLINE_MAX_BYTES so no measured \
+             tool spills"
+        );
+    }
     let received_bytes =
         serde_json::to_vec(&result.content).with_context(|| format!("serialize {tool} CallToolResult.content"))?.len();
     measurements.insert(tool.to_owned(), Measurement { received_bytes, spill_files: spill_files(&result) });
@@ -334,6 +340,18 @@ fn content_text(result: &CallToolResult) -> String {
         .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// Whether `result`'s content is aether-mcp's whole-response spill placeholder
+/// (a top-level JSON object carrying `file`, `bytes`, and `summary`), rather
+/// than the tool's real response — distinct from a legitimate inner `{file}`
+/// reply-bytes reference, which does not carry all three keys at top level.
+fn is_spill_placeholder(result: &CallToolResult) -> bool {
+    result.content.iter().filter_map(|content| content.as_text()).any(|text| {
+        serde_json::from_str::<Value>(&text.text).ok().and_then(|value| value.as_object().cloned()).is_some_and(
+            |object| object.contains_key("file") && object.contains_key("bytes") && object.contains_key("summary"),
+        )
+    })
 }
 
 fn spill_files(result: &CallToolResult) -> Vec<SpillFile> {
@@ -586,6 +604,20 @@ mod tests {
         let combined_message = format!("{combined_error:#}");
         assert!(combined_message.contains("scenario failed"));
         assert!(combined_message.contains("reap failed"));
+    }
+
+    #[test]
+    fn spill_placeholder_detector_matches_only_the_whole_response_spill_shape() {
+        let spilled = CallToolResult::success(vec![Content::text(
+            r#"{"file":"/tmp/aether-response-1.json","bytes":40000,"summary":{"kind":"array","count":12}}"#,
+        )]);
+        assert!(is_spill_placeholder(&spilled));
+
+        let in_budget = CallToolResult::success(vec![Content::text(r#"{"engine_id":"engine-7"}"#)]);
+        assert!(!is_spill_placeholder(&in_budget));
+
+        let reply_bytes_reference = CallToolResult::success(vec![Content::text(r#"{"file":"/tmp/reply.bin"}"#)]);
+        assert!(!is_spill_placeholder(&reply_bytes_reference));
     }
 
     #[test]
