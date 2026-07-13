@@ -112,8 +112,8 @@ impl Mcp {
     }
 
     /// The fallible staging body of [`Self::stage_boot_manifest`]: pushes
-    /// each staged path the moment its `fs::write` succeeds, so the caller
-    /// holds an exact inventory of what exists when any later step fails.
+    /// each staged path before attempting its `fs::write`, so the caller's
+    /// cleanup covers a partially-written file as well as later failures.
     async fn stage_boot_files(
         &self,
         components: &[ComponentSpec],
@@ -133,10 +133,10 @@ impl Mcp {
             let resolved = self.resolve_component(&resolve_selector).await?;
             let seq = SEQ.fetch_add(1, Ordering::Relaxed);
             let wasm_path = env::temp_dir().join(format!("aether-boot-wasm-{}-{seq}.wasm", process::id()));
+            wasm_paths.push(wasm_path.clone());
             fs::write(&wasm_path, &resolved.wasm)
                 .await
                 .map_err(|e| internal_msg(&format!("staging boot wasm for selector {resolve_selector:?}: {e}")))?;
-            wasm_paths.push(wasm_path.clone());
             let mut entry = serde_json::json!({ "wasm": wasm_path.to_string_lossy() });
             if let Some(name) = &spec.name {
                 entry["name"] = serde_json::json!(name);
@@ -151,11 +151,11 @@ impl Mcp {
             {
                 let seq = SEQ.fetch_add(1, Ordering::Relaxed);
                 let config_path = env::temp_dir().join(format!("aether-boot-config-{}-{seq}.bin", process::id()));
+                config_paths.push(config_path.clone());
                 fs::write(&config_path, config).await.map_err(|e| {
                     internal_msg(&format!("staging boot config for selector {resolve_selector:?}: {e}"))
                 })?;
                 entry["config"] = serde_json::json!(config_path.to_string_lossy());
-                config_paths.push(config_path);
             }
             // An explicit `export` wins over the selector's `@actor` half.
             let export = spec.export.clone().or_else(|| resolved.export.clone());
