@@ -353,6 +353,27 @@ macro_rules! export {
     ($component:ty) => {
         $crate::__export_internal!($component);
     };
+    // ADR-0147: a `boot = $boot` slot ahead of an explicit `default =`.
+    // Boot is instantiated once per loaded module (unconditionally, whatever
+    // selector the caller names) and is not itself selectable; `$default` is
+    // still the bare-load target. `$boot` joins the `@all` type list at the
+    // head so it gets an `ActorBoundary` / type tag / spawn-by-tag entry like
+    // any other exported type — the host constructs the singleton by tag. The
+    // `@boot` wrapper emits the `aether.boot` custom section naming `$boot`,
+    // then re-dispatches to the `@default` arm for everything else. Ordered
+    // before the bootless `default =` arm so the `boot =` opt-in is matched
+    // first.
+    (boot = $boot:ty , default = $default:ty $(, $rest:ty)* $(,)?) => {
+        $crate::__export_multi_internal!(@boot $boot ; @default $default ; @all $boot, $default $(, $rest)*);
+    };
+    // ADR-0147: a `boot = $boot` slot on a defaultless multi-actor module —
+    // the fixture / kit shape (selector loads only, one unconditional boot).
+    // Requires at least one non-boot actor so the module has something to
+    // load; a boot-only module has no loadable export. Ordered before the
+    // bootless bare-multi arm.
+    (boot = $boot:ty $(, $rest:ty)+ $(,)?) => {
+        $crate::__export_multi_internal!(@boot $boot ; @no_default ; @all $boot $(, $rest)+);
+    };
     // ADR-0138: multi-actor module with an explicit default —
     // `export!(default = A, B, C)` designates `A` as the bare-load target
     // (the export a `load` with no selector instantiates) and keeps it at
@@ -360,7 +381,7 @@ macro_rules! export {
     // multi arm so the `default =` opt-in is matched first; it reproduces the
     // pre-ADR-0138 behavior with the default named explicitly.
     (default = $default:ty $(, $rest:ty)* $(,)?) => {
-        $crate::__export_multi_internal!(@default $default ; @all $default $(, $rest)*);
+        $crate::__export_multi_internal!(@no_boot ; @default $default ; @all $default $(, $rest)*);
     };
     // ADR-0096 / ADR-0138: multi-actor module — two or more `WasmActor`
     // types in one crate. Requires at least a first + one more so it never
@@ -369,7 +390,7 @@ macro_rules! export {
     // hard error naming the exports, not an instantiation of `$first` by
     // list position. Opt into a default with the `default =` arm above.
     ($first:ty $(, $rest:ty)+ $(,)?) => {
-        $crate::__export_multi_internal!(@no_default ; @all $first $(, $rest)+);
+        $crate::__export_multi_internal!(@no_boot ; @no_default ; @all $first $(, $rest)+);
     };
 }
 
@@ -920,6 +941,53 @@ macro_rules! __export_internal {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __export_multi_internal {
+    // ADR-0147: `@boot` wrapper — emit the `aether.boot` custom section naming
+    // `$boot`'s namespace, then re-dispatch to the bootless `@default` /
+    // `@no_default` arm for the `aether.namespace` / `aether.no_default`
+    // section, the init shim, and the shared body. Boot is otherwise an
+    // ordinary member of `@all`: its type tag, `aether.kinds.inputs`
+    // `ActorBoundary`, and spawn-by-tag entry all come from the shared body, so
+    // the host constructs the singleton through the same `init_typed_p32` path
+    // as any named export. The two marker dimensions (boot present/absent,
+    // default present/absent) compose rather than exploding the shared body.
+    (@boot $boot:ty ; @default $default:ty ; @all $($component:ty),+) => {
+        $crate::__export_multi_internal!(@boot_section $boot);
+        $crate::__export_multi_internal!(@default $default ; @all $($component),+);
+    };
+    (@boot $boot:ty ; @no_default ; @all $($component:ty),+) => {
+        $crate::__export_multi_internal!(@boot_section $boot);
+        $crate::__export_multi_internal!(@no_default ; @all $($component),+);
+    };
+    // `@no_boot` wrapper — no boot section, a straight re-dispatch. Its
+    // presence makes the four boot × default combinations explicit at the
+    // `export!` call site instead of leaving the bootless forms to invoke
+    // `@default` / `@no_default` directly.
+    (@no_boot ; @default $default:ty ; @all $($component:ty),+) => {
+        $crate::__export_multi_internal!(@default $default ; @all $($component),+);
+    };
+    (@no_boot ; @no_default ; @all $($component:ty),+) => {
+        $crate::__export_multi_internal!(@no_default ; @all $($component),+);
+    };
+    // The `aether.boot` custom section (ADR-0147) — a wasm-target-gated static
+    // pinning `$boot`'s `Addressable::NAMESPACE` bytes, byte-for-byte the twin
+    // of the `aether.namespace` section the `@default` arm emits below. Its
+    // presence is what the host's `read_boot_namespace_from_bytes` reads to
+    // find the module's unconditional boot type.
+    (@boot_section $boot:ty) => {
+        #[cfg(target_family = "wasm")]
+        #[used]
+        #[unsafe(link_section = "aether.boot")]
+        static __AETHER_BOOT_SECTION: [u8; <$boot as $crate::Addressable>::NAMESPACE.len()] = {
+            let bytes = <$boot as $crate::Addressable>::NAMESPACE.as_bytes();
+            let mut out = [0u8; <$boot as $crate::Addressable>::NAMESPACE.len()];
+            let mut i = 0;
+            while i < bytes.len() {
+                out[i] = bytes[i];
+                i += 1;
+            }
+            out
+        };
+    };
     // ADR-0138: multi-actor module WITH a default. Emits the
     // `aether.namespace` section (naming `$default`) and a 3-arg
     // `init_with_config_p32` that constructs `$default`, then the shared body.

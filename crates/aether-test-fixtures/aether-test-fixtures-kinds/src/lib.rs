@@ -33,6 +33,30 @@ pub struct TickObserved {
     pub count: u64,
 }
 
+/// ADR-0147 boot fixture: broadcast the module's `boot` actor emits from
+/// its `wire` hook, once per boot instance. A `TestBench` scenario counts
+/// it via `count_observed` to prove the module-boot singleton is
+/// instantiated exactly once no matter how many selector loads of the
+/// module happened (cardinality). Structured-shaped like [`TickObserved`]
+/// so the bench's loopback decoder records the kind name without the test
+/// pre-registering anything.
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[kind(name = "aether.test_fixture.boot_observed")]
+pub struct BootObserved {
+    pub marker: u64,
+}
+
+/// ADR-0147 boot fixture: broadcast the module's `boot` actor emits from
+/// its `unwire` teardown hook, once when the host tears the boot singleton
+/// down (its refcount reached zero as the last non-boot actor from the
+/// module unloaded). The scenario asserts it stays at zero across a partial
+/// unload (boot survives) and reaches one after the last unload (teardown).
+#[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[kind(name = "aether.test_fixture.boot_torn_down")]
+pub struct BootTornDown {
+    pub marker: u64,
+}
+
 /// Broadcast payload the probe emits on each `Key` input dispatch,
 /// carrying the pressed key `code`. Lets the ADR-0021 input round-trip
 /// scenarios count `aether.input` fan-out deliveries the same way

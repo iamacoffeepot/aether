@@ -81,6 +81,16 @@ pub const NAMESPACE_SECTION: &str = "aether.namespace";
 /// the exports rather than an instantiation by list position.
 pub const NO_DEFAULT_SECTION: &str = "aether.no_default";
 
+/// The section name of the ADR-0147 boot slot. A module that declares a
+/// `boot = $boot` slot in its `export!` pins `$boot`'s
+/// `Addressable::NAMESPACE` bytes here — the raw UTF-8 string, no version
+/// prefix or wire wrapper, exactly like [`NAMESPACE_SECTION`]. The host
+/// reads it to learn the module's unconditional boot type: the actor
+/// instantiated once per loaded module content hash, refcounted against the
+/// module's other actors, and not selectable through an `export` selector.
+/// Absence means the module declares no boot slot (the zero-overhead case).
+pub const BOOT_SECTION: &str = "aether.boot";
+
 /// Wire versions accepted in `aether.kinds`. The shape record's bytes
 /// are `Kind::ID` hash input, so a change to their layout regenerates
 /// every id — a deliberate clean break, taken loudly via this version
@@ -193,6 +203,28 @@ pub fn read_namespace_from_bytes(wasm: &[u8]) -> Result<Option<String>, String> 
             return str::from_utf8(reader.data())
                 .map(|s| Some(s.to_owned()))
                 .map_err(|e| format!("{NAMESPACE_SECTION}: invalid UTF-8: {e}"));
+        }
+    }
+    Ok(None)
+}
+
+/// Read the module's ADR-0147 [`BOOT_SECTION`] as a UTF-8 string — the
+/// `Addressable::NAMESPACE` of its unconditional boot type. Returns `None`
+/// when the section is absent (a module with no `boot =` slot, the common
+/// case), and `Some(namespace)` when present. Returns an `Err` only on
+/// malformed UTF-8 — the substrate surfaces that as a load failure rather
+/// than silently ignoring a declared boot slot. Structurally identical to
+/// [`read_namespace_from_bytes`].
+pub fn read_boot_namespace_from_bytes(wasm: &[u8]) -> Result<Option<String>, String> {
+    for payload in Parser::new(0).parse_all(wasm) {
+        let payload = payload.map_err(|e| format!("wasmparser: {e}"))?;
+        let Payload::CustomSection(reader) = payload else {
+            continue;
+        };
+        if reader.name() == BOOT_SECTION {
+            return str::from_utf8(reader.data())
+                .map(|s| Some(s.to_owned()))
+                .map_err(|e| format!("{BOOT_SECTION}: invalid UTF-8: {e}"));
         }
     }
     Ok(None)
@@ -750,6 +782,21 @@ mod tests {
 
         let without = wat::parse_str(r#"(module (func (export "noop")))"#).unwrap();
         assert!(!read_no_default_marker(&without));
+    }
+
+    #[test]
+    fn boot_namespace_read_by_section_presence() {
+        // Tripwire: pins the ADR-0147 boot-slot contract — the section name is
+        // `aether.boot` and its payload is the raw UTF-8 namespace of the
+        // module's boot type (no version prefix). A module carrying the
+        // section reads back `Some(namespace)`; one without reads `None`.
+        // Drifting the section name or changing the payload framing breaks
+        // this.
+        let with = wasm_with_section(BOOT_SECTION, b"aether.test.boot");
+        assert_eq!(read_boot_namespace_from_bytes(&with).unwrap(), Some("aether.test.boot".to_owned()));
+
+        let without = wat::parse_str(r#"(module (func (export "noop")))"#).unwrap();
+        assert_eq!(read_boot_namespace_from_bytes(&without).unwrap(), None);
     }
 
     #[test]

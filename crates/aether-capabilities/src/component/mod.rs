@@ -69,7 +69,7 @@ pub use runtime::ComponentHostConfig;
 // and the reply kinds must be in scope here, not behind the runtime gate.
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, ListComponents, ListComponentsResult, LoadComponent,
-    LoadResult, ReplaceComponent,
+    LoadResult, ReplaceComponent, ReplaceResult,
 };
 
 // The `#[actor]` attribute sits on the capability struct (the struct-hosted
