@@ -40,13 +40,13 @@ impl ComponentHostCapabilityState {
 
         // 2. Parse the per-actor capability manifest (ADR-0033 /
         //    ADR-0096) and resolve which exported type to load.
-        //    `export: None` selects the entry (first) type — the
+        //    `export: None` selects the default (first) type — the
         //    only type a single-actor module has — so the legacy
         //    load is unchanged. A named selector must match one of
         //    the module's `ActorBoundary` namespaces, else the load
         //    fails cleanly. The selected type's `type_tag` drives
         //    `init_typed_p32` at instantiate; `None` keeps the
-        //    legacy entry-init path.
+        //    legacy default-init path.
         let actors = match kind_manifest::read_actor_inputs_from_bytes(&payload.wasm) {
             Ok(a) => a,
             Err(error) => return LoadResult::Err { error },
@@ -67,24 +67,24 @@ impl ComponentHostCapabilityState {
                     Some(aether_data::mailbox_id_from_name(requested).0),
                     Some(requested.clone()),
                 )
-            } else if kind_manifest::read_no_entry_marker(&payload.wasm) {
+            } else if kind_manifest::read_no_default_marker(&payload.wasm) {
                 // ADR-0138: a defaultless multi-actor module (built with a bare
-                // `export!(A, B, …)`) carries no bare-load entry. An unselected
+                // `export!(A, B, …)`) carries no bare-load default. An unselected
                 // load is a hard error that names the exports so the caller can
                 // pick one, rather than instantiating an actor by list position.
                 let available: Vec<&str> = actors.iter().filter_map(|a| a.namespace.as_deref()).collect();
                 return LoadResult::Err {
                     error: format!(
-                        "module has no default entry (ADR-0138): load one of its exports \
+                        "module has no default (ADR-0138): load one of its exports \
                      by name via the export selector; exported types: {available:?}"
                     ),
                 };
             } else {
-                let entry = actors.first();
+                let default_actor = actors.first();
                 (
-                    entry.map(|a| a.capabilities.clone()).unwrap_or_default(),
+                    default_actor.map(|a| a.capabilities.clone()).unwrap_or_default(),
                     None,
-                    entry.and_then(|a| a.namespace.clone()),
+                    default_actor.and_then(|a| a.namespace.clone()),
                 )
             };
 
@@ -97,8 +97,8 @@ impl ComponentHostCapabilityState {
         };
 
         // 4. Resolve the component name. Caller > selected export's
-        // namespace > wasm-declared entry namespace > monotonic
-        // default. A non-entry export defaults its mailbox name to
+        // namespace > wasm-declared default namespace > monotonic
+        // default. A non-default export defaults its mailbox name to
         // the selected type's namespace, the multi-actor analog of
         // the single-actor `aether.namespace` fallback.
         let name = match payload.name.or(selected_namespace) {
@@ -134,7 +134,7 @@ impl ComponentHostCapabilityState {
             config: payload.config,
             // ADR-0096: the selected export's actor-type tag, threaded
             // through to `Component::instantiate` so it calls
-            // `init_typed_p32`. `None` = entry type (single-actor
+            // `init_typed_p32`. `None` = default type (single-actor
             // modules and unselected loads keep the legacy init path).
             type_tag,
             // ADR-0097: the full per-type capability map, so a guest

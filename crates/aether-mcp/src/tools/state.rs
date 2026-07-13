@@ -63,14 +63,14 @@ impl Mcp {
             .map_err(|e| frame_size_aware_error(&format!("resolve_component {selector:?}"), e))?;
         match ResolveComponentResult::decode_from_bytes(&reply.payload) {
             Some(ResolveComponentResult::Ok { wasm, export, manifest, config_kind, .. }) => {
-                // ADR-0138: the bare-load entry is the manifest's opted-in
+                // ADR-0138: the bare-load default is the manifest's opted-in
                 // `default_entry` (the single-actor namespace or the
-                // `export!(entry = …)` designation), NOT "the first actor
+                // `export!(default = …)` designation), NOT "the first actor
                 // by list position". A defaultless multi-actor module
                 // reports `None`, so replica-name derivation falls through
                 // to `name` / `export`.
-                let entry_namespace = manifest.default_entry;
-                Ok(ResolvedComponent { wasm, export, entry_namespace, config_kind })
+                let default_namespace = manifest.default_entry;
+                Ok(ResolvedComponent { wasm, export, default_namespace, config_kind })
             }
             Some(ResolveComponentResult::Err { error }) => Err(internal_msg(&error)),
             None => Err(internal_msg("undecodable ResolveComponentResult")),
@@ -87,18 +87,44 @@ impl Mcp {
     /// host build paths. A `module@actor` selector's `@actor` half
     /// populates the entry's `export` unless the spec set one explicitly.
     /// Returns the staged paths so the caller cleans them all up once the
-    /// substrate has read them at boot.
+    /// substrate has read them at boot; a staging failure removes whatever
+    /// it already wrote before surfacing the error.
     pub(super) async fn stage_boot_manifest(
         &self,
         components: &[ComponentSpec],
     ) -> Result<StagedBootManifest, McpError> {
+        let mut wasm_paths: Vec<PathBuf> = Vec::with_capacity(components.len());
+        let mut config_paths: Vec<PathBuf> = Vec::new();
+        match self.stage_boot_files(components, &mut wasm_paths, &mut config_paths).await {
+            Ok((manifest_path, expected_names)) => {
+                Ok(StagedBootManifest { manifest_path, wasm_paths, config_paths, expected_names })
+            }
+            Err(e) => {
+                // No StagedBootManifest reaches the caller on this path, so
+                // nothing else will ever clean these up — best-effort remove
+                // every file staged before the failure.
+                for path in wasm_paths.iter().chain(config_paths.iter()) {
+                    let _ = fs::remove_file(path).await;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// The fallible staging body of [`Self::stage_boot_manifest`]: pushes
+    /// each staged path before attempting its `fs::write`, so the caller's
+    /// cleanup covers a partially-written file as well as later failures.
+    async fn stage_boot_files(
+        &self,
+        components: &[ComponentSpec],
+        wasm_paths: &mut Vec<PathBuf>,
+        config_paths: &mut Vec<PathBuf>,
+    ) -> Result<(PathBuf, Vec<String>), McpError> {
         use std::env;
         use std::process;
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
 
-        let mut wasm_paths: Vec<PathBuf> = Vec::with_capacity(components.len());
-        let mut config_paths: Vec<PathBuf> = Vec::new();
         let mut entries: Vec<serde_json::Value> = Vec::with_capacity(components.len());
         let mut expected_names: Vec<String> = Vec::with_capacity(components.len());
         for spec in components {
@@ -107,6 +133,7 @@ impl Mcp {
             let resolved = self.resolve_component(&resolve_selector).await?;
             let seq = SEQ.fetch_add(1, Ordering::Relaxed);
             let wasm_path = env::temp_dir().join(format!("aether-boot-wasm-{}-{seq}.wasm", process::id()));
+            wasm_paths.push(wasm_path.clone());
             fs::write(&wasm_path, &resolved.wasm)
                 .await
                 .map_err(|e| internal_msg(&format!("staging boot wasm for selector {resolve_selector:?}: {e}")))?;
@@ -124,11 +151,11 @@ impl Mcp {
             {
                 let seq = SEQ.fetch_add(1, Ordering::Relaxed);
                 let config_path = env::temp_dir().join(format!("aether-boot-config-{}-{seq}.bin", process::id()));
+                config_paths.push(config_path.clone());
                 fs::write(&config_path, config).await.map_err(|e| {
                     internal_msg(&format!("staging boot config for selector {resolve_selector:?}: {e}"))
                 })?;
                 entry["config"] = serde_json::json!(config_path.to_string_lossy());
-                config_paths.push(config_path);
             }
             // An explicit `export` wins over the selector's `@actor` half.
             let export = spec.export.clone().or_else(|| resolved.export.clone());
@@ -142,14 +169,14 @@ impl Mcp {
             }
             // Derive the expected registered name(s) in the same precedence
             // order the engine applies: caller-supplied name > export
-            // namespace > entry actor namespace. Fail loud if none is
+            // namespace > default actor namespace. Fail loud if none is
             // determinable: a spawn that can't name what it's waiting for is
             // a bug to surface at stage time.
-            let ns = replica_base_name(spec.name.as_deref(), export.as_deref(), resolved.entry_namespace.as_deref())
+            let ns = replica_base_name(spec.name.as_deref(), export.as_deref(), resolved.default_namespace.as_deref())
                 .ok_or_else(|| {
                     internal_msg(&format!(
                         "component {:?}: cannot determine expected registered name \
-                     (no `name`, `export`, or entry actor namespace in the wasm manifest); \
+                     (no `name`, `export`, or default actor namespace in the wasm manifest); \
                      set `name` or `export` on the ComponentSpec",
                         spec.selector,
                     ))
@@ -163,15 +190,19 @@ impl Mcp {
                 None => expected_names.push(format!("aether.component/aether.embedded:{ns}")),
             }
             entries.push(entry);
-            wasm_paths.push(wasm_path);
         }
 
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let manifest_path = env::temp_dir().join(format!("aether-boot-manifest-{}-{seq}.json", process::id()));
         let bytes = serde_json::to_vec(&serde_json::json!({ "components": entries }))
             .map_err(|e| internal_msg(&format!("encoding boot manifest: {e}")))?;
-        fs::write(&manifest_path, bytes).await.map_err(|e| internal_msg(&format!("staging boot manifest: {e}")))?;
-        Ok(StagedBootManifest { manifest_path, wasm_paths, config_paths, expected_names })
+        if let Err(e) = fs::write(&manifest_path, bytes).await {
+            // A failed write can still create the file — remove it here, since
+            // the manifest path never reaches the caller's cleanup vecs.
+            let _ = fs::remove_file(&manifest_path).await;
+            return Err(internal_msg(&format!("staging boot manifest: {e}")));
+        }
+        Ok((manifest_path, expected_names))
     }
 
     /// Resolve a `MailSpec` against the per-engine merged kind view

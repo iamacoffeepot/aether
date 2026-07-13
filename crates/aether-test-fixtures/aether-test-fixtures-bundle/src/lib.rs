@@ -1,8 +1,8 @@
 //! The main test-fixture bundle: the bulk of the workspace's wasm
 //! fixtures consolidated into one ADR-0096 multi-actor module. One
 //! `src/<name>.rs` module per former fixture; a single
-//! `export!(entry = Probe, …)` packs all of them into one cdylib, with
-//! `Probe` the opted-in default entry (ADR-0138) so a bare `load` of
+//! `export!(default = Probe, …)` packs all of them into one cdylib, with
+//! `Probe` the opted-in default (ADR-0138) so a bare `load` of
 //! `aether_test_fixtures_bundle.wasm` instantiates it. The integration
 //! tests load this one wasm and select an in-bundle actor with
 //! `export: Some("<NAMESPACE>")`.
@@ -47,12 +47,12 @@ pub use stateful_replace::{Counter, Sidecar};
 pub use tcp_load_probe::TcpLoadProbe;
 pub use ui_widget::UiWidget;
 
-// ADR-0138: `entry = Probe` opts this multi-actor module into `Probe` as
+// ADR-0138: `default = Probe` opts this multi-actor module into `Probe` as
 // its bare-load default, so a `load` with no `export` selector instantiates
-// it — the entry-load contract the probe scenarios rely on. The remaining
+// it — the default-load contract the probe scenarios rely on. The remaining
 // actors are reachable by their `NAMESPACE` export selector.
 aether_actor::export!(
-    entry = Probe,
+    default = Probe,
     ProbeWithConfig,
     RootManager,
     Panel,

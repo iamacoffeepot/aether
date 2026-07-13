@@ -353,23 +353,23 @@ macro_rules! export {
     ($component:ty) => {
         $crate::__export_internal!($component);
     };
-    // ADR-0138: multi-actor module with an explicit default entry —
-    // `export!(entry = A, B, C)` designates `A` as the bare-load target
+    // ADR-0138: multi-actor module with an explicit default —
+    // `export!(default = A, B, C)` designates `A` as the bare-load target
     // (the export a `load` with no selector instantiates) and keeps it at
     // the head of the exported set. This arm is ordered before the generic
-    // multi arm so the `entry =` opt-in is matched first; it reproduces the
-    // pre-ADR-0138 behavior with the entry named explicitly.
-    (entry = $entry:ty $(, $rest:ty)* $(,)?) => {
-        $crate::__export_multi_internal!(@entry $entry ; @all $entry $(, $rest)*);
+    // multi arm so the `default =` opt-in is matched first; it reproduces the
+    // pre-ADR-0138 behavior with the default named explicitly.
+    (default = $default:ty $(, $rest:ty)* $(,)?) => {
+        $crate::__export_multi_internal!(@default $default ; @all $default $(, $rest)*);
     };
     // ADR-0096 / ADR-0138: multi-actor module — two or more `WasmActor`
     // types in one crate. Requires at least a first + one more so it never
     // shadows the single-actor arm above. Per ADR-0138 this bare form
-    // designates NO default entry: a `load` with no export selector is a
+    // designates NO default: a `load` with no export selector is a
     // hard error naming the exports, not an instantiation of `$first` by
-    // list position. Opt into a default with the `entry =` arm above.
+    // list position. Opt into a default with the `default =` arm above.
     ($first:ty $(, $rest:ty)+ $(,)?) => {
-        $crate::__export_multi_internal!(@no_entry ; @all $first $(, $rest)+);
+        $crate::__export_multi_internal!(@no_default ; @all $first $(, $rest)+);
     };
 }
 
@@ -707,13 +707,22 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            // Derive the actor's own mailbox id (its lineage carry) so a
-            // `send::<R>` from the save hook resolves the receiver through
-            // `R::resolve` — the same id `receive` derives for `WasmCtx`.
-            let mailbox_id = $crate::__macro_internals::mailbox_id_from_name(
-                <$component as $crate::Addressable>::NAMESPACE,
-            )
-            .0;
+            // ADR-0114 addressing amendment: the cluster self-identity is the
+            // real folded id captured at `init` / `wire` — the same id
+            // `receive` derives for `WasmCtx`, so a `send::<R>` from the save
+            // hook resolves correctly at any lineage depth. Fall back to
+            // `hash(NAMESPACE)` only before any shim has run.
+            let mailbox_id = {
+                let captured = __AETHER_INLINE.self_id();
+                if captured != 0 {
+                    captured
+                } else {
+                    $crate::__macro_internals::mailbox_id_from_name(
+                        <$component as $crate::Addressable>::NAMESPACE,
+                    )
+                    .0
+                }
+            };
             // ADR-0114 §5: run the parent's `on_dehydrate` and every
             // resident inline child's into a single composite, then call
             // the host `save_state` once. With no inline children the
@@ -752,10 +761,19 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
-            let mailbox_id = $crate::__macro_internals::mailbox_id_from_name(
-                <$component as $crate::Addressable>::NAMESPACE,
-            )
-            .0;
+            // ADR-0114 addressing amendment: self_id-first, name-hash
+            // fallback — the same derivation as `receive` / `on_dehydrate`.
+            let mailbox_id = {
+                let captured = __AETHER_INLINE.self_id();
+                if captured != 0 {
+                    captured
+                } else {
+                    $crate::__macro_internals::mailbox_id_from_name(
+                        <$component as $crate::Addressable>::NAMESPACE,
+                    )
+                    .0
+                }
+            };
             // ADR-0114 §5: decompose the migration bundle, restore the
             // parent, then reconstruct each inline child by type. For a
             // childless component the bundle decomposes to the raw parent
@@ -867,21 +885,21 @@ macro_rules! __export_internal {
 }
 
 /// ADR-0096 / ADR-0138: FFI shims for a multi-actor module —
-/// `export!(entry = A, B, …)` or `export!(A, B, …)`.
+/// `export!(default = A, B, …)` or `export!(A, B, …)`.
 ///
 /// One module-level `Slot<Box<dyn ErasedWasmActor>>` holds whichever
 /// exported type the instance became. Two construction entry points:
 ///
 /// - `init_with_config_p32` (the existing 3-arg ABI) constructs the
-///   **entry** type when the module opted into one (`@entry`). A
-///   defaultless module (`@no_entry`, ADR-0138) instead stages a
-///   "module has no default entry" failure here — the guest-side backstop
+///   **default** type when the module opted into one (`@default`). A
+///   defaultless module (`@no_default`, ADR-0138) instead stages a
+///   "module has no default" failure here — the guest-side backstop
 ///   for a bare load the host should already have rejected.
 /// - `init_typed_p32` (4-arg, carries an actor-type tag) matches the
 ///   tag against each exported type's `mailbox_id_from_name(NAMESPACE)`
 ///   and constructs the selected one. This path is unchanged by ADR-0138:
 ///   a named load resolves the same way whether or not the module has a
-///   default entry.
+///   default.
 ///
 /// `receive` / `wire` / `unwire` / `on_dehydrate` / `on_rehydrate` all
 /// route through the boxed `ErasedWasmActor`, so a multi-actor instance
@@ -893,25 +911,25 @@ macro_rules! __export_internal {
 ///
 /// ADR-0138: the two forms share one `@shared_body` rule (slot, inline
 /// registry, inputs section, `init` / `init_typed`, receive, dehydrate /
-/// rehydrate). They differ in exactly three items, emitted by the `@entry`
-/// / `@no_entry` wrapper rules: the entry form emits the `aether.namespace`
-/// custom section naming the entry type and an `init_with_config_p32` that
-/// constructs it; the no-entry form omits `aether.namespace`, emits the
-/// `aether.no_entry` marker section instead, and stages a failure from
+/// rehydrate). They differ in exactly three items, emitted by the `@default`
+/// / `@no_default` wrapper rules: the default form emits the `aether.namespace`
+/// custom section naming the default type and an `init_with_config_p32` that
+/// constructs it; the no-default form omits `aether.namespace`, emits the
+/// `aether.no_default` marker section instead, and stages a failure from
 /// `init_with_config_p32`.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __export_multi_internal {
-    // ADR-0138: multi-actor module WITH a default entry. Emits the
-    // `aether.namespace` section (naming `$entry`) and a 3-arg
-    // `init_with_config_p32` that constructs `$entry`, then the shared body.
-    (@entry $entry:ty ; @all $($component:ty),+) => {
+    // ADR-0138: multi-actor module WITH a default. Emits the
+    // `aether.namespace` section (naming `$default`) and a 3-arg
+    // `init_with_config_p32` that constructs `$default`, then the shared body.
+    (@default $default:ty ; @all $($component:ty),+) => {
         #[cfg(target_family = "wasm")]
         #[used]
         #[unsafe(link_section = "aether.namespace")]
-        static __AETHER_NAMESPACE_SECTION: [u8; <$entry as $crate::Addressable>::NAMESPACE.len()] = {
-            let bytes = <$entry as $crate::Addressable>::NAMESPACE.as_bytes();
-            let mut out = [0u8; <$entry as $crate::Addressable>::NAMESPACE.len()];
+        static __AETHER_NAMESPACE_SECTION: [u8; <$default as $crate::Addressable>::NAMESPACE.len()] = {
+            let bytes = <$default as $crate::Addressable>::NAMESPACE.as_bytes();
+            let mut out = [0u8; <$default as $crate::Addressable>::NAMESPACE.len()];
             let mut i = 0;
             while i < bytes.len() {
                 out[i] = bytes[i];
@@ -921,7 +939,7 @@ macro_rules! __export_multi_internal {
         };
 
         /// # Safety
-        /// Existing 3-arg init ABI; constructs the entry (opted-in) export.
+        /// Existing 3-arg init ABI; constructs the default (opted-in) export.
         #[cfg(target_family = "wasm")]
         #[unsafe(export_name = "init_with_config_p32")]
         pub unsafe extern "C" fn init_with_config(
@@ -942,36 +960,36 @@ macro_rules! __export_multi_internal {
             // cluster self-identity (correct at any lineage depth).
             __AETHER_INLINE.set_self_id(mailbox_id);
             // Issue 2692: install the by-tag inline-spawn resolver over the
-            // module's full exported set (entry + rest), so any exported actor
+            // module's full exported set (default + rest), so any exported actor
             // can `ctx.spawn_inline_child_by_tag(...)`.
             __AETHER_INLINE.set_spawn_resolver(
                 $crate::__export_internal!(@spawn_inline_child_by_tag $($component),+),
             );
-            $crate::__export_multi_internal!(@construct $entry, mailbox_id, config_bytes)
+            $crate::__export_multi_internal!(@construct $default, mailbox_id, config_bytes)
         }
 
         $crate::__export_multi_internal!(@shared_body $($component),+);
     };
 
-    // ADR-0138: multi-actor module WITHOUT a default entry. Omits the
-    // `aether.namespace` section, emits the `aether.no_entry` marker
+    // ADR-0138: multi-actor module WITHOUT a default. Omits the
+    // `aether.namespace` section, emits the `aether.no_default` marker
     // section, and stages a failure from the 3-arg `init_with_config_p32`
     // (the guest-side backstop — the host rejects a bare, defaultless load
     // before it ever reaches this shim). A named load still resolves
     // through `init_typed_p32` in the shared body.
-    (@no_entry ; @all $($component:ty),+) => {
-        // The section-level no-entry marker (ADR-0138): a single version
-        // byte in `aether.no_entry`, wasm-target-gated exactly like the
-        // `aether.namespace` section the entry form emits. Its presence is
+    (@no_default ; @all $($component:ty),+) => {
+        // The section-level no-default marker (ADR-0138): a single version
+        // byte in `aether.no_default`, wasm-target-gated exactly like the
+        // `aether.namespace` section the default form emits. Its presence is
         // what lets the host distinguish a defaultless multi-actor module
         // from a legacy single-actor module.
         #[cfg(target_family = "wasm")]
         #[used]
-        #[unsafe(link_section = "aether.no_entry")]
-        static __AETHER_NO_ENTRY_SECTION: [u8; 1] = [1u8];
+        #[unsafe(link_section = "aether.no_default")]
+        static __AETHER_NO_DEFAULT_SECTION: [u8; 1] = [1u8];
 
         /// # Safety
-        /// 3-arg init ABI on a defaultless module: there is no entry to
+        /// 3-arg init ABI on a defaultless module: there is no default to
         /// construct, so stage a failure and return non-zero. This is a
         /// backstop — the host rejects a bare, defaultless load first.
         #[cfg(target_family = "wasm")]
@@ -991,8 +1009,8 @@ macro_rules! __export_multi_internal {
         $crate::__export_multi_internal!(@shared_body $($component),+);
     };
 
-    // ADR-0138: the body shared by `@entry` and `@no_entry` — everything
-    // except the `aether.namespace` / `aether.no_entry` sections and the
+    // ADR-0138: the body shared by `@default` and `@no_default` — everything
+    // except the `aether.namespace` / `aether.no_default` sections and the
     // 3-arg `init_with_config_p32` shim, which the wrapper rules emit.
     (@shared_body $($component:ty),+) => {
         static __AETHER_MULTI: $crate::Slot<
@@ -1012,7 +1030,7 @@ macro_rules! __export_multi_internal {
         // `ActorBoundary { namespace }` record (version-tagged like
         // every other record) so the host's
         // `read_actor_inputs_from_bytes` regroups the flat record
-        // stream into one capability set per type. The entry type is
+        // stream into one capability set per type. The default type is
         // first. A single-actor `export!` never reaches this arm, so
         // the boundary-free single-actor layout stays byte-identical.
         #[cfg(target_family = "wasm")]
@@ -1072,8 +1090,8 @@ macro_rules! __export_multi_internal {
 
         /// # Safety
         /// ADR-0090 legacy zero-config init; forwards to the 3-arg
-        /// `init_with_config` the wrapper rule (`@entry` / `@no_entry`)
-        /// emits — construct the entry, or stage the no-default failure.
+        /// `init_with_config` the wrapper rule (`@default` / `@no_default`)
+        /// emits — construct the default, or stage the no-default failure.
         #[cfg(target_family = "wasm")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn init(mailbox_id: u64) -> u32 {
@@ -1192,7 +1210,7 @@ macro_rules! __export_multi_internal {
             let mail =
                 unsafe { $crate::Mail::__from_raw(kind, ptr, byte_len, count, sender, recipient) };
             // ADR-0114: same receive membrane as the single-actor arm —
-            // own id dispatches the entry/boxed type, an inline-child
+            // own id dispatches the default/boxed type, an inline-child
             // alias dispatches the co-located child. ADR-0112: the boxed
             // `ErasedWasmActor` seam carries the `Manual` view; the
             // synthesized impl downgrades to `Single` per hook. The
@@ -1267,13 +1285,22 @@ macro_rules! __export_multi_internal {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
             };
-            // Derive the live actor's own mailbox id (its lineage carry) so a
-            // `send::<R>` from the save hook resolves the receiver through
-            // `R::resolve` — the same id `receive` derives for `WasmCtx`.
-            let mailbox_id = $crate::__macro_internals::mailbox_id_from_name(
-                instance.erased_namespace(),
-            )
-            .0;
+            // ADR-0114 addressing amendment: the cluster self-identity is the
+            // real folded id captured at `init` / `wire` — the same id
+            // `receive` derives for `WasmCtx`, so a `send::<R>` from the save
+            // hook resolves correctly at any lineage depth. Fall back to
+            // `hash(namespace)` only before any shim has run.
+            let mailbox_id = {
+                let captured = __AETHER_INLINE.self_id();
+                if captured != 0 {
+                    captured
+                } else {
+                    $crate::__macro_internals::mailbox_id_from_name(
+                        instance.erased_namespace(),
+                    )
+                    .0
+                }
+            };
             // ADR-0114 §5: compose the parent + every inline child into one
             // composite, then `save_state` once (the boxed instance's
             // dehydrate routes through `erased_on_dehydrate`). Childless ⇒
@@ -1303,17 +1330,27 @@ macro_rules! __export_multi_internal {
         /// describing the prior-state bundle the old instance produced.
         /// Routes through the boxed `ErasedWasmActor` to the live type's
         /// [`$crate::WasmActor::on_rehydrate`] (ADR-0101). Self-mailbox id
-        /// derived from the live instance's namespace.
+        /// is the captured folded id, with the live instance's namespace
+        /// hash as the pre-shim fallback.
         #[cfg(target_family = "wasm")]
         #[unsafe(export_name = "on_rehydrate_p32")]
         pub unsafe extern "C" fn on_rehydrate(version: u32, ptr: u32, len: u32) -> u32 {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
             };
-            let mailbox_id = $crate::__macro_internals::mailbox_id_from_name(
-                instance.erased_namespace(),
-            )
-            .0;
+            // ADR-0114 addressing amendment: self_id-first, name-hash
+            // fallback — the same derivation as `receive` / `on_dehydrate`.
+            let mailbox_id = {
+                let captured = __AETHER_INLINE.self_id();
+                if captured != 0 {
+                    captured
+                } else {
+                    $crate::__macro_internals::mailbox_id_from_name(
+                        instance.erased_namespace(),
+                    )
+                    .0
+                }
+            };
             // ADR-0114 §5: decompose, restore the boxed parent, then
             // reconstruct each inline child by matching its type tag against
             // every exported type. Childless ⇒ the boxed parent sees the

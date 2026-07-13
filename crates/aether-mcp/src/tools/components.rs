@@ -23,13 +23,13 @@ use tokio::fs;
 /// (ADR-0116) — the front half of `load_component` / `replace_component` /
 /// the boot-manifest pre-resolution. `export` is the `module@actor`
 /// selector's actor half, threaded into the forwarded `LoadComponent.export`.
-/// `entry_namespace` is the first actor's `Actor::NAMESPACE` from the wasm
+/// `default_namespace` is the first actor's `Actor::NAMESPACE` from the wasm
 /// manifest (per `export!` order), used by `stage_boot_manifest` to derive the
 /// expected registered name when neither `spec.name` nor an export is set.
 pub(super) struct ResolvedComponent {
     pub(super) wasm: Vec<u8>,
     pub(super) export: Option<String>,
-    pub(super) entry_namespace: Option<String>,
+    pub(super) default_namespace: Option<String>,
     pub(super) config_kind: Option<KindDescriptorWire>,
 }
 
@@ -132,7 +132,7 @@ pub(super) fn selector_with_explicit_export(selector: &str, export: Option<&str>
 
 /// Resolve the base name a `replicas` fan-out derives its `{base}-{index}`
 /// names from (issue 2626), using the same precedence the component host
-/// itself applies at load: caller `name` > `export` > entry actor
+/// itself applies at load: caller `name` > `export` > default actor
 /// namespace. `None` when none of the three is available — the caller
 /// turns that into a clean tool error naming what to set. Shared by
 /// `stage_boot_manifest` (deriving `expected_names` to poll) and
@@ -141,9 +141,9 @@ pub(super) fn selector_with_explicit_export(selector: &str, export: Option<&str>
 pub(super) fn replica_base_name(
     name: Option<&str>,
     export: Option<&str>,
-    entry_namespace: Option<&str>,
+    default_namespace: Option<&str>,
 ) -> Option<String> {
-    name.or(export).or(entry_namespace).map(str::to_owned)
+    name.or(export).or(default_namespace).map(str::to_owned)
 }
 
 /// Derive the `{base}-{index}` name set a `replicas` fan-out registers
@@ -385,12 +385,12 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
     // issue 2626: loop the single-load dispatch N times, one shared
     // wasm/config, naming each instance in the same precedence order
     // `stage_boot_manifest` derives `expected_names` in.
-    let base = replica_base_name(args.name.as_deref(), export.as_deref(), resolved.entry_namespace.as_deref())
+    let base = replica_base_name(args.name.as_deref(), export.as_deref(), resolved.default_namespace.as_deref())
         .ok_or_else(|| {
             McpError::invalid_params(
                 format!(
                     "component {selector:?}: cannot determine a base name for `replicas` \
-                     (no `name`, `export`, or entry actor namespace in the wasm manifest); \
+                     (no `name`, `export`, or default actor namespace in the wasm manifest); \
                      set `name` or `export`"
                 ),
                 None,

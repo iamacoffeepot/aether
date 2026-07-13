@@ -224,13 +224,13 @@ fn components_all_loaded_partial_match_is_not_ready() {
 
 /// `replica_base_name` follows the same precedence the component host
 /// applies at load: caller `name` wins over `export`, which wins over
-/// the entry actor namespace — the bug this catches is a fan-out base
+/// the default actor namespace — the bug this catches is a fan-out base
 /// name that disagrees with what an unreplicated load would resolve to.
 #[test]
 fn replica_base_name_follows_name_export_namespace_precedence() {
-    assert_eq!(replica_base_name(Some("caller"), Some("export-ns"), Some("entry-ns")), Some("caller".to_owned()),);
-    assert_eq!(replica_base_name(None, Some("export-ns"), Some("entry-ns")), Some("export-ns".to_owned()),);
-    assert_eq!(replica_base_name(None, None, Some("entry-ns")), Some("entry-ns".to_owned()),);
+    assert_eq!(replica_base_name(Some("caller"), Some("export-ns"), Some("default-ns")), Some("caller".to_owned()),);
+    assert_eq!(replica_base_name(None, Some("export-ns"), Some("default-ns")), Some("export-ns".to_owned()),);
+    assert_eq!(replica_base_name(None, None, Some("default-ns")), Some("default-ns".to_owned()),);
     assert_eq!(replica_base_name(None, None, None), None);
 }
 

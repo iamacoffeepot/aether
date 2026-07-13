@@ -71,20 +71,20 @@ The contracts are visible in the types:
 - Actor state is only touched through serialized `&mut self` dispatch.
 - `export!` emits FFI and actor/kind manifests; do not write host exports by hand.
 
-## 3. Make entry selection explicit
+## 3. Make default selection explicit
 
 For one actor, `export!(Echo)` is unambiguous. For several actors choose whether
 the module has a default:
 
 ```rust
 // Bare loads select Console; other actors remain selectable.
-aether_actor::export!(entry = Console, Inspector, Worker);
+aether_actor::export!(default = Console, Inspector, Worker);
 
 // No default: every load must select Alpha or Beta explicitly.
 aether_actor::export!(Alpha, Beta);
 ```
 
-Declaration order does **not** make the first actor the entry. Defaultless
+Declaration order does **not** make the first actor the default. Defaultless
 modules omit `aether.namespace` and a bare load fails (ADR-0138).
 
 ## 4. Build the wasm artifact

@@ -144,10 +144,10 @@ aether_actor::export!(Echo);
 For multi-actor modules, declare the default explicitly:
 
 ```rust
-aether_actor::export!(entry = Console, Inspector, Worker);
+aether_actor::export!(default = Console, Inspector, Worker);
 ```
 
-Without `entry =`, a multi-actor module is defaultless and every load must select
+Without `default =`, a multi-actor module is defaultless and every load must select
 an export. Build for `wasm32-unknown-unknown`, call `upload_component` with the
 artifact path, then call `load_component`/`replace_component` with the returned
 registry selector—not a host wasm path.

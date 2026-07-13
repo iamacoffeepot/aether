@@ -136,11 +136,11 @@ pub fn component_manifest(wasm: &[u8]) -> Result<ComponentManifest, String> {
     let groups = kind_manifest::read_actor_inputs_from_bytes(wasm)?;
     let module_namespace = kind_manifest::read_namespace_from_bytes(wasm)?;
     let provenance = kind_manifest::read_producers_from_bytes(wasm);
-    // ADR-0138: a defaultless multi-actor module carries the no-entry
-    // marker and omits `aether.namespace`, so it has no bare-load entry.
-    // Otherwise the entry is the module's `aether.namespace` value (the
-    // single-actor namespace or the `export!(entry = …)` opt-in).
-    let default_entry = if kind_manifest::read_no_entry_marker(wasm) {
+    // ADR-0138: a defaultless multi-actor module carries the no-default
+    // marker and omits `aether.namespace`, so it has no bare-load default.
+    // Otherwise the default is the module's `aether.namespace` value (the
+    // single-actor namespace or the `export!(default = …)` opt-in).
+    let default_entry = if kind_manifest::read_no_default_marker(wasm) {
         None
     } else {
         module_namespace.clone()
@@ -226,16 +226,19 @@ mod tests {
     }
 
     #[test]
-    fn default_entry_tracks_the_no_entry_marker() {
+    fn default_entry_tracks_the_no_default_marker() {
         // ADR-0138: a single-actor / opted-in module carries its
-        // `aether.namespace` and no marker, so its bare-load entry is that
+        // `aether.namespace` and no marker, so its bare-load default is that
         // namespace. A defaultless multi-actor module carries the
-        // `aether.no_entry` marker (and omits `aether.namespace`), so it
-        // has no bare-load entry.
-        let entry = wasm_with_section("aether.namespace", b"aether.probe");
-        assert_eq!(component_manifest(&entry).expect("manifest reads").default_entry.as_deref(), Some("aether.probe"),);
+        // `aether.no_default` marker (and omits `aether.namespace`), so it
+        // has no bare-load default.
+        let with_default = wasm_with_section("aether.namespace", b"aether.probe");
+        assert_eq!(
+            component_manifest(&with_default).expect("manifest reads").default_entry.as_deref(),
+            Some("aether.probe"),
+        );
 
-        let defaultless = wasm_with_section("aether.no_entry", &[1u8]);
+        let defaultless = wasm_with_section("aether.no_default", &[1u8]);
         assert_eq!(component_manifest(&defaultless).expect("manifest reads").default_entry, None,);
     }
 }

@@ -81,7 +81,7 @@ pub struct ComponentSpec {
     /// ADR-0096: which exported actor type to instantiate from a
     /// multi-actor module, named by its `Addressable::NAMESPACE`. Omit only
     /// for a single-actor module or a multi-actor module that explicitly
-    /// declares `export!(entry = A, ...)`; a defaultless module requires a
+    /// declares `export!(default = A, ...)`; a defaultless module requires a
     /// selection. A `module@actor` selector populates this from its `@actor`
     /// half — set it explicitly to override.
     #[serde(default)]
@@ -89,7 +89,7 @@ pub struct ComponentSpec {
     /// Fan this entry out into N instances at boot (issue 2626), one
     /// shared config: each instance is named `{base}-{index}` for `index`
     /// in `0..replicas`, where `base` follows the same precedence as an
-    /// unreplicated load (`name` > `export` > the entry actor's own
+    /// unreplicated load (`name` > `export` > the default actor's own
     /// namespace) — so `replicas: 1` differs from an omitted field only by
     /// the `-0` suffix. Pairs with `#[router(shared)]` (ADR-0136) to scale
     /// an HTTP handler to N instances in one spec. Omit (or `null`) for
@@ -705,7 +705,7 @@ pub struct LoadComponentArgs {
     /// multi-actor module, named by its `Addressable::NAMESPACE` (e.g.
     /// `"ui.panel"`). Omit only when the module declares a default: the
     /// sole type in a single-actor module or the type selected by
-    /// `export!(entry = A, ...)`. A defaultless `export!(A, B, ...)`
+    /// `export!(default = A, ...)`. A defaultless `export!(A, B, ...)`
     /// requires an explicit selection. A `module@actor` selector
     /// populates this from its `@actor` half. An export the module doesn't
     /// declare comes back as a `LoadResult::Err`.
@@ -714,7 +714,7 @@ pub struct LoadComponentArgs {
     /// Load N instances of this component in one call (issue 2626), one
     /// shared config: loops the single-load dispatch N times, naming each
     /// instance `{base}-{index}` for `index` in `0..replicas` (`base` =
-    /// `name` > `export` > the entry actor's own namespace — the same
+    /// `name` > `export` > the default actor's own namespace — the same
     /// precedence a plain load resolves against). Pairs with
     /// `#[router(shared)]` (ADR-0136) to scale an HTTP handler to N
     /// instances in one call. Returns one shared `capabilities` block plus

@@ -373,7 +373,7 @@ mod engine {
     ///
     /// - `namespaces` — every exported actor's `Addressable::NAMESPACE`. A
     ///   single-actor module yields one; a multi-actor module
-    ///   (`export!(A, B, …)`) yields one per type, the entry type first.
+    ///   (`export!(A, B, …)`) yields one per type, the default type first.
     /// - `actors` — one [`ComponentActor`] per exported actor type, the
     ///   `module@actor` selector axis (ADR-0096 export selector).
     /// - `handled_kinds` — the union of every actor's handled `KindId`s
@@ -381,10 +381,10 @@ mod engine {
     /// - `fallback` — whether any exported actor declares a `#[fallback]`.
     /// - `provenance` — the wasm `producers` custom section rendered as a
     ///   short string (`"<tool> <version>; …"`), or empty when absent.
-    /// - `default_entry` — the bare-load entry actor's namespace per
+    /// - `default_entry` — the bare-load default actor's namespace per
     ///   ADR-0138; `None` for a defaultless multi-actor module (built with
     ///   a bare `export!(A, B, …)`), `Some(ns)` for a single-actor module
-    ///   or a multi-actor module that opted in via `export!(entry = A, …)`.
+    ///   or a multi-actor module that opted in via `export!(default = A, …)`.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub struct ComponentManifest {
         pub namespaces: Vec<String>,
@@ -580,10 +580,10 @@ mod control_plane {
         pub config: Vec<u8>,
         /// ADR-0096 / ADR-0138: which exported actor type to instantiate
         /// from a multi-actor module, named by its `Addressable::NAMESPACE`.
-        /// `None` loads the module's **entry** type — the single type a
-        /// single-actor module has, or the `export!(entry = A, …)` opt-in
+        /// `None` loads the module's **default** type — the single type a
+        /// single-actor module has, or the `export!(default = A, …)` opt-in
         /// on a multi-actor module. A defaultless multi-actor module (a
-        /// bare `export!(A, B, …)`) has no entry, so `None` against it is a
+        /// bare `export!(A, B, …)`) has no default, so `None` against it is a
         /// clean `LoadResult::Err` that names the exports (ADR-0138). An
         /// export that the module doesn't declare is likewise a clean
         /// `LoadResult::Err`.
@@ -709,7 +709,7 @@ mod control_plane {
         /// ADR-0096: which exported actor type to instantiate from the
         /// replacement module, named by its `Addressable::NAMESPACE`. `None`
         /// reuses the trampoline's **current hosted type** (not
-        /// necessarily the entry), so a bare replace preserves
+        /// necessarily the default), so a bare replace preserves
         /// today's behaviour byte-for-byte. `Some(ns)` instantiates the
         /// named export — mirroring [`LoadComponent::export`] — and an
         /// export the replacement module doesn't declare is a clean

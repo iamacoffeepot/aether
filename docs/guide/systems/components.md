@@ -42,7 +42,7 @@ custom sections**:
   component accepts — your doc comments, filtered through a `# Agent` section if
   you write one, ride along.
 - **`aether.namespace`** — present only when the module declares an explicit
-  entry actor; it carries that actor's default load namespace.
+  default actor; it carries that actor's default load namespace.
 
 You never write `extern "C"` by hand. The `_p32` suffix on the pointer-taking
 exports (`receive_p32`, `on_rehydrate_p32`) is the dual-target FFI convention
@@ -56,11 +56,11 @@ through the in-process transport rather than the FFI path.
 A crate can export more than one actor type ([ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md)):
 
 ```rust
-aether_actor::export!(entry = RootManager, Panel, Toolbar);
+aether_actor::export!(default = RootManager, Panel, Toolbar);
 ```
 
 The module then carries every listed type's code behind one FFI surface, and the
-load path picks which type an instance becomes (below). Only `entry = RootManager`
+load path picks which type an instance becomes (below). Only `default = RootManager`
 makes it the default for a bare load and emits `aether.namespace`. A plain
 `export!(RootManager, Panel, Toolbar)` is deliberately defaultless: the loader
 requires an actor selection and declaration order has no meaning (ADR-0138).
@@ -92,7 +92,7 @@ string is the address you send subsequent mail to. Bare names (`"player"`) are
 For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the
 target type's `NAMESPACE` — and stands up that type. Omission defaults only when
-the module declared an explicit entry; a defaultless multi-actor module returns a
+the module declared an explicit default; a defaultless multi-actor module returns a
 load error. The selected type's namespace also becomes the default trampoline
 name, so loading the `Panel` export with `export: "ui.panel"` registers it at
 `aether.component/aether.embedded:ui.panel` and the `LoadResult` reports that type's
