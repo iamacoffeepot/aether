@@ -42,7 +42,12 @@ jobs:
               - 'clippy.toml'
               - '.cargo/**'
               - '.config/**'
-              - '.github/workflows/**'
+              # ci.yml only, not workflows/**: the fleet workflows
+              # (agent-work, review, dogfood, judge, chat, ...) cannot
+              # change a Rust build's outcome, and re-running the whole
+              # suite on their edits stalls the workflow-iteration loop
+              # (#3297). ci.yml defines these jobs, so it stays.
+              - '.github/workflows/ci.yml'
             # Qodana's gate is the code set plus its own config, so a
             # qodana.yaml edit still triggers a scan even though it
             # changes no Rust.
@@ -55,7 +60,12 @@ jobs:
               - 'clippy.toml'
               - '.cargo/**'
               - '.config/**'
-              - '.github/workflows/**'
+              # ci.yml only, not workflows/**: the fleet workflows
+              # (agent-work, review, dogfood, judge, chat, ...) cannot
+              # change a Rust build's outcome, and re-running the whole
+              # suite on their edits stalls the workflow-iteration loop
+              # (#3297). ci.yml defines these jobs, so it stays.
+              - '.github/workflows/ci.yml'
               - 'qodana.yaml'
 
   fmt:
