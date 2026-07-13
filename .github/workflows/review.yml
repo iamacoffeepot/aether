@@ -97,7 +97,7 @@ jobs:
     #       s3:GetObject/PutObject/DeleteObject/ListBucket on
     #       arn:aws:s3:::<AGENT_SESSION_BUCKET>/agent/pool/* (+ ListBucket
     #       prefix condition), assumable from this repo's OIDC sub;
-    #   (b) add a bucket lifecycle rule expiring agent/pool/v1/* after 1 day
+    #   (b) add a bucket lifecycle rule expiring agent/pool/v2/* after 1 day
     #       (entries are cache-worthless past the hour; GH artifacts remain
     #       the forensic copy);
     #   (c) set repo vars AGENT_POOL_ENABLE=true (the flip — gated on the
@@ -402,7 +402,7 @@ jobs:
             gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename' > /tmp/pool-changed.txt || true
             slug="$(node /tmp/agent-pool.mjs root < /tmp/pool-changed.txt | jq -r .slug)" || slug=""
             git ls-tree -r HEAD > /tmp/pool-ls-tree.txt
-            idx="agent/pool/v1/idx/${cli_version}/${model}/${slug}/"
+            idx="agent/pool/v2/idx/review/${cli_version}/${model}/${slug}/"
             munged="$(echo "$GITHUB_WORKSPACE" | tr '/' '-')"
             keys="$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$idx" \
               --query 'sort_by(Contents||`[]`,&LastModified)[].Key' --output text 2>/dev/null \
@@ -414,10 +414,10 @@ jobs:
               if [ "$(echo "$elig" | jq -r .ok)" != "true" ]; then
                 echo "pool: retired ${cand_sid} ($(echo "$elig" | jq -r .reason))" | tee -a "$GITHUB_STEP_SUMMARY"
                 aws s3 rm "s3://${BUCKET}/${key}" >/dev/null 2>&1 || true
-                aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v1/sessions/${cand_sid}/" >/dev/null 2>&1 || true
+                aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v2/sessions/${cand_sid}/" >/dev/null 2>&1 || true
                 continue
               fi
-              lease="agent/pool/v1/leases/${cand_sid}"
+              lease="agent/pool/v2/leases/${cand_sid}"
               echo "$(( $(date +%s) + 3000 ))" > /tmp/pool-lease.txt   # job leash 45 min + 5
               if ! aws s3api put-object --bucket "$BUCKET" --key "$lease" --body /tmp/pool-lease.txt --if-none-match '*' >/dev/null 2>&1; then
                 held="$(aws s3 cp "s3://${BUCKET}/${lease}" - 2>/dev/null || echo 0)"
@@ -431,7 +431,7 @@ jobs:
                 fi
               fi
               mkdir -p "$HOME/.claude/projects/${munged}"
-              if aws s3 sync "s3://${BUCKET}/agent/pool/v1/sessions/${cand_sid}/" "$HOME/.claude/projects/${munged}/" >/dev/null 2>&1; then
+              if aws s3 sync "s3://${BUCKET}/agent/pool/v2/sessions/${cand_sid}/" "$HOME/.claude/projects/${munged}/" >/dev/null 2>&1; then
                 sid="$cand_sid"
                 cp /tmp/pool-candidate.json /tmp/pool-prior-manifest.json
                 echo "pool: warm checkout ${sid} (root $(jq -r .subsystem_root /tmp/pool-candidate.json), $(jq -r .context_tokens /tmp/pool-candidate.json) ctx tokens)" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -566,13 +566,13 @@ jobs:
           git show origin/main:scripts/agent-pool.mjs > /tmp/agent-pool.mjs || true
           model="claude-sonnet-5"
           release_lease() {
-            [ -n "${PRIOR_SID:-}" ] && aws s3 rm "s3://${BUCKET}/agent/pool/v1/leases/${PRIOR_SID}" >/dev/null 2>&1 || true
+            [ -n "${PRIOR_SID:-}" ] && aws s3 rm "s3://${BUCKET}/agent/pool/v2/leases/${PRIOR_SID}" >/dev/null 2>&1 || true
           }
           retire_prior() {
             if [ -n "${PRIOR_SID:-}" ] && [ -f /tmp/pool-prior-manifest.json ]; then
               old_slug="$(jq -r .slug /tmp/pool-prior-manifest.json 2>/dev/null)" || old_slug=""
-              aws s3 rm "s3://${BUCKET}/agent/pool/v1/idx/${CLI_VERSION:-unknown}/${model}/${old_slug}/${PRIOR_SID}.json" >/dev/null 2>&1 || true
-              aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v1/sessions/${PRIOR_SID}/" >/dev/null 2>&1 || true
+              aws s3 rm "s3://${BUCKET}/agent/pool/v2/idx/review/${CLI_VERSION:-unknown}/${model}/${old_slug}/${PRIOR_SID}.json" >/dev/null 2>&1 || true
+              aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v2/sessions/${PRIOR_SID}/" >/dev/null 2>&1 || true
             fi
           }
           [ -n "${BUCKET:-}" ] || exit 0
@@ -594,8 +594,8 @@ jobs:
             new_sid="$(jq -r .session_id /tmp/pool-manifest-new.json)"
             slug="$(jq -r .slug /tmp/pool-manifest-new.json)"
             munged="$(echo "$GITHUB_WORKSPACE" | tr '/' '-')"
-            idx="agent/pool/v1/idx/${CLI_VERSION:-unknown}/${model}/${slug}"
-            if aws s3 sync "$HOME/.claude/projects/${munged}/" "s3://${BUCKET}/agent/pool/v1/sessions/${new_sid}/" >/dev/null 2>&1 \
+            idx="agent/pool/v2/idx/review/${CLI_VERSION:-unknown}/${model}/${slug}"
+            if aws s3 sync "$HOME/.claude/projects/${munged}/" "s3://${BUCKET}/agent/pool/v2/sessions/${new_sid}/" >/dev/null 2>&1 \
                && aws s3 cp /tmp/pool-manifest-new.json "s3://${BUCKET}/${idx}/${new_sid}.json" >/dev/null 2>&1; then
               echo "pool: deposited ${new_sid} under ${idx} ($(jq -r .context_tokens /tmp/pool-manifest-new.json) ctx tokens)" | tee -a "$GITHUB_STEP_SUMMARY"
               [ "${PRIOR_SID:-}" != "$new_sid" ] && retire_prior
@@ -606,7 +606,7 @@ jobs:
                     [ -n "$stale" ] || continue
                     ssid="$(basename "$stale" .json)"
                     aws s3 rm "s3://${BUCKET}/${stale}" >/dev/null 2>&1 || true
-                    aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v1/sessions/${ssid}/" >/dev/null 2>&1 || true
+                    aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v2/sessions/${ssid}/" >/dev/null 2>&1 || true
                     echo "pool: depth trim retired ${ssid}" | tee -a "$GITHUB_STEP_SUMMARY"
                   done
             else
