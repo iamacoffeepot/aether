@@ -1,6 +1,6 @@
 ---
 name: land
-description: Land a CI-green draft PR — un-draft, enable native auto-merge to squash it, delete the closing issue's phase:* label (Done), sweep the worktree. `--sweep` discovers this shard's held green draft PRs and lands them in sequence, predicting and recomputing conflict state after every merge, auto-rebasing behind branches when branch protection requires up-to-date (strict mode), and routing dirty content conflicts to the user rather than touching their contents.
+description: Land a CI-green draft PR — un-draft, enable native auto-merge to squash it, delete the closing issue's phase:* label (Done), sweep the worktree. `--sweep` discovers this shard's held green draft PRs and lands them in sequence, predicting and recomputing conflict state after every merge, merging `origin/main` into behind branches when branch protection requires up-to-date (strict mode), and routing dirty content conflicts to the user rather than touching their contents.
 ---
 
 # /land — PR landing skill
@@ -90,27 +90,27 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
      --jq '.required_status_checks.strict'
    ```
 
-   On a read failure or absent field, default to `true` (conservative: treat as strict-on and rebase).
+   On a read failure or absent field, default to `true` (conservative: treat as strict-on and merge-in).
 
-   - **strict=false and `merge-tree`-clean** — GitHub does not require the branch to be up-to-date before merging, so behind+clean is already mergeable. Skip the rebase and force-push; proceed directly to step 4 (Qodana sweep) / step 5 (un-draft). Note "behind → merged direct (strict off)" in the summary.
-   - **strict=true (or read failure)** — the branch must be up-to-date before merging. Proceed with the full rebase sequence below.
+   - **strict=false and `merge-tree`-clean** — GitHub does not require the branch to be up-to-date before merging, so behind+clean is already mergeable. Skip the merge-in; proceed directly to step 4 (Qodana sweep) / step 5 (un-draft). Note "behind → merged direct (strict off)" in the summary.
+   - **strict=true (or read failure)** — the branch must be up-to-date before merging. Proceed with the merge-in sequence below.
 
-   **Full rebase sequence (strict=true or read failure):**
+   **Merge-in sequence (strict=true or read failure):**
 
-   The rebase runs inside the branch's own worktree (`<m>` is the closing issue; step 8 sweeps exactly this path). `git rebase origin/main` with no branch argument rebases the worktree's current HEAD in place — git refuses the `<branch>` argument when that branch is checked out in another worktree, so the argument is dropped.
+   The merge runs inside the branch's own worktree (`<m>` is the closing issue; step 8 sweeps exactly this path). `git merge origin/main` merges into the worktree's current HEAD.
 
    ```bash
    wt=.claude/worktrees/issue-<m>
    git -C "$wt" fetch origin
-   git -C "$wt" rebase origin/main
+   git -C "$wt" merge origin/main
    ```
-   If the rebase produces conflicts, the branch becomes `dirty` — surface and abort.
+   If the merge produces conflicts, the branch becomes `dirty` — surface and abort.
 
-   Force-push the rebased branch:
+   Push the merged branch:
    ```bash
-   git -C "$wt" push --force-with-lease origin <branch>
+   git -C "$wt" push origin <branch>
    ```
-   The force-push triggers a fresh CI run for the new sha, which is the gate. Then re-predict. In `--sweep` mode the recompute loop iterates this same rebase action after every sibling merge, so a branch that becomes `behind` after a sibling lands is rebased by the same path — no separate sweep handling is needed.
+   The push triggers a fresh CI run for the new sha, which is the gate. Then re-predict. In `--sweep` mode the recompute loop iterates this same merge-in action after every sibling merge, so a branch that becomes `behind` after a sibling lands is merged by the same path — no separate sweep handling is needed.
 
 4. **Qodana sweep (only when `Qodana scan` is the sole red).** When gate-check found `Qodana scan` as the one failing required check, resolve it before un-drafting — run the [Qodana sweep](#qodana-sweep): fetch the findings from the `qodana-report` artifact, triage and fix them in the worktree, re-push, and wait for `CI pass` green. Only then proceed. Skip this step when the PR is already fully green; bail to the user (do not un-draft) when the sweep surfaces an artifact-missing / outside-the-diff / uncertain case.
 
@@ -187,7 +187,7 @@ Classify the result into one of three states:
 | State | Condition | Action |
 |-------|-----------|--------|
 | **clean** | `merge-tree` exits 0 with a valid tree hash and no conflict markers | Proceed with the landing sequence. |
-| **behind** | branch's `merge-base` with `origin/main` is not `origin/main` itself (the branch needs rebase), but `merge-tree` would produce a clean tree | strict=true → auto-rebase onto fresh `main`, re-push, re-predict; strict=false → behind+clean is mergeable, merge direct (no rebase). |
+| **behind** | branch's `merge-base` with `origin/main` is not `origin/main` itself (the branch needs a merge-in), but `merge-tree` would produce a clean tree | strict=true → merge `origin/main` into the branch, push, re-predict; strict=false → behind+clean is mergeable, merge direct (no merge-in). |
 | **dirty** | `merge-tree` exits non-zero or produces output containing conflict markers (`<<<<<<<`) | Surface to the user. Never touch the branch contents. |
 
 Cross-check: after the local oracle classifies a branch, compare against `mergeable_state` from `gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.mergeable_state'`:
@@ -214,7 +214,7 @@ Branch contents untouched. Options:
 
 In `--sweep` mode, a `dirty` PR halts the remaining sequence — a conflict requires a human (or a delegated agent) decision, and landing subsequent PRs can change the conflict shape. Print the halt reason, list the remaining PRs that were not landed, and wait for the user to resolve before re-running.
 
-**Recompute after every merge (`--sweep` only).** After each successful merge, `origin/main` has advanced. Recompute the conflict prediction for every remaining PR in the sequence using the same local oracle before proceeding to the next land. A branch that was `clean` against the prior `main` can be `behind` (or even `dirty`, in the degenerate case) after a sibling lands. When strict=false, a recomputed `behind` branch that is `merge-tree`-clean stays mergeable and the sweep merges it directly — no rebase, no force-push, no CI re-run.
+**Recompute after every merge (`--sweep` only).** After each successful merge, `origin/main` has advanced. Recompute the conflict prediction for every remaining PR in the sequence using the same local oracle before proceeding to the next land. A branch that was `clean` against the prior `main` can be `behind` (or even `dirty`, in the degenerate case) after a sibling lands. When strict=false, a recomputed `behind` branch that is `merge-tree`-clean stays mergeable and the sweep merges it directly — no merge-in, no CI re-run.
 
 ## Phase label reconcile
 
