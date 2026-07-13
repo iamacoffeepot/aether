@@ -59,7 +59,7 @@ ensure_label "bounce-to:plan"   c5def5 "/scope resumes from Plan"
 # reconciler sets approval:surface-exceeded when a PR's diff escapes its issue's
 # ## Declared surface and mirrors it into the required `Approval gate` commit
 # status; approval:surface-ok is the owner's waiver, honoured only when the
-# owner applied it (timeline actor check), mirroring review:skip.
+# owner applied it (timeline actor check).
 ensure_label "approval:surface-exceeded" d93f0b "PR diff escapes the issue's declared surface — re-approval owed"
 ensure_label "approval:surface-ok"       0e8a16 "owner waiver: declared-surface overreach accepted"
 

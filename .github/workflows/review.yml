@@ -2,15 +2,13 @@ name: Review
 
 # Producer-side quality check: run the repo's five-pillar review workflow
 # (.claude/workflows/review.js) over a PR's diff via headless Claude Code,
-# and post the rollup as inline PR annotations + a summary comment with the
-# `review:unresolved` label. The five-pillar verdict is now submitted NATIVELY
-# by the reviewer App `iamabarista` (ADR-0148) — an `APPROVE` (clean or
-# out-of-scope) or `REQUEST_CHANGES` (actionable) review; barista authors no
-# PR, so GitHub does not 422 its self-verdict the way it would kettle's. This
-# rung ships that channel SIDE-BY-SIDE with the still-authoritative mirror: the
-# `gate` job below mirrors the label into a required `Review gate` commit status
-# that blocks merge on a Rust-touching PR (a non-Rust PR is never held), and
-# branch protection keeps gating on the status until a later owner-signed flip.
+# and post the rollup as inline PR annotations + a summary comment. The
+# five-pillar verdict is submitted NATIVELY by the reviewer App `iamabarista`
+# (ADR-0148) — an `APPROVE` (clean or out-of-scope) or `REQUEST_CHANGES`
+# (actionable) review; barista authors no PR, so GitHub does not 422 its
+# self-verdict the way it would kettle's. Branch protection's native required
+# review is the merge gate: a PR merges only once barista's standing verdict is
+# APPROVE, or the owner approves / dismisses the verdict natively.
 #
 # The review runs on an explicit request, and every request yields a full
 # `origin/main...HEAD` review with one verdict. Two triggers, both of which
@@ -26,11 +24,10 @@ name: Review
 # Findings already posted are deduped by the poster's fingerprints, so a
 # re-request never double-annotates.
 #
-# Two skip paths guard against reviewing mass mechanical sweeps: an
-# owner-applied `review:skip` label waives the review (gate success only
-# when the timeline actor is the owner — agents never apply it), and a
-# changed-`.rs`-file cap (AETHER_REVIEW_MAX_FILES) skips the session and
-# FAILS the gate closed until the owner waives or forces a full review.
+# A changed-`.rs`-file cap (AETHER_REVIEW_MAX_FILES) guards against reviewing
+# mass mechanical sweeps: over the cap the session is skipped and barista
+# submits no verdict, so the PR rests blocked on the native required review
+# until the owner forces a full review or approves it natively.
 # `workflow_dispatch` and `@barista full review` bypass the cap — the
 # deliberate "review it anyway"; plain `@barista review` does not.
 #
@@ -64,8 +61,9 @@ concurrency:
   cancel-in-progress: true
 
 # One-place knob for the review size cap: a PR changing more `.rs` files
-# than this skips the session (no fan-out spend) and the gate FAILS CLOSED
-# until the owner applies `review:skip` or forces a full review.
+# than this skips the session (no fan-out spend). With no verdict submitted,
+# the PR rests blocked on the native required review until the owner forces a
+# full review or approves it natively.
 env:
   AETHER_REVIEW_MAX_FILES: "40"
 
@@ -131,18 +129,13 @@ jobs:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.AGENT_CLAUDE_CODE_OAUTH_TOKEN }}
     outputs:
       pr_number: ${{ steps.resolve.outputs.pr_number }}
-      # head_sha + touches_rust feed the `gate` job's per-SHA status post,
-      # so they are emitted the moment a PR resolves — even when the review
-      # session is skipped (label / cap / non-Rust) — not only on the
-      # proceed path.
       head_sha: ${{ steps.resolve.outputs.head_sha }}
+      # touches_rust feeds the `approve` job: a non-Rust PR gets a session-less
+      # barista APPROVE so it carries a standing verdict for the native
+      # required review. Emitted the moment a PR resolves, even when the review
+      # session is skipped (cap / non-Rust), not only on the proceed path.
       touches_rust: ${{ steps.resolve.outputs.touches_rust }}
       diff_base: ${{ steps.resolve.outputs.diff_base }}
-      # skip_reason (label | cap) marks a deliberately-skipped session; the
-      # gate turns it into an owner-verified success (label) or a fail-closed
-      # decision prompt (cap). rs_count rides along for the cap description.
-      skip_reason: ${{ steps.resolve.outputs.skip_reason }}
-      rs_count: ${{ steps.resolve.outputs.rs_count }}
       rollup_produced: ${{ steps.rollup.outputs.produced }}
     steps:
       - uses: runs-on/action@v2
@@ -150,7 +143,7 @@ jobs:
       # are pure GitHub API calls. The PR number is explicit on both
       # triggers (the dispatch input, or the commented PR's issue number),
       # so there is no inference: this step reads the PR, drops a fork or
-      # closed one, and applies the label / non-Rust / size-cap skips.
+      # closed one, and applies the non-Rust / size-cap skips.
       # head_sha feeds the checkout. Every review is FULL — diff_base is
       # always origin/main.
       - name: Resolve PR and apply gates
@@ -190,40 +183,22 @@ jobs:
           fi
 
           # Emit pr_number AND head_sha the moment the PR resolves, ahead of
-          # the skip decisions below: the `gate` job posts the required
-          # `Review gate` status on this head SHA on every request, including
-          # the label / cap / non-Rust runs where the session is a no-op.
+          # the skip decisions below: the `approve` job needs head_sha to post
+          # a session-less barista APPROVE on this SHA for every non-Rust PR,
+          # including the cap / non-Rust runs where the session is a no-op.
           echo "pr_number=$pr" >> "$GITHUB_OUTPUT"
           head_sha="$(jq -r '.head.sha' <<<"$pr_info")"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
           echo "diff_base=origin/main" >> "$GITHUB_OUTPUT"
 
-          # Owner waiver: a `review:skip` label skips the review session
-          # outright. The gate decides whether it counts — it verifies the
-          # label was applied by the repo owner (timeline actor check) and
-          # posts success only then; any other applier keeps the gate red.
-          # A workflow_dispatch bypasses the label: dispatching is the
-          # deliberate "review it anyway" path. Capture then match with a
-          # here-string so grep -q can't SIGPIPE the paginated gh under
-          # pipefail.
-          if [ "$EVENT" != "workflow_dispatch" ]; then
-            pr_labels="$(gh api "repos/${REPO}/issues/${pr}/labels" --jq '.[].name')"
-            if grep -qx 'review:skip' <<<"$pr_labels"; then
-              echo "PR #$pr carries review:skip — review session skipped; gate verifies the applier."
-              echo "skip_reason=label" >> "$GITHUB_OUTPUT"
-              echo "proceed=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
-
-          # Rust-touch detection drives the gate verdict: classification
+          # Rust-touch detection drives the verdict class: classification
           # tracks changed `.rs` source only — the surface the five pillars
           # judge; a PR that changes any `.rs` file is held to the review
-          # verdict, every other PR gets an automatic success. A
-          # manifest-only PR (lockfile / `Cargo.toml` edit with no `.rs`
-          # change) is intentionally treated as no-Rust: there is no
-          # reviewable surface, so the gate auto-succeeds rather than
-          # holding a PR the review can never produce a verdict for.
+          # verdict, every other PR gets a session-less barista APPROVE (the
+          # `approve` job). A manifest-only PR (lockfile / `Cargo.toml` edit
+          # with no `.rs` change) is intentionally treated as no-Rust: there
+          # is no reviewable surface, so it is approved out-of-scope rather
+          # than held for a verdict the review can never produce.
           # Capture the file list first, then match with a here-string (not
           # a pipe) so a `grep -q` early exit can't SIGPIPE the paginated gh
           # under `pipefail`.
@@ -235,23 +210,22 @@ jobs:
             # skip the review session entirely, not just the verdict: the
             # /review skill refuses an empty .rs file set, so running it
             # here would loud-fail on every docs/workflow/manifest-only PR.
-            # The gate job still posts its success-skip status from the
-            # touches_rust output above.
+            # The `approve` job posts the session-less out-of-scope APPROVE
+            # from the touches_rust output above.
             echo "touches_rust=false" >> "$GITHUB_OUTPUT"
             echo "PR #$pr touches no Rust — review session skipped."
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Size cap: over the cap the session never spawns and the gate
-          # FAILS CLOSED until the owner waives with review:skip or forces
-          # a full review (workflow_dispatch or `@barista full review`,
-          # which set BYPASS_CAP above).
+          # Size cap: over the cap the session never spawns and no verdict is
+          # submitted, so the PR rests blocked on the native required review
+          # until the owner forces a full review (workflow_dispatch or
+          # `@barista full review`, which set BYPASS_CAP above) or approves it
+          # natively.
           rs_count=$(grep -cE '\.rs$' <<<"$files")
           if [ "$BYPASS_CAP" != "true" ] && [ "$rs_count" -gt "$AETHER_REVIEW_MAX_FILES" ]; then
-            echo "PR #$pr changes $rs_count .rs files (cap $AETHER_REVIEW_MAX_FILES) — review session skipped; gate fails closed."
-            echo "skip_reason=cap" >> "$GITHUB_OUTPUT"
-            echo "rs_count=$rs_count" >> "$GITHUB_OUTPUT"
+            echo "PR #$pr changes $rs_count .rs files (cap $AETHER_REVIEW_MAX_FILES) — review session skipped; PR rests blocked on the native required review."
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -263,9 +237,9 @@ jobs:
       # attaches to the latest MAIN commit — its head_branch is always "main" —
       # so the downstream chain can never re-derive the PR from its event.
       # This artifact is the explicit hand-off. It is written on EVERY path
-      # that resolves a PR (label/cap/non-Rust skips included), matching the
-      # `gate` job's coverage, so dogfood can apply its own gate stack (the
-      # live `Review gate` status among them) to the right PR.
+      # that resolves a PR (cap/non-Rust skips included), so dogfood can apply
+      # its own gate stack (the native `reviewDecision` among them) to the
+      # right PR.
       - name: Write the review-context hand-off for Dogfood
         if: steps.resolve.outputs.pr_number != ''
         env:
@@ -730,8 +704,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # The verdict-submission POST rides barista; every other call (summary
-          # comment, dedup reads, the review:unresolved label) stays on
-          # GITHUB_TOKEN.
+          # comment, dedup reads) stays on GITHUB_TOKEN.
           BARISTA_TOKEN: ${{ steps.barista-token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ needs.review.outputs.pr_number }}
@@ -756,12 +729,12 @@ jobs:
   approve:
     name: Out-of-scope approve
     needs: review
-    # The whole-PR-no-Rust class — the same PRs the `gate` job auto-succeeds —
-    # gets a session-less barista APPROVE so barista carries a standing verdict
-    # on every class a later required-review flip will read. `always()` because
-    # the `post` job is skipped for this class (no rollup), and the pr_number
-    # guard drops the fork / no-open-PR cases. Over-cap PRs are Rust-touching
-    # (touches_rust != 'false'), so they never reach here — they rest fail-closed.
+    # The whole-PR-no-Rust class gets a session-less barista APPROVE so barista
+    # carries a standing verdict the native required review reads. `always()`
+    # because the `post` job is skipped for this class (no rollup), and the
+    # pr_number guard drops the fork / no-open-PR cases. Over-cap PRs are
+    # Rust-touching (touches_rust != 'false'), so they never reach here — they
+    # rest blocked on the absent verdict.
     if: >
       always() &&
       needs.review.outputs.pr_number != '' &&
@@ -800,121 +773,4 @@ jobs:
           gh api -X POST "repos/${REPO}/pulls/${PR}/reviews" \
             -f event=APPROVE \
             -f commit_id="${HEAD_SHA}" \
-            -f body='Out of scope for the five-pillar review (no Rust changed) — auto-approved by barista, mirroring the `Review gate` non-Rust success.'
-
-  gate:
-    name: Review gate
-    needs: [review, post]
-    # Runs on EVERY request that resolved a PR — including the label / cap /
-    # non-Rust runs where the session is skipped and `post` no-ops.
-    # `always()`
-    # so a skipped/failed upstream job never suppresses the status post; the
-    # pr_number guard drops the fork / closed-PR cases where the review job
-    # never resolved a PR (and so emitted no outputs).
-    if: always() && needs.review.outputs.pr_number != ''
-    runs-on: ubuntu-latest
-    # Only scope needed: post a commit status. Never touches branch code.
-    permissions:
-      statuses: write
-    steps:
-      # Mirror the advisory `review:unresolved` label into a required
-      # `Review gate` commit status on the PR's head SHA. This status is the
-      # bridge between the review request and a per-SHA required check. This
-      # status is recomputed from the LIVE label on every request, including
-      # requests whose session is skipped. A non-Rust PR is never held to
-      # the verdict; a Rust PR mirrors its label; an infra failure in the review job posts
-      # failure rather than leaving the required context missing.
-      #
-      # Verdict table (first match wins):
-      #   review:skip, applied by owner  -> success  (owner waiver; session never ran)
-      #   review:skip, any other actor   -> failure  (waiver is the owner's signoff alone)
-      #   over the .rs file cap          -> failure  (too large to auto-review; owner
-      #                                               waives with review:skip or forces a
-      #                                               full review via workflow_dispatch or
-      #                                               an `@barista full review` comment)
-      #   review job did not succeed     -> failure  (infra/cancelled; re-request to clear)
-      #   PR touches no Rust             -> success  (review not required)
-      #   Rust + review:unresolved set   -> failure  (points at the rollup)
-      #   Rust + label absent            -> success
-      #
-      # The review:skip waiver is verified against the issue timeline: the
-      # most recent review:skip `labeled` event's actor must be the repo
-      # owner. That blocks any non-owner identity; an agent operating the
-      # owner's own token is API-indistinguishable from the owner, so that
-      # layer is process — agents never apply review:skip (recorded in the
-      # /land skill's never-do list, same class as never stripping
-      # review:unresolved).
-      #
-      # The infra-failure check runs first so a review job that dies before
-      # computing touches_rust (leaving it empty) fails closed rather than
-      # falling through to the non-Rust success branch — an empty value must
-      # never read as "no Rust changes". Keyed on REVIEW_RESULT != "success"
-      # (not == "failure") so a cancelled run fails closed too.
-      #
-      # Wedge hazard (issue #2996 rollout is two-phase): branch protection
-      # must NOT require this context until the poster is proven live on real
-      # PRs — a required context that nothing posts wedges every open PR.
-      - name: Post the Review gate status
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR: ${{ needs.review.outputs.pr_number }}
-          HEAD_SHA: ${{ needs.review.outputs.head_sha }}
-          TOUCHES_RUST: ${{ needs.review.outputs.touches_rust }}
-          SKIP_REASON: ${{ needs.review.outputs.skip_reason }}
-          RS_COUNT: ${{ needs.review.outputs.rs_count }}
-          REVIEW_RESULT: ${{ needs.review.result }}
-          OWNER: iamacoffeepot
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          # Owner waiver first — it is the explicit human override, so it
-          # outranks every other row (including a stale review:unresolved
-          # from an earlier review of this PR). Verify the applier via the
-          # timeline: the most recent review:skip labeled event's actor.
-          if [ "$SKIP_REASON" = "label" ]; then
-            actor="$(gh api "repos/${REPO}/issues/${PR}/timeline" --paginate \
-              --jq '[.[] | select(.event=="labeled" and .label.name=="review:skip")] | last | .actor.login // empty')"
-            if [ "$actor" = "$OWNER" ]; then
-              state="success"
-              description="review skipped — review:skip applied by owner"
-            else
-              state="failure"
-              description="review:skip ignored: applied by '${actor:-unknown}', not the owner. Owner must re-apply, or force a full review (@barista full review / workflow_dispatch)."
-            fi
-          elif [ "$SKIP_REASON" = "cap" ]; then
-            # Fail closed on size: an unreviewed mass change never goes
-            # green on size alone — the owner decides (waive or review).
-            state="failure"
-            description="${RS_COUNT} .rs files exceed cap ${AETHER_REVIEW_MAX_FILES} — owner: apply review:skip to waive, or force a full review (@barista full review / workflow_dispatch)."
-          # Infra-failure check next: a review job that dies before computing
-          # touches_rust leaves it empty, which must fail closed rather than
-          # fall through to the non-Rust success branch below. Keyed on
-          # != "success" (not == "failure") so a cancelled run fails closed
-          # too — the review can't be bypassed by an infra flake; re-run to
-          # clear.
-          elif [ "$REVIEW_RESULT" != "success" ]; then
-            state="failure"
-            description="review run failed (infra). Re-request via @barista review or workflow_dispatch."
-          elif [ "$TOUCHES_RUST" != "true" ]; then
-            # Non-Rust PR with a completed review job: never required to pass
-            # the review.
-            state="success"
-            description="no Rust changes — review not required"
-          else
-            # Rust PR with a verdict: mirror the LIVE label. Capture then match
-            # with a here-string (not a pipe) so grep -q can't SIGPIPE gh.
-            labels="$(gh api "repos/${REPO}/issues/${PR}/labels" --jq '.[].name')"
-            if grep -qx 'review:unresolved' <<<"$labels"; then
-              state="failure"
-              description="review unresolved; see rollup. Fix, then re-request via @barista review — a clean fresh verdict clears the label and re-mirrors this status."
-            else
-              state="success"
-              description="review verdict clear"
-            fi
-          fi
-          gh api -X POST "repos/${REPO}/statuses/${HEAD_SHA}" \
-            -f state="$state" \
-            -f context="Review gate" \
-            -f description="$description" \
-            -f target_url="$RUN_URL"
+            -f body='Out of scope for the five-pillar review (no Rust changed) — auto-approved by barista so the PR carries a standing verdict for the native required review.'

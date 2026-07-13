@@ -86,7 +86,7 @@ After all replies and resolutions, refresh the automated verdicts before asking 
 
 - Re-request the review by posting an `@barista review` comment on the PR. The review runs only on request, and a fix push dismissed barista's stale verdict, so this comment is what produces the fresh full verdict that supersedes the standing `REQUEST_CHANGES`; it also covers a declined finding needing a fresh verdict without a new head SHA. Stage the comment body in `/tmp` and post it over REST.
 - When a dogfood finding was declined or retried, dispatch `.github/workflows/dogfood.yml` for the PR through its REST workflow-dispatch endpoint.
-- Wait for the owning workflow and poster to settle. Re-read its rollup and unresolved label; a reconciler dispatch alone cannot clear `review:unresolved` or `dogfood:unresolved`.
+- Wait for the owning workflow and poster to settle. Re-read its rollup, the native review verdict, and the dogfood label; a reconciler dispatch alone cannot clear barista's standing `REQUEST_CHANGES` verdict or `dogfood:unresolved`.
 
 Then stage `{"ref":"main","inputs":{"pr":"<PR>"}}` in `/tmp` and `POST repos/iamacoffeepot/aether/actions/workflows/reconciler.yml/dispatches` with that file. Do not write a phase label yourself. If a fresh automated verdict still finds the declined item actionable, preserve `phase:findings` and ask the owner to choose a fix or an explicit waiver; this skill never strips the unresolved label itself.
 
@@ -98,4 +98,4 @@ Re-read the issue and inventories after the reconciler runs:
 - `phase:building`: CI is pending or red; keep the PR draft and diagnose through repository-owned checks;
 - `phase:stalled` or `phase:bounced`: preserve the branch/worktree and report the parked reason.
 
-Never strip `review:unresolved` or `dogfood:unresolved`, apply `review:skip`, edit the issue body, un-draft, merge, delete a phase label, or remove the worktree. Posters and the reconciler own QA labels/state; `$land` owns release and cleanup.
+Never strip `dogfood:unresolved`, dismiss barista's review verdict, edit the issue body, un-draft, merge, delete a phase label, or remove the worktree. Posters and the reconciler own QA labels/state; `$land` owns release and cleanup.

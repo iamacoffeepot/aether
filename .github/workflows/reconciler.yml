@@ -13,11 +13,10 @@ name: Reconciler
 # changed-file set to stay a subset of its closing issue's `## Declared surface`
 # globs (what /approve resolved the approval tier over). A diff that escapes the
 # declaration is no longer the change that was approved, so it is pinned at
-# `building` behind a required, failing `Approval gate` commit status — the same
-# owner-gated, label-mirroring shape review.yml uses for `review:unresolved` ->
-# `Review gate`. It self-heals when the owner trims the diff, widens the
-# declaration (an issue-timeline edit), or applies an `approval:surface-ok`
-# waiver.
+# `building` behind a required, failing `Approval gate` commit status — an
+# owner-gated, label-mirroring shape. It self-heals when the owner trims the
+# diff, widens the declaration (an issue-timeline edit), or applies an
+# `approval:surface-ok` waiver.
 #
 # `Approval gate` is a REQUIRED check, so this workflow posts it on EVERY path,
 # never conditionally. A required context that never reports does not pass —
@@ -33,8 +32,8 @@ name: Reconciler
 #     unlabeled] — the payload carries the PR directly. synchronize is the
 #     push-demotes path (a fresh head with CI not yet green falls back to
 #     building); labeled/unlabeled wakes the reconciler when a QA post job flips
-#     the review:unresolved / dogfood:unresolved PR label, or when the owner
-#     applies the approval:surface-ok waiver. A label event on any other label
+#     the dogfood:unresolved PR label, or when the owner applies the
+#     approval:surface-ok waiver. A label event on any other label
 #     exits cleanly. The reconciler's own approval:surface-exceeded write does
 #     not re-enter it: GITHUB_TOKEN-authored events do not trigger workflows.
 #   - pull_request_review [submitted, dismissed] — a native review verdict
@@ -174,7 +173,7 @@ jobs:
               # own peers make on unrelated labels.
               if [ "$EVENT_ACTION" = "labeled" ] || [ "$EVENT_ACTION" = "unlabeled" ]; then
                 case "$LABEL_NAME" in
-                  review:unresolved|dogfood:unresolved|approval:surface-ok) ;;
+                  dogfood:unresolved|approval:surface-ok) ;;
                   *) echo "label '${LABEL_NAME}' is not a QA flag — nothing to reconcile."; exit 0 ;;
                 esac
               fi
@@ -451,9 +450,8 @@ jobs:
                 "${RUNNER_TEMP}/globs.txt" "${RUNNER_TEMP}/changed.txt" "${RUNNER_TEMP}/policy.yml")"
 
               # Owner waiver: approval:surface-ok accepts the overreach, but only
-              # when the owner applied it — verified via the timeline actor, the
-              # same shape review.yml's review:skip waiver uses. An agent can set
-              # the label; it just doesn't count.
+              # when the owner applied it — verified via the timeline actor. An
+              # agent can set the label; it just doesn't count.
               surface_ok=0
               if grep -qx 'approval:surface-ok' <<<"$pr_labels"; then
                 waiver_actor="$(gh api "repos/${REPO}/issues/${pr}/timeline" --paginate \

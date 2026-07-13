@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // Post a five-pillar review rollup onto its PR: inline annotations for
 // findings that land on a changed diff line, everything else folded into
-// the verdict review body, plus a marker-anchored summary comment and the
-// `review:unresolved` label.
+// the verdict review body, plus a marker-anchored summary comment.
 //
 // The posture is load-bearing: the verdict review is authored by the
 // reviewer App `iamabarista` (BARISTA_TOKEN) as a NATIVE `APPROVE` /
@@ -13,10 +12,9 @@
 // when the rollup is actionable and `APPROVE` when it is clean — no third
 // outcome.
 //
-// This rung ships the native verdict SIDE-BY-SIDE with the still-authoritative
-// mirror chain: the `review:unresolved` label (written here on GITHUB_TOKEN)
-// mirrors into the required `Review gate` commit status, which is what branch
-// protection gates on until the flip retires it. Everything except the single
+// Branch protection's native required review is the merge gate: barista's
+// standing verdict blocks the merge until it is APPROVE, or the owner
+// approves / dismisses it natively. Everything except the single
 // verdict-submission call stays on GITHUB_TOKEN; only that POST rides barista.
 //
 // Inputs (env):
@@ -35,13 +33,12 @@ import { pathToFileURL } from 'node:url'
 
 const MARKER = '<!-- aether-review -->'
 const FP_RE = /aether-review-fp:([^\s>]+)/g
-const LABEL = 'review:unresolved'
 const API = 'https://api.github.com'
 
-// The verdict is native now, but the label → `Review gate` status mirror stays
-// authoritative until #3233 retires it, so the footer names both.
+// Barista submits the verdict natively; branch protection's required review is
+// what gates the merge on it.
 const POSTURE_FOOTER =
-  '_Barista submits this as a native `APPROVE` / `REQUEST_CHANGES` verdict; until the branch-protection flip lands, the required `Review gate` status mirrored from the `review:unresolved` label remains the authoritative merge gate._'
+  '_Barista submits this as a native `APPROVE` / `REQUEST_CHANGES` review; branch protection\'s required review gates the merge on the standing verdict._'
 
 function requireEnv(name) {
   const v = process.env[name]
@@ -225,8 +222,8 @@ export function visibleSoftHolds(rollup, disclosed = new Set()) {
 
 // The rollup is actionable when it carries anything a reviewer must clear: a
 // confirmed finding, a soft-hold, or a high-severity spec-fidelity finding.
-// This is the same predicate the `review:unresolved` label decision uses, so
-// the native verdict and the mirror label never disagree on what "clean" means.
+// This is the predicate `verdictEvent` reads to choose REQUEST_CHANGES over
+// APPROVE, so it is the single definition of what "clean" means.
 // `disclosed` — prior barista correctness-fingerprint paths on this same PR —
 // routes a matching scope-leakage entry to advisory in both arms below.
 export function isActionable(rollup, disclosed = new Set()) {
@@ -408,19 +405,6 @@ async function main() {
   } else {
     await api(env.token, 'POST', `repos/${env.repo}/issues/${env.pr}/comments`, { body: summary })
     console.log('posted summary comment')
-  }
-
-  // Advisory label: set when there is something actionable (a confirmed
-  // finding, a soft-hold, or a high-severity spec finding), cleared clean.
-  if (isActionable(rollup, disclosed)) {
-    const res = await api(env.token, 'POST', `repos/${env.repo}/issues/${env.pr}/labels`, { labels: [LABEL] })
-    if (!res.ok) console.error(`add label failed: ${res.status} ${res.text}`)
-    else console.log(`set ${LABEL}`)
-  } else {
-    const res = await api(env.token, 'DELETE', `repos/${env.repo}/issues/${env.pr}/labels/${encodeURIComponent(LABEL)}`)
-    // 404 = the label was not present; a clean no-op.
-    if (res.ok || res.status === 404) console.log(`cleared ${LABEL}`)
-    else console.error(`remove label failed: ${res.status} ${res.text}`)
   }
 }
 

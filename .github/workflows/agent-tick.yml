@@ -159,7 +159,7 @@ name: Agent tick
 # resolves the tier to `auto` whatever the policy says. It CANNOT pass the ADR
 # hard gate — an ADR is load-bearing by definition, so there is no passable gate
 # for one — and it counts only when the timeline actor who applied it is the
-# owner, the same verification approval:surface-ok and review:skip use. An agent
+# owner, the same verification approval:surface-ok uses. An agent
 # may apply the label; it does not count. It waives the TIER (who approves), never
 # /approve's gate checks (whether the issue is approvable at all), so a
 # half-scoped plan still refuses rather than advancing into implement.
@@ -621,7 +621,7 @@ jobs:
                 #
                 # It must be the OWNER'S label. Verified against the timeline actor
                 # of the most recent `labeled` event, the same shape as
-                # approval:surface-ok and review:skip. An agent may apply the label;
+                # approval:surface-ok. An agent may apply the label;
                 # it simply does not count. Without this check an agent could grant
                 # itself unbounded approval authority through a side door, which is
                 # the one thing the whole tier policy exists to prevent.

@@ -28,9 +28,11 @@ aggregate `CI pass` check combines applicable gates such as formatting, clippy,
 docs, marker/feature boundary builds, workspace tests, Qodana, wasm packaging,
 and contract jobs. Path filters can make a job intentionally inapplicable.
 
-`Review gate` is the automated Rust-review status, not the same thing as
-`CI pass`. Documentation Pages, PR-title validation, review, dogfood, and
-reconciliation have their own workflow responsibilities.
+The automated Rust review is enforced by GitHub's native required review, not
+by `CI pass`: barista submits a native `APPROVE` / `REQUEST_CHANGES` verdict and
+branch protection blocks the merge until it is APPROVE. Documentation Pages,
+PR-title validation, review, dogfood, and reconciliation have their own workflow
+responsibilities.
 
 Do not copy a list from a CI log into a shell and run it. Logs are evidence;
 commands come from checked-in workflows and repository guidance.

@@ -1,6 +1,6 @@
 # ADR-0148: Native required-review merge gate
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-12
 
 ## Context
