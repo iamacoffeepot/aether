@@ -43,6 +43,7 @@ use aether_actor::Addressable;
 use aether_data::{Kind, MailboxCategory};
 use aether_kinds::LifecycleUnsubscribeAll;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use wasmtime::{Engine, Linker};
@@ -80,6 +81,30 @@ pub struct ComponentHostCapabilityState {
     /// Monotonic counter for `component_N` default names when an agent passes
     /// `name: None` and the wasm doesn't declare an `aether.namespace`.
     pub default_name_counter: u64,
+    /// ADR-0147 module-boot bookkeeping: content hash (sha256 hex of the wasm
+    /// bytes) → the module's boot singleton. A module that declares a `boot =`
+    /// slot instantiates exactly one boot actor per `(engine, content hash)`;
+    /// this table is the per-engine half of that pairing (the state itself is
+    /// the per-substrate-process singleton every load runs through). Refcounted
+    /// against the module's non-boot actors and empty for every bootless module,
+    /// so the common case costs nothing.
+    pub boot_registry: HashMap<String, BootEntry>,
+    /// ADR-0147: a loaded non-boot actor's own trampoline mailbox → the content
+    /// hash of the module it came from. Populated only for actors sourced from a
+    /// module that declares a boot slot, so a drop / replace can find and
+    /// decrement the right boot refcount. A bootless module inserts nothing.
+    pub boot_hash_by_actor: HashMap<MailboxId, String>,
+}
+
+/// ADR-0147: one module's boot singleton. `mailbox_id` addresses the boot
+/// trampoline (spawned through the same `WasmTrampoline` path as any export);
+/// `refcount` counts the module's live **non-boot** actors — boot never counts
+/// itself, so its own drop could never be the one that zeroes the count. The
+/// boot is torn down when `refcount` reaches zero (the last non-boot actor from
+/// the module unloads or is rebound onto a different content hash).
+pub struct BootEntry {
+    pub mailbox_id: MailboxId,
+    pub refcount: u32,
 }
 
 /// Forward an arbitrary kind to a trampoline's mailbox, preserving the
@@ -129,6 +154,8 @@ impl NativeActor for ComponentHostCapability {
             mailer,
             outbound: config.hub_outbound,
             default_name_counter: 0,
+            boot_registry: HashMap::new(),
+            boot_hash_by_actor: HashMap::new(),
         })
     }
 
@@ -184,6 +211,10 @@ impl NativeActor for ComponentHostCapability {
         if state.registry.lookup(<HttpServerCapability as Addressable>::NAMESPACE).is_some() {
             ctx.actor::<HttpServerCapability>().send(&UnregisterRoutesAll { mailbox: payload.mailbox_id });
         }
+        // ADR-0147: account this actor's departure against its module's boot
+        // singleton before forwarding the drop — the last non-boot actor from a
+        // boot-bearing module tears the boot down here.
+        state.release_boot_ref(ctx, payload.mailbox_id);
         forward_to_trampoline(ctx, payload.mailbox_id, DropComponent::ID, &payload);
     }
 
@@ -203,7 +234,12 @@ impl NativeActor for ComponentHostCapability {
     /// replacement module to instantiate; `None` reuses the type the
     /// trampoline currently hosts.
     #[handler::single]
-    fn on_replace_component(_state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
+    fn on_replace_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
+        // ADR-0147: rebind the actor's boot bookkeeping onto the replacement's
+        // content before forwarding — the mailbox's old module refcount is
+        // decremented (tearing its boot down if it was the last), and the new
+        // module's boot singleton is spawned / incremented if it declares one.
+        state.rebind_boot_ref(ctx, payload.mailbox_id, &payload.wasm);
         forward_to_trampoline(ctx, payload.mailbox_id, ReplaceComponent::ID, &payload);
     }
 

@@ -1,0 +1,25 @@
+[package]
+name = "aether-test-fixtures-boot"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ADR-0147 fixture: a multi-actor module with an unconditional `boot =` slot.
+# One boot actor (`Boot`) plus two ordinary selectable actors (`WidgetA`,
+# `WidgetB`), exported via `export!(boot = Boot, WidgetA, WidgetB)` (no
+# `default =` — selector loads only, keeping the fixture minimal). Standalone
+# (not in the main `aether-test-fixtures-bundle`, which is one cdylib shared
+# across dozens of unrelated scenario tests) so the new host boot machinery's
+# test surface stays isolated: folding an unconditional boot slot into the
+# shared bundle would spawn and refcount-track a boot instance on every one of
+# those loads. Mirrors the `aether-test-fixtures-defaultless` precedent.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "../../aether-actor" }
+aether-kinds = { path = "../../aether-kinds" }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
+
+[lints]
+workspace = true

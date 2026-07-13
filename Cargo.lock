@@ -348,6 +348,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-test-fixtures-boot"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-kinds",
+ "aether-test-fixtures-kinds",
+]
+
+[[package]]
 name = "aether-test-fixtures-bundle"
 version = "0.3.0-alpha"
 dependencies = [

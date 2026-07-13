@@ -86,6 +86,12 @@ fn probe_address() -> String {
     format!("aether.component/{}:{}", aether_capabilities::WasmTrampoline::NAMESPACE, PROBE_NAME)
 }
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
+/// ADR-0147 boot fixture markers (`crate::aether-test-fixtures-boot`): the boot
+/// actor broadcasts `BOOT_OBSERVED` from `wire` (once per instance) and
+/// `BOOT_TORN_DOWN` from `unwire` (once at teardown). The boot scenario counts
+/// them via `count_observed`.
+const BOOT_OBSERVED: &str = "aether.test_fixture.boot_observed";
+const BOOT_TORN_DOWN: &str = "aether.test_fixture.boot_torn_down";
 
 /// Build a `NamedMail` for a `CaptureFrame` mail bundle. Uses
 /// the kind's wire encoding (`encode_into_bytes`) so any K — cast
@@ -211,6 +217,8 @@ fn require_wgpu_only() -> bool {
     false
 }
 
+#[path = "test_bench_scenario/boot.rs"]
+mod boot;
 #[path = "test_bench_scenario/clipboard.rs"]
 mod clipboard;
 #[path = "test_bench_scenario/component.rs"]
