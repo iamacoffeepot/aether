@@ -320,9 +320,22 @@ jobs:
           echo "AGENT_CLAUDE_CODE_OAUTH_TOKEN secret is not set — the review is skipped."
           echo "Mint one with 'claude setup-token' and add it: gh secret set AGENT_CLAUDE_CODE_OAUTH_TOKEN"
 
+      # Pinned via AGENT_CLAUDE_CODE_VERSION (#3285): a CLI upgrade changes the
+      # system-prompt bytes, which cold-misses the fleet-wide prompt cache and
+      # invalidates any resumable session. Unset falls back to latest with a
+      # warning — a missing var never bricks the fleet.
       - name: Install Claude Code
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
-        run: npm install -g @anthropic-ai/claude-code
+        env:
+          CLAUDE_CODE_VERSION: ${{ vars.AGENT_CLAUDE_CODE_VERSION }}
+        run: |
+          if [ -n "${CLAUDE_CODE_VERSION:-}" ]; then
+            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+          else
+            echo "::warning::AGENT_CLAUDE_CODE_VERSION is unset — installing latest; an upstream release cold-misses the fleet prompt cache (#3285)"
+            npm install -g @anthropic-ai/claude-code
+          fi
+          claude --version
 
       # Pre-trust the checkout so settings.json permissions aren't ignored
       # with a warning under skip-permissions.
@@ -359,26 +372,40 @@ jobs:
       # MECHANICAL, not prose: the prompt prescribes a concrete poll loop
       # (sleep + check for the rollup file) because two live runs proved a
       # session will end on a promise with the workflow still in flight.
-      - name: Run the five-pillar review
+      # The -p text is BYTE-CONSTANT across runs (#3285): the per-run parameters
+      # (pr_number, diff_base) ride /tmp/agent-task.json, so every review box
+      # sends an identical first user message and reads the shared prompt-cache
+      # prefix instead of re-writing it. ${GITHUB_WORKSPACE} stays interpolated —
+      # it is byte-constant per runner substrate. Keep the rest constant.
+      - name: Stage the task parameters
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
           DIFF_BASE: ${{ steps.resolve.outputs.diff_base }}
           REVIEW_MODE: ${{ steps.resolve.outputs.review_mode }}
         run: |
-          claude -p "You are running headless in CI on a checkout of PR #${PR_NUMBER}'s head branch.
-          The diff base is ${DIFF_BASE}; the head is the current HEAD.
-          Invoke the repo's /review skill in INTEGRATED mode against ${DIFF_BASE}...HEAD:
-          resolve the changed .rs files and their per-file diffs from git, and read the issue
-          text this PR closes (use gh to find the PR's closing reference for issue #${PR_NUMBER}
-          if needed). Pass noBuild: true, depth: gate, diffBase: \"${DIFF_BASE}\", and
-          reviewMode: \"${REVIEW_MODE}\" in the /review invocation's workflow args — this runner
-          has no Rust toolchain, so the high-severity correctness refuter must
+          jq -nc --arg pr "$PR_NUMBER" --arg base "$DIFF_BASE" --arg mode "$REVIEW_MODE" '{pr_number: $pr, diff_base: $base, review_mode: $mode}' > /tmp/agent-task.json
+
+      - name: Run the five-pillar review
+        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          claude -p "You are running headless in CI on a checkout of a PR's head branch.
+          FIRST ACTION: read /tmp/agent-task.json. Its pr_number field is the PR under
+          review; its diff_base field is the diff base; its review_mode field is the review mode.
+          The head is the current HEAD.
+          Invoke the repo's /review skill in INTEGRATED mode against <diff_base>...HEAD,
+          substituting the file's diff_base value: resolve the changed .rs files and their
+          per-file diffs from git, and read the issue text this PR closes (use gh to find
+          the PR's closing reference for the pr_number
+          if needed). Pass noBuild: true, depth: gate, diffBase: <diff_base>, and
+          reviewMode: <review_mode> (both read from the file) in the /review invocation's workflow
+          args — this runner has no Rust toolchain, so the high-severity correctness refuter must
           ground read-only rather than write and run a scratch cargo test, and diffBase + reviewMode
           let it classify a flagged correctness bug's provenance against the merge-base (a pre-existing
-          bug reachable on the base becomes an advisory follow-up, never an in-PR demand). Let the skill
-          run the review.js workflow in a single pass.
+          bug reachable on the base becomes an advisory follow-up, never an in-PR demand). Let the skill run the
+          review.js workflow in a single pass.
           THE WAIT CONTRACT (load-bearing — two prior runs died on this): the Workflow tool
           runs in the BACKGROUND. In headless mode your final reply exits the process and
           KILLS the in-flight workflow, so you may not produce a final reply until

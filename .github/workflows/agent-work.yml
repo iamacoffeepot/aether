@@ -380,9 +380,22 @@ jobs:
           jq 'del(.hooks)' .claude/settings.json > /tmp/settings.json
           mv /tmp/settings.json .claude/settings.json
 
+      # Pinned via AGENT_CLAUDE_CODE_VERSION (#3285): a CLI upgrade changes the
+      # system-prompt bytes, which cold-misses the fleet-wide prompt cache and
+      # invalidates any resumable session. Unset falls back to latest with a
+      # warning — a missing var never bricks the fleet.
       - name: Install Claude Code
         if: steps.guard.outputs.proceed == 'true'
-        run: npm install -g @anthropic-ai/claude-code
+        env:
+          CLAUDE_CODE_VERSION: ${{ vars.AGENT_CLAUDE_CODE_VERSION }}
+        run: |
+          if [ -n "${CLAUDE_CODE_VERSION:-}" ]; then
+            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+          else
+            echo "::warning::AGENT_CLAUDE_CODE_VERSION is unset — installing latest; an upstream release cold-misses the fleet prompt cache (#3285)"
+            npm install -g @anthropic-ai/claude-code
+          fi
+          claude --version
 
       # Pre-trust the checkout so settings.json permissions aren't ignored with a
       # warning under skip-permissions.
@@ -463,8 +476,13 @@ jobs:
       # its own re-entrancy guard first, then follows ask-and-park / end-turn-not-
       # wait rather than blocking on a human. The workflow just launches it.
       #
-      # If #3128 ever renames the wrappers, the skill reference below (built from
-      # inputs.task) is the single edit site. stream-json + the jq renderer make
+      # The -p text is BYTE-CONSTANT across dispatches (#3285): the per-run
+      # parameters ride /tmp/agent-task.json, staged in the step below, so every
+      # box of this workflow sends an identical first user message and reads the
+      # shared prompt-cache prefix instead of re-writing ~26K tokens at the cache
+      # write premium. Keep it constant — one interpolation here re-prices every
+      # dispatch. If #3128 ever renames the wrappers, the constant instruction
+      # below is the single edit site. stream-json + the jq renderer make
       # the session watchable live in the Actions log; the tee'd JSONL is the
       # durable transcript, uploaded below. The tee target lives in /tmp, outside
       # the checkout, so the session can never mistake it for repo scratch. `|| true`
@@ -478,6 +496,11 @@ jobs:
       # mechanical in-turn poll that never ends a turn on a pending background
       # task — see .claude/skills/headless/protocol.md, the CI-wait contract. The
       # var is left set as a harmless backstop; nothing now depends on it.
+      - name: Stage the task parameters
+        if: steps.guard.outputs.proceed == 'true'
+        run: |
+          jq -nc --arg task "$TASK" --arg ref "$REF" '{task: $task, ref: $ref}' > /tmp/agent-task.json
+
       - name: Drive the headless wrapper
         if: steps.guard.outputs.proceed == 'true'
         env:
@@ -487,17 +510,23 @@ jobs:
           AGENT_MAIN_STRICT: ${{ vars.AGENT_MAIN_STRICT }}
         run: |
           set -euo pipefail
-          claude -p "You are running headless in CI on a checkout of the aether repo.
-          Invoke the repo's /${TASK}-headless skill against ref ${REF}.
-          That wrapper executes the original /${TASK} skill verbatim and applies
-          .claude/skills/headless/protocol.md for the interaction surface: run its
-          re-entrancy guard first, then follow the wrapper's Overrides table exactly —
-          ask-and-park where the original would ask a human, end-turn-not-wait where
-          the original would block on a human, checkout-as-isolation instead of a
-          worktree, and the owner's public git identity (already configured) for any
-          commit or merge. Never sleep-poll on a human and never author under the
-          owner's real name or personal email. When you reach the wrapper's terminal state (parked, or the flow's
-          end-turn point), end your turn." \
+          cat > /tmp/agent-prompt.md <<'PROMPT'
+          You are running headless in CI on a checkout of the aether repo.
+          FIRST ACTION: read /tmp/agent-task.json. Its "task" field names this run's
+          pipeline task; its "ref" field is the issue or PR ref to act on.
+          Invoke the repo's /<task>-headless skill against that ref, substituting
+          the file's task value for <task>. That wrapper executes the original
+          /<task> skill verbatim and applies .claude/skills/headless/protocol.md
+          for the interaction surface: run its re-entrancy guard first, then follow
+          the wrapper's Overrides table exactly — ask-and-park where the original
+          would ask a human, end-turn-not-wait where the original would block on a
+          human, checkout-as-isolation instead of a worktree, and the owner's
+          public git identity (already configured) for any commit or merge. Never
+          sleep-poll on a human and never author under the owner's real name or
+          personal email. When you reach the wrapper's terminal state (parked, or
+          the flow's end-turn point), end your turn.
+          PROMPT
+          claude -p "$(cat /tmp/agent-prompt.md)" \
             --dangerously-skip-permissions \
             --model "$MODEL" \
             --max-turns ${{ (inputs.task == 'implement' || inputs.task == 'approve-sweep') && 400 || 200 }} \
