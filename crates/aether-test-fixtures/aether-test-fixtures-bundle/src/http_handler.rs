@@ -35,6 +35,20 @@ use aether_capabilities::http::{ResponseStream, WebSocketStream};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::DropComponent;
 
+/// Bind the calling actor as the `/` catch-all (ADR-0130/0131) so every
+/// route-unmatched request dispatches to it — the reflexive replacement
+/// for the retired `handler_mailbox` config default. Shared by every
+/// catch-all fixture in this module; the routed fixtures register their
+/// specific prefixes instead.
+fn bind_catch_all(ctx: &mut WasmCtx<'_>) {
+    ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+        prefix: "/".to_string(),
+        method: None,
+        kind: <HttpServerRequest as Kind>::ID,
+        shared: false,
+    });
+}
+
 pub struct HttpHandler;
 
 #[actor]
@@ -45,16 +59,8 @@ impl WasmActor for HttpHandler {
         Ok(HttpHandler)
     }
 
-    /// Bind this actor as the `/` catch-all (ADR-0130/0131) so every
-    /// route-unmatched request dispatches here — the reflexive replacement
-    /// for the retired `handler_mailbox` config default.
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
-        ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
-            prefix: "/".to_string(),
-            method: None,
-            kind: <HttpServerRequest as Kind>::ID,
-            shared: false,
-        });
+        bind_catch_all(ctx);
     }
 
     /// Route an inbound HTTP request to a status + body and reply the
@@ -138,16 +144,10 @@ impl WasmActor for StreamingHttpHandler {
         Ok(StreamingHttpHandler { stream: None, next_index: 0, ended: false })
     }
 
-    /// Bind this actor as the `/` catch-all (ADR-0130/0131) — the reflexive
-    /// replacement for the retired `handler_mailbox` config default; the cap
-    /// still reads this actor's accept-set to take the streaming path.
+    /// The cap reads this actor's accept-set off the catch-all binding to
+    /// take the streaming path.
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
-        ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
-            prefix: "/".to_string(),
-            method: None,
-            kind: <HttpServerRequest as Kind>::ID,
-            shared: false,
-        });
+        bind_catch_all(ctx);
     }
 
     /// Open a streamed `200` response. The body arrives later, one chunk per
@@ -159,6 +159,10 @@ impl WasmActor for StreamingHttpHandler {
     //noinspection DuplicatedCode -- actor macros require one request handler per fixture actor type.
     #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
+        // Disarm the previous request's stream too: each request opens a
+        // fresh stream, and the slot must re-arm from the new stream's own
+        // first credit grant or every chunk goes to the dead stream.
+        self.stream = None;
         self.next_index = 0;
         self.ended = false;
         HttpResponseStreamOpen { status: 200, headers: Vec::new() }
@@ -208,16 +212,8 @@ impl WasmActor for WebSocketHandler {
         Ok(WebSocketHandler { connections: BTreeMap::new() })
     }
 
-    /// Bind this actor as the `/` catch-all (ADR-0130/0131) so every upgrade
-    /// request dispatches here — the reflexive replacement for the retired
-    /// `handler_mailbox` config default.
     fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
-        ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
-            prefix: "/".to_string(),
-            method: None,
-            kind: <HttpServerRequest as Kind>::ID,
-            shared: false,
-        });
+        bind_catch_all(ctx);
     }
 
     /// Accept every upgrade the cap routes here (the cap has already validated
@@ -401,6 +397,10 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// `wire`.
     #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
+        // Disarm the previous request's stream too: each request opens a
+        // fresh stream, and the slot must re-arm from the new stream's own
+        // first credit grant or every chunk goes to the dead stream.
+        self.stream = None;
         self.next_index = 0;
         self.ended = false;
         HttpResponseStreamOpen { status: 200, headers: Vec::new() }

@@ -386,6 +386,18 @@ mod test_handlers {
         }
     }
 
+    /// Bind the calling handler as the `/` catch-all (ADR-0130) — the
+    /// shared replacement for the retired `handler_mailbox` default, so a
+    /// route-unmatched request reaches that handler.
+    fn bind_catch_all(ctx: &mut NativeCtx<'_>) {
+        ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+            prefix: "/".to_string(),
+            method: None,
+            kind: <HttpServerRequest as Kind>::ID,
+            shared: false,
+        });
+    }
+
     /// Replies `200` and echoes the request's method / path / query /
     /// peer address (as headers) and body (verbatim), so a test can
     /// assert the full request round-tripped to the handler.
@@ -405,16 +417,8 @@ mod test_handlers {
             Ok(EchoHttpHandlerState)
         }
 
-        /// Bind as the `/` catch-all (ADR-0130) — the replacement for the
-        /// retired `handler_mailbox` default, so a route-unmatched request
-        /// reaches this handler.
         fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
-            ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
-                prefix: "/".to_string(),
-                method: None,
-                kind: <HttpServerRequest as Kind>::ID,
-                shared: false,
-            });
+            bind_catch_all(ctx);
         }
 
         #[handler::single]
@@ -453,15 +457,8 @@ mod test_handlers {
             Ok(FixedBodyHttpHandlerState)
         }
 
-        /// Bind as the `/` catch-all (ADR-0130) — the replacement for the
-        /// retired `handler_mailbox` default.
         fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
-            ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
-                prefix: "/".to_string(),
-                method: None,
-                kind: <HttpServerRequest as Kind>::ID,
-                shared: false,
-            });
+            bind_catch_all(ctx);
         }
 
         #[handler::single]
@@ -495,15 +492,8 @@ mod test_handlers {
             Ok(SilentHttpHandlerState)
         }
 
-        /// Bind as the `/` catch-all (ADR-0130) — the replacement for the
-        /// retired `handler_mailbox` default.
         fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
-            ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
-                prefix: "/".to_string(),
-                method: None,
-                kind: <HttpServerRequest as Kind>::ID,
-                shared: false,
-            });
+            bind_catch_all(ctx);
         }
 
         #[handler::single]
@@ -546,16 +536,10 @@ mod test_handlers {
             Ok(StreamHttpHandlerState { next_index: 0, ended: false })
         }
 
-        /// Bind as the `/` catch-all (ADR-0130) — the replacement for the
-        /// retired `handler_mailbox` default; the cap still reads this
-        /// handler's accept-set to take the streaming path.
+        /// The cap reads this handler's accept-set off the catch-all
+        /// binding to take the streaming path.
         fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
-            ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
-                prefix: "/".to_string(),
-                method: None,
-                kind: <HttpServerRequest as Kind>::ID,
-                shared: false,
-            });
+            bind_catch_all(ctx);
         }
 
         #[handler::single]
@@ -621,15 +605,8 @@ mod test_handlers {
             Ok(FloodHttpHandlerState { flooded: false })
         }
 
-        /// Bind as the `/` catch-all (ADR-0130) — the replacement for the
-        /// retired `handler_mailbox` default.
         fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
-            ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
-                prefix: "/".to_string(),
-                method: None,
-                kind: <HttpServerRequest as Kind>::ID,
-                shared: false,
-            });
+            bind_catch_all(ctx);
         }
 
         #[handler::single]
@@ -685,16 +662,10 @@ mod test_handlers {
             Ok(StreamingUploadHandlerState { received: 0, stream: None })
         }
 
-        /// Bind as the `/` catch-all (ADR-0130) — the replacement for the
-        /// retired `handler_mailbox` default; the cap still reads this
-        /// handler's accept-set to take the request-streaming path.
+        /// The cap reads this handler's accept-set off the catch-all
+        /// binding to take the request-streaming path.
         fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
-            ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
-                prefix: "/".to_string(),
-                method: None,
-                kind: <HttpServerRequest as Kind>::ID,
-                shared: false,
-            });
+            bind_catch_all(ctx);
         }
 
         #[handler::manual]
