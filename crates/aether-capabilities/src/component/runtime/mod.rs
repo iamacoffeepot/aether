@@ -29,8 +29,10 @@ pub use self::config::ComponentHostConfig;
 
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, ListComponents, ListComponentsResult, LoadComponent,
-    LoadResult, ReplaceComponent,
+    LoadResult, ReplaceComponent, ReplaceResult,
 };
+
+pub use aether_actor::Manual;
 
 // Crate-local wiring the `#[runtime] impl` handler bodies name (sibling caps it
 // mails, the unsubscribe kind, the `Kind` / `MailboxCategory` vocabulary), the
@@ -40,7 +42,7 @@ use crate::http::kinds::UnregisterRoutesAll;
 use crate::input::{InputCapability, UnsubscribeAll};
 use crate::lifecycle::LifecycleCapability;
 use aether_actor::Addressable;
-use aether_data::{Kind, MailboxCategory};
+use aether_data::{Kind, MailboxCategory, Source};
 use aether_kinds::LifecycleUnsubscribeAll;
 
 use std::collections::HashMap;
@@ -94,6 +96,24 @@ pub struct ComponentHostCapabilityState {
     /// module that declares a boot slot, so a drop / replace can find and
     /// decrement the right boot refcount. A bootless module inserts nothing.
     pub boot_hash_by_actor: HashMap<MailboxId, String>,
+    /// ADR-0147: in-flight `aether.component.replace` forwards awaiting their
+    /// trampoline `ReplaceResult`, keyed by the forward's correlation id. The
+    /// boot-refcount transfer for a replace is committed only after the swap
+    /// succeeds (`finish_replace`), so the caller's reply target and the
+    /// replacement wasm are parked here across the hop. Empty except while a
+    /// replace is settling.
+    pub pending_replace: HashMap<u64, PendingReplace>,
+}
+
+/// ADR-0147: a parked `aether.component.replace` forward. `source` is the
+/// original caller's reply target (the trampoline's `ReplaceResult` is routed
+/// to the cap instead, then re-replied here); `actor_mailbox` and `new_wasm`
+/// are what `rebind_boot_ref` needs to commit the boot-refcount transfer once
+/// the swap is confirmed successful.
+pub struct PendingReplace {
+    pub source: Source,
+    pub actor_mailbox: MailboxId,
+    pub new_wasm: Vec<u8>,
 }
 
 /// ADR-0147: one module's boot singleton. `mailbox_id` addresses the boot
@@ -156,6 +176,7 @@ impl NativeActor for ComponentHostCapability {
             default_name_counter: 0,
             boot_registry: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
+            pending_replace: HashMap::new(),
         })
     }
 
@@ -235,12 +256,23 @@ impl NativeActor for ComponentHostCapability {
     /// trampoline currently hosts.
     #[handler::single]
     fn on_replace_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
-        // ADR-0147: rebind the actor's boot bookkeeping onto the replacement's
-        // content before forwarding — the mailbox's old module refcount is
-        // decremented (tearing its boot down if it was the last), and the new
-        // module's boot singleton is spawned / incremented if it declares one.
-        state.rebind_boot_ref(ctx, payload.mailbox_id, &payload.wasm);
-        forward_to_trampoline(ctx, payload.mailbox_id, ReplaceComponent::ID, &payload);
+        // ADR-0147: forward the replace to the trampoline but intercept its
+        // `ReplaceResult` at this cap (`begin_replace`), so the boot-refcount
+        // transfer is committed only after the swap actually succeeds
+        // (`finish_replace` / `on_replace_result`). Committing it here — before
+        // the fire-and-forget replace resolves — would desync the refcount on a
+        // failed replace, where the trampoline keeps hosting the old module.
+        state.begin_replace(ctx, payload);
+    }
+
+    /// Settle a forwarded `aether.component.replace` (ADR-0147). The
+    /// trampoline's `ReplaceResult` is routed here rather than straight to the
+    /// caller so the boot-refcount transfer can be gated on the swap's success;
+    /// `finish_replace` commits it on `Ok`, then re-replies the verdict to the
+    /// original caller.
+    #[handler::manual]
+    fn on_replace_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, payload: ReplaceResult) {
+        state.finish_replace(ctx, payload);
     }
 
     /// Enumerate the components this engine has actually loaded and
