@@ -126,8 +126,28 @@ jobs:
     # so it must never hold a write scope on the default token — every write
     # (labels, comments, commits, PR ops) rides the App installation token minted
     # below, mirroring review.yml's read-only executing job.
+    #
+    # id-token: write exists ONLY for the warm-session-pool steps (#3313): it lets
+    # the job assume the OIDC role scoped to agent/pool/* on the session bucket.
+    # That is an S3-prefix write surface reachable by the repo code this job runs,
+    # bounded by three fences: the role's policy covers only agent/pool/*, the pool
+    # is inert unless the owner sets AGENT_POOL_ENABLE=true, and every pool step is
+    # fenced so a miss degrades to today's cold run. Owner console prerequisites:
+    #   (a) widen the OIDC role (AGENT_AWS_ROLE_ARN) with
+    #       s3:GetObject/PutObject/DeleteObject/ListBucket on
+    #       arn:aws:s3:::<AGENT_SESSION_BUCKET>/agent/pool/* (+ ListBucket prefix
+    #       condition), assumable from this repo's OIDC sub (v1 already granted it
+    #       for the review box);
+    #   (b) extend the bucket lifecycle rule expiring agent/pool/v2/* after 1 day
+    #       (entries are cache-worthless past the hour; GH artifacts remain the
+    #       forensic copy);
+    #   (c) set repo vars AGENT_POOL_ENABLE=true (the flip — enabled last for the
+    #       implement bucket, the highest-contamination surface, per #3310's risk
+    #       ordering) and optionally AGENT_POOL_DEPTH / AGENT_POOL_CUTOFF_MINS /
+    #       AGENT_POOL_CONTEXT_CAP_TOKENS (defaults 1 / 55 / 150000).
     permissions:
       contents: read
+      id-token: write
     env:
       # Exposed at job level under the name the Claude Code binary reads, sourced
       # from AGENT_CLAUDE_CODE_OAUTH_TOKEN — the same dedicated CI subscription
@@ -495,6 +515,120 @@ jobs:
           echo "model resolved to ${model}"
           echo "model=${model}" >> "$GITHUB_OUTPUT"
 
+      # Warm session pool (#3313; design of record: the #3264 design comment,
+      # v1.5 + the v2 function-primary directive). Resume a deposited session
+      # whose file-beliefs are provably true at this checkout instead of
+      # re-sending and re-writing the same large shared prefix (system prompt,
+      # CLAUDE.md, the wrapper skill text) from cold. Keyed by function = the
+      # dispatched task, so a scope box resumes a prior scope session, a land box
+      # a prior land session, each bucketed separately; the resolved model is a
+      # path segment too, so an opus session and a sonnet session never
+      # cross-serve. The pool is an optimization layer: every pool step is fenced
+      # so a failure degrades to today's cold run — it must never block or redden
+      # the work. Inert unless the owner sets AGENT_POOL_ENABLE=true (console
+      # prerequisites in this job's permissions comment above).
+      - name: Configure AWS credentials for the session pool
+        id: pool-creds
+        if: steps.guard.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != '' && vars.AGENT_POOL_ENABLE == 'true'
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AGENT_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AGENT_AWS_REGION }}
+
+      # Checkout half: select the newest belief-truth-valid same-function
+      # session, retire stale entries on the spot (delete-not-keep), lease via S3
+      # conditional write with self-healing reclaim of an expired lease. `set -e`
+      # is deliberately absent: every miss falls through to a cold run. Selection
+      # by task warmth: `implement` (the one code-shaped task) derives a
+      # request-side subsystem slug from the issue's `## Declared surface` globs
+      # and LISTs that exact idx prefix first, falling back to the generic
+      # within-function prefix on a miss; every other task LISTs the generic
+      # within-function prefix directly (it carries no cheap request-side key).
+      # Every candidate — exact or generic — still passes the unchanged
+      # per-candidate `eligible` belief-truth gate, so generic selection relaxes
+      # only the relevance ranking, never the safety gate.
+      - name: Pool checkout
+        id: pool-checkout
+        if: steps.guard.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != '' && vars.AGENT_POOL_ENABLE == 'true' && steps.pool-creds.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BUCKET: ${{ vars.AGENT_SESSION_BUCKET }}
+          MODEL: ${{ steps.model.outputs.model }}
+          AGENT_POOL_CUTOFF_MINS: ${{ vars.AGENT_POOL_CUTOFF_MINS }}
+          AGENT_POOL_CONTEXT_CAP_TOKENS: ${{ vars.AGENT_POOL_CONTEXT_CAP_TOKENS }}
+        run: |
+          set -uo pipefail
+          # Stage the pool script from origin/main, never a branch the wrapper
+          # might later cut: a stale branch must not silently kill the pool
+          # (#3293), and the idx path is a workflow-side string either way.
+          git show origin/main:scripts/agent-pool.mjs > /tmp/agent-pool.mjs || true
+          sid=""; slug=""
+          cli_version="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+          model="$MODEL"
+          if [ -n "$cli_version" ] && [ -n "${BUCKET:-}" ]; then
+            idx_base="agent/pool/v2/idx/${TASK}/${cli_version}/${model}/"
+            idx="$idx_base"
+            # implement is the one task with a cheap request-side key — the
+            # issue's declared-surface globs. Extract the ```-fenced block under
+            # `## Declared surface`, resolve it to a slug (narrowestRoot drops
+            # each path's trailing segment, so `dir/**` and `dir/file.rs` both
+            # resolve to their directory), and prefer that exact prefix.
+            if [ "$TASK" = "implement" ]; then
+              gh api "repos/${REPO}/issues/${REF}" --jq '.body' | tr -d '\r' > /tmp/pool-issue-body.txt || true
+              awk '/^## Declared surface/{f=1;next} f&&/^```/{if(seen){exit}seen=1;next} f&&seen{print}' \
+                /tmp/pool-issue-body.txt > /tmp/pool-declared.txt || true
+              slug="$(node /tmp/agent-pool.mjs root < /tmp/pool-declared.txt | jq -r .slug)" || slug=""
+              [ -n "$slug" ] && [ "$slug" != "null" ] && idx="${idx_base}${slug}/"
+            fi
+            git ls-tree -r HEAD > /tmp/pool-ls-tree.txt
+            munged="$(echo "$GITHUB_WORKSPACE" | tr '/' '-')"
+            for prefix in "$idx" "$idx_base"; do
+              keys="$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$prefix" \
+                --query 'sort_by(Contents||`[]`,&LastModified)[].Key' --output text 2>/dev/null \
+                | tr '\t' '\n' | grep -v '^None$' | tail -5 | tac)" || keys=""
+              for key in $keys; do
+                aws s3 cp "s3://${BUCKET}/${key}" /tmp/pool-candidate.json >/dev/null 2>&1 || continue
+                cand_sid="$(jq -r .session_id /tmp/pool-candidate.json)" || continue
+                elig="$(node /tmp/agent-pool.mjs eligible --manifest /tmp/pool-candidate.json --ls-tree /tmp/pool-ls-tree.txt)" || continue
+                if [ "$(echo "$elig" | jq -r .ok)" != "true" ]; then
+                  echo "pool: retired ${cand_sid} ($(echo "$elig" | jq -r .reason))" | tee -a "$GITHUB_STEP_SUMMARY"
+                  aws s3 rm "s3://${BUCKET}/${key}" >/dev/null 2>&1 || true
+                  aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v2/sessions/${cand_sid}/" >/dev/null 2>&1 || true
+                  continue
+                fi
+                lease="agent/pool/v2/leases/${cand_sid}"
+                echo "$(( $(date +%s) + 5700 ))" > /tmp/pool-lease.txt   # covers the longest task leash (90 min) + 5
+                if ! aws s3api put-object --bucket "$BUCKET" --key "$lease" --body /tmp/pool-lease.txt --if-none-match '*' >/dev/null 2>&1; then
+                  held="$(aws s3 cp "s3://${BUCKET}/${lease}" - 2>/dev/null || echo 0)"
+                  if [ "${held:-0}" -lt "$(date +%s)" ] 2>/dev/null; then
+                    # expired lease from a dead box — reclaim; a raced re-create still 412s for the loser
+                    aws s3 rm "s3://${BUCKET}/${lease}" >/dev/null 2>&1 || true
+                    aws s3api put-object --bucket "$BUCKET" --key "$lease" --body /tmp/pool-lease.txt --if-none-match '*' >/dev/null 2>&1 \
+                      || { echo "pool: lease race lost on ${cand_sid}"; continue; }
+                  else
+                    echo "pool: ${cand_sid} is leased"; continue
+                  fi
+                fi
+                mkdir -p "$HOME/.claude/projects/${munged}"
+                if aws s3 sync "s3://${BUCKET}/agent/pool/v2/sessions/${cand_sid}/" "$HOME/.claude/projects/${munged}/" >/dev/null 2>&1; then
+                  sid="$cand_sid"
+                  cp /tmp/pool-candidate.json /tmp/pool-prior-manifest.json
+                  echo "pool: warm checkout ${sid} (root $(jq -r .subsystem_root /tmp/pool-candidate.json), $(jq -r .context_tokens /tmp/pool-candidate.json) ctx tokens)" | tee -a "$GITHUB_STEP_SUMMARY"
+                else
+                  aws s3 rm "s3://${BUCKET}/${lease}" >/dev/null 2>&1 || true
+                fi
+                break
+              done
+              [ -n "$sid" ] && break
+              # A non-implement task (or implement with no slug) has idx == idx_base:
+              # the first pass already listed the generic prefix, so don't list it twice.
+              [ "$prefix" = "$idx_base" ] && break
+            done
+          fi
+          [ -n "$sid" ] || echo "pool: cold run"
+          { echo "cli_version=${cli_version}"; echo "session_id=${sid}"; } >> "$GITHUB_OUTPUT"
+
       # Drive headless Claude through the #3128 wrapper for the dispatched task.
       # The wrapper executes the original /<task> skill verbatim and applies
       # .claude/skills/headless/protocol.md for the interaction surface: it runs
@@ -506,8 +640,16 @@ jobs:
       # box of this workflow sends an identical first user message and reads the
       # shared prompt-cache prefix instead of re-writing ~26K tokens at the cache
       # write premium. Keep it constant — one interpolation here re-prices every
-      # dispatch. If #3128 ever renames the wrappers, the constant instruction
-      # below is the single edit site. stream-json + the jq renderer make
+      # dispatch. The #3313 warm-pool addition is a DELIBERATE one-time edit to
+      # those constant bytes: the SESSION-REUSE verdict contract is appended to
+      # the always-present prompt (cold runs deposit too, so they must emit a
+      # verdict) and ${GITHUB_WORKSPACE} stays interpolated in the verdict path —
+      # byte-constant per runner substrate, exactly as review.yml does it — so
+      # cross-box prompt-cache reuse is preserved going forward and only the old
+      # cached prefix is repriced once. On a warm checkout a constant NEW-JOB
+      # preamble is prepended (drawing the v1.5 trust boundary), which does not
+      # perturb the cold-path bytes. If #3128 ever renames the wrappers, the
+      # constant instruction below is the single edit site. stream-json + the jq renderer make
       # the session watchable live in the Actions log; the tee'd JSONL is the
       # durable transcript, uploaded below. The tee target lives in /tmp, outside
       # the checkout, so the session can never mistake it for repo scratch. `|| true`
@@ -531,11 +673,12 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           MODEL: ${{ steps.model.outputs.model }}
+          POOL_SESSION_ID: ${{ steps.pool-checkout.outputs.session_id }}
           CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "2400000"
           AGENT_MAIN_STRICT: ${{ vars.AGENT_MAIN_STRICT }}
         run: |
           set -euo pipefail
-          cat > /tmp/agent-prompt.md <<'PROMPT'
+          cat > /tmp/agent-prompt.md <<PROMPT
           You are running headless in CI on a checkout of the aether repo.
           FIRST ACTION: read /tmp/agent-task.json. Its "task" field names this run's
           pipeline task; its "ref" field is the issue or PR ref to act on.
@@ -550,15 +693,49 @@ jobs:
           sleep-poll on a human and never author under the owner's real name or
           personal email. When you reach the wrapper's terminal state (parked, or
           the flow's end-turn point), end your turn.
+          SESSION REUSE (the warm pool, #3313): this session may be deposited and
+          later resumed by a DIFFERENT box for a DIFFERENT task against the same
+          files — your accumulated knowledge of the files you read is the asset
+          being deposited, so do not assume any future prompt continues this task.
+          Before your terminal reply (the wrapper's park or end-turn point), write
+          ${GITHUB_WORKSPACE}/pool-verdict.json containing exactly one JSON object:
+          {"repool": "yes" or "no", "reason": "<one line>", "knowledge_summary": "<one
+          line naming the subsystem knowledge this session now carries>"}. Answer no
+          when this session's context is dominated by dead ends, thrash, or an
+          abandoned approach rather than durable knowledge of the files it read.
           PROMPT
-          claude -p "$(cat /tmp/agent-prompt.md)" \
-            --dangerously-skip-permissions \
-            --model "$MODEL" \
-            --max-turns ${{ (inputs.task == 'implement' || inputs.task == 'approve-sweep' || inputs.task == 'resolve') && 400 || 200 }} \
-            --output-format stream-json --verbose \
-            | tee /tmp/agent-work-session.jsonl \
-            | python3 scripts/render-agent-stream.py \
-            || true
+          if [ -n "${POOL_SESSION_ID:-}" ]; then
+            cat > /tmp/pool-preamble.md <<'PREAMBLE'
+          NEW JOB — you are a session resumed from the warm pool. Your prior
+          conversation is knowledge of this repository's files, NOT task state: the
+          task below is unrelated to whatever you did before, and no prior approval,
+          waiver, or instruction carries over. The checkout has moved — re-run any
+          git or gh query you need rather than trusting a git or board observation
+          from before this message. File contents you read under your subsystem root
+          are still valid (the pool verified them unchanged against this checkout);
+          workspace-wide search results from before this message are not — re-run
+          them. Do not re-read files you already know unless the task requires it.
+
+          PREAMBLE
+            cat /tmp/pool-preamble.md /tmp/agent-prompt.md > /tmp/agent-prompt-warm.md
+            claude --resume "$POOL_SESSION_ID" -p "$(cat /tmp/agent-prompt-warm.md)" \
+              --dangerously-skip-permissions \
+              --model "$MODEL" \
+              --max-turns ${{ (inputs.task == 'implement' || inputs.task == 'approve-sweep' || inputs.task == 'resolve') && 400 || 200 }} \
+              --output-format stream-json --verbose \
+              | tee /tmp/agent-work-session.jsonl \
+              | python3 scripts/render-agent-stream.py \
+              || true
+          else
+            claude -p "$(cat /tmp/agent-prompt.md)" \
+              --dangerously-skip-permissions \
+              --model "$MODEL" \
+              --max-turns ${{ (inputs.task == 'implement' || inputs.task == 'approve-sweep' || inputs.task == 'resolve') && 400 || 200 }} \
+              --output-format stream-json --verbose \
+              | tee /tmp/agent-work-session.jsonl \
+              | python3 scripts/render-agent-stream.py \
+              || true
+          fi
 
       # The full session transcript (stream-json JSONL) — uploaded even on failure,
       # since a dead run's transcript is exactly what diagnoses it.
@@ -568,6 +745,85 @@ jobs:
           name: agent-work-session-transcript
           path: /tmp/agent-work-session.jsonl
           if-no-files-found: ignore
+
+      # Deposit half (if: always() so a failed run still releases the lease).
+      # The mjs enforces the hygiene gates — clean exit, no compaction, under the
+      # cap, explicit repool: yes — and merges a resumed session's prior read set
+      # (the declared set is cumulative). A refusal retires the resumed entry
+      # rather than reverting it; a successful re-deposit supersedes it under the
+      # new session id. Depth trim keeps the newest AGENT_POOL_DEPTH entries per
+      # slug. The idx is keyed by function = the dispatched task and by the
+      # resolved model, so an opus scope session and a sonnet scope session never
+      # cross-serve.
+      - name: Pool deposit
+        if: always() && steps.guard.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != '' && vars.AGENT_POOL_ENABLE == 'true' && steps.pool-creds.outcome == 'success'
+        env:
+          BUCKET: ${{ vars.AGENT_SESSION_BUCKET }}
+          MODEL: ${{ steps.model.outputs.model }}
+          CLI_VERSION: ${{ steps.pool-checkout.outputs.cli_version }}
+          PRIOR_SID: ${{ steps.pool-checkout.outputs.session_id }}
+          AGENT_POOL_DEPTH: ${{ vars.AGENT_POOL_DEPTH }}
+          AGENT_POOL_CUTOFF_MINS: ${{ vars.AGENT_POOL_CUTOFF_MINS }}
+          AGENT_POOL_CONTEXT_CAP_TOKENS: ${{ vars.AGENT_POOL_CONTEXT_CAP_TOKENS }}
+        run: |
+          set -uo pipefail
+          # Same origin/main staging as Pool checkout (#3293) — this step runs
+          # even when checkout was skipped, so it stages its own copy.
+          git show origin/main:scripts/agent-pool.mjs > /tmp/agent-pool.mjs || true
+          model="$MODEL"
+          release_lease() {
+            [ -n "${PRIOR_SID:-}" ] && aws s3 rm "s3://${BUCKET}/agent/pool/v2/leases/${PRIOR_SID}" >/dev/null 2>&1 || true
+          }
+          retire_prior() {
+            if [ -n "${PRIOR_SID:-}" ] && [ -f /tmp/pool-prior-manifest.json ]; then
+              old_slug="$(jq -r .slug /tmp/pool-prior-manifest.json 2>/dev/null)" || old_slug=""
+              aws s3 rm "s3://${BUCKET}/agent/pool/v2/idx/${TASK}/${CLI_VERSION:-unknown}/${model}/${old_slug}/${PRIOR_SID}.json" >/dev/null 2>&1 || true
+              aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v2/sessions/${PRIOR_SID}/" >/dev/null 2>&1 || true
+            fi
+          }
+          [ -n "${BUCKET:-}" ] || exit 0
+          [ -f /tmp/agent-work-session.jsonl ] || { release_lease; exit 0; }
+          git ls-tree -r HEAD > /tmp/pool-ls-tree.txt
+          prior_flag=""
+          [ -f /tmp/pool-prior-manifest.json ] && prior_flag="--prior /tmp/pool-prior-manifest.json"
+          out="$(node /tmp/agent-pool.mjs manifest \
+            --transcript /tmp/agent-work-session.jsonl \
+            --ls-tree /tmp/pool-ls-tree.txt \
+            --verdict "$GITHUB_WORKSPACE/pool-verdict.json" \
+            --cli-version "${CLI_VERSION:-unknown}" $prior_flag)" || out='{"ok":false,"reason":"manifest-error"}'
+          # Record this box's re-pool disposition for the spend ledger's pool
+          # block (#3166) — accepted, or the refusal/retirement reason. A /tmp
+          # write, so it can never perturb the deposit's own control flow.
+          echo "$out" | jq -r 'if .ok then "accepted" else .reason end' > /tmp/pool-deposit-reason.txt 2>/dev/null || true
+          if [ "$(echo "$out" | jq -r .ok)" = "true" ]; then
+            echo "$out" | jq .manifest > /tmp/pool-manifest-new.json
+            new_sid="$(jq -r .session_id /tmp/pool-manifest-new.json)"
+            slug="$(jq -r .slug /tmp/pool-manifest-new.json)"
+            munged="$(echo "$GITHUB_WORKSPACE" | tr '/' '-')"
+            idx="agent/pool/v2/idx/${TASK}/${CLI_VERSION:-unknown}/${model}/${slug}"
+            if aws s3 sync "$HOME/.claude/projects/${munged}/" "s3://${BUCKET}/agent/pool/v2/sessions/${new_sid}/" >/dev/null 2>&1 \
+               && aws s3 cp /tmp/pool-manifest-new.json "s3://${BUCKET}/${idx}/${new_sid}.json" >/dev/null 2>&1; then
+              echo "pool: deposited ${new_sid} under ${idx} ($(jq -r .context_tokens /tmp/pool-manifest-new.json) ctx tokens)" | tee -a "$GITHUB_STEP_SUMMARY"
+              [ "${PRIOR_SID:-}" != "$new_sid" ] && retire_prior
+              depth="${AGENT_POOL_DEPTH:-1}"
+              aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "${idx}/" \
+                --query 'sort_by(Contents||`[]`,&LastModified)[].Key' --output text 2>/dev/null \
+                | tr '\t' '\n' | grep -v '^None$' | head -n -"$depth" | while read -r stale; do
+                    [ -n "$stale" ] || continue
+                    ssid="$(basename "$stale" .json)"
+                    aws s3 rm "s3://${BUCKET}/${stale}" >/dev/null 2>&1 || true
+                    aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v2/sessions/${ssid}/" >/dev/null 2>&1 || true
+                    echo "pool: depth trim retired ${ssid}" | tee -a "$GITHUB_STEP_SUMMARY"
+                  done
+            else
+              echo "pool: deposit upload failed — entry not published" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "pool: deposit refused ($(echo "$out" | jq -r .reason))" | tee -a "$GITHUB_STEP_SUMMARY"
+            retire_prior
+          fi
+          release_lease
+          exit 0
 
       # Meter the run into the spend ledger (rung 1, #3166). Derive one usage
       # record from the tee'd transcript and write it to a distinct per-run key
@@ -589,24 +845,73 @@ jobs:
       # cleanly and the ledger stays empty. Every failure here is swallowed — a
       # session-side metering slip must never redden the job, whose durable
       # state is on GitHub.
+      #
+      # Warm-pool boxes (#3313) carry a `pool` block beside the cost/token
+      # columns: warm-vs-cold per function bucket, the re-pool verdict and whether
+      # the box complied by writing it, and this box's own deposit disposition
+      # (accepted / refusal reason) — what lets the flag-flip be demonstrated
+      # against the ledger instead of asserted. Assembled only when
+      # AGENT_POOL_ENABLE is on. Credential care: the pool-creds step exported
+      # OIDC creds scoped to agent/pool/* into the job env, and they cannot reach
+      # agent/usage/* — so this step clears the AWS_* credential triplet before
+      # the `aws s3 cp` and lets the RunsOn instance profile carry the write.
+      # Without the unset the ledger write silently 403s (region is left intact).
       - name: Meter the run into the spend ledger
         if: always() && steps.guard.outputs.proceed == 'true'
         env:
           MODEL: ${{ steps.model.outputs.model }}
           JOB_STATUS: ${{ job.status }}
+          AGENT_POOL_ENABLE: ${{ vars.AGENT_POOL_ENABLE }}
+          POOL_SESSION_ID: ${{ steps.pool-checkout.outputs.session_id }}
+          POOL_CLI_VERSION: ${{ steps.pool-checkout.outputs.cli_version }}
         run: |
           set -uo pipefail
           [ -f /tmp/agent-work-session.jsonl ] || { echo "no transcript — nothing to meter"; exit 0; }
           command -v node >/dev/null || { echo "no node — ledger row skipped"; exit 0; }
           command -v aws  >/dev/null || { echo "no aws cli — ledger write skipped"; exit 0; }
           day="$(date -u +%F)"
+
+          pool_arg=""
+          if [ "${AGENT_POOL_ENABLE:-}" = "true" ]; then
+            warm=false; [ -n "${POOL_SESSION_ID:-}" ] && warm=true
+            verdict="null"; reason=""; compliance="null"
+            if [ -f "$GITHUB_WORKSPACE/pool-verdict.json" ]; then
+              verdict="$(jq -r '.repool // "unknown"' "$GITHUB_WORKSPACE/pool-verdict.json")"
+              reason="$(jq -r '.reason // ""' "$GITHUB_WORKSPACE/pool-verdict.json")"
+              compliance="true"
+            elif [ "$warm" = true ]; then
+              compliance="false"   # warm session was asked to write a verdict and did not
+            fi
+            retire="$( [ -f /tmp/pool-deposit-reason.txt ] && cat /tmp/pool-deposit-reason.txt || true )"
+            jq -nc \
+              --argjson warm "$warm" \
+              --arg session_id "${POOL_SESSION_ID:-}" \
+              --arg cli_version "${POOL_CLI_VERSION:-}" \
+              --arg verdict "$verdict" \
+              --arg reason "$reason" \
+              --argjson compliance "$compliance" \
+              --arg retire "$retire" \
+              '{
+                 warm: $warm,
+                 session_id: (if $session_id == "" then null else $session_id end),
+                 cli_version: (if $cli_version == "" then null else $cli_version end),
+                 repool_verdict: (if $verdict == "null" then null else $verdict end),
+                 repool_reason: (if $reason == "" then null else $reason end),
+                 repool_compliance: $compliance,
+                 retire_reason: (if $retire == "" then null else $retire end)
+               }' > /tmp/pool-meter.json && pool_arg="--pool /tmp/pool-meter.json"
+          fi
+
           record="$(node scripts/agent-usage-record.mjs \
             --transcript /tmp/agent-work-session.jsonl \
             --task "$TASK" --ref "$REF" --run-id "$GITHUB_RUN_ID" \
             --conclusion "$JOB_STATUS" --model "$MODEL" \
-            --created-at "$(date -u +%FT%TZ)")" \
+            --created-at "$(date -u +%FT%TZ)" $pool_arg)" \
             || { echo "usage derivation failed — ledger row skipped"; exit 0; }
           printf '%s\n' "$record" > /tmp/agent-usage-record.json
+
+          # Drop the pool OIDC creds so the instance profile carries the write.
+          unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
           aws s3 cp /tmp/agent-usage-record.json \
             "s3://aether-evidence/agent/usage/${day}/${GITHUB_RUN_ID}.json" \
             --content-type application/json \
