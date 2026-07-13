@@ -130,6 +130,22 @@ async fn component_config_path_is_json_and_encodes() {
     std_fs::remove_file(&path).ok();
 }
 
+// Tripwire: config_path bounds the read against the RPC frame cap up
+// front, the same as the `$file` sigil embed path, instead of failing
+// late at frame encode.
+#[tokio::test]
+async fn component_config_path_oversized_is_rejected_up_front() {
+    let cap = max_frame_size();
+    let path = stage_blob_file("config-oversize", &vec![0u8; cap + 1]);
+    let schema = config_struct_schema();
+    let kind = config_kind(&schema);
+    let err = component_config_bytes(Some(&kind), None, Some(path.to_str().expect("utf-8 temp path")), "test")
+        .await
+        .expect_err("oversized config_path must be rejected up front");
+    assert!(err.to_string().contains("RPC frame cap"), "unexpected error: {err}");
+    std_fs::remove_file(&path).ok();
+}
+
 #[tokio::test]
 async fn component_config_rejects_both_sources() {
     let schema = config_struct_schema();

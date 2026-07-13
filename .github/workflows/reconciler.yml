@@ -107,7 +107,7 @@ jobs:
     # diagnostic comment: those ride the issues API but land on a PULL REQUEST, so
     # GitHub scopes them to the pull-requests permission — issues: write alone
     # returns 403. checks: read backs the head check-runs; statuses: write backs
-    # reading the Review gate status and posting the Approval gate status.
+    # posting the Approval gate status.
     permissions:
       issues: write
       pull-requests: write
@@ -284,25 +284,33 @@ jobs:
             fi
             echo "fact ci_green: ${ci_green} (CI pass=${ci_state})"
 
-            # Fact — review verdict in (per head): the Review gate commit status
-            # exists on this head SHA. success = clean (includes the non-Rust
-            # auto-skip and the owner review:skip waiver); failure = findings
-            # (mirrors review:unresolved). Absent/pending = verdict owed.
-            review_state="$(gh api "repos/${REPO}/commits/${head_sha}/status" \
-              --jq '[.statuses[] | select(.context == "Review gate")] | .[0].state // "missing"')"
-            case "$review_state" in
-              success|failure) review_owed=0 ;;
-              *) review_owed=1 ;;
+            # Fact — review verdict in (PR-level, ADR-0148): GitHub's native
+            # reviewDecision, aggregated from barista's required native review and
+            # already dismiss-stale-aware, so no per-head read is needed to stay
+            # honest across pushes — a fresh push's is_synchronize demotion already
+            # pins the head at building until CI is green. REVIEW_REQUIRED or null
+            # = verdict owed (null is the pre-flip/not-required state; fail closed
+            # rather than sliding a PR to held with no verdict ever submitted).
+            # CHANGES_REQUESTED = findings. APPROVED = verdict in and clean.
+            review_decision="$(gh api graphql -f query='
+              query($owner:String!, $repo:String!, $pr:Int!) {
+                repository(owner:$owner, name:$repo) {
+                  pullRequest(number:$pr) { reviewDecision }
+                }
+              }' -F owner="${REPO%/*}" -F repo="${REPO#*/}" -F pr="$pr" \
+              --jq '.data.repository.pullRequest.reviewDecision // empty')"
+            case "$review_decision" in
+              APPROVED) review_owed=0; review_findings=0 ;;
+              CHANGES_REQUESTED) review_owed=0; review_findings=1 ;;
+              *) review_owed=1; review_findings=0 ;;
             esac
-            echo "fact review_gate: ${review_state} (owed=${review_owed})"
+            echo "fact review_decision: ${review_decision:-null} (owed=${review_owed} findings=${review_findings})"
 
             # Fact — the advisory QA flags on the PR (PRs are issues for labels).
             pr_labels="$(gh api "repos/${REPO}/issues/${pr}/labels" --jq '.[].name')"
-            review_unresolved=0
-            grep -qx 'review:unresolved' <<<"$pr_labels" && review_unresolved=1
             dogfood_unresolved=0
             grep -qx 'dogfood:unresolved' <<<"$pr_labels" && dogfood_unresolved=1
-            echo "fact pr_labels: review:unresolved=${review_unresolved} dogfood:unresolved=${dogfood_unresolved}"
+            echo "fact pr_labels: dogfood:unresolved=${dogfood_unresolved}"
 
             # Fact — dogfood owed: the closing issue carries a filled Dogfood
             # brief that is not N/A (the same section read dogfood.yml gates on).
@@ -513,7 +521,7 @@ jobs:
               }' -F owner="${REPO%/*}" -F repo="${REPO#*/}" -F pr="$pr" \
               --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')"
             findings_open=0
-            if [ "$review_unresolved" -eq 1 ] || [ "$dogfood_unresolved" -eq 1 ] || [ "${unresolved_threads:-0}" -gt 0 ]; then
+            if [ "$review_findings" -eq 1 ] || [ "$dogfood_unresolved" -eq 1 ] || [ "${unresolved_threads:-0}" -gt 0 ]; then
               findings_open=1
             fi
             echo "fact unresolved_threads: ${unresolved_threads:-0} (findings_open=${findings_open})"

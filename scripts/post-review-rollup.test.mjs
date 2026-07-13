@@ -3,7 +3,9 @@ import test from 'node:test'
 
 import {
   buildReviewBody,
+  fingerprint,
   isActionable,
+  normalizeFingerprint,
   shouldSubmitVerdict,
   verdictEvent,
 } from './post-review-rollup.mjs'
@@ -120,4 +122,26 @@ test('buildReviewBody renders no soft-hold section for a clean rollup', () => {
   const body = buildReviewBody([], [], 0, 'APPROVE')
   assert.doesNotMatch(body, /soft-hold/)
   assert.match(body, /No confirmed findings — the change is clean under all five pillars\./)
+})
+
+// Tripwire: fingerprint's path half must canonicalize to repo-relative
+// regardless of whether it's fed an absolute CI-runner path or an
+// already-relative one — otherwise the same file fingerprints two ways and
+// cross-run dedup silently breaks (the bug this issue fixes). The parse-side
+// normalizer must map a legacy absolute marker onto that same canonical key
+// so already-posted findings keep deduping after the change.
+test('fingerprint canonicalizes both path forms to one key, and normalizeFingerprint matches legacy markers', () => {
+  const prior = process.env.GITHUB_WORKSPACE
+  process.env.GITHUB_WORKSPACE = '/home/runner/_work/aether/aether'
+  try {
+    const absolute = fingerprint('/home/runner/_work/aether/aether/crates/x.rs', 3, 'correctness')
+    const relative = fingerprint('crates/x.rs', 3, 'correctness')
+    assert.equal(absolute, relative)
+
+    const legacyMarker = '/home/runner/_work/aether/aether/crates/x.rs|3|correctness'
+    assert.equal(normalizeFingerprint(legacyMarker), relative)
+  } finally {
+    if (prior === undefined) delete process.env.GITHUB_WORKSPACE
+    else process.env.GITHUB_WORKSPACE = prior
+  }
 })
