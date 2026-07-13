@@ -365,16 +365,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
           DIFF_BASE: ${{ steps.resolve.outputs.diff_base }}
+          REVIEW_MODE: ${{ steps.resolve.outputs.review_mode }}
         run: |
           claude -p "You are running headless in CI on a checkout of PR #${PR_NUMBER}'s head branch.
           The diff base is ${DIFF_BASE}; the head is the current HEAD.
           Invoke the repo's /review skill in INTEGRATED mode against ${DIFF_BASE}...HEAD:
           resolve the changed .rs files and their per-file diffs from git, and read the issue
           text this PR closes (use gh to find the PR's closing reference for issue #${PR_NUMBER}
-          if needed). Pass noBuild: true and depth: gate in the /review invocation's workflow
-          args — this runner has no Rust toolchain, so the high-severity correctness refuter must
-          ground read-only rather than write and run a scratch cargo test. Let the skill run the
-          review.js workflow in a single pass.
+          if needed). Pass noBuild: true, depth: gate, diffBase: \"${DIFF_BASE}\", and
+          reviewMode: \"${REVIEW_MODE}\" in the /review invocation's workflow args — this runner
+          has no Rust toolchain, so the high-severity correctness refuter must
+          ground read-only rather than write and run a scratch cargo test, and diffBase + reviewMode
+          let it classify a flagged correctness bug's provenance against the merge-base (a pre-existing
+          bug reachable on the base becomes an advisory follow-up, never an in-PR demand). Let the skill
+          run the review.js workflow in a single pass.
           THE WAIT CONTRACT (load-bearing — two prior runs died on this): the Workflow tool
           runs in the BACKGROUND. In headless mode your final reply exits the process and
           KILLS the in-flight workflow, so you may not produce a final reply until
