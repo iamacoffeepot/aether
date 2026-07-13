@@ -17,12 +17,14 @@
 //     (error-exit | compacted | missing-verdict | declined | over-cap).
 //
 //   eligible --manifest <json> --ls-tree <file>
-//     → {ok: true} | {ok: false, reason: stale-tree | past-cutoff | over-cap}
-//     Belief-truth gate: the subtree listing under the manifest's subsystem
-//     root must be byte-identical (covers unread files and negative
-//     knowledge), and every out-of-root read must blob-match. Age is judged
-//     against AGENT_POOL_CUTOFF_MINS; the cap re-check makes lowering
-//     AGENT_POOL_CONTEXT_CAP_TOKENS retire existing entries retroactively.
+//     → {ok: true} | {ok: false, reason: past-cutoff | over-cap}
+//     Age is judged against AGENT_POOL_CUTOFF_MINS; the cap re-check makes
+//     lowering AGENT_POOL_CONTEXT_CAP_TOKENS retire existing entries
+//     retroactively. Belief-truth (subtree/out-of-root blob matching) was
+//     retired by #3341: a resumed session's beliefs may be stale, but every
+//     fact that decides an action is re-derived on the current checkout, so
+//     re-checking those beliefs at pool level was redundant and cost real
+//     reuse (zero non-judge sessions ever survived it).
 //
 //   root
 //     stdin: newline-separated repo-relative paths (a PR's changed files)
@@ -164,12 +166,6 @@ export function evaluateEligibility(manifest, lsTree, now) {
   const ageMins = (Math.floor(now / 1000) - manifest.deposited_at) / 60;
   if (ageMins >= CUTOFF_MINS) return { ok: false, reason: 'past-cutoff' };
   if (manifest.context_tokens > CONTEXT_CAP) return { ok: false, reason: 'over-cap' };
-  if (subtreeHash(lsTree, manifest.subsystem_root) !== manifest.subtree_hash) {
-    return { ok: false, reason: 'stale-tree' };
-  }
-  for (const [rel, hash] of Object.entries(manifest.out_of_root || {})) {
-    if (lsTree.get(rel) !== hash) return { ok: false, reason: 'stale-tree' };
-  }
   return { ok: true };
 }
 
