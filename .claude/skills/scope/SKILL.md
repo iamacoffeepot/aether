@@ -276,8 +276,9 @@ Every op with a REST endpoint rides REST (`gh api <path>`); only the one PR-draf
 - Un-draft a PR — `markPullRequestReadyForReview` (the REST `pulls` PATCH cannot clear `draft`), in `/land`.
 - Enumerate a PR's review threads — `reviewThreads` (the thread node id and its first comment's `databaseId` have no REST projection), in `/findings`.
 - Resolve a review thread — `resolveReviewThread` (no REST verb marks a thread resolved), in `/findings`.
+- Enable per-PR auto-merge — `enablePullRequestAutoMerge` (`gh pr merge --auto`; no REST verb enables auto-merge), in `/land`. The immediate-merge fallback still uses the REST `Merge PR` row above.
 
-These three are the pipeline's GraphQL-only ops; everything else, phase state included, is REST.
+These four are the pipeline's GraphQL-only ops; everything else, phase state included, is REST.
 
 ## Phase label reconcile
 
