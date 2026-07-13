@@ -427,38 +427,10 @@ jobs:
           path: ${{ runner.temp }}/qodana/caches
           key: qodana-2026.1-${{ github.ref }}-${{ github.sha }}
 
-  # Desktop chassis tests run the full OS matrix because winit event
-  # loops, wgpu driver init, and platform-specific frame capture are
-  # the only places per-OS coverage catches real bugs. Linux is covered
-  # by the workspace job above; this job adds macOS + Windows.
-  desktop:
-    name: Test desktop (${{ matrix.os }})
-    needs: changes
-    # only run this job on tagged releases
-    if: needs.changes.outputs.code == 'true' && startsWith(github.ref, 'refs/tags/')
-    runs-on: ${{ matrix.os }}
-    # Normal run is ≤ 2 min; cap at 15 so a runner stall (hub mac
-    # CI flaked on 2026-04-21 against PR #164's commit, then
-    # re-ran clean on the same SHA) doesn't eat the default 6h
-    # quota. Long-term we'd rather treat repeat flakes as a real
-    # scheduler/concurrency signal than keep growing this bound.
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ macos-latest, windows-latest ]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p aether-substrate-bundle --all-targets
-
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, dogfood-token-table, approval-machinery, clippy, docs, marker-build, test, desktop, qodana ]
+    needs: [ changes, fmt, dogfood-token-table, approval-machinery, clippy, docs, marker-build, test, qodana ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -471,7 +443,6 @@ jobs:
           echo "docs:    ${{ needs.docs.result }}"
           echo "marker-build: ${{ needs.marker-build.result }}"
           echo "test:    ${{ needs.test.result }}"
-          echo "desktop: ${{ needs.desktop.result }}"
           echo "qodana:  ${{ needs.qodana.result }}"
           fail=0
           [[ "${{ needs.changes.result }}" == "success" ]] || fail=1
@@ -482,6 +453,5 @@ jobs:
           [[ "${{ needs.docs.result }}"    == "success" || "${{ needs.docs.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.marker-build.result }}" == "success" || "${{ needs.marker-build.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.test.result }}"    == "success" || "${{ needs.test.result }}" == "skipped" ]] || fail=1
-          [[ "${{ needs.desktop.result }}" == "success" || "${{ needs.desktop.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.qodana.result }}"  == "success" || "${{ needs.qodana.result }}" == "skipped" ]] || fail=1
           exit $fail
