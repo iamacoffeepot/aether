@@ -276,9 +276,22 @@ jobs:
           echo "Mint one from the agent subscription with 'claude setup-token' and add it:"
           echo "  gh secret set AGENT_CLAUDE_CODE_OAUTH_TOKEN"
 
+      # Pinned via AGENT_CLAUDE_CODE_VERSION (#3285): a CLI upgrade changes the
+      # system-prompt bytes, which cold-misses the fleet-wide prompt cache and
+      # invalidates any resumable session. Unset falls back to latest with a
+      # warning — a missing var never bricks the fleet.
       - name: Install Claude Code
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
-        run: npm install -g @anthropic-ai/claude-code
+        env:
+          CLAUDE_CODE_VERSION: ${{ vars.AGENT_CLAUDE_CODE_VERSION }}
+        run: |
+          if [ -n "${CLAUDE_CODE_VERSION:-}" ]; then
+            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+          else
+            echo "::warning::AGENT_CLAUDE_CODE_VERSION is unset — installing latest; an upstream release cold-misses the fleet prompt cache (#3285)"
+            npm install -g @anthropic-ai/claude-code
+          fi
+          claude --version
 
       # Pre-trust the checkout so settings.json permissions aren't ignored with a
       # warning under skip-permissions.
@@ -313,17 +326,30 @@ jobs:
       #
       # `|| true` so a session failure never fails the job — a missing verdict
       # file is the signal that no comment is posted.
+      # The -p text is BYTE-CONSTANT across runs (#3285): the judged issue rides
+      # /tmp/agent-task.json, so every judge box sends an identical first user
+      # message and reads the shared prompt-cache prefix instead of re-writing
+      # it. ${GITHUB_WORKSPACE} stays interpolated — byte-constant per runner
+      # substrate. Keep the rest constant.
+      - name: Stage the task parameters
+        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        env:
+          ISSUE: ${{ steps.resolve.outputs.issue }}
+        run: |
+          jq -nc --arg issue "$ISSUE" '{issue: $issue}' > /tmp/agent-task.json
+
       - name: Run the judge pass
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE: ${{ steps.resolve.outputs.issue }}
         run: |
           claude -p "You are running headless in CI on a checkout of origin/main.
-          Judge issue #${ISSUE} of ${REPO}, which has just reached phase:plan.
+          FIRST ACTION: read /tmp/agent-task.json. Its issue field is the issue
+          number to judge — an issue of this repo that has just reached phase:plan.
           Read .claude/skills/judge/SKILL.md and follow it exactly — it is the
           human-owned rubric, it is normative, and you never edit it.
-          Read the issue with: gh issue view ${ISSUE} --json title,body,labels
+          Read the issue with: gh issue view <issue> --json title,body,labels
+          (substituting the task file's issue number).
           Then read every ADR its Design notes cite (under docs/adr/), the approval
           policy at .github/approval-policy.yml, and whatever code on this checkout
           a plan step's coherence depends on.

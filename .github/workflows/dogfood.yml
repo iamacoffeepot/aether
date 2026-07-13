@@ -338,9 +338,22 @@ jobs:
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
       - uses: mozilla-actions/sccache-action@v0.0.9
 
+      # Pinned via AGENT_CLAUDE_CODE_VERSION (#3285): a CLI upgrade changes the
+      # system-prompt bytes, which cold-misses the fleet-wide prompt cache and
+      # invalidates any resumable session. Unset falls back to latest with a
+      # warning — a missing var never bricks the fleet.
       - name: Install Claude Code
         if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
-        run: npm install -g @anthropic-ai/claude-code
+        env:
+          CLAUDE_CODE_VERSION: ${{ vars.AGENT_CLAUDE_CODE_VERSION }}
+        run: |
+          if [ -n "${CLAUDE_CODE_VERSION:-}" ]; then
+            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+          else
+            echo "::warning::AGENT_CLAUDE_CODE_VERSION is unset — installing latest; an upstream release cold-misses the fleet prompt cache (#3285)"
+            npm install -g @anthropic-ai/claude-code
+          fi
+          claude --version
 
       # The repo's .claude hooks bind interactive sessions into per-session
       # worktrees and police edits outside them — actively harmful in CI, where
@@ -475,19 +488,27 @@ jobs:
                      expectedArtifact: (if $artifact == "none" or $artifact == "" then null else $artifact end)},
               driverModel: $driver, judgeFramePath: $judgeframe}')"
 
-          # Assemble the prompt in a quoted heredoc so the interpolated JSON is
-          # inserted verbatim (no shell re-parsing of its contents).
+          # The per-run parameters ride /tmp/agent-task.json so the prompt below
+          # stays BYTE-CONSTANT across runs (#3285): every dogfood box sends an
+          # identical first user message and reads the shared prompt-cache prefix
+          # instead of re-writing it. ${GITHUB_WORKSPACE} stays interpolated — it
+          # is byte-constant per runner substrate. Keep the rest constant.
+          jq -nc --arg pr "$PR_NUMBER" --argjson args "$args_json" \
+            '{pr_number: $pr, args: $args}' > /tmp/agent-task.json
+
           cat > /tmp/dogfood-prompt.md <<EOF
-          You are running headless in CI on the resolved checkout for PR #${PR_NUMBER}: its head for
+          You are running headless in CI on the resolved checkout of a PR: its head for
           automatic runs and open-PR dispatches, or its merge commit (main) for a manual re-trial of
           a merged PR. The aether MCP harness is already up (tunnel -> aether-mcp -> hub -> substrate)
           via .mcp.json.
 
-          Run the repo's DOGFOOD WORKFLOW (.claude/workflows/dogfood.js, the /dogfood entry point) via
-          the Workflow/Skill tooling, passing args set to EXACTLY this JSON object. Supplying args.task
-          SKIPS the Author phase and its human approval stop — that is what makes this run unattended:
+          FIRST ACTION: read /tmp/agent-task.json. Its pr_number field identifies the PR this
+          checkout resolves; its args field is a JSON object you will pass through EXACTLY.
 
-          ${args_json}
+          Run the repo's DOGFOOD WORKFLOW (.claude/workflows/dogfood.js, the /dogfood entry point) via
+          the Workflow/Skill tooling, passing args set to EXACTLY the task file's args object.
+          Supplying args.task SKIPS the Author phase and its human approval stop — that is what makes
+          this run unattended.
 
           THE WAIT CONTRACT (load-bearing — headless runs die on this): the Workflow tool runs in the
           BACKGROUND. Launch it, then end your turn with a one-line status note — nothing else. The

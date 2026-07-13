@@ -367,9 +367,23 @@ jobs:
           role-to-assume: ${{ vars.AGENT_AWS_ROLE_ARN }}
           aws-region: ${{ vars.AGENT_AWS_REGION }}
 
+      # Pinned via AGENT_CLAUDE_CODE_VERSION (#3285): a CLI upgrade changes the
+      # system-prompt bytes, which cold-misses the fleet-wide prompt cache — and
+      # chat is the fleet's most upgrade-sensitive surface, since resuming a
+      # session across an upgrade reprocesses its entire history uncached. Unset
+      # falls back to latest with a warning — a missing var never bricks chat.
       - name: Install Claude Code
         if: steps.route.outputs.parked == 'false'
-        run: npm install -g @anthropic-ai/claude-code
+        env:
+          CLAUDE_CODE_VERSION: ${{ vars.AGENT_CLAUDE_CODE_VERSION }}
+        run: |
+          if [ -n "${CLAUDE_CODE_VERSION:-}" ]; then
+            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+          else
+            echo "::warning::AGENT_CLAUDE_CODE_VERSION is unset — installing latest; an upstream release cold-misses the fleet prompt cache (#3285)"
+            npm install -g @anthropic-ai/claude-code
+          fi
+          claude --version
 
       # Pre-trust the working directory so settings-based permissions aren't
       # ignored with a warning under skip-permissions.
