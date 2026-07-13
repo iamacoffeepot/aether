@@ -471,9 +471,13 @@ jobs:
       # so a session failure never fails the job — the durable state is on GitHub
       # and the transcript diagnoses a dead run.
       #
-      # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS is raised to 40 min for implement:
-      # its CI Refine loop is background-workflow-shaped and the default ten-minute
-      # ceiling routinely under-waits it. Harmless for scope/land.
+      # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS was meant to hold the claude -p
+      # process open across a pending background task, but it does not reliably
+      # do so in this box (iamacoffeepot/aether#3245), so the headless CI waits
+      # (implement's Refine loop, land's rebase / Qodana waits) are realized as a
+      # mechanical in-turn poll that never ends a turn on a pending background
+      # task — see .claude/skills/headless/protocol.md, the CI-wait contract. The
+      # var is left set as a harmless backstop; nothing now depends on it.
       - name: Drive the headless wrapper
         if: steps.guard.outputs.proceed == 'true'
         env:
