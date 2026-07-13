@@ -1,4 +1,4 @@
-name: fuzz-nightly
+name: Fuzz nightly
 
 # Coverage-guided fuzz of `aether_codec::decode_schema` and the
 # `aether_data::wire` roundtrip / panic-freedom targets, off the merge
@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   fuzz:
-    name: fuzz ${{ matrix.target }}
+    name: Fuzz ${{ matrix.target }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

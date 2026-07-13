@@ -1,4 +1,4 @@
-name: context-budget-canary
+name: Context budget canary
 
 on:
   schedule:
@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   measure:
+    name: Measure context budgets
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
