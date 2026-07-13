@@ -85,8 +85,9 @@ on:
           - approve-sweep
           - implement
           - land
+          - resolve
       ref:
-        description: Ref to act on (issue number for scope/approve/implement, PR number for land, the constant `all` for approve-sweep)
+        description: Ref to act on (issue number for scope/approve/implement, PR number for land/resolve, the constant `all` for approve-sweep)
         type: string
         required: true
 
@@ -109,15 +110,17 @@ jobs:
     # Per-task runner sizing against the RunsOn label pattern (dogfood.yml uses
     # the same runs-on=<run_id>/runner=<size> form): scope and approve are
     # API-and-prose work on a small box (approve's heaviest step is a git-log
-    # freshness read); implement builds the workspace and wants s3-cache to warm
-    # sccache across a retrying PR's runs; land is a merge on a non-spot box so a
+    # freshness read); implement and resolve build the workspace and want
+    # s3-cache to warm sccache across a retrying PR's runs (resolve drives the
+    # same CI Refine loop implement does); land is a merge on a non-spot box so a
     # spot reclaim can never interrupt the squash.
-    runs-on: runs-on=${{ github.run_id }}/runner=${{ inputs.task == 'implement' && '8cpu-linux-x64/extras=s3-cache' || (inputs.task == 'land' && '2cpu-linux-x64/spot=false' || '2cpu-linux-x64') }}
+    runs-on: runs-on=${{ github.run_id }}/runner=${{ (inputs.task == 'implement' || inputs.task == 'resolve') && '8cpu-linux-x64/extras=s3-cache' || (inputs.task == 'land' && '2cpu-linux-x64/spot=false' || '2cpu-linux-x64') }}
     # Bring-up leash per task (review.yml's rationale: a wedged in-flight run must
     # not idle an EC2 runner toward the 6h default). implement's CI Refine loop is
-    # the long pole, so it gets the widest leash; approve-sweep walks a whole
-    # queue of per-issue gate checks, so it gets double the single-approve leash.
-    timeout-minutes: ${{ inputs.task == 'implement' && 90 || (inputs.task == 'approve-sweep' && 60 || 30) }}
+    # the long pole, so it gets the widest leash; resolve runs the same loop, so
+    # it shares that leash; approve-sweep walks a whole queue of per-issue gate
+    # checks, so it gets double the single-approve leash.
+    timeout-minutes: ${{ (inputs.task == 'implement' || inputs.task == 'resolve') && 90 || (inputs.task == 'approve-sweep' && 60 || 30) }}
     # Read-only on GITHUB_TOKEN. This job checks out and executes repo code
     # (headless Claude drives the wrapper skill under --dangerously-skip-permissions),
     # so it must never hold a write scope on the default token — every write
@@ -311,6 +314,28 @@ jobs:
                 fi
               fi
               ;;
+            resolve)
+              # resolve rebuilds a DIRTY PR's head on a merge of origin/main and
+              # drives it green — so a PR that is already merged, or whose conflict
+              # is already gone, has nothing to resolve. A merged PR short-circuits;
+              # so does a mergeable_state that is neither dirty (the conflict this
+              # task exists to fix) nor unknown (GitHub is still computing it —
+              # proceed and let the wrapper's own guard re-read it). Any settled
+              # non-dirty state (clean/behind/blocked/unstable/…) means a prior
+              # resolve landed or main moved back under the branch: a clean no-op.
+              merged="$(gh api "repos/${REPO}/pulls/${REF}" --jq '.merged')"
+              if [ "$merged" = "true" ]; then
+                echo "PR #${REF} is already merged — nothing to resolve."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              state="$(gh api "repos/${REPO}/pulls/${REF}" --jq '.mergeable_state')"
+              if [ "$state" != "dirty" ] && [ "$state" != "unknown" ]; then
+                echo "PR #${REF} mergeable_state is '${state}' (not dirty) — the conflict is already resolved; nothing to do."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              ;;
           esac
           echo "proceed=true" >> "$GITHUB_OUTPUT"
 
@@ -440,7 +465,7 @@ jobs:
             # sweep regardless of what models the queued issues route their
             # implementation to.
             approve-sweep) issue="" ;;
-            land)
+            land|resolve)
               issue="$(gh api graphql -f query='
                 query($owner:String!,$name:String!,$number:Int!){
                   repository(owner:$owner,name:$name){
@@ -529,7 +554,7 @@ jobs:
           claude -p "$(cat /tmp/agent-prompt.md)" \
             --dangerously-skip-permissions \
             --model "$MODEL" \
-            --max-turns ${{ (inputs.task == 'implement' || inputs.task == 'approve-sweep') && 400 || 200 }} \
+            --max-turns ${{ (inputs.task == 'implement' || inputs.task == 'approve-sweep' || inputs.task == 'resolve') && 400 || 200 }} \
             --output-format stream-json --verbose \
             | tee /tmp/agent-work-session.jsonl \
             | python3 scripts/render-agent-stream.py \

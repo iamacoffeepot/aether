@@ -1,6 +1,6 @@
 ---
 name: land
-description: Land a CI-green draft PR — un-draft, enable native auto-merge to squash it, delete the closing issue's phase:* label (Done), sweep the worktree. `--sweep` discovers this shard's held green draft PRs and lands them in sequence, predicting and recomputing conflict state after every merge, merging `origin/main` into behind branches when branch protection requires up-to-date (strict mode), and routing dirty content conflicts to the user rather than touching their contents.
+description: Land a CI-green draft PR — un-draft, enable native auto-merge to squash it, delete the closing issue's phase:* label (Done), sweep the worktree. `--sweep` discovers this shard's held green draft PRs and lands them in sequence, predicting and recomputing conflict state after every merge, merging `origin/main` into behind branches when branch protection requires up-to-date (strict mode), and dispatching a `resolve` task for a dirty content conflict rather than touching the branch contents itself.
 ---
 
 # /land — PR landing skill
@@ -71,9 +71,9 @@ Read PR draft state and `mergeable_state` over REST (`gh api repos/iamacoffeepot
    Confirm land sequence? (no merge happens until your go-ahead)
    ```
 
-5. **On confirmation, land in sequence.** Land each PR through the [Landing sequence](#landing-sequence) in the printed order. After every merge, **recompute the remaining predictions** — the HEAD of `main` has advanced and a previously-clean branch may now be `behind`. A recomputed `dirty` halts the sequence and surfaces the conflict to the user before proceeding to the next PR.
+5. **On confirmation, land in sequence.** Land each PR through the [Landing sequence](#landing-sequence) in the printed order. After every merge, **recompute the remaining predictions** — the HEAD of `main` has advanced and a previously-clean branch may now be `behind`. A recomputed `dirty` dispatches a `resolve` task for that PR and continues to the next PR rather than halting the sequence (see [Dirty conflict handling](#conflict-prediction-and-routing)).
 
-The sweep never auto-confirms and never auto-resolves a `dirty` conflict. Landing is serial by construction — each merge advances `main` and the recompute loop updates conflict state after it — so sweep concurrency is 1 and no cap applies.
+The sweep never auto-confirms; a `dirty` conflict is handed to a dispatched `resolve` task rather than resolved inline. Landing is serial by construction — each merge advances `main` and the recompute loop updates conflict state after it — so sweep concurrency is 1 and no cap applies.
 
 ## Landing sequence
 
@@ -81,7 +81,7 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
 
 1. **Gate-check.** Verify draft state, CI green, and closing-issue presence per [Preconditions](#preconditions). Abort on any failure.
 
-2. **Predict conflict state.** Run [Conflict prediction and routing](#conflict-prediction-and-routing) for this PR's branch. If `dirty`, surface and abort — do not un-draft a dirty branch.
+2. **Predict conflict state.** Run [Conflict prediction and routing](#conflict-prediction-and-routing) for this PR's branch. If `dirty`, dispatch a `resolve` task and abort this land — never un-draft a dirty branch (see [Dirty conflict handling](#conflict-prediction-and-routing)).
 
 3. **Handle a `behind` branch.** Before acting on a `behind` classification, read `required_status_checks.strict` from branch protection once per `/land` invocation (cache the result for `--sweep`; it is stable across the run):
 
@@ -104,7 +104,7 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
    git -C "$wt" fetch origin
    git -C "$wt" merge origin/main
    ```
-   If the merge produces conflicts, the branch becomes `dirty` — surface and abort.
+   If the merge produces conflicts, the branch becomes `dirty` — dispatch a `resolve` task and abort this land (see [Dirty conflict handling](#conflict-prediction-and-routing)).
 
    Push the merged branch:
    ```bash
@@ -188,7 +188,7 @@ Classify the result into one of three states:
 |-------|-----------|--------|
 | **clean** | `merge-tree` exits 0 with a valid tree hash and no conflict markers | Proceed with the landing sequence. |
 | **behind** | branch's `merge-base` with `origin/main` is not `origin/main` itself (the branch needs a merge-in), but `merge-tree` would produce a clean tree | strict=true → merge `origin/main` into the branch, push, re-predict; strict=false → behind+clean is mergeable, merge direct (no merge-in). |
-| **dirty** | `merge-tree` exits non-zero or produces output containing conflict markers (`<<<<<<<`) | Surface to the user. Never touch the branch contents. |
+| **dirty** | `merge-tree` exits non-zero or produces output containing conflict markers (`<<<<<<<`) | Dispatch a `resolve` task (see the **Dirty conflict handling** note below); `/land` never edits the branch contents itself. |
 
 Cross-check: after the local oracle classifies a branch, compare against `mergeable_state` from `gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.mergeable_state'`:
 
@@ -197,22 +197,17 @@ Cross-check: after the local oracle classifies a branch, compare against `mergea
 - `dirty` → agrees with the oracle's `dirty` classification.
 - `unknown` → transient; trust the local oracle and note the `unknown` in the plan.
 - `clean` paired with the oracle's `behind` → agreement when strict=false; GitHub reports a behind+clean branch as `clean` when up-to-date is not required. Do not route this as a disagreement.
-- A disagreement between the oracle and `mergeable_state` (e.g. oracle says `clean`, GitHub says `dirty`) → treat as `dirty` and surface the disagreement before proceeding. The local oracle can be wrong when the remote diverges from a local fetch; a fresh `git fetch origin` and re-run resolves most cases.
+- A disagreement between the oracle and `mergeable_state` (e.g. oracle says `clean`, GitHub says `dirty`) → the local oracle can be wrong when the remote diverges from a local fetch, so a fresh `git fetch origin` and re-run resolves most cases. A disagreement that persists after a re-fetch is treated as `dirty` — dispatch a `resolve` task (see the **Dirty conflict handling** note below), the same as any confirmed `dirty`.
 
-**Dirty conflict handling.** When a branch is `dirty`, `/land` surfaces the specific conflicting files from `merge-tree`'s output and stops:
+**Dirty conflict handling.** A content conflict is not a human trigger — it is an ordinary agent-authored code change the pipeline already knows how to make safe (CI green, a fresh review verdict on the resolved head, the reconciler's declared-surface containment). So when a branch is `dirty`, `/land` does not surface-and-stop; it dispatches a `resolve` task — a headless Claude box that checks out the branch, merges `origin/main` into it (the merge-not-rebase mechanic), resolves every conflict hunk (semantic ones included — there is no "too complex to attempt" tier), and drives the resolved head green and re-reviewed:
 
-```
-✗ PR #<n> has a content conflict — landing aborted.
-Conflicting files:
-  crates/aether-data/src/id.rs
-  crates/aether-kinds/src/lib.rs
-
-Branch contents untouched. Options:
-  1. Resolve manually: rebase <branch> onto main, fix the conflicts, re-push, then re-run /land <n>.
-  2. Delegate: /implement <issue> --resume to have an agent resolve the rebase.
+```bash
+gh workflow run agent-work.yml -f task=resolve -f ref=<n>
 ```
 
-In `--sweep` mode, a `dirty` PR halts the remaining sequence — a conflict requires a human (or a delegated agent) decision, and landing subsequent PRs can change the conflict shape. Print the halt reason, list the remaining PRs that were not landed, and wait for the user to resolve before re-running.
+Then abort this land — the resolve box owns the branch now. `/resolve` is a pure producer, like `/implement`: it neither opens a PR (the PR exists) nor merges (that is `/land`'s job on a later pass). Its resolution push trips `dismiss_stale_reviews` (the prior approval drops to `REVIEW_REQUIRED`) and, once CI is green, the resolve box re-requests the review, so the resolved head earns a fresh verdict; the reconciler then recomputes it back to `phase:held` and the standard held→land path (a tick, or native auto-merge) lands it. A resolve box self-bounces (ask-and-park) only on a genuine incompatibility of intent — two sides encoding an incompatible product decision — which is the sole route to a person.
+
+In `--sweep` mode, a `dirty` PR no longer halts the remaining sequence: dispatch its `resolve` task, note the dispatch in the plan, and continue landing the rest of the sequence. Landing the siblings first can only change the conflict shape, which the resolve box re-reads when it runs; the resolved PR rejoins a future sweep once its resolved head is held and green.
 
 **Recompute after every merge (`--sweep` only).** After each successful merge, `origin/main` has advanced. Recompute the conflict prediction for every remaining PR in the sequence using the same local oracle before proceeding to the next land. A branch that was `clean` against the prior `main` can be `behind` (or even `dirty`, in the degenerate case) after a sibling lands. When strict=false, a recomputed `behind` branch that is `merge-tree`-clean stays mergeable and the sweep merges it directly — no merge-in, no CI re-run.
 
@@ -232,7 +227,7 @@ This is the same form `/scope` documents for the `Backlog` and `Done` phases —
 
 ## What /land does NOT do
 
-- Auto-resolve content conflicts. A `dirty` branch always surfaces to the user (or an optional delegated agent).
+- Resolve content conflicts inline. `/land` never edits a branch's contents itself; a `dirty` branch is handed to a dispatched `resolve` task (a headless box that merges `origin/main` in and resolves the hunks), which re-enters the held→land path once its resolved head is green and re-reviewed.
 - Un-draft a PR with a non-Qodana required check red. The gate enforces green before un-draft, except a sole `Qodana scan` red, which the [Qodana sweep](#qodana-sweep) resolves first.
 - Auto-suppress Qodana findings — edit a `qodana.yaml` exclude or commit a `--baseline` — without surfacing to the user. The Qodana sweep fixes findings or surfaces them; it never silences them.
 - Resolve findings or strip `review:unresolved` / `dogfood:unresolved` itself. `/findings` resolves the review threads and pushes the fixes; the reconciler reads that and computes `findings` → `held`; `/land` trusts `held`. The runner's poster clears the label on a re-run that finds nothing actionable, and the required `Review gate` status clears on the next CI green re-mirroring the now-absent label. `/land` only refuses while the closing issue is short of `phase:held`.
