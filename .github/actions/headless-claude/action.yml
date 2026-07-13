@@ -1,0 +1,109 @@
+name: Headless Claude setup
+description: >-
+  Shared headless-Claude session scaffold, extracted from agent-work /
+  agent-judge / review / agent-chat (#3359): strip the interactive-session
+  .claude hooks from the checkout copy, install the version-pinned Claude Code
+  CLI (#3285), pre-trust the workspace so settings.json permissions apply under
+  skip-permissions, and run the isolated no-tools AUTH-OK probe.
+
+inputs:
+  strip-hooks:
+    description: >-
+      Strip the interactive-session .claude hooks from the checkout copy.
+      Checkout-based callers keep 'true'; agent-chat has no full checkout (no
+      .claude/settings.json to strip) and passes 'false'.
+    required: false
+    default: 'true'
+  claude-code-version:
+    description: >-
+      Pinned Claude Code CLI version, forwarded from vars.AGENT_CLAUDE_CODE_VERSION
+      (#3285). Empty installs latest with a prompt-cache-miss warning.
+    required: false
+    default: ''
+  trust-basecamp:
+    description: >-
+      When 'true', create and pre-trust /home/runner/basecamp alongside $PWD
+      (the work/judge/review shape). agent-chat passes 'false' for its single-$PWD
+      trust and skips the basecamp mkdir.
+    required: false
+    default: 'true'
+  probe-model:
+    description: >-
+      Model for the no-tools auth probe. The probe is only an auth check, so a
+      fixed cheap default is correct; a caller may override.
+    required: false
+    default: 'claude-sonnet-5'
+  oauth-token:
+    description: >-
+      Claude Code OAuth token, passed into the auth-probe step env so the CLI
+      authenticates. Callers forward secrets.AGENT_CLAUDE_CODE_OAUTH_TOKEN.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The repo's .claude hooks bind interactive sessions into per-session
+    # worktrees and police edits outside them — actively harmful in CI, where
+    # the SessionStart rebind would move the session out of $GITHUB_WORKSPACE.
+    # The runner is ephemeral and single-purpose, so strip the hooks from this
+    # checkout COPY; the hooks in the repo itself are untouched.
+    - name: Strip interactive-session hooks from the checkout copy
+      if: inputs.strip-hooks == 'true'
+      shell: bash
+      run: |
+        jq 'del(.hooks)' .claude/settings.json > /tmp/settings.json
+        mv /tmp/settings.json .claude/settings.json
+
+    # Pinned via AGENT_CLAUDE_CODE_VERSION (#3285): a CLI upgrade changes the
+    # system-prompt bytes, which cold-misses the fleet-wide prompt cache and
+    # invalidates any resumable session. Unset falls back to latest with a
+    # warning — a missing var never bricks the fleet.
+    - name: Install Claude Code
+      shell: bash
+      env:
+        CLAUDE_CODE_VERSION: ${{ inputs.claude-code-version }}
+      run: |
+        if [ -n "${CLAUDE_CODE_VERSION:-}" ]; then
+          npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+        else
+          echo "::warning::AGENT_CLAUDE_CODE_VERSION is unset — installing latest; an upstream release cold-misses the fleet prompt cache (#3285)"
+          npm install -g @anthropic-ai/claude-code
+        fi
+        claude --version
+
+    # Claude runs from a constant, bare, git-less basecamp cwd (#3346) so its
+    # prompt head carries no volatile cwd-git snapshot — a warm --resume stays
+    # cache-hot across main movement. The checkout is reached via --add-dir.
+    - name: Prepare the bare basecamp cwd
+      if: inputs.trust-basecamp == 'true'
+      shell: bash
+      run: mkdir -p /home/runner/basecamp
+
+    # Pre-trust the basecamp cwd (#3346) and the checkout dir so settings.json
+    # permissions aren't ignored with a warning under skip-permissions. A
+    # checkout-free caller (agent-chat) trusts only $PWD.
+    - name: Pre-trust the workspace for headless Claude
+      shell: bash
+      env:
+        TRUST_BASECAMP: ${{ inputs.trust-basecamp }}
+      run: |
+        if [ "$TRUST_BASECAMP" = "true" ]; then
+          printf '{"projects":{"/home/runner/basecamp":{"hasTrustDialogAccepted":true},"%s":{"hasTrustDialogAccepted":true}}}\n' "$PWD" > "$HOME/.claude.json"
+        else
+          printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$PWD" > "$HOME/.claude.json"
+        fi
+
+    # Auth in isolation before the real run: a one-line prompt, no tools. If
+    # this fails the AGENT OAuth token itself is the problem, not the harness.
+    # --max-turns 3 (not 1) because the model occasionally spends a turn before
+    # emitting the reply, which a 1-turn cap turns into a spurious auth failure.
+    - name: Auth probe (no tools)
+      shell: bash
+      env:
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.oauth-token }}
+        PROBE_MODEL: ${{ inputs.probe-model }}
+      run: |
+        claude -p "Reply with exactly: AUTH-OK" \
+          --model "$PROBE_MODEL" \
+          --max-turns 3 | tee /tmp/auth.log
+        grep -q "AUTH-OK" /tmp/auth.log

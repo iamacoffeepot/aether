@@ -278,17 +278,6 @@ jobs:
         with:
           ref: main
 
-      # The repo's .claude hooks bind interactive sessions into per-session
-      # worktrees and police edits outside them — actively harmful in CI, where
-      # the SessionStart rebind would move the session out of $GITHUB_WORKSPACE.
-      # The runner is ephemeral and single-purpose, so strip the hooks from this
-      # checkout COPY; the hooks in the repo itself are untouched.
-      - name: Strip interactive-session hooks from the checkout copy
-        if: steps.resolve.outputs.proceed == 'true'
-        run: |
-          jq 'del(.hooks)' .claude/settings.json > /tmp/settings.json
-          mv /tmp/settings.json .claude/settings.json
-
       - name: Note when the OAuth token secret is absent
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN == ''
         run: |
@@ -296,41 +285,15 @@ jobs:
           echo "Mint one from the agent subscription with 'claude setup-token' and add it:"
           echo "  gh secret set AGENT_CLAUDE_CODE_OAUTH_TOKEN"
 
-      # Pinned via AGENT_CLAUDE_CODE_VERSION (#3285): a CLI upgrade changes the
-      # system-prompt bytes, which cold-misses the fleet-wide prompt cache and
-      # invalidates any resumable session. Unset falls back to latest with a
-      # warning — a missing var never bricks the fleet.
-      - name: Install Claude Code
+      # Shared headless-Claude scaffold (#3359): strip hooks, pinned install,
+      # basecamp mkdir + pre-trust, auth probe. The composite folds in the
+      # former separate "Prepare the bare basecamp cwd" mkdir under trust-basecamp.
+      - name: Headless Claude setup
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
-        env:
-          CLAUDE_CODE_VERSION: ${{ vars.AGENT_CLAUDE_CODE_VERSION }}
-        run: |
-          if [ -n "${CLAUDE_CODE_VERSION:-}" ]; then
-            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
-          else
-            echo "::warning::AGENT_CLAUDE_CODE_VERSION is unset — installing latest; an upstream release cold-misses the fleet prompt cache (#3285)"
-            npm install -g @anthropic-ai/claude-code
-          fi
-          claude --version
-
-      # Pre-trust the basecamp cwd (#3346) and the added checkout dir so
-      # settings.json permissions aren't ignored with a warning under
-      # skip-permissions.
-      - name: Pre-trust the workspace for headless Claude
-        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
-        run: printf '{"projects":{"/home/runner/basecamp":{"hasTrustDialogAccepted":true},"%s":{"hasTrustDialogAccepted":true}}}\n' "$PWD" > "$HOME/.claude.json"
-
-      # Auth in isolation before the real run: a one-line prompt, no tools. If
-      # this fails the AGENT OAuth token itself is the problem, not the harness.
-      # --max-turns 3 (not 1) because the model occasionally spends a turn before
-      # emitting the reply, which a 1-turn cap turns into a spurious auth failure.
-      - name: Auth probe (no tools)
-        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
-        run: |
-          claude -p "Reply with exactly: AUTH-OK" \
-            --model claude-sonnet-5 \
-            --max-turns 3 | tee /tmp/auth.log
-          grep -q "AUTH-OK" /tmp/auth.log
+        uses: ./.github/actions/headless-claude
+        with:
+          claude-code-version: ${{ vars.AGENT_CLAUDE_CODE_VERSION }}
+          oauth-token: ${{ secrets.AGENT_CLAUDE_CODE_OAUTH_TOKEN }}
 
       # The judge pass. A cold headless context, OR a warm one resumed from the
       # judge function-bucket of the session pool (#3314) — either way it reads
@@ -448,13 +411,6 @@ jobs:
           fi
           [ -n "$sid" ] || echo "pool: cold run"
           { echo "cli_version=${cli_version}"; echo "session_id=${sid}"; } >> "$GITHUB_OUTPUT"
-
-      # Claude runs from a constant, bare, git-less basecamp cwd (#3346) so its
-      # prompt head carries no volatile cwd-git snapshot — a warm --resume stays
-      # cache-hot across main movement. The checkout is reached via --add-dir.
-      - name: Prepare the bare basecamp cwd
-        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
-        run: mkdir -p /home/runner/basecamp
 
       - name: Run the judge pass
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
