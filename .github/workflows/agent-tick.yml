@@ -421,12 +421,20 @@ jobs:
           # Board scan → advanceable snapshot. Open non-PR issues with labels;
           # `has("pull_request")|not` drops PRs (they share the issues endpoint).
           # `type` and `alert` back the scope-eligibility gate below.
+          # The await read matches only a REAL park marker — the full HTML
+          # comment opening at the start of a line, the shape every park
+          # writer emits — never a bare substring: an issue that merely
+          # QUOTES the marker in prose (backticked, mid-sentence, unclosed)
+          # must not self-park (#3330 sat unlabeled and undispatchable
+          # because its own body documented the marker). The (^|\n)
+          # alternation anchors the line start without relying on the jq
+          # regex engine's multi-line ^ default.
           gh api "repos/${REPO}/issues?state=open&per_page=100" --paginate \
             --jq '.[] | select(has("pull_request")|not)
               | [ .number,
                   ([.labels[].name | select(startswith("phase:"))] | .[0] // "none"),
                   (if (([.labels[].name] | index("agent:awaiting-answer"))
-                       or ((.body // "") | contains("<!-- aether-agent:awaiting-answer"))) then "await" else "-" end),
+                       or ((.body // "") | test("(^|\\n)<!-- aether-agent:awaiting-answer[^>]*-->"))) then "await" else "-" end),
                   (if ([.labels[].name] | index("agent:dont-touch")) then "dt" else "-" end),
                   ([.labels[].name | select(startswith("type:")) | ltrimstr("type:")] | .[0] // "-"),
                   (if ([.labels[].name] | index("alert")) then "alert" else "-" end),
@@ -478,14 +486,46 @@ jobs:
                      | select(.state=="OPEN" and (.merged|not))] | .[0].number // empty'
           }
 
-          # Latest comment author — an owner reply means an awaiting-answer item
-          # has been answered (question-resume) and must not be nudged. Comments
-          # come oldest-first; tail -n1 is the newest across all pages.
+          # Park-anchored owner-reply read (#3330). The old read took only the
+          # LATEST comment author, and agent-chat acks every owner comment on
+          # a parked issue — the ack landed after the reply, so the newest
+          # author was always the bot and owner_answered could never become
+          # true (observed on #3316: the park was unclearable by commenting).
+          # Anchor on the park moment instead and ask whether ANY comment
+          # after it is owner-authored — no later automated comment can bury
+          # the reply. The anchor is the newest comment carrying a real park
+          # marker (the full HTML comment opening at line start, same anchored
+          # form as the board scan above), falling back to the newest
+          # agent:awaiting-answer label event for a marker-less park.
+          # RFC3339-Z timestamps (what the API returns) compare
+          # chronologically as plain strings. Comments come oldest-first;
+          # head/tail -n1 under `|| true` is the file's SIGPIPE-safe idiom.
+          park_anchor() {
+            local ts
+            ts="$(gh api "repos/${REPO}/issues/${1}/comments?per_page=100" --paginate \
+              --jq '[.[] | select(.body // "" | test("(^|\\n)<!-- aether-agent:awaiting-answer[^>]*-->")) | .created_at] | last // empty' \
+              | tail -n1 || true)"
+            if [ -z "$ts" ]; then
+              ts="$(gh api "repos/${REPO}/issues/${1}/timeline?per_page=100" --paginate \
+                --jq '[.[] | select(.event=="labeled" and .label.name=="agent:awaiting-answer") | .created_at] | last // empty' \
+                | tail -n1 || true)"
+            fi
+            printf '%s' "$ts"
+          }
+
+          # The owner's first comment strictly after the park anchor — empty
+          # when the question is unanswered or no park anchor exists.
+          owner_answer_ts() {
+            local park
+            park="$(park_anchor "$1")"
+            [ -n "$park" ] || return 0
+            gh api "repos/${REPO}/issues/${1}/comments?per_page=100" --paginate \
+              --jq ".[] | select(.user.login == \"${OWNER}\" and .created_at > \"${park}\") | .created_at" \
+              | head -n1 || true
+          }
+
           owner_answered() {
-            local last
-            last="$(gh api "repos/${REPO}/issues/${1}/comments?per_page=100" --paginate \
-              --jq '.[].user.login' | tail -n1 || true)"
-            [ "$last" = "$OWNER" ]
+            [ -n "$(owner_answer_ts "$1")" ]
           }
 
           # A rescued answer older than one tick interval (the ~20m schedule
@@ -493,13 +533,12 @@ jobs:
           # clear the park: the tick backstop is rescuing a silently-stranded
           # answer, which warrants a visible alert (#3265). The grace is one tick
           # interval so a freshly-answered surface the tick legitimately picks up
-          # is never alerted. Reads the newest comment's timestamp (the owner's
-          # answer when owner_answered is true), the same tail -n1 shape.
+          # is never alerted. Ages the owner's park-anchored reply itself, not
+          # the newest comment — a later bot ack must not reset the clock.
           STRAND_GRACE_SECS=1200
           answer_stale() {
             local ts age
-            ts="$(gh api "repos/${REPO}/issues/${1}/comments?per_page=100" --paginate \
-              --jq '.[].created_at' | tail -n1 || true)"
+            ts="$(owner_answer_ts "$1")"
             [ -n "$ts" ] || return 1
             age=$(( $(date -u +%s) - $(date -u -d "$ts" +%s) ))
             [ "$age" -ge "$STRAND_GRACE_SECS" ]
@@ -1081,10 +1120,15 @@ jobs:
               echo "#${num}: parked $(( park_age / 86400 ))d < ${nudge_days}d — not stale"; continue
             fi
 
-            # Do not nudge a question the owner has already answered.
-            last_author="$(gh api "repos/${REPO}/issues/${num}/comments?per_page=100" --paginate \
-              --jq '.[].user.login' | tail -n1 || true)"
-            if [ "$last_author" = "$OWNER" ]; then
+            # Do not nudge a question the owner has already answered — any
+            # owner comment after the park counts, not just the newest: a
+            # later bot ack must not bury the reply and re-nudge an answered
+            # question (#3330). RFC3339-Z timestamps compare as strings, and
+            # $park is already in hand from the label-event read above.
+            owner_reply="$(gh api "repos/${REPO}/issues/${num}/comments?per_page=100" --paginate \
+              --jq ".[] | select(.user.login == \"${OWNER}\" and .created_at > \"${park}\") | .created_at" \
+              | head -n1 || true)"
+            if [ -n "$owner_reply" ]; then
               echo "#${num}: owner already replied — skip nudge"; continue
             fi
 
