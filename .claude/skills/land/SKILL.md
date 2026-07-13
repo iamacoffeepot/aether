@@ -1,11 +1,11 @@
 ---
 name: land
-description: Land a CI-green draft PR — un-draft, squash-merge, delete the closing issue's phase:* label (Done), sweep the worktree. `--sweep` discovers this shard's held green draft PRs and lands them in sequence, predicting and recomputing conflict state after every merge, auto-rebasing behind branches when branch protection requires up-to-date (strict mode), and routing dirty content conflicts to the user rather than touching their contents.
+description: Land a CI-green draft PR — un-draft, enable native auto-merge to squash it, delete the closing issue's phase:* label (Done), sweep the worktree. `--sweep` discovers this shard's held green draft PRs and lands them in sequence, predicting and recomputing conflict state after every merge, auto-rebasing behind branches when branch protection requires up-to-date (strict mode), and routing dirty content conflicts to the user rather than touching their contents.
 ---
 
 # /land — PR landing skill
 
-The post-review landing action: take a draft PR that the user has approved, un-draft it, let native auto-merge squash it onto `main`, delete the closing issue's `phase:*` label (Done is label-absence), and sweep the merged worktree. Deliberately separate from `/implement`, which holds at draft and never merges.
+The post-review landing action: take a draft PR that the user has approved, un-draft it, enable native auto-merge so GitHub squashes it onto `main` the instant its required gates go green, delete the closing issue's `phase:*` label (Done is label-absence), and sweep the merged worktree. Deliberately separate from `/implement`, which holds at draft and never merges.
 
 Two entry shapes, one skill:
 
@@ -125,13 +125,17 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
    ```
    Verify `isDraft` is `false` in the response before proceeding.
 
-6. **Squash-merge.** With auto-merge enabled on this repo, un-drafting a green PR typically lets GitHub's native auto-merge land it. When that is not relied on (e.g. auto-merge disabled, or a race window), issue the REST squash merge directly:
+6. **Enable native auto-merge to squash-merge.** Enable per-PR auto-merge so GitHub fires the squash the instant every required check passes — including the `dismiss_stale_reviews` re-review the un-draft (step 5) triggers — rather than waiting for a tick to notice the PR is mergeable:
+   ```bash
+   gh pr merge <n> --auto --squash
+   ```
+   This is the GraphQL `enablePullRequestAutoMerge` mutation under the hood (per `/scope` §REST-vs-GraphQL routing's GraphQL-only list) — there is no REST equivalent, so this is one of the pipeline's rare `gh` convenience-subcommand calls rather than a `gh api` form. If auto-merge cannot be enabled (all required gates are already green with nothing left for auto-merge to wait on, or a repo-setting race), fall back to the immediate REST squash merge:
    ```bash
    gh api -X PUT repos/iamacoffeepot/aether/pulls/<n>/merge \
      -f merge_method=squash \
      -f commit_title="<pr-title>"
    ```
-   Poll the PR state (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.merged'`) until `true` before proceeding to avoid marking an un-landed issue Done (deleting its phase label).
+   Either way, poll the PR state (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.merged'`) until `true` before proceeding to avoid marking an un-landed issue Done (deleting its phase label).
 
 7. **Move the closing issue to Done — delete its `phase:*` label.** `Done` is label-absence (per the phase-label-reconcile rules in `/scope` and `/implement`), so the canonical phase write here is a REST label delete, not a swap:
    ```bash
