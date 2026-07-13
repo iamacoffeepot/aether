@@ -14,7 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      AETHER_MCP_RESPONSE_INLINE_MAX_BYTES: "32768"
+      # Raised well above any measured response so no scenario tool spills
+      # during measurement — mirrors the reply-cap raise below.
+      AETHER_MCP_RESPONSE_INLINE_MAX_BYTES: "1048576"
       AETHER_MCP_REPLY_INLINE_MAX_BYTES: "262144"
 
     steps:
