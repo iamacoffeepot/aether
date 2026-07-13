@@ -168,6 +168,8 @@ For a real code fix, edit in the issue worktree, run the two local checks, commi
 
 At the retry cap, or a wall-clock cap reached after repeated real code failures, self-bounce to Plan and post one comment containing the ordered attempt history and what the next plan must address. If the wall clock expires while CI is merely pending or a runner/GitHub service is slow, set `phase:stalled` instead; elapsed time alone is not a scope regression. For a design discovery, bounce to Design with the concrete code/test evidence. Leave the worktree and draft PR intact for inspection.
 
+When CI is green (a sole held `Qodana scan` red counts as green here), request the integrated review — it activates only on this explicit request, never on its own: stage `{"ref":"main","inputs":{"pr":"<PR>"}}` in `/tmp` and `POST repos/iamacoffeepot/aether/actions/workflows/review.yml/dispatches` with that file. Barista submits one `APPROVE`/`REQUEST_CHANGES` verdict and dogfood chains off the review's completion. Re-review after a later fix push is an `@barista review` PR comment, which `$findings` owns.
+
 ## Success state
 
 Success means all checks are complete and green:
@@ -176,7 +178,8 @@ Success means all checks are complete and green:
 - PR remains draft;
 - branch and worktree remain present;
 - no merge or un-draft occurs;
-- no inline `$review` is run, because PR-bound integrated review starts in CI at first green.
+- no inline `$review` is run; PR-bound integrated review runs from the CI-green review dispatch above;
+- the review dispatch has been posted for the green head.
 
 Report the issue, draft PR, branch, worktree, checks, and observed phase. Route `phase:findings` to `$findings <PR>`. Point to `$land <PR>` only after the user reviews the draft and the reconciler reports `phase:held`.
 

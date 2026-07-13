@@ -7,7 +7,6 @@ import {
   fingerprint,
   isActionable,
   normalizeFingerprint,
-  shouldSubmitVerdict,
   verdictEvent,
   visibleSoftHolds,
 } from './post-review-rollup.mjs'
@@ -41,66 +40,23 @@ test('isActionable fires on a confirmed finding, a soft-hold, or a high-severity
 // bug in code the diff merely touched never gates the PR that revealed it. If followUps ever started
 // counting toward actionable, the catch-22 this fixes reopens: the correctness pillar demands an
 // in-PR fix and the spec pillar then punishes it as scope leakage, wedging the PR un-approvable.
-test('a rollup with only followUps is not actionable and APPROVEs on full', () => {
+test('a rollup with only followUps is not actionable and APPROVEs', () => {
   assert.equal(isActionable(FOLLOWUPS_ONLY), false)
-  assert.equal(verdictEvent(FOLLOWUPS_ONLY, 'full'), 'APPROVE')
-  assert.equal(verdictEvent(FOLLOWUPS_ONLY, 'incremental'), null)
+  assert.equal(verdictEvent(FOLLOWUPS_ONLY), 'APPROVE')
 })
 
-// Tripwire: an actionable rollup owes REQUEST_CHANGES in BOTH review modes —
-// an actionable delta is still actionable, so the mode never softens it.
-test('an actionable rollup selects REQUEST_CHANGES in both modes', () => {
+// Tripwire: verdictEvent is a total two-outcome function — every request
+// yields a verdict, REQUEST_CHANGES when actionable and APPROVE when clean.
+// If a third outcome (a null / no-submission case) ever crept back in, a
+// findings fix-push would dismiss the stale verdict, the re-requested review
+// would submit nothing, and the PR would wedge at REVIEW_REQUIRED — the #3208
+// deadlock this model retires.
+test('verdictEvent always yields a verdict: REQUEST_CHANGES when actionable, APPROVE when clean', () => {
   for (const rollup of [CONFIRMED, SOFT_HOLD, HIGH_SPEC]) {
-    assert.equal(verdictEvent(rollup, 'full'), 'REQUEST_CHANGES')
-    assert.equal(verdictEvent(rollup, 'incremental'), 'REQUEST_CHANGES')
+    assert.equal(verdictEvent(rollup), 'REQUEST_CHANGES')
   }
-})
-
-// Tripwire: a clean pass APPROVEs only on a FULL review; a clean INCREMENTAL
-// delta owes NO verdict, so barista never supersedes its own standing
-// REQUEST_CHANGES off a delta that re-checked only the newly-changed lines.
-// This is the exact refutation the judge raised and the owner endorsed.
-test('a clean rollup APPROVEs on full but submits no verdict on incremental', () => {
-  assert.equal(verdictEvent(CLEAN, 'full'), 'APPROVE')
-  assert.equal(verdictEvent(CLEAN, 'incremental'), null)
-})
-
-// Tripwire: the dedup guard keeps the review timeline clean under the
-// per-green-push re-trigger. It must skip a same-event same-SHA re-run with no
-// new content, fire on a clean<->actionable transition, fire when barista has
-// no standing verdict, and — the case the judge flagged — never submit for a
-// clean incremental pass (owedEvent null), leaving a standing REQUEST_CHANGES
-// in place.
-test('shouldSubmitVerdict dedups a standing verdict but fires on a transition', () => {
-  // Same event already standing, nothing new → skip.
-  assert.equal(
-    shouldSubmitVerdict({ owedEvent: 'REQUEST_CHANGES', latestBarista: 'REQUEST_CHANGES', hasNewContent: false }),
-    false,
-  )
-  // Same event standing, but fresh annotations this run → submit.
-  assert.equal(
-    shouldSubmitVerdict({ owedEvent: 'REQUEST_CHANGES', latestBarista: 'REQUEST_CHANGES', hasNewContent: true }),
-    true,
-  )
-  // actionable → clean-full transition (standing REQUEST_CHANGES, now owe APPROVE) → submit.
-  assert.equal(
-    shouldSubmitVerdict({ owedEvent: 'APPROVE', latestBarista: 'REQUEST_CHANGES', hasNewContent: false }),
-    true,
-  )
-  // No standing verdict on this SHA yet → submit.
-  assert.equal(
-    shouldSubmitVerdict({ owedEvent: 'APPROVE', latestBarista: null, hasNewContent: false }),
-    true,
-  )
-  // Clean incremental (no verdict owed) → never submit, whatever is standing.
-  assert.equal(
-    shouldSubmitVerdict({ owedEvent: null, latestBarista: 'REQUEST_CHANGES', hasNewContent: true }),
-    false,
-  )
-  assert.equal(
-    shouldSubmitVerdict({ owedEvent: null, latestBarista: null, hasNewContent: false }),
-    false,
-  )
+  assert.equal(verdictEvent(CLEAN), 'APPROVE')
+  assert.equal(verdictEvent(LOW_SPEC), 'APPROVE')
 })
 
 const SOFT_HOLD_FINDING = {
@@ -183,7 +139,7 @@ test('a disclosed scope-leakage finding drops from isActionable, verdictEvent, a
     },
   }
   assert.equal(isActionable(rollup, disclosed), false)
-  assert.notEqual(verdictEvent(rollup, 'full', disclosed), 'REQUEST_CHANGES')
+  assert.notEqual(verdictEvent(rollup, disclosed), 'REQUEST_CHANGES')
 
   // review.js's specSoftHolds mirror base-names `file`, so the softHolds-shaped
   // entry carries only the basename while `disclosed` holds the full repo-relative
@@ -241,5 +197,5 @@ test('a scope-leakage finding with no matching disclosed entry still gates', () 
   }
   assert.equal(isActionable(rollup, new Set(['scripts/unrelated.mjs'])), true)
   assert.equal(isActionable(rollup), true)
-  assert.equal(verdictEvent(rollup, 'full'), 'REQUEST_CHANGES')
+  assert.equal(verdictEvent(rollup), 'REQUEST_CHANGES')
 })

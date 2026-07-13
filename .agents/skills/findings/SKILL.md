@@ -84,7 +84,7 @@ A fix push causes the reconciler to compute `phase:building` for the fresh head.
 
 After all replies and resolutions, refresh the automated verdicts before asking the reconciler to compute state:
 
-- When a review finding was declined or otherwise needs a fresh verdict without a new head SHA, dispatch `.github/workflows/review.yml` for the PR through its REST workflow-dispatch endpoint.
+- Re-request the review by posting an `@barista review` comment on the PR. The review runs only on request, and a fix push dismissed barista's stale verdict, so this comment is what produces the fresh full verdict that supersedes the standing `REQUEST_CHANGES`; it also covers a declined finding needing a fresh verdict without a new head SHA. Stage the comment body in `/tmp` and post it over REST.
 - When a dogfood finding was declined or retried, dispatch `.github/workflows/dogfood.yml` for the PR through its REST workflow-dispatch endpoint.
 - Wait for the owning workflow and poster to settle. Re-read its rollup and unresolved label; a reconciler dispatch alone cannot clear `review:unresolved` or `dogfood:unresolved`.
 
