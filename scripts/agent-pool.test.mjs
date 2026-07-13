@@ -127,17 +127,11 @@ test('buildManifest hygiene gates name their refusal', () => {
     { ok: false, reason: 'over-cap' });
 });
 
-test('evaluateEligibility: fresh serves, each retirement names itself', () => {
+test('evaluateEligibility: fresh serves; cutoff and cap still retire, cap boundary inclusive', () => {
   const lsTree = parseLsTree(LS_TREE);
   const transcript = parseTranscript(jsonl([init, readEv(`${CWD}/crates/x/src/lib.rs`), readEv(`${CWD}/CLAUDE.md`), result]));
   const prior = { read_files: ['crates/x/src/other.rs'], external_reads: [] };
   const { manifest } = buildManifest({ transcript, lsTree, verdict, prior, now: NOW });
-  assert.equal(manifest.subsystem_root, '.');
-  // Re-key to a narrow root so out-of-root checking is exercised too.
-  const narrow = buildManifest({
-    transcript: parseTranscript(jsonl([init, readEv(`${CWD}/crates/x/src/lib.rs`), result])),
-    lsTree, verdict, prior: { read_files: ['CLAUDE.md'], external_reads: [] }, now: NOW,
-  }).manifest;
 
   assert.deepEqual(evaluateEligibility(manifest, lsTree, NOW + 60_000), { ok: true });
   assert.deepEqual(
@@ -146,20 +140,40 @@ test('evaluateEligibility: fresh serves, each retirement names itself', () => {
   assert.deepEqual(
     evaluateEligibility({ ...manifest, context_tokens: 200_000 }, lsTree, NOW + 60_000),
     { ok: false, reason: 'over-cap' });
+  // Exactly at the cap still serves — the check is a strict `>`.
   assert.deepEqual(
-    evaluateEligibility(manifest, parseLsTree(LS_TREE.replace('bbb2', 'bbb9')), NOW + 60_000),
-    { ok: false, reason: 'stale-tree' });
-  // narrow root: CLAUDE.md is out-of-root — its blob change retires; crates/y change is inert.
-  assert.equal(narrow.subsystem_root, '.', 'CLAUDE.md in prior widens the root');
+    evaluateEligibility({ ...manifest, context_tokens: 150_000 }, lsTree, NOW + 60_000),
+    { ok: true });
 });
 
-test('eligibility with a genuinely narrow root ignores unrelated churn', () => {
+// Tripwire (#3341): the belief-truth gate — subtree_hash / out_of_root blob
+// matching — is retired. A manifest whose in-root subtree AND whose pinned
+// out-of-root blobs have BOTH churned since deposit must still serve; that
+// combination is exactly what the old `stale-tree` gate retired on every
+// non-judge task, which is the regression this issue exists to undo.
+// Exercised against both an implement-shaped (crate-scoped root, a pinned
+// out-of-root read) and a land-shaped (repo-wide root) manifest so the
+// uniform-across-tasks claim isn't just tested for one shape.
+test('evaluateEligibility ignores repo churn entirely — tree beliefs are not re-checked', () => {
   const lsTree = parseLsTree(LS_TREE);
-  const { manifest } = buildManifest({
-    transcript: parseTranscript(jsonl([init, readEv(`${CWD}/crates/x/src/lib.rs`), readEv(`${CWD}/crates/x/src/other.rs`), result])),
-    lsTree, verdict, prior: null, now: NOW,
-  });
-  assert.equal(manifest.subsystem_root, 'crates/x/src');
-  const unrelated = parseLsTree(LS_TREE.replace('ddd4', 'ddd9').replace('ccc3', 'ccc9'));
-  assert.deepEqual(evaluateEligibility(manifest, unrelated, NOW + 60_000), { ok: true });
+  const churned = parseLsTree(LS_TREE.replace('bbb2', 'bbb9').replace('ddd4', 'ddd9').replace('ccc3', 'ccc9'));
+
+  const implementShaped = {
+    subsystem_root: 'crates/x',
+    subtree_hash: subtreeHash(lsTree, 'crates/x'),
+    out_of_root: { 'CLAUDE.md': 'ccc3' },
+    context_tokens: 10_000,
+    deposited_at: NOW / 1000,
+  };
+  const landShaped = {
+    subsystem_root: '.',
+    subtree_hash: subtreeHash(lsTree, '.'),
+    out_of_root: {},
+    context_tokens: 10_000,
+    deposited_at: NOW / 1000,
+  };
+
+  for (const manifest of [implementShaped, landShaped]) {
+    assert.deepEqual(evaluateEligibility(manifest, churned, NOW + 60_000), { ok: true });
+  }
 });
