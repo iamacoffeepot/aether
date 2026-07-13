@@ -424,20 +424,17 @@ jobs:
           # Board scan → advanceable snapshot. Open non-PR issues with labels;
           # `has("pull_request")|not` drops PRs (they share the issues endpoint).
           # `type` and `alert` back the scope-eligibility gate below.
-          # The await read matches only a REAL park marker — the full HTML
-          # comment opening at the start of a line, the shape every park
-          # writer emits — never a bare substring: an issue that merely
-          # QUOTES the marker in prose (backticked, mid-sentence, unclosed)
-          # must not self-park (#3330 sat unlabeled and undispatchable
-          # because its own body documented the marker). The (^|\n)
-          # alternation anchors the line start without relying on the jq
-          # regex engine's multi-line ^ default.
+          # The await read keys on the agent:awaiting-answer label alone —
+          # the canonical parked-state store every park writes — never a
+          # free-text scan: an issue that merely QUOTES the marker in prose
+          # (backticked, mid-sentence, unclosed) must not self-park (#3330
+          # sat unlabeled and undispatchable because its own body documented
+          # the marker).
           gh api "repos/${REPO}/issues?state=open&per_page=100" --paginate \
             --jq '.[] | select(has("pull_request")|not)
               | [ .number,
                   ([.labels[].name | select(startswith("phase:"))] | .[0] // "none"),
-                  (if (([.labels[].name] | index("agent:awaiting-answer"))
-                       or ((.body // "") | test("(^|\\n)<!-- aether-agent:awaiting-answer[^>]*-->"))) then "await" else "-" end),
+                  (if ([.labels[].name] | index("agent:awaiting-answer")) then "await" else "-" end),
                   (if ([.labels[].name] | index("agent:dont-touch")) then "dt" else "-" end),
                   ([.labels[].name | select(startswith("type:")) | ltrimstr("type:")] | .[0] // "-"),
                   (if ([.labels[].name] | index("alert")) then "alert" else "-" end),
@@ -496,23 +493,16 @@ jobs:
           # true (observed on #3316: the park was unclearable by commenting).
           # Anchor on the park moment instead and ask whether ANY comment
           # after it is owner-authored — no later automated comment can bury
-          # the reply. The anchor is the newest comment carrying a real park
-          # marker (the full HTML comment opening at line start, same anchored
-          # form as the board scan above), falling back to the newest
-          # agent:awaiting-answer label event for a marker-less park.
+          # the reply. The anchor is the newest agent:awaiting-answer label
+          # event, structured GitHub data every park emits.
           # RFC3339-Z timestamps (what the API returns) compare
           # chronologically as plain strings. Comments come oldest-first;
           # head/tail -n1 under `|| true` is the file's SIGPIPE-safe idiom.
           park_anchor() {
             local ts
-            ts="$(gh api "repos/${REPO}/issues/${1}/comments?per_page=100" --paginate \
-              --jq '[.[] | select(.body // "" | test("(^|\\n)<!-- aether-agent:awaiting-answer[^>]*-->")) | .created_at] | last // empty' \
+            ts="$(gh api "repos/${REPO}/issues/${1}/timeline?per_page=100" --paginate \
+              --jq '[.[] | select(.event=="labeled" and .label.name=="agent:awaiting-answer") | .created_at] | last // empty' \
               | tail -n1 || true)"
-            if [ -z "$ts" ]; then
-              ts="$(gh api "repos/${REPO}/issues/${1}/timeline?per_page=100" --paginate \
-                --jq '[.[] | select(.event=="labeled" and .label.name=="agent:awaiting-answer") | .created_at] | last // empty' \
-                | tail -n1 || true)"
-            fi
             printf '%s' "$ts"
           }
 
