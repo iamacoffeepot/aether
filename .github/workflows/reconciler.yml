@@ -137,8 +137,6 @@ jobs:
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     steps:
-      # The DEFAULT branch, never the PR head — the security posture above says
-      # this workflow runs no branch code, and a PR must not be able to edit the
       # Resolve the PR set for this event, then recompute each one. The fact
       # reads and the compute live in this single step so a run's whole
       # reasoning is legible from its log: one line per fact, one for the
