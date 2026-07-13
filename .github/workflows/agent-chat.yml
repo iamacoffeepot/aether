@@ -159,20 +159,11 @@ jobs:
     # no-op. `/agent` is a protocol constant, not an identity — nothing about the
     # App's handle is hardcoded, and GitHub's contains() is case-insensitive on
     # strings. A comment that summons nothing is free.
-    # The body-marker clause is gate parity with the in-job route step (which
-    # also reads the awaiting-answer marker from the issue BODY, #3198): a
-    # surface's awaiting-answer state lives in EITHER the agent:awaiting-answer
-    # label OR the body marker, and a label-less body-marker reply would otherwise
-    # skip the whole job before the route step runs — a green success with nothing
-    # dispatched. issue_comment carries github.event.issue.body, so no API call is
-    # needed. The owner + kill-switch clauses above are untouched; this only widens
-    # what counts as an addressed-to-the-agent surface.
     if: >
       vars.AGENT_ENABLED == 'true' &&
       github.event.sender.login == github.repository_owner &&
       !contains(github.event.issue.labels.*.name, 'agent:dont-touch') &&
       (contains(github.event.issue.labels.*.name, 'agent:awaiting-answer') ||
-       contains(github.event.issue.body, '<!-- aether-agent:awaiting-answer') ||
        contains(github.event.comment.body, '/agent'))
     # issues: write covers the reply comment and the label removal; id-token:
     # write is the OIDC mint for the AWS role; contents: read is the floor. The
