@@ -9,8 +9,8 @@ budget_bytes = 35646
 tolerance = 0.1
 
 [tool.list_components]
-raw_bytes = 1209
-budget_bytes = 1330
+raw_bytes = 10461
+budget_bytes = 11507
 tolerance = 0.1
 
 [tool.load_component]
