@@ -24,8 +24,9 @@ name: Agent tick
 #     reason is a human manual kick: it bypasses the gap/budget gate (the
 #     deliberate operator override) but not the quiescence barrier. `reason=defer`
 #     is a SELF-ARMED SUCCESSOR (below): it honors the gate like any scheduled or
-#     completion-chain tick, so the re-arm chain paces against the minimum
-#     interval rather than collapsing it to ~0.
+#     completion-chain tick, and a recency guard arms at most one successor per
+#     pacing window (#3332) — the chain rests on the completion event and cron
+#     backstop between windows rather than re-arming at ~25s tick cadence.
 #
 # SELF-SUSTAINING WAVEFRONT (#3256, ADR-0146 §4 amended). The completion chain
 # re-arms the tick only while boxes keep completing, so a tick that dispatches
@@ -221,9 +222,10 @@ on:
         description: >-
           Dispatch reason. Empty = a human manual kick (bypasses the gap/budget
           gate, the deliberate operator override). 'defer' = a self-armed
-          successor tick (honors the gate so the re-arm chain paces against the
-          minimum interval instead of collapsing it). See SELF-SUSTAINING
-          WAVEFRONT in this file's header (#3256).
+          successor tick (honors the gate; a recency guard arms at most one
+          successor per pacing window instead of re-arming at ~25s tick cadence,
+          resting on the completion chain and cron backstop between windows —
+          #3332). See SELF-SUSTAINING WAVEFRONT in this file's header (#3256).
         required: false
         default: ""
         type: string
@@ -383,8 +385,9 @@ jobs:
           # Governor gap/budget gate — statelessly computed from run history. A
           # bare manual workflow_dispatch (empty reason) is the deliberate
           # operator override and skips this gate; a self-armed successor
-          # (reason=defer) honors it like any scheduled/completion-chain tick, so
-          # the re-arm chain paces against the minimum interval (#3256). A decline
+          # (reason=defer) honors it like any scheduled/completion-chain tick, and
+          # arm_successor's recency guard paces the re-arm to at most one per
+          # pacing window rather than a ~25s spin (#3256, #3332). A decline
           # here does NOT exit — it records that a wave is owed (gov_declined), so
           # the dispatch phase can arm a successor instead of sawing off the chain.
           manual_override=false
@@ -840,14 +843,44 @@ jobs:
           # the gap/budget gate (it is a short scan that exits, never a sleeping
           # held runner); the concurrency: agent-tick group serializes it.
           arm_successor() {
-            local others
-            others="$(gh run list --workflow agent-tick.yml --json databaseId,status --limit 100 \
-              --jq '[.[] | select(.status=="queued" or .status=="in_progress"
+            local runs others last_created age pace_floor pace_minutes
+            # One enumeration serves both guards: the single-in-flight
+            # idempotency check and the recency pacing guard below.
+            runs="$(gh run list --workflow agent-tick.yml --json databaseId,status,createdAt --limit 100 2>/dev/null || echo '[]')"
+            others="$(printf '%s' "$runs" \
+              | jq '[.[] | select(.status=="queued" or .status=="in_progress"
                                   or .status=="requested" or .status=="waiting" or .status=="pending")
                       | .databaseId | select(. != '"${GITHUB_RUN_ID}"')] | length' 2>/dev/null || echo 0)"
             if [ "${others:-0}" -gt 0 ]; then
               summary "- successor already armed (${others} agent-tick run(s) in flight) — not re-arming (${1})."
               return 0
+            fi
+            # Recency pacing guard (#3332). Without it, an owed-but-blocked
+            # condition (a governor gap/budget decline, or an owed wave held by a
+            # live box) re-arms a successor immediately; that successor re-evaluates
+            # the same still-blocked condition and re-arms again, so the chain
+            # busy-loops at the ~25s tick run-duration. Rest instead whenever the
+            # most recent OTHER agent-tick started less than pace_minutes ago — the
+            # immediate self-armed successor is always "recent" by that measure and
+            # so cannot re-arm, which is exactly what breaks the spin. Liveness
+            # holds: an owed wave blocked by a live box is re-armed by that box's
+            # workflow_run completion (not gated here — this only gates the
+            # self-arm insurance), and cron (~20m) backstops the rest, both inside
+            # AGENT_STALL_ALERT_MINUTES (default 30). pace_minutes floors the gap
+            # knob at pace_floor so the guard holds even at the default gap=0: the
+            # floor sits a few minutes above the ~25s tick duration, honoring
+            # ADR-0146 §4's "without a busy-loop" where "spaced by the minimum
+            # interval" alone would permit the gap=0 collapse.
+            pace_floor=3
+            pace_minutes=$(( gap_minutes > pace_floor ? gap_minutes : pace_floor ))
+            last_created="$(printf '%s' "$runs" \
+              | jq -r '[.[] | select(.databaseId != '"${GITHUB_RUN_ID}"') | .createdAt] | max // empty' 2>/dev/null || echo '')"
+            if [ -n "$last_created" ]; then
+              age=$(( ( $(date -u +%s) - $(date -u -d "$last_created" +%s) ) / 60 ))
+              if [ "$age" -lt "$pace_minutes" ]; then
+                summary "- successor paced — last tick ${age}m ago < ${pace_minutes}m; resting on completion/cron backstop (${1})."
+                return 0
+              fi
             fi
             gh workflow run agent-tick.yml -f reason=defer
             summary "- armed a successor tick (reason=defer) — ${1} owes a wave."
