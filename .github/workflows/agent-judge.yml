@@ -817,8 +817,13 @@ jobs:
           gh api "repos/${REPO}/issues/${ISSUE}" --jq '.body // ""' > /tmp/issue-body.md
           if grep -qE 'docs/adr/|ADR-[0-9]{4}|ADR flag:' /tmp/issue-body.md; then
             echo "issue #${ISSUE} is ADR-bearing — asserting advisory_only: true."
-            sed -E 's/^advisory_only:[[:space:]]*.*$/advisory_only:        true/' \
-              judge-verdict.md > /tmp/verdict.md
+            if grep -qE '^advisory_only:' judge-verdict.md; then
+              sed -E 's/^advisory_only:[[:space:]]*.*$/advisory_only:        true/' \
+                judge-verdict.md > /tmp/verdict.md
+            else
+              awk 'BEGIN{f=0} /^```/{f++; if(f==2) print "advisory_only:        true"} {print}' \
+                judge-verdict.md > /tmp/verdict.md
+            fi
             mv /tmp/verdict.md judge-verdict.md
           fi
 
