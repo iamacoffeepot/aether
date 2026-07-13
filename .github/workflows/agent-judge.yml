@@ -36,12 +36,16 @@ name: Agent judge
 # is live its board scan is a natural place to ALSO dispatch a missed judge pass
 # — a redundant backstop, never a prerequisite.
 #
-# INDEPENDENCE. The judge never judges a plan it authored. In v1 that is
-# guaranteed by construction: this workflow spawns a FRESH headless context
-# (claude -p, never --resume), and all scoping runs in separate agent-work runs,
-# so no session is ever shared between a scoper and the judge. The rubric skill
-# asserts the invariant in text as well, so it survives a future change that
-# might otherwise try to resume a scope session into a judge pass.
+# INDEPENDENCE. The judge never judges a plan it authored. The judge box is
+# cold, OR resumed only from the judge function-bucket of the warm session pool
+# (#3314): a judge selects candidates from idx/judge/ alone, so it can only ever
+# resume another JUDGE session, never a scoper's — scope and judge never share a
+# session. The NEW-JOB preamble the pool prepends on a warm resume discards prior
+# task state, so a re-judge that happens to resume a prior judge session is not
+# anchored on that verdict. Independence is thus preserved by function-bucketing
+# plus the preamble, and the rubric skill asserts the invariant in text as well.
+# (Superseding this file's former "claude -p, never --resume" absolute — pooling
+# makes the resume conditional, and function-bucketing keeps it independent.)
 #
 # SECURITY. Same least-privilege split as review.yml / agent-work.yml: the job
 # that executes code (headless Claude under --dangerously-skip-permissions) is
@@ -191,11 +195,27 @@ jobs:
     runs-on: ubuntu-latest
     # Bring-up leash: a wedged session must not idle toward the 6h default.
     timeout-minutes: 30
-    # Read-only. This job executes repo code (headless Claude under
-    # --dangerously-skip-permissions), so it holds no write scope — the comment
-    # is `post`'s alone.
+    # Read-only on the repo. This job executes repo code (headless Claude under
+    # --dangerously-skip-permissions), so it holds no repo write scope — the
+    # comment is `post`'s alone. id-token: write exists ONLY for the warm-session-
+    # pool steps (#3314): it lets the job assume the OIDC role scoped to
+    # agent/pool/* on the session bucket, the same fence review.yml uses. There
+    # is no untrusted PR branch here (the judge reads origin/main), and the pool
+    # is inert unless the owner sets AGENT_POOL_ENABLE=true. Owner console
+    # prerequisites for the pool on this box:
+    #   (a) the OIDC role (AGENT_AWS_ROLE_ARN) must reach agent/pool/* on
+    #       AGENT_SESSION_BUCKET (s3:GetObject/PutObject/DeleteObject/ListBucket)
+    #       from the agent-judge OIDC subject (v1 granted it for review);
+    #   (b) the SAME role must ADDITIONALLY grant agent/usage/* PutObject on the
+    #       evidence bucket — this job is ubuntu-latest with no instance profile,
+    #       so the meter step below cannot drop the OIDC creds and fall back to a
+    #       profile the way review/dogfood do; it keeps the OIDC creds for the
+    #       ledger write. Until granted, the write degrades cleanly (the judge
+    #       stays green) — the grant is a documented prerequisite, not a gate;
+    #   (c) the one-day bucket lifecycle rule on agent/pool/v2/* (v1's rule).
     permissions:
       contents: read
+      id-token: write
     env:
       # Exposed at job level under the name the Claude Code binary reads, sourced
       # from the AGENT-isolated secret. Job-level presence is what lets the step
@@ -311,18 +331,22 @@ jobs:
             --max-turns 3 | tee /tmp/auth.log
           grep -q "AUTH-OK" /tmp/auth.log
 
-      # The judge pass. A FRESH headless context (never --resume: that is the
-      # independence invariant made structural) reads the rubric skill, the
-      # issue, the cited ADRs, and the policy file, then writes the verdict body
-      # to judge-verdict.md. The rubric lives in the skill, NOT in this prompt —
-      # the prompt only points at it, so a rubric change is a skill diff.
+      # The judge pass. A cold headless context, OR a warm one resumed from the
+      # judge function-bucket of the session pool (#3314) — either way it reads
+      # the rubric skill, the issue, the cited ADRs, and the policy file, then
+      # writes the verdict body to judge-verdict.md. Independence holds on the
+      # warm path because a judge only ever resumes another JUDGE session and the
+      # NEW-JOB preamble discards prior task state (see the INDEPENDENCE header).
+      # The rubric lives in the skill, NOT in this prompt — the prompt only
+      # points at it, so a rubric change is a skill diff.
       #
       # The model writes the fenced block + reasoning ONLY. The marker comment's
       # header and the <!-- aether-judge:<n> --> marker are the post job's, so
       # the model can never break comment dedup.
       #
-      # No backticks in the prompt: it is a double-quoted shell string, where a
-      # backtick would command-substitute.
+      # No backticks and no $(...) in the prompt: it is written through an
+      # unquoted heredoc, where either would be shell-evaluated. ${GITHUB_WORKSPACE}
+      # is the one intended interpolation.
       #
       # `|| true` so a session failure never fails the job — a missing verdict
       # file is the signal that no comment is posted.
@@ -338,12 +362,100 @@ jobs:
         run: |
           jq -nc --arg issue "$ISSUE" '{issue: $issue}' > /tmp/agent-task.json
 
+      # Warm session pool (#3314; design of record: the #3264 design comment,
+      # v1.5; function-primary key #3319). Resume a deposited JUDGE session whose
+      # beliefs are provably true at this checkout instead of re-deriving the
+      # rubric skill + policy file + cited ADRs from scratch. The pool is an
+      # optimization layer: every pool step is fenced so a failure degrades to
+      # today's cold run — it must never block or redden a judge pass. Inert
+      # unless the owner sets AGENT_POOL_ENABLE=true (console prerequisites in
+      # this job's permissions comment above).
+      - name: Configure AWS credentials for the session pool
+        id: pool-creds
+        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != '' && vars.AGENT_POOL_ENABLE == 'true'
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AGENT_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AGENT_AWS_REGION }}
+
+      # Checkout half: GENERIC-WITHIN-FUNCTION selection. The judge box has no
+      # cheap request-side subsystem key, so instead of review.yml's exact-slug
+      # prefix it LISTs the whole idx/judge/<cli>/<model>/ prefix across every
+      # slug and takes the newest candidate the belief-truth `eligible` gate
+      # accepts, retiring a stale entry on the spot (delete-not-keep). Lease via
+      # S3 conditional write with self-healing reclaim of an expired lease.
+      # `set -e` is deliberately absent: every miss falls through to a cold run.
+      - name: Pool checkout
+        id: pool-checkout
+        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != '' && vars.AGENT_POOL_ENABLE == 'true' && steps.pool-creds.outcome == 'success'
+        env:
+          BUCKET: ${{ vars.AGENT_SESSION_BUCKET }}
+          AGENT_POOL_CUTOFF_MINS: ${{ vars.AGENT_POOL_CUTOFF_MINS }}
+          AGENT_POOL_CONTEXT_CAP_TOKENS: ${{ vars.AGENT_POOL_CONTEXT_CAP_TOKENS }}
+        run: |
+          set -uo pipefail
+          # The pool logic runs from origin/main (this job checks out main, so
+          # HEAD already is main; staging from origin/main keeps parity with
+          # review.yml and guards the #3293 branch-cut-before-script case).
+          git show origin/main:scripts/agent-pool.mjs > /tmp/agent-pool.mjs || true
+          sid=""
+          cli_version="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+          model="claude-sonnet-5"
+          if [ -n "$cli_version" ] && [ -n "${BUCKET:-}" ]; then
+            git ls-tree -r HEAD > /tmp/pool-ls-tree.txt
+            # No slug segment — LIST every slug bucket under this function and let
+            # the eligible gate pick the winner (generic-within-function).
+            idx="agent/pool/v2/idx/judge/${cli_version}/${model}/"
+            munged="$(echo "$GITHUB_WORKSPACE" | tr '/' '-')"
+            keys="$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$idx" \
+              --query 'sort_by(Contents||`[]`,&LastModified)[].Key' --output text 2>/dev/null \
+              | tr '\t' '\n' | grep -v '^None$' | tail -5 | tac)" || keys=""
+            for key in $keys; do
+              aws s3 cp "s3://${BUCKET}/${key}" /tmp/pool-candidate.json >/dev/null 2>&1 || continue
+              cand_sid="$(jq -r .session_id /tmp/pool-candidate.json)" || continue
+              elig="$(node /tmp/agent-pool.mjs eligible --manifest /tmp/pool-candidate.json --ls-tree /tmp/pool-ls-tree.txt)" || continue
+              if [ "$(echo "$elig" | jq -r .ok)" != "true" ]; then
+                echo "pool: retired ${cand_sid} ($(echo "$elig" | jq -r .reason))" | tee -a "$GITHUB_STEP_SUMMARY"
+                aws s3 rm "s3://${BUCKET}/${key}" >/dev/null 2>&1 || true
+                aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v2/sessions/${cand_sid}/" >/dev/null 2>&1 || true
+                continue
+              fi
+              lease="agent/pool/v2/leases/${cand_sid}"
+              echo "$(( $(date +%s) + 2100 ))" > /tmp/pool-lease.txt   # job leash 30 min + 5
+              if ! aws s3api put-object --bucket "$BUCKET" --key "$lease" --body /tmp/pool-lease.txt --if-none-match '*' >/dev/null 2>&1; then
+                held="$(aws s3 cp "s3://${BUCKET}/${lease}" - 2>/dev/null || echo 0)"
+                if [ "${held:-0}" -lt "$(date +%s)" ] 2>/dev/null; then
+                  # expired lease from a dead box — reclaim; a raced re-create still 412s for the loser
+                  aws s3 rm "s3://${BUCKET}/${lease}" >/dev/null 2>&1 || true
+                  aws s3api put-object --bucket "$BUCKET" --key "$lease" --body /tmp/pool-lease.txt --if-none-match '*' >/dev/null 2>&1 \
+                    || { echo "pool: lease race lost on ${cand_sid}"; continue; }
+                else
+                  echo "pool: ${cand_sid} is leased"; continue
+                fi
+              fi
+              mkdir -p "$HOME/.claude/projects/${munged}"
+              if aws s3 sync "s3://${BUCKET}/agent/pool/v2/sessions/${cand_sid}/" "$HOME/.claude/projects/${munged}/" >/dev/null 2>&1; then
+                sid="$cand_sid"
+                cp /tmp/pool-candidate.json /tmp/pool-prior-manifest.json
+                echo "pool: warm checkout ${sid} (root $(jq -r .subsystem_root /tmp/pool-candidate.json), $(jq -r .context_tokens /tmp/pool-candidate.json) ctx tokens)" | tee -a "$GITHUB_STEP_SUMMARY"
+              else
+                aws s3 rm "s3://${BUCKET}/${lease}" >/dev/null 2>&1 || true
+              fi
+              break
+            done
+          fi
+          [ -n "$sid" ] || echo "pool: cold run"
+          { echo "cli_version=${cli_version}"; echo "session_id=${sid}"; } >> "$GITHUB_OUTPUT"
+
       - name: Run the judge pass
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          POOL_SESSION_ID: ${{ steps.pool-checkout.outputs.session_id }}
         run: |
-          claude -p "You are running headless in CI on a checkout of origin/main.
+          cat > /tmp/judge-task-prompt.md <<PROMPT
+          You are running headless in CI on a checkout of origin/main.
           FIRST ACTION: read /tmp/agent-task.json. Its issue field is the issue
           number to judge — an issue of this repo that has just reached phase:plan.
           Read .claude/skills/judge/SKILL.md and follow it exactly — it is the
@@ -363,14 +475,212 @@ jobs:
           aether-judge marker or the header: the workflow prepends those.
           You have ZERO authority: write no label, merge nothing, open no PR, and
           edit no file in the repo other than that one verdict file.
-          Print exactly JUDGE-DONE when the file is written." \
-            --dangerously-skip-permissions \
-            --model claude-sonnet-5 \
-            --max-turns 40 \
-            --output-format stream-json --verbose \
-            | tee /tmp/judge-session.jsonl \
-            | python3 scripts/render-agent-stream.py \
-            || true
+          SESSION REUSE (the warm pool, #3314): this session may be deposited and
+          later resumed by a DIFFERENT judge job for a DIFFERENT issue against the
+          same files — your accumulated knowledge of the files you read (the rubric
+          skill, the ADRs, the policy file) is the asset being deposited, so do not
+          assume any future prompt continues this task. A resumed judge only ever
+          resumes another JUDGE session, so the independence invariant holds. After
+          the verdict file is written and before your final reply, write
+          ${GITHUB_WORKSPACE}/pool-verdict.json containing exactly one JSON object:
+          {"repool": "yes" or "no", "reason": "<one line>", "knowledge_summary":
+          "<one line naming the subsystem knowledge this session now carries>"}.
+          Answer no when this session's context is dominated by dead ends or thrash
+          rather than durable knowledge of the files it read.
+          Print exactly JUDGE-DONE when the verdict file is written.
+          PROMPT
+          if [ -n "${POOL_SESSION_ID:-}" ]; then
+            cat > /tmp/pool-preamble.md <<'PREAMBLE'
+          NEW JOB — you are a session resumed from the warm pool. Your prior
+          conversation is knowledge of this repository's files, NOT task state: the
+          issue below is unrelated to whatever you judged before, and no prior
+          verdict, abstention, or instruction carries over. This checkout is
+          origin/main and may have advanced since your prior run, so every git or
+          board observation from before this message is stale — re-run any git or gh
+          query you need. File contents you read under your subsystem root are still
+          valid (the pool verified them unchanged against this checkout); workspace-
+          wide search results from before this message are not — re-run them. Do not
+          re-read files you already know unless the task requires it.
+
+          PREAMBLE
+            cat /tmp/pool-preamble.md /tmp/judge-task-prompt.md > /tmp/judge-prompt.md
+            claude --resume "$POOL_SESSION_ID" -p "$(cat /tmp/judge-prompt.md)" \
+              --dangerously-skip-permissions \
+              --model claude-sonnet-5 \
+              --max-turns 40 \
+              --output-format stream-json --verbose \
+              | tee /tmp/judge-session.jsonl \
+              | python3 scripts/render-agent-stream.py \
+              || true
+          else
+            claude -p "$(cat /tmp/judge-task-prompt.md)" \
+              --dangerously-skip-permissions \
+              --model claude-sonnet-5 \
+              --max-turns 40 \
+              --output-format stream-json --verbose \
+              | tee /tmp/judge-session.jsonl \
+              | python3 scripts/render-agent-stream.py \
+              || true
+          fi
+
+      # Deposit half (if: always() so a failed pass still releases the lease).
+      # The mjs enforces the hygiene gates — clean exit, no compaction, under the
+      # cap, explicit repool: yes — and merges a resumed session's prior read set.
+      # A refusal retires the resumed entry; a successful re-deposit supersedes it
+      # under the new session id. Depth trim keeps the newest AGENT_POOL_DEPTH
+      # entries per slug. Same generic-within-function function bucket (judge), but
+      # the deposit still writes a slug-specific idx key — only the CHECKOUT lists
+      # generically; the manifest derives the slug from the read set.
+      - name: Pool deposit
+        if: always() && steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != '' && vars.AGENT_POOL_ENABLE == 'true' && steps.pool-creds.outcome == 'success'
+        env:
+          BUCKET: ${{ vars.AGENT_SESSION_BUCKET }}
+          CLI_VERSION: ${{ steps.pool-checkout.outputs.cli_version }}
+          PRIOR_SID: ${{ steps.pool-checkout.outputs.session_id }}
+          AGENT_POOL_DEPTH: ${{ vars.AGENT_POOL_DEPTH }}
+          AGENT_POOL_CUTOFF_MINS: ${{ vars.AGENT_POOL_CUTOFF_MINS }}
+          AGENT_POOL_CONTEXT_CAP_TOKENS: ${{ vars.AGENT_POOL_CONTEXT_CAP_TOKENS }}
+        run: |
+          set -uo pipefail
+          git show origin/main:scripts/agent-pool.mjs > /tmp/agent-pool.mjs || true
+          model="claude-sonnet-5"
+          release_lease() {
+            [ -n "${PRIOR_SID:-}" ] && aws s3 rm "s3://${BUCKET}/agent/pool/v2/leases/${PRIOR_SID}" >/dev/null 2>&1 || true
+          }
+          retire_prior() {
+            if [ -n "${PRIOR_SID:-}" ] && [ -f /tmp/pool-prior-manifest.json ]; then
+              old_slug="$(jq -r .slug /tmp/pool-prior-manifest.json 2>/dev/null)" || old_slug=""
+              aws s3 rm "s3://${BUCKET}/agent/pool/v2/idx/judge/${CLI_VERSION:-unknown}/${model}/${old_slug}/${PRIOR_SID}.json" >/dev/null 2>&1 || true
+              aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v2/sessions/${PRIOR_SID}/" >/dev/null 2>&1 || true
+            fi
+          }
+          [ -n "${BUCKET:-}" ] || exit 0
+          [ -f /tmp/judge-session.jsonl ] || { release_lease; exit 0; }
+          git ls-tree -r HEAD > /tmp/pool-ls-tree.txt
+          prior_flag=""
+          [ -f /tmp/pool-prior-manifest.json ] && prior_flag="--prior /tmp/pool-prior-manifest.json"
+          out="$(node /tmp/agent-pool.mjs manifest \
+            --transcript /tmp/judge-session.jsonl \
+            --ls-tree /tmp/pool-ls-tree.txt \
+            --verdict "$GITHUB_WORKSPACE/pool-verdict.json" \
+            --cli-version "${CLI_VERSION:-unknown}" $prior_flag)" || out='{"ok":false,"reason":"manifest-error"}'
+          # Record this box's re-pool disposition for the spend ledger's pool block
+          # (#3166). A /tmp write, so it can never perturb the deposit control flow.
+          echo "$out" | jq -r 'if .ok then "accepted" else .reason end' > /tmp/pool-deposit-reason.txt 2>/dev/null || true
+          if [ "$(echo "$out" | jq -r .ok)" = "true" ]; then
+            echo "$out" | jq .manifest > /tmp/pool-manifest-new.json
+            new_sid="$(jq -r .session_id /tmp/pool-manifest-new.json)"
+            slug="$(jq -r .slug /tmp/pool-manifest-new.json)"
+            munged="$(echo "$GITHUB_WORKSPACE" | tr '/' '-')"
+            idx="agent/pool/v2/idx/judge/${CLI_VERSION:-unknown}/${model}/${slug}"
+            if aws s3 sync "$HOME/.claude/projects/${munged}/" "s3://${BUCKET}/agent/pool/v2/sessions/${new_sid}/" >/dev/null 2>&1 \
+               && aws s3 cp /tmp/pool-manifest-new.json "s3://${BUCKET}/${idx}/${new_sid}.json" >/dev/null 2>&1; then
+              echo "pool: deposited ${new_sid} under ${idx} ($(jq -r .context_tokens /tmp/pool-manifest-new.json) ctx tokens)" | tee -a "$GITHUB_STEP_SUMMARY"
+              [ "${PRIOR_SID:-}" != "$new_sid" ] && retire_prior
+              depth="${AGENT_POOL_DEPTH:-1}"
+              aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "${idx}/" \
+                --query 'sort_by(Contents||`[]`,&LastModified)[].Key' --output text 2>/dev/null \
+                | tr '\t' '\n' | grep -v '^None$' | head -n -"$depth" | while read -r stale; do
+                    [ -n "$stale" ] || continue
+                    ssid="$(basename "$stale" .json)"
+                    aws s3 rm "s3://${BUCKET}/${stale}" >/dev/null 2>&1 || true
+                    aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v2/sessions/${ssid}/" >/dev/null 2>&1 || true
+                    echo "pool: depth trim retired ${ssid}" | tee -a "$GITHUB_STEP_SUMMARY"
+                  done
+            else
+              echo "pool: deposit upload failed — entry not published" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "pool: deposit refused ($(echo "$out" | jq -r .reason))" | tee -a "$GITHUB_STEP_SUMMARY"
+            retire_prior
+          fi
+          release_lease
+          exit 0
+
+      # Meter the judge run into the same spend ledger as agent-work / review
+      # (#3166) — this rung closes the gap that judge spend was invisible. The
+      # envelope carries a `pool` block (warm-vs-cold, the re-pool verdict + the
+      # box's compliance, this box's own re-pool disposition), assembled only when
+      # AGENT_POOL_ENABLE is on, so the flag-flip is demonstrated against the
+      # ledger rather than asserted.
+      #
+      # Credential care DIVERGES from review/dogfood: this job is ubuntu-latest
+      # with NO instance profile, so it CANNOT drop the pool OIDC creds and fall
+      # back to an ambient profile for the agent/usage/* write. It KEEPS the OIDC
+      # creds, which requires the judge OIDC role to ALSO grant agent/usage/*
+      # PutObject (this job's permissions comment documents it). The write
+      # degrades cleanly (|| echo) until that grant lands — the judge stays green.
+      # The script is staged from origin/main, never a PR head. Fenced like every
+      # pool step: a metering slip never reddens a judge pass.
+      - name: Meter the judge into the spend ledger
+        if: always() && steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        env:
+          ISSUE: ${{ steps.resolve.outputs.issue }}
+          JOB_STATUS: ${{ job.status }}
+          AGENT_POOL_ENABLE: ${{ vars.AGENT_POOL_ENABLE }}
+          POOL_SESSION_ID: ${{ steps.pool-checkout.outputs.session_id }}
+          POOL_CLI_VERSION: ${{ steps.pool-checkout.outputs.cli_version }}
+        run: |
+          set -uo pipefail
+          [ -f /tmp/judge-session.jsonl ] || { echo "no transcript — nothing to meter"; exit 0; }
+          command -v node >/dev/null || { echo "no node — ledger row skipped"; exit 0; }
+          command -v aws  >/dev/null || { echo "no aws cli — ledger write skipped"; exit 0; }
+          git show origin/main:scripts/agent-usage-record.mjs > /tmp/agent-usage-record.mjs || {
+            echo "usage script not on origin/main yet — ledger row skipped"; exit 0; }
+
+          pool_arg=""
+          if [ "${AGENT_POOL_ENABLE:-}" = "true" ]; then
+            warm=false; [ -n "${POOL_SESSION_ID:-}" ] && warm=true
+            verdict="null"; reason=""; compliance="null"
+            if [ -f "$GITHUB_WORKSPACE/pool-verdict.json" ]; then
+              verdict="$(jq -r '.repool // "unknown"' "$GITHUB_WORKSPACE/pool-verdict.json")"
+              reason="$(jq -r '.reason // ""' "$GITHUB_WORKSPACE/pool-verdict.json")"
+              compliance="true"
+            elif [ "$warm" = true ]; then
+              compliance="false"   # warm session was asked to write a verdict and did not
+            fi
+            retire="$( [ -f /tmp/pool-deposit-reason.txt ] && cat /tmp/pool-deposit-reason.txt || true )"
+            jq -nc \
+              --argjson warm "$warm" \
+              --arg session_id "${POOL_SESSION_ID:-}" \
+              --arg cli_version "${POOL_CLI_VERSION:-}" \
+              --arg verdict "$verdict" \
+              --arg reason "$reason" \
+              --argjson compliance "$compliance" \
+              --arg retire "$retire" \
+              '{
+                 warm: $warm,
+                 session_id: (if $session_id == "" then null else $session_id end),
+                 cli_version: (if $cli_version == "" then null else $cli_version end),
+                 repool_verdict: (if $verdict == "null" then null else $verdict end),
+                 repool_reason: (if $reason == "" then null else $reason end),
+                 repool_compliance: $compliance,
+                 retire_reason: (if $retire == "" then null else $retire end)
+               }' > /tmp/pool-meter.json && pool_arg="--pool /tmp/pool-meter.json"
+          fi
+
+          record="$(node /tmp/agent-usage-record.mjs \
+            --transcript /tmp/judge-session.jsonl \
+            --task judge --ref "$ISSUE" --run-id "$GITHUB_RUN_ID" \
+            --conclusion "$JOB_STATUS" --model claude-sonnet-5 \
+            --created-at "$(date -u +%FT%TZ)" $pool_arg)" \
+            || { echo "usage derivation failed — ledger row skipped"; exit 0; }
+          printf '%s\n' "$record" > /tmp/judge-usage-record.json
+
+          # KEEP the pool OIDC creds (no instance profile here) for the write —
+          # unlike review/dogfood, which unset them and ride an instance profile.
+          # The creds are only in the env when the pool-creds step ran (pool on);
+          # with no instance profile to fall back on, a pool-off run has nothing to
+          # authenticate the write, so derive the row for the transcript but skip
+          # the write rather than emit a misleading IAM-grant failure.
+          if [ -z "${AWS_ACCESS_KEY_ID:-}" ]; then
+            echo "no pool OIDC creds in env (AGENT_POOL_ENABLE off?) — ledger row derived, not written"
+            exit 0
+          fi
+          aws s3 cp /tmp/judge-usage-record.json \
+            "s3://aether-evidence/agent/usage/$(date -u +%F)/${GITHUB_RUN_ID}.json" \
+            --content-type application/json \
+            || echo "ledger write failed (judge OIDC role's agent/usage/* grant pending?) — judge stays green"
 
       # Whether a WELL-FORMED verdict was produced gates the post job. A file with
       # no greppable `verdict:` line is not a verdict — the fenced block is the
