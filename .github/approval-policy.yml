@@ -30,12 +30,17 @@
 # is itself a `human`-tier glob below, so a relaxation can never auto-approve
 # its own relaxation.
 #
-# The ADR hard gate lives ABOVE this file, unconditionally, in /approve's skill
-# text: an issue that carries an `ADR flag:` or writes an ADR routes to `human`
-# before any policy lookup, permanently. The `docs/adr/**` entry below is
-# belt-and-suspenders, not the source of that rule. Merely *citing* an ADR is not
-# the test — every well-scoped issue cites several, and treating that as
-# load-bearing routes the whole board to the owner and makes this file dead code.
+# The ADR hard gate lives ABOVE this file, in /approve's skill text, and is
+# maturity-aware (ADR-0146 §6, amended #3306): an issue that carries an
+# `ADR flag:` or writes/edits an ADR is ADR-bearing, and a NEW ADR or an
+# amendment to an ESTABLISHED (non-Proposed) one routes to `human` before any
+# policy lookup. Only a change whose every touched ADR is still `Status: Proposed`
+# (an in-progress arc the owner already approved once) defers to this file — and
+# the `docs/adr/**` entry below is `judge` precisely so that fall-through resolves
+# to a shadow reader, not the owner. The new/established → `human` guarantee lives
+# in the gate, not here (a glob matches paths, not maturity). Merely *citing* an
+# ADR is not the test — every well-scoped issue cites several, and treating that
+# as load-bearing routes the whole board to the owner and makes this file dead code.
 #
 # KNOWN GAP: a glob matches paths, not novelty, so "adding a new core system"
 # cannot be fully expressed here. A new CRATE is caught — it must add a
@@ -72,11 +77,20 @@ rules:
   - glob: "crates/*/Cargo.toml"
     tier: human
 
+  # ADRs. The routing decision lives in the ADR hard gate ABOVE this file
+  # (maturity-aware, ADR-0146 §6, amended #3306): a new or established ADR is
+  # already routed to the owner by the gate before this lookup runs, so this
+  # entry is only ever consulted on the gate's in-progress fall-through — a
+  # change to a still-Proposed ADR mid-arc, which the owner has said he does not
+  # want to re-approve. `judge` is that fall-through tier: no owner force, a
+  # shadow second-reader. A Proposed-ADR change that also touches a `human`-tier
+  # surface still resolves `human` through that surface (most-restrictive-wins).
+  - glob: "docs/adr/**"
+    tier: judge
+
   # Constitutional, and every supported agent harness's own machinery.
   # Self-modification of the thing that decides what may self-modify is the
   # owner's alone.
-  - glob: "docs/adr/**"
-    tier: human
   - glob: "/AGENTS.md"
     tier: human
   - glob: "/CLAUDE.md"

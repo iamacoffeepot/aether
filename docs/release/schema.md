@@ -41,7 +41,10 @@ At Plan, `/scope` emits a fenced `## Declared surface` glob list. `/approve`
 validates that it covers the planned targets and resolves the most restrictive
 `auto|judge|human` tier from `.github/approval-policy.yml` over every path
 each declaration can permit, including higher-tier files inside a declared
-subtree. An explicit `ADR flag:` or declared ADR edit is always human-routed.
+subtree. An explicit `ADR flag:` or declared ADR edit makes the issue
+ADR-bearing; the maturity-aware ADR hard gate (ADR-0146 §6) human-routes a new
+or established (non-`Proposed`) ADR, while a change touching only still-`Proposed`
+ADRs defers to the policy lookup (`docs/adr/**` is `judge`).
 The hosted judge is currently shadow-only, so `judge` still requires owner
 confirmation; `auto` does not. The hosted tick dispatches an approval run only
 for an exact `auto` result, and the headless gate resolves the tier again

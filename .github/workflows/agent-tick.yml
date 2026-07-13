@@ -107,8 +107,10 @@ name: Agent tick
 # definition (the skill's) and the tick only pre-filters, cheaply, so a Claude
 # run is never spent where it provably cannot advance anything. Per phase:plan
 # issue: the ADR hard gate first (an `ADR flag:` line, or `docs/adr/` in the
-# declared surface, routes to the owner unconditionally, ahead of any policy
-# lookup), then the issue's `## Declared surface` globs resolved against
+# declared surface, makes the issue ADR-bearing; a NEW or ESTABLISHED touched
+# ADR routes to the owner ahead of any policy lookup, while an in-progress-only
+# Proposed-ADR touch defers to policy — ADR-0146 §6, amended #3306), then the
+# issue's `## Declared surface` globs resolved against
 # .github/approval-policy.yml by scripts/surface-match.py — the same matcher the
 # reconciler holds a merged diff to, so the tier is resolved over exactly the
 # surface that is later enforced. Most-restrictive-wins (human > judge > auto);
@@ -157,8 +159,10 @@ name: Agent tick
 #
 # approval:pre-approved is the owner's per-issue override on that lookup: it
 # resolves the tier to `auto` whatever the policy says. It CANNOT pass the ADR
-# hard gate — an ADR is load-bearing by definition, so there is no passable gate
-# for one — and it counts only when the timeline actor who applied it is the
+# hard gate WHEN THAT GATE FIRES — a new or established ADR is load-bearing by
+# definition, so there is no passable gate for one; an in-progress-only Proposed
+# ADR does not fire the gate, so the override resolves it like any deferred
+# issue — and it counts only when the timeline actor who applied it is the
 # owner, the same verification approval:surface-ok uses. An agent
 # may apply the label; it does not count. It waives the TIER (who approves), never
 # /approve's gate checks (whether the issue is approvable at all), so a
@@ -515,18 +519,50 @@ jobs:
           # issue at phase:plan for its human or judge reader. Fail-safe by
           # construction — nothing but an explicit `auto` opens the gate.
           approval_tier() {
-            local body surface
+            local body surface adr_flag=0 adr_lines
             body="$(gh api "repos/${REPO}/issues/${1}" --jq '.body // ""')"
             # ADR hard gate, ahead of the policy lookup, exactly as /approve
-            # states it: work that NEEDS an ADR (the flag line /scope emits) or
-            # WRITES one (docs/adr/ in the surface) is the owner's, permanently.
+            # states it (ADR-0146 §6, amended #3306): the gate is MATURITY-aware,
+            # not presence-aware. An issue is ADR-bearing when it NEEDS an ADR
+            # (the flag line /scope emits) or WRITES/edits one (docs/adr/ in the
+            # surface). A NEW ADR (absent on origin/main) or an amendment to an
+            # ESTABLISHED one (Status != Proposed) is the owner's; only a change
+            # to a still-Proposed ADR mid-arc defers to the policy lookup below.
             # Merely citing an ADR is not the test — every well-scoped issue does.
-            if grep -qi 'ADR flag:' <<<"$body"; then echo "adr"; return; fi
+            grep -qi 'ADR flag:' <<<"$body" && adr_flag=1
             surface="$(awk '/^## Declared surface/{f=1; next} /^## /{f=0} f' <<<"$body" \
               | sed -n '/^[[:space:]]*```/,/^[[:space:]]*```/p' | sed '1d;$d' \
               | grep -v '^[[:space:]]*$' || true)"
+            adr_lines="$(grep '^[[:space:]]*docs/adr/' <<<"$surface" || true)"
+            # ADR-bearing: an ADR flag OR a declared docs/adr/ path. Run the
+            # maturity read; a non-ADR issue skips it and falls straight through.
+            if [ "$adr_flag" = 1 ] || [ -n "$adr_lines" ]; then
+              local proposed_seen=0 path status
+              # Classify each declared docs/adr/ file against origin/main. New
+              # (absent) or established (Status != Proposed) fires the gate ->
+              # human. Track whether any line resolved to an existing Proposed
+              # ADR; when none does (an ADR flag naming a not-yet-written ADR, an
+              # unreadable status line, or a path resolving to no file), fail
+              # safe to the owner — in-progress maturity must be PROVEN.
+              while IFS= read -r path; do
+                path="$(printf '%s' "$path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+                [ -z "$path" ] && continue
+                if ! git cat-file -e "origin/main:${path}" 2>/dev/null; then
+                  echo "adr"; return
+                fi
+                status="$(git show "origin/main:${path}" 2>/dev/null \
+                  | grep -m1 '^- \*\*Status:\*\*' || true)"
+                if [ -z "$status" ]; then echo "adr"; return; fi
+                if grep -qi 'Proposed' <<<"$status"; then
+                  proposed_seen=1
+                else
+                  echo "adr"; return
+                fi
+              done <<<"$adr_lines"
+              if [ "$proposed_seen" != 1 ]; then echo "adr"; return; fi
+              # Every touched ADR is an existing Proposed one — defer to policy.
+            fi
             if [ -z "$surface" ]; then echo "none"; return; fi
-            if grep -q '^[[:space:]]*docs/adr/' <<<"$surface"; then echo "adr"; return; fi
             printf '%s\n' "$surface" > "/tmp/surface-${1}.txt"
             # Isolated mode keeps a changed checkout from shadowing stdlib imports
             # beside this trusted matcher while the App token is in scope.
