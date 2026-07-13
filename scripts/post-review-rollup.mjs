@@ -152,8 +152,28 @@ function resolvePath(fileField, changed) {
   return matches.length === 1 ? matches[0] : null
 }
 
-function fingerprint(path, line, pillar) {
-  return `${path || '?'}|${line ?? '-'}|${pillar || '?'}`
+// Canonicalize a path to repo-relative by stripping a leading checkout-root
+// ($GITHUB_WORKSPACE) prefix. No-op when the env is unset or the prefix
+// doesn't match, and idempotent on input that's already relative — so the
+// same helper normalizes both a fresh emission and a legacy absolute marker
+// parsed out of history.
+export function repoRelative(path) {
+  const root = process.env.GITHUB_WORKSPACE
+  if (!root || !path) return path
+  const prefix = `${root.replace(/\/+$/, '')}/`
+  return path.startsWith(prefix) ? path.slice(prefix.length) : path
+}
+
+export function fingerprint(path, line, pillar) {
+  return `${repoRelative(path) || '?'}|${line ?? '-'}|${pillar || '?'}`
+}
+
+// Normalize the path segment of a fingerprint parsed out of prior comment
+// history, so a legacy absolute marker still matches a newly-emitted
+// canonical one when building the `posted` dedup set.
+export function normalizeFingerprint(fp) {
+  const [path, ...rest] = fp.split('|')
+  return [repoRelative(path), ...rest].join('|')
 }
 
 function findingBody(f) {
@@ -264,7 +284,7 @@ async function main() {
     apiList(env.token, `repos/${env.repo}/issues/${env.pr}/comments`),
   ])
   for (const c of [...reviewComments, ...reviews, ...issueComments]) {
-    for (const m of String(c.body || '').matchAll(FP_RE)) posted.add(m[1])
+    for (const m of String(c.body || '').matchAll(FP_RE)) posted.add(normalizeFingerprint(m[1]))
   }
 
   // Partition findings into inline (anchored on a changed line) and body
