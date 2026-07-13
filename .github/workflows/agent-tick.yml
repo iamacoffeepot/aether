@@ -67,7 +67,12 @@ name: Agent tick
 #   phase:ready                   -> implement
 #   phase:building/qa/findings    -> none       (reconciler-owned; #3126)
 #   phase:held                    -> land       (ref is the open closing PR)
-#   phase:bounced/stalled         -> none       (rest until an owner acts)
+#   phase:bounced (directive)     -> scope       (resume via bounce-to:*; no
+#                                               agent:awaiting-answer present)
+#   phase:bounced (question) /
+#     phase:stalled                -> none       (rest until an owner acts;
+#                                               agent:awaiting-answer is what
+#                                               splits directive from question)
 #
 # THE APPROVAL TIER (#3176) is what makes `phase:plan -> approve` safe to
 # dispatch unattended. The tick decides WHETHER to dispatch; the executor's
@@ -485,7 +490,12 @@ jobs:
             if [ "$dt" = "dt" ]; then summary "- skip #${num}: agent:dont-touch"; continue; fi
             if [ "$alert" = "alert" ]; then summary "- skip #${num}: alert — machine-filed, not a work item"; continue; fi
             case "$phase" in
-              none|phase:define|phase:design)
+              none|phase:define|phase:design|phase:bounced)
+                # A bounced issue resumes via the bounce-to:* contract /scope
+                # already implements (#3250 evidence); await-parking below (the
+                # "$await" = "await" check) is what splits a directive bounce
+                # (dispatched here) from a question bounce (parked instead).
+                #
                 # The type gate applies to the whole scope arm, not just Backlog: an
                 # issue already at define/design got there through the pipeline and
                 # will carry a type:*, so a missing one still means "not ours".
@@ -759,3 +769,52 @@ jobs:
             gh api -X POST "repos/${REPO}/issues/${num}/comments" -F body=@/tmp/nudge.md
             echo "#${num}: nudged"
           done < /tmp/await.txt
+
+          # Stale bounces: a directive bounce dispatches on the next quiescent
+          # wave (the scope arm above), so a healthy one never sits at
+          # phase:bounced long enough to cross the day-scale threshold below.
+          # This loop only ever fires for one that's stuck (kill switch off,
+          # type:* outside AGENT_SCOPE_TYPES, or a persistent re-scope loop).
+          # A question bounce also carries agent:awaiting-answer and is already
+          # nudged by the loop above, so it's excluded here to avoid a double
+          # nudge.
+          gh api "repos/${REPO}/issues?state=open&per_page=100&labels=phase:bounced" --paginate \
+            --jq '.[] | select(has("pull_request")|not) | .number' > /tmp/bounced.txt
+
+          while IFS= read -r num; do
+            [ -n "$num" ] || continue
+
+            labels="$(gh api "repos/${REPO}/issues/${num}/labels" --jq '.[].name' || true)"
+            if grep -qxF 'agent:dont-touch' <<<"$labels"; then
+              echo "#${num}: agent:dont-touch — skip"; continue
+            fi
+            if grep -qxF 'agent:awaiting-answer' <<<"$labels"; then
+              echo "#${num}: agent:awaiting-answer — already covered by the loop above"; continue
+            fi
+
+            # Park time = the most recent phase:bounced label event.
+            park="$(gh api "repos/${REPO}/issues/${num}/timeline?per_page=100" --paginate \
+              --jq '[.[] | select(.event=="labeled" and .label.name=="phase:bounced") | .created_at] | last // empty' || true)"
+            [ -n "$park" ] || continue
+            park_age=$(( now_epoch - $(date -u -d "$park" +%s) ))
+            if [ "$park_age" -lt "$threshold" ]; then
+              echo "#${num}: bounced $(( park_age / 86400 ))d < ${nudge_days}d — not stale"; continue
+            fi
+
+            # De-dup: re-nudge on cadence, not every tick.
+            last_nudge="$(gh api "repos/${REPO}/issues/${num}/comments?per_page=100" --paginate \
+              --jq '[.[] | select(.body | contains("<!-- aether-nudge -->")) | .created_at] | last // empty' || true)"
+            if [ -n "$last_nudge" ]; then
+              if [ $(( now_epoch - $(date -u -d "$last_nudge" +%s) )) -lt "$threshold" ]; then
+                echo "#${num}: nudged within the cadence — skip"; continue
+              fi
+            fi
+
+            cat > /tmp/nudge.md <<EOF
+          @${OWNER} — issue #${num} was bounced $(( park_age / 86400 )) day(s) ago and hasn't resumed — address the reason on the issue, or reply here.
+
+          <!-- aether-nudge -->
+          EOF
+            gh api -X POST "repos/${REPO}/issues/${num}/comments" -F body=@/tmp/nudge.md
+            echo "#${num}: nudged (stale bounce)"
+          done < /tmp/bounced.txt
