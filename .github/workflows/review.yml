@@ -387,10 +387,11 @@ jobs:
       # the tee'd JSONL is the durable session transcript, uploaded as an
       # artifact below (iamacoffeepot/aether#2981). The tee target lives
       # in /tmp, outside the checkout, so the session can never mistake
-      # it for repo scratch and delete it (#2986). The wait contract is
-      # MECHANICAL, not prose: the prompt prescribes a concrete poll loop
-      # (sleep + check for the rollup file) because two live runs proved a
-      # session will end on a promise with the workflow still in flight.
+      # it for repo scratch and delete it (#2986). The wait contract mirrors
+      # dogfood's #3086 shape — launch the background workflow, end the turn,
+      # let the harness re-invoke on completion under the raised ceiling —
+      # because the CLI blocks sleep-polling and the old mechanical poll loop
+      # raced the ten-minute default ceiling (#3295, run 29249216987).
       # The -p text is BYTE-CONSTANT across runs (#3285): the per-run parameters
       # (pr_number, diff_base) ride /tmp/agent-task.json, so every review box
       # sends an identical first user message and reads the shared prompt-cache
@@ -504,6 +505,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           POOL_SESSION_ID: ${{ steps.pool-checkout.outputs.session_id }}
+          # The #3086 wait-ceiling raise (40 min), mirrored from dogfood: the
+          # review workflow runs as a background task, and the default
+          # ten-minute ceiling terminates it mid-flight when the review takes
+          # longer (run 29249216987). Belt to the contract rewrite below.
+          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "2400000"
         run: |
           cat > /tmp/review-task-prompt.md <<PROMPT
           You are running headless in CI on a checkout of a PR's head branch.
@@ -521,19 +527,23 @@ jobs:
           let it classify a flagged correctness bug's provenance against the merge-base (a pre-existing
           bug reachable on the base becomes an advisory follow-up, never an in-PR demand). Let the skill run the
           review.js workflow in a single pass.
-          THE WAIT CONTRACT (load-bearing — two prior runs died on this): the Workflow tool
-          runs in the BACKGROUND. In headless mode your final reply exits the process and
-          KILLS the in-flight workflow, so you may not produce a final reply until
-          ${GITHUB_WORKSPACE}/review-rollup.json exists on disk. While the workflow runs, poll
-          mechanically: run the Bash command
-          'sleep 60; ls ${GITHUB_WORKSPACE}/review-rollup.json 2>/dev/null || echo waiting'
-          again and again, as many turns as it takes — the completion notification or the
-          workflow result will reach you between polls. Polling turns are cheap; an early
-          final reply wastes the whole run. The file will never appear on its own — the
-          workflow returns the rollup as a VALUE, and YOU write the file when it does.
-          When the workflow returns { rollup, files }, write the returned ROLLUP object as JSON
-          verbatim to exactly ${GITHUB_WORKSPACE}/review-rollup.json — that absolute path, not
-          a path relative to your working directory (the rollup, not the whole return).
+          THE WAIT CONTRACT (load-bearing — headless runs die on this): the Workflow tool
+          runs in the BACKGROUND. Launch it, then end your turn with a one-line status
+          note — nothing else. The headless harness holds the process open for the
+          in-flight background workflow (this step raises the wait ceiling to forty
+          minutes) and re-invokes you with a completion notification when it finishes.
+          Do NOT poll for the result: sleep-based polling is blocked here, and a Monitor
+          on the rollup path is useless because that file only appears when YOU write
+          it. Do NOT stop the workflow task, and NEVER treat the status note as the end
+          of the job. When the completion notification arrives, read the workflow's
+          returned { rollup, files } value (from the task output file if the
+          notification truncates it) and write the returned ROLLUP object as JSON
+          verbatim to exactly ${GITHUB_WORKSPACE}/review-rollup.json — that absolute
+          path, not a path relative to your working directory (the rollup, not the
+          whole return). The file never appears on its own — YOU write it. If the
+          workflow reports an error or no rollup, do NOT fabricate a replacement file:
+          leave the failure in the session transcript so the action records an
+          actionable no-rollup attempt.
           Do not edit any source (the noBuild flag above keeps the correctness refuter
           subagent non-editing too).
           SESSION REUSE (the warm pool, #3286): this session may be deposited and later
