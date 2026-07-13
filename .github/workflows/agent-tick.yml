@@ -11,10 +11,10 @@ name: Agent tick
 #
 # TRIGGER MODEL (three paths, one job body):
 #   - workflow_run on "Agent work" completed — the COMPLETION CHAIN. Each
-#     finishing step re-invokes the tick, which dispatches the next wave the
-#     moment quiescence returns, so waves chain at the natural pace of the work.
-#     The list matches the executor's `name:` (display name "Agent work"), the
-#     same way review.yml/reconciler.yml key on "CI".
+#     finishing box frees a slot and re-invokes the tick, which refills the freed
+#     slot with the next advanceable item, so waves chain at the natural pace of
+#     the work. The list matches the executor's `name:` (display name "Agent
+#     work"), the same way review.yml/reconciler.yml key on "CI".
 #   - schedule on offset minutes (~every 20) — a PURE BEST-EFFORT BACKSTOP.
 #     GitHub drops scheduled events under load (observed: a `7,27,47` cron silent
 #     for 2.5h, #3256), so cron is NOT a liveness dependency — the self-sustaining
@@ -22,7 +22,7 @@ name: Agent tick
 #     self-dispatch ever misses.
 #   - workflow_dispatch — two callers, split by the `reason` input. An EMPTY
 #     reason is a human manual kick: it bypasses the gap/budget gate (the
-#     deliberate operator override) but not the quiescence barrier. `reason=defer`
+#     deliberate operator override). `reason=defer`
 #     is a SELF-ARMED SUCCESSOR (below): it honors the gate like any scheduled or
 #     completion-chain tick, and a recency guard arms at most one successor per
 #     pacing window (#3332) — the chain rests on the completion event and cron
@@ -31,8 +31,8 @@ name: Agent tick
 # SELF-SUSTAINING WAVEFRONT (#3256, ADR-0146 §4 amended). The completion chain
 # re-arms the tick only while boxes keep completing, so a tick that dispatches
 # NOTHING — a governor gap/budget decline, or an owed wave that cannot be slotted
-# (width cap) or run (not quiescent) — produces no box, no completion event, and
-# no successor: the chain saws off its own branch, leaving cron (unreliable) the
+# (width cap) or is held by the scope⊗sweep mutex — produces no box, no completion
+# event, and no successor: the chain saws off its own branch, leaving cron (unreliable) the
 # sole revival. Observed live: a gap-declined tick was the last tick for ~55min
 # with five phase:ready issues waiting. The fix: a tick that declines/defers a
 # wave WHILE ONE IS OWED arms a single successor tick itself (arm_successor),
@@ -51,10 +51,22 @@ name: Agent tick
 # contract) makes the claim observable. The tick enumerates runs from the
 # platform (`gh run list --workflow agent-work.yml`) and classifies each by
 # parsing its name — no claim label, nothing to desync on a crash. That live set
-# is both the BARRIER (quiescent = no live non-land run) and the double-dispatch
-# guard (an item with a matching live run is skipped). A crashed run leaves the
-# resting phase unmoved and drops out of the live set, so the next tick
-# re-dispatches by absence — crash recovery needs no bookkeeping.
+# is the CONCURRENCY CAP (#3343: dispatch fills up to `width − live non-land
+# count` free slots every tick, not a wave only at quiescence) and the
+# double-dispatch guard (an item with a matching live run is skipped). A crashed
+# run leaves the resting phase unmoved and drops out of the live set, so the next
+# tick re-dispatches by absence — crash recovery needs no bookkeeping.
+#
+# THE ONE RETAINED MUTUAL EXCLUSION (#3343). Retiring the barrier keeps exactly
+# one board-level read/write hazard gated: the approve-sweep reads every
+# phase:plan body while a live (or same-wave) scope box can rewrite one, so
+# scope⊗approve-sweep is a mutex. When both are freshly advanceable and neither
+# is live the sweep wins the wave and fresh scope defers one wave (an owed sweep
+# must not be starved); a live scope blocks the sweep. Everything else the
+# barrier used to serialize (implement/scope/approve against each other) carried
+# no safety the per-item run-name claim, the governor width/budget, and /land's
+# merge-tree oracle don't already carry continuously, so it now runs concurrently
+# up to the width cap.
 #
 # THE GOVERNOR is repo variables at one choke point, all computed statelessly
 # from run history (no counter is stored):
@@ -167,17 +179,17 @@ name: Agent tick
 # blinds the dispatcher, per its contract). The snapshot is ordered
 # land > question-resume > approve/implement/scope and slots are filled in that
 # order.
-# `land` BYPASSES THE BARRIER — dispatched every tick regardless of quiescence
-# and excluded from the barrier's live set — because land runs are minutes long,
-# agent-work's merged-check makes re-dispatch idempotent, and landing unblocks
-# downstream. Question-resume is a backstop tier: the primary resume path is the
-# owner's comment re-dispatching agent-work directly, but the tick also picks up
-# an agent:awaiting-answer item whose latest comment is the owner's (they
-# answered), dispatching the task matching its resting phase. A non-land item
-# dispatches only when quiescent; a still-parked awaiting-answer item (no owner
-# reply) is left alone. Chat runs (#3130) never enter the barrier: the run list
-# is scoped to agent-work.yml, so a live owner conversation cannot stall the
-# wavefront. Wave decisions go to $GITHUB_STEP_SUMMARY, not the issue timeline —
+# `land` DISPATCHES OFF THE SLOT BUDGET — every held PR every tick, not counted
+# against the width cap and excluded from the live non-land count — because land
+# runs are minutes long, agent-work's merged-check makes re-dispatch idempotent,
+# and landing unblocks downstream. Question-resume is a backstop tier: the primary
+# resume path is the owner's comment re-dispatching agent-work directly, but the
+# tick also picks up an agent:awaiting-answer item whose latest comment is the
+# owner's (they answered), dispatching the task matching its resting phase, ahead
+# of fresh work in the free slots. A still-parked awaiting-answer item (no owner
+# reply) is left alone. Chat runs (#3130) never enter the live set: the run list
+# is scoped to agent-work.yml, so a live owner conversation does not consume a
+# slot. Wave decisions go to $GITHUB_STEP_SUMMARY, not the issue timeline —
 # issues and labels stay the only durable state.
 #
 # NUDGE. An agent:awaiting-answer item whose park (its most recent
@@ -232,7 +244,7 @@ on:
         type: string
 
 # Serialize overlapping triggers (a cron landing on a completion event) into one
-# tick at a time so two runs never race the barrier read. cancel-in-progress is
+# tick at a time so two runs never race the live-set read. cancel-in-progress is
 # false: a tick is short and a superseded one still finishes its dispatch cleanly.
 concurrency:
   group: agent-tick
@@ -317,10 +329,10 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
-      # The wave: governor gate, then the computed barrier, board scan, priority,
-      # and dispatch — one step so a tick's whole reasoning is legible in one log
-      # group (the reconciler's posture). The live set and the governor both read
-      # the single run enumeration below.
+      # The wave: governor gate, then the live-set + free-slot computation, board
+      # scan, priority, and dispatch — one step so a tick's whole reasoning is
+      # legible in one log group (the reconciler's posture). The live set and the
+      # governor both read the single run enumeration below.
       - name: Compute and dispatch the wave
         if: steps.preflight.outputs.proceed == 'true'
         env:
@@ -347,8 +359,8 @@ jobs:
           summary "## Agent tick — $(date -u +%FT%TZ) (${EVENT})"
 
           # Enumerate agent-work runs once. This one read is the platform state
-          # the whole tick computes over: the barrier's live set and the
-          # governor's gap/budget both derive from it.
+          # the whole tick computes over: the live set (concurrency cap +
+          # double-dispatch guard) and the governor's gap/budget both derive from it.
           gh run list --workflow agent-work.yml \
             --json databaseId,name,status,event,createdAt --limit 100 > /tmp/runs.json
 
@@ -596,10 +608,11 @@ jobs:
             python3 -I scripts/surface-match.py --tier "/tmp/surface-${1}.txt" .github/approval-policy.yml
           }
 
-          # Bucket advanceable items by priority tier. land bypasses the barrier
-          # and the slot budget; approve/scope/implement need quiescence; an
-          # awaiting-answer approve/scope/implement item only advances when the
-          # owner has replied (question-resume), else it is left parked.
+          # Bucket advanceable items by priority tier. land dispatches off the
+          # slot budget; approve/scope/implement fill the free slots (width − live
+          # non-land), question-resume ahead of fresh work; an awaiting-answer
+          # approve/scope/implement item only advances when the owner has replied
+          # (question-resume), else it is left parked.
           land_items=""
           resume_items=""
           strand_items=""
@@ -802,18 +815,42 @@ jobs:
           # auto set and parking the reply-actionable non-auto remainder per issue
           # (PER-ISSUE ASKS, header above) — so the tick counts only the auto
           # queue as the dispatch reason. The is_live read is the same singleton
-          # guard every task uses (a live sweep also holds the quiescence barrier
-          # below, so this line mostly buys the summary).
+          # guard every task uses.
+          #
+          # scope⊗approve-sweep mutex (#3343). With the global quiescence barrier
+          # retired, the one board-level read/write hazard left is the sweep
+          # reading every phase:plan body while a scope box can rewrite one (a
+          # resumed re-scope). The two must never overlap. sweep_live / scope_live
+          # read the live set; a fresh scope in the SAME wave is excluded by the
+          # slot loop below when the sweep dispatches. Tie-break when both are
+          # freshly advanceable and neither is live: the sweep wins (an owed sweep
+          # must not be starved — the motivating pain), fresh scope defers a wave.
+          # A LIVE scope still blocks the sweep, keeping the mutex symmetric.
+          sweep_live=false
+          if is_live "approve-sweep" "all"; then sweep_live=true; fi
+          scope_live=false
+          case $'\n'"${live_pairs}" in
+            *$'\n'scope:*) scope_live=true ;;
+          esac
+          sweep_dispatching=false
+          sweep_mutex_deferred=false
           sweep_why=""
           if [ "${approve_queue}" -gt 0 ]; then
             sweep_why="${approve_queue} auto-tier"
           fi
           if [ -n "${sweep_why}" ]; then
-            if is_live "approve-sweep" "all"; then
+            if [ "$sweep_live" = "true" ]; then
               trace "- skip approve sweep: work-approve-sweep-all already live (${sweep_why})"
               cat_deferred="${cat_deferred}work-approve-sweep-all — already live (${sweep_why})"$'\n'
+            elif [ "$scope_live" = "true" ]; then
+              # Owed but held by the mutex — mark it so the deferred-wave successor
+              # is armed even when no other non-land item defers this wave.
+              sweep_mutex_deferred=true
+              trace "- defer approve sweep: a scope box is live — scope⊗sweep mutex (${sweep_why})"
+              cat_deferred="${cat_deferred}work-approve-sweep-all — scope box live, scope⊗sweep mutex (${sweep_why})"$'\n'
             else
               work_items="approve-sweep all"$'\n'"${work_items}"
+              sweep_dispatching=true
               trace "- approve sweep: ${sweep_why} plan issue(s) — one work-approve-sweep-all dispatch"
             fi
           fi
@@ -890,7 +927,7 @@ jobs:
             exit 0
           fi
 
-          # Land first — every held PR, regardless of quiescence, off the slot
+          # Land first — every held PR, regardless of the width cap, off the slot
           # budget.
           while IFS= read -r entry; do
             [ -n "$entry" ] || continue
@@ -899,74 +936,84 @@ jobs:
             dispatch "$1" "$2"
           done <<< "$land_items"
 
-          # Non-land only when quiescent (no live non-land run). Slots = width
-          # minus the live non-land count (0 here, so width); question-resume
-          # fills ahead of fresh work.
+          # Non-land dispatch against a live concurrency cap — the global
+          # quiescence barrier is retired (#3343), so this loop runs on every
+          # tick, not only at quiescence. Slots = width minus the live non-land
+          # count, clamped at 0; question-resume fills ahead of fresh work. When
+          # live_nonland >= width, slots == 0 and every item defers through the
+          # slots-full path, re-armed as an owed successor below.
           deferred_nonland=0
-          if [ "$live_nonland" -eq 0 ]; then
-            slots=$(( width - live_nonland ))
-            [ "$slots" -lt 0 ] && slots=0
-            filled=0
-            while IFS= read -r entry; do
-              [ -n "$entry" ] || continue
-              if [ "$filled" -ge "$slots" ]; then
-                trace "- deferred (slots full): ${entry}"
-                cat_deferred="${cat_deferred}work-${entry%% *}-${entry#* } — slots full"$'\n'
-                deferred_nonland=$((deferred_nonland + 1))
-                continue
-              fi
-              # shellcheck disable=SC2086
-              set -- $entry
-              dispatch "$1" "$2"
-              filled=$((filled + 1))
-            done <<< "${resume_items}${work_items}"
-            trace "- filled ${filled}/${slots} non-land slot(s)."
-
-            # A rescued strand means an owner answer did not resume via the
-            # primary agent-chat path — file a visible alert so a dropped decision
-            # is not a silent green success (#3265). Keep one open alert issue and
-            # append, mirroring context-budget-canary.yml's upsert; the hidden
-            # marker dedups against the open alert.
-            if [ -n "${strand_items}" ]; then
-              alert_title="ci: owner answer stranded — resumed by the tick backstop"
-              {
-                echo "<!-- aether-alert:stranded-answer -->"
-                echo "The tick backstop re-dispatched an owner-answered awaiting-answer surface whose answer had already sat past the grace: the primary \`agent-chat\` path did not resume it. Each such rescue is an owner decision that read as a green success while nothing moved."
-                echo
-                printf 'Stranded this tick:'
-                for s in ${strand_items}; do printf ' #%s' "$s"; done
-                echo
-                echo
-                echo "- Run: ${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
-              } > /tmp/strand-alert.md
-              existing_alert="$(gh issue list --state open --search "${alert_title} in:title" \
-                --json number,title \
-                --jq "map(select(.title == \"${alert_title}\")) | .[0].number // empty" || true)"
-              if [ -n "$existing_alert" ]; then
-                gh issue comment "$existing_alert" --body-file /tmp/strand-alert.md \
-                  && { trace "- alert: appended stranded-answer rescue to #${existing_alert} (${strand_items})"; \
-                       cat_dispatched="${cat_dispatched}stranded-answer alert appended to #${existing_alert} (${strand_items})"$'\n'; } \
-                  || { w="- warn: could not append stranded-answer rescue to #${existing_alert}"; trace "$w"; cat_warnings="${cat_warnings}${w}"$'\n'; }
-              else
-                gh issue create --title "$alert_title" --body-file /tmp/strand-alert.md --label alert \
-                  && { trace "- alert: filed stranded-answer rescue issue (${strand_items})"; \
-                       cat_dispatched="${cat_dispatched}stranded-answer alert filed (${strand_items})"$'\n'; } \
-                  || { w="- warn: could not file stranded-answer rescue issue (${strand_items})"; trace "$w"; cat_warnings="${cat_warnings}${w}"$'\n'; }
-              fi
+          slots=$(( width - live_nonland ))
+          [ "$slots" -lt 0 ] && slots=0
+          filled=0
+          while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            # shellcheck disable=SC2086
+            set -- $entry
+            # scope⊗approve-sweep mutex (#3343): a scope box must not run while the
+            # sweep is live or dispatching this wave (the sweep reads plan bodies a
+            # scope can rewrite). Defer the scope item — re-armed as an owed
+            # successor — without consuming a slot.
+            if [ "$1" = "scope" ] && { [ "$sweep_live" = "true" ] || [ "$sweep_dispatching" = "true" ]; }; then
+              trace "- deferred (scope⊗sweep mutex): ${entry}"
+              cat_deferred="${cat_deferred}work-${1}-${2} — scope⊗sweep mutex"$'\n'
+              deferred_nonland=$((deferred_nonland + 1))
+              continue
             fi
-          else
-            deferred_nonland="$(printf '%s' "${resume_items}${work_items}" | grep -c . || true)"
-            trace "- not quiescent: ${live_nonland} live non-land run(s) — deferring new approve/scope/implement."
-            cat_deferred="${cat_deferred}approve/scope/implement — not quiescent (${live_nonland} live non-land run(s))"$'\n'
+            if [ "$filled" -ge "$slots" ]; then
+              trace "- deferred (slots full): ${entry}"
+              cat_deferred="${cat_deferred}work-${1}-${2} — slots full"$'\n'
+              deferred_nonland=$((deferred_nonland + 1))
+              continue
+            fi
+            dispatch "$1" "$2"
+            filled=$((filled + 1))
+          done <<< "${resume_items}${work_items}"
+          trace "- filled ${filled}/${slots} non-land slot(s)."
+
+          # A rescued strand means an owner answer did not resume via the
+          # primary agent-chat path — file a visible alert so a dropped decision
+          # is not a silent green success (#3265). Keep one open alert issue and
+          # append, mirroring context-budget-canary.yml's upsert; the hidden
+          # marker dedups against the open alert.
+          if [ -n "${strand_items}" ]; then
+            alert_title="ci: owner answer stranded — resumed by the tick backstop"
+            {
+              echo "<!-- aether-alert:stranded-answer -->"
+              echo "The tick backstop re-dispatched an owner-answered awaiting-answer surface whose answer had already sat past the grace: the primary \`agent-chat\` path did not resume it. Each such rescue is an owner decision that read as a green success while nothing moved."
+              echo
+              printf 'Stranded this tick:'
+              for s in ${strand_items}; do printf ' #%s' "$s"; done
+              echo
+              echo
+              echo "- Run: ${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
+            } > /tmp/strand-alert.md
+            existing_alert="$(gh issue list --state open --search "${alert_title} in:title" \
+              --json number,title \
+              --jq "map(select(.title == \"${alert_title}\")) | .[0].number // empty" || true)"
+            if [ -n "$existing_alert" ]; then
+              gh issue comment "$existing_alert" --body-file /tmp/strand-alert.md \
+                && { trace "- alert: appended stranded-answer rescue to #${existing_alert} (${strand_items})"; \
+                     cat_dispatched="${cat_dispatched}stranded-answer alert appended to #${existing_alert} (${strand_items})"$'\n'; } \
+                || { w="- warn: could not append stranded-answer rescue to #${existing_alert}"; trace "$w"; cat_warnings="${cat_warnings}${w}"$'\n'; }
+            else
+              gh issue create --title "$alert_title" --body-file /tmp/strand-alert.md --label alert \
+                && { trace "- alert: filed stranded-answer rescue issue (${strand_items})"; \
+                     cat_dispatched="${cat_dispatched}stranded-answer alert filed (${strand_items})"$'\n'; } \
+                || { w="- warn: could not file stranded-answer rescue issue (${strand_items})"; trace "$w"; cat_warnings="${cat_warnings}${w}"$'\n'; }
+            fi
           fi
 
-          # An owed wave that could not be slotted (width cap) or run (not
-          # quiescent) still needs a guaranteed successor — the not-quiescent case
-          # normally re-arms via the completing box's workflow_run event, but that
-          # event can be dropped, so arm here too. The idempotency guard keeps this
-          # a no-op whenever a tick is already queued.
-          if [ "$deferred_nonland" -gt 0 ]; then
-            arm_successor "${deferred_nonland} non-land item(s) deferred"
+          # An owed wave that could not be slotted (width cap) or was held by the
+          # scope⊗sweep mutex still needs a guaranteed successor. A live box
+          # normally re-arms via its workflow_run event, but that event can be
+          # dropped, so arm here too; the idempotency guard keeps this a no-op
+          # whenever a tick is already queued. sweep_mutex_deferred covers the case
+          # where the owed sweep is the ONLY thing held (by a live scope) and no
+          # other non-land item defers this wave.
+          if [ "$deferred_nonland" -gt 0 ] || [ "$sweep_mutex_deferred" = "true" ]; then
+            reason_n="$deferred_nonland"; [ "$sweep_mutex_deferred" = "true" ] && reason_n="$((deferred_nonland + 1))"
+            arm_successor "${reason_n} non-land item(s) deferred"
           fi
 
           # Categorized job-summary render — additive over the trace() detail
@@ -1018,8 +1065,8 @@ jobs:
           fi
 
           # (1) Any live non-land agent-work run means the fleet is working — not
-          # stalled — so stop early. Land runs are excluded (they bypass the
-          # barrier and are minutes-long, so a live land is not "the fleet works").
+          # stalled — so stop early. Land runs are excluded (they dispatch off the
+          # slot budget and are minutes-long, so a live land is not "the fleet works").
           gh run list --workflow agent-work.yml --json name,status --limit 100 > /tmp/stall-runs.json
           live_nonland=0
           while IFS= read -r rn; do
@@ -1183,8 +1230,8 @@ jobs:
             echo "#${num}: nudged"
           done < /tmp/await.txt
 
-          # Stale bounces: a directive bounce dispatches on the next quiescent
-          # wave (the scope arm above), so a healthy one never sits at
+          # Stale bounces: a directive bounce dispatches in the next free slot
+          # (the scope arm above), so a healthy one never sits at
           # phase:bounced long enough to cross the day-scale threshold below.
           # This loop only ever fires for one that's stuck (kill switch off,
           # type:* outside AGENT_SCOPE_TYPES, or a persistent re-scope loop).
