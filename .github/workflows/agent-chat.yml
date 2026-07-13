@@ -160,10 +160,10 @@ jobs:
     # App's handle is hardcoded, and GitHub's contains() is case-insensitive on
     # strings. A comment that summons nothing is free.
     # The body-marker clause is gate parity with the in-job route step (which
-    # already reads the awaiting-answer marker from the issue BODY, #3198): a
+    # also reads the awaiting-answer marker from the issue BODY, #3198): a
     # surface's awaiting-answer state lives in EITHER the agent:awaiting-answer
-    # label OR the body marker, and a label-less digest reply would otherwise skip
-    # the whole job before the route step runs — a green success with nothing
+    # label OR the body marker, and a label-less body-marker reply would otherwise
+    # skip the whole job before the route step runs — a green success with nothing
     # dispatched. issue_comment carries github.event.issue.body, so no API call is
     # needed. The owner + kill-switch clauses above are untouched; this only widens
     # what counts as an addressed-to-the-agent surface.
@@ -213,14 +213,13 @@ jobs:
             exit 0
           fi
 
-          # The marker is the greppable anchor the park wrote. Two homes, body
-          # first: the verdict digest carries its marker in the issue BODY (the
-          # converge re-render refreshes it there), while single-issue parks
-          # carry theirs in a comment. Reading only comments made a healthy
-          # digest look like a torn pair — the owner's first live verdict fell
-          # through to the plain branch and dispatched nothing (#3198). Capture
-          # then match with a here-string so grep -q can't SIGPIPE the paginated
-          # gh under pipefail.
+          # The marker is the greppable anchor the park wrote. Read both homes,
+          # body first: a per-issue ask-and-park carries its marker in a comment,
+          # but the body read is retained as gate parity with the summon clause
+          # above so a marker in EITHER home routes rather than falling through to
+          # the plain branch and dispatching nothing (#3198). Capture then match
+          # with a here-string so grep -q can't SIGPIPE the paginated gh under
+          # pipefail.
           body="$(gh api "repos/${REPO}/issues/${ISSUE}" --jq '.body // ""')"
           marker="$(grep -m1 -oE '<!-- aether-agent:awaiting-answer[^>]*-->' <<<"$body" || true)"
           if [ -z "$marker" ]; then
@@ -236,26 +235,20 @@ jobs:
             exit 0
           fi
 
-          # task admits a hyphen and ref admits the sweep's constant `all`
-          # alongside issue/PR numbers — the narrower [a-z]+ / [0-9]+ forms
-          # would silently truncate `approve-sweep` to `approve` and misroute a
-          # digest reply at the digest issue's own number.
+          # task admits a hyphen and ref admits non-numeric forms alongside
+          # issue/PR numbers — keep the parse broad so a hyphenated task or a
+          # symbolic ref routes rather than being silently truncated by a
+          # narrower [a-z]+ / [0-9]+ form.
           task="$(grep -oE 'task=[a-z-]+' <<<"$marker" | head -n1 | cut -d= -f2 || true)"
           ref="$(grep -oE 'ref=[a-z0-9]+' <<<"$marker" | head -n1 | cut -d= -f2 || true)"
           [ -n "$ref" ] || ref="$ISSUE"
-          # approve parks come from two writers: a single-issue approve run, and
-          # the approve sweep — whose per-issue gate-failure parks deliberately
-          # carry task=approve ref=<n> (no session pointer) so the owner's
-          # answer resumes that ONE issue down the single-issue path, never the
-          # batch. approve-sweep appears in exactly one marker: the verdict
-          # digest (#3190), whose reply re-dispatches the whole sweep to read
-          # and apply the verdict. Its grammar is (approve-sweep, all) —
-          # normalize the ref so a mangled marker cannot break the
-          # platform-enforced concurrency singleton keyed on
-          # work-approve-sweep-all.
-          if [ "$task" = "approve-sweep" ]; then ref="all"; fi
+          # approve parks come from a single-issue approve run and from the
+          # approve sweep's per-issue asks — both deliberately carry
+          # task=approve ref=<n> (no session pointer) so the owner's answer
+          # resumes that ONE issue down the single-issue path (#3316 retired the
+          # central-ticket reply that once re-dispatched the whole sweep).
           case "$task" in
-            scope|approve|approve-sweep|implement|land|resolve) ;;
+            scope|approve|implement|land|resolve) ;;
             *)
               echo "parked marker carries an unrecognized task='${task:-}' — falling back to a plain turn."
               echo "parked=false" >> "$GITHUB_OUTPUT"

@@ -157,17 +157,20 @@ sweep per wave that walks every such issue through the full per-issue gates —
 approval is read-mostly, so the whole queue shares one runner. The headless
 gate resolves each tier again before writing Ready. `judge`, `human`,
 ADR-bearing, missing-surface, and unresolved-policy outcomes remain at Plan for
-their reader — and the sweep surfaces them on one ticket: everything a sweep
-does not advance (a human-tier wait, a gate failure, a blocked dependency)
-becomes a row in a single open `agent:digest` issue, grouped so decisions,
-defects, and waits read apart at a glance, with a no-reply breadcrumb comment
-on each listed issue linking back. Every sweep run converges the same open
-digest to the current board; the owner's single reply — on GitHub or straight
-from the notification email — approves any listed non-ADR issue and can direct
-mechanical label fixes in the same breath. The reply waives who approves,
-never the scope gates, and ADR-bearing rows are visibility-only. The verdict
-reply (or a "dismiss") closes the digest, and the next sweep with uncovered
-candidates opens the next one.
+their reader — and the sweep surfaces each on the issue it concerns rather than
+on one shared ticket: a reply-actionable candidate (a human/judge-tier wait, a
+directable gate failure, or a dependency only the owner can unblock) gets its
+own parked ask — the fixed `agent:awaiting-answer` marker comment plus label,
+the same per-issue ask-and-park the single-issue approve path writes — while a
+self-healing candidate (an ordinary open dependency) or an ADR-bearing one just
+rests at Plan, re-entering the pool when its blocker clears or when the owner
+runs `/approve` himself. Convergence is the label: a parked issue is excluded
+from the next sweep's enumeration, so an unchanged ask is never re-asked. The
+owner's reply — approve, direct a labels-only fix, or `/bounce` — clears the
+label and re-dispatches that one issue down the single-issue approve path; the
+reply waives who approves, never the scope gates. For the board-wide "what is
+waiting on me" view, `scripts/status-sweep.sh` lists every open parked ask on
+demand — the aggregation a central ticket once maintained, computed when asked.
 
 The owner can pre-authorize one non-ADR issue at any earlier phase with
 `approval:pre-approved`. The approval gate verifies the actor of the latest
