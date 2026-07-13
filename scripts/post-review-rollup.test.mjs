@@ -17,6 +17,12 @@ const SOFT_HOLD = { confirmed: [], softHolds: [{ pillar: 'economy' }], spec: { f
 const HIGH_SPEC = { confirmed: [], softHolds: [], spec: { findings: [{ severity: 'high', description: 'unasked change' }] } }
 const LOW_SPEC = { confirmed: [], softHolds: [], spec: { findings: [{ severity: 'low', description: 'nit' }] } }
 const CLEAN = { confirmed: [], softHolds: [], spec: { findings: [] } }
+const FOLLOWUPS_ONLY = {
+  confirmed: [],
+  softHolds: [],
+  spec: { findings: [] },
+  followUps: [{ pillar: 'correctness', file: 'a.rs', line: 3, source: 'pre-existing', severity: 'high' }],
+}
 
 // Tripwire: the actionable predicate is what both the native verdict and the
 // mirror label read; if these three actionable shapes ever stop counting, a
@@ -28,6 +34,17 @@ test('isActionable fires on a confirmed finding, a soft-hold, or a high-severity
   assert.equal(isActionable(HIGH_SPEC), true)
   assert.equal(isActionable(LOW_SPEC), false)
   assert.equal(isActionable(CLEAN), false)
+})
+
+// Tripwire (#3250): a provenance-routed pre-existing finding lands in `followUps`, which
+// isActionable / verdictEvent must IGNORE — the whole point of the channel is that a pre-existing
+// bug in code the diff merely touched never gates the PR that revealed it. If followUps ever started
+// counting toward actionable, the catch-22 this fixes reopens: the correctness pillar demands an
+// in-PR fix and the spec pillar then punishes it as scope leakage, wedging the PR un-approvable.
+test('a rollup with only followUps is not actionable and APPROVEs on full', () => {
+  assert.equal(isActionable(FOLLOWUPS_ONLY), false)
+  assert.equal(verdictEvent(FOLLOWUPS_ONLY, 'full'), 'APPROVE')
+  assert.equal(verdictEvent(FOLLOWUPS_ONLY, 'incremental'), null)
 })
 
 // Tripwire: an actionable rollup owes REQUEST_CHANGES in BOTH review modes —

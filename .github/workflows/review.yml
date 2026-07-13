@@ -401,9 +401,10 @@ jobs:
         env:
           PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
           DIFF_BASE: ${{ steps.resolve.outputs.diff_base }}
+          REVIEW_MODE: ${{ steps.resolve.outputs.review_mode }}
         run: |
-          jq -nc --arg pr "$PR_NUMBER" --arg base "$DIFF_BASE" --arg head "$(git rev-parse HEAD)" \
-            '{pr_number: $pr, diff_base: $base, head_sha: $head}' > /tmp/agent-task.json
+          jq -nc --arg pr "$PR_NUMBER" --arg base "$DIFF_BASE" --arg mode "$REVIEW_MODE" --arg head "$(git rev-parse HEAD)" \
+            '{pr_number: $pr, diff_base: $base, review_mode: $mode, head_sha: $head}' > /tmp/agent-task.json
 
       # Warm session pool (#3286; design of record: the #3264 design comment,
       # v1.5). Resume a deposited session whose beliefs are provably true at
@@ -502,14 +503,18 @@ jobs:
           cat > /tmp/review-task-prompt.md <<PROMPT
           You are running headless in CI on a checkout of a PR's head branch.
           FIRST ACTION: read /tmp/agent-task.json. Its pr_number field is the PR under
-          review; its diff_base field is the diff base; its head_sha field is the
-          checkout's HEAD. Invoke the repo's /review skill in INTEGRATED mode against
-          <diff_base>...HEAD, substituting the file's diff_base value: resolve the
-          changed .rs files and their per-file diffs from git, and read the issue text
-          this PR closes (use gh to find the PR's closing reference for the pr_number
-          if needed). Pass noBuild: true and depth: gate in the /review invocation's workflow
+          review; its diff_base field is the diff base; its review_mode field is the
+          review mode; its head_sha field is the checkout's HEAD.
+          Invoke the repo's /review skill in INTEGRATED mode against <diff_base>...HEAD,
+          substituting the file's diff_base value: resolve the changed .rs files and their
+          per-file diffs from git, and read the issue text this PR closes (use gh to find
+          the PR's closing reference for the pr_number
+          if needed). Pass noBuild: true, depth: gate, diffBase: <diff_base>, and
+          reviewMode: <review_mode> (both read from the file) in the /review invocation's workflow
           args — this runner has no Rust toolchain, so the high-severity correctness refuter must
-          ground read-only rather than write and run a scratch cargo test. Let the skill run the
+          ground read-only rather than write and run a scratch cargo test, and diffBase + reviewMode
+          let it classify a flagged correctness bug's provenance against the merge-base (a pre-existing
+          bug reachable on the base becomes an advisory follow-up, never an in-PR demand). Let the skill run the
           review.js workflow in a single pass.
           THE WAIT CONTRACT (load-bearing — two prior runs died on this): the Workflow tool
           runs in the BACKGROUND. In headless mode your final reply exits the process and

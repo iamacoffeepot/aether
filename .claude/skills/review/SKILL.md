@@ -23,7 +23,7 @@ The Claude entry point to the `review` workflow (`.claude/workflows/review.js`).
 
 ## Inputs
 
-The skill assembles the workflow's arg contract (`{issue?, files, testFiles?, diffs?}`, grounded against `.claude/workflows/review.js`):
+The skill assembles the workflow's arg contract (`{issue?, files, testFiles?, diffs?, diffBase?, reviewMode?}`, grounded against `.claude/workflows/review.js`):
 
 - `files` — a non-empty array of absolute `.rs` paths for the code lenses (correctness, economy, convention).
 - `testFiles` — absolute `.rs` paths for the test-integrity lens.
@@ -31,12 +31,14 @@ The skill assembles the workflow's arg contract (`{issue?, files, testFiles?, di
 - `diffs` — per-file diff hunks keyed by path, so the finders judge the change rather than the whole file (integrated mode).
 - `noBuild` — passed through to the workflow args; set true in CI so the correctness refuter grounds read-only.
 - `depth` — `gate` is the light per-PR gate (correctness + spec fidelity, Sonnet verify, no challenge); `deep` is the default full five-pillar review.
+- `diffBase` — the diff base ref the caller reviewed against, passed through to the workflow. `origin/main` on a full review (the merge-base) and the last-reviewed SHA on an incremental one, matching `base` below. The high-severity correctness refuter reads the flagged site on this base to classify a bug's provenance — pre-existing on the base becomes an advisory follow-up, never an in-PR demand.
+- `reviewMode` — `full` or `incremental` (default `full`). Gates the provenance classification: it fires only on a full review, where `diffBase` is the merge-base. On incremental the base is the PR's own prior head, so a bug an earlier commit of this PR introduced would read as pre-existing — provenance is therefore not established there.
 
 ## Caller-side prep
 
 The workflow sandbox cannot run `git` or `grep`, so the skill resolves the file set before invoking it:
 
-1. **Integrated** — resolve the changed files and their per-file diffs from the branch against `origin/main` by default, or the CI-provided last-reviewed SHA for an incremental re-review (`git diff --name-only <base>...HEAD` for the `.rs` set; `git diff <base>...HEAD -- <file>` per file for `diffs`). Split test files (`tests/`, `#[cfg(test)]`-heavy) into `testFiles`. Read the issue body as `issue`.
+1. **Integrated** — resolve the changed files and their per-file diffs from the branch against `origin/main` by default, or the CI-provided last-reviewed SHA for an incremental re-review (`git diff --name-only <base>...HEAD` for the `.rs` set; `git diff <base>...HEAD -- <file>` per file for `diffs`). Split test files (`tests/`, `#[cfg(test)]`-heavy) into `testFiles`. Read the issue body as `issue`. Pass that base as `diffBase` and the mode as `reviewMode` so the workflow can classify a flagged correctness bug's provenance against the merge-base (full reviews only) — CI's `review.yml` threads both from its resolve step.
 2. **Backfill** — resolve the crate's whole-file `.rs` set (`git ls-files -- <crate>/src '*.rs'`), shard per crate to keep each run bounded, and pass no `issue`.
 
 The workflow reads source itself; there is no live MCP harness precondition (unlike `/dogfood`, `/review` does not drive a running engine).

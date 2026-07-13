@@ -33,6 +33,14 @@ export const meta = {
 //   noBuild,      bool                — the high-severity correctness refuter grounds read-only (no
 //                                       scratch #[test] write + cargo test run); set true where no
 //                                       toolchain/build cache is provisioned (default false).
+//   diffBase,     string              — the diff base ref the caller reviewed against. On a FULL
+//                                       review this is origin/main (the merge-base); on an INCREMENTAL
+//                                       one it is the PR's own last-reviewed SHA. Correctness
+//                                       provenance classification trusts it only on full (see reviewMode).
+//   reviewMode,   'full'|'incremental' — the review mode; default 'full'. Provenance classification
+//                                       fires only on full, where diffBase is the merge-base — on
+//                                       incremental the base is this PR's own prior head, so a bug an
+//                                       earlier commit of this PR introduced would read as pre-existing.
 // }
 //
 // returns { rollup, files }. rollup = { totals, spec, softHolds, confirmed, grouped,
@@ -54,6 +62,11 @@ const FINDER_MODEL = A.finderModel || 'sonnet'
 const NO_BUILD = A.noBuild === true
 const DIFFS = A.diffs || {}
 const HAS_DIFFS = Object.keys(DIFFS).length > 0
+// Provenance inputs (issue #3250). DIFF_BASE_REF is the merge-base on a full review and this PR's own
+// prior head on an incremental one; REVIEW_MODE gates the correctness provenance classification to
+// full reviews, where the base's meaning ("code before this PR") is the one provenance needs.
+const DIFF_BASE_REF = A.diffBase || null
+const REVIEW_MODE = A.reviewMode || 'full'
 
 // Profile parameterizes the funnel shape (issue #3015). The per-PR merge gate is gate depth over
 // the pr profile: merged finders and small-diff batching are gated on the diff-line data that only
@@ -403,6 +416,7 @@ const VERDICT = {
     symbol: { type: 'string' },
     final_verdict: { type: 'string', enum: ['confirmed', 'false-positive', 'uncertain'] },
     rationale: { type: 'string', description: 'why the fix genuinely wins under the strict bar, OR why it is a false positive; use uncertain only when the relevant code could not be read' },
+    provenance: { type: 'string', enum: ['pre-existing', 'introduced', 'unknown'], description: 'CORRECTNESS, full review only: whether the flagged defect is reachable on the merge-base (diffBase). pre-existing = the same defect is reachable on the base (route to advisory follow-up, never a soft-hold); introduced = the base is clean at that site (this diff created it); unknown = the base could not be read. Omit entirely on incremental reviews and non-correctness lenses.' },
   },
 }
 
@@ -515,6 +529,17 @@ function refutePrompt(file, fd, lens) {
 ${step2}
 3. NEVER uphold a finding whose suggested fix would break a currently-passing test — check the fix against the suite before confirming.\n`
     : ''
+  // Provenance (issue #3250): a pre-existing bug in code this diff merely touched is NOT this PR's
+  // responsibility — demanding an in-PR fix manufactures the scope leakage the spec pillar then punishes,
+  // wedging the PR into an un-approvable state. Establish provenance against the merge-base, but only on a
+  // FULL review: on incremental the "base" is this PR's own prior head, where a bug an earlier commit of
+  // this same PR introduced would spuriously read as reachable-on-the-base, so provenance is left unset.
+  const provenance = (corr && REVIEW_MODE === 'full' && DIFF_BASE_REF)
+    ? `\nESTABLISH PROVENANCE — this is a FULL review and the merge-base is \`${DIFF_BASE_REF}\`, so whether the defect predates this PR is decidable, not a guess. Read the flagged site on the base and set the \`provenance\` field:
+1. \`git show ${DIFF_BASE_REF}:${file}\` (and any code it depends on there) — read the site as it stood before this PR.
+2. provenance='pre-existing' ONLY when the SAME defect is reachable on the base (it was already there); 'introduced' when the base is clean at that site (this diff created it); 'unknown' only when the base cannot be read.
+Set provenance INDEPENDENTLY of final_verdict: a real bug (final_verdict='confirmed') that is pre-existing stays confirmed — it is simply routed to an advisory follow-up rather than an in-PR demand. Do not soften your correctness verdict because a defect is pre-existing; only report the provenance.\n`
+    : ''
   return `A code-review finding was raised under the ${lens.name} lens. Decide whether it survives a STRICT bar — do not rescue it with a plausible story, and do not reject a real issue out of conservatism.
 
 File: ${file}
@@ -525,7 +550,7 @@ Suggested fix: ${fd.suggested_form}
 Finder rationale: ${fd.rationale}
 
 Read the site and the code it depends on.
-${grounding}
+${grounding}${provenance}
 ${BAR}
 
 If the finding genuinely meets the bar, final_verdict='confirmed' with the concrete reason it holds (for correctness: the failing input/path, confirmed against a test where possible). If the code is fine as written (the verbosity/terseness is load-bearing, the behavior is correct, a passing test already pins it, the rule does not apply), final_verdict='false-positive'. Use 'uncertain' only when you cannot read or run the relevant code.`
@@ -724,14 +749,18 @@ if (PROFILE === 'pr' && !NO_CHALLENGE && challengeLenses.length && scopeUnits(in
 // Spec-fidelity findings never flow through rowOf/gateFor — they live in the separate Phase 0
 // `spec` channel — so a high-severity spec finding is routed into softHolds directly, below.
 const gateFor = (lens, severity) => (lens.gate === 'soft-hold' && severity === 'high') ? 'soft-hold' : 'advisory'
+// provenance rides from the correctness refuter's verdict (fd.verify.provenance, set only for
+// high-severity correctness on a full review) so the site-agnostic partition below can route a
+// pre-existing finding out of confirmed; absent for every other lens/path, so those stay confirmed.
 const rowOf = (file, lens, fd, source) => ({
   file, pillar: fd.pillar || lens.key, source, category: fd.category, line: fd.line, symbol: fd.symbol,
   severity: fd.severity, gate: gateFor(lens, fd.severity), recommendation: fd.recommendation,
   suggested_form: fd.suggested_form, direction: fd.direction, char_delta: fd.char_delta,
+  provenance: fd.verify ? fd.verify.provenance : undefined,
 })
 
 const totals = { files: 0, finders: 0, findings: 0, confirmed: 0, falsePositives: 0, challengerMissed: 0, softHolds: 0 }
-const confirmed = [], spared = [], uncertain = [], lintCandidates = []
+const confirmed = [], followUps = [], spared = [], uncertain = [], lintCandidates = []
 
 for (const e of clean) {
   if (!e.runs || !e.runs.length) continue
@@ -787,12 +816,24 @@ for (const it of prChallengeMissed) {
   else uncertain.push({ ...rowOf(file, lens, fd, 'uncertain'), stage: 'challenge', note: (v && v.rationale) || 'no verify result' })
 }
 
+// Provenance partition (issue #3250) — site-agnostic, after EVERY confirmed.push site (the per-file
+// finder loop, the backfill per-file challenge, and the per-PR challenge). A correctness finding
+// established `pre-existing` on the merge-base is a real discovery worth filing, but not this PR's
+// responsibility to fix: route it out of `confirmed` into the advisory `followUps` channel so it never
+// reaches `softHolds` or drives REQUEST_CHANGES. One post-pass over `confirmed` covers all three push
+// sites by construction, so a fourth site added later is carved out without re-patching. isActionable
+// reads only confirmed/softHolds/spec, so moving the row out of confirmed is the whole gate change.
+for (const r of confirmed) {
+  if (r.provenance === 'pre-existing') followUps.push({ ...r, source: 'pre-existing', gate: 'advisory' })
+}
+const gatedConfirmed = confirmed.filter(r => r.provenance !== 'pre-existing')
+
 // Dedup backstop: a finder that strayed into another file, two sub-lenses overlapping, or a per-PR
 // challenge miss on a site a finder already raised can produce the same row twice. Keep the first
 // row per (file, pillar, category, line).
 const seenRows = new Set()
 const deduped = []
-for (const r of confirmed) {
+for (const r of gatedConfirmed) {
   const k = `${r.file}:${r.pillar}:${r.category}:${r.line}`
   if (seenRows.has(k)) continue
   seenRows.add(k); deduped.push(r)
@@ -818,13 +859,13 @@ for (const r of deduped) ((grouped[r.file] ||= {})[r.pillar] ||= []).push(r)
 const bySource = deduped.reduce((a, r) => ((a[r.source] = (a[r.source] || 0) + 1), a), {})
 const specCount = spec ? (spec.findings || []).length : 0
 
-log(`review [${PROFILE}/${FINDER_SHAPE}]: ${totals.files} files, ${totals.finders} finders -> ${totals.confirmed} confirmed (high-conf ${bySource['high-confidence'] || 0}, refuter ${bySource['refuter'] || 0}, challenger ${bySource['challenger-missed'] || 0}), ${softHolds.length} SOFT-HOLD, ${spared.length} spared, ${uncertain.length} uncertain, ${lintCandidates.length} lint candidates, ${specCount} spec findings`)
+log(`review [${PROFILE}/${FINDER_SHAPE}]: ${totals.files} files, ${totals.finders} finders -> ${totals.confirmed} confirmed (high-conf ${bySource['high-confidence'] || 0}, refuter ${bySource['refuter'] || 0}, challenger ${bySource['challenger-missed'] || 0}), ${softHolds.length} SOFT-HOLD, ${followUps.length} follow-up (pre-existing), ${spared.length} spared, ${uncertain.length} uncertain, ${lintCandidates.length} lint candidates, ${specCount} spec findings`)
 
 return {
   rollup: {
     totals,
     spec: spec ? { findings: spec.findings || [], outOfScope: spec.outOfScope || [] } : null,
-    softHolds, confirmed: deduped, grouped, lintCandidates, spared, uncertain,
+    softHolds, confirmed: deduped, followUps, grouped, lintCandidates, spared, uncertain,
   },
   files: clean,
 }

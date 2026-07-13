@@ -292,7 +292,7 @@ function standingBaristaVerdict(reviews, baristaLogin, headSha) {
   return events.length ? events[events.length - 1] : null
 }
 
-export function buildReviewBody(folded, softHoldFolded, softHoldCount, owedEvent) {
+export function buildReviewBody(folded, softHoldFolded, softHoldCount, owedEvent, followUps = []) {
   const lines = ['## Five-pillar review', '']
   if (owedEvent === 'APPROVE' && !folded.length && !softHoldCount) {
     lines.push('No confirmed findings — the change is clean under all five pillars.', '')
@@ -307,6 +307,17 @@ export function buildReviewBody(folded, softHoldFolded, softHoldCount, owedEvent
     for (const { f, fp } of softHoldFolded) lines.push(...renderFoldedFinding(f, fp))
     lines.push('')
   }
+  // Advisory pre-existing findings (issue #3250): reachable on `main`, so a discovery to file as a
+  // separate issue — NEVER an in-PR demand, and kept out of the confirmed / soft-hold counts so they
+  // never gate. Rendered without a dedup marker: they carry no verdict teeth.
+  if (followUps.length) {
+    lines.push(`**${followUps.length} pre-existing finding(s)** — reachable on \`main\`; file as a separate follow-up issue, not fixed in this PR.`, '')
+    for (const f of followUps) {
+      const anchor = `${f.path || f.file || ''}${f.line != null ? `:${f.line}` : ''}`
+      lines.push(`- ${findingBody(f)}${anchor ? ` \`${anchor}\`` : ''}`)
+    }
+    lines.push('')
+  }
   lines.push(POSTURE_FOOTER)
   return lines.join('\n')
 }
@@ -317,6 +328,7 @@ async function main() {
   // Accept either the bare rollup or the workflow's full { rollup, files }.
   const rollup = rawRollup && rawRollup.rollup ? rawRollup.rollup : rawRollup
   const confirmed = Array.isArray(rollup.confirmed) ? rollup.confirmed : []
+  const followUps = Array.isArray(rollup.followUps) ? rollup.followUps : []
   const specFindings = rollup.spec && Array.isArray(rollup.spec.findings) ? rollup.spec.findings : []
 
   const filesData = JSON.parse(await readFile(env.filesPath, 'utf8'))
@@ -413,8 +425,9 @@ async function main() {
   const owedEvent = verdictEvent(rollup, env.reviewMode, disclosed)
   const hasNewContent = inline.length > 0 || folded.length > 0 || softHoldFolded.length > 0
   const latestBarista = standingBaristaVerdict(reviews, env.baristaLogin, env.headSha)
+  const followUpsNormalized = followUps.map((f) => withResolvedPath(f, changed))
   if (shouldSubmitVerdict({ owedEvent, latestBarista, hasNewContent })) {
-    const body = buildReviewBody(folded, softHoldFolded, softHolds.length, owedEvent)
+    const body = buildReviewBody(folded, softHoldFolded, softHolds.length, owedEvent, followUpsNormalized)
     const review = { event: owedEvent, body, commit_id: env.headSha }
     if (inline.length) review.comments = inline
     let res = await api(env.baristaToken, 'POST', `repos/${env.repo}/pulls/${env.pr}/reviews`, review)
@@ -442,7 +455,7 @@ async function main() {
   // Upsert the marker-anchored summary comment — the human-readable rollup
   // and the reviewed head SHA. Regenerated in full each run, and it carries
   // every fingerprint so re-runs dedup against it.
-  const summary = renderSummary(rollup, normalized, softHoldsForSummary, allFingerprints, env.headSha)
+  const summary = renderSummary(rollup, normalized, softHoldsForSummary, followUpsNormalized, allFingerprints, env.headSha)
   const existing = issueComments.find((c) => String(c.body || '').includes(MARKER))
   if (existing) {
     await api(env.token, 'PATCH', `repos/${env.repo}/issues/comments/${existing.id}`, { body: summary })
@@ -468,12 +481,13 @@ async function main() {
   }
 }
 
-function renderSummary(rollup, normalized, softHoldsForSummary, fingerprints, headSha) {
+function renderSummary(rollup, normalized, softHoldsForSummary, followUps, fingerprints, headSha) {
   const lines = [MARKER, '## Five-pillar review — summary', '']
   lines.push(
     `Confirmed: **${(rollup.confirmed || []).length}** · ` +
       `Soft-holds: **${(rollup.softHolds || []).length}** · ` +
       `Spec: **${normalized.filter((f) => f.pillar === 'spec-fidelity').length}** · ` +
+      `Follow-ups: ${(rollup.followUps || []).length} · ` +
       `Lint candidates: ${(rollup.lintCandidates || []).length} · ` +
       `Spared: ${(rollup.spared || []).length} · ` +
       `Uncertain: ${(rollup.uncertain || []).length}`,
@@ -498,6 +512,18 @@ function renderSummary(rollup, normalized, softHoldsForSummary, fingerprints, he
     }
   } else {
     lines.push('_No confirmed findings — the change is clean under all five pillars._', '')
+  }
+
+  // Advisory pre-existing findings (issue #3250) — reachable on `main`, so file as separate
+  // follow-up issues, never fixed in this PR. Kept out of the confirmed / soft-hold sections above.
+  if (followUps.length) {
+    lines.push('### Pre-existing (advisory — file as follow-up, not fixed here)', '')
+    for (const f of followUps) {
+      const loc = f.line != null ? `:${f.line}` : ''
+      const anchor = `${f.path || f.file || ''}${loc}`
+      lines.push(`- ${findingBody(f)}${anchor ? ` \`${anchor}\`` : ''}`)
+    }
+    lines.push('')
   }
 
   lines.push(POSTURE_FOOTER)
