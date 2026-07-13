@@ -576,7 +576,7 @@ jobs:
               [ -n "$slug" ] && [ "$slug" != "null" ] && idx="${idx_base}${slug}/"
             fi
             git ls-tree -r HEAD > /tmp/pool-ls-tree.txt
-            munged="$(echo "$GITHUB_WORKSPACE" | tr '/' '-')"
+            munged="$(echo "$GITHUB_WORKSPACE" | sed -E 's/[^a-zA-Z0-9]/-/g')"
             for prefix in "$idx" "$idx_base"; do
               keys="$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$prefix" \
                 --query 'sort_by(Contents||`[]`,&LastModified)[].Key' --output text 2>/dev/null \
@@ -793,10 +793,10 @@ jobs:
             echo "$out" | jq .manifest > /tmp/pool-manifest-new.json
             new_sid="$(jq -r .session_id /tmp/pool-manifest-new.json)"
             slug="$(jq -r .slug /tmp/pool-manifest-new.json)"
-            munged="$(echo "$GITHUB_WORKSPACE" | tr '/' '-')"
+            munged="$(echo "$GITHUB_WORKSPACE" | sed -E 's/[^a-zA-Z0-9]/-/g')"
             idx="agent/pool/v2/idx/${TASK}/${CLI_VERSION:-unknown}/${model}/${slug}"
-            if aws s3 sync "$HOME/.claude/projects/${munged}/" "s3://${BUCKET}/agent/pool/v2/sessions/${new_sid}/" >/dev/null 2>&1 \
-               && aws s3 cp /tmp/pool-manifest-new.json "s3://${BUCKET}/${idx}/${new_sid}.json" >/dev/null 2>&1; then
+            if aws s3 sync "$HOME/.claude/projects/${munged}/" "s3://${BUCKET}/agent/pool/v2/sessions/${new_sid}/" >/dev/null 2>/tmp/pool-upload-err.txt \
+               && aws s3 cp /tmp/pool-manifest-new.json "s3://${BUCKET}/${idx}/${new_sid}.json" >/dev/null 2>>/tmp/pool-upload-err.txt; then
               echo "pool: deposited ${new_sid} under ${idx} ($(jq -r .context_tokens /tmp/pool-manifest-new.json) ctx tokens)" | tee -a "$GITHUB_STEP_SUMMARY"
               [ "${PRIOR_SID:-}" != "$new_sid" ] && retire_prior
               depth="${AGENT_POOL_DEPTH:-1}"
@@ -810,7 +810,7 @@ jobs:
                     echo "pool: depth trim retired ${ssid}" | tee -a "$GITHUB_STEP_SUMMARY"
                   done
             else
-              echo "pool: deposit upload failed — entry not published" | tee -a "$GITHUB_STEP_SUMMARY"
+              echo "pool: deposit upload failed — entry not published ($(tail -c 300 /tmp/pool-upload-err.txt 2>/dev/null | tr '\n' ' '))" | tee -a "$GITHUB_STEP_SUMMARY"
             fi
           else
             echo "pool: deposit refused ($(echo "$out" | jq -r .reason))" | tee -a "$GITHUB_STEP_SUMMARY"
