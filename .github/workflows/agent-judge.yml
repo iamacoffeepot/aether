@@ -313,11 +313,12 @@ jobs:
           fi
           claude --version
 
-      # Pre-trust the checkout so settings.json permissions aren't ignored with a
-      # warning under skip-permissions.
+      # Pre-trust the basecamp cwd (#3346) and the added checkout dir so
+      # settings.json permissions aren't ignored with a warning under
+      # skip-permissions.
       - name: Pre-trust the workspace for headless Claude
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
-        run: printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$PWD" > "$HOME/.claude.json"
+        run: printf '{"projects":{"/home/runner/basecamp":{"hasTrustDialogAccepted":true},"%s":{"hasTrustDialogAccepted":true}}}\n' "$PWD" > "$HOME/.claude.json"
 
       # Auth in isolation before the real run: a one-line prompt, no tools. If
       # this fails the AGENT OAuth token itself is the problem, not the harness.
@@ -407,7 +408,7 @@ jobs:
             # No slug segment — LIST every slug bucket under this function and let
             # the eligible gate pick the winner (generic-within-function).
             idx="agent/pool/v2/idx/judge/${cli_version}/${model}/"
-            munged="$(echo "$GITHUB_WORKSPACE" | sed -E 's/[^a-zA-Z0-9]/-/g')"
+            munged="$(echo "/home/runner/basecamp" | sed -E 's/[^a-zA-Z0-9]/-/g')"
             keys="$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$idx" \
               --query 'sort_by(Contents||`[]`,&LastModified)[].Key' --output text 2>/dev/null \
               | tr '\t' '\n' | grep -v '^None$' | tail -5 | tac)" || keys=""
@@ -448,6 +449,13 @@ jobs:
           [ -n "$sid" ] || echo "pool: cold run"
           { echo "cli_version=${cli_version}"; echo "session_id=${sid}"; } >> "$GITHUB_OUTPUT"
 
+      # Claude runs from a constant, bare, git-less basecamp cwd (#3346) so its
+      # prompt head carries no volatile cwd-git snapshot — a warm --resume stays
+      # cache-hot across main movement. The checkout is reached via --add-dir.
+      - name: Prepare the bare basecamp cwd
+        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: mkdir -p /home/runner/basecamp
+
       - name: Run the judge pass
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
         env:
@@ -456,6 +464,8 @@ jobs:
         run: |
           cat > /tmp/judge-task-prompt.md <<PROMPT
           You are running headless in CI on a checkout of origin/main.
+          The repo checkout is at ${GITHUB_WORKSPACE}; cd into it and do all repo
+          work there — your current directory is a bare scratch dir, not the repo.
           FIRST ACTION: read /tmp/agent-task.json. Its issue field is the issue
           number to judge — an issue of this repo that has just reached phase:plan.
           Read .claude/skills/judge/SKILL.md and follow it exactly — it is the
@@ -504,20 +514,24 @@ jobs:
 
           PREAMBLE
             cat /tmp/pool-preamble.md /tmp/judge-task-prompt.md > /tmp/judge-prompt.md
-            claude --resume "$POOL_SESSION_ID" -p "$(cat /tmp/judge-prompt.md)" \
+            (cd /home/runner/basecamp && claude --resume "$POOL_SESSION_ID" -p "$(cat /tmp/judge-prompt.md)" \
               --dangerously-skip-permissions \
+              --add-dir "$GITHUB_WORKSPACE" \
+              --append-system-prompt "$(cat "$GITHUB_WORKSPACE/CLAUDE.md")" \
               --model claude-sonnet-5 \
               --max-turns 40 \
-              --output-format stream-json --verbose \
+              --output-format stream-json --verbose) \
               | tee /tmp/judge-session.jsonl \
               | python3 scripts/render-agent-stream.py \
               || true
           else
-            claude -p "$(cat /tmp/judge-task-prompt.md)" \
+            (cd /home/runner/basecamp && claude -p "$(cat /tmp/judge-task-prompt.md)" \
               --dangerously-skip-permissions \
+              --add-dir "$GITHUB_WORKSPACE" \
+              --append-system-prompt "$(cat "$GITHUB_WORKSPACE/CLAUDE.md")" \
               --model claude-sonnet-5 \
               --max-turns 40 \
-              --output-format stream-json --verbose \
+              --output-format stream-json --verbose) \
               | tee /tmp/judge-session.jsonl \
               | python3 scripts/render-agent-stream.py \
               || true
@@ -586,7 +600,7 @@ jobs:
             echo "$out" | jq .manifest > /tmp/pool-manifest-new.json
             new_sid="$(jq -r .session_id /tmp/pool-manifest-new.json)"
             slug="$(jq -r .slug /tmp/pool-manifest-new.json)"
-            munged="$(echo "$GITHUB_WORKSPACE" | sed -E 's/[^a-zA-Z0-9]/-/g')"
+            munged="$(echo "/home/runner/basecamp" | sed -E 's/[^a-zA-Z0-9]/-/g')"
             idx="agent/pool/v2/idx/judge/${CLI_VERSION:-unknown}/${model}/${slug}"
             if aws s3 sync "$HOME/.claude/projects/${munged}/" "s3://${BUCKET}/agent/pool/v2/sessions/${new_sid}/" >/dev/null 2>/tmp/pool-upload-err.txt \
                && aws s3 cp /tmp/pool-manifest-new.json "s3://${BUCKET}/${idx}/${new_sid}.json" >/dev/null 2>>/tmp/pool-upload-err.txt; then

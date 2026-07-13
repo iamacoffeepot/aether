@@ -440,11 +440,12 @@ jobs:
           echo "AGENT_CLAUDE_CODE_OAUTH_TOKEN secret is not set — the trial is skipped."
           echo "Mint one with 'claude setup-token' and add it: gh secret set AGENT_CLAUDE_CODE_OAUTH_TOKEN"
 
-      # Pre-trust the checkout so settings.json permissions aren't ignored with
-      # a warning under skip-permissions.
+      # Pre-trust the basecamp cwd (#3346) and the added checkout dir so
+      # settings.json permissions aren't ignored with a warning under
+      # skip-permissions.
       - name: Pre-trust the workspace for headless Claude
         if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
-        run: printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$PWD" > "$HOME/.claude.json"
+        run: printf '{"projects":{"/home/runner/basecamp":{"hasTrustDialogAccepted":true},"%s":{"hasTrustDialogAccepted":true}}}\n' "$PWD" > "$HOME/.claude.json"
 
       # Auth in isolation before the real run: a one-line prompt, no tools. If
       # this fails the OAuth token itself is the problem, not the harness.
@@ -520,7 +521,7 @@ jobs:
             # No slug segment — LIST every slug bucket under this function and let
             # the eligible gate pick the winner (generic-within-function).
             idx="agent/pool/v2/idx/dogfood/${cli_version}/${model}/"
-            munged="$(echo "$GITHUB_WORKSPACE" | sed -E 's/[^a-zA-Z0-9]/-/g')"
+            munged="$(echo "/home/runner/basecamp" | sed -E 's/[^a-zA-Z0-9]/-/g')"
             keys="$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$idx" \
               --query 'sort_by(Contents||`[]`,&LastModified)[].Key' --output text 2>/dev/null \
               | tr '\t' '\n' | grep -v '^None$' | tail -5 | tac)" || keys=""
@@ -575,6 +576,13 @@ jobs:
       # trial routinely exceeds; issue 3085). Forty minutes leaves the
       # 60-minute job budget room for the pre-trial build and the post-trial
       # evidence steps.
+      # Claude runs from a constant, bare, git-less basecamp cwd (#3346) so its
+      # prompt head carries no volatile cwd-git snapshot — a warm --resume stays
+      # cache-hot across main movement. The checkout is reached via --add-dir.
+      - name: Prepare the bare basecamp cwd
+        if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: mkdir -p /home/runner/basecamp
+
       - name: Run the dogfood trial
         if: env.CLAUDE_CODE_OAUTH_TOKEN != ''
         env:
@@ -618,6 +626,8 @@ jobs:
           automatic runs and open-PR dispatches, or its merge commit (main) for a manual re-trial of
           a merged PR. The aether MCP harness is already up (tunnel -> aether-mcp -> hub -> substrate)
           via .mcp.json.
+          The repo checkout is at ${GITHUB_WORKSPACE}; cd into it and do all repo work there — your
+          current directory is a bare scratch dir, not the repo.
 
           FIRST ACTION: read /tmp/agent-task.json. Its pr_number field identifies the PR this
           checkout resolves; its args field is a JSON object you will pass through EXACTLY.
@@ -688,22 +698,26 @@ jobs:
 
           PREAMBLE
             cat /tmp/pool-preamble.md /tmp/dogfood-prompt.md > /tmp/dogfood-prompt-warm.md
-            claude --resume "$POOL_SESSION_ID" -p "$(cat /tmp/dogfood-prompt-warm.md)" \
-              --mcp-config .mcp.json \
+            (cd /home/runner/basecamp && claude --resume "$POOL_SESSION_ID" -p "$(cat /tmp/dogfood-prompt-warm.md)" \
+              --mcp-config "$GITHUB_WORKSPACE/.mcp.json" \
               --dangerously-skip-permissions \
+              --add-dir "$GITHUB_WORKSPACE" \
+              --append-system-prompt "$(cat "$GITHUB_WORKSPACE/CLAUDE.md")" \
               --model "$DRIVER_MODEL" \
               --max-turns 120 \
-              --output-format stream-json --verbose \
+              --output-format stream-json --verbose) \
               | tee /tmp/dogfood-session.jsonl \
               | python3 scripts/render-agent-stream.py \
               || true
           else
-            claude -p "$(cat /tmp/dogfood-prompt.md)" \
-              --mcp-config .mcp.json \
+            (cd /home/runner/basecamp && claude -p "$(cat /tmp/dogfood-prompt.md)" \
+              --mcp-config "$GITHUB_WORKSPACE/.mcp.json" \
               --dangerously-skip-permissions \
+              --add-dir "$GITHUB_WORKSPACE" \
+              --append-system-prompt "$(cat "$GITHUB_WORKSPACE/CLAUDE.md")" \
               --model "$DRIVER_MODEL" \
               --max-turns 120 \
-              --output-format stream-json --verbose \
+              --output-format stream-json --verbose) \
               | tee /tmp/dogfood-session.jsonl \
               | python3 scripts/render-agent-stream.py \
               || true
@@ -772,7 +786,7 @@ jobs:
             echo "$out" | jq .manifest > /tmp/pool-manifest-new.json
             new_sid="$(jq -r .session_id /tmp/pool-manifest-new.json)"
             slug="$(jq -r .slug /tmp/pool-manifest-new.json)"
-            munged="$(echo "$GITHUB_WORKSPACE" | sed -E 's/[^a-zA-Z0-9]/-/g')"
+            munged="$(echo "/home/runner/basecamp" | sed -E 's/[^a-zA-Z0-9]/-/g')"
             idx="agent/pool/v2/idx/dogfood/${CLI_VERSION:-unknown}/${model}/${slug}"
             if aws s3 sync "$HOME/.claude/projects/${munged}/" "s3://${BUCKET}/agent/pool/v2/sessions/${new_sid}/" >/dev/null 2>/tmp/pool-upload-err.txt \
                && aws s3 cp /tmp/pool-manifest-new.json "s3://${BUCKET}/${idx}/${new_sid}.json" >/dev/null 2>>/tmp/pool-upload-err.txt; then
