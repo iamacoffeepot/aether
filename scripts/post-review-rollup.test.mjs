@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  buildReviewBody,
   fingerprint,
   isActionable,
   normalizeFingerprint,
@@ -81,6 +82,46 @@ test('shouldSubmitVerdict dedups a standing verdict but fires on a transition', 
     shouldSubmitVerdict({ owedEvent: null, latestBarista: null, hasNewContent: false }),
     false,
   )
+})
+
+const SOFT_HOLD_FINDING = {
+  pillar: 'spec-fidelity',
+  category: 'scope-leakage',
+  file: 'scripts/post-review-rollup.mjs',
+  line: 233,
+  symbol: 'buildReviewBody',
+  severity: 'high',
+  suggested_form: 'render the soft-hold body instead of a bare count',
+}
+
+// Fix for #3249: a rollup whose only finding is a soft-hold must not collapse
+// to a bare count — the reader needs the same suggested_form + anchor a
+// folded finding gets, since soft-holds are the high-severity, land-gating
+// class.
+test('buildReviewBody renders a soft-hold finding, not just a count', () => {
+  const body = buildReviewBody([], [{ f: SOFT_HOLD_FINDING, fp: 'fp-soft-hold' }], 1, 'REQUEST_CHANGES')
+  assert.match(body, /\*\*1 soft-hold\*\* finding\(s\) — clear before un-draft\./)
+  assert.match(body, /render the soft-hold body instead of a bare count/)
+  assert.match(body, /`scripts\/post-review-rollup\.mjs:233`/)
+})
+
+// A soft-hold that duplicates a confirmed/spec finding is the caller's
+// (main()'s) fingerprint-dedup responsibility — it excludes the duplicate
+// from `softHoldFolded` before calling buildReviewBody. This asserts the
+// render side of that contract: given the deduped input, the shared finding
+// text appears exactly once, never doubled between the folded and soft-hold
+// sections.
+test('buildReviewBody renders a soft-hold deduped against a confirmed finding exactly once', () => {
+  const shared = { pillar: 'correctness', file: 'a.rs', line: 3, suggested_form: 'fix the off-by-one' }
+  const body = buildReviewBody([{ f: shared, fp: 'a.rs|3|correctness' }], [], 1, 'REQUEST_CHANGES')
+  const occurrences = body.split('fix the off-by-one').length - 1
+  assert.equal(occurrences, 1)
+})
+
+test('buildReviewBody renders no soft-hold section for a clean rollup', () => {
+  const body = buildReviewBody([], [], 0, 'APPROVE')
+  assert.doesNotMatch(body, /soft-hold/)
+  assert.match(body, /No confirmed findings — the change is clean under all five pillars\./)
 })
 
 // Tripwire: fingerprint's path half must canonicalize to repo-relative
