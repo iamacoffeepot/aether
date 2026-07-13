@@ -1,4 +1,4 @@
-name: docs
+name: Docs
 
 # Builds the mdBook guide (docs/) and, on main, publishes it to GitHub Pages.
 # On pull requests the build runs as a check only — a broken book fails the PR
@@ -31,6 +31,7 @@ concurrency:
 
 jobs:
   build:
+    name: Build guide
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,6 +50,7 @@ jobs:
           path: docs/book
 
   deploy:
+    name: Deploy to Pages
     if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest

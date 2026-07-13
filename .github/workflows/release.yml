@@ -1,4 +1,4 @@
-name: release
+name: Release
 
 # Manually triggered: build the standalone loco-motion game for Windows and
 # upload the `.exe` as an artifact to download and hand out (#1518; bundling
