@@ -77,8 +77,27 @@ jobs:
     # Read-only on the repo. This job checks out and executes PR-head code
     # (headless Claude Code drives the review over the branch's checkout),
     # so it must never hold a write scope — all posting is the `post` job's.
+    # id-token: write exists ONLY for the warm-session-pool steps (#3286):
+    # it lets the job assume the OIDC role scoped to agent/pool/* on the
+    # session bucket. That is an S3-prefix write surface reachable by
+    # PR-head code, bounded by three fences: the role's policy covers only
+    # agent/pool/*, this job never runs on fork PRs (the job-level guard
+    # below), and the pool is inert unless the owner sets
+    # AGENT_POOL_ENABLE=true. Owner console prerequisites for the pool:
+    #   (a) widen the OIDC role (AGENT_AWS_ROLE_ARN) with
+    #       s3:GetObject/PutObject/DeleteObject/ListBucket on
+    #       arn:aws:s3:::<AGENT_SESSION_BUCKET>/agent/pool/* (+ ListBucket
+    #       prefix condition), assumable from this repo's OIDC sub;
+    #   (b) add a bucket lifecycle rule expiring agent/pool/v1/* after 1 day
+    #       (entries are cache-worthless past the hour; GH artifacts remain
+    #       the forensic copy);
+    #   (c) set repo vars AGENT_POOL_ENABLE=true (the flip — gated on the
+    #       #3286 board-state review) and optionally AGENT_POOL_DEPTH /
+    #       AGENT_POOL_MATCH / AGENT_POOL_CUTOFF_MINS /
+    #       AGENT_POOL_CONTEXT_CAP_TOKENS (defaults 1 / exact / 55 / 150000).
     permissions:
       contents: read
+      id-token: write
     # Job-level guard: on the workflow_run path the parent CI must have
     # succeeded and the head must be this repo (fork PRs never see the
     # secret and never run here); the manual dispatch path is always
@@ -384,17 +403,108 @@ jobs:
           DIFF_BASE: ${{ steps.resolve.outputs.diff_base }}
           REVIEW_MODE: ${{ steps.resolve.outputs.review_mode }}
         run: |
-          jq -nc --arg pr "$PR_NUMBER" --arg base "$DIFF_BASE" --arg mode "$REVIEW_MODE" '{pr_number: $pr, diff_base: $base, review_mode: $mode}' > /tmp/agent-task.json
+          jq -nc --arg pr "$PR_NUMBER" --arg base "$DIFF_BASE" --arg mode "$REVIEW_MODE" --arg head "$(git rev-parse HEAD)" \
+            '{pr_number: $pr, diff_base: $base, review_mode: $mode, head_sha: $head}' > /tmp/agent-task.json
 
+      # Warm session pool (#3286; design of record: the #3264 design comment,
+      # v1.5). Resume a deposited session whose beliefs are provably true at
+      # this checkout instead of re-deriving the subsystem from scratch. The
+      # pool is an optimization layer: every pool step is fenced so a failure
+      # degrades to today's cold run — it must never block or redden review.
+      # Inert unless the owner sets AGENT_POOL_ENABLE=true (console
+      # prerequisites in this job's permissions comment above).
+      - name: Configure AWS credentials for the session pool
+        id: pool-creds
+        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != '' && vars.AGENT_POOL_ENABLE == 'true'
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AGENT_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AGENT_AWS_REGION }}
+
+      # Checkout half: request-side key from the PR's changed files, newest
+      # eligible manifest wins, belief-truth validation retires stale entries
+      # on the spot (delete-not-keep), lease via S3 conditional write with
+      # self-healing reclaim of an expired lease. `set -e` is deliberately
+      # absent: every miss falls through to a cold run.
+      - name: Pool checkout
+        id: pool-checkout
+        if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != '' && vars.AGENT_POOL_ENABLE == 'true' && steps.pool-creds.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUCKET: ${{ vars.AGENT_SESSION_BUCKET }}
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          AGENT_POOL_CUTOFF_MINS: ${{ vars.AGENT_POOL_CUTOFF_MINS }}
+          AGENT_POOL_CONTEXT_CAP_TOKENS: ${{ vars.AGENT_POOL_CONTEXT_CAP_TOKENS }}
+        run: |
+          set -uo pipefail
+          sid=""; slug=""
+          cli_version="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+          model="claude-sonnet-5"
+          if [ -n "$cli_version" ] && [ -n "${BUCKET:-}" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename' > /tmp/pool-changed.txt || true
+            slug="$(node scripts/agent-pool.mjs root < /tmp/pool-changed.txt | jq -r .slug)" || slug=""
+            git ls-tree -r HEAD > /tmp/pool-ls-tree.txt
+            idx="agent/pool/v1/idx/${cli_version}/${model}/${slug}/"
+            munged="$(echo "$GITHUB_WORKSPACE" | tr '/' '-')"
+            keys="$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$idx" \
+              --query 'sort_by(Contents||`[]`,&LastModified)[].Key' --output text 2>/dev/null \
+              | tr '\t' '\n' | grep -v '^None$' | tail -5 | tac)" || keys=""
+            for key in $keys; do
+              aws s3 cp "s3://${BUCKET}/${key}" /tmp/pool-candidate.json >/dev/null 2>&1 || continue
+              cand_sid="$(jq -r .session_id /tmp/pool-candidate.json)" || continue
+              elig="$(node scripts/agent-pool.mjs eligible --manifest /tmp/pool-candidate.json --ls-tree /tmp/pool-ls-tree.txt)" || continue
+              if [ "$(echo "$elig" | jq -r .ok)" != "true" ]; then
+                echo "pool: retired ${cand_sid} ($(echo "$elig" | jq -r .reason))" | tee -a "$GITHUB_STEP_SUMMARY"
+                aws s3 rm "s3://${BUCKET}/${key}" >/dev/null 2>&1 || true
+                aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v1/sessions/${cand_sid}/" >/dev/null 2>&1 || true
+                continue
+              fi
+              lease="agent/pool/v1/leases/${cand_sid}"
+              echo "$(( $(date +%s) + 3000 ))" > /tmp/pool-lease.txt   # job leash 45 min + 5
+              if ! aws s3api put-object --bucket "$BUCKET" --key "$lease" --body /tmp/pool-lease.txt --if-none-match '*' >/dev/null 2>&1; then
+                held="$(aws s3 cp "s3://${BUCKET}/${lease}" - 2>/dev/null || echo 0)"
+                if [ "${held:-0}" -lt "$(date +%s)" ] 2>/dev/null; then
+                  # expired lease from a dead box — reclaim; a raced re-create still 412s for the loser
+                  aws s3 rm "s3://${BUCKET}/${lease}" >/dev/null 2>&1 || true
+                  aws s3api put-object --bucket "$BUCKET" --key "$lease" --body /tmp/pool-lease.txt --if-none-match '*' >/dev/null 2>&1 \
+                    || { echo "pool: lease race lost on ${cand_sid}"; continue; }
+                else
+                  echo "pool: ${cand_sid} is leased"; continue
+                fi
+              fi
+              mkdir -p "$HOME/.claude/projects/${munged}"
+              if aws s3 sync "s3://${BUCKET}/agent/pool/v1/sessions/${cand_sid}/" "$HOME/.claude/projects/${munged}/" >/dev/null 2>&1; then
+                sid="$cand_sid"
+                cp /tmp/pool-candidate.json /tmp/pool-prior-manifest.json
+                echo "pool: warm checkout ${sid} (root $(jq -r .subsystem_root /tmp/pool-candidate.json), $(jq -r .context_tokens /tmp/pool-candidate.json) ctx tokens)" | tee -a "$GITHUB_STEP_SUMMARY"
+              else
+                aws s3 rm "s3://${BUCKET}/${lease}" >/dev/null 2>&1 || true
+              fi
+              break
+            done
+          fi
+          [ -n "$sid" ] || echo "pool: cold run"
+          { echo "cli_version=${cli_version}"; echo "session_id=${sid}"; } >> "$GITHUB_OUTPUT"
+
+      # The -p text stays BYTE-CONSTANT on the cold path (#3285). The warm
+      # path prepends a constant NEW-JOB preamble that draws the v1.5 trust
+      # boundary: file knowledge under the validated root is good; workspace-
+      # wide search results and git/board observations predate the resume and
+      # must be re-derived; no prior approval or task state carries over.
+      # Both paths carry the reuse notice + re-pool verdict contract — the
+      # deposit step below refuses to pool a session without an explicit yes.
       - name: Run the five-pillar review
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          POOL_SESSION_ID: ${{ steps.pool-checkout.outputs.session_id }}
         run: |
-          claude -p "You are running headless in CI on a checkout of a PR's head branch.
+          cat > /tmp/review-task-prompt.md <<PROMPT
+          You are running headless in CI on a checkout of a PR's head branch.
           FIRST ACTION: read /tmp/agent-task.json. Its pr_number field is the PR under
-          review; its diff_base field is the diff base; its review_mode field is the review mode.
-          The head is the current HEAD.
+          review; its diff_base field is the diff base; its review_mode field is the
+          review mode; its head_sha field is the checkout's HEAD.
           Invoke the repo's /review skill in INTEGRATED mode against <diff_base>...HEAD,
           substituting the file's diff_base value: resolve the changed .rs files and their
           per-file diffs from git, and read the issue text this PR closes (use gh to find
@@ -420,14 +530,121 @@ jobs:
           verbatim to exactly ${GITHUB_WORKSPACE}/review-rollup.json — that absolute path, not
           a path relative to your working directory (the rollup, not the whole return).
           Do not edit any source (the noBuild flag above keeps the correctness refuter
-          subagent non-editing too). Print exactly REVIEW-DONE when the file is written." \
-            --dangerously-skip-permissions \
-            --model claude-sonnet-5 \
-            --max-turns 80 \
-            --output-format stream-json --verbose \
-            | tee /tmp/review-session.jsonl \
-            | python3 scripts/render-agent-stream.py \
-            || true
+          subagent non-editing too).
+          SESSION REUSE (the warm pool, #3286): this session may be deposited and later
+          resumed by a DIFFERENT job for a DIFFERENT task against the same files — your
+          accumulated knowledge of the files you read is the asset being deposited, so
+          do not assume any future prompt continues this task. After the rollup file is
+          written and before your final reply, write ${GITHUB_WORKSPACE}/pool-verdict.json
+          containing exactly one JSON object: {"repool": "yes" or "no", "reason": "<one
+          line>", "knowledge_summary": "<one line naming the subsystem knowledge this
+          session now carries>"}. Answer no when this session's context is dominated by
+          dead ends, thrash, or an abandoned approach rather than durable knowledge of
+          the files it read.
+          Print exactly REVIEW-DONE when the rollup and verdict files are written.
+          PROMPT
+          if [ -n "${POOL_SESSION_ID:-}" ]; then
+            cat > /tmp/pool-preamble.md <<'PREAMBLE'
+          NEW JOB — you are a session resumed from the warm pool. Your prior
+          conversation is knowledge of this repository's files, NOT task state: the
+          task below is unrelated to whatever you did before, and no prior approval,
+          waiver, or instruction carries over. The checkout has moved: its HEAD is the
+          head_sha in /tmp/agent-task.json, so every git or board observation from
+          before this message is stale — re-run any git or gh query you need. File
+          contents you read under your subsystem root are still valid (the pool
+          verified them unchanged against this checkout); workspace-wide search
+          results from before this message are not — re-run them. Do not re-read
+          files you already know unless the task requires it.
+
+          PREAMBLE
+            cat /tmp/pool-preamble.md /tmp/review-task-prompt.md > /tmp/review-prompt.md
+            claude --resume "$POOL_SESSION_ID" -p "$(cat /tmp/review-prompt.md)" \
+              --dangerously-skip-permissions \
+              --model claude-sonnet-5 \
+              --max-turns 80 \
+              --output-format stream-json --verbose \
+              | tee /tmp/review-session.jsonl \
+              | python3 scripts/render-agent-stream.py \
+              || true
+          else
+            claude -p "$(cat /tmp/review-task-prompt.md)" \
+              --dangerously-skip-permissions \
+              --model claude-sonnet-5 \
+              --max-turns 80 \
+              --output-format stream-json --verbose \
+              | tee /tmp/review-session.jsonl \
+              | python3 scripts/render-agent-stream.py \
+              || true
+          fi
+
+      # Deposit half (if: always() so a failed review still releases the
+      # lease). The mjs enforces the hygiene gates — clean exit, no
+      # compaction, under the cap, explicit repool: yes — and merges a
+      # resumed session's prior read set (the declared set is cumulative). A
+      # refusal retires the resumed entry rather than reverting it; a
+      # successful re-deposit supersedes it under the new session id. Depth
+      # trim keeps the newest AGENT_POOL_DEPTH entries per slug.
+      - name: Pool deposit
+        if: always() && steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != '' && vars.AGENT_POOL_ENABLE == 'true' && steps.pool-creds.outcome == 'success'
+        env:
+          BUCKET: ${{ vars.AGENT_SESSION_BUCKET }}
+          CLI_VERSION: ${{ steps.pool-checkout.outputs.cli_version }}
+          PRIOR_SID: ${{ steps.pool-checkout.outputs.session_id }}
+          AGENT_POOL_DEPTH: ${{ vars.AGENT_POOL_DEPTH }}
+          AGENT_POOL_CUTOFF_MINS: ${{ vars.AGENT_POOL_CUTOFF_MINS }}
+          AGENT_POOL_CONTEXT_CAP_TOKENS: ${{ vars.AGENT_POOL_CONTEXT_CAP_TOKENS }}
+        run: |
+          set -uo pipefail
+          model="claude-sonnet-5"
+          release_lease() {
+            [ -n "${PRIOR_SID:-}" ] && aws s3 rm "s3://${BUCKET}/agent/pool/v1/leases/${PRIOR_SID}" >/dev/null 2>&1 || true
+          }
+          retire_prior() {
+            if [ -n "${PRIOR_SID:-}" ] && [ -f /tmp/pool-prior-manifest.json ]; then
+              old_slug="$(jq -r .slug /tmp/pool-prior-manifest.json 2>/dev/null)" || old_slug=""
+              aws s3 rm "s3://${BUCKET}/agent/pool/v1/idx/${CLI_VERSION:-unknown}/${model}/${old_slug}/${PRIOR_SID}.json" >/dev/null 2>&1 || true
+              aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v1/sessions/${PRIOR_SID}/" >/dev/null 2>&1 || true
+            fi
+          }
+          [ -n "${BUCKET:-}" ] || exit 0
+          [ -f /tmp/review-session.jsonl ] || { release_lease; exit 0; }
+          git ls-tree -r HEAD > /tmp/pool-ls-tree.txt
+          prior_flag=""
+          [ -f /tmp/pool-prior-manifest.json ] && prior_flag="--prior /tmp/pool-prior-manifest.json"
+          out="$(node scripts/agent-pool.mjs manifest \
+            --transcript /tmp/review-session.jsonl \
+            --ls-tree /tmp/pool-ls-tree.txt \
+            --verdict "$GITHUB_WORKSPACE/pool-verdict.json" \
+            --cli-version "${CLI_VERSION:-unknown}" $prior_flag)" || out='{"ok":false,"reason":"manifest-error"}'
+          if [ "$(echo "$out" | jq -r .ok)" = "true" ]; then
+            echo "$out" | jq .manifest > /tmp/pool-manifest-new.json
+            new_sid="$(jq -r .session_id /tmp/pool-manifest-new.json)"
+            slug="$(jq -r .slug /tmp/pool-manifest-new.json)"
+            munged="$(echo "$GITHUB_WORKSPACE" | tr '/' '-')"
+            idx="agent/pool/v1/idx/${CLI_VERSION:-unknown}/${model}/${slug}"
+            if aws s3 sync "$HOME/.claude/projects/${munged}/" "s3://${BUCKET}/agent/pool/v1/sessions/${new_sid}/" >/dev/null 2>&1 \
+               && aws s3 cp /tmp/pool-manifest-new.json "s3://${BUCKET}/${idx}/${new_sid}.json" >/dev/null 2>&1; then
+              echo "pool: deposited ${new_sid} under ${idx} ($(jq -r .context_tokens /tmp/pool-manifest-new.json) ctx tokens)" | tee -a "$GITHUB_STEP_SUMMARY"
+              [ "${PRIOR_SID:-}" != "$new_sid" ] && retire_prior
+              depth="${AGENT_POOL_DEPTH:-1}"
+              aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "${idx}/" \
+                --query 'sort_by(Contents||`[]`,&LastModified)[].Key' --output text 2>/dev/null \
+                | tr '\t' '\n' | grep -v '^None$' | head -n -"$depth" | while read -r stale; do
+                    [ -n "$stale" ] || continue
+                    ssid="$(basename "$stale" .json)"
+                    aws s3 rm "s3://${BUCKET}/${stale}" >/dev/null 2>&1 || true
+                    aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v1/sessions/${ssid}/" >/dev/null 2>&1 || true
+                    echo "pool: depth trim retired ${ssid}" | tee -a "$GITHUB_STEP_SUMMARY"
+                  done
+            else
+              echo "pool: deposit upload failed — entry not published" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "pool: deposit refused ($(echo "$out" | jq -r .reason))" | tee -a "$GITHUB_STEP_SUMMARY"
+            retire_prior
+          fi
+          release_lease
+          exit 0
 
       # Whether the run produced a rollup gates the `post` job. Kept as a
       # step so `post` can `needs`-read it without inspecting the artifact.
