@@ -1,5 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { writeFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   parseLsTree, narrowestRoot, slugify, subtreeHash, parseTranscript,
   buildManifest, evaluateEligibility,
@@ -79,6 +83,58 @@ test('parseTranscript: main-loop reads only, terminal context, compaction flag',
   assert.equal(t.compacted, false);
   const c = parseTranscript(jsonl([init, { type: 'system', subtype: 'compact_boundary' }, result]));
   assert.equal(c.compacted, true);
+});
+
+test('parseTranscript captures turn-1 resume cost from the first main-loop turn', () => {
+  const t = happyTranscript();
+  // The first readEv's usage — the resume's turn-1 write/read (#3347).
+  assert.equal(t.turn1CacheCreation, 5_000);
+  assert.equal(t.turn1CacheRead, 40_000);
+});
+
+test('turn-1 capture reads a haiku main-loop turn — before the context-accounting skip', () => {
+  const haikuTurn = {
+    type: 'assistant',
+    message: { model: 'claude-haiku-4-5', usage: { input_tokens: 3, cache_read_input_tokens: 111, cache_creation_input_tokens: 222 }, content: [] },
+  };
+  const t = parseTranscript(jsonl([init, haikuTurn, result]));
+  // Turn-1 is captured regardless of model (the canary probes on haiku)...
+  assert.equal(t.turn1CacheCreation, 222);
+  assert.equal(t.turn1CacheRead, 111);
+  // ...while contextTokens still applies the haiku skip — a separate axis.
+  assert.equal(t.contextTokens, 0);
+});
+
+test('turn-1 is the FIRST usage-bearing turn on a resume-only transcript', () => {
+  const firstTurn = {
+    type: 'assistant',
+    message: { model: 'claude-sonnet-5', usage: { input_tokens: 1, cache_read_input_tokens: 7, cache_creation_input_tokens: 9 }, content: [] },
+  };
+  // No init, and a second turn with larger usage follows — turn-1 must be the first (9/7), not the second.
+  const t = parseTranscript(jsonl([firstTurn, readEv(`${CWD}/CLAUDE.md`), result]));
+  assert.equal(t.turn1CacheCreation, 9);
+  assert.equal(t.turn1CacheRead, 7);
+});
+
+test('turn-1 is null on a transcript with no main-loop usage', () => {
+  const t = parseTranscript(jsonl([init, result]));
+  assert.equal(t.turn1CacheCreation, null);
+  assert.equal(t.turn1CacheRead, null);
+});
+
+test('resume-cost subcommand prints write=<n> read=<n>', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'poolcost-'));
+  const populated = join(dir, 'warm.jsonl');
+  writeFileSync(populated, jsonl([init, readEv(`${CWD}/CLAUDE.md`), result]));
+  assert.equal(
+    execFileSync('node', ['scripts/agent-pool.mjs', 'resume-cost', '--transcript', populated], { encoding: 'utf8' }).trim(),
+    'write=5000 read=40000');
+  // Null turn-1 renders as 0/0, never a crash or blank.
+  const empty = join(dir, 'cold.jsonl');
+  writeFileSync(empty, jsonl([init, result]));
+  assert.equal(
+    execFileSync('node', ['scripts/agent-pool.mjs', 'resume-cost', '--transcript', empty], { encoding: 'utf8' }).trim(),
+    'write=0 read=0');
 });
 
 test('buildManifest happy path: split, key, out-of-root blobs', () => {

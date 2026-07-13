@@ -740,6 +740,23 @@ jobs:
           path: /tmp/agent-work-session.jsonl
           if-no-files-found: ignore
 
+      # Warm-resume drift signal (#3347). A byte-stable resume re-writes only
+      # tens of tokens of the cached head; a Claude Code release that changes
+      # prompt composition silently turns every "warm" resume back into a full
+      # cold re-write. Print the resumed session's turn-1 cache accounting so
+      # that drift is one glance in the run summary, not transcript archaeology.
+      # Warm resumes only (session_id set) — a cold run's full head write is
+      # expected, not signal. Staged from origin/main like the pool steps, and
+      # fully fenced so a parse miss never touches the job result.
+      - name: Pool resume-cost printout
+        if: always() && steps.pool-checkout.outputs.session_id != ''
+        run: |
+          set -uo pipefail
+          [ -f /tmp/agent-work-session.jsonl ] || exit 0
+          git show origin/main:scripts/agent-pool.mjs > /tmp/agent-pool.mjs 2>/dev/null || exit 0
+          cost="$(node /tmp/agent-pool.mjs resume-cost --transcript /tmp/agent-work-session.jsonl 2>/dev/null)" || exit 0
+          [ -n "$cost" ] && echo "pool: resume turn-1 ${cost}" | tee -a "$GITHUB_STEP_SUMMARY" || true
+
       # Deposit half (if: always() so a failed run still releases the lease).
       # The mjs enforces the hygiene gates — clean exit, no compaction, under the
       # cap, explicit repool: yes — and merges a resumed session's prior read set

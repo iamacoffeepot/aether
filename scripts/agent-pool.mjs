@@ -30,6 +30,13 @@
 //     stdin: newline-separated repo-relative paths (a PR's changed files)
 //     → {root, slug} — the request-side subsystem key for the S3 idx path.
 //
+//   resume-cost --transcript <jsonl>
+//     → prints `write=<n> read=<n>` — the FIRST main-loop turn's cache
+//     accounting (cache_creation / cache_read). The warm-resume drift signal
+//     (#3347): a byte-stable resume writes tens of tokens, a drifted one
+//     re-writes the whole head. Model-agnostic (reads the first usage-bearing
+//     main-loop turn regardless of model — the canary probes on haiku).
+//
 // Knobs (env, defaults per the design): AGENT_POOL_CUTOFF_MINS=55,
 // AGENT_POOL_CONTEXT_CAP_TOKENS=150000.
 
@@ -85,6 +92,7 @@ export function parseTranscript(text) {
   // loop, so subagent reads are correctly excluded), the terminal context
   // size, and whether the session ever compacted.
   let init = null, result = null, compacted = false, contextTokens = 0;
+  let turn1CacheCreation = null, turn1CacheRead = null;
   const reads = new Set();
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
@@ -95,8 +103,17 @@ export function parseTranscript(text) {
     else if (ev.type === 'result') result = ev;
     else if (ev.type === 'assistant' && !ev.parent_tool_use_id) {
       const msg = ev.message || {};
-      if (/haiku/.test(msg.model || '')) continue;
       const u = msg.usage;
+      // Turn-1 resume cost (#3347): the FIRST usage-bearing main-loop turn's
+      // cache accounting, captured BEFORE the haiku skip below — the canary
+      // probes on a cheap haiku model with no subagents, and a real warm
+      // resume's turn-1 can itself be a haiku session, so the drift signal
+      // must read the first turn regardless of model.
+      if (u && turn1CacheCreation === null) {
+        turn1CacheCreation = u.cache_creation_input_tokens || 0;
+        turn1CacheRead = u.cache_read_input_tokens || 0;
+      }
+      if (/haiku/.test(msg.model || '')) continue;
       if (u) {
         contextTokens = (u.cache_read_input_tokens || 0)
           + (u.cache_creation_input_tokens || 0) + (u.input_tokens || 0);
@@ -108,7 +125,7 @@ export function parseTranscript(text) {
       }
     }
   }
-  return { init, result, compacted, contextTokens, reads: [...reads] };
+  return { init, result, compacted, contextTokens, turn1CacheCreation, turn1CacheRead, reads: [...reads] };
 }
 
 export function buildManifest({ transcript, lsTree, verdict, prior, cliVersion, now }) {
@@ -196,8 +213,11 @@ function main() {
     const paths = readFileSync(0, 'utf8').split('\n').map((s) => s.trim()).filter(Boolean);
     const root = narrowestRoot(paths);
     console.log(JSON.stringify({ root, slug: slugify(root) }));
+  } else if (cmd === 'resume-cost') {
+    const t = parseTranscript(readFileSync(arg('transcript'), 'utf8'));
+    console.log(`write=${t.turn1CacheCreation ?? 0} read=${t.turn1CacheRead ?? 0}`);
   } else {
-    console.error('usage: agent-pool.mjs manifest|eligible|root [--flags]');
+    console.error('usage: agent-pool.mjs manifest|eligible|root|resume-cost [--flags]');
     process.exit(2);
   }
 }
