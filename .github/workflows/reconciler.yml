@@ -28,7 +28,7 @@ name: Reconciler
 # a change it has no opinion about. Only a diff that actually escapes its
 # declaration goes red.
 #
-# TRIGGER MODEL (four paths, one pure recompute each):
+# TRIGGER MODEL (five paths, one pure recompute each):
 #   - pull_request [opened, reopened, synchronize, ready_for_review, labeled,
 #     unlabeled] — the payload carries the PR directly. synchronize is the
 #     push-demotes path (a fresh head with CI not yet green falls back to
@@ -37,6 +37,12 @@ name: Reconciler
 #     applies the approval:surface-ok waiver. A label event on any other label
 #     exits cleanly. The reconciler's own approval:surface-exceeded write does
 #     not re-enter it: GITHUB_TOKEN-authored events do not trigger workflows.
+#   - pull_request_review [submitted, dismissed] — a native review verdict
+#     changes GitHub's reviewDecision, which the reconciler keys merge-readiness
+#     on (ADR-0148), so a submitted or dismissed review must recompute. Barista
+#     (iamabarista[bot]) is a separate GitHub App, not GITHUB_TOKEN, so its
+#     createPullRequestReview call genuinely raises this event regardless of
+#     which review.yml job submitted it.
 #   - workflow_run on CI only — CI is pull_request-triggered, so a CI run object
 #     carries the real PR branch and resolves exactly as review.yml's resolve
 #     step does. Review and Dogfood are deliberately NOT in this list: those
@@ -77,6 +83,8 @@ name: Reconciler
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted, dismissed]
   workflow_run:
     workflows: ["CI"]
     types: [completed]
@@ -125,6 +133,8 @@ jobs:
       github.event_name == 'schedule' ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'workflow_run' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     steps:
@@ -168,6 +178,9 @@ jobs:
                   *) echo "label '${LABEL_NAME}' is not a QA flag — nothing to reconcile."; exit 0 ;;
                 esac
               fi
+              prs="$PR_NUMBER"
+              ;;
+            pull_request_review)
               prs="$PR_NUMBER"
               ;;
             workflow_dispatch)
