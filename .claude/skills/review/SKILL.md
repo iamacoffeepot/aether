@@ -18,7 +18,7 @@ The Claude entry point to the `review` workflow (`.claude/workflows/review.js`).
 /review --backfill <crate|path>   whole-file audit of existing code, no issue (sharded per crate)
 ```
 
-- **Integrated mode** runs when an issue and its diff are in hand — the spec-fidelity lens runs (the asked-vs-changed delta). For a PR-bound change this mode runs in CI on explicit request: the implement box dispatches the review action (`.github/workflows/review.yml`) once the PR's CI is green (re-review is an `@barista review` PR comment), and it posts the rollup as PR annotations plus the `review:unresolved` label, so an inline invocation at the end of `/implement` duplicates the pass. Invoke it directly only for a change that never becomes a PR.
+- **Integrated mode** runs when an issue and its diff are in hand — the spec-fidelity lens runs (the asked-vs-changed delta). For a PR-bound change this mode runs in CI on explicit request: the implement box dispatches the review action (`.github/workflows/review.yml`) once the PR's CI is green (re-review is an `@barista review` PR comment), and it posts the rollup as PR annotations plus a native barista `APPROVE` / `REQUEST_CHANGES` verdict, so an inline invocation at the end of `/implement` duplicates the pass. Invoke it directly only for a change that never becomes a PR.
 - **Backfill mode** runs against a crate or path's whole-file set with no issue — the spec lens does not run; the other four pillars audit existing code.
 
 ## Inputs

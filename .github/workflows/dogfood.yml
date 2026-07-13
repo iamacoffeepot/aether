@@ -12,11 +12,11 @@ name: Dogfood
 # of the PR gate chain, so it fires only when everything upstream is green):
 #   1. CI green      — the other CI gates passed (structural: Review only runs
 #                      on CI success, and Dogfood only runs on Review success).
-#   2. Review gate   — the `Review gate` commit status stands `success` on the
-#                      current head. That single status encodes "review ran at
-#                      least once" for Rust PRs and the auto-skip for non-Rust
-#                      ones (issue 2996), so requiring it makes dogfood the very
-#                      last thing to run without polling review's own state.
+#   2. Review green  — the PR's native `reviewDecision` is `APPROVED`. That
+#                      encodes barista's standing verdict for Rust PRs and the
+#                      session-less out-of-scope APPROVE for non-Rust ones
+#                      (ADR-0148), so requiring it makes dogfood the very last
+#                      thing to run without polling review's own state.
 #   3. Brief present — the closing issue carries a filled `## Dogfood brief`
 #                      (emitted by /scope). An `N/A` brief (or none) skips
 #                      cleanly: no consumer surface to trial, no run.
@@ -33,8 +33,8 @@ name: Dogfood
 # the user (phase:bounced + a persistent-failure comment linking every attempt's
 # evidence) rather than looping forever. A `workflow_dispatch` with a `pr` input
 # is the manual override: it bypasses the retry-state guards (green + cap) for a
-# deliberate re-trial, but still honours the structural gates (Review gate
-# green, brief present). A manual dispatch may run a merged PR on its merge
+# deliberate re-trial, but still honours the structural gates (reviewDecision
+# APPROVED, brief present). A manual dispatch may run a merged PR on its merge
 # commit and does not require that PR to remain open.
 #
 # RUN-ID CONVENTION: `<github.run_id>-<attempt>` — sortable, collision-free
@@ -46,7 +46,7 @@ name: Dogfood
 # only (a fork PR never sees the OAuth token and skips); NEVER
 # pull_request_target. A manual dispatch is a deliberate operator override and
 # may re-trial a merged PR without an open PR: it checks out that PR's merge
-# commit, which is main, while still probing the original head's Review gate.
+# commit, which is main, while still probing the PR's native reviewDecision.
 # Automatic `workflow_run` behavior stays unchanged. Least-privilege split —
 # the `trial` job executes the resolved code (build + headless Claude with
 # --dangerously-skip-permissions on the ephemeral box) and holds `contents:
@@ -121,7 +121,7 @@ jobs:
       surface: ${{ steps.gate.outputs.surface }}
       expected_artifact: ${{ steps.gate.outputs.expected_artifact }}
     steps:
-      - name: Resolve PR, Review gate, brief, and retry state
+      - name: Resolve PR, review decision, brief, and retry state
         id: gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -165,9 +165,9 @@ jobs:
             ''|*[!0-9]*) skip "Resolved PR '${pr:-}' is not a number — nothing to dogfood." ;;
           esac
 
-          # Read the PR object once. Review gate status stays anchored to its
-          # head, even when a manual re-trial later checks out a merged PR's
-          # merge commit.
+          # Read the PR object once. reviewDecision is a PR-level fact, read
+          # from the PR itself even when a manual re-trial later checks out a
+          # merged PR's merge commit.
           pr_object="$(gh api "repos/${REPO}/pulls/${pr}")"
           head_sha="$(jq -r '.head.sha' <<<"$pr_object")"
           merged="$(jq -r '.merged' <<<"$pr_object")"
@@ -182,14 +182,20 @@ jobs:
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
           echo "checkout_sha=$checkout_sha" >> "$GITHUB_OUTPUT"
 
-          # Gate 2 — the `Review gate` commit status must stand `success` on the
-          # current head. This is the "review has gone green" predicate; it also
-          # auto-passes non-Rust PRs (the review action posts success-skip for
-          # them). Applies on the dispatch path too — dispatch overrides only the
-          # retry state, not the structural gate stack.
-          gate="$(gh api "repos/${REPO}/commits/${head_sha}/status" \
-            --jq '[.statuses[] | select(.context == "Review gate")] | .[0].state // "missing"')"
-          [ "$gate" = "success" ] || skip "Review gate is '${gate}', not success — dogfood waits for review to go green."
+          # Gate 2 — the PR's native `reviewDecision` must be `APPROVED`. This is
+          # the "review has gone green" predicate (ADR-0148): barista's standing
+          # verdict feeds reviewDecision for Rust PRs, and a non-Rust PR is
+          # APPROVED by the session-less out-of-scope approve. Applies on the
+          # dispatch path too — dispatch overrides only the retry state, not the
+          # structural gate stack.
+          review_decision="$(gh api graphql -f query='
+            query($owner:String!, $repo:String!, $pr:Int!) {
+              repository(owner:$owner, name:$repo) {
+                pullRequest(number:$pr) { reviewDecision }
+              }
+            }' -F owner="${REPO%/*}" -F repo="${REPO#*/}" -F pr="$pr" \
+            --jq '.data.repository.pullRequest.reviewDecision // "missing"')"
+          [ "$review_decision" = "APPROVED" ] || skip "reviewDecision is '${review_decision}', not APPROVED — dogfood waits for review to go green."
 
           # Gate 3 — the closing issue must carry a filled `## Dogfood brief`.
           # The closing reference is the authoritative link (GraphQL
