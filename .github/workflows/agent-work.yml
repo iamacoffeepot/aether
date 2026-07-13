@@ -240,7 +240,7 @@ jobs:
               # scope walks Backlog -> phase:plan. A label at or beyond a post-plan
               # rung means scoping already completed; a re-dispatch is a clean no-op.
               labels="$(gh api "repos/${REPO}/issues/${REF}/labels" --jq '.[].name')"
-              if grep -qxE 'phase:(ready|refine|executing|building|qa|findings|held)' <<<"$labels"; then
+              if grep -qxE 'phase:(ready|building|qa|findings|held)' <<<"$labels"; then
                 echo "issue #${REF} is at/past a post-plan rung — scope already complete; nothing to do."
                 echo "proceed=false" >> "$GITHUB_OUTPUT"
                 exit 0
@@ -253,7 +253,7 @@ jobs:
               # issue that has not reached phase:plan yet is left to the skill's own
               # Phase gate, which refuses it and says so.
               labels="$(gh api "repos/${REPO}/issues/${REF}/labels" --jq '.[].name')"
-              if grep -qxE 'phase:(ready|refine|executing|building|qa|findings|held)' <<<"$labels"; then
+              if grep -qxE 'phase:(ready|building|qa|findings|held)' <<<"$labels"; then
                 echo "issue #${REF} is at/past a post-plan rung — approve already complete; nothing to do."
                 echo "proceed=false" >> "$GITHUB_OUTPUT"
                 exit 0
@@ -654,14 +654,6 @@ jobs:
       # the checkout, so the session can never mistake it for repo scratch. `|| true`
       # so a session failure never fails the job — the durable state is on GitHub
       # and the transcript diagnoses a dead run.
-      #
-      # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS was meant to hold the claude -p
-      # process open across a pending background task, but it does not reliably
-      # do so in this box (iamacoffeepot/aether#3245), so the headless CI waits
-      # (implement's Refine loop, land's rebase / Qodana waits) are realized as a
-      # mechanical in-turn poll that never ends a turn on a pending background
-      # task — see .claude/skills/headless/protocol.md, the CI-wait contract. The
-      # var is left set as a harmless backstop; nothing now depends on it.
       - name: Stage the task parameters
         if: steps.guard.outputs.proceed == 'true'
         run: |
@@ -680,7 +672,6 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           MODEL: ${{ steps.model.outputs.model }}
           POOL_SESSION_ID: ${{ steps.pool-checkout.outputs.session_id }}
-          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "2400000"
           AGENT_MAIN_STRICT: ${{ vars.AGENT_MAIN_STRICT }}
         run: |
           set -euo pipefail

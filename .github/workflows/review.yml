@@ -102,8 +102,8 @@ jobs:
     #       the forensic copy);
     #   (c) set repo vars AGENT_POOL_ENABLE=true (the flip — gated on the
     #       #3286 board-state review) and optionally AGENT_POOL_DEPTH /
-    #       AGENT_POOL_MATCH / AGENT_POOL_CUTOFF_MINS /
-    #       AGENT_POOL_CONTEXT_CAP_TOKENS (defaults 1 / exact / 55 / 150000).
+    #       AGENT_POOL_CUTOFF_MINS / AGENT_POOL_CONTEXT_CAP_TOKENS
+    #       (defaults 1 / 55 / 150000).
     permissions:
       contents: read
       id-token: write
@@ -135,7 +135,6 @@ jobs:
       # required review. Emitted the moment a PR resolves, even when the review
       # session is skipped (cap / non-Rust), not only on the proceed path.
       touches_rust: ${{ steps.resolve.outputs.touches_rust }}
-      diff_base: ${{ steps.resolve.outputs.diff_base }}
       rollup_produced: ${{ steps.rollup.outputs.produced }}
     steps:
       - uses: runs-on/action@v2
@@ -189,7 +188,6 @@ jobs:
           echo "pr_number=$pr" >> "$GITHUB_OUTPUT"
           head_sha="$(jq -r '.head.sha' <<<"$pr_info")"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
-          echo "diff_base=origin/main" >> "$GITHUB_OUTPUT"
 
           # Rust-touch detection drives the verdict class: classification
           # tracks changed `.rs` source only — the surface the five pillars
@@ -231,32 +229,6 @@ jobs:
           fi
 
           echo "proceed=true" >> "$GITHUB_OUTPUT"
-
-      # Hand the resolved PR to the chained Dogfood workflow. Dogfood triggers
-      # on this workflow's completion, but the run object its trigger hands it
-      # attaches to the latest MAIN commit — its head_branch is always "main" —
-      # so the downstream chain can never re-derive the PR from its event.
-      # This artifact is the explicit hand-off. It is written on EVERY path
-      # that resolves a PR (cap/non-Rust skips included), so dogfood can apply
-      # its own gate stack (the native `reviewDecision` among them) to the
-      # right PR.
-      - name: Write the review-context hand-off for Dogfood
-        if: steps.resolve.outputs.pr_number != ''
-        env:
-          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
-          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
-        run: |
-          jq -nc --argjson pr "$PR_NUMBER" --arg head_sha "$HEAD_SHA" \
-            '{pr: $pr, head_sha: $head_sha}' > "$RUNNER_TEMP/review-context.json"
-          cat "$RUNNER_TEMP/review-context.json"
-      - uses: actions/upload-artifact@v4
-        if: steps.resolve.outputs.pr_number != ''
-        with:
-          name: review-context
-          path: ${{ runner.temp }}/review-context.json
-          # Consumed by the Dogfood run that fires minutes later; nothing
-          # reads it after that.
-          retention-days: 1
 
       # Check out the PR head with full history, then fetch origin/main
       # explicitly — the diff base every review runs against.
@@ -354,9 +326,8 @@ jobs:
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
         env:
           PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
-          DIFF_BASE: ${{ steps.resolve.outputs.diff_base }}
         run: |
-          jq -nc --arg pr "$PR_NUMBER" --arg base "$DIFF_BASE" --arg head "$(git rev-parse HEAD)" \
+          jq -nc --arg pr "$PR_NUMBER" --arg base "origin/main" --arg head "$(git rev-parse HEAD)" \
             '{pr_number: $pr, diff_base: $base, head_sha: $head}' > /tmp/agent-task.json
 
       # Warm session pool (#3286; design of record: the #3264 design comment,
@@ -464,11 +435,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           POOL_SESSION_ID: ${{ steps.pool-checkout.outputs.session_id }}
-          # The #3086 wait-ceiling raise (40 min), mirrored from dogfood: the
-          # review workflow runs as a background task, and the default
-          # ten-minute ceiling terminates it mid-flight when the review takes
-          # longer (run 29249216987). Belt to the contract rewrite below.
-          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "2400000"
         run: |
           cat > /tmp/review-task-prompt.md <<PROMPT
           You are running headless in CI on a checkout of a PR's head branch.
