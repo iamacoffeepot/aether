@@ -176,6 +176,22 @@ export function normalizeFingerprint(fp) {
   return [repoRelative(path), ...rest].join('|')
 }
 
+// Prior barista correctness-pillar fingerprint paths, parsed from the full
+// review/comment history the caller already fetched for the `posted` dedup
+// pass. Reuses normalizeFingerprint outright — a legacy absolute-path marker
+// (predating the repo-relative convention) yields the same repo-relative key
+// a fresh emission carries, so a mixed-form history still matches.
+export function disclosedPaths(comments) {
+  const disclosed = new Set()
+  for (const c of comments) {
+    for (const m of String(c.body || '').matchAll(FP_RE)) {
+      const [path, , pillar] = normalizeFingerprint(m[1]).split('|')
+      if (pillar === 'correctness') disclosed.add(path)
+    }
+  }
+  return disclosed
+}
+
 function findingBody(f) {
   const rec = f.recommendation ? `${f.recommendation}: ` : ''
   const sev = f.severity ? ` _(${f.severity})_` : ''
@@ -199,15 +215,34 @@ function renderFoldedFinding(f, fp) {
   return [`- ${findingBody(f)} \`${anchor}\``, `  <!-- aether-review-fp:${fp} -->`]
 }
 
+// The one scope-leakage filter shared by the `isActionable` gate and the
+// rendered soft-hold banner count, so they can't drift apart: a `disclosed`
+// path — one a prior barista correctness finding already named on this same
+// PR — routes a matching scope-leakage soft-hold to advisory. review.js's
+// `specSoftHolds` mirror base-names `file` (`base(f.file)`), so the match
+// tolerates a `disclosed` entry that is only a path suffix of it.
+export function visibleSoftHolds(rollup, disclosed = new Set()) {
+  const softHolds = Array.isArray(rollup.softHolds) ? rollup.softHolds : []
+  return softHolds.filter((f) => {
+    if (f.category !== 'scope-leakage' || !f.file) return true
+    return !(disclosed.has(f.file) || [...disclosed].some((d) => d.endsWith(`/${f.file}`)))
+  })
+}
+
 // The rollup is actionable when it carries anything a reviewer must clear: a
 // confirmed finding, a soft-hold, or a high-severity spec-fidelity finding.
 // This is the same predicate the `review:unresolved` label decision uses, so
 // the native verdict and the mirror label never disagree on what "clean" means.
-export function isActionable(rollup) {
+// `disclosed` — prior barista correctness-fingerprint paths on this same PR —
+// routes a matching scope-leakage entry to advisory in both arms below.
+export function isActionable(rollup, disclosed = new Set()) {
   const confirmed = Array.isArray(rollup.confirmed) ? rollup.confirmed : []
-  const softHolds = Array.isArray(rollup.softHolds) ? rollup.softHolds : []
+  const softHolds = visibleSoftHolds(rollup, disclosed)
   const specFindings = rollup.spec && Array.isArray(rollup.spec.findings) ? rollup.spec.findings : []
-  return confirmed.length > 0 || softHolds.length > 0 || specFindings.some((f) => f.severity === 'high')
+  const gatingSpecFindings = specFindings.filter(
+    (f) => !(f.category === 'scope-leakage' && disclosed.has(f.file)),
+  )
+  return confirmed.length > 0 || softHolds.length > 0 || gatingSpecFindings.some((f) => f.severity === 'high')
 }
 
 // Select barista's verdict event, review-mode-aware:
@@ -218,8 +253,8 @@ export function isActionable(rollup) {
 // `review:unresolved` untouched after a clean incremental review: a delta that
 // re-checks only the newly-changed lines cannot vouch for the whole PR, so an
 // `APPROVE` there would supersede an earlier full-review `REQUEST_CHANGES`.
-export function verdictEvent(rollup, reviewMode) {
-  if (isActionable(rollup)) return 'REQUEST_CHANGES'
+export function verdictEvent(rollup, reviewMode, disclosed = new Set()) {
+  if (isActionable(rollup, disclosed)) return 'REQUEST_CHANGES'
   return reviewMode === 'incremental' ? null : 'APPROVE'
 }
 
@@ -293,7 +328,6 @@ async function main() {
   // Accept either the bare rollup or the workflow's full { rollup, files }.
   const rollup = rawRollup && rawRollup.rollup ? rawRollup.rollup : rawRollup
   const confirmed = Array.isArray(rollup.confirmed) ? rollup.confirmed : []
-  const softHolds = Array.isArray(rollup.softHolds) ? rollup.softHolds : []
   const followUps = Array.isArray(rollup.followUps) ? rollup.followUps : []
   const specFindings = rollup.spec && Array.isArray(rollup.spec.findings) ? rollup.spec.findings : []
 
@@ -302,13 +336,17 @@ async function main() {
   const hunks = new Map(filesData.map((f) => [f.filename, commentableLines(f.patch)]))
 
   // Gather fingerprints already posted, from every surface that could carry
-  // one, so a dispatched re-run never double-annotates.
+  // one, so a dispatched re-run never double-annotates. The same history
+  // yields the disclosed-paths set: a prior barista correctness finding on
+  // this same PR routes a matching scope-leakage finding to advisory.
   const posted = new Set()
   const [reviewComments, reviews, issueComments] = await Promise.all([
     apiList(env.token, `repos/${env.repo}/pulls/${env.pr}/comments`),
     apiList(env.token, `repos/${env.repo}/pulls/${env.pr}/reviews`),
     apiList(env.token, `repos/${env.repo}/issues/${env.pr}/comments`),
   ])
+  const disclosed = disclosedPaths([...reviewComments, ...reviews, ...issueComments])
+  const softHolds = visibleSoftHolds(rollup, disclosed)
   for (const c of [...reviewComments, ...reviews, ...issueComments]) {
     for (const m of String(c.body || '').matchAll(FP_RE)) posted.add(normalizeFingerprint(m[1]))
   }
@@ -384,7 +422,7 @@ async function main() {
   // clean: a same-event same-SHA re-run with no new content is skipped, and a
   // clean incremental pass submits nothing so it never supersedes a standing
   // REQUEST_CHANGES.
-  const owedEvent = verdictEvent(rollup, env.reviewMode)
+  const owedEvent = verdictEvent(rollup, env.reviewMode, disclosed)
   const hasNewContent = inline.length > 0 || folded.length > 0 || softHoldFolded.length > 0
   const latestBarista = standingBaristaVerdict(reviews, env.baristaLogin, env.headSha)
   const followUpsNormalized = followUps.map((f) => withResolvedPath(f, changed))
@@ -429,7 +467,7 @@ async function main() {
 
   // Advisory label: set when there is something actionable (a confirmed
   // finding, a soft-hold, or a high-severity spec finding), cleared clean.
-  if (isActionable(rollup)) {
+  if (isActionable(rollup, disclosed)) {
     const res = await api(env.token, 'POST', `repos/${env.repo}/issues/${env.pr}/labels`, { labels: [LABEL] })
     if (!res.ok) console.error(`add label failed: ${res.status} ${res.text}`)
     else console.log(`set ${LABEL}`)

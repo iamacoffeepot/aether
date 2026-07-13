@@ -3,11 +3,13 @@ import test from 'node:test'
 
 import {
   buildReviewBody,
+  disclosedPaths,
   fingerprint,
   isActionable,
   normalizeFingerprint,
   shouldSubmitVerdict,
   verdictEvent,
+  visibleSoftHolds,
 } from './post-review-rollup.mjs'
 
 const CONFIRMED = { confirmed: [{ pillar: 'correctness', file: 'a.rs', line: 3 }], softHolds: [], spec: { findings: [] } }
@@ -161,4 +163,83 @@ test('fingerprint canonicalizes both path forms to one key, and normalizeFingerp
     if (prior === undefined) delete process.env.GITHUB_WORKSPACE
     else process.env.GITHUB_WORKSPACE = prior
   }
+})
+
+// Tripwire for #3255: a scope-leakage finding whose file a prior barista
+// correctness fingerprint already named on this same PR is evidence-based
+// disclosure, not a prose self-waiver — it must drop from both gate arms
+// (isActionable's high-severity spec check, verdictEvent) AND from the
+// rendered soft-hold banner count (visibleSoftHolds), which mirrors
+// review.js's specSoftHolds basename-only `file`.
+test('a disclosed scope-leakage finding drops from isActionable, verdictEvent, and visibleSoftHolds', () => {
+  const disclosed = new Set(['scripts/other.mjs'])
+  const rollup = {
+    confirmed: [],
+    softHolds: [],
+    spec: {
+      findings: [
+        { severity: 'high', category: 'scope-leakage', file: 'scripts/other.mjs', description: 'touched unasked file' },
+      ],
+    },
+  }
+  assert.equal(isActionable(rollup, disclosed), false)
+  assert.notEqual(verdictEvent(rollup, 'full', disclosed), 'REQUEST_CHANGES')
+
+  // review.js's specSoftHolds mirror base-names `file`, so the softHolds-shaped
+  // entry carries only the basename while `disclosed` holds the full repo-relative
+  // path — visibleSoftHolds must still match it (the suffix tolerance).
+  const softHoldRollup = {
+    softHolds: [{ pillar: 'spec-fidelity', category: 'scope-leakage', file: 'other.mjs', severity: 'high' }],
+  }
+  assert.equal(visibleSoftHolds(softHoldRollup, disclosed).length, 0)
+})
+
+// Tripwire for #3255 / the owner's #3250 bounce, requirement 3: this must be
+// the ABSOLUTE-form case, not two repo-relative paths — a test with only
+// repo-relative paths would pass today even if disclosedPaths never
+// normalized, which is exactly the silent no-op (green tests, green CI,
+// catch-22 still wedging PRs) the bounce called out.
+test('disclosedPaths normalizes an absolute-form correctness fingerprint, and it still drops a repo-relative scope-leakage finding', () => {
+  const prior = process.env.GITHUB_WORKSPACE
+  process.env.GITHUB_WORKSPACE = '/home/runner/_work/aether/aether'
+  try {
+    const comments = [
+      { body: 'aether-review-fp:/home/runner/_work/aether/aether/scripts/other.mjs|12|correctness' },
+    ]
+    const disclosed = disclosedPaths(comments)
+    assert.deepEqual([...disclosed], ['scripts/other.mjs'])
+
+    const rollup = {
+      confirmed: [],
+      softHolds: [],
+      spec: {
+        findings: [
+          { severity: 'high', category: 'scope-leakage', file: 'scripts/other.mjs', description: 'touched unasked file' },
+        ],
+      },
+    }
+    assert.equal(isActionable(rollup, disclosed), false)
+  } finally {
+    if (prior === undefined) delete process.env.GITHUB_WORKSPACE
+    else process.env.GITHUB_WORKSPACE = prior
+  }
+})
+
+// Tripwire: the carve-out is evidence-gated, not blanket — a scope-leakage
+// finding with no matching entry in `disclosed` still gates, both against an
+// unrelated-path disclosed set and against the default empty set (so every
+// pre-existing isActionable/verdictEvent call site keeps working unchanged).
+test('a scope-leakage finding with no matching disclosed entry still gates', () => {
+  const rollup = {
+    confirmed: [],
+    softHolds: [],
+    spec: {
+      findings: [
+        { severity: 'high', category: 'scope-leakage', file: 'scripts/other.mjs', description: 'touched unasked file' },
+      ],
+    },
+  }
+  assert.equal(isActionable(rollup, new Set(['scripts/unrelated.mjs'])), true)
+  assert.equal(isActionable(rollup), true)
+  assert.equal(verdictEvent(rollup, 'full'), 'REQUEST_CHANGES')
 })
