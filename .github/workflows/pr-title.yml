@@ -18,13 +18,8 @@ jobs:
             fix
             chore
             docs
-            refactor
-            test
             perf
-            build
-            ci
-            style
-            revert
+            refactor
             flake
           requireScope: false
           subjectPattern: ^(?![A-Z]).+$
