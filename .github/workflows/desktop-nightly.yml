@@ -1,0 +1,74 @@
+name: Desktop nightly
+
+# Desktop chassis tests run the full OS matrix because winit event loops,
+# wgpu driver init, and platform-specific frame capture are the only places
+# per-OS coverage catches real bugs; Linux is covered by ci.yml's workspace
+# `test` job. Relocated here from ci.yml's `desktop` job (issue 3358): that
+# job was gated on `startsWith(github.ref, 'refs/tags/')`, but nothing in
+# the repo triggers on or pushes tags, so the gate was never true and the
+# job never ran. A schedule reaches it instead, off the merge critical path
+# — a per-OS regression surfaces the next morning rather than blocking a PR.
+# `workflow_dispatch` runs it on demand without waiting for the nightly tick.
+
+on:
+  schedule:
+    - cron: "37 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: Test desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      issues: write
+    # Normal run is ≤ 2 min; cap at 15 so a runner stall doesn't eat the
+    # default 6h quota.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ macos-latest, windows-latest ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p aether-substrate-bundle --all-targets
+
+      # File one triage issue per OS and comment subsequent failures on it
+      # rather than filing duplicates — mirrors fuzz-nightly.yml's idiom.
+      - name: File or update failure issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          OS: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          title="ci: desktop nightly failing (${OS})"
+
+          {
+            echo "The desktop nightly matrix failed on \`${OS}\`."
+            echo
+            echo "- Run: ${RUN_URL}"
+          } > issue_body.md
+
+          existing=$(gh issue list --state open --search "${title} in:title" \
+            --json number,title \
+            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")
+
+          if [ -n "$existing" ]; then
+            echo "Commenting on existing issue #${existing}."
+            gh issue comment "$existing" --body-file issue_body.md
+          else
+            echo "Filing new failure issue."
+            # --label alert: a machine-filed alert is not a pipeline work item,
+            # and the fleet's dispatcher skips anything carrying it. Without the
+            # label an unlabelled issue reads as Backlog and gets scoped (#3180).
+            gh issue create --title "$title" --body-file issue_body.md --label alert
+          fi
