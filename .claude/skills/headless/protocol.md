@@ -27,10 +27,10 @@ Where the original would ask a human — a scope Define or Design bounce, a scop
 
 The owner's reply re-dispatches the job, which `claude --resume`s the same session from the S3 pointer recorded in the comment marker, so the answer continues the same reasoning context rather than a cold re-scope. V1's only answerer is the owner — there is no `ask:*` routing vocabulary yet.
 
-The question comment has a fixed, machine-parseable shape so the resume path can find it and its S3 pointer without heuristics. The leading HTML-comment marker is the greppable anchor, carrying `task`, `ref`, `run`, and the S3 `session` URI as key=value pairs; the numbered **Options** list is the parseable choice set. Two marker variants carry no `session=` and resume fresh instead of `--resume`ing: an approve gate-failure park (`task=approve ref=<n>`, written by the approve sweep — gate context is cheap to re-derive) and the approve sweep's verdict digest (`task=approve-sweep ref=all`, always the constant `all` — the verdict run re-derives everything from the board):
+The question comment has a fixed, machine-parseable shape so the resume path can find it and its S3 pointer without heuristics. The leading HTML-comment marker is the greppable anchor, carrying `task`, `ref`, `run`, and the S3 `session` URI as key=value pairs; the numbered **Options** list is the parseable choice set. One marker variant carries no `session=` and resumes fresh instead of `--resume`ing: an approve per-issue ask (`task=approve ref=<n>`, written by the single-issue `/approve-headless` and by the approve sweep's per-issue asks — the gate/verdict context is cheap to re-derive from the board, so no stored session is needed):
 
 ```markdown
-<!-- aether-agent:awaiting-answer task=<scope|approve|approve-sweep|implement|land|resolve> ref=<issue-or-pr-or-all> run=<run-url> session=<s3-uri> -->
+<!-- aether-agent:awaiting-answer task=<scope|approve|implement|land|resolve> ref=<issue-or-pr> run=<run-url> session=<s3-uri> -->
 **Parked on #<N> — need a decision.**
 
 <question in plain language, the load-bearing "why" first>

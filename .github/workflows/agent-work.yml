@@ -269,14 +269,8 @@ jobs:
               # issues rest at phase:ready and drop out, the rest are re-processed.
               plan_count="$(gh api "repos/${REPO}/issues?labels=phase:plan&state=open&per_page=1" \
                 --jq 'map(select(has("pull_request")|not)) | length')"
-              # An open verdict digest (#3190) is also work: the sweep must read
-              # an answered one (or close a stale one) even when the plan queue
-              # emptied between the park and the reply, so an open digest keeps
-              # the dispatch alive on its own.
-              digest_count="$(gh api "repos/${REPO}/issues?labels=agent:digest&state=open&per_page=1" \
-                --jq 'map(select(has("pull_request")|not)) | length')"
-              if [ "${plan_count:-0}" -eq 0 ] && [ "${digest_count:-0}" -eq 0 ]; then
-                echo "no open phase:plan issue and no open digest — the approve queue is empty; nothing to do."
+              if [ "${plan_count:-0}" -eq 0 ]; then
+                echo "no open phase:plan issue — the approve queue is empty; nothing to do."
                 echo "proceed=false" >> "$GITHUB_OUTPUT"
                 exit 0
               fi
