@@ -1,0 +1,209 @@
+#!/usr/bin/env node
+// Warm session pool — the pure-logic half (#3286, design of record: #3264
+// design comment v1.5). Derives a pool manifest from a box's stream-json
+// transcript and judges a candidate manifest's eligibility against a fresh
+// checkout. All S3 and git side effects live in the workflow steps; this
+// script reads files it is handed and prints one JSON object to stdout, so
+// every decision is unit-testable. Exit code is 0 on any well-formed
+// decision (the workflow branches on the printed `ok`), nonzero only on
+// unusable input.
+//
+// Subcommands:
+//   manifest --transcript <jsonl> --ls-tree <file> --verdict <json> \
+//            [--prior <manifest.json>] [--cli-version <v>]
+//     → {ok: true, manifest} | {ok: false, reason}
+//     The hygiene gates (clean result, no compaction, explicit repool: yes,
+//     under the context cap) are enforced here; a refusal names its reason
+//     (error-exit | compacted | missing-verdict | declined | over-cap).
+//
+//   eligible --manifest <json> --ls-tree <file>
+//     → {ok: true} | {ok: false, reason: stale-tree | past-cutoff | over-cap}
+//     Belief-truth gate: the subtree listing under the manifest's subsystem
+//     root must be byte-identical (covers unread files and negative
+//     knowledge), and every out-of-root read must blob-match. Age is judged
+//     against AGENT_POOL_CUTOFF_MINS; the cap re-check makes lowering
+//     AGENT_POOL_CONTEXT_CAP_TOKENS retire existing entries retroactively.
+//
+//   root
+//     stdin: newline-separated repo-relative paths (a PR's changed files)
+//     → {root, slug} — the request-side subsystem key for the S3 idx path.
+//
+// Knobs (env, defaults per the design): AGENT_POOL_CUTOFF_MINS=55,
+// AGENT_POOL_CONTEXT_CAP_TOKENS=150000.
+
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+
+const CUTOFF_MINS = Number(process.env.AGENT_POOL_CUTOFF_MINS || 55);
+const CONTEXT_CAP = Number(process.env.AGENT_POOL_CONTEXT_CAP_TOKENS || 150000);
+
+const sha256 = (s) => createHash('sha256').update(s).digest('hex');
+
+export function parseLsTree(text) {
+  // `git ls-tree -r HEAD` lines: "<mode> blob <hash>\t<path>"
+  const map = new Map();
+  for (const line of text.split('\n')) {
+    const tab = line.indexOf('\t');
+    if (tab === -1) continue;
+    const [, kind, hash] = line.slice(0, tab).split(/\s+/);
+    if (kind === 'blob') map.set(line.slice(tab + 1), hash);
+  }
+  return map;
+}
+
+export function narrowestRoot(paths) {
+  // Narrowest directory containing every path; "." for a repo-wide set.
+  if (paths.length === 0) return '.';
+  let parts = paths[0].split('/').slice(0, -1);
+  for (const p of paths.slice(1)) {
+    const q = p.split('/').slice(0, -1);
+    let i = 0;
+    while (i < parts.length && i < q.length && parts[i] === q[i]) i++;
+    parts = parts.slice(0, i);
+  }
+  return parts.length ? parts.join('/') : '.';
+}
+
+export function slugify(root) {
+  return root === '.' ? '_root' : root.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+export function subtreeHash(lsTree, root) {
+  const prefix = root === '.' ? '' : root.replace(/\/$/, '') + '/';
+  const lines = [...lsTree.entries()]
+    .filter(([path]) => path.startsWith(prefix))
+    .map(([path, hash]) => `${path}:${hash}`)
+    .sort();
+  return sha256(lines.join('\n'));
+}
+
+export function parseTranscript(text) {
+  // Extract the pool-relevant facts: the init event, the result record, the
+  // MAIN-LOOP Read set (sidechain context never enters the resumable main
+  // loop, so subagent reads are correctly excluded), the terminal context
+  // size, and whether the session ever compacted.
+  let init = null, result = null, compacted = false, contextTokens = 0;
+  const reads = new Set();
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let ev;
+    try { ev = JSON.parse(line); } catch { continue; }
+    if (ev.type === 'system' && ev.subtype === 'init') init = ev;
+    else if (ev.type === 'system' && /compact/.test(ev.subtype || '')) compacted = true;
+    else if (ev.type === 'result') result = ev;
+    else if (ev.type === 'assistant' && !ev.parent_tool_use_id) {
+      const msg = ev.message || {};
+      if (/haiku/.test(msg.model || '')) continue;
+      const u = msg.usage;
+      if (u) {
+        contextTokens = (u.cache_read_input_tokens || 0)
+          + (u.cache_creation_input_tokens || 0) + (u.input_tokens || 0);
+      }
+      for (const blk of msg.content || []) {
+        if (blk?.type === 'tool_use' && blk.name === 'Read' && blk.input?.file_path) {
+          reads.add(blk.input.file_path);
+        }
+      }
+    }
+  }
+  return { init, result, compacted, contextTokens, reads: [...reads] };
+}
+
+export function buildManifest({ transcript, lsTree, verdict, prior, cliVersion, now }) {
+  const { init, result, compacted, contextTokens, reads } = transcript;
+  if (!init) return { ok: false, reason: 'no-init' };
+  if (!result || result.subtype !== 'success' || result.is_error) {
+    return { ok: false, reason: 'error-exit' };
+  }
+  if (compacted) return { ok: false, reason: 'compacted' };
+  if (!verdict || verdict.repool !== 'yes') {
+    return { ok: false, reason: verdict ? 'declined' : 'missing-verdict' };
+  }
+  if (contextTokens > CONTEXT_CAP) return { ok: false, reason: 'over-cap' };
+
+  const cwd = init.cwd.replace(/\/$/, '');
+  // A resumed run's transcript holds only the new turns; the declared set is
+  // cumulative for the session's life, so merge the prior manifest's set.
+  const repoReads = new Set(prior?.read_files || []);
+  const external = new Set(prior?.external_reads || []);
+  for (const abs of reads) {
+    (abs.startsWith(cwd + '/') ? repoReads.add(abs.slice(cwd.length + 1)) : external.add(abs));
+  }
+
+  const readFiles = [...repoReads].sort();
+  const root = narrowestRoot(readFiles);
+  const prefix = root === '.' ? '' : root + '/';
+  const outOfRoot = {};
+  for (const rel of readFiles) {
+    if (!rel.startsWith(prefix) && lsTree.has(rel)) outOfRoot[rel] = lsTree.get(rel);
+  }
+
+  return {
+    ok: true,
+    manifest: {
+      schema: 1,
+      session_id: init.session_id,
+      model: init.model,
+      cwd,
+      cli_version: cliVersion || null,
+      tools_fingerprint: sha256(JSON.stringify(init.tools || [])).slice(0, 16),
+      read_files: readFiles,
+      external_reads: [...external].sort(),
+      subsystem_root: root,
+      slug: slugify(root),
+      subtree_hash: subtreeHash(lsTree, root),
+      out_of_root: outOfRoot,
+      context_tokens: contextTokens,
+      verdict: { reason: verdict.reason || '', knowledge_summary: verdict.knowledge_summary || '' },
+      deposited_at: Math.floor(now / 1000),
+    },
+  };
+}
+
+export function evaluateEligibility(manifest, lsTree, now) {
+  const ageMins = (Math.floor(now / 1000) - manifest.deposited_at) / 60;
+  if (ageMins >= CUTOFF_MINS) return { ok: false, reason: 'past-cutoff' };
+  if (manifest.context_tokens > CONTEXT_CAP) return { ok: false, reason: 'over-cap' };
+  if (subtreeHash(lsTree, manifest.subsystem_root) !== manifest.subtree_hash) {
+    return { ok: false, reason: 'stale-tree' };
+  }
+  for (const [rel, hash] of Object.entries(manifest.out_of_root || {})) {
+    if (lsTree.get(rel) !== hash) return { ok: false, reason: 'stale-tree' };
+  }
+  return { ok: true };
+}
+
+function arg(name) {
+  const i = process.argv.indexOf(`--${name}`);
+  return i === -1 ? undefined : process.argv[i + 1];
+}
+
+function main() {
+  const cmd = process.argv[2];
+  if (cmd === 'manifest') {
+    const transcript = parseTranscript(readFileSync(arg('transcript'), 'utf8'));
+    const lsTree = parseLsTree(readFileSync(arg('ls-tree'), 'utf8'));
+    let verdict = null;
+    try { verdict = JSON.parse(readFileSync(arg('verdict'), 'utf8')); } catch { /* missing-verdict */ }
+    let prior = null;
+    if (arg('prior')) {
+      try { prior = JSON.parse(readFileSync(arg('prior'), 'utf8')); } catch { /* fresh deposit */ }
+    }
+    console.log(JSON.stringify(buildManifest({
+      transcript, lsTree, verdict, prior, cliVersion: arg('cli-version'), now: Date.now(),
+    })));
+  } else if (cmd === 'eligible') {
+    const manifest = JSON.parse(readFileSync(arg('manifest'), 'utf8'));
+    const lsTree = parseLsTree(readFileSync(arg('ls-tree'), 'utf8'));
+    console.log(JSON.stringify(evaluateEligibility(manifest, lsTree, Date.now())));
+  } else if (cmd === 'root') {
+    const paths = readFileSync(0, 'utf8').split('\n').map((s) => s.trim()).filter(Boolean);
+    const root = narrowestRoot(paths);
+    console.log(JSON.stringify({ root, slug: slugify(root) }));
+  } else {
+    console.error('usage: agent-pool.mjs manifest|eligible|root [--flags]');
+    process.exit(2);
+  }
+}
+
+if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop())) main();
