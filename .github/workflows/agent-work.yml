@@ -69,7 +69,7 @@ name: Agent work
 #       is confirmed strict-off, so a land box takes the direct-merge path for
 #       a behind+clean PR instead of the App token's doomed protection read;
 #       absent it (or on drift after a protection change) the fleet keeps
-#       today's conservative rebase.
+#       today's conservative merge-in of origin/main.
 # Absent any of these, the preflight step fails early with the exact remedy.
 
 on:
