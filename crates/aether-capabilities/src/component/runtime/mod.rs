@@ -28,8 +28,8 @@ use super::ComponentHostCapability;
 pub use self::config::ComponentHostConfig;
 
 use aether_kinds::{
-    DescribeComponent, DescribeComponentResult, DropComponent, ListComponents, ListComponentsResult, LoadComponent,
-    LoadResult, ReplaceComponent, ReplaceResult,
+    DescribeComponent, DescribeComponentResult, DropComponent, DropResult, ListComponents, ListComponentsResult,
+    LoadComponent, LoadResult, ReplaceComponent, ReplaceResult,
 };
 
 pub use aether_actor::Manual;
@@ -41,7 +41,7 @@ use crate::http::HttpServerCapability;
 use crate::http::kinds::UnregisterRoutesAll;
 use crate::input::{InputCapability, UnsubscribeAll};
 use crate::lifecycle::LifecycleCapability;
-use aether_actor::Addressable;
+use aether_actor::{Addressable, OutboundReply, ReplyMode};
 use aether_data::{Kind, MailboxCategory, Source};
 use aether_kinds::LifecycleUnsubscribeAll;
 
@@ -143,12 +143,38 @@ pub struct BootEntry {
 /// A free fn (no `self`) under the ADR-0122 split: the state-bearing struct
 /// holds no field this helper reads, so it stays stateless and the handlers
 /// reach it through the parent's `use runtime::*` glob.
-fn forward_to_trampoline<P>(ctx: &mut NativeCtx<'_>, recipient: MailboxId, kind: KindId, payload: &P)
+fn forward_to_trampoline<M: ReplyMode, P>(ctx: &mut NativeCtx<'_, M>, recipient: MailboxId, kind: KindId, payload: &P)
 where
     P: Kind,
 {
     let bytes = payload.encode_into_bytes();
     let _ = ctx.send_envelope_tracked_with_reply_to(recipient, kind, &bytes, ctx.reply_target());
+}
+
+impl ComponentHostCapabilityState {
+    /// Purge a trampoline mailbox from every cap's fan-out / routing table so no
+    /// cap keeps firing at a torn-down mailbox: `aether.input`'s input-stream
+    /// tables ([`UnsubscribeAll`]), `aether.lifecycle`'s per-stage tables
+    /// ([`LifecycleUnsubscribeAll`]), and `aether.http.server`'s route table
+    /// ([`UnregisterRoutesAll`], ADR-0130). Mail rather than direct mutation
+    /// (post-issue-640 — each cap owns its own subscriber table).
+    ///
+    /// Shared by the external drop path ([`NativeActor::on_drop_component`]) and
+    /// the ADR-0147 internal boot-teardown paths ([`Self::release_boot_ref`] at
+    /// refcount zero, and the load-time freshly-inserted-boot rollback), so a
+    /// boot torn down internally clears the same registrations an external drop
+    /// would — without self-sending a `DropComponent` back through the guarded
+    /// `on_drop_component` (which rejects boot mailboxes, ADR-0147).
+    pub fn purge_trampoline_registrations<M: ReplyMode>(&self, ctx: &mut NativeCtx<'_, M>, mailbox: MailboxId) {
+        ctx.actor::<InputCapability>().send(&UnsubscribeAll { mailbox });
+        ctx.actor::<LifecycleCapability>().send(&LifecycleUnsubscribeAll { mailbox: mailbox.0 });
+        // The http server registers only when a bind is configured (ADR-0108),
+        // so gate its route purge on the cap being live — an unguarded typed
+        // send would warn-drop on every drop in a chassis that serves no HTTP.
+        if self.registry.lookup(<HttpServerCapability as Addressable>::NAMESPACE).is_some() {
+            ctx.actor::<HttpServerCapability>().send(&UnregisterRoutesAll { mailbox });
+        }
+    }
 }
 
 #[runtime]
@@ -217,24 +243,34 @@ impl NativeActor for ComponentHostCapability {
     /// # Agent
     /// `DropComponent { mailbox_id }`. The `mailbox_id` is the
     /// trampoline's id from the `LoadResult.mailbox_id` field.
-    #[handler::single]
-    fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: DropComponent) {
-        // Cap-side cleanup: ask each owning cap to drop the dying
-        // trampoline from its fan-out sets. Mail rather than direct
-        // mutation post-issue-640 — each cap is the sole owner of its
-        // own subscriber table.
-        ctx.actor::<InputCapability>().send(&UnsubscribeAll { mailbox: payload.mailbox_id });
-        ctx.actor::<LifecycleCapability>().send(&LifecycleUnsubscribeAll { mailbox: payload.mailbox_id.0 });
-        // The http server registers only when a bind is configured
-        // (ADR-0108), so gate its route purge on the cap being live —
-        // an unguarded typed send would warn-drop on every component
-        // drop in a chassis that serves no HTTP.
-        if state.registry.lookup(<HttpServerCapability as Addressable>::NAMESPACE).is_some() {
-            ctx.actor::<HttpServerCapability>().send(&UnregisterRoutesAll { mailbox: payload.mailbox_id });
+    #[handler::manual]
+    fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, payload: DropComponent) {
+        // ADR-0147 non-droppability guard: the boot actor is unconditional and
+        // refcounted against its module's non-boot actors, so an external drop
+        // addressed straight at a boot mailbox must be rejected — letting it
+        // through would tear the boot down out from under the refcount and leave
+        // a dangling `boot_registry` entry. The boot is torn down automatically
+        // (internally, through `release_boot_ref`) when its last non-boot actor
+        // unloads; that internal path is not routed through this handler, so the
+        // guard never blocks it.
+        if state.boot_registry.values().any(|entry| entry.mailbox_id == payload.mailbox_id) {
+            ctx.reply(&DropResult::Err {
+                error: format!(
+                    "mailbox {} is a module boot actor (ADR-0147): the boot singleton is unconditional \
+                     and refcounted against its module's non-boot actors, so it cannot be dropped directly — \
+                     drop the module's non-boot actors and the boot is torn down when the last one unloads",
+                    payload.mailbox_id
+                ),
+            });
+            return;
         }
+        // Cap-side cleanup: purge the dying trampoline from every cap's fan-out
+        // sets before forwarding the drop.
+        state.purge_trampoline_registrations(ctx, payload.mailbox_id);
         // ADR-0147: account this actor's departure against its module's boot
         // singleton before forwarding the drop — the last non-boot actor from a
-        // boot-bearing module tears the boot down here.
+        // boot-bearing module tears the boot down here (which purges the boot's
+        // own registrations via `release_boot_ref`).
         state.release_boot_ref(ctx, payload.mailbox_id);
         forward_to_trampoline(ctx, payload.mailbox_id, DropComponent::ID, &payload);
     }

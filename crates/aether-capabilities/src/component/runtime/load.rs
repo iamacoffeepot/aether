@@ -84,6 +84,23 @@ impl ComponentHostCapabilityState {
             Err(error) => return LoadResult::Err { error },
         };
 
+        // 2b. ADR-0147 non-selectability guard (§1): boot is instantiated
+        // unconditionally, once per loaded module, and is never reachable through
+        // the export selector. Reject a boot-naming selection up front, before
+        // export resolution runs, so no code path can treat the boot type as a
+        // selectable export.
+        if let Some(boot_ns) = &boot_namespace
+            && payload.export.as_deref() == Some(boot_ns.as_str())
+        {
+            return LoadResult::Err {
+                error: format!(
+                    "export {boot_ns:?} names this module's boot actor, which is not selectable \
+                     (ADR-0147): the boot actor is instantiated unconditionally, once per loaded \
+                     module content hash, and cannot be loaded by an export selector"
+                ),
+            };
+        }
+
         let (capabilities, type_tag, selected_namespace): (ComponentCapabilities, Option<u64>, Option<String>) =
             if let Some(requested) = &payload.export {
                 let Some(group) = actors.iter().find(|a| a.namespace.as_deref() == Some(requested.as_str())) else {
@@ -128,24 +145,6 @@ impl ComponentHostCapabilityState {
                     default_actor.and_then(|a| a.namespace.clone()),
                 )
             };
-
-        // 2b. ADR-0147 non-selectability guard (§1): boot is instantiated
-        // unconditionally, once per loaded module, and is never reachable
-        // through the export selector. Reject the selection before the ordinary
-        // export-resolution match above could spawn a second, untracked
-        // boot-type trampoline alongside the singleton. `boot_namespace` was
-        // read in step 2a.
-        if let Some(boot_ns) = &boot_namespace
-            && payload.export.as_deref() == Some(boot_ns.as_str())
-        {
-            return LoadResult::Err {
-                error: format!(
-                    "export {boot_ns:?} names this module's boot actor, which is not selectable \
-                     (ADR-0147): the boot actor is instantiated unconditionally, once per loaded \
-                     module content hash, and cannot be loaded by an export selector"
-                ),
-            };
-        }
 
         // 3. Compile module.
         let module = match Module::new(&self.engine, &payload.wasm) {
@@ -233,15 +232,18 @@ impl ComponentHostCapabilityState {
                 // ADR-0147: if this load freshly spawned the module's boot
                 // singleton (first sight of its content hash), the requested
                 // actor never spawned, so nothing will ever refcount against
-                // that boot. Tear it back down — the same teardown
-                // `release_boot_ref` performs at refcount zero (detached
-                // `DropComponent` + registry removal) — rather than leaking the
-                // boot singleton. A load that only found an existing boot leaves
-                // it untouched: its other actors still hold the refcount.
+                // that boot. Tear it back down — the same cleanup
+                // `release_boot_ref` performs at refcount zero (purge fan-out
+                // registrations, then a detached `DropComponent` to the boot
+                // trampoline, plus registry removal) — rather than leaking the
+                // boot singleton and its registrations. A load that only found an
+                // existing boot leaves it untouched: its other actors still hold
+                // the refcount.
                 if boot_freshly_inserted
                     && let Some(hash) = &boot_hash
                     && let Some(entry) = self.boot_registry.remove(hash)
                 {
+                    self.purge_trampoline_registrations(ctx, entry.mailbox_id);
                     let bytes = DropComponent { mailbox_id: entry.mailbox_id }.encode_into_bytes();
                     let _ = ctx.send_envelope_detached(entry.mailbox_id, DropComponent::ID, &bytes);
                 }
@@ -359,14 +361,17 @@ impl ComponentHostCapabilityState {
 
     /// ADR-0147: account a departing non-boot actor against its module's boot
     /// singleton. Decrements the owning module's refcount; when it reaches zero
-    /// (the last non-boot actor from the module is gone), self-sends a
-    /// fire-and-forget [`DropComponent`] to the boot trampoline — tearing it
-    /// down through the same handler any component drop takes — and forgets the
-    /// registry entry. A no-op for an actor from a bootless module (nothing was
-    /// tracked). The teardown send is detached, not a `forward_to_trampoline`:
-    /// the boot's `DropResult` must not route back to whoever originated the
-    /// external drop, so it starts a fresh chain and its reply lands harmlessly
-    /// at the cap.
+    /// (the last non-boot actor from the module is gone), purges the boot
+    /// mailbox's own fan-out registrations and self-sends a fire-and-forget
+    /// [`DropComponent`] to the boot trampoline — tearing it down through the
+    /// same cleanup any component drop takes — then forgets the registry entry.
+    /// A no-op for an actor from a bootless module (nothing was tracked). The
+    /// teardown send is detached, not a `forward_to_trampoline`: the boot's
+    /// `DropResult` must not route back to whoever originated the external drop,
+    /// so it starts a fresh chain and its reply lands harmlessly at the cap. It
+    /// is also sent straight to the boot trampoline rather than self-routed
+    /// through `on_drop_component`, whose ADR-0147 guard rejects boot mailboxes —
+    /// this internal path is exactly how the boot is *legitimately* dropped.
     pub fn release_boot_ref<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, M>, actor_mailbox: MailboxId) {
         let Some(hash) = self.boot_hash_by_actor.remove(&actor_mailbox) else {
             return;
@@ -378,6 +383,7 @@ impl ComponentHostCapabilityState {
         if entry.refcount == 0 {
             let boot_mailbox = entry.mailbox_id;
             self.boot_registry.remove(&hash);
+            self.purge_trampoline_registrations(ctx, boot_mailbox);
             let bytes = DropComponent { mailbox_id: boot_mailbox }.encode_into_bytes();
             let _ = ctx.send_envelope_detached(boot_mailbox, DropComponent::ID, &bytes);
         }
