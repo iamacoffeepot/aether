@@ -438,12 +438,17 @@ jobs:
           AGENT_POOL_CONTEXT_CAP_TOKENS: ${{ vars.AGENT_POOL_CONTEXT_CAP_TOKENS }}
         run: |
           set -uo pipefail
+          # The pool logic runs from origin/main (fetched by the diff-base step),
+          # never from the PR-head checkout: a branch cut before the script
+          # landed would otherwise silently kill the pool (#3293), and PR-head
+          # code must not be able to tamper with manifest derivation.
+          git show origin/main:scripts/agent-pool.mjs > /tmp/agent-pool.mjs || true
           sid=""; slug=""
           cli_version="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
           model="claude-sonnet-5"
           if [ -n "$cli_version" ] && [ -n "${BUCKET:-}" ]; then
             gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename' > /tmp/pool-changed.txt || true
-            slug="$(node scripts/agent-pool.mjs root < /tmp/pool-changed.txt | jq -r .slug)" || slug=""
+            slug="$(node /tmp/agent-pool.mjs root < /tmp/pool-changed.txt | jq -r .slug)" || slug=""
             git ls-tree -r HEAD > /tmp/pool-ls-tree.txt
             idx="agent/pool/v1/idx/${cli_version}/${model}/${slug}/"
             munged="$(echo "$GITHUB_WORKSPACE" | tr '/' '-')"
@@ -453,7 +458,7 @@ jobs:
             for key in $keys; do
               aws s3 cp "s3://${BUCKET}/${key}" /tmp/pool-candidate.json >/dev/null 2>&1 || continue
               cand_sid="$(jq -r .session_id /tmp/pool-candidate.json)" || continue
-              elig="$(node scripts/agent-pool.mjs eligible --manifest /tmp/pool-candidate.json --ls-tree /tmp/pool-ls-tree.txt)" || continue
+              elig="$(node /tmp/agent-pool.mjs eligible --manifest /tmp/pool-candidate.json --ls-tree /tmp/pool-ls-tree.txt)" || continue
               if [ "$(echo "$elig" | jq -r .ok)" != "true" ]; then
                 echo "pool: retired ${cand_sid} ($(echo "$elig" | jq -r .reason))" | tee -a "$GITHUB_STEP_SUMMARY"
                 aws s3 rm "s3://${BUCKET}/${key}" >/dev/null 2>&1 || true
@@ -595,6 +600,9 @@ jobs:
           AGENT_POOL_CONTEXT_CAP_TOKENS: ${{ vars.AGENT_POOL_CONTEXT_CAP_TOKENS }}
         run: |
           set -uo pipefail
+          # Same origin/main staging as Pool checkout (#3293) — this step runs
+          # even when checkout was skipped, so it stages its own copy.
+          git show origin/main:scripts/agent-pool.mjs > /tmp/agent-pool.mjs || true
           model="claude-sonnet-5"
           release_lease() {
             [ -n "${PRIOR_SID:-}" ] && aws s3 rm "s3://${BUCKET}/agent/pool/v1/leases/${PRIOR_SID}" >/dev/null 2>&1 || true
@@ -611,7 +619,7 @@ jobs:
           git ls-tree -r HEAD > /tmp/pool-ls-tree.txt
           prior_flag=""
           [ -f /tmp/pool-prior-manifest.json ] && prior_flag="--prior /tmp/pool-prior-manifest.json"
-          out="$(node scripts/agent-pool.mjs manifest \
+          out="$(node /tmp/agent-pool.mjs manifest \
             --transcript /tmp/review-session.jsonl \
             --ls-tree /tmp/pool-ls-tree.txt \
             --verdict "$GITHUB_WORKSPACE/pool-verdict.json" \
