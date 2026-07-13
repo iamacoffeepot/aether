@@ -182,9 +182,10 @@ name: Agent tick
 #
 # NUDGE. An agent:awaiting-answer item whose park (its most recent
 # awaiting-answer label event) is older than AGENT_NUDGE_DAYS gets one @-owner
-# nudge comment carrying an <!-- aether-nudge --> marker, de-duped by that
-# marker's age so it re-nudges on cadence, not every tick. Skipped when the owner
-# has already replied.
+# nudge comment, de-duped by the most recent agent:nudged label event so it
+# re-nudges on cadence, not every tick (#3336 moved this cadence marker off the
+# free-text <!-- aether-nudge --> comment; a re-nudge remove-then-re-adds the
+# label to stamp a fresh event). Skipped when the owner has already replied.
 #
 # IDENTITY. Every dispatch and nudge rides the aether-agent App installation
 # token (actions/create-github-app-token), NOT GITHUB_TOKEN: App-created
@@ -1155,10 +1156,16 @@ jobs:
               echo "#${num}: owner already replied — skip nudge"; continue
             fi
 
-            # De-dup: re-nudge on cadence, not every tick. A marker comment
-            # younger than the threshold means the last nudge is still fresh.
-            last_nudge="$(gh api "repos/${REPO}/issues/${num}/comments?per_page=100" --paginate \
-              --jq '[.[] | select(.body | contains("<!-- aether-nudge -->")) | .created_at] | last // empty' || true)"
+            # De-dup: re-nudge on cadence, not every tick. The most recent
+            # agent:nudged label event dates the last nudge (#3336). Transition
+            # fallback: a nudge posted before #3336 landed carries no label, so
+            # fall back to the old <!-- aether-nudge --> comment's age.
+            last_nudge="$(gh api "repos/${REPO}/issues/${num}/timeline?per_page=100" --paginate \
+              --jq '[.[] | select(.event=="labeled" and .label.name=="agent:nudged") | .created_at] | last // empty' || true)"
+            if [ -z "$last_nudge" ]; then
+              last_nudge="$(gh api "repos/${REPO}/issues/${num}/comments?per_page=100" --paginate \
+                --jq '[.[] | select(.body | contains("<!-- aether-nudge -->")) | .created_at] | last // empty' || true)"
+            fi
             if [ -n "$last_nudge" ]; then
               if [ $(( now_epoch - $(date -u -d "$last_nudge" +%s) )) -lt "$threshold" ]; then
                 echo "#${num}: nudged within the cadence — skip"; continue
@@ -1167,10 +1174,12 @@ jobs:
 
             cat > /tmp/nudge.md <<EOF
           @${OWNER} — issue #${num} has been waiting on your answer for $(( park_age / 86400 )) day(s). Reply here and the fleet resumes it on the next tick.
-
-          <!-- aether-nudge -->
           EOF
             gh api -X POST "repos/${REPO}/issues/${num}/comments" -F body=@/tmp/nudge.md
+            # Stamp a fresh nudge cadence: remove-then-re-add agent:nudged so its
+            # labeled event dates this nudge (#3336). Remove tolerates absence.
+            gh api -X DELETE "repos/${REPO}/issues/${num}/labels/agent:nudged" 2>/dev/null || true
+            gh api -X POST "repos/${REPO}/issues/${num}/labels" -f 'labels[]=agent:nudged' >/dev/null
             echo "#${num}: nudged"
           done < /tmp/await.txt
 
@@ -1205,9 +1214,15 @@ jobs:
               echo "#${num}: bounced $(( park_age / 86400 ))d < ${nudge_days}d — not stale"; continue
             fi
 
-            # De-dup: re-nudge on cadence, not every tick.
-            last_nudge="$(gh api "repos/${REPO}/issues/${num}/comments?per_page=100" --paginate \
-              --jq '[.[] | select(.body | contains("<!-- aether-nudge -->")) | .created_at] | last // empty' || true)"
+            # De-dup: re-nudge on cadence, not every tick. Same agent:nudged
+            # label-event read as the await loop, with the pre-#3336 comment-age
+            # fallback.
+            last_nudge="$(gh api "repos/${REPO}/issues/${num}/timeline?per_page=100" --paginate \
+              --jq '[.[] | select(.event=="labeled" and .label.name=="agent:nudged") | .created_at] | last // empty' || true)"
+            if [ -z "$last_nudge" ]; then
+              last_nudge="$(gh api "repos/${REPO}/issues/${num}/comments?per_page=100" --paginate \
+                --jq '[.[] | select(.body | contains("<!-- aether-nudge -->")) | .created_at] | last // empty' || true)"
+            fi
             if [ -n "$last_nudge" ]; then
               if [ $(( now_epoch - $(date -u -d "$last_nudge" +%s) )) -lt "$threshold" ]; then
                 echo "#${num}: nudged within the cadence — skip"; continue
@@ -1216,9 +1231,10 @@ jobs:
 
             cat > /tmp/nudge.md <<EOF
           @${OWNER} — issue #${num} was bounced $(( park_age / 86400 )) day(s) ago and hasn't resumed — address the reason on the issue, or reply here.
-
-          <!-- aether-nudge -->
           EOF
             gh api -X POST "repos/${REPO}/issues/${num}/comments" -F body=@/tmp/nudge.md
+            # Stamp a fresh nudge cadence (#3336), same as the await loop.
+            gh api -X DELETE "repos/${REPO}/issues/${num}/labels/agent:nudged" 2>/dev/null || true
+            gh api -X POST "repos/${REPO}/issues/${num}/labels" -f 'labels[]=agent:nudged' >/dev/null
             echo "#${num}: nudged (stale bounce)"
           done < /tmp/bounced.txt

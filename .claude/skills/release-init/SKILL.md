@@ -27,7 +27,7 @@ Bootstraps the label vocabulary + local marker the other release skills depend o
 bash scripts/release-project-init.sh <version> --owner <owner>
 ```
 
-The script ensures every pipeline label exists and is idempotent — a re-run only fills gaps. It covers the phase labels (`phase:define` … `phase:stalled`; Backlog and Done carry none), the `bounce-to:*` resume targets `/bounce` stamps, the `approval:surface-exceeded` / `approval:surface-ok` declared-surface labels the reconciler and its owner waiver use, the `size:*` weights (including `size:xl` = fat), and the `model:*` routing labels. `type:*` labels are stamped by `/sketch` from the title's conventional-commit prefix and `crate:*` labels are created on demand at filing, so this step doesn't touch them.
+The script ensures every pipeline label exists and is idempotent — a re-run only fills gaps. It covers the phase labels (`phase:define` … `phase:stalled`; Backlog and Done carry none), the `bounce-to:*` resume targets `/bounce` stamps, the `approval:surface-exceeded` / `approval:surface-ok` declared-surface labels the reconciler and its owner waiver use, the fleet control surface (`agent:dont-touch`, `agent:awaiting-answer`, the `agent:park:{scope,approve,implement,land,resolve}` re-dispatch-routing labels and the `agent:nudged` nudge-cadence label — the parked-question routing state, moved off the free-text HTML marker into labels per #3336), the `size:*` weights (including `size:xl` = fat), and the `model:*` routing labels. `type:*` labels are stamped by `/sketch` from the title's conventional-commit prefix and `crate:*` labels are created on demand at filing, so this step doesn't touch them.
 
 ### 2. Print summary
 
