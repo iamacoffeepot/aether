@@ -186,11 +186,12 @@ jobs:
     steps:
       # Decide the branch BEFORE any secret-bearing step, from observable board
       # facts alone (GITHUB_TOKEN reads, no App token yet). A parked answer is an
-      # owner comment on an issue carrying agent:awaiting-answer; task + ref come
-      # from the parked-question comment's marker
-      # (<!-- aether-agent:awaiting-answer task=… ref=… … -->, #3128's fixed
-      # shape). Recover ref from the marker (the authoritative work ref), falling
-      # back to this issue's number if the marker omits it.
+      # owner comment on an issue carrying agent:awaiting-answer; the re-dispatch
+      # task comes from the agent:park:<task> label (#3336 moved it off the
+      # free-text marker into structured GitHub state), and the work ref is always
+      # this surface's own number. A one-release transition fallback reads the old
+      # <!-- aether-agent:awaiting-answer task=… --> marker for parks that were
+      # written before this landed.
       - name: Route — parked answer or plain conversation
         id: route
         env:
@@ -204,44 +205,42 @@ jobs:
             exit 0
           fi
 
-          # The marker is the greppable anchor the park wrote. Read both homes,
-          # body first: a per-issue ask-and-park carries its marker in a comment,
-          # but the body read is retained as gate parity with the summon clause
-          # above so a marker in EITHER home routes rather than falling through to
-          # the plain branch and dispatching nothing (#3198). Capture then match
-          # with a here-string so grep -q can't SIGPIPE the paginated gh under
-          # pipefail.
-          body="$(gh api "repos/${REPO}/issues/${ISSUE}" --jq '.body // ""')"
-          marker="$(grep -m1 -oE '<!-- aether-agent:awaiting-answer[^>]*-->' <<<"$body" || true)"
-          if [ -z "$marker" ]; then
-            comments="$(gh api "repos/${REPO}/issues/${ISSUE}/comments" --paginate --jq '.[].body')"
-            marker="$(grep -m1 -oE '<!-- aether-agent:awaiting-answer[^>]*-->' <<<"$comments" || true)"
-          fi
-          if [ -z "$marker" ]; then
-            # The label is set but no marker comment is present — the pair is torn.
-            # Treat it as a plain turn (reply inline) rather than dispatching a
-            # task we cannot address; the owner sees a normal reply and can retry.
-            echo "agent:awaiting-answer is set but no parked-question marker was found — falling back to a plain turn."
-            echo "parked=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          # The re-dispatch task lives in the agent:park:<task> label. Read it
+          # there first. Transition fallback: for a park written before #3336
+          # landed, grep task= off the old marker — reading both homes, body
+          # first, for parity with the summon clause above (a per-issue ask-and-
+          # park carried its marker in a comment, #3198). Capture then match with
+          # a here-string so grep -q can't SIGPIPE the paginated gh under pipefail.
+          task="$(grep -m1 -oE '^agent:park:[a-z-]+$' <<<"$labels" | cut -d: -f3 || true)"
+          if [ -z "$task" ]; then
+            body="$(gh api "repos/${REPO}/issues/${ISSUE}" --jq '.body // ""')"
+            marker="$(grep -m1 -oE '<!-- aether-agent:awaiting-answer[^>]*-->' <<<"$body" || true)"
+            if [ -z "$marker" ]; then
+              comments="$(gh api "repos/${REPO}/issues/${ISSUE}/comments" --paginate --jq '.[].body')"
+              marker="$(grep -m1 -oE '<!-- aether-agent:awaiting-answer[^>]*-->' <<<"$comments" || true)"
+            fi
+            task="$(grep -oE 'task=[a-z-]+' <<<"$marker" | head -n1 | cut -d= -f2 || true)"
           fi
 
-          # task admits a hyphen and ref admits non-numeric forms alongside
-          # issue/PR numbers — keep the parse broad so a hyphenated task or a
-          # symbolic ref routes rather than being silently truncated by a
-          # narrower [a-z]+ / [0-9]+ form.
-          task="$(grep -oE 'task=[a-z-]+' <<<"$marker" | head -n1 | cut -d= -f2 || true)"
-          ref="$(grep -oE 'ref=[a-z0-9]+' <<<"$marker" | head -n1 | cut -d= -f2 || true)"
-          [ -n "$ref" ] || ref="$ISSUE"
+          # The work ref is always this surface's own number — the marker's old
+          # ref= field only ever restated it (agent-chat already fell back to
+          # ref="$ISSUE"), so #3336 dropped the stored field and this is now its
+          # sole source.
+          ref="$ISSUE"
+
           # approve parks come from a single-issue approve run and from the
-          # approve sweep's per-issue asks — both deliberately carry
-          # task=approve ref=<n> (no session pointer) so the owner's answer
-          # resumes that ONE issue down the single-issue path (#3316 retired the
-          # central-ticket reply that once re-dispatched the whole sweep).
+          # approve sweep's per-issue asks — both carry task=approve so the
+          # owner's answer resumes that ONE issue down the single-issue path
+          # (#3316 retired the central-ticket reply that once re-dispatched the
+          # whole sweep).
           case "$task" in
             scope|approve|implement|land|resolve) ;;
             *)
-              echo "parked marker carries an unrecognized task='${task:-}' — falling back to a plain turn."
+              # The label is set but no routable task was found — a torn pair
+              # (agent:awaiting-answer without an agent:park:* label and without
+              # a marker), or an unrecognized task. Reply inline rather than
+              # dispatch a task we cannot address; the owner can retry.
+              echo "agent:awaiting-answer is set but no routable task was found (task='${task:-}') — falling back to a plain turn."
               echo "parked=false" >> "$GITHUB_OUTPUT"
               exit 0
               ;;
@@ -308,6 +307,18 @@ jobs:
           else
             echo "no agent:awaiting-answer label on #${ISSUE} to clear (marker-only surface) — continuing."
           fi
+          # Clear the parked-state siblings too (#3336): the agent:park:<task>
+          # routing label and the agent:nudged cadence marker are scoped to THIS
+          # park, so an owner reply that ends it must drop both — leaving
+          # agent:nudged behind would suppress the first nudge of the next park.
+          # Enumerate the live set and delete each present agent:park:* plus
+          # agent:nudged; all tolerant of absence under set -euo pipefail.
+          for lbl in $(gh api "repos/${REPO}/issues/${ISSUE}/labels" \
+              --jq '.[].name | select(startswith("agent:park:") or . == "agent:nudged")' || true); do
+            if gh api -X DELETE "repos/${REPO}/issues/${ISSUE}/labels/${lbl}" 2>/dev/null; then
+              echo "cleared ${lbl} on #${ISSUE}."
+            fi
+          done
           gh workflow run agent-work.yml -f task="$TASK" -f ref="$REF"
           echo "re-dispatched agent-work: task=${TASK} ref=${REF}."
 

@@ -23,14 +23,13 @@ An unanswered park means the job is waiting on the owner — end the turn withou
 
 ## ask-and-park
 
-Where the original would ask a human — a scope Define or Design bounce, a scope §Comments self-bounce, a land dirty-conflict or Qodana bail-out, or any value judgment only the owner can make — the headless agent does not stop and wait. It posts a structured question comment in the fixed shape below, applies the `agent:awaiting-answer` label, syncs its session to S3 (see [session-to-S3-sync](#session-to-s3-sync)), and exits 0. The exit is clean: a parked question is a normal terminal state for a headless run, not a failure.
+Where the original would ask a human — a scope Define or Design bounce, a scope §Comments self-bounce, a land dirty-conflict or Qodana bail-out, or any value judgment only the owner can make — the headless agent does not stop and wait. It posts a plain-prose question comment in the fixed shape below, applies the `agent:awaiting-answer` label plus the `agent:park:<task>` label naming which task an owner reply re-dispatches, and exits 0. The exit is clean: a parked question is a normal terminal state for a headless run, not a failure.
 
-The owner's reply re-dispatches the job, which `claude --resume`s the same session from the S3 pointer recorded in the comment marker, so the answer continues the same reasoning context rather than a cold re-scope. V1's only answerer is the owner — there is no `ask:*` routing vocabulary yet.
+The owner's reply re-dispatches the job — agent-chat reads the task from the `agent:park:<task>` label and the work ref from the surface the reply lands on, then dispatches agent-work (#3336 moved this routing payload off the free-text marker into structured GitHub state). Best-effort reasoning-context carry rides the #3313 warm session pool, bucketed by task+model; the reliable path is re-deriving the state from the board, exactly as the approve park already does. V1's only answerer is the owner — there is no `ask:*` routing vocabulary yet.
 
-The question comment has a fixed, machine-parseable shape so the resume path can find it and its S3 pointer without heuristics. The leading HTML-comment marker is the greppable anchor, carrying `task`, `ref`, `run`, and the S3 `session` URI as key=value pairs; the numbered **Options** list is the parseable choice set. One marker variant carries no `session=` and resumes fresh instead of `--resume`ing: an approve per-issue ask (`task=approve ref=<n>`, written by the single-issue `/approve-headless` and by the approve sweep's per-issue asks — the gate/verdict context is cheap to re-derive from the board, so no stored session is needed):
+The question comment carries the human question and options only — no HTML marker. The machine state lives entirely in labels (`agent:awaiting-answer` classifies the park, `agent:park:<task>` routes the re-dispatch), so `status-sweep.sh` and agent-chat's route step read structured GitHub state rather than parsing the comment. The numbered **Options** list is for the owner; the leading `**Parked on #<N>**` header is what `status-sweep.sh` selects as the displayed question:
 
 ```markdown
-<!-- aether-agent:awaiting-answer task=<scope|approve|implement|land|resolve> ref=<issue-or-pr> run=<run-url> session=<s3-uri> -->
 **Parked on #<N> — need a decision.**
 
 <question in plain language, the load-bearing "why" first>
@@ -39,10 +38,10 @@ Options:
 1. <option A> — <consequence>
 2. <option B> — <consequence>
 
-Reply with an option number or free-form; your reply re-dispatches this job, which resumes the same session.
+Reply with an option number or free-form; your reply re-dispatches this job.
 ```
 
-Post the comment over REST (`gh api -X POST repos/iamacoffeepot/aether/issues/<n>/comments -F body=@<file>`, body written to a file first so its backticks and `$` are not shell-expanded) and apply the label over REST (the same `…/labels` endpoints the original's phase reconcile uses). The question carries its load-bearing "why" first, then the options with their consequences, so the owner can decide from the comment alone.
+Post the comment over REST (`gh api -X POST repos/iamacoffeepot/aether/issues/<n>/comments -F body=@<file>`, body written to a file first so its backticks and `$` are not shell-expanded) and apply both labels over REST (the same `…/labels` endpoints the original's phase reconcile uses). The question carries its load-bearing "why" first, then the options with their consequences, so the owner can decide from the comment alone.
 
 ## end-turn-not-wait
 
@@ -72,7 +71,3 @@ The checkout copy has its `.claude` interactive-session hooks stripped (the `jq 
 ## commit-identity-assert
 
 Before any commit or merge, assert the owner's public git identity — `iamacoffeepot` / `me@iamateapot.dev` — for the checkout (#3215): the fleet works in the owner's name, so its commits author as the owner. This narrows, not weakens, the standing privacy rule: the owner's real name and personal email never appear in any commit the agent produces — the public identity above is the only sanctioned author.
-
-## session-to-S3-sync
-
-On ask-and-park, sync the Claude session directory to S3 under a per-issue prefix in the RunsOn cache bucket, and record the resulting `s3://…` pointer in the parked-question comment's marker (`session=<s3-uri>`). Resume is `claude --resume` from that pointer, so the owner's answer continues the same reasoning context — the parked run's exploration and design reads carry forward rather than being re-derived from scratch. The comment marker is the only place the pointer lives; nothing else stores it, consistent with computed-liveness.

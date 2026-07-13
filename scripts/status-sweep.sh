@@ -16,14 +16,13 @@
 #
 # Output (space-padded for alignment):
 #
-#   #3316  task=approve   ref=3316  age=2d   **Parked on #3316 — need a decision.**
-#   #3200  task=scope     ref=3200  age=5d   **Parked on #3200 — need a decision.**
+#   #3316  task=approve   age=2d   **Parked on #3316 — need a decision.**
+#   #3200  task=scope     age=5d   **Parked on #3200 — need a decision.**
 #
 # Columns:
-#   #N     — issue number
-#   task   — the parked task from the awaiting-answer marker (approve / scope / …)
-#   ref    — the marker's ref (the issue/PR the task acts on)
-#   age    — days since the park comment was posted (? when undeterminable)
+#   #N     — issue number (the work ref is always this same number, #3336)
+#   task   — the parked task from the agent:park:<task> label (approve / scope / …)
+#   age    — days since the agent:awaiting-answer label was applied (? when undeterminable)
 #   ask    — the first line of the parked question (the bold "Parked on …" header)
 #
 # REST only — no `gh issue list` (GraphQL-backed). Every call goes through the
@@ -61,34 +60,45 @@ iso_to_epoch() {
 # Print one status line for a parked issue given its number.
 print_ask_line() {
     local num="$1"
-    local body marker task ref
-    body="$(gh api "repos/$REPO/issues/$num" --jq '.body // ""' 2>/dev/null || echo "")"
+    local labels task ask created
 
-    # The marker lives in the park comment (single-issue and per-issue-ask parks
-    # post it there); read the body first for parity with the chat route step,
-    # then fall back to comments. Capture the comment carrying it so its
-    # created_at dates the park.
-    local created=""
-    marker="$(grep -m1 -oE '<!-- aether-agent:awaiting-answer[^>]*-->' <<<"$body" || true)"
-    local ask=""
-    if [[ -n "$marker" ]]; then
-        ask="$(awk '/<!-- aether-agent:awaiting-answer/{f=1; next} f && NF {print; exit}' <<<"$body" || true)"
-        created="$(gh api "repos/$REPO/issues/$num" --jq '.created_at' 2>/dev/null || echo "")"
-    else
-        local comments
-        comments="$(gh api "repos/$REPO/issues/$num/comments" --paginate \
-            --jq '[.[] | select(.body | test("<!-- aether-agent:awaiting-answer")) ] | last // {}' 2>/dev/null || echo '{}')"
-        local cbody
-        cbody="$(jq -r '.body // ""' <<<"$comments")"
-        marker="$(grep -m1 -oE '<!-- aether-agent:awaiting-answer[^>]*-->' <<<"$cbody" || true)"
-        ask="$(awk '/<!-- aether-agent:awaiting-answer/{f=1; next} f && NF {print; exit}' <<<"$cbody" || true)"
-        created="$(jq -r '.created_at // ""' <<<"$comments")"
+    # task: the agent:park:<task> label (#3336 moved it off the free-text
+    # marker). Transition fallback below reads task= off the old marker for a
+    # park written before #3336 landed.
+    labels="$(gh api "repos/$REPO/issues/$num/labels" --jq '.[].name' 2>/dev/null || echo "")"
+    task="$(grep -m1 -oE '^agent:park:[a-z-]+$' <<<"$labels" | cut -d: -f3 || true)"
+
+    # Park age dates from the most recent agent:awaiting-answer labeled event —
+    # the same authoritative park timestamp agent-tick's nudge loop reads.
+    created="$(gh api "repos/$REPO/issues/$num/timeline?per_page=100" --paginate \
+        --jq '[.[] | select(.event=="labeled" and .label.name=="agent:awaiting-answer") | .created_at] | last // empty' 2>/dev/null || echo "")"
+
+    # Question text: the first non-empty line of the latest park comment. The
+    # comment is now pure prose opening with the bold "**Parked on …**" header
+    # (#3336 dropped the HTML marker) — select the latest comment carrying it.
+    ask="$(gh api "repos/$REPO/issues/$num/comments" --paginate \
+        --jq '[.[] | select(.body | test("\\*\\*Parked on"))] | last | .body // ""' 2>/dev/null \
+        | awk 'NF {print; exit}' || true)"
+
+    # Transition fallback for a pre-#3336 park still carrying the marker: recover
+    # the task and question from the marker in the body or the latest park comment.
+    if [[ -z "$task" || -z "$ask" ]]; then
+        local body marker=""
+        body="$(gh api "repos/$REPO/issues/$num" --jq '.body // ""' 2>/dev/null || echo "")"
+        local mbody="$body"
+        marker="$(grep -m1 -oE '<!-- aether-agent:awaiting-answer[^>]*-->' <<<"$body" || true)"
+        if [[ -z "$marker" ]]; then
+            local comments
+            comments="$(gh api "repos/$REPO/issues/$num/comments" --paginate \
+                --jq '[.[] | select(.body | test("<!-- aether-agent:awaiting-answer")) ] | last // {}' 2>/dev/null || echo '{}')"
+            mbody="$(jq -r '.body // ""' <<<"$comments")"
+            marker="$(grep -m1 -oE '<!-- aether-agent:awaiting-answer[^>]*-->' <<<"$mbody" || true)"
+        fi
+        [[ -n "$task" ]] || task="$(grep -oE 'task=[a-z-]+' <<<"$marker" | head -n1 | cut -d= -f2 || true)"
+        [[ -n "$ask" ]] || ask="$(awk '/<!-- aether-agent:awaiting-answer/{f=1; next} f && NF {print; exit}' <<<"$mbody" || true)"
     fi
 
-    task="$(grep -oE 'task=[a-z-]+' <<<"$marker" | head -n1 | cut -d= -f2 || true)"
-    ref="$(grep -oE 'ref=[a-z0-9]+' <<<"$marker" | head -n1 | cut -d= -f2 || true)"
     [ -n "$task" ] || task="?"
-    [ -n "$ref" ] || ref="$num"
 
     local age="?"
     if [[ -n "$created" ]]; then
@@ -101,8 +111,8 @@ print_ask_line() {
     fi
 
     [ -n "$ask" ] || ask="(no question text found)"
-    printf '%-7s  %-14s  %-10s  %-6s  %s\n' \
-        "#$num" "task=$task" "ref=$ref" "age=$age" "$ask"
+    printf '%-7s  %-14s  %-6s  %s\n' \
+        "#$num" "task=$task" "age=$age" "$ask"
 }
 
 # Enumerate open issues carrying agent:awaiting-answer (PRs filtered out).

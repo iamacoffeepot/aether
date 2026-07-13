@@ -15,7 +15,7 @@ Before any process step, run the protocol's [re-entrancy-first](../headless/prot
 
 | Original anchor | Interactive behavior | Headless override |
 |-----------------|---------------------|-------------------|
-| [`### Define`](../scope/SKILL.md#define) Bounce | Self-bounce with a comment asking the specific clarifying question, then the user re-invokes | [ask-and-park](../headless/protocol.md#ask-and-park) — post the structured question comment, apply `agent:awaiting-answer`, sync the session to S3, exit 0 |
+| [`### Define`](../scope/SKILL.md#define) Bounce | Self-bounce with a comment asking the specific clarifying question, then the user re-invokes | [ask-and-park](../headless/protocol.md#ask-and-park) — post the structured question comment, apply `agent:awaiting-answer` + `agent:park:scope`, exit 0 |
 | [`### Design`](../scope/SKILL.md#design) Bounce | Self-bounce on a tied value-judgment only the user can make | [ask-and-park](../headless/protocol.md#ask-and-park) |
 | [`### Design`](../scope/SKILL.md#design) ADR drafting | Scaffold an ADR on a branch and open a PR; the issue is not `/approve`-eligible until it merges | [ask-and-park](../headless/protocol.md#ask-and-park) — a headless scoper cuts no branch; when the chosen approach is load-bearing, park the ADR decision to the owner rather than drafting it |
 | [`## Comments`](../scope/SKILL.md#comments) self-bounce question/blocker | Prose comment addressed to a human | [ask-and-park](../headless/protocol.md#ask-and-park) — the same content, posted in the machine-parseable park shape |

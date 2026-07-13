@@ -70,6 +70,19 @@ ensure_label "approval:surface-ok"       0e8a16 "owner waiver: declared-surface 
 ensure_label "agent:dont-touch"      000000 "fleet-blind: the dispatcher, judge, and executor skip this issue. Only the owner removes it."
 ensure_label "agent:awaiting-answer" fbca04 "an agent parked a question here; an owner reply resumes its session"
 
+# The parked-question routing payload, moved off the free-text HTML marker into
+# structured labels (#3336). agent:park:<task> names which task an owner reply
+# re-dispatches — the route step and status-sweep read it instead of grepping the
+# marker. agent:nudged carries the nudge cadence: its most recent labeled event
+# dates the last @-owner nudge, so re-nudging remove-then-re-adds it. Both are
+# cleared alongside agent:awaiting-answer when the owner replies.
+ensure_label "agent:park:scope"      fbca04 "parked ask re-dispatches /scope on reply"
+ensure_label "agent:park:approve"    fbca04 "parked ask re-dispatches /approve on reply"
+ensure_label "agent:park:implement"  fbca04 "parked ask re-dispatches /implement on reply"
+ensure_label "agent:park:land"       fbca04 "parked ask re-dispatches /land on reply"
+ensure_label "agent:park:resolve"    fbca04 "parked ask re-dispatches /resolve on reply"
+ensure_label "agent:nudged"          fbca04 "nudge-cadence marker; its latest labeled event dates the last @-owner nudge"
+
 # Machine-filed alerts (the context-budget canary, the nightly fuzzer). They carry
 # no type:* label because they never went through /sketch, so without this tag the
 # dispatcher reads them as Backlog and scopes them. The alert-filing workflows
