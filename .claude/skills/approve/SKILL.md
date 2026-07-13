@@ -19,7 +19,7 @@ The primary human review point of the release flow. The user invokes `/approve <
 
    This is the REST issues endpoint (per `/scope` §REST-vs-GraphQL routing), not `gh issue list`, which is GraphQL-backed and drains the contended pool.
 
-2. **Gate-check each candidate.** Run the full [gate checks](#gate-checks) per issue — `Phase == Plan`, the three §-sections present and non-empty, every referenced ADR PR merged, exactly one `model:*` label, not blocked by a `blocked`/`wontfix`/`duplicate` label, freshness gate (targeted paths exist on `origin/main` and none churned since scope), dependency gate (every `#N` in `## Depends on` is a closed issue). Drop any issue that fails and record the reason; the sweep never silently skips — every dropped issue is listed in the plan with its drop reason. `--skip-adr` is **not** honored in sweep mode: a batch is the wrong place for a per-issue emergency override, so an unmerged-ADR issue is dropped and listed, to be approved singly with `/approve <n> --skip-adr` if the override is intended.
+2. **Gate-check each candidate.** Run the full [gate checks](#gate-checks) per issue — `Phase == Plan`, the three §-sections present and non-empty, every referenced ADR PR merged, exactly one `model:*` label, not blocked by a `blocked`/`wontfix`/`duplicate` label, freshness gate (targeted paths exist on `origin/main`; churn re-grounds against the plan's anchors, parking only a broken anchor), dependency gate (every `#N` in `## Depends on` is a closed issue). Drop any issue that fails and record the reason; the sweep never silently skips — every dropped issue is listed in the plan with its drop reason. `--skip-adr` is **not** honored in sweep mode: a batch is the wrong place for a per-issue emergency override, so an unmerged-ADR issue is dropped and listed, to be approved singly with `/approve <n> --skip-adr` if the override is intended.
 
 3. **Print the approve plan and wait for confirmation.** A batch label write is cheap to do but annoying to unwind, so one confirmation prompt covers the set. Print the issues that will be approved (with their `size:*` / `model:*` for context), any umbrella issues flagged distinctly (an umbrella with `## Sub-issues` is approvable — approving means "the plan is approved, children split correctly" — but it is not itself `/implement`-able; see [Multi-PR umbrella issues](#multi-pr-umbrella-issues)), and the dropped-with-reason list, then stop and wait:
 
@@ -67,7 +67,7 @@ Run all of these. **Refuse** if any fail; list every failure in the refusal outp
 | ADR merged | if §Design notes references an ADR PR, that PR's `mergedAt` is non-null (see [ADR gate, in detail](#adr-gate-in-detail); an ADR reference *also* forces the `human` tier via the [ADR hard gate](#adr-hard-gate)) | "ADR PR #M is not merged. Merge it or pass `--skip-adr` to override." |
 | Model label | exactly one `model:*` label present, except a pure umbrella (non-empty `## Sub-issues`, coordination-only own plan; see [Multi-PR umbrella issues](#multi-pr-umbrella-issues)), which carries none (REST: `gh api repos/iamacoffeepot/aether/issues/<n>/labels`) | "Missing model:* label (or more than one). `/scope` stamps model routing at Plan — re-run its Plan step or add the label by hand." |
 | Not blocked | no `blocked` / `wontfix` / `duplicate` label present | "Issue carries label '<label>' which blocks approval." |
-| Freshness | targeted paths exist on `origin/main` and none have churned since scope | "Targets removed on main: <paths>" (hard refuse) / "Targets churned since scope — re-ground before approving: <paths>" (soft surface) |
+| Freshness | targeted paths exist on `origin/main`; churn since scope re-grounds against the plan's anchors and surfaces only a broken one | "Targets removed on main: <paths>" (hard refuse) / "Plan anchor broken by churn — re-ground failed: `<pattern>` at `<path>`" (soft surface) |
 | Dependency | every `#N` in `## Depends on` is a closed (Done) issue | "Blocked on unlanded dependency: #N (open)." |
 | Umbrella integrity | if `## Sub-issues` is non-empty, the own `## Implementation plan` describes only coordination/integration, not net-new code the children don't cover | "Malformed umbrella: `## Sub-issues` plus a substantial own plan. Split the residual plan into its own child issue (leaving a pure umbrella), or remove `## Sub-issues` to make it a plain implementable issue." |
 
@@ -86,22 +86,35 @@ git cat-file -e origin/main:<path>   # exit 0 = exists, exit 128 = gone
 
 A Tier A failure is a hard refusal (single) or drop-with-reason (sweep): the issue's premise is provably dead — there is nothing to implement.
 
-**Tier B — drift since scope (soft surface).** The scoped-at reference is the timestamp of the most-recent `phase:plan` labeled event on the issue timeline:
+**Tier B — drift since scope (auto re-ground).** Churn on a target since scope is not a park by itself — the machine re-runs the plan's anchors against current `main` and parks only when the churn actually broke an edit site. Plans are grep-anchored by convention (`/scope` §Plan: anchors + re-runnable patterns, not frozen line numbers), so the re-ground the park used to ask a human for is mechanical.
+
+First establish the **drift floor**. A prior re-ground leaves a deduped `<!-- aether-agent:freshness-baseline sha=<origin/main-sha> -->` breadcrumb comment on the issue; when one is present, its sha is the floor — so a re-grounded issue is not re-detected as fresh drift every run. With no baseline marker yet, the floor is the scoped-at reference: the timestamp of the most-recent `phase:plan` labeled event on the issue timeline.
 
 ```bash
 gh api repos/iamacoffeepot/aether/issues/<n>/timeline \
   --jq '[.[] | select(.event=="labeled" and .label.name=="phase:plan")] | last | .created_at'
 ```
 
-For each referenced path and each ADR file named in §Design notes, check for commits on `origin/main` since that timestamp:
+Detect churn on the declared-surface paths (and each ADR file named in §Design notes) since the floor — a `git diff --name-only` against the baseline sha when a marker sets the floor, else `git log --since` against the scoped-at timestamp:
 
 ```bash
-git log origin/main --since=<scoped-at> -- <path>
+git diff --name-only <baseline-sha> origin/main -- <path>   # baseline-marker floor
+git log origin/main --since=<scoped-at> -- <path>           # scoped-at floor (no baseline yet)
 ```
 
-A non-empty result means `main` has churned the target since the issue was scoped. Tier B does not auto-refuse: surface "Targets churned since scope — re-ground before approving: <paths>" so the human reviewer decides. In sweep mode, treat a Tier B hit as a drop-with-reason and list it in the plan (the reviewer resolves it singly with `/approve <n>` after grounding).
+An empty churn set → no drift; proceed to tier resolution. A non-empty set means `main` has moved a target since the floor; re-ground it rather than parking:
 
-**Symbol-tier follow-on (pending #2204).** Symbol-level checking — confirming named target symbols still exist on `origin/main`, not just the files — extends the same Tier A machinery once #2204's stable-anchor + discovery-command plan convention lands. Until then the freshness gate runs on paths only.
+1. Parse §Implementation plan for the edit sites whose file paths intersect the churned set.
+2. Derive each site's **anchor** per the `/scope` §Plan convention — the explicit `git grep` / `rg` pattern where the plan gives one, else the cited symbol plus its path (`fn foo` in `<path>` → `git grep -n 'fn foo' origin/main -- <path>`).
+3. Run each anchor against `origin/main` and check it **still lands** (a non-empty match).
+
+**Every anchor still lands** → the drift is cosmetic. Refresh the freshness baseline: record the current `origin/main` sha in a `<!-- aether-agent:freshness-baseline sha=<sha> -->` breadcrumb comment (deduped — skip the post if a marker already carries this sha), then proceed to tier resolution with at most that breadcrumb — no park, and in sweep mode no digest freshness row.
+
+**Any anchor is broken** (its pattern no longer matches, or the symbol is gone) → surface (single) / file a digest freshness row (sweep) naming the **specific broken anchor — its pattern and its path** — an actionable ask, not "targets churned, re-scope." The reviewer re-scopes the one broken edit site; `/implement` never inherits a dead anchor.
+
+**A churned path whose plan site carries no machine-runnable anchor** (no pattern and no citable symbol) falls back to today's surface (single) / digest freshness row (sweep) for that path — conservative: only auto-clear drift the machine can actually verify.
+
+This is the mechanism the former "Symbol-tier follow-on" note deferred: #2204 landed the stable-anchor + discovery-command plan convention, so re-running a plan site's anchor confirms the named target still exists on `origin/main`, not just the file — Tier A still guards raw file existence, Tier B now guards the edit sites themselves.
 
 ## Dependency gate
 
