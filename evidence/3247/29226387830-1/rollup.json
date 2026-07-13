@@ -1,0 +1,69 @@
+{
+  "totals": {
+    "findings": 2,
+    "papercut": 1,
+    "missingPrimitive": 0,
+    "docGap": 1,
+    "blocker": 0,
+    "softHolds": 0
+  },
+  "succeeded": true,
+  "buildGreen": null,
+  "summary": "Drove load_component over the MCP harness with a config_path pointing at a 71,303,180-byte (68 MiB) harness-host JSON file, over the default 64 MiB RPC frame cap. The tool rejected it up front with MCP error -32602 (invalid_params): 'load_component \"aether_kit@aether.kit.camera-controller\": config_path \"…\" is 71303180 bytes, over the 67108864-byte RPC frame cap; a blob this large must stage as a hub-read path (ADR-0115/0116), not inline into mail'. This is an early, cap-naming rejection — not a late cap-silent encode failure. Confirmed parity with the {\"$file\": …} oversized embed: an aether.fs.write with a $file embed of the same file produced the identical message body (same 71303180 / 67108864 byte figures, same guidance) differing only by the \"config_path\" vs \"$file\" leader. Setup path had friction: selector is resolved before the config file is read, so exercising the config_path cap required a real stored component — I built aether-kit to wasm32 (existing crate, no new crate written), uploaded it, and loaded its camera-controller export (which declares a Config kind). Error-path task, nothing renders; engine terminated and probe file cleaned up.",
+  "artifact": null,
+  "friction": {
+    "papercut": [
+      {
+        "category": "papercut",
+        "severity": "low",
+        "where": "load_component config_path handling — ordering relative to selector resolution",
+        "what": "The config_path frame-cap check happens only after the selector resolves against the hub registry. Probing the cap with a placeholder selector returns a selector-resolution error first, masking the config cap, so verifying 'is my oversized config rejected up front?' in isolation requires already having a real stored component whose Config kind you intend to load. This made the setup for an error-path check heavier than the check itself (build+upload a component just to reach the read cap).",
+        "suggested": "Optional: validate config_path size before or independently of selector resolution so the frame-cap rejection surfaces even when the selector is a placeholder — the file read is local to aether-mcp and doesn't depend on the resolved component. Low priority since real usage always has a valid selector."
+      }
+    ],
+    "missing-primitive": [],
+    "doc-gap": [
+      {
+        "category": "doc-gap",
+        "severity": "medium",
+        "where": "docs/guide/operating/host-paths-and-artifacts.md — the 'Path surface matrix' table",
+        "what": "The config_path row (load_component/replace_component) reads 'reads structured JSON and schema-encodes it for the selected component' and says nothing about the frame-cap rejection, while the very next row for a Bytes '{\"$file\": path}' embed explicitly states 'reads the whole host file, then rejects it if it exceeds the RPC frame cap'. After this fix the two paths behave identically, but the matrix documents only the $file side, so a fresh consumer reading the table would not learn that config_path is now capped the same way. The prose 'Configuration and other host reads' section likewise never mentions the config_path cap.",
+        "suggested": "Update the config_path row (and the Configuration prose) to say it reads the file then rejects it if it exceeds the RPC frame cap, mirroring the $file row — one clause so the two host-read paths read as the single shared behavior they now are."
+      }
+    ],
+    "blocker": []
+  },
+  "softHolds": [],
+  "task": {
+    "medium": "drive",
+    "prompt": "Over the MCP harness, drive `load_component` (or `replace_component`) against a running engine with a `config_path` pointing at a harness-host file larger than the RPC frame cap, and confirm the tool rejects it up front with an actionable error that names the frame cap — the same failure a `{\"$file\": …}` oversized embed produces — rather than a late, cap-silent encode failure.",
+    "surfaceUnderTest": "the `load_component` / `replace_component` MCP tools' `config_path` handling and their `McpError::invalid_params` error text.",
+    "expectedArtifact": "none — this is an error-path fix, nothing renders; the graded outcome is the returned error message naming the RPC frame cap."
+  },
+  "provenance": {
+    "driver": {
+      "model": "claude-sonnet-5"
+    },
+    "phases": {
+      "author": {
+        "model": "sonnet",
+        "effort": "medium",
+        "agentType": null,
+        "prompt": null
+      },
+      "attempt": {
+        "model": "opus",
+        "effort": "high",
+        "agentType": "general-purpose",
+        "prompt": "You are a FRESH consumer of the aether engine. You have NEVER seen the implementation of the surface you are about to use — discover it from the public docs as a real user would. Your job is to accomplish a task AND to honestly log every point of friction, because the friction log is the whole signal.\n\nYOUR TASK:\nOver the MCP harness, drive `load_component` (or `replace_component`) against a running engine with a `config_path` pointing at a harness-host file larger than the RPC frame cap, and confirm the tool rejects it up front with an actionable error that names the frame cap — the same failure a `{\"$file\": …}` oversized embed produces — rather than a late, cap-silent encode failure.\n\nSURFACE YOU MUST USE: the `load_component` / `replace_component` MCP tools' `config_path` handling and their `McpError::invalid_params` error text.\nMEDIUM: drive — Drive the running engine over the MCP harness (ToolSearch for the mcp__aether-hub__* tools: spawn_substrate, load_component, send_mail, send_mail_traced, capture_frame, describe_kinds, describe_component). Write no crate.\n\nTHE FRESHNESS RULE (load-bearing):\n- Work from docs/guide/ (start at docs/guide/SUMMARY.md) and public crate signatures ONLY.\n- If you cannot figure out how to use the surface from the public docs + signatures and have to read crate INTERNALS (private modules, test code, the impl bodies) to proceed — that is itself a DOC-GAP finding. Log it (category doc-gap, where = what you were trying to do, what = the doc that was missing), then proceed.\n- Do NOT let yourself be coached past a rough edge by reading the implementation. A real consumer cannot.\n\nTHE STALL RULE:\n- Do NOT heroically work around friction — that hides the papercut. When you hit a wall (an awkward composition, a surprising default, a missing primitive, a confusing error), LOG it as a finding and either route around it minimally or, if it truly blocks the task, log a blocker finding and STOP. A real consumer's stall IS the data.\n- Reach for a primitive the engine lacks? That is a missing-primitive finding (suggest what to build) — do not hand-roll it silently.\n\nReport buildGreen = null (you write no crate).\n\nRENDER ARTIFACT: this task renders. After you produce the visual state, spawn_substrate / drive it so the expected frame is showing, and LEAVE THE ENGINE ALIVE — report its engine_id so a judge can capture it. Do NOT terminate that engine.\n\nTHE IMMEDIATE-MODE RULE (load-bearing — the judge grades a frame it captures itself, later):\n- The render surface is immediate mode. draw_triangle, draw_textured_quads, and the aether.text.draw* family accumulate for ONE frame and clear. Mailing them once does not leave a lasting picture: a bare capture taken after the fact comes back empty, and the judge would rule your correct render 'wrong'.\n- So report replayMails: the exact mail bundle a fresh capture must dispatch to put the expected frame back on screen — each entry { recipient_name, kind_name, params } exactly as you sent it. The judge passes it as capture_frame's own `mails`, which fire before readback.\n- Report replayMails = [] ONLY when the picture genuinely redraws itself every tick (a loaded component that re-sends its draws on Tick). If you produced the visual with one-shot mail, an empty bundle means a blank frame and a false verdict.\n\nReturn succeeded, summary, engineId, replayMails, buildGreen, and findings (every friction point — category, severity, where, what, suggested). An empty findings array means the surface was friction-free; be honest, not generous."
+      },
+      "judge": {
+        "model": "opus",
+        "effort": "high",
+        "agentType": "general-purpose",
+        "prompt": null
+      }
+    }
+  },
+  "tokensPerTool": []
+}
