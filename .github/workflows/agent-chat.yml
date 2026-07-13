@@ -380,43 +380,30 @@ jobs:
           role-to-assume: ${{ vars.AGENT_AWS_ROLE_ARN }}
           aws-region: ${{ vars.AGENT_AWS_REGION }}
 
-      # Pinned via AGENT_CLAUDE_CODE_VERSION (#3285): a CLI upgrade changes the
-      # system-prompt bytes, which cold-misses the fleet-wide prompt cache — and
-      # chat is the fleet's most upgrade-sensitive surface, since resuming a
-      # session across an upgrade reprocesses its entire history uncached. Unset
-      # falls back to latest with a warning — a missing var never bricks chat.
-      - name: Install Claude Code
+      # agent-chat is checkout-free by design (API orchestration, not builds),
+      # but a local `uses: ./…` composite must be present in the workspace. So
+      # sparse-checkout just the action tree (main, no PR-head code) before the
+      # shared setup. This runs after chat's job-level owner gate and cannot
+      # weaken the crown-jewel gate (#3359).
+      - name: Check out the composite action
         if: steps.route.outputs.parked == 'false'
-        env:
-          CLAUDE_CODE_VERSION: ${{ vars.AGENT_CLAUDE_CODE_VERSION }}
-        run: |
-          if [ -n "${CLAUDE_CODE_VERSION:-}" ]; then
-            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
-          else
-            echo "::warning::AGENT_CLAUDE_CODE_VERSION is unset — installing latest; an upstream release cold-misses the fleet prompt cache (#3285)"
-            npm install -g @anthropic-ai/claude-code
-          fi
-          claude --version
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          sparse-checkout: .github/actions
 
-      # Pre-trust the working directory so settings-based permissions aren't
-      # ignored with a warning under skip-permissions.
-      - name: Pre-trust the workspace for headless Claude
+      # Shared headless-Claude scaffold (#3359): pinned install (#3285), pre-trust,
+      # auth probe. Chat has no full checkout (strip-hooks: false) and trusts only
+      # $PWD (trust-basecamp: false, no basecamp cwd). The probe model defaults to
+      # claude-sonnet-5 — chat's MODEL — so the probe is unchanged.
+      - name: Headless Claude setup
         if: steps.route.outputs.parked == 'false'
-        run: printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$PWD" > "$HOME/.claude.json"
-
-      # Auth in isolation before the real turn: a one-line prompt, no tools. If
-      # this fails the AGENT OAuth token itself is the problem, not the turn.
-      # --max-turns 3 (not 1) because the model occasionally spends a turn before
-      # emitting the reply, which a 1-turn cap turns into a spurious auth failure.
-      - name: Auth probe (no tools)
-        if: steps.route.outputs.parked == 'false'
-        env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.AGENT_CLAUDE_CODE_OAUTH_TOKEN }}
-        run: |
-          claude -p "Reply with exactly: AUTH-OK" \
-            --model "$MODEL" \
-            --max-turns 3 | tee /tmp/auth.log
-          grep -q "AUTH-OK" /tmp/auth.log
+        uses: ./.github/actions/headless-claude
+        with:
+          strip-hooks: 'false'
+          trust-basecamp: 'false'
+          claude-code-version: ${{ vars.AGENT_CLAUDE_CODE_VERSION }}
+          oauth-token: ${{ secrets.AGENT_CLAUDE_CODE_OAUTH_TOKEN }}
 
       # Restore the per-issue session before the turn: sync the session tree into
       # Claude's project store and read the pointer for the id to resume. A
