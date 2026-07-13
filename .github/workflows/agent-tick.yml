@@ -338,6 +338,11 @@ jobs:
           daily_budget="${DAILY_WAVE_BUDGET:-0}"
 
           summary() { echo "$1" >> "$GITHUB_STEP_SUMMARY"; echo "$1"; }
+          # Per-issue decision detail goes to stdout only — the categorized
+          # render below is what the job summary shows. trace() preserves the
+          # existing debug line byte-for-byte on stdout; summary() stays
+          # reserved for the header and the governor early-exit lines.
+          trace() { echo "$1"; }
           summary "## Agent tick — $(date -u +%FT%TZ) (${EVENT})"
 
           # Enumerate agent-work runs once. This one read is the platform state
@@ -539,6 +544,17 @@ jobs:
           approve_queue=0
           digest_queue=0
 
+          # Categorized job-summary render (additive over the trace above): each
+          # terminal decision below appends one compact entry to the matching
+          # accumulator, rendered as a "### <Category> (<count>)" block at the
+          # end of the step. Empty categories are omitted from the render.
+          cat_dispatched=""
+          cat_deferred=""
+          cat_waiting=""
+          cat_resting=""
+          cat_excluded=""
+          cat_warnings=""
+
           # The open digest, read once: its presence suppresses the non-auto
           # dispatch reason, and its marker's issues=<csv> names the plan issues
           # it already covers — those are the owner's to direct from the digest
@@ -559,8 +575,16 @@ jobs:
           }
           while IFS=$'	' read -r num phase await dt itype alert preapp; do
             [ -n "$num" ] || continue
-            if [ "$dt" = "dt" ]; then summary "- skip #${num}: agent:dont-touch"; continue; fi
-            if [ "$alert" = "alert" ]; then summary "- skip #${num}: alert — machine-filed, not a work item"; continue; fi
+            if [ "$dt" = "dt" ]; then
+              trace "- skip #${num}: agent:dont-touch"
+              cat_excluded="${cat_excluded}#${num} — agent:dont-touch"$'\n'
+              continue
+            fi
+            if [ "$alert" = "alert" ]; then
+              trace "- skip #${num}: alert — machine-filed, not a work item"
+              cat_excluded="${cat_excluded}#${num} — alert, machine-filed"$'\n'
+              continue
+            fi
             case "$phase" in
               none|phase:define|phase:design|phase:bounced)
                 # A bounced issue resumes via the bounce-to:* contract /scope
@@ -572,18 +596,21 @@ jobs:
                 # issue already at define/design got there through the pipeline and
                 # will carry a type:*, so a missing one still means "not ours".
                 if [ "$itype" = "-" ]; then
-                  summary "- skip #${num}: no type:* label — not a pipeline work item"
+                  trace "- skip #${num}: no type:* label — not a pipeline work item"
+                  cat_excluded="${cat_excluded}#${num} — no type:* label"$'\n'
                   continue
                 fi
                 if ! scopeable "$itype"; then
-                  summary "- skip #${num}: type:${itype} not in AGENT_SCOPE_TYPES (${scope_types})"
+                  trace "- skip #${num}: type:${itype} not in AGENT_SCOPE_TYPES (${scope_types})"
+                  cat_excluded="${cat_excluded}#${num} — type:${itype} not in AGENT_SCOPE_TYPES"$'\n'
                   continue
                 fi
                 task="scope"; ref="$num"
                 ;;
               phase:plan)
                 if [ -n "$open_digest_num" ] && digest_has "$num"; then
-                  summary "- skip #${num}: listed on open digest #${open_digest_num} — the owner directs it from there"
+                  trace "- skip #${num}: listed on open digest #${open_digest_num} — the owner directs it from there"
+                  cat_waiting="${cat_waiting}#${num} — listed on open digest #${open_digest_num}"$'\n'
                   continue
                 fi
                 tier="$(approval_tier "$num")"
@@ -608,10 +635,10 @@ jobs:
                   actor="$(gh api "repos/${REPO}/issues/${num}/timeline" --paginate \
                     --jq '[.[] | select(.event=="labeled" and .label.name=="approval:pre-approved")] | last | .actor.login // empty')"
                   if [ "$actor" = "$OWNER" ]; then
-                    summary "- #${num}: approval:pre-approved by the owner (tier was ${tier}) — treated as auto"
+                    trace "- #${num}: approval:pre-approved by the owner (tier was ${tier}) — treated as auto"
                     tier="auto"
                   else
-                    summary "- #${num}: approval:pre-approved ignored — applied by '${actor:-unknown}', not the owner"
+                    trace "- #${num}: approval:pre-approved ignored — applied by '${actor:-unknown}', not the owner"
                   fi
                 fi
                 case "$tier" in
@@ -623,10 +650,10 @@ jobs:
                     # an answered park resumes down the single-issue path rather
                     # than being batch-processed.
                     if [ "$await" = "await" ]; then
-                      summary "- #${num}: approval tier auto — awaiting-answer, per-issue approve on owner reply"
+                      trace "- #${num}: approval tier auto — awaiting-answer, per-issue approve on owner reply"
                       task="approve"; ref="$num"
                     else
-                      summary "- #${num}: approval tier auto — queued for the approve sweep"
+                      trace "- #${num}: approval tier auto — queued for the approve sweep"
                       approve_queue=$((approve_queue + 1))
                       continue
                     fi
@@ -638,15 +665,18 @@ jobs:
                   # batch-digested. The sweep decides presentation (an ADR row
                   # is listed but never reply-approvable); the tick only counts.
                   adr)
-                    summary "- skip #${num}: ADR hard gate — the owner approves this one"
+                    trace "- skip #${num}: ADR hard gate — the owner approves this one"
+                    cat_waiting="${cat_waiting}#${num} — ADR hard gate"$'\n'
                     if [ "$await" != "await" ]; then digest_queue=$((digest_queue + 1)); fi
                     continue ;;
                   none)
-                    summary "- skip #${num}: no declared surface — not auto-approvable"
+                    trace "- skip #${num}: no declared surface — not auto-approvable"
+                    cat_waiting="${cat_waiting}#${num} — no declared surface"$'\n'
                     if [ "$await" != "await" ]; then digest_queue=$((digest_queue + 1)); fi
                     continue ;;
                   *)
-                    summary "- skip #${num}: approval tier ${tier} — awaiting its reader"
+                    trace "- skip #${num}: approval tier ${tier} — awaiting its reader"
+                    cat_waiting="${cat_waiting}#${num} — approval tier ${tier}, awaiting its reader"$'\n'
                     if [ "$await" != "await" ]; then digest_queue=$((digest_queue + 1)); fi
                     continue ;;
                 esac
@@ -673,15 +703,17 @@ jobs:
                   done
                   if [ "$found" -ge 1 ] && [ "$open_children" -eq 0 ]; then
                     gh api -X DELETE "repos/${REPO}/issues/${num}/labels/phase:ready" >/dev/null \
-                      || summary "- warn #${num}: umbrella close could not delete phase:ready"
+                      || { w="- warn #${num}: umbrella close could not delete phase:ready"; trace "$w"; cat_warnings="${cat_warnings}${w}"$'\n'; }
                     gh api -X PATCH "repos/${REPO}/issues/${num}" -f state=closed -f state_reason=completed >/dev/null \
-                      || summary "- warn #${num}: umbrella close PATCH failed"
+                      || { w="- warn #${num}: umbrella close PATCH failed"; trace "$w"; cat_warnings="${cat_warnings}${w}"$'\n'; }
                     printf 'Pure umbrella auto-closed by the tick: all %s listed children are closed (#3212).\n' "$found" > /tmp/umbrella-close.md
                     gh api -X POST "repos/${REPO}/issues/${num}/comments" -F body=@/tmp/umbrella-close.md >/dev/null \
-                      || summary "- warn #${num}: umbrella close comment failed"
-                    summary "- closed #${num}: pure umbrella, all ${found} children closed"
+                      || { w="- warn #${num}: umbrella close comment failed"; trace "$w"; cat_warnings="${cat_warnings}${w}"$'\n'; }
+                    trace "- closed #${num}: pure umbrella, all ${found} children closed"
+                    cat_dispatched="${cat_dispatched}#${num} — pure umbrella auto-closed (${found} children closed)"$'\n'
                   else
-                    summary "- skip #${num}: pure umbrella, ${open_children}/${found} children still open — resting at phase:ready"
+                    trace "- skip #${num}: pure umbrella, ${open_children}/${found} children still open — resting at phase:ready"
+                    cat_resting="${cat_resting}#${num} — pure umbrella, ${open_children}/${found} children still open"$'\n'
                   fi
                   continue
                 fi
@@ -691,9 +723,17 @@ jobs:
             esac
             if [ "$task" = "land" ]; then
               ref="$(resolve_open_pr "$num" || true)"
-              if [ -z "$ref" ]; then summary "- skip #${num}: phase:held but no open closing PR"; continue; fi
+              if [ -z "$ref" ]; then
+                trace "- skip #${num}: phase:held but no open closing PR"
+                cat_excluded="${cat_excluded}#${num} — phase:held, no open closing PR"$'\n'
+                continue
+              fi
             fi
-            if is_live "$task" "$ref"; then summary "- skip work-${task}-${ref}: already live"; continue; fi
+            if is_live "$task" "$ref"; then
+              trace "- skip work-${task}-${ref}: already live"
+              cat_deferred="${cat_deferred}work-${task}-${ref} — already live"$'\n'
+              continue
+            fi
             if [ "$task" = "land" ]; then
               land_items="${land_items}${task} ${ref}"$'\n'
               continue
@@ -709,7 +749,8 @@ jobs:
                   strand_items="${strand_items}${num} "
                 fi
               else
-                summary "- skip #${num}: agent:awaiting-answer, owner has not replied — parked"
+                trace "- skip #${num}: agent:awaiting-answer, owner has not replied — parked"
+                cat_waiting="${cat_waiting}#${num} — agent:awaiting-answer, owner has not replied"$'\n'
               fi
             else
               work_items="${work_items}${task} ${ref}"$'\n'
@@ -744,16 +785,18 @@ jobs:
           fi
           if [ -n "${sweep_why}" ]; then
             if is_live "approve-sweep" "all"; then
-              summary "- skip approve sweep: work-approve-sweep-all already live (${sweep_why})"
+              trace "- skip approve sweep: work-approve-sweep-all already live (${sweep_why})"
+              cat_deferred="${cat_deferred}work-approve-sweep-all — already live (${sweep_why})"$'\n'
             else
               work_items="approve-sweep all"$'\n'"${work_items}"
-              summary "- approve sweep: ${sweep_why} plan issue(s) — one work-approve-sweep-all dispatch"
+              trace "- approve sweep: ${sweep_why} plan issue(s) — one work-approve-sweep-all dispatch"
             fi
           fi
 
           dispatch() {
             gh workflow run agent-work.yml -f task="$1" -f ref="$2"
-            summary "- dispatched: work-${1}-${2}"
+            trace "- dispatched: work-${1}-${2}"
+            cat_dispatched="${cat_dispatched}work-${1}-${2}"$'\n'
           }
 
           # Guarantee a successor tick when a wave is owed but this tick did not
@@ -812,7 +855,8 @@ jobs:
             while IFS= read -r entry; do
               [ -n "$entry" ] || continue
               if [ "$filled" -ge "$slots" ]; then
-                summary "- deferred (slots full): ${entry}"
+                trace "- deferred (slots full): ${entry}"
+                cat_deferred="${cat_deferred}work-${entry%% *}-${entry#* } — slots full"$'\n'
                 deferred_nonland=$((deferred_nonland + 1))
                 continue
               fi
@@ -821,7 +865,7 @@ jobs:
               dispatch "$1" "$2"
               filled=$((filled + 1))
             done <<< "${resume_items}${work_items}"
-            summary "- filled ${filled}/${slots} non-land slot(s)."
+            trace "- filled ${filled}/${slots} non-land slot(s)."
 
             # A rescued strand means an owner answer did not resume via the
             # primary agent-chat path — file a visible alert so a dropped decision
@@ -845,17 +889,20 @@ jobs:
                 --jq "map(select(.title == \"${alert_title}\")) | .[0].number // empty" || true)"
               if [ -n "$existing_alert" ]; then
                 gh issue comment "$existing_alert" --body-file /tmp/strand-alert.md \
-                  && summary "- alert: appended stranded-answer rescue to #${existing_alert} (${strand_items})" \
-                  || summary "- warn: could not append stranded-answer rescue to #${existing_alert}"
+                  && { trace "- alert: appended stranded-answer rescue to #${existing_alert} (${strand_items})"; \
+                       cat_dispatched="${cat_dispatched}stranded-answer alert appended to #${existing_alert} (${strand_items})"$'\n'; } \
+                  || { w="- warn: could not append stranded-answer rescue to #${existing_alert}"; trace "$w"; cat_warnings="${cat_warnings}${w}"$'\n'; }
               else
                 gh issue create --title "$alert_title" --body-file /tmp/strand-alert.md --label alert \
-                  && summary "- alert: filed stranded-answer rescue issue (${strand_items})" \
-                  || summary "- warn: could not file stranded-answer rescue issue (${strand_items})"
+                  && { trace "- alert: filed stranded-answer rescue issue (${strand_items})"; \
+                       cat_dispatched="${cat_dispatched}stranded-answer alert filed (${strand_items})"$'\n'; } \
+                  || { w="- warn: could not file stranded-answer rescue issue (${strand_items})"; trace "$w"; cat_warnings="${cat_warnings}${w}"$'\n'; }
               fi
             fi
           else
             deferred_nonland="$(printf '%s' "${resume_items}${work_items}" | grep -c . || true)"
-            summary "- not quiescent: ${live_nonland} live non-land run(s) — deferring new approve/scope/implement."
+            trace "- not quiescent: ${live_nonland} live non-land run(s) — deferring new approve/scope/implement."
+            cat_deferred="${cat_deferred}approve/scope/implement — not quiescent (${live_nonland} live non-land run(s))"$'\n'
           fi
 
           # An owed wave that could not be slotted (width cap) or run (not
@@ -866,6 +913,29 @@ jobs:
           if [ "$deferred_nonland" -gt 0 ]; then
             arm_successor "${deferred_nonland} non-land item(s) deferred"
           fi
+
+          # Categorized job-summary render — additive over the trace() detail
+          # above, which already reached stdout as each decision was made. A
+          # summary-only echo (not trace) keeps this pass from doubling stdout.
+          # Empty categories are omitted so a quiet tick's summary stays short.
+          summary_only() { echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          render_category() {
+            local title="$1" acc="$2" count
+            count="$(printf '%s' "$acc" | grep -c . || true)"
+            [ "$count" -gt 0 ] || return 0
+            summary_only ""
+            summary_only "### ${title} (${count})"
+            while IFS= read -r line; do
+              [ -n "$line" ] || continue
+              summary_only "- ${line}"
+            done <<< "$acc"
+          }
+          render_category "Dispatched" "$cat_dispatched"
+          render_category "Deferred — will retry next tick" "$cat_deferred"
+          render_category "Waiting on the owner" "$cat_waiting"
+          render_category "Resting" "$cat_resting"
+          render_category "Excluded" "$cat_excluded"
+          render_category "Warnings" "$cat_warnings"
 
       # Stall visibility (#3256). The self-sustaining wavefront above guards
       # against a lost chain, but a genuine liveness loss — a future regression, or
