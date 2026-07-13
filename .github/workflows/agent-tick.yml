@@ -275,7 +275,7 @@ jobs:
       contents: read
     env:
       REPO: ${{ github.repository }}
-      OWNER: iamacoffeepot
+      OWNER: ${{ github.repository_owner }}
       EVENT: ${{ github.event_name }}
     steps:
       # Kill switch + required-secret preflight, before any spend. Both degrade
