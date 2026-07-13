@@ -158,7 +158,11 @@ jobs:
     # and burn no runner minute, rather than start a job that skips its way to a
     # no-op. `/agent` is a protocol constant, not an identity — nothing about the
     # App's handle is hardcoded, and GitHub's contains() is case-insensitive on
-    # strings. A comment that summons nothing is free.
+    # strings. A comment that summons nothing is free. GitHub Actions expressions
+    # have no regex, so this contains() is a coarse superset pre-filter only —
+    # anything not containing the substring at all still never starts the job.
+    # The Route step below re-tightens it to a word-ish token so a substring
+    # mention (`/agent-tick.yml`, `/agents`) doesn't burn a full turn.
     if: >
       vars.AGENT_ENABLED == 'true' &&
       github.event.sender.login == github.repository_owner &&
@@ -196,12 +200,26 @@ jobs:
         id: route
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           set -euo pipefail
           labels="$(gh api "repos/${REPO}/issues/${ISSUE}/labels" --jq '.[].name')"
           if ! grep -qx 'agent:awaiting-answer' <<<"$labels"; then
-            echo "no agent:awaiting-answer on #${ISSUE} — plain conversational turn."
-            echo "parked=false" >> "$GITHUB_OUTPUT"
+            # The job-level contains() above is only a coarse superset
+            # pre-filter (no regex in GitHub Actions expressions); re-check
+            # here with a real word-ish match so a comment that merely
+            # mentions `/agent` as a substring of a longer token
+            # (`/agent-tick.yml`, `/agent-work`, `/agents`) no-ops instead of
+            # spending a turn. A miss emits parked=skip; every downstream step
+            # gates on parked == 'true' or == 'false', so skip is a clean
+            # no-op with no other edits.
+            if grep -iqE '(^|[[:space:]])/agent([^A-Za-z0-9_-]|$)' <<<"$COMMENT_BODY"; then
+              echo "no agent:awaiting-answer on #${ISSUE} — plain conversational turn."
+              echo "parked=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "comment contains '/agent' only as a substring of a longer token — no-op."
+              echo "parked=skip" >> "$GITHUB_OUTPUT"
+            fi
             exit 0
           fi
 
