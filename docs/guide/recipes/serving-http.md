@@ -9,20 +9,22 @@ receives `aether.http.server.request` and replies
 ## 1. Configure the server
 
 The HTTP server is opt-in (off by default). Set `AETHER_HTTP_SERVER_ENABLED=1`
-to turn it on, and point it at the component mailbox your handler will register
-at:
+to turn it on and bind the listening socket:
 
 ```sh
 AETHER_HTTP_SERVER_ENABLED=1 \
 AETHER_HTTP_SERVER_BIND_ADDR=127.0.0.1:8080 \
-AETHER_HTTP_SERVER_HANDLER_MAILBOX=aether.component/aether.embedded:web \
 cargo run -p aether-substrate-bundle --bin aether-substrate-headless
 ```
 
 `AETHER_HTTP_SERVER_BIND_ADDR` defaults to `127.0.0.1:8080`; use port `0` to
-let the OS pick a free port. `AETHER_HTTP_SERVER_HANDLER_MAILBOX` is the late-
-bound mailbox name (ADR-0108 §3): the server resolves it at dispatch time, so
-the handler component can load or reload without restarting the server.
+let the OS pick a free port. The server has no default-handler config knob: a
+component receives requests by claiming a route (ADR-0130), and a handler that
+wants *every* request registers the `/` catch-all from its `wire` hook —
+`register_route_self { prefix: "/" }` (shown in §3, and in §Claiming routes
+for narrower prefixes). The registration is runtime-bound, so the handler can
+load or reload without restarting the server, and a request matching no route
+is answered `503`.
 
 ### Over MCP (`spawn_substrate`)
 
@@ -38,8 +40,7 @@ other field becomes `--http-server-<field>=<value>`:
 {
   "args": [
     "--http-server-enabled",
-    "--http-server-bind-addr=127.0.0.1:8080",
-    "--http-server-handler-mailbox=aether.component/aether.embedded:web"
+    "--http-server-bind-addr=127.0.0.1:8080"
   ]
 }
 ```
@@ -80,7 +81,9 @@ an idle kept-alive connection is closed after `keep_alive_timeout_millis`.
 
 ```rust
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::http::kinds::{HttpServerRequest, HttpServerResponse};
+use aether_capabilities::http::HttpServerCapability;
+use aether_capabilities::http::kinds::{HttpServerRequest, HttpServerResponse, RegisterRouteSelf};
+use aether_data::Kind as _;
 
 pub struct Web;
 
@@ -90,6 +93,18 @@ impl WasmActor for Web {
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Web)
+    }
+
+    // Claim the `/` catch-all so every request dispatches here. Register a
+    // narrower prefix instead (see §Claiming routes) to own just one path
+    // family and leave the rest to other handlers.
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+        ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+            prefix: "/".to_string(),
+            method: None,
+            kind: HttpServerRequest::ID,
+            shared: false,
+        });
     }
 
     #[handler::single]
@@ -116,10 +131,11 @@ needs to reply one of *several* kinds (see "Mixing buffered and streamed routes"
 below), since a single return type can't express that choice.
 
 The component registers at `aether.component/aether.embedded:web` (its
-`NAMESPACE` const rendered through the ADR-0099 lineage), which is the same
-address you put in `AETHER_HTTP_SERVER_HANDLER_MAILBOX`. `req.peer_addr`
-carries the connecting client's address (`ip:port`, IPv6 bracketed) for
-logging, rate-limiting, or allowlisting.
+`NAMESPACE` const rendered through the ADR-0099 lineage). Its `wire` hook
+claims the `/` catch-all, so every request the server can't match to a more
+specific route dispatches here. `req.peer_addr` carries the connecting
+client's address (`ip:port`, IPv6 bracketed) for logging, rate-limiting, or
+allowlisting.
 
 ## 4. Load the handler
 
@@ -178,8 +194,9 @@ optional extra headers, and the body.
 Several components can each own a path family on the same server (ADR-0130).
 A component claims a prefix from its `wire` hook by mailing
 `aether.http.server.register_route_self` to the server capability; the server
-then dispatches matching requests to that component directly, and everything
-unmatched still goes to the configured `handler_mailbox` default.
+then dispatches matching requests to that component directly. A request
+matching no route is answered `503`, unless some component claimed the `/`
+catch-all (as the §3 handler does) — then everything unmatched goes there.
 
 ```rust
 use aether_capabilities::http::HttpServerCapability;
@@ -191,6 +208,7 @@ fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
         prefix: "/api".to_string(),
         method: None,                        // or Some(HttpMethod::Get)
         kind: HttpServerRequest::ID,
+        shared: false,                       // true joins an ADR-0136 member set
     });
 }
 ```
@@ -350,8 +368,8 @@ or `shared`).
 If the handler receives the request but returns without calling `ctx.reply`, the
 settled chain triggers the `502 Bad Gateway` safety net. If the handler takes
 longer than `AETHER_HTTP_SERVER_REQUEST_TIMEOUT_MILLIS` (default 30 000 ms), the
-server sends `504 Gateway Timeout`. A missing handler mailbox (nothing loaded
-yet) returns `503 Service Unavailable`.
+server sends `504 Gateway Timeout`. A request matching no route (nothing has
+claimed it — e.g. no handler loaded yet) returns `503 Service Unavailable`.
 
 ## Adding response headers
 

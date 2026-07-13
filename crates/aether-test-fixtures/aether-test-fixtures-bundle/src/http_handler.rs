@@ -11,8 +11,9 @@
 //!   (`hello from aether: {path}`)
 //!
 //! Registered at `aether.component/aether.embedded:test.web` after load.
-//! The e2e test configures `HttpServerConfig.handler_mailbox` to that
-//! address and then fires real `TcpStream` requests at the bound port.
+//! The handler binds the `/` catch-all route from its `wire` hook
+//! (ADR-0130/0131), then the e2e test fires real `TcpStream` requests at
+//! the bound port.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated trampoline owns the decoded
@@ -34,6 +35,20 @@ use aether_capabilities::http::{ResponseStream, WebSocketStream};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::DropComponent;
 
+/// Bind the calling actor as the `/` catch-all (ADR-0130/0131) so every
+/// route-unmatched request dispatches to it — the reflexive replacement
+/// for the retired `handler_mailbox` config default. Shared by every
+/// catch-all fixture in this module; the routed fixtures register their
+/// specific prefixes instead.
+fn bind_catch_all(ctx: &mut WasmCtx<'_>) {
+    ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+        prefix: "/".to_string(),
+        method: None,
+        kind: <HttpServerRequest as Kind>::ID,
+        shared: false,
+    });
+}
+
 pub struct HttpHandler;
 
 #[actor]
@@ -44,14 +59,17 @@ impl WasmActor for HttpHandler {
         Ok(HttpHandler)
     }
 
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+        bind_catch_all(ctx);
+    }
+
     /// Route an inbound HTTP request to a status + body and reply the
     /// formatted response. The HTTP server cap writes the reply to the
     /// waiting client socket.
     ///
     /// # Agent
-    /// Not sent manually — the `aether.http.server` cap dispatches it
-    /// on every inbound request. Configure `HttpServerConfig.handler_mailbox`
-    /// to `"aether.component/aether.embedded:test.web"` to route here.
+    /// Not sent manually — the `aether.http.server` cap dispatches it on
+    /// every inbound request; this actor binds the `/` catch-all in `wire`.
     #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, req: HttpServerRequest) -> HttpServerResponse {
         HttpServerResponse {
@@ -126,17 +144,25 @@ impl WasmActor for StreamingHttpHandler {
         Ok(StreamingHttpHandler { stream: None, next_index: 0, ended: false })
     }
 
+    /// The cap reads this actor's accept-set off the catch-all binding to
+    /// take the streaming path.
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+        bind_catch_all(ctx);
+    }
+
     /// Open a streamed `200` response. The body arrives later, one chunk per
     /// unit of credit the cap grants.
     ///
     /// # Agent
     /// Not sent manually — the `aether.http.server` cap dispatches it on
-    /// every inbound request. Route here by pointing
-    /// `HttpServerConfig.handler_mailbox` at
-    /// `"aether.component/aether.embedded:test.web_stream"`.
+    /// every inbound request; this actor binds the `/` catch-all in `wire`.
     //noinspection DuplicatedCode -- actor macros require one request handler per fixture actor type.
     #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
+        // Disarm the previous request's stream too: each request opens a
+        // fresh stream, and the slot must re-arm from the new stream's own
+        // first credit grant or every chunk goes to the dead stream.
+        self.stream = None;
         self.next_index = 0;
         self.ended = false;
         HttpResponseStreamOpen { status: 200, headers: Vec::new() }
@@ -184,6 +210,10 @@ impl WasmActor for WebSocketHandler {
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(WebSocketHandler { connections: BTreeMap::new() })
+    }
+
+    fn wire(&mut self, ctx: &mut WasmCtx<'_>) {
+        bind_catch_all(ctx);
     }
 
     /// Accept every upgrade the cap routes here (the cap has already validated
@@ -315,15 +345,14 @@ impl WasmActor for RoutedHttpHandler {
 }
 
 /// Response-streaming handler reached through an **externally-registered
-/// route** rather than the configured default `handler_mailbox` (ADR-0128
-/// streaming × ADR-0131 route dispatch). It claims `/routed-stream` for its
-/// own mailbox with a raw `RegisterRouteSelf` from `wire`, then behaves
-/// exactly like [`StreamingHttpHandler`]: replies `HttpResponseStreamOpen`
-/// and emits `STREAM_CHUNK_COUNT` credit-paced `"chunk-{i}\n"` chunks. The
-/// e2e test points `HttpServerConfig.handler_mailbox` at a *different*
-/// mailbox, so the default-handler dispatch cannot mask the route path — the
-/// initial response-stream credit grant must reach this handler via the route
-/// it registered, not the configured default.
+/// route** (ADR-0128 streaming × ADR-0131 route dispatch). It claims
+/// `/routed-stream` for its own mailbox with a raw `RegisterRouteSelf` from
+/// `wire`, then behaves exactly like [`StreamingHttpHandler`]: replies
+/// `HttpResponseStreamOpen` and emits `STREAM_CHUNK_COUNT` credit-paced
+/// `"chunk-{i}\n"` chunks. Unlike the other fixtures it does **not** claim
+/// the `/` catch-all, so a `/routed-stream` request can only reach it via
+/// the specific route it registered — the initial response-stream credit
+/// grant must arrive through that route path.
 ///
 /// Registered at `aether.component/aether.embedded:test.web_stream_routed`
 /// after load.
@@ -359,8 +388,8 @@ impl WasmActor for RoutedStreamingHttpHandler {
         });
     }
 
-    /// Open a streamed `200` response. Dispatched here through the registered
-    /// route, not the default `handler_mailbox`.
+    /// Open a streamed `200` response. Dispatched here through the specific
+    /// `/routed-stream` route this actor registered in `wire`.
     ///
     /// # Agent
     /// Not sent manually — the `aether.http.server` cap dispatches it on a
@@ -368,6 +397,10 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// `wire`.
     #[handler::single]
     fn on_request(&mut self, _ctx: &mut WasmCtx<'_>, _req: HttpServerRequest) -> HttpResponseStreamOpen {
+        // Disarm the previous request's stream too: each request opens a
+        // fresh stream, and the slot must re-arm from the new stream's own
+        // first credit grant or every chunk goes to the dead stream.
+        self.stream = None;
         self.next_index = 0;
         self.ended = false;
         HttpResponseStreamOpen { status: 200, headers: Vec::new() }

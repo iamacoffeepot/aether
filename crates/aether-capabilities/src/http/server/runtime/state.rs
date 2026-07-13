@@ -63,7 +63,6 @@ pub struct HttpSupervisorState {
 /// state; the addressing identity is the distinct ZST
 /// [`HttpDispatchShard`](crate::http::server::shard::HttpDispatchShard).
 pub struct HttpShardState {
-    pub handler_mailbox: String,
     /// The supervisor's shared route table (ADR-0130/0135); this shard only
     /// reads it, at request-dispatch time.
     pub routes: SharedRoutes,
@@ -81,9 +80,9 @@ pub struct HttpShardState {
     pub keep_alive_timeout: Duration,
     pub self_mailbox: MailboxId,
     /// Cached `Arc<Mailer>` so the shard can fire wake mails into itself,
-    /// resolve the handler mailbox by name at dispatch time, and subscribe
-    /// to settlement. The shard is single-threaded post-ADR-0038 so direct
-    /// storage is fine.
+    /// validate a matched route's registrant against the registry at
+    /// dispatch time, and subscribe to settlement. The shard is
+    /// single-threaded post-ADR-0038 so direct storage is fine.
     pub mailer: Arc<Mailer>,
     pub inbound_rx: mpsc::Receiver<InboundEvent>,
     pub inbound_tx: mpsc::Sender<InboundEvent>,
@@ -162,7 +161,6 @@ impl HttpSupervisorState {
                 wake_dirty: Arc::clone(&wake_dirty),
                 routes: Arc::clone(&self.routes),
                 live_connections: Arc::clone(&self.live_connections),
-                handler_mailbox: self.config.handler_mailbox.clone(),
                 max_request_bytes: self.config.max_request_bytes,
                 max_header_bytes: self.config.max_header_bytes,
                 request_timeout: Duration::from_millis(self.config.request_timeout_millis),
@@ -372,11 +370,7 @@ impl HttpShardState {
             ws_idle_timeout: self.ws_idle_timeout,
             ws_max_message_bytes: self.max_request_bytes,
         };
-        let shared = ReaderShared {
-            routes: Arc::clone(&self.routes),
-            handler_mailbox: Arc::from(self.handler_mailbox.as_str()),
-            peer: peer.to_string(),
-        };
+        let shared = ReaderShared { routes: Arc::clone(&self.routes), peer: peer.to_string() };
 
         // Per-connection transport reader below the mail layer — carries
         // inbound mail in; no inbound chain to inherit, no settlement

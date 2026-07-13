@@ -45,17 +45,11 @@ use aether_substrate_bundle::test_bench::test_helpers::{
 /// The `http_handler` fixture's `NAMESPACE` const — the subname under
 /// which `WasmTrampoline` registers it, and the last segment of its
 /// full lineage address (`aether.component/aether.embedded:test.web`).
+/// The handler binds the `/` catch-all route in its `wire` hook.
 const HANDLER_NAMESPACE: &str = "test.web";
-
-/// The full handler mailbox address the http server cap resolves at
-/// dispatch time (ADR-0108 §3 late binding).
-const HANDLER_MAILBOX: &str = "aether.component/aether.embedded:test.web";
 
 /// The `StreamingHttpHandler` fixture's `NAMESPACE` const (ADR-0128).
 const STREAM_HANDLER_NAMESPACE: &str = "test.web_stream";
-
-/// The streaming handler's full lineage mailbox address.
-const STREAM_HANDLER_MAILBOX: &str = "aether.component/aether.embedded:test.web_stream";
 
 /// The chunk count `StreamingHttpHandler` emits — kept in step with the
 /// fixture's own `STREAM_CHUNK_COUNT`.
@@ -63,15 +57,12 @@ const STREAM_CHUNK_COUNT: u32 = 20;
 
 /// The `RoutedStreamingHttpHandler` fixture's `NAMESPACE` const — a
 /// response-streaming handler reached through an externally-registered
-/// route (`register_route_self` in `wire`) rather than the configured
-/// default `handler_mailbox` (ADR-0128 × ADR-0131).
+/// route (`register_route_self { prefix: "/routed-stream" }` in `wire`)
+/// rather than a `/` catch-all (ADR-0128 × ADR-0131).
 const ROUTED_STREAM_HANDLER_NAMESPACE: &str = "test.web_stream_routed";
 
 /// The `WebSocketHandler` fixture's `NAMESPACE` const (ADR-0129).
 const WS_HANDLER_NAMESPACE: &str = "test.web_socket";
-
-/// The websocket handler's full lineage mailbox address.
-const WS_HANDLER_MAILBOX: &str = "aether.component/aether.embedded:test.web_socket";
 
 /// RFC 6455 §1.3 worked-vector handshake key, and the `Sec-WebSocket-Accept`
 /// the server must echo for it (base64(SHA-1(key + GUID))). Using the fixed
@@ -248,7 +239,6 @@ mod tests {
         let server_config = HttpServerConfig {
             enabled: true,
             bind_addr: "127.0.0.1:0".to_string(),
-            handler_mailbox: HANDLER_MAILBOX.to_string(),
             max_request_bytes: 65_536,
             max_header_bytes: 8_192,
             request_timeout_millis: 10_000,
@@ -306,6 +296,14 @@ mod tests {
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
+        // The handler binds the `/` catch-all via async `wire` mail, so poll
+        // it live before the assertions rather than racing the registration.
+        poll_body_contains(
+            port,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            "hello from aether",
+        );
+
         // GET / → 200 with body "hello from aether"
         let root_response = round_trip(port, b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         let root_str = String::from_utf8_lossy(&root_response);
@@ -350,7 +348,6 @@ mod tests {
         let server_config = HttpServerConfig {
             enabled: true,
             bind_addr: "127.0.0.1:0".to_string(),
-            handler_mailbox: STREAM_HANDLER_MAILBOX.to_string(),
             max_request_bytes: 65_536,
             max_header_bytes: 8_192,
             request_timeout_millis: 10_000,
@@ -406,6 +403,10 @@ mod tests {
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
+        // The handler binds the `/` catch-all via async `wire` mail, so poll
+        // it live before the assertions rather than racing the registration.
+        poll_body_contains(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", "chunk-");
+
         let response = round_trip(port, b"GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         let head = String::from_utf8_lossy(&response);
         assert!(head.starts_with("HTTP/1.1 200 "), "GET /stream should reply 200, got: {head:?}");
@@ -417,19 +418,18 @@ mod tests {
     }
 
     /// Regression for issue 2600: a response-streaming handler reached
-    /// through an externally-registered route (ADR-0131) — not the configured
-    /// default `handler_mailbox` — must still be granted its initial
-    /// response-stream credit window (ADR-0128), so it emits its body chunks
-    /// rather than opening the stream and hanging (`curl` error 18).
+    /// through an externally-registered route (ADR-0131) must still be granted
+    /// its initial response-stream credit window (ADR-0128), so it emits its
+    /// body chunks rather than opening the stream and hanging (`curl` error 18).
     ///
-    /// The `RoutedStreamingHttpHandler` fixture claims `/routed-stream` for
-    /// its own mailbox in `wire`; `HttpServerConfig.handler_mailbox` is bound
-    /// to a mailbox that does **not** resolve to it, so the default-handler
-    /// dispatch cannot mask the route path. On today's bug `open_stream`
-    /// re-resolves the (unresolvable) default handler and drops the initial
-    /// credit grant, so zero chunks arrive; after the fix the grant reaches
-    /// the route's handler and the client reassembles the same body the
-    /// default-handler streaming test asserts.
+    /// The `RoutedStreamingHttpHandler` fixture claims only `/routed-stream`
+    /// for its own mailbox in `wire` and binds no `/` catch-all, so a
+    /// `/routed-stream` request can only reach it via that specific route —
+    /// the negative control is now inherent (no catch-all to mask the route
+    /// path). On today's bug `open_stream` drops the initial credit grant, so
+    /// zero chunks arrive; after the fix the grant reaches the route's handler
+    /// and the client reassembles the same body the catch-all streaming test
+    /// asserts.
     #[test]
     fn wasm_handler_streams_chunked_response_via_registered_route() {
         let strict = env::var("AETHER_REQUIRE_RUNTIME").is_ok();
@@ -451,10 +451,9 @@ mod tests {
         let server_config = HttpServerConfig {
             enabled: true,
             bind_addr: "127.0.0.1:0".to_string(),
-            // Deliberately unresolvable: the streaming handler is reachable
-            // only through the route it registers, so the default-handler
-            // dispatch cannot mask the bug (issue 2600 negative control).
-            handler_mailbox: "aether.component/aether.embedded:test.web_absent_default".to_string(),
+            // No catch-all: the streaming handler is reachable only through
+            // the `/routed-stream` route it registers, so nothing can mask
+            // the bug (issue 2600 negative control).
             max_request_bytes: 65_536,
             max_header_bytes: 8_192,
             request_timeout_millis: 10_000,
@@ -568,7 +567,6 @@ mod tests {
         let server_config = HttpServerConfig {
             enabled: true,
             bind_addr: "127.0.0.1:0".to_string(),
-            handler_mailbox: WS_HANDLER_MAILBOX.to_string(),
             max_request_bytes: 65_536,
             max_header_bytes: 8_192,
             request_timeout_millis: 10_000,
@@ -623,20 +621,30 @@ mod tests {
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
         assert!(port > 0, "bound to an OS-assigned port");
 
-        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
-        stream.set_read_timeout(Some(Duration::from_secs(10))).expect("set_read_timeout");
-
-        // Handshake.
+        // Handshake. The handler binds the `/` catch-all via async `wire`
+        // mail, so poll the upgrade live (reconnecting each attempt) rather
+        // than racing the registration — a pre-registration upgrade is 503.
         let handshake = format!(
             "GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n\
              Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
              Sec-WebSocket-Key: {WS_TEST_KEY}\r\n\r\n"
         );
-        stream.write_all(handshake.as_bytes()).expect("write handshake");
-        stream.flush().expect("flush handshake");
-
-        let head = read_http_head(&mut stream);
-        assert!(head.starts_with("HTTP/1.1 101 "), "upgrade should reply 101, got: {head:?}");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let (mut stream, head) = loop {
+            let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect to http server");
+            stream.set_read_timeout(Some(Duration::from_secs(10))).expect("set_read_timeout");
+            stream.write_all(handshake.as_bytes()).expect("write handshake");
+            stream.flush().expect("flush handshake");
+            let head = read_http_head(&mut stream);
+            if head.starts_with("HTTP/1.1 101 ") {
+                break (stream, head);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "websocket upgrade did not go live (route registration) within 30s; last: {head:?}",
+            );
+            thread::sleep(Duration::from_millis(25));
+        };
         assert!(
             head.contains(&format!("Sec-WebSocket-Accept: {WS_TEST_ACCEPT}")),
             "101 should echo the computed accept key, got: {head:?}",
@@ -758,7 +766,7 @@ mod tests {
     /// `/routed` via `register_route_self` in `wire`; dropping the
     /// component (`aether.component.drop` → the component cap's
     /// `unregister_routes_all` fan-out) purges the route, so the same
-    /// request falls back to the configured `handler_mailbox`. The
+    /// request falls back to the `test.web` fixture's `/` catch-all. The
     /// drop is injected through the routed guest itself — the request
     /// body names the trampoline mailbox id to drop — since the built
     /// chassis exposes no direct mail surface to the test.
@@ -785,7 +793,6 @@ mod tests {
         let server_config = HttpServerConfig {
             enabled: true,
             bind_addr: "127.0.0.1:0".to_string(),
-            handler_mailbox: HANDLER_MAILBOX.to_string(),
             max_request_bytes: 65_536,
             max_header_bytes: 8_192,
             request_timeout_millis: 10_000,

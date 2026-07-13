@@ -15,13 +15,11 @@ pub type ConnId = u64;
 pub type SharedRoutes = Arc<RwLock<Vec<Route>>>;
 
 /// Read-mostly state a reader thread consults to make the fast-path
-/// decision itself (ADR-0135 §2): the shared route table, the
-/// late-bound fallback handler name, and the connection's peer string
-/// (captured once at adoption; every request's `peer_addr` clones it
-/// on the reader thread rather than the shard).
+/// decision itself (ADR-0135 §2): the shared route table and the
+/// connection's peer string (captured once at adoption; every request's
+/// `peer_addr` clones it on the reader thread rather than the shard).
 pub struct ReaderShared {
     pub routes: SharedRoutes,
-    pub handler_mailbox: Arc<str>,
     pub peer: String,
 }
 
@@ -42,7 +40,6 @@ pub struct HttpShardSeed {
     pub wake_dirty: Arc<AtomicBool>,
     pub routes: SharedRoutes,
     pub live_connections: Arc<AtomicUsize>,
-    pub handler_mailbox: String,
     pub max_request_bytes: usize,
     pub max_header_bytes: usize,
     pub request_timeout: Duration,
@@ -288,9 +285,9 @@ pub struct StreamState {
     /// by connection through this field.
     pub conn_id: ConnId,
     /// The handler mailbox this stream's credit grants address. For a response
-    /// stream (ADR-0128) it is the late-bound `handler_mailbox`; for a
-    /// websocket (ADR-0129) it is the handler resolved at handshake. Stored so
-    /// credit replenishment addresses the right actor without a re-lookup.
+    /// stream (ADR-0128) it is the registrant of the matched route (ADR-0130);
+    /// for a websocket (ADR-0129) it is the handler resolved at handshake. Stored
+    /// so credit replenishment addresses the right actor without a re-lookup.
     pub handler: MailboxId,
     /// Bounded hand-off to the writer thread. `try_send` never blocks the
     /// dispatcher: the credit accounting keeps the invariant

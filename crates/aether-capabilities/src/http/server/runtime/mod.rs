@@ -152,7 +152,6 @@ impl NativeActor for HttpServerCapability {
             target: "aether_substrate::http_server",
             addr = %config.bind_addr,
             port,
-            handler = %config.handler_mailbox,
             "http server bound",
         );
 
