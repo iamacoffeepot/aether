@@ -611,6 +611,10 @@ jobs:
             --ls-tree /tmp/pool-ls-tree.txt \
             --verdict "$GITHUB_WORKSPACE/pool-verdict.json" \
             --cli-version "${CLI_VERSION:-unknown}" $prior_flag)" || out='{"ok":false,"reason":"manifest-error"}'
+          # Record this box's re-pool disposition for the spend ledger's pool
+          # block (#3166) — accepted, or the refusal/retirement reason. A /tmp
+          # write, so it can never perturb the deposit's own control flow.
+          echo "$out" | jq -r 'if .ok then "accepted" else .reason end' > /tmp/pool-deposit-reason.txt 2>/dev/null || true
           if [ "$(echo "$out" | jq -r .ok)" = "true" ]; then
             echo "$out" | jq .manifest > /tmp/pool-manifest-new.json
             new_sid="$(jq -r .session_id /tmp/pool-manifest-new.json)"
@@ -640,6 +644,84 @@ jobs:
           fi
           release_lease
           exit 0
+
+      # Meter the review run into the same spend ledger as agent-work (#3166).
+      # Review boxes run the warm session pool (#3286/#3290), so their envelope
+      # carries a `pool` block beside the cost/token columns: warm-vs-cold, the
+      # re-pool verdict and whether the box complied by writing it, and this
+      # box's own re-pool disposition (accepted / refusal reason). That is what
+      # lets the pool's flag-flip be demonstrated against the ledger instead of
+      # asserted. The pool block is assembled only when AGENT_POOL_ENABLE is on.
+      #
+      # Credential care: the pool-creds step exported OIDC creds scoped to
+      # agent/pool/* into the job env, and they cannot reach agent/usage/* — so
+      # this step clears the AWS_* credential triplet and lets the RunsOn
+      # instance profile (which reaches the evidence bucket ambiently, like
+      # dogfood's write) carry the PutObject. Region is left intact. The script
+      # is staged from origin/main — never the PR head — so a branch cut before
+      # it landed still meters, and PR-head code can't tamper with derivation.
+      # Fenced like every pool step: a metering slip never reddens a review.
+      - name: Meter the review into the spend ledger
+        if: always() && steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        env:
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          JOB_STATUS: ${{ job.status }}
+          AGENT_POOL_ENABLE: ${{ vars.AGENT_POOL_ENABLE }}
+          POOL_SESSION_ID: ${{ steps.pool-checkout.outputs.session_id }}
+          POOL_CLI_VERSION: ${{ steps.pool-checkout.outputs.cli_version }}
+        run: |
+          set -uo pipefail
+          [ -f /tmp/review-session.jsonl ] || { echo "no transcript — nothing to meter"; exit 0; }
+          command -v node >/dev/null || { echo "no node — ledger row skipped"; exit 0; }
+          command -v aws  >/dev/null || { echo "no aws cli — ledger write skipped"; exit 0; }
+          git show origin/main:scripts/agent-usage-record.mjs > /tmp/agent-usage-record.mjs || {
+            echo "usage script not on origin/main yet — ledger row skipped"; exit 0; }
+
+          pool_arg=""
+          if [ "${AGENT_POOL_ENABLE:-}" = "true" ]; then
+            warm=false; [ -n "${POOL_SESSION_ID:-}" ] && warm=true
+            verdict="null"; reason=""; compliance="null"
+            if [ -f "$GITHUB_WORKSPACE/pool-verdict.json" ]; then
+              verdict="$(jq -r '.repool // "unknown"' "$GITHUB_WORKSPACE/pool-verdict.json")"
+              reason="$(jq -r '.reason // ""' "$GITHUB_WORKSPACE/pool-verdict.json")"
+              compliance="true"
+            elif [ "$warm" = true ]; then
+              compliance="false"   # warm session was asked to write a verdict and did not
+            fi
+            retire="$( [ -f /tmp/pool-deposit-reason.txt ] && cat /tmp/pool-deposit-reason.txt || true )"
+            jq -nc \
+              --argjson warm "$warm" \
+              --arg session_id "${POOL_SESSION_ID:-}" \
+              --arg cli_version "${POOL_CLI_VERSION:-}" \
+              --arg verdict "$verdict" \
+              --arg reason "$reason" \
+              --argjson compliance "$compliance" \
+              --arg retire "$retire" \
+              '{
+                 warm: $warm,
+                 session_id: (if $session_id == "" then null else $session_id end),
+                 cli_version: (if $cli_version == "" then null else $cli_version end),
+                 repool_verdict: (if $verdict == "null" then null else $verdict end),
+                 repool_reason: (if $reason == "" then null else $reason end),
+                 repool_compliance: $compliance,
+                 retire_reason: (if $retire == "" then null else $retire end)
+               }' > /tmp/pool-meter.json && pool_arg="--pool /tmp/pool-meter.json"
+          fi
+
+          record="$(node /tmp/agent-usage-record.mjs \
+            --transcript /tmp/review-session.jsonl \
+            --task review --ref "$PR_NUMBER" --run-id "$GITHUB_RUN_ID" \
+            --conclusion "$JOB_STATUS" --model claude-sonnet-5 \
+            --created-at "$(date -u +%FT%TZ)" $pool_arg)" \
+            || { echo "usage derivation failed — ledger row skipped"; exit 0; }
+          printf '%s\n' "$record" > /tmp/review-usage-record.json
+
+          # Drop the pool OIDC creds so the instance profile carries the write.
+          unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+          aws s3 cp /tmp/review-usage-record.json \
+            "s3://aether-evidence/agent/usage/$(date -u +%F)/${GITHUB_RUN_ID}.json" \
+            --content-type application/json \
+            || echo "ledger write failed (IAM grant on agent/usage/* pending?) — review stays green"
 
       # Whether the run produced a rollup gates the `post` job. Kept as a
       # step so `post` can `needs`-read it without inspecting the artifact.

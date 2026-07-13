@@ -543,3 +543,46 @@ jobs:
           name: agent-work-session-transcript
           path: /tmp/agent-work-session.jsonl
           if-no-files-found: ignore
+
+      # Meter the run into the spend ledger (rung 1, #3166). Derive one usage
+      # record from the tee'd transcript and write it to a distinct per-run key
+      # under s3://aether-evidence/agent/usage/<UTC-day>/<run_id>.json, so the
+      # tick (rung 2, #3169) can read a day's spend from one prefix listing
+      # instead of downloading N transcript artifacts. One object per run is
+      # race-free — each run owns its key, so concurrent waves never contend and
+      # S3's lack of append never bites.
+      #
+      # `if: always()` so a failed run still records what it spent (its cost is
+      # the same scarce resource whether or not it landed). The write rides the
+      # RunsOn instance-profile credentials ambiently — the same path dogfood.yml
+      # already uses to write s3://aether-evidence with a bare `aws s3 cp`, no
+      # OIDC mint and no id-token permission (agent-work runs on a RunsOn runner
+      # whose in-VPC instance profile reaches the bucket, unlike the hosted
+      # agent-chat box the issue sketch assumed). The IAM policy must grant
+      # s3:PutObject on aether-evidence/agent/usage/* (an infra-console grant,
+      # like dogfood's existing evidence write); until it lands the write fails
+      # cleanly and the ledger stays empty. Every failure here is swallowed — a
+      # session-side metering slip must never redden the job, whose durable
+      # state is on GitHub.
+      - name: Meter the run into the spend ledger
+        if: always() && steps.guard.outputs.proceed == 'true'
+        env:
+          MODEL: ${{ steps.model.outputs.model }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -uo pipefail
+          [ -f /tmp/agent-work-session.jsonl ] || { echo "no transcript — nothing to meter"; exit 0; }
+          command -v node >/dev/null || { echo "no node — ledger row skipped"; exit 0; }
+          command -v aws  >/dev/null || { echo "no aws cli — ledger write skipped"; exit 0; }
+          day="$(date -u +%F)"
+          record="$(node scripts/agent-usage-record.mjs \
+            --transcript /tmp/agent-work-session.jsonl \
+            --task "$TASK" --ref "$REF" --run-id "$GITHUB_RUN_ID" \
+            --conclusion "$JOB_STATUS" --model "$MODEL" \
+            --created-at "$(date -u +%FT%TZ)")" \
+            || { echo "usage derivation failed — ledger row skipped"; exit 0; }
+          printf '%s\n' "$record" > /tmp/agent-usage-record.json
+          aws s3 cp /tmp/agent-usage-record.json \
+            "s3://aether-evidence/agent/usage/${day}/${GITHUB_RUN_ID}.json" \
+            --content-type application/json \
+            || echo "ledger write failed (IAM grant on agent/usage/* pending?) — run stays green"
