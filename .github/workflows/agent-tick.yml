@@ -15,12 +15,35 @@ name: Agent tick
 #     moment quiescence returns, so waves chain at the natural pace of the work.
 #     The list matches the executor's `name:` (display name "Agent work"), the
 #     same way review.yml/reconciler.yml key on "CI".
-#   - schedule on offset minutes (~every 20) — the MISSED-EVENT BACKSTOP only.
-#     GitHub does drop workflow_run events; the cron guarantees the wavefront
-#     resumes within one period even when a completion event is lost. It is not
-#     the primary pacer.
-#   - workflow_dispatch — a manual kick. It bypasses the gap and budget gates
-#     (the deliberate operator override) but not the quiescence barrier.
+#   - schedule on offset minutes (~every 20) — a PURE BEST-EFFORT BACKSTOP.
+#     GitHub drops scheduled events under load (observed: a `7,27,47` cron silent
+#     for 2.5h, #3256), so cron is NOT a liveness dependency — the self-sustaining
+#     wavefront below owns liveness; cron only shortens a recovery window if the
+#     self-dispatch ever misses.
+#   - workflow_dispatch — two callers, split by the `reason` input. An EMPTY
+#     reason is a human manual kick: it bypasses the gap/budget gate (the
+#     deliberate operator override) but not the quiescence barrier. `reason=defer`
+#     is a SELF-ARMED SUCCESSOR (below): it honors the gate like any scheduled or
+#     completion-chain tick, so the re-arm chain paces against the minimum
+#     interval rather than collapsing it to ~0.
+#
+# SELF-SUSTAINING WAVEFRONT (#3256, ADR-0146 §4 amended). The completion chain
+# re-arms the tick only while boxes keep completing, so a tick that dispatches
+# NOTHING — a governor gap/budget decline, or an owed wave that cannot be slotted
+# (width cap) or run (not quiescent) — produces no box, no completion event, and
+# no successor: the chain saws off its own branch, leaving cron (unreliable) the
+# sole revival. Observed live: a gap-declined tick was the last tick for ~55min
+# with five phase:ready issues waiting. The fix: a tick that declines/defers a
+# wave WHILE ONE IS OWED arms a single successor tick itself (arm_successor),
+# instead of exiting. It is idempotent and single-in-flight — it arms nothing
+# when another agent-tick run is already queued/in-progress, so a future tick is
+# GUARANTEED exactly when the chain would otherwise have none, with no fan-out
+# and no held runner (each successor is a short scan that exits, not a sleeping
+# box). A genuinely quiescent board with nothing owed arms nothing and rests.
+# This demotes cron from a liveness dependency to the pure best-effort backstop
+# above. A residual stall — dispatchable work with no live box and no recent tick
+# — additionally surfaces as a machine-filed `alert` issue (the stall-alert step),
+# so a lost wavefront is visible rather than silent.
 #
 # COMPUTED LIVENESS, NEVER STORED. A live agent-work run IS the claim on its
 # (task, ref) pair; the deterministic run-name `work-{task}-{ref}` (#3129's
@@ -50,6 +73,10 @@ name: Agent tick
 #   - AGENT_DAILY_WAVE_BUDGET    — daily dispatch cap (0/unset = unlimited).
 #   - AGENT_NUDGE_DAYS  — stale-awaiting-answer nudge threshold in days
 #                         (0/unset = nudge disabled).
+#   - AGENT_STALL_ALERT_MINUTES — the residual-stall detector's silence window in
+#                         minutes (default 30; 0/unset disables). A stall — ready
+#                         work, no live box, no prior tick within this window —
+#                         files a machine `alert` issue (#3256).
 # Free-running is not a mode: it is these dials opened wide (width high, gap 0,
 # budget 0), one governor with one set of knobs.
 #
@@ -176,6 +203,7 @@ name: Agent tick
 #     - AGENT_MIN_WAVE_GAP_MINUTES initial '0' (or unset)
 #     - AGENT_DAILY_WAVE_BUDGET   initial '0'/unset (unlimited)
 #     - AGENT_NUDGE_DAYS          initial '3' (0/unset disables the nudge)
+#     - AGENT_STALL_ALERT_MINUTES initial '30' (0/unset disables the stall alert)
 #   Secrets (SHARED with agent-work — no new secret; the App must additionally
 #   hold the Actions: write permission so the tick can list runs and dispatch):
 #     - AGENT_APP_ID, AGENT_APP_PRIVATE_KEY — the aether-agent GitHub App.
@@ -190,6 +218,17 @@ on:
     workflows: ["Agent work"]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      reason:
+        description: >-
+          Dispatch reason. Empty = a human manual kick (bypasses the gap/budget
+          gate, the deliberate operator override). 'defer' = a self-armed
+          successor tick (honors the gate so the re-arm chain paces against the
+          minimum interval instead of collapsing it). See SELF-SUSTAINING
+          WAVEFRONT in this file's header (#3256).
+        required: false
+        default: ""
+        type: string
 
 # Serialize overlapping triggers (a cron landing on a completion event) into one
 # tick at a time so two runs never race the barrier read. cancel-in-progress is
@@ -289,6 +328,7 @@ jobs:
           SCOPE_TYPES: ${{ vars.AGENT_SCOPE_TYPES }}
           MIN_WAVE_GAP_MINUTES: ${{ vars.AGENT_MIN_WAVE_GAP_MINUTES }}
           DAILY_WAVE_BUDGET: ${{ vars.AGENT_DAILY_WAVE_BUDGET }}
+          REASON: ${{ github.event.inputs.reason }}
         run: |
           set -euo pipefail
           owner="${REPO%/*}"
@@ -338,8 +378,19 @@ jobs:
           }
 
           # Governor gap/budget gate — statelessly computed from run history. A
-          # workflow_dispatch is the deliberate override and skips this gate.
-          if [ "$EVENT" != "workflow_dispatch" ]; then
+          # bare manual workflow_dispatch (empty reason) is the deliberate
+          # operator override and skips this gate; a self-armed successor
+          # (reason=defer) honors it like any scheduled/completion-chain tick, so
+          # the re-arm chain paces against the minimum interval (#3256). A decline
+          # here does NOT exit — it records that a wave is owed (gov_declined), so
+          # the dispatch phase can arm a successor instead of sawing off the chain.
+          manual_override=false
+          if [ "$EVENT" = "workflow_dispatch" ] && [ -z "${REASON:-}" ]; then
+            manual_override=true
+          fi
+          gov_declined=false
+          gov_reason=""
+          if [ "$manual_override" != "true" ]; then
             if [ "$gap_minutes" -gt 0 ]; then
               last_created="$(jq -r '[.[].createdAt] | max // empty' /tmp/runs.json)"
               if [ -n "$last_created" ]; then
@@ -347,17 +398,19 @@ jobs:
                 age_minutes=$(( ( $(date -u +%s) - last_epoch ) / 60 ))
                 if [ "$age_minutes" -lt "$gap_minutes" ]; then
                   summary "- governor: last wave ${age_minutes}m ago < gap ${gap_minutes}m — no dispatch this tick."
-                  exit 0
+                  gov_declined=true
+                  gov_reason="gap ${gap_minutes}m (last wave ${age_minutes}m ago)"
                 fi
               fi
             fi
-            if [ "$daily_budget" -gt 0 ]; then
+            if [ "$gov_declined" != "true" ] && [ "$daily_budget" -gt 0 ]; then
               midnight="$(date -u -d 'today 00:00:00' +%s)"
               today_count="$(jq -r --argjson m "$midnight" \
                 '[.[] | select((.createdAt | fromdateiso8601) >= $m)] | length' /tmp/runs.json)"
               if [ "$today_count" -ge "$daily_budget" ]; then
                 summary "- governor: ${today_count} waves today >= budget ${daily_budget} — no dispatch this tick."
-                exit 0
+                gov_declined=true
+                gov_reason="daily budget ${daily_budget} (${today_count} waves today)"
               fi
             fi
           fi
@@ -677,6 +730,42 @@ jobs:
             summary "- dispatched: work-${1}-${2}"
           }
 
+          # Guarantee a successor tick when a wave is owed but this tick did not
+          # dispatch it (#3256). Idempotent and single-in-flight: if any
+          # agent-tick run other than this one is already queued/in-progress a
+          # future tick is already guaranteed, so we arm nothing — this is what
+          # bounds the re-arm to at most one extra tick in flight (no fan-out) and
+          # what makes it a no-op in normal operation, where completion events
+          # keep a tick queued. The successor carries reason=defer so it honors
+          # the gap/budget gate (it is a short scan that exits, never a sleeping
+          # held runner); the concurrency: agent-tick group serializes it.
+          arm_successor() {
+            local others
+            others="$(gh run list --workflow agent-tick.yml --json databaseId,status --limit 100 \
+              --jq '[.[] | select(.status=="queued" or .status=="in_progress"
+                                  or .status=="requested" or .status=="waiting" or .status=="pending")
+                      | .databaseId | select(. != '"${GITHUB_RUN_ID}"')] | length' 2>/dev/null || echo 0)"
+            if [ "${others:-0}" -gt 0 ]; then
+              summary "- successor already armed (${others} agent-tick run(s) in flight) — not re-arming (${1})."
+              return 0
+            fi
+            gh workflow run agent-tick.yml -f reason=defer
+            summary "- armed a successor tick (reason=defer) — ${1} owes a wave."
+          }
+
+          # Governor declined this tick (gap/budget): dispatch nothing, but if a
+          # wave is OWED — advanceable work is on the board that the decline held
+          # back — arm one successor so the owed wave is not stranded waiting on a
+          # completion event that will not fire. Nothing owed → the chain rests.
+          if [ "$gov_declined" = "true" ]; then
+            if [ -n "${land_items}${resume_items}${work_items}" ]; then
+              arm_successor "governor decline (${gov_reason})"
+            else
+              summary "- governor declined and nothing advanceable — no wave owed, chain rests."
+            fi
+            exit 0
+          fi
+
           # Land first — every held PR, regardless of quiescence, off the slot
           # budget.
           while IFS= read -r entry; do
@@ -689,13 +778,18 @@ jobs:
           # Non-land only when quiescent (no live non-land run). Slots = width
           # minus the live non-land count (0 here, so width); question-resume
           # fills ahead of fresh work.
+          deferred_nonland=0
           if [ "$live_nonland" -eq 0 ]; then
             slots=$(( width - live_nonland ))
             [ "$slots" -lt 0 ] && slots=0
             filled=0
             while IFS= read -r entry; do
               [ -n "$entry" ] || continue
-              if [ "$filled" -ge "$slots" ]; then summary "- deferred (slots full): ${entry}"; continue; fi
+              if [ "$filled" -ge "$slots" ]; then
+                summary "- deferred (slots full): ${entry}"
+                deferred_nonland=$((deferred_nonland + 1))
+                continue
+              fi
               # shellcheck disable=SC2086
               set -- $entry
               dispatch "$1" "$2"
@@ -703,7 +797,131 @@ jobs:
             done <<< "${resume_items}${work_items}"
             summary "- filled ${filled}/${slots} non-land slot(s)."
           else
+            deferred_nonland="$(printf '%s' "${resume_items}${work_items}" | grep -c . || true)"
             summary "- not quiescent: ${live_nonland} live non-land run(s) — deferring new approve/scope/implement."
+          fi
+
+          # An owed wave that could not be slotted (width cap) or run (not
+          # quiescent) still needs a guaranteed successor — the not-quiescent case
+          # normally re-arms via the completing box's workflow_run event, but that
+          # event can be dropped, so arm here too. The idempotency guard keeps this
+          # a no-op whenever a tick is already queued.
+          if [ "$deferred_nonland" -gt 0 ]; then
+            arm_successor "${deferred_nonland} non-land item(s) deferred"
+          fi
+
+      # Stall visibility (#3256). The self-sustaining wavefront above guards
+      # against a lost chain, but a genuine liveness loss — a future regression, or
+      # a self-dispatch that somehow misses — must be VISIBLE rather than silent:
+      # the incident that motivated this ran ~55min unnoticed. This is the
+      # residual-stall detector. On the conjunction of (dispatchable work on the
+      # board) AND (no live non-land agent-work run) AND (no agent-tick run other
+      # than this one within the last AGENT_STALL_ALERT_MINUTES), it upserts one
+      # `alert` issue by title — the same dedup-by-title, file-or-comment shape the
+      # context-budget canary and the nightly fuzzer use. Its own step, independent
+      # of the governor gate, so a stall inside a gap window is still surfaced.
+      - name: File a stall alert when the wavefront is lost
+        if: steps.preflight.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SCOPE_TYPES: ${{ vars.AGENT_SCOPE_TYPES }}
+          STALL_MINUTES: ${{ vars.AGENT_STALL_ALERT_MINUTES }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          stall_minutes="${STALL_MINUTES:-30}"
+          if [ "$stall_minutes" -le 0 ]; then
+            echo "AGENT_STALL_ALERT_MINUTES is '${stall_minutes}' — stall detection disabled."
+            exit 0
+          fi
+
+          # (1) Any live non-land agent-work run means the fleet is working — not
+          # stalled — so stop early. Land runs are excluded (they bypass the
+          # barrier and are minutes-long, so a live land is not "the fleet works").
+          gh run list --workflow agent-work.yml --json name,status --limit 100 > /tmp/stall-runs.json
+          live_nonland=0
+          while IFS= read -r rn; do
+            [ -n "$rn" ] || continue
+            case "$rn" in work-land-*) continue ;; work-*) live_nonland=$((live_nonland + 1)) ;; esac
+          done < <(jq -r '.[]
+            | select(.status=="queued" or .status=="in_progress"
+                     or .status=="requested" or .status=="waiting" or .status=="pending")
+            | .name' /tmp/stall-runs.json)
+          if [ "$live_nonland" -gt 0 ]; then
+            echo "${live_nonland} live non-land run(s) — fleet is working, no stall."
+            exit 0
+          fi
+
+          # (2) The most recent agent-tick run OTHER than this one. This run is a
+          # tick happening now, so it cannot itself prove liveness — the signal is
+          # whether the PREVIOUS tick was long enough ago that the fleet went
+          # silent (the completion chain died and only this tick, likely cron or a
+          # manual kick, revived it).
+          prev_tick="$(gh run list --workflow agent-tick.yml --json databaseId,createdAt --limit 100 \
+            --jq '[.[] | select(.databaseId != '"${GITHUB_RUN_ID}"')] | max_by(.createdAt) | .createdAt // empty')"
+          if [ -n "$prev_tick" ]; then
+            prev_age_min=$(( ( $(date -u +%s) - $(date -u -d "$prev_tick" +%s) ) / 60 ))
+            if [ "$prev_age_min" -lt "$stall_minutes" ]; then
+              echo "previous tick ${prev_age_min}m ago < ${stall_minutes}m — ticks are firing, no stall."
+              exit 0
+            fi
+            prev_desc="${prev_age_min}m ago"
+          else
+            prev_desc="never (no prior agent-tick run found)"
+          fi
+
+          # (3) Is there dispatchable work the fleet should be advancing? A lite
+          # board scan mirroring the dispatcher's advanceable/scopeable logic:
+          # ready/plan/held are dispatchable directly; a backlog/define/design/
+          # bounced issue is dispatchable only with a scopeable type:*. Parked
+          # (agent:awaiting-answer), alert, and dont-touch items are not owed.
+          scope_types="${SCOPE_TYPES:-feat,fix,chore,docs,perf,refactor,flake}"
+          scopeable() { case ",${scope_types}," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
+          gh api "repos/${REPO}/issues?state=open&per_page=100" --paginate \
+            --jq '.[] | select(has("pull_request")|not)
+              | [ .number,
+                  ([.labels[].name | select(startswith("phase:"))] | .[0] // "none"),
+                  (if ([.labels[].name] | index("agent:awaiting-answer")) then "await" else "-" end),
+                  (if ([.labels[].name] | index("agent:dont-touch")) then "dt" else "-" end),
+                  ([.labels[].name | select(startswith("type:")) | ltrimstr("type:")] | .[0] // "-"),
+                  (if ([.labels[].name] | index("alert")) then "alert" else "-" end) ]
+              | @tsv' > /tmp/stall-board.tsv
+          dispatchable=0
+          while IFS=$'\t' read -r num phase await dt itype alert; do
+            [ -n "$num" ] || continue
+            { [ "$dt" = "dt" ] || [ "$alert" = "alert" ] || [ "$await" = "await" ]; } && continue
+            case "$phase" in
+              phase:ready|phase:plan|phase:held) dispatchable=$((dispatchable + 1)) ;;
+              none|phase:define|phase:design|phase:bounced)
+                if [ "$itype" != "-" ] && scopeable "$itype"; then dispatchable=$((dispatchable + 1)); fi ;;
+            esac
+          done < /tmp/stall-board.tsv
+          if [ "$dispatchable" -eq 0 ]; then
+            echo "no dispatchable work on the board — an idle fleet is not a stall."
+            exit 0
+          fi
+
+          # All three hold: dispatchable work, no live box, no recent prior tick.
+          # Upsert one alert issue by title (file-or-comment, dedup by exact
+          # title), matching the canary/fuzzer shape. The alert label makes the
+          # dispatcher skip it as a non-work item.
+          title="alert: agent fleet stall - dispatchable work with no live box"
+          {
+            echo "The agent fleet appears to have stalled: **${dispatchable}** dispatchable issue(s) on the board, no live non-land \`agent-work\` run, and the previous \`agent-tick\` was ${prev_desc} (threshold ${stall_minutes}m)."
+            echo
+            echo "The completion chain likely sawed off its own branch — a no-op tick left no successor (#3256) — and cron did not cover it. This tick is filing the alert as it recovers; if this recurs, investigate why the self-sustaining wavefront did not arm a successor."
+            echo
+            echo "- Run: ${RUN_URL}"
+          } > /tmp/stall-alert.md
+          existing="$(gh issue list --state open --search "${title} in:title" \
+            --json number,title \
+            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+          if [ -n "$existing" ]; then
+            echo "Commenting on existing stall alert #${existing}."
+            gh issue comment "$existing" --body-file /tmp/stall-alert.md
+          else
+            echo "Filing stall alert."
+            gh issue create --title "$title" --body-file /tmp/stall-alert.md --label alert
           fi
 
       # Re-notify the owner about stale parked questions. Independent of the wave
