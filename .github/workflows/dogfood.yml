@@ -63,10 +63,10 @@ name: Dogfood
 # never a required status check; the teeth are the dogfood:unresolved /land
 # gate (issue 2969).
 
+# Manual dispatch only (owner decision, 2026-07-13): the automatic
+# Review-completion chain is retired; dogfood runs only when deliberately
+# dispatched.
 on:
-  workflow_run:
-    workflows: ["Review"]
-    types: [completed]
   workflow_dispatch:
     inputs:
       pr:
