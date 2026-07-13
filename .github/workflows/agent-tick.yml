@@ -74,8 +74,22 @@ name: Agent tick
 #                         ends the run with a summary line and zero dispatch.
 #                         Flippable from the repo Variables UI with no code or
 #                         secret access; halts all new dispatch within one tick.
-#   - AGENT_WAVE_WIDTH  — the N-cap (default 2). Free slots = width minus the
-#                         live non-land count.
+#   - AGENT_WAVE_WIDTH  — the all-stages maximum M (default 2), the cap on total
+#                         live non-land concurrency. Free shared slots = M minus
+#                         the live non-land count.
+#   - AGENT_STAGE_WIDTH_{SCOPE,APPROVE,IMPLEMENT} — per-stage sub-caps under M,
+#                         each defaulting to M (unset = no sub-cap tighter than
+#                         the global one, so behavior is unchanged). A non-land
+#                         item dispatches iff its stage has a remaining sub-slot
+#                         AND M has a remaining shared slot; both are consumed.
+#                         Fill is downstream-first (implement > approve > scope),
+#                         so capping scope's width and filling it last lets later
+#                         ticks resume earlier scope finishers' warm-pool deposits
+#                         (#3313). approve-sweep counts toward the approve stage.
+#   - AGENT_LAND_UNDER_MAX — count land against M (default false). Land is
+#                         cache-neutral and board-clearing, so by default it is
+#                         dispatched first off the shared max; true routes it under
+#                         M (never a per-stage sub-cap), deferring when M is full.
 #   - AGENT_MIN_WAVE_GAP_MINUTES — minimum gap since the last wave (default 0).
 #   - AGENT_SCOPE_TYPES — comma-separated type:* values the fleet will scope
 #                         (default feat,fix,chore,docs,perf,refactor,flake — the
@@ -211,7 +225,11 @@ name: Agent tick
 # is the acceptance test once they do):
 #   Repo variables (Settings -> Secrets and variables -> Actions -> Variables):
 #     - AGENT_ENABLED             set 'true' to go live (absent/other = halted)
-#     - AGENT_WAVE_WIDTH          initial '2'
+#     - AGENT_WAVE_WIDTH          initial '2' (the all-stages maximum M)
+#     - AGENT_STAGE_WIDTH_SCOPE   unset (defaults to M; set to sub-cap scope)
+#     - AGENT_STAGE_WIDTH_APPROVE unset (defaults to M; set to sub-cap approve)
+#     - AGENT_STAGE_WIDTH_IMPLEMENT unset (defaults to M; set to sub-cap implement)
+#     - AGENT_LAND_UNDER_MAX      unset/'false' (land exempt from M; 'true' counts it)
 #     - AGENT_MIN_WAVE_GAP_MINUTES initial '0' (or unset)
 #     - AGENT_DAILY_WAVE_BUDGET   initial '0'/unset (unlimited)
 #     - AGENT_NUDGE_DAYS          initial '3' (0/unset disables the nudge)
@@ -338,6 +356,10 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           WAVE_WIDTH: ${{ vars.AGENT_WAVE_WIDTH }}
+          STAGE_WIDTH_SCOPE: ${{ vars.AGENT_STAGE_WIDTH_SCOPE }}
+          STAGE_WIDTH_APPROVE: ${{ vars.AGENT_STAGE_WIDTH_APPROVE }}
+          STAGE_WIDTH_IMPLEMENT: ${{ vars.AGENT_STAGE_WIDTH_IMPLEMENT }}
+          LAND_UNDER_MAX: ${{ vars.AGENT_LAND_UNDER_MAX }}
           SCOPE_TYPES: ${{ vars.AGENT_SCOPE_TYPES }}
           MIN_WAVE_GAP_MINUTES: ${{ vars.AGENT_MIN_WAVE_GAP_MINUTES }}
           DAILY_WAVE_BUDGET: ${{ vars.AGENT_DAILY_WAVE_BUDGET }}
@@ -349,9 +371,30 @@ jobs:
           source scripts/agent-tick-lib.sh
           owner="${REPO%/*}"
           name="${REPO#*/}"
+          # AGENT_WAVE_WIDTH is now the all-stages maximum M (name + default 2
+          # kept): it caps total live non-land concurrency. Each per-stage width
+          # defaults to M, so an unset per-stage knob is no sub-cap tighter than
+          # the global one and reproduces today's single-cap behavior exactly.
           width="${WAVE_WIDTH:-2}"
+          stage_scope="${STAGE_WIDTH_SCOPE:-$width}"
+          stage_approve="${STAGE_WIDTH_APPROVE:-$width}"
+          stage_implement="${STAGE_WIDTH_IMPLEMENT:-$width}"
+          land_under_max="${LAND_UNDER_MAX:-false}"
           gap_minutes="${MIN_WAVE_GAP_MINUTES:-0}"
           daily_budget="${DAILY_WAVE_BUDGET:-0}"
+
+          # A non-land item's stage is its task, with approve-sweep folded into
+          # the approve family; land carries no stage bucket (global-only, and
+          # exempt unless land_under_max). Used for both live counts and the
+          # per-stage fill budgets below.
+          stage_of() {
+            case "$1" in
+              scope) echo scope ;;
+              approve|approve-sweep) echo approve ;;
+              implement) echo implement ;;
+              *) echo "" ;;
+            esac
+          }
 
           # Pastel palette (256-color), one canonical set shared with
           # render-agent-stream.py and agent-work.yml's pool-line family, so the
@@ -403,6 +446,10 @@ jobs:
             | .name' /tmp/runs.json)"
           live_pairs=""
           live_nonland=0
+          live_land=0
+          live_scope=0
+          live_approve=0
+          live_implement=0
           while IFS= read -r rn; do
             [ -n "$rn" ] || continue
             case "$rn" in
@@ -411,7 +458,18 @@ jobs:
             esac
             [ -n "$task" ] && [ -n "$ref" ] || continue
             live_pairs="${live_pairs}${task}:${ref}"$'\n'
-            [ "$task" != "land" ] && live_nonland=$((live_nonland + 1))
+            if [ "$task" = "land" ]; then
+              live_land=$((live_land + 1))
+            else
+              live_nonland=$((live_nonland + 1))
+            fi
+            # Per-stage live counts feed the per-stage fill budgets. approve-sweep
+            # counts toward the approve stage (stage_of folds it in).
+            case "$(stage_of "$task")" in
+              scope) live_scope=$((live_scope + 1)) ;;
+              approve) live_approve=$((live_approve + 1)) ;;
+              implement) live_implement=$((live_implement + 1)) ;;
+            esac
           done <<< "$live_names"
           live_total="$(printf '%s' "$live_pairs" | grep -c . || true)"
           summary "- live agent-work runs: ${live_total} (${live_nonland} non-land)"
@@ -867,49 +925,125 @@ jobs:
             exit 0
           fi
 
-          # Land first — every held PR, regardless of the width cap, off the slot
-          # budget.
+          # Two interacting budgets. The all-stages maximum M (width) caps total
+          # non-land concurrency; each stage carries its own sub-cap defaulting to
+          # M. A non-land item dispatches iff its stage has a remaining per-stage
+          # slot AND the shared max has one, consuming one of each.
+          if [ "$land_under_max" = "true" ]; then
+            # Land routed under M: live land also counts against the shared max.
+            global_remaining=$(( width - live_nonland - live_land ))
+          else
+            global_remaining=$(( width - live_nonland ))
+          fi
+          [ "$global_remaining" -lt 0 ] && global_remaining=0
+          global_budget="$global_remaining"
+          # Per-stage remaining. The scope⊗approve-sweep mutex (#3343) is now a
+          # stage-width override: scope's effective width is forced to 0 while a
+          # sweep is live or dispatching this wave (the sweep reads plan bodies a
+          # scope can rewrite), folding the former per-item skip into the
+          # per-stage vocabulary. Tie-break and sweep_mutex_deferred arming stay
+          # in the sweep block above.
+          eff_scope="$stage_scope"
+          if [ "$sweep_live" = "true" ] || [ "$sweep_dispatching" = "true" ]; then
+            eff_scope=0
+          fi
+          rem_scope=$(( eff_scope - live_scope )); [ "$rem_scope" -lt 0 ] && rem_scope=0
+          rem_approve=$(( stage_approve - live_approve )); [ "$rem_approve" -lt 0 ] && rem_approve=0
+          rem_implement=$(( stage_implement - live_implement )); [ "$rem_implement" -lt 0 ] && rem_implement=0
+          deferred_nonland=0
+          land_deferred=0
+
+          # Land first — highest fill priority. Off every per-stage sub-cap; off
+          # the shared max too by default, so today's unconditional off-budget
+          # land dispatch is unchanged. AGENT_LAND_UNDER_MAX=true routes land
+          # under M instead — it then competes for a shared-max slot (never a
+          # per-stage one), deferring when the max is full.
           while IFS= read -r entry; do
             [ -n "$entry" ] || continue
             # shellcheck disable=SC2086
             set -- $entry
-            dispatch "$1" "$2"
+            if [ "$land_under_max" = "true" ]; then
+              if [ "$global_remaining" -le 0 ]; then
+                trace DEFER "work-${1}-${2}" "all-stages max full (land under max)"
+                cat_deferred="${cat_deferred}work-${1}-${2} — all-stages max full (land under max)"$'\n'
+                land_deferred=$((land_deferred + 1))
+                continue
+              fi
+              dispatch "$1" "$2"
+              global_remaining=$((global_remaining - 1))
+            else
+              dispatch "$1" "$2"
+            fi
           done <<< "$land_items"
 
-          # Non-land dispatch against a live concurrency cap — the global
-          # quiescence barrier is retired (#3343), so this loop runs on every
-          # tick, not only at quiescence. Slots = width minus the live non-land
-          # count, clamped at 0; question-resume fills ahead of fresh work. When
-          # live_nonland >= width, slots == 0 and every item defers through the
-          # slots-full path, re-armed as an owed successor below.
-          deferred_nonland=0
-          slots=$(( width - live_nonland ))
-          [ "$slots" -lt 0 ] && slots=0
+          # Non-land dispatch against the two budgets — the global quiescence
+          # barrier is retired (#3343), so this loop runs on every tick, not only
+          # at quiescence. Fill priority is downstream-first: implement > approve >
+          # scope, preserving resume-ahead-of-fresh within each stage. Scope is
+          # where warm-pool resume matters most (#3313), so filling it last under a
+          # binding max lets later ticks resume earlier scope finishers' deposits —
+          # the cache-friendly direction. With every per-stage knob unset each
+          # stage width equals M, so every per-stage remaining is ≥ the global
+          # remaining and the shared max is the sole binding constraint — the same
+          # dispatch set as today. The trailing "" stage carries any future
+          # unstaged non-land task global-only rather than dropping it.
+          ordered=""
+          for stg in implement approve scope ""; do
+            while IFS= read -r entry; do
+              [ -n "$entry" ] || continue
+              # shellcheck disable=SC2086
+              set -- $entry
+              [ "$(stage_of "$1")" = "$stg" ] && ordered="${ordered}${entry}"$'\n'
+            done <<< "$resume_items"
+            while IFS= read -r entry; do
+              [ -n "$entry" ] || continue
+              # shellcheck disable=SC2086
+              set -- $entry
+              [ "$(stage_of "$1")" = "$stg" ] && ordered="${ordered}${entry}"$'\n'
+            done <<< "$work_items"
+          done
+
           filled=0
           while IFS= read -r entry; do
             [ -n "$entry" ] || continue
             # shellcheck disable=SC2086
             set -- $entry
-            # scope⊗approve-sweep mutex (#3343): a scope box must not run while the
-            # sweep is live or dispatching this wave (the sweep reads plan bodies a
-            # scope can rewrite). Defer the scope item — re-armed as an owed
-            # successor — without consuming a slot.
-            if [ "$1" = "scope" ] && { [ "$sweep_live" = "true" ] || [ "$sweep_dispatching" = "true" ]; }; then
-              trace DEFER "work-${1}-${2}" "scope⊗sweep mutex"
-              cat_deferred="${cat_deferred}work-${1}-${2} — scope⊗sweep mutex"$'\n'
-              deferred_nonland=$((deferred_nonland + 1))
-              continue
-            fi
-            if [ "$filled" -ge "$slots" ]; then
+            stg="$(stage_of "$1")"
+            case "$stg" in
+              scope) stage_rem="$rem_scope" ;;
+              approve) stage_rem="$rem_approve" ;;
+              implement) stage_rem="$rem_implement" ;;
+              *) stage_rem="$global_remaining" ;;
+            esac
+            if [ "$global_remaining" -le 0 ]; then
               trace DEFER "work-${1}-${2}" "slots full"
               cat_deferred="${cat_deferred}work-${1}-${2} — slots full"$'\n'
               deferred_nonland=$((deferred_nonland + 1))
               continue
             fi
+            if [ "$stage_rem" -le 0 ]; then
+              # A mutex-forced scope width keeps the mutex's own defer reason so the
+              # log still reads the mutex, not a generic stage cap.
+              if [ "$stg" = "scope" ] && { [ "$sweep_live" = "true" ] || [ "$sweep_dispatching" = "true" ]; }; then
+                reason="scope⊗sweep mutex"
+              else
+                reason="stage:${stg} full"
+              fi
+              trace DEFER "work-${1}-${2}" "$reason"
+              cat_deferred="${cat_deferred}work-${1}-${2} — ${reason}"$'\n'
+              deferred_nonland=$((deferred_nonland + 1))
+              continue
+            fi
             dispatch "$1" "$2"
             filled=$((filled + 1))
-          done <<< "${resume_items}${work_items}"
-          trace NOTE "" "filled ${filled}/${slots} non-land slot(s)."
+            global_remaining=$((global_remaining - 1))
+            case "$stg" in
+              scope) rem_scope=$((rem_scope - 1)) ;;
+              approve) rem_approve=$((rem_approve - 1)) ;;
+              implement) rem_implement=$((rem_implement - 1)) ;;
+            esac
+          done <<< "$ordered"
+          trace NOTE "" "filled ${filled}/${global_budget} non-land slot(s)."
 
           # A rescued strand means an owner answer did not resume via the
           # primary agent-chat path — file a visible alert so a dropped decision
@@ -944,16 +1078,18 @@ jobs:
             fi
           fi
 
-          # An owed wave that could not be slotted (width cap) or was held by the
-          # scope⊗sweep mutex still needs a guaranteed successor. A live box
-          # normally re-arms via its workflow_run event, but that event can be
-          # dropped, so arm here too; the idempotency guard keeps this a no-op
-          # whenever a tick is already queued. sweep_mutex_deferred covers the case
-          # where the owed sweep is the ONLY thing held (by a live scope) and no
-          # other non-land item defers this wave.
-          if [ "$deferred_nonland" -gt 0 ] || [ "$sweep_mutex_deferred" = "true" ]; then
-            reason_n="$deferred_nonland"; [ "$sweep_mutex_deferred" = "true" ] && reason_n="$((deferred_nonland + 1))"
-            arm_successor "${reason_n} non-land item(s) deferred"
+          # An owed wave that could not be slotted (the shared max, a per-stage
+          # cap, or land under the max) or was held by the scope⊗sweep mutex still
+          # needs a guaranteed successor. A live box normally re-arms via its
+          # workflow_run event, but that event can be dropped, so arm here too; the
+          # idempotency guard keeps this a no-op whenever a tick is already queued.
+          # sweep_mutex_deferred covers the case where the owed sweep is the ONLY
+          # thing held (by a live scope) and no other item defers this wave;
+          # land_deferred covers an owed land held back by land-under-max.
+          if [ "$deferred_nonland" -gt 0 ] || [ "$land_deferred" -gt 0 ] || [ "$sweep_mutex_deferred" = "true" ]; then
+            reason_n=$((deferred_nonland + land_deferred))
+            [ "$sweep_mutex_deferred" = "true" ] && reason_n="$((reason_n + 1))"
+            arm_successor "${reason_n} item(s) deferred"
           fi
 
           # Categorized job-summary render — additive over the trace() detail
