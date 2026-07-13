@@ -107,13 +107,16 @@ jobs:
     # diagnostic comment: those ride the issues API but land on a PULL REQUEST, so
     # GitHub scopes them to the pull-requests permission — issues: write alone
     # returns 403. checks: read backs the head check-runs; statuses: write backs
-    # posting the Approval gate status.
+    # posting the Approval gate status. actions: write backs the self-requeue
+    # workflow_dispatch when a default-branch fetch is infra-unavailable after
+    # retries (#3259), matching agent-judge.yml's same-rationale grant.
     permissions:
       issues: write
       pull-requests: write
       contents: read
       checks: read
       statuses: write
+      actions: write
     # Same-repo only. Dispatch and schedule are always trusted; a pull_request
     # or CI-completion path with a fork head is skipped (its token is read-only
     # and it carries no QA state to reconcile).
@@ -194,6 +197,31 @@ jobs:
             echo "No PR to reconcile for this event."
             exit 0
           fi
+
+          # Wraps a default-branch contents-API fetch (no `?ref=` — the same
+          # pin to main the security posture below requires) in a bounded
+          # retry with backoff: a transient blip — rate limit, network, a
+          # truncated body — must not read as a verdict about the diff
+          # (#3259). Retries on both a failed API call and an empty result, so
+          # a truncated-but-200 response gets the same second chance a hard
+          # failure does. Returns non-zero only once every attempt has failed.
+          fetch_default_branch_file() {
+            path="$1" dest="$2"
+            attempt=1
+            while [ "$attempt" -le 3 ]; do
+              if gh api "repos/${REPO}/contents/${path}" --jq '.content' 2>/dev/null \
+                   | base64 -d >"$dest" 2>/dev/null \
+                 && [ -s "$dest" ]; then
+                return 0
+              fi
+              echo "fetch_default_branch_file: attempt ${attempt} failed for ${path}"
+              if [ "$attempt" -lt 3 ]; then
+                sleep "$((2 ** attempt))"
+              fi
+              attempt=$((attempt + 1))
+            done
+            return 1
+          }
 
           # Recompute one PR: resolve its closing issue, gate on the issue phase,
           # read the facts, compute the target phase by the first-match table,
@@ -367,10 +395,8 @@ jobs:
               # the verdict below is containment, which never consults it. Before
               # this file exists on the default branch the fetch simply misses, and
               # the tier column honestly reads "?" rather than asserting a tier.
-              if ! gh api "repos/${REPO}/contents/.github/approval-policy.yml" \
-                   --jq '.content' 2>/dev/null | base64 -d >"${RUNNER_TEMP}/policy.yml" 2>/dev/null; then
-                : >"${RUNNER_TEMP}/policy.yml"
-              fi
+              fetch_default_branch_file ".github/approval-policy.yml" "${RUNNER_TEMP}/policy.yml" \
+                || : >"${RUNNER_TEMP}/policy.yml"
               # The matcher is fetched the same way the policy is: the contents API
               # with NO ref, which always resolves to the default branch. This
               # workflow checks nothing out on purpose. A checkout pinned to the
@@ -389,11 +415,18 @@ jobs:
               # FAILING gate and moves on: the check is red and legible instead of
               # absent and mysterious. It cannot mean "contained", because with no
               # matcher containment was never computed.
-              if ! gh api "repos/${REPO}/contents/scripts/surface-match.py" \
-                   --jq '.content' 2>/dev/null | base64 -d >"${RUNNER_TEMP}/surface_match.py" 2>/dev/null \
+              if ! fetch_default_branch_file "scripts/surface-match.py" "${RUNNER_TEMP}/surface_match.py" \
                  || ! [ -s "${RUNNER_TEMP}/surface_match.py" ]; then
-                echo "fact declared_surface: matcher unavailable on the default branch."
+                echo "fact declared_surface: matcher unavailable on the default branch after retries."
                 post_gate failure "surface matcher unavailable on the default branch — containment not computed"
+                # Infra-unavailable, not containment-violated: the verdict above
+                # reflects the fetch, not the diff, so guarantee a later recompute
+                # rather than leaning on the cron backstop (#3256 shows that is not
+                # reliable). A GITHUB_TOKEN-created workflow_dispatch is the
+                # documented exception that re-triggers a workflow.
+                gh api -X POST "repos/${REPO}/actions/workflows/reconciler.yml/dispatches" \
+                  -f ref=main -F 'inputs[pr]='"${pr}" >/dev/null
+                echo "requeue: dispatched reconciler for PR #${pr} — matcher fetch was infra-unavailable, not a containment verdict"
                 echo "::endgroup::"
                 return 0
               fi
