@@ -170,11 +170,22 @@ always pass the SHA that fetch captured — never a PR head or any other commit.
 Treat any resolver, policy, Git, or JSON failure as an approval gate failure;
 never substitute a default from memory.
 
-Apply the ADR hard gate before using the returned policy tier. Route to
-`human` when Design notes contain a non-empty line beginning `ADR flag:` or
-the declared/target paths touch `docs/adr/`. Ordinary citations to existing
-ADRs do not trigger this routing gate; they remain inputs to the separate ADR
-merge-readiness check above.
+Apply the ADR hard gate before using the returned policy tier. The gate is
+maturity-aware, not presence-aware (ADR-0146 §6, amended #3306). An issue is
+ADR-bearing when Design notes contain a non-empty line beginning `ADR flag:` or
+the declared/target paths touch `docs/adr/`. For an ADR-bearing issue, classify
+each concrete `docs/adr/…` file against `origin/main`: absent (a new ADR the
+change would create) routes to `human`; present with a `- **Status:**` line
+(line 3 per `docs/adr/TEMPLATE.md`) other than `Proposed` (established) routes
+to `human`. Only when the issue is ADR-bearing and every touched ADR file exists
+on `origin/main` with `- **Status:** Proposed` (an in-progress arc) does the gate
+not fire — the issue then defers to the ordinary policy tier over its full
+surface (the `docs/adr/**` rule is `judge`, so a Proposed-ADR-only surface lands
+at `judge`). Fail-safe: if the issue is ADR-bearing but no existing Proposed ADR
+file can be resolved to cover the touch (an `ADR flag:` naming a not-yet-written
+ADR, an unreadable status line, or a `docs/adr/` path that resolves to no file),
+route to `human`. Ordinary citations to existing ADRs do not make an issue
+ADR-bearing; they remain inputs to the separate ADR merge-readiness check above.
 
 For non-ADR work carrying `approval:pre-approved`, page the issue timeline and
 inspect the most recent `labeled` event for that exact label. Treat the override
@@ -186,8 +197,10 @@ A timeline/API failure makes the override unavailable rather than verified.
 A valid owner override changes the effective tier to `auto` but does not alter
 the recorded policy tier and never bypasses a structural, freshness,
 dependency, model, or other gate. The ADR hard gate is evaluated first and has
-no override: ADR-bearing work remains human-routed even when the owner applied
-`approval:pre-approved`.
+no override when it fires: work touching a new or established ADR remains
+human-routed even when the owner applied `approval:pre-approved`. Work whose
+every ADR touch is an in-progress (Proposed) ADR does not fire the gate, so a
+valid override resolves it to `auto` like any other deferred issue.
 
 For non-ADR work without a valid override, use the resolver's
 `auto|judge|human` result:

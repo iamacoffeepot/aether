@@ -64,14 +64,14 @@ Run all of these. **Refuse** if any fail; list every failure in the refusal outp
 | Problem statement | body has `## Problem statement` and the section is non-empty | "Missing or empty §Problem statement." |
 | Design notes | body has `## Design notes` and is non-empty | "Missing or empty §Design notes." |
 | Implementation plan | body has `## Implementation plan` and is non-empty | "Missing or empty §Implementation plan." |
-| ADR merged | if §Design notes references an ADR PR, that PR's `mergedAt` is non-null (see [ADR gate, in detail](#adr-gate-in-detail); an ADR reference *also* forces the `human` tier via the [ADR hard gate](#adr-hard-gate)) | "ADR PR #M is not merged. Merge it or pass `--skip-adr` to override." |
+| ADR merged | if §Design notes references an ADR PR, that PR's `mergedAt` is non-null (see [ADR gate, in detail](#adr-gate-in-detail); a new or established ADR touch *also* forces the `human` tier via the [ADR hard gate](#adr-hard-gate)) | "ADR PR #M is not merged. Merge it or pass `--skip-adr` to override." |
 | Model label | exactly one `model:*` label present, except a pure umbrella (non-empty `## Sub-issues`, coordination-only own plan; see [Multi-PR umbrella issues](#multi-pr-umbrella-issues)), which carries none (REST: `gh api repos/iamacoffeepot/aether/issues/<n>/labels`) | "Missing model:* label (or more than one). `/scope` stamps model routing at Plan — re-run its Plan step or add the label by hand." |
 | Not blocked | no `blocked` / `wontfix` / `duplicate` label present | "Issue carries label '<label>' which blocks approval." |
 | Freshness | targeted paths exist on `origin/main`; churn since scope re-grounds against the plan's anchors and surfaces only a broken one | "Targets removed on main: <paths>" (hard refuse) / "Plan anchor broken by churn — re-ground failed: `<pattern>` at `<path>`" (soft surface) |
 | Dependency | every `#N` in `## Depends on` is a closed (Done) issue | "Blocked on unlanded dependency: #N (open)." |
 | Umbrella integrity | if `## Sub-issues` is non-empty, the own `## Implementation plan` describes only coordination/integration, not net-new code the children don't cover | "Malformed umbrella: `## Sub-issues` plus a substantial own plan. Split the residual plan into its own child issue (leaving a pure umbrella), or remove `## Sub-issues` to make it a plain implementable issue." |
 
-If **all** gates pass, decide the approval tier: the [ADR hard gate](#adr-hard-gate) first (an ADR-bearing issue routes to the owner unconditionally), then the [Approval tier](#approval-tier) policy lookup for everything else. The tier decides who approves; the gates above decide whether the issue is approvable at all.
+If **all** gates pass, decide the approval tier: the [ADR hard gate](#adr-hard-gate) first (a new-or-established-ADR touch routes to the owner; an in-progress-only ADR touch defers), then the [Approval tier](#approval-tier) policy lookup for everything else. The tier decides who approves; the gates above decide whether the issue is approvable at all.
 
 ## Freshness gate
 
@@ -171,13 +171,21 @@ The agent tick owns the umbrella's end of life (#3212): its `phase:ready` arm ne
 
 ## ADR hard gate
 
-Runs **before any policy lookup**, permanently and unconditionally. An ADR-bearing issue routes to the `human` tier — the owner — before [Approval tier](#approval-tier) is consulted at all. No policy rule, present or future, can auto- or judge-approve it: an ADR is load-bearing by definition. This rule lives in skill text, above the policy file, so it survives any edit to `.github/approval-policy.yml`; that file's `docs/adr/**` `human` entry is belt-and-suspenders, not the source of the rule. The [Approval tier](#approval-tier) lookup is consulted only for a non-ADR issue.
+Runs **before any policy lookup**. The gate is **maturity-aware**, not presence-aware: an ADR-bearing issue routes to the `human` tier — the owner — before [Approval tier](#approval-tier) is consulted, *unless* its only ADR touch is to an ADR whose own arc is still in progress. The owner's care boundary is by ADR maturity, not by any `docs/adr/` touch (ADR-0146 §6, amended #3306): he reviews a **new** ADR and an amendment to an **established** ADR, but not a change to a still-Proposed ADR he already approved the arc of once. This rule lives in skill text, above the policy file, so the new/established → owner guarantee survives any edit to `.github/approval-policy.yml`; that file's `docs/adr/**` entry (now `judge`) only ever resolves the in-progress fall-through. The [Approval tier](#approval-tier) lookup is consulted for a non-ADR issue **and** for an ADR-bearing issue whose every touched ADR is in progress.
 
 **An issue is ADR-bearing when it carries an explicit `ADR flag:` line, or its `## Declared surface` includes `docs/adr/`** — that is, when the work *needs* an ADR or *writes* one.
 
+**The maturity read.** For an ADR-bearing issue, enumerate the concrete `docs/adr/…` files from its `## Declared surface` and classify each against `origin/main`:
+
+- **New** — the `docs/adr/…` path is **absent** on `origin/main` (the change would create it) → the gate fires → `human`.
+- **Established** — the file **exists** on `origin/main` and its `- **Status:**` line (line 3 of every ADR, per `docs/adr/TEMPLATE.md`) is anything **other than `Proposed`** (Accepted, Superseded, Deprecated, Rejected) → the gate fires → `human`.
+- **In progress** — the file **exists** on `origin/main` with `- **Status:** Proposed` → the gate does **not** force `human`; the issue defers to the ordinary [Approval tier](#approval-tier) policy lookup over its full declared surface (which lands at the `judge` default when the ADR is its only surface, or a more-restrictive tier if another surface demands one — most-restrictive-wins).
+
+The gate fires (`human`) if **any** touched ADR is new or established; it defers to policy only when **every** touched ADR is an existing Proposed one. **Fail-safe:** if the issue is ADR-bearing but no concrete existing Proposed ADR file can be resolved to cover the ADR touch — an `ADR flag:` naming a not-yet-written ADR, an unreadable or missing `Status` line, or a `docs/adr/` surface entry that resolves to no such file — route to `human`. The gate defaults to the owner unless in-progress maturity is *proven*, mirroring the policy file's fail-closed-to-`human` posture.
+
 Citing an ADR in prose is **not** the test. `/scope` grounds every design in the ADRs it rests on — a good plan cites several — so a citation-based test routes the entire board to the owner and makes the policy file dead code. That is exactly what happened when this gate first shipped: every issue on the `phase:plan` board carried between three and fifteen ADR citations, none carried an `ADR flag:`, and all of them were short-circuited to `human` without the tier ever being resolved. The gate must separate *this design rests on ADR-0099* from *this work changes the architecture*; only the second is load-bearing.
 
-Do not widen this back to a prose match. The safety property does not need it: anything that adds, changes, or is gated on an ADR still carries an `ADR flag:` (which `/scope` emits precisely for load-bearing work) or declares `docs/adr/` in its surface, and either one routes to the owner permanently.
+Do not widen this back to a prose match. The safety property does not need it: anything that adds, changes, or is gated on an ADR still carries an `ADR flag:` (which `/scope` emits precisely for load-bearing work) or declares `docs/adr/` in its surface, and either one enters the maturity read above — where a new or established ADR still routes to the owner, and only an in-progress (Proposed) one defers to policy.
 
 Note the [ADR merge gate](#adr-gate-in-detail) is a *different* check answering a *different* question — whether an ADR this issue depends on has merged yet — and its citation-based parse is correct there. Routing and merge-readiness are not the same test; do not collapse them.
 
@@ -201,7 +209,7 @@ An issue carrying `approval:pre-approved` resolves to the **`auto`** tier whatev
 
 Three constraints, and none of them are negotiable:
 
-**It cannot pass the [ADR hard gate](#adr-hard-gate).** That gate runs *above* the policy lookup and *above* this label. An issue carrying an `ADR flag:` or declaring `docs/adr/` routes to the owner even with the label applied. An ADR is load-bearing by definition — there is no passable gate for one. Check the ADR gate first and refuse before you ever look at this label.
+**It cannot pass the [ADR hard gate](#adr-hard-gate) when that gate fires.** The gate runs *above* the policy lookup and *above* this label. An issue whose ADR touch is **new or established** routes to the owner even with the label applied — a new or established ADR is load-bearing by definition, and there is no passable gate for one. Check the ADR gate first: if it fires, refuse before you ever look at this label. (An ADR-bearing issue whose every ADR touch is **in progress** does not fire the gate, so the label resolves it to `auto` like any other deferred issue.)
 
 **It must be the owner's label.** Verify against the timeline: the most recent `labeled` event for `approval:pre-approved` must name the repo owner as its actor (the same check `approval:surface-ok` uses — `gh api repos/iamacoffeepot/aether/issues/<n>/timeline`). An agent may apply the label; it does not count, and the refusal says who applied it. Without this check an agent could grant itself unbounded approval authority through a side door, which is the one thing this whole policy exists to prevent. Never treat the label's mere presence as sufficient.
 

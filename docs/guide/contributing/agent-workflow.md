@@ -144,8 +144,12 @@ manifest tier even when the planned edit names only source today. `auto` work
 may advance without a new owner decision. `judge` work receives an independent
 verdict, but the judge is currently shadow-only, so the owner still confirms
 it. `human` work always waits for the owner. An explicit `ADR flag:` or a
-declared `docs/adr/**` edit takes the human route before policy lookup;
-ordinary citations to existing ADRs do not.
+declared `docs/adr/**` edit makes the issue ADR-bearing, and the ADR hard gate
+is maturity-aware (ADR-0146 §6): a **new** ADR or an amendment to an
+**established** (non-`Proposed`) one takes the human route before policy lookup,
+while a change whose every touched ADR is still `Status: Proposed` defers to the
+ordinary policy lookup (the `docs/adr/**` tier is `judge`). Ordinary citations
+to existing ADRs make an issue neither ADR-bearing nor human-routed.
 
 The hosted tick resolves Plan surfaces with the same canonical matcher and,
 when any issue resolves to exactly `auto`, dispatches one batched approval
