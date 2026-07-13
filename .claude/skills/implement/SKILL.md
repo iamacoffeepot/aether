@@ -217,10 +217,17 @@ Format/clippy/build are never flakes — always real, always immediate fix.
 
 CI green — or green except a sole `Qodana scan` red held for `/land`:
 
-1. No phase-label write. The reconciler computes the resting state from the PR: `phase:held` when CI is green and nothing is open, or `phase:findings` when the first-green review/dogfood rollup posts actionable findings. `/implement` writes nothing here — the draft-PR-open-and-green fact is what the reconciler reads. A held `Qodana scan` red is normal: `/land` runs the Qodana sweep before it un-drafts.
-2. Leave the PR as a **draft**. Do not un-draft, do not merge, do not close, do not delete the `phase:*` label (Done is a `/land`-time action). Un-drafting is the user's (or the approved release process's) action — once a PR is un-drafted, native auto-merge lands it on green ([[feedback_green_pr_automerges_before_review]]).
-   A held green draft may still receive its first-green automated review: the review action fires when CI passes and, when the rollup is actionable, posts findings and sets `review:unresolved` on the PR (the dogfood runner sets `dogfood:unresolved` by the same contract). The reconciler reads those and moves the closing issue to `phase:findings`. Resolving them — fix or justify each finding, reply on its thread with the fix commit, then resolve the thread — is `/findings`'s mandate, not `/implement`'s; run `/findings <pr>` on a PR at `phase:findings`. `/land` refuses to land while either label is present or the issue sits at `phase:findings`.
-3. Print to user:
+1. No phase-label write. The reconciler computes the resting state from the PR: `phase:held` when CI is green and nothing is open, or `phase:findings` when the requested review/dogfood rollup posts actionable findings. `/implement` writes nothing here — the draft-PR-open-and-green fact is what the reconciler reads. A held `Qodana scan` red is normal: `/land` runs the Qodana sweep before it un-drafts.
+2. **Request the review.** CI green is the explicit hand-off to review — the review never fires on its own, so a green PR that nobody requests a review for sits verdict-less forever:
+
+   ```bash
+   gh workflow run review.yml -f pr=<N>
+   ```
+
+   The dispatch activates the five-pillar review against `origin/main...HEAD`, barista submits one `APPROVE` / `REQUEST_CHANGES` verdict, and dogfood chains off the review's completion. On the headless implement box the dispatch rides the fleet App token (App-created events trigger downstream workflows). Re-review after a later fix push is an `@barista review` comment on the PR — `/findings`'s re-request channel, not `/implement`'s.
+3. Leave the PR as a **draft**. Do not un-draft, do not merge, do not close, do not delete the `phase:*` label (Done is a `/land`-time action). Un-drafting is the user's (or the approved release process's) action — once a PR is un-drafted, native auto-merge lands it on green ([[feedback_green_pr_automerges_before_review]]).
+   The requested review posts its verdict and, when the rollup is actionable, findings plus `review:unresolved` on the PR (the dogfood runner sets `dogfood:unresolved` by the same contract). The reconciler reads those and moves the closing issue to `phase:findings`. Resolving them — fix or justify each finding, reply on its thread with the fix commit, then resolve the thread — is `/findings`'s mandate, not `/implement`'s; run `/findings <pr>` on a PR at `phase:findings`. `/land` refuses to land while either label is present or the issue sits at `phase:findings`.
+4. Print to user:
 
    ```
    ✓ #<N> implemented and CI-green.

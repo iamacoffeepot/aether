@@ -1,6 +1,6 @@
 ---
 name: review
-description: Pre-land review of a code change against five judgment pillars that mechanical gates (clippy/rustc/Qodana/fmt) cannot decide — spec fidelity (asked-vs-changed delta), correctness (named bug-shapes), test integrity (does the test catch an owned bug), economy (fewest chars that still make sense), and convention/architecture (stated rules + ADR conformance). Returns an issue-ready rollup with soft-hold flags on high-severity correctness/spec findings; never gates CI, never touches GitHub. Integrated review of a PR-bound change is automatic in CI — the review action runs it at the PR's first green — so do not invoke /review inline at the end of /implement. Invoke manually for backfill mode (auditing existing whole files per crate) or for a change that never becomes a PR. Distinct from the global /code-review skill — this wraps the repo's five-pillar review workflow.
+description: Pre-land review of a code change against five judgment pillars that mechanical gates (clippy/rustc/Qodana/fmt) cannot decide — spec fidelity (asked-vs-changed delta), correctness (named bug-shapes), test integrity (does the test catch an owned bug), economy (fewest chars that still make sense), and convention/architecture (stated rules + ADR conformance). Returns an issue-ready rollup with soft-hold flags on high-severity correctness/spec findings; never gates CI, never touches GitHub. Integrated review of a PR-bound change runs in CI on explicit request — the implement box dispatches the review action once CI is green, and an @barista review comment re-requests it — so do not invoke /review inline at the end of /implement. Invoke manually for backfill mode (auditing existing whole files per crate) or for a change that never becomes a PR. Distinct from the global /code-review skill — this wraps the repo's five-pillar review workflow.
 ---
 
 # /review — five-pillar pre-land review
@@ -18,7 +18,7 @@ The Claude entry point to the `review` workflow (`.claude/workflows/review.js`).
 /review --backfill <crate|path>   whole-file audit of existing code, no issue (sharded per crate)
 ```
 
-- **Integrated mode** runs when an issue and its diff are in hand — the spec-fidelity lens runs (the asked-vs-changed delta). For a PR-bound change this mode runs automatically: the review action (`.github/workflows/review.yml`) invokes it in CI at the PR's first green and posts the rollup as PR annotations plus the `review:unresolved` label, so an inline invocation at the end of `/implement` duplicates the pass. Invoke it directly only for a change that never becomes a PR.
+- **Integrated mode** runs when an issue and its diff are in hand — the spec-fidelity lens runs (the asked-vs-changed delta). For a PR-bound change this mode runs in CI on explicit request: the implement box dispatches the review action (`.github/workflows/review.yml`) once the PR's CI is green (re-review is an `@barista review` PR comment), and it posts the rollup as PR annotations plus the `review:unresolved` label, so an inline invocation at the end of `/implement` duplicates the pass. Invoke it directly only for a change that never becomes a PR.
 - **Backfill mode** runs against a crate or path's whole-file set with no issue — the spec lens does not run; the other four pillars audit existing code.
 
 ## Inputs
@@ -38,7 +38,7 @@ The skill assembles the workflow's arg contract (`{issue?, files, testFiles?, di
 
 The workflow sandbox cannot run `git` or `grep`, so the skill resolves the file set before invoking it:
 
-1. **Integrated** — resolve the changed files and their per-file diffs from the branch against `origin/main` by default, or the CI-provided last-reviewed SHA for an incremental re-review (`git diff --name-only <base>...HEAD` for the `.rs` set; `git diff <base>...HEAD -- <file>` per file for `diffs`). Split test files (`tests/`, `#[cfg(test)]`-heavy) into `testFiles`. Read the issue body as `issue`. Pass that base as `diffBase` and the mode as `reviewMode` so the workflow can classify a flagged correctness bug's provenance against the merge-base (full reviews only) — CI's `review.yml` threads both from its resolve step.
+1. **Integrated** — resolve the changed files and their per-file diffs from the branch against `origin/main` (`git diff --name-only origin/main...HEAD` for the `.rs` set; `git diff origin/main...HEAD -- <file>` per file for `diffs`). Split test files (`tests/`, `#[cfg(test)]`-heavy) into `testFiles`. Read the issue body as `issue`. Pass that base as `diffBase` and `full` as `reviewMode` so the workflow can classify a flagged correctness bug's provenance against the merge-base — CI's `review.yml` reviews every request this same full way and threads both from its resolve step.
 2. **Backfill** — resolve the crate's whole-file `.rs` set (`git ls-files -- <crate>/src '*.rs'`), shard per crate to keep each run bounded, and pass no `issue`.
 
 The workflow reads source itself; there is no live MCP harness precondition (unlike `/dogfood`, `/review` does not drive a running engine).

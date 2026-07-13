@@ -4,15 +4,14 @@
 // the verdict review body, plus a marker-anchored summary comment and the
 // `review:unresolved` label.
 //
-// The posture is load-bearing: the verdict review is now authored by the
+// The posture is load-bearing: the verdict review is authored by the
 // reviewer App `iamabarista` (BARISTA_TOKEN) as a NATIVE `APPROVE` /
 // `REQUEST_CHANGES` review — barista authors no PR, so GitHub does not 422
-// its verdict the way it would kettle's self-authored one (ADR-0148). The
-// event is selected by review mode: `REQUEST_CHANGES` when the rollup is
-// actionable (either mode), `APPROVE` only on a clean FULL pass, and NO
-// submission on a clean INCREMENTAL pass — an incremental delta says nothing
-// about an earlier full-review finding, so an `APPROVE` there would wrongly
-// supersede barista's own standing `REQUEST_CHANGES`.
+// its verdict the way it would kettle's self-authored one (ADR-0148). Every
+// run submits exactly one verdict: the review runs on an explicit request,
+// a request means "vouch for this PR", so the run owes `REQUEST_CHANGES`
+// when the rollup is actionable and `APPROVE` when it is clean — no third
+// outcome.
 //
 // This rung ships the native verdict SIDE-BY-SIDE with the still-authoritative
 // mirror chain: the `review:unresolved` label (written here on GITHUB_TOKEN)
@@ -23,12 +22,9 @@
 // Inputs (env):
 //   GITHUB_TOKEN        least-privilege token (pull-requests + issues write)
 //   BARISTA_TOKEN       iamabarista installation token — authors the verdict
-//   BARISTA_LOGIN       barista's bot login (default iamabarista[bot]); used to
-//                       find barista's standing verdict for the dedup guard
 //   GITHUB_REPOSITORY   owner/repo
 //   PR_NUMBER           the PR to annotate
 //   HEAD_SHA            the reviewed PR head SHA
-//   REVIEW_MODE         full or incremental
 //   ROLLUP_PATH         review-rollup.json (the workflow's returned rollup)
 //   FILES_PATH          pr-files.json (gh api pulls/{n}/files --paginate)
 //
@@ -57,11 +53,9 @@ function environment() {
   return {
     token: requireEnv('GITHUB_TOKEN'),
     baristaToken: requireEnv('BARISTA_TOKEN'),
-    baristaLogin: process.env.BARISTA_LOGIN || 'iamabarista[bot]',
     repo: requireEnv('GITHUB_REPOSITORY'),
     pr: Number(requireEnv('PR_NUMBER')),
     headSha: requireEnv('HEAD_SHA'),
-    reviewMode: requireEnv('REVIEW_MODE'),
     rollupPath: process.env.ROLLUP_PATH || 'review-rollup.json',
     filesPath: process.env.FILES_PATH || 'pr-files.json',
   }
@@ -245,51 +239,11 @@ export function isActionable(rollup, disclosed = new Set()) {
   return confirmed.length > 0 || softHolds.length > 0 || gatingSpecFindings.some((f) => f.severity === 'high')
 }
 
-// Select barista's verdict event, review-mode-aware:
-//   actionable (either mode)  -> REQUEST_CHANGES
-//   clean, full pass          -> APPROVE
-//   clean, incremental pass   -> null (no submission — leave standing verdict)
-// The incremental-clean null mirrors the label branch that leaves
-// `review:unresolved` untouched after a clean incremental review: a delta that
-// re-checks only the newly-changed lines cannot vouch for the whole PR, so an
-// `APPROVE` there would supersede an earlier full-review `REQUEST_CHANGES`.
-export function verdictEvent(rollup, reviewMode, disclosed = new Set()) {
-  if (isActionable(rollup, disclosed)) return 'REQUEST_CHANGES'
-  return reviewMode === 'incremental' ? null : 'APPROVE'
-}
-
-// Whether to submit the owed verdict, given barista's standing verdict on this
-// head SHA (`latestBarista`, in event vocabulary, or null) and whether there is
-// fresh inline/body content this run. Submit only when a verdict is owed AND
-// one of: there is new content, barista's standing verdict differs from the one
-// now owed (a clean<->actionable transition), or barista has no standing verdict
-// on this SHA yet. A null `owedEvent` (clean incremental) never submits.
-export function shouldSubmitVerdict({ owedEvent, latestBarista, hasNewContent }) {
-  if (!owedEvent) return false
-  if (hasNewContent) return true
-  if (!latestBarista) return true
-  return latestBarista !== owedEvent
-}
-
-// GitHub stores a submitted review's verdict as APPROVED / CHANGES_REQUESTED;
-// the submit event is APPROVE / REQUEST_CHANGES. Normalize a stored state back
-// to the event vocabulary so the dedup guard compares like with like. Anything
-// that is not a verdict (COMMENTED / DISMISSED / PENDING) maps to null.
-function reviewStateToEvent(state) {
-  if (state === 'APPROVED') return 'APPROVE'
-  if (state === 'CHANGES_REQUESTED') return 'REQUEST_CHANGES'
-  return null
-}
-
-// Barista's most-recent verdict (APPROVE / REQUEST_CHANGES) on this head SHA,
-// in event vocabulary, or null when barista has none. Reviews arrive in
-// submitted order, so the last matching verdict is the standing one.
-function standingBaristaVerdict(reviews, baristaLogin, headSha) {
-  const events = reviews
-    .filter((r) => r.user && r.user.login === baristaLogin && r.commit_id === headSha)
-    .map((r) => reviewStateToEvent(r.state))
-    .filter(Boolean)
-  return events.length ? events[events.length - 1] : null
+// Select barista's verdict event. Every request yields a verdict — the
+// request means "vouch for this PR", so a clean rollup APPROVEs and an
+// actionable one REQUEST_CHANGES; there is no third outcome.
+export function verdictEvent(rollup, disclosed = new Set()) {
+  return isActionable(rollup, disclosed) ? 'REQUEST_CHANGES' : 'APPROVE'
 }
 
 export function buildReviewBody(folded, softHoldFolded, softHoldCount, owedEvent, followUps = []) {
@@ -414,48 +368,39 @@ async function main() {
     }
   }
 
-  // The native barista verdict: event selected by review mode, inline
-  // annotations attached when there are fresh ones, the folded findings in the
-  // body. Decoupled from the inline/folded guard — a verdict may be owed (an
-  // APPROVE on a clean pass, or a standing REQUEST_CHANGES to (re)assert) with
-  // no fresh annotations — but the duplicate-verdict guard keeps the timeline
-  // clean: a same-event same-SHA re-run with no new content is skipped, and a
-  // clean incremental pass submits nothing so it never supersedes a standing
-  // REQUEST_CHANGES.
-  const owedEvent = verdictEvent(rollup, env.reviewMode, disclosed)
-  const hasNewContent = inline.length > 0 || folded.length > 0 || softHoldFolded.length > 0
-  const latestBarista = standingBaristaVerdict(reviews, env.baristaLogin, env.headSha)
+  // The native barista verdict: every run submits one — REQUEST_CHANGES when
+  // the rollup is actionable, APPROVE when it is clean — with fresh inline
+  // annotations attached when there are any and the folded findings in the
+  // body. Unconditional by design: the review runs on an explicit request,
+  // so the request is what owes the verdict, and a fresh submission after a
+  // fix push is exactly what supersedes the standing REQUEST_CHANGES that
+  // `dismiss_stale_reviews` left behind.
+  const owedEvent = verdictEvent(rollup, disclosed)
   const followUpsNormalized = followUps.map((f) => withResolvedPath(f, changed))
-  if (shouldSubmitVerdict({ owedEvent, latestBarista, hasNewContent })) {
-    const body = buildReviewBody(folded, softHoldFolded, softHolds.length, owedEvent, followUpsNormalized)
-    const review = { event: owedEvent, body, commit_id: env.headSha }
-    if (inline.length) review.comments = inline
-    let res = await api(env.baristaToken, 'POST', `repos/${env.repo}/pulls/${env.pr}/reviews`, review)
-    if (!res.ok && review.comments) {
-      // A rejected inline position (e.g. an outdated hunk) 422s the whole
-      // review. Fold the inline findings into the body and retry — with the
-      // SAME verdict event, so a bad hunk position never silently downgrades a
-      // blocking REQUEST_CHANGES to an advisory comment.
-      console.warn(`inline review rejected (${res.status}) — retrying folded into the body`)
-      const extra = inline.map((c) => `- ${c.body.split('\n')[0]} \`${c.path}:${c.line}\``)
-      res = await api(env.baristaToken, 'POST', `repos/${env.repo}/pulls/${env.pr}/reviews`, {
-        event: owedEvent,
-        commit_id: env.headSha,
-        body: `${body}\n\n${extra.join('\n')}`,
-      })
-    }
-    if (!res.ok) console.error(`review POST failed: ${res.status} ${res.text}`)
-    else console.log(`posted ${owedEvent} verdict: ${inline.length} inline, ${folded.length} folded`)
-  } else if (owedEvent) {
-    console.log(`barista ${owedEvent} already standing on ${env.headSha} — no re-submission`)
-  } else {
-    console.log('clean incremental review — leaving barista\'s standing verdict untouched')
+  const body = buildReviewBody(folded, softHoldFolded, softHolds.length, owedEvent, followUpsNormalized)
+  const review = { event: owedEvent, body, commit_id: env.headSha }
+  if (inline.length) review.comments = inline
+  let res = await api(env.baristaToken, 'POST', `repos/${env.repo}/pulls/${env.pr}/reviews`, review)
+  if (!res.ok && review.comments) {
+    // A rejected inline position (e.g. an outdated hunk) 422s the whole
+    // review. Fold the inline findings into the body and retry — with the
+    // SAME verdict event, so a bad hunk position never silently downgrades a
+    // blocking REQUEST_CHANGES to an advisory comment.
+    console.warn(`inline review rejected (${res.status}) — retrying folded into the body`)
+    const extra = inline.map((c) => `- ${c.body.split('\n')[0]} \`${c.path}:${c.line}\``)
+    res = await api(env.baristaToken, 'POST', `repos/${env.repo}/pulls/${env.pr}/reviews`, {
+      event: owedEvent,
+      commit_id: env.headSha,
+      body: `${body}\n\n${extra.join('\n')}`,
+    })
   }
+  if (!res.ok) console.error(`review POST failed: ${res.status} ${res.text}`)
+  else console.log(`posted ${owedEvent} verdict: ${inline.length} inline, ${folded.length} folded`)
 
-  // Upsert the marker-anchored summary comment — the human-readable rollup
-  // and the reviewed head SHA. Regenerated in full each run, and it carries
-  // every fingerprint so re-runs dedup against it.
-  const summary = renderSummary(rollup, normalized, softHoldsForSummary, followUpsNormalized, allFingerprints, env.headSha)
+  // Upsert the marker-anchored summary comment — the human-readable rollup.
+  // Regenerated in full each run, and it carries every fingerprint so
+  // re-runs dedup against it.
+  const summary = renderSummary(rollup, normalized, softHoldsForSummary, followUpsNormalized, allFingerprints)
   const existing = issueComments.find((c) => String(c.body || '').includes(MARKER))
   if (existing) {
     await api(env.token, 'PATCH', `repos/${env.repo}/issues/comments/${existing.id}`, { body: summary })
@@ -471,17 +416,15 @@ async function main() {
     const res = await api(env.token, 'POST', `repos/${env.repo}/issues/${env.pr}/labels`, { labels: [LABEL] })
     if (!res.ok) console.error(`add label failed: ${res.status} ${res.text}`)
     else console.log(`set ${LABEL}`)
-  } else if (env.reviewMode !== 'incremental') {
+  } else {
     const res = await api(env.token, 'DELETE', `repos/${env.repo}/issues/${env.pr}/labels/${encodeURIComponent(LABEL)}`)
     // 404 = the label was not present; a clean no-op.
     if (res.ok || res.status === 404) console.log(`cleared ${LABEL}`)
     else console.error(`remove label failed: ${res.status} ${res.text}`)
-  } else {
-    console.log(`left ${LABEL} unchanged after clean incremental review`)
   }
 }
 
-function renderSummary(rollup, normalized, softHoldsForSummary, followUps, fingerprints, headSha) {
+function renderSummary(rollup, normalized, softHoldsForSummary, followUps, fingerprints) {
   const lines = [MARKER, '## Five-pillar review — summary', '']
   lines.push(
     `Confirmed: **${(rollup.confirmed || []).length}** · ` +
@@ -527,8 +470,7 @@ function renderSummary(rollup, normalized, softHoldsForSummary, followUps, finge
   }
 
   lines.push(POSTURE_FOOTER)
-  // Hidden reviewed state and fingerprints for incremental routing + dedup.
-  lines.push(`<!-- aether-reviewed-sha:${headSha} -->`)
+  // Hidden fingerprints so re-runs dedup against this comment.
   for (const fp of fingerprints) lines.push(`<!-- aether-review-fp:${fp} -->`)
   return lines.join('\n')
 }
