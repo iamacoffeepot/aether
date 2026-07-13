@@ -369,7 +369,8 @@ jobs:
             --jq '.[] | select(has("pull_request")|not)
               | [ .number,
                   ([.labels[].name | select(startswith("phase:"))] | .[0] // "none"),
-                  (if ([.labels[].name] | index("agent:awaiting-answer")) then "await" else "-" end),
+                  (if (([.labels[].name] | index("agent:awaiting-answer"))
+                       or ((.body // "") | contains("<!-- aether-agent:awaiting-answer"))) then "await" else "-" end),
                   (if ([.labels[].name] | index("agent:dont-touch")) then "dt" else "-" end),
                   ([.labels[].name | select(startswith("type:")) | ltrimstr("type:")] | .[0] // "-"),
                   (if ([.labels[].name] | index("alert")) then "alert" else "-" end),
@@ -431,6 +432,23 @@ jobs:
             [ "$last" = "$OWNER" ]
           }
 
+          # A rescued answer older than one tick interval (the ~20m schedule
+          # cadence) means the primary agent-chat path had its chance and did NOT
+          # clear the park: the tick backstop is rescuing a silently-stranded
+          # answer, which warrants a visible alert (#3265). The grace is one tick
+          # interval so a freshly-answered surface the tick legitimately picks up
+          # is never alerted. Reads the newest comment's timestamp (the owner's
+          # answer when owner_answered is true), the same tail -n1 shape.
+          STRAND_GRACE_SECS=1200
+          answer_stale() {
+            local ts age
+            ts="$(gh api "repos/${REPO}/issues/${1}/comments?per_page=100" --paginate \
+              --jq '.[].created_at' | tail -n1 || true)"
+            [ -n "$ts" ] || return 1
+            age=$(( $(date -u +%s) - $(date -u -d "$ts" +%s) ))
+            [ "$age" -ge "$STRAND_GRACE_SECS" ]
+          }
+
           # The approval tier of a phase:plan issue — the pre-filter that decides
           # whether an auto-approval run is worth dispatching at all. Echoes one
           # word: `adr` (the ADR hard gate fired), `none` (no declared surface),
@@ -463,6 +481,7 @@ jobs:
           # owner has replied (question-resume), else it is left parked.
           land_items=""
           resume_items=""
+          strand_items=""
           work_items=""
           approve_queue=0
           digest_queue=0
@@ -629,6 +648,13 @@ jobs:
             if [ "$await" = "await" ]; then
               if owner_answered "$num"; then
                 resume_items="${resume_items}${task} ${ref}"$'\n'
+                # The owner answered but the surface is still parked, so the tick
+                # is the backstop rescuing it. If that answer has sat past the
+                # grace, the primary agent-chat path dropped it silently — record
+                # the strand so a visible alert is filed once it dispatches (#3265).
+                if answer_stale "$num"; then
+                  strand_items="${strand_items}${num} "
+                fi
               else
                 summary "- skip #${num}: agent:awaiting-answer, owner has not replied — parked"
               fi
@@ -702,6 +728,37 @@ jobs:
               filled=$((filled + 1))
             done <<< "${resume_items}${work_items}"
             summary "- filled ${filled}/${slots} non-land slot(s)."
+
+            # A rescued strand means an owner answer did not resume via the
+            # primary agent-chat path — file a visible alert so a dropped decision
+            # is not a silent green success (#3265). Keep one open alert issue and
+            # append, mirroring context-budget-canary.yml's upsert; the hidden
+            # marker dedups against the open alert.
+            if [ -n "${strand_items}" ]; then
+              alert_title="ci: owner answer stranded — resumed by the tick backstop"
+              {
+                echo "<!-- aether-alert:stranded-answer -->"
+                echo "The tick backstop re-dispatched an owner-answered awaiting-answer surface whose answer had already sat past the grace: the primary \`agent-chat\` path did not resume it. Each such rescue is an owner decision that read as a green success while nothing moved."
+                echo
+                printf 'Stranded this tick:'
+                for s in ${strand_items}; do printf ' #%s' "$s"; done
+                echo
+                echo
+                echo "- Run: ${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
+              } > /tmp/strand-alert.md
+              existing_alert="$(gh issue list --state open --search "${alert_title} in:title" \
+                --json number,title \
+                --jq "map(select(.title == \"${alert_title}\")) | .[0].number // empty" || true)"
+              if [ -n "$existing_alert" ]; then
+                gh issue comment "$existing_alert" --body-file /tmp/strand-alert.md \
+                  && summary "- alert: appended stranded-answer rescue to #${existing_alert} (${strand_items})" \
+                  || summary "- warn: could not append stranded-answer rescue to #${existing_alert}"
+              else
+                gh issue create --title "$alert_title" --body-file /tmp/strand-alert.md --label alert \
+                  && summary "- alert: filed stranded-answer rescue issue (${strand_items})" \
+                  || summary "- warn: could not file stranded-answer rescue issue (${strand_items})"
+              fi
+            fi
           else
             summary "- not quiescent: ${live_nonland} live non-land run(s) — deferring new approve/scope/implement."
           fi
