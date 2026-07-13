@@ -164,6 +164,21 @@ function findingBody(f) {
   return `**${f.pillar}${cat}**${sev} — ${f.symbol || ''} ${rec}${suggestion}`.trim()
 }
 
+// Shared by confirmed findings, spec findings, and soft-holds: resolve `file`
+// to the full changed-file path once, up front, so every downstream anchor /
+// fingerprint computation reads a common `path` field.
+function withResolvedPath(f, changed) {
+  return { ...f, path: resolvePath(f.file, changed) }
+}
+
+// One folded-finding line pair: the finding text + anchor, then its dedup
+// marker. Shared by the ordinary folded section and the soft-hold section so
+// the two render identically.
+function renderFoldedFinding(f, fp) {
+  const anchor = `${f.path || f.file || ''}${f.line != null ? `:${f.line}` : ''}`
+  return [`- ${findingBody(f)} \`${anchor}\``, `  <!-- aether-review-fp:${fp} -->`]
+}
+
 // The rollup is actionable when it carries anything a reviewer must clear: a
 // confirmed finding, a soft-hold, or a high-severity spec-fidelity finding.
 // This is the same predicate the `review:unresolved` label decision uses, so
@@ -222,21 +237,20 @@ function standingBaristaVerdict(reviews, baristaLogin, headSha) {
   return events.length ? events[events.length - 1] : null
 }
 
-function buildReviewBody(folded, softHolds, owedEvent) {
+export function buildReviewBody(folded, softHoldFolded, softHoldCount, owedEvent) {
   const lines = ['## Five-pillar review', '']
-  if (owedEvent === 'APPROVE' && !folded.length && !softHolds.length) {
+  if (owedEvent === 'APPROVE' && !folded.length && !softHoldCount) {
     lines.push('No confirmed findings — the change is clean under all five pillars.', '')
   }
   if (folded.length) {
     lines.push('Findings not anchored to a changed line:', '')
-    for (const { f, fp } of folded) {
-      lines.push(`- ${findingBody(f)} \`${f.path || f.file || ''}${f.line != null ? `:${f.line}` : ''}\``)
-      lines.push(`  <!-- aether-review-fp:${fp} -->`)
-    }
+    for (const { f, fp } of folded) lines.push(...renderFoldedFinding(f, fp))
     lines.push('')
   }
-  if (softHolds.length) {
-    lines.push(`**${softHolds.length} soft-hold** finding(s) — clear before un-draft.`, '')
+  if (softHoldCount) {
+    lines.push(`**${softHoldCount} soft-hold** finding(s) — clear before un-draft.`, '')
+    for (const { f, fp } of softHoldFolded) lines.push(...renderFoldedFinding(f, fp))
+    lines.push('')
   }
   lines.push(POSTURE_FOOTER)
   return lines.join('\n')
@@ -271,11 +285,11 @@ async function main() {
   // (everything else, including spec-fidelity findings, which carry no
   // line). Each finding is normalized to a common shape first.
   const normalized = [
-    ...confirmed.map((f) => ({ ...f, path: resolvePath(f.file, changed) })),
-    ...specFindings.map((f) => ({
+    ...confirmed.map((f) => withResolvedPath(f, changed)),
+    ...specFindings.map((f) => withResolvedPath({
       ...f, pillar: 'spec-fidelity', line: undefined, recommendation: undefined,
-      suggested_form: f.description, path: resolvePath(f.file, changed),
-    })),
+      suggested_form: f.description,
+    }, changed)),
   ]
 
   const inline = []
@@ -298,6 +312,38 @@ async function main() {
     }
   }
 
+  // Every soft-hold duplicates a row already present in `confirmed` or
+  // `spec.findings` (review.js's `specSoftHolds` decoupling), so dedup against
+  // the fingerprints normalized/spec just produced — a soft-hold that overlaps
+  // renders once, via its confirmed/spec row, not twice. `posted` catches the
+  // re-run case: a soft-hold with no confirmed/spec twin that was already
+  // annotated on an earlier pass. Survivors partition inline/folded exactly
+  // like the confirmed/spec path; `softHoldsForSummary` (dedup against
+  // confirmed/spec only, not `posted`) feeds the always-regenerated summary
+  // comment so it never goes missing a soft-hold-only entry.
+  const confirmedSpecFingerprints = new Set(allFingerprints)
+  const softHoldsNormalized = softHolds.map((f) => withResolvedPath(f, changed))
+  const softHoldFolded = []
+  const softHoldsForSummary = []
+  for (const f of softHoldsNormalized) {
+    const anchor = f.path && f.line != null && hunks.get(f.path)?.has(Number(f.line))
+    const fp = fingerprint(anchor ? f.path : f.path || f.file, anchor ? f.line : undefined, f.pillar)
+    const duplicate = confirmedSpecFingerprints.has(fp)
+    if (!duplicate) softHoldsForSummary.push(f)
+    if (duplicate || posted.has(fp)) continue
+    allFingerprints.push(fp)
+    if (anchor) {
+      inline.push({
+        path: f.path,
+        line: Number(f.line),
+        side: 'RIGHT',
+        body: `${findingBody(f)}\n<!-- aether-review-fp:${fp} -->`,
+      })
+    } else {
+      softHoldFolded.push({ f, fp })
+    }
+  }
+
   // The native barista verdict: event selected by review mode, inline
   // annotations attached when there are fresh ones, the folded findings in the
   // body. Decoupled from the inline/folded guard — a verdict may be owed (an
@@ -307,10 +353,10 @@ async function main() {
   // clean incremental pass submits nothing so it never supersedes a standing
   // REQUEST_CHANGES.
   const owedEvent = verdictEvent(rollup, env.reviewMode)
-  const hasNewContent = inline.length > 0 || folded.length > 0
+  const hasNewContent = inline.length > 0 || folded.length > 0 || softHoldFolded.length > 0
   const latestBarista = standingBaristaVerdict(reviews, env.baristaLogin, env.headSha)
   if (shouldSubmitVerdict({ owedEvent, latestBarista, hasNewContent })) {
-    const body = buildReviewBody(folded, softHolds, owedEvent)
+    const body = buildReviewBody(folded, softHoldFolded, softHolds.length, owedEvent)
     const review = { event: owedEvent, body, commit_id: env.headSha }
     if (inline.length) review.comments = inline
     let res = await api(env.baristaToken, 'POST', `repos/${env.repo}/pulls/${env.pr}/reviews`, review)
@@ -338,7 +384,7 @@ async function main() {
   // Upsert the marker-anchored summary comment — the human-readable rollup
   // and the reviewed head SHA. Regenerated in full each run, and it carries
   // every fingerprint so re-runs dedup against it.
-  const summary = renderSummary(rollup, normalized, allFingerprints, env.headSha)
+  const summary = renderSummary(rollup, normalized, softHoldsForSummary, allFingerprints, env.headSha)
   const existing = issueComments.find((c) => String(c.body || '').includes(MARKER))
   if (existing) {
     await api(env.token, 'PATCH', `repos/${env.repo}/issues/comments/${existing.id}`, { body: summary })
@@ -364,7 +410,7 @@ async function main() {
   }
 }
 
-function renderSummary(rollup, normalized, fingerprints, headSha) {
+function renderSummary(rollup, normalized, softHoldsForSummary, fingerprints, headSha) {
   const lines = [MARKER, '## Five-pillar review — summary', '']
   lines.push(
     `Confirmed: **${(rollup.confirmed || []).length}** · ` +
@@ -377,7 +423,7 @@ function renderSummary(rollup, normalized, fingerprints, headSha) {
   )
 
   const grouped = new Map()
-  for (const f of normalized) {
+  for (const f of [...normalized, ...softHoldsForSummary]) {
     const key = f.path || f.file || '(unknown)'
     if (!grouped.has(key)) grouped.set(key, [])
     grouped.get(key).push(f)
