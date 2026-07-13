@@ -735,6 +735,11 @@ jobs:
               continue
             fi
             if [ "$task" = "land" ]; then
+              if [ "$await" = "await" ] && ! owner_answered "$num"; then
+                trace "- skip #${num}: phase:held land parked on agent:awaiting-answer, owner has not replied"
+                cat_waiting="${cat_waiting}#${num} — phase:held land parked, owner has not replied"$'\n'
+                continue
+              fi
               land_items="${land_items}${task} ${ref}"$'\n'
               continue
             fi
