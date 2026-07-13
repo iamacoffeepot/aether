@@ -554,6 +554,10 @@ jobs:
           AGENT_POOL_CONTEXT_CAP_TOKENS: ${{ vars.AGENT_POOL_CONTEXT_CAP_TOKENS }}
         run: |
           set -uo pipefail
+          # Lavender accent shared across the pool: family (↓ checkout / ↑
+          # deposit / ♻ retired), matching render-agent-stream.py's pastel set.
+          c_pool=$'\033[38;5;183m'; c_reset=$'\033[0m'
+          pool_log() { printf '%spool: %s %s%s\n' "$c_pool" "$1" "$2" "$c_reset"; }
           # Stage the pool script from origin/main, never a branch the wrapper
           # might later cut: a stale branch must not silently kill the pool
           # (#3293), and the idx path is a workflow-side string either way.
@@ -587,7 +591,7 @@ jobs:
                 cand_sid="$(jq -r .session_id /tmp/pool-candidate.json)" || continue
                 elig="$(node /tmp/agent-pool.mjs eligible --manifest /tmp/pool-candidate.json --ls-tree /tmp/pool-ls-tree.txt)" || continue
                 if [ "$(echo "$elig" | jq -r .ok)" != "true" ]; then
-                  echo "pool: retired ${cand_sid} ($(echo "$elig" | jq -r .reason))" | tee -a "$GITHUB_STEP_SUMMARY"
+                  pool_log "♻" "retired ${cand_sid} ($(echo "$elig" | jq -r .reason))" | tee -a "$GITHUB_STEP_SUMMARY"
                   aws s3 rm "s3://${BUCKET}/${key}" >/dev/null 2>&1 || true
                   aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v2/sessions/${cand_sid}/" >/dev/null 2>&1 || true
                   continue
@@ -600,16 +604,16 @@ jobs:
                     # expired lease from a dead box — reclaim; a raced re-create still 412s for the loser
                     aws s3 rm "s3://${BUCKET}/${lease}" >/dev/null 2>&1 || true
                     aws s3api put-object --bucket "$BUCKET" --key "$lease" --body /tmp/pool-lease.txt --if-none-match '*' >/dev/null 2>&1 \
-                      || { echo "pool: lease race lost on ${cand_sid}"; continue; }
+                      || { pool_log "↓" "lease race lost on ${cand_sid}"; continue; }
                   else
-                    echo "pool: ${cand_sid} is leased"; continue
+                    pool_log "↓" "${cand_sid} is leased"; continue
                   fi
                 fi
                 mkdir -p "$HOME/.claude/projects/${munged}"
                 if aws s3 sync "s3://${BUCKET}/agent/pool/v2/sessions/${cand_sid}/" "$HOME/.claude/projects/${munged}/" >/dev/null 2>&1; then
                   sid="$cand_sid"
                   cp /tmp/pool-candidate.json /tmp/pool-prior-manifest.json
-                  echo "pool: warm checkout ${sid} (root $(jq -r .subsystem_root /tmp/pool-candidate.json), $(jq -r .context_tokens /tmp/pool-candidate.json) ctx tokens)" | tee -a "$GITHUB_STEP_SUMMARY"
+                  pool_log "↓" "warm checkout ${sid} (root $(jq -r .subsystem_root /tmp/pool-candidate.json), $(jq -r .context_tokens /tmp/pool-candidate.json) ctx tokens)" | tee -a "$GITHUB_STEP_SUMMARY"
                 else
                   aws s3 rm "s3://${BUCKET}/${lease}" >/dev/null 2>&1 || true
                 fi
@@ -621,7 +625,7 @@ jobs:
               [ "$prefix" = "$idx_base" ] && break
             done
           fi
-          [ -n "$sid" ] || echo "pool: cold run"
+          [ -n "$sid" ] || pool_log "↓" "cold run"
           { echo "cli_version=${cli_version}"; echo "session_id=${sid}"; } >> "$GITHUB_OUTPUT"
 
       # Drive headless Claude through the #3128 wrapper for the dispatched task.
@@ -792,6 +796,10 @@ jobs:
           AGENT_POOL_CONTEXT_CAP_TOKENS: ${{ vars.AGENT_POOL_CONTEXT_CAP_TOKENS }}
         run: |
           set -uo pipefail
+          # Lavender accent shared across the pool: family (↓ checkout / ↑
+          # deposit / ♻ retired), matching render-agent-stream.py's pastel set.
+          c_pool=$'\033[38;5;183m'; c_reset=$'\033[0m'
+          pool_log() { printf '%spool: %s %s%s\n' "$c_pool" "$1" "$2" "$c_reset"; }
           # Same origin/main staging as Pool checkout (#3293) — this step runs
           # even when checkout was skipped, so it stages its own copy.
           git show origin/main:scripts/agent-pool.mjs > /tmp/agent-pool.mjs || true
@@ -828,7 +836,7 @@ jobs:
             idx="agent/pool/v2/idx/${TASK}/${CLI_VERSION:-unknown}/${model}/${slug}"
             if aws s3 sync "$HOME/.claude/projects/${munged}/" "s3://${BUCKET}/agent/pool/v2/sessions/${new_sid}/" >/dev/null 2>/tmp/pool-upload-err.txt \
                && aws s3 cp /tmp/pool-manifest-new.json "s3://${BUCKET}/${idx}/${new_sid}.json" >/dev/null 2>>/tmp/pool-upload-err.txt; then
-              echo "pool: deposited ${new_sid} under ${idx} ($(jq -r .context_tokens /tmp/pool-manifest-new.json) ctx tokens)" | tee -a "$GITHUB_STEP_SUMMARY"
+              pool_log "↑" "deposited ${new_sid} under ${idx} ($(jq -r .context_tokens /tmp/pool-manifest-new.json) ctx tokens)" | tee -a "$GITHUB_STEP_SUMMARY"
               [ "${PRIOR_SID:-}" != "$new_sid" ] && retire_prior
               depth="${AGENT_POOL_DEPTH:-1}"
               aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "${idx}/" \
@@ -838,13 +846,13 @@ jobs:
                     ssid="$(basename "$stale" .json)"
                     aws s3 rm "s3://${BUCKET}/${stale}" >/dev/null 2>&1 || true
                     aws s3 rm --recursive "s3://${BUCKET}/agent/pool/v2/sessions/${ssid}/" >/dev/null 2>&1 || true
-                    echo "pool: depth trim retired ${ssid}" | tee -a "$GITHUB_STEP_SUMMARY"
+                    pool_log "♻" "depth trim retired ${ssid}" | tee -a "$GITHUB_STEP_SUMMARY"
                   done
             else
-              echo "pool: deposit upload failed — entry not published ($(tail -c 300 /tmp/pool-upload-err.txt 2>/dev/null | tr '\n' ' '))" | tee -a "$GITHUB_STEP_SUMMARY"
+              pool_log "↑" "deposit upload failed — entry not published ($(tail -c 300 /tmp/pool-upload-err.txt 2>/dev/null | tr '\n' ' '))" | tee -a "$GITHUB_STEP_SUMMARY"
             fi
           else
-            echo "pool: deposit refused ($(echo "$out" | jq -r .reason))" | tee -a "$GITHUB_STEP_SUMMARY"
+            pool_log "↑" "deposit refused ($(echo "$out" | jq -r .reason))" | tee -a "$GITHUB_STEP_SUMMARY"
             retire_prior
           fi
           release_lease

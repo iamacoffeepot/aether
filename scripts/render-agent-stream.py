@@ -20,7 +20,10 @@ def paint(code, s):
     return f"\033[{code}m{s}\033[0m" if COLOR else s
 
 
-DIM, BOLD, CYAN, GREEN, RED, YELLOW = "2", "1", "36", "32", "31", "33"
+BOLD = "1"
+OK, ERROR, INFO, WARN, MUTED = "38;5;151", "38;5;210", "38;5;117", "38;5;222", "38;5;245"
+
+TOOL_COL_WIDTH = 12  # fixed so the arg column lines up across tool names
 
 # How to summarise each tool's input: the parameters a reader actually needs to
 # know what happened. Anything not listed falls back to a compact key=value line.
@@ -78,7 +81,8 @@ def main():
                 elif block.get("type") == "tool_use":
                     name = block.get("name", "?")
                     tools[block.get("id")] = name
-                    print(f"  {paint(CYAN, '▸ ' + name)}  {describe(name, block.get('input', {}))}", flush=True)
+                    col = paint(INFO, "▸ " + name.ljust(TOOL_COL_WIDTH))
+                    print(f"  {col}  {describe(name, block.get('input', {}))}", flush=True)
 
         elif kind == "user":
             # Tool results arrive as user messages. A call whose outcome is invisible
@@ -98,21 +102,21 @@ def main():
                 err = block.get("is_error")
 
                 if err:
-                    print(f"      {paint(RED, '↳ error')} {flat(content, 200)}", flush=True)
+                    print(f"      {paint(ERROR, '✗ ↳')} {flat(content, 200)}", flush=True)
                 elif name in ("Bash", "Grep", "Glob", "ToolSearch"):
-                    print(f"      {paint(GREEN, '↳')} {paint(DIM, flat(content, 160) or '(no output)')}", flush=True)
+                    print(f"      {paint(OK, '✓ ↳')} {paint(MUTED, flat(content, 160) or '(no output)')}", flush=True)
                 else:
                     lines = content.count("\n") + 1 if content else 0
-                    print(f"      {paint(GREEN, '↳')} {paint(DIM, f'{lines} lines')}", flush=True)
+                    print(f"      {paint(OK, '✓ ↳')} {paint(MUTED, f'{lines} lines')}", flush=True)
 
         elif kind == "result":
             u = ev.get("usage", {}) or {}
             ok = not ev.get("is_error")
-            head = paint(GREEN if ok else RED, f"result: {ev.get('subtype', '?')}")
+            head = paint(OK if ok else ERROR, f"result: {ev.get('subtype', '?')}")
             print("\n" + paint(BOLD, "── " + head))
             print(
                 paint(
-                    DIM,
+                    MUTED,
                     f"   {ev.get('num_turns', 0)} turns · "
                     f"{ev.get('duration_ms', 0) / 60000:.1f} min · "
                     f"${ev.get('total_cost_usd', 0):.2f} · "
