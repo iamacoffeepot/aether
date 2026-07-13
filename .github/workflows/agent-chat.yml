@@ -255,7 +255,7 @@ jobs:
           # work-approve-sweep-all.
           if [ "$task" = "approve-sweep" ]; then ref="all"; fi
           case "$task" in
-            scope|approve|approve-sweep|implement|land) ;;
+            scope|approve|approve-sweep|implement|land|resolve) ;;
             *)
               echo "parked marker carries an unrecognized task='${task:-}' — falling back to a plain turn."
               echo "parked=false" >> "$GITHUB_OUTPUT"
