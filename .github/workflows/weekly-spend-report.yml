@@ -1,0 +1,74 @@
+name: Weekly spend report
+
+# Rung 2 of the #3166 ledger arc (parent umbrella #3378): a periodic read-out
+# over the fleet spend ledger the daily scorecard (scripts/agent-scorecard.sh)
+# already computes on demand. Runs the scorecard with --days 7 and upserts a
+# rolling report issue, so cost-per-task, cost-per-model, and the warm-resume
+# rate (the steady-state proof #3350's bare-cwd fix holds) are legible without
+# anyone running the scorecard by hand. Verdict/refine quality columns degrade
+# to "n/a" until a write-side follow-up populates them on the ledger record
+# (see the scorecard's own header comment and #3382's §Side findings).
+#
+# Scheduled Monday 08:00 UTC — no collision with the other crons in this repo
+# (agent-tick / agent-judge at :07,:27,:47 hourly, cache-behavior-canary 05:17,
+# context-budget-canary 07:43, desktop-nightly 07:37, fuzz-nightly 06:17,
+# reconciler every 15 minutes).
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  report:
+    name: Publish weekly spend/quality report
+    # Small RunsOn box, not ubuntu-latest: the in-VPC instance profile carries
+    # the S3 read scripts/agent-scorecard.sh already relies on (the same path
+    # agent-work / review / dogfood use for their ledger writes), so this job
+    # needs no new IAM role or OIDC grant — just a bucket read the instance
+    # profile already has.
+    runs-on: runs-on=${{ github.run_id }}/runner=2cpu-linux-x64
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the weekly scorecard
+        run: scripts/agent-scorecard.sh --days 7 > /tmp/weekly-report.txt
+
+      # Keep one open rolling report issue and append subsequent weekly runs
+      # as comments, mirroring context-budget-canary.yml's file-or-comment
+      # upsert shape — the difference being this always posts (the report is
+      # the point), not only on a breach.
+      - name: Upsert the weekly report issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="ci: weekly fleet spend/quality report"
+          {
+            echo '~~~text'
+            cat /tmp/weekly-report.txt
+            echo '~~~'
+            echo
+            echo "- Run: ${RUN_URL}"
+          } > /tmp/weekly-report-issue.md
+
+          existing=$(gh issue list --state open --search "${title} in:title" \
+            --json number,title \
+            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")
+
+          if [ -n "$existing" ]; then
+            echo "Commenting on existing weekly report issue #${existing}."
+            gh issue comment "$existing" --body-file /tmp/weekly-report-issue.md
+          else
+            echo "Filing the weekly report issue."
+            # agent:dont-touch: a rolling report issue is not a pipeline work
+            # item, and the fleet dispatcher/scoper skips anything carrying it
+            # — without the label an unlabelled issue reads as Backlog and gets
+            # scoped (#3180).
+            gh issue create --title "$title" --body-file /tmp/weekly-report-issue.md --label agent:dont-touch
+          fi
