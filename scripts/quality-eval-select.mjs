@@ -72,7 +72,7 @@ export function isCodeBearing(paths) {
 }
 
 // The first label carrying `<prefix>:` (e.g. `size:` -> `size:m`), or null.
-export function pickLabel(labels, prefix) {
+function pickLabel(labels, prefix) {
   const hit = (labels || []).find((l) => String(l).startsWith(`${prefix}:`))
   return hit || null
 }
@@ -93,7 +93,11 @@ async function api(token, path) {
       'user-agent': 'aether-quality-eval-select',
     },
   })
-  if (!res.ok) throw new Error(`GET ${url} -> ${res.status} ${await res.text()}`)
+  if (!res.ok) {
+    const err = new Error(`GET ${url} -> ${res.status} ${await res.text()}`)
+    err.status = res.status
+    throw err
+  }
   return { data: await res.json(), link: res.headers.get('link') }
 }
 
@@ -147,8 +151,11 @@ async function main() {
     try {
       commit = (await api(token, `repos/${repo}/commits/${pr.merge_commit_sha}`)).data
     } catch (err) {
-      console.error(`skip PR #${pr.number}: cannot resolve squash commit — ${err.message}`)
-      continue
+      if (err.status === 404) {
+        console.error(`skip PR #${pr.number}: squash commit gone — ${err.message}`)
+        continue
+      }
+      throw err // systemic (auth/rate-limit/network) — abort rather than skip-spam an empty sample
     }
     const parentSha = commit.parents && commit.parents[0] && commit.parents[0].sha
     const paths = (commit.files || []).map((f) => f.filename)
@@ -158,8 +165,11 @@ async function main() {
     try {
       issue = (await api(token, `repos/${repo}/issues/${issueNumber}`)).data
     } catch (err) {
-      console.error(`skip #${issueNumber}: cannot read closing issue — ${err.message}`)
-      continue
+      if (err.status === 404) {
+        console.error(`skip #${issueNumber}: closing issue gone — ${err.message}`)
+        continue
+      }
+      throw err // systemic — abort rather than skip-spam an empty sample
     }
     if (issue.pull_request) continue // the reference resolved to a PR, not an issue
 
