@@ -9,6 +9,8 @@ The user invokes `/bounce` when reviewing scope artifacts (or watching execution
 
 Self-bounces by other skills (`/scope` hitting a wall, `/implement` discovering a design flaw mid-execution) use the same mechanism — this skill is the explicit user-driven wrapper.
 
+A **reviewer-initiated bounce** (issue #3391) reaches the same `phase:bounced` + `bounce-to:<phase>` state without a human `/bounce`: when a review finds a fundamental problem (a root design flaw / major security defect on the deep pass, or a confirm pass judging the delta needs restart-level rework), the poster stamps `review:bounce` on the PR and `reconciler.yml` regresses the linked issue and closes the PR. See `.claude/skills/review/SKILL.md` § The bounce outcome.
+
 ## Invocation
 
 ```

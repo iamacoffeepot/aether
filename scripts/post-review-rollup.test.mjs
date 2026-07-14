@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  bounceSignal,
   buildReviewBody,
   disclosedPaths,
   fingerprint,
@@ -239,4 +240,42 @@ const CONFIRM_RESTART = {
 test('a confirm-pass restart signal is actionable and REQUEST_CHANGES even with no open findings', () => {
   assert.equal(isActionable(CONFIRM_RESTART), true)
   assert.equal(verdictEvent(CONFIRM_RESTART), 'REQUEST_CHANGES')
+})
+
+// Reviewer bounce (issue #3391): the third TERMINAL outcome, carried out-of-band as rollup.bounce =
+// { to, reason } (review.js normalizes both the deep pass's fundamental-problem conclusion and the confirm
+// pass's restart escalation into it). bounceSignal is the pure reader the poster's bounce path and the
+// reconciler edge both key on.
+const DEEP_BOUNCE = {
+  confirmed: [], softHolds: [], spec: { findings: [] },
+  bounce: { to: 'design', reason: 'the change is architecturally wrong at the root' },
+}
+const SCOPE_BOUNCE = {
+  confirmed: [], softHolds: [], spec: { findings: [] },
+  bounce: { to: 'plan', reason: 'the issue was scoped incorrectly' },
+}
+
+test('bounceSignal returns {to, reason} when a bounce is present, null when absent', () => {
+  assert.deepEqual(bounceSignal(DEEP_BOUNCE), { to: 'design', reason: 'the change is architecturally wrong at the root' })
+  assert.deepEqual(bounceSignal(SCOPE_BOUNCE), { to: 'plan', reason: 'the issue was scoped incorrectly' })
+  assert.equal(bounceSignal(CLEAN), null)
+  assert.equal(bounceSignal(CONFIRM_RESTART), null) // restart alone is not a bounce field
+  assert.equal(bounceSignal({ bounce: { reason: 'no phase' } }), null) // a bounce with no `to` is not a signal
+})
+
+// A bounce keeps the PR merge-blocked (issue #3391): barista still owes REQUEST_CHANGES, even with no
+// confirmed finding, soft-hold, or spec finding to gate on — the bounce arm in isActionable carries it.
+test('a bounce with no other finding is still actionable and REQUEST_CHANGES', () => {
+  assert.equal(isActionable(DEEP_BOUNCE), true)
+  assert.equal(verdictEvent(DEEP_BOUNCE), 'REQUEST_CHANGES')
+})
+
+// Tripwire: verdictEvent stays the TOTAL two-outcome function ADR-0148 pins even when a bounce is present —
+// bounce is a third terminal outcome carried out-of-band (the PR labels), NOT a third verdict value. If
+// verdictEvent ever returned a bounce-shaped third value, ADR-0148's native merge gate (which reads only
+// APPROVE / REQUEST_CHANGES) would stop recognizing the verdict and the PR would wedge.
+test('verdictEvent never yields a third value even when a bounce is present', () => {
+  assert.equal(verdictEvent(DEEP_BOUNCE), 'REQUEST_CHANGES')
+  assert.equal(verdictEvent(SCOPE_BOUNCE), 'REQUEST_CHANGES')
+  assert.ok(['APPROVE', 'REQUEST_CHANGES'].includes(verdictEvent(DEEP_BOUNCE)))
 })

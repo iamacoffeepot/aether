@@ -292,6 +292,65 @@ jobs:
             issue_labels="$(gh api "repos/${REPO}/issues/${issue}/labels" --jq '.[].name')"
             current_phase="$(grep -m1 -oE '^phase:[a-z]+' <<<"$issue_labels" || true)"
             echo "fact issue_phase: ${current_phase:-none}"
+
+            # Fact — the advisory QA flags on the PR (PRs are issues for labels).
+            # Read up here (ahead of the domain gate) so the reviewer-bounce edge
+            # below can key on it: a bounce fires regardless of the issue's current
+            # phase, and must stay reachable even on a re-poke where the issue is
+            # already phase:bounced (which the domain gate would otherwise drop).
+            pr_labels="$(gh api "repos/${REPO}/issues/${pr}/labels" --jq '.[].name')"
+            dogfood_unresolved=0
+            grep -qx 'dogfood:unresolved' <<<"$pr_labels" && dogfood_unresolved=1
+            echo "fact pr_labels: dogfood:unresolved=${dogfood_unresolved}"
+
+            # Reviewer-bounce edge (issue #3391). A deep pass that found a fundamental
+            # problem, or a confirm pass judging the delta needs restart-level rework,
+            # stamps `review:bounce` (+ `review:bounce-to:<phase>`) on the PR via
+            # post-review-rollup.mjs. That is a review→issue-phase-regression with no
+            # native reviewDecision to carry it, so it is handled HERE — ahead of the
+            # native-verdict target ladder and the domain gate — as a first-match edge:
+            # regress the linked issue to phase:bounced + bounce-to:<phase> (the
+            # mechanism /bounce and this reconcile already use), record the reason on
+            # the issue, and CLOSE the bounced PR so it leaves the open-PR pool — the
+            # work restarts from the regressed issue and a fresh /implement supersedes
+            # it. Idempotent: the label write is skipped once the issue already rests at
+            # phase:bounced with the same bounce-to, and the PR close is skipped once it
+            # is already closed, so a re-poke is a clean no-op.
+            if grep -qx 'review:bounce' <<<"$pr_labels"; then
+              bounce_to="$(grep -m1 -oE '^review:bounce-to:[a-z]+' <<<"$pr_labels" | sed 's/^review:bounce-to://' || true)"
+              [ -n "$bounce_to" ] || bounce_to=design
+              echo "verdict: PR #${pr} carries review:bounce — regress issue #${issue} to phase:bounced + bounce-to:${bounce_to}, close the PR."
+
+              cur_bounce_to="$(grep -m1 -oE '^bounce-to:[a-z]+' <<<"$issue_labels" | sed 's/^bounce-to://' || true)"
+              if [ "$current_phase" = "phase:bounced" ] && [ "$cur_bounce_to" = "$bounce_to" ]; then
+                echo "write: issue #${issue} already phase:bounced + bounce-to:${bounce_to} — no label change."
+              else
+                # Atomic PUT — every non-phase / non-bounce-to label plus the two new
+                # ones, so the issue never carries two phase or two bounce-to labels.
+                new_labels="$(gh api "repos/${REPO}/issues/${issue}/labels" \
+                  --jq "[.[].name | select((startswith(\"phase:\") or startswith(\"bounce-to:\")) | not)] + [\"phase:bounced\", \"bounce-to:${bounce_to}\"]")"
+                gh api -X PUT "repos/${REPO}/issues/${issue}/labels" \
+                  --input <(jq -nc --argjson l "$new_labels" '{labels: $l}') >/dev/null \
+                  && echo "write: issue #${issue} ${current_phase:-none} → phase:bounced + bounce-to:${bounce_to}" \
+                  || echo "warn: could not regress issue #${issue} labels"
+                gh api -X POST "repos/${REPO}/issues/${issue}/comments" \
+                  -f body="Bounced by the review of PR #${pr} to \`phase:bounced\` + \`bounce-to:${bounce_to}\` — the review found a fundamental problem a fix round cannot address (the reason is on the PR). The work returns to scoping; re-run \`/scope\` from \`bounce-to:${bounce_to}\`, and a fresh \`/implement\` supersedes PR #${pr}." >/dev/null \
+                  || echo "warn: could not post the bounce reason on issue #${issue}"
+              fi
+
+              if [ "$(gh api "repos/${REPO}/pulls/${pr}" --jq '.state')" = "open" ]; then
+                gh api -X POST "repos/${REPO}/issues/${pr}/comments" \
+                  -f body="Closing — the review bounced issue #${issue} to \`phase:bounced\` + \`bounce-to:${bounce_to}\`. The work returns to scoping; a fresh PR supersedes this one." >/dev/null || true
+                gh api -X PATCH "repos/${REPO}/pulls/${pr}" -f state=closed >/dev/null \
+                  && echo "write: closed bounced PR #${pr}" \
+                  || echo "warn: could not close bounced PR #${pr}"
+              fi
+
+              post_gate success "issue #${issue} bounced by review — PR closed, work returns to scoping"
+              echo "::endgroup::"
+              return 0
+            fi
+
             case "$current_phase" in
               phase:ready|phase:executing|phase:building|phase:refine|phase:qa|phase:findings|phase:held) ;;
               *)
@@ -343,12 +402,6 @@ jobs:
               *) review_owed=1; review_findings=0 ;;
             esac
             echo "fact review_decision: ${review_decision:-null} (owed=${review_owed} findings=${review_findings})"
-
-            # Fact — the advisory QA flags on the PR (PRs are issues for labels).
-            pr_labels="$(gh api "repos/${REPO}/issues/${pr}/labels" --jq '.[].name')"
-            dogfood_unresolved=0
-            grep -qx 'dogfood:unresolved' <<<"$pr_labels" && dogfood_unresolved=1
-            echo "fact pr_labels: dogfood:unresolved=${dogfood_unresolved}"
 
             # Fact — dogfood owed: the closing issue carries a filled Dogfood
             # brief that is not N/A (the same section read dogfood.yml gates on).

@@ -79,74 +79,31 @@ function safeJson(t) {
   try { return JSON.parse(t) } catch { return null }
 }
 
-async function graphql(token, query, variables) {
-  const res = await fetch(`${API}/graphql`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: 'application/vnd.github+json',
-      'user-agent': 'aether-review-poster',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({ query, variables }),
-  })
-  const text = await res.text()
-  return { ok: res.ok, data: text ? safeJson(text) : null }
-}
-
-// The issue a PR closes, via the authoritative closingIssuesReferences link
-// (not a body regex — a re-worded body never loses it), mirroring the resolver
-// dogfood.yml / reconciler.yml use. null when the PR closes no issue.
-async function closingIssue(token, repo, pr) {
-  const [owner, name] = repo.split('/')
-  const { ok, data } = await graphql(token,
-    `query($owner:String!,$name:String!,$pr:Int!){
-       repository(owner:$owner,name:$name){
-         pullRequest(number:$pr){ closingIssuesReferences(first:1){ nodes{ number } } }
-       }
-     }`,
-    { owner, name, pr })
-  if (!ok || data?.errors) {
-    console.warn('closingIssue query failed', data?.errors ?? 'http error')
-    return null
-  }
-  return data?.data?.repository?.pullRequest?.closingIssuesReferences?.nodes?.[0]?.number ?? null
-}
-
-// Interim ask-and-park for a confirm-pass restart signal (issue #3390). Until the
-// native bounce outcome lands (#3391), a delta that needs restart-level rework
-// stays inside ADR-0148's two-outcome model: barista's standing REQUEST_CHANGES
-// holds the merge, and the owner is parked on the closing issue to decide. Resolve
-// the linked issue, apply `agent:awaiting-answer`, and post the park comment. A
-// missing linked issue or a failed call degrades to the standing REQUEST_CHANGES
-// alone — the restart is still surfaced in the verdict body, so the park is a best
-// effort on top, never a gate.
-async function parkForRestart(env, rationale) {
-  const issue = await closingIssue(env.token, env.repo, env.pr)
-  if (!issue) {
-    console.warn('confirm restart: PR closes no issue — cannot park; standing REQUEST_CHANGES holds the merge.')
-    return
-  }
-  const labelRes = await api(env.token, 'POST', `repos/${env.repo}/issues/${issue}/labels`, { labels: ['agent:awaiting-answer'] })
-  if (!labelRes.ok) console.error(`confirm restart: label POST failed (${labelRes.status}): ${labelRes.text}`)
-  const why = rationale ? rationale : 'the delta since the deep review diverges enough that confirming individual findings is meaningless'
+// Stamp the reviewer bounce signal ON THE PR (issue #3391) — the out-of-band carrier for the third
+// terminal outcome. `review:bounce` plus `review:bounce-to:<phase>` are PR labels (a PR is an issue for
+// labels), so they survive for the reconciler to read on its next poke, and the reviewer's reason posts as
+// a PR comment. The poster deliberately touches only the PR: regressing the LINKED issue's phase and
+// closing the PR are reconciler.yml's edge, keyed on these labels. Each write is guarded — a label the
+// repo has not bootstrapped, or a transient failure, warns and carries on; the barista REQUEST_CHANGES
+// already submitted keeps the PR merge-blocked regardless, so the stamp is never a gate.
+async function stampBounce(env, bounce) {
+  const labels = ['review:bounce', `review:bounce-to:${bounce.to}`]
+  const labelRes = await api(env.token, 'POST', `repos/${env.repo}/issues/${env.pr}/labels`, { labels })
+  if (!labelRes.ok) console.error(`bounce: label POST failed (${labelRes.status}) — are review:bounce* bootstrapped? ${labelRes.text}`)
+  const why = bounce.reason || 'the review found a fundamental problem a fix round cannot address'
   const body = [
-    `**Parked on #${issue} — need a decision.**`,
+    `**Review bounce — \`bounce-to:${bounce.to}\`.**`,
     '',
-    `The confirm re-review of PR #${env.pr} raised a **restart signal**: ${why}. A confirm pass never re-reviews from scratch (that is the non-converging ratchet it exists to stop) and the deep pass runs at most once per PR, so a restart-level rework is a bounce decision, not another review round. Barista's standing \`REQUEST_CHANGES\` holds the merge in the meantime.`,
+    `This review found a fundamental problem a fix round cannot address: ${why}`,
     '',
-    'Options:',
-    `1. Bounce the issue and re-scope the rework — the honest path when the delta is a redesign.`,
-    `2. Force a fresh deep review (\`@barista full review\` on the PR) — if you judge the delta a genuine new baseline worth one more full pass.`,
-    '',
-    'Reply with an option number or free-form; your reply re-dispatches this job.',
+    `Rather than continue \`REQUEST_CHANGES\` rounds, the work returns to scoping. The reconciler regresses the linked issue to \`phase:bounced\` + \`bounce-to:${bounce.to}\` and closes this PR; a fresh \`/implement\` supersedes it. Barista's \`REQUEST_CHANGES\` holds the merge until then.`,
   ].join('\n')
-  const commentRes = await api(env.token, 'POST', `repos/${env.repo}/issues/${issue}/comments`, { body })
+  const commentRes = await api(env.token, 'POST', `repos/${env.repo}/issues/${env.pr}/comments`, { body })
   if (!commentRes.ok) {
-    console.error(`confirm restart: park comment POST failed (${commentRes.status}): ${commentRes.text}`)
+    console.error(`bounce: reason comment POST failed (${commentRes.status}): ${commentRes.text}`)
     return
   }
-  console.log(`confirm restart: parked owner on #${issue} (agent:awaiting-answer)`)
+  console.log(`bounce: stamped review:bounce + review:bounce-to:${bounce.to} on PR #${env.pr}`)
 }
 
 // Paginate a GitHub list endpoint via the Link header.
@@ -309,7 +266,24 @@ export function isActionable(rollup, disclosed = new Set()) {
     (f) => !(f.category === 'scope-leakage' && disclosed.has(f.file)),
   )
   const restart = !!(rollup.restart && rollup.restart.signaled)
-  return confirmed.length > 0 || softHolds.length > 0 || gatingSpecFindings.some((f) => f.severity === 'high') || restart
+  // A bounce keeps the PR merge-blocked while the reconciler regresses the linked issue (issue #3391):
+  // barista still owes REQUEST_CHANGES. verdictEvent stays two-outcome — a bounce resolves to
+  // REQUEST_CHANGES here, never a third value.
+  return confirmed.length > 0 || softHolds.length > 0 || gatingSpecFindings.some((f) => f.severity === 'high') || restart || !!bounceSignal(rollup)
+}
+
+// The reviewer BOUNCE signal (issue #3391) — a third TERMINAL outcome beside the two native verdicts,
+// carried out-of-band because GitHub's review API has no bounce verb (ADR-0148's amendment). review.js
+// normalizes both sources — the deep pass's fundamental-problem conclusion and the confirm pass's restart
+// escalation — into rollup.bounce = { to, reason }. A pure reader, unit-testable and null in the common
+// case (leaving the ordinary two-outcome path untouched). It is NOT a verdict: the bounce path in main()
+// stamps the PR's review:bounce labels and posts the reason, and the reconciler reads those labels to
+// regress the linked issue's phase — verdictEvent is never routed through it and stays a total two-outcome
+// function.
+export function bounceSignal(rollup) {
+  const b = rollup && rollup.bounce
+  if (!b || !b.to) return null
+  return { to: b.to === 'plan' ? 'plan' : 'design', reason: b.reason || '' }
 }
 
 // Select barista's verdict event. Every request yields a verdict — the
@@ -470,12 +444,13 @@ async function main() {
   if (!res.ok) console.error(`review POST failed: ${res.status} ${res.text}`)
   else console.log(`posted ${owedEvent} verdict: ${inline.length} inline, ${folded.length} folded`)
 
-  // Confirm-pass restart signal (issue #3390) — the interim ask-and-park stand-in
-  // for the native bounce (#3391). The standing REQUEST_CHANGES above already
-  // holds the merge; this parks the owner on the linked issue to decide the redo.
-  if (rollup.reviewPass === 'confirm' && rollup.restart && rollup.restart.signaled) {
-    await parkForRestart(env, rollup.restart.rationale)
-  }
+  // Reviewer bounce signal (issue #3391) — the real bounce edge that replaces #3390's interim
+  // ask-and-park. The barista REQUEST_CHANGES above already holds the merge; here the poster stamps the
+  // out-of-band bounce signal ON THE PR so the reconciler can regress the LINKED issue's phase (the poster
+  // deliberately does not resolve or touch the issue itself — that is reconciler.yml's edge). A deep pass's
+  // fundamental-problem conclusion or a confirm pass's restart escalation both arrive as rollup.bounce.
+  const bounce = bounceSignal(rollup)
+  if (bounce) await stampBounce(env, bounce)
 
   // Upsert the marker-anchored summary comment — the human-readable rollup.
   // Regenerated in full each run, and it carries every fingerprint so
