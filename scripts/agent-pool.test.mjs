@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   parseLsTree, narrowestRoot, slugify, subtreeHash, parseTranscript,
-  buildManifest, evaluateEligibility,
+  buildManifest, evaluateEligibility, prefixDiff,
 } from './agent-pool.mjs';
 
 const CWD = '/work/repo';
@@ -232,4 +232,71 @@ test('evaluateEligibility ignores repo churn entirely — tree beliefs are not r
   for (const manifest of [implementShaped, landShaped]) {
     assert.deepEqual(evaluateEligibility(manifest, churned, NOW + 60_000), { ok: true });
   }
+});
+
+test('prefixDiff: a clean prefix (deposited wholly at the front of resuming) is the hit case', () => {
+  // The resuming transcript is the replayed prior turns PLUS new turns, so the
+  // deposited transcript is a byte-identical prefix — the byte-stable resume.
+  const deposited = jsonl([init, readEv(`${CWD}/CLAUDE.md`)]);
+  const resuming = deposited + jsonl([readEv(`${CWD}/crates/x/src/lib.rs`), result]);
+  const r = prefixDiff(deposited, resuming);
+  assert.equal(r.identical, true);
+  assert.equal(r.cleanPrefix, true);
+  assert.equal(r.sharedBytes, Buffer.byteLength(deposited));
+  assert.equal(r.depositedBytes, Buffer.byteLength(deposited));
+  assert.equal(r.resumingBytes, Buffer.byteLength(resuming));
+});
+
+test('prefixDiff: shared region matches but deposited runs past resuming — not a clean prefix', () => {
+  const resuming = jsonl([init, readEv(`${CWD}/CLAUDE.md`)]);
+  const deposited = resuming + jsonl([result]);
+  const r = prefixDiff(deposited, resuming);
+  assert.equal(r.identical, true);
+  assert.equal(r.cleanPrefix, false);
+  assert.equal(r.sharedBytes, Buffer.byteLength(resuming));
+});
+
+test('prefixDiff: a byte drift inside the shared region localizes to its enclosing event', () => {
+  // Identical init line; the second (assistant) event diverges — the first
+  // differing byte falls inside event index 1.
+  const deposited = '{"type":"system","subtype":"init"}\n{"type":"assistant","x":1}\n';
+  const resuming = '{"type":"system","subtype":"init"}\n{"type":"assistant","x":2}\n';
+  const r = prefixDiff(deposited, resuming);
+  assert.equal(r.identical, false);
+  assert.equal(r.offset, deposited.indexOf('1'));
+  assert.equal(r.eventIndex, 1);
+  assert.deepEqual(r.event, { type: 'assistant', subtype: null });
+  // The byte offset within its own line, and the divergent-byte windows differ.
+  assert.equal(r.byteInLine, deposited.indexOf('1') - deposited.indexOf('\n') - 1);
+  assert.notEqual(r.deposited, r.resuming);
+});
+
+// Tripwire (#3422): the diff is on UTF-8 BYTES, not UTF-16 code units — the
+// warm-resume miss is measured against the cached byte prefix, and the whole
+// point of the localizer is a byte offset that lines up with the API's cache
+// accounting. A multibyte char before the divergence pushes the byte offset
+// past the string index, so a regression to string comparison would flip this.
+test('prefixDiff reports a BYTE offset, not a UTF-16 code-unit index', () => {
+  const prefix = '{"m":"—"}\n'; // em-dash — 3 UTF-8 bytes, 1 code unit
+  const deposited = prefix + '{"x":"a"}\n';
+  const resuming = prefix + '{"x":"b"}\n';
+  const r = prefixDiff(deposited, resuming);
+  assert.equal(r.identical, false);
+  // The byte offset counts the em-dash as 3 bytes; the string index counts 1.
+  assert.equal(r.offset, Buffer.byteLength(deposited.slice(0, deposited.indexOf('a'))));
+  assert.notEqual(r.offset, deposited.indexOf('a'));
+});
+
+test('prefix-diff subcommand reads transcripts as raw buffers and prints the JSON verdict', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'poolpfx-'));
+  const dep = join(dir, 'deposited.jsonl');
+  const res = join(dir, 'resuming.jsonl');
+  writeFileSync(dep, jsonl([init, readEv(`${CWD}/CLAUDE.md`)]));
+  writeFileSync(res, jsonl([init, readEv(`${CWD}/CLAUDE.md`), result]));
+  const out = JSON.parse(execFileSync(
+    'node',
+    ['scripts/agent-pool.mjs', 'prefix-diff', '--deposited', dep, '--resuming', res],
+    { encoding: 'utf8' }).trim());
+  assert.equal(out.identical, true);
+  assert.equal(out.cleanPrefix, true);
 });

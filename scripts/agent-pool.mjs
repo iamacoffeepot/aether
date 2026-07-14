@@ -37,6 +37,19 @@
 //     re-writes the whole head. Model-agnostic (reads the first usage-bearing
 //     main-loop turn regardless of model — the canary probes on haiku).
 //
+//   prefix-diff --deposited <jsonl> --resuming <jsonl>
+//     → {identical, cleanPrefix, sharedBytes, ...} when the shared region is
+//       byte-identical, or {identical: false, offset, eventIndex, byteInLine,
+//       event, deposited, resuming} localizing the first divergent byte.
+//     The decisive resume cache-miss diagnostic (#3422). A resuming session's
+//     transcript is the replayed prior turns PLUS its new turns, so the
+//     deposited transcript it resumed should be a byte-identical PREFIX of it.
+//     A divergence inside the shared prefix localizes the drift to the
+//     deposit/replay path (in-repo); a clean prefix means the on-disk bytes are
+//     stable and any miss is the CLI's request serialization (harness/API). The
+//     comparison is on UTF-8 BYTES, not UTF-16 code units — the drift is
+//     measured against the cached byte prefix.
+//
 // Knobs (env, defaults per the design): AGENT_POOL_CUTOFF_MINS=55,
 // AGENT_POOL_CONTEXT_CAP_TOKENS=150000.
 
@@ -186,6 +199,64 @@ export function evaluateEligibility(manifest, lsTree, now) {
   return { ok: true };
 }
 
+export function prefixDiff(deposited, resuming) {
+  // The decisive warm-resume cache-miss diagnostic (#3422). A resuming
+  // session's transcript is the replayed prior turns PLUS its new turns, so the
+  // deposited transcript it resumed should be a byte-identical PREFIX of it.
+  // Compare on a BYTE basis (UTF-8, not UTF-16 code units — the drift is
+  // measured against the cached byte prefix) and report the first byte that
+  // diverges within the shared region, localized to its enclosing JSONL event.
+  // A clean prefix (no divergence, the deposited transcript wholly at the
+  // front) is the byte-stable hit; a divergence inside the shared region is the
+  // in-repo deposit/replay drift the issue exists to localize.
+  const a = Buffer.from(deposited);
+  const b = Buffer.from(resuming);
+  const shared = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < shared && a[i] === b[i]) i++;
+  if (i === shared) {
+    return {
+      identical: true,
+      cleanPrefix: a.length <= b.length,
+      sharedBytes: shared,
+      depositedBytes: a.length,
+      resumingBytes: b.length,
+    };
+  }
+  const { eventIndex, lineStart, event } = locateEvent(a, i);
+  const window = 48;
+  return {
+    identical: false,
+    offset: i,
+    eventIndex,
+    byteInLine: i - lineStart,
+    event,
+    depositedBytes: a.length,
+    resumingBytes: b.length,
+    deposited: a.subarray(Math.max(0, i - window), i + window).toString('utf8'),
+    resuming: b.subarray(Math.max(0, i - window), i + window).toString('utf8'),
+  };
+}
+
+function locateEvent(buf, offset) {
+  // Byte `offset` falls inside the JSONL line that starts after the last
+  // newline before it; return that line's event index, its start offset, and
+  // its parsed {type, subtype} when the line is valid JSON (the differing byte
+  // can land in a partial or corrupt line, leaving event null).
+  let lineStart = 0, eventIndex = 0;
+  for (let j = 0; j < offset; j++) {
+    if (buf[j] === 0x0a) { eventIndex++; lineStart = j + 1; }
+  }
+  let lineEnd = buf.indexOf(0x0a, lineStart);
+  if (lineEnd === -1) lineEnd = buf.length;
+  let event = null;
+  try {
+    const ev = JSON.parse(buf.subarray(lineStart, lineEnd).toString('utf8'));
+    event = { type: ev.type ?? null, subtype: ev.subtype ?? null };
+  } catch { /* the differing byte falls in a partial or corrupt line */ }
+  return { eventIndex, lineStart, event };
+}
+
 function arg(name) {
   const i = process.argv.indexOf(`--${name}`);
   return i === -1 ? undefined : process.argv[i + 1];
@@ -216,8 +287,14 @@ function main() {
   } else if (cmd === 'resume-cost') {
     const t = parseTranscript(readFileSync(arg('transcript'), 'utf8'));
     console.log(`write=${t.turn1CacheCreation ?? 0} read=${t.turn1CacheRead ?? 0}`);
+  } else if (cmd === 'prefix-diff') {
+    // Read the transcripts as raw buffers — the diff is byte-exact, so no
+    // encoding round-trip may normalize the very bytes under examination.
+    const deposited = readFileSync(arg('deposited'));
+    const resuming = readFileSync(arg('resuming'));
+    console.log(JSON.stringify(prefixDiff(deposited, resuming)));
   } else {
-    console.error('usage: agent-pool.mjs manifest|eligible|root|resume-cost [--flags]');
+    console.error('usage: agent-pool.mjs manifest|eligible|root|resume-cost|prefix-diff [--flags]');
     process.exit(2);
   }
 }
