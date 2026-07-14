@@ -240,16 +240,26 @@ test('evaluateEligibility ignores belief-file churn — read-source tree beliefs
   }
 });
 
-test('headHash covers CLAUDE.md and skills, ignores everything else', () => {
+test('headHash covers CLAUDE.md and SKILL.md files, ignores everything else', () => {
   assert.equal(isHeadInput('CLAUDE.md'), true);
   assert.equal(isHeadInput('.claude/skills/land/SKILL.md'), true);
   assert.equal(isHeadInput('crates/x/src/lib.rs'), false);
   assert.equal(isHeadInput('docs/adr/0001-x.md'), false);
-  const base = headHash(parseLsTree(LS_TREE));
+  // A sibling asset under a skill dir is NOT a head input — only SKILL.md's
+  // description rides the static head, so protocol.md / reference files must not
+  // trip head-drift (the #3426 review finding this narrowing fixes).
+  assert.equal(isHeadInput('.claude/skills/headless/protocol.md'), false);
+  const withAsset = LS_TREE
+    + '100644 blob sk01\t.claude/skills/land/SKILL.md\n'
+    + '100644 blob px01\t.claude/skills/headless/protocol.md\n';
+  const base = headHash(parseLsTree(withAsset));
   // A non-head (belief-source) file moving does not change the head hash...
-  assert.equal(headHash(parseLsTree(LS_TREE.replace('aaa1', 'aaa9'))), base);
-  // ...but CLAUDE.md moving does.
-  assert.notEqual(headHash(parseLsTree(LS_TREE.replace('ccc3', 'ccc9'))), base);
+  assert.equal(headHash(parseLsTree(withAsset.replace('aaa1', 'aaa9'))), base);
+  // ...nor does a non-SKILL.md skill-dir asset moving...
+  assert.equal(headHash(parseLsTree(withAsset.replace('px01', 'px99'))), base);
+  // ...but CLAUDE.md and a SKILL.md moving both do.
+  assert.notEqual(headHash(parseLsTree(withAsset.replace('ccc3', 'ccc9'))), base);
+  assert.notEqual(headHash(parseLsTree(withAsset.replace('sk01', 'sk99'))), base);
 });
 
 // Tripwire (#3422): the head-freshness gate. The static head (CLAUDE.md +
