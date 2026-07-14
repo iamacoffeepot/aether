@@ -147,9 +147,11 @@ jobs:
       # are pure GitHub API calls. The PR number is explicit on both
       # triggers (the dispatch input, or the commented PR's issue number),
       # so there is no inference: this step reads the PR, drops a fork or
-      # closed one, and applies the non-Rust / size-cap skips.
-      # head_sha feeds the checkout. Every review is FULL — diff_base is
-      # always origin/main.
+      # closed one, and applies the non-Rust / size-cap skips. head_sha feeds
+      # the checkout. The DEEP-vs-CONFIRM pass selection (issue #3390) also
+      # lives here: a plain `@barista review` on a PR barista already carries a
+      # standing verdict on is a CONFIRM pass (diff_base = that last-reviewed
+      # SHA); every other request is a DEEP pass (diff_base = origin/main).
       - name: Resolve PR and apply gates
         id: resolve
         env:
@@ -158,9 +160,12 @@ jobs:
           DISPATCH_PR: ${{ inputs.pr }}
           COMMENT_PR: ${{ github.event.issue.number }}
           # workflow_dispatch and `@barista full review` bypass the size
-          # cap; plain `@barista review` does not.
+          # cap; plain `@barista review` does not. The same flag selects the
+          # DEEP pass: a bypass request always re-reviews in full, so only a
+          # plain `@barista review` with a standing verdict can be a CONFIRM.
           BYPASS_CAP: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.comment.body, '@barista full review') }}
           REPO: ${{ github.repository }}
+          BARISTA_LOGIN: iamabarista[bot]
         run: |
           set -euo pipefail
           if [ "$EVENT" = "workflow_dispatch" ]; then
@@ -250,6 +255,30 @@ jobs:
             exit 0
           fi
 
+          # Deep-vs-confirm pass selection (issue #3390). Barista's latest standing
+          # verdict (its most recent APPROVE / CHANGES_REQUESTED review) is the
+          # last-reviewed SHA. A plain `@barista review` on a PR that already has one
+          # is a CONFIRM pass: the session confirms the reported findings were
+          # addressed against the delta since that SHA rather than re-running the
+          # whole five-pillar fan-out. Every bypass request (workflow_dispatch /
+          # `@barista full review`) and every first review (no standing verdict) is a
+          # DEEP pass against origin/main. The deep pass happens at most once per PR —
+          # "needs a full re-review" is the restart/bounce signal, not a second deep.
+          # Stream the matching commit_ids (per-page `.[]` jq so --paginate
+          # concatenates in chronological order) and take the last with tail -1 — the
+          # newest verdict, robust across pages; tail consumes fully, no SIGPIPE.
+          last_verdict_sha="$(gh api "repos/${REPO}/pulls/${pr}/reviews" --paginate \
+            --jq ".[] | select(.user.login==\"${BARISTA_LOGIN}\" and (.state==\"APPROVED\" or .state==\"CHANGES_REQUESTED\")) | .commit_id" | tail -1)"
+          if [ "$BYPASS_CAP" = "true" ] || [ -z "$last_verdict_sha" ]; then
+            echo "review_pass=deep" >> "$GITHUB_OUTPUT"
+            echo "diff_base=origin/main" >> "$GITHUB_OUTPUT"
+            echo "PR #$pr — DEEP pass (diff base origin/main)."
+          else
+            echo "review_pass=confirm" >> "$GITHUB_OUTPUT"
+            echo "diff_base=$last_verdict_sha" >> "$GITHUB_OUTPUT"
+            echo "PR #$pr — CONFIRM pass against last-reviewed SHA $last_verdict_sha."
+          fi
+
           echo "proceed=true" >> "$GITHUB_OUTPUT"
 
       # Check out the PR head with full history, then fetch origin/main
@@ -306,9 +335,15 @@ jobs:
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
         env:
           PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          # diff_base is origin/main on a deep pass and barista's last-reviewed SHA
+          # on a confirm pass; review_pass tells the session which prompt it is under
+          # (issue #3390). Both ride the file, not the -p text, so the prompt stays
+          # byte-constant per class for the #3285 prompt cache.
+          DIFF_BASE: ${{ steps.resolve.outputs.diff_base }}
+          REVIEW_PASS: ${{ steps.resolve.outputs.review_pass }}
         run: |
-          jq -nc --arg pr "$PR_NUMBER" --arg base "origin/main" --arg head "$(git rev-parse HEAD)" \
-            '{pr_number: $pr, diff_base: $base, head_sha: $head}' > /tmp/agent-task.json
+          jq -nc --arg pr "$PR_NUMBER" --arg base "$DIFF_BASE" --arg head "$(git rev-parse HEAD)" --arg pass "$REVIEW_PASS" \
+            '{pr_number: $pr, diff_base: $base, head_sha: $head, review_pass: $pass}' > /tmp/agent-task.json
 
       # Warm session pool (#3286; design of record: the #3264 design comment,
       # v1.5). Resume a deposited session whose beliefs are provably true at
@@ -409,14 +444,80 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           POOL_SESSION_ID: ${{ steps.pool-checkout.outputs.session_id }}
           REVIEW_CLASS: ${{ steps.resolve.outputs.review_class }}
+          REVIEW_PASS: ${{ steps.resolve.outputs.review_pass }}
         run: |
-          # Profile-conditional task prompt: `light` (workflow/action/script
-          # diff, no Rust) resolves the three globs and runs correctness +
-          # convention with the cargo refuter off; `rust` keeps today's full
-          # five-pillar prompt verbatim so its -p text stays byte-constant for
-          # the prompt cache (#3285). Each class's prompt is byte-constant with
-          # other runs of the same class.
-          if [ "$REVIEW_CLASS" = "light" ]; then
+          # Pass- and profile-conditional task prompt. A CONFIRM pass (issue #3390)
+          # takes precedence over the class split: it is the cheap single-session
+          # re-review that confirms the deep pass's findings were addressed against
+          # the delta, so it neither fans out nor cares whether the diff is Rust or
+          # light. Otherwise `light` (workflow/action/script diff, no Rust) resolves
+          # the three globs and runs correctness + convention with the cargo refuter
+          # off; `rust` keeps today's full five-pillar prompt verbatim. Each prompt is
+          # byte-constant with other runs of the same pass/class for the prompt cache
+          # (#3285) — the per-run params ride /tmp/agent-task.json.
+          if [ "$REVIEW_PASS" = "confirm" ]; then
+          cat > /tmp/review-task-prompt.md <<PROMPT
+          You are running headless in CI on a checkout of a PR's head branch.
+          The repo checkout is at ${GITHUB_WORKSPACE}; cd into it and do all repo
+          work there — your current directory is a bare scratch dir, not the repo.
+          FIRST ACTION: read /tmp/agent-task.json. Its pr_number field is the PR under
+          review; its diff_base field is barista's LAST-REVIEWED SHA (not origin/main);
+          its head_sha field is the checkout's HEAD; its review_pass field is 'confirm'.
+          This is a CONFIRM pass, NOT a full review. The deep five-pillar pass already
+          ran on this PR and barista posted findings. Your job is to confirm whether the
+          delta since the last-reviewed SHA ADDRESSED those findings — never to re-review
+          the whole change or hunt for new nits (that non-converging ratchet is exactly
+          what this pass exists to stop).
+          Resolve two things caller-side (the workflow sandbox cannot run git/gh):
+          1. PRIOR FINDINGS — use gh to read this PR's barista review verdict bodies, its
+          inline review comments, and the '<!-- aether-review -->' summary comment. Each
+          reported finding carries an 'aether-review-fp:PATH|LINE|PILLAR' marker next to
+          its rendered text ('**pillar/category** (severity) — symbol recommendation:
+          suggested_form'). Parse each into an object { file (PATH), line (LINE, null if
+          '-'), pillar, category, symbol, severity, suggested_form, gate ('soft-hold' if
+          the finding was under a soft-hold section, else 'advisory') }. Deduplicate by
+          PATH|LINE|PILLAR (the same finding appears on multiple surfaces).
+          2. DELTA — the changed files and per-file diff hunks since the last-reviewed
+          SHA: 'git diff --name-only <diff_base>...HEAD' and 'git diff <diff_base>...HEAD
+          -- <file>' per file, substituting the file's diff_base value.
+          Then invoke the repo's /review skill in a CONFIRM pass: pass reviewPass:
+          'confirm', priorFindings: <the parsed list>, diffs: <the delta hunks keyed by
+          absolute path>, diffBase: <diff_base>, and files: <the delta's changed file
+          absolute paths> in the /review invocation's workflow args. The confirm session
+          runs a single verifier over { priorFindings, delta } — it emits NO new ordinary
+          findings; a nit on unchanged code is at most a non-blocking advisory. Let the
+          skill run the review.js workflow in a single pass.
+          THE WAIT CONTRACT (load-bearing — headless runs die on this): the Workflow tool
+          runs in the BACKGROUND. Launch it, then end your turn with a one-line status
+          note — nothing else. The headless harness holds the process open for the
+          in-flight background workflow (this step raises the wait ceiling to forty
+          minutes) and re-invokes you with a completion notification when it finishes.
+          Do NOT poll for the result: sleep-based polling is blocked here, and a Monitor
+          on the rollup path is useless because that file only appears when YOU write
+          it. Do NOT stop the workflow task, and NEVER treat the status note as the end
+          of the job. When the completion notification arrives, read the workflow's
+          returned { rollup, files } value (from the task output file if the
+          notification truncates it) and write the returned ROLLUP object as JSON
+          verbatim to exactly ${GITHUB_WORKSPACE}/review-rollup.json — that absolute
+          path, not a path relative to your working directory (the rollup, not the
+          whole return). The file never appears on its own — YOU write it. If the
+          workflow reports an error or no rollup, do NOT fabricate a replacement file:
+          leave the failure in the session transcript so the action records an
+          actionable no-rollup attempt.
+          Do not edit any source.
+          SESSION REUSE (the warm pool, #3286): this session may be deposited and later
+          resumed by a DIFFERENT job for a DIFFERENT task against the same files — your
+          accumulated knowledge of the files you read is the asset being deposited, so
+          do not assume any future prompt continues this task. After the rollup file is
+          written and before your final reply, write ${GITHUB_WORKSPACE}/pool-verdict.json
+          containing exactly one JSON object: {"repool": "yes" or "no", "reason": "<one
+          line>", "knowledge_summary": "<one line naming the subsystem knowledge this
+          session now carries>"}. Answer no when this session's context is dominated by
+          dead ends, thrash, or an abandoned approach rather than durable knowledge of
+          the files it read.
+          Print exactly REVIEW-DONE when the rollup and verdict files are written.
+          PROMPT
+          elif [ "$REVIEW_CLASS" = "light" ]; then
           cat > /tmp/review-task-prompt.md <<PROMPT
           You are running headless in CI on a checkout of a PR's head branch.
           The repo checkout is at ${GITHUB_WORKSPACE}; cd into it and do all repo

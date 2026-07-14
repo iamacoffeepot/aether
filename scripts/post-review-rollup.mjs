@@ -79,6 +79,68 @@ function safeJson(t) {
   try { return JSON.parse(t) } catch { return null }
 }
 
+async function graphql(token, query, variables) {
+  const res = await fetch(`${API}/graphql`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: 'application/vnd.github+json',
+      'user-agent': 'aether-review-poster',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ query, variables }),
+  })
+  const text = await res.text()
+  return { ok: res.ok, data: text ? safeJson(text) : null }
+}
+
+// The issue a PR closes, via the authoritative closingIssuesReferences link
+// (not a body regex — a re-worded body never loses it), mirroring the resolver
+// dogfood.yml / reconciler.yml use. null when the PR closes no issue.
+async function closingIssue(token, repo, pr) {
+  const [owner, name] = repo.split('/')
+  const { ok, data } = await graphql(token,
+    `query($owner:String!,$name:String!,$pr:Int!){
+       repository(owner:$owner,name:$name){
+         pullRequest(number:$pr){ closingIssuesReferences(first:1){ nodes{ number } } }
+       }
+     }`,
+    { owner, name, pr })
+  if (!ok) return null
+  return data?.data?.repository?.pullRequest?.closingIssuesReferences?.nodes?.[0]?.number ?? null
+}
+
+// Interim ask-and-park for a confirm-pass restart signal (issue #3390). Until the
+// native bounce outcome lands (#3391), a delta that needs restart-level rework
+// stays inside ADR-0148's two-outcome model: barista's standing REQUEST_CHANGES
+// holds the merge, and the owner is parked on the closing issue to decide. Resolve
+// the linked issue, apply `agent:awaiting-answer`, and post the park comment. A
+// missing linked issue or a failed call degrades to the standing REQUEST_CHANGES
+// alone — the restart is still surfaced in the verdict body, so the park is a best
+// effort on top, never a gate.
+async function parkForRestart(env, rationale) {
+  const issue = await closingIssue(env.token, env.repo, env.pr)
+  if (!issue) {
+    console.warn('confirm restart: PR closes no issue — cannot park; standing REQUEST_CHANGES holds the merge.')
+    return
+  }
+  await api(env.token, 'POST', `repos/${env.repo}/issues/${issue}/labels`, { labels: ['agent:awaiting-answer'] })
+  const why = rationale ? rationale : 'the delta since the deep review diverges enough that confirming individual findings is meaningless'
+  const body = [
+    `**Parked on #${issue} — need a decision.**`,
+    '',
+    `The confirm re-review of PR #${env.pr} raised a **restart signal**: ${why}. A confirm pass never re-reviews from scratch (that is the non-converging ratchet it exists to stop) and the deep pass runs at most once per PR, so a restart-level rework is a bounce decision, not another review round. Barista's standing \`REQUEST_CHANGES\` holds the merge in the meantime.`,
+    '',
+    'Options:',
+    `1. Bounce the issue and re-scope the rework — the honest path when the delta is a redesign.`,
+    `2. Force a fresh deep review (\`@barista full review\` on the PR) — if you judge the delta a genuine new baseline worth one more full pass.`,
+    '',
+    'Reply with an option number or free-form; your reply re-dispatches this job.',
+  ].join('\n')
+  await api(env.token, 'POST', `repos/${env.repo}/issues/${issue}/comments`, { body })
+  console.log(`confirm restart: parked owner on #${issue} (agent:awaiting-answer)`)
+}
+
 // Paginate a GitHub list endpoint via the Link header.
 async function apiList(token, path) {
   const out = []
@@ -221,11 +283,16 @@ export function visibleSoftHolds(rollup, disclosed = new Set()) {
 }
 
 // The rollup is actionable when it carries anything a reviewer must clear: a
-// confirmed finding, a soft-hold, or a high-severity spec-fidelity finding.
-// This is the predicate `verdictEvent` reads to choose REQUEST_CHANGES over
-// APPROVE, so it is the single definition of what "clean" means.
+// confirmed finding, a soft-hold, a high-severity spec-fidelity finding, or —
+// on a confirm pass (issue #3390) — a raised restart signal (the delta needs
+// restart-level rework). This is the predicate `verdictEvent` reads to choose
+// REQUEST_CHANGES over APPROVE, so it is the single definition of what "clean"
+// means. A confirm pass re-asserts its still-open prior findings into
+// `confirmed`, so an unaddressed-finding round is already actionable through
+// the confirmed arm; the restart arm covers the case where the restart is the
+// only signal (every prior finding addressed but the delta warrants a redo).
 // `disclosed` — prior barista correctness-fingerprint paths on this same PR —
-// routes a matching scope-leakage entry to advisory in both arms below.
+// routes a matching scope-leakage entry to advisory in the spec arm below.
 export function isActionable(rollup, disclosed = new Set()) {
   const confirmed = Array.isArray(rollup.confirmed) ? rollup.confirmed : []
   const softHolds = visibleSoftHolds(rollup, disclosed)
@@ -233,7 +300,8 @@ export function isActionable(rollup, disclosed = new Set()) {
   const gatingSpecFindings = specFindings.filter(
     (f) => !(f.category === 'scope-leakage' && disclosed.has(f.file)),
   )
-  return confirmed.length > 0 || softHolds.length > 0 || gatingSpecFindings.some((f) => f.severity === 'high')
+  const restart = !!(rollup.restart && rollup.restart.signaled)
+  return confirmed.length > 0 || softHolds.length > 0 || gatingSpecFindings.some((f) => f.severity === 'high') || restart
 }
 
 // Select barista's verdict event. Every request yields a verdict — the
@@ -393,6 +461,13 @@ async function main() {
   }
   if (!res.ok) console.error(`review POST failed: ${res.status} ${res.text}`)
   else console.log(`posted ${owedEvent} verdict: ${inline.length} inline, ${folded.length} folded`)
+
+  // Confirm-pass restart signal (issue #3390) — the interim ask-and-park stand-in
+  // for the native bounce (#3391). The standing REQUEST_CHANGES above already
+  // holds the merge; this parks the owner on the linked issue to decide the redo.
+  if (rollup.reviewPass === 'confirm' && rollup.restart && rollup.restart.signaled) {
+    await parkForRestart(env, rollup.restart.rationale)
+  }
 
   // Upsert the marker-anchored summary comment — the human-readable rollup.
   // Regenerated in full each run, and it carries every fingerprint so

@@ -199,3 +199,44 @@ test('a scope-leakage finding with no matching disclosed entry still gates', () 
   assert.equal(isActionable(rollup), true)
   assert.equal(verdictEvent(rollup), 'REQUEST_CHANGES')
 })
+
+// Confirm pass (issue #3390): the three terminal outcomes of a re-review, all inside
+// ADR-0148's two native verdicts. review.js's runConfirmPass re-asserts still-open prior
+// findings into `confirmed` (unchanged, so their fingerprints match across rounds) and rides
+// the restart flag on `rollup.restart`. These pin the verdict the poster derives from each.
+
+// All prior findings addressed, no restart -> a clean confirm APPROVEs: the convergent
+// end of the address->confirm loop, not another deep re-roll.
+const CONFIRM_CLEAN = {
+  reviewPass: 'confirm', restart: { signaled: false, rationale: 'ordinary fix round' },
+  confirmed: [], softHolds: [], spec: null, followUps: [],
+}
+test('a clean confirm pass (all addressed, no restart) is not actionable and APPROVEs', () => {
+  assert.equal(isActionable(CONFIRM_CLEAN), false)
+  assert.equal(verdictEvent(CONFIRM_CLEAN), 'APPROVE')
+})
+
+// A still-open prior finding re-asserts the standing REQUEST_CHANGES through the confirmed
+// arm — no new finding, no flip, the same fingerprints the deep pass posted.
+const CONFIRM_UNADDRESSED = {
+  reviewPass: 'confirm', restart: { signaled: false, rationale: '' },
+  confirmed: [{ pillar: 'correctness', file: 'a.rs', line: 3, source: 'confirm', gate: 'advisory' }],
+  softHolds: [], spec: null, followUps: [],
+}
+test('a confirm pass with a still-open prior finding re-asserts REQUEST_CHANGES', () => {
+  assert.equal(isActionable(CONFIRM_UNADDRESSED), true)
+  assert.equal(verdictEvent(CONFIRM_UNADDRESSED), 'REQUEST_CHANGES')
+})
+
+// Tripwire: the restart signal is actionable ON ITS OWN — every prior finding addressed
+// (empty confirmed) but the delta warrants a full redo. Without the restart arm in
+// isActionable this would APPROVE, silently landing a rework the reviewer flagged as
+// restart-level; the poster's ask-and-park hangs off this same signal.
+const CONFIRM_RESTART = {
+  reviewPass: 'confirm', restart: { signaled: true, rationale: 'delta is a redesign' },
+  confirmed: [], softHolds: [], spec: null, followUps: [],
+}
+test('a confirm-pass restart signal is actionable and REQUEST_CHANGES even with no open findings', () => {
+  assert.equal(isActionable(CONFIRM_RESTART), true)
+  assert.equal(verdictEvent(CONFIRM_RESTART), 'REQUEST_CHANGES')
+})
