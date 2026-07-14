@@ -56,7 +56,7 @@ export const meta = {
 const A = (typeof args === 'string') ? JSON.parse(args || '{}') : (args || {})
 const FILES = Array.isArray(A.files) ? A.files : []
 const TEST_FILES = Array.isArray(A.testFiles) ? A.testFiles : []
-if (!FILES.length && !TEST_FILES.length) throw new Error('review: args.files (and/or args.testFiles) must be a non-empty array of absolute .rs paths')
+if (!FILES.length && !TEST_FILES.length) throw new Error('review: args.files (and/or args.testFiles) must be a non-empty array of absolute reviewable-source paths')
 
 const FINDER_MODEL = A.finderModel || 'sonnet'
 const NO_BUILD = A.noBuild === true
@@ -81,6 +81,19 @@ const FINDER_SHAPE = A.finderShape || (PROFILE === 'pr' ? 'merged' : 'specialist
 if (FINDER_SHAPE !== 'merged' && FINDER_SHAPE !== 'specialist') throw new Error(`review: args.finderShape must be 'merged' or 'specialist', got ${JSON.stringify(A.finderShape)}`)
 const VERIFY_MODEL = A.verifyModel || (DEPTH === 'gate' ? 'sonnet' : 'opus')
 const NO_CHALLENGE = A.noChallenge === true || DEPTH === 'gate'
+
+// Light profile (issue #3376): a review of the fleet's own automation surface
+// (.github/workflows/**, .github/actions/**, scripts/**) carries no Rust — the
+// reviewable file set is entirely non-.rs. The correctness/convention pillar
+// prompts below are Rust-anchored (a rustc/borrowck carve-out, a Rust bug
+// taxonomy); on a shell/YAML/JS diff those carve-outs are inapplicable rather
+// than protective, so a bounded language-neutral note is appended to the two
+// pillars keyed on this flag, keeping the correctness lens invariant-focused on
+// the diff's actual language. On a Rust review LIGHT_PROFILE is false and the
+// pillar prompts are byte-identical to before.
+const LIGHT_PROFILE = FILES.length > 0 && FILES.every(f => !/\.rs$/.test(f))
+const LIGHT_NOTE = `
+LANGUAGE-NEUTRAL (this diff is NOT Rust — it is shell / YAML / JS in the fleet's automation surface): judge logic, control-flow, and state-accounting invariants in the diff's ACTUAL language — an owed-wave liveness break, a slot / counter accounting miss, a broken conditional or loop guard, a dropped error path or unquoted expansion in bash. The rustc/borrowck carve-out is Rust-only: there is no borrow checker or type system here, so never spare a real logic/state bug on the grounds that a compiler would have caught it.`
 
 // Small-diff batching (pr profile): files whose diff changes fewer than SMALL_DIFF_LINES lines
 // group into shared finder calls, at most BATCH_CAP files per call.
@@ -150,8 +163,8 @@ const ALL_LENSES = [
 - SILENT INCOMPLETENESS: TODO / todo!() / unimplemented!() / a "for now" stub / a branch or match arm that no-ops where the logic is required.
 - INVARIANT VIOLATION: new code that can put a type into a state its invariant forbids (flag the violation; the over-broad pub exposing the field is economy/visibility).
 - RESOURCE LEAK: a handle / subscription / mixer-lane / texture / spawned child acquired without the matching release on every path, including early-return and error paths.
-- CONCURRENCY: a data race / lost update / lock-order hazard. SCOPED: actor state is single-threaded behind its run-token (ADR-0038), so this shape is N/A in actor/component code — apply it ONLY in aether-substrate / native chassis code.`,
-    carveOut: `Judgment about behavior, not lints. rustc owns type/borrow safety; where a clippy lint already fires, route it to lintCandidates. Do not flag style/verbosity (economy) or wrong-feature (spec). A finding must name the concrete input or path that misbehaves.`,
+- CONCURRENCY: a data race / lost update / lock-order hazard. SCOPED: actor state is single-threaded behind its run-token (ADR-0038), so this shape is N/A in actor/component code — apply it ONLY in aether-substrate / native chassis code.${LIGHT_PROFILE ? LIGHT_NOTE : ''}`,
+    carveOut: `Judgment about behavior, not lints. rustc owns type/borrow safety (on Rust source only); where a clippy lint already fires, route it to lintCandidates. Do not flag style/verbosity (economy) or wrong-feature (spec). A finding must name the concrete input or path that misbehaves.`,
   },
   {
     key: 'test-integrity',
@@ -192,7 +205,7 @@ TRIPWIRE (the only flat-value keep): the pinned value is COMPUTED — a hash, go
 - DRIVER NAMING: a passive *Capability that is actually a driver -> *DriverCapability.
 - MODULE SIBLINGS: suffix files foo_x.rs/foo_y.rs -> a parent dir foo/{mod,x,y}.rs.
 - ACTOR STATE: a Mutex/RwLock/RefCell/Cell/atomic in an aether actor's state (ADR-0038: actor state is plain fields behind the run-token).
-- ADR CONFORMANCE (judgment): a cross-actor path that is not mail; a native/wasm boundary the substrate/actor split forbids; an addressing pattern outside the lineage model (ADR-0099) not yet clippy-banned.`,
+- ADR CONFORMANCE (judgment): a cross-actor path that is not mail; a native/wasm boundary the substrate/actor split forbids; an addressing pattern outside the lineage model (ADR-0099) not yet clippy-banned.${LIGHT_PROFILE ? LIGHT_NOTE : ''}`,
     carveOut: `Do not re-judge Layer 0 (clippy -D warnings, fmt, Qodana, check-no-dividers, the env::var / mailbox_id_from_name disallowed-methods). If a rule is ALREADY gated, it cannot appear in a clean diff — finding one means the gate has a HOLE; emit it as a lintCandidate with note 'gate-gap'. Pure code-quality judgment with no stated rule -> economy. A brand-new concept with no existing repo name is not TERMINOLOGY — only inventing a synonym for a concept already named.`,
   },
 ]
