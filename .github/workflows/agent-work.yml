@@ -86,8 +86,9 @@ on:
           - implement
           - land
           - resolve
+          - findings
       ref:
-        description: Ref to act on (issue number for scope/approve/implement, PR number for land/resolve, the constant `all` for approve-sweep)
+        description: Ref to act on (issue number for scope/approve/implement, PR number for land/resolve/findings, the constant `all` for approve-sweep)
         type: string
         required: true
 
@@ -111,16 +112,16 @@ jobs:
     # the same runs-on=<run_id>/runner=<size> form): scope and approve are
     # API-and-prose work on a small box (approve's heaviest step is a git-log
     # freshness read); implement and resolve build the workspace and want
-    # s3-cache to warm sccache across a retrying PR's runs (resolve drives the
-    # same CI Refine loop implement does); land is a merge on a non-spot box so a
-    # spot reclaim can never interrupt the squash.
-    runs-on: runs-on=${{ github.run_id }}/runner=${{ (inputs.task == 'implement' || inputs.task == 'resolve') && '8cpu-linux-x64/extras=s3-cache' || (inputs.task == 'land' && '2cpu-linux-x64/spot=false' || '2cpu-linux-x64') }}
+    # s3-cache to warm sccache across a retrying PR's runs (resolve and findings
+    # drive the same CI Refine loop implement does); land is a merge on a non-spot
+    # box so a spot reclaim can never interrupt the squash.
+    runs-on: runs-on=${{ github.run_id }}/runner=${{ (inputs.task == 'implement' || inputs.task == 'resolve' || inputs.task == 'findings') && '8cpu-linux-x64/extras=s3-cache' || (inputs.task == 'land' && '2cpu-linux-x64/spot=false' || '2cpu-linux-x64') }}
     # Bring-up leash per task (review.yml's rationale: a wedged in-flight run must
     # not idle an EC2 runner toward the 6h default). implement's CI Refine loop is
-    # the long pole, so it gets the widest leash; resolve runs the same loop, so
-    # it shares that leash; approve-sweep walks a whole queue of per-issue gate
-    # checks, so it gets double the single-approve leash.
-    timeout-minutes: ${{ (inputs.task == 'implement' || inputs.task == 'resolve') && 90 || (inputs.task == 'approve-sweep' && 60 || 30) }}
+    # the long pole, so it gets the widest leash; resolve and findings run the same
+    # loop, so they share that leash; approve-sweep walks a whole queue of per-issue
+    # gate checks, so it gets double the single-approve leash.
+    timeout-minutes: ${{ (inputs.task == 'implement' || inputs.task == 'resolve' || inputs.task == 'findings') && 90 || (inputs.task == 'approve-sweep' && 60 || 30) }}
     # Read-only on GITHUB_TOKEN. This job checks out and executes repo code
     # (headless Claude drives the wrapper skill under --dangerously-skip-permissions),
     # so it must never hold a write scope on the default token — every write
@@ -350,6 +351,38 @@ jobs:
                 exit 0
               fi
               ;;
+            findings)
+              # findings resolves a PR's review/dogfood findings and drives CI green
+              # again. A MERGED PR has already landed — nothing to resolve; a clean
+              # no-op. An open PR resumes, which the wrapper's own re-entrancy guard
+              # handles, so only a merged PR short-circuits here.
+              merged="$(gh api "repos/${REPO}/pulls/${REF}" --jq '.merged')"
+              if [ "$merged" = "true" ]; then
+                echo "PR #${REF} is already merged — findings already resolved; nothing to do."
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              # Informational: confirm the closing issue carries phase:findings (the
+              # dispatch precondition). The label vocabulary is the reconciler's, so
+              # this only logs — the wrapper's /findings precondition is the enforcer.
+              issue="$(gh api graphql -f query='
+                query($owner:String!,$name:String!,$number:Int!){
+                  repository(owner:$owner,name:$name){
+                    pullRequest(number:$number){
+                      closingIssuesReferences(first:1){ nodes{ number } }
+                    }
+                  }
+                }' -f owner="$owner" -f name="$name" -F number="$REF" \
+                --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[0].number // empty')"
+              if [ -n "$issue" ]; then
+                ilabels="$(gh api "repos/${REPO}/issues/${issue}/labels" --jq '.[].name' || true)"
+                if grep -qx 'phase:findings' <<<"$ilabels"; then
+                  echo "closing issue #${issue} is phase:findings — findings dispatch precondition met."
+                else
+                  echo "closing issue #${issue} is not phase:findings; the wrapper's /findings precondition will decide."
+                fi
+              fi
+              ;;
           esac
           echo "proceed=true" >> "$GITHUB_OUTPUT"
 
@@ -420,7 +453,8 @@ jobs:
 
       # Resolve the driving model from the issue's model:* label (scope stamps it
       # at Plan; /implement and /approve gate on it). scope/approve/implement's ref
-      # is the issue; land's ref is a PR, so resolve its closing issue. Default to
+      # is the issue; land/resolve/findings' ref is a PR, so resolve its closing
+      # issue. Default to
       # the proven headless sonnet string; an explicit label wins in either
       # direction. scope's default INVERTS to opus (#3203): a pre-scope issue
       # cannot carry the label — scope is what stamps it — so the label read is
@@ -443,7 +477,7 @@ jobs:
             # sweep regardless of what models the queued issues route their
             # implementation to.
             approve-sweep) issue="" ;;
-            land|resolve)
+            land|resolve|findings)
               issue="$(gh api graphql -f query='
                 query($owner:String!,$name:String!,$number:Int!){
                   repository(owner:$owner,name:$name){
@@ -481,7 +515,10 @@ jobs:
           # so it never invalidates the prompt cache back to the system-prompt region
           # (the measured hazard). implement is uniformly medium; its size:l split
           # rides the model axis (sonnet->opus), already a pool-key segment. Untouched
-          # tasks (scope/resolve) emit empty and keep Claude Code's xhigh default.
+          # tasks (scope/resolve/findings) emit empty and keep Claude Code's xhigh
+          # default — findings stays at the default pending its own measurement, the
+          # same treatment #3375 gave resolve (a measurement-free medium pin is the
+          # assumption #3375 declined to make for the closest analog).
           effort=""
           case "$TASK" in
             land|approve|approve-sweep) effort="low" ;;
@@ -697,7 +734,7 @@ jobs:
               --append-system-prompt "$(cat "$GITHUB_WORKSPACE/CLAUDE.md")" \
               --model "$MODEL" \
               ${EFFORT:+--effort "$EFFORT"} \
-              --max-turns ${{ (inputs.task == 'implement' || inputs.task == 'approve-sweep' || inputs.task == 'resolve') && 400 || 200 }} \
+              --max-turns ${{ (inputs.task == 'implement' || inputs.task == 'approve-sweep' || inputs.task == 'resolve' || inputs.task == 'findings') && 400 || 200 }} \
               --output-format stream-json --verbose) \
               | tee /tmp/agent-work-session.jsonl \
               | python3 scripts/render-agent-stream.py \
@@ -709,7 +746,7 @@ jobs:
               --append-system-prompt "$(cat "$GITHUB_WORKSPACE/CLAUDE.md")" \
               --model "$MODEL" \
               ${EFFORT:+--effort "$EFFORT"} \
-              --max-turns ${{ (inputs.task == 'implement' || inputs.task == 'approve-sweep' || inputs.task == 'resolve') && 400 || 200 }} \
+              --max-turns ${{ (inputs.task == 'implement' || inputs.task == 'approve-sweep' || inputs.task == 'resolve' || inputs.task == 'findings') && 400 || 200 }} \
               --output-format stream-json --verbose) \
               | tee /tmp/agent-work-session.jsonl \
               | python3 scripts/render-agent-stream.py \

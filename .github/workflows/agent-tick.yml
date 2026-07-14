@@ -119,7 +119,8 @@ name: Agent tick
 #                                               task survives for question-
 #                                               resume and manual kicks)
 #   phase:ready                   -> implement
-#   phase:building/qa/findings    -> none       (reconciler-owned; #3126)
+#   phase:building/qa             -> none       (reconciler-owned; #3126)
+#   phase:findings                -> findings   (ref is the open closing PR)
 #   phase:held                    -> land       (ref is the open closing PR)
 #   phase:bounced (directive)     -> scope       (resume via bounce-to:*; no
 #                                               agent:awaiting-answer present)
@@ -761,14 +762,19 @@ jobs:
                   continue
                 fi
                 task="implement"; ref="$num" ;;
+              phase:findings) task="findings"; ref="" ;;
               phase:held) task="land"; ref="" ;;
               *) continue ;;
             esac
-            if [ "$task" = "land" ]; then
+            # findings resolves its ref exactly like land — the open closing PR —
+            # but does NOT bypass the wave cap: it falls through to the generic
+            # work_items path below (a width-capped producer, not land's off-slot
+            # merge), so only the ref-resolution is shared with land here.
+            if [ "$task" = "land" ] || [ "$task" = "findings" ]; then
               ref="$(resolve_open_pr "$num" || true)"
               if [ -z "$ref" ]; then
-                trace SKIP "#${num}" "phase:held but no open closing PR"
-                cat_excluded="${cat_excluded}#${num} — phase:held, no open closing PR"$'\n'
+                trace SKIP "#${num}" "${phase} but no open closing PR"
+                cat_excluded="${cat_excluded}#${num} — ${phase}, no open closing PR"$'\n'
                 continue
               fi
             fi
@@ -1179,8 +1185,8 @@ jobs:
 
           # (3) Is there dispatchable work the fleet should be advancing? The same
           # canonical board scan the dispatcher runs (board_scan in
-          # scripts/agent-tick-lib.sh): ready/plan/held are dispatchable directly;
-          # a backlog/define/design/bounced issue is dispatchable only with a
+          # scripts/agent-tick-lib.sh): ready/plan/held/findings are dispatchable
+          # directly; a backlog/define/design/bounced issue is dispatchable only with a
           # scopeable type:*. Parked (agent:awaiting-answer), alert, and dont-touch
           # items are not owed.
           board_scan > /tmp/stall-board.tsv
@@ -1193,7 +1199,7 @@ jobs:
             [ -n "$num" ] || continue
             { [ "$dt" = "dt" ] || [ "$alert" = "alert" ] || [ "$await" = "await" ]; } && continue
             case "$phase" in
-              phase:ready|phase:plan|phase:held) dispatchable=$((dispatchable + 1)) ;;
+              phase:ready|phase:plan|phase:held|phase:findings) dispatchable=$((dispatchable + 1)) ;;
               none|phase:define|phase:design|phase:bounced)
                 if [ "$itype" != "-" ] && scopeable "$itype"; then dispatchable=$((dispatchable + 1)); fi ;;
             esac

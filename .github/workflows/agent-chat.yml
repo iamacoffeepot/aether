@@ -258,7 +258,7 @@ jobs:
           # (#3316 retired the central-ticket reply that once re-dispatched the
           # whole sweep).
           case "$task" in
-            scope|approve|implement|land|resolve) ;;
+            scope|approve|implement|land|resolve|findings) ;;
             *)
               # The label is set but no routable task was found — a torn pair
               # (agent:awaiting-answer without an agent:park:* label and without

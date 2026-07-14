@@ -29,7 +29,15 @@ If the PR's closing issue is not at `phase:findings`, there is nothing for this 
 
 Work every finding through the same three steps, in this order. The order is load-bearing: fix first so the reply can name the fix commit, reply second so the thread carries the resolution, resolve last so the reconciler sees a closed thread. Skipping the resolve is the failure this skill exists to prevent.
 
-1. **Fix or justify.** Implement a fix in a follow-up commit on the PR branch, or decline the finding with a written reason. Every finding is resolved exactly one of these two ways — no finding is silently skippable. A fix is a normal commit-and-push to the PR branch; a decline is a reason the reviewer (or the next reader) can weigh, carried in the reply.
+1. **Fix or justify.** First get onto the PR's head branch — read the head ref over REST and check it out against the current `origin`, exactly as `/resolve` §Resolution procedure step 1 does, so a box that starts anywhere other than the branch (a headless run lands on the default branch) can commit and push a fix:
+
+   ```bash
+   branch="$(gh api repos/iamacoffeepot/aether/pulls/<pr> --jq '.head.ref')"
+   git fetch origin
+   git checkout "$branch"
+   ```
+
+   Then implement a fix in a follow-up commit on that branch, or decline the finding with a written reason. Every finding is resolved exactly one of these two ways — no finding is silently skippable. A fix is a normal commit-and-push to the PR branch; a decline is a reason the reviewer (or the next reader) can weigh, carried in the reply.
 
 2. **Reply with the fix commit.** How the reply is posted depends on where the finding lives:
    - **Anchored findings** are inline review-comment threads — the COMMENT review posts them as inline comments (`scripts/post-review-rollup.mjs` sets `review.comments` to the inline set). Reply on the thread over REST with `in_reply_to` set to the thread's first comment `databaseId`, naming the fix commit sha (or the decline reason).
@@ -75,7 +83,7 @@ Both the `reviewThreads` query and the `resolveReviewThread` mutation are GraphQ
 
 ## How the phase advances
 
-A fix push demotes `findings` → `building` on the fresh head (the reconciler's push-demotes rule) and dismisses barista's stale verdict (`dismiss_stale_reviews`), and CI runs against the new sha. Once it is green again, **re-request the review**: post an `@barista review` comment on the PR. The review runs only on request, so this comment is what produces the fresh full verdict that supersedes the standing `REQUEST_CHANGES` — without it the PR sits at `REVIEW_REQUIRED` indefinitely (`@barista full review` is the same request with the changed-`.rs` size-cap bypass). With no open thread and a non-actionable re-requested rollup the reconciler recomputes the PR to `phase:held`. This skill makes the observable facts true — the fixes are pushed, the threads are resolved, the re-review is requested — and the reconciler computes the label from them. Threads resolve and unresolve raise no Actions event, so the `*/15` reconciler backstop is what picks up the final resolve and advances the state; a `workflow_dispatch` re-reconcile with the PR number is the way to advance it immediately rather than waiting for the backstop.
+A fix push demotes `findings` → `building` on the fresh head (the reconciler's push-demotes rule) and dismisses barista's stale verdict (`dismiss_stale_reviews`), and CI runs against the new sha. **Wait for CI green** on the new sha before re-requesting — poll `scripts/wave-status.sh --wait <pr>` (the same REST poll `/resolve` §Refine loop uses; it loops until the `CI pass` aggregator settles and fast-fails on a deterministic red). Once it is green again, **re-request the review**: post an `@barista review` comment on the PR. The review runs only on request, so this comment is what produces the fresh full verdict that supersedes the standing `REQUEST_CHANGES` — without it the PR sits at `REVIEW_REQUIRED` indefinitely (`@barista full review` is the same request with the changed-`.rs` size-cap bypass). With no open thread and a non-actionable re-requested rollup the reconciler recomputes the PR to `phase:held`. This skill makes the observable facts true — the fixes are pushed, the threads are resolved, the re-review is requested — and the reconciler computes the label from them. Threads resolve and unresolve raise no Actions event, so the `*/15` reconciler backstop is what picks up the final resolve and advances the state; a `workflow_dispatch` re-reconcile with the PR number is the way to advance it immediately rather than waiting for the backstop.
 
 ## What /findings does NOT do
 

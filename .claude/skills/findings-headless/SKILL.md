@@ -1,0 +1,24 @@
+---
+name: findings-headless
+description: Headless variant of /findings for a one-shot GitHub Actions runner. Executes ../findings/SKILL.md verbatim for the fix-reply-resolve mandate, the CI-green wait, and the review re-request; overrides only the interaction surface — the branch checkout is the runner's own, fix commits assert the bot identity, and the terminal hand-off becomes end-turn — per ../headless/protocol.md.
+---
+
+# /findings-headless — headless QA-findings wrapper
+
+This wraps `/findings` for a headless agent running one-shot on an ephemeral GitHub Actions runner. It carries no process of its own. The tick dispatches it on a `phase:findings` issue's open closing PR (`gh workflow run agent-work.yml -f task=findings -f ref=<pr>`).
+
+Execute `../findings/SKILL.md` verbatim — the precondition, the fix-or-justify / reply-with-the-fix-commit / resolve-the-thread mandate, the concrete GraphQL/REST invocations, the CI-green wait, the `@barista review` re-request, the terminal hand-off that lets the reconciler recompute `findings` → `held`. Where the original touches the interaction surface, `../headless/protocol.md` governs. An instruction is overridden if and only if it appears in the Overrides table below, cited by the original's anchor; everything else is the original's, unchanged. An improvement to `/findings` is live here the moment it merges, because this wrapper only references it.
+
+Before any process step, run the protocol's [re-entrancy-first](../headless/protocol.md#re-entrancy-first) guard: check whether the PR is already merged (findings already resolved — a clean no-op), whether its closing issue still carries `phase:findings` (a prior run may have already resolved every thread and let the reconciler advance it), whether the branch already carries an unpushed fix, and whether an unanswered `agent:awaiting-answer` park is open on the PR, then post a start-of-work comment with the run link and begin the original at the phase the observed state implies.
+
+## Overrides
+
+| Original anchor | Interactive behavior | Headless override |
+|-----------------|---------------------|-------------------|
+| [`## Mandate`](../findings/SKILL.md#mandate) step 1 checkout | `git checkout "$branch"` in the current working tree | [checkout-as-isolation](../headless/protocol.md#checkout-as-isolation) — the runner's `$GITHUB_WORKSPACE` checkout is the workspace; check the PR's head branch out directly in it, no worktree add. The re-entrancy guard derives prior-attempt state (already merged, issue no longer `phase:findings`, an unpushed fix) from GitHub and the checkout rather than from a stale on-disk worktree |
+| [`## Mandate`](../findings/SKILL.md#mandate) step 1 fix commit | Commit the fix in the current git identity | [commit-identity-assert](../headless/protocol.md#commit-identity-assert) — assert the owner's public `user.name` / `user.email` before committing; never author a fix commit under the owner's real name or personal email |
+| [`## How the phase advances`](../findings/SKILL.md#how-the-phase-advances) terminal hand-off | Push the fixes, resolve the threads, re-request the review, and let the reconciler advance the phase | [end-turn-not-wait](../headless/protocol.md#end-turn-not-wait) — leave the fixes pushed, the threads resolved, and the review re-requested (the reconciler computes the resting state — `phase:held`, or `phase:findings` again when the fresh verdict is still actionable), post the terminal state as a comment, end the turn; the held→land path resumes it elsewhere |
+
+Everything the table does not cite — the precondition, the fix-reply-resolve mandate and its ordering, the GraphQL `resolveReviewThread` step, the commit-and-format discipline, the CI classification and flake handling, the review re-request — is `/findings`'s, verbatim. `/findings` has no owner touchpoint in v1 — a finding is fixed or declined with a written reason, never waived on the owner's behalf — so this wrapper carries no [ask-and-park](../headless/protocol.md#ask-and-park) row.
+
+**Not overridden — the CI wait.** [`## How the phase advances`](../findings/SKILL.md#how-the-phase-advances)'s `scripts/wave-status.sh --wait <pr>` poll is an in-job wait on CI, not on a human, so [end-turn-not-wait](../headless/protocol.md#end-turn-not-wait) does not override the wait itself — but a one-shot runner cannot block a foreground on it, so the agent realizes it the headless way the protocol's [CI-wait contract](../headless/protocol.md#the-ci-wait-contract) specifies: poll it mechanically with cheap in-turn status-check turns until CI settles, then continue in the same box — never ending the turn on a pending background wait, and — while the wait is unsettled — never `ScheduleWakeup stop` or sign off as if the turn were done, either of which releases the process and abandons the loop before CI settles.
