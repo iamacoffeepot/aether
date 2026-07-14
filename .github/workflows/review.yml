@@ -24,10 +24,12 @@ name: Review
 # Findings already posted are deduped by the poster's fingerprints, so a
 # re-request never double-annotates.
 #
-# A changed-`.rs`-file cap (AETHER_REVIEW_MAX_FILES) guards against reviewing
-# mass mechanical sweeps: over the cap the session is skipped and barista
-# submits no verdict, so the PR rests blocked on the native required review
-# until the owner forces a full review or approves it natively.
+# A changed-reviewable-file cap (AETHER_REVIEW_MAX_FILES) guards against
+# reviewing mass mechanical sweeps: over the cap the session is skipped and
+# barista submits no verdict, so the PR rests blocked on the native required
+# review until the owner forces a full review or approves it natively. The cap
+# counts the reviewable files of the selected class — the `.rs` count for a
+# Rust PR, the workflow/action/script count for a light one.
 # `workflow_dispatch` and `@barista full review` bypass the cap — the
 # deliberate "review it anyway"; plain `@barista review` does not.
 #
@@ -60,10 +62,11 @@ concurrency:
     }}
   cancel-in-progress: true
 
-# One-place knob for the review size cap: a PR changing more `.rs` files
-# than this skips the session (no fan-out spend). With no verdict submitted,
-# the PR rests blocked on the native required review until the owner forces a
-# full review or approves it natively.
+# One-place knob for the review size cap: a PR changing more reviewable files
+# than this (the selected class's `.rs` or workflow/action/script count) skips
+# the session (no fan-out spend). With no verdict submitted, the PR rests
+# blocked on the native required review until the owner forces a full review or
+# approves it natively.
 env:
   AETHER_REVIEW_MAX_FILES: "40"
 
@@ -130,11 +133,13 @@ jobs:
     outputs:
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       head_sha: ${{ steps.resolve.outputs.head_sha }}
-      # touches_rust feeds the `approve` job: a non-Rust PR gets a session-less
-      # barista APPROVE so it carries a standing verdict for the native
-      # required review. Emitted the moment a PR resolves, even when the review
-      # session is skipped (cap / non-Rust), not only on the proceed path.
-      touches_rust: ${{ steps.resolve.outputs.touches_rust }}
+      # review_class feeds the `approve` job: a `none` PR (docs / ADR / md /
+      # manifest-only) gets a session-less barista APPROVE so it carries a
+      # standing verdict for the native required review; `rust` and `light`
+      # flow to the review session and the `post` job. Emitted the moment a PR
+      # resolves, even when the session is skipped (cap / none), not only on
+      # the proceed path.
+      review_class: ${{ steps.resolve.outputs.review_class }}
       rollup_produced: ${{ steps.rollup.outputs.produced }}
     steps:
       - uses: runs-on/action@v2
@@ -182,36 +187,52 @@ jobs:
           fi
 
           # Emit pr_number AND head_sha the moment the PR resolves, ahead of
-          # the skip decisions below: the `approve` job needs head_sha to post
-          # a session-less barista APPROVE on this SHA for every non-Rust PR,
-          # including the cap / non-Rust runs where the session is a no-op.
+          # the classification below: head_sha feeds the checkout on the
+          # proceed path (rust / light), and the `approve` job needs it to post
+          # a session-less barista APPROVE on this SHA for a `none`-class PR,
+          # where the session is a no-op.
           echo "pr_number=$pr" >> "$GITHUB_OUTPUT"
           head_sha="$(jq -r '.head.sha' <<<"$pr_info")"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
 
-          # Rust-touch detection drives the verdict class: classification
-          # tracks changed `.rs` source only — the surface the five pillars
-          # judge; a PR that changes any `.rs` file is held to the review
-          # verdict, every other PR gets a session-less barista APPROVE (the
-          # `approve` job). A manifest-only PR (lockfile / `Cargo.toml` edit
-          # with no `.rs` change) is intentionally treated as no-Rust: there
-          # is no reviewable surface, so it is approved out-of-scope rather
-          # than held for a verdict the review can never produce.
-          # Capture the file list first, then match with a here-string (not
-          # a pipe) so a `grep -q` early exit can't SIGPIPE the paginated gh
+          # Three-way classification over the changed-file list drives both
+          # the review profile and the verdict routing:
+          #   rust  — any `.rs` in the diff → today's full five-pillar review.
+          #   light — no `.rs`, but the diff touches the fleet's own automation
+          #           surface (`.github/workflows/**`, `.github/actions/**`,
+          #           `scripts/**`) → a light-profile review session
+          #           (correctness + convention, cargo-oriented refuter off).
+          #           A logic/liveness/state-accounting bug in bash-inside-YAML
+          #           parses fine and leaves unrelated CI green, so this surface
+          #           is exactly the invariant class the pillars catch and CI
+          #           cannot — it must not land unreviewed.
+          #   none  — everything else (docs / ADR / `.md` / manifest-only, incl.
+          #           a lockfile / `Cargo.toml` edit with no `.rs` change) → the
+          #           session-less out-of-scope barista APPROVE (the `approve`
+          #           job); there is no reviewable surface to hold a verdict.
+          # Capture the file list first, then match with here-strings (not
+          # pipes) so a `grep -q` early exit can't SIGPIPE the paginated gh
           # under `pipefail`.
           files="$(gh api "repos/${REPO}/pulls/${pr}/files" --paginate --jq '.[].filename')"
+          light_re='^(\.github/workflows/|\.github/actions/|scripts/)'
           if grep -qE '\.rs$' <<<"$files"; then
-            echo "touches_rust=true" >> "$GITHUB_OUTPUT"
+            review_class=rust
+            reviewable_count=$(grep -cE '\.rs$' <<<"$files")
+          elif grep -qE "$light_re" <<<"$files"; then
+            review_class=light
+            reviewable_count=$(grep -cE "$light_re" <<<"$files")
           else
-            # No Rust source in the diff (including a manifest-only PR) →
-            # skip the review session entirely, not just the verdict: the
-            # /review skill refuses an empty .rs file set, so running it
-            # here would loud-fail on every docs/workflow/manifest-only PR.
-            # The `approve` job posts the session-less out-of-scope APPROVE
-            # from the touches_rust output above.
-            echo "touches_rust=false" >> "$GITHUB_OUTPUT"
-            echo "PR #$pr touches no Rust — review session skipped."
+            review_class=none
+          fi
+          echo "review_class=$review_class" >> "$GITHUB_OUTPUT"
+
+          if [ "$review_class" = "none" ]; then
+            # No reviewable surface (docs / ADR / `.md` / manifest-only) → skip
+            # the review session entirely, not just the verdict: the /review
+            # skill refuses an empty reviewable-file set, so running it here
+            # would loud-fail. The `approve` job posts the session-less
+            # out-of-scope APPROVE from the review_class output above.
+            echo "PR #$pr touches no reviewable surface — review session skipped."
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -220,10 +241,11 @@ jobs:
           # submitted, so the PR rests blocked on the native required review
           # until the owner forces a full review (workflow_dispatch or
           # `@barista full review`, which set BYPASS_CAP above) or approves it
-          # natively.
-          rs_count=$(grep -cE '\.rs$' <<<"$files")
-          if [ "$BYPASS_CAP" != "true" ] && [ "$rs_count" -gt "$AETHER_REVIEW_MAX_FILES" ]; then
-            echo "PR #$pr changes $rs_count .rs files (cap $AETHER_REVIEW_MAX_FILES) — review session skipped; PR rests blocked on the native required review."
+          # natively. The cap applies to the selected class's reviewable-file
+          # count — the `.rs` count for `rust`, the matched-glob count for
+          # `light`.
+          if [ "$BYPASS_CAP" != "true" ] && [ "$reviewable_count" -gt "$AETHER_REVIEW_MAX_FILES" ]; then
+            echo "PR #$pr changes $reviewable_count reviewable files (cap $AETHER_REVIEW_MAX_FILES) — review session skipped; PR rests blocked on the native required review."
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -386,7 +408,72 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           POOL_SESSION_ID: ${{ steps.pool-checkout.outputs.session_id }}
+          REVIEW_CLASS: ${{ steps.resolve.outputs.review_class }}
         run: |
+          # Profile-conditional task prompt: `light` (workflow/action/script
+          # diff, no Rust) resolves the three globs and runs correctness +
+          # convention with the cargo refuter off; `rust` keeps today's full
+          # five-pillar prompt verbatim so its -p text stays byte-constant for
+          # the prompt cache (#3285). Each class's prompt is byte-constant with
+          # other runs of the same class.
+          if [ "$REVIEW_CLASS" = "light" ]; then
+          cat > /tmp/review-task-prompt.md <<PROMPT
+          You are running headless in CI on a checkout of a PR's head branch.
+          The repo checkout is at ${GITHUB_WORKSPACE}; cd into it and do all repo
+          work there — your current directory is a bare scratch dir, not the repo.
+          FIRST ACTION: read /tmp/agent-task.json. Its pr_number field is the PR under
+          review; its diff_base field is the diff base; its head_sha field is the
+          checkout's HEAD.
+          This is a LIGHT-PROFILE review: the PR changes no Rust, but it touches the
+          fleet's own automation surface (.github/workflows/**, .github/actions/**,
+          scripts/**), where a logic / liveness / state-accounting bug in
+          bash-inside-YAML parses fine and leaves unrelated CI green. Invoke the repo's
+          /review skill in INTEGRATED mode against <diff_base>...HEAD, substituting the
+          file's diff_base value: resolve the changed files matching .github/workflows/**,
+          .github/actions/**, and scripts/** (NOT .rs) and their per-file diffs from git,
+          and read the issue text this PR closes (use gh to find the PR's closing
+          reference for the pr_number if needed).
+          Pass lenses: ['correctness', 'convention'], noBuild: true, depth: gate,
+          diffBase: <diff_base> (read from the file), and reviewMode: full in the /review
+          invocation's workflow args — the light profile runs only the correctness and
+          convention pillars with the cargo-oriented correctness refuter off (noBuild), so
+          it judges logic / control-flow / state-accounting invariants in the diff's actual
+          language (shell / YAML / JS) rather than Rust-anchored hazards; diffBase +
+          reviewMode let it classify a flagged bug's provenance against the merge-base (a
+          pre-existing bug reachable on the base becomes an advisory follow-up, never an
+          in-PR demand). Let the skill run the review.js workflow in a single pass.
+          THE WAIT CONTRACT (load-bearing — headless runs die on this): the Workflow tool
+          runs in the BACKGROUND. Launch it, then end your turn with a one-line status
+          note — nothing else. The headless harness holds the process open for the
+          in-flight background workflow (this step raises the wait ceiling to forty
+          minutes) and re-invokes you with a completion notification when it finishes.
+          Do NOT poll for the result: sleep-based polling is blocked here, and a Monitor
+          on the rollup path is useless because that file only appears when YOU write
+          it. Do NOT stop the workflow task, and NEVER treat the status note as the end
+          of the job. When the completion notification arrives, read the workflow's
+          returned { rollup, files } value (from the task output file if the
+          notification truncates it) and write the returned ROLLUP object as JSON
+          verbatim to exactly ${GITHUB_WORKSPACE}/review-rollup.json — that absolute
+          path, not a path relative to your working directory (the rollup, not the
+          whole return). The file never appears on its own — YOU write it. If the
+          workflow reports an error or no rollup, do NOT fabricate a replacement file:
+          leave the failure in the session transcript so the action records an
+          actionable no-rollup attempt.
+          Do not edit any source (the noBuild flag above keeps the correctness refuter
+          subagent non-editing too).
+          SESSION REUSE (the warm pool, #3286): this session may be deposited and later
+          resumed by a DIFFERENT job for a DIFFERENT task against the same files — your
+          accumulated knowledge of the files you read is the asset being deposited, so
+          do not assume any future prompt continues this task. After the rollup file is
+          written and before your final reply, write ${GITHUB_WORKSPACE}/pool-verdict.json
+          containing exactly one JSON object: {"repool": "yes" or "no", "reason": "<one
+          line>", "knowledge_summary": "<one line naming the subsystem knowledge this
+          session now carries>"}. Answer no when this session's context is dominated by
+          dead ends, thrash, or an abandoned approach rather than durable knowledge of
+          the files it read.
+          Print exactly REVIEW-DONE when the rollup and verdict files are written.
+          PROMPT
+          else
           cat > /tmp/review-task-prompt.md <<PROMPT
           You are running headless in CI on a checkout of a PR's head branch.
           The repo checkout is at ${GITHUB_WORKSPACE}; cd into it and do all repo
@@ -436,6 +523,7 @@ jobs:
           the files it read.
           Print exactly REVIEW-DONE when the rollup and verdict files are written.
           PROMPT
+          fi
           if [ -n "${POOL_SESSION_ID:-}" ]; then
             cat > /tmp/pool-preamble.md <<'PREAMBLE'
           NEW JOB — you are a session resumed from the warm pool. Your prior
@@ -757,16 +845,16 @@ jobs:
   approve:
     name: Out-of-scope approve
     needs: review
-    # The whole-PR-no-Rust class gets a session-less barista APPROVE so barista
-    # carries a standing verdict the native required review reads. `always()`
-    # because the `post` job is skipped for this class (no rollup), and the
-    # pr_number guard drops the fork / no-open-PR cases. Over-cap PRs are
-    # Rust-touching (touches_rust != 'false'), so they never reach here — they
-    # rest blocked on the absent verdict.
+    # The `none` class (docs / ADR / md / manifest-only) gets a session-less
+    # barista APPROVE so barista carries a standing verdict the native required
+    # review reads. `always()` because the `post` job is skipped for this class
+    # (no rollup), and the pr_number guard drops the fork / no-open-PR cases.
+    # Over-cap PRs are `rust`/`light` (review_class != 'none'), so they never
+    # reach here — they rest blocked on the absent verdict.
     if: >
       always() &&
       needs.review.outputs.pr_number != '' &&
-      needs.review.outputs.touches_rust == 'false'
+      needs.review.outputs.review_class == 'none'
     runs-on: ubuntu-latest
     # A pure-API job: no branch checkout, no repo write scope. The APPROVE rides
     # the minted barista token, not the job's GITHUB_TOKEN.

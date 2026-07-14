@@ -19,13 +19,14 @@ The Claude entry point to the `review` workflow (`.claude/workflows/review.js`).
 ```
 
 - **Integrated mode** runs when an issue and its diff are in hand — the spec-fidelity lens runs (the asked-vs-changed delta). For a PR-bound change this mode runs in CI on explicit request: the implement box dispatches the review action (`.github/workflows/review.yml`) once the PR's CI is green (re-review is an `@barista review` PR comment), and it posts the rollup as PR annotations plus a native barista `APPROVE` / `REQUEST_CHANGES` verdict, so an inline invocation at the end of `/implement` duplicates the pass. Invoke it directly only for a change that never becomes a PR.
+  - **Light profile** — the CI gate runs a *light-profile* integrated review over a PR whose diff carries no Rust but touches the fleet's own automation surface (`.github/workflows/**`, `.github/actions/**`, `scripts/**`), where a logic/liveness/state-accounting bug in bash-inside-YAML parses fine and leaves unrelated CI green. It is the same integrated mode with a narrower selection: the caller resolves the reviewable set under those three globs (not `.rs`), and invokes with `lenses: ['correctness', 'convention']`, `noBuild: true`, `depth: gate`, and the same `diffBase`/`reviewMode` threading. So it runs only the correctness and convention pillars, with the cargo-oriented correctness refuter off (`noBuild`) — the pillars judge logic/control-flow/state-accounting invariants in the diff's actual language (shell/YAML/JS) rather than Rust-anchored hazards. A docs/ADR/`.md`/manifest-only PR carries no reviewable surface and is not reviewed at all (the gate auto-approves it out of scope); a Rust-touching PR gets the full five-pillar review, not this profile.
 - **Backfill mode** runs against a crate or path's whole-file set with no issue — the spec lens does not run; the other four pillars audit existing code.
 
 ## Inputs
 
 The skill assembles the workflow's arg contract (`{issue?, files, testFiles?, diffs?, diffBase?, reviewMode?}`, grounded against `.claude/workflows/review.js`):
 
-- `files` — a non-empty array of absolute `.rs` paths for the code lenses (correctness, economy, convention).
+- `files` — a non-empty array of absolute reviewable-source paths for the code lenses (correctness, economy, convention). `.rs` paths for the Rust and backfill profiles; the `.github/workflows/**`, `.github/actions/**`, `scripts/**` set for the light profile.
 - `testFiles` — absolute `.rs` paths for the test-integrity lens.
 - `issue` — the issue or scope text for the spec-fidelity lens. Omit for backfill; its presence is what selects integrated mode.
 - `diffs` — per-file diff hunks keyed by path, so the finders judge the change rather than the whole file (integrated mode).
@@ -38,7 +39,7 @@ The skill assembles the workflow's arg contract (`{issue?, files, testFiles?, di
 
 The workflow sandbox cannot run `git` or `grep`, so the skill resolves the file set before invoking it:
 
-1. **Integrated** — resolve the changed files and their per-file diffs from the branch against `origin/main` (`git diff --name-only origin/main...HEAD` for the `.rs` set; `git diff origin/main...HEAD -- <file>` per file for `diffs`). Split test files (`tests/`, `#[cfg(test)]`-heavy) into `testFiles`. Read the issue body as `issue`. Pass that base as `diffBase` and `full` as `reviewMode` so the workflow can classify a flagged correctness bug's provenance against the merge-base — CI's `review.yml` reviews every request this same full way and threads both from its resolve step.
+1. **Integrated** — resolve the changed files and their per-file diffs from the branch against `origin/main` (`git diff --name-only origin/main...HEAD` for the `.rs` set; `git diff origin/main...HEAD -- <file>` per file for `diffs`). Split test files (`tests/`, `#[cfg(test)]`-heavy) into `testFiles`. Read the issue body as `issue`. Pass that base as `diffBase` and `full` as `reviewMode` so the workflow can classify a flagged correctness bug's provenance against the merge-base — CI's `review.yml` reviews every request this same full way and threads both from its resolve step. For the **light profile** (the caller signals it — CI's gate does so on a no-Rust workflow/action/script diff), resolve the reviewable set under `.github/workflows/**`, `.github/actions/**`, and `scripts/**` instead of the `.rs` set (no `testFiles`), and add `lenses: ['correctness', 'convention']` and `noBuild: true` to the args so only those two pillars run with the cargo refuter off.
 2. **Backfill** — resolve the crate's whole-file `.rs` set (`git ls-files -- <crate>/src '*.rs'`), shard per crate to keep each run bounded, and pass no `issue`.
 
 The workflow reads source itself; there is no live MCP harness precondition (unlike `/dogfood`, `/review` does not drive a running engine).
