@@ -26,8 +26,9 @@ while [ $# -gt 0 ]; do
     --days)
       [ $# -ge 2 ] || { echo "--days requires a value" >&2; exit 1; }
       DAYS="$2"
-      [[ "$DAYS" =~ ^[0-9]+$ ]] && [ "$DAYS" -ge 1 ] && [ "$DAYS" -le 366 ] \
+      [[ "$DAYS" =~ ^[0-9]+$ ]] && [ "$((10#$DAYS))" -ge 1 ] && [ "$((10#$DAYS))" -le 366 ] \
         || { echo "invalid --days '${DAYS}' (want an integer 1..366)" >&2; exit 1; }
+      DAYS=$((10#$DAYS))
       shift 2
       ;;
     *)
@@ -72,10 +73,8 @@ for d in "${days[@]}"; do
     # An empty day lists nothing and still exits 0; a non-zero exit with stderr
     # is a real read failure (auth/network) the window total must not hide —
     # counted into the printed header so the report itself says it is partial.
-    if [ -s "$tmp/s3err" ]; then
-      echo "warning: read failed for ${d}, window may be incomplete" >&2
-      failed_days=$((failed_days + 1))
-    fi
+    failed_days=$((failed_days + 1))
+    [ -s "$tmp/s3err" ] && echo "warning: read failed for ${d}, window may be incomplete" >&2
     continue
   fi
   for f in "$daydir"/*.json; do
