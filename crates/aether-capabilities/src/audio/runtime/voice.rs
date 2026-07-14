@@ -145,8 +145,8 @@ impl OscVoice {
     pub fn new(pitch: u8, velocity: u8, wave: Wave, adsr: Adsr, base_amp: f32, sample_rate: f32, seed: u32) -> Self {
         let freq = 440.0 * ((f32::from(pitch) - 69.0) / 12.0).exp2();
         let phase_step = freq / sample_rate;
-        let vel_norm = f32::from(velocity) / 127.0;
-        let amplitude = base_amp * vel_norm * vel_norm;
+        let v = f32::from(velocity) / 127.0;
+        let amplitude = base_amp * v * v;
         Self {
             phase: 0.0,
             phase_step,
@@ -426,13 +426,13 @@ pub struct PartialBankVoice {
 impl PartialBankVoice {
     pub fn new(pitch: u8, velocity: u8, def: &PartialBankDef, base_amp: f32, sample_rate: f32) -> Self {
         let f0 = 440.0 * ((f32::from(pitch) - 69.0) / 12.0).exp2();
-        let vel_norm = f32::from(velocity) / 127.0;
-        let amplitude = base_amp * vel_norm;
+        let v = f32::from(velocity) / 127.0;
+        let amplitude = base_amp * v;
         let pitch_scale = f0 / REFERENCE_FREQ;
         let dt = 1.0 / sample_rate;
 
         let mut partials = [Partial::SILENT; PARTIAL_COUNT];
-        let mut amp_total = 0.0f32;
+        let mut total = 0.0f32;
         for (i, p) in partials.iter_mut().enumerate() {
             // PARTIAL_COUNT is 8 — the index-to-float casts are exact.
             #[allow(clippy::cast_precision_loss)]
@@ -447,12 +447,12 @@ impl PartialBankVoice {
             p.phase_step = (n * f0 * stretch * detune) / sample_rate;
             let rate = def.decay_base * i_f.mul_add(def.decay_spread, 1.0) * pitch_scale;
             p.decay_mul = (-rate * dt).exp();
-            let amp = def.partial_amps[i] * i_f.mul_add(def.brightness_tilt * vel_norm, 1.0);
+            let amp = def.partial_amps[i] * i_f.mul_add(def.brightness_tilt * v, 1.0);
             p.amp = amp;
-            amp_total += amp;
+            total += amp;
         }
-        if amp_total > 0.0 {
-            let norm = 1.0 / amp_total;
+        if total > 0.0 {
+            let norm = 1.0 / total;
             for p in &mut partials {
                 p.amp *= norm;
             }
@@ -579,14 +579,14 @@ pub fn build_builtin_kernel(
 }
 
 /// Constant-power stereo placement for a bipolar `i8` pan (ADR-0127):
-/// `0` center, `-128` hard left, `127` hard right. The `i8` maps into
-/// `[-1.0, 1.0]` (clamped at the edges), then a constant-power law
-/// splits the mono voice into `[gain_l, gain_r]`. Center yields
-/// `[cos(π/4), sin(π/4)]` (≈`0.707` each), so perceived loudness holds
-/// constant as a voice pans across the image.
+/// `0` center, `-128` hard left, `127` hard right. The `i8` maps to
+/// `[-1.0, 1.0]` (clamped, since `-128 / 127` lands just past `-1.0`),
+/// then a constant-power law splits the mono voice into `[gain_l,
+/// gain_r]`. Center yields `[cos(π/4), sin(π/4)]` (≈`0.707` each), so
+/// perceived loudness holds constant as a voice pans across the image.
 pub fn pan_law(pan: i8) -> [f32; 2] {
     use std::f32::consts::FRAC_PI_4;
-    let pan_norm = (f32::from(pan) / 128.0).clamp(-1.0, 1.0);
+    let pan_norm = (f32::from(pan) / 127.0).clamp(-1.0, 1.0);
     let theta = (pan_norm + 1.0) * FRAC_PI_4;
     [theta.cos(), theta.sin()]
 }

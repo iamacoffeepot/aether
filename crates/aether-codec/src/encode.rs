@@ -504,10 +504,9 @@ fn encode_enum_body(body: &Value, variant: &EnumVariant, path: &str, out: &mut V
     }
 }
 
-/// Recursively walk a `repr_c: true` struct's fields, packing each into
-/// `out` under `#[repr(C)]` alignment rules. Returns the maximum field
-/// alignment so the caller can apply the trailing padding that rounds
-/// the struct up to its own alignment.
+/// Recursively walk a `repr_c: true` struct's fields, packing them
+/// into `out` with `#[repr(C)]` alignment rules. Returns the maximum
+/// field alignment so the caller can apply trailing padding.
 fn encode_struct_fields(
     out: &mut Vec<u8>,
     obj: &serde_json::Map<String, Value>,
@@ -515,9 +514,9 @@ fn encode_struct_fields(
 ) -> Result<usize, EncodeError> {
     let mut max_align = 1usize;
     for field in fields {
-        let field_value = obj.get(&*field.name).ok_or_else(|| EncodeError::MissingField(field.name.to_string()))?;
-        let field_align = encode_field_value(out, &field.name, &field.ty, field_value)?;
-        max_align = max_align.max(field_align);
+        let value = obj.get(&*field.name).ok_or_else(|| EncodeError::MissingField(field.name.to_string()))?;
+        let a = encode_field_value(out, &field.name, &field.ty, value)?;
+        max_align = max_align.max(a);
     }
     Ok(max_align)
 }
@@ -534,10 +533,10 @@ fn encode_field_value(out: &mut Vec<u8>, name: &str, ty: &SchemaType, value: &Va
     }
     match ty {
         SchemaType::Scalar(p) => {
-            let align = align_of_primitive(*p);
-            pad_to(out, align);
+            let a = align_of_primitive(*p);
+            pad_to(out, a);
             write_primitive_schema(out, *p, value, name)?;
-            Ok(align)
+            Ok(a)
         }
         SchemaType::Array { element, len } => {
             let arr = value
@@ -600,9 +599,8 @@ fn encode_field_value(out: &mut Vec<u8>, name: &str, ty: &SchemaType, value: &Va
     }
 }
 
-/// Compute the `#[repr(C)]` alignment of a cast-shaped schema — the
-/// largest alignment among its leaves. Used to place fields at the right
-/// offsets without actually encoding them.
+/// Compute the `#[repr(C)]` alignment of a cast-shaped schema. Used to
+/// place fields at the right offsets without actually encoding them.
 fn alignment_of_schema(ty: &SchemaType) -> Result<usize, EncodeError> {
     match ty {
         SchemaType::Scalar(p) => Ok(align_of_primitive(*p)),
@@ -610,11 +608,11 @@ fn alignment_of_schema(ty: &SchemaType) -> Result<usize, EncodeError> {
         SchemaType::TypeId(_) => Ok(8),
         SchemaType::Array { element, .. } => alignment_of_schema(element),
         SchemaType::Struct { fields, repr_c: true } => {
-            let mut max_align = 1usize;
-            for field in fields.iter() {
-                max_align = max_align.max(alignment_of_schema(&field.ty)?);
+            let mut a = 1usize;
+            for f in fields.iter() {
+                a = a.max(alignment_of_schema(&f.ty)?);
             }
-            Ok(max_align)
+            Ok(a)
         }
         _ => Err(EncodeError::UnsupportedSchema("alignment query on non-cast schema")),
     }

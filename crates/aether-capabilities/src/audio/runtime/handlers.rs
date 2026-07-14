@@ -14,9 +14,8 @@ use crate::audio::kinds::{
 };
 
 impl AudioCapabilityState {
-    /// Queue a `note_on` for the realtime mixer.
     pub fn handle_note_on(&mut self, ctx: &mut NativeCtx<'_>, mail: NoteOn) {
-        let Some(sender) = self.sender.as_ref() else {
+        let Some(s) = self.sender.as_ref() else {
             return;
         };
         let ev = AudioEvent::NoteOn {
@@ -26,7 +25,7 @@ impl AudioCapabilityState {
             instrument_id: mail.instrument_id,
             pan: mail.pan,
         };
-        if sender.push(ev).is_err() {
+        if s.push(ev).is_err() {
             tracing::warn!(
                 target: "aether_substrate::audio",
                 "event queue full — dropping note_on",
@@ -34,9 +33,8 @@ impl AudioCapabilityState {
         }
     }
 
-    /// Queue a `note_off` for the realtime mixer.
     pub fn handle_note_off(&mut self, ctx: &mut NativeCtx<'_>, mail: NoteOff) {
-        let Some(sender) = self.sender.as_ref() else {
+        let Some(s) = self.sender.as_ref() else {
             return;
         };
         let ev = AudioEvent::NoteOff {
@@ -44,7 +42,7 @@ impl AudioCapabilityState {
             pitch: mail.pitch,
             instrument_id: mail.instrument_id,
         };
-        if sender.push(ev).is_err() {
+        if s.push(ev).is_err() {
             tracing::warn!(
                 target: "aether_substrate::audio",
                 "event queue full — dropping note_off",
@@ -54,12 +52,12 @@ impl AudioCapabilityState {
 
     pub fn handle_set_master_gain(&mut self, _ctx: &mut NativeCtx<'_>, mail: SetMasterGain) -> SetMasterGainResult {
         let applied = mail.gain.clamp(0.0, 1.0);
-        let Some(sender) = self.sender.as_ref() else {
+        let Some(s) = self.sender.as_ref() else {
             return SetMasterGainResult::Err {
                 error: "audio pipeline not initialised on this desktop substrate".to_owned(),
             };
         };
-        let _ = sender.push(AudioEvent::SetMasterGain { gain: applied });
+        let _ = s.push(AudioEvent::SetMasterGain { gain: applied });
         tracing::info!(
             target: "aether_substrate::audio",
             requested = mail.gain,
@@ -71,12 +69,12 @@ impl AudioCapabilityState {
 
     pub fn handle_set_reverb_send(&mut self, _ctx: &mut NativeCtx<'_>, mail: SetReverbSend) -> SetReverbSendResult {
         let applied = mail.send.clamp(0.0, 1.0);
-        let Some(sender) = self.sender.as_ref() else {
+        let Some(s) = self.sender.as_ref() else {
             return SetReverbSendResult::Err {
                 error: "audio pipeline not initialised on this desktop substrate".to_owned(),
             };
         };
-        let _ = sender.push(AudioEvent::SetReverbSend { send: applied });
+        let _ = s.push(AudioEvent::SetReverbSend { send: applied });
         tracing::info!(
             target: "aether_substrate::audio",
             requested = mail.send,
@@ -88,13 +86,13 @@ impl AudioCapabilityState {
 
     pub fn handle_set_sender_gain(&mut self, ctx: &mut NativeCtx<'_>, mail: SetSenderGain) -> SetSenderGainResult {
         let applied = mail.gain.clamp(0.0, 4.0);
-        let Some(sender) = self.sender.as_ref() else {
+        let Some(s) = self.sender.as_ref() else {
             return SetSenderGainResult::Err {
                 error: "audio pipeline not initialised on this desktop substrate".to_owned(),
             };
         };
         let sender_mailbox = sender_mailbox_id(ctx.reply_target());
-        let _ = sender.push(AudioEvent::SetSenderGain { sender_mailbox, gain: applied });
+        let _ = s.push(AudioEvent::SetSenderGain { sender_mailbox, gain: applied });
         tracing::info!(
             target: "aether_substrate::audio",
             requested = mail.gain,
@@ -134,7 +132,9 @@ impl AudioCapabilityState {
         #[allow(clippy::cast_possible_truncation)]
         let accepted = mail.events.len() as u32;
         let ev = AudioEvent::Schedule { sender_mailbox: sender_mailbox_id(ctx.reply_target()), events: mail.events };
-        let _ = sender.push(ev);
+        if sender.push(ev).is_err() {
+            return ScheduleResult::Err { error: "audio event queue full — schedule dropped".to_owned() };
+        }
         ScheduleResult::Ok { accepted }
     }
 

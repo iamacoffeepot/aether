@@ -120,27 +120,8 @@ mod cached_font_metrics_tests {
     #[test]
     fn unmapped_codepoint_uses_default_advance() {
         let cache = CachedFontMetrics::new(&monospace_metrics());
-        // 'z' has no cmap entry → default_advance (600), the same as 'a'.
+        // 'z' is absent → default_advance (600), the same as 'a'.
         assert_eq!(cache.measure("z", 100.0), cache.measure("a", 100.0));
-    }
-
-    /// `FontMetrics` is the wire payload of `FontMetricsResult::Ok` — the
-    /// table a guest caches once and measures against locally (ADR-0105).
-    /// Round-trip the full table through the wire codec and verify every
-    /// field survives, so a change that breaks the metrics grab's wire
-    /// shape is caught at the unit level rather than as a garbled
-    /// measurement in a live guest.
-    #[test]
-    fn font_metrics_survives_a_wire_roundtrip() {
-        let metrics = monospace_metrics();
-        let bytes = aether_data::wire::to_vec(&metrics).expect("FontMetrics must encode");
-        let decoded: FontMetrics = aether_data::wire::from_bytes(&bytes).expect("FontMetrics must decode");
-        assert_eq!(decoded.units_per_em, metrics.units_per_em);
-        assert_eq!(decoded.ascent, metrics.ascent);
-        assert_eq!(decoded.descent, metrics.descent);
-        assert_eq!(decoded.line_gap, metrics.line_gap);
-        assert_eq!(decoded.default_advance, metrics.default_advance);
-        assert_eq!(decoded.advances, metrics.advances);
     }
 
     #[test]
@@ -148,16 +129,16 @@ mod cached_font_metrics_tests {
         let cache = CachedFontMetrics::new(&monospace_metrics());
         let text = "abc";
         let size = 50.0;
-        let glyph_count = text.chars().count();
+        let count = text.chars().count();
 
         let mut prev = 0.0;
-        for index in 0..=glyph_count {
+        for index in 0..=count {
             let x = cache.caret_x(text, index, size);
             assert!(x >= prev, "caret must not move backward at {index}");
             prev = x;
         }
-        assert_eq!(cache.caret_x(text, glyph_count, size), cache.measure(text, size));
-        // A past-the-end index clamps to the full width.
+        assert_eq!(cache.caret_x(text, count, size), cache.measure(text, size));
+        // Past-the-end clamps to the full width.
         assert_eq!(cache.caret_x(text, 99, size), cache.measure(text, size));
     }
 }

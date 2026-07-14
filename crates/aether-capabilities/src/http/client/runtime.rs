@@ -29,7 +29,7 @@ pub use aether_substrate::chassis::error::BootError;
 use crate::http::kinds::{Fetch, FetchResult, HttpError, HttpHeader, HttpMethod};
 
 /// Adapter-facing request shape. Converted from the wire `Fetch`
-/// kind by the cap before it is handed to the adapter.
+/// kind by the cap before handing to the adapter.
 pub struct FetchRequest {
     pub url: String,
     pub method: HttpMethod,
@@ -124,17 +124,14 @@ impl NativeActor for HttpCapability {
             FetchRequest { url: mail.url, method: mail.method, headers: mail.headers, body: mail.body, timeout };
 
         match state.adapter.fetch(adapter_req) {
-            Ok(resp) => FetchResult::Ok { url, status: resp.status, headers: resp.headers, body: resp.body },
+            Ok(r) => FetchResult::Ok { url, status: r.status, headers: r.headers, body: r.body },
             Err(error) => FetchResult::Err { url, error },
         }
     }
 }
 
-/// Default `User-Agent` header value applied when the caller sets none.
-const DEFAULT_USER_AGENT: &str = concat!("aether/", env!("CARGO_PKG_VERSION"));
-
 /// `ureq`-backed adapter. Holds the shared agent, the initial-host allowlist
-/// (empty = deny all), the response body cap, and the `require_https`
+/// (empty = deny all), the response cap, and the `require_https`
 /// flag. Thread-safe: `ureq::Agent` is cheaply cloneable and
 /// internally synchronised, so the same adapter drives the cap from
 /// one dispatch thread today and would parallelise cleanly behind a
@@ -173,13 +170,13 @@ impl HttpAdapter for UreqHttpAdapter {
     fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, HttpError> {
         use ureq::RequestExt;
 
-        let parsed_url = url::Url::parse(&req.url).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
+        let parsed = url::Url::parse(&req.url).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
 
-        if self.require_https && parsed_url.scheme() != "https" {
+        if self.require_https && parsed.scheme() != "https" {
             return Err(HttpError::InvalidUrl("http scheme not allowed (AETHER_HTTP_REQUIRE_HTTPS=1)".to_string()));
         }
 
-        let host = parsed_url.host_str().ok_or_else(|| HttpError::InvalidUrl("no host in url".to_string()))?;
+        let host = parsed.host_str().ok_or_else(|| HttpError::InvalidUrl("no host in url".to_string()))?;
         self.check_allowlist(host)?;
 
         if req.body.len() > self.max_body_bytes {
@@ -194,22 +191,22 @@ impl HttpAdapter for UreqHttpAdapter {
         // but `Host: B` routes the vhost to B server-side). User-
         // Agent defaults to `aether/<version>` if not set.
         let mut saw_user_agent = false;
-        for header in &req.headers {
-            if header.name.eq_ignore_ascii_case("host") {
+        for h in &req.headers {
+            if h.name.eq_ignore_ascii_case("host") {
                 tracing::warn!(
                     target: "aether_substrate::http",
-                    value = %header.value,
+                    value = %h.value,
                     "stripping caller-set Host header",
                 );
                 continue;
             }
-            if header.name.eq_ignore_ascii_case("user-agent") {
+            if h.name.eq_ignore_ascii_case("user-agent") {
                 saw_user_agent = true;
             }
-            builder = builder.header(&header.name, &header.value);
+            builder = builder.header(&h.name, &h.value);
         }
         if !saw_user_agent {
-            builder = builder.header("User-Agent", DEFAULT_USER_AGENT);
+            builder = builder.header("User-Agent", concat!("aether/", env!("CARGO_PKG_VERSION")));
         }
 
         let http_req = builder.body(req.body).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
@@ -264,8 +261,7 @@ fn ureq_error_to_http_error(e: ureq::Error) -> HttpError {
     }
 }
 
-/// Build an HTTP adapter from explicit configuration: the disabled
-/// stub when `config.disabled` is set, the `ureq`-backed stack otherwise.
+/// Build an HTTP adapter from explicit configuration.
 pub fn build_http_adapter(config: HttpConfig) -> Arc<dyn HttpAdapter> {
     if config.disabled {
         tracing::info!(

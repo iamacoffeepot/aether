@@ -47,7 +47,7 @@ pub const SETTLE_EWMA_ALPHA_PERMILLE: u32 = 200;
 
 /// Minimum spacing between slow-settlement warns. A saturating
 /// pipeline settles slowly on *every* advance, so an unguarded warn
-/// would itself spam the log rings; one line per episode is enough.
+/// would itself spam the rings; one line per episode is enough.
 pub const SLOW_SETTLE_WARN_COOLDOWN: Duration = Duration::from_secs(5);
 
 /// Internal state-advance decision produced by `on_advance` before
@@ -63,7 +63,7 @@ pub enum Step {
 pub struct PendingAdvance {
     /// Causal-chain root of the in-flight broadcast (ADR-0080 §6).
     pub root: MailId,
-    /// Kind id of the state just broadcast — echoed back in `completed`.
+    /// Kind id of the state just broadcast — echoed in `completed`.
     pub completed_kind: KindId,
     /// Kind id of the state to broadcast next — echoed in `next`.
     /// `KindId(0)` when the settling broadcast was a terminal.
@@ -93,22 +93,22 @@ impl LifecycleCapabilityState {
         // in u128 (no signed casts): next = prev ± α·|sample − prev|.
         let alpha = u128::from(SETTLE_EWMA_ALPHA_PERMILLE);
         let next_nanos = self.settlement_latency_ewma.map_or(latency.as_nanos(), |prev| {
-            let prev_nanos = prev.as_nanos();
-            let sample_nanos = latency.as_nanos();
-            if sample_nanos >= prev_nanos {
-                prev_nanos + (sample_nanos - prev_nanos) * alpha / 1000
+            let prev = prev.as_nanos();
+            let sample = latency.as_nanos();
+            if sample >= prev {
+                prev + (sample - prev) * alpha / 1000
             } else {
-                sample_nanos + (prev_nanos - sample_nanos) * alpha / 1000
+                prev - (prev - sample) * alpha / 1000
             }
         });
-        let smoothed = Duration::from_nanos(u64::try_from(next_nanos).unwrap_or(u64::MAX));
-        self.settlement_latency_ewma = Some(smoothed);
+        let ewma = Duration::from_nanos(u64::try_from(next_nanos).unwrap_or(u64::MAX));
+        self.settlement_latency_ewma = Some(ewma);
 
         let threshold = self.advance_timeout / SLOW_SETTLE_DIVISOR;
         if latency < threshold {
             return;
         }
-        if self.last_slow_warn.is_some_and(|armed| armed.elapsed() < SLOW_SETTLE_WARN_COOLDOWN) {
+        if self.last_slow_warn.is_some_and(|t| t.elapsed() < SLOW_SETTLE_WARN_COOLDOWN) {
             return;
         }
         self.last_slow_warn = Some(Instant::now());
@@ -116,7 +116,7 @@ impl LifecycleCapabilityState {
             target: "aether_capabilities::lifecycle",
             root = ?root,
             latency_millis = latency.as_millis(),
-            ewma_millis = smoothed.as_millis(),
+            ewma_millis = ewma.as_millis(),
             threshold_millis = threshold.as_millis(),
             "settlement latency exceeded the slow threshold; the trace/settlement \
              pipeline is degrading — `describe_tree <root>` for the in-flight nodes; \

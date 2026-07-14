@@ -54,8 +54,7 @@ pub struct TreeWalk {
 
 impl TreeWalk {
     /// Begin a walk for `root`, seeding the frontier with the root
-    /// mail's `sender` — the one ring guaranteed to hold the root's
-    /// own `Sent`.
+    /// mail's `sender` (where the root's own `Sent` lives).
     #[must_use]
     pub fn new(root: MailId) -> Self {
         let mut frontier = VecDeque::new();
@@ -67,9 +66,9 @@ impl TreeWalk {
     /// when the frontier is exhausted. Skips mailboxes already visited
     /// (a diamond in the mail graph enqueues the same recipient twice).
     pub fn next_mailbox(&mut self) -> Option<MailboxId> {
-        while let Some(mailbox) = self.frontier.pop_front() {
-            if self.visited.insert(mailbox) {
-                return Some(mailbox);
+        while let Some(mbx) = self.frontier.pop_front() {
+            if self.visited.insert(mbx) {
+                return Some(mbx);
             }
         }
         None
@@ -85,10 +84,9 @@ impl TreeWalk {
             if entry.root != self.root {
                 continue;
             }
-            if let TraceEvent::Sent { recipient, .. } = entry.event {
-                if self.visited.contains(&recipient) {
-                    continue;
-                }
+            if let TraceEvent::Sent { recipient, .. } = entry.event
+                && !self.visited.contains(&recipient)
+            {
                 self.frontier.push_back(recipient);
             }
             self.collected.push(entry);
@@ -96,8 +94,8 @@ impl TreeWalk {
     }
 
     /// Stitch the collected events into a [`DescribeTreeResult`],
-    /// resolving every node's `thread_name` to `None`. This is the path
-    /// the MCP and the wasm build take — neither can reach a substrate's
+    /// resolving every node's `thread_name` to `None`. The path the MCP
+    /// and the wasm build take — neither can reach a substrate's
     /// reverse-lookup registry.
     #[must_use]
     pub fn finish(self) -> DescribeTreeResult {
@@ -151,8 +149,7 @@ where
     if !mails.iter().any(|n| n.mail_id == root) {
         return DescribeTreeResult::Err { not_found: root };
     }
-    let unfinished = mails.iter().filter(|n| n.t_finished.is_none()).count();
-    let in_flight = u32::try_from(unfinished).unwrap_or(u32::MAX);
+    let in_flight = u32::try_from(mails.iter().filter(|n| n.t_finished.is_none()).count()).unwrap_or(u32::MAX);
     DescribeTreeResult::Ok { root, in_flight, mails }
 }
 

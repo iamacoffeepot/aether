@@ -149,8 +149,7 @@ impl Atlas {
             return cached_slot(*cached);
         }
 
-        let expected_len = (width * height) as usize;
-        if width == 0 || height == 0 || coverage.len() < expected_len {
+        if width == 0 || height == 0 || coverage.len() < (width * height) as usize {
             self.cache.insert(key, None);
             return GlyphSlot::Empty;
         }
@@ -163,16 +162,16 @@ impl Atlas {
         };
 
         self.blit(x, y, width, height, coverage);
-        let atlas_size = ATLAS_SIZE as f32;
+        let size = ATLAS_SIZE as f32;
         let entry = AtlasEntry {
             x,
             y,
             width,
             height,
-            u0: x as f32 / atlas_size,
-            v0: y as f32 / atlas_size,
-            u1: (x + width) as f32 / atlas_size,
-            v1: (y + height) as f32 / atlas_size,
+            u0: x as f32 / size,
+            v0: y as f32 / size,
+            u1: (x + width) as f32 / size,
+            v1: (y + height) as f32 / size,
         };
         self.cache.insert(key, Some(entry));
         GlyphSlot::Placed { entry, uploaded: true }
@@ -181,13 +180,13 @@ impl Atlas {
     /// The RGBA8 bytes of a placed glyph's rect, row-major — the payload
     /// for the `update_texture` that uploads it.
     pub fn rect_rgba(&self, entry: &AtlasEntry) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity((entry.width * entry.height * 4) as usize);
+        let mut out = Vec::with_capacity((entry.width * entry.height * 4) as usize);
         for row in 0..entry.height {
             let start = (((entry.y + row) * ATLAS_SIZE + entry.x) * 4) as usize;
             let end = start + (entry.width * 4) as usize;
-            bytes.extend_from_slice(&self.pixels[start..end]);
+            out.extend_from_slice(&self.pixels[start..end]);
         }
-        bytes
+        out
     }
 
     /// Reserve a `width × height` rect (plus padding) on the current or a
@@ -208,7 +207,7 @@ impl Atlas {
         }
         let (x, y) = (self.shelf_x, self.shelf_y);
         self.shelf_x += padded_width;
-        self.shelf_height = self.shelf_height.max(height);
+        self.shelf_height = self.shelf_height.max(padded_height);
         Some((x, y))
     }
 

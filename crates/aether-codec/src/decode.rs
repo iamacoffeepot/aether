@@ -259,16 +259,13 @@ fn read_primitive_le(cur: &mut Cursor<'_>, p: Primitive, path: &str) -> Result<V
 }
 
 fn struct_alignment(fields: &[NamedField]) -> Result<usize, DecodeError> {
-    let mut max_align = 1usize;
-    for field in fields {
-        max_align = max_align.max(alignment_of_schema(&field.ty)?);
+    let mut a = 1usize;
+    for f in fields {
+        a = a.max(alignment_of_schema(&f.ty)?);
     }
-    Ok(max_align)
+    Ok(a)
 }
 
-/// `#[repr(C)]` alignment of a cast-shaped schema — the inverse of the
-/// encoder's same query. Used to skip inter-field padding while walking
-/// the byte layout.
 fn alignment_of_schema(ty: &SchemaType) -> Result<usize, DecodeError> {
     match ty {
         SchemaType::Scalar(p) => Ok(align_of_primitive(*p)),
@@ -331,7 +328,7 @@ fn decode_wire_value(cur: &mut Cursor<'_>, schema: &SchemaType, path: &str) -> R
             // `remaining` can't be valid non-degenerate input. Zero-byte
             // elements start small and grow by push; the decode-wide
             // budget bounds that loop.
-            let mut arr = Vec::with_capacity(len.min(cur.bytes.len()));
+            let mut arr = Vec::with_capacity(len.min(cur.remaining()));
             for i in 0..len {
                 let elem_path = format!("{path}[{i}]");
                 arr.push(decode_wire_value(cur, inner, &elem_path)?);
@@ -489,7 +486,6 @@ impl<'a> Cursor<'a> {
         Self { bytes, pos: 0, values_left }
     }
 
-    /// Bytes not yet consumed from the input slice.
     fn remaining(&self) -> usize {
         self.bytes.len() - self.pos
     }
@@ -511,8 +507,6 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Copy the next `N` bytes as a fixed-size array, advancing `pos`.
-    /// Errors `Truncated` when fewer than `N` bytes remain.
     fn take<const N: usize>(&mut self, path: &str) -> Result<[u8; N], DecodeError> {
         if self.remaining() < N {
             return Err(DecodeError::Truncated { path: path.into(), needed: N, had: self.remaining() });
