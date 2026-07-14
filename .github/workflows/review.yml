@@ -612,12 +612,49 @@ jobs:
           This is a LIGHT-PROFILE review: the PR changes no Rust, but it touches the
           fleet's own automation surface (.github/workflows/**, .github/actions/**,
           scripts/**), where a logic / liveness / state-accounting bug in
-          bash-inside-YAML parses fine and leaves unrelated CI green. Invoke the repo's
-          /review skill in INTEGRATED mode against <diff_base>...HEAD, substituting the
-          file's diff_base value: resolve the changed files matching .github/workflows/**,
-          .github/actions/**, and scripts/** (NOT .rs) and their per-file diffs from git,
-          and read the issue text this PR closes (use gh to find the PR's closing
-          reference for the pr_number if needed).
+          bash-inside-YAML parses fine and leaves unrelated CI green.
+          READ THE DIFF FIRST, THEN SIZE YOUR OWN MACHINERY (issue #3414). The tier table
+          already decided this diff earns a review session; your call is how much machinery
+          above that floor to spend. Resolve the changed files matching .github/workflows/**,
+          .github/actions/**, and scripts/** (NOT .rs) and their per-file diffs from git:
+          'git diff --name-only <diff_base>...HEAD' and 'git diff <diff_base>...HEAD -- <file>'
+          per file, substituting the file's diff_base value. Read the issue text this PR
+          closes (use gh to find the PR's closing reference for the pr_number if needed).
+          Then judge how much this diff earns — you have two paths, and the choice is yours.
+          INLINE PATH (the default for a small, simple light diff). When the diff is small
+          enough that you can review it confidently in this one context, apply the light
+          profile's two pillars — correctness and convention — DIRECTLY IN THIS SESSION: do
+          NOT invoke the /review skill, do NOT use the Workflow tool, do NOT spawn subagents,
+          and therefore observe NO wait contract (the whole judgment is yours, in this
+          context, like a confirm pass). Judge logic / control-flow / state-accounting
+          invariants in the diff's actual language (shell / YAML / JS), not Rust-anchored
+          hazards, and classify each flagged bug's provenance against the merge-base
+          <diff_base> (a bug reachable on the base is a pre-existing advisory follow-up,
+          never an in-PR demand). Then write ${GITHUB_WORKSPACE}/review-rollup.json yourself
+          — that absolute path — containing exactly one JSON object in the deep-rollup shape
+          the post job reads (the same shape review.js returns; the deep-only channels are
+          empty because no fan-out ran):
+          {"reviewPass": "deep",
+           "restart": null,
+           "bounce": null,
+           "totals": {"files": <N>, "findings": <total flagged>, "confirmed": <M>, "softHolds": <S>},
+           "spec": null,
+           "confirmed": [<one row per IN-PR finding: {"file" (full changed-file path), "pillar" ("correctness" or "convention"), "source": "high-confidence", "category", "line" (null if unknown), "symbol", "severity", "gate" ("soft-hold" for a high-severity correctness finding, else "advisory"), "recommendation", "suggested_form"}>],
+           "softHolds": [<the subset of confirmed whose gate is "soft-hold">],
+           "followUps": [<one row per PRE-EXISTING (base-reachable) finding: {"file", "pillar", "source": "deep-advisory", "category", "line" (null ok), "symbol", "severity", "gate": "advisory", "suggested_form": "<the note>"}>],
+           "grouped": {}, "lintCandidates": [], "spared": [], "uncertain": []}
+          A clean inline review writes the same object with confirmed / softHolds / followUps
+          all empty — do NOT fabricate findings to fill it. restart / bounce stay null: a
+          diff so divergent it would warrant a restart is exactly a diff you should NOT be
+          inlining — escalate to the fan-out below instead. If you cannot resolve the diff
+          or the closing issue text, do NOT write a rollup file: leave the failure in the
+          session transcript so the action records an actionable no-rollup attempt.
+          FAN-OUT PATH (escalation — always safe). When the diff exceeds what you can review
+          confidently in one context — many files, tangled control flow, a change whose blast
+          radius you are unsure of — do NOT inline. Invoke the repo's /review skill in
+          INTEGRATED mode against <diff_base>...HEAD, substituting the file's diff_base value:
+          resolve the same changed files (.github/workflows/**, .github/actions/**,
+          scripts/**; NOT .rs) and their per-file diffs, and read the closing issue text.
           Pass lenses: ['correctness', 'convention'], noBuild: true, depth: gate,
           diffBase: <diff_base> (read from the file), and reviewMode: full in the /review
           invocation's workflow args — the light profile runs only the correctness and
@@ -627,7 +664,8 @@ jobs:
           reviewMode let it classify a flagged bug's provenance against the merge-base (a
           pre-existing bug reachable on the base becomes an advisory follow-up, never an
           in-PR demand). Let the skill run the review.js workflow in a single pass.
-          THE WAIT CONTRACT (load-bearing — headless runs die on this): the Workflow tool
+          THE WAIT CONTRACT (load-bearing — headless runs die on this; applies to the
+          FAN-OUT PATH ONLY, since the inline path spawns nothing): the Workflow tool
           runs in the BACKGROUND. Launch it, then end your turn with a one-line status
           note — nothing else. The headless harness holds the process open for the
           in-flight background workflow (this step raises the wait ceiling to forty
@@ -644,8 +682,12 @@ jobs:
           workflow reports an error or no rollup, do NOT fabricate a replacement file:
           leave the failure in the session transcript so the action records an
           actionable no-rollup attempt.
-          Do not edit any source (the noBuild flag above keeps the correctness refuter
-          subagent non-editing too).
+          WHEN IN DOUBT, ESCALATE. Escalating a small diff to the fan-out is always safe;
+          inlining a diff too large to review confidently is the only unsafe move. Never
+          review below the fan-out floor out of thrift — the floor is the mechanical table's
+          call, the spend above it is yours.
+          Do not edit any source (on the fan-out path the noBuild flag keeps the correctness
+          refuter subagent non-editing too).
           SESSION REUSE (the warm pool, #3286): this session may be deposited and later
           resumed by a DIFFERENT job for a DIFFERENT task against the same files — your
           accumulated knowledge of the files you read is the asset being deposited, so
