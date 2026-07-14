@@ -28,7 +28,15 @@ export const meta = {
 //                                       specialist for backfill.
 //   lenses,       [string]            — optional subset of pillar keys to run.
 //   finderModel,  string              — model for Phase 0 + finders + batched/challenge verify (default 'sonnet').
-//   verifyModel,  string              — model for the high-severity correctness refuter (default 'opus').
+//   verifyModel,  string              — model for the high-severity correctness refuter (default 'sonnet').
+//   finderEffort, string              — reasoning effort for the finder-role calls (Phase 0, per-file
+//                                       finders, challenges; default 'high'). Pinned rather than inherited:
+//                                       the calibration sweep (spike/review-calibration) measured xhigh —
+//                                       the session default — at LOWER recall than high (83.3% vs 91.7%)
+//                                       at 1.9x the price, so inheriting the session effort degrades the gate.
+//   verifyEffort, string              — reasoning effort for the refute-role calls (per-finding high-severity
+//                                       refuter, batched refuter; default 'medium' — measured equal to
+//                                       higher tiers on kept-real/killed-fabricated at half the cost).
 //   noChallenge,  bool                — skip the false-negative challenge (per-PR in pr, per-file in backfill).
 //   noBuild,      bool                — the high-severity correctness refuter grounds read-only (no
 //                                       scratch #[test] write + cargo test run); set true where no
@@ -84,8 +92,18 @@ const DEPTH = A.depth || 'deep'
 if (DEPTH !== 'gate' && DEPTH !== 'deep') throw new Error(`review: args.depth must be 'gate' or 'deep', got ${JSON.stringify(A.depth)}`)
 const FINDER_SHAPE = A.finderShape || (PROFILE === 'pr' ? 'merged' : 'specialist')
 if (FINDER_SHAPE !== 'merged' && FINDER_SHAPE !== 'specialist') throw new Error(`review: args.finderShape must be 'merged' or 'specialist', got ${JSON.stringify(A.finderShape)}`)
-const VERIFY_MODEL = A.verifyModel || (DEPTH === 'gate' ? 'sonnet' : 'opus')
+const VERIFY_MODEL = A.verifyModel || 'sonnet'
 const NO_CHALLENGE = A.noChallenge === true || DEPTH === 'gate'
+
+// Efforts are pinned, never inherited (issue #3428): the CI review session runs at the CLI's
+// default effort (xhigh), and the calibration sweep measured xhigh finders at lower recall than
+// high at nearly twice the price. Workflow subagents are fresh sessions, so pinning here has no
+// prompt-cache cost — unlike a session-level --effort flip, which invalidates the pooled cache.
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+const FINDER_EFFORT = A.finderEffort || 'high'
+if (!EFFORTS.includes(FINDER_EFFORT)) throw new Error(`review: args.finderEffort must be one of ${EFFORTS.join('|')}, got ${JSON.stringify(A.finderEffort)}`)
+const VERIFY_EFFORT = A.verifyEffort || 'medium'
+if (!EFFORTS.includes(VERIFY_EFFORT)) throw new Error(`review: args.verifyEffort must be one of ${EFFORTS.join('|')}, got ${JSON.stringify(A.verifyEffort)}`)
 
 // Light profile (issue #3376): a review of the fleet's own automation surface
 // (.github/workflows/**, .github/actions/**, scripts/**) carries no Rust — the
@@ -644,9 +662,10 @@ If the change is genuinely clean under these lenses, final_verdict='clean-confir
 
 // The verify funnel, shared by the per-file stage and the per-PR challenge (issue #3015 item 3).
 // Each item is { fd, lens, file }; the verdict is attached back onto item.fd.verify. High-severity
-// correctness gets a per-finding, test-grounded refuter on the Opus verify model (the soft-hold
+// correctness gets a per-finding, test-grounded refuter on the verify model (the soft-hold
 // pillar, where a confident hallucination costs most); every other refute-bound finding goes to one
-// read-only batch adjudicator per file on the cheap finder model, verdicts keyed by list index.
+// read-only batch adjudicator per file on the finder model. Both refute roles run at VERIFY_EFFORT,
+// verdicts keyed by list index.
 async function refuteFlags(items) {
   const isTopTier = (it) => it.lens.key === 'correctness' && it.fd.severity === 'high'
   const perFinding = items.filter(isTopTier)
@@ -657,6 +676,7 @@ async function refuteFlags(items) {
       label: `refute:${it.lens.key}:${it.fd.symbol}`.slice(0, 80),
       phase: 'Verify',
       model: VERIFY_MODEL,
+      effort: VERIFY_EFFORT,
       // A Bash-capable agent so it can write/run a grounding test, not just read.
       agentType: 'general-purpose',
       schema: VERDICT,
@@ -670,6 +690,7 @@ async function refuteFlags(items) {
       label: `refute-batch:${base(file)}`.slice(0, 80),
       phase: 'Verify',
       model: FINDER_MODEL,
+      effort: VERIFY_EFFORT,
       schema: BATCH_VERDICT,
     }).then(res => {
       for (const v of ((res && res.verdicts) || [])) {
@@ -698,7 +719,7 @@ let spec = null
 let inScope = scoped
 if (A.issue && SPEC_LENS) {
   phase('Scope')
-  spec = await agent(specPrompt(A.issue, scoped), { label: 'spec-fidelity', phase: 'Scope', model: FINDER_MODEL, schema: SPEC_SCHEMA })
+  spec = await agent(specPrompt(A.issue, scoped), { label: 'spec-fidelity', phase: 'Scope', model: FINDER_MODEL, effort: FINDER_EFFORT, schema: SPEC_SCHEMA })
   const out = new Set((spec && spec.outOfScope) || [])
   if (out.size) {
     // Keep out-of-scope files in the funnel with the reduced correctness-only lens set (a demoted
@@ -734,6 +755,7 @@ const results = await pipeline(
       label: f.batch ? `find:${lens.key}:batch${f.members.length}` : `find:${lens.key}:${base(f.file)}`,
       phase: 'Find',
       model: FINDER_MODEL,
+      effort: FINDER_EFFORT,
       schema: findSchema({ pillar: lens.key === 'quality', batched: !!f.batch }),
     }).then(r => ({ lens, r }))
   )),
@@ -751,7 +773,7 @@ const results = await pipeline(
     // Per-file clean-lens challenge — backfill only, on the cheap model.
     const cleanRuns = (NO_CHALLENGE || PROFILE === 'pr') ? [] : runs.filter(x => !(x.r.findings || []).length && CHALLENGE_LENSES.has(x.lens.key))
     const challenge = parallel(cleanRuns.map(x => () =>
-      agent(challengePrompt(x.r.file || files[0], x.lens), { label: `challenge:${x.lens.key}:${base(x.r.file || files[0])}`, phase: 'Verify', model: FINDER_MODEL, schema: CHALLENGE })
+      agent(challengePrompt(x.r.file || files[0], x.lens), { label: `challenge:${x.lens.key}:${base(x.r.file || files[0])}`, phase: 'Verify', model: FINDER_MODEL, effort: FINDER_EFFORT, schema: CHALLENGE })
         .then(c => ({ lens: x.lens, file: x.r.file || files[0], challenge: c }))
     ))
 
@@ -770,7 +792,7 @@ let prChallengeMissed = []
 const challengeLenses = SELECTED.filter(l => CHALLENGE_LENSES.has(l.key))
 if (PROFILE === 'pr' && !NO_CHALLENGE && challengeLenses.length && scopeUnits(inScope).some(u => u.diff)) {
   phase('Verify')
-  const ch = await agent(prChallengePrompt(inScope, challengeLenses), { label: 'challenge:pr', phase: 'Verify', model: FINDER_MODEL, schema: PR_CHALLENGE_SCHEMA })
+  const ch = await agent(prChallengePrompt(inScope, challengeLenses), { label: 'challenge:pr', phase: 'Verify', model: FINDER_MODEL, effort: FINDER_EFFORT, schema: PR_CHALLENGE_SCHEMA })
   if (ch && ch.final_verdict === 'missed') {
     const lensByKey = new Map(challengeLenses.map(l => [l.key, l]))
     for (const m of (ch.missed || [])) {
@@ -785,7 +807,7 @@ if (PROFILE === 'pr' && !NO_CHALLENGE && challengeLenses.length && scopeUnits(in
 // ALWAYS_VERIFY finding its refuter upheld), refuter 'confirmed' (a low/med flag upheld), or
 // challenger 'missed' (a clean lens overlooked it — refute-gated in the pr profile). 'spared' = a
 // flag the refuter overturned, now including a refuted high-confidence correctness finding (issue
-// #3015 item 2 — the Opus refuter's verdict is consulted rather than discarded). gate = soft-hold
+// #3015 item 2 — the verify-model refuter's verdict is consulted rather than discarded). gate = soft-hold
 // only for a high-severity finding on a soft-hold pillar (spec/correctness); everything else advisory.
 // Spec-fidelity findings never flow through rowOf/gateFor — they live in the separate Phase 0
 // `spec` channel — so a high-severity spec finding is routed into softHolds directly, below.
