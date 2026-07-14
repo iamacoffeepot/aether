@@ -332,7 +332,7 @@ jobs:
       - name: Mint the App installation token
         id: app-token
         if: steps.preflight.outputs.proceed == 'true'
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
           app-id: ${{ secrets.AGENT_APP_ID }}
           private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
@@ -341,7 +341,7 @@ jobs:
       # two files the tier lookup below needs. Pinned to the default branch for
       # the same reason the reconciler pins its copy: an issue must not be able to
       # relax the policy it is being tiered by. Shallow; the tick builds nothing.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         if: steps.preflight.outputs.proceed == 'true'
         with:
           ref: ${{ github.event.repository.default_branch }}

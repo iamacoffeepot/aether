@@ -160,7 +160,7 @@ jobs:
       TASK: ${{ inputs.task }}
       REF: ${{ inputs.ref }}
     steps:
-      - uses: runs-on/action@v2
+      - uses: runs-on/action@4e5f72399b6b17f2e79c511c1b38a315a64d22dc # v2
 
       # Fail early and clearly when a required secret is absent, rather than
       # letting the App-token mint fail with a cryptic error. All three secrets
@@ -192,7 +192,7 @@ jobs:
       # ones do not, which is the whole reason the arc can chain event-driven.
       - name: Mint the App installation token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
           app-id: ${{ secrets.AGENT_APP_ID }}
           private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
@@ -402,7 +402,7 @@ jobs:
       # and approve-sweep — the freshness gate reads `git log origin/main
       # --since=<scoped-at>` over each plan's targeted paths, which a shallow
       # clone cannot answer. Only scope is shallow.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         if: steps.guard.outputs.proceed == 'true'
         with:
           token: ${{ steps.app-token.outputs.token }}
@@ -506,7 +506,7 @@ jobs:
         id: pool-creds
         if: steps.guard.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != '' && vars.AGENT_POOL_ENABLE == 'true'
         continue-on-error: true
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ vars.AGENT_AWS_ROLE_ARN }}
           aws-region: ${{ vars.AGENT_AWS_REGION }}
@@ -722,7 +722,7 @@ jobs:
 
       # The full session transcript (stream-json JSONL) — uploaded even on failure,
       # since a dead run's transcript is exactly what diagnoses it.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: agent-work-session-transcript

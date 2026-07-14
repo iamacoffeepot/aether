@@ -164,7 +164,7 @@ jobs:
       review_class: ${{ steps.resolve.outputs.review_class }}
       rollup_produced: ${{ steps.rollup.outputs.produced }}
     steps:
-      - uses: runs-on/action@v2
+      - uses: runs-on/action@4e5f72399b6b17f2e79c511c1b38a315a64d22dc # v2
       # Resolve the PR and apply the run gates BEFORE any checkout — these
       # are pure GitHub API calls. The PR number is explicit on both
       # triggers (the dispatch input, or the commented PR's issue number),
@@ -361,7 +361,7 @@ jobs:
 
       # Check out the PR head with full history, then fetch origin/main
       # explicitly — the diff base every review runs against.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         if: steps.resolve.outputs.proceed == 'true'
         with:
           ref: ${{ steps.resolve.outputs.head_sha }}
@@ -434,7 +434,7 @@ jobs:
         id: pool-creds
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != '' && vars.AGENT_POOL_ENABLE == 'true'
         continue-on-error: true
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ vars.AGENT_AWS_ROLE_ARN }}
           aws-region: ${{ vars.AGENT_AWS_REGION }}
@@ -991,7 +991,7 @@ jobs:
             echo "produced=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always() && steps.rollup.outputs.produced == 'true'
         with:
           name: review-rollup
@@ -1002,7 +1002,7 @@ jobs:
       # failure, since a dead run's transcript is exactly what diagnoses
       # it. This is the same transcript.jsonl artifact the evidence design
       # (#2967) wants long-term.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: review-session-transcript
@@ -1025,8 +1025,8 @@ jobs:
       issues: write
       actions: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: review-rollup
       # Mint the critic installation token that AUTHORS the native verdict.
@@ -1037,7 +1037,7 @@ jobs:
       # App mint; critic authors no PR, so GitHub does not 422 its verdict.
       - name: Mint the critic installation token
         id: critic-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
           app-id: ${{ secrets.CRITIC_APP_ID }}
           private-key: ${{ secrets.CRITIC_APP_PRIVATE_KEY }}
@@ -1096,7 +1096,7 @@ jobs:
     steps:
       - name: Mint the critic installation token
         id: critic-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
           app-id: ${{ secrets.CRITIC_APP_ID }}
           private-key: ${{ secrets.CRITIC_APP_PRIVATE_KEY }}

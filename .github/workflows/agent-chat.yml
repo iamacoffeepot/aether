@@ -302,7 +302,7 @@ jobs:
       # whole reason the parked-answer dispatch can wake agent-work.
       - name: Mint the App installation token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
           app-id: ${{ secrets.AGENT_APP_ID }}
           private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}
@@ -381,7 +381,7 @@ jobs:
       # RunsOn in-VPC instance-profile creds, which do not exist off RunsOn.
       - name: Configure AWS credentials (OIDC)
         if: steps.route.outputs.parked == 'false'
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ vars.AGENT_AWS_ROLE_ARN }}
           aws-region: ${{ vars.AGENT_AWS_REGION }}
@@ -394,7 +394,7 @@ jobs:
       # gate and cannot weaken the crown-jewel gate (#3359).
       - name: Check out the composite action
         if: steps.route.outputs.parked == 'false'
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 1
           sparse-checkout: |
