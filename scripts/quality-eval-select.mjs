@@ -27,18 +27,18 @@ import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 
 const API = 'https://api.github.com'
-const DAY_MS = 86_400_000
+const DAY_MILLIS = 86_400_000
 
-// Merged-within-window filter, pure so the test can pin `nowMs`. A PR counts
-// when it has a `merged_at` at or after (nowMs - windowDays*day) and at or
-// before nowMs — an un-merged (closed-only) PR carries a null `merged_at` and
+// Merged-within-window filter, pure so the test can pin `nowMillis`. A PR counts
+// when it has a `merged_at` at or after (nowMillis - windowDays*day) and at or
+// before nowMillis — an un-merged (closed-only) PR carries a null `merged_at` and
 // is excluded.
-export function withinTrailingWindow(prs, nowMs, windowDays) {
-  const start = nowMs - windowDays * DAY_MS
+export function withinTrailingWindow(prs, nowMillis, windowDays) {
+  const start = nowMillis - windowDays * DAY_MILLIS
   return prs.filter((pr) => {
     if (!pr.merged_at) return false
     const merged = Date.parse(pr.merged_at)
-    return Number.isFinite(merged) && merged >= start && merged <= nowMs
+    return Number.isFinite(merged) && merged >= start && merged <= nowMillis
   })
 }
 
@@ -106,13 +106,22 @@ function nextLink(link) {
   return null
 }
 
+// A set-but-garbage env var must throw, not flow NaN into the window arithmetic.
+function intEnv(name, fallback) {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return fallback
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n < 1) throw new Error(name + ' must be a positive integer, got: ' + raw)
+  return n
+}
+
 async function main() {
   const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || requireEnv('GITHUB_TOKEN')
   const repo = process.env.GITHUB_REPOSITORY || 'iamacoffeepot/aether'
-  const sampleSize = Number(process.env.QUALITY_EVAL_SAMPLE_SIZE || '5')
-  const windowDays = Number(process.env.QUALITY_EVAL_WINDOW_DAYS || '7')
-  const nowMs = Date.now()
-  const windowStart = nowMs - windowDays * DAY_MS
+  const sampleSize = intEnv('QUALITY_EVAL_SAMPLE_SIZE', 5)
+  const windowDays = intEnv('QUALITY_EVAL_WINDOW_DAYS', 7)
+  const nowMillis = Date.now()
+  const windowStart = nowMillis - windowDays * DAY_MILLIS
 
   // Walk closed PRs newest-updated-first, stopping once a whole page predates
   // the window. Cap the walk so a quiet repo can't spin the API indefinitely.
@@ -121,7 +130,7 @@ async function main() {
   for (let page = 0; page < 8 && path; page++) {
     const { data, link } = await api(token, path)
     if (!Array.isArray(data) || data.length === 0) break
-    merged.push(...withinTrailingWindow(data, nowMs, windowDays))
+    merged.push(...withinTrailingWindow(data, nowMillis, windowDays))
     const oldestUpdated = data.map((pr) => Date.parse(pr.updated_at)).filter(Number.isFinite).sort((a, b) => a - b)[0]
     if (oldestUpdated !== undefined && oldestUpdated < windowStart) break
     path = nextLink(link)

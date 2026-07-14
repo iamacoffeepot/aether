@@ -83,7 +83,12 @@ while IFS= read -r line; do
   # in the sealed scratch. A hit means the clone leaked the truth — fail the
   # sample loudly rather than emit a possibly-peeked verdict (the exact risk the
   # 2026-07-14 bounce guards against).
-  if git -C "$scratch" rev-list --all 2>/dev/null | grep -qx "$squash_sha"; then
+  if ! revs=$(git -C "$scratch" rev-list --all); then
+    echo "[#${issue}] SKIP: contamination check itself failed (rev-list error) — refusing to treat as clean" >&2
+    rm -rf "$scratch"
+    continue
+  fi
+  if grep -qx "$squash_sha" <<<"$revs"; then
     echo "[#${issue}] CONTAMINATED: squash ${squash_sha:0:12} reachable in the scratch clone — skipping" >&2
     contaminated=$((contaminated + 1))
     rm -rf "$scratch"
@@ -94,11 +99,28 @@ while IFS= read -r line; do
   # headless run — the SessionStart rebind would move the session out of scratch).
   if [ -f "$scratch/.claude/settings.json" ]; then
     tmp=$(mktemp)
-    jq 'del(.hooks)' "$scratch/.claude/settings.json" >"$tmp" && mv "$tmp" "$scratch/.claude/settings.json"
+    if ! jq 'del(.hooks)' "$scratch/.claude/settings.json" >"$tmp"; then
+      echo "[#${issue}] SKIP: could not strip hooks from the scratch settings.json" >&2
+      rm -f "$tmp"; rm -rf "$scratch"
+      continue
+    fi
+    mv "$tmp" "$scratch/.claude/settings.json"
   fi
 
   # Pre-trust the scratch project so settings.json applies without a blocking
   # trust prompt — needed because the belt below does NOT skip permissions.
+  # untrust_scratch scrubs that entry again on every post-trust exit path, so
+  # the shared home file does not accrete one dead entry per sample.
+  untrust_scratch() {
+    [ -f "$HOME/.claude.json" ] || return 0
+    local t; t=$(mktemp)
+    if jq --arg d "$scratch" 'del(.projects[$d])' "$HOME/.claude.json" >"$t"; then
+      mv "$t" "$HOME/.claude.json"
+    else
+      rm -f "$t"
+      echo "[#${issue}] warning: could not scrub trust entry for ${scratch}" >&2
+    fi
+  }
   if [ -f "$HOME/.claude.json" ]; then
     tmp=$(mktemp)
     jq --arg d "$scratch" '.projects[$d] = {"hasTrustDialogAccepted":true}' "$HOME/.claude.json" >"$tmp" && mv "$tmp" "$HOME/.claude.json"
@@ -127,7 +149,12 @@ while IFS= read -r line; do
   # ground-truth diff (from the full-history workspace checkout).
   git -C "$scratch" add -A 2>/dev/null || true
   candidate_diff=$(git -C "$scratch" diff --cached 2>/dev/null || true)
-  landed_diff=$(git -C "$workspace" show "$squash_sha" 2>/dev/null || true)
+  if ! landed_diff=$(git -C "$workspace" show "$squash_sha"); then
+    echo "[#${issue}] SKIP: could not resolve landed diff for ${squash_sha}" >&2
+    untrust_scratch
+    rm -rf "$scratch"
+    continue
+  fi
 
   jq -nc \
     --argjson issue "$issue" \
@@ -139,6 +166,7 @@ while IFS= read -r line; do
     '{issue: $issue, candidate_diff: $candidate_diff, landed_diff: $landed_diff, model: $model, model_label: $model_label, size_label: $size_label}'
 
   processed=$((processed + 1))
+  untrust_scratch
   rm -rf "$scratch"
 done <"$records_file"
 
