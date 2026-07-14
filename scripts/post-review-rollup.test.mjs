@@ -100,6 +100,26 @@ test('buildReviewBody renders no soft-hold section for a clean rollup', () => {
   assert.match(body, /No confirmed findings — the change is clean under all five pillars\./)
 })
 
+// Tripwire (#3408): reviewer free-text (suggested_form / recommendation) is arbitrary
+// markdown-significant text — a bash-comment suggestion starting with `#` must never
+// be promoted to a heading (or any other block-level construct) when folded into the
+// rollup body.
+test('buildReviewBody fences a multi-line, #-leading suggested_form so it never renders as a heading', () => {
+  const finding = {
+    pillar: 'correctness',
+    file: 'a.rs',
+    line: 3,
+    recommendation: 'wrap in inline code',
+    suggested_form: '# wait/exit semantics\nre-reads sha every tick',
+  }
+  const body = buildReviewBody([{ f: finding, fp: 'a.rs|3|correctness' }], [], 0, 'REQUEST_CHANGES')
+  for (const line of body.split('\n')) {
+    if (line === '## Five-pillar review') continue
+    assert.doesNotMatch(line, /^#{1,6}\s/, `line rendered as a heading: ${line}`)
+  }
+  assert.match(body, /wait\/exit semantics re-reads sha every tick/)
+})
+
 // Tripwire: fingerprint's path half must canonicalize to repo-relative
 // regardless of whether it's fed an absolute CI-runner path or an
 // already-relative one — otherwise the same file fingerprints two ways and
