@@ -36,7 +36,7 @@ Merge gating moves to GitHub's native required-review mechanism, with a dedicate
 identity.
 
 - **Reviewer App.** `iamacritic` — permission-scoped to `pull_requests: write` (nothing else), installed on
-  this repository only. Its private key lives in repo secrets (`BARISTA_APP_ID` / `BARISTA_APP_PRIVATE_KEY`)
+  this repository only. Its private key lives in repo secrets (`CRITIC_APP_ID` / `CRITIC_APP_PRIVATE_KEY`)
   and is minted into a token only by workflows running `main`'s code (the same `create-github-app-token`
   pattern the writer App uses), so approval authority stays pinned to `main` whatever a PR branch does. Builder
   writes; critic reviews. The two-App split is the same separation of duties a human org has between author

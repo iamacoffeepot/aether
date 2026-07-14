@@ -912,12 +912,9 @@ jobs:
       - name: Mint the critic installation token
         id: critic-token
         uses: actions/create-github-app-token@v1
-        # The BARISTA_APP_* secret names predate the App rename to iamacritic; App
-        # tokens key on the App ID (rename-stable), so they keep working until the
-        # owner re-mints the secrets under CRITIC_APP_* names.
         with:
-          app-id: ${{ secrets.BARISTA_APP_ID }}
-          private-key: ${{ secrets.BARISTA_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CRITIC_APP_ID }}
+          private-key: ${{ secrets.CRITIC_APP_PRIVATE_KEY }}
       - name: Fetch the PR's changed files + diff hunks
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -972,12 +969,9 @@ jobs:
       - name: Mint the critic installation token
         id: critic-token
         uses: actions/create-github-app-token@v1
-        # The BARISTA_APP_* secret names predate the App rename to iamacritic; App
-        # tokens key on the App ID (rename-stable), so they keep working until the
-        # owner re-mints the secrets under CRITIC_APP_* names.
         with:
-          app-id: ${{ secrets.BARISTA_APP_ID }}
-          private-key: ${{ secrets.BARISTA_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.CRITIC_APP_ID }}
+          private-key: ${{ secrets.CRITIC_APP_PRIVATE_KEY }}
       - name: Submit the out-of-scope APPROVE as critic
         env:
           GH_TOKEN: ${{ steps.critic-token.outputs.token }}
