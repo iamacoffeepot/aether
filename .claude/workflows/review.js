@@ -49,7 +49,7 @@ export const meta = {
 //                                       is the deep pass's miss, rendered as a non-blocking advisory at
 //                                       most). Orthogonal to reviewMode (provenance) — the confirm pass
 //                                       freezes the finding set across re-review rounds so they converge.
-//   priorFindings,[obj]                — confirm pass only: the findings barista's standing verdict already
+//   priorFindings,[obj]                — confirm pass only: the findings critic's standing verdict already
 //                                       reported (each { file, line, pillar, category, symbol, severity,
 //                                       suggested_form, gate }), resolved caller-side from the PR's
 //                                       aether-review-fp-marked surface. The confirm session judges each

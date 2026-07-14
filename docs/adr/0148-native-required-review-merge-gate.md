@@ -23,9 +23,9 @@ status contexts instead of the review timeline.
 
 Replacing the mirror with native reviews runs into one rigid constraint: **identity**. GitHub hard-rejects a
 review verdict (`APPROVE` / `REQUEST_CHANGES`) whose author is the PR author — and every fleet PR is opened by
-the writer App (`iamakettle[bot]`), because PR creation must ride an App token for the event-driven reconciler
+the writer App (`iamabuilder[bot]`), because PR creation must ride an App token for the event-driven reconciler
 to hear the `pull_request` events (`GITHUB_TOKEN`-initiated events do not trigger workflows). The verdict
-identity therefore cannot be kettle. It also cannot be `GITHUB_TOKEN`: the repository toggle that would allow
+identity therefore cannot be builder. It also cannot be `GITHUB_TOKEN`: the repository toggle that would allow
 Actions to approve PRs is the same toggle that allows it repo-wide, and `pull_request`-triggered workflows run
 the *branch's* copy of the workflow files — a PR gone sideways could add a step that approves itself. The
 approval channel must be reachable only by code on `main`.
@@ -35,11 +35,11 @@ approval channel must be reachable only by code on `main`.
 Merge gating moves to GitHub's native required-review mechanism, with a dedicated reviewer App as the verdict
 identity.
 
-- **Reviewer App.** `iamabarista` — permission-scoped to `pull_requests: write` (nothing else), installed on
+- **Reviewer App.** `iamacritic` — permission-scoped to `pull_requests: write` (nothing else), installed on
   this repository only. Its private key lives in repo secrets (`BARISTA_APP_ID` / `BARISTA_APP_PRIVATE_KEY`)
   and is minted into a token only by workflows running `main`'s code (the same `create-github-app-token`
-  pattern the writer App uses), so approval authority stays pinned to `main` whatever a PR branch does. Kettle
-  writes; barista reviews. The two-App split is the same separation of duties a human org has between author
+  pattern the writer App uses), so approval authority stays pinned to `main` whatever a PR branch does. Builder
+  writes; critic reviews. The two-App split is the same separation of duties a human org has between author
   and reviewer.
 - **Branch protection.** `main` gains `required_pull_request_reviews` with `required_approving_review_count: 1`
   and `dismiss_stale_reviews: true`. A new push dismisses a stale approval, so the refine loop naturally forces
@@ -47,17 +47,17 @@ identity.
   removed.
 - **Verdict submission.** The review session's output becomes a single native review call: inline comments plus
   `event: REQUEST_CHANGES` when findings are actionable, `event: APPROVE` when clean. A standing
-  `REQUEST_CHANGES` blocks the merge by itself; the fix loop pushes, resolves the threads, and barista's
+  `REQUEST_CHANGES` blocks the merge by itself; the fix loop pushes, resolves the threads, and critic's
   re-review replaces its own prior verdict.
 - **Out-of-scope PRs.** The review session's scope predicate (Rust-touching) is unchanged. A PR outside it
-  receives a session-less barista `APPROVE` — the same semantics as today's auto-green `Review gate` status,
+  receives a session-less critic `APPROVE` — the same semantics as today's auto-green `Review gate` status,
   submitted through the same channel as every other verdict so the required-review count is satisfied for every
   PR class.
 - **Over-cap PRs.** A PR exceeding the changed-file cap (`AETHER_REVIEW_MAX_FILES`) receives no verdict at all
   and rests blocked at review-required — fail-closed, as today — until the owner dispatches a full review
   (`workflow_dispatch`) or reviews it natively himself.
 - **Owner waiver.** `review:skip` is retired. The owner overrides a verdict natively: approve the PR (he is
-  never the author of a fleet PR), and dismiss barista's standing `REQUEST_CHANGES` if one exists. Dismissal
+  never the author of a fleet PR), and dismiss critic's standing `REQUEST_CHANGES` if one exists. Dismissal
   requires a stated reason, so the waiver carries its own audit trail — the actor-verification shell code has
   no native-flow equivalent to keep.
 - **Reconciler.** The review facts collapse to one primary signal: `reviewDecision` (`REVIEW_REQUIRED` =
@@ -67,15 +67,15 @@ identity.
 
 ## Consequences
 
-- The review history becomes legible in the standard GitHub UI: kettle authored, barista requested changes,
-  barista (or the owner) approved. No labels or status contexts to cross-reference.
+- The review history becomes legible in the standard GitHub UI: builder authored, critic requested changes,
+  critic (or the owner) approved. No labels or status contexts to cross-reference.
 - The verdict gates itself. There is no window where the label and the status mirror disagree, and no mirror
   job to keep honest.
 - Every PR class now requires an approval, including the owner's own PRs — he cannot self-approve, so his PRs
-  wait on barista like everyone else's. This is dogfooding, not an accident; if it chafes, an admin-bypass
+  wait on critic like everyone else's. This is dogfooding, not an accident; if it chafes, an admin-bypass
   allowance in branch protection is the native escape hatch, decided separately.
 - Session-authored PRs (opened in a supervised Claude session on the owner's token) author as the owner, so
-  barista or kettle can approve them; fleet PRs author as kettle, so barista or the owner can. Barista is the
+  critic or builder can approve them; fleet PRs author as builder, so critic or the owner can. Critic is the
   one identity that can approve every class, which is what earns it its existence.
 - A dismissed-stale approval means each refine push costs a re-review. The review workflow already re-runs per
   push today, so the session cost is unchanged; only the approval's lifetime shortens to match reality.
@@ -91,7 +91,7 @@ identity.
   branch-copy workflows run on `pull_request` triggers, so the PR under review could reach the approval
   channel. The gate exists precisely for the agent-gone-sideways case; an approval path the PR can reach is
   decorative.
-- **Kettle as the reviewer** — rejected: GitHub 422s a verdict review on your own PR, and kettle must remain
+- **Builder as the reviewer** — rejected: GitHub 422s a verdict review on your own PR, and builder must remain
   the PR author for event-wake semantics. Commit authorship (the owner's public identity, ADR-0146 arc) is
   metadata; the self-approval rule keys on the PR's creating actor.
 - **An owner PAT for the reviewer** — rejected: fleet actions become indistinguishable from the owner's,
@@ -117,8 +117,8 @@ is itself the bounce signal, never a second deep pass.
 Bounce is expressed **out-of-band of the native verdict**, never as a third native review event —
 GitHub's review API exposes only `APPROVE` / `REQUEST_CHANGES` / `COMMENT`, and this ADR's merge gate
 keys on the native `reviewDecision`, which cannot carry it. The core decision is therefore
-**unchanged**: native required review still gates the merge on `APPROVE` / `REQUEST_CHANGES`, barista is
-still the verdict identity, and a bounced PR still carries barista's native `REQUEST_CHANGES` so it
+**unchanged**: native required review still gates the merge on `APPROVE` / `REQUEST_CHANGES`, critic is
+still the verdict identity, and a bounced PR still carries critic's native `REQUEST_CHANGES` so it
 stays merge-blocked. Bounce lives *beside* the verdict, not in place of it. The mechanism:
 
 - **Signal.** On a bounce, `scripts/post-review-rollup.mjs` takes a bounce path beside its two-way

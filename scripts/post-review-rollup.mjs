@@ -4,22 +4,22 @@
 // the verdict review body, plus a marker-anchored summary comment.
 //
 // The posture is load-bearing: the verdict review is authored by the
-// reviewer App `iamabarista` (BARISTA_TOKEN) as a NATIVE `APPROVE` /
-// `REQUEST_CHANGES` review — barista authors no PR, so GitHub does not 422
-// its verdict the way it would kettle's self-authored one (ADR-0148). Every
+// reviewer App `iamacritic` (CRITIC_TOKEN) as a NATIVE `APPROVE` /
+// `REQUEST_CHANGES` review — critic authors no PR, so GitHub does not 422
+// its verdict the way it would builder's self-authored one (ADR-0148). Every
 // run submits exactly one verdict: the review runs on an explicit request,
 // a request means "vouch for this PR", so the run owes `REQUEST_CHANGES`
 // when the rollup is actionable and `APPROVE` when it is clean — no third
 // outcome.
 //
-// Branch protection's native required review is the merge gate: barista's
+// Branch protection's native required review is the merge gate: critic's
 // standing verdict blocks the merge until it is APPROVE, or the owner
 // approves / dismisses it natively. Everything except the single
-// verdict-submission call stays on GITHUB_TOKEN; only that POST rides barista.
+// verdict-submission call stays on GITHUB_TOKEN; only that POST rides critic.
 //
 // Inputs (env):
 //   GITHUB_TOKEN        least-privilege token (pull-requests + issues write)
-//   BARISTA_TOKEN       iamabarista installation token — authors the verdict
+//   CRITIC_TOKEN       iamacritic installation token — authors the verdict
 //   GITHUB_REPOSITORY   owner/repo
 //   PR_NUMBER           the PR to annotate
 //   HEAD_SHA            the reviewed PR head SHA
@@ -35,10 +35,10 @@ const MARKER = '<!-- aether-review -->'
 const FP_RE = /aether-review-fp:([^\s>]+)/g
 const API = 'https://api.github.com'
 
-// Barista submits the verdict natively; branch protection's required review is
+// Critic submits the verdict natively; branch protection's required review is
 // what gates the merge on it.
 const POSTURE_FOOTER =
-  '_Barista submits this as a native `APPROVE` / `REQUEST_CHANGES` review; branch protection\'s required review gates the merge on the standing verdict._'
+  '_Critic submits this as a native `APPROVE` / `REQUEST_CHANGES` review; branch protection\'s required review gates the merge on the standing verdict._'
 
 function requireEnv(name) {
   const v = process.env[name]
@@ -49,7 +49,7 @@ function requireEnv(name) {
 function environment() {
   return {
     token: requireEnv('GITHUB_TOKEN'),
-    baristaToken: requireEnv('BARISTA_TOKEN'),
+    criticToken: requireEnv('CRITIC_TOKEN'),
     repo: requireEnv('GITHUB_REPOSITORY'),
     pr: Number(requireEnv('PR_NUMBER')),
     headSha: requireEnv('HEAD_SHA'),
@@ -84,7 +84,7 @@ function safeJson(t) {
 // labels), so they survive for the reconciler to read on its next poke, and the reviewer's reason posts as
 // a PR comment. The poster deliberately touches only the PR: regressing the LINKED issue's phase and
 // closing the PR are reconciler.yml's edge, keyed on these labels. Each write is guarded — a label the
-// repo has not bootstrapped, or a transient failure, warns and carries on; the barista REQUEST_CHANGES
+// repo has not bootstrapped, or a transient failure, warns and carries on; the critic REQUEST_CHANGES
 // already submitted keeps the PR merge-blocked regardless, so the stamp is never a gate.
 async function stampBounce(env, bounce) {
   const labels = ['review:bounce', `review:bounce-to:${bounce.to}`]
@@ -94,8 +94,8 @@ async function stampBounce(env, bounce) {
   // The reconciler's regression/close edge keys purely off the review:bounce
   // label — when that write failed, do not claim it will act.
   const reconcilerClaim = labelRes.ok
-    ? `Rather than continue \`REQUEST_CHANGES\` rounds, the work returns to scoping. The reconciler regresses the linked issue to \`phase:bounced\` + \`bounce-to:${bounce.to}\` and closes this PR; a fresh \`/implement\` supersedes it. Barista's \`REQUEST_CHANGES\` holds the merge until then.`
-    : `The \`review:bounce\` label write FAILED (${labelRes.status}), so the reconciler will NOT act on this bounce automatically — apply \`review:bounce\` + \`review:bounce-to:${bounce.to}\` to this PR by hand (or re-run the review post) to trigger the regression. Barista's \`REQUEST_CHANGES\` holds the merge until then.`
+    ? `Rather than continue \`REQUEST_CHANGES\` rounds, the work returns to scoping. The reconciler regresses the linked issue to \`phase:bounced\` + \`bounce-to:${bounce.to}\` and closes this PR; a fresh \`/implement\` supersedes it. Critic's \`REQUEST_CHANGES\` holds the merge until then.`
+    : `The \`review:bounce\` label write FAILED (${labelRes.status}), so the reconciler will NOT act on this bounce automatically — apply \`review:bounce\` + \`review:bounce-to:${bounce.to}\` to this PR by hand (or re-run the review post) to trigger the regression. Critic's \`REQUEST_CHANGES\` holds the merge until then.`
   const body = [
     `**Review bounce — \`bounce-to:${bounce.to}\`.**`,
     '',
@@ -199,7 +199,7 @@ export function normalizeFingerprint(fp) {
   return [repoRelative(path), ...rest].join('|')
 }
 
-// Prior barista correctness-pillar fingerprint paths, parsed from the full
+// Prior critic correctness-pillar fingerprint paths, parsed from the full
 // review/comment history the caller already fetched for the `posted` dedup
 // pass. Reuses normalizeFingerprint outright — a legacy absolute-path marker
 // (predating the repo-relative convention) yields the same repo-relative key
@@ -240,7 +240,7 @@ function renderFoldedFinding(f, fp) {
 
 // The one scope-leakage filter shared by the `isActionable` gate and the
 // rendered soft-hold banner count, so they can't drift apart: a `disclosed`
-// path — one a prior barista correctness finding already named on this same
+// path — one a prior critic correctness finding already named on this same
 // PR — routes a matching scope-leakage soft-hold to advisory. review.js's
 // `specSoftHolds` mirror base-names `file` (`base(f.file)`), so the match
 // tolerates a `disclosed` entry that is only a path suffix of it.
@@ -261,7 +261,7 @@ export function visibleSoftHolds(rollup, disclosed = new Set()) {
 // `confirmed`, so an unaddressed-finding round is already actionable through
 // the confirmed arm; the restart arm covers the case where the restart is the
 // only signal (every prior finding addressed but the delta warrants a redo).
-// `disclosed` — prior barista correctness-fingerprint paths on this same PR —
+// `disclosed` — prior critic correctness-fingerprint paths on this same PR —
 // routes a matching scope-leakage entry to advisory in the spec arm below.
 export function isActionable(rollup, disclosed = new Set()) {
   const confirmed = Array.isArray(rollup.confirmed) ? rollup.confirmed : []
@@ -272,7 +272,7 @@ export function isActionable(rollup, disclosed = new Set()) {
   )
   const restart = !!(rollup.restart && rollup.restart.signaled)
   // A bounce keeps the PR merge-blocked while the reconciler regresses the linked issue (issue #3391):
-  // barista still owes REQUEST_CHANGES. verdictEvent stays two-outcome — a bounce resolves to
+  // critic still owes REQUEST_CHANGES. verdictEvent stays two-outcome — a bounce resolves to
   // REQUEST_CHANGES here, never a third value.
   return confirmed.length > 0 || softHolds.length > 0 || gatingSpecFindings.some((f) => f.severity === 'high') || restart || !!bounceSignal(rollup)
 }
@@ -291,7 +291,7 @@ export function bounceSignal(rollup) {
   return { to: b.to === 'plan' ? 'plan' : 'design', reason: b.reason || '' }
 }
 
-// Select barista's verdict event. Every request yields a verdict — the
+// Select critic's verdict event. Every request yields a verdict — the
 // request means "vouch for this PR", so a clean rollup APPROVEs and an
 // actionable one REQUEST_CHANGES; there is no third outcome.
 export function verdictEvent(rollup, disclosed = new Set()) {
@@ -343,7 +343,7 @@ async function main() {
 
   // Gather fingerprints already posted, from every surface that could carry
   // one, so a dispatched re-run never double-annotates. The same history
-  // yields the disclosed-paths set: a prior barista correctness finding on
+  // yields the disclosed-paths set: a prior critic correctness finding on
   // this same PR routes a matching scope-leakage finding to advisory.
   const posted = new Set()
   const [reviewComments, reviews, issueComments] = await Promise.all([
@@ -420,7 +420,7 @@ async function main() {
     }
   }
 
-  // The native barista verdict: every run submits one — REQUEST_CHANGES when
+  // The native critic verdict: every run submits one — REQUEST_CHANGES when
   // the rollup is actionable, APPROVE when it is clean — with fresh inline
   // annotations attached when there are any and the folded findings in the
   // body. Unconditional by design: the review runs on an explicit request,
@@ -432,7 +432,7 @@ async function main() {
   const body = buildReviewBody(folded, softHoldFolded, softHolds.length, owedEvent, followUpsNormalized)
   const review = { event: owedEvent, body, commit_id: env.headSha }
   if (inline.length) review.comments = inline
-  let res = await api(env.baristaToken, 'POST', `repos/${env.repo}/pulls/${env.pr}/reviews`, review)
+  let res = await api(env.criticToken, 'POST', `repos/${env.repo}/pulls/${env.pr}/reviews`, review)
   if (!res.ok && review.comments) {
     // A rejected inline position (e.g. an outdated hunk) 422s the whole
     // review. Fold the inline findings into the body and retry — with the
@@ -440,7 +440,7 @@ async function main() {
     // blocking REQUEST_CHANGES to an advisory comment.
     console.warn(`inline review rejected (${res.status}) — retrying folded into the body`)
     const extra = inline.map((c) => `- ${c.body.split('\n')[0]} \`${c.path}:${c.line}\``)
-    res = await api(env.baristaToken, 'POST', `repos/${env.repo}/pulls/${env.pr}/reviews`, {
+    res = await api(env.criticToken, 'POST', `repos/${env.repo}/pulls/${env.pr}/reviews`, {
       event: owedEvent,
       commit_id: env.headSha,
       body: `${body}\n\n${extra.join('\n')}`,
@@ -450,7 +450,7 @@ async function main() {
   else console.log(`posted ${owedEvent} verdict: ${inline.length} inline, ${folded.length} folded`)
 
   // Reviewer bounce signal (issue #3391) — the real bounce edge that replaces #3390's interim
-  // ask-and-park. The barista REQUEST_CHANGES above already holds the merge; here the poster stamps the
+  // ask-and-park. The critic REQUEST_CHANGES above already holds the merge; here the poster stamps the
   // out-of-band bounce signal ON THE PR so the reconciler can regress the LINKED issue's phase (the poster
   // deliberately does not resolve or touch the issue itself — that is reconciler.yml's edge). A deep pass's
   // fundamental-problem conclusion or a confirm pass's restart escalation both arrive as rollup.bounce.

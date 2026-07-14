@@ -122,7 +122,7 @@ test('fingerprint canonicalizes both path forms to one key, and normalizeFingerp
   }
 })
 
-// Tripwire for #3255: a scope-leakage finding whose file a prior barista
+// Tripwire for #3255: a scope-leakage finding whose file a prior critic
 // correctness fingerprint already named on this same PR is evidence-based
 // disclosure, not a prose self-waiver — it must drop from both gate arms
 // (isActionable's high-severity spec check, verdictEvent) AND from the
@@ -263,7 +263,7 @@ test('bounceSignal returns {to, reason} when a bounce is present, null when abse
   assert.equal(bounceSignal({ bounce: { reason: 'no phase' } }), null) // a bounce with no `to` is not a signal
 })
 
-// A bounce keeps the PR merge-blocked (issue #3391): barista still owes REQUEST_CHANGES, even with no
+// A bounce keeps the PR merge-blocked (issue #3391): critic still owes REQUEST_CHANGES, even with no
 // confirmed finding, soft-hold, or spec finding to gate on — the bounce arm in isActionable carries it.
 test('a bounce with no other finding is still actionable and REQUEST_CHANGES', () => {
   assert.equal(isActionable(DEEP_BOUNCE), true)
