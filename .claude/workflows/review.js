@@ -360,6 +360,21 @@ const SPEC_SCHEMA = {
         },
       },
     },
+    // The deep pass's BOUNCE conclusion (issue #3391) — a whole-PR judgment the spec agent is placed to
+    // make (it reads the issue plus the entire diff). Optional; omit it entirely for the common case.
+    // warranted=true ONLY for a FUNDAMENTAL problem a fix round cannot address, so the honest terminal is
+    // to send the work back to re-scoping rather than continue REQUEST_CHANGES rounds. An ordinary
+    // in-PR-fixable finding is a finding, not a bounce.
+    bounce: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['warranted', 'to', 'reason'],
+      properties: {
+        warranted: { type: 'boolean', description: 'true ONLY for a root design flaw or a major security defect a fix round cannot address' },
+        to: { type: 'string', enum: ['design', 'plan'], description: 'the phase to resume at: design for a fundamental design/security flaw (the default), plan for a scope-level miss' },
+        reason: { type: 'string', description: 'one paragraph — the fundamental problem and why a fix round cannot address it' },
+      },
+    },
   },
 }
 
@@ -524,7 +539,9 @@ ${SPEC_LENS.taxonomy}
 
 ${SPEC_LENS.carveOut}
 
-Report outOfScope = the files the issue never asked to touch (drive-by / unrelated — they will be pruned from the deeper passes). findings = each over-delivery / under-delivery / scope-leakage / silent-deviation with the file, the item, the asked-vs-changed delta, severity, and confidence. If the change faithfully matches the issue, return empty arrays. Be conservative: a refactor the issue implies is not leakage; flag only a genuine mismatch.`
+Report outOfScope = the files the issue never asked to touch (drive-by / unrelated — they will be pruned from the deeper passes). findings = each over-delivery / under-delivery / scope-leakage / silent-deviation with the file, the item, the asked-vs-changed delta, severity, and confidence. If the change faithfully matches the issue, return empty arrays. Be conservative: a refactor the issue implies is not leakage; flag only a genuine mismatch.
+
+Finally, judge whether this change warrants a BOUNCE (issue #3391) — a third terminal outcome BESIDE the ordinary findings. Set bounce.warranted=true ONLY for a FUNDAMENTAL problem a fix round cannot address: the change solves the wrong problem or is architecturally wrong at the root (a design flaw — resume at 'design'), a major security defect the design itself invites (resume at 'design'), or the issue was scoped incorrectly so the work must return to planning (a scope-level miss — resume at 'plan'). A bounce sends the work back to re-scoping instead of continuing REQUEST_CHANGES rounds, so the bar is high: anything fixable in this PR is a finding, not a bounce. Default to NOT warranted; when you do bounce, give a one-paragraph reason naming the fundamental problem and why a fix round cannot address it. Omit the bounce field entirely when it is not warranted.`
 }
 
 function findPrompt(f, lens) {
@@ -773,9 +790,14 @@ async function runConfirmPass() {
   const restart = (verdict && verdict.restart && verdict.restart.signaled)
     ? { signaled: true, rationale: verdict.restart.rationale || '' }
     : { signaled: false, rationale: (verdict && verdict.restart && verdict.restart.rationale) || '' }
+  // The confirm-pass bounce (issue #3391): a raised restart signal — the delta needs restart-level rework —
+  // IS the confirm side's bounce. It resumes at 'design' (a rework this large is a design-level regression),
+  // superseding #3390's interim ask-and-park: the poster now takes the real bounce path off rollup.bounce
+  // instead of parking the owner. restart stays on the rollup for continuity; bounce is what the poster reads.
+  const bounce = restart.signaled ? { to: 'design', reason: restart.rationale } : null
   return {
     reviewPass: 'confirm',
-    restart,
+    restart, bounce,
     totals: { priorFindings: PRIOR_FINDINGS.length, stillOpen: confirmed.length, advisories: followUps.length },
     spec: null,
     softHolds, confirmed, followUps, grouped: {}, lintCandidates: [], spared: [], uncertain: [],
@@ -1010,11 +1032,19 @@ const specCount = spec ? (spec.findings || []).length : 0
 
 log(`review [${PROFILE}/${FINDER_SHAPE}]: ${totals.files} files, ${totals.finders} finders -> ${totals.confirmed} confirmed (high-conf ${bySource['high-confidence'] || 0}, refuter ${bySource['refuter'] || 0}, challenger ${bySource['challenger-missed'] || 0}), ${softHolds.length} SOFT-HOLD, ${followUps.length} follow-up (pre-existing), ${spared.length} spared, ${uncertain.length} uncertain, ${lintCandidates.length} lint candidates, ${specCount} spec findings`)
 
+// The deep-pass bounce signal (issue #3391): the spec agent's whole-PR bounce conclusion, normalized to
+// { to, reason } for the poster's bounceSignal path. null (the common case) leaves the two-outcome verdict
+// untouched. Rides the spec pass, so it fires only in integrated mode with the spec lens selected; the
+// confirm pass carries its own bounce (from the restart signal) in runConfirmPass.
+const bounce = (spec && spec.bounce && spec.bounce.warranted)
+  ? { to: spec.bounce.to === 'plan' ? 'plan' : 'design', reason: spec.bounce.reason || '' }
+  : null
+
 return {
   rollup: {
     totals,
     spec: spec ? { findings: spec.findings || [], outOfScope: spec.outOfScope || [] } : null,
-    softHolds, confirmed: deduped, followUps, grouped, lintCandidates, spared, uncertain,
+    softHolds, confirmed: deduped, followUps, grouped, lintCandidates, spared, uncertain, bounce,
   },
   files: clean,
 }
