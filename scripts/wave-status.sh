@@ -187,20 +187,24 @@ if [[ $WAIT_MODE -eq 1 ]]; then
     done
 fi
 
-# --wait-verdict mode (issue #3405): loop until critic holds a standing verdict
-# on the PR's CURRENT head SHA. The head is re-read every tick so the wait
-# follows a fix push, and a verdict on a stale SHA keeps polling — the snapshot
-# review column's known staleness gap must not leak into the loop that gates
-# the implement verdict loop. Exit 0 on APPROVED, 1 on CHANGES_REQUESTED.
+# --wait-verdict mode (issue #3405) — see the usage comment above for the
+# wait/exit semantics; re-reads sha every tick so a stale-SHA verdict (the
+# snapshot review column's known staleness gap) never short-circuits the wait.
 if [[ $VERDICT_MODE -eq 1 ]]; then
     if [[ -z "$VERDICT_PR" ]]; then
         echo "--wait-verdict requires a PR number" >&2
         exit 2
     fi
     CRITIC_LOGIN="iamacritic[bot]"
+    # One unguarded fetch first (mirroring --wait): a bad PR number or auth
+    # failure surfaces gh's real error and exits now; the guarded in-loop
+    # re-reads absorb only transient hiccups.
+    sha=$(gh api "repos/$REPO/pulls/$VERDICT_PR" --jq '.head.sha')
     echo "[wave-status] waiting for a $CRITIC_LOGIN verdict on PR #$VERDICT_PR's current head…"
     while :; do
-        sha=$(gh api "repos/$REPO/pulls/$VERDICT_PR" --jq '.head.sha' 2>/dev/null) || { sleep 20; continue; }
+        # Guarded re-read every tick — the wait follows a fix push; a
+        # transient hiccup keeps the previous sha for this tick only.
+        sha=$(gh api "repos/$REPO/pulls/$VERDICT_PR" --jq '.head.sha' 2>/dev/null) || true
         # Stream matching reviews per page (chronological), keep the newest
         # verdict on the current head; tail consumes fully, no SIGPIPE.
         verdict=$(gh api "repos/$REPO/pulls/$VERDICT_PR/reviews" --paginate \
