@@ -215,10 +215,24 @@ export function disclosedPaths(comments) {
   return disclosed
 }
 
+// Flatten reviewer free-text to a single line and wrap it in an inline code
+// span so a leading `#`/`>`/`-` (or any other block-level markdown trigger)
+// renders literally instead of being promoted to a heading/blockquote/list.
+// The delimiter is one backtick longer than the longest backtick run in the
+// content (the CommonMark rule for embedding arbitrary text in inline code).
+function inlineCode(s) {
+  if (!s) return ''
+  const flat = s.replace(/\r?\n+/g, ' ')
+  const longestRun = Math.max(0, ...[...flat.matchAll(/`+/g)].map((m) => m[0].length))
+  const delim = '`'.repeat(longestRun + 1)
+  const pad = flat.startsWith('`') || flat.endsWith('`') ? ' ' : ''
+  return `${delim}${pad}${flat}${pad}${delim}`
+}
+
 function findingBody(f) {
-  const rec = f.recommendation ? `${f.recommendation}: ` : ''
+  const rec = f.recommendation ? `${inlineCode(f.recommendation)}: ` : ''
   const sev = f.severity ? ` _(${f.severity})_` : ''
-  const suggestion = f.suggested_form || f.description || ''
+  const suggestion = inlineCode(f.suggested_form || f.description || '')
   const cat = f.category ? `/${f.category}` : ''
   return `**${f.pillar}${cat}**${sev} — ${f.symbol || ''} ${rec}${suggestion}`.trim()
 }
