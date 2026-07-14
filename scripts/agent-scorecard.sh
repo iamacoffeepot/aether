@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Read-only scorecard over the fleet spend ledger (rung 1, #3166). Lists one
-# UTC day's per-run usage records under s3://<bucket>/agent/usage/<day>/, reads
-# each object, and prints the legibility rung 1 delivers on its own: spend per
-# issue/ref, per task, and per model; cost-per-landed-PR; warm-vs-cold per task;
-# and the TTL-drift signals (the ephemeral_5m occurrence rate and the warm-
-# resume cache-hit ratio). Pure jq + aws s3 + shell, no build, no writes.
+# Read-only scorecard over the fleet spend ledger (rung 1, #3166). Lists the
+# trailing N UTC days' per-run usage records under s3://<bucket>/agent/usage/,
+# reads each object, and prints the legibility rung 1 (and rung 2's weekly
+# report, #3382) delivers on its own: spend per issue/ref, per task, and per
+# model; cost-per-landed-PR; warm-vs-cold per task; the TTL-drift signals (the
+# ephemeral_5m occurrence rate and the warm-resume cache-hit ratio); and
+# verdict/refine quality signals (degrading to n/a until the write side
+# populates them). Pure jq + aws s3 + shell, no build, no writes.
 #
-#   scripts/agent-scorecard.sh [YYYY-MM-DD]     # day defaults to today (UTC)
+#   scripts/agent-scorecard.sh [--days N] [YYYY-MM-DD]
+#     --days N     aggregate the trailing N UTC days ending on the end-day
+#                  (default 1 — today's single-day behavior is unchanged)
+#     YYYY-MM-DD   end day of the window; defaults to today (UTC)
 #
 # Env: AGENT_EVIDENCE_BUCKET (default aether-evidence). Reads on ambient creds
 # (the RunsOn instance profile, or a developer's own AWS profile). `gh` is used
@@ -14,32 +19,87 @@
 # `gh`, that line falls back to cost-per-ref without the merged join.
 set -uo pipefail
 
-DAY="${1:-$(date -u +%F)}"
+DAYS=1
+END_DAY="$(date -u +%F)"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --days)
+      [ $# -ge 2 ] || { echo "--days requires a value" >&2; exit 1; }
+      DAYS="$2"
+      [[ "$DAYS" =~ ^[0-9]+$ ]] && [ "$((10#$DAYS))" -ge 1 ] && [ "$((10#$DAYS))" -le 366 ] \
+        || { echo "invalid --days '${DAYS}' (want an integer 1..366)" >&2; exit 1; }
+      DAYS=$((10#$DAYS))
+      shift 2
+      ;;
+    *)
+      END_DAY="$1"
+      shift
+      ;;
+  esac
+done
 BUCKET="${AGENT_EVIDENCE_BUCKET:-aether-evidence}"
-PREFIX="agent/usage/${DAY}/"
+USAGE="s3://${BUCKET}/agent/usage"
 
 command -v aws >/dev/null || { echo "aws cli not found" >&2; exit 1; }
 command -v jq  >/dev/null || { echo "jq not found" >&2; exit 1; }
 
+# Validate END_DAY once up front so the window arithmetic below can't silently
+# push empty strings into days[] off a failed substitution.
+date -u -d "$END_DAY" +%F >/dev/null 2>&1 || { echo "invalid date: ${END_DAY}" >&2; exit 1; }
+
+# The N most recent UTC days ending on END_DAY, newest first.
+days=()
+for ((k = 0; k < DAYS; k++)); do
+  days+=("$(date -u -d "${END_DAY} - ${k} days" +%F)")
+done
+range_newest="${days[0]}"
+range_oldest="${days[$((${#days[@]} - 1))]}"
+
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-aws s3 cp "s3://${BUCKET}/${PREFIX}" "$tmp/" --recursive --exclude '*' --include '*.json' >/dev/null 2>&1 \
-  || { echo "no ledger objects under s3://${BUCKET}/${PREFIX} (empty day, or read denied)"; exit 0; }
-
-# One object per run — concatenate into a single JSONL stream for jq.
+# One object per run across the whole window — concatenate into a single
+# JSONL stream for jq. The existing jq -s aggregation below is window-agnostic
+# (it just aggregates whatever rows land in $ledger), so it is unchanged by
+# the day count; only the fetch loop and the header are range-aware.
 ledger="$tmp/ledger.jsonl"
 : > "$ledger"
 found=0
-for f in "$tmp"/*.json; do
-  [ -e "$f" ] || continue
-  cat "$f" >> "$ledger"
-  echo >> "$ledger"
-  found=$((found + 1))
+failed_days=0
+for d in "${days[@]}"; do
+  daydir="$tmp/${d}"
+  mkdir -p "$daydir"
+  if ! aws s3 cp "${USAGE}/${d}/" "$daydir/" --recursive --exclude '*' --include '*.json' >/dev/null 2>"$tmp/s3err"; then
+    # An empty day lists nothing and still exits 0; a non-zero exit with stderr
+    # is a real read failure (auth/network) the window total must not hide —
+    # counted into the printed header so the report itself says it is partial.
+    failed_days=$((failed_days + 1))
+    [ -s "$tmp/s3err" ] && echo "warning: read failed for ${d}, window may be incomplete" >&2
+    continue
+  fi
+  for f in "$daydir"/*.json; do
+    [ -e "$f" ] || continue
+    cat "$f" >> "$ledger"
+    echo >> "$ledger"
+    found=$((found + 1))
+  done
 done
-[ "$found" -gt 0 ] || { echo "no ledger objects under s3://${BUCKET}/${PREFIX}"; exit 0; }
+if [ "$found" -eq 0 ]; then
+  if [ "$DAYS" -eq 1 ]; then
+    echo "no ledger objects under ${USAGE}/${END_DAY}/ (empty day, or read denied)"
+  else
+    echo "no ledger objects under ${USAGE}/ for ${range_oldest}..${range_newest} (empty window, or read denied)"
+  fi
+  exit 0
+fi
 
-echo "Spend scorecard — ${DAY} (${found} runs, s3://${BUCKET}/${PREFIX})"
+incomplete=""
+[ "$failed_days" -gt 0 ] && incomplete="  (WARNING: ${failed_days}/${DAYS} days failed to read, totals incomplete)"
+if [ "$DAYS" -eq 1 ]; then
+  echo "Spend scorecard — ${END_DAY} (${found} runs, ${USAGE}/${END_DAY}/)${incomplete}"
+else
+  echo "Spend scorecard — ${range_oldest}..${range_newest} (${DAYS} days, ${found} runs, ${USAGE}/)${incomplete}"
+fi
 echo
 
 jq -s -r '
@@ -88,6 +148,19 @@ jq -s -r '
                | (add / length) ) as $ratio
              | "  warm-resume hit ratio: \(($ratio * 1000 | round / 10))%  (first-call cache_read share, avg over warm runs)"
         end )
+  , ""
+  , "Quality signals:"
+  , ( if (map(select(.verdict != null)) | length) == 0 and (map(select(.refine_iterations != null)) | length) == 0
+      then "  n/a — not yet in ledger record (verdict/refine sourcing is a write-side follow-up)"
+      else ( group_by(.task // "unknown")
+             | map({
+                 task: (.[0].task // "unknown"),
+                 verdicts: (map(select(.verdict != null) | .verdict) | group_by(.) | map({key: .[0], count: length})),
+                 mean_refine: ( (map(select(.refine_iterations != null) | .refine_iterations)) as $r
+                   | if ($r | length) == 0 then null else (($r | add) / ($r | length)) end )
+               })[]
+             | "  \(.task)  verdicts \(if (.verdicts | length) == 0 then "n/a" else (.verdicts | map("\(.key)=\(.count)") | join(", ")) end)  mean-refine \(.mean_refine // "n/a")" )
+      end )
 ' "$ledger"
 
 # cost-per-landed-PR: total spend attributed to refs whose PR merged. Needs a
