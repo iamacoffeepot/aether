@@ -33,7 +33,7 @@ test('a produced rollup keeps the existing evidence, token, and poster path', as
 
   assert.match(
     workflow,
-    /- uses: actions\/download-artifact@v4\n        if: needs\.trial\.outputs\.rollup_produced == 'true'\n        with:\n          name: dogfood-run/,
+    /- uses: actions\/download-artifact@\S+[^\n]*\n        if: needs\.trial\.outputs\.rollup_produced == 'true'\n        with:\n          name: dogfood-run/,
   )
   assert.match(workflow, /node scripts\/dogfood-token-table\.mjs dogfood-run\/transcript\.jsonl dogfood-run\/rollup\.json/)
   assert.match(workflow, /HAS_FRAME="\$HAS_FRAME" node scripts\/post-dogfood-rollup\.mjs/)

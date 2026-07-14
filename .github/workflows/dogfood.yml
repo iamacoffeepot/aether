@@ -330,10 +330,10 @@ jobs:
     outputs:
       rollup_produced: ${{ steps.rollup.outputs.produced }}
     steps:
-      - uses: runs-on/action@v2
+      - uses: runs-on/action@4e5f72399b6b17f2e79c511c1b38a315a64d22dc # v2
       # Automatic runs and open-PR dispatches check out the PR head. A manual
       # dispatch of a merged PR checks out its merge commit, which is main.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.resolve.outputs.checkout_sha }}
           fetch-depth: 0
@@ -343,7 +343,7 @@ jobs:
       # explicitly, mirroring review.yml's diff-base step.
       - name: Fetch origin/main for the pool + meter scripts
         run: git fetch origin main:refs/remotes/origin/main
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
       - name: Install Linux deps (ALSA headers for cpal, Mesa lavapipe for wgpu, Xvfb + xkbcommon-x11 for the desktop chassis, mold, ffmpeg for x11grab)
         # libxkbcommon-x11-{0,dev}: winit's keyboard layer dlopens
@@ -353,7 +353,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
           mesa-vulkan-drivers xvfb libxkbcommon-x11-0 libxkbcommon-x11-dev mold ffmpeg
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Configure sccache (S3 backend)
         run: |
           echo "SCCACHE_BUCKET=$RUNS_ON_S3_BUCKET_CACHE" >> "$GITHUB_ENV"
@@ -361,7 +361,7 @@ jobs:
           echo "SCCACHE_S3_KEY_PREFIX=cache/sccache" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
-      - uses: mozilla-actions/sccache-action@v0.0.9
+      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
 
       # Pinned via AGENT_CLAUDE_CODE_VERSION (#3285): a CLI upgrade changes the
       # system-prompt bytes, which cold-misses the fleet-wide prompt cache and
@@ -487,7 +487,7 @@ jobs:
         id: pool-creds
         if: env.CLAUDE_CODE_OAUTH_TOKEN != '' && vars.AGENT_POOL_ENABLE == 'true'
         continue-on-error: true
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ vars.AGENT_AWS_ROLE_ARN }}
           aws-region: ${{ vars.AGENT_AWS_REGION }}
@@ -952,7 +952,7 @@ jobs:
             echo "produced=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always() && steps.rollup.outputs.produced == 'true'
         with:
           name: dogfood-run
@@ -961,7 +961,7 @@ jobs:
 
       # The transcript, uploaded even on failure — a dead run's transcript is
       # exactly what diagnoses it.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: dogfood-session-transcript
@@ -1009,8 +1009,8 @@ jobs:
       VIEWER_BASE: https://iamacoffeepot.github.io/aether/evidence/
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: needs.trial.outputs.rollup_produced == 'true'
         with:
           name: dogfood-run

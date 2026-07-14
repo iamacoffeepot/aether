@@ -21,15 +21,15 @@ jobs:
       AETHER_MCP_REPLY_INLINE_MAX_BYTES: "262144"
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
       - name: Install desktop capture dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev mesa-vulkan-drivers xvfb libxkbcommon-x11-0 libxkbcommon-x11-dev
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Build component fixtures
         run: cargo xtask dist

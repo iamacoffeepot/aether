@@ -273,7 +273,7 @@ jobs:
       # origin/main only. The judge reads the repo's own ADRs, policy file, and
       # targeted code as they are on the trunk — never a PR branch, never
       # untrusted code.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         if: steps.resolve.outputs.proceed == 'true'
         with:
           ref: main
@@ -338,7 +338,7 @@ jobs:
         id: pool-creds
         if: steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != '' && vars.AGENT_POOL_ENABLE == 'true'
         continue-on-error: true
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ vars.AGENT_AWS_ROLE_ARN }}
           aws-region: ${{ vars.AGENT_AWS_REGION }}
@@ -694,7 +694,7 @@ jobs:
             echo "produced=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always() && steps.verdict.outputs.produced == 'true'
         with:
           name: judge-verdict
@@ -703,7 +703,7 @@ jobs:
 
       # The full session transcript (stream-json JSONL) — uploaded even on
       # failure, since a dead run's transcript is exactly what diagnoses it.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: judge-session-transcript
@@ -728,7 +728,7 @@ jobs:
       ISSUE: ${{ needs.judge.outputs.issue }}
       APP_ID: ${{ secrets.AGENT_APP_ID }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: judge-verdict
 
@@ -746,7 +746,7 @@ jobs:
       - name: Mint the App installation token
         id: app-token
         if: env.APP_ID != ''
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
           app-id: ${{ secrets.AGENT_APP_ID }}
           private-key: ${{ secrets.AGENT_APP_PRIVATE_KEY }}

@@ -53,7 +53,7 @@ jobs:
       # this ceiling separates that from a full head re-write. Tune here.
       BARE_MAX_WRITE: "500"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       # Pinned via AGENT_CLAUDE_CODE_VERSION (#3285), warn-and-latest fallback
       # exactly as agent-work.yml — the pin is the whole point: the canary must
