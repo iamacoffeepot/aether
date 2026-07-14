@@ -263,7 +263,7 @@ jobs:
           # whole five-pillar fan-out. Every bypass request (workflow_dispatch /
           # `@barista full review`) and every first review (no standing verdict) is a
           # DEEP pass against origin/main. The deep pass happens at most once per PR —
-          # "needs a full re-review" is the restart/bounce signal, not a second deep.
+          # "needs a full re-review" is the restart signal, not a second deep.
           # Stream the matching commit_ids (per-page `.[]` jq so --paginate
           # concatenates in chronological order) and take the last with tail -1 — the
           # newest verdict, robust across pages; tail consumes fully, no SIGPIPE.
@@ -276,6 +276,10 @@ jobs:
           else
             echo "review_pass=confirm" >> "$GITHUB_OUTPUT"
             echo "diff_base=$last_verdict_sha" >> "$GITHUB_OUTPUT"
+            # The last-reviewed SHA can be unreachable from any live ref (a
+            # force-advanced branch, an intervening merge) — fetch it by SHA so
+            # the confirm diff has the object regardless.
+            git fetch -q origin "$last_verdict_sha" || echo "warning: could not fetch confirm diff base $last_verdict_sha — the session's diff step will fail loudly rather than diff against a missing object"
             echo "PR #$pr — CONFIRM pass against last-reviewed SHA $last_verdict_sha."
           fi
 

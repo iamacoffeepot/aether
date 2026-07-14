@@ -106,7 +106,10 @@ async function closingIssue(token, repo, pr) {
        }
      }`,
     { owner, name, pr })
-  if (!ok) return null
+  if (!ok || data?.errors) {
+    console.warn('closingIssue query failed', data?.errors ?? 'http error')
+    return null
+  }
   return data?.data?.repository?.pullRequest?.closingIssuesReferences?.nodes?.[0]?.number ?? null
 }
 
@@ -124,7 +127,8 @@ async function parkForRestart(env, rationale) {
     console.warn('confirm restart: PR closes no issue — cannot park; standing REQUEST_CHANGES holds the merge.')
     return
   }
-  await api(env.token, 'POST', `repos/${env.repo}/issues/${issue}/labels`, { labels: ['agent:awaiting-answer'] })
+  const labelRes = await api(env.token, 'POST', `repos/${env.repo}/issues/${issue}/labels`, { labels: ['agent:awaiting-answer'] })
+  if (!labelRes.ok) console.error(`confirm restart: label POST failed (${labelRes.status}): ${labelRes.text}`)
   const why = rationale ? rationale : 'the delta since the deep review diverges enough that confirming individual findings is meaningless'
   const body = [
     `**Parked on #${issue} — need a decision.**`,
@@ -137,7 +141,11 @@ async function parkForRestart(env, rationale) {
     '',
     'Reply with an option number or free-form; your reply re-dispatches this job.',
   ].join('\n')
-  await api(env.token, 'POST', `repos/${env.repo}/issues/${issue}/comments`, { body })
+  const commentRes = await api(env.token, 'POST', `repos/${env.repo}/issues/${issue}/comments`, { body })
+  if (!commentRes.ok) {
+    console.error(`confirm restart: park comment POST failed (${commentRes.status}): ${commentRes.text}`)
+    return
+  }
   console.log(`confirm restart: parked owner on #${issue} (agent:awaiting-answer)`)
 }
 
