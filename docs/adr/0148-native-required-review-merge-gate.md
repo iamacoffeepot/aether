@@ -101,3 +101,43 @@ identity.
   App gives scoped and rotation-free.
 - **Keeping the mirror chain** — rejected: it is a bespoke re-implementation of review gating with more moving
   parts, no self-gating verdict, and an illegible history; the monster this ADR exists to retire.
+
+## Amendment (2026-07-14): review bounce as a third terminal outcome (issue #3391)
+
+The Decision above pins the *verdict* model to exactly two native events — `APPROVE` /
+`REQUEST_CHANGES` — and states there is "no third outcome". That remains true of the **verdict**, but
+the review *lifecycle* now grows a third terminal *outcome*: **bounce**. When the deep pass finds a
+fundamental problem (a design flaw or a major security concern), or the confirm pass (the
+one-deep-then-confirm lifecycle, issue #3390) judges the delta so large or divergent that only a
+complete re-review would do, the right terminal is not another round of PR-level `REQUEST_CHANGES`
+ping-pong — it is to send the work back to re-scoping. Standing owner directives: the deep pass runs at
+most once per PR lifecycle; confirm outcomes are exactly {approve, escalate}; "needs a full re-review"
+is itself the bounce signal, never a second deep pass.
+
+Bounce is expressed **out-of-band of the native verdict**, never as a third native review event —
+GitHub's review API exposes only `APPROVE` / `REQUEST_CHANGES` / `COMMENT`, and this ADR's merge gate
+keys on the native `reviewDecision`, which cannot carry it. The core decision is therefore
+**unchanged**: native required review still gates the merge on `APPROVE` / `REQUEST_CHANGES`, barista is
+still the verdict identity, and a bounced PR still carries barista's native `REQUEST_CHANGES` so it
+stays merge-blocked. Bounce lives *beside* the verdict, not in place of it. The mechanism:
+
+- **Signal.** On a bounce, `scripts/post-review-rollup.mjs` takes a bounce path beside its two-way
+  `verdictEvent` branch: it posts the reviewer's bounce reason and stamps a `review:bounce` label (plus
+  `review:bounce-to:<phase>` carrying the resume phase — typically `design` for a fundamental design
+  flaw, `plan` for a scope-level miss) on the PR. A label is the carrier because it survives on the PR
+  for the reconciler to read and is not a native verdict, so it does not perturb the merge gate.
+- **Reconciler edge.** `.github/workflows/reconciler.yml` gains a new first-match edge: a PR carrying
+  `review:bounce` regresses its **linked issue** (via `closingIssuesReferences`) to `phase:bounced` +
+  `bounce-to:<phase>` — the same atomic-`PUT` label reconcile `/bounce` performs — and records the
+  bounce reason as an issue comment. This is a genuinely new source→target: the reconciler previously
+  mapped only the native `reviewDecision` to `phase:{building,qa,findings,held}`, never to a phase
+  regression.
+- **PR disposition.** A bounced PR no longer merges; the work restarts from the regressed issue and a
+  fresh `/implement` supersedes it. The bounced PR is **closed** (with a comment linking the regressed
+  issue) so it does not sit stale in the review pool — the fresh implement PR carries the issue's
+  closing keyword.
+
+This is an amendment, not a supersession: the required-review merge gate — the whole subject of the
+original Decision — stands intact. Bounce adds a review→issue-phase-regression edge that the two-outcome
+verdict model had no room for, carried by a label rather than a native event precisely so the native
+gate is untouched.
