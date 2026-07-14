@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   parseLsTree, narrowestRoot, slugify, subtreeHash, parseTranscript,
-  buildManifest, evaluateEligibility,
+  buildManifest, evaluateEligibility, prefixDiff, headHash, isHeadInput,
 } from './agent-pool.mjs';
 
 const CWD = '/work/repo';
@@ -209,15 +209,20 @@ test('evaluateEligibility: fresh serves; cutoff and cap still retire, cap bounda
 // non-judge task, which is the regression this issue exists to undo.
 // Exercised against both an implement-shaped (crate-scoped root, a pinned
 // out-of-root read) and a land-shaped (repo-wide root) manifest so the
-// uniform-across-tasks claim isn't just tested for one shape.
-test('evaluateEligibility ignores repo churn entirely — tree beliefs are not re-checked', () => {
+// uniform-across-tasks claim isn't just tested for one shape. The head stays
+// FRESH here (only belief files churn) so this isolates belief churn from the
+// #3422 head-freshness gate — CLAUDE.md, a head input, is deliberately not
+// churned; its churn is the next test's subject, not this one's.
+test('evaluateEligibility ignores belief-file churn — read-source tree beliefs are not re-checked', () => {
   const lsTree = parseLsTree(LS_TREE);
-  const churned = parseLsTree(LS_TREE.replace('bbb2', 'bbb9').replace('ddd4', 'ddd9').replace('ccc3', 'ccc9'));
+  const beliefChurned = parseLsTree(LS_TREE.replace('bbb2', 'bbb9').replace('ddd4', 'ddd9'));
+  const head = headHash(lsTree);
 
   const implementShaped = {
     subsystem_root: 'crates/x',
     subtree_hash: subtreeHash(lsTree, 'crates/x'),
     out_of_root: { 'CLAUDE.md': 'ccc3' },
+    head_hash: head,
     context_tokens: 10_000,
     deposited_at: NOW / 1000,
   };
@@ -225,11 +230,148 @@ test('evaluateEligibility ignores repo churn entirely — tree beliefs are not r
     subsystem_root: '.',
     subtree_hash: subtreeHash(lsTree, '.'),
     out_of_root: {},
+    head_hash: head,
     context_tokens: 10_000,
     deposited_at: NOW / 1000,
   };
 
   for (const manifest of [implementShaped, landShaped]) {
-    assert.deepEqual(evaluateEligibility(manifest, churned, NOW + 60_000), { ok: true });
+    assert.deepEqual(evaluateEligibility(manifest, beliefChurned, NOW + 60_000), { ok: true });
   }
+});
+
+test('headHash covers CLAUDE.md and SKILL.md files, ignores everything else', () => {
+  assert.equal(isHeadInput('CLAUDE.md'), true);
+  assert.equal(isHeadInput('.claude/skills/land/SKILL.md'), true);
+  assert.equal(isHeadInput('crates/x/src/lib.rs'), false);
+  assert.equal(isHeadInput('docs/adr/0001-x.md'), false);
+  // A sibling asset under a skill dir is NOT a head input — only SKILL.md's
+  // description rides the static head, so protocol.md / reference files must not
+  // trip head-drift (the #3426 review finding this narrowing fixes).
+  assert.equal(isHeadInput('.claude/skills/headless/protocol.md'), false);
+  const withAsset = LS_TREE
+    + '100644 blob sk01\t.claude/skills/land/SKILL.md\n'
+    + '100644 blob px01\t.claude/skills/headless/protocol.md\n';
+  const base = headHash(parseLsTree(withAsset));
+  // A non-head (belief-source) file moving does not change the head hash...
+  assert.equal(headHash(parseLsTree(withAsset.replace('aaa1', 'aaa9'))), base);
+  // ...nor does a non-SKILL.md skill-dir asset moving...
+  assert.equal(headHash(parseLsTree(withAsset.replace('px01', 'px99'))), base);
+  // ...but CLAUDE.md and a SKILL.md moving both do.
+  assert.notEqual(headHash(parseLsTree(withAsset.replace('ccc3', 'ccc9'))), base);
+  assert.notEqual(headHash(parseLsTree(withAsset.replace('sk01', 'sk99'))), base);
+});
+
+// Tripwire (#3422): the head-freshness gate. The static head (CLAUDE.md +
+// skills) is the cached prefix a warm resume reuses, NOT a re-derived belief,
+// so a head that moved on origin/main since deposit (head_hash mismatch) is a
+// real cache miss and must retire the entry — the deterministic in-repo half
+// of the resume cache miss. Distinct from the belief-churn test above: there
+// the head is held fresh and churn is ignored; here the head itself moves.
+test('evaluateEligibility retires on head drift — CLAUDE.md or a skill moved since deposit', () => {
+  const withSkill = LS_TREE + '100644 blob sk01\t.claude/skills/land/SKILL.md\n';
+  const lsTree = parseLsTree(withSkill);
+  const manifest = { context_tokens: 10_000, deposited_at: NOW / 1000, head_hash: headHash(lsTree) };
+
+  // A fresh head serves.
+  assert.deepEqual(evaluateEligibility(manifest, lsTree, NOW + 60_000), { ok: true });
+  // CLAUDE.md's blob moving retires.
+  assert.deepEqual(
+    evaluateEligibility(manifest, parseLsTree(withSkill.replace('ccc3', 'ccc9')), NOW + 60_000),
+    { ok: false, reason: 'head-drift' });
+  // A skill file's blob moving retires.
+  assert.deepEqual(
+    evaluateEligibility(manifest, parseLsTree(withSkill.replace('sk01', 'sk99')), NOW + 60_000),
+    { ok: false, reason: 'head-drift' });
+  // A belief-source file moving with the head held fresh still serves — the gate is head-scoped.
+  assert.deepEqual(
+    evaluateEligibility(manifest, parseLsTree(withSkill.replace('bbb2', 'bbb9')), NOW + 60_000),
+    { ok: true });
+});
+
+test('evaluateEligibility skips the head gate for a pre-gate manifest carrying no head_hash', () => {
+  // A manifest deposited before the #3422 gate has no head_hash; it is not
+  // retired on head drift (it ages out within the cutoff), keeping the #3341
+  // don't-retire-what-you-can't-prove-stale posture for legacy entries.
+  const legacy = { context_tokens: 10_000, deposited_at: NOW / 1000 };
+  const headMoved = parseLsTree(LS_TREE.replace('ccc3', 'ccc9'));
+  assert.deepEqual(evaluateEligibility(legacy, headMoved, NOW + 60_000), { ok: true });
+});
+
+test('buildManifest records a head_hash that gates its own fresh-checkout eligibility', () => {
+  const lsTree = parseLsTree(LS_TREE);
+  const { manifest } = buildManifest({ transcript: happyTranscript(), lsTree, verdict, now: NOW });
+  assert.equal(manifest.head_hash, headHash(lsTree));
+  // A fresh checkout serves; the head moving under it retires.
+  assert.deepEqual(evaluateEligibility(manifest, lsTree, NOW + 60_000), { ok: true });
+  assert.deepEqual(
+    evaluateEligibility(manifest, parseLsTree(LS_TREE.replace('ccc3', 'ccc9')), NOW + 60_000),
+    { ok: false, reason: 'head-drift' });
+});
+
+test('prefixDiff: a clean prefix (deposited wholly at the front of resuming) is the hit case', () => {
+  // The resuming transcript is the replayed prior turns PLUS new turns, so the
+  // deposited transcript is a byte-identical prefix — the byte-stable resume.
+  const deposited = jsonl([init, readEv(`${CWD}/CLAUDE.md`)]);
+  const resuming = deposited + jsonl([readEv(`${CWD}/crates/x/src/lib.rs`), result]);
+  const r = prefixDiff(deposited, resuming);
+  assert.equal(r.identical, true);
+  assert.equal(r.cleanPrefix, true);
+  assert.equal(r.sharedBytes, Buffer.byteLength(deposited));
+  assert.equal(r.depositedBytes, Buffer.byteLength(deposited));
+  assert.equal(r.resumingBytes, Buffer.byteLength(resuming));
+});
+
+test('prefixDiff: shared region matches but deposited runs past resuming — not a clean prefix', () => {
+  const resuming = jsonl([init, readEv(`${CWD}/CLAUDE.md`)]);
+  const deposited = resuming + jsonl([result]);
+  const r = prefixDiff(deposited, resuming);
+  assert.equal(r.identical, true);
+  assert.equal(r.cleanPrefix, false);
+  assert.equal(r.sharedBytes, Buffer.byteLength(resuming));
+});
+
+test('prefixDiff: a byte drift inside the shared region localizes to its enclosing event', () => {
+  // Identical init line; the second (assistant) event diverges — the first
+  // differing byte falls inside event index 1.
+  const deposited = '{"type":"system","subtype":"init"}\n{"type":"assistant","x":1}\n';
+  const resuming = '{"type":"system","subtype":"init"}\n{"type":"assistant","x":2}\n';
+  const r = prefixDiff(deposited, resuming);
+  assert.equal(r.identical, false);
+  assert.equal(r.offset, deposited.indexOf('1'));
+  assert.equal(r.eventIndex, 1);
+  assert.deepEqual(r.event, { type: 'assistant', subtype: null });
+  // The byte offset within its own line, and the divergent-byte windows differ.
+  assert.equal(r.byteInLine, deposited.indexOf('1') - deposited.indexOf('\n') - 1);
+  assert.notEqual(r.deposited, r.resuming);
+});
+
+// Tripwire (#3422): the diff is on UTF-8 BYTES, not UTF-16 code units — the
+// warm-resume miss is measured against the cached byte prefix, and the whole
+// point of the localizer is a byte offset that lines up with the API's cache
+// accounting. A multibyte char before the divergence pushes the byte offset
+// past the string index, so a regression to string comparison would flip this.
+test('prefixDiff reports a BYTE offset, not a UTF-16 code-unit index', () => {
+  const prefix = '{"m":"—"}\n'; // em-dash — 3 UTF-8 bytes, 1 code unit
+  const deposited = prefix + '{"x":"a"}\n';
+  const resuming = prefix + '{"x":"b"}\n';
+  const r = prefixDiff(deposited, resuming);
+  assert.equal(r.identical, false);
+  // The byte offset counts the em-dash as 3 bytes; the string index counts 1.
+  assert.equal(r.offset, Buffer.byteLength(deposited.slice(0, deposited.indexOf('a'))));
+  assert.notEqual(r.offset, deposited.indexOf('a'));
+});
+
+test('prefix-diff subcommand reads transcripts as raw buffers and prints the JSON verdict', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'poolpfx-'));
+  const dep = join(dir, 'deposited.jsonl');
+  const res = join(dir, 'resuming.jsonl');
+  writeFileSync(dep, jsonl([init, readEv(`${CWD}/CLAUDE.md`)]));
+  writeFileSync(res, jsonl([init, readEv(`${CWD}/CLAUDE.md`), result]));
+  const out = JSON.parse(execFileSync(
+    'node',
+    ['scripts/agent-pool.mjs', 'prefix-diff', '--deposited', dep, '--resuming', res],
+    { encoding: 'utf8' }).trim());
+  assert.equal(out.identical, true);
+  assert.equal(out.cleanPrefix, true);
 });

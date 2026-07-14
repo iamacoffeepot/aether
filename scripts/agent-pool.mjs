@@ -17,14 +17,18 @@
 //     (error-exit | compacted | missing-verdict | declined | over-cap).
 //
 //   eligible --manifest <json> --ls-tree <file>
-//     → {ok: true} | {ok: false, reason: past-cutoff | over-cap}
+//     → {ok: true} | {ok: false, reason: past-cutoff | over-cap | head-drift}
 //     Age is judged against AGENT_POOL_CUTOFF_MINS; the cap re-check makes
 //     lowering AGENT_POOL_CONTEXT_CAP_TOKENS retire existing entries
 //     retroactively. Belief-truth (subtree/out-of-root blob matching) was
 //     retired by #3341: a resumed session's beliefs may be stale, but every
 //     fact that decides an action is re-derived on the current checkout, so
 //     re-checking those beliefs at pool level was redundant and cost real
-//     reuse (zero non-judge sessions ever survived it).
+//     reuse (zero non-judge sessions ever survived it). The head-freshness gate
+//     (#3422) is the exception the belief argument does NOT cover: the static
+//     head (CLAUDE.md + skills) is the cached prefix the resume reuses, not a
+//     re-derived belief, so a head that moved on origin/main since deposit
+//     (head_hash mismatch) is a real cache miss and retires the entry.
 //
 //   root
 //     stdin: newline-separated repo-relative paths (a PR's changed files)
@@ -36,6 +40,19 @@
 //     (#3347): a byte-stable resume writes tens of tokens, a drifted one
 //     re-writes the whole head. Model-agnostic (reads the first usage-bearing
 //     main-loop turn regardless of model — the canary probes on haiku).
+//
+//   prefix-diff --deposited <jsonl> --resuming <jsonl>
+//     → {identical, cleanPrefix, sharedBytes, ...} when the shared region is
+//       byte-identical, or {identical: false, offset, eventIndex, byteInLine,
+//       event, deposited, resuming} localizing the first divergent byte.
+//     The decisive resume cache-miss diagnostic (#3422). A resuming session's
+//     transcript is the replayed prior turns PLUS its new turns, so the
+//     deposited transcript it resumed should be a byte-identical PREFIX of it.
+//     A divergence inside the shared prefix localizes the drift to the
+//     deposit/replay path (in-repo); a clean prefix means the on-disk bytes are
+//     stable and any miss is the CLI's request serialization (harness/API). The
+//     comparison is on UTF-8 BYTES, not UTF-16 code units — the drift is
+//     measured against the cached byte prefix.
 //
 // Knobs (env, defaults per the design): AGENT_POOL_CUTOFF_MINS=55,
 // AGENT_POOL_CONTEXT_CAP_TOKENS=150000.
@@ -81,6 +98,40 @@ export function subtreeHash(lsTree, root) {
   const prefix = root === '.' ? '' : root.replace(/\/$/, '') + '/';
   const lines = [...lsTree.entries()]
     .filter(([path]) => path.startsWith(prefix))
+    .map(([path, hash]) => `${path}:${hash}`)
+    .sort();
+  return sha256(lines.join('\n'));
+}
+
+export function isHeadInput(path) {
+  // The fleet-shared static head a warm resume reuses is composed from
+  // CLAUDE.md (injected verbatim into the system prompt via
+  // --append-system-prompt) and the skill set (each SKILL.md's frontmatter
+  // description rides the system prompt's available-skills list). Those are the
+  // repo files whose bytes land in the cached prefix; a resume box that
+  // checked out an origin/main where any of them moved gets a different head
+  // and cache-misses. Match SKILL.md by NAME, not the whole .claude/skills/
+  // tree — sibling assets (headless/protocol.md, reference files, on-demand
+  // skill bodies) do NOT ride the static head, so folding them in would
+  // spuriously trip head-drift and retire a reusable entry. The blob hash still
+  // covers a SKILL.md's body, so a body-only edit over-retires — fail-safe
+  // (over-retire, never serve a stale head); narrowing past the file to the
+  // description field alone is impossible from ls-tree blob hashes. The tool
+  // set is the head's third input but is not a repo file (it comes from the CLI
+  // + MCP config, already captured as the manifest's tools_fingerprint), so it
+  // is not an ls-tree-derivable head hash.
+  return path === 'CLAUDE.md' || path.endsWith('/SKILL.md');
+}
+
+export function headHash(lsTree) {
+  // Hash the blob hashes of the head inputs so a head that moved on origin/main
+  // between the depositing box's checkout and the resuming box's is detected —
+  // the deterministic, in-repo half of the #3422 warm-resume cache miss (the
+  // ~15k inside-head divergence cluster). Derived from the same `git ls-tree`
+  // map both the deposit (manifest) and resume (eligible) calls already receive,
+  // so the gate needs no new workflow plumbing.
+  const lines = [...lsTree.entries()]
+    .filter(([path]) => isHeadInput(path))
     .map(([path, hash]) => `${path}:${hash}`)
     .sort();
   return sha256(lines.join('\n'));
@@ -172,6 +223,7 @@ export function buildManifest({ transcript, lsTree, verdict, prior, cliVersion, 
       slug: slugify(root),
       subtree_hash: subtreeHash(lsTree, root),
       out_of_root: outOfRoot,
+      head_hash: headHash(lsTree),
       context_tokens: contextTokens,
       verdict: { reason: verdict.reason || '', knowledge_summary: verdict.knowledge_summary || '' },
       deposited_at: Math.floor(now / 1000),
@@ -183,7 +235,76 @@ export function evaluateEligibility(manifest, lsTree, now) {
   const ageMins = (Math.floor(now / 1000) - manifest.deposited_at) / 60;
   if (ageMins >= CUTOFF_MINS) return { ok: false, reason: 'past-cutoff' };
   if (manifest.context_tokens > CONTEXT_CAP) return { ok: false, reason: 'over-cap' };
+  // Head-freshness gate (#3422): the static head (CLAUDE.md + skills) is NOT a
+  // session belief — it is not re-derived on the fresh checkout, it is the
+  // cached prefix the resume reuses. So unlike the subtree/blob belief-truth
+  // #3341 retired, a head that moved since deposit is a real cache miss (the
+  // resume re-writes the whole head), and retiring the entry is the fix. Gate
+  // only when the manifest carries a head_hash — a pre-gate manifest simply
+  // ages out within the cutoff, so skipping it costs no correctness and keeps
+  // the #3341 don't-retire-what-you-can't-prove-stale posture for legacy entries.
+  if (manifest.head_hash !== undefined && manifest.head_hash !== headHash(lsTree)) {
+    return { ok: false, reason: 'head-drift' };
+  }
   return { ok: true };
+}
+
+export function prefixDiff(deposited, resuming) {
+  // The decisive warm-resume cache-miss diagnostic (#3422). A resuming
+  // session's transcript is the replayed prior turns PLUS its new turns, so the
+  // deposited transcript it resumed should be a byte-identical PREFIX of it.
+  // Compare on a BYTE basis (UTF-8, not UTF-16 code units — the drift is
+  // measured against the cached byte prefix) and report the first byte that
+  // diverges within the shared region, localized to its enclosing JSONL event.
+  // A clean prefix (no divergence, the deposited transcript wholly at the
+  // front) is the byte-stable hit; a divergence inside the shared region is the
+  // in-repo deposit/replay drift the issue exists to localize.
+  const a = Buffer.from(deposited);
+  const b = Buffer.from(resuming);
+  const shared = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < shared && a[i] === b[i]) i++;
+  if (i === shared) {
+    return {
+      identical: true,
+      cleanPrefix: a.length <= b.length,
+      sharedBytes: shared,
+      depositedBytes: a.length,
+      resumingBytes: b.length,
+    };
+  }
+  const { eventIndex, lineStart, event } = locateEvent(a, i);
+  const window = 48;
+  return {
+    identical: false,
+    offset: i,
+    eventIndex,
+    byteInLine: i - lineStart,
+    event,
+    depositedBytes: a.length,
+    resumingBytes: b.length,
+    deposited: a.subarray(Math.max(0, i - window), i + window).toString('utf8'),
+    resuming: b.subarray(Math.max(0, i - window), i + window).toString('utf8'),
+  };
+}
+
+function locateEvent(buf, offset) {
+  // Byte `offset` falls inside the JSONL line that starts after the last
+  // newline before it; return that line's event index, its start offset, and
+  // its parsed {type, subtype} when the line is valid JSON (the differing byte
+  // can land in a partial or corrupt line, leaving event null).
+  let lineStart = 0, eventIndex = 0;
+  for (let j = 0; j < offset; j++) {
+    if (buf[j] === 0x0a) { eventIndex++; lineStart = j + 1; }
+  }
+  let lineEnd = buf.indexOf(0x0a, lineStart);
+  if (lineEnd === -1) lineEnd = buf.length;
+  let event = null;
+  try {
+    const ev = JSON.parse(buf.subarray(lineStart, lineEnd).toString('utf8'));
+    event = { type: ev.type ?? null, subtype: ev.subtype ?? null };
+  } catch { /* the differing byte falls in a partial or corrupt line */ }
+  return { eventIndex, lineStart, event };
 }
 
 function arg(name) {
@@ -216,8 +337,14 @@ function main() {
   } else if (cmd === 'resume-cost') {
     const t = parseTranscript(readFileSync(arg('transcript'), 'utf8'));
     console.log(`write=${t.turn1CacheCreation ?? 0} read=${t.turn1CacheRead ?? 0}`);
+  } else if (cmd === 'prefix-diff') {
+    // Read the transcripts as raw buffers — the diff is byte-exact, so no
+    // encoding round-trip may normalize the very bytes under examination.
+    const deposited = readFileSync(arg('deposited'));
+    const resuming = readFileSync(arg('resuming'));
+    console.log(JSON.stringify(prefixDiff(deposited, resuming)));
   } else {
-    console.error('usage: agent-pool.mjs manifest|eligible|root|resume-cost [--flags]');
+    console.error('usage: agent-pool.mjs manifest|eligible|root|resume-cost|prefix-diff [--flags]');
     process.exit(2);
   }
 }
