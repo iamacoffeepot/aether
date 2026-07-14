@@ -473,7 +473,8 @@ jobs:
             (cd /home/runner/basecamp && claude --resume "$POOL_SESSION_ID" -p "$(cat /tmp/judge-prompt.md)" \
               --dangerously-skip-permissions \
               --add-dir "$GITHUB_WORKSPACE" \
-              --append-system-prompt "$(cat "$GITHUB_WORKSPACE/CLAUDE.md")" \
+              --allowedTools Read,Bash,Write,Grep,Glob \
+              --strict-mcp-config \
               --model claude-sonnet-5 \
               --max-turns 40 \
               --output-format stream-json --verbose) \
@@ -484,7 +485,8 @@ jobs:
             (cd /home/runner/basecamp && claude -p "$(cat /tmp/judge-task-prompt.md)" \
               --dangerously-skip-permissions \
               --add-dir "$GITHUB_WORKSPACE" \
-              --append-system-prompt "$(cat "$GITHUB_WORKSPACE/CLAUDE.md")" \
+              --allowedTools Read,Bash,Write,Grep,Glob \
+              --strict-mcp-config \
               --model claude-sonnet-5 \
               --max-turns 40 \
               --output-format stream-json --verbose) \
