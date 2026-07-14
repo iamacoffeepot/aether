@@ -24,7 +24,10 @@ END_DAY="$(date -u +%F)"
 while [ $# -gt 0 ]; do
   case "$1" in
     --days)
+      [ $# -ge 2 ] || { echo "--days requires a value" >&2; exit 1; }
       DAYS="$2"
+      [[ "$DAYS" =~ ^[0-9]+$ ]] && [ "$DAYS" -ge 1 ] && [ "$DAYS" -le 366 ] \
+        || { echo "invalid --days '${DAYS}' (want an integer 1..366)" >&2; exit 1; }
       shift 2
       ;;
     *)
@@ -34,9 +37,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 BUCKET="${AGENT_EVIDENCE_BUCKET:-aether-evidence}"
+USAGE="s3://${BUCKET}/agent/usage"
 
 command -v aws >/dev/null || { echo "aws cli not found" >&2; exit 1; }
 command -v jq  >/dev/null || { echo "jq not found" >&2; exit 1; }
+
+# Validate END_DAY once up front so the window arithmetic below can't silently
+# push empty strings into days[] off a failed substitution.
+date -u -d "$END_DAY" +%F >/dev/null 2>&1 || { echo "invalid date: ${END_DAY}" >&2; exit 1; }
 
 # The N most recent UTC days ending on END_DAY, newest first.
 days=()
@@ -59,8 +67,12 @@ found=0
 for d in "${days[@]}"; do
   daydir="$tmp/${d}"
   mkdir -p "$daydir"
-  aws s3 cp "s3://${BUCKET}/agent/usage/${d}/" "$daydir/" --recursive --exclude '*' --include '*.json' >/dev/null 2>&1 \
-    || continue
+  if ! aws s3 cp "${USAGE}/${d}/" "$daydir/" --recursive --exclude '*' --include '*.json' >/dev/null 2>"$tmp/s3err"; then
+    # An empty day lists nothing and still exits 0; a non-zero exit with stderr
+    # is a real read failure (auth/network) the window total must not hide.
+    [ -s "$tmp/s3err" ] && echo "warning: read failed for ${d}, window may be incomplete" >&2
+    continue
+  fi
   for f in "$daydir"/*.json; do
     [ -e "$f" ] || continue
     cat "$f" >> "$ledger"
@@ -70,17 +82,17 @@ for d in "${days[@]}"; do
 done
 if [ "$found" -eq 0 ]; then
   if [ "$DAYS" -eq 1 ]; then
-    echo "no ledger objects under s3://${BUCKET}/agent/usage/${END_DAY}/ (empty day, or read denied)"
+    echo "no ledger objects under ${USAGE}/${END_DAY}/ (empty day, or read denied)"
   else
-    echo "no ledger objects under s3://${BUCKET}/agent/usage/ for ${range_oldest}..${range_newest} (empty window, or read denied)"
+    echo "no ledger objects under ${USAGE}/ for ${range_oldest}..${range_newest} (empty window, or read denied)"
   fi
   exit 0
 fi
 
 if [ "$DAYS" -eq 1 ]; then
-  echo "Spend scorecard — ${END_DAY} (${found} runs, s3://${BUCKET}/agent/usage/${END_DAY}/)"
+  echo "Spend scorecard — ${END_DAY} (${found} runs, ${USAGE}/${END_DAY}/)"
 else
-  echo "Spend scorecard — ${range_oldest}..${range_newest} (${DAYS} days, ${found} runs, s3://${BUCKET}/agent/usage/)"
+  echo "Spend scorecard — ${range_oldest}..${range_newest} (${DAYS} days, ${found} runs, ${USAGE}/)"
 fi
 echo
 

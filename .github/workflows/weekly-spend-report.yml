@@ -66,9 +66,9 @@ jobs:
             gh issue comment "$existing" --body-file /tmp/weekly-report-issue.md
           else
             echo "Filing the weekly report issue."
-            # agent:dont-touch: a rolling report issue is not a pipeline work
-            # item, and the fleet dispatcher/scoper skips anything carrying it
-            # — without the label an unlabelled issue reads as Backlog and gets
-            # scoped (#3180).
-            gh issue create --title "$title" --body-file /tmp/weekly-report-issue.md --label agent:dont-touch
+            # alert: a machine-filed report issue is not a pipeline work item —
+            # the label keeps it out of the scoper, matching the idiom every
+            # other machine-filed non-work issue uses (fuzz-nightly,
+            # cache-behavior-canary, context-budget-canary, agent-tick; #3180).
+            gh issue create --title "$title" --body-file /tmp/weekly-report-issue.md --label alert
           fi
