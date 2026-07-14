@@ -38,8 +38,8 @@ name: Reconciler
 #     not re-enter it: GITHUB_TOKEN-authored events do not trigger workflows.
 #   - pull_request_review [submitted, dismissed] — a native review verdict
 #     changes GitHub's reviewDecision, which the reconciler keys merge-readiness
-#     on (ADR-0148), so a submitted or dismissed review must recompute. Barista
-#     (iamabarista[bot]) is a separate GitHub App, not GITHUB_TOKEN, so its
+#     on (ADR-0148), so a submitted or dismissed review must recompute. Critic
+#     (iamacritic[bot]) is a separate GitHub App, not GITHUB_TOKEN, so its
 #     createPullRequestReview call genuinely raises this event regardless of
 #     which review.yml job submitted it.
 #   - workflow_run on CI only — CI is pull_request-triggered, so a CI run object
@@ -385,7 +385,7 @@ jobs:
             echo "fact ci_green: ${ci_green} (CI pass=${ci_state})"
 
             # Fact — review verdict in (PR-level, ADR-0148): GitHub's native
-            # reviewDecision, aggregated from barista's required native review and
+            # reviewDecision, aggregated from critic's required native review and
             # already dismiss-stale-aware, so no per-head read is needed to stay
             # honest across pushes — a fresh push's is_synchronize demotion already
             # pins the head at building until CI is green. REVIEW_REQUIRED or null

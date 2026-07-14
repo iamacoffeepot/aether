@@ -85,13 +85,13 @@ The Refine loop writes no phase label — the reconciler computes `building` / `
 
 ## Review re-request
 
-Post-#3246 the review runs **only on an explicit request** — it does not chain off a CI completion. The resolution push already dismissed the stale approval (`dismiss_stale_reviews`), so once the Refine loop reaches CI green, re-request the review on the resolved head — the same `@barista review` channel `/findings` uses for a fix push:
+Post-#3246 the review runs **only on an explicit request** — it does not chain off a CI completion. The resolution push already dismissed the stale approval (`dismiss_stale_reviews`), so once the Refine loop reaches CI green, re-request the review on the resolved head — the same `@iamacritic review` channel `/findings` uses for a fix push:
 
 ```bash
-gh api -X POST repos/iamacoffeepot/aether/issues/<n>/comments -f body='@barista review'
+gh api -X POST repos/iamacoffeepot/aether/issues/<n>/comments -f body='@iamacritic review'
 ```
 
-(`@barista full review` is the same request with the changed-`.rs` size-cap bypass.) The comment trigger is restricted to the owner and the fleet App — the box posts as the App, so the comment is admitted. barista submits one fresh `APPROVE` / `REQUEST_CHANGES` verdict against the resolved head; with no open thread and a non-actionable rollup the reconciler recomputes the PR back through `building` → `qa` → `held`. Without this comment the resolved head sits at `REVIEW_REQUIRED` indefinitely — the re-request is what earns the fresh verdict the resolved head must have before it can land.
+(`@iamacritic full review` is the same request with the changed-`.rs` size-cap bypass.) The comment trigger is restricted to the owner and the fleet App — the box posts as the App, so the comment is admitted. critic submits one fresh `APPROVE` / `REQUEST_CHANGES` verdict against the resolved head; with no open thread and a non-actionable rollup the reconciler recomputes the PR back through `building` → `qa` → `held`. Without this comment the resolved head sits at `REVIEW_REQUIRED` indefinitely — the re-request is what earns the fresh verdict the resolved head must have before it can land.
 
 ## Terminal state
 
@@ -105,7 +105,7 @@ CI green (or green except a sole `Qodana scan` red held for `/land`) with the re
    ✓ PR #<n> conflict resolved and CI-green.
    Resolved head: <pr-url>
    Branch: <branch>
-   Review re-requested (@barista review) on the resolved head.
+   Review re-requested (@iamacritic review) on the resolved head.
    Next: the reconciler computes held once the fresh verdict is in; the held→land path lands it.
    ```
 

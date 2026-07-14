@@ -29,7 +29,7 @@ docs, marker/feature boundary builds, workspace tests, Qodana, wasm packaging,
 and contract jobs. Path filters can make a job intentionally inapplicable.
 
 The automated Rust review is enforced by GitHub's native required review, not
-by `CI pass`: barista submits a native `APPROVE` / `REQUEST_CHANGES` verdict and
+by `CI pass`: critic submits a native `APPROVE` / `REQUEST_CHANGES` verdict and
 branch protection blocks the merge until it is APPROVE. Documentation Pages,
 PR-title validation, review, dogfood, and reconciliation have their own workflow
 responsibilities.

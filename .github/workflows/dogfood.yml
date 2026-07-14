@@ -13,7 +13,7 @@ name: Dogfood
 #   1. CI green      — the other CI gates passed (structural: Review only runs
 #                      on CI success, and Dogfood only runs on Review success).
 #   2. Review green  — the PR's native `reviewDecision` is `APPROVED`. That
-#                      encodes barista's standing verdict for Rust PRs and the
+#                      encodes critic's standing verdict for Rust PRs and the
 #                      session-less out-of-scope APPROVE for non-Rust ones
 #                      (ADR-0148), so requiring it makes dogfood the very last
 #                      thing to run without polling review's own state.
@@ -183,7 +183,7 @@ jobs:
           echo "checkout_sha=$checkout_sha" >> "$GITHUB_OUTPUT"
 
           # Gate 2 — the PR's native `reviewDecision` must be `APPROVED`. This is
-          # the "review has gone green" predicate (ADR-0148): barista's standing
+          # the "review has gone green" predicate (ADR-0148): critic's standing
           # verdict feeds reviewDecision for Rust PRs, and a non-Rust PR is
           # APPROVED by the session-less out-of-scope approve. Applies on the
           # dispatch path too — dispatch overrides only the retry state, not the
