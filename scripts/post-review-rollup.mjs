@@ -244,14 +244,6 @@ function withResolvedPath(f, changed) {
   return { ...f, path: resolvePath(f.file, changed) }
 }
 
-// One folded-finding line pair: the finding text + anchor, then its dedup
-// marker. Shared by the ordinary folded section and the soft-hold section so
-// the two render identically.
-function renderFoldedFinding(f, fp) {
-  const anchor = `${f.path || f.file || ''}${f.line != null ? `:${f.line}` : ''}`
-  return [`- ${findingBody(f)} \`${anchor}\``, `  <!-- aether-review-fp:${fp} -->`]
-}
-
 // The one scope-leakage filter shared by the `isActionable` gate and the
 // rendered soft-hold banner count, so they can't drift apart: a `disclosed`
 // path — one a prior critic correctness finding already named on this same
@@ -312,32 +304,20 @@ export function verdictEvent(rollup, disclosed = new Set()) {
   return isActionable(rollup, disclosed) ? 'REQUEST_CHANGES' : 'APPROVE'
 }
 
-export function buildReviewBody(folded, softHoldFolded, softHoldCount, owedEvent, followUps = []) {
+// The native review body is the verdict-gate surface, not the detail
+// rendering — the upserted summary comment (renderSummary) is the single
+// full rendering, so this stays a one-line verdict plus a pointer to it
+// (issue #3424). The wording carries no `@iamacritic review` / `@iamacritic
+// full review` substring (#3423); posted as a PR review, it cannot
+// self-trigger the comment listener regardless.
+export function buildReviewBody(owedEvent) {
   const lines = ['## Five-pillar review', '']
-  if (owedEvent === 'APPROVE' && !folded.length && !softHoldCount) {
-    lines.push('No confirmed findings — the change is clean under all five pillars.', '')
-  }
-  if (folded.length) {
-    lines.push('Findings not anchored to a changed line:', '')
-    for (const { f, fp } of folded) lines.push(...renderFoldedFinding(f, fp))
-    lines.push('')
-  }
-  if (softHoldCount) {
-    lines.push(`**${softHoldCount} soft-hold** finding(s) — clear before un-draft.`, '')
-    for (const { f, fp } of softHoldFolded) lines.push(...renderFoldedFinding(f, fp))
-    lines.push('')
-  }
-  // Advisory pre-existing findings (issue #3250): reachable on `main`, so a discovery to file as a
-  // separate issue — NEVER an in-PR demand, and kept out of the confirmed / soft-hold counts so they
-  // never gate. Rendered without a dedup marker: they carry no verdict teeth.
-  if (followUps.length) {
-    lines.push(`**${followUps.length} pre-existing finding(s)** — reachable on \`main\`; file as a separate follow-up issue, not fixed in this PR.`, '')
-    for (const f of followUps) {
-      const anchor = `${f.path || f.file || ''}${f.line != null ? `:${f.line}` : ''}`
-      lines.push(`- ${findingBody(f)}${anchor ? ` \`${anchor}\`` : ''}`)
-    }
-    lines.push('')
-  }
+  lines.push(
+    owedEvent === 'APPROVE'
+      ? 'Clean under all five pillars — see the five-pillar rollup comment for detail.'
+      : 'Changes requested — see the five-pillar rollup comment for the findings.',
+    ''
+  )
   lines.push(POSTURE_FOOTER)
   return lines.join('\n')
 }
@@ -407,13 +387,14 @@ async function main() {
   // the fingerprints normalized/spec just produced — a soft-hold that overlaps
   // renders once, via its confirmed/spec row, not twice. `posted` catches the
   // re-run case: a soft-hold with no confirmed/spec twin that was already
-  // annotated on an earlier pass. Survivors partition inline/folded exactly
-  // like the confirmed/spec path; `softHoldsForSummary` (dedup against
-  // confirmed/spec only, not `posted`) feeds the always-regenerated summary
-  // comment so it never goes missing a soft-hold-only entry.
+  // annotated on an earlier pass. An anchored survivor gets an inline
+  // annotation; an unanchored one has nowhere to render on the native review
+  // (issue #3424 slimmed the native body to a verdict + pointer) but still
+  // reaches the reader via `softHoldsForSummary`, which feeds the
+  // always-regenerated summary comment so it never goes missing a
+  // soft-hold-only entry.
   const confirmedSpecFingerprints = new Set(allFingerprints)
   const softHoldsNormalized = softHolds.map((f) => withResolvedPath(f, changed))
-  const softHoldFolded = []
   const softHoldsForSummary = []
   for (const f of softHoldsNormalized) {
     const anchor = f.path && f.line != null && hunks.get(f.path)?.has(Number(f.line))
@@ -429,8 +410,6 @@ async function main() {
         side: 'RIGHT',
         body: `${findingBody(f)}\n<!-- aether-review-fp:${fp} -->`,
       })
-    } else {
-      softHoldFolded.push({ f, fp })
     }
   }
 
@@ -443,7 +422,7 @@ async function main() {
   // `dismiss_stale_reviews` left behind.
   const owedEvent = verdictEvent(rollup, disclosed)
   const followUpsNormalized = followUps.map((f) => withResolvedPath(f, changed))
-  const body = buildReviewBody(folded, softHoldFolded, softHolds.length, owedEvent, followUpsNormalized)
+  const body = buildReviewBody(owedEvent)
   const review = { event: owedEvent, body, commit_id: env.headSha }
   if (inline.length) review.comments = inline
   let res = await api(env.criticToken, 'POST', `repos/${env.repo}/pulls/${env.pr}/reviews`, review)
@@ -492,7 +471,7 @@ async function main() {
   }
 }
 
-function renderSummary(rollup, normalized, softHoldsForSummary, followUps, fingerprints) {
+export function renderSummary(rollup, normalized, softHoldsForSummary, followUps, fingerprints) {
   const lines = [MARKER, '## Five-pillar review — summary', '']
   lines.push(
     `Confirmed: **${(rollup.confirmed || []).length}** · ` +

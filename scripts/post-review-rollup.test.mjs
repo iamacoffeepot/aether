@@ -8,6 +8,7 @@ import {
   fingerprint,
   isActionable,
   normalizeFingerprint,
+  renderSummary,
   verdictEvent,
   visibleSoftHolds,
 } from './post-review-rollup.mjs'
@@ -73,38 +74,48 @@ const SOFT_HOLD_FINDING = {
 // Fix for #3249: a rollup whose only finding is a soft-hold must not collapse
 // to a bare count — the reader needs the same suggested_form + anchor a
 // folded finding gets, since soft-holds are the high-severity, land-gating
-// class.
-test('buildReviewBody renders a soft-hold finding, not just a count', () => {
-  const body = buildReviewBody([], [{ f: SOFT_HOLD_FINDING, fp: 'fp-soft-hold' }], 1, 'REQUEST_CHANGES')
-  assert.match(body, /\*\*1 soft-hold\*\* finding\(s\) — clear before un-draft\./)
-  assert.match(body, /render the soft-hold body instead of a bare count/)
-  assert.match(body, /`scripts\/post-review-rollup\.mjs:233`/)
+// class. Issue #3424 moved the full rendering to the summary comment
+// (renderSummary) — the native review body is now a slim verdict + pointer.
+test('renderSummary renders a soft-hold finding, not just a count', () => {
+  const rollup = { confirmed: [], softHolds: [SOFT_HOLD_FINDING], spec: { findings: [] } }
+  const summary = renderSummary(rollup, [], [SOFT_HOLD_FINDING], [], ['fp-soft-hold'])
+  assert.match(summary, /render the soft-hold body instead of a bare count/)
+  assert.match(summary, /`:233`/)
 })
 
 // A soft-hold that duplicates a confirmed/spec finding is the caller's
 // (main()'s) fingerprint-dedup responsibility — it excludes the duplicate
-// from `softHoldFolded` before calling buildReviewBody. This asserts the
+// from `softHoldsForSummary` before calling renderSummary. This asserts the
 // render side of that contract: given the deduped input, the shared finding
-// text appears exactly once, never doubled between the folded and soft-hold
-// sections.
-test('buildReviewBody renders a soft-hold deduped against a confirmed finding exactly once', () => {
+// text appears exactly once, never doubled between the confirmed and
+// soft-hold sections.
+test('renderSummary renders a soft-hold deduped against a confirmed finding exactly once', () => {
   const shared = { pillar: 'correctness', file: 'a.rs', line: 3, suggested_form: 'fix the off-by-one' }
-  const body = buildReviewBody([{ f: shared, fp: 'a.rs|3|correctness' }], [], 1, 'REQUEST_CHANGES')
-  const occurrences = body.split('fix the off-by-one').length - 1
+  const rollup = { confirmed: [shared], softHolds: [], spec: { findings: [] } }
+  const summary = renderSummary(rollup, [shared], [], [], ['a.rs|3|correctness'])
+  const occurrences = summary.split('fix the off-by-one').length - 1
   assert.equal(occurrences, 1)
 })
 
 test('buildReviewBody renders no soft-hold section for a clean rollup', () => {
-  const body = buildReviewBody([], [], 0, 'APPROVE')
+  const body = buildReviewBody('APPROVE')
   assert.doesNotMatch(body, /soft-hold/)
-  assert.match(body, /No confirmed findings — the change is clean under all five pillars\./)
+  assert.match(body, /Clean under all five pillars — see the five-pillar rollup comment for detail\./)
+})
+
+test('buildReviewBody points at the rollup comment for a changes-requested verdict, with no finding detail', () => {
+  const body = buildReviewBody('REQUEST_CHANGES')
+  assert.match(body, /Changes requested — see the five-pillar rollup comment for the findings\./)
+  assert.doesNotMatch(body, /soft-hold/)
+  assert.doesNotMatch(body, /Findings not anchored/)
 })
 
 // Tripwire (#3408): reviewer free-text (suggested_form / recommendation) is arbitrary
 // markdown-significant text — a bash-comment suggestion starting with `#` must never
 // be promoted to a heading (or any other block-level construct) when folded into the
-// rollup body.
-test('buildReviewBody fences a multi-line, #-leading suggested_form so it never renders as a heading', () => {
+// rollup summary. Re-pointed at renderSummary (#3424) — the surface that now owns
+// finding-detail rendering.
+test('renderSummary fences a multi-line, #-leading suggested_form so it never renders as a heading', () => {
   const finding = {
     pillar: 'correctness',
     file: 'a.rs',
@@ -112,12 +123,14 @@ test('buildReviewBody fences a multi-line, #-leading suggested_form so it never 
     recommendation: 'wrap in inline code',
     suggested_form: '# wait/exit semantics\nre-reads sha every tick',
   }
-  const body = buildReviewBody([{ f: finding, fp: 'a.rs|3|correctness' }], [], 0, 'REQUEST_CHANGES')
-  for (const line of body.split('\n')) {
-    if (line === '## Five-pillar review') continue
+  const rollup = { confirmed: [finding], softHolds: [], spec: { findings: [] } }
+  const summary = renderSummary(rollup, [finding], [], [], ['a.rs|3|correctness'])
+  const ownHeaders = new Set(['## Five-pillar review — summary', '### Findings'])
+  for (const line of summary.split('\n')) {
+    if (ownHeaders.has(line)) continue
     assert.doesNotMatch(line, /^#{1,6}\s/, `line rendered as a heading: ${line}`)
   }
-  assert.match(body, /wait\/exit semantics re-reads sha every tick/)
+  assert.match(summary, /wait\/exit semantics re-reads sha every tick/)
 })
 
 // Tripwire: fingerprint's path half must canonicalize to repo-relative
