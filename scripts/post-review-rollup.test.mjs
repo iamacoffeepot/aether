@@ -277,5 +277,4 @@ test('a bounce with no other finding is still actionable and REQUEST_CHANGES', (
 test('verdictEvent never yields a third value even when a bounce is present', () => {
   assert.equal(verdictEvent(DEEP_BOUNCE), 'REQUEST_CHANGES')
   assert.equal(verdictEvent(SCOPE_BOUNCE), 'REQUEST_CHANGES')
-  assert.ok(['APPROVE', 'REQUEST_CHANGES'].includes(verdictEvent(DEEP_BOUNCE)))
 })

@@ -91,12 +91,17 @@ async function stampBounce(env, bounce) {
   const labelRes = await api(env.token, 'POST', `repos/${env.repo}/issues/${env.pr}/labels`, { labels })
   if (!labelRes.ok) console.error(`bounce: label POST failed (${labelRes.status}) — are review:bounce* bootstrapped? ${labelRes.text}`)
   const why = bounce.reason || 'the review found a fundamental problem a fix round cannot address'
+  // The reconciler's regression/close edge keys purely off the review:bounce
+  // label — when that write failed, do not claim it will act.
+  const reconcilerClaim = labelRes.ok
+    ? `Rather than continue \`REQUEST_CHANGES\` rounds, the work returns to scoping. The reconciler regresses the linked issue to \`phase:bounced\` + \`bounce-to:${bounce.to}\` and closes this PR; a fresh \`/implement\` supersedes it. Barista's \`REQUEST_CHANGES\` holds the merge until then.`
+    : `The \`review:bounce\` label write FAILED (${labelRes.status}), so the reconciler will NOT act on this bounce automatically — apply \`review:bounce\` + \`review:bounce-to:${bounce.to}\` to this PR by hand (or re-run the review post) to trigger the regression. Barista's \`REQUEST_CHANGES\` holds the merge until then.`
   const body = [
     `**Review bounce — \`bounce-to:${bounce.to}\`.**`,
     '',
     `This review found a fundamental problem a fix round cannot address: ${why}`,
     '',
-    `Rather than continue \`REQUEST_CHANGES\` rounds, the work returns to scoping. The reconciler regresses the linked issue to \`phase:bounced\` + \`bounce-to:${bounce.to}\` and closes this PR; a fresh \`/implement\` supersedes it. Barista's \`REQUEST_CHANGES\` holds the merge until then.`,
+    reconcilerClaim,
   ].join('\n')
   const commentRes = await api(env.token, 'POST', `repos/${env.repo}/issues/${env.pr}/comments`, { body })
   if (!commentRes.ok) {
@@ -450,7 +455,14 @@ async function main() {
   // deliberately does not resolve or touch the issue itself — that is reconciler.yml's edge). A deep pass's
   // fundamental-problem conclusion or a confirm pass's restart escalation both arrive as rollup.bounce.
   const bounce = bounceSignal(rollup)
-  if (bounce) await stampBounce(env, bounce)
+  if (bounce) {
+    // Dedup like every other finding write: a re-run must not stack a second
+    // bounce stamp/comment on a PR already carrying one.
+    const labelsRes = await api(env.token, 'GET', `repos/${env.repo}/issues/${env.pr}/labels`)
+    const alreadyBounced = labelsRes.ok && (labelsRes.data ?? []).some((l) => l.name === 'review:bounce')
+    if (alreadyBounced) console.log('bounce: PR already stamped — skipping duplicate bounce write')
+    else await stampBounce(env, bounce)
+  }
 
   // Upsert the marker-anchored summary comment — the human-readable rollup.
   // Regenerated in full each run, and it carries every fingerprint so

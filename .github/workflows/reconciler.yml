@@ -338,9 +338,12 @@ jobs:
                   || echo "warn: could not post the bounce reason on issue #${issue}"
               fi
 
-              if [ "$(gh api "repos/${REPO}/pulls/${pr}" --jq '.state')" = "open" ]; then
+              pr_state="$(gh api "repos/${REPO}/pulls/${pr}" --jq '.state' || echo unknown)"
+              echo "fact pr_state: ${pr_state}"
+              if [ "$pr_state" = "open" ]; then
                 gh api -X POST "repos/${REPO}/issues/${pr}/comments" \
-                  -f body="Closing — the review bounced issue #${issue} to \`phase:bounced\` + \`bounce-to:${bounce_to}\`. The work returns to scoping; a fresh PR supersedes this one." >/dev/null || true
+                  -f body="Closing — the review bounced issue #${issue} to \`phase:bounced\` + \`bounce-to:${bounce_to}\`. The work returns to scoping; a fresh PR supersedes this one." >/dev/null \
+                  || echo "warn: could not post the closing comment on PR #${pr}"
                 gh api -X PATCH "repos/${REPO}/pulls/${pr}" -f state=closed >/dev/null \
                   && echo "write: closed bounced PR #${pr}" \
                   || echo "warn: could not close bounced PR #${pr}"
