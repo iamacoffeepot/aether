@@ -120,6 +120,14 @@ The sweep never auto-confirms and never dispatches the serial tail (push / PR / 
 - **Body ambiguous or missing the fix** → refuse: *"`--quick` needs a complete fix in the body. Run `/scope <issue>` to design it."* Don't guess.
 - **Fix looks design-bearing** (new public API, wire-format change, ADR-worthy choice) → refuse: *"This needs design, not a quick fix. Run `/scope <issue>`."* `--quick` is for mechanical work only (the old `/delegate` bar).
 
+**Bench the issue before working it.** A `--quick` run works in the main session while the cloud fleet's wavefront can still see the issue on the board, so the first act after the gate check is to bench it:
+
+```bash
+gh api -X POST repos/iamacoffeepot/aether/issues/<n>/labels -f 'labels[]=agent:dont-touch'
+```
+
+`agent:dont-touch` is the fleet's per-issue kill switch — the tick's scan filters it and agent-work's point-of-spend guard refuses it — so no wavefront tick dispatches the same issue mid-run (the tick counted a quick issue as dispatchable before this rule; #3433). When the quick issue is filed in-session rather than pre-existing, stamping the label in the creation call is equivalent. No removal step: only the owner removes the label, and the merge that closes the issue retires it with the lifecycle.
+
 ## Worktree setup
 
 ```bash
