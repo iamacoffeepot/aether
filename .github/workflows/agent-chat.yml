@@ -107,6 +107,12 @@ name: Agent chat
 #       preferred over static IAM keys-as-secrets — it matches the arc's no-
 #       static-secret posture and needs no rotation; static access keys are the
 #       documented fallback if the OIDC trust policy is out of scope for now.
+#   (f) grant that SAME OIDC role (AGENT_AWS_ROLE_ARN) s3:PutObject on
+#       arn:aws:s3:::aether-evidence/agent/usage/* — the "Meter the turn into
+#       the spend ledger" step keeps this job's OIDC creds (no instance profile
+#       to fall back to) for its spend-ledger row (rung 1, #3166). One grant on
+#       this role also covers agent-judge, which rides the same role for the
+#       same write.
 # Absent any of these, the run logs the exact remedy and exits without spend.
 
 on:
@@ -381,16 +387,19 @@ jobs:
           aws-region: ${{ vars.AGENT_AWS_REGION }}
 
       # agent-chat is checkout-free by design (API orchestration, not builds),
-      # but a local `uses: ./…` composite must be present in the workspace. So
-      # sparse-checkout just the action tree (main, no PR-head code) before the
-      # shared setup. This runs after chat's job-level owner gate and cannot
-      # weaken the crown-jewel gate (#3359).
+      # but a local `uses: ./…` composite must be present in the workspace, and
+      # (#3381) so must scripts/agent-usage-record.mjs for the meter step below
+      # to run it. So sparse-checkout just those two paths (main, no PR-head
+      # code) before the shared setup. This runs after chat's job-level owner
+      # gate and cannot weaken the crown-jewel gate (#3359).
       - name: Check out the composite action
         if: steps.route.outputs.parked == 'false'
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          sparse-checkout: .github/actions
+          sparse-checkout: |
+            .github/actions
+            scripts/agent-usage-record.mjs
 
       # Shared headless-Claude scaffold (#3359): pinned install (#3285), pre-trust,
       # auth probe. Chat has no full checkout (strip-hooks: false) and trusts only
@@ -505,6 +514,7 @@ jobs:
           fi
           printf '%s\n' "$reply" > /tmp/chat-reply.md
           printf '%s\n' "$new_id" > /tmp/session-pointer
+          printf '%s\n' "$out" > /tmp/agent-chat-result.json
           echo "turn produced a reply (session ${new_id})."
 
       # Persist the session whole before the reply posts, so a torn write can
@@ -533,3 +543,46 @@ jobs:
           set -euo pipefail
           gh api -X POST "repos/${REPO}/issues/${ISSUE}/comments" -F body=@/tmp/chat-reply.md
           echo "posted the reply on #${ISSUE}."
+
+      # Meter the turn into the same spend ledger as agent-work / agent-judge /
+      # review / dogfood (rung 1, #3166) — this rung closes the last gap: chat
+      # ran no Claude turn without a usage row. `--output-format json` gives one
+      # terminal `result` object, not a `stream-json` transcript;
+      # agent-usage-record.mjs's parseTranscript already tolerates a lone object
+      # (it becomes the captured result, the per-call first_call_* columns stay
+      # null), so the record derives from it with no script change. No `--pool`:
+      # agent-chat is not a warm-pool function.
+      #
+      # Credential path DIVERGES from agent-work / review / dogfood: this job is
+      # ubuntu-latest with no instance profile, so it CANNOT drop the OIDC creds
+      # from "Configure AWS credentials (OIDC)" and fall back to an ambient
+      # profile — there is none. It KEEPS the OIDC creds, which requires the
+      # AGENT_AWS_ROLE_ARN role to ALSO grant s3:PutObject on agent/usage/* (the
+      # same requirement agent-judge already documents; one console grant on
+      # that role covers both). Until granted, the write degrades cleanly
+      # (|| echo) and the turn stays green. `if: always()` so a failed turn
+      # still records what it spent.
+      - name: Meter the turn into the spend ledger
+        if: always() && steps.route.outputs.parked == 'false'
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -uo pipefail
+          [ -f /tmp/agent-chat-result.json ] || { echo "no result — nothing to meter"; exit 0; }
+          command -v node >/dev/null || { echo "no node — ledger row skipped"; exit 0; }
+          command -v aws  >/dev/null || { echo "no aws cli — ledger write skipped"; exit 0; }
+
+          record="$(node scripts/agent-usage-record.mjs \
+            --transcript /tmp/agent-chat-result.json \
+            --task chat --ref "$ISSUE" --run-id "$GITHUB_RUN_ID" \
+            --conclusion "$JOB_STATUS" --model "$MODEL" \
+            --created-at "$(date -u +%FT%TZ)")" \
+            || { echo "usage derivation failed — ledger row skipped"; exit 0; }
+          printf '%s\n' "$record" > /tmp/agent-usage-record.json
+
+          # Do NOT unset AWS_*: unlike agent-work/review/dogfood, chat has no
+          # instance profile to fall back to — the OIDC creds are its only path.
+          aws s3 cp /tmp/agent-usage-record.json \
+            "s3://aether-evidence/agent/usage/$(date -u +%F)/${GITHUB_RUN_ID}.json" \
+            --content-type application/json \
+            || echo "ledger write failed (OIDC role's agent/usage/* grant pending?) — run stays green"
