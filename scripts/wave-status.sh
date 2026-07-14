@@ -17,6 +17,16 @@
 #                                            docs / marker build / hook tests)
 #                                            concludes failure, without waiting
 #                                            for the slow jobs to finish.
+#   scripts/wave-status.sh --wait-verdict <pr>
+#                                            loop (every 20s) until critic holds a
+#                                            standing verdict on <pr>'s CURRENT
+#                                            head SHA (issue #3405 — the implement
+#                                            verdict loop's wait); exit 0 on
+#                                            APPROVED, 1 on CHANGES_REQUESTED. A
+#                                            verdict on a stale SHA keeps polling
+#                                            (a fix push dismissed it), and the
+#                                            head is re-read every tick so the
+#                                            wait follows a push.
 #
 # Output (snapshot mode):
 #
@@ -47,8 +57,10 @@ OWNER="iamacoffeepot"
 REPO="iamacoffeepot/aether"
 WAIT_MODE=0
 WAIT_PR=""
+VERDICT_MODE=0
+VERDICT_PR=""
 
-# Collect optional PR-number filters and parse --wait.
+# Collect optional PR-number filters and parse --wait / --wait-verdict.
 FILTER_PRS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -57,9 +69,14 @@ while [[ $# -gt 0 ]]; do
             WAIT_PR="$2"
             shift 2
             ;;
+        --wait-verdict)
+            VERDICT_MODE=1
+            VERDICT_PR="$2"
+            shift 2
+            ;;
         --*)
             echo "unknown flag: $1" >&2
-            echo "usage: wave-status.sh [<pr> ...] | --wait <pr>" >&2
+            echo "usage: wave-status.sh [<pr> ...] | --wait <pr> | --wait-verdict <pr>" >&2
             exit 2
             ;;
         *)
@@ -165,6 +182,37 @@ if [[ $WAIT_MODE -eq 1 ]]; then
             echo "[wave-status] CI pass: $verdict"
             echo "$runs" | jq -r '.[] | select(.conclusion != "success" and .conclusion != null) | .name + ": " + .conclusion'
             [[ "$verdict" == "success" ]] && exit 0 || exit 1
+        fi
+        sleep 20
+    done
+fi
+
+# --wait-verdict mode (issue #3405): loop until critic holds a standing verdict
+# on the PR's CURRENT head SHA. The head is re-read every tick so the wait
+# follows a fix push, and a verdict on a stale SHA keeps polling — the snapshot
+# review column's known staleness gap must not leak into the loop that gates
+# the implement verdict loop. Exit 0 on APPROVED, 1 on CHANGES_REQUESTED.
+if [[ $VERDICT_MODE -eq 1 ]]; then
+    if [[ -z "$VERDICT_PR" ]]; then
+        echo "--wait-verdict requires a PR number" >&2
+        exit 2
+    fi
+    CRITIC_LOGIN="iamacritic[bot]"
+    echo "[wave-status] waiting for a $CRITIC_LOGIN verdict on PR #$VERDICT_PR's current head…"
+    while :; do
+        sha=$(gh api "repos/$REPO/pulls/$VERDICT_PR" --jq '.head.sha' 2>/dev/null) || { sleep 20; continue; }
+        # Stream matching reviews per page (chronological), keep the newest
+        # verdict on the current head; tail consumes fully, no SIGPIPE.
+        verdict=$(gh api "repos/$REPO/pulls/$VERDICT_PR/reviews" --paginate \
+            --jq ".[] | select(.user.login == \"$CRITIC_LOGIN\" and .commit_id == \"$sha\"
+                       and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\")) | .state" \
+            2>/dev/null | tail -1) || verdict=""
+        if [[ "$verdict" == "APPROVED" ]]; then
+            echo "[wave-status] verdict on ${sha:0:8}…: APPROVED"
+            exit 0
+        elif [[ "$verdict" == "CHANGES_REQUESTED" ]]; then
+            echo "[wave-status] verdict on ${sha:0:8}…: CHANGES_REQUESTED"
+            exit 1
         fi
         sleep 20
     done

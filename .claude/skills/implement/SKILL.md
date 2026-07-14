@@ -224,10 +224,21 @@ CI green — or green except a sole `Qodana scan` red held for `/land`:
    gh workflow run review.yml -f pr=<N>
    ```
 
-   The dispatch activates the five-pillar review against `origin/main...HEAD`, critic submits one `APPROVE` / `REQUEST_CHANGES` verdict, and dogfood chains off the review's completion. On the headless implement box the dispatch rides the fleet App token (App-created events trigger downstream workflows). Re-review after a later fix push is an `@iamacritic review` comment on the PR — `/findings`'s re-request channel, not `/implement`'s.
-3. Leave the PR as a **draft**. Do not un-draft, do not merge, do not close, do not delete the `phase:*` label (Done is a `/land`-time action). Un-drafting is the user's (or the approved release process's) action — once a PR is un-drafted, native auto-merge lands it on green ([[feedback_green_pr_automerges_before_review]]).
-   The requested review posts its verdict — a native critic `APPROVE` / `REQUEST_CHANGES` review, with findings annotated on the PR when the rollup is actionable (the dogfood runner sets `dogfood:unresolved` by its own contract). The reconciler reads the review verdict and that label and moves the closing issue to `phase:findings`. Resolving them — fix or justify each finding, reply on its thread with the fix commit, then resolve the thread — is `/findings`'s mandate, not `/implement`'s; run `/findings <pr>` on a PR at `phase:findings`. `/land` refuses to land while critic's verdict stands at `REQUEST_CHANGES`, `dogfood:unresolved` is present, or the issue sits at `phase:findings`.
-4. Print to user:
+   The dispatch activates the review against `origin/main...HEAD` — the reviewer's own tier table decides how much machinery the diff earns (issue #3404; the requester never pre-judges that) — critic submits one `APPROVE` / `REQUEST_CHANGES` verdict, and dogfood chains off the review's completion. On the headless implement box the dispatch rides the fleet App token (App-created events trigger downstream workflows).
+3. **The verdict loop (issue #3405).** The builder is not done until its work is accepted — wait for the verdict and loop until APPROVE:
+
+   ```bash
+   scripts/wave-status.sh --wait-verdict <PR>
+   ```
+
+   Exit 0 (APPROVED) → step 4. Exit 1 (CHANGES_REQUESTED) → run one findings iteration: execute [`/findings`' Mandate](../findings/SKILL.md#mandate) — fix or justify each finding, reply on its thread with the fix commit, resolve the thread — re-enter the [Refine loop](#refine-loop-the-spin-until-green-part) until CI is green on the fixed head, post the plain `@iamacritic review` re-request (the reviewer resolves it to the cheap in-session delta confirm), then return to the wait.
+
+   **The crash-safety invariant:** every iteration completes its externally-visible acts — the fix pushes, the thread resolutions, the re-request comment — *before* re-entering the wait. A box that dies waiting strands nothing: the re-request is already posted, the confirm verdict arrives without any builder session, the reconciler computes the resting phase, and `/land` proceeds. The wait only buys the next iteration a warm context.
+
+   **Budgets:** at most **3 findings iterations** per run — a fourth CHANGES_REQUESTED self-bounces to Plan with the full attempt history (the same mechanics as the retry cap). Within **10 minutes of the runner leash** (headless: the 90-minute `agent-work` timeout), finish the current iteration's visible acts, post the loop state as a PR comment, and end instead of re-entering the wait — the pipeline converges without the box, and a re-dispatched run's re-entrancy guard resumes from the observed PR state.
+4. Leave the PR as a **draft**. Do not un-draft, do not merge, do not close, do not delete the `phase:*` label (Done is a `/land`-time action). Un-drafting is the user's (or the approved release process's) action — once a PR is un-drafted, native auto-merge lands it on green ([[feedback_green_pr_automerges_before_review]]).
+   The verdict the loop ended on is critic's native APPROVE (with `dogfood:unresolved` still the dogfood runner's own contract). The reconciler computes the resting phase from the same facts the loop made true. The standalone `/findings <pr>` remains the manual path for a findings-phase PR whose builder box is gone (a leash death) or for review-only passes. `/land` refuses to land while critic's verdict stands at `REQUEST_CHANGES`, `dogfood:unresolved` is present, or the issue sits at `phase:findings`.
+5. Print to user:
 
    ```
    ✓ #<N> implemented and CI-green.
@@ -314,14 +325,14 @@ The single `PUT …/labels` replaces the label set with the non-`phase:*` labels
 - **CI red on first push** (formatting, build, clippy): fix in-worktree and re-push. A first-push red doesn't count against the retry budget — with `cargo fmt` the only local check, shaking the initial build out under CI is expected, and the retry cap counts real failures once the PR is established.
 - **Stale worktree from a prior aborted or bounced run** (`.claude/worktrees/issue-<N>` already exists): the [stale-worktree probe](#sweep-dispatch) catches this before `git worktree add` runs — auto-cleared when safe (clean, branch not ahead, no open PR), surfaced for a decision when dirty / ahead / PR-attached — both in §Sweep dispatch for the batch and inline in §Worktree setup for a single-issue run. If `git worktree list` is itself wedged so the remove can't proceed, instruct the user to clean it up manually.
 - **Phase regression while running** (someone hand-bounces the issue mid-execution): detect on the next phase-label swap, abort the loop, leave the branch and PR as-is, post a comment noting the abort.
-- **PR gets reviewer comments mid-loop**: ignore in v1. `/implement` only listens to CI signal. Reviewer feedback is a separate human concern — they can `/bounce` or comment on the PR directly.
+- **PR gets reviewer comments mid-CI-loop**: the Refine loop listens only to CI signal; critic's findings are consumed at their proper station — the verdict loop (Done condition step 3), after CI is green. A human reviewer's ad-hoc comments remain a human concern (`/bounce` or direct handling).
 
 ## What `/implement` does NOT do
 
 - Merge the PR (manual or Phase C orchestrator).
 - Edit the issue body (only `/scope` does).
 - Re-scope the issue when CI surfaces problems — bounce instead.
-- Address reviewer feedback on the PR. Reviewers comment; `/bounce` if the feedback requires re-scoping; manual handling otherwise.
+- Address a *human* reviewer's ad-hoc feedback on the PR. Critic's findings are the verdict loop's input (Done condition step 3); a human's comments are `/bounce` material if they require re-scoping, manual handling otherwise.
 - Notify anyone. The printed output and the `phase:*` labels are the surface; the only comment this skill posts is a self-bounce reason.
 - Merge — code PRs always hold for your review; auto-merge is the release process's call, not this skill's.
 - Run scoped (without `--quick`) on an issue that isn't at `phase:ready`. For an ad-hoc fix whose body already carries the change, use `--quick`.
