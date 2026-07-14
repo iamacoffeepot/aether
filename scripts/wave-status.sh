@@ -10,8 +10,12 @@
 #   scripts/wave-status.sh                   print all open PRs
 #   scripts/wave-status.sh 42 99             restrict to PR #42 and #99
 #   scripts/wave-status.sh --wait <pr>       loop (every 20s) until the `CI pass`
-#                                            aggregator for <pr> completes;
-#                                            exit 0 on success, 1 on failure.
+#                                            aggregator for <pr>'s CURRENT head
+#                                            SHA completes; exit 0 on success,
+#                                            1 on failure. The head is re-read
+#                                            every tick so the wait follows a
+#                                            fix push instead of settling on a
+#                                            superseded head's verdict.
 #                                            Fast-fails (exits 1 early) the moment
 #                                            a deterministic check (fmt / clippy /
 #                                            docs / marker build / hook tests)
@@ -107,11 +111,18 @@ ci_verdict() {
 }
 
 # Fetch a PR's review state — the highest-signal state across all reviews.
+# An APPROVED review only counts when its commit_id matches the current head
+# sha (a push doesn't auto-dismiss a stale approval on GitHub's side, so an
+# approval on a superseded head falls through to "pending" instead of
+# misreporting "approved"). CHANGES_REQUESTED is not head-gated: GitHub
+# doesn't auto-dismiss it on a push either, and it should keep blocking the
+# merge until a fresh review clears it.
 # Returns: "approved" | "changes-requested" | "pending" | "none"
 review_state() {
     local pr_num="$1"
+    local sha="$2"
     local reviews
-    reviews=$(gh api "repos/$REPO/pulls/$pr_num/reviews" --jq '[.[].state]' 2>/dev/null) || { echo "none"; return 0; }
+    reviews=$(gh api "repos/$REPO/pulls/$pr_num/reviews" --jq '[.[] | {state, commit_id}]' 2>/dev/null) || { echo "none"; return 0; }
     local count
     count=$(echo "$reviews" | jq 'length')
     if [[ "$count" == "0" ]]; then
@@ -120,8 +131,8 @@ review_state() {
     fi
     # CHANGES_REQUESTED beats APPROVED beats PENDING (commented/dismissed).
     local cr approved
-    cr=$(echo "$reviews" | jq '[.[] | select(. == "CHANGES_REQUESTED")] | length')
-    approved=$(echo "$reviews" | jq '[.[] | select(. == "APPROVED")] | length')
+    cr=$(echo "$reviews" | jq '[.[] | select(.state == "CHANGES_REQUESTED")] | length')
+    approved=$(echo "$reviews" | jq --arg sha "$sha" '[.[] | select(.state == "APPROVED" and .commit_id == $sha)] | length')
     if [[ "$cr" != "0" ]]; then
         echo "changes-requested"
     elif [[ "$approved" != "0" ]]; then
@@ -143,7 +154,7 @@ print_pr_line() {
     local state_col ci_col review_col
     state_col=$([ "$draft_flag" = "true" ] && echo "draft" || echo "ready")
     ci_col="ci:$(ci_verdict "$sha")"
-    review_col="review:$(review_state "$num")"
+    review_col="review:$(review_state "$num" "$sha")"
 
     printf '%-6s  %-7s  %-18s  %-28s  %s\n' \
         "#$num" "$state_col" "$ci_col" "$review_col" "$branch"
@@ -164,6 +175,9 @@ if [[ $WAIT_MODE -eq 1 ]]; then
     # the slow jobs — the new push supersedes the run.
     fast_fail_names='["Format","Clippy","Docs","Marker-only host build"]'
     while :; do
+        # Guarded re-read every tick — the wait follows a fix push; a
+        # transient hiccup keeps the previous sha for this tick only.
+        sha=$(gh api "repos/$REPO/pulls/$WAIT_PR" --jq '.head.sha' 2>/dev/null) || true
         runs=$(gh api "repos/$REPO/commits/$sha/check-runs" --paginate --jq '.check_runs' 2>/dev/null) || { sleep 20; continue; }
         fast_red=$(echo "$runs" | jq -r --argjson ff "$fast_fail_names" \
             '.[] | select(.status == "completed")
