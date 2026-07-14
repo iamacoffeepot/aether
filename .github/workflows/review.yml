@@ -56,6 +56,7 @@ on:
 run-name: >-
   review-${{
     github.event_name == 'workflow_dispatch' && inputs.pr ||
+    (github.event.sender.login == 'iamacoffeepot' || github.event.sender.login == 'iamabuilder[bot]') &&
     (contains(github.event.comment.body, '@iamacritic review') || contains(github.event.comment.body, '@iamacritic full review')) && github.event.issue.number ||
     github.run_id
   }}
@@ -69,6 +70,7 @@ concurrency:
   group: >-
     review-${{
       github.event_name == 'workflow_dispatch' && inputs.pr ||
+      (github.event.sender.login == 'iamacoffeepot' || github.event.sender.login == 'iamabuilder[bot]') &&
       (contains(github.event.comment.body, '@iamacritic review') || contains(github.event.comment.body, '@iamacritic full review')) && github.event.issue.number ||
       github.run_id
     }}
@@ -1128,4 +1130,4 @@ jobs:
           gh api -X POST "repos/${REPO}/pulls/${PR}/reviews" \
             -f event=APPROVE \
             -f commit_id="${HEAD_SHA}" \
-            -f body="Below the review-session bar — tier \`${APPROVE_ROUTE}\`: ${why}. Auto-approved by critic so the PR carries a standing verdict for the native required review; \`@iamacritic full review\` forces a session anyway."
+            -f body="Below the review-session bar — tier \`${APPROVE_ROUTE}\`: ${why}. Auto-approved by critic so the PR carries a standing verdict for the native required review; the owner can force a full review session on this PR anyway."
