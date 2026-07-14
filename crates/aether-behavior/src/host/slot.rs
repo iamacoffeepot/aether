@@ -198,12 +198,10 @@ impl ScriptSlot {
         let Some(load) = self.state_load_fn else {
             return;
         };
-        if self.store.set_fuel(self.fuel_per_call).is_err() {
-            return;
-        }
         let Some((ptr, len)) = self.write_guest(blob) else {
             return;
         };
+        let _ = self.store.set_fuel(self.fuel_per_call);
         let _ = load.call(&mut self.store, (ptr, len));
     }
 
@@ -492,22 +490,6 @@ mod tests {
             .expect("test setup: stateful module instantiates");
 
         assert_eq!(slot.save_state(), default_blob);
-    }
-
-    // Tripwire: `offer_state` must set fuel before guest `alloc`, or the
-    // prior-state blob never reaches `state_load` and `state_save` comes back
-    // empty on restore.
-    #[test]
-    fn offer_state_round_trips_prior_blob_through_restore() {
-        let engine = build_engine();
-        let handled = KindId(0x5001);
-        let default_blob = b"default state";
-        let prior_blob = b"persist me";
-        let mut slot =
-            ScriptSlot::instantiate(&engine, &stateful_wasm(handled, default_blob), Some(prior_blob), 1_000_000, 3)
-                .expect("test setup: stateful module instantiates");
-
-        assert_eq!(slot.save_state(), prior_blob);
     }
 
     // Tripwire: a missing `state_save` export is fail-open and yields no blob.

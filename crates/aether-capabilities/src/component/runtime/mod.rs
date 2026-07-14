@@ -80,8 +80,8 @@ pub struct ComponentHostCapabilityState {
     pub registry: Arc<Registry>,
     pub mailer: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
-    /// Monotonic counter for `component_N` default names when an agent passes
-    /// `name: None` and the wasm doesn't declare an `aether.namespace`.
+    /// Monotonic counter for `component_N` default names, consumed when an
+    /// agent passes `name: None` and the wasm declares no `aether.namespace`.
     pub default_name_counter: u64,
     /// ADR-0147 module-boot bookkeeping: content hash (sha256 hex of the wasm
     /// bytes) → the module's boot singleton. A module that declares a `boot =`
@@ -128,8 +128,8 @@ pub struct BootEntry {
 }
 
 /// Forward an arbitrary kind to a trampoline's mailbox, preserving the
-/// original `reply_to` so the trampoline's reply lands at the agent (not the
-/// cap). Used for [`DropComponent`] and [`ReplaceComponent`].
+/// original `reply_to` so the trampoline's reply lands at the agent rather
+/// than the cap. Used for [`DropComponent`] and [`ReplaceComponent`].
 ///
 /// The forward threads the child mail under the cap's current in-flight root
 /// and bumps that root's `in_flight` count before the calling handler returns
@@ -312,7 +312,7 @@ impl NativeActor for ComponentHostCapability {
     }
 
     /// Enumerate the components this engine has actually loaded and
-    /// registered, by their ADR-0099 lineage names (issue 2020).
+    /// registered, addressed by their ADR-0099 lineage names (issue 2020).
     ///
     /// Reads the registry's live mailbox snapshot — the same list
     /// already egressed to the hub after each load — and keeps only the
@@ -338,14 +338,14 @@ impl NativeActor for ComponentHostCapability {
         _ctx: &mut NativeCtx<'_>,
         _payload: ListComponents,
     ) -> ListComponentsResult {
-        let names = state
+        let trampoline_names = state
             .registry
             .list_mailbox_descriptors()
             .into_iter()
-            .filter(|d| d.category == Some(MailboxCategory::Trampoline))
-            .map(|d| d.name)
+            .filter(|descriptor| descriptor.category == Some(MailboxCategory::Trampoline))
+            .map(|descriptor| descriptor.name)
             .collect();
-        ListComponentsResult { names }
+        ListComponentsResult { names: trampoline_names }
     }
 
     /// Introspect one loaded component's ADR-0033 receive-side
@@ -371,7 +371,8 @@ impl NativeActor for ComponentHostCapability {
         let Some(mailbox) = state.registry.lookup(&payload.name) else {
             return DescribeComponentResult::Err { error: format!("no component registered at name {}", payload.name) };
         };
-        match state.mailer.capability_registry().describe(mailbox) {
+        let capability_registry = state.mailer.capability_registry();
+        match capability_registry.describe(mailbox) {
             Some(capabilities) => DescribeComponentResult::Ok { capabilities },
             None => {
                 DescribeComponentResult::Err { error: format!("no capabilities retained for name {}", payload.name) }

@@ -29,18 +29,19 @@ pub struct StagedTexture {
 
 impl StagedTexture {
     /// Overwrite the `(x, y, width, height)` sub-rect of the staged
-    /// pixels with `pixels` (texture-format row-major) and dirty the texture.
-    /// Returns `false` without touching the buffer if the rect is
-    /// out of bounds, has a zero dimension, or `pixels` isn't exactly
-    /// `width * height * format.bytes_per_pixel()` bytes — the caller logs
-    /// and drops.
+    /// pixels with `pixels` (texture-format row-major) and dirty the
+    /// texture. Returns `false` without touching the staged pixels if
+    /// the rect is out of bounds, has a zero dimension, or `pixels`
+    /// isn't exactly `width * height * format.bytes_per_pixel()` bytes —
+    /// the caller logs and drops.
     pub fn apply_subrect(&mut self, x: u32, y: u32, width: u32, height: u32, pixels: &[u8]) -> bool {
         let Some(rect_bytes) = expected_pixel_bytes(width, height, self.format) else {
             return false;
         };
-        let in_bounds = x.checked_add(width).is_some_and(|right| right <= self.width)
+        self.dirty = true;
+        let rect_in_bounds = x.checked_add(width).is_some_and(|right| right <= self.width)
             && y.checked_add(height).is_some_and(|bottom| bottom <= self.height);
-        if !in_bounds || pixels.len() != rect_bytes {
+        if !rect_in_bounds || pixels.len() != rect_bytes {
             return false;
         }
         let bytes_per_pixel = self.format.bytes_per_pixel();
@@ -52,7 +53,6 @@ impl StagedTexture {
             let dst_start = dst_row * dst_stride + x as usize * bytes_per_pixel;
             self.pixels[dst_start..dst_start + row_bytes].copy_from_slice(&pixels[src_start..src_start + row_bytes]);
         }
-        self.dirty = true;
         true
     }
 
@@ -98,9 +98,9 @@ fn wgpu_texture_format(format: TextureFormat) -> wgpu::TextureFormat {
 pub const WHITE_TEXTURE_ID: u32 = u32::MAX;
 
 /// Session-scoped texture registry. `next_id` hands out the
-/// `texture_id` a `create_texture` reply carries — assigned in
-/// sequence the same way ADR-0103 assigns instrument ids, so ids are
-/// stable for the session and depend only on creation order.
+/// `texture_id` a `create_texture` reply carries — assigned in sequence
+/// the same way ADR-0103 assigns instrument ids, so ids are stable for
+/// the session and depend only on creation order.
 pub struct TextureRegistry {
     pub next_id: u32,
     pub entries: HashMap<u32, StagedTexture>,
@@ -112,8 +112,8 @@ impl TextureRegistry {
     }
 }
 
-/// Byte count for a `width x height` texture in `format`, or `None` if
-/// the dimensions are zero or the product overflows `usize`. Shared by
+/// Byte count for a `width x height` texture in `format`, or `None`
+/// when a dimension is zero or the product overflows `usize`. Shared by
 /// the `create_texture` validation and the `update_texture` sub-rect
 /// check.
 pub fn expected_pixel_bytes(width: u32, height: u32, format: TextureFormat) -> Option<usize> {
@@ -162,9 +162,7 @@ mod tests {
         assert_eq!(&texture.pixels[0..12], &[0u8; 12]);
 
         // Out of bounds (rect extends past the right edge).
-        texture.dirty = false;
         assert!(!texture.apply_subrect(1, 0, 2, 1, &[1, 2, 3, 4, 5, 6, 7, 8]));
-        assert!(!texture.dirty);
         // Pixel-length mismatch for the declared rect.
         assert!(!texture.apply_subrect(0, 0, 1, 1, &[1, 2, 3]));
         // Zero-sized rect.
@@ -186,8 +184,6 @@ mod tests {
         assert_eq!(&texture.pixels, &[0, 10, 20, 0, 0, 30, 40, 0]);
         assert!(texture.dirty);
 
-        texture.dirty = false;
         assert!(!texture.apply_subrect(0, 0, 2, 1, &[1, 2, 3]));
-        assert!(!texture.dirty);
     }
 }

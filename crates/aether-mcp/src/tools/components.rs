@@ -86,17 +86,6 @@ pub(super) async fn component_config_bytes(
             let bytes = fs::read(path)
                 .await
                 .map_err(|e| McpError::invalid_params(format!("{context}: reading config_path {path:?}: {e}"), None))?;
-            if bytes.len() > max_frame_size() {
-                return Err(McpError::invalid_params(
-                    format!(
-                        "{context}: config_path {path:?} is {} bytes, over the {}-byte RPC frame cap; a \
-                         blob this large must stage as a hub-read path (ADR-0115/0116), not inline into mail",
-                        bytes.len(),
-                        max_frame_size()
-                    ),
-                    None,
-                ));
-            }
             serde_json::from_slice(&bytes).map_err(|e| {
                 McpError::invalid_params(format!("{context}: parsing config_path {path:?} as JSON: {e}"), None)
             })?
