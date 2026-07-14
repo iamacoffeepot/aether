@@ -48,6 +48,18 @@ on:
   issue_comment:
     types: [created]
 
+# The stage-keying grammar: a run is keyed by the object its task mutates —
+# work-{task}-<issue> for the issue-mutating stages, work-land-<pr> and this
+# review-<pr> for the PR-mutating ones. Mirrors the concurrency expression
+# below, run-id fallback included, so an ordinary comment's all-skip run
+# never wears a review key.
+run-name: >-
+  review-${{
+    github.event_name == 'workflow_dispatch' && inputs.pr ||
+    (contains(github.event.comment.body, '@iamacritic review') || contains(github.event.comment.body, '@iamacritic full review')) && github.event.issue.number ||
+    github.run_id
+  }}
+
 # One review per PR; a newer request supersedes an in-flight one. Keyed by
 # the dispatched PR number, or the commented PR's issue number. issue_comment
 # fires on EVERY new comment and a run whose jobs all skip still cancels its
