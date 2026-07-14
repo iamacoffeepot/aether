@@ -67,7 +67,7 @@ jobs:
           else
             echo "Filing the weekly report issue."
             # alert: a machine-filed report issue is not a pipeline work item —
-            # the label keeps it out of the scoper, matching the idiom every
+            # the label keeps it out of the dispatcher, matching the idiom every
             # other machine-filed non-work issue uses (fuzz-nightly,
             # cache-behavior-canary, context-budget-canary, agent-tick; #3180).
             gh issue create --title "$title" --body-file /tmp/weekly-report-issue.md --label alert

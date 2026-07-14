@@ -64,13 +64,18 @@ trap 'rm -rf "$tmp"' EXIT
 ledger="$tmp/ledger.jsonl"
 : > "$ledger"
 found=0
+failed_days=0
 for d in "${days[@]}"; do
   daydir="$tmp/${d}"
   mkdir -p "$daydir"
   if ! aws s3 cp "${USAGE}/${d}/" "$daydir/" --recursive --exclude '*' --include '*.json' >/dev/null 2>"$tmp/s3err"; then
     # An empty day lists nothing and still exits 0; a non-zero exit with stderr
-    # is a real read failure (auth/network) the window total must not hide.
-    [ -s "$tmp/s3err" ] && echo "warning: read failed for ${d}, window may be incomplete" >&2
+    # is a real read failure (auth/network) the window total must not hide —
+    # counted into the printed header so the report itself says it is partial.
+    if [ -s "$tmp/s3err" ]; then
+      echo "warning: read failed for ${d}, window may be incomplete" >&2
+      failed_days=$((failed_days + 1))
+    fi
     continue
   fi
   for f in "$daydir"/*.json; do
@@ -89,10 +94,12 @@ if [ "$found" -eq 0 ]; then
   exit 0
 fi
 
+incomplete=""
+[ "$failed_days" -gt 0 ] && incomplete="  (WARNING: ${failed_days}/${DAYS} days failed to read, totals incomplete)"
 if [ "$DAYS" -eq 1 ]; then
-  echo "Spend scorecard — ${END_DAY} (${found} runs, ${USAGE}/${END_DAY}/)"
+  echo "Spend scorecard — ${END_DAY} (${found} runs, ${USAGE}/${END_DAY}/)${incomplete}"
 else
-  echo "Spend scorecard — ${range_oldest}..${range_newest} (${DAYS} days, ${found} runs, ${USAGE}/)"
+  echo "Spend scorecard — ${range_oldest}..${range_newest} (${DAYS} days, ${found} runs, ${USAGE}/)${incomplete}"
 fi
 echo
 
