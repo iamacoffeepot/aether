@@ -37,13 +37,18 @@
 //     re-writes the whole head. Model-agnostic (reads the first usage-bearing
 //     main-loop turn regardless of model — the canary probes on haiku).
 //
-// Knobs (env, defaults per the design): AGENT_POOL_CUTOFF_MINS=55,
+// Knobs (env, defaults per the design): AGENT_POOL_CUTOFF_MINS=5,
 // AGENT_POOL_CONTEXT_CAP_TOKENS=150000.
 
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
-const CUTOFF_MINS = Number(process.env.AGENT_POOL_CUTOFF_MINS || 55);
+// The default tracks the observed effective prompt-cache TTL (~5 min) on the
+// overage-tier fleet boxes, per #3264's "age-bound derived from cache TTL"
+// invariant — a resume past the TTL re-materializes the whole session tail
+// at full input price, so it is retired rather than served stale. Raise via
+// the env/vars override on a longer-TTL tier.
+const CUTOFF_MINS = Number(process.env.AGENT_POOL_CUTOFF_MINS || 5);
 const CONTEXT_CAP = Number(process.env.AGENT_POOL_CONTEXT_CAP_TOKENS || 150000);
 
 const sha256 = (s) => createHash('sha256').update(s).digest('hex');

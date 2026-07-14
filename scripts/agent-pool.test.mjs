@@ -183,6 +183,10 @@ test('buildManifest hygiene gates name their refusal', () => {
     { ok: false, reason: 'over-cap' });
 });
 
+// Tripwire: the age cutoff default is bound to the effective prompt-cache
+// TTL (~5 min, #3416), so a resume past the TTL is retired rather than
+// served stale — a regression back toward the old 55-minute default would
+// serve a dead-cache resume at full input price and slip past this bracket.
 test('evaluateEligibility: fresh serves; cutoff and cap still retire, cap boundary inclusive', () => {
   const lsTree = parseLsTree(LS_TREE);
   const transcript = parseTranscript(jsonl([init, readEv(`${CWD}/crates/x/src/lib.rs`), readEv(`${CWD}/CLAUDE.md`), result]));
@@ -190,8 +194,17 @@ test('evaluateEligibility: fresh serves; cutoff and cap still retire, cap bounda
   const { manifest } = buildManifest({ transcript, lsTree, verdict, prior, now: NOW });
 
   assert.deepEqual(evaluateEligibility(manifest, lsTree, NOW + 60_000), { ok: true });
+  // Just under the 5-minute cutoff still serves.
   assert.deepEqual(
-    evaluateEligibility(manifest, lsTree, NOW + 56 * 60_000),
+    evaluateEligibility(manifest, lsTree, NOW + 4 * 60_000),
+    { ok: true });
+  // Exactly at the cutoff retires — the check is an inclusive `>=`.
+  assert.deepEqual(
+    evaluateEligibility(manifest, lsTree, NOW + 5 * 60_000),
+    { ok: false, reason: 'past-cutoff' });
+  // Well past the cutoff still retires.
+  assert.deepEqual(
+    evaluateEligibility(manifest, lsTree, NOW + 6 * 60_000),
     { ok: false, reason: 'past-cutoff' });
   assert.deepEqual(
     evaluateEligibility({ ...manifest, context_tokens: 200_000 }, lsTree, NOW + 60_000),
