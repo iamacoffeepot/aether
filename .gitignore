@@ -22,6 +22,10 @@
 .claude/scheduled_tasks.lock
 .claude/worktrees/
 .agents/worktrees/
+# Codex sessions render visualizations into `.codex/visualizations/` in the
+# checkout they ran from — runtime output, never repo content. Only that
+# subdirectory is ignored; anything else under `.codex/` stays visible.
+.codex/visualizations/
 .claude/skills/*
 !.claude/skills/adr/
 !.claude/skills/approve/
