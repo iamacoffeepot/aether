@@ -1,0 +1,24 @@
+A code-review finding was raised under the Correctness lens. Decide whether it survives a STRICT bar — do not rescue it with a plausible story, and do not reject a real issue out of conservatism.
+
+File: <WORKTREE>/crates/aether-capabilities/src/text/runtime/atlas.rs
+Site: pack (shelf-height accumulator) (around line 211)
+Category: off-by-one
+Current form: self.shelf_height = self.shelf_height.max(height);
+Suggested fix: self.shelf_height = self.shelf_height.max(padded_height); — keep the GLYPH_PADDING gutter between shelf rows
+Finder rationale: the next shelf starts at shelf_y + shelf_height; accumulating the unpadded height loses the one-pixel gutter, so bilinear sampling bleeds the tallest glyph's bottom row into the row below
+
+Read the site and the code it depends on.
+
+GROUND THE VERDICT IN TESTS, not inspection — a confident reading of subtle code (math conventions, sign order, edge cases) is exactly where this lens hallucinates a bug.
+1. Read the existing #[test]s for this item. A passing test that pins the claimed-broken behavior REFUTES the finding (final_verdict='false-positive') — cite the test by name.
+2. No test covers the claim and no build is available here — ground by reading the existing #[test]s and the code path; if a high-severity claim has no covering test, state that in the rationale and return final_verdict='uncertain' rather than confirming on inspection alone.
+3. NEVER uphold a finding whose suggested fix would break a currently-passing test — check the fix against the suite before confirming.
+
+The bar for keeping a finding (strict, all lenses): the fix must be strictly better, not merely different.
+- ECONOMY: the suggested form is "the fewest characters that still make sense" — shorter AND at least as clear/safe (over-verbose), or the terse form genuinely costs clarity/safety so the longer fix is worth it (over-terse). Reject taste ("I would write it differently").
+- CORRECTNESS: name the concrete input or code path that misbehaves. Reject "could be unsafe" with no path; reject a hazard rustc/borrowck already prevents.
+- CONVENTION: cite the CLAUDE.md / ADR rule it breaks. Reject anything Layer 0 (clippy -D warnings, fmt, Qodana, check-no-dividers, the disallowed-methods bans) already gates — that is a lintCandidate, not a judgment finding.
+- TEST-INTEGRITY: junk unless the test exercises owned logic a plausible edit to THIS crate would break (and that the shared derive/codec/registry machinery's own tests would NOT already catch), OR it pins a COMPUTED value (a hash, golden bytes, a derived KindId number). A symmetric derive-only roundtrip, a name/schema-shape mirror, or a registry re-test is junk however much ceremony surrounds it.
+Policy anchors: CLAUDE.md and docs/guide/testing.md.
+
+If the finding genuinely meets the bar, final_verdict='confirmed' with the concrete reason it holds (for correctness: the failing input/path, confirmed against a test where possible). If the code is fine as written (the verbosity/terseness is load-bearing, the behavior is correct, a passing test already pins it, the rule does not apply), final_verdict='false-positive'. Use 'uncertain' only when you cannot read or run the relevant code.

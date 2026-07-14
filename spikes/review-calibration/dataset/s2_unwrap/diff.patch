@@ -1,0 +1,49 @@
+diff --git a/crates/aether-codec/src/frame.rs b/crates/aether-codec/src/frame.rs
+index c6e11f56..d9eefcc9 100644
+--- a/crates/aether-codec/src/frame.rs
++++ b/crates/aether-codec/src/frame.rs
+@@ -158,28 +158,29 @@ pub fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>, FrameError> {
+     Ok(out)
+ }
+ 
+-/// Synchronous read of one framed message. Blocks until a complete
++/// Synchronous read of one framed message: the 4-byte little-endian
++/// length prefix, then the wire-encoded body. Blocks until a complete
+ /// frame is consumed from `r`. Async callers should inline the
+-/// length+body reads on their own async stream rather than calling
++/// prefix + body reads on their own async stream rather than calling
+ /// this on a blocking wrapper.
+ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T, FrameError> {
+-    let mut len_buf = [0u8; 4];
+-    r.read_exact(&mut len_buf)?;
+-    let len = u32::from_le_bytes(len_buf) as usize;
++    let mut prefix_buf = [0u8; 4];
++    r.read_exact(&mut prefix_buf).unwrap();
++    let body_len = u32::from_le_bytes(prefix_buf) as usize;
+     let max = max_frame_size();
+-    if len > max {
+-        return Err(FrameError::FrameTooLarge { size: len, max });
++    if body_len > max {
++        return Err(FrameError::FrameTooLarge { size: body_len, max });
+     }
+-    let mut buf = vec![0u8; len];
+-    r.read_exact(&mut buf)?;
+-    Ok(wire::from_bytes(&buf)?)
++    let mut body_buf = vec![0u8; body_len];
++    r.read_exact(&mut body_buf)?;
++    Ok(wire::from_bytes(&body_buf)?)
+ }
+ 
+-/// Pop one complete length-prefixed frame body from an incremental
+-/// receive buffer. A partial prefix or body returns `Ok(None)` without
+-/// changing `buf`, so callers can append the next stream chunk and try
+-/// again. An oversize prefix is rejected before waiting for or
+-/// allocating its declared body.
++/// Pop one complete length-prefixed frame body out of an incremental
++/// receive buffer. A partial prefix or a partial body returns `Ok(None)`
++/// and leaves `buf` untouched, so callers can append the next stream
++/// chunk and retry. An oversize prefix is rejected before the decoder
++/// waits for or allocates its declared body.
+ pub fn pop_frame(buf: &mut Vec<u8>) -> Result<Option<Vec<u8>>, FrameError> {
+     let Some(&prefix) = buf.first_chunk::<4>() else {
+         return Ok(None);

@@ -1,0 +1,57 @@
+diff --git a/crates/aether-mcp/src/tools/components.rs b/crates/aether-mcp/src/tools/components.rs
+index b3e1a3fb..58908d70 100644
+--- a/crates/aether-mcp/src/tools/components.rs
++++ b/crates/aether-mcp/src/tools/components.rs
+@@ -63,6 +63,52 @@ impl StagedBootManifest {
+     }
+ }
+ 
++/// Resolve an optional component init-config source (`config` inline JSON or
++/// `config_path` JSON file) and schema-encode it to the component's declared
++/// Config kind. No source returns `None`; a source for a no-config component is
++/// a tool error.
++pub(super) async fn component_config_bytes(
++    config_kind: Option<&KindDescriptorWire>,
++    config: Option<serde_json::Value>,
++    config_path: Option<&str>,
++    context: &str,
++) -> Result<Option<Vec<u8>>, McpError> {
++    let value = match (config, config_path) {
++        (None, None) => return Ok(None),
++        (Some(_), Some(_)) => {
++            return Err(McpError::invalid_params(
++                format!("{context}: set only one of `config` or `config_path`"),
++                None,
++            ));
++        }
++        (Some(value), None) => value,
++        (None, Some(path)) => {
++            let bytes = fs::read(path)
++                .await
++                .map_err(|e| McpError::invalid_params(format!("{context}: reading config_path {path:?}: {e}"), None))?;
++            serde_json::from_slice(&bytes).map_err(|e| {
++                McpError::invalid_params(format!("{context}: parsing config_path {path:?} as JSON: {e}"), None)
++            })?
++        }
++    };
++
++    let Some(config_kind) = config_kind else {
++        return Err(McpError::invalid_params(
++            format!("{context}: config JSON was provided but the component declares no Config kind"),
++            None,
++        ));
++    };
++    let schema = wire::from_bytes::<SchemaType>(&config_kind.schema_wire)
++        .map_err(|e| internal_msg(&format!("{context}: decoding config schema for {}: {e}", config_kind.name)))?;
++    let resolved = resolve_bytes_params(value, &schema, max_frame_size()).await.map_err(|e| {
++        McpError::invalid_params(format!("{context}: resolving config blob params for {}: {e}", config_kind.name), None)
++    })?;
++    let bytes = aether_codec::encode_schema(&resolved, &schema).map_err(|e| {
++        McpError::invalid_params(format!("{context}: config does not match {}: {e}", config_kind.name), None)
++    })?;
++    Ok(Some(bytes))
++}
++
+ /// Return `true` once every name in `want` is present in `actual`.
+ /// Used by `wait_for_loaded_components` to drive identity-based readiness
+ /// polling: the count variant (`actual.len() >= want.len()`) is insufficient

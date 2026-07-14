@@ -1,0 +1,142 @@
+[
+ {
+  "cell": "sonnet:medium",
+  "id": "T-s2",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "read_frame's contract is Result<T, FrameError> (every other failure path in the fn \u2014 body read at line 175, decode at line 176, oversize check \u2014 returns Err). Line 168's `r.read_exact(&mut prefix_buf).unwrap()` breaks that contract: a stream that closes with 0..3 bytes available (peer disconnect mid"
+ },
+ {
+  "cell": "sonnet:medium",
+  "id": "T-s3",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "Traced pack()'s shelf-advance math: shelf_x advances by padded_width (line 210, includes GLYPH_PADDING), giving a real 1px horizontal gutter between glyphs on the same shelf. But shelf_height accumulates the unpadded height (line 211: `.max(height)`), and the next shelf's y-origin is `shelf_y + shel"
+ },
+ {
+  "cell": "sonnet:medium",
+  "id": "T-s4",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "Traced the exact control flow: in `absorb`, the `continue` inside `if self.visited.contains(&recipient) { continue; }` is inside the outer `for entry in entries` loop, not scoped only to the `if let TraceEvent::Sent` block \u2014 so it skips the rest of that loop iteration entirely, including the uncondi"
+ },
+ {
+  "cell": "sonnet:medium",
+  "id": "T-r2",
+  "truth": "real",
+  "verdict": null,
+  "rationale": null
+ },
+ {
+  "cell": "sonnet:high",
+  "id": "T-s2",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "Empirically verified, not just inspected. I added a temporary test (`Cursor::new(vec![0u8, 1u8])`, i.e. a 2-byte stream that closes before the 4-byte prefix is complete) and ran it: `cargo test -p aether-codec` panicked at frame.rs:168 with `called Result::unwrap() on an Err value: Error { kind: Une"
+ },
+ {
+  "cell": "sonnet:high",
+  "id": "T-s3",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "pack() applies the GLYPH_PADDING gutter asymmetrically: shelf_x advances by padded_width (line 210: `self.shelf_x += padded_width`), reserving a 1px horizontal gap between glyphs on the same shelf, but shelf_height is updated from the raw `height` (line 211: `self.shelf_height.max(height)`), not `pa"
+ },
+ {
+  "cell": "sonnet:high",
+  "id": "T-s4",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "Traced and empirically reproduced. In `absorb`, the visited-check gates both the frontier push and (via `continue`) the `collected.push(entry)` for that same `Sent` entry. `visited` is populated only when a mailbox is dequeued via `next_mailbox`, so a `Sent` discovered later (in a different mailbox'"
+ },
+ {
+  "cell": "sonnet:high",
+  "id": "T-r2",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "Empirically verified, not just inspected. wasmi's Fuel::new() (wasmi_core 1.1.0, fuel.rs) initializes `remaining: 0` \u2014 a freshly built Store with fuel metering on starts at zero fuel, armed only by an explicit set_fuel call. In offer_state, write_guest(blob) (which calls the metered alloc_fn) runs b"
+ },
+ {
+  "cell": "opus:medium",
+  "id": "T-s2",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "Line 168 reads the 4-byte length prefix with `r.read_exact(&mut prefix_buf).unwrap()`, while the body read on line 175 uses `?` and the fn returns `Result<T, FrameError>`. Concrete path: a peer that connects and closes before writing 4 bytes causes `read_exact` to return `Err(UnexpectedEof)` \u2014 a nor"
+ },
+ {
+  "cell": "opus:medium",
+  "id": "T-s3",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "pack applies the horizontal gutter (shelf_x += width + GLYPH_PADDING) and reserves the vertical gutter in its bounds check (shelf_y + padded_height > ATLAS_SIZE), but the shelf-height accumulator on line 211 uses the unpadded height. So when the next shelf opens (shelf_y += shelf_height), it starts "
+ },
+ {
+  "cell": "opus:medium",
+  "id": "T-s4",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "The `continue` on a visited recipient skips `self.collected.push(entry)` as well as the frontier push. A `Sent` event exists only in its sender's ring, so this drops it permanently; the fold then discards any mail_id lacking a `Sent` via `let sent = node.sent?`. Concrete path: chassis(0)->observer(1"
+ },
+ {
+  "cell": "opus:medium",
+  "id": "T-r2",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "On the only path that calls offer_state (instantiate, slot.rs:132), the store is fresh and wasmi's fuel starts at 0 (wasmi_core 1.1.0 Fuel::new sets remaining:0 with metering enabled). write_guest (line 258) calls the alloc export, which executes several metered instructions (test_support.rs:143-148"
+ },
+ {
+  "cell": "opus:high",
+  "id": "T-s2",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "Line 168 `r.read_exact(&mut prefix_buf).unwrap()` panics the reader thread on any prefix I/O error, while the sibling body read one line down (line 175) uses `?` and the fn signature is `Result<T, FrameError>` with a dedicated `FrameError::Io` variant and `From<io::Error>` impl. Concrete misbehaving"
+ },
+ {
+  "cell": "opus:high",
+  "id": "T-s3",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "Genuine off-by-one. The horizontal axis advances by padded_width (shelf_x += padded_width, line 210), leaving a 1px gutter col, but the shelf-height accumulator uses the unpadded height (self.shelf_height.max(height), line 211). A new shelf starts at shelf_y + shelf_height (line 202), so a shelf who"
+ },
+ {
+  "cell": "opus:high",
+  "id": "T-s4",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "The visited-recipient guard in absorb (lines 89-91) uses `continue`, which skips both the frontier push AND `self.collected.push(entry)`. Any `Sent` whose recipient is an already-visited mailbox is dropped from `collected`; since `fold_nodes_with` filters out any node lacking a `Sent` (line 212 `let"
+ },
+ {
+  "cell": "opus:high",
+  "id": "T-r2",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "Real invariant-violation: migration state is silently dropped on the hydrate path. offer_state calls write_guest(blob) (line 201) before arming fuel (line 204). write_guest invokes the guest `alloc` export, which is fuel-metered (build_engine sets consume_fuel(true)). The only caller, instantiate (l"
+ },
+ {
+  "cell": "fable:medium",
+  "id": "T-s2",
+  "truth": "real",
+  "verdict": "false-positive",
+  "rationale": "The cited defect does not exist in the current tree: crates/aether-codec/src/frame.rs line 168 is `r.read_exact(&mut prefix_buf)?;` \u2014 the prefix read already propagates as FrameError::Io via `?`, identical to the other I/O paths in the fn. The behavior the finding asks for is pinned by a passing-sha"
+ },
+ {
+  "cell": "fable:medium",
+  "id": "T-s3",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "pack() checks that padded_height fits (line 206) and advances shelf_x by padded_width (line 210), but accumulates only the unpadded height into shelf_height (line 211). Since the next shelf starts at shelf_y + shelf_height, the tallest glyph on each shelf ends at exactly the row where the next shelf"
+ },
+ {
+  "cell": "fable:medium",
+  "id": "T-s4",
+  "truth": "real",
+  "verdict": "false-positive",
+  "rationale": "The finding's quoted \"current form\" does not exist in the code: absorb's visited check (walk.rs:88-93) guards only the frontier push, and self.collected.push(entry) runs unconditionally, so a Sent to an already-visited mailbox is still collected \u2014 the code already implements the suggested fix. The e"
+ },
+ {
+  "cell": "fable:medium",
+  "id": "T-r2",
+  "truth": "real",
+  "verdict": "confirmed",
+  "rationale": "Empirically grounded, not inspection-only. A fresh wasmi Store under a consume_fuel(true) engine starts with zero fuel, so the `alloc` call inside write_guest (line 262) traps OutOfFuel before offer_state's later set_fuel at line 204 ever runs, and the else-return at line 201 silently drops the migr"
+ }
+]

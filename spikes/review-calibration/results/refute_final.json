@@ -1,0 +1,516 @@
+{
+ "cells": {
+  "fable:medium": {
+   "keptReal": 6,
+   "real": 6,
+   "killedFab": 6,
+   "fab": 6,
+   "uncertain": 0
+  },
+  "opus:high": {
+   "keptReal": 6,
+   "real": 6,
+   "killedFab": 6,
+   "fab": 6,
+   "uncertain": 0
+  },
+  "opus:medium": {
+   "keptReal": 6,
+   "real": 6,
+   "killedFab": 6,
+   "fab": 6,
+   "uncertain": 0
+  },
+  "sonnet:high": {
+   "keptReal": 6,
+   "real": 6,
+   "killedFab": 6,
+   "fab": 6,
+   "uncertain": 0
+  },
+  "sonnet:medium": {
+   "keptReal": 5,
+   "real": 6,
+   "killedFab": 6,
+   "fab": 6,
+   "uncertain": 1
+  }
+ },
+ "rows": [
+  {
+   "cell": "fable:medium",
+   "id": "F-atlas-overflow",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "Every AtlasEntry reaching rect_rgba is produced by Atlas::pack, which hard-clamps rects to the fixed 512x512 atlas (padded_width > ATLAS_SIZE and shelf_y + padded_height > ATLAS_SIZE both refuse placement, returning GlyphSlot::Full instead of an entry). Max possible product is 511*511*4 = 1,044,484 ",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "fable:medium",
+   "id": "F-frame-cap",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "read_frame already performs the exact bound check the finding asks for: lines 170-173 of crates/aether-codec/src/frame.rs compare body_len against max_frame_size() and return FrameError::FrameTooLarge before the vec![0u8; body_len] allocation at line 174. A 4 GiB declared prefix is rejected without ",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "fable:medium",
+   "id": "F-settle-saturate",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The EWMA update is a convex combination: in both branches next_nanos is bounded by max(prev_nanos, sample_nanos) since alpha/1000 = 0.2 < 1, so there is no accumulator that can exceed its inputs. prev comes from a stored Duration built via Duration::from_nanos(u64) and sample is a measured Instant-d",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "fable:medium",
+   "id": "F-slot-refuel",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The finding's premise \u2014 that fuel is a shared budget save_state drains without re-arming \u2014 is false: every guest entry point re-arms the budget itself. filter_inner sets self.store.set_fuel(self.fuel_per_call) at the top of every filter call (slot.rs:233, with the module doc \"Only fuel resets per ca",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "fable:medium",
+   "id": "F-texture-zero",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The suggested fix already exists: expected_pixel_bytes opens with `if width == 0 || height == 0 { return None; }` before the checked_mul chain, so a zero dimension is rejected explicitly and can never reach wgpu as Some(0). The passing test expected_pixel_bytes_validates_dimensions pins exactly the ",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "fable:medium",
+   "id": "F-walk-cycle",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The suggested fix already exists in the code: TreeWalk has a visited BTreeSet (walk.rs:50); next_mailbox only yields a mailbox when visited.insert() returns true (lines 68-75), and absorb refuses to enqueue an already-visited recipient (lines 87-91). A cyclic mail graph (A\u2192B\u2192A) therefore re-enqueues",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "fable:medium",
+   "id": "T-r2",
+   "truth": "real",
+   "verdict": "confirmed",
+   "source": "refute-serial"
+  },
+  {
+   "cell": "fable:medium",
+   "id": "T-s2",
+   "truth": "real",
+   "verdict": "confirmed",
+   "source": "refute-serial"
+  },
+  {
+   "cell": "fable:medium",
+   "id": "T-s3",
+   "truth": "real",
+   "verdict": "confirmed",
+   "source": "refute-serial"
+  },
+  {
+   "cell": "fable:medium",
+   "id": "T-s4",
+   "truth": "real",
+   "verdict": "confirmed",
+   "source": "refute-serial"
+  },
+  {
+   "cell": "fable:medium",
+   "id": "T-s7",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "The decreasing-sample branch (settlement.rs:101) computes sample + \u03b1\u00b7(prev \u2212 sample), which equals prev \u2212 (1\u2212\u03b1)\u00b7(prev \u2212 sample) \u2014 it anchors at the new sample and moves the EWMA by weight 0.8 instead of \u03b1 = 0.2, contradicting both the adjacent comment (next = prev \u00b1 \u03b1\u00b7|sample \u2212 prev|) and the symmet",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "fable:medium",
+   "id": "T-s8",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "Concrete failing input: pan=127. With /128.0, pan_norm = 0.9921875, theta falls short of pi/2, and cos(theta) = 0.00614 leaks into the left channel (verified numerically) \u2014 while ADR-0127 and the function's own doc comment specify 127 = hard right mapped to 1.0, and the +1.0 side of the clamp is ind",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:high",
+   "id": "F-atlas-overflow",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The multiplication cannot overflow. An AtlasEntry reaching rect_rgba is only ever produced by get_or_insert from pack's output, and pack (lines 198-208) caps both width and height against ATLAS_SIZE=512 (returns None/Full otherwise). So entry.width*entry.height*4 <= 512*512*4 = 1,048,576, ~4000x bel",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:high",
+   "id": "F-frame-cap",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The bound check the finder asks for already exists directly above the flagged line. read_frame reads the 4-byte prefix into body_len (line 169), then at lines 170-173 does `let max = max_frame_size(); if body_len > max { return Err(FrameError::FrameTooLarge { size: body_len, max }); }` \u2014 returning b",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:high",
+   "id": "F-settle-saturate",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The claimed \"poisoning\" requires u64::try_from(next_nanos) to fail, i.e. next_nanos > u64::MAX (~584 years in nanos). This is structurally unreachable: next_nanos is a weighted average strictly bounded between prev_nanos and sample_nanos; prev is always \u2264 u64::MAX because every stored EWMA is writte",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:high",
+   "id": "F-slot-refuel",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The finding assumes the store's fuel is a budget shared across calls, so spending it in save_state starves later filter calls. That is refuted by the code path: filter_inner's first statement (line 233) is `self.store.set_fuel(self.fuel_per_call)?`, and wasmi's set_fuel sets an absolute value, not a",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:high",
+   "id": "F-texture-zero",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The function already rejects zero dimensions explicitly. Lines 120-122 read `if width == 0 || height == 0 { return None; }` before the checked_mul. The finder quoted only the checked_mul line and missed this guard; the suggested fix is already the current form. The passing test `expected_pixel_bytes",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:high",
+   "id": "F-walk-cycle",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The visited-set check the finding asks for already exists. next_mailbox returns a mailbox only when self.visited.insert(mbx) returns true (BTreeSet::insert is false for a duplicate), so each mailbox id is handed out at most once; absorb further guards enqueue with !self.visited.contains(&recipient).",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:high",
+   "id": "T-r2",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "Real invariant-violation: migration state is silently dropped on the hydrate path. offer_state calls write_guest(blob) (line 201) before arming fuel (line 204). write_guest invokes the guest `alloc` export, which is fuel-metered (build_engine sets consume_fuel(true)). The only caller, instantiate (l",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "opus:high",
+   "id": "T-s2",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "Line 168 `r.read_exact(&mut prefix_buf).unwrap()` panics the reader thread on any prefix I/O error, while the sibling body read one line down (line 175) uses `?` and the fn signature is `Result<T, FrameError>` with a dedicated `FrameError::Io` variant and `From<io::Error>` impl. Concrete misbehaving",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "opus:high",
+   "id": "T-s3",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "Genuine off-by-one. The horizontal axis advances by padded_width (shelf_x += padded_width, line 210), leaving a 1px gutter col, but the shelf-height accumulator uses the unpadded height (self.shelf_height.max(height), line 211). A new shelf starts at shelf_y + shelf_height (line 202), so a shelf who",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "opus:high",
+   "id": "T-s4",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "The visited-recipient guard in absorb (lines 89-91) uses `continue`, which skips both the frontier push AND `self.collected.push(entry)`. Any `Sent` whose recipient is an already-visited mailbox is dropped from `collected`; since `fold_nodes_with` filters out any node lacking a `Sent` (line 212 `let",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "opus:high",
+   "id": "T-s7",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "The decreasing-sample branch (line 101) computes `sample + (prev \u2212 sample)\u00b7\u03b1 = (1\u2212\u03b1)\u00b7sample + \u03b1\u00b7prev`, which anchors the EWMA at the new sample with weight (1\u2212\u03b1). The correct EWMA \u2014 and the invariant stated in the adjacent line-93 comment `next = prev \u00b1 \u03b1\u00b7|sample \u2212 prev|` \u2014 is `prev \u2212 (prev \u2212 sample",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:high",
+   "id": "T-s8",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "ADR-0127 states \"127 = hard right, mapped to [-1.0, 1.0]\". With /128.0, an i8 pan of 127 maps to pan_norm=0.9921875, giving gain_l=cos(theta)\u22480.00614 and gain_r\u22480.99998 \u2014 a ~0.6% (\u221244 dB) left residue instead of the specified [0, 1] hard right. Because i8/128.0 spans only [-1.0, 0.9921875], the .cla",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:medium",
+   "id": "F-atlas-overflow",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "rect_rgba only ever receives an AtlasEntry, and every AtlasEntry is minted by get_or_insert after pack() succeeds. pack (lines 198-208) rejects any placement whose padded_width exceeds ATLAS_SIZE (512) or that overflows the atlas height, so a placed entry always has width, height <= 511. Thus entry.",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:medium",
+   "id": "F-frame-cap",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The suggested fix already exists in the code. read_frame reads the 4-byte prefix, computes body_len, then at lines 170-173 checks `if body_len > max { return Err(FrameError::FrameTooLarge { size, max }) }` where max = max_frame_size() (default 64 MiB, env-overridable, hard-clamped at 1 GiB). Only af",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:medium",
+   "id": "F-settle-saturate",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The EWMA update is bounded: the result never exceeds max(prev_nanos, sample_nanos), so next_nanos can only exceed u64::MAX if a single latency sample exceeds u64::MAX nanoseconds (~584 years). latency is a Duration from Instant-elapsed settlement times, so that branch is unreachable defensive code, ",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:medium",
+   "id": "F-slot-refuel",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The finding's premise \u2014 that fuel is a shared budget spent by save_state and never re-armed, so subsequent filter calls run starved \u2014 is false. Every guest-call entry point re-arms fuel at its top: filter_inner unconditionally calls self.store.set_fuel(self.fuel_per_call) at line 233 before the filt",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:medium",
+   "id": "F-texture-zero",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The zero-dimension guard the finding asks for already exists: lines 120-122 of texture.rs read `if width == 0 || height == 0 { return None; }`, executing before the checked_mul on line 123. The finder quoted only the checked_mul line and overlooked the guard directly above it. The passing test `expe",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:medium",
+   "id": "F-walk-cycle",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The visited-set guard the finder proposes already exists. next_mailbox (line 71) only returns a mailbox when self.visited.insert(mailbox) is true, so each mailbox is handed out at most once; absorb (line 89) further guards re-enqueue with !self.visited.contains(&recipient). With a finite mailbox set",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:medium",
+   "id": "T-r2",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "On the only path that calls offer_state (instantiate, slot.rs:132), the store is fresh and wasmi's fuel starts at 0 (wasmi_core 1.1.0 Fuel::new sets remaining:0 with metering enabled). write_guest (line 258) calls the alloc export, which executes several metered instructions (test_support.rs:143-148",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "opus:medium",
+   "id": "T-s2",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "Line 168 reads the 4-byte length prefix with `r.read_exact(&mut prefix_buf).unwrap()`, while the body read on line 175 uses `?` and the fn returns `Result<T, FrameError>`. Concrete path: a peer that connects and closes before writing 4 bytes causes `read_exact` to return `Err(UnexpectedEof)` \u2014 a nor",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "opus:medium",
+   "id": "T-s3",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "pack applies the horizontal gutter (shelf_x += width + GLYPH_PADDING) and reserves the vertical gutter in its bounds check (shelf_y + padded_height > ATLAS_SIZE), but the shelf-height accumulator on line 211 uses the unpadded height. So when the next shelf opens (shelf_y += shelf_height), it starts ",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "opus:medium",
+   "id": "T-s4",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "The `continue` on a visited recipient skips `self.collected.push(entry)` as well as the frontier push. A `Sent` event exists only in its sender's ring, so this drops it permanently; the fold then discards any mail_id lacking a `Sent` via `let sent = node.sent?`. Concrete path: chassis(0)->observer(1",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "opus:medium",
+   "id": "T-s7",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "The decreasing-sample branch (line 101) `sample + (prev - sample)*alpha/1000` = `(1-\u03b1)\u00b7sample + \u03b1\u00b7prev` swaps the EWMA weights: it puts weight (1-\u03b1)=0.8 on the new sample and \u03b1=0.2 on the running average, the inverse of the correct/increasing branch `(1-\u03b1)\u00b7prev + \u03b1\u00b7sample`. Concrete input prev=100ms",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "opus:medium",
+   "id": "T-s8",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "Concrete failing input pan=127: ADR-0127 and the function's own doc comment both state 127 = hard right (left channel silent), but /128.0 maps 127 to 0.992, yielding pan_gains=[0.00614,0.99998] \u2014 a ~-44 dB residue in the left channel at documented full-right. Additionally, with /128.0 the value rang",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:high",
+   "id": "F-atlas-overflow",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The only place an `AtlasEntry` is ever constructed is in `get_or_insert` (atlas.rs:167-176), using the `(x, y)` returned by `pack()`. `pack()` explicitly rejects any rect whose padded dimensions exceed `ATLAS_SIZE` (512): `if padded_width > ATLAS_SIZE { return None; }` and the symmetric check on `sh",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:high",
+   "id": "F-frame-cap",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The suggested fix (\"validate body_len against max_frame_size() before allocating\") already exists in the code: read_frame checks `if body_len > max { return Err(FrameError::FrameTooLarge...) }` at lines 171-173, immediately before the `vec![0u8; body_len]` allocation at line 174. The check runs firs",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:high",
+   "id": "F-settle-saturate",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The EWMA update at line 95-103 is an interpolation, not an extrapolation: when sample_nanos >= prev_nanos, next = prev_nanos + (sample_nanos - prev_nanos) * alpha/1000 with alpha/1000 = 0.2, which is provably in [prev_nanos, sample_nanos]; symmetrically for the sample < prev branch. So next_nanos ca",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:high",
+   "id": "F-slot-refuel",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The finding assumes fuel is a persistent budget that save_state depletes and must \"re-arm.\" It is not: every call path that executes guest code re-arms fuel itself before running. filter_inner (line 233) unconditionally calls `self.store.set_fuel(self.fuel_per_call)` before every filter_fn.call \u2014 th",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:high",
+   "id": "F-texture-zero",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The finding misreads the current code. `expected_pixel_bytes` (lines 119-124) already has an explicit zero-dimension guard before the checked_mul: `if width == 0 || height == 0 { return None; }`. It does not fall through to `Some(0)` for a zero-width texture as the finding claims. The existing test ",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:high",
+   "id": "F-walk-cycle",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The suggested fix already exists. `absorb` (lines 88-93) only pushes a `Sent` event's `recipient` onto the frontier `if !self.visited.contains(&recipient)`, and `next_mailbox` (lines 70-74) additionally guards via `self.visited.insert(mailbox)`, returning `None` once the frontier drains without find",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:high",
+   "id": "T-r2",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "Empirically verified, not just inspected. wasmi's Fuel::new() (wasmi_core 1.1.0, fuel.rs) initializes `remaining: 0` \u2014 a freshly built Store with fuel metering on starts at zero fuel, armed only by an explicit set_fuel call. In offer_state, write_guest(blob) (which calls the metered alloc_fn) runs b",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "sonnet:high",
+   "id": "T-s2",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "Empirically verified, not just inspected. I added a temporary test (`Cursor::new(vec![0u8, 1u8])`, i.e. a 2-byte stream that closes before the 4-byte prefix is complete) and ran it: `cargo test -p aether-codec` panicked at frame.rs:168 with `called Result::unwrap() on an Err value: Error { kind: Une",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "sonnet:high",
+   "id": "T-s3",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "pack() applies the GLYPH_PADDING gutter asymmetrically: shelf_x advances by padded_width (line 210: `self.shelf_x += padded_width`), reserving a 1px horizontal gap between glyphs on the same shelf, but shelf_height is updated from the raw `height` (line 211: `self.shelf_height.max(height)`), not `pa",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "sonnet:high",
+   "id": "T-s4",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "Traced and empirically reproduced. In `absorb`, the visited-check gates both the frontier push and (via `continue`) the `collected.push(entry)` for that same `Sent` entry. `visited` is populated only when a mailbox is dequeued via `next_mailbox`, so a `Sent` discovered later (in a different mailbox'",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "sonnet:high",
+   "id": "T-s7",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "Verified by direct computation of both formulas (not just reading): current code `sample_nanos + (prev_nanos - sample_nanos) * alpha / 1000` algebraically equals `sample*(1-alpha) + prev*alpha` \u2014 i.e. weight (1-alpha)=0.8 on the new sample and alpha=0.2 on the old average. That is backwards relative",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:high",
+   "id": "T-s8",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "Traced the arithmetic directly (no test exercises pan=127, so grounding is via the code path itself, not a subtle-reading guess). For pan=127 (ADR-0127's documented \"hard right\"): f32::from(127)/128.0 = 0.9921875, which the .clamp(-1.0,1.0) leaves untouched (never reaches 1.0). theta = (0.9921875+1)",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:medium",
+   "id": "F-atlas-overflow",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "entry.width/height passed to rect_rgba can never be attacker-scale: an AtlasEntry is only ever constructed inside get_or_insert after Atlas::pack(width, height) succeeds (line 158), and pack() rejects any width/height whose padded size exceeds ATLAS_SIZE (512) before ever reserving a rect (line 198:",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:medium",
+   "id": "F-frame-cap",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The finding claims body_len is used to allocate before any bound check, but lines 170-172 (immediately preceding the flagged `vec![0u8; body_len]` at line 174) already do `let max = max_frame_size(); if body_len > max { return Err(FrameError::FrameTooLarge { size: body_len, max }); }`. So a maliciou",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:medium",
+   "id": "F-settle-saturate",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The claimed \"accumulator overflow\" path is not reachable from any real call. next_nanos is a weighted average \u2014 next = prev \u00b1 \u03b1\u00b7|sample-prev|/1000 with \u03b1 \u2264 1000 (SETTLE_EWMA_ALPHA_PERMILLE) \u2014 which is mathematically bounded by max(prev_nanos, sample_nanos), never larger than both inputs. Both inputs",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:medium",
+   "id": "F-slot-refuel",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The finding claims save_state spends the store's shared fuel budget without re-arming it, so \"the filter calls that follow run fuel-starved and trap.\" But filter_inner (line 233) unconditionally calls self.store.set_fuel(self.fuel_per_call) at the start of every filter call \u2014 the surrounding comment",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:medium",
+   "id": "F-texture-zero",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The finding claims checked_mul only guards overflow and a zero dimension sails through to produce Some(0), but the code at lines 120-122 explicitly checks `if width == 0 || height == 0 { return None; }` before ever reaching the checked_mul chain. This is directly pinned by the existing test `expecte",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:medium",
+   "id": "F-walk-cycle",
+   "truth": "fabricated",
+   "verdict": "false-positive",
+   "rationale": "The suggested fix already exists. `next_mailbox` (line 70-75) only returns a mailbox if `self.visited.insert(mailbox)` succeeds \u2014 i.e. it's a set, and a mailbox popped a second time is silently dropped by the `while let` loop rather than re-yielded. `absorb` (line 88-93) additionally skips enqueuein",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:medium",
+   "id": "T-r2",
+   "truth": "real",
+   "verdict": "confirmed",
+   "source": "refute-serial"
+  },
+  {
+   "cell": "sonnet:medium",
+   "id": "T-s2",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "read_frame's contract is Result<T, FrameError> (every other failure path in the fn \u2014 body read at line 175, decode at line 176, oversize check \u2014 returns Err). Line 168's `r.read_exact(&mut prefix_buf).unwrap()` breaks that contract: a stream that closes with 0..3 bytes available (peer disconnect mid",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "sonnet:medium",
+   "id": "T-s3",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "Traced pack()'s shelf-advance math: shelf_x advances by padded_width (line 210, includes GLYPH_PADDING), giving a real 1px horizontal gutter between glyphs on the same shelf. But shelf_height accumulates the unpadded height (line 211: `.max(height)`), and the next shelf's y-origin is `shelf_y + shel",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "sonnet:medium",
+   "id": "T-s4",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "Traced the exact control flow: in `absorb`, the `continue` inside `if self.visited.contains(&recipient) { continue; }` is inside the outer `for entry in entries` loop, not scoped only to the `if let TraceEvent::Sent` block \u2014 so it skips the rest of that loop iteration entirely, including the uncondi",
+   "source": "refute-rerun"
+  },
+  {
+   "cell": "sonnet:medium",
+   "id": "T-s7",
+   "truth": "real",
+   "verdict": "uncertain",
+   "rationale": "The existing test `settlement_latency_ewma_and_slow_warn_gate` only exercises the increasing-sample branch (10ms->20ms->250ms->300ms) and confirms that branch's formula: prev + (sample-prev)*alpha with alpha=0.2 gives 10+10*0.2=12ms, matching the asserted 12ms. No test exercises a decreasing sample,",
+   "source": "refute-round1"
+  },
+  {
+   "cell": "sonnet:medium",
+   "id": "T-s8",
+   "truth": "real",
+   "verdict": "confirmed",
+   "rationale": "The doc comment on pan_law (lines 581-586) explicitly states the invariant: \"127 hard right\" mapping into [-1.0, 1.0]. With the current `/128.0` divisor, i8's range -128..=127 maps to exactly [-1.0, 0.9921875] \u2014 pan=127 (127/128.0) never reaches 1.0, so hard-right pans still leave a small residual g",
+   "source": "refute-round1"
+  }
+ ]
+}

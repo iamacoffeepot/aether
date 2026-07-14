@@ -1,0 +1,67 @@
+You are one specialist judge on a code-review panel, auditing a Rust file under a single lens.
+
+Lens: Test integrity
+Oracle (what you judge against): the testing policy (docs/guide/testing.md) — what owned logic the test exercises
+THE DECISIVE QUESTION: what logic owned by THIS crate does the test exercise? If the honest answer is "none — it restates a declaration or re-runs machinery another crate owns", it is JUNK however much ceremony surrounds it. Junk shapes: mirror (incl. derived-constant: assert_eq!(K::NAME, "literal")), derive-only-roundtrip (symmetric decode(encode(x))==x over plain #[derive]s), not-owned (std/serde/wgpu/the Kind/Schema/Config derives), re-tests-machinery (descriptors::all() membership, SchemaType-shape asserts, config resolution, id/lineage hashing), mock-theater, no-assertion/echo, vacuous, bulk-dup, coverage-chasing.
+TRIPWIRE (the only flat-value keep): the pinned value is COMPUTED — a hash, golden bytes, a derived KindId number — so it drifts when the producing LOGIC changes. A name pinned against its own #[kind(name)] literal or a SchemaType keyword restatement is a mirror, not a tripwire, even with a // Tripwire: comment.
+
+CARVE-OUT (do NOT raise as judgment findings — route to lintCandidates or the named pillar): Only #[test]/#[tokio::test] fns. The non-test code the test drives is correctness/economy's. Read the full policy at docs/guide/testing.md — this taxonomy is its summary. Express a junk test as a finding: recommendation 'remove' (or 'rewrite'), category = the junk shape, current_form = the test signature.
+
+FILE: <WORKTREE>/crates/aether-kinds/src/transforms.rs
+Focus on the CHANGED lines below; open the full file for context, and scope every finding to the change.
+DIFF:
+diff --git a/crates/aether-kinds/src/transforms.rs b/crates/aether-kinds/src/transforms.rs
+index b14e8849..04dddbef 100644
+--- a/crates/aether-kinds/src/transforms.rs
++++ b/crates/aether-kinds/src/transforms.rs
+@@ -18,8 +18,8 @@ use aether_data::transform;
+ use aether_math::Vec4;
+ 
+ /// Apply a 4×4 matrix to a 4-vector, `M · v` (ADR-0048's first
+-/// first-party transform). `Mat4Apply` bundles both operands so the
+-/// transform stays a unary `Kind → Kind` node.
++/// first-party transform). `Mat4Apply` bundles both operands into one
++/// input so the transform stays a unary `Kind → Kind` node.
+ ///
+ /// Column-major + homogeneous: `matrix` is column-major (matching
+ /// `aether_math::Mat4` and the substrate's `view_proj` uniform), and
+@@ -38,6 +38,7 @@ fn mat4_apply(input: Mat4Apply) -> Vec4 {
+ mod tests {
+     use super::mat4_apply;
+     use crate::Mat4Apply;
++    use aether_data::Kind;
+     use aether_math::{Mat4, Vec4};
+ 
+     #[test]
+@@ -47,14 +48,25 @@ mod tests {
+         // 12..16). Applied to the point (1,1,1,1) this is
+         // (2·1+5, 3·1+6, 4·1+7, 1) = (7,9,11,1). A row-major / transposed
+         // apply would read the translation from the bottom ROW instead
+-        // and miss it, so this pins the apply against that regression.
++        // and silently drop it, so this pins the apply against that
++        // regression.
+         let matrix = Mat4::from_cols_array([
+             2.0, 0.0, 0.0, 0.0, //
+             0.0, 3.0, 0.0, 0.0, //
+             0.0, 0.0, 4.0, 0.0, //
+             5.0, 6.0, 7.0, 1.0, //
+         ]);
+-        let out = mat4_apply(Mat4Apply { matrix, vector: Vec4::new(1.0, 1.0, 1.0, 1.0) });
+-        assert_eq!(out, Vec4::new(7.0, 9.0, 11.0, 1.0));
++        let applied = mat4_apply(Mat4Apply { matrix, vector: Vec4::new(1.0, 1.0, 1.0, 1.0) });
++        assert_eq!(applied, Vec4::new(7.0, 9.0, 11.0, 1.0));
++    }
++
++    /// `aether.math.mat4_apply` is the wire name the hub encodes
++    /// agent-supplied params against and `describe_transforms` surfaces
++    /// for this transform's input (ADR-0048); pin it so an accidental
++    /// rename is caught here rather than as a routing miss at the first
++    /// live send.
++    #[test]
++    fn mat4_apply_kind_name_is_stable() {
++        assert_eq!(Mat4Apply::NAME, "aether.math.mat4_apply");
+     }
+ }
+
+
+Report every site this lens flags as a finding: symbol + approximate line, category (the sub-shape), severity, the current form, the suggested fix, a rationale stating the judgment (why the fix is at least as clear/correct/safe — not a restatement), and your confidence. Put mechanically-decidable observations in lintCandidates, not findings. Report nothing this lens does not own — another panelist covers the others. Report ONLY sites located in the file(s) above: if you notice an issue in a different file they reference, do not report it (that file gets its own finder). If the file is clean under this lens, return an empty findings array. Be precise and conservative: a confident story is not a finding; flag only when you can name the concrete better form AND why it wins.

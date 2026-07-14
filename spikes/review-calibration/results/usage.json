@@ -1,0 +1,89 @@
+{
+ "seeding_agents": [
+  {
+   "agent": "A (audio/text: s1,s3,s8)",
+   "type": "general-purpose",
+   "tokens": 108034,
+   "tool_uses": 28,
+   "duration_s": 414.2
+  },
+  {
+   "agent": "B (trace/render/ewma: s4,s6,s7,c1)",
+   "type": "general-purpose",
+   "tokens": 115915,
+   "tool_uses": 29,
+   "duration_s": 452.5
+  },
+  {
+   "agent": "C (codec: s2,s5,c3)",
+   "type": "general-purpose",
+   "tokens": 110051,
+   "tool_uses": 18,
+   "duration_s": 381.8
+  },
+  {
+   "agent": "D (tests/clean: t1,t2,c4,c2)",
+   "type": "general-purpose",
+   "tokens": 108740,
+   "tool_uses": 39,
+   "duration_s": 419.1
+  }
+ ],
+ "workflow_runs": [
+  {
+   "run": "finder-main",
+   "run_id": "wf_c319bcab-229",
+   "agents": 224,
+   "errors": 0,
+   "subagent_tokens": 11541960,
+   "tool_uses": 573,
+   "duration_s": 1170.9,
+   "note": "16 items x 14 cell-trials; items s2/s3/s4/r2 partially contaminated by concurrent refuter tree-tampering; superseded for those items by finder-rerun"
+  },
+  {
+   "run": "refute-round1",
+   "run_id": "wf_4998fc6b-90d",
+   "agents": 60,
+   "errors": 0,
+   "subagent_tokens": 3394102,
+   "tool_uses": 281,
+   "duration_s": 430.6,
+   "note": "5 cells x 12 findings, parallel; T-s2/T-s3/T-s4/T-r2 verdicts contaminated by cross-agent grounding interference; superseded by refute-rerun + refute-serial"
+  },
+  {
+   "run": "refute-rerun",
+   "run_id": "wf_c558a298-4ad",
+   "agents": 20,
+   "errors": 1,
+   "subagent_tokens": 1187778,
+   "tool_uses": 127,
+   "duration_s": 300.7,
+   "note": "post WIP-commit; fable rows still interference-hit (parallel grounding), sonnet:medium T-r2 died on API server error; both superseded by refute-serial"
+  },
+  {
+   "run": "finder-rerun",
+   "run_id": "wf_1808e0e9-133",
+   "agents": 56,
+   "errors": 0,
+   "subagent_tokens": 2945734,
+   "tool_uses": 162,
+   "duration_s": 620.0,
+   "note": "decontamination re-run of s2/s3/s4/r2 x 14 cell-trials on the committed tree; authoritative for those items"
+  },
+  {
+   "run": "refute-serial",
+   "run_id": "wf_49b572dd-1d9",
+   "agents": 5,
+   "errors": 0,
+   "subagent_tokens": 315559,
+   "tool_uses": 47,
+   "duration_s": 571.7,
+   "note": "sequential (one at a time): fable x T-s2/s3/s4/r2 + sonnet:medium T-r2 retry; authoritative for those cells"
+  }
+ ],
+ "totals": {
+  "agents": 369,
+  "subagent_tokens": 19827873,
+  "wall_clock_s_sum": 4761.5
+ }
+}

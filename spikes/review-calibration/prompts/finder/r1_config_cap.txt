@@ -1,0 +1,77 @@
+You are one specialist judge on a code-review panel, auditing a Rust file under a single lens.
+
+Lens: Correctness
+Oracle (what you judge against): the code's own contract — what it implies it should do
+Named bug-shapes (NOT "find any bug" — flag only these, each with a concrete misbehaving input/path).
+- SWALLOWED ERROR: a fallible result dropped — let _ = on a Result, .ok() discarding an Err, unwrap()/expect() on a runtime-fallible path, an omitted ? that loses an error, an error remapped to a less-informative one.
+- MISSING BOUNDS CAP: recursion or geometrically-/user-derived iteration without the CLAUDE.md-mandated depth/budget cap that returns an error rather than overflowing; unbounded growth; integer overflow on user-derived arithmetic.
+- SILENT INCOMPLETENESS: TODO / todo!() / unimplemented!() / a "for now" stub / a branch or match arm that no-ops where the logic is required.
+- INVARIANT VIOLATION: new code that can put a type into a state its invariant forbids (flag the violation; the over-broad pub exposing the field is economy/visibility).
+- RESOURCE LEAK: a handle / subscription / mixer-lane / texture / spawned child acquired without the matching release on every path, including early-return and error paths.
+- CONCURRENCY: a data race / lost update / lock-order hazard. SCOPED: actor state is single-threaded behind its run-token (ADR-0038), so this shape is N/A in actor/component code — apply it ONLY in aether-substrate / native chassis code.
+
+CARVE-OUT (do NOT raise as judgment findings — route to lintCandidates or the named pillar): Judgment about behavior, not lints. rustc owns type/borrow safety (on Rust source only); where a clippy lint already fires, route it to lintCandidates. Do not flag style/verbosity (economy) or wrong-feature (spec). A finding must name the concrete input or path that misbehaves.
+
+FILE: <WORKTREE>/crates/aether-mcp/src/tools/components.rs
+Focus on the CHANGED lines below; open the full file for context, and scope every finding to the change.
+DIFF:
+diff --git a/crates/aether-mcp/src/tools/components.rs b/crates/aether-mcp/src/tools/components.rs
+index b3e1a3fb..58908d70 100644
+--- a/crates/aether-mcp/src/tools/components.rs
++++ b/crates/aether-mcp/src/tools/components.rs
+@@ -63,6 +63,52 @@ impl StagedBootManifest {
+     }
+ }
+ 
++/// Resolve an optional component init-config source (`config` inline JSON or
++/// `config_path` JSON file) and schema-encode it to the component's declared
++/// Config kind. No source returns `None`; a source for a no-config component is
++/// a tool error.
++pub(super) async fn component_config_bytes(
++    config_kind: Option<&KindDescriptorWire>,
++    config: Option<serde_json::Value>,
++    config_path: Option<&str>,
++    context: &str,
++) -> Result<Option<Vec<u8>>, McpError> {
++    let value = match (config, config_path) {
++        (None, None) => return Ok(None),
++        (Some(_), Some(_)) => {
++            return Err(McpError::invalid_params(
++                format!("{context}: set only one of `config` or `config_path`"),
++                None,
++            ));
++        }
++        (Some(value), None) => value,
++        (None, Some(path)) => {
++            let bytes = fs::read(path)
++                .await
++                .map_err(|e| McpError::invalid_params(format!("{context}: reading config_path {path:?}: {e}"), None))?;
++            serde_json::from_slice(&bytes).map_err(|e| {
++                McpError::invalid_params(format!("{context}: parsing config_path {path:?} as JSON: {e}"), None)
++            })?
++        }
++    };
++
++    let Some(config_kind) = config_kind else {
++        return Err(McpError::invalid_params(
++            format!("{context}: config JSON was provided but the component declares no Config kind"),
++            None,
++        ));
++    };
++    let schema = wire::from_bytes::<SchemaType>(&config_kind.schema_wire)
++        .map_err(|e| internal_msg(&format!("{context}: decoding config schema for {}: {e}", config_kind.name)))?;
++    let resolved = resolve_bytes_params(value, &schema, max_frame_size()).await.map_err(|e| {
++        McpError::invalid_params(format!("{context}: resolving config blob params for {}: {e}", config_kind.name), None)
++    })?;
++    let bytes = aether_codec::encode_schema(&resolved, &schema).map_err(|e| {
++        McpError::invalid_params(format!("{context}: config does not match {}: {e}", config_kind.name), None)
++    })?;
++    Ok(Some(bytes))
++}
++
+ /// Return `true` once every name in `want` is present in `actual`.
+ /// Used by `wait_for_loaded_components` to drive identity-based readiness
+ /// polling: the count variant (`actual.len() >= want.len()`) is insufficient
+
+
+Report every site this lens flags as a finding: symbol + approximate line, category (the sub-shape), severity, the current form, the suggested fix, a rationale stating the judgment (why the fix is at least as clear/correct/safe — not a restatement), and your confidence. Put mechanically-decidable observations in lintCandidates, not findings. Report nothing this lens does not own — another panelist covers the others. Report ONLY sites located in the file(s) above: if you notice an issue in a different file they reference, do not report it (that file gets its own finder). If the file is clean under this lens, return an empty findings array. Be precise and conservative: a confident story is not a finding; flag only when you can name the concrete better form AND why it wins.

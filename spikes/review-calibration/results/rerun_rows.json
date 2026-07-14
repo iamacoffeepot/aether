@@ -1,0 +1,1169 @@
+[
+ {
+  "cell": "haiku:low",
+  "trial": 0,
+  "item": "s2_unwrap",
+  "level": "L1",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "read_frame::prefix_read",
+    "line": 168,
+    "category": "swallowed-error",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "haiku:low",
+  "trial": 0,
+  "item": "s3_off_by_one",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 1,
+  "findings": [
+   {
+    "symbol": "Atlas::get_or_insert @ line 152",
+    "line": 152,
+    "category": "missing-bounds-cap",
+    "severity": "high",
+    "confidence": "high",
+    "matched": false
+   },
+   {
+    "symbol": "Atlas::pack @ line 211",
+    "line": 211,
+    "category": "invariant-violation",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "haiku:low",
+  "trial": 0,
+  "item": "s4_silent_noop",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "TreeWalk::absorb, line 88-94",
+    "line": 90,
+    "category": "silent-incompleteness",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "haiku:low",
+  "trial": 0,
+  "item": "r2_fuel_order",
+  "level": "L4",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "offer_state, line 204",
+    "line": 204,
+    "category": "swallowed-error",
+    "severity": "medium",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "haiku:medium",
+  "trial": 0,
+  "item": "s2_unwrap",
+  "level": "L1",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "read_frame",
+    "line": 168,
+    "category": "swallowed-error",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "haiku:medium",
+  "trial": 0,
+  "item": "s3_off_by_one",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "Atlas::pack, line 211",
+    "line": 211,
+    "category": "invariant-violation",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "haiku:medium",
+  "trial": 0,
+  "item": "s4_silent_noop",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": false,
+  "hitSeverity": null,
+  "hitConfidence": null,
+  "fpCount": 0,
+  "findings": [],
+  "agentFailed": false
+ },
+ {
+  "cell": "haiku:medium",
+  "trial": 0,
+  "item": "r2_fuel_order",
+  "level": "L4",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "ScriptSlot::offer_state / line 201",
+    "line": 201,
+    "category": "swallowed-error",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "haiku:high",
+  "trial": 0,
+  "item": "s2_unwrap",
+  "level": "L1",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "read_frame @ line 168",
+    "line": 168,
+    "category": "swallowed-error",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "haiku:high",
+  "trial": 0,
+  "item": "s3_off_by_one",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "Atlas::pack line 211 \u2014 shelf_height calculation",
+    "line": 211,
+    "category": "invariant-violation",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "haiku:high",
+  "trial": 0,
+  "item": "s4_silent_noop",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "TreeWalk::absorb() \u2014 lines 89\u201391",
+    "line": 89,
+    "category": "silent-incompleteness",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "haiku:high",
+  "trial": 0,
+  "item": "r2_fuel_order",
+  "level": "L4",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "offer_state (lines 204-205)",
+    "line": 204,
+    "category": "SWALLOWED ERROR",
+    "severity": "medium",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:low",
+  "trial": 0,
+  "item": "s2_unwrap",
+  "level": "L1",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "read_frame",
+    "line": 169,
+    "category": "SWALLOWED ERROR",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:low",
+  "trial": 0,
+  "item": "s3_off_by_one",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "Atlas::pack",
+    "line": 211,
+    "category": "invariant-violation",
+    "severity": "medium",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:low",
+  "trial": 0,
+  "item": "s4_silent_noop",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": false,
+  "hitSeverity": null,
+  "hitConfidence": null,
+  "fpCount": 0,
+  "findings": [],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:low",
+  "trial": 0,
+  "item": "r2_fuel_order",
+  "level": "L4",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "medium",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "ScriptSlot::offer_state",
+    "line": 204,
+    "category": "missing-bounds-cap",
+    "severity": "medium",
+    "confidence": "medium",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:medium",
+  "trial": 0,
+  "item": "s2_unwrap",
+  "level": "L1",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "read_frame",
+    "line": 168,
+    "category": "SWALLOWED ERROR",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:medium",
+  "trial": 0,
+  "item": "s3_off_by_one",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "Atlas::pack",
+    "line": 211,
+    "category": "invariant-violation",
+    "severity": "medium",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:medium",
+  "trial": 0,
+  "item": "s4_silent_noop",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": false,
+  "hitSeverity": null,
+  "hitConfidence": null,
+  "fpCount": 0,
+  "findings": [],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:medium",
+  "trial": 0,
+  "item": "r2_fuel_order",
+  "level": "L4",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "medium",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "ScriptSlot::offer_state",
+    "line": 204,
+    "category": "MISSING BOUNDS CAP",
+    "severity": "medium",
+    "confidence": "medium",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:medium",
+  "trial": 1,
+  "item": "s2_unwrap",
+  "level": "L1",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "read_frame",
+    "line": 168,
+    "category": "SWALLOWED ERROR",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:medium",
+  "trial": 1,
+  "item": "s3_off_by_one",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "Atlas::pack (shelf_height update), line 211",
+    "line": 211,
+    "category": "invariant-violation",
+    "severity": "medium",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:medium",
+  "trial": 1,
+  "item": "s4_silent_noop",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": false,
+  "hitSeverity": null,
+  "hitConfidence": null,
+  "fpCount": 0,
+  "findings": [],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:medium",
+  "trial": 1,
+  "item": "r2_fuel_order",
+  "level": "L4",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "medium",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "ScriptSlot::offer_state",
+    "line": 204,
+    "category": "missing-bounds-cap",
+    "severity": "medium",
+    "confidence": "medium",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:high",
+  "trial": 0,
+  "item": "s2_unwrap",
+  "level": "L1",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "read_frame",
+    "line": 168,
+    "category": "swallowed-error",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:high",
+  "trial": 0,
+  "item": "s3_off_by_one",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "Atlas::pack \u2014 shelf_height update",
+    "line": 211,
+    "category": "invariant-violation",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:high",
+  "trial": 0,
+  "item": "s4_silent_noop",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "TreeWalk::absorb",
+    "line": 88,
+    "category": "SILENT INCOMPLETENESS",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:high",
+  "trial": 0,
+  "item": "r2_fuel_order",
+  "level": "L4",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "medium",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "ScriptSlot::offer_state",
+    "line": 204,
+    "category": "swallowed-error",
+    "severity": "medium",
+    "confidence": "medium",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:high",
+  "trial": 1,
+  "item": "s2_unwrap",
+  "level": "L1",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "read_frame (prefix read)",
+    "line": 168,
+    "category": "swallowed-error",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:high",
+  "trial": 1,
+  "item": "s3_off_by_one",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "Atlas::pack",
+    "line": 211,
+    "category": "invariant-violation",
+    "severity": "medium",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:high",
+  "trial": 1,
+  "item": "s4_silent_noop",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "TreeWalk::absorb",
+    "line": 88,
+    "category": "silent-incompleteness",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:high",
+  "trial": 1,
+  "item": "r2_fuel_order",
+  "level": "L4",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "ScriptSlot::offer_state",
+    "line": 204,
+    "category": "SWALLOWED ERROR",
+    "severity": "medium",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:xhigh",
+  "trial": 0,
+  "item": "s2_unwrap",
+  "level": "L1",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "read_frame",
+    "line": 168,
+    "category": "SWALLOWED ERROR",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:xhigh",
+  "trial": 0,
+  "item": "s3_off_by_one",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "Atlas::pack",
+    "line": 211,
+    "category": "invariant-violation",
+    "severity": "medium",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:xhigh",
+  "trial": 0,
+  "item": "s4_silent_noop",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "TreeWalk::absorb",
+    "line": 88,
+    "category": "silent-incompleteness",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "sonnet:xhigh",
+  "trial": 0,
+  "item": "r2_fuel_order",
+  "level": "L4",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "ScriptSlot::offer_state",
+    "line": 201,
+    "category": "swallowed-error",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   },
+   {
+    "symbol": "ScriptSlot::offer_state",
+    "line": 204,
+    "category": "swallowed-error",
+    "severity": "low",
+    "confidence": "medium",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:low",
+  "trial": 0,
+  "item": "s2_unwrap",
+  "level": "L1",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "read_frame (prefix read)",
+    "line": 168,
+    "category": "SWALLOWED ERROR",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:low",
+  "trial": 0,
+  "item": "s3_off_by_one",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "Atlas::pack \u2014 shelf_height.max(height)",
+    "line": 211,
+    "category": "invariant-violation",
+    "severity": "medium",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:low",
+  "trial": 0,
+  "item": "s4_silent_noop",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": false,
+  "hitSeverity": null,
+  "hitConfidence": null,
+  "fpCount": 0,
+  "findings": [],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:low",
+  "trial": 0,
+  "item": "r2_fuel_order",
+  "level": "L4",
+  "lens": "correctness",
+  "hit": false,
+  "hitSeverity": null,
+  "hitConfidence": null,
+  "fpCount": 0,
+  "findings": [],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:medium",
+  "trial": 0,
+  "item": "s2_unwrap",
+  "level": "L1",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "read_frame \u2014 prefix read",
+    "line": 168,
+    "category": "SWALLOWED ERROR",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:medium",
+  "trial": 0,
+  "item": "s3_off_by_one",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "Atlas::pack \u2014 shelf_height update, `self.shelf_height = self.shelf_height.max(height)`",
+    "line": 211,
+    "category": "invariant-violation",
+    "severity": "medium",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:medium",
+  "trial": 0,
+  "item": "s4_silent_noop",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "TreeWalk::absorb (continue on already-visited recipient)",
+    "line": 90,
+    "category": "SILENT INCOMPLETENESS",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:medium",
+  "trial": 0,
+  "item": "r2_fuel_order",
+  "level": "L4",
+  "lens": "correctness",
+  "hit": false,
+  "hitSeverity": null,
+  "hitConfidence": null,
+  "fpCount": 0,
+  "findings": [],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:medium",
+  "trial": 1,
+  "item": "s2_unwrap",
+  "level": "L1",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "read_frame \u2014 prefix read (r.read_exact(&mut prefix_buf).unwrap())",
+    "line": 168,
+    "category": "swallowed-error",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:medium",
+  "trial": 1,
+  "item": "s3_off_by_one",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "Atlas::pack \u2014 self.shelf_height.max(height)",
+    "line": 211,
+    "category": "invariant-violation",
+    "severity": "medium",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:medium",
+  "trial": 1,
+  "item": "s4_silent_noop",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "TreeWalk::absorb (Sent branch continue)",
+    "line": 89,
+    "category": "SILENT INCOMPLETENESS",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:medium",
+  "trial": 1,
+  "item": "r2_fuel_order",
+  "level": "L4",
+  "lens": "correctness",
+  "hit": false,
+  "hitSeverity": null,
+  "hitConfidence": null,
+  "fpCount": 0,
+  "findings": [],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:high",
+  "trial": 0,
+  "item": "s2_unwrap",
+  "level": "L1",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "read_frame (prefix read)",
+    "line": 168,
+    "category": "SWALLOWED ERROR",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:high",
+  "trial": 0,
+  "item": "s3_off_by_one",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "medium",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "Atlas::pack (self.shelf_height assignment)",
+    "line": 211,
+    "category": "INVARIANT VIOLATION",
+    "severity": "medium",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:high",
+  "trial": 0,
+  "item": "s4_silent_noop",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "TreeWalk::absorb (the `continue` in the Sent arm)",
+    "line": 90,
+    "category": "silent-incompleteness",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "opus:high",
+  "trial": 0,
+  "item": "r2_fuel_order",
+  "level": "L4",
+  "lens": "correctness",
+  "hit": false,
+  "hitSeverity": null,
+  "hitConfidence": null,
+  "fpCount": 0,
+  "findings": [],
+  "agentFailed": false
+ },
+ {
+  "cell": "fable:medium",
+  "trial": 0,
+  "item": "s2_unwrap",
+  "level": "L1",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "read_frame \u2014 prefix read `r.read_exact(&mut prefix_buf).unwrap()`",
+    "line": 168,
+    "category": "SWALLOWED ERROR",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "fable:medium",
+  "trial": 0,
+  "item": "s3_off_by_one",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "Atlas::pack \u2014 shelf_height update",
+    "line": 211,
+    "category": "invariant-violation",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "fable:medium",
+  "trial": 0,
+  "item": "s4_silent_noop",
+  "level": "L2",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "high",
+  "hitConfidence": "high",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "TreeWalk::absorb \u2014 Sent branch (`if self.visited.contains(&recipient) { continue; }`)",
+    "line": 89,
+    "category": "silent-incompleteness",
+    "severity": "high",
+    "confidence": "high",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ },
+ {
+  "cell": "fable:medium",
+  "trial": 0,
+  "item": "r2_fuel_order",
+  "level": "L4",
+  "lens": "correctness",
+  "hit": true,
+  "hitSeverity": "low",
+  "hitConfidence": "medium",
+  "fpCount": 0,
+  "findings": [
+   {
+    "symbol": "ScriptSlot::offer_state \u2014 the two `let _ =` lines (set_fuel, load.call)",
+    "line": 204,
+    "category": "swallowed-error",
+    "severity": "low",
+    "confidence": "medium",
+    "matched": true
+   }
+  ],
+  "agentFailed": false
+ }
+]

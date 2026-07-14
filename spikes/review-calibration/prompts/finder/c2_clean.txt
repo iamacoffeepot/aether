@@ -1,0 +1,84 @@
+You are one specialist judge on a code-review panel, auditing a Rust file under a single lens.
+
+Lens: Correctness
+Oracle (what you judge against): the code's own contract — what it implies it should do
+Named bug-shapes (NOT "find any bug" — flag only these, each with a concrete misbehaving input/path).
+- SWALLOWED ERROR: a fallible result dropped — let _ = on a Result, .ok() discarding an Err, unwrap()/expect() on a runtime-fallible path, an omitted ? that loses an error, an error remapped to a less-informative one.
+- MISSING BOUNDS CAP: recursion or geometrically-/user-derived iteration without the CLAUDE.md-mandated depth/budget cap that returns an error rather than overflowing; unbounded growth; integer overflow on user-derived arithmetic.
+- SILENT INCOMPLETENESS: TODO / todo!() / unimplemented!() / a "for now" stub / a branch or match arm that no-ops where the logic is required.
+- INVARIANT VIOLATION: new code that can put a type into a state its invariant forbids (flag the violation; the over-broad pub exposing the field is economy/visibility).
+- RESOURCE LEAK: a handle / subscription / mixer-lane / texture / spawned child acquired without the matching release on every path, including early-return and error paths.
+- CONCURRENCY: a data race / lost update / lock-order hazard. SCOPED: actor state is single-threaded behind its run-token (ADR-0038), so this shape is N/A in actor/component code — apply it ONLY in aether-substrate / native chassis code.
+
+CARVE-OUT (do NOT raise as judgment findings — route to lintCandidates or the named pillar): Judgment about behavior, not lints. rustc owns type/borrow safety (on Rust source only); where a clippy lint already fires, route it to lintCandidates. Do not flag style/verbosity (economy) or wrong-feature (spec). A finding must name the concrete input or path that misbehaves.
+
+FILE: <WORKTREE>/crates/aether-capabilities/src/component/runtime/mod.rs
+Focus on the CHANGED lines below; open the full file for context, and scope every finding to the change.
+DIFF:
+diff --git a/crates/aether-capabilities/src/component/runtime/mod.rs b/crates/aether-capabilities/src/component/runtime/mod.rs
+index f42ac5ce..882c620d 100644
+--- a/crates/aether-capabilities/src/component/runtime/mod.rs
++++ b/crates/aether-capabilities/src/component/runtime/mod.rs
+@@ -80,8 +80,8 @@ pub struct ComponentHostCapabilityState {
+     pub registry: Arc<Registry>,
+     pub mailer: Arc<Mailer>,
+     pub outbound: Arc<HubOutbound>,
+-    /// Monotonic counter for `component_N` default names when an agent passes
+-    /// `name: None` and the wasm doesn't declare an `aether.namespace`.
++    /// Monotonic counter for `component_N` default names, consumed when an
++    /// agent passes `name: None` and the wasm declares no `aether.namespace`.
+     pub default_name_counter: u64,
+     /// ADR-0147 module-boot bookkeeping: content hash (sha256 hex of the wasm
+     /// bytes) → the module's boot singleton. A module that declares a `boot =`
+@@ -128,8 +128,8 @@ pub struct BootEntry {
+ }
+ 
+ /// Forward an arbitrary kind to a trampoline's mailbox, preserving the
+-/// original `reply_to` so the trampoline's reply lands at the agent (not the
+-/// cap). Used for [`DropComponent`] and [`ReplaceComponent`].
++/// original `reply_to` so the trampoline's reply lands at the agent rather
++/// than the cap. Used for [`DropComponent`] and [`ReplaceComponent`].
+ ///
+ /// The forward threads the child mail under the cap's current in-flight root
+ /// and bumps that root's `in_flight` count before the calling handler returns
+@@ -312,7 +312,7 @@ impl NativeActor for ComponentHostCapability {
+     }
+ 
+     /// Enumerate the components this engine has actually loaded and
+-    /// registered, by their ADR-0099 lineage names (issue 2020).
++    /// registered, addressed by their ADR-0099 lineage names (issue 2020).
+     ///
+     /// Reads the registry's live mailbox snapshot — the same list
+     /// already egressed to the hub after each load — and keeps only the
+@@ -338,14 +338,14 @@ impl NativeActor for ComponentHostCapability {
+         _ctx: &mut NativeCtx<'_>,
+         _payload: ListComponents,
+     ) -> ListComponentsResult {
+-        let names = state
++        let trampoline_names = state
+             .registry
+             .list_mailbox_descriptors()
+             .into_iter()
+-            .filter(|d| d.category == Some(MailboxCategory::Trampoline))
+-            .map(|d| d.name)
++            .filter(|descriptor| descriptor.category == Some(MailboxCategory::Trampoline))
++            .map(|descriptor| descriptor.name)
+             .collect();
+-        ListComponentsResult { names }
++        ListComponentsResult { names: trampoline_names }
+     }
+ 
+     /// Introspect one loaded component's ADR-0033 receive-side
+@@ -371,7 +371,8 @@ impl NativeActor for ComponentHostCapability {
+         let Some(mailbox) = state.registry.lookup(&payload.name) else {
+             return DescribeComponentResult::Err { error: format!("no component registered at name {}", payload.name) };
+         };
+-        match state.mailer.capability_registry().describe(mailbox) {
++        let capability_registry = state.mailer.capability_registry();
++        match capability_registry.describe(mailbox) {
+             Some(capabilities) => DescribeComponentResult::Ok { capabilities },
+             None => {
+                 DescribeComponentResult::Err { error: format!("no capabilities retained for name {}", payload.name) }
+
+
+Report every site this lens flags as a finding: symbol + approximate line, category (the sub-shape), severity, the current form, the suggested fix, a rationale stating the judgment (why the fix is at least as clear/correct/safe — not a restatement), and your confidence. Put mechanically-decidable observations in lintCandidates, not findings. Report nothing this lens does not own — another panelist covers the others. Report ONLY sites located in the file(s) above: if you notice an issue in a different file they reference, do not report it (that file gets its own finder). If the file is clean under this lens, return an empty findings array. Be precise and conservative: a confident story is not a finding; flag only when you can name the concrete better form AND why it wins.

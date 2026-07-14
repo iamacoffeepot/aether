@@ -1,0 +1,82 @@
+You are one specialist judge on a code-review panel, auditing a Rust file under a single lens.
+
+Lens: Correctness
+Oracle (what you judge against): the code's own contract — what it implies it should do
+Named bug-shapes (NOT "find any bug" — flag only these, each with a concrete misbehaving input/path).
+- SWALLOWED ERROR: a fallible result dropped — let _ = on a Result, .ok() discarding an Err, unwrap()/expect() on a runtime-fallible path, an omitted ? that loses an error, an error remapped to a less-informative one.
+- MISSING BOUNDS CAP: recursion or geometrically-/user-derived iteration without the CLAUDE.md-mandated depth/budget cap that returns an error rather than overflowing; unbounded growth; integer overflow on user-derived arithmetic.
+- SILENT INCOMPLETENESS: TODO / todo!() / unimplemented!() / a "for now" stub / a branch or match arm that no-ops where the logic is required.
+- INVARIANT VIOLATION: new code that can put a type into a state its invariant forbids (flag the violation; the over-broad pub exposing the field is economy/visibility).
+- RESOURCE LEAK: a handle / subscription / mixer-lane / texture / spawned child acquired without the matching release on every path, including early-return and error paths.
+- CONCURRENCY: a data race / lost update / lock-order hazard. SCOPED: actor state is single-threaded behind its run-token (ADR-0038), so this shape is N/A in actor/component code — apply it ONLY in aether-substrate / native chassis code.
+
+CARVE-OUT (do NOT raise as judgment findings — route to lintCandidates or the named pillar): Judgment about behavior, not lints. rustc owns type/borrow safety (on Rust source only); where a clippy lint already fires, route it to lintCandidates. Do not flag style/verbosity (economy) or wrong-feature (spec). A finding must name the concrete input or path that misbehaves.
+
+FILE: <WORKTREE>/crates/aether-capabilities/src/lifecycle/runtime/settlement.rs
+Focus on the CHANGED lines below; open the full file for context, and scope every finding to the change.
+DIFF:
+diff --git a/crates/aether-capabilities/src/lifecycle/runtime/settlement.rs b/crates/aether-capabilities/src/lifecycle/runtime/settlement.rs
+index f28e5a13..bc55640e 100644
+--- a/crates/aether-capabilities/src/lifecycle/runtime/settlement.rs
++++ b/crates/aether-capabilities/src/lifecycle/runtime/settlement.rs
+@@ -47,7 +47,7 @@ pub const SETTLE_EWMA_ALPHA_PERMILLE: u32 = 200;
+ 
+ /// Minimum spacing between slow-settlement warns. A saturating
+ /// pipeline settles slowly on *every* advance, so an unguarded warn
+-/// would itself spam the rings; one line per episode is enough.
++/// would itself spam the log rings; one line per episode is enough.
+ pub const SLOW_SETTLE_WARN_COOLDOWN: Duration = Duration::from_secs(5);
+ 
+ /// Internal state-advance decision produced by `on_advance` before
+@@ -63,7 +63,7 @@ pub enum Step {
+ pub struct PendingAdvance {
+     /// Causal-chain root of the in-flight broadcast (ADR-0080 §6).
+     pub root: MailId,
+-    /// Kind id of the state just broadcast — echoed in `completed`.
++    /// Kind id of the state just broadcast — echoed back in `completed`.
+     pub completed_kind: KindId,
+     /// Kind id of the state to broadcast next — echoed in `next`.
+     /// `KindId(0)` when the settling broadcast was a terminal.
+@@ -93,22 +93,22 @@ impl LifecycleCapabilityState {
+         // in u128 (no signed casts): next = prev ± α·|sample − prev|.
+         let alpha = u128::from(SETTLE_EWMA_ALPHA_PERMILLE);
+         let next_nanos = self.settlement_latency_ewma.map_or(latency.as_nanos(), |prev| {
+-            let prev = prev.as_nanos();
+-            let sample = latency.as_nanos();
+-            if sample >= prev {
+-                prev + (sample - prev) * alpha / 1000
++            let prev_nanos = prev.as_nanos();
++            let sample_nanos = latency.as_nanos();
++            if sample_nanos >= prev_nanos {
++                prev_nanos + (sample_nanos - prev_nanos) * alpha / 1000
+             } else {
+-                prev - (prev - sample) * alpha / 1000
++                sample_nanos + (prev_nanos - sample_nanos) * alpha / 1000
+             }
+         });
+-        let ewma = Duration::from_nanos(u64::try_from(next_nanos).unwrap_or(u64::MAX));
+-        self.settlement_latency_ewma = Some(ewma);
++        let smoothed = Duration::from_nanos(u64::try_from(next_nanos).unwrap_or(u64::MAX));
++        self.settlement_latency_ewma = Some(smoothed);
+ 
+         let threshold = self.advance_timeout / SLOW_SETTLE_DIVISOR;
+         if latency < threshold {
+             return;
+         }
+-        if self.last_slow_warn.is_some_and(|t| t.elapsed() < SLOW_SETTLE_WARN_COOLDOWN) {
++        if self.last_slow_warn.is_some_and(|armed| armed.elapsed() < SLOW_SETTLE_WARN_COOLDOWN) {
+             return;
+         }
+         self.last_slow_warn = Some(Instant::now());
+@@ -116,7 +116,7 @@ impl LifecycleCapabilityState {
+             target: "aether_capabilities::lifecycle",
+             root = ?root,
+             latency_millis = latency.as_millis(),
+-            ewma_millis = ewma.as_millis(),
++            ewma_millis = smoothed.as_millis(),
+             threshold_millis = threshold.as_millis(),
+             "settlement latency exceeded the slow threshold; the trace/settlement \
+              pipeline is degrading — `describe_tree <root>` for the in-flight nodes; \
+
+
+Report every site this lens flags as a finding: symbol + approximate line, category (the sub-shape), severity, the current form, the suggested fix, a rationale stating the judgment (why the fix is at least as clear/correct/safe — not a restatement), and your confidence. Put mechanically-decidable observations in lintCandidates, not findings. Report nothing this lens does not own — another panelist covers the others. Report ONLY sites located in the file(s) above: if you notice an issue in a different file they reference, do not report it (that file gets its own finder). If the file is clean under this lens, return an empty findings array. Be precise and conservative: a confident story is not a finding; flag only when you can name the concrete better form AND why it wins.

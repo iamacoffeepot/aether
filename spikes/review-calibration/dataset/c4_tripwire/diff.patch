@@ -1,0 +1,46 @@
+diff --git a/crates/aether-data/src/hash.rs b/crates/aether-data/src/hash.rs
+index 136c7561..632922d5 100644
+--- a/crates/aether-data/src/hash.rs
++++ b/crates/aether-data/src/hash.rs
+@@ -332,6 +332,18 @@ mod tests {
+         let _ = mailbox_id_from_name_pair("aether.embedded", "host/leaf");
+     }
+ 
++    // Tripwire: this is the routing id every engine, guest SDK, and hub
++    // derives independently for a chassis mailbox — FNV-1a 64 over
++    // `MAILBOX_DOMAIN ++ name` with the ADR-0064 `Tag::Mailbox` nibble
++    // stamped into the high bits. If this assertion fails, the hash
++    // function, domain prefix, or tag layout drifted and every derived
++    // mailbox address changed with it — treat it as a wire-identity
++    // break and version the protocol, do not just re-bless the value.
++    #[test]
++    fn mailbox_id_derivation_is_pinned() {
++        assert_eq!(mailbox_id_from_name("aether.render").0, 0x1BB7_BDAF_DA11_73C0);
++    }
++
+     #[test]
+     fn has_path_separator_detects_only_the_slash() {
+         assert!(has_path_separator("a/b"));
+@@ -345,7 +357,8 @@ mod tests {
+     fn pair_matches_joined_name() {
+         // The identity scope-relative resolution leans on: composing
+         // `prefix` + `:` + `segment` hashes the same as hashing the
+-        // already-joined name, so the const path never has to allocate.
++        // already-joined name, so the const path never allocates a
++        // joined buffer.
+         assert_eq!(mailbox_id_from_name_pair("a", "b"), mailbox_id_from_name("a:b"),);
+         assert_eq!(
+             mailbox_id_from_name_pair("aether.embedded", "camera"),
+@@ -437,7 +450,10 @@ mod tests {
+ 
+     #[test]
+     fn scope_path_too_long_is_rejected() {
+-        let big: String = "x".repeat(MAX_SCOPE_PATH_BYTES + 1);
+-        assert_eq!(validate_scope_path(&[big.as_str()]), Err(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES }),);
++        let oversized: String = "x".repeat(MAX_SCOPE_PATH_BYTES + 1);
++        assert_eq!(
++            validate_scope_path(&[oversized.as_str()]),
++            Err(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES }),
++        );
+     }
+ }

@@ -1,0 +1,52 @@
+diff --git a/crates/aether-kinds/src/transforms.rs b/crates/aether-kinds/src/transforms.rs
+index b14e8849..04dddbef 100644
+--- a/crates/aether-kinds/src/transforms.rs
++++ b/crates/aether-kinds/src/transforms.rs
+@@ -18,8 +18,8 @@ use aether_data::transform;
+ use aether_math::Vec4;
+ 
+ /// Apply a 4×4 matrix to a 4-vector, `M · v` (ADR-0048's first
+-/// first-party transform). `Mat4Apply` bundles both operands so the
+-/// transform stays a unary `Kind → Kind` node.
++/// first-party transform). `Mat4Apply` bundles both operands into one
++/// input so the transform stays a unary `Kind → Kind` node.
+ ///
+ /// Column-major + homogeneous: `matrix` is column-major (matching
+ /// `aether_math::Mat4` and the substrate's `view_proj` uniform), and
+@@ -38,6 +38,7 @@ fn mat4_apply(input: Mat4Apply) -> Vec4 {
+ mod tests {
+     use super::mat4_apply;
+     use crate::Mat4Apply;
++    use aether_data::Kind;
+     use aether_math::{Mat4, Vec4};
+ 
+     #[test]
+@@ -47,14 +48,25 @@ mod tests {
+         // 12..16). Applied to the point (1,1,1,1) this is
+         // (2·1+5, 3·1+6, 4·1+7, 1) = (7,9,11,1). A row-major / transposed
+         // apply would read the translation from the bottom ROW instead
+-        // and miss it, so this pins the apply against that regression.
++        // and silently drop it, so this pins the apply against that
++        // regression.
+         let matrix = Mat4::from_cols_array([
+             2.0, 0.0, 0.0, 0.0, //
+             0.0, 3.0, 0.0, 0.0, //
+             0.0, 0.0, 4.0, 0.0, //
+             5.0, 6.0, 7.0, 1.0, //
+         ]);
+-        let out = mat4_apply(Mat4Apply { matrix, vector: Vec4::new(1.0, 1.0, 1.0, 1.0) });
+-        assert_eq!(out, Vec4::new(7.0, 9.0, 11.0, 1.0));
++        let applied = mat4_apply(Mat4Apply { matrix, vector: Vec4::new(1.0, 1.0, 1.0, 1.0) });
++        assert_eq!(applied, Vec4::new(7.0, 9.0, 11.0, 1.0));
++    }
++
++    /// `aether.math.mat4_apply` is the wire name the hub encodes
++    /// agent-supplied params against and `describe_transforms` surfaces
++    /// for this transform's input (ADR-0048); pin it so an accidental
++    /// rename is caught here rather than as a routing miss at the first
++    /// live send.
++    #[test]
++    fn mat4_apply_kind_name_is_stable() {
++        assert_eq!(Mat4Apply::NAME, "aether.math.mat4_apply");
+     }
+ }

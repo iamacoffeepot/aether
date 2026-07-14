@@ -1,0 +1,24 @@
+A code-review finding was raised under the Correctness lens. Decide whether it survives a STRICT bar — do not rescue it with a plausible story, and do not reject a real issue out of conservatism.
+
+File: <WORKTREE>/crates/aether-behavior/src/host/slot.rs
+Site: offer_state (fuel arming order) (around line 204)
+Category: invariant-violation
+Current form: let Some((ptr, len)) = self.write_guest(blob) else { return; }; let _ = self.store.set_fuel(self.fuel_per_call);
+Suggested fix: arm fuel before write_guest — the guest alloc inside write_guest is fuel-metered and traps when the store has no fuel, so the prior-state blob is silently dropped
+Finder rationale: on a fresh store write_guest's alloc call runs with whatever fuel is left (possibly none); a trap makes write_guest return None and offer_state silently returns, losing the migration state
+
+Read the site and the code it depends on.
+
+GROUND THE VERDICT IN TESTS, not inspection — a confident reading of subtle code (math conventions, sign order, edge cases) is exactly where this lens hallucinates a bug.
+1. Read the existing #[test]s for this item. A passing test that pins the claimed-broken behavior REFUTES the finding (final_verdict='false-positive') — cite the test by name.
+2. No test covers the claim and no build is available here — ground by reading the existing #[test]s and the code path; if a high-severity claim has no covering test, state that in the rationale and return final_verdict='uncertain' rather than confirming on inspection alone.
+3. NEVER uphold a finding whose suggested fix would break a currently-passing test — check the fix against the suite before confirming.
+
+The bar for keeping a finding (strict, all lenses): the fix must be strictly better, not merely different.
+- ECONOMY: the suggested form is "the fewest characters that still make sense" — shorter AND at least as clear/safe (over-verbose), or the terse form genuinely costs clarity/safety so the longer fix is worth it (over-terse). Reject taste ("I would write it differently").
+- CORRECTNESS: name the concrete input or code path that misbehaves. Reject "could be unsafe" with no path; reject a hazard rustc/borrowck already prevents.
+- CONVENTION: cite the CLAUDE.md / ADR rule it breaks. Reject anything Layer 0 (clippy -D warnings, fmt, Qodana, check-no-dividers, the disallowed-methods bans) already gates — that is a lintCandidate, not a judgment finding.
+- TEST-INTEGRITY: junk unless the test exercises owned logic a plausible edit to THIS crate would break (and that the shared derive/codec/registry machinery's own tests would NOT already catch), OR it pins a COMPUTED value (a hash, golden bytes, a derived KindId number). A symmetric derive-only roundtrip, a name/schema-shape mirror, or a registry re-test is junk however much ceremony surrounds it.
+Policy anchors: CLAUDE.md and docs/guide/testing.md.
+
+If the finding genuinely meets the bar, final_verdict='confirmed' with the concrete reason it holds (for correctness: the failing input/path, confirmed against a test where possible). If the code is fine as written (the verbosity/terseness is load-bearing, the behavior is correct, a passing test already pins it, the rule does not apply), final_verdict='false-positive'. Use 'uncertain' only when you cannot read or run the relevant code.

@@ -1,0 +1,25 @@
+diff --git a/crates/aether-behavior/src/host/slot.rs b/crates/aether-behavior/src/host/slot.rs
+index 9082d874..83be1938 100644
+--- a/crates/aether-behavior/src/host/slot.rs
++++ b/crates/aether-behavior/src/host/slot.rs
+@@ -191,6 +191,20 @@ impl ScriptSlot {
+         self.read_packed(packed).unwrap_or_default()
+     }
+ 
++    /// Offer `blob` to the script's `state_load` export (migration restore).
++    /// A missing export or a trap is ignored (fail-open — an undecodable blob
++    /// leaves the fresh script untouched, mirroring `state_load_serde`).
++    pub fn offer_state(&mut self, blob: &[u8]) {
++        let Some(load) = self.state_load_fn else {
++            return;
++        };
++        let Some((ptr, len)) = self.write_guest(blob) else {
++            return;
++        };
++        let _ = self.store.set_fuel(self.fuel_per_call);
++        let _ = load.call(&mut self.store, (ptr, len));
++    }
++
+     /// Run one fuel-metered filter call for `(kind, bytes)`. Any trap or
+     /// malformed output fails open ([`FilterOutcome::Passthrough`]),
+     /// incrementing the consecutive-trap counter and disabling the script at
