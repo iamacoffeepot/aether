@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   parseLsTree, narrowestRoot, slugify, subtreeHash, parseTranscript,
-  buildManifest, evaluateEligibility, prefixDiff,
+  buildManifest, evaluateEligibility, prefixDiff, headHash, isHeadInput,
 } from './agent-pool.mjs';
 
 const CWD = '/work/repo';
@@ -209,15 +209,20 @@ test('evaluateEligibility: fresh serves; cutoff and cap still retire, cap bounda
 // non-judge task, which is the regression this issue exists to undo.
 // Exercised against both an implement-shaped (crate-scoped root, a pinned
 // out-of-root read) and a land-shaped (repo-wide root) manifest so the
-// uniform-across-tasks claim isn't just tested for one shape.
-test('evaluateEligibility ignores repo churn entirely — tree beliefs are not re-checked', () => {
+// uniform-across-tasks claim isn't just tested for one shape. The head stays
+// FRESH here (only belief files churn) so this isolates belief churn from the
+// #3422 head-freshness gate — CLAUDE.md, a head input, is deliberately not
+// churned; its churn is the next test's subject, not this one's.
+test('evaluateEligibility ignores belief-file churn — read-source tree beliefs are not re-checked', () => {
   const lsTree = parseLsTree(LS_TREE);
-  const churned = parseLsTree(LS_TREE.replace('bbb2', 'bbb9').replace('ddd4', 'ddd9').replace('ccc3', 'ccc9'));
+  const beliefChurned = parseLsTree(LS_TREE.replace('bbb2', 'bbb9').replace('ddd4', 'ddd9'));
+  const head = headHash(lsTree);
 
   const implementShaped = {
     subsystem_root: 'crates/x',
     subtree_hash: subtreeHash(lsTree, 'crates/x'),
     out_of_root: { 'CLAUDE.md': 'ccc3' },
+    head_hash: head,
     context_tokens: 10_000,
     deposited_at: NOW / 1000,
   };
@@ -225,13 +230,73 @@ test('evaluateEligibility ignores repo churn entirely — tree beliefs are not r
     subsystem_root: '.',
     subtree_hash: subtreeHash(lsTree, '.'),
     out_of_root: {},
+    head_hash: head,
     context_tokens: 10_000,
     deposited_at: NOW / 1000,
   };
 
   for (const manifest of [implementShaped, landShaped]) {
-    assert.deepEqual(evaluateEligibility(manifest, churned, NOW + 60_000), { ok: true });
+    assert.deepEqual(evaluateEligibility(manifest, beliefChurned, NOW + 60_000), { ok: true });
   }
+});
+
+test('headHash covers CLAUDE.md and skills, ignores everything else', () => {
+  assert.equal(isHeadInput('CLAUDE.md'), true);
+  assert.equal(isHeadInput('.claude/skills/land/SKILL.md'), true);
+  assert.equal(isHeadInput('crates/x/src/lib.rs'), false);
+  assert.equal(isHeadInput('docs/adr/0001-x.md'), false);
+  const base = headHash(parseLsTree(LS_TREE));
+  // A non-head (belief-source) file moving does not change the head hash...
+  assert.equal(headHash(parseLsTree(LS_TREE.replace('aaa1', 'aaa9'))), base);
+  // ...but CLAUDE.md moving does.
+  assert.notEqual(headHash(parseLsTree(LS_TREE.replace('ccc3', 'ccc9'))), base);
+});
+
+// Tripwire (#3422): the head-freshness gate. The static head (CLAUDE.md +
+// skills) is the cached prefix a warm resume reuses, NOT a re-derived belief,
+// so a head that moved on origin/main since deposit (head_hash mismatch) is a
+// real cache miss and must retire the entry — the deterministic in-repo half
+// of the resume cache miss. Distinct from the belief-churn test above: there
+// the head is held fresh and churn is ignored; here the head itself moves.
+test('evaluateEligibility retires on head drift — CLAUDE.md or a skill moved since deposit', () => {
+  const withSkill = LS_TREE + '100644 blob sk01\t.claude/skills/land/SKILL.md\n';
+  const lsTree = parseLsTree(withSkill);
+  const manifest = { context_tokens: 10_000, deposited_at: NOW / 1000, head_hash: headHash(lsTree) };
+
+  // A fresh head serves.
+  assert.deepEqual(evaluateEligibility(manifest, lsTree, NOW + 60_000), { ok: true });
+  // CLAUDE.md's blob moving retires.
+  assert.deepEqual(
+    evaluateEligibility(manifest, parseLsTree(withSkill.replace('ccc3', 'ccc9')), NOW + 60_000),
+    { ok: false, reason: 'head-drift' });
+  // A skill file's blob moving retires.
+  assert.deepEqual(
+    evaluateEligibility(manifest, parseLsTree(withSkill.replace('sk01', 'sk99')), NOW + 60_000),
+    { ok: false, reason: 'head-drift' });
+  // A belief-source file moving with the head held fresh still serves — the gate is head-scoped.
+  assert.deepEqual(
+    evaluateEligibility(manifest, parseLsTree(withSkill.replace('bbb2', 'bbb9')), NOW + 60_000),
+    { ok: true });
+});
+
+test('evaluateEligibility skips the head gate for a pre-gate manifest carrying no head_hash', () => {
+  // A manifest deposited before the #3422 gate has no head_hash; it is not
+  // retired on head drift (it ages out within the cutoff), keeping the #3341
+  // don't-retire-what-you-can't-prove-stale posture for legacy entries.
+  const legacy = { context_tokens: 10_000, deposited_at: NOW / 1000 };
+  const headMoved = parseLsTree(LS_TREE.replace('ccc3', 'ccc9'));
+  assert.deepEqual(evaluateEligibility(legacy, headMoved, NOW + 60_000), { ok: true });
+});
+
+test('buildManifest records a head_hash that gates its own fresh-checkout eligibility', () => {
+  const lsTree = parseLsTree(LS_TREE);
+  const { manifest } = buildManifest({ transcript: happyTranscript(), lsTree, verdict, now: NOW });
+  assert.equal(manifest.head_hash, headHash(lsTree));
+  // A fresh checkout serves; the head moving under it retires.
+  assert.deepEqual(evaluateEligibility(manifest, lsTree, NOW + 60_000), { ok: true });
+  assert.deepEqual(
+    evaluateEligibility(manifest, parseLsTree(LS_TREE.replace('ccc3', 'ccc9')), NOW + 60_000),
+    { ok: false, reason: 'head-drift' });
 });
 
 test('prefixDiff: a clean prefix (deposited wholly at the front of resuming) is the hit case', () => {
