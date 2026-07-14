@@ -45,7 +45,18 @@ Do not soften a finding because the plan is well written, because it cites an AD
 1. The issue body — `## Problem statement`, `## Design notes`, `## Implementation plan`, `## Declared surface`, `## Depends on`, and the `size:*` / `model:*` labels.
 2. Every ADR the Design notes cite, read from `docs/adr/` on `origin/main`.
 3. `.github/approval-policy.yml` — the tier table the `risk_class` dimension resolves against.
-4. The code the plan targets, on `origin/main`, when a step's coherence depends on what is actually there.
+4. The code the plan targets, on `origin/main`, when a step's coherence depends on what is actually there — read it **narrowly**. Prefer a targeted `git grep` for the cited symbol, or a read of the exact cited section/anchor, over pulling a whole file or a whole ADR into context. The verdict turns on whether a specific anchor exists and coheres, not on a full-file survey; a whole-file (or whole-ADR) read is justified only when a coherence check genuinely needs the surrounding shape, and even then scope it to the relevant span. This bounds the per-turn context the verdict accumulates.
+
+### The crate map (for `scope_size_honesty`)
+
+Weigh the stamped `size:*` against the plan's crate reach without re-reading `CLAUDE.md`. The workspace's crates and their layering:
+
+- **Infrastructure (non-actor):** `aether-data` (universal data layer — typed-ids, wire identity, the `Kind`/`Schema` traits, encode/decode; proc macros in `aether-data-derive`), which `aether-codec` (JSON ↔ wire bytes + stream framing) and `aether-kinds` (substrate kind vocabulary) build on; `aether-math` (`Vec2/3/4`, `Mat4`, `Quat`, `Aabb`). Everything that describes typed bytes depends on `aether-data`.
+- **Runtime + chassis (ADR-0073):** `aether-substrate` (shared runtime) and `aether-capabilities` (native capabilities); all four chassis (`desktop` / `headless` / `hub` / `test_bench`) plus the hub library live in `aether-substrate-bundle`.
+- **Guest/actor SDK:** `aether-actor` (the `Actor` / `WasmActor` traits, `Mailbox`, `WasmCtx`, `#[actor]`, `export!`; proc macros in `aether-actor-derive`).
+- **Reference + tooling:** `aether-kit` (reference components — camera, mesh, terra), `aether-mesh` (DSL mesh authoring), `aether-mcp` (out-of-process RPC/MCP harness), `aether-tunnel` (stable MCP front).
+
+Use this to price reach: a plan whose steps span several of these groups (e.g. a wire-format change rippling `aether-data` → `aether-codec` → every dependent chassis) is a multi-PR arc, not an `m` because it was labelled one. Consult a `Cargo.toml` or `git grep` on `origin/main` only when a specific dependency edge is load-bearing to the size call.
 
 `/approve`'s own [Gate checks](../approve/SKILL.md#gate-checks) are mechanical — sections present, ADR PR merged, dependencies closed, targets still on `main`. Do not re-run them; they are already automated and they are not taste. Judge what the mechanical gate cannot: whether the plan, read closely, actually holds up.
 
