@@ -160,6 +160,18 @@ print_pr_line() {
         "#$num" "$state_col" "$ci_col" "$review_col" "$branch"
 }
 
+# Guarded per-tick head-sha re-read shared by the --wait and --wait-verdict
+# loops — the wait follows a fix push instead of pinning the startup head.
+# `echo "$prev"` on failure keeps the previous sha for this tick only; a bare
+# `sha=$(cmd 2>/dev/null) || true` would wipe $sha to empty on a transient
+# failure instead, since the assignment itself always succeeds.
+pr_head_sha() {
+    local pr="$1" prev="$2"
+    local sha
+    sha=$(gh api "repos/$REPO/pulls/$pr" --jq '.head.sha' 2>/dev/null) || { echo "$prev"; return 0; }
+    echo "$sha"
+}
+
 # --wait mode: loop until the aggregator settles for the given PR, exit 0 on
 # success, 1 on failure. Uses the same REST check-runs endpoint as the snapshot
 # path so the behaviour is identical to the CI-loop in /implement.
@@ -175,9 +187,7 @@ if [[ $WAIT_MODE -eq 1 ]]; then
     # the slow jobs — the new push supersedes the run.
     fast_fail_names='["Format","Clippy","Docs","Marker-only host build"]'
     while :; do
-        # Guarded re-read every tick — the wait follows a fix push; a
-        # transient hiccup keeps the previous sha for this tick only.
-        sha=$(gh api "repos/$REPO/pulls/$WAIT_PR" --jq '.head.sha' 2>/dev/null) || true
+        sha=$(pr_head_sha "$WAIT_PR" "$sha")
         runs=$(gh api "repos/$REPO/commits/$sha/check-runs" --paginate --jq '.check_runs' 2>/dev/null) || { sleep 20; continue; }
         fast_red=$(echo "$runs" | jq -r --argjson ff "$fast_fail_names" \
             '.[] | select(.status == "completed")
@@ -216,9 +226,7 @@ if [[ $VERDICT_MODE -eq 1 ]]; then
     sha=$(gh api "repos/$REPO/pulls/$VERDICT_PR" --jq '.head.sha')
     echo "[wave-status] waiting for a $CRITIC_LOGIN verdict on PR #$VERDICT_PR's current head…"
     while :; do
-        # Guarded re-read every tick — the wait follows a fix push; a
-        # transient hiccup keeps the previous sha for this tick only.
-        sha=$(gh api "repos/$REPO/pulls/$VERDICT_PR" --jq '.head.sha' 2>/dev/null) || true
+        sha=$(pr_head_sha "$VERDICT_PR" "$sha")
         # Stream matching reviews per page (chronological), keep the newest
         # verdict on the current head; tail consumes fully, no SIGPIPE.
         verdict=$(gh api "repos/$REPO/pulls/$VERDICT_PR/reviews" --paginate \
