@@ -41,20 +41,11 @@ export const meta = {
 //                                       fires only on full, where diffBase is the merge-base — on
 //                                       incremental the base is this PR's own prior head, so a bug an
 //                                       earlier commit of this PR introduced would read as pre-existing.
-//   reviewPass,   'deep'|'confirm'     — the pass shape (issue #3390); default 'deep'. deep is the full
-//                                       five-pillar fan-out below. confirm is a single cheap verifier
-//                                       session over {priorFindings, delta} that checks only whether the
-//                                       already-reported findings were addressed since the last-reviewed
-//                                       SHA — it emits NO new ordinary findings (a nit on unchanged code
-//                                       is the deep pass's miss, rendered as a non-blocking advisory at
-//                                       most). Orthogonal to reviewMode (provenance) — the confirm pass
-//                                       freezes the finding set across re-review rounds so they converge.
-//   priorFindings,[obj]                — confirm pass only: the findings critic's standing verdict already
-//                                       reported (each { file, line, pillar, category, symbol, severity,
-//                                       suggested_form, gate }), resolved caller-side from the PR's
-//                                       aether-review-fp-marked surface. The confirm session judges each
-//                                       against the delta; the still-open ones are re-asserted unchanged.
 // }
+//
+// This workflow is the DEEP pass only. The re-request delta confirm (issue #3390's confirm
+// pass) is adjudicated inside the review session itself since #3404 — the session writes the
+// confirm rollup directly, in the same shape, so nothing here takes a pass selector.
 //
 // returns { rollup, files }. rollup = { totals, spec, softHolds, confirmed, grouped,
 // lintCandidates, spared, uncertain }. confirmed is issue-ready (each row tagged source:
@@ -69,13 +60,8 @@ export const meta = {
 const A = (typeof args === 'string') ? JSON.parse(args || '{}') : (args || {})
 const FILES = Array.isArray(A.files) ? A.files : []
 const TEST_FILES = Array.isArray(A.testFiles) ? A.testFiles : []
-// The pass shape (issue #3390). confirm skips the whole fan-out below and runs one verifier over the
-// prior findings + delta, so it needs neither a reviewable-file set nor a selected lens — its file
-// guard is priorFindings, checked in the confirm branch. deep keeps today's non-empty-files contract.
-const REVIEW_PASS = A.reviewPass || 'deep'
-if (REVIEW_PASS !== 'deep' && REVIEW_PASS !== 'confirm') throw new Error(`review: args.reviewPass must be 'deep' or 'confirm', got ${JSON.stringify(A.reviewPass)}`)
-const PRIOR_FINDINGS = Array.isArray(A.priorFindings) ? A.priorFindings : []
-if (REVIEW_PASS === 'deep' && !FILES.length && !TEST_FILES.length) throw new Error('review: args.files (and/or args.testFiles) must be a non-empty array of absolute reviewable-source paths')
+if (A.reviewPass !== undefined) throw new Error('review: args.reviewPass is retired (#3404) — the delta confirm runs inside the review session, not through this workflow')
+if (!FILES.length && !TEST_FILES.length) throw new Error('review: args.files (and/or args.testFiles) must be a non-empty array of absolute reviewable-source paths')
 
 const FINDER_MODEL = A.finderModel || 'sonnet'
 const NO_BUILD = A.noBuild === true
@@ -697,127 +683,11 @@ async function refuteFlags(items) {
   await batches
 }
 
-// The confirm-pass verdict schema: one addressed/not adjudication per prior finding (keyed by index),
-// a whole-delta restart signal, and advisories for any unchanged-code nit the session cannot suppress
-// (rendered non-blocking, never a new gating finding). No new ordinary findings — that is the whole point.
-const CONFIRM_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['adjudications', 'restart', 'advisories'],
-  properties: {
-    adjudications: {
-      type: 'array',
-      description: 'one entry per prior finding, keyed by its index (#0, #1, …) in the submitted list',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['index', 'addressed', 'rationale'],
-        properties: {
-          index: { type: 'integer', description: 'the prior-finding index from the submitted list' },
-          addressed: { type: 'boolean', description: 'true iff the delta resolves the finding (the concern it named no longer holds)' },
-          rationale: { type: 'string', description: 'the delta hunk that addresses it, or why it is still open' },
-        },
-      },
-    },
-    restart: {
-      type: 'object',
-      additionalProperties: false,
-      required: ['signaled', 'rationale'],
-      properties: {
-        signaled: { type: 'boolean', description: 'true only when the delta is so large or divergent that a full re-review is warranted — a fundamental rework, not an ordinary fix round' },
-        rationale: { type: 'string', description: 'why the delta needs restart-level rework, or why it does not' },
-      },
-    },
-    advisories: {
-      type: 'array',
-      description: 'at most a non-blocking note per unchanged-code nit the deep pass missed — NEVER a new gating finding',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['file', 'pillar', 'symbol', 'note'],
-        properties: {
-          file: { type: 'string', description: 'absolute path of the file the nit is in' },
-          line: { type: 'integer', description: 'approximate line (advisory)' },
-          pillar: { type: 'string', description: 'the pillar it would fall under' },
-          symbol: { type: 'string', description: 'the item' },
-          note: { type: 'string', description: 'the observation, stated as a non-blocking advisory' },
-        },
-      },
-    },
-  },
-}
-
-function confirmPrompt(prior, deltaBlocks) {
-  const list = prior.map((f, i) => `#${i} [${f.pillar || '?'}${f.category ? `/${f.category}` : ''}]${f.severity ? ` (${f.severity})` : ''} ${f.symbol || ''} \`${f.file || '?'}${f.line != null ? `:${f.line}` : ''}\`
-  concern: ${f.suggested_form || f.description || f.rationale || '(see the finding on the PR)'}`).join('\n\n')
-  return `You are the CONFIRM pass of a two-pass review lifecycle (issue #3390). The DEEP pass already reviewed this PR and reported the findings below. Your ONLY job is to check whether the delta since that deep review ADDRESSED each of them — NOT to re-review the whole change. Do not hunt for new findings: a nit on code that did NOT change since the deep pass is the deep reviewer's own miss, and re-raising it is the non-converging ratchet this pass exists to stop.
-
-PRIOR FINDINGS (adjudicate every one, keyed by its index):
-${list || '(none — the standing verdict carried no findings)'}
-
-DELTA SINCE THE LAST-REVIEWED SHA${DIFF_BASE_REF ? ` (${DIFF_BASE_REF}...HEAD)` : ''} — the ONLY code you may judge as changed:
-${deltaBlocks || '(no delta hunks provided)'}
-
-For EACH prior finding, read the site (open the full file where you need context) and decide: does the delta resolve the concern it named? Set addressed=true only when the concern genuinely no longer holds; addressed=false when the site is unchanged or the change does not resolve it. Ground a correctness adjudication in the code and its tests, not a plausible story.
-
-Then judge the WHOLE delta once for the RESTART signal: set restart.signaled=true ONLY when the delta is a fundamental rework — so large or divergent from what the deep pass reviewed that confirming individual findings is meaningless and a complete re-review is the honest call. An ordinary fix round (edits scoped to the reported findings) is NOT a restart.
-
-Put any unchanged-code nit you notice in advisories (non-blocking) — never as a new finding. If the delta cleanly addresses every prior finding and warrants no restart, return all addressed=true, restart.signaled=false, and advisories=[].`
-}
-
-// Build the { rollup } a confirm pass returns. The still-open prior findings are re-asserted UNCHANGED
-// so their fingerprints match the deep pass's — post-review-rollup dedups them against the PR history,
-// re-submitting the standing REQUEST_CHANGES with no new annotations (the convergent address->confirm
-// loop). soft-hold prior findings keep their gate; advisories flow to followUps (the existing
-// non-blocking, no-dedup-marker channel). restart rides on the rollup for the poster's ask-and-park.
-async function runConfirmPass() {
-  const deltaBlocks = Object.entries(DIFFS).map(([file, diff]) => `FILE: ${file}\nDIFF:\n${diff}`).join('\n\n')
-  const verdict = await agent(confirmPrompt(PRIOR_FINDINGS, deltaBlocks), {
-    label: 'confirm', phase: 'Verify', model: FINDER_MODEL, schema: CONFIRM_SCHEMA,
-  })
-  const addressed = new Map(((verdict && verdict.adjudications) || []).map(a => [a.index, a.addressed !== false]))
-  const stillOpen = PRIOR_FINDINGS.filter((_, i) => addressed.get(i) === false)
-  const confirmed = stillOpen.map(f => ({
-    file: f.file, pillar: f.pillar, source: 'confirm', category: f.category, line: f.line ?? null,
-    symbol: f.symbol, severity: f.severity, gate: f.gate === 'soft-hold' ? 'soft-hold' : 'advisory',
-    recommendation: f.recommendation, suggested_form: f.suggested_form,
-  }))
-  const followUps = ((verdict && verdict.advisories) || []).map(a => ({
-    file: a.file, pillar: a.pillar || 'advisory', source: 'confirm-advisory', category: 'unchanged-code',
-    line: a.line ?? null, symbol: a.symbol, severity: 'low', gate: 'advisory', suggested_form: a.note,
-  }))
-  const softHolds = confirmed.filter(r => r.gate === 'soft-hold')
-  const restart = (verdict && verdict.restart && verdict.restart.signaled)
-    ? { signaled: true, rationale: verdict.restart.rationale || '' }
-    : { signaled: false, rationale: (verdict && verdict.restart && verdict.restart.rationale) || '' }
-  // The confirm-pass bounce (issue #3391): a raised restart signal — the delta needs restart-level rework —
-  // IS the confirm side's bounce. It resumes at 'design' (a rework this large is a design-level regression),
-  // superseding #3390's interim ask-and-park: the poster now takes the real bounce path off rollup.bounce
-  // instead of parking the owner. restart stays on the rollup for continuity; bounce is what the poster reads.
-  const bounce = restart.signaled ? { to: 'design', reason: restart.rationale } : null
-  return {
-    reviewPass: 'confirm',
-    restart, bounce,
-    totals: { priorFindings: PRIOR_FINDINGS.length, stillOpen: confirmed.length, advisories: followUps.length },
-    spec: null,
-    softHolds, confirmed, followUps, grouped: {}, lintCandidates: [], spared: [], uncertain: [],
-  }
-}
-
-// Confirm pass (issue #3390) — the convergent re-review. Instead of re-running the five-pillar fan-out
-// and re-sampling the whole diff's nit distribution (the non-converging ratchet), one cheap verifier
-// session takes the findings the deep pass already reported plus the delta since the last-reviewed SHA
-// and answers only: (a) is each prior finding addressed by the delta? and (b) is the delta so large or
-// divergent that only a full re-review would do (the restart signal)? It emits NO new ordinary findings —
-// a would-be nit on unchanged code is the deep pass's own miss and lands as a non-blocking advisory at
-// most. The still-open prior findings are re-asserted UNCHANGED (same file/line/pillar), so their
-// fingerprints match across rounds and the finding set is frozen rather than re-sampled — that is what
-// makes re-reviews converge. Runs before the deep fan-out and returns its own rollup.
-if (REVIEW_PASS === 'confirm') {
-  const rollup = await runConfirmPass()
-  log(`review [confirm]: ${PRIOR_FINDINGS.length} prior finding(s) -> ${rollup.confirmed.length} still open, ${rollup.followUps.length} advisory, restart=${!!(rollup.restart && rollup.restart.signaled)}`)
-  return { rollup, files: [] }
-}
+// The confirm pass no longer runs through this workflow (issue #3404): a plain re-request's
+// delta confirm is adjudicated directly inside the review session, which writes the confirm
+// rollup itself — same shape runConfirmPass used to assemble (reviewPass/restart/bounce/totals/
+// confirmed/followUps and the empty deep-only channels), so the rollup readers are unchanged.
+// This workflow is the DEEP pass only.
 
 const scoped = resolveScope()
 if (!scoped.length) throw new Error('review: no files resolved to any lens (check files/testFiles vs selected lenses)')
@@ -1035,7 +905,7 @@ log(`review [${PROFILE}/${FINDER_SHAPE}]: ${totals.files} files, ${totals.finder
 // The deep-pass bounce signal (issue #3391): the spec agent's whole-PR bounce conclusion, normalized to
 // { to, reason } for the poster's bounceSignal path. null (the common case) leaves the two-outcome verdict
 // untouched. Rides the spec pass, so it fires only in integrated mode with the spec lens selected; the
-// confirm pass carries its own bounce (from the restart signal) in runConfirmPass.
+// in-session delta confirm (#3404) carries its own bounce, from the restart signal, on the rollup it writes.
 const bounce = (spec && spec.bounce && spec.bounce.warranted)
   ? { to: spec.bounce.to === 'plan' ? 'plan' : 'design', reason: spec.bounce.reason || '' }
   : null

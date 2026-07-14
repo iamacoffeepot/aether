@@ -81,6 +81,11 @@ concurrency:
 # approves it natively.
 env:
   AETHER_REVIEW_MAX_FILES: "40"
+  # Small-diff bar for the `trivial-small-light` tier (issue #3404): a
+  # `light`-class PR whose summed additions+deletions sit at or under this
+  # gets the session-less critic APPROVE instead of a review session. `rust`
+  # never skips on size alone — a small `.rs` diff is semantics by definition.
+  AETHER_REVIEW_TRIVIAL_MAX_LINES: "20"
 
 jobs:
   review:
@@ -145,12 +150,15 @@ jobs:
     outputs:
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       head_sha: ${{ steps.resolve.outputs.head_sha }}
-      # review_class feeds the `approve` job: a `none` PR (docs / ADR / md /
-      # manifest-only) gets a session-less critic APPROVE so it carries a
-      # standing verdict for the native required review; `rust` and `light`
-      # flow to the review session and the `post` job. Emitted the moment a PR
-      # resolves, even when the session is skipped (cap / none), not only on
+      # approve_route feeds the `approve` job: a non-empty route (a PR the
+      # tier table resolved below the session bar — `out-of-scope`,
+      # `trivial-comment-only`, or `trivial-small-light`; issue #3404) gets a
+      # session-less critic APPROVE naming the matched tier, so it carries a
+      # standing verdict for the native required review. An empty route flows
+      # to the review session and the `post` job. Emitted the moment a PR
+      # resolves, even when the session is skipped (cap / tier), not only on
       # the proceed path.
+      approve_route: ${{ steps.resolve.outputs.approve_route }}
       review_class: ${{ steps.resolve.outputs.review_class }}
       rollup_produced: ${{ steps.rollup.outputs.produced }}
     steps:
@@ -227,10 +235,13 @@ jobs:
           #           a lockfile / `Cargo.toml` edit with no `.rs` change) → the
           #           session-less out-of-scope critic APPROVE (the `approve`
           #           job); there is no reviewable surface to hold a verdict.
-          # Capture the file list first, then match with here-strings (not
-          # pipes) so a `grep -q` early exit can't SIGPIPE the paginated gh
-          # under `pipefail`.
-          files="$(gh api "repos/${REPO}/pulls/${pr}/files" --paginate --jq '.[].filename')"
+          # Fetch the changed-file set once, patches included — the class
+          # split and both trivial-tier predicates read it. `--paginate`
+          # concatenates top-level arrays, so `jq -s 'add'` normalizes to one.
+          # Match with here-strings (not pipes) so a `grep -q` early exit
+          # can't SIGPIPE the paginated gh under `pipefail`.
+          gh api "repos/${REPO}/pulls/${pr}/files" --paginate | jq -s 'add' > /tmp/pr-files.json
+          files="$(jq -r '.[].filename' /tmp/pr-files.json)"
           light_re='^(\.github/workflows/|\.github/actions/|scripts/)'
           if grep -qE '\.rs$' <<<"$files"; then
             review_class=rust
@@ -243,13 +254,58 @@ jobs:
           fi
           echo "review_class=$review_class" >> "$GITHUB_OUTPUT"
 
+          # Tier table (issue #3404) — ordered, fully mechanical, top match
+          # wins. A matched tier routes to the session-less `approve` job via
+          # the approve_route output: the reviewer picks its tools, and a diff
+          # below the session bar gets a verdict without a session. An
+          # explicit request (BYPASS_CAP — workflow_dispatch or `@iamacritic
+          # full review`) skips the trivial tiers exactly as it skips the size
+          # cap: "review it anyway".
+          #
+          #   out-of-scope         — review_class=none (docs / ADR / `.md` /
+          #                          manifest-only): no reviewable surface to
+          #                          hold a verdict. Today's rule, unchanged.
+          #   trivial-comment-only — any class: every changed line (adds AND
+          #                          removes), trimmed, is blank or starts
+          #                          with its file's comment leader (`#` for
+          #                          .yml/.yaml/.sh/.toml, `//` for
+          #                          .rs/.js/.mjs). A file with no mapped
+          #                          leader or no patch fails the predicate.
+          #                          Pure comment sweeps need no session
+          #                          whatever their size.
+          #   trivial-small-light  — light class only: summed additions +
+          #                          deletions ≤ AETHER_REVIEW_TRIVIAL_MAX_LINES.
+          #                          rust never skips on size alone — a small
+          #                          `.rs` diff is semantics by definition.
+          approve_route=""
           if [ "$review_class" = "none" ]; then
-            # No reviewable surface (docs / ADR / `.md` / manifest-only) → skip
-            # the review session entirely, not just the verdict: the /review
-            # skill refuses an empty reviewable-file set, so running it here
-            # would loud-fail. The `approve` job posts the session-less
-            # out-of-scope APPROVE from the review_class output above.
-            echo "PR #$pr touches no reviewable surface — review session skipped."
+            approve_route="out-of-scope"
+          elif [ "$BYPASS_CAP" != "true" ]; then
+            comment_only="$(jq -r '
+              def leader(f): if (f|test("\\.(yml|yaml|sh|toml)$")) then "#"
+                elif (f|test("\\.(rs|js|mjs)$")) then "//" else null end;
+              (length > 0) and
+              ([ .[] | leader(.filename) as $l |
+                 if $l == null or .patch == null then false
+                 else ([ .patch | split("\n")[] |
+                         select(test("^[+-]") and (test("^\\+\\+\\+|^---") | not)) |
+                         sub("^[+-]"; "") | gsub("^\\s+|\\s+$"; "") ] |
+                       all(. == "" or startswith($l)))
+                 end ] | all)' /tmp/pr-files.json)"
+            total_changed="$(jq '[.[] | .additions + .deletions] | add // 0' /tmp/pr-files.json)"
+            if [ "$comment_only" = "true" ]; then
+              approve_route="trivial-comment-only"
+            elif [ "$review_class" = "light" ] && [ "$total_changed" -le "$AETHER_REVIEW_TRIVIAL_MAX_LINES" ]; then
+              approve_route="trivial-small-light"
+            fi
+          fi
+          echo "approve_route=$approve_route" >> "$GITHUB_OUTPUT"
+          if [ -n "$approve_route" ]; then
+            # Below the session bar → skip the review session entirely, not
+            # just the verdict: the /review skill refuses an empty or trivial
+            # reviewable-file set. The `approve` job posts the session-less
+            # APPROVE naming this tier from the approve_route output above.
+            echo "PR #$pr — tier: $approve_route — review session skipped; session-less critic APPROVE."
             echo "proceed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -462,10 +518,11 @@ jobs:
           REVIEW_CLASS: ${{ steps.resolve.outputs.review_class }}
           REVIEW_PASS: ${{ steps.resolve.outputs.review_pass }}
         run: |
-          # Pass- and profile-conditional task prompt. A CONFIRM pass (issue #3390)
-          # takes precedence over the class split: it is the cheap single-session
-          # re-review that confirms the deep pass's findings were addressed against
-          # the delta, so it neither fans out nor cares whether the diff is Rust or
+          # Pass- and profile-conditional task prompt. A CONFIRM pass (issue #3390,
+          # judged in-session since #3404) takes precedence over the class split: the
+          # resumed session itself adjudicates {prior findings, delta} and writes the
+          # rollup — no review.js invocation, no Workflow tool, no spawned agents — so
+          # it neither fans out nor cares whether the diff is Rust or
           # light. Otherwise `light` (workflow/action/script diff, no Rust) resolves
           # the three globs and runs correctness + convention with the cargo refuter
           # off; `rust` keeps today's full five-pillar prompt verbatim. Each prompt is
@@ -484,42 +541,49 @@ jobs:
           delta since the last-reviewed SHA ADDRESSED those findings — never to re-review
           the whole change or hunt for new nits (that non-converging ratchet is exactly
           what this pass exists to stop).
-          Resolve two things caller-side (the workflow sandbox cannot run git/gh):
+          Resolve two things caller-side (do all of this yourself, in this session):
           1. PRIOR FINDINGS — use gh to read this PR's critic review verdict bodies, its
           inline review comments, and the '<!-- aether-review -->' summary comment. Each
           reported finding carries an 'aether-review-fp:PATH|LINE|PILLAR' marker next to
           its rendered text ('**pillar/category** (severity) — symbol recommendation:
           suggested_form'). Parse each into an object { file (PATH), line (LINE, null if
-          '-'), pillar, category, symbol, severity, suggested_form, gate ('soft-hold' if
-          the finding was under a soft-hold section, else 'advisory') }. Deduplicate by
-          PATH|LINE|PILLAR (the same finding appears on multiple surfaces).
+          '-'), pillar, category, symbol, severity, recommendation, suggested_form, gate
+          ('soft-hold' if the finding was under a soft-hold section, else 'advisory') }.
+          Deduplicate by PATH|LINE|PILLAR (the same finding appears on multiple surfaces).
           2. DELTA — the changed files and per-file diff hunks since the last-reviewed
           SHA: 'git diff --name-only <diff_base>...HEAD' and 'git diff <diff_base>...HEAD
           -- <file>' per file, substituting the file's diff_base value.
-          Then invoke the repo's /review skill in a CONFIRM pass: pass reviewPass:
-          'confirm', priorFindings: <the parsed list>, diffs: <the delta hunks keyed by
-          absolute path>, diffBase: <diff_base>, and files: <the delta's changed file
-          absolute paths> in the /review invocation's workflow args. The confirm session
-          runs a single verifier over { priorFindings, delta } — it emits NO new ordinary
-          findings; a nit on unchanged code is at most a non-blocking advisory. Let the
-          skill run the review.js workflow in a single pass.
-          THE WAIT CONTRACT (load-bearing — headless runs die on this): the Workflow tool
-          runs in the BACKGROUND. Launch it, then end your turn with a one-line status
-          note — nothing else. The headless harness holds the process open for the
-          in-flight background workflow (this step raises the wait ceiling to forty
-          minutes) and re-invokes you with a completion notification when it finishes.
-          Do NOT poll for the result: sleep-based polling is blocked here, and a Monitor
-          on the rollup path is useless because that file only appears when YOU write
-          it. Do NOT stop the workflow task, and NEVER treat the status note as the end
-          of the job. When the completion notification arrives, read the workflow's
-          returned { rollup, files } value (from the task output file if the
-          notification truncates it) and write the returned ROLLUP object as JSON
-          verbatim to exactly ${GITHUB_WORKSPACE}/review-rollup.json — that absolute
-          path, not a path relative to your working directory (the rollup, not the
-          whole return). The file never appears on its own — YOU write it. If the
-          workflow reports an error or no rollup, do NOT fabricate a replacement file:
-          leave the failure in the session transcript so the action records an
-          actionable no-rollup attempt.
+          Then adjudicate DIRECTLY IN THIS SESSION (issue #3404) — do NOT invoke the
+          /review skill, do NOT use the Workflow tool, do NOT spawn subagents; the whole
+          judgment is yours, in this context. For each prior finding decide: does the
+          delta resolve it (the concern it named no longer holds)? Note the resolving
+          hunk, or why it is still open. Emit NO new ordinary findings — a would-be nit
+          on unchanged code is the deep pass's own miss and lands as a non-blocking
+          advisory at most. Separately decide the restart signal: true only when the
+          delta is so large or divergent that a full re-review is warranted — a
+          fundamental rework, not an ordinary fix round.
+          Then write ${GITHUB_WORKSPACE}/review-rollup.json yourself — that absolute
+          path — containing exactly one JSON object in this shape (the confirm rollup
+          contract; the post job reads it verbatim):
+          {"reviewPass": "confirm",
+           "restart": {"signaled": <bool>, "rationale": "<why / why not>"},
+           "bounce": <null, or {"to": "design", "reason": "<restart rationale>"} iff restart.signaled>,
+           "totals": {"priorFindings": <N>, "stillOpen": <M>, "advisories": <K>},
+           "spec": null,
+           "confirmed": [<one row per STILL-OPEN prior finding, re-asserted UNCHANGED so
+             its fingerprint matches across rounds: {"file", "pillar", "source": "confirm",
+             "category", "line" (null if unknown), "symbol", "severity",
+             "gate" ("soft-hold" only if the prior finding was soft-hold, else "advisory"),
+             "recommendation", "suggested_form"}>],
+           "softHolds": [<the subset of confirmed whose gate is "soft-hold">],
+           "followUps": [<one row per unchanged-code advisory: {"file", "pillar",
+             "source": "confirm-advisory", "category": "unchanged-code", "line" (null ok),
+             "symbol", "severity": "low", "gate": "advisory", "suggested_form": "<the note>"}>],
+           "grouped": {}, "lintCandidates": [], "spared": [], "uncertain": []}
+          An addressed finding appears in NO array — only still-open findings are
+          re-asserted. If you cannot resolve the prior findings or the delta, do NOT
+          fabricate a rollup file: leave the failure in the session transcript so the
+          action records an actionable no-rollup attempt.
           Do not edit any source.
           SESSION REUSE (the warm pool, #3286): this session may be deposited and later
           resumed by a DIFFERENT job for a DIFFERENT task against the same files — your
@@ -960,18 +1024,20 @@ jobs:
         run: gh workflow run reconciler.yml -f pr="$PR"
 
   approve:
-    name: Out-of-scope approve
+    name: Below-the-bar approve
     needs: review
-    # The `none` class (docs / ADR / md / manifest-only) gets a session-less
-    # critic APPROVE so critic carries a standing verdict the native required
-    # review reads. `always()` because the `post` job is skipped for this class
-    # (no rollup), and the pr_number guard drops the fork / no-open-PR cases.
-    # Over-cap PRs are `rust`/`light` (review_class != 'none'), so they never
-    # reach here — they rest blocked on the absent verdict.
+    # A PR the tier table resolved below the session bar (a non-empty
+    # approve_route — `out-of-scope`, `trivial-comment-only`, or
+    # `trivial-small-light`; issue #3404) gets a session-less critic APPROVE
+    # naming the matched tier, so critic carries a standing verdict the native
+    # required review reads. `always()` because the `post` job is skipped for
+    # these routes (no rollup), and the pr_number guard drops the fork /
+    # no-open-PR cases. Over-cap PRs carry an empty route, so they never reach
+    # here — they rest blocked on the absent verdict.
     if: >
       always() &&
       needs.review.outputs.pr_number != '' &&
-      needs.review.outputs.review_class == 'none'
+      needs.review.outputs.approve_route != ''
     runs-on: ubuntu-latest
     # A pure-API job: no branch checkout, no repo write scope. The APPROVE rides
     # the minted critic token, not the job's GITHUB_TOKEN.
@@ -984,26 +1050,36 @@ jobs:
         with:
           app-id: ${{ secrets.CRITIC_APP_ID }}
           private-key: ${{ secrets.CRITIC_APP_PRIVATE_KEY }}
-      - name: Submit the out-of-scope APPROVE as critic
+      - name: Submit the below-the-bar APPROVE as critic
         env:
           GH_TOKEN: ${{ steps.critic-token.outputs.token }}
           REPO: ${{ github.repository }}
           PR: ${{ needs.review.outputs.pr_number }}
           HEAD_SHA: ${{ needs.review.outputs.head_sha }}
+          APPROVE_ROUTE: ${{ needs.review.outputs.approve_route }}
           CRITIC_LOGIN: iamacritic[bot]
         run: |
           set -euo pipefail
           # Skip when critic already approved this head SHA, so repeated
-          # requests on a no-Rust PR don't spam duplicate approvals. Stream the
-          # matching review ids (a per-page `.[]` jq, so --paginate concatenates
-          # cleanly rather than emitting one length per page) and test non-empty.
+          # requests on a below-the-bar PR don't spam duplicate approvals.
+          # Stream the matching review ids (a per-page `.[]` jq, so --paginate
+          # concatenates cleanly rather than emitting one length per page) and
+          # test non-empty.
           approved="$(gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
             --jq ".[] | select(.user.login==\"${CRITIC_LOGIN}\" and .commit_id==\"${HEAD_SHA}\" and .state==\"APPROVED\") | .id")"
           if [ -n "$approved" ]; then
             echo "critic already approved ${HEAD_SHA} — skipping."
             exit 0
           fi
+          # The verdict body names the matched tier so the APPROVE is
+          # self-explaining on the PR.
+          case "$APPROVE_ROUTE" in
+            out-of-scope) why='no reviewable surface changed (docs / ADR / manifest only)' ;;
+            trivial-comment-only) why='every changed line is a comment or blank — no behavior to review' ;;
+            trivial-small-light) why='automation-surface diff under the small-diff bar (AETHER_REVIEW_TRIVIAL_MAX_LINES)' ;;
+            *) why="tier $APPROVE_ROUTE" ;;
+          esac
           gh api -X POST "repos/${REPO}/pulls/${PR}/reviews" \
             -f event=APPROVE \
             -f commit_id="${HEAD_SHA}" \
-            -f body='Out of scope for the five-pillar review (no Rust changed) — auto-approved by critic so the PR carries a standing verdict for the native required review.'
+            -f body="Below the review-session bar — tier \`${APPROVE_ROUTE}\`: ${why}. Auto-approved by critic so the PR carries a standing verdict for the native required review; \`@iamacritic full review\` forces a session anyway."
