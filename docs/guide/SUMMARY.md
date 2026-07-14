@@ -91,6 +91,7 @@
 - [Tests that earn their place](testing.md)
   - [TestBench and FleetBench](testing/testbench-and-fleetbench.md)
   - [Performance, load, and fuzzing](testing/performance-and-fuzzing.md)
+  - [Offline quality eval](testing/quality-eval.md)
 
 # Contributing
 
