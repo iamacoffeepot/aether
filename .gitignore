@@ -22,6 +22,9 @@
 .claude/scheduled_tasks.lock
 .claude/worktrees/
 .agents/worktrees/
+# Codex session artifacts (visualizations etc.) land under `.codex/` in the
+# checkout the session ran from — runtime output, never repo content.
+.codex/
 .claude/skills/*
 !.claude/skills/adr/
 !.claude/skills/approve/
