@@ -773,6 +773,7 @@ jobs:
               --add-dir "$GITHUB_WORKSPACE" \
               --append-system-prompt "$(cat "$GITHUB_WORKSPACE/CLAUDE.md")" \
               --model claude-sonnet-5 \
+              --effort high \
               --max-turns 80 \
               --output-format stream-json --verbose) \
               | tee /tmp/review-session.jsonl \
@@ -784,6 +785,7 @@ jobs:
               --add-dir "$GITHUB_WORKSPACE" \
               --append-system-prompt "$(cat "$GITHUB_WORKSPACE/CLAUDE.md")" \
               --model claude-sonnet-5 \
+              --effort high \
               --max-turns 80 \
               --output-format stream-json --verbose) \
               | tee /tmp/review-session.jsonl \
