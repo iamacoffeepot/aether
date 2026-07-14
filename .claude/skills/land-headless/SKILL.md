@@ -9,7 +9,7 @@ This wraps `/land` for a headless agent running one-shot on an ephemeral GitHub 
 
 Execute `../land/SKILL.md` verbatim — the preconditions and QA-label gate, the conflict prediction oracle, the behind-branch merge-in handling, the Qodana sweep, the un-draft and auto-merge enablement, the phase-label delete. Where the original touches the interaction surface, `../headless/protocol.md` governs. An instruction is overridden if and only if it appears in the Overrides table below, cited by the original's anchor; everything else is the original's, unchanged. An improvement to `/land` is live here the moment it merges, because this wrapper only references it.
 
-Before any process step, run the protocol's [re-entrancy-first](../headless/protocol.md#re-entrancy-first) guard: check whether the PR is already merged (a crashed land job that already merged leaves nothing to redo), whether the closing issue still carries its `phase:*` label, and whether an unanswered `agent:awaiting-answer` park is open, then post a start-of-work comment with the run link and begin the original at the point the observed state implies.
+Before any process step, run the protocol's [re-entrancy-first](../headless/protocol.md#re-entrancy-first) guard: check whether the PR is already merged (a crashed land job that already merged leaves nothing to redo), whether the closing issue still carries its `phase:*` label, and whether an unanswered `agent:awaiting-answer` park is open, then begin the original at the point the observed state implies.
 
 ## Overrides
 

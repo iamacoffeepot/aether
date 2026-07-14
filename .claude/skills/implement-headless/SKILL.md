@@ -9,7 +9,7 @@ This wraps `/implement` for a headless agent running one-shot on an ephemeral Gi
 
 Execute `../implement/SKILL.md` verbatim — the preconditions, the plan-literal Execute phase, the commit-and-format step, the push, the draft-PR open, the CI Refine loop, the phase-label reconcile, the self-bounce mechanics. Where the original touches the interaction surface, `../headless/protocol.md` governs. An instruction is overridden if and only if it appears in the Overrides table below, cited by the original's anchor; everything else is the original's, unchanged. An improvement to `/implement` is live here the moment it merges, because this wrapper only references it.
 
-Before any process step, run the protocol's [re-entrancy-first](../headless/protocol.md#re-entrancy-first) guard: check whether the PR is already merged, whether the branch already exists, which `phase:*` label is present, and whether an unanswered `agent:awaiting-answer` park is open, then post a start-of-work comment with the run link and begin the original at the phase the observed state implies.
+Before any process step, run the protocol's [re-entrancy-first](../headless/protocol.md#re-entrancy-first) guard: check whether the PR is already merged, whether the branch already exists, which `phase:*` label is present, and whether an unanswered `agent:awaiting-answer` park is open, then begin the original at the phase the observed state implies.
 
 ## Overrides
 
