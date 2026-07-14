@@ -473,6 +473,23 @@ jobs:
           echo "model resolved to ${model}"
           echo "model=${model}" >> "$GITHUB_OUTPUT"
 
+          # Reasoning effort pinned per task type (#3375). Measured on landed-issue
+          # reruns (2026-07-13/14 probes): xhigh buys nothing below size:l, and at
+          # size:l Opus-medium dominates Sonnet-xhigh on cost, correctness, and wall
+          # clock. Effort is keyed on task ALONE so it is constant within any warm-
+          # pool bucket ((task, cli_version, model)) — a --resume never flips effort,
+          # so it never invalidates the prompt cache back to the system-prompt region
+          # (the measured hazard). implement is uniformly medium; its size:l split
+          # rides the model axis (sonnet->opus), already a pool-key segment. Untouched
+          # tasks (scope/resolve) emit empty and keep Claude Code's xhigh default.
+          effort=""
+          case "$TASK" in
+            land|approve|approve-sweep) effort="low" ;;
+            implement) effort="medium" ;;
+          esac
+          echo "effort resolved to ${effort:-<default>}"
+          echo "effort=${effort}" >> "$GITHUB_OUTPUT"
+
       # Warm session pool (#3313; design of record: the #3264 design comment,
       # v1.5 + the v2 function-primary directive). Resume a deposited session
       # whose file-beliefs are provably true at this checkout instead of
@@ -627,6 +644,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           MODEL: ${{ steps.model.outputs.model }}
+          EFFORT: ${{ steps.model.outputs.effort }}
           POOL_SESSION_ID: ${{ steps.pool-checkout.outputs.session_id }}
           AGENT_MAIN_STRICT: ${{ vars.AGENT_MAIN_STRICT }}
         run: |
@@ -678,6 +696,7 @@ jobs:
               --add-dir "$GITHUB_WORKSPACE" \
               --append-system-prompt "$(cat "$GITHUB_WORKSPACE/CLAUDE.md")" \
               --model "$MODEL" \
+              ${EFFORT:+--effort "$EFFORT"} \
               --max-turns ${{ (inputs.task == 'implement' || inputs.task == 'approve-sweep' || inputs.task == 'resolve') && 400 || 200 }} \
               --output-format stream-json --verbose) \
               | tee /tmp/agent-work-session.jsonl \
@@ -689,6 +708,7 @@ jobs:
               --add-dir "$GITHUB_WORKSPACE" \
               --append-system-prompt "$(cat "$GITHUB_WORKSPACE/CLAUDE.md")" \
               --model "$MODEL" \
+              ${EFFORT:+--effort "$EFFORT"} \
               --max-turns ${{ (inputs.task == 'implement' || inputs.task == 'approve-sweep' || inputs.task == 'resolve') && 400 || 200 }} \
               --output-format stream-json --verbose) \
               | tee /tmp/agent-work-session.jsonl \
