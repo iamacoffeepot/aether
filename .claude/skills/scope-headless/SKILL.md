@@ -9,7 +9,7 @@ This wraps `/scope` for a headless agent running one-shot on an ephemeral GitHub
 
 Execute `../scope/SKILL.md` verbatim — the full Define → Design → Plan walk, the phase-label reconcile, the body-editing mechanics, the grounding and API-budget discipline, every judgment call. Where the original touches the interaction surface, `../headless/protocol.md` governs. An instruction is overridden if and only if it appears in the Overrides table below, cited by the original's anchor; everything else is the original's, unchanged. An improvement to `/scope` is live here the moment it merges, because this wrapper only references it.
 
-Before any process step, run the protocol's [re-entrancy-first](../headless/protocol.md#re-entrancy-first) guard: read the issue's current `phase:*` label and check for an unanswered `agent:awaiting-answer` park, then post a start-of-work comment with the run link and begin the original at the phase the observed state implies.
+Before any process step, run the protocol's [re-entrancy-first](../headless/protocol.md#re-entrancy-first) guard: read the issue's current `phase:*` label and check for an unanswered `agent:awaiting-answer` park, then begin the original at the phase the observed state implies.
 
 ## Overrides
 

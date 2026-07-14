@@ -9,7 +9,7 @@ This wraps `/approve` for a headless agent running one-shot on an ephemeral GitH
 
 Execute `../approve/SKILL.md` verbatim — every gate check, the freshness gate, the dependency gate, the umbrella-integrity gate, the ADR merge gate, the ADR hard gate, the approval-tier lookup, the `phase:ready` label reconcile, the idempotency rules. Where the original touches the interaction surface, `../headless/protocol.md` governs. An instruction is overridden if and only if it appears in the Overrides table below, cited by the original's anchor; everything else is the original's, unchanged. An improvement to `/approve` is live here the moment it merges, because this wrapper only references it.
 
-Before any process step, run the protocol's [re-entrancy-first](../headless/protocol.md#re-entrancy-first) guard: read the issue's current `phase:*` label (already `phase:ready` means the gate cleared — re-validate and no-op per [`## Idempotency`](../approve/SKILL.md#idempotency)) and check for an unanswered `agent:awaiting-answer` park, then post a start-of-work comment with the run link and begin the original at the point the observed state implies.
+Before any process step, run the protocol's [re-entrancy-first](../headless/protocol.md#re-entrancy-first) guard: read the issue's current `phase:*` label (already `phase:ready` means the gate cleared — re-validate and no-op per [`## Idempotency`](../approve/SKILL.md#idempotency)) and check for an unanswered `agent:awaiting-answer` park, then begin the original at the point the observed state implies.
 
 ## The authority bound
 

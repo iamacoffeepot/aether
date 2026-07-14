@@ -19,7 +19,13 @@ A crashed or re-dispatched job must re-derive its state from observable facts ra
 - Which `phase:*` label is present on the issue?
 - Is there already an unanswered `agent:awaiting-answer` label with a parked-question comment on this issue?
 
-An unanswered park means the job is waiting on the owner — end the turn without re-asking. Otherwise post a start-of-work comment carrying the run link, then begin the original's process at the phase the observed state implies. A crash between steps leaves the phase label un-moved, so the next dispatch resumes from the same observable point without a stored cursor.
+An unanswered park means the job is waiting on the owner — end the turn without re-asking. Otherwise begin the original's process at the phase the observed state implies — the agent posts no start-of-work comment of its own; the workflow has already posted the claim comment (`agent-work.yml`'s start-of-work step), and the agent authors only the comments [comment-discipline](#comment-discipline) sanctions. A crash between steps leaves the phase label un-moved, so the next dispatch resumes from the same observable point without a stored cursor.
+
+## comment-discipline
+
+The headless agent authors a comment only where a base skill or this protocol explicitly instructs one — it never posts an announcement, status, progress, or narration comment of its own. The claim/start-of-work comment is the workflow's: `agent-work.yml` posts it natively, before the agent's process begins. The sanctioned comment surfaces are exactly those the skills name: the [ask-and-park](#ask-and-park) question comment, a self-bounce reason (scope §Comments), `/findings` review-thread replies, and any digest or terminal-state comment a base skill's own steps instruct — an [end-turn-not-wait](#end-turn-not-wait) terminal comment exists only where the base skill's terminal step calls for one; scope, whose §Comments forbids progress comments, carries its terminal state on the `phase:*` label and posts nothing.
+
+An unrequested comment is an uncontrolled write to a public page from a token-bearing session. The model composes comment bodies blind — no fixed template, no review — and the `${GITHUB_RUN_ID:-local}` shell placeholder that shipped unexpanded into a freelanced comment on PR #3413 is the proof: the same blind composition could just as easily interpolate an env value or a token into a public page. Keeping the model tier cheap is fine; the guardrail is text, not effort.
 
 ## ask-and-park
 
