@@ -271,7 +271,11 @@ jobs:
           #                          .yml/.yaml/.sh/.toml, `//` for
           #                          .rs/.js/.mjs). A file with no mapped
           #                          leader or no patch fails the predicate.
-          #                          Pure comment sweeps need no session
+          #                          The per-file `.patch` from `pulls/{}/files`
+          #                          carries no `---`/`+++` header lines (hunks
+          #                          start at `@@`, which never matches `^[+-]`),
+          #                          so `^[+-]` lines are exactly the changed
+          #                          lines. Pure comment sweeps need no session
           #                          whatever their size.
           #   trivial-small-light  — light class only: summed additions +
           #                          deletions ≤ AETHER_REVIEW_TRIVIAL_MAX_LINES.
@@ -288,7 +292,7 @@ jobs:
               ([ .[] | leader(.filename) as $l |
                  if $l == null or .patch == null then false
                  else ([ .patch | split("\n")[] |
-                         select(test("^[+-]") and (test("^\\+\\+\\+|^---") | not)) |
+                         select(test("^[+-]")) |
                          sub("^[+-]"; "") | gsub("^\\s+|\\s+$"; "") ] |
                        all(. == "" or startswith($l)))
                  end ] | all)' /tmp/pr-files.json)"
