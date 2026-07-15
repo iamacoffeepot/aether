@@ -1,11 +1,11 @@
 ---
 name: land
-description: Land a CI-green draft PR — un-draft, enable native auto-merge to squash it, delete the closing issue's phase:* label (Done), sweep the worktree. `--sweep` discovers this shard's held green draft PRs and lands them in sequence, predicting and recomputing conflict state after every merge, merging `origin/main` into behind branches when branch protection requires up-to-date (strict mode), and dispatching a `resolve` task for a dirty content conflict rather than touching the branch contents itself.
+description: Land a CI-green draft PR — un-draft, enable native auto-merge to squash it, sweep the worktree (the reconciler clears the closing issue's phase:* label at Done on the merge-close event). `--sweep` discovers this shard's held green draft PRs and lands them in sequence, predicting and recomputing conflict state after every merge, merging `origin/main` into behind branches when branch protection requires up-to-date (strict mode), and dispatching a `resolve` task for a dirty content conflict rather than touching the branch contents itself.
 ---
 
 # /land — PR landing skill
 
-The post-review landing action: take a draft PR that the user has approved, un-draft it, enable native auto-merge so GitHub squashes it onto `main` the instant its required gates go green, delete the closing issue's `phase:*` label (Done is label-absence), and sweep the merged worktree. Deliberately separate from `/implement`, which holds at draft and never merges.
+The post-review landing action: take a draft PR that the user has approved, un-draft it, enable native auto-merge so GitHub squashes it onto `main` the instant its required gates go green, and sweep the merged worktree. Clearing the closing issue's `phase:*` label at Done (Done is label-absence) is the reconciler's, done reactively on the PR's merge-close event — `/land` no longer writes phase (issue #3446). Deliberately separate from `/implement`, which holds at draft and never merges.
 
 Two entry shapes, one skill:
 
@@ -133,25 +133,18 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
      -f merge_method=squash \
      -f commit_title="<pr-title>"
    ```
-   Either way, poll the PR state (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.merged'`) until `true` before proceeding to avoid marking an un-landed issue Done (deleting its phase label).
+   Either way, poll the PR state (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.merged'`) until `true` before proceeding — the merge must be confirmed before the sweep tail runs, and the reconciler's Done-cleanup keys on the same merge-close, so an un-landed PR must never be treated as landed.
 
-6. **Move the closing issue to Done — delete its `phase:*` label.** `Done` is label-absence (per the phase-label-reconcile rules in `/scope` and `/implement`), so the canonical phase write here is a REST label delete, not a swap:
-   ```bash
-   gh api "repos/iamacoffeepot/aether/issues/<m>/labels" \
-     --jq '.[].name | select(startswith("phase:"))' \
-     | while read -r l; do
-         gh api -X DELETE "repos/iamacoffeepot/aether/issues/<m>/labels/$l"
-       done
-   ```
+   `/land` writes no phase label here. `Done` is label-absence, and the reconciler — the single writer of the post-green phase stretch — owns clearing the closing issue's `phase:*` label, firing on the PR's merge-close (`closed`) event rather than a `/land` follow-up delete. The old follow-up delete raced the merge-close: the squash-merge's `Closes #N` closed the issue several seconds before the delete landed, so a board monitor read a closed issue still carrying `phase:held` (issue #3446). `/land` polls `.merged` to `true` in step 5 (it must never proceed on an un-landed PR) and stops there; the reconciler's `merged`-gated Done branch clears the label atomically with — and reactively to — the close.
 
-7. **Sweep the merged worktree.** Run the worktree removal for this PR's branch, equivalent to `/sweep worktrees` §Target: worktrees step 4 for the merged entry:
+6. **Sweep the merged worktree.** Run the worktree removal for this PR's branch, equivalent to `/sweep worktrees` §Target: worktrees step 4 for the merged entry:
    ```bash
    git worktree remove "$(git rev-parse --show-toplevel)/.claude/worktrees/issue-<m>"
    git branch -D <branch>
    ```
    If the worktree has uncommitted files (rare — the implement agent should have committed everything), use `--force`. Skip this step when `--no-sweep` was passed.
 
-8. **Print summary.**
+7. **Print summary.**
    ```
    ✓ #<n> landed.
    Merged: <pr-url>
@@ -199,17 +192,7 @@ In `--sweep` mode, a `dirty` PR no longer halts the remaining sequence: dispatch
 
 ## Phase label reconcile
 
-`Done` carries no `phase:*` label — it is label-absence, the canonical resting state for a closed issue. The landing sequence deletes the current `phase:*` label instead of swapping it, per the rule in `/scope` §Phase label reconcile:
-
-```bash
-gh api "repos/iamacoffeepot/aether/issues/<m>/labels" \
-  --jq '.[].name | select(startswith("phase:"))' \
-  | while read -r l; do
-      gh api -X DELETE "repos/iamacoffeepot/aether/issues/<m>/labels/$l"
-    done
-```
-
-This is the same form `/scope` documents for the `Backlog` and `Done` phases — a REST `DELETE …/labels` per phase label, off the contended pool.
+`Done` carries no `phase:*` label — it is label-absence, the canonical resting state for a closed issue. `/land` does **not** write that label itself: the reconciler owns clearing the closing issue's `phase:*` label at Done, firing on the PR's merge-close (`closed`) event with a `merged`-strict gate and a `*/15` schedule backstop for a missed event (`.github/workflows/reconciler.yml`). This keeps the reconciler the single writer of the post-green phase stretch and removes the land-side follow-up delete that raced the merge-close (issue #3446). `/land`'s only phase-relevant act is the step-5 `.merged` poll, which confirms the merge before the sweep tail — it never edits a phase label.
 
 ## What /land does NOT do
 
@@ -218,7 +201,7 @@ This is the same form `/scope` documents for the `Backlog` and `Done` phases —
 - Resolve findings or strip `dogfood:unresolved` itself. `/findings` resolves the review threads and pushes the fixes; the reconciler reads that and computes `findings` → `held`; `/land` trusts `held`. A fresh critic verdict on the next review re-request supersedes the standing `REQUEST_CHANGES`, and the dogfood runner's poster clears `dogfood:unresolved` on a re-run that finds nothing actionable. `/land` only refuses while the closing issue is short of `phase:held`.
 - Approve the PR or dismiss critic's review verdict. The review waiver is the owner's signoff alone — the owner overrides a standing `REQUEST_CHANGES` by approving the PR or dismissing the verdict natively (ADR-0148 §Owner waiver); an agent never does either, whoever's token it holds. Same class as the label-strip rule above.
 - Land PRs in parallel. Protected `main` enforces linear history; parallel landing races to discover the serialization. The sequence lands one at a time with recompute.
-- Delete the `phase:*` label before verifying the merge completed (`merged` field confirmed `true`).
+- Write the closing issue's `phase:*` label at Done. The reconciler owns Done-cleanup on the merge-close event (issue #3446); `/land` only confirms the merge via the step-5 `.merged` poll.
 - Remove a worktree whose PR has not merged. The sweep tail runs only after a confirmed merge.
-- Edit the issue body. `/scope` owns the body; `/land` only touches the `phase:*` label.
+- Edit the issue body. `/scope` owns the body; `/land` touches no issue label.
 - Dispatch implementation. `/implement` handles that; `/land` acts on PRs that implement has already produced and the user has reviewed.
