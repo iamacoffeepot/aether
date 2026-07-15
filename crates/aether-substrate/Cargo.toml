@@ -60,6 +60,9 @@ serde = { workspace = true, features = ["derive", "std"] }
 # JSONL on a panic-hook write path. Read-side consumers (operator
 # `jq` queries) match.
 serde_json = { workspace = true }
+# ADR-0115 / ADR-0149: sha256 content addressing for the `content_store`
+# core (the hub `ArtifactStore` and Bloomery `artifacts` port build on it).
+sha2 = { workspace = true, features = ["std"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wasmtime = { workspace = true, optional = true }

@@ -332,7 +332,8 @@ mod tests {
         .expect("test setup: write stand-in");
         fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).expect("test setup: chmod stand-in");
 
-        let mut store = ArtifactStore::open(&dir.join("store"), DEFAULT_DISK_BUDGET_BYTES);
+        let mut store =
+            ArtifactStore::open(&dir.join("store"), DEFAULT_DISK_BUDGET_BYTES).expect("test setup: open store");
         let bootstrap = HashSet::from([stand_in.to_string_lossy().into_owned()]);
         bootstrap_ingest(&mut store, &bootstrap);
 

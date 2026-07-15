@@ -178,7 +178,8 @@ impl NativeActor for EngineServer {
             .as_deref()
             .filter(|d| !d.is_empty())
             .map_or_else(ArtifactStore::default_root, |dir| PathBuf::from(dir).join(LAYOUT_VERSION_DIR));
-        let mut store = ArtifactStore::open(&store_dir, config.binary_disk_budget_bytes);
+        let mut store = ArtifactStore::open(&store_dir, config.binary_disk_budget_bytes)
+            .map_err(|e| BootError::Other(Box::new(e)))?;
         bootstrap_ingest(&mut store, &config.binary_bootstrap);
         Ok(EngineServerState {
             engines: HashMap::new(),

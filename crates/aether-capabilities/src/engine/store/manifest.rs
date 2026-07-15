@@ -51,17 +51,6 @@ impl StoredManifest {
     }
 }
 
-/// How a caller addresses a stored artifact in [`super::ArtifactStore::get`] —
-/// by its content hash or by a human-readable name. The seam #1954's
-/// spawn cutover consumes to resolve a registry reference to bytes.
-#[derive(Debug, Clone)]
-pub enum Selector {
-    /// The sha256 hex content address.
-    Hash(String),
-    /// A name an upload pointed at a hash.
-    Name(String),
-}
-
 /// One resolved artifact returned by [`super::ArtifactStore::get`]: its content
 /// hash, the on-disk path of its raw bytes (the fork target for #1954, the
 /// resolve-and-forward byte source for #1956), the type tag, the
