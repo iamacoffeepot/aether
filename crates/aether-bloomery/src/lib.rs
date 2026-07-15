@@ -61,8 +61,8 @@ pub use port::{
     ViewDocument,
 };
 pub use reduce::{
-    BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, IntegrateError, Outcome, ResolveError,
-    SealConflict, Snapshot, SupersedeError, reduce, view_of,
+    BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, IntegrateError, LandError, Outcome,
+    ResolveError, SealConflict, SealError, Snapshot, SupersedeError, reduce, view_of,
 };
 pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
 pub use values::{
