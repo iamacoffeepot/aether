@@ -217,11 +217,11 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
             }
         }
 
-        if let Some(name) = name {
-            if self.entries.contains_key(&hash) {
-                self.names.insert(name, hash.clone());
-                self.persist_names();
-            }
+        if let Some(name) = name
+            && self.entries.contains_key(&hash)
+        {
+            self.names.insert(name, hash.clone());
+            self.persist_names();
         }
 
         self.evict_if_needed();
