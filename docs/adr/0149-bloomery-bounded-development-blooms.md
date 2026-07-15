@@ -149,12 +149,19 @@ policy as parameters; the hub store keeps its current behavior as one consumer, 
 eviction-free with provenance kept in the journal — avoiding the "two stores duplicate addressing and
 eviction" outcome ADR-0116 rejected.
 
-GitHub lives entirely outside those ports as `aether-bloomery-github`: inward it translates issues into
-observation-attested sketch candidates, reviews into decision proposals bound to displayed digests, and refs
-into source artifacts; outward it projects evidence into issues, PRs, checks, and attestations; and when
-GitHub hosts the repository it implements the source port. No core module names a GitHub type. Webhook
-deliveries are untrusted observations the reducer is free to ignore; platform authentication is never an
-author signature. Unplug the adapter and an active bloom still runs to completion.
+GitHub lives entirely outside those ports as `aether-bloomery-github`, and its direction is outward
+*(amended 2026-07-15: the original text made the adapter an intent importer — issues becoming sketch
+candidates, reviews becoming decision proposals; the owner's intent is the reverse)*: the adapter maintains
+a shadow copy of Bloomery's internals — workpieces project to issues, blooms to their aggregate views,
+evidence to checks and comments, every projection carrying internal ids and digests in stable metadata,
+idempotent and rebuildable from the journal after deletion — and it implements the source port when GitHub
+hosts the repository, so Git remains the versioning substrate. Intent enters Bloomery natively, never
+through the mirror. The one inward channel is stage results: when a stage Bloomery dispatched executes on
+GitHub — a reviewer verdict, a check run — the adapter normalizes the outcome into evidence bound to the
+exact digests Bloomery displayed, entering the reducer like any other attempt result. Free-form platform
+activity is not translated: platform authentication is never an author signature, a comment never becomes
+a command, and a webhook at most flags a drifted projection for repair. No core module names a GitHub
+type. Unplug the adapter and an active bloom still runs to completion — the mirror lags and rebuilds.
 
 ### Execution on Actions, by demotion
 
@@ -194,10 +201,12 @@ become a build server.
 
 Each step is reversible and the current pipeline keeps operating until explicitly retired:
 
-1. **Shadow.** `aether-bloomery` values + reducer + property tests; the storage-core extraction; the
-   SQLite store capability; a read-only GitHub importer that mirrors the live board into drafts and
-   predicts what the tick and reconciler will decide. Predictions diff against actual pipeline behavior.
-   Zero authority.
+1. **Mirror.** `aether-bloomery` values + reducer + property tests; the storage-core extraction; the
+   SQLite store capability; and the projection mirror — synthetic blooms driven through the reducer and
+   journal appear as carbon copies on GitHub, idempotently, rebuilt after deletion. No execution, no
+   landing authority; the gate to step 2 is a faithful mirror plus kill-and-restart drills converging.
+   *(Amended 2026-07-15: originally a read-only importer predicting the live board's decisions — that
+   pointed the shadow inward; the mirror points it outward, matching the adapter's direction above.)*
 2. **Executor bridge.** Bloomery seals real blooms and dispatches work through the Actions wrapper lane;
    the tick's scheduling retires. GitHub objects remain the social view; landing authority is unchanged.
 3. **Authority moves.** Compare-and-swap landing moves to the source port; App keys and receipt signing
