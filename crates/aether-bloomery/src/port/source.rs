@@ -2,6 +2,8 @@
 //! integrate, and compare-and-swap land. Branch names are working handles,
 //! never identity — every value here is digest-addressed.
 
+use alloc::vec::Vec;
+
 use crate::digest::Digest;
 use crate::ids::BloomId;
 use crate::values::LandingReceipt;
@@ -38,6 +40,14 @@ pub enum IntegrateOutcome {
     Conflict {
         /// The conflicting tree/point.
         at: Digest,
+    },
+    /// The expected checkpoint was stale — the integration branch has
+    /// advanced past it, so the single-writer CAS is refused rather than
+    /// clobbering a concurrent advance. The caller re-reads the current
+    /// checkpoint and retries.
+    StaleCheckpoint {
+        /// The tree the integration branch is actually at.
+        actual: Digest,
     },
 }
 
@@ -76,12 +86,33 @@ pub trait SourceBackend {
     /// Backend-defined — e.g. the integration branch could not be written.
     fn checkpoint(&self, bloom: &BloomId, tree: &Digest) -> Result<Checkpoint, Self::Error>;
 
-    /// Integrate `candidate` onto `bloom`'s single-writer integration branch.
+    /// Enumerate the recorded integration checkpoints for `bloom`, so a
+    /// successor bloom can reuse the ones drift did not invalidate
+    /// (ADR-0149's successor-reuse clause requires checkpoints be queryable
+    /// by digest — [#3465]).
+    ///
+    /// # Errors
+    /// Backend-defined — e.g. the integration branch could not be read.
+    ///
+    /// [#3465]: https://github.com/iamacoffeepot/aether/issues/3465
+    fn checkpoints(&self, bloom: &BloomId) -> Result<Vec<Checkpoint>, Self::Error>;
+
+    /// Integrate `candidate` onto `bloom`'s single-writer integration branch,
+    /// guarded by `expected`: if the branch has advanced past that checkpoint
+    /// the swap is refused with [`IntegrateOutcome::StaleCheckpoint`] rather
+    /// than clobbering a concurrent advance (the single-writer CAS semantics
+    /// ADR-0149 assigns to integrate).
     ///
     /// # Errors
     /// Backend-defined — a transport or backend fault, distinct from the
-    /// clean [`IntegrateOutcome::Conflict`] result.
-    fn integrate(&self, bloom: &BloomId, candidate: &Digest) -> Result<IntegrateOutcome, Self::Error>;
+    /// clean [`IntegrateOutcome::Conflict`] / [`IntegrateOutcome::StaleCheckpoint`]
+    /// results.
+    fn integrate(
+        &self,
+        bloom: &BloomId,
+        candidate: &Digest,
+        expected: &Checkpoint,
+    ) -> Result<IntegrateOutcome, Self::Error>;
 
     /// Compare-and-swap mainline from `expected_base` to `new_head` for
     /// `bloom`. A moved base is the clean [`LandOutcome::BaseMoved`] result,
