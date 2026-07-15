@@ -11,6 +11,7 @@ members = [
     "crates/aether-actor-derive",
     "crates/aether-behavior",
     "crates/aether-behavior-derive",
+    "crates/aether-bloomery",
     "crates/aether-capabilities-derive",
     "crates/aether-data-derive",
     "crates/aether-derive",
@@ -87,8 +88,10 @@ toml = "0.9"
 # Content-addressed hashing for the hub binary store (ADR-0115, issue
 # 1953): sha256 over a binary's raw bytes keys each entry. Native-only
 # consumer (`aether-capabilities` under `native`); pinned here so any
-# future hashing surface shares the major.
-sha2 = "0.10"
+# future hashing surface shares the major. Default features off keeps the
+# no_std consumers (`aether-bloomery`'s wasm-safe content-addressing core,
+# ADR-0149) no_std; native consumers re-add `std` on their own declaration.
+sha2 = { version = "0.10", default-features = false }
 syn = { version = "2", features = ["full"] }
 tracing = { version = "0.1", default-features = false }
 wasmtime = "44"

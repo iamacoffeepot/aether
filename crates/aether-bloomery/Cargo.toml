@@ -1,0 +1,27 @@
+[package]
+name = "aether-bloomery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The canonical wire format (ADR-0118) backs content-addressing: a
+# `Digest` is sha256 over a value's `aether_data::wire` bytes, so digests
+# reuse the workspace's own canonical encoding rather than a parallel one.
+# `aether-data` is no_std + alloc, keeping this crate wasm-safe. The
+# `derive` feature is not needed — the value vocabulary is content-
+# addressed and serde-encoded, not a mail-kind set.
+aether-data = { path = "../aether-data" }
+# Content-addressing needs a collision-resistant hash, consistent with the
+# hub binary store (ADR-0115). Default features off keeps the core no_std
+# for the later cdylib-actors slice of ADR-0149.
+sha2 = { workspace = true, default-features = false }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+
+[dev-dependencies]
+# The seven named invariants ride property tests (ADR-0149 migration
+# step 1). Dev-only — the pure core never links a test dependency.
+proptest = { workspace = true }
+
+[lints]
+workspace = true

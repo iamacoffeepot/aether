@@ -90,6 +90,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-bloomery"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-data",
+ "proptest",
+ "serde",
+ "sha2",
+]
+
+[[package]]
 name = "aether-capabilities"
 version = "0.3.0-alpha"
 dependencies = [
