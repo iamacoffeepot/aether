@@ -53,7 +53,9 @@ pub mod values;
 
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, StageId, WorkpieceId};
-pub use manifest::{ClosureViolation, PromptManifest, ProvenanceIndex, Slot, SlotRole, assemble_manifest};
+pub use manifest::{
+    ClosureViolation, MANIFEST_CLOSURE_BUDGET, PromptManifest, ProvenanceIndex, Slot, SlotRole, assemble_manifest,
+};
 pub use port::{
     Checkpoint, IntegrateOutcome, LandOutcome, ProjectionBackend, ProjectionState, SourceBackend, SourceSnapshot,
 };
