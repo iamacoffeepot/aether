@@ -139,7 +139,11 @@ tokens, or shells:
 - **executor** — `submit` / `cancel` / `inspect` / `stream_evidence` to disposable workers; no
   arbitrary-command message exists
 - **signing** — verify statements, sign receipts; private keys never enter wasm
-- **projection** — push typed receipts outward
+- **projection** — push typed receipts and self-contained view documents outward: a view document is a
+  pure projection of the journal carrying everything an adapter renders (per-bloom membership, scope
+  revisions, stages, evidence digests, resolution claims) — an adapter never queries back into the store
+  *(amended 2026-07-15: the first port draft carried opaque ids only, which no adapter can render; found
+  by the judge pass on the projection-mirror slice, twin of the checkpoint-enumeration amendment)*
 
 The artifacts capability reuses the engine store's storage layer rather than growing a rival. The
 content-addressed core inside the hub's binary/component store (ADR-0115/0116) — sha256 addressing, atomic
