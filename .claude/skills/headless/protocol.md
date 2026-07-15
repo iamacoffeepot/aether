@@ -29,7 +29,7 @@ An unrequested comment is an uncontrolled write to a public page from a token-be
 
 ## ask-and-park
 
-Where the original would ask a human — a scope Define or Design bounce, a scope §Comments self-bounce, a land dirty-conflict or Qodana bail-out, or any value judgment only the owner can make — the headless agent does not stop and wait. It posts a plain-prose question comment in the fixed shape below, applies the `agent:awaiting-answer` label plus the `agent:park:<task>` label naming which task an owner reply re-dispatches, and exits 0. The exit is clean: a parked question is a normal terminal state for a headless run, not a failure.
+Where the original would ask a human — a scope Define or Design bounce, a scope §Comments self-bounce, a land dirty-conflict, or any value judgment only the owner can make — the headless agent does not stop and wait. It posts a plain-prose question comment in the fixed shape below, applies the `agent:awaiting-answer` label plus the `agent:park:<task>` label naming which task an owner reply re-dispatches, and exits 0. The exit is clean: a parked question is a normal terminal state for a headless run, not a failure.
 
 The owner's reply re-dispatches the job — agent-chat reads the task from the `agent:park:<task>` label and the work ref from the surface the reply lands on, then dispatches agent-work (#3336 moved this routing payload off the free-text marker into structured GitHub state). Best-effort reasoning-context carry rides the #3313 warm session pool, bucketed by task+model; the reliable path is re-deriving the state from the board, exactly as the approve park already does. V1's only answerer is the owner — there is no `ask:*` routing vocabulary yet.
 
@@ -53,7 +53,7 @@ Post the comment over REST (`gh api -X POST repos/iamacoffeepot/aether/issues/<n
 
 The headless agent never sleep-polls or blocks on a human. The original's terminal human-waits — scope's "stops at Plan, awaiting `/approve`", implement's "print to user … tell me to land", land's "wait for one confirmation" — each become: post the terminal state as a comment and end the turn. The dispatch that resumes the flow comes from elsewhere — the owner's reply, or the reconciler or tick of a sibling rung — so there is nothing to wait on in-job.
 
-This targets waits on a human, not waits on CI. An in-job wait the original owns that needs no human — the Refine-loop `scripts/wave-status.sh --wait <pr>` CI poll, `/land`'s strict-mode rebase re-predict, its Qodana-sweep wait — is **not** overridden here; the wait itself stays. The distinction is the party being waited on: a human wait is replaced by end-turn plus re-dispatch, a CI wait is kept — but a one-shot runner cannot realize a long synchronous foreground block, so it realizes the kept wait the headless way described next.
+This targets waits on a human, not waits on CI. An in-job wait the original owns that needs no human — the Refine-loop `scripts/wave-status.sh --wait <pr>` CI poll, `/land`'s strict-mode rebase re-predict — is **not** overridden here; the wait itself stays. The distinction is the party being waited on: a human wait is replaced by end-turn plus re-dispatch, a CI wait is kept — but a one-shot runner cannot realize a long synchronous foreground block, so it realizes the kept wait the headless way described next.
 
 ### the CI-wait contract
 

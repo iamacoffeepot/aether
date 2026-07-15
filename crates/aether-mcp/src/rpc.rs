@@ -509,7 +509,7 @@ fn classify_write_error(e: &RpcClientError, generation: u64) -> CallError {
 /// `tx` in `conn.pending`, and return the cid. Bundles the dead-socket
 /// check, the write, and the pending registration — every call shape
 /// (`call_once`, `call_collecting_once`) does the same dance, so
-/// factoring it here keeps Qodana's `DuplicatedCode` quiet and
+/// factoring it here keeps the duplicate-code check quiet and
 /// localizes the lock-section invariant. All steps run under one hold
 /// of `conn.pending` so the check-and-register is atomic against the
 /// router's death.

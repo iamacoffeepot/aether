@@ -155,7 +155,7 @@ Type comes from the issue's `type:*` label. Slug is the issue title sanitized: l
 
 3. Commit the work. The committed HEAD is the durable handoff artifact the parent's takeover adopts. In the in-session path this step runs inline and the agent continues to step 4; in hybrid background-agent mode the agent commits here and proceeds to step 4.
 
-4. Format before pushing. GitHub is the build engine and runs the full check set — clippy, docs, marker build, tests, qodana — on every push, so it is the sole gate and nothing heavy builds locally. In hybrid background-agent mode the agent runs this step, then **STOPs** after it; in the in-session path it runs here before step 5.
+4. Format before pushing. GitHub is the build engine and runs the full check set — clippy, docs, marker build, tests, dup-check, unused-deps — on every push, so it is the sole gate and nothing heavy builds locally. In hybrid background-agent mode the agent runs this step, then **STOPs** after it; in the in-session path it runs here before step 5.
    - Assert a clean working tree (`git status --porcelain` empty) — the committed HEAD is what gets pushed; amend any post-commit edits into the commit (or discard them) before proceeding; `git stash` is banned for concurrent agents (`feedback_concurrent_agents_never_git_stash`)
    - `cargo fmt` — the one local check. A formatting slip is the cheapest CI red to avoid; every other failure surfaces in the Refine loop and is fixed there.
 
@@ -182,11 +182,11 @@ After PR open, enter the loop. On each iteration:
    scripts/wave-status.sh --wait <pr>
    ```
 
-   `wave-status.sh --wait <pr>` loops (polling every 20s) until `CI pass` — the required merge aggregator — is present and completed with zero pending check-runs, then exits 0 on `success` or 1 on failure/neutral. A subset-registered matrix (only `Detect changes` up, say) can't trip a false green. To respond to reds as they surface rather than after the whole run settles, it **fast-fails**: the moment a deterministic check (Format / Clippy / Docs / Marker-only host build) concludes failure it exits 1 immediately, without waiting for the slow test / qodana jobs — those checks are never flaky and never auto-retried to green, so their red already dooms `CI pass`. Exit 0 → goto step 2; exit 1 → the script has already printed the failed check names — go to step 3.
+   `wave-status.sh --wait <pr>` loops (polling every 20s) until `CI pass` — the required merge aggregator — is present and completed with zero pending check-runs, then exits 0 on `success` or 1 on failure/neutral. A subset-registered matrix (only `Detect changes` up, say) can't trip a false green. To respond to reds as they surface rather than after the whole run settles, it **fast-fails**: the moment a deterministic check (Format / Clippy / Docs / Marker-only host build) concludes failure it exits 1 immediately, without waiting for the slow test jobs — those checks are never flaky and never auto-retried to green, so their red already dooms `CI pass`. Exit 0 → goto step 2; exit 1 → the script has already printed the failed check names — go to step 3.
 
-2. **CI green** → goto "Done condition" below. **Or green except a sole `Qodana scan` red** — the failing required checks minus `CI pass` are exactly `{Qodana scan}`: also goto "Done condition". A sole Qodana red is not fixed or Stalled here; it is left for `/land` to resolve from the `qodana-report` artifact before landing. (Any other red alongside it is a real failure — go to step 3.)
+2. **CI green** → goto "Done condition" below.
 
-3. **CI failed** (a non-Qodana required check is red) → pull logs (`gh run view <run-id> --log-failed`), classify, act:
+3. **CI failed** (a required check is red) → pull logs (`gh run view <run-id> --log-failed`), classify, act:
 
    ```
    Classification → Action
@@ -223,9 +223,9 @@ Format/clippy/build are never flakes — always real, always immediate fix.
 
 ## Done condition
 
-CI green — or green except a sole `Qodana scan` red held for `/land`:
+CI green:
 
-1. No phase-label write. The reconciler computes the resting state from the PR: `phase:held` when CI is green and nothing is open, or `phase:findings` when the requested review/dogfood rollup posts actionable findings. `/implement` writes nothing here — the draft-PR-open-and-green fact is what the reconciler reads. A held `Qodana scan` red is normal: `/land` runs the Qodana sweep before it un-drafts.
+1. No phase-label write. The reconciler computes the resting state from the PR: `phase:held` when CI is green and nothing is open, or `phase:findings` when the requested review/dogfood rollup posts actionable findings. `/implement` writes nothing here — the draft-PR-open-and-green fact is what the reconciler reads.
 2. **Request the review.** CI green is the explicit hand-off to review — the review never fires on its own, so a green PR that nobody requests a review for sits verdict-less forever:
 
    ```bash

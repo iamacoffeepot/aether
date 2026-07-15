@@ -3,7 +3,7 @@
 //! 10-cap base (handle, log, trace, input, component-host, fs, http,
 //! tcp + the aborter + worker count) and the same optional RPC
 //! server tail, with only their renderer + window stack differing.
-//! Qodana flagged the parallel chains as duplicated code; this module
+//! The duplicate-code check flagged the parallel chains as duplicated code; this module
 //! pulls the shared scaffolding out so each chassis declares only
 //! the parts that genuinely differ.
 //!

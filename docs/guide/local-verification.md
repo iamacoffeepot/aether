@@ -25,8 +25,8 @@ Rust tier.
 
 The checked-in workflows are authoritative for the exact current jobs. The
 aggregate `CI pass` check combines applicable gates such as formatting, clippy,
-docs, marker/feature boundary builds, workspace tests, Qodana, wasm packaging,
-and contract jobs. Path filters can make a job intentionally inapplicable.
+docs, marker/feature boundary builds, workspace tests, duplicate-code and
+unused-dependency checks, wasm packaging, and contract jobs. Path filters can make a job intentionally inapplicable.
 
 The automated Rust review is enforced by GitHub's native required review, not
 by `CI pass`: critic submits a native `APPROVE` / `REQUEST_CHANGES` verdict and

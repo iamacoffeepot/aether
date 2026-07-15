@@ -15,4 +15,4 @@ Require a citation to `AGENTS.md`, an accepted ADR, `docs/guide/`, or an establi
 
 ## Bar
 
-Include the exact rule path and rule text or term in the rationale. A new concept with no established name is not a terminology violation. Route an already-gated rule to `lintCandidates` with `gate-gap`; do not present clippy, formatting, Qodana, or repository check failures as judgment findings.
+Include the exact rule path and rule text or term in the rationale. A new concept with no established name is not a terminology violation. Route an already-gated rule to `lintCandidates` with `gate-gap`; do not present clippy, formatting, or repository check failures as judgment findings.

@@ -24,8 +24,8 @@ members = [
     # typed↔reshaped replace-pair satellites, the ADR-0138 defaultless
     # multi-actor fixture, and the ADR-0147 boot-slot fixture) and the
     # split-cap native lib. Listed explicitly (not a
-    # `crates/aether-test-fixtures/*` glob) because Qodana's TOML inspector
-    # can't resolve workspace globs.
+    # `crates/aether-test-fixtures/*` glob); the glob form would resolve
+    # now, but the explicit list documents each fixture crate.
     "crates/aether-test-fixtures/aether-test-fixtures-kinds",
     "crates/aether-test-fixtures/aether-test-fixtures-bundle",
     "crates/aether-test-fixtures/aether-test-fixtures-stateful-typed",
