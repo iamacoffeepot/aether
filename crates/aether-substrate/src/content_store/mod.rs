@@ -218,8 +218,10 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
         }
 
         if let Some(name) = name {
-            self.names.insert(name, hash.clone());
-            self.persist_names();
+            if self.entries.contains_key(&hash) {
+                self.names.insert(name, hash.clone());
+                self.persist_names();
+            }
         }
 
         self.evict_if_needed();
