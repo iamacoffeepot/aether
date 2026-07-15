@@ -132,8 +132,10 @@ tokens, or shells:
 
 - **store** — journal transactions, membership claims, inbox/outbox
 - **artifacts** — digest-addressed bytes; canonical record, never evicted
-- **source** — snapshot, checkpoint, integrate, compare-and-swap land; branch names are working handles,
-  never identity
+- **source** — snapshot, checkpoint (produce *and enumerate*: successor reuse requires checkpoints be
+  queryable by digest, so enumeration is part of the port contract, not an adapter nicety — *amended
+  2026-07-15, making explicit what the successor-reuse clause already implied*), integrate,
+  compare-and-swap land; branch names are working handles, never identity
 - **executor** — `submit` / `cancel` / `inspect` / `stream_evidence` to disposable workers; no
   arbitrary-command message exists
 - **signing** — verify statements, sign receipts; private keys never enter wasm
