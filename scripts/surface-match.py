@@ -34,7 +34,10 @@ Two modes:
         Containment. Prints `path\ttier` for every path in <changed_file> that
         NO glob in <globs_file> matches; silent when the diff is contained. The
         tier column is annotation only — it reads `?` without a <policy_file>,
-        or when the policy is empty (not on the default branch yet).
+        or when the policy is empty (not on the default branch yet). A root
+        Cargo.lock change is treated as contained when the declared surface
+        names any Cargo.toml manifest — the generated lockfile delta a declared
+        manifest change necessarily produces.
 
     surface-match.py --tier <surface_file> <policy_file>
         Set-sound tier resolution over declared surface patterns. Exact paths and
@@ -129,6 +132,12 @@ def valid_surface_glob(pattern):
     if "*" not in pattern:
         return True
     return pattern.endswith("/**") and pattern.count("*") == 2
+
+
+def surface_declares_manifest(globs):
+    """Whether any in-grammar declared glob names a Cargo.toml manifest."""
+
+    return any(valid_surface_glob(g) and (g == "Cargo.toml" or g.endswith("/Cargo.toml")) for g in globs)
 
 
 RANK = {"auto": 0, "judge": 1, "human": 2}
@@ -372,17 +381,24 @@ def main(argv):
         print(max(tiers, key=lambda t: RANK.get(t, len(RANK))))
         return
 
+    globs = read_globs(argv[1])
     matchers = []
-    for glob in read_globs(argv[1]):
+    for glob in globs:
         if valid_surface_glob(glob):
             matchers.append(compile_surface_glob(glob))
         else:
             # Fail toward escape: the paths this pattern claimed to cover are
             # reported as outside the surface rather than silently contained.
             print(f"ignored out-of-grammar surface glob: {glob}", file=sys.stderr)
+    manifest_declared = surface_declares_manifest(globs)
     policy = load_policy(argv[3]) if len(argv) > 3 else None
     for path in read_paths(argv[2]):
         if not any(m.match(path) for m in matchers):
+            # Issue #3483: a root Cargo.lock delta is the generated, unavoidable
+            # consequence of a declared Cargo.toml change, so it stays in-surface
+            # whenever the declared surface names any manifest.
+            if path == "Cargo.lock" and manifest_declared:
+                continue
             print(f"{path}\t{tier_of(path, policy)}")
 
 

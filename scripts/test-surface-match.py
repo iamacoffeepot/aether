@@ -207,6 +207,55 @@ class MatcherTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stdout, "human\n")
 
+    def test_surface_declares_manifest(self) -> None:
+        self.assertTrue(surface_match.surface_declares_manifest(["Cargo.toml"]))
+        self.assertTrue(surface_match.surface_declares_manifest(["crates/aether-data/Cargo.toml"]))
+        self.assertTrue(
+            surface_match.surface_declares_manifest(["docs/guide/**", "crates/aether-data/Cargo.toml"])
+        )
+        self.assertFalse(surface_match.surface_declares_manifest(["crates/aether-data/**", "docs/guide/**"]))
+        self.assertFalse(surface_match.surface_declares_manifest([]))
+
+    def test_cargo_lock_exempt_when_manifest_declared(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = root / "policy.yml"
+            policy.write_text(POLICY, encoding="utf-8")
+
+            # Case A: a declared manifest exempts root Cargo.lock (and a nested
+            # x/Cargo.lock stays flagged — the exemption is root-only).
+            globs_a = root / "globs-a.txt"
+            paths_a = root / "paths-a.txt"
+            globs_a.write_text("crates/aether-data/Cargo.toml\ncrates/aether-data/**\n", encoding="utf-8")
+            paths_a.write_text(
+                "Cargo.lock\ncrates/aether-data/src/lib.rs\nx/Cargo.lock\n",
+                encoding="utf-8",
+            )
+            completed_a = subprocess.run(
+                [sys.executable, "-I", str(SCRIPT), str(globs_a), str(paths_a), str(policy)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed_a.returncode, 0, completed_a.stderr)
+            escaping_paths = [line.split("\t")[0] for line in completed_a.stdout.splitlines()]
+            self.assertNotIn("Cargo.lock", escaping_paths)
+            self.assertIn("x/Cargo.lock", escaping_paths)
+
+            # Case B: no declared manifest, root Cargo.lock still escapes.
+            globs_b = root / "globs-b.txt"
+            paths_b = root / "paths-b.txt"
+            globs_b.write_text("docs/guide/**\n", encoding="utf-8")
+            paths_b.write_text("Cargo.lock\n", encoding="utf-8")
+            completed_b = subprocess.run(
+                [sys.executable, "-I", str(SCRIPT), str(globs_b), str(paths_b), str(policy)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed_b.returncode, 0, completed_b.stderr)
+            self.assertTrue(completed_b.stdout.startswith("Cargo.lock\t"))
+
     def test_containment_cli_and_root_anchor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
