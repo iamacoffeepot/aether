@@ -81,7 +81,7 @@ name: Reconciler
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled, closed]
   pull_request_review:
     types: [submitted, dismissed]
   workflow_run:
@@ -196,6 +196,27 @@ jobs:
               # gate below short-circuits the ones whose issue is out of scope.
               prs="$(gh api "repos/${REPO}/pulls?state=open&per_page=100" --paginate \
                 --jq '.[].number')"
+              # Done-cleanup backstop (issue #3446). The open-PR sweep above
+              # excludes merged (closed) PRs, so a missed `closed` event would
+              # strand a post-green phase label on a Done issue. Sweep closed
+              # issues still carrying one of the four post-green phases and clear
+              # it. Steady state is empty (the `closed` event clears promptly), so
+              # this is four cheap REST reads per tick. `has("pull_request")` drops
+              # PRs (which the issues API returns for the labels endpoint) — only
+              # the closing ISSUE is Done. Each pipeline is `|| true`-guarded so a
+              # transient read failure (rate limit / network — the class #3259
+              # hardened elsewhere in this file) under `set -euo pipefail` cannot
+              # abort the run before the primary open-PR reconciliation below.
+              for p in building qa findings held; do
+                gh api "repos/${REPO}/issues?state=closed&labels=phase:${p}&per_page=100" --paginate \
+                  --jq '.[] | select(has("pull_request")|not) | .number' \
+                  | while IFS= read -r n; do
+                      [ -n "$n" ] || continue
+                      gh api -X DELETE "repos/${REPO}/issues/${n}/labels/phase:${p}" >/dev/null 2>&1 \
+                        && echo "backstop: cleared phase:${p} from closed issue #${n}" \
+                        || echo "backstop: could not clear phase:${p} from issue #${n}"
+                    done || true
+              done
               ;;
             *)
               echo "unexpected event '${EVENT}' — nothing to reconcile."
@@ -284,6 +305,36 @@ jobs:
             fi
             echo "fact issue: #${issue}"
 
+            # Done edge (issue #3446). A merged PR closes its issue via `Closes #N`;
+            # a closed-because-merged issue is Done, and Done is phase-label
+            # absence. The reconciler — the single writer of the post-green phase
+            # stretch — owns this cleanup on the merge-close event, so `/land` no
+            # longer deletes the label as a follow-up (that follow-up raced the
+            # merge-close, leaving a closed issue transiently carrying
+            # `phase:held`). Gate STRICTLY on merged: a PR closed WITHOUT merging
+            # (a human's Close-pull-request, or the reviewer-bounce PATCH-closed
+            # path below) must keep the issue's phase — that work is not Done. The
+            # closed-unmerged no-op is enforced below, after the reviewer-bounce
+            # edge, so a bounce-close still regresses its issue.
+            pr_meta="$(gh api "repos/${REPO}/pulls/${pr}" --jq '[.merged, .state] | @tsv')"
+            merged="$(cut -f1 <<<"$pr_meta")"
+            state="$(cut -f2 <<<"$pr_meta")"
+            echo "fact merged=${merged} state=${state}"
+            if [ "$merged" = "true" ]; then
+              echo "verdict: PR #${pr} merged — issue #${issue} is Done, clearing its phase label."
+              gh api "repos/${REPO}/issues/${issue}/labels" \
+                --jq '.[].name | select(startswith("phase:"))' \
+                | while IFS= read -r pl; do
+                    [ -n "$pl" ] || continue
+                    gh api -X DELETE "repos/${REPO}/issues/${issue}/labels/${pl}" >/dev/null 2>&1 \
+                      && echo "write: deleted ${pl} from issue #${issue}" \
+                      || echo "write: ${pl} already absent on issue #${issue}"
+                  done
+              post_gate success "issue #${issue} merged — Done, phase label cleared"
+              echo "::endgroup::"
+              return 0
+            fi
+
             # Domain gate: recompute only issues resting in the reconciler's
             # stretch. Straggler executing/refine labels ARE in the domain — the
             # reconciler migrates them forward on this recompute. An issue outside
@@ -350,6 +401,21 @@ jobs:
               fi
 
               post_gate success "issue #${issue} bounced by review — PR closed, work returns to scoping"
+              echo "::endgroup::"
+              return 0
+            fi
+
+            # Closed-unmerged no-op (issue #3446). With the `closed` trigger now
+            # firing this workflow on a PR close, a PR closed WITHOUT merging — a
+            # human's Close-pull-request, or a bounce-close a prior run already
+            # regressed above — must not have its issue's phase recomputed: the
+            # ladder below would PUT a fresh (now stale) phase onto an issue that
+            # has no live PR behind it. The merged==true Done case cleared above;
+            # anything still closed here is unmerged, so leave the phase untouched
+            # and pass the required gate.
+            if [ "$state" = "closed" ]; then
+              echo "verdict: PR #${pr} closed without merging — leave issue #${issue} phase '${current_phase:-none}' untouched."
+              post_gate success "PR #${pr} closed unmerged — no phase to reconcile"
               echo "::endgroup::"
               return 0
             fi
