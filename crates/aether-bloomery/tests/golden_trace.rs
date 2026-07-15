@@ -10,7 +10,8 @@
 
 mod common;
 
-use aether_bloomery::{Decisions, Fact, Outcome, Snapshot, digest_of, reduce};
+use aether_bloomery::{Decisions, Fact, Outcome, Snapshot, reduce};
+use aether_data::wire::to_vec;
 use common::{claim, digest, draft, event, membership};
 
 /// Run the canonical five-stage bloom and return every decision plus the
@@ -58,9 +59,12 @@ fn replay_is_byte_identical() {
     let (first, _) = run_trace();
     let (second, _) = run_trace();
 
-    // Structural equality and a canonical-encoding digest match: the replayed
+    // Structural equality and a canonical-encoding byte match: the replayed
     // decision stream is byte-identical, which is what makes the journal
-    // replayable (ADR-0149 §The control core).
+    // replayable (ADR-0149 §The control core). Compared over the raw
+    // `aether_data::wire` bytes directly — a `Vec<Decisions>` is not a
+    // content-addressed vocabulary type, so it carries no domain tag; this
+    // replays byte-identity more directly than a digest would.
     assert_eq!(first, second);
-    assert_eq!(digest_of(&first), digest_of(&second));
+    assert_eq!(to_vec(&first).unwrap(), to_vec(&second).unwrap());
 }

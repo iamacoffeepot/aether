@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use crate::digest::Digest;
+use crate::digest::{ContentAddressed, Digest};
 use crate::ids::StageId;
 use crate::sign::{KeyProvider, SignatureEnvelope};
 
@@ -45,6 +45,10 @@ impl Statement {
             Provenance::ObservationAttestation(_) | Provenance::StageReceipt(_) => false,
         }
     }
+}
+
+impl ContentAddressed for Statement {
+    const DOMAIN: &'static str = "aether.bloomery.statement";
 }
 
 /// One of the three provenance claims a [`Statement`] can carry.

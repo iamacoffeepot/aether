@@ -10,8 +10,9 @@
 mod common;
 
 use aether_bloomery::{
-    BloomStatus, Evidence, EvidenceKind, Fact, Outcome, ResolveError, Snapshot, WorkpieceId, reduce,
+    Artifact, BloomStatus, Digest, Evidence, EvidenceKind, Fact, Outcome, ResolveError, Snapshot, WorkpieceId, reduce,
 };
+use aether_data::wire::to_vec;
 use common::{claim, digest, draft, event, membership, sealed_and_resolved, step, workpiece};
 use proptest::collection::btree_set;
 use proptest::prelude::*;
@@ -160,6 +161,20 @@ proptest! {
 
         let successor_record = after_supersede.blooms.get(&successor).unwrap();
         prop_assert_eq!(&successor_record.claims, &predecessor_claims);
+    }
+
+    // Invariant 8 — typed content addressing (ADR-0149 §The value vocabulary).
+    // A content-addressed value's digest hashes its type's DOMAIN tag ahead of
+    // the wire bytes, so it is never the bare sha256 of those bytes — the
+    // untagged scheme under which structurally-identical values of different
+    // types collide, and onto which the former encode-failure path degraded.
+    // Tripwire: dropping the domain-tag hashing in `digest_of` collapses the
+    // tagged digest onto the untagged one.
+    #[test]
+    fn digest_incorporates_the_domain_tag(bytes in prop::collection::vec(any::<u8>(), 0..64)) {
+        let artifact = Artifact { media_type: String::new(), bytes, parents: vec![digest(1)] };
+        let untagged = Digest::of_wire_bytes(&to_vec(&artifact).unwrap());
+        prop_assert_ne!(artifact.id(), untagged);
     }
 }
 

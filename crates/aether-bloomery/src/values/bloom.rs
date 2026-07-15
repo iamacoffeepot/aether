@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use crate::digest::{Digest, digest_of};
+use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::{BloomId, WorkpieceId};
 use crate::values::{Budget, Evidence, Forecast};
 
@@ -91,6 +91,10 @@ pub struct BloomSpec {
     policy: Digest,
     budget: Budget,
     forecast: Forecast,
+}
+
+impl ContentAddressed for BloomSpec {
+    const DOMAIN: &'static str = "aether.bloomery.bloom_spec";
 }
 
 impl BloomSpec {

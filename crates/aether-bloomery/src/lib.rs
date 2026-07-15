@@ -51,7 +51,7 @@ pub mod reduce;
 pub mod sign;
 pub mod values;
 
-pub use digest::{Digest, digest_of};
+pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, StageId, WorkpieceId};
 pub use manifest::{ClosureViolation, PromptManifest, ProvenanceIndex, Slot, SlotRole, assemble_manifest};
 pub use port::{
