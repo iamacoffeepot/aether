@@ -26,7 +26,7 @@ fn temp_root(label: &str) -> PathBuf {
 #[test]
 fn upload_dedups_identical_bytes_to_one_hash() {
     let root = temp_root("dedup");
-    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None);
+    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
     let h1 = store.upload(b"the-bytes", meta("a"), None);
     let h2 = store.upload(b"the-bytes", meta("a"), None);
     assert_eq!(h1, h2, "identical bytes dedup to the same content hash");
@@ -37,7 +37,7 @@ fn upload_dedups_identical_bytes_to_one_hash() {
 #[test]
 fn name_repoints_to_the_latest_uploaded_hash() {
     let root = temp_root("repoint");
-    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None);
+    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
     let h_old = store.upload(b"v1", meta("a"), Some("svc".to_owned()));
     let h_new = store.upload(b"v2", meta("a"), Some("svc".to_owned()));
     assert_ne!(h_old, h_new);
@@ -50,11 +50,11 @@ fn name_repoints_to_the_latest_uploaded_hash() {
 fn entries_and_metadata_persist_across_a_reopen() {
     let root = temp_root("persist");
     let hash = {
-        let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None);
+        let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
         store.upload(b"persisted-bytes", meta("keep"), Some("svc".to_owned()))
         // store drops here — LockGuard releases lock.pid
     };
-    let mut reopened: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None);
+    let mut reopened: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
     assert!(reopened.contains(&hash), "the entry survives a reopen");
     let resolved = reopened.get(&Selector::Name("svc".to_owned())).expect("the name survives a reopen");
     assert_eq!(resolved.hash, hash);
@@ -70,7 +70,7 @@ fn lru_budget_evicts_the_oldest_unnamed_unpinned_entry() {
     // Budget holds the three ~10-byte initial entries (≈31 bytes) but
     // not a fourth, so the trigger upload forces exactly one eviction —
     // of the only unnamed, unpinned candidate.
-    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(40));
+    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::LruBudget(40)).expect("open store");
     let h_plain = store.upload(b"plain-aaaa", meta("a"), None);
     let h_named = store.upload(b"named-bbbb", meta("a"), Some("keep".to_owned()));
     let h_pinned = store.upload(b"pinned-ccc", meta("a"), None);
@@ -94,9 +94,9 @@ fn eviction_free_policy_retains_what_lru_would_reclaim() {
     // Same tiny budget-shaped byte sizes as the LRU test, but the
     // eviction-free store never evicts regardless of the ledger.
     let lru_root = temp_root("policy-lru");
-    let mut lru: ContentStore<Meta> = ContentStore::open(&lru_root, EvictionPolicy::LruBudget(40));
+    let mut lru: ContentStore<Meta> = ContentStore::open(&lru_root, EvictionPolicy::LruBudget(40)).expect("open store");
     let free_root = temp_root("policy-free");
-    let mut free: ContentStore<Meta> = ContentStore::open(&free_root, EvictionPolicy::None);
+    let mut free: ContentStore<Meta> = ContentStore::open(&free_root, EvictionPolicy::None).expect("open store");
 
     let mut lru_plain = String::new();
     let mut free_plain = String::new();
@@ -124,7 +124,7 @@ fn eviction_free_policy_retains_what_lru_would_reclaim() {
 #[test]
 fn entries_iteration_exposes_hash_metadata_and_sequence() {
     let root = temp_root("entries");
-    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None);
+    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
     let first = store.upload(b"first", meta("one"), Some("first".to_owned()));
     let second = store.upload(b"second", meta("two"), None);
 
@@ -152,7 +152,7 @@ fn entries_iteration_exposes_hash_metadata_and_sequence() {
 fn sidecar_flattens_metadata_beside_the_sequence() {
     let root = temp_root("sidecar-shape");
     let hash = {
-        let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None);
+        let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
         store.upload(b"shape", meta("flat"), None)
     };
     let sidecar_path = root.join("entries").join(format!("{hash}.manifest"));
@@ -172,7 +172,7 @@ fn sidecar_flattens_metadata_beside_the_sequence() {
 fn legacy_sidecar_without_sequence_restores_at_zero() {
     let root = temp_root("legacy-seq");
     let hash = {
-        let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None);
+        let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
         store.upload(b"legacy", meta("old"), None)
     };
     let sidecar_path = root.join("entries").join(format!("{hash}.manifest"));
@@ -181,7 +181,7 @@ fn legacy_sidecar_without_sequence_restores_at_zero() {
     value.as_object_mut().expect("sidecar is an object").remove("uploaded_seq");
     fs::write(&sidecar_path, serde_json::to_vec(&value).expect("re-encode legacy sidecar")).expect("write legacy");
 
-    let store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None);
+    let store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
     let seq = store.entries().find(|entry| entry.hash == hash).map(|entry| entry.uploaded_seq);
     assert_eq!(seq, Some(0), "a legacy sidecar restores at sequence zero");
     let _ = fs::remove_dir_all(&root);

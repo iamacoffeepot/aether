@@ -33,6 +33,7 @@ mod persistence;
 
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -159,17 +160,18 @@ pub struct ContentStore<M> {
 
 impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
     /// Open (or create) the store at `root` with the given eviction
-    /// policy. Infallible: a root that can't be created falls back to a
-    /// unique temp dir so a caller always comes up with a working store.
-    /// The `lock.pid` reclaim is best-effort — a stale (dead-pid) or
-    /// garbage lock is reclaimed; a live holder leaves the store unlocked
-    /// but still operating.
-    #[must_use]
-    pub fn open(root: &Path, policy: EvictionPolicy) -> Self {
-        let root = ensure_root(root);
+    /// policy. A root that can't be created falls back to a unique temp
+    /// dir, so a caller normally comes up with a working store; only a
+    /// total storage failure — the configured root *and* the temp
+    /// fallback both uncreatable — returns an error rather than a store
+    /// pointed at a directory that does not exist. The `lock.pid` reclaim
+    /// is best-effort — a stale (dead-pid) or garbage lock is reclaimed;
+    /// a live holder leaves the store unlocked but still operating.
+    pub fn open(root: &Path, policy: EvictionPolicy) -> io::Result<Self> {
+        let root = ensure_root(root)?;
         let lock = acquire_lock(&root);
         let RestoredIndex { entries, names, total_bytes, clock, next_seq } = restore(&root);
-        Self { root, policy, entries, names, total_bytes, clock, next_seq, _lock: lock }
+        Ok(Self { root, policy, entries, names, total_bytes, clock, next_seq, _lock: lock })
     }
 
     /// The root this store resolved to (after any temp fallback).

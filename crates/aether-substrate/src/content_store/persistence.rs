@@ -112,23 +112,26 @@ pub fn write_sidecar<M: Serialize>(path: &Path, sidecar: &SidecarRecord<M>) -> i
 }
 
 /// Ensure `root/entries` exists, falling back to a unique temp dir when
-/// the configured root can't be created — so the store always opens.
-pub fn ensure_root(root: &Path) -> PathBuf {
+/// the configured root can't be created. Returns the usable root, or the
+/// fallback-creation error when even the temp dir can't be created — so a
+/// total storage failure surfaces to the caller instead of yielding a
+/// path to a directory that does not exist.
+pub fn ensure_root(root: &Path) -> io::Result<PathBuf> {
     if fs::create_dir_all(root.join("entries")).is_ok() {
-        return root.to_path_buf();
+        return Ok(root.to_path_buf());
     }
     let fallback = env::temp_dir().join(format!("aether-content-store-{}-{}", process::id(), now_nanos()));
     if let Err(e) = fs::create_dir_all(fallback.join("entries")) {
         tracing::warn!(target: TARGET, error = %e, "content store: temp fallback dir creation failed");
-    } else {
-        tracing::warn!(
-            target: TARGET,
-            requested = %root.display(),
-            fallback = %fallback.display(),
-            "content store: configured root unusable; using a temp fallback",
-        );
+        return Err(e);
     }
-    fallback
+    tracing::warn!(
+        target: TARGET,
+        requested = %root.display(),
+        fallback = %fallback.display(),
+        "content store: configured root unusable; using a temp fallback",
+    );
+    Ok(fallback)
 }
 
 /// Best-effort `lock.pid` acquisition (ADR-0115). Delegates to

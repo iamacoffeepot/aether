@@ -53,6 +53,7 @@ mod manifest;
 mod tests;
 
 use std::env;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use aether_kinds::{
@@ -124,15 +125,15 @@ impl ArtifactStore {
         env::temp_dir().join("aether-binaries").join(LAYOUT_VERSION_DIR)
     }
 
-    /// Open (or create) the store at `root` with the given disk budget.
-    /// Infallible: a root that can't be created falls back to a unique
-    /// temp dir so the hub always comes up with a working store. The
-    /// `lock.pid` reclaim is best-effort — a stale (dead-pid) or garbage
-    /// lock is reclaimed; a live holder leaves the store unlocked but
-    /// still operating.
-    #[must_use]
-    pub fn open(root: &Path, disk_budget_bytes: u64) -> Self {
-        Self { inner: ContentStore::open(root, EvictionPolicy::LruBudget(disk_budget_bytes)) }
+    /// Open (or create) the store at `root` with the given disk budget. A
+    /// root that can't be created falls back to a unique temp dir, so the
+    /// hub normally comes up with a working store; a total storage failure
+    /// (configured root and temp fallback both uncreatable) surfaces as an
+    /// error. The `lock.pid` reclaim is best-effort — a stale (dead-pid)
+    /// or garbage lock is reclaimed; a live holder leaves the store
+    /// unlocked but still operating.
+    pub fn open(root: &Path, disk_budget_bytes: u64) -> io::Result<Self> {
+        Ok(Self { inner: ContentStore::open(root, EvictionPolicy::LruBudget(disk_budget_bytes))? })
     }
 
     /// The layout root this store resolved to (after any temp fallback).

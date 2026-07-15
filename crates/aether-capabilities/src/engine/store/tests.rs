@@ -42,7 +42,7 @@ fn component_manifest(namespace: &str) -> StoredManifest {
 #[test]
 fn upload_dedups_identical_bytes_to_one_hash() {
     let root = temp_root("dedup");
-    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
     let h1 = store.upload(b"the-binary-bytes", ArtifactKind::Binary, manifest("headless"), None);
     let h2 = store.upload(b"the-binary-bytes", ArtifactKind::Binary, manifest("headless"), None);
     assert_eq!(h1, h2, "identical bytes dedup to the same content hash");
@@ -56,7 +56,7 @@ fn component_store_uploads_dedups_and_resolves_by_attribute() {
     // wasm as a second type-tagged artifact. Upload + dedup, name
     // repoint, resolve by hash / name, list by namespace / handled-kind.
     let root = temp_root("component");
-    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
 
     let h1 = store.upload(
         b"probe-wasm-bytes",
@@ -113,7 +113,7 @@ fn component_store_uploads_dedups_and_resolves_by_attribute() {
 #[test]
 fn name_repoints_to_the_latest_uploaded_hash() {
     let root = temp_root("repoint");
-    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
     let h_old = store.upload(b"v1", ArtifactKind::Binary, manifest("headless"), Some("engine".to_owned()));
     let h_new = store.upload(b"v2", ArtifactKind::Binary, manifest("headless"), Some("engine".to_owned()));
     assert_ne!(h_old, h_new);
@@ -126,11 +126,11 @@ fn name_repoints_to_the_latest_uploaded_hash() {
 fn entries_persist_across_a_reopen() {
     let root = temp_root("persist");
     let hash = {
-        let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+        let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
         store.upload(b"persisted-bytes", ArtifactKind::Binary, manifest("headless"), Some("svc".to_owned()))
         // store drops here — LockGuard releases lock.pid
     };
-    let mut reopened = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let mut reopened = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
     assert!(reopened.contains(&hash), "the entry survives a reopen");
     let resolved = reopened.get(&Selector::Name("svc".to_owned())).expect("the name survives a reopen");
     assert_eq!(resolved.hash, hash);
@@ -145,7 +145,7 @@ fn eviction_skips_pinned_and_named_entries() {
     // Budget holds the three ~10-byte initial entries (≈31 bytes) but
     // not a fourth, so the trigger upload forces exactly one eviction —
     // of the only unnamed, unpinned candidate.
-    let mut store = ArtifactStore::open(&root, 40);
+    let mut store = ArtifactStore::open(&root, 40).expect("open store");
     // Unnamed, unpinned — the eviction candidate.
     let h_plain = store.upload(b"plain-aaaa", ArtifactKind::Binary, manifest("headless"), None);
     // Named — protected.
@@ -165,7 +165,7 @@ fn eviction_skips_pinned_and_named_entries() {
 #[test]
 fn list_applies_chassis_and_caps_filters() {
     let root = temp_root("filter");
-    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
     store.upload(b"headless-bin", ArtifactKind::Binary, manifest("headless"), None);
     let desktop = match manifest("desktop") {
         StoredManifest::Binary(mut m) => {
@@ -208,7 +208,7 @@ fn binary_page_filter(limit: Option<u32>, include_history: bool) -> ListEngineBi
 #[test]
 fn listing_pages_apply_limits_after_counting_and_keep_raw_matches_uncapped() {
     let root = temp_root("listing-cap");
-    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
     let mut hashes = Vec::new();
     for index in 0..25 {
         hashes.push(store.upload(
@@ -244,7 +244,7 @@ fn listing_pages_apply_limits_after_counting_and_keep_raw_matches_uncapped() {
 #[test]
 fn listing_pages_exclude_unnamed_history_unless_requested() {
     let root = temp_root("listing-history");
-    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
     let named = store.upload(b"named", ArtifactKind::Binary, manifest("headless"), Some("live".to_owned()));
     let unnamed = store.upload(b"unnamed", ArtifactKind::Binary, manifest("headless"), None);
 
@@ -265,7 +265,7 @@ fn listing_pages_exclude_unnamed_history_unless_requested() {
 #[test]
 fn component_listing_pages_apply_the_same_history_count_and_limit_contract() {
     let root = temp_root("component-listing-page");
-    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
     let named = store.upload(
         b"named-component",
         ArtifactKind::Component,
@@ -303,7 +303,7 @@ fn component_listing_pages_apply_the_same_history_count_and_limit_contract() {
 fn first_ingest_order_survives_dedup_and_reopen() {
     let root = temp_root("listing-persisted-order");
     let (older, newer) = {
-        let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+        let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
         let older = store.upload(b"older", ArtifactKind::Binary, manifest("headless"), Some("older".to_owned()));
         let newer = store.upload(b"newer", ArtifactKind::Binary, manifest("headless"), Some("newer".to_owned()));
         let duplicate =
@@ -314,7 +314,7 @@ fn first_ingest_order_survives_dedup_and_reopen() {
         (older, newer)
     };
 
-    let reopened = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let reopened = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
     let page = reopened.list_binaries_page(&binary_page_filter(None, false));
     assert_eq!(
         page.binaries.iter().map(|entry| &entry.hash).collect::<Vec<_>>(),
@@ -328,7 +328,7 @@ fn first_ingest_order_survives_dedup_and_reopen() {
 fn legacy_sidecars_restore_at_zero_with_deterministic_hash_ties() {
     let root = temp_root("listing-legacy-order");
     let (left, right) = {
-        let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+        let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
         let left = store.upload(b"legacy-left", ArtifactKind::Binary, manifest("headless"), Some("left".to_owned()));
         let right = store.upload(b"legacy-right", ArtifactKind::Binary, manifest("headless"), Some("right".to_owned()));
         (left, right)
@@ -341,7 +341,7 @@ fn legacy_sidecars_restore_at_zero_with_deterministic_hash_ties() {
         fs::write(&path, serde_json::to_vec(&sidecar).expect("encode legacy sidecar")).expect("write legacy sidecar");
     }
 
-    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
     let mut legacy_hashes = vec![left, right];
     legacy_hashes.sort();
     let legacy_page = store.list_binaries_page(&binary_page_filter(None, false));
@@ -361,7 +361,7 @@ fn legacy_sidecars_restore_at_zero_with_deterministic_hash_ties() {
 #[test]
 fn multiple_names_share_one_row_with_the_smallest_representative() {
     let root = temp_root("listing-multi-name");
-    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES);
+    let mut store = ArtifactStore::open(&root, DEFAULT_DISK_BUDGET_BYTES).expect("open store");
     let hash = store.upload(b"same", ArtifactKind::Binary, manifest("headless"), Some("zeta".to_owned()));
     assert_eq!(store.upload(b"same", ArtifactKind::Binary, manifest("headless"), Some("alpha".to_owned())), hash);
 
