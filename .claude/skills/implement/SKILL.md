@@ -157,7 +157,7 @@ Type comes from the issue's `type:*` label. Slug is the issue title sanitized: l
 
 4. Format before pushing. GitHub is the build engine and runs the full check set — clippy, docs, marker build, tests, dup-check, unused-deps — on every push, so it is the sole gate and nothing heavy builds locally. In hybrid background-agent mode the agent runs this step, then **STOPs** after it; in the in-session path it runs here before step 5.
    - Assert a clean working tree (`git status --porcelain` empty) — the committed HEAD is what gets pushed; amend any post-commit edits into the commit (or discard them) before proceeding; `git stash` is banned for concurrent agents (`feedback_concurrent_agents_never_git_stash`)
-   - `cargo fmt` — the one local check. A formatting slip is the cheapest CI red to avoid; every other failure surfaces in the Refine loop and is fixed there.
+   - `cargo fmt` — the one local check, gated on the committed diff actually touching Rust: run it only when `git diff --name-only origin/main...HEAD -- '*.rs'` is non-empty, and skip it with a one-line log otherwise. A formatting slip is the cheapest CI red to avoid on a Rust diff; every other failure surfaces in the Refine loop and is fixed there. On a non-Rust diff (skill-text, workflow-YAML, docs) `cargo fmt` has nothing to check, and since it is the first cargo invocation of the run, skipping it also skips the rustup toolchain sync it would otherwise trigger.
 
 5. Push the branch, then open the PR over REST (`gh pr create` is GraphQL-backed; `POST …/pulls` is REST and takes `draft: true` directly). Write the PR body to a file first so backticks / `$` in the template aren't shell-expanded, and pass it with `-F body=@<file>`:
    ```bash
