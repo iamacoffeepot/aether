@@ -106,21 +106,26 @@ export function subtreeHash(lsTree, root) {
 export function isHeadInput(path) {
   // The fleet-shared static head a warm resume reuses is composed from
   // CLAUDE.md (injected verbatim into the system prompt via
-  // --append-system-prompt) and the skill set (each SKILL.md's frontmatter
-  // description rides the system prompt's available-skills list). Those are the
-  // repo files whose bytes land in the cached prefix; a resume box that
-  // checked out an origin/main where any of them moved gets a different head
-  // and cache-misses. Match SKILL.md by NAME, not the whole .claude/skills/
-  // tree — sibling assets (headless/protocol.md, reference files, on-demand
-  // skill bodies) do NOT ride the static head, so folding them in would
-  // spuriously trip head-drift and retire a reusable entry. The blob hash still
-  // covers a SKILL.md's body, so a body-only edit over-retires — fail-safe
-  // (over-retire, never serve a stale head); narrowing past the file to the
-  // description field alone is impossible from ls-tree blob hashes. The tool
-  // set is the head's third input but is not a repo file (it comes from the CLI
-  // + MCP config, already captured as the manifest's tools_fingerprint), so it
-  // is not an ls-tree-derivable head hash.
-  return path === 'CLAUDE.md' || path.endsWith('/SKILL.md');
+  // --append-system-prompt) and the .claude/skills/ set (each SKILL.md's
+  // frontmatter description rides the system prompt's available-skills
+  // list). Those are the repo files whose bytes land in a Claude box's
+  // cached prefix; a resume box that checked out an origin/main where any of
+  // them moved gets a different head and cache-misses. Match SKILL.md by
+  // NAME under .claude/skills/, not any SKILL.md tree — the .agents/skills/
+  // Codex-mirror SKILL.md files are excluded because the pool is keyed by
+  // (task, cli_version, model), so a Claude box only ever resumes a Claude
+  // session and those bytes never enter its prompt; folding them in would
+  // spuriously trip head-drift and retire a reusable entry on a Codex-only
+  // edit. Likewise sibling assets under .claude/skills/ (headless/protocol.md,
+  // reference files, on-demand skill bodies) do NOT ride the static head, so
+  // matching only the SKILL.md leaf keeps them out. The blob hash still
+  // covers a SKILL.md's body, so a body-only .claude edit over-retires —
+  // fail-safe (over-retire, never serve a stale head); narrowing past the
+  // file to the description field alone is impossible from ls-tree blob
+  // hashes. The tool set is the head's third input but is not a repo file (it
+  // comes from the CLI + MCP config, already captured as the manifest's
+  // tools_fingerprint), so it is not an ls-tree-derivable head hash.
+  return path === 'CLAUDE.md' || (path.startsWith('.claude/skills/') && path.endsWith('/SKILL.md'));
 }
 
 export function headHash(lsTree) {
