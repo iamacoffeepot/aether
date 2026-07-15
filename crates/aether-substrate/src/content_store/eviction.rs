@@ -39,8 +39,15 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
             if let Some(entry) = self.entries.remove(&hash) {
                 self.total_bytes = self.total_bytes.saturating_sub(entry.bytes_len);
                 let (bytes_path, manifest_path) = self.entry_paths(&hash);
-                let _ = fs::remove_file(&bytes_path);
-                let _ = fs::remove_file(&manifest_path);
+                // Best-effort disk reclaim — the index removal above is
+                // authoritative, so a failed unlink only leaks a byte file;
+                // surface it rather than swallowing it silently.
+                if let Err(e) = fs::remove_file(&bytes_path) {
+                    tracing::warn!(target: TARGET, hash = %hash, error = %e, "content store: evicting entry bytes failed");
+                }
+                if let Err(e) = fs::remove_file(&manifest_path) {
+                    tracing::warn!(target: TARGET, hash = %hash, error = %e, "content store: evicting entry manifest failed");
+                }
                 tracing::info!(target: TARGET, hash = %hash, "content store: evicted to hold disk budget");
             }
         }
