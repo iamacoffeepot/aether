@@ -203,7 +203,10 @@ jobs:
               # it. Steady state is empty (the `closed` event clears promptly), so
               # this is four cheap REST reads per tick. `has("pull_request")` drops
               # PRs (which the issues API returns for the labels endpoint) — only
-              # the closing ISSUE is Done.
+              # the closing ISSUE is Done. Each pipeline is `|| true`-guarded so a
+              # transient read failure (rate limit / network — the class #3259
+              # hardened elsewhere in this file) under `set -euo pipefail` cannot
+              # abort the run before the primary open-PR reconciliation below.
               for p in building qa findings held; do
                 gh api "repos/${REPO}/issues?state=closed&labels=phase:${p}&per_page=100" --paginate \
                   --jq '.[] | select(has("pull_request")|not) | .number' \
@@ -212,7 +215,7 @@ jobs:
                       gh api -X DELETE "repos/${REPO}/issues/${n}/labels/phase:${p}" >/dev/null 2>&1 \
                         && echo "backstop: cleared phase:${p} from closed issue #${n}" \
                         || echo "backstop: could not clear phase:${p} from issue #${n}"
-                    done
+                    done || true
               done
               ;;
             *)
@@ -309,10 +312,14 @@ jobs:
             # longer deletes the label as a follow-up (that follow-up raced the
             # merge-close, leaving a closed issue transiently carrying
             # `phase:held`). Gate STRICTLY on merged: a PR closed WITHOUT merging
-            # (the reviewer-bounce PATCH-closed path below) must keep the issue's
-            # phase — that work returns to scoping and is not Done.
-            merged="$(gh api "repos/${REPO}/pulls/${pr}" --jq '.merged')"
-            echo "fact merged: ${merged}"
+            # (a human's Close-pull-request, or the reviewer-bounce PATCH-closed
+            # path below) must keep the issue's phase — that work is not Done. The
+            # closed-unmerged no-op is enforced below, after the reviewer-bounce
+            # edge, so a bounce-close still regresses its issue.
+            pr_meta="$(gh api "repos/${REPO}/pulls/${pr}" --jq '[.merged, .state] | @tsv')"
+            merged="$(cut -f1 <<<"$pr_meta")"
+            state="$(cut -f2 <<<"$pr_meta")"
+            echo "fact merged=${merged} state=${state}"
             if [ "$merged" = "true" ]; then
               echo "verdict: PR #${pr} merged — issue #${issue} is Done, clearing its phase label."
               gh api "repos/${REPO}/issues/${issue}/labels" \
@@ -394,6 +401,21 @@ jobs:
               fi
 
               post_gate success "issue #${issue} bounced by review — PR closed, work returns to scoping"
+              echo "::endgroup::"
+              return 0
+            fi
+
+            # Closed-unmerged no-op (issue #3446). With the `closed` trigger now
+            # firing this workflow on a PR close, a PR closed WITHOUT merging — a
+            # human's Close-pull-request, or a bounce-close a prior run already
+            # regressed above — must not have its issue's phase recomputed: the
+            # ladder below would PUT a fresh (now stale) phase onto an issue that
+            # has no live PR behind it. The merged==true Done case cleared above;
+            # anything still closed here is unmerged, so leave the phase untouched
+            # and pass the required gate.
+            if [ "$state" = "closed" ]; then
+              echo "verdict: PR #${pr} closed without merging — leave issue #${issue} phase '${current_phase:-none}' untouched."
+              post_gate success "PR #${pr} closed unmerged — no phase to reconcile"
               echo "::endgroup::"
               return 0
             fi
