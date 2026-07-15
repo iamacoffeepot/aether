@@ -46,6 +46,23 @@ proptest! {
         prop_assert_eq!(forward.seal().id(), reversed.seal().id());
     }
 
+    // Invariant 1 (tie-break) — members sharing one scope_revision still seal
+    // canonically: the sort key falls through past the revision to the workpiece
+    // (then the approval evidence), so the same same-revision set in any order
+    // seals byte-identically. Tripwire: sorting on the revision alone (the
+    // pre-total-order key) left same-revision members order-undetermined, so a
+    // stable sort leaked their input position into the id.
+    #[test]
+    fn seal_is_canonical_over_shared_revision_members(names in btree_set("wp-[a-z]{1,5}", 2..6)) {
+        let names: Vec<String> = names.into_iter().collect();
+        let forward: Vec<_> = names.iter().map(|name| membership(name, 7)).collect();
+        let mut reversed = forward.clone();
+        reversed.reverse();
+
+        prop_assert_eq!(draft(1, forward.clone()).seal(), draft(1, reversed.clone()).seal());
+        prop_assert_eq!(draft(1, forward).seal().id(), draft(1, reversed).seal().id());
+    }
+
     // Invariant 4 — no evidence validates a digest it does not name.
     // Tripwire: `Evidence::validates` returning anything but exact-match.
     #[test]
