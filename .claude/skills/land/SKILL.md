@@ -97,7 +97,7 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
 
    **Merge-in sequence (strict=true or read failure):**
 
-   The merge runs inside the branch's own worktree (`<m>` is the closing issue; step 7 sweeps exactly this path). `git merge origin/main` merges into the worktree's current HEAD.
+   The merge runs inside the branch's own worktree (`<m>` is the closing issue; step 6 sweeps exactly this path). `git merge origin/main` merges into the worktree's current HEAD.
 
    ```bash
    wt=.claude/worktrees/issue-<m>
