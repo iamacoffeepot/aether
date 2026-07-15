@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Batched PR wave-status sweep over REST. Prints one aligned line per open PR
-# authored by iamacoffeepot, enriched with CI verdict (the `CI pass` aggregator
-# conclusion), draft state, review state, and head branch — all in a single
-# script invocation so a multi-PR status check costs one Bash tool call, not
-# one command per PR per fact.
+# Batched PR wave-status sweep over REST. Prints one aligned line per open PR,
+# enriched with CI verdict (the `CI pass` aggregator conclusion), draft state,
+# review state, and head branch — all in a single script invocation so a
+# multi-PR status check costs one Bash tool call, not one command per PR per
+# fact. Snapshot mode has two sub-modes: given explicit PR numbers, it selects
+# those PRs with no author filter (a named PR, e.g. fleet-bot-authored, is
+# never dropped by who authored it); with no numbers, a bare sweep filters to
+# the owner (iamacoffeepot) and the fleet bot (iamabuilder[bot]).
 #
 # Usage:
 #
@@ -58,6 +61,7 @@
 set -euo pipefail
 
 OWNER="iamacoffeepot"
+FLEET_BOT="iamabuilder[bot]"
 REPO="iamacoffeepot/aether"
 WAIT_MODE=0
 WAIT_PR=""
@@ -244,20 +248,31 @@ if [[ $VERDICT_MODE -eq 1 ]]; then
     done
 fi
 
-# Snapshot mode: list open PRs authored by the owner, apply optional filter.
-prs_json=$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate \
-    --jq "[.[] | select(.user.login == \"$OWNER\")]" 2>/dev/null)
+# Snapshot mode: list open PRs, in one of two sub-modes.
+#   - Explicit PR numbers given: the caller named the PRs, so select by number
+#     against ALL open PRs — no author filter. A named PR (e.g. a fleet-bot-
+#     authored one) is never dropped by who authored it.
+#   - Bare sweep (no numbers): filter to the fleet author allowlist
+#     ($OWNER, $FLEET_BOT) so the sweep stays scoped to the owner's and the
+#     fleet's own PRs rather than listing every contributor's.
+prs_json=$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate --jq '.' 2>/dev/null)
 
-total=$(echo "$prs_json" | jq 'length')
-if [[ "$total" == "0" ]]; then
-    echo "No open PRs authored by $OWNER."
-    exit 0
-fi
-
-# If positional PR numbers were given, filter to those.
 if [[ ${#FILTER_PRS[@]} -gt 0 ]]; then
     filter_json=$(printf '%s\n' "${FILTER_PRS[@]}" | jq -R '.' | jq -sc '.')
     prs_json=$(echo "$prs_json" | jq --argjson f "$filter_json" '[.[] | select([.number | tostring] | inside($f | map(tostring)))]')
+    total=$(echo "$prs_json" | jq 'length')
+    if [[ "$total" == "0" ]]; then
+        echo "No open PR found matching: ${FILTER_PRS[*]}."
+        exit 0
+    fi
+else
+    prs_json=$(echo "$prs_json" | jq --arg owner "$OWNER" --arg bot "$FLEET_BOT" \
+        '[.[] | select(.user.login == $owner or .user.login == $bot)]')
+    total=$(echo "$prs_json" | jq 'length')
+    if [[ "$total" == "0" ]]; then
+        echo "No open PRs authored by $OWNER or $FLEET_BOT."
+        exit 0
+    fi
 fi
 
 # Iterate and print.
