@@ -34,49 +34,69 @@ pub fn restore<M: DeserializeOwned>(root: &Path) -> RestoredIndex<M> {
     let mut clock: u64 = 0;
     let mut max_uploaded_seq: u64 = 0;
     let entries_dir = root.join("entries");
-    if let Ok(read_dir) = fs::read_dir(&entries_dir) {
-        for dirent in read_dir.flatten() {
-            let path = dirent.path();
-            // Only sidecars drive restoration; the bytes file is keyed off it.
-            if path.extension().and_then(|e| e.to_str()) != Some("manifest") {
-                continue;
+    match fs::read_dir(&entries_dir) {
+        Ok(read_dir) => {
+            for dirent in read_dir.flatten() {
+                let path = dirent.path();
+                // Only sidecars drive restoration; the bytes file is keyed off it.
+                if path.extension().and_then(|e| e.to_str()) != Some("manifest") {
+                    continue;
+                }
+                let Some(hash) = path.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let Some(sidecar) = read_sidecar::<M>(&path) else {
+                    continue;
+                };
+                let Ok(meta) = fs::metadata(entries_dir.join(hash)) else {
+                    // Sidecar without bytes — a torn write; skip it.
+                    continue;
+                };
+                let bytes_len = meta.len();
+                clock += 1;
+                max_uploaded_seq = max_uploaded_seq.max(sidecar.uploaded_seq);
+                entries.insert(
+                    hash.to_owned(),
+                    Entry {
+                        metadata: sidecar.metadata,
+                        bytes_len,
+                        pinned: false,
+                        last_access: clock,
+                        uploaded_seq: sidecar.uploaded_seq,
+                    },
+                );
+                total_bytes = total_bytes.saturating_add(bytes_len);
             }
-            let Some(hash) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let Some(sidecar) = read_sidecar::<M>(&path) else {
-                continue;
-            };
-            let Ok(meta) = fs::metadata(entries_dir.join(hash)) else {
-                // Sidecar without bytes — a torn write; skip it.
-                continue;
-            };
-            let bytes_len = meta.len();
-            clock += 1;
-            max_uploaded_seq = max_uploaded_seq.max(sidecar.uploaded_seq);
-            entries.insert(
-                hash.to_owned(),
-                Entry {
-                    metadata: sidecar.metadata,
-                    bytes_len,
-                    pinned: false,
-                    last_access: clock,
-                    uploaded_seq: sidecar.uploaded_seq,
-                },
-            );
-            total_bytes = total_bytes.saturating_add(bytes_len);
         }
+        // A missing entries dir is a fresh store — nothing to restore. Any
+        // other read error (a permissions fault, say) is worth surfacing
+        // rather than silently restoring an empty store.
+        Err(e) if e.kind() != ErrorKind::NotFound => {
+            tracing::warn!(target: TARGET, error = %e, "content store: reading entries dir failed; restoring empty");
+        }
+        Err(_) => {}
     }
-    // Names: keep only entries that still resolve to a stored hash.
+    // Names: keep only entries that still resolve to a stored hash. A
+    // missing names.json is normal (no names yet); a read or parse error
+    // is logged rather than swallowed.
     let mut names: HashMap<String, String> = HashMap::new();
-    if let Ok(bytes) = fs::read(root.join("names.json"))
-        && let Ok(stored) = serde_json::from_slice::<HashMap<String, String>>(&bytes)
-    {
-        for (name, hash) in stored {
-            if entries.contains_key(&hash) {
-                names.insert(name, hash);
+    match fs::read(root.join("names.json")) {
+        Ok(bytes) => match serde_json::from_slice::<HashMap<String, String>>(&bytes) {
+            Ok(stored) => {
+                for (name, hash) in stored {
+                    if entries.contains_key(&hash) {
+                        names.insert(name, hash);
+                    }
+                }
             }
+            Err(e) => {
+                tracing::warn!(target: TARGET, error = %e, "content store: parsing names.json failed; ignoring names");
+            }
+        },
+        Err(e) if e.kind() != ErrorKind::NotFound => {
+            tracing::warn!(target: TARGET, error = %e, "content store: reading names.json failed; ignoring names");
         }
+        Err(_) => {}
     }
     RestoredIndex { entries, names, total_bytes, clock, next_seq: max_uploaded_seq.saturating_add(1) }
 }
