@@ -119,7 +119,13 @@ name: Agent tick
 #                                               task survives for question-
 #                                               resume and manual kicks)
 #   phase:ready                   -> implement
-#   phase:building/qa/findings    -> none       (reconciler-owned; #3126)
+#   phase:building/findings       -> implement  ONLY when no live work-implement
+#                                               run holds the claim (#3468: a
+#                                               crashed or obligation-abandoning
+#                                               box leaves the PR driverless);
+#                                               building with a PR rests while
+#                                               its CI is still pending
+#   phase:qa                      -> none       (reconciler-owned; #3126)
 #   phase:held                    -> land       (ref is the open closing PR)
 #   phase:bounced (directive)     -> scope       (resume via bounce-to:*; no
 #                                               agent:awaiting-answer present)
@@ -759,6 +765,32 @@ jobs:
                     cat_resting="${cat_resting}#${num} — pure umbrella, ${open_children}/${found} children still open"$'\n'
                   fi
                   continue
+                fi
+                task="implement"; ref="$num" ;;
+              phase:building|phase:findings)
+                # #3468: a box that crashed — or exited green with abandoned
+                # obligations (observed 2/2 on #3467: end-of-turn on background
+                # CI waiters that cannot survive the runner) — leaves the issue
+                # resting here with no live run and nothing dispatching at it.
+                # The claim IS the live run, so a missing run is the re-dispatch
+                # signal: crash recovery generalized to abandoned-success. The
+                # implement box's re-entrancy guard makes a spurious dispatch a
+                # cheap no-op. Damping: a building PR whose CI is still pending
+                # has nothing actionable — a re-dispatched box would only park
+                # on CI again, burning a Claude run per tick for the length of
+                # the test job — so it rests until CI settles. findings is
+                # actionable by definition (the reconciler computed it from
+                # real review/thread state), and building-without-a-PR is the
+                # classic crashed-box shape; both dispatch immediately.
+                pr_ref="$(resolve_open_pr "$num" || true)"
+                if [ "$phase" = "phase:building" ] && [ -n "$pr_ref" ]; then
+                  ci_pending="$(gh pr checks "$pr_ref" --json bucket \
+                    --jq 'any(.bucket == "pending")' 2>/dev/null || echo true)"
+                  if [ "$ci_pending" = "true" ]; then
+                    trace SKIP "#${num}" "phase:building, CI still pending on PR #${pr_ref} — resting until it settles"
+                    cat_resting="${cat_resting}#${num} — building, CI pending on PR #${pr_ref}"$'\n'
+                    continue
+                  fi
                 fi
                 task="implement"; ref="$num" ;;
               phase:held) task="land"; ref="" ;;
