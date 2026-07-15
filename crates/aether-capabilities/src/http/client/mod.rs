@@ -7,8 +7,9 @@
 //! v1 semantics (ADR-0043):
 //! - Blocking on the dispatcher thread (one request at a time).
 //! - Buffered request + response bodies; streaming is deferred.
-//! - Deny-by-default initial-URL host allowlist via `AETHER_HTTP_ALLOWLIST`.
-//!   The current default ureq redirect policy is not revalidated per hop.
+//! - Deny-by-default host allowlist via `AETHER_HTTP_ALLOWLIST`, enforced on
+//!   every redirect hop (bounded by a fixed redirect budget), not just the
+//!   initial URL.
 //! - Response size capped at `AETHER_HTTP_MAX_BODY_BYTES` (16MB).
 //! - Default request timeout 30s, per-request override via
 //!   `Fetch.timeout_ms`.

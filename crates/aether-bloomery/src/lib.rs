@@ -53,13 +53,16 @@ pub mod values;
 
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, StageId, WorkpieceId};
-pub use manifest::{ClosureViolation, PromptManifest, ProvenanceIndex, Slot, SlotRole, assemble_manifest};
+pub use manifest::{
+    ClosureViolation, MANIFEST_CLOSURE_BUDGET, PromptManifest, ProvenanceIndex, Slot, SlotRole, assemble_manifest,
+};
 pub use port::{
-    Checkpoint, IntegrateOutcome, LandOutcome, ProjectionBackend, ProjectionState, SourceBackend, SourceSnapshot,
+    BloomView, Checkpoint, IntegrateOutcome, LandOutcome, MemberView, ProjectionBackend, SourceBackend, SourceSnapshot,
+    ViewDocument,
 };
 pub use reduce::{
     BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, IntegrateError, LandError, Outcome,
-    ResolveError, SealConflict, SealError, Snapshot, SupersedeError, reduce,
+    ResolveError, SealConflict, SealError, Snapshot, SupersedeError, reduce, view_of,
 };
 pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
 pub use values::{
