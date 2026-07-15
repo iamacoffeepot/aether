@@ -155,13 +155,17 @@ candidates, reviews becoming decision proposals; the owner's intent is the rever
 a shadow copy of Bloomery's internals — workpieces project to issues, blooms to their aggregate views,
 evidence to checks and comments, every projection carrying internal ids and digests in stable metadata,
 idempotent and rebuildable from the journal after deletion — and it implements the source port when GitHub
-hosts the repository, so Git remains the versioning substrate. Intent enters Bloomery natively, never
-through the mirror. The one inward channel is stage results: when a stage Bloomery dispatched executes on
-GitHub — a reviewer verdict, a check run — the adapter normalizes the outcome into evidence bound to the
-exact digests Bloomery displayed, entering the reducer like any other attempt result. Free-form platform
-activity is not translated: platform authentication is never an author signature, a comment never becomes
-a command, and a webhook at most flags a drifted projection for repair. No core module names a GitHub
-type. Unplug the adapter and an active bloom still runs to completion — the mirror lags and rebuilds.
+hosts the repository, so Git remains the versioning substrate. Intent enters Bloomery natively; GitHub is
+never the driver. Two narrow inward channels exist. First, stage results: when a stage Bloomery dispatched
+executes on GitHub — a reviewer verdict, a check run — the adapter normalizes the outcome into evidence
+bound to the exact digests Bloomery displayed, entering the reducer like any other attempt result. Second,
+observation intake *(second amendment 2026-07-15: importing material is allowed; driving is not)*: the
+adapter may import a selected issue or comment as an observation-attested artifact — material a bloom
+draft can be shaped from — but an observation carries no authority: it becomes intent only when a person
+adopts its exact digest in a native statement, and no platform event advances the reducer by itself.
+Platform authentication is never an author signature, a comment never becomes a command, and an
+unrecognized webhook at most flags a drifted projection for repair. No core module names a GitHub type.
+Unplug the adapter and an active bloom still runs to completion — the mirror lags and rebuilds.
 
 ### Execution on Actions, by demotion
 
