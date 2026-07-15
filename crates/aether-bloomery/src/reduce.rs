@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, WorkpieceId};
+use crate::port::{BloomView, MemberView, ViewDocument};
 use crate::values::{BloomSpec, LandingReceipt, ResolutionClaim, ResolvedBloom};
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -498,4 +499,41 @@ impl BloomRecord {
     fn sealed(spec: BloomSpec) -> Self {
         Self { spec, status: BloomStatus::Sealed, claims: Vec::new(), superseded_by: None }
     }
+}
+
+/// Assemble a self-contained [`ViewDocument`] from a snapshot — the pure
+/// `Snapshot -> ViewDocument` projection the reconcile port pushes outward
+/// (ADR-0149 §The boundary, as amended by [#3471]). Every field an adapter
+/// renders rides on the returned document, so the adapter never queries back
+/// into the store. Pure: reads the snapshot, allocates a document, mutates
+/// nothing.
+///
+/// Each [`BloomRecord`] becomes a [`BloomView`] (its sealed-spec id, status,
+/// and successor), and each sealed [`crate::Membership`] a [`MemberView`]
+/// carrying the member's scope revision, approval evidence, and — matched by
+/// workpiece from the record's accumulated claims — its resolution claim once
+/// integrated (`None` until then).
+///
+/// [#3471]: https://github.com/iamacoffeepot/aether/issues/3471
+#[must_use]
+pub fn view_of(snapshot: &Snapshot) -> ViewDocument {
+    let blooms = snapshot
+        .blooms
+        .values()
+        .map(|record| {
+            let members = record
+                .spec
+                .members()
+                .iter()
+                .map(|member| MemberView {
+                    workpiece: member.workpiece.clone(),
+                    scope_revision: member.scope_revision,
+                    approval: member.approval.clone(),
+                    resolution: record.claims.iter().find(|c| c.workpiece == member.workpiece).cloned(),
+                })
+                .collect();
+            BloomView { id: record.spec.id(), status: record.status, superseded_by: record.superseded_by, members }
+        })
+        .collect();
+    ViewDocument { mainline: snapshot.mainline, blooms }
 }

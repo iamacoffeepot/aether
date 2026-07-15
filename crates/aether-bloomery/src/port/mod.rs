@@ -24,5 +24,5 @@
 mod projection;
 mod source;
 
-pub use projection::{ProjectionBackend, ProjectionState};
+pub use projection::{BloomView, MemberView, ProjectionBackend, ViewDocument};
 pub use source::{Checkpoint, IntegrateOutcome, LandOutcome, SourceBackend, SourceSnapshot};
