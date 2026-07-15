@@ -25,6 +25,15 @@ license.workspace = true
 # here matches: cfg cleanly elides on wasm regardless of how the
 # consumer flips features.
 
+# cargo-machete (the CI unused-deps gate) scans source without resolving
+# features, so it cannot see that `clap` is used only through the
+# `#[derive(clap::Args)]` the Config derive emits on the per-cap
+# `*Overlay` structs under the optional `runtime` feature (see the `clap`
+# dependency comment below). That is a false positive — the dep is real —
+# so it is ignored here rather than removed.
+[package.metadata.cargo-machete]
+ignored = ["clap"]
+
 [features]
 # Default-on: chassis-target builds get the full cap set with their
 # substrate-side runtime impls. Wasm consumers do

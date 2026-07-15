@@ -48,6 +48,9 @@ jobs:
               # suite on their edits stalls the workflow-iteration loop
               # (#3297). ci.yml defines these jobs, so it stays.
               - '.github/workflows/ci.yml'
+              # jscpd's gate threshold lives in .jscpd.json, so a config
+              # edit must re-run the dup-check job.
+              - '.jscpd.json'
             # Qodana's gate is the code set plus its own config, so a
             # qodana.yaml edit still triggers a scan even though it
             # changes no Rust.
@@ -333,6 +336,42 @@ jobs:
         if: always() && github.event_name == 'pull_request'
         run: sccache --show-stats
 
+  # Token-based duplicate-code detection (jscpd). The gate — minTokens
+  # and the duplicated-line percentage threshold — lives in .jscpd.json,
+  # the single source of truth this job reads; jscpd exits non-zero when
+  # the tree exceeds it. Whole-tree scan of crates/ (not a diff-scoped
+  # run): jscpd only finds clones among the files it scans, so scanning
+  # just the PR's changed files would miss a changed file duplicating an
+  # unchanged one. node-only, so it needs no Rust toolchain.
+  dup-check:
+    name: Duplicate code
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: npx --yes jscpd@5.0.12 crates
+
+  # Unused-dependency detection (cargo-machete). Scoped to crates/ to
+  # match dup-check. False positives (a dep used only through a
+  # macro-emitted path or an optional feature, which machete's
+  # source-only scan cannot see) are silenced per-crate via
+  # `[package.metadata.cargo-machete] ignored`, not by dropping the dep.
+  unused-deps:
+    name: Unused dependencies
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - run: cargo install cargo-machete --locked
+      - run: cargo machete crates
+
   # Qodana scan folded in from .github/workflows/qodana.yml so the
   # ci-pass aggregator can needs: it directly (iamacoffeepot/aether#941).
   # Gated on the `qodana` changes filter (code paths + qodana.yaml) so a
@@ -430,7 +469,7 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, dogfood-token-table, approval-machinery, clippy, docs, marker-build, test, qodana ]
+    needs: [ changes, fmt, dogfood-token-table, approval-machinery, clippy, docs, marker-build, test, dup-check, unused-deps, qodana ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -443,6 +482,8 @@ jobs:
           echo "docs:    ${{ needs.docs.result }}"
           echo "marker-build: ${{ needs.marker-build.result }}"
           echo "test:    ${{ needs.test.result }}"
+          echo "dup-check: ${{ needs.dup-check.result }}"
+          echo "unused-deps: ${{ needs.unused-deps.result }}"
           echo "qodana:  ${{ needs.qodana.result }}"
           fail=0
           [[ "${{ needs.changes.result }}" == "success" ]] || fail=1
@@ -453,5 +494,7 @@ jobs:
           [[ "${{ needs.docs.result }}"    == "success" || "${{ needs.docs.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.marker-build.result }}" == "success" || "${{ needs.marker-build.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.test.result }}"    == "success" || "${{ needs.test.result }}" == "skipped" ]] || fail=1
+          [[ "${{ needs.dup-check.result }}" == "success" || "${{ needs.dup-check.result }}" == "skipped" ]] || fail=1
+          [[ "${{ needs.unused-deps.result }}" == "success" || "${{ needs.unused-deps.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.qodana.result }}"  == "success" || "${{ needs.qodana.result }}" == "skipped" ]] || fail=1
           exit $fail
