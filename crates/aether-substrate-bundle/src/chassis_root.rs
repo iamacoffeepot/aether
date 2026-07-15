@@ -2,7 +2,7 @@
 //! (ADR-0080 §6). Both the headless driver and the test-bench bin
 //! own an `AtomicU64` that hands out `correlation_id`s for synthetic
 //! chassis-root mail, skipping 0 (reserved sentinel). Extracted from
-//! a duplicated closure across both sites — see PR 952's qodana
+//! a duplicated closure across both sites — see PR 952's duplicate-code
 //! follow-up.
 
 use std::sync::atomic::{AtomicU64, Ordering};

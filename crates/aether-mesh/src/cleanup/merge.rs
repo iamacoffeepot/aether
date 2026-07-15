@@ -688,7 +688,7 @@ mod tests {
         // 8 vertices: outer 2x2 quad (0..=3) and the 1x1 hole (4..=7)
         // centered inside it. Named locals rather than a literal pool
         // so the diagram reads as outer / hole rather than a wall of
-        // pt(...) calls; also breaks Qodana's structural match with
+        // pt(...) calls; also breaks the duplicate-code check's structural match with
         // sibling vertex literals elsewhere in the cleanup tests.
         let outer_bl = pt(0.0, 0.0, 0.0);
         let outer_br = pt(2.0, 0.0, 0.0);

@@ -105,7 +105,7 @@ pollster = "0.4.0"
 # with the `png` dep above, so no `image` / `bitmap_encoder` pull. Not
 # feature-gated: a few small pure-Rust crates next to the chassis's
 # wgpu/wasmtime aren't worth gating off the build for, and gating left the
-# bin uncovered by Qodana / clippy (the "missing features" finding).
+# bin uncovered by clippy (the "missing features" finding).
 plotters = { version = "0.3", default-features = false, features = [
     "bitmap_backend",
     "ab_glyph",

@@ -25,9 +25,9 @@ Two entry shapes, one skill:
 | Check | Refusal |
 |-------|---------|
 | PR exists and is a draft | "PR #N is not a draft — it may have already been un-drafted or merged." |
-| CI green — or green except `Qodana scan` as the sole failing required check, none pending (the [Qodana sweep](#qodana-sweep) resolves it before un-draft) | "PR #N has a non-Qodana required check red (or checks pending). Wait, or use `/implement <issue>` to fix a non-Qodana red." |
+| CI green — no required check red, none pending | "PR #N has a required check red (or checks pending). Wait, or use `/implement <issue>` to fix a red." |
 | PR has a closing issue (the PR's closing-issue reference) | "PR #N has no closing issue. Link one (`Closes #M`) or delete the phase label manually." |
-| Closing issue at `phase:held` (REST: `gh api 'repos/iamacoffeepot/aether/issues?labels=phase:held&state=open' --jq '.[].number'`) | "PR #N's closing issue is not at `phase:held`. The reconciler holds it at `building` / `qa` / `findings` until CI is green, the QA verdict is in, and every review thread is resolved. Resolve open findings with `/findings <pr>`; a non-Qodana red needs `/implement <issue>`." |
+| Closing issue at `phase:held` (REST: `gh api 'repos/iamacoffeepot/aether/issues?labels=phase:held&state=open' --jq '.[].number'`) | "PR #N's closing issue is not at `phase:held`. The reconciler holds it at `building` / `qa` / `findings` until CI is green, the QA verdict is in, and every review thread is resolved. Resolve open findings with `/findings <pr>`; a red needs `/implement <issue>`." |
 
 Read PR draft state and `mergeable_state` over REST (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.draft, .mergeable_state'`); read CI state from the REST check-runs endpoint (`gh api repos/iamacoffeepot/aether/commits/<sha>/check-runs`). Both are REST forms per the §REST-vs-GraphQL routing table in `/scope`. `phase:held` is the single eligibility signal: the reconciler reaches it only when CI is green, the review/dogfood rollup is non-actionable, and no review thread is open, so it subsumes the underlying review verdict and `dogfood:unresolved` state — `/findings` resolves the threads, the reconciler computes `findings` → `held`, and `/land` trusts `held`. The review verdict is enforced natively: branch protection's required review blocks the merge while critic's standing `REQUEST_CHANGES` verdict stands, and the owner overrides by approving the PR or dismissing the verdict natively. That native required review is the hard enforcement; the `phase:held` precondition is the pipeline-level gate on top of it.
 
@@ -92,12 +92,12 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
 
    On a read failure or absent field, default to `true` (conservative: treat as strict-on and merge-in).
 
-   - **strict=false and `merge-tree`-clean** — GitHub does not require the branch to be up-to-date before merging, so behind+clean is already mergeable. Skip the merge-in; proceed directly to step 4 (Qodana sweep) / step 5 (un-draft). Note "behind → merged direct (strict off)" in the summary.
+   - **strict=false and `merge-tree`-clean** — GitHub does not require the branch to be up-to-date before merging, so behind+clean is already mergeable. Skip the merge-in; proceed directly to step 4 (un-draft). Note "behind → merged direct (strict off)" in the summary.
    - **strict=true (or read failure)** — the branch must be up-to-date before merging. Proceed with the merge-in sequence below.
 
    **Merge-in sequence (strict=true or read failure):**
 
-   The merge runs inside the branch's own worktree (`<m>` is the closing issue; step 8 sweeps exactly this path). `git merge origin/main` merges into the worktree's current HEAD.
+   The merge runs inside the branch's own worktree (`<m>` is the closing issue; step 7 sweeps exactly this path). `git merge origin/main` merges into the worktree's current HEAD.
 
    ```bash
    wt=.claude/worktrees/issue-<m>
@@ -112,9 +112,7 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
    ```
    The push triggers a fresh CI run for the new sha, which is the gate. Then re-predict. In `--sweep` mode the recompute loop iterates this same merge-in action after every sibling merge, so a branch that becomes `behind` after a sibling lands is merged by the same path — no separate sweep handling is needed.
 
-4. **Qodana sweep (only when `Qodana scan` is the sole red).** When gate-check found `Qodana scan` as the one failing required check, resolve it before un-drafting — run the [Qodana sweep](#qodana-sweep): fetch the findings from the `qodana-report` artifact, triage and fix them in the worktree, re-push, and wait for `CI pass` green. Only then proceed. Skip this step when the PR is already fully green; bail to the user (do not un-draft) when the sweep surfaces an artifact-missing / outside-the-diff / uncertain case.
-
-5. **Un-draft via GraphQL.** The REST `pulls` PATCH cannot clear `draft`, so this is a GraphQL-only op (per `/scope` §REST-vs-GraphQL routing). It is one of the pipeline's few GraphQL-only ops — it joins `/findings`'s `reviewThreads` query and `resolveReviewThread` mutation (per `/scope` §GitHub API budget → GraphQL-only list); every other operation, phase state included, runs on REST now that the project board is retired:
+4. **Un-draft via GraphQL.** The REST `pulls` PATCH cannot clear `draft`, so this is a GraphQL-only op (per `/scope` §REST-vs-GraphQL routing). It is one of the pipeline's few GraphQL-only ops — it joins `/findings`'s `reviewThreads` query and `resolveReviewThread` mutation (per `/scope` §GitHub API budget → GraphQL-only list); every other operation, phase state included, runs on REST now that the project board is retired:
    ```bash
    gh api graphql -f query='
    mutation {
@@ -125,7 +123,7 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
    ```
    Verify `isDraft` is `false` in the response before proceeding.
 
-6. **Enable native auto-merge to squash-merge.** Enable per-PR auto-merge so GitHub fires the squash the instant every required check passes — including the `dismiss_stale_reviews` re-review the un-draft (step 5) triggers — rather than waiting for a tick to notice the PR is mergeable:
+5. **Enable native auto-merge to squash-merge.** Enable per-PR auto-merge so GitHub fires the squash the instant every required check passes — including the `dismiss_stale_reviews` re-review the un-draft (step 4) triggers — rather than waiting for a tick to notice the PR is mergeable:
    ```bash
    gh pr merge <n> --auto --squash
    ```
@@ -137,7 +135,7 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
    ```
    Either way, poll the PR state (`gh api repos/iamacoffeepot/aether/pulls/<n> --jq '.merged'`) until `true` before proceeding to avoid marking an un-landed issue Done (deleting its phase label).
 
-7. **Move the closing issue to Done — delete its `phase:*` label.** `Done` is label-absence (per the phase-label-reconcile rules in `/scope` and `/implement`), so the canonical phase write here is a REST label delete, not a swap:
+6. **Move the closing issue to Done — delete its `phase:*` label.** `Done` is label-absence (per the phase-label-reconcile rules in `/scope` and `/implement`), so the canonical phase write here is a REST label delete, not a swap:
    ```bash
    gh api "repos/iamacoffeepot/aether/issues/<m>/labels" \
      --jq '.[].name | select(startswith("phase:"))' \
@@ -146,32 +144,20 @@ Single-mode steps, executed once per PR (sweep mode iterates this per PR in orde
        done
    ```
 
-8. **Sweep the merged worktree.** Run the worktree removal for this PR's branch, equivalent to `/sweep worktrees` §Target: worktrees step 4 for the merged entry:
+7. **Sweep the merged worktree.** Run the worktree removal for this PR's branch, equivalent to `/sweep worktrees` §Target: worktrees step 4 for the merged entry:
    ```bash
    git worktree remove "$(git rev-parse --show-toplevel)/.claude/worktrees/issue-<m>"
    git branch -D <branch>
    ```
    If the worktree has uncommitted files (rare — the implement agent should have committed everything), use `--force`. Skip this step when `--no-sweep` was passed.
 
-9. **Print summary.**
+8. **Print summary.**
    ```
    ✓ #<n> landed.
    Merged: <pr-url>
    Issue #<m>: Phase → Done
    Worktree: .claude/worktrees/issue-<m> swept
    ```
-
-## Qodana sweep
-
-Qodana is a required CI gate (`Qodana scan`, in `ci-pass`). When a PR's only red is `Qodana scan`, `/land` resolves it here, before un-drafting; whether the reconciler holds such a PR at `phase:held` is the reconciler's own predicate, not restated here. Invoked from [Landing sequence](#landing-sequence) step 4 when `Qodana scan` is the sole red.
-
-1. **Confirm Qodana-only.** From the REST check-runs set, the failing required checks minus `CI pass` must be exactly `{Qodana scan}`. Any other red is a real failure — refuse and route to `/implement`.
-2. **Fetch + parse the findings.** `scripts/qodana-report.sh <pr>` downloads the PR's `qodana-report` CI artifact, parses the SARIF, filters to findings on the PR's own changes, and prints the actionable list (`file:line  [severity] ruleId — message`), exiting non-zero when PR-diff findings exist. `--all` prints the whole-tree set.
-3. **Triage + fix in the worktree.** Resolve each finding. Surface a suspected **false positive** to the user rather than editing a `qodana.yaml` exclude or committing a `--baseline` — those weaken the gate and need explicit sign-off (fix what's fixable; baseline only verified FPs).
-4. **Local sanity** before re-push: `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, and the affected `cargo nextest`.
-5. **Commit + push**, then `scripts/wave-status.sh --wait <pr>` until green, and continue the landing sequence from un-draft.
-
-**Bail out — surface to the user, do not fix —** when `qodana-report.sh` reports no artifact or the Qodana job crashed (EAP infra; the old `Stalled` case); when findings land outside the PR's own changes; or when the find set is too large / uncertain for a confident pass (a large clean set may go to a focused `Agent`; inline is the default). Never auto-suppress a finding to make the gate pass.
 
 ## Conflict prediction and routing
 
@@ -228,8 +214,7 @@ This is the same form `/scope` documents for the `Backlog` and `Done` phases —
 ## What /land does NOT do
 
 - Resolve content conflicts inline. `/land` never edits a branch's contents itself; a `dirty` branch is handed to a dispatched `resolve` task (a headless box that merges `origin/main` in and resolves the hunks), which re-enters the held→land path once its resolved head is green and re-reviewed.
-- Un-draft a PR with a non-Qodana required check red. The gate enforces green before un-draft, except a sole `Qodana scan` red, which the [Qodana sweep](#qodana-sweep) resolves first.
-- Auto-suppress Qodana findings — edit a `qodana.yaml` exclude or commit a `--baseline` — without surfacing to the user. The Qodana sweep fixes findings or surfaces them; it never silences them.
+- Un-draft a PR with a required check red. The gate enforces green before un-draft.
 - Resolve findings or strip `dogfood:unresolved` itself. `/findings` resolves the review threads and pushes the fixes; the reconciler reads that and computes `findings` → `held`; `/land` trusts `held`. A fresh critic verdict on the next review re-request supersedes the standing `REQUEST_CHANGES`, and the dogfood runner's poster clears `dogfood:unresolved` on a re-run that finds nothing actionable. `/land` only refuses while the closing issue is short of `phase:held`.
 - Approve the PR or dismiss critic's review verdict. The review waiver is the owner's signoff alone — the owner overrides a standing `REQUEST_CHANGES` by approving the PR or dismissing the verdict natively (ADR-0148 §Owner waiver); an agent never does either, whoever's token it holds. Same class as the label-strip rule above.
 - Land PRs in parallel. Protected `main` enforces linear history; parallel landing races to discover the serialization. The sequence lands one at a time with recompute.

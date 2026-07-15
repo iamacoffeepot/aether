@@ -103,7 +103,7 @@ valid_scope() {
     local root
     root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
-    case " ci docs adr qodana repo release workflow guide " in
+    case " ci docs adr repo release workflow guide " in
         *" $scope "*) return 0 ;;
     esac
 
@@ -139,7 +139,7 @@ if (( ${#issues[@]} )); then
         printf '\nRules reference:\n'
         printf '  - Issue title: {type}({scope}): <subject>. Types: feat fix chore docs perf refactor flake.\n'
         printf '  - PR title: conventional-commit shape with a lowercase subject.\n'
-        printf '  - Scope is a crate name OR a meta-scope: ci docs adr qodana repo release workflow guide.\n'
+        printf '  - Scope is a crate name OR a meta-scope: ci docs adr repo release workflow guide.\n'
         printf '  - Body: no backslash before a backtick/dollar; no dollar-delimited math span.\n'
         printf '\nTo override deliberately, include `<!-- pr-body-ok: <letters> - <reason> -->` (letters: a/c/d/e).\n'
     } >&2

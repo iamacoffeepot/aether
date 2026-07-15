@@ -5,7 +5,7 @@
 //! [`OwnedDispatch`](crate::mail::registry::OwnedDispatch)
 //! field-for-field, with a `From<OwnedDispatch>` impl moving every
 //! field across. Both the struct definition and
-//! the move were Qodana DC findings — and rightly so, since the two
+//! the move were duplicate-code findings — and rightly so, since the two
 //! types literally carried the same data with the same ownership
 //! semantics under two names. `Envelope` is now a type alias for
 //! `OwnedDispatch`: same fields, same construction sites

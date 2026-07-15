@@ -26,7 +26,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
-      qodana: ${{ steps.filter.outputs.qodana }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
@@ -51,25 +50,6 @@ jobs:
               # jscpd's gate threshold lives in .jscpd.json, so a config
               # edit must re-run the dup-check job.
               - '.jscpd.json'
-            # Qodana's gate is the code set plus its own config, so a
-            # qodana.yaml edit still triggers a scan even though it
-            # changes no Rust.
-            qodana:
-              - 'crates/**'
-              - 'xtask/**'
-              - 'Cargo.toml'
-              - 'Cargo.lock'
-              - 'rust-toolchain.toml'
-              - 'clippy.toml'
-              - '.cargo/**'
-              - '.config/**'
-              # ci.yml only, not workflows/**: the fleet workflows
-              # (agent-work, review, dogfood, judge, chat, ...) cannot
-              # change a Rust build's outcome, and re-running the whole
-              # suite on their edits stalls the workflow-iteration loop
-              # (#3297). ci.yml defines these jobs, so it stays.
-              - '.github/workflows/ci.yml'
-              - 'qodana.yaml'
 
   fmt:
     name: Format
@@ -193,7 +173,7 @@ jobs:
     # side survives on the free-disk-space reclaim step instead.)
     runs-on: ${{ github.event_name == 'pull_request' && format('runs-on={0}/runner=8cpu-linux-x64/volume=150gb/extras=s3-cache', github.run_id) || 'ubuntu-latest' }}
     # Quota-gated single job: the account's 32-vCPU spot quota can't
-    # absorb two 8-vCPU shards alongside clippy + qodana when runs
+    # absorb two 8-vCPU shards alongside clippy when runs
     # overlap (MaxSpotInstanceCountExceeded -> on-demand fallback /
     # queueing). The 2-way nextest name-hash shard split
     # (iamacoffeepot/aether#2803) costs ~half the test execution in
@@ -372,104 +352,10 @@ jobs:
       - run: cargo install cargo-machete --locked
       - run: cargo machete crates
 
-  # Qodana scan folded in from .github/workflows/qodana.yml so the
-  # ci-pass aggregator can needs: it directly (iamacoffeepot/aether#941).
-  # Gated on the `qodana` changes filter (code paths + qodana.yaml) so a
-  # docs / .claude / scripts-only PR skips it instead of blocking the
-  # merge gate on a multi-minute scan with no Rust to analyze
-  # (iamacoffeepot/aether#1089); ci-pass accepts a skipped qodana the
-  # same way it does clippy/docs/test. The cache cycle is split out of
-  # qodana-action so we can interleave an ownership chown between the
-  # root-written scan and the tar save (qodana-action's built-in save
-  # runs inside its own step, before any post-scan step we could add, so
-  # we can't fix the ownership in time without taking over the save side).
-  qodana:
-    name: Qodana scan
-    needs: changes
-    if: needs.changes.outputs.qodana == 'true'
-    # PR runs on the fast spot runner, main pushes on GitHub-hosted —
-    # rationale on the clippy job.
-    runs-on: ${{ github.event_name == 'pull_request' && format('runs-on={0}/runner=8cpu-linux-x64/extras=s3-cache', github.run_id) || 'ubuntu-latest' }}
-    permissions:
-      contents: write
-      pull-requests: write
-      checks: write
-    steps:
-      - uses: runs-on/action@4e5f72399b6b17f2e79c511c1b38a315a64d22dc # v2
-        if: github.event_name == 'pull_request'
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-
-      - name: Restore Qodana cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ${{ runner.temp }}/qodana/caches
-          key: qodana-2026.1-${{ github.ref }}-${{ github.sha }}
-          restore-keys: |
-            qodana-2026.1-${{ github.ref }}-
-            qodana-2026.1-
-
-      - name: Qodana scan
-        uses: JetBrains/qodana-action@4861e015da555e86a72b862892aba6c2b93e6891 # v2026.1
-        with:
-          # -u root forwards through `qodana scan` to the underlying
-          # `docker run`, keeping the container's design-default user.
-          # The qodana-action's wrapper otherwise passes `-u $(id -u)`
-          # to preserve the runner user's ownership of the workspace
-          # dir — but that flips the container to non-root, and the
-          # baked /usr/local/cargo (registry + global-cache) is
-          # root-owned, so cargo metadata perm-denies and Qodana
-          # leaves the entire workspace unanalysed. Running as root
-          # inside the container is the documented default — see
-          # https://www.jetbrains.com/help/qodana/docker-image-configuration.html
-          # § "Run as a non-root user". The CARGO_HOME override on
-          # the prior approach (iamacoffeepot/aether#911) is now
-          # unnecessary.
-          #
-          # The fail-threshold lives in qodana.yaml (`failThreshold`),
-          # the single source of truth this job reads. It stays explicit there
-          # (not the action's default, which could shift across version
-          # bumps — iamacoffeepot/aether#941), so no --fail-threshold
-          # CLI override here, which would shadow the yaml value.
-          args: --linter qodana-rust -u root
-          # We own restore/save (steps above + below); qodana-action's
-          # built-in cache save runs root-owned and trips tar exit 2.
-          use-caches: false
-          # Upload SARIF + qodana.sarif.json as a workflow artifact
-          # ('qodana-report') so triagers can grab findings without
-          # depending on the JB web dashboard.
-          upload-result: true
-        env:
-          QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
-
-      - name: Reclaim qodana cache ownership for tar
-        # Qodana ran as root in the container; new cache files inherit
-        # uid 0 on the bind-mount. The save step below runs as the
-        # runner user (uid 1001) and would tar-exit-2 on those files.
-        # Chown the tree back so save can read everything.
-        #
-        # `if: always()` so the chown still runs when qodana itself
-        # exits non-zero on findings. `|| true` because the cache dir
-        # may not exist at all if the scan crashed before populating.
-        if: always()
-        run: |
-          if [ -d "${RUNNER_TEMP}/qodana/caches" ]; then
-            sudo chown -R "$(id -u):$(id -g)" "${RUNNER_TEMP}/qodana/caches" || true
-          fi
-
-      - name: Save Qodana cache
-        if: always()
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ${{ runner.temp }}/qodana/caches
-          key: qodana-2026.1-${{ github.ref }}-${{ github.sha }}
-
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, fmt, dogfood-token-table, approval-machinery, clippy, docs, marker-build, test, dup-check, unused-deps, qodana ]
+    needs: [ changes, fmt, dogfood-token-table, approval-machinery, clippy, docs, marker-build, test, dup-check, unused-deps ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -484,7 +370,6 @@ jobs:
           echo "test:    ${{ needs.test.result }}"
           echo "dup-check: ${{ needs.dup-check.result }}"
           echo "unused-deps: ${{ needs.unused-deps.result }}"
-          echo "qodana:  ${{ needs.qodana.result }}"
           fail=0
           [[ "${{ needs.changes.result }}" == "success" ]] || fail=1
           [[ "${{ needs.fmt.result }}"     == "success" ]] || fail=1
@@ -496,5 +381,4 @@ jobs:
           [[ "${{ needs.test.result }}"    == "success" || "${{ needs.test.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.dup-check.result }}" == "success" || "${{ needs.dup-check.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.unused-deps.result }}" == "success" || "${{ needs.unused-deps.result }}" == "skipped" ]] || fail=1
-          [[ "${{ needs.qodana.result }}"  == "success" || "${{ needs.qodana.result }}" == "skipped" ]] || fail=1
           exit $fail

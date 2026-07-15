@@ -92,7 +92,7 @@ Same skill mechanism, different invocation site. `/bounce` is the user-driven va
 
 ## Stalled (separate semantic)
 
-`Phase=Stalled` is a different signal — env/tooling failure, not a phase regression. Examples: qodana CI service down, GitHub API rate-limited mid-batch, `gh` token expired. The issue's scoping is fine; the *environment* is the problem.
+`Phase=Stalled` is a different signal — env/tooling failure, not a phase regression. Examples: a CI runner image failing to provision, GitHub API rate-limited mid-batch, `gh` token expired. The issue's scoping is fine; the *environment* is the problem.
 
 v1 has no `/stall` skill — set the `phase:stalled` label manually, with no `bounce-to:*` label (a stall is not a phase regression). Use the REST swap from [Phase label reconcile](#phase-label-reconcile), with `new="phase:stalled"`, so the halt is visible on the issue. Future `/stall <issue> --reason "<env-issue>"` would post the reason the same way `/bounce` does — it's the same surviving comment class.
 

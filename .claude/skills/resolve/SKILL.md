@@ -77,7 +77,7 @@ If the merge cannot be resolved because the two sides encode an incompatible pro
 After the resolution push, drive CI green on the new sha through the **same Refine loop `/implement` uses** — see `/implement` §Refine loop (the spin-until-green part). In brief:
 
 1. Wait for CI via `scripts/wave-status.sh --wait <pr>` (REST poll, fast-fails on a deterministic red).
-2. CI green — or green except a sole `Qodana scan` red held for `/land` — → go to [Terminal state](#terminal-state).
+2. CI green → go to [Terminal state](#terminal-state).
 3. CI failed → pull logs, classify (format/clippy/build/test per `/implement`'s table), fix in the branch, push to the same branch, and loop. A resolution can shake out a build or test failure the merge introduced; those are fixed in the loop exactly as `/implement` fixes its own.
 4. Retry cap / wall-clock hit → self-bounce (ask-and-park in the headless wrapper), same budget as `/implement` (retry-cap 3, wall 30 min; overridable). A CI failure the box cannot drive green is *not* the incompatible-intent case — it self-bounces with the attempt history, like `/implement`.
 
@@ -95,9 +95,9 @@ gh api -X POST repos/iamacoffeepot/aether/issues/<n>/comments -f body='@iamacrit
 
 ## Terminal state
 
-CI green (or green except a sole `Qodana scan` red held for `/land`) with the review re-requested:
+CI green with the review re-requested:
 
-1. **No phase-label write, no PR open, no merge.** The resolved head is a green, re-reviewed producer artifact; the reconciler reads the observable facts (CI green, fresh verdict pending/in, threads resolved) and computes the resting state — `phase:held` when the fresh verdict is non-actionable, or `phase:findings` when the re-review posts actionable findings (resolve them with `/findings <pr>`, not here). A sole `Qodana scan` red is normal and left for `/land`'s Qodana sweep.
+1. **No phase-label write, no PR open, no merge.** The resolved head is a green, re-reviewed producer artifact; the reconciler reads the observable facts (CI green, fresh verdict pending/in, threads resolved) and computes the resting state — `phase:held` when the fresh verdict is non-actionable, or `phase:findings` when the re-review posts actionable findings (resolve them with `/findings <pr>`, not here).
 2. **Hand back to the held→land path.** From `phase:held`, the standard land path takes over — a tick, or native auto-merge — with no further resolve action. `/resolve` neither un-drafts nor merges; landing is `/land`'s call.
 3. Print to user:
 

@@ -1824,7 +1824,7 @@ mod tests {
     /// range, and the DAG is acyclic (every edge points forward — all our
     /// real shapes wire strictly increasing indices). Factored so each
     /// real-shape test asserts the same invariants without copy-pasting the
-    /// checks (keeps Qodana's `DuplicatedCode` quiet).
+    /// checks (keeps the duplicate-code check quiet).
     fn assert_well_formed_real(topo: &Topology, expected_nodes: usize) {
         assert_eq!(topo.tier, Tier::Real, "real factory must tag Tier::Real");
         assert_eq!(topo.downstreams.len(), expected_nodes, "node count for {}", topo.name);

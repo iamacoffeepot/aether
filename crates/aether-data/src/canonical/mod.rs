@@ -110,7 +110,7 @@ mod tests {
     /// One-line builders for the `Pending` / `Ok(u64)` / `Err{reason}`
     /// `VariantShape`s. Pulled out individually so each construction
     /// site reads as a named call rather than a multi-line struct
-    /// literal — the literal shape was what Qodana fingerprinted as
+    /// literal — the literal shape was what the duplicate-code check fingerprinted as
     /// duplicate against `RESULT`'s parallel `EnumVariant` declaration.
     fn pending_shape() -> VariantShape {
         VariantShape::Unit { discriminant: 0 }

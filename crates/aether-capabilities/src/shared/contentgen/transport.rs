@@ -4,7 +4,7 @@
 //!
 //! Extracted so the `aether.anthropic` and `aether.gemini` adapters
 //! don't each carry a byte-identical copy of the HTTP plumbing (the
-//! Qodana duplicate-code detector flags the parallel copies otherwise).
+//! duplicate-code check flags the parallel copies otherwise).
 //! The error taxonomy stays per-provider — only the mechanical
 //! string/HTTP scaffolding is shared.
 
