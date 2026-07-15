@@ -191,11 +191,11 @@ Note the [ADR merge gate](#adr-gate-in-detail) is a *different* check answering 
 
 ## Approval tier
 
-For a non-ADR issue (the [ADR hard gate](#adr-hard-gate) has already routed an ADR-bearing one to the owner), resolve the issue's approval tier against `.github/approval-policy.yml` over its `## Declared surface` globs (the machine-readable glob block `/scope` emits at Plan):
+For a non-ADR issue (the [ADR hard gate](#adr-hard-gate) has already routed an ADR-bearing one to the owner), resolve the issue's approval tier against `.github/approval-policy.yml` over its `## Declared surface` globs (the machine-readable glob block `/scope` emits at Plan) by calling the same strict resolver the reconciler's containment check and agent-tick's dispatch gate already use — never by reading the policy file and matching globs by hand:
 
-1. Read the policy file's `default` tier and its ordered `rules` list of `{glob, tier}` entries; `tier ∈ {auto, judge, human}`.
-2. Each declared path's tier is the **most restrictive** matching rule (`human > judge > auto`), or the file's `default` when no rule matches — today `judge`, so an unpoliced surface gets a second reader rather than a rubber stamp. Read the tier out of the file; do not assume it. Globs are gitwildmatch (gitignore-style `**`), matched exactly as the reconciler's containment step matches them.
-3. The issue's approval tier is the most restrictive tier over every path in its declared surface.
+1. Write the issue's `## Declared surface` fenced glob lines to a temp file, one glob per line, fence stripped.
+2. Run `python3 scripts/surface-match.py --tier <surface_file> .github/approval-policy.yml`. This resolves each declared glob through the same strict `valid_surface_glob` grammar the reconciler's containment check applies — an out-of-grammar glob (e.g. a mid-path `crates/*/Cargo.toml`) fails closed to `human` instead of silently matching the policy's more permissive grammar — and prints the single most-restrictive tier (`human > judge > auto`) over the whole declared surface.
+3. Treat a `?` result (the policy file unreadable or empty) as a **gate failure** — refuse, do not fall back to a remembered default. This is parity with Codex's `resolve_approval_tier.py`, which already runs this exact strict path.
 
 Route by the resulting tier:
 
