@@ -108,6 +108,27 @@ proptest! {
     }
 }
 
+// Invariant 1b (m3) — sealing is canonical over the *full* member content, not
+// just `(scope_revision, workpiece)`: members sharing a revision, or even a
+// revision and a workpiece, still order deterministically, so the id never
+// depends on input order. Tripwire: a partial sort key leaves a shared-revision
+// or shared-workpiece pair order-sensitive.
+#[test]
+fn seal_is_canonical_over_full_member_content() {
+    // Two members sharing a scope revision, differing only in workpiece.
+    let a = membership("wp-a", 10);
+    let b = membership("wp-b", 10);
+    assert_eq!(draft(1, vec![a.clone(), b.clone()]).seal().id(), draft(1, vec![b, a.clone()]).seal().id());
+
+    // Two members sharing (scope_revision, workpiece), differing only in the
+    // approval evidence — a degenerate set the reducer rejects at admission, but
+    // seal() must still order it deterministically so its id is input-order
+    // independent.
+    let mut c = membership("wp-a", 10);
+    c.approval = Evidence { subject: digest(10), kind: EvidenceKind::Approval, detail: digest(77) };
+    assert_eq!(draft(1, vec![a.clone(), c.clone()]).seal().id(), draft(1, vec![c, a]).seal().id());
+}
+
 // Invariant 2 (M4) — the V1 one-sealed-unlanded-bloom-per-mainline rule: a
 // second seal is refused while any bloom is still Sealed or Resolved, even when
 // its membership is disjoint (so this is the V1 rule, not a membership

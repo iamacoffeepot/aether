@@ -55,19 +55,28 @@ pub struct BloomDraft {
 impl BloomDraft {
     /// Freeze the draft into an immutable spec with a canonical member order.
     ///
-    /// Members are sorted by `(scope_revision, workpiece)` (ADR-0149 §The
-    /// bloom: "sorted workpiece scope-revision digests") and de-duplicated, so
-    /// a draft and the same draft with its proposals in any other order — or
-    /// with an exact proposal repeated — seal to byte-identical specs, and
-    /// therefore the same [`BloomId`]. Sorting on the revision alone left the
-    /// order of two members sharing a revision undetermined, so their relative
-    /// position leaked into the id; the workpiece tiebreak closes that. This
-    /// canonicalization is what makes the id a stable function of the *set*,
-    /// not the order.
+    /// Members are sorted by scope-revision digest first (ADR-0149 §The bloom:
+    /// "sorted workpiece scope-revision digests"), then by every remaining field
+    /// — workpiece, then the approval evidence — and de-duplicated, so a draft
+    /// and the same draft with its proposals in any other order, or with an
+    /// exact proposal repeated, seal to byte-identical specs and therefore the
+    /// same [`BloomId`]. The tail keys past the revision matter: sorting on the
+    /// revision alone left two members sharing a revision (or a workpiece)
+    /// order-undetermined, so their input position leaked into the id. Ordering
+    /// over the *full* member content makes the key a total order, so the id is
+    /// a stable function of the member *set*, not its order — even for a
+    /// degenerate set the reducer will later reject at admission.
     #[must_use]
     pub fn seal(&self) -> BloomSpec {
         let mut members = self.proposals.clone();
-        members.sort_by(|a, b| a.scope_revision.cmp(&b.scope_revision).then_with(|| a.workpiece.cmp(&b.workpiece)));
+        members.sort_by(|a, b| {
+            a.scope_revision
+                .cmp(&b.scope_revision)
+                .then_with(|| a.workpiece.cmp(&b.workpiece))
+                .then_with(|| a.approval.subject.cmp(&b.approval.subject))
+                .then_with(|| a.approval.kind.cmp(&b.approval.kind))
+                .then_with(|| a.approval.detail.cmp(&b.approval.detail))
+        });
         members.dedup();
         BloomSpec {
             members,

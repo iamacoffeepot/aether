@@ -87,7 +87,7 @@ impl Evidence {
 }
 
 /// The class of an [`Evidence`] artifact.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum EvidenceKind {
     /// An owner (or policy) approval of a scope revision.
     Approval,
