@@ -501,7 +501,10 @@ jobs:
               # tick's approval-tier lookup (#3176). Prints the changed paths that
               # escape the declaration, tier-annotated; silent when contained.
               escaping="$(python3 -I "${RUNNER_TEMP}/surface_match.py" \
-                "${RUNNER_TEMP}/globs.txt" "${RUNNER_TEMP}/changed.txt" "${RUNNER_TEMP}/policy.yml")"
+                "${RUNNER_TEMP}/globs.txt" "${RUNNER_TEMP}/changed.txt" "${RUNNER_TEMP}/policy.yml" \
+                2>"${RUNNER_TEMP}/surface_stderr.txt")"
+              cat "${RUNNER_TEMP}/surface_stderr.txt" >&2
+              dropped_globs="$(sed -n 's/^ignored out-of-grammar surface glob: //p' "${RUNNER_TEMP}/surface_stderr.txt")"
 
               # Owner waiver: approval:surface-ok accepts the overreach, but only
               # when the owner applied it — verified via the timeline actor. An
@@ -586,6 +589,12 @@ jobs:
                   awk -F'\t' '{printf "| `%s` | %s |\n", $1, $2}' <<<"$escaping"
                   echo
                   echo "Clear it by trimming the diff back inside the declaration, widening \`## Declared surface\` on #${issue} (an owner edit — the issue timeline records it), or applying \`approval:surface-ok\` (owner only). The next reconcile recomputes from scratch."
+                  if [ -n "$dropped_globs" ]; then
+                    echo
+                    echo "**Note:** these declared globs were ignored as out-of-grammar, so they cover nothing — a declared surface glob must be a concrete path or a literal directory prefix ending in one final \`/**\`:"
+                    echo
+                    sed 's/^/- `/; s/$/`/' <<<"$dropped_globs"
+                  fi
                 } >"${RUNNER_TEMP}/comment.md"
                 if [ -n "$comment_id" ]; then
                   gh api -X PATCH "repos/${REPO}/issues/comments/${comment_id}" \
