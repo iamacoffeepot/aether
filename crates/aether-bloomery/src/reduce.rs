@@ -281,6 +281,10 @@ pub enum SupersedeError {
     /// A successor member is already claimed by a foreign active bloom (the
     /// predecessor's own holds, released in the same decision set, are exempt).
     MembershipConflict(SealConflict),
+    /// The successor's membership fails the same per-member admission a seal
+    /// runs — empty, a duplicate workpiece, or an approval that does not bind
+    /// its scope revision. A superseding spec is held to seal's member validity.
+    InvalidMember(SealError),
 }
 
 /// Why an integration was refused.
@@ -350,23 +354,11 @@ fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec) -> Decisions {
     if snapshot.blooms.contains_key(&bloom) {
         return Decisions::rejected(Outcome::SealRejected(SealError::KnownBloom(bloom)));
     }
-    // A bloom resolves into one artifact carrying a claim for every member; an
-    // empty membership would trivially resolve and advance mainline on zero
-    // evidence.
-    if spec.members().is_empty() {
-        return Decisions::rejected(Outcome::SealRejected(SealError::EmptyMembership));
-    }
-    // Every member is verified: no duplicate workpiece, and each approval binds
-    // its own scope revision as an Approval (ADR-0149 "verify every member's
-    // scope and approval lineage").
-    let mut seen = BTreeSet::new();
-    for member in spec.members() {
-        if !seen.insert(&member.workpiece) {
-            return Decisions::rejected(Outcome::SealRejected(SealError::DuplicateWorkpiece(member.workpiece.clone())));
-        }
-        if member.approval.kind != EvidenceKind::Approval || !member.approval.validates(&member.scope_revision) {
-            return Decisions::rejected(Outcome::SealRejected(SealError::UnapprovedMember(member.workpiece.clone())));
-        }
+    // Every member is verified: non-empty membership, no duplicate workpiece,
+    // and each approval binds its own scope revision as an Approval (ADR-0149
+    // "verify every member's scope and approval lineage").
+    if let Err(error) = validate_member_admission(spec.members()) {
+        return Decisions::rejected(Outcome::SealRejected(error));
     }
     // All-or-nothing admission: any member already in a foreign active bloom
     // aborts the whole seal, naming the conflict — a failed batch admission
@@ -386,6 +378,32 @@ fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec) -> Decisions {
         .map(|member| Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom })
         .collect();
     Decisions { outcome: Outcome::Sealed(bloom), effects }
+}
+
+/// The per-member admission checks a bloom's membership must pass before it can
+/// claim anything — a non-empty set, no duplicate workpiece, and every approval
+/// binding its own scope revision as an [`EvidenceKind::Approval`] (ADR-0149
+/// "verify every member's scope and approval lineage"). Both the first-door
+/// seal and the second-door supersession run it, so a successor is held to the
+/// same member validity a fresh seal is. The error is a [`SealError`] — seal's
+/// vocabulary is the canonical name for a bad membership; supersession wraps it.
+fn validate_member_admission(members: &[Membership]) -> Result<(), SealError> {
+    // A bloom resolves into one artifact carrying a claim for every member; an
+    // empty membership would trivially resolve and advance mainline on zero
+    // evidence.
+    if members.is_empty() {
+        return Err(SealError::EmptyMembership);
+    }
+    let mut seen = BTreeSet::new();
+    for member in members {
+        if !seen.insert(&member.workpiece) {
+            return Err(SealError::DuplicateWorkpiece(member.workpiece.clone()));
+        }
+        if member.approval.kind != EvidenceKind::Approval || !member.approval.validates(&member.scope_revision) {
+            return Err(SealError::UnapprovedMember(member.workpiece.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// The first member already held by an active bloom other than `exempt`, if
@@ -421,6 +439,13 @@ fn reduce_supersede(snapshot: &Snapshot, predecessor: &BloomId, successor: &Bloo
     let successor_id = successor.id();
     if successor_id == *predecessor {
         return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::SelfSupersession));
+    }
+    // The successor is a fresh membership set claiming into `active`, so it must
+    // pass the same per-member admission a seal runs before it claims or inherits
+    // anything — an empty, duplicate-workpiece, or unapproved successor is
+    // refused here rather than admitted on invalid members (ADR-0149).
+    if let Err(error) = validate_member_admission(successor.members()) {
+        return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
     }
     // Supersession is a second door into `active`, so it runs the same
     // all-or-nothing conflict scan as seal — but the predecessor's own holds are

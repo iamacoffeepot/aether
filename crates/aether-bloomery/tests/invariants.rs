@@ -301,6 +301,33 @@ fn supersede_rejects_a_foreign_double_claim() {
     }
 }
 
+// M3 (supersede admission) — a superseding spec runs the same per-member
+// admission a seal does: an empty, duplicate-workpiece, or unapproved successor
+// is refused before it claims or inherits anything. Tripwire on reduce_supersede
+// skipping the member-validity checks reduce_seal runs.
+#[test]
+fn supersede_rejects_an_invalid_successor_membership() {
+    let mut snapshot = Snapshot::new(digest(1));
+    let predecessor_spec = draft(1, vec![membership("own", 10)]).seal();
+    let predecessor = predecessor_spec.id();
+    splice_bloom(&mut snapshot, &predecessor_spec, BloomStatus::Sealed);
+
+    // A successor repeating one workpiece — invalid the same way a seal's is.
+    let dup = draft(2, vec![membership("dup", 20), membership("dup", 21)]).seal();
+    let decided = reduce(&snapshot, &event("dup", Fact::Supersede { predecessor, successor: dup }));
+    assert_eq!(
+        decided.outcome,
+        Outcome::SupersedeRejected(SupersedeError::InvalidMember(SealError::DuplicateWorkpiece(workpiece("dup")))),
+    );
+    assert!(decided.effects.is_empty());
+
+    // An empty successor is refused the same way.
+    let empty = draft(2, vec![]).seal();
+    let decided = reduce(&snapshot, &event("empty", Fact::Supersede { predecessor, successor: empty }));
+    assert_eq!(decided.outcome, Outcome::SupersedeRejected(SupersedeError::InvalidMember(SealError::EmptyMembership)));
+    assert!(decided.effects.is_empty());
+}
+
 // Invariant 7 (M3) — a successor atomically inherits its predecessor's claims,
 // but only those whose workpiece it re-admits at the same scope revision: an
 // ejected workpiece and a scope-changed one both drop their stale claims.
