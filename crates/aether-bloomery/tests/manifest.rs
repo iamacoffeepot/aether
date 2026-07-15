@@ -14,6 +14,7 @@ use aether_bloomery::{
     Slot, SlotRole, Statement, assemble_manifest,
 };
 use aether_bloomery::{FakeKeyProvider, KeyId, Observation};
+use proptest::prelude::*;
 
 fn digest(seed: u8) -> Digest {
     Digest::from_bytes([seed; 32])
@@ -161,33 +162,62 @@ fn derived_instruction_chain_is_admissible_and_authors_its_closure() {
     assert_eq!(manifest.slots[0].parent_closure, vec![digest(11), digest(12)]);
 }
 
-#[test]
-fn forged_parent_closure_does_not_ground_a_slot() {
-    // The caller stuffs parent_closure with a signed statement's digest the
-    // index does record — but `parents(slot.artifact)` records no such edge, so
-    // grounding (which follows `parents`, never the slot field) never reaches
-    // it. Tripwire on trusting the caller-declared closure.
-    let mut statements = HashMap::new();
-    statements.insert(digest(21), signed_statement());
-    let index = TestIndex { statements, ..Default::default() };
+proptest! {
+    // The caller-declared parent_closure is never trusted for grounding: no
+    // matter what digests it forges — including ones the index records as
+    // genuine signed statements — the slot stays ungrounded, because grounding
+    // follows `index.parents` (which records no edge from the artifact) and
+    // never the slot field. Property over the artifact seed and the forged
+    // closure. Tripwire on trusting the caller-declared closure.
+    #[test]
+    fn forged_parent_closure_never_grounds(
+        artifact_seed in 0u8..=255u8,
+        forged in prop::collection::vec(0u8..=255u8, 0..8),
+    ) {
+        // The artifact is not itself a recorded ground; every forged digest is,
+        // so the only thing between the forgery and admission is that the walk
+        // does not follow the declared closure.
+        prop_assume!(!forged.contains(&artifact_seed));
+        let mut statements = HashMap::new();
+        for &seed in &forged {
+            statements.insert(digest(seed), signed_statement());
+        }
+        let index = TestIndex { statements, ..Default::default() };
 
-    let slot = Slot { artifact: digest(20), role: SlotRole::Instruction, parent_closure: vec![digest(21)] };
-    let violation = assemble_manifest(vec![slot], &index, &FakeKeyProvider).unwrap_err();
-    assert_eq!(violation, ClosureViolation::UngroundedInstruction { slot: digest(20) });
-}
+        let slot = Slot {
+            artifact: digest(artifact_seed),
+            role: SlotRole::Instruction,
+            parent_closure: forged.iter().map(|&seed| digest(seed)).collect(),
+        };
+        let violation = assemble_manifest(vec![slot], &index, &FakeKeyProvider).unwrap_err();
+        prop_assert_eq!(violation, ClosureViolation::UngroundedInstruction { slot: digest(artifact_seed) });
+    }
 
-#[test]
-fn broken_derivation_edge_is_rejected() {
-    // The recorded chain leads to digest(31), a node the index does not know
-    // (no statement, no policy, no parents), before reaching any ground — a
-    // broken edge, refused.
-    let mut parents = HashMap::new();
-    parents.insert(digest(30), vec![digest(31)]);
-    let index = TestIndex { parents, ..Default::default() };
+    // A recorded derivation chain that dead-ends at an index-unknown node before
+    // reaching any ground is refused, whatever the chain's seeds and length — a
+    // broken edge. Property over the chain of distinct seeds.
+    #[test]
+    fn broken_derivation_edge_always_rejected(seeds in prop::collection::vec(0u8..=255u8, 2..6)) {
+        // Dedup so the chain is a simple path (a repeat would only shorten it).
+        let mut chain: Vec<u8> = Vec::new();
+        for seed in seeds {
+            if !chain.contains(&seed) {
+                chain.push(seed);
+            }
+        }
+        prop_assume!(chain.len() >= 2);
 
-    let slot = instruction(digest(30));
-    let violation = assemble_manifest(vec![slot], &index, &FakeKeyProvider).unwrap_err();
-    assert_eq!(violation, ClosureViolation::UngroundedInstruction { slot: digest(30) });
+        // Link each node to the next; the last node has no recorded parents and
+        // is neither a statement nor a policy — the broken edge.
+        let mut parents = HashMap::new();
+        for pair in chain.windows(2) {
+            parents.insert(digest(pair[0]), vec![digest(pair[1])]);
+        }
+        let index = TestIndex { parents, ..Default::default() };
+
+        let violation = assemble_manifest(vec![instruction(digest(chain[0]))], &index, &FakeKeyProvider).unwrap_err();
+        prop_assert_eq!(violation, ClosureViolation::UngroundedInstruction { slot: digest(chain[0]) });
+    }
 }
 
 #[test]
@@ -198,6 +228,21 @@ fn overlong_closure_exceeds_budget() {
     for i in 0..(MANIFEST_CLOSURE_BUDGET + 2) {
         parents.insert(digest_n(i), vec![digest_n(i + 1)]);
     }
+    let index = TestIndex { parents, ..Default::default() };
+
+    let slot = Slot { artifact: digest_n(0), role: SlotRole::Instruction, parent_closure: vec![] };
+    let violation = assemble_manifest(vec![slot], &index, &FakeKeyProvider).unwrap_err();
+    assert_eq!(violation, ClosureViolation::ClosureBudgetExceeded { slot: digest_n(0) });
+}
+
+#[test]
+fn high_fanout_exceeds_budget() {
+    // The budget is enforced on breadth, not just depth: a single node whose
+    // fan-out alone exceeds the budget is refused as its parents are inserted,
+    // before the whole fan-out is admitted into the walk.
+    let fanout: Vec<Digest> = (1..(MANIFEST_CLOSURE_BUDGET + 5)).map(digest_n).collect();
+    let mut parents = HashMap::new();
+    parents.insert(digest_n(0), fanout);
     let index = TestIndex { parents, ..Default::default() };
 
     let slot = Slot { artifact: digest_n(0), role: SlotRole::Instruction, parent_closure: vec![] };

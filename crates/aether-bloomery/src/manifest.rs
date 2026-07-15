@@ -214,12 +214,7 @@ fn ground_instruction(
     let mut traced = Vec::new();
     let mut most_advanced = Advance::Ungrounded;
 
-    let mut work = 0usize;
     while let Some(node) = stack.pop() {
-        work += 1;
-        if work > MANIFEST_CLOSURE_BUDGET {
-            return Err(ClosureViolation::ClosureBudgetExceeded { slot: artifact });
-        }
         if node != artifact {
             traced.push(node);
         }
@@ -242,6 +237,12 @@ fn ground_instruction(
         if let Some(parents) = index.parents(&node) {
             for parent in parents {
                 if visited.insert(parent) {
+                    // Cap total distinct nodes at insertion, not just at pop, so
+                    // a single high-fan-out node cannot grow the stack and
+                    // visited-set unboundedly before the next pop is examined.
+                    if visited.len() > MANIFEST_CLOSURE_BUDGET {
+                        return Err(ClosureViolation::ClosureBudgetExceeded { slot: artifact });
+                    }
                     stack.push(parent);
                 }
             }
