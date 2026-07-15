@@ -143,16 +143,113 @@ pub struct UreqHttpAdapter {
     max_body_bytes: usize,
 }
 
+/// Redirect budget for [`UreqHttpAdapter::fetch`]'s hand-rolled follow loop
+/// (issue #3463). Not an operator concern — a fixed cap, not a config field.
+const MAX_REDIRECTS: usize = 10;
+
+/// Per-hop redirect decision, returned by the pure [`classify_redirect`].
+/// `Deny` carries the same `HttpError` a direct request to that URL would
+/// have returned, so a denied redirect is indistinguishable from a direct
+/// denial at the adapter's error boundary.
+#[derive(Debug, PartialEq, Eq)]
+enum RedirectDecision {
+    /// Not a followable redirect (non-3xx, no `Location`, or budget spent) —
+    /// return the response to the caller as-is.
+    Return,
+    /// A 3xx to an allowlisted, scheme-valid host — follow it.
+    Follow(url::Url),
+    /// A 3xx to a denied host or scheme — fail closed with the same error
+    /// a direct request to that target would produce.
+    Deny(HttpError),
+}
+
+/// Decide whether to follow one redirect hop. Pure and unit-testable: given
+/// the just-received status/`Location` and the current URL, re-runs the same
+/// `require_https` + allowlist checks the initial URL gets, so every hop that
+/// actually egresses is validated (the SSRF-adjacent gap issue #3463 closes).
+fn classify_redirect(
+    status: u16,
+    location: Option<&str>,
+    current: &url::Url,
+    allowlist: &HashSet<String>,
+    require_https: bool,
+    hops_left: usize,
+) -> RedirectDecision {
+    if !(300..400).contains(&status) || hops_left == 0 {
+        return RedirectDecision::Return;
+    }
+    let Some(location) = location else {
+        return RedirectDecision::Return;
+    };
+    let Ok(target) = current.join(location) else {
+        return RedirectDecision::Return;
+    };
+
+    if require_https && target.scheme() != "https" {
+        return RedirectDecision::Deny(HttpError::InvalidUrl(
+            "http scheme not allowed (AETHER_HTTP_REQUIRE_HTTPS=1)".to_string(),
+        ));
+    }
+    let Some(host) = target.host_str() else {
+        return RedirectDecision::Deny(HttpError::InvalidUrl("no host in url".to_string()));
+    };
+    if !allowlist.contains(host) {
+        return RedirectDecision::Deny(HttpError::AllowlistDenied);
+    }
+
+    RedirectDecision::Follow(target)
+}
+
+/// The standard redirect method/body rule: 303 always drops to GET with no
+/// body; 307/308 preserve the original method and body (unlike `ureq`'s own
+/// automatic follower, which bails on a body-bearing method rather than
+/// resend it — our loop keeps the body, so it can); any other 3xx (301, 302,
+/// …) follows curl's convention — GET/HEAD keep their method, everything
+/// else becomes GET, body dropped either way. Returns `(method, keep_body)`.
+fn redirect_method_and_body(status: u16, method: HttpMethod) -> (HttpMethod, bool) {
+    match status {
+        303 => (HttpMethod::Get, false),
+        307 | 308 => (method, true),
+        _ if matches!(method, HttpMethod::Get | HttpMethod::Head) => (method, false),
+        _ => (HttpMethod::Get, false),
+    }
+}
+
+/// Strip credential-bearing headers before re-issuing a cross-host redirect
+/// — mirrors the protection `ureq`'s built-in follower gives via
+/// `RedirectAuthHeaders::SameHost`, which a hand-rolled loop must reproduce
+/// rather than silently drop.
+fn strip_credential_headers_for_redirect(headers: &mut Vec<HttpHeader>) {
+    headers.retain(|h| {
+        !h.name.eq_ignore_ascii_case("authorization")
+            && !h.name.eq_ignore_ascii_case("cookie")
+            && !h.name.eq_ignore_ascii_case("proxy-authorization")
+    });
+}
+
+fn find_header_value(headers: &[HttpHeader], name: &str) -> Option<String> {
+    headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).map(|h| h.value.clone())
+}
+
+/// Whether a redirect hop crosses hosts and so must drop credential
+/// headers before re-issuing.
+fn redirect_crosses_host(current: &url::Url, target: &url::Url) -> bool {
+    current.host_str() != target.host_str()
+}
+
 impl UreqHttpAdapter {
     /// Construct an adapter with explicit knobs. Chassis code uses
     /// [`build_http_adapter`] for env-derived construction;
     /// tests build adapters directly to avoid env contamination.
     #[must_use]
     pub fn new(allowlist: HashSet<String>, require_https: bool, max_body_bytes: usize) -> Self {
-        // ureq's default redirect policy is intentionally unchanged here. The
-        // adapter validates only the initial URL host; redirect targets are not
-        // rechecked against `allowlist` in the current implementation.
-        let config = ureq::Agent::config_builder().http_status_as_error(false).build();
+        // Auto-redirect-following is off (`max_redirects(0)`): `fetch` runs
+        // its own follow loop so every hop — not just the initial URL — is
+        // re-validated against `allowlist` and `require_https` before it is
+        // dialed (issue #3463). With `max_redirects` at 0,
+        // `max_redirects_will_error` never triggers (it only fires above 0
+        // redirects), so an unfollowed 3xx returns as an ordinary response.
+        let config = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).build();
         let agent = ureq::Agent::new_with_config(config);
         Self { agent, allowlist, require_https, max_body_bytes }
     }
@@ -164,13 +261,23 @@ impl UreqHttpAdapter {
             Err(HttpError::AllowlistDenied)
         }
     }
-}
 
-impl HttpAdapter for UreqHttpAdapter {
-    fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, HttpError> {
+    /// Validate one URL against `require_https` + the allowlist and issue
+    /// exactly one non-following request. The redirect follow loop lives in
+    /// [`HttpAdapter::fetch`]; this runs the same gate the initial URL gets,
+    /// for whichever URL — initial or a re-validated redirect target — is
+    /// current.
+    fn fetch_once(
+        &self,
+        url: &str,
+        method: HttpMethod,
+        headers: &[HttpHeader],
+        body: &[u8],
+        timeout: Duration,
+    ) -> Result<FetchResponse, HttpError> {
         use ureq::RequestExt;
 
-        let parsed = url::Url::parse(&req.url).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
+        let parsed = url::Url::parse(url).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
 
         if self.require_https && parsed.scheme() != "https" {
             return Err(HttpError::InvalidUrl("http scheme not allowed (AETHER_HTTP_REQUIRE_HTTPS=1)".to_string()));
@@ -179,11 +286,11 @@ impl HttpAdapter for UreqHttpAdapter {
         let host = parsed.host_str().ok_or_else(|| HttpError::InvalidUrl("no host in url".to_string()))?;
         self.check_allowlist(host)?;
 
-        if req.body.len() > self.max_body_bytes {
+        if body.len() > self.max_body_bytes {
             return Err(HttpError::BodyTooLarge);
         }
 
-        let mut builder = Request::builder().method(http_method_to_http_crate(req.method)).uri(&req.url);
+        let mut builder = Request::builder().method(http_method_to_http_crate(method)).uri(url);
 
         // Host header is derived from the URL by ureq; reject any
         // caller-set Host so it can't be used to bypass the
@@ -191,7 +298,7 @@ impl HttpAdapter for UreqHttpAdapter {
         // but `Host: B` routes the vhost to B server-side). User-
         // Agent defaults to `aether/<version>` if not set.
         let mut saw_user_agent = false;
-        for h in &req.headers {
+        for h in headers {
             if h.name.eq_ignore_ascii_case("host") {
                 tracing::warn!(
                     target: "aether_substrate::http",
@@ -209,25 +316,25 @@ impl HttpAdapter for UreqHttpAdapter {
             builder = builder.header("User-Agent", concat!("aether/", env!("CARGO_PKG_VERSION")));
         }
 
-        let http_req = builder.body(req.body).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
+        let http_req = builder.body(body.to_vec()).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
 
         let mut response = http_req
             .with_agent(&self.agent)
             .configure()
-            .timeout_global(Some(req.timeout))
+            .timeout_global(Some(timeout))
             .build()
             .run()
             .map_err(ureq_error_to_http_error)?;
 
         let status = response.status().as_u16();
 
-        let mut headers = Vec::with_capacity(response.headers().len());
+        let mut resp_headers = Vec::with_capacity(response.headers().len());
         for (name, value) in response.headers() {
             // Non-UTF8 header values are rare but real (binary
             // cookies, broken servers). Skip rather than fail the
             // whole fetch.
             if let Ok(value_str) = value.to_str() {
-                headers.push(HttpHeader { name: name.as_str().to_string(), value: value_str.to_string() });
+                resp_headers.push(HttpHeader { name: name.as_str().to_string(), value: value_str.to_string() });
             }
         }
 
@@ -237,7 +344,46 @@ impl HttpAdapter for UreqHttpAdapter {
             Err(e) => return Err(HttpError::AdapterError(format!("body read: {e}"))),
         };
 
-        Ok(FetchResponse { status, headers, body })
+        Ok(FetchResponse { status, headers: resp_headers, body })
+    }
+}
+
+impl HttpAdapter for UreqHttpAdapter {
+    fn fetch(&self, req: FetchRequest) -> Result<FetchResponse, HttpError> {
+        let mut current = url::Url::parse(&req.url).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
+        let mut method = req.method;
+        let mut headers = req.headers;
+        let mut body = req.body;
+        let mut hops_left = MAX_REDIRECTS;
+
+        loop {
+            let response = self.fetch_once(current.as_str(), method, &headers, &body, req.timeout)?;
+            let location = find_header_value(&response.headers, "location");
+
+            match classify_redirect(
+                response.status,
+                location.as_deref(),
+                &current,
+                &self.allowlist,
+                self.require_https,
+                hops_left,
+            ) {
+                RedirectDecision::Return => return Ok(response),
+                RedirectDecision::Deny(error) => return Err(error),
+                RedirectDecision::Follow(target) => {
+                    let (new_method, keep_body) = redirect_method_and_body(response.status, method);
+                    if redirect_crosses_host(&current, &target) {
+                        strip_credential_headers_for_redirect(&mut headers);
+                    }
+                    method = new_method;
+                    if !keep_body {
+                        body = Vec::new();
+                    }
+                    current = target;
+                    hops_left -= 1;
+                }
+            }
+        }
     }
 }
 
@@ -513,5 +659,170 @@ mod tests {
             timeout: Duration::from_secs(30),
         });
         assert!(matches!(resp, Err(HttpError::Disabled)));
+    }
+
+    // issue #3463: per-hop redirect re-validation. `classify_redirect` is
+    // the pure seam carrying the SSRF-boundary invariant, so it is tested
+    // directly rather than through a live redirecting server.
+    mod redirect_classification {
+        use super::super::{RedirectDecision, classify_redirect, redirect_method_and_body};
+        use crate::http::kinds::{HttpError, HttpMethod};
+        use std::collections::HashSet;
+
+        fn allowlist(hosts: &[&str]) -> HashSet<String> {
+            hosts.iter().map(|h| (*h).to_string()).collect()
+        }
+
+        fn url(s: &str) -> url::Url {
+            url::Url::parse(s).expect("test fixture URL must parse")
+        }
+
+        #[test]
+        fn redirect_to_denied_host_is_denied() {
+            // Tripwire: the SSRF boundary this issue closes — a redirect
+            // target outside the allowlist must fail exactly like a direct
+            // request to that host would.
+            let current = url("https://allowed.example.com/start");
+            let decision = classify_redirect(
+                302,
+                Some("https://denied.example.com/next"),
+                &current,
+                &allowlist(&["allowed.example.com"]),
+                false,
+                10,
+            );
+            assert!(matches!(decision, RedirectDecision::Deny(HttpError::AllowlistDenied)));
+        }
+
+        #[test]
+        fn redirect_within_allowlist_follows() {
+            let current = url("https://allowed.example.com/start");
+            let decision = classify_redirect(
+                302,
+                Some("https://allowed.example.com/next"),
+                &current,
+                &allowlist(&["allowed.example.com"]),
+                false,
+                10,
+            );
+            match decision {
+                RedirectDecision::Follow(target) => assert_eq!(target.as_str(), "https://allowed.example.com/next"),
+                other => panic!("expected Follow, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn non_redirect_status_returns() {
+            let current = url("https://allowed.example.com/start");
+            let decision = classify_redirect(200, None, &current, &allowlist(&["allowed.example.com"]), false, 10);
+            assert_eq!(decision, RedirectDecision::Return);
+        }
+
+        #[test]
+        fn redirect_without_location_returns() {
+            let current = url("https://allowed.example.com/start");
+            let decision = classify_redirect(302, None, &current, &allowlist(&["allowed.example.com"]), false, 10);
+            assert_eq!(decision, RedirectDecision::Return);
+        }
+
+        #[test]
+        fn http_hop_denied_under_require_https() {
+            let current = url("https://allowed.example.com/start");
+            let decision = classify_redirect(
+                302,
+                Some("http://allowed.example.com/next"),
+                &current,
+                &allowlist(&["allowed.example.com"]),
+                true,
+                10,
+            );
+            assert!(matches!(decision, RedirectDecision::Deny(HttpError::InvalidUrl(_))));
+        }
+
+        #[test]
+        fn spent_budget_returns_instead_of_following() {
+            let current = url("https://allowed.example.com/start");
+            let decision = classify_redirect(
+                302,
+                Some("https://allowed.example.com/next"),
+                &current,
+                &allowlist(&["allowed.example.com"]),
+                false,
+                0,
+            );
+            assert_eq!(decision, RedirectDecision::Return);
+        }
+
+        #[test]
+        fn redirect_method_and_body_rule() {
+            assert_eq!(redirect_method_and_body(303, HttpMethod::Post), (HttpMethod::Get, false));
+            assert_eq!(redirect_method_and_body(307, HttpMethod::Post), (HttpMethod::Post, true));
+            assert_eq!(redirect_method_and_body(308, HttpMethod::Put), (HttpMethod::Put, true));
+            assert_eq!(redirect_method_and_body(302, HttpMethod::Get), (HttpMethod::Get, false));
+            assert_eq!(redirect_method_and_body(301, HttpMethod::Post), (HttpMethod::Get, false));
+        }
+    }
+
+    #[test]
+    fn cross_host_redirect_strips_credential_headers() {
+        let mut headers = vec![
+            HttpHeader { name: "Authorization".to_string(), value: "Bearer secret".to_string() },
+            HttpHeader { name: "Cookie".to_string(), value: "session=abc".to_string() },
+            HttpHeader { name: "Proxy-Authorization".to_string(), value: "Basic xyz".to_string() },
+            HttpHeader { name: "Accept".to_string(), value: "application/json".to_string() },
+        ];
+        super::strip_credential_headers_for_redirect(&mut headers);
+        assert_eq!(headers, vec![HttpHeader { name: "Accept".to_string(), value: "application/json".to_string() }]);
+    }
+
+    #[test]
+    fn redirect_crosses_host_detects_same_vs_cross_host() {
+        let current = url::Url::parse("https://allowed.example.com/start").expect("test fixture URL must parse");
+        let same_host = url::Url::parse("https://allowed.example.com/next").expect("test fixture URL must parse");
+        let cross_host = url::Url::parse("https://other.example.com/next").expect("test fixture URL must parse");
+        assert!(!super::redirect_crosses_host(&current, &same_host));
+        assert!(super::redirect_crosses_host(&current, &cross_host));
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // test-only loopback server thread; no actor lineage or runtime work.
+    fn redirect_to_denied_host_end_to_end_never_connects_onward() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        // A local server the allowlist permits, which 302s to a host the
+        // allowlist denies. Proves `fetch` never dials the second hop: if it
+        // did, the denied host wouldn't resolve/connect and the error would
+        // be an adapter/connect failure rather than `AllowlistDenied`.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        let addr = listener.local_addr().expect("listener local addr");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept one connection");
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).expect("read request");
+            let response = b"HTTP/1.1 302 Found\r\n\
+                Location: https://denied.example.invalid/\r\n\
+                Content-Length: 0\r\n\
+                Connection: close\r\n\
+                \r\n";
+            stream.write_all(response).expect("write redirect response");
+        });
+
+        let mut allowlist = HashSet::new();
+        allowlist.insert(addr.ip().to_string());
+        let adapter = UreqHttpAdapter::new(allowlist, false, DEFAULT_MAX_BODY_BYTES);
+
+        let resp = adapter.fetch(FetchRequest {
+            url: format!("http://{addr}/"),
+            method: HttpMethod::Get,
+            headers: vec![],
+            body: vec![],
+            timeout: Duration::from_secs(5),
+        });
+
+        assert!(matches!(resp, Err(HttpError::AllowlistDenied)));
+        server.join().expect("server thread panicked");
     }
 }
