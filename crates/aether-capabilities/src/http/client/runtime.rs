@@ -193,11 +193,24 @@ fn classify_redirect(
     let Some(host) = target.host_str() else {
         return RedirectDecision::Deny(HttpError::InvalidUrl("no host in url".to_string()));
     };
-    if !allowlist.contains(host) {
-        return RedirectDecision::Deny(HttpError::AllowlistDenied);
+    if let Err(error) = check_allowlist(allowlist, host) {
+        return RedirectDecision::Deny(error);
     }
 
     RedirectDecision::Follow(target)
+}
+
+/// Shared allowlist gate: both the initial-URL path
+/// ([`UreqHttpAdapter::fetch_once`]) and the redirect-hop path
+/// ([`classify_redirect`]) call this one function, so a future change to
+/// allowlist semantics (case-folding, wildcard support, …) can't silently
+/// apply to one path and not the other.
+fn check_allowlist(allowlist: &HashSet<String>, host: &str) -> Result<(), HttpError> {
+    if allowlist.contains(host) {
+        Ok(())
+    } else {
+        Err(HttpError::AllowlistDenied)
+    }
 }
 
 /// The standard redirect method/body rule: 303 always drops to GET with no
@@ -231,10 +244,11 @@ fn find_header_value(headers: &[HttpHeader], name: &str) -> Option<String> {
     headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).map(|h| h.value.clone())
 }
 
-/// Whether a redirect hop crosses hosts and so must drop credential
-/// headers before re-issuing.
-fn redirect_crosses_host(current: &url::Url, target: &url::Url) -> bool {
-    current.host_str() != target.host_str()
+/// Whether a redirect hop must drop credential headers before re-issuing:
+/// it crosses hosts, or it isn't `https` (a same-host downgrade to plain
+/// `http` must not carry credentials over the wire in the clear either).
+fn redirect_needs_credential_strip(current: &url::Url, target: &url::Url) -> bool {
+    current.host_str() != target.host_str() || target.scheme() != "https"
 }
 
 impl UreqHttpAdapter {
@@ -252,14 +266,6 @@ impl UreqHttpAdapter {
         let config = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).build();
         let agent = ureq::Agent::new_with_config(config);
         Self { agent, allowlist, require_https, max_body_bytes }
-    }
-
-    fn check_allowlist(&self, host: &str) -> Result<(), HttpError> {
-        if self.allowlist.contains(host) {
-            Ok(())
-        } else {
-            Err(HttpError::AllowlistDenied)
-        }
     }
 
     /// Validate one URL against `require_https` + the allowlist and issue
@@ -284,7 +290,7 @@ impl UreqHttpAdapter {
         }
 
         let host = parsed.host_str().ok_or_else(|| HttpError::InvalidUrl("no host in url".to_string()))?;
-        self.check_allowlist(host)?;
+        check_allowlist(&self.allowlist, host)?;
 
         if body.len() > self.max_body_bytes {
             return Err(HttpError::BodyTooLarge);
@@ -372,7 +378,7 @@ impl HttpAdapter for UreqHttpAdapter {
                 RedirectDecision::Deny(error) => return Err(error),
                 RedirectDecision::Follow(target) => {
                     let (new_method, keep_body) = redirect_method_and_body(response.status, method);
-                    if redirect_crosses_host(&current, &target) {
+                    if redirect_needs_credential_strip(&current, &target) {
                         strip_credential_headers_for_redirect(&mut headers);
                     }
                     method = new_method;
@@ -776,12 +782,15 @@ mod tests {
     }
 
     #[test]
-    fn redirect_crosses_host_detects_same_vs_cross_host() {
+    fn redirect_needs_credential_strip_detects_cross_host_and_downgrade() {
         let current = url::Url::parse("https://allowed.example.com/start").expect("test fixture URL must parse");
-        let same_host = url::Url::parse("https://allowed.example.com/next").expect("test fixture URL must parse");
+        let same_host_https = url::Url::parse("https://allowed.example.com/next").expect("test fixture URL must parse");
         let cross_host = url::Url::parse("https://other.example.com/next").expect("test fixture URL must parse");
-        assert!(!super::redirect_crosses_host(&current, &same_host));
-        assert!(super::redirect_crosses_host(&current, &cross_host));
+        let same_host_downgrade =
+            url::Url::parse("http://allowed.example.com/next").expect("test fixture URL must parse");
+        assert!(!super::redirect_needs_credential_strip(&current, &same_host_https));
+        assert!(super::redirect_needs_credential_strip(&current, &cross_host));
+        assert!(super::redirect_needs_credential_strip(&current, &same_host_downgrade));
     }
 
     #[test]
