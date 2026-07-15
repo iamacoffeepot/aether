@@ -58,8 +58,8 @@ pub use port::{
     Checkpoint, IntegrateOutcome, LandOutcome, ProjectionBackend, ProjectionState, SourceBackend, SourceSnapshot,
 };
 pub use reduce::{
-    BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, IntegrateError, Outcome, ResolveError,
-    SealConflict, Snapshot, SupersedeError, reduce,
+    BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, IntegrateError, LandError, Outcome,
+    ResolveError, SealConflict, SealError, Snapshot, SupersedeError, reduce,
 };
 pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
 pub use values::{
