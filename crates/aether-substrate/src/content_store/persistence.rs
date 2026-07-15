@@ -1,4 +1,4 @@
-//! Disk persistence layer for [`super::ArtifactStore`]: index restore from
+//! Disk persistence layer for [`super::ContentStore`]: index restore from
 //! disk, sidecar read/write, root setup, and `lock.pid` acquisition.
 
 use std::collections::HashMap;
@@ -9,14 +9,17 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aether_substrate::atomic_write::atomic_write;
-use aether_substrate::pid_lock::{LockAcquisition, LockGuard, acquire_lock_pid};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
-use super::{Entry, StoredEntry, TARGET};
+use crate::atomic_write::atomic_write;
+use crate::pid_lock::{LockAcquisition, LockGuard, acquire_lock_pid};
+
+use super::{Entry, SidecarRecord, TARGET};
 
 /// The in-memory index [`restore`] rebuilds from disk.
-pub struct RestoredIndex {
-    pub entries: HashMap<String, Entry>,
+pub struct RestoredIndex<M> {
+    pub entries: HashMap<String, Entry<M>>,
     pub names: HashMap<String, String>,
     pub total_bytes: u64,
     pub clock: u64,
@@ -25,8 +28,8 @@ pub struct RestoredIndex {
 
 /// Rebuild the in-memory index from disk: every `entries/<hash>.manifest`
 /// sidecar paired with its `<hash>` bytes, plus the `names.json` map.
-pub fn restore(root: &Path) -> RestoredIndex {
-    let mut entries: HashMap<String, Entry> = HashMap::new();
+pub fn restore<M: DeserializeOwned>(root: &Path) -> RestoredIndex<M> {
+    let mut entries: HashMap<String, Entry<M>> = HashMap::new();
     let mut total_bytes: u64 = 0;
     let mut clock: u64 = 0;
     let mut max_uploaded_seq: u64 = 0;
@@ -41,7 +44,7 @@ pub fn restore(root: &Path) -> RestoredIndex {
             let Some(hash) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let Some(sidecar) = read_sidecar(&path) else {
+            let Some(sidecar) = read_sidecar::<M>(&path) else {
                 continue;
             };
             let Ok(meta) = fs::metadata(entries_dir.join(hash)) else {
@@ -54,8 +57,7 @@ pub fn restore(root: &Path) -> RestoredIndex {
             entries.insert(
                 hash.to_owned(),
                 Entry {
-                    kind: sidecar.kind,
-                    manifest: sidecar.manifest,
+                    metadata: sidecar.metadata,
                     bytes_len,
                     pinned: false,
                     last_access: clock,
@@ -79,12 +81,12 @@ pub fn restore(root: &Path) -> RestoredIndex {
     RestoredIndex { entries, names, total_bytes, clock, next_seq: max_uploaded_seq.saturating_add(1) }
 }
 
-fn read_sidecar(path: &Path) -> Option<StoredEntry> {
+fn read_sidecar<M: DeserializeOwned>(path: &Path) -> Option<SidecarRecord<M>> {
     let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
-pub fn write_sidecar(path: &Path, sidecar: &StoredEntry) -> io::Result<()> {
+pub fn write_sidecar<M: Serialize>(path: &Path, sidecar: &SidecarRecord<M>) -> io::Result<()> {
     let bytes = serde_json::to_vec(sidecar).map_err(|e| io::Error::new(ErrorKind::InvalidData, e))?;
     atomic_write(path, &bytes)
 }
@@ -95,15 +97,15 @@ pub fn ensure_root(root: &Path) -> PathBuf {
     if fs::create_dir_all(root.join("entries")).is_ok() {
         return root.to_path_buf();
     }
-    let fallback = env::temp_dir().join(format!("aether-binaries-{}-{}", process::id(), now_nanos()));
+    let fallback = env::temp_dir().join(format!("aether-content-store-{}-{}", process::id(), now_nanos()));
     if let Err(e) = fs::create_dir_all(fallback.join("entries")) {
-        tracing::warn!(target: TARGET, error = %e, "binary store: temp fallback dir creation failed");
+        tracing::warn!(target: TARGET, error = %e, "content store: temp fallback dir creation failed");
     } else {
         tracing::warn!(
             target: TARGET,
             requested = %root.display(),
             fallback = %fallback.display(),
-            "binary store: configured root unusable; using a temp fallback",
+            "content store: configured root unusable; using a temp fallback",
         );
     }
     fallback
@@ -124,7 +126,7 @@ pub fn acquire_lock(root: &Path) -> Option<LockGuard> {
                 target: TARGET,
                 path = %path.display(),
                 holder_pid = pid,
-                "binary store: lock held by a live process; operating unlocked",
+                "content store: lock held by a live process; operating unlocked",
             );
             None
         }
@@ -133,7 +135,7 @@ pub fn acquire_lock(root: &Path) -> Option<LockGuard> {
                 target: TARGET,
                 path = %path.display(),
                 error = %e,
-                "binary store: writing lock.pid failed; operating unlocked",
+                "content store: writing lock.pid failed; operating unlocked",
             );
             None
         }
@@ -153,6 +155,7 @@ pub fn hash_hex(bytes: &[u8]) -> String {
 }
 
 /// Nanoseconds since the Unix epoch, for temp-dir and tmp-file nonces.
+#[must_use]
 pub fn now_nanos() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos())
 }

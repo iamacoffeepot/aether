@@ -14,6 +14,20 @@
 //! read straight from the wasm, ADR-0116 / #1956), carried in the
 //! [`StoredManifest`] enum.
 //!
+//! ## Storage core (ADR-0149)
+//!
+//! The domain-clean storage layer — sha256 addressing, the on-disk entry
+//! index, atomic sidecar persistence + restore, `lock.pid` acquisition,
+//! and the eviction step — lives in
+//! [`aether_substrate::content_store`] as [`ContentStore<M>`], parameterized
+//! over the per-entry metadata type and an [`EvictionPolicy`]. This module
+//! is one consumer of it: [`ArtifactStore`] wraps a
+//! `ContentStore<StoredEntry>` under the [`LruBudget`](EvictionPolicy::LruBudget)
+//! policy and layers the binary/component vocabulary — [`ArtifactKind`] /
+//! [`StoredManifest`], the manifest filters, and the four list/match
+//! projections — over the core's entry-iteration API. Bloomery's
+//! eviction-free `artifacts` port (ADR-0149) is the second consumer.
+//!
 //! ## Layout
 //!
 //! Under a hub-scoped, layout-versioned root — the dir resolved from
@@ -33,34 +47,32 @@
 //! hub child's restart. The disk budget is enforced by LRU eviction over
 //! entries that are neither pinned nor named — a named or pinned entry is
 //! kept regardless of recency.
-//!
-//! The `lock.pid` acquisition protocol lives in
-//! `aether_substrate::pid_lock`. The `aether.engine` cap is
-//! single-threaded (one dispatcher run-token), so the store holds its
-//! index in plain fields behind `&mut self` rather than an inner lock.
 
-mod eviction;
 mod manifest;
-mod persistence;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
 use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_kinds::{
     BinaryEntry, ComponentEntry, ListComponentBinaries, ListComponentBinariesResult, ListEngineBinaries,
     ListEngineBinariesResult,
 };
-use aether_substrate::atomic_write::atomic_write;
-use aether_substrate::pid_lock::LockGuard;
+use aether_substrate::content_store::{ContentStore, EvictionPolicy};
 use serde::{Deserialize, Serialize};
 
-pub use manifest::{ArtifactKind, Selector, StoredArtifact, StoredManifest, component_manifest, config_descriptor};
+pub use aether_substrate::content_store::Selector;
+pub use manifest::{ArtifactKind, StoredArtifact, StoredManifest, component_manifest, config_descriptor};
 use manifest::{matches_binary_filter, matches_component_filter};
-use persistence::{RestoredIndex, acquire_lock, ensure_root, hash_hex, restore, write_sidecar};
+
+/// The core's `now_nanos`, re-surfaced under the pre-extraction path so the
+/// in-tree regression suite (`tests.rs`) keeps its temp-root nonce helper
+/// unchanged — the bit-for-bit gate must not be edited by the move.
+#[cfg(test)]
+mod persistence {
+    pub use aether_substrate::content_store::now_nanos;
+}
 
 /// Layout-version subdirectory under the resolved root, so a future
 /// on-disk format change can land beside `v1` without a migration.
@@ -73,66 +85,26 @@ pub const LAYOUT_VERSION_DIR: &str = "v1";
 /// unparseable env value back to it.
 pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 
-const TARGET: &str = "aether_capabilities::engine::store";
 const DEFAULT_LIST_CAP: u32 = 20;
 
-/// The JSON sidecar written next to each entry's bytes — the type tag
-/// plus the type-tagged manifest, so a fresh store rebuilds its index
-/// from disk. `kind` is redundant with the `manifest` variant but kept
-/// for a forward-compatible read of an entry whose manifest variant a
-/// future build doesn't recognize.
+/// The hub's per-entry metadata `M` for [`ContentStore`]: the type tag
+/// plus the type-tagged manifest. The core flattens this beside the ingest
+/// sequence, so the on-disk sidecar stays `{ kind, manifest, uploaded_seq }`
+/// — the pre-extraction JSON layout, preserved bit-for-bit. `kind` is
+/// redundant with the `manifest` variant but kept for a forward-compatible
+/// read of an entry whose manifest variant a future build doesn't recognize.
 #[derive(Serialize, Deserialize, Clone)]
-struct StoredEntry {
+pub struct StoredEntry {
     kind: ArtifactKind,
     manifest: StoredManifest,
-    #[serde(default)]
-    uploaded_seq: u64,
-}
-
-/// In-memory record of one entry. The bytes live on disk at
-/// `entries/<hash>`; only the metadata is held in memory (artifacts are
-/// large), read back lazily on [`ArtifactStore::get`].
-struct Entry {
-    kind: ArtifactKind,
-    manifest: StoredManifest,
-    bytes_len: u64,
-    /// Eviction protection independent of naming (an explicit
-    /// [`ArtifactStore::pin`]). A named entry is also eviction-protected.
-    pinned: bool,
-    /// Monotonic access stamp; lower = older, the LRU eviction key.
-    last_access: u64,
-    /// Stable first-ingest sequence. Reads and deduplicated uploads never
-    /// change it; listing pages sort newest-first by this value.
-    uploaded_seq: u64,
 }
 
 /// Content-addressed, disk-backed, budget-bounded artifact store
-/// (ADR-0115). Owned by the single-threaded `aether.engine` cap, so its
-/// index lives in plain fields behind `&mut self`; #1955 can wrap it
-/// behind a lock when a multi-owner registry needs one.
+/// (ADR-0115). The hub consumer over [`ContentStore<StoredEntry>`] with the
+/// [`LruBudget`](EvictionPolicy::LruBudget) policy: the core owns storage,
+/// this layer owns the binary/component vocabulary.
 pub struct ArtifactStore {
-    /// The layout-versioned root holding `entries/`, `names.json`,
-    /// `lock.pid`.
-    root: PathBuf,
-    disk_budget_bytes: u64,
-    /// hash -> entry metadata.
-    entries: HashMap<String, Entry>,
-    /// name -> hash. Repointing a name to a new hash is a plain overwrite;
-    /// the old hash keeps its bytes but loses its name (and so its
-    /// eviction protection).
-    names: HashMap<String, String>,
-    /// Approximate on-disk byte ledger, the LRU eviction trigger.
-    total_bytes: u64,
-    /// Monotonic source for `Entry::last_access`.
-    clock: u64,
-    /// Sequence to assign to the next successfully persisted new content
-    /// hash. It advances only after both bytes and sidecar are durable.
-    next_seq: u64,
-    /// `lock.pid` guard. Held for the store's lifetime when the lock was
-    /// freshly written; `None` when another live process holds it (the
-    /// store still operates — a content-addressed store tolerates a shared
-    /// dir, so the lock is hygiene, not a hard mutex).
-    _lock: Option<LockGuard>,
+    inner: ContentStore<StoredEntry>,
 }
 
 impl ArtifactStore {
@@ -142,7 +114,8 @@ impl ArtifactStore {
     /// `AETHER_BINARY_STORE_DIR` override now rides `EngineConfig`'s
     /// `binary_store_dir` field (ADR-0090), and `EngineServer::init` joins
     /// [`LAYOUT_VERSION_DIR`] to a configured override or falls back here
-    /// when it's unset.
+    /// when it's unset. Hub-domain naming, so it stays hub-side glue rather
+    /// than moving into the domain-neutral core (ADR-0149 §Affected surfaces).
     #[must_use]
     pub fn default_root() -> PathBuf {
         if let Some(data) = dirs::data_dir() {
@@ -159,17 +132,14 @@ impl ArtifactStore {
     /// still operating.
     #[must_use]
     pub fn open(root: &Path, disk_budget_bytes: u64) -> Self {
-        let root = ensure_root(root);
-        let lock = acquire_lock(&root);
-        let RestoredIndex { entries, names, total_bytes, clock, next_seq } = restore(&root);
-        Self { root, disk_budget_bytes, entries, names, total_bytes, clock, next_seq, _lock: lock }
+        Self { inner: ContentStore::open(root, EvictionPolicy::LruBudget(disk_budget_bytes)) }
     }
 
     /// The layout root this store resolved to (after any temp fallback).
     #[must_use]
     #[allow(dead_code)]
     pub fn root(&self) -> &Path {
-        &self.root
+        self.inner.root()
     }
 
     /// Ingest `bytes` content-addressed, recording `manifest` and
@@ -185,43 +155,7 @@ impl ArtifactStore {
         manifest: StoredManifest,
         name: Option<String>,
     ) -> String {
-        let hash = hash_hex(bytes);
-        let clock = self.next_clock();
-
-        if let Some(entry) = self.entries.get_mut(&hash) {
-            // Dedup: bump recency so a re-uploaded entry isn't the first
-            // eviction target.
-            entry.last_access = clock;
-        } else {
-            // New content: write the bytes + the sidecar, then index it. A
-            // write failure leaves the entry out of the index, so the store
-            // stays consistent — the next upload of the same bytes retries.
-            let (bytes_path, manifest_path) = self.entry_paths(&hash);
-            let uploaded_seq = self.next_seq;
-            let sidecar = StoredEntry { kind, manifest: manifest.clone(), uploaded_seq };
-            if let Err(e) = atomic_write(&bytes_path, bytes) {
-                tracing::warn!(target: TARGET, hash = %hash, error = %e, "binary store: writing entry bytes failed");
-            } else if let Err(e) = write_sidecar(&manifest_path, &sidecar) {
-                tracing::warn!(target: TARGET, hash = %hash, error = %e, "binary store: writing entry manifest failed");
-                let _ = fs::remove_file(&bytes_path);
-            } else {
-                let bytes_len = bytes.len() as u64;
-                self.entries.insert(
-                    hash.clone(),
-                    Entry { kind, manifest, bytes_len, pinned: false, last_access: clock, uploaded_seq },
-                );
-                self.total_bytes = self.total_bytes.saturating_add(bytes_len);
-                self.next_seq = self.next_seq.saturating_add(1);
-            }
-        }
-
-        if let Some(name) = name {
-            self.names.insert(name, hash.clone());
-            self.persist_names();
-        }
-
-        self.evict_if_needed();
-        hash
+        self.inner.upload(bytes, StoredEntry { kind, manifest }, name)
     }
 
     /// Pin (or unpin) an entry by hash, protecting it from eviction
@@ -230,18 +164,13 @@ impl ArtifactStore {
     /// today a pin holds for the store's lifetime (the hub process).
     #[allow(dead_code)]
     pub fn set_pinned(&mut self, hash: &str, pinned: bool) -> bool {
-        if let Some(entry) = self.entries.get_mut(hash) {
-            entry.pinned = pinned;
-            true
-        } else {
-            false
-        }
+        self.inner.set_pinned(hash, pinned)
     }
 
     /// Pin an entry by hash. Convenience for `set_pinned(hash, true)`.
     #[allow(dead_code)]
     pub fn pin(&mut self, hash: &str) -> bool {
-        self.set_pinned(hash, true)
+        self.inner.pin(hash)
     }
 
     /// Enumerate the stored binaries matching `filter` as
@@ -252,13 +181,13 @@ impl ArtifactStore {
     /// artifacts are listed here.
     #[must_use]
     pub fn matching_binaries(&self, filter: &ListEngineBinaries) -> Vec<BinaryEntry> {
-        self.entries
-            .iter()
-            .filter_map(|(hash, entry)| {
-                let manifest = entry.manifest.as_binary()?;
+        self.inner
+            .entries()
+            .filter_map(|entry| {
+                let manifest = entry.metadata.manifest.as_binary()?;
                 matches_binary_filter(manifest, filter).then(|| BinaryEntry {
-                    hash: hash.clone(),
-                    name: self.name_for(hash),
+                    hash: entry.hash.to_owned(),
+                    name: self.inner.name_for(entry.hash),
                     manifest: manifest.clone(),
                 })
             })
@@ -273,13 +202,13 @@ impl ArtifactStore {
     /// only `Component`-kind artifacts are listed here.
     #[must_use]
     pub fn matching_components(&self, filter: &ListComponentBinaries) -> Vec<ComponentEntry> {
-        self.entries
-            .iter()
-            .filter_map(|(hash, entry)| {
-                let manifest = entry.manifest.as_component()?;
+        self.inner
+            .entries()
+            .filter_map(|entry| {
+                let manifest = entry.metadata.manifest.as_component()?;
                 matches_component_filter(manifest, filter).then(|| ComponentEntry {
-                    hash: hash.clone(),
-                    name: self.name_for(hash),
+                    hash: entry.hash.to_owned(),
+                    name: self.inner.name_for(entry.hash),
                     manifest: manifest.clone(),
                 })
             })
@@ -294,18 +223,21 @@ impl ArtifactStore {
     #[must_use]
     pub fn list_binaries_page(&self, filter: &ListEngineBinaries) -> ListEngineBinariesResult {
         let mut matches: Vec<_> = self
-            .entries
-            .iter()
-            .filter_map(|(hash, entry)| {
-                let manifest = entry.manifest.as_binary()?;
+            .inner
+            .entries()
+            .filter_map(|entry| {
+                let manifest = entry.metadata.manifest.as_binary()?;
                 if !matches_binary_filter(manifest, filter) {
                     return None;
                 }
-                let name = self.name_for(hash);
+                let name = self.inner.name_for(entry.hash);
                 if name.is_none() && !filter.include_history {
                     return None;
                 }
-                Some((entry.uploaded_seq, BinaryEntry { hash: hash.clone(), name, manifest: manifest.clone() }))
+                Some((
+                    entry.uploaded_seq,
+                    BinaryEntry { hash: entry.hash.to_owned(), name, manifest: manifest.clone() },
+                ))
             })
             .collect();
         matches.sort_by(|(left_seq, left), (right_seq, right)| {
@@ -322,18 +254,21 @@ impl ArtifactStore {
     #[must_use]
     pub fn list_components_page(&self, filter: &ListComponentBinaries) -> ListComponentBinariesResult {
         let mut matches: Vec<_> = self
-            .entries
-            .iter()
-            .filter_map(|(hash, entry)| {
-                let manifest = entry.manifest.as_component()?;
+            .inner
+            .entries()
+            .filter_map(|entry| {
+                let manifest = entry.metadata.manifest.as_component()?;
                 if !matches_component_filter(manifest, filter) {
                     return None;
                 }
-                let name = self.name_for(hash);
+                let name = self.inner.name_for(entry.hash);
                 if name.is_none() && !filter.include_history {
                     return None;
                 }
-                Some((entry.uploaded_seq, ComponentEntry { hash: hash.clone(), name, manifest: manifest.clone() }))
+                Some((
+                    entry.uploaded_seq,
+                    ComponentEntry { hash: entry.hash.to_owned(), name, manifest: manifest.clone() },
+                ))
             })
             .collect();
         matches.sort_by(|(left_seq, left), (right_seq, right)| {
@@ -348,72 +283,33 @@ impl ArtifactStore {
     /// (ADR-0115; the seam #1954 consumes). `None` if the hash / name
     /// isn't stored. Bumps the entry's recency.
     pub fn get(&mut self, selector: &Selector) -> Option<StoredArtifact> {
-        let hash = match selector {
-            Selector::Hash(h) => h.clone(),
-            Selector::Name(n) => self.names.get(n)?.clone(),
-        };
-        let clock = self.next_clock();
-        let entry = self.entries.get_mut(&hash)?;
-        entry.last_access = clock;
-        let kind = entry.kind;
-        let manifest = entry.manifest.clone();
-        let name = self.name_for(&hash);
-        let (path, _) = self.entry_paths(&hash);
-        Some(StoredArtifact { hash, path, kind, manifest, name })
+        let resolved = self.inner.get(selector)?;
+        Some(StoredArtifact {
+            hash: resolved.hash,
+            path: resolved.path,
+            kind: resolved.metadata.kind,
+            manifest: resolved.metadata.manifest,
+            name: resolved.name,
+        })
     }
 
     /// Number of stored entries.
     #[must_use]
     #[allow(dead_code)]
     pub fn entry_count(&self) -> usize {
-        self.entries.len()
+        self.inner.entry_count()
     }
 
     /// Approximate on-disk byte total.
     #[must_use]
     #[allow(dead_code)]
     pub fn total_bytes(&self) -> u64 {
-        self.total_bytes
+        self.inner.total_bytes()
     }
 
     /// Whether an entry with `hash` is stored.
     #[must_use]
     pub fn contains(&self, hash: &str) -> bool {
-        self.entries.contains_key(hash)
-    }
-
-    /// The lexicographically smallest name pointing at `hash`, for a
-    /// [`BinaryEntry`] / a [`StoredArtifact`].
-    fn name_for(&self, hash: &str) -> Option<String> {
-        self.names.iter().filter(|(_, h)| h.as_str() == hash).map(|(n, _)| n).min().cloned()
-    }
-
-    fn next_clock(&mut self) -> u64 {
-        self.clock += 1;
-        self.clock
-    }
-
-    /// The `(bytes, manifest-sidecar)` paths for `hash` under `entries/`.
-    fn entry_paths(&self, hash: &str) -> (PathBuf, PathBuf) {
-        let dir = self.root.join("entries");
-        (dir.join(hash), dir.join(format!("{hash}.manifest")))
-    }
-
-    fn names_path(&self) -> PathBuf {
-        self.root.join("names.json")
-    }
-
-    /// Rewrite `names.json` from the in-memory map (best-effort).
-    fn persist_names(&self) {
-        match serde_json::to_vec(&self.names) {
-            Ok(bytes) => {
-                if let Err(e) = atomic_write(&self.names_path(), &bytes) {
-                    tracing::warn!(target: TARGET, error = %e, "binary store: persisting names failed");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(target: TARGET, error = %e, "binary store: encoding names failed");
-            }
-        }
+        self.inner.contains(hash)
     }
 }
