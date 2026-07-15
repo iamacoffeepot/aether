@@ -1,11 +1,24 @@
 //! Content addressing (ADR-0149 §The value vocabulary).
 //!
 //! A [`Digest`] is a sha256 over a value's *canonical aether-wire bytes*
-//! ([`aether_data::wire`], ADR-0118). The workspace already owns one
-//! canonical encoding; digests reuse it rather than inventing a parallel
-//! canonicalization that would drift. sha256 — not `aether-data`'s FNV-1a
-//! id hashing — because content addressing needs collision resistance,
-//! consistent with the hub binary store (ADR-0115).
+//! ([`aether_data::wire`], ADR-0118) with a per-type domain tag hashed ahead
+//! of them. The workspace already owns one canonical encoding; digests reuse
+//! it rather than inventing a parallel canonicalization that would drift.
+//! sha256 — not `aether-data`'s FNV-1a id hashing — because content
+//! addressing needs collision resistance, consistent with the hub binary
+//! store (ADR-0115).
+//!
+//! # Typed content addressing
+//!
+//! The wire format is positional and untagged, so structurally-identical
+//! values of different Rust types encode to identical bytes. To deliver the
+//! ADR-0149 promise of *typed* content addressing, [`digest_of`] hashes a
+//! stable per-type domain tag ([`ContentAddressed::DOMAIN`]) ahead of the
+//! value bytes: distinct types produce distinct digests by construction, and
+//! the [`ContentAddressed`] bound leaves no untagged path over a typed value
+//! to reach for. The domain tag is part of every digest of its type — it must
+//! never change once a digest is persisted, or the address of every value of
+//! that type moves.
 
 use aether_data::wire::to_vec;
 use serde::{Deserialize, Serialize};
@@ -42,14 +55,92 @@ impl Digest {
     }
 }
 
-/// The digest of a value: sha256 over its canonical aether-wire encoding.
+/// A value that is content-addressed by digest.
 ///
-/// Canonical encoding is infallible for every bloom value — it fails only
-/// when a length exceeds the `u32` ceiling (ADR-0118), which no control-plane
-/// value approaches — so an encode error degrades to hashing empty input
-/// rather than panicking in the `no_std` core.
+/// The `const DOMAIN` is a stable per-type domain-separation tag [`digest_of`]
+/// hashes length-prefixed ahead of the value's wire bytes, so two
+/// structurally-identical values of different vocabulary types never share a
+/// digest. Making the tag mandatory through this trait bound is what delivers
+/// "typed content addressed" (ADR-0149 §The value vocabulary) by construction:
+/// there is no untagged `digest_of` path over a typed value.
+///
+/// `DOMAIN` is part of every persisted digest of the implementing type, so it
+/// must be an explicit, stable string — never `core::any::type_name`, whose
+/// output is not stable across compiler versions.
+pub trait ContentAddressed: Serialize {
+    /// The stable domain-separation tag for this type.
+    const DOMAIN: &'static str;
+}
+
+/// The digest of a content-addressed value: sha256 over its type's domain tag
+/// (length-prefixed) followed by the value's canonical aether-wire encoding.
+///
+/// The domain tag ([`ContentAddressed::DOMAIN`]) is hashed length-prefixed
+/// ahead of the value bytes so the domain/value boundary is unambiguous and
+/// distinct types never collide.
+///
+/// Infallible by invariant: every bloom value encodes well under the ADR-0118
+/// `u32` wire-length ceiling — no control-plane value approaches 4 GiB — so an
+/// encode failure is a broken invariant, not a recoverable runtime condition.
+/// It panics rather than degrade to a wrong address (the prior
+/// `unwrap_or_default` aliased every encode failure, and any genuinely-empty
+/// encoding, to a single colliding digest — the wrong degradation for a
+/// content-addressing primitive).
+///
+/// # Panics
+///
+/// Panics if `value` fails to wire-encode — i.e. some length exceeds the
+/// ADR-0118 `u32` ceiling. This cannot happen for any bloom value (none
+/// approaches 4 GiB); an occurrence is a broken invariant, deliberately loud
+/// rather than a silently colliding address.
 #[must_use]
-pub fn digest_of<T: Serialize + ?Sized>(value: &T) -> Digest {
-    let bytes = to_vec(value).unwrap_or_default();
-    Digest::of_wire_bytes(&bytes)
+pub fn digest_of<T: ContentAddressed + ?Sized>(value: &T) -> Digest {
+    let bytes = to_vec(value).expect("bloom values never exceed the ADR-0118 u32 wire-length ceiling");
+    let domain_len =
+        u32::try_from(T::DOMAIN.len()).expect("a domain tag is a short static string, well under the u32 ceiling");
+    let mut hasher = Sha256::new();
+    hasher.update(domain_len.to_le_bytes());
+    hasher.update(T::DOMAIN.as_bytes());
+    hasher.update(&bytes);
+    Digest(hasher.finalize().into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ContentAddressed, digest_of};
+
+    // Two ContentAddressed impls sharing one byte payload but differing in
+    // DOMAIN, so the domain tag is the only thing that can distinguish them.
+    struct Alpha(u32);
+    struct Beta(u32);
+
+    impl serde::Serialize for Alpha {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            self.0.serialize(s)
+        }
+    }
+    impl serde::Serialize for Beta {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            self.0.serialize(s)
+        }
+    }
+
+    impl ContentAddressed for Alpha {
+        const DOMAIN: &'static str = "test.alpha";
+    }
+    impl ContentAddressed for Beta {
+        const DOMAIN: &'static str = "test.beta";
+    }
+
+    #[test]
+    fn distinct_domain_over_identical_bytes_yields_distinct_digests() {
+        // Alpha and Beta encode to the same wire bytes; only the domain tag
+        // differs, so a collision here means domain separation is not applied.
+        assert_ne!(digest_of(&Alpha(7)), digest_of(&Beta(7)));
+    }
+
+    #[test]
+    fn same_value_yields_stable_digest() {
+        assert_eq!(digest_of(&Alpha(7)), digest_of(&Alpha(7)));
+    }
 }

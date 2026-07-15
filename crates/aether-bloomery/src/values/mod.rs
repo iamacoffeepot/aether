@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use crate::digest::{Digest, digest_of};
+use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::WorkpieceId;
 
 /// The generic immutable node of the derivation DAG: opaque typed bytes plus
@@ -33,6 +33,10 @@ pub struct Artifact {
     pub bytes: Vec<u8>,
     /// The parents this artifact derives from, named by digest.
     pub parents: Vec<Digest>,
+}
+
+impl ContentAddressed for Artifact {
+    const DOMAIN: &'static str = "aether.bloomery.artifact";
 }
 
 impl Artifact {

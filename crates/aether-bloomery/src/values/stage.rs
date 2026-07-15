@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use crate::digest::{Digest, digest_of};
+use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::StageId;
 use crate::values::Budget;
 
@@ -43,6 +43,10 @@ pub struct StageBinding {
 pub struct StageCatalog {
     /// The bindings, one per stage in the catalog.
     pub bindings: Vec<StageBinding>,
+}
+
+impl ContentAddressed for StageCatalog {
+    const DOMAIN: &'static str = "aether.bloomery.stage_catalog";
 }
 
 impl StageCatalog {
