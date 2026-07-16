@@ -17,8 +17,10 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+use alloc::string::String;
+
 use crate::digest::Digest;
-use crate::ids::{BloomId, WorkpieceId};
+use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::BloomStatus;
 use crate::values::{Evidence, LandingReceipt, ResolutionClaim};
 
@@ -51,9 +53,10 @@ pub struct BloomView {
 
 /// One member's outward view: the admitted workpiece, the exact scope
 /// revision the bloom pinned, the approval evidence bound to that revision,
-/// and — once the member is integrated — its resolution claim. A member is
+/// — once the member is integrated — its resolution claim, and — while its
+/// stage is held on a parked question — its pending-decision. A member is
 /// integrated iff `resolution` is `Some` (the coarse per-member state the
-/// reducer tracks).
+/// reducer tracks) and held iff `pending_decision` is `Some`.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct MemberView {
     /// The admitted workpiece.
@@ -64,6 +67,30 @@ pub struct MemberView {
     pub approval: Evidence,
     /// The member's resolution claim once integrated; `None` until then.
     pub resolution: Option<ResolutionClaim>,
+    /// The member's pending-decision hold while a parked question holds its
+    /// stage; `None` when the member is not held (ADR-0151). Carried on the
+    /// self-contained document so the outward adapter renders the question with
+    /// no query-back into the store.
+    pub pending_decision: Option<PendingDecisionView>,
+}
+
+/// A member's pending-decision hold, rendered for the outward mirror: the held
+/// question's digest (the stable idempotency key the projected comment carries)
+/// plus the human-readable decision a person reads where they already look. The
+/// digest is what an adopting answer names; the prose is the question itself.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct PendingDecisionView {
+    /// The held [`crate::Question`]'s content-addressed digest — the exact
+    /// digest an answer adopts, carried in the projection's stable metadata.
+    pub question: Digest,
+    /// The held stage.
+    pub stage: StageId,
+    /// The decision to be made, in plain language.
+    pub prompt: String,
+    /// The options considered, each with its consequence.
+    pub options: Vec<String>,
+    /// What the pending decision blocks.
+    pub blocked: String,
 }
 
 /// The outward mirror. The implementation does the I/O (writes issues,

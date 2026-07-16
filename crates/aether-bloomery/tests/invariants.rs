@@ -14,8 +14,9 @@
 mod common;
 
 use aether_bloomery::{
-    AdmitEvidenceError, Artifact, BloomStatus, Digest, Evidence, EvidenceKind, Fact, LandError, Outcome, ResolveError,
-    SealError, Snapshot, SupersedeError, reduce,
+    AdmitEvidenceError, AdoptAnswerError, Artifact, BloomStatus, Decision, Digest, Evidence, EvidenceKind, Fact, KeyId,
+    LandError, Observation, Outcome, Provenance, Question, ResolveError, SealError, SignatureEnvelope, Snapshot,
+    StageId, Statement, SupersedeError, reduce,
 };
 use aether_data::wire::to_vec;
 use common::{claim, digest, draft, event, membership, sealed_and_resolved, splice_bloom, step, workpiece};
@@ -518,6 +519,134 @@ fn a_replayed_admission_is_a_duplicate() {
     let (twice, replay) = step(&once, &admit);
     assert!(matches!(replay.outcome, Outcome::Duplicate));
     assert_eq!(twice.blooms.get(&bloom).unwrap().evidence.len(), 1, "a replayed key does not re-append");
+}
+
+// A parked question named on `wp` for the bloom `bloom`, its evidence bound to
+// the attempt subject. Returns the built question so a test can name its digest.
+fn parked_question(workpiece: &str) -> Question {
+    Question {
+        stage: StageId::Construct,
+        subject: digest(70),
+        workpiece: aether_bloomery::WorkpieceId(workpiece.into()),
+        prompt: "tie between A and B".into(),
+        options: vec!["A".into(), "B".into()],
+        blocked: "construct is held".into(),
+    }
+}
+
+// An author-signed statement adopting `question` — the answer shape the reducer
+// admits as intent.
+fn answer_adopting(question: Digest) -> Statement {
+    Statement {
+        words: b"answer: choose A".to_vec(),
+        provenance: Provenance::AuthorSignature(SignatureEnvelope { signer: KeyId("owner".into()), signature: vec![] }),
+        parents: vec![question],
+    }
+}
+
+// ADR-0151 — admitting a Question derives a pending-decision hold that blocks
+// resolve. The hold is folded from the evidence log (the question digest is the
+// evidence detail), and `reduce_resolve` refuses a bloom with any open hold by
+// name (PendingDecision), not a misreported MemberNotIntegrated.
+#[test]
+fn a_question_admission_holds_the_bloom_and_blocks_resolve() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let question = parked_question("wp");
+    let question_digest = question.id();
+    let evidence = Evidence { subject: digest(70), kind: EvidenceKind::Question, detail: question_digest };
+    let (held, decided) = step(&snapshot, &event("park", Fact::AdmitEvidence { bloom, evidence }));
+    assert!(matches!(decided.outcome, Outcome::EvidenceAdmitted { .. }), "a question admits as evidence");
+    assert!(held.blooms.get(&bloom).unwrap().holds.contains(&question_digest), "the fold derives the hold");
+
+    // Even with the (single) member integrated, the open hold blocks resolve.
+    let claim = claim("wp", 10, 100);
+    let (integrated, _) = step(&held, &event("int", Fact::Integrate { bloom, claim }));
+    let resolve = reduce(&integrated, &event("r", Fact::Resolve { bloom, tree: digest(40), lineage: vec![] }));
+    assert!(
+        matches!(resolve.outcome, Outcome::ResolveRejected(ResolveError::PendingDecision { question: q }) if q == question_digest),
+        "an open hold blocks resolve, named by the held question",
+    );
+}
+
+// ADR-0151 — an adopting answer releases the hold and re-dispatches: the answer
+// names the held question digest, so the reducer clears the hold and emits a
+// RedispatchStage outbox effect carrying the answer digest; the bloom can then
+// resolve. A sibling member is unaffected throughout.
+#[test]
+fn an_adopted_answer_releases_the_hold_and_redispatches() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("held", 10), membership("free", 11)]).seal();
+    let bloom = spec.id();
+    let (mut snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    // The free sibling integrates while the other member is parked.
+    let question = parked_question("held");
+    let question_digest = question.id();
+    let park_ev = Evidence { subject: digest(70), kind: EvidenceKind::Question, detail: question_digest };
+    (snapshot, _) = step(&snapshot, &event("park", Fact::AdmitEvidence { bloom, evidence: park_ev }));
+    (snapshot, _) = step(&snapshot, &event("int-free", Fact::Integrate { bloom, claim: claim("free", 11, 101) }));
+    (snapshot, _) = step(&snapshot, &event("int-held", Fact::Integrate { bloom, claim: claim("held", 10, 100) }));
+
+    // Both members integrated, but the hold still blocks resolve.
+    let blocked = reduce(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), lineage: vec![] }));
+    assert!(matches!(blocked.outcome, Outcome::ResolveRejected(ResolveError::PendingDecision { .. })));
+
+    // The answer adopts the held question: hold released, re-dispatch emitted.
+    let answer = answer_adopting(question_digest);
+    let answer_digest = aether_bloomery::digest_of(&answer);
+    let (released, adopted) = step(&snapshot, &event("ans", Fact::AdoptAnswer { bloom, answer }));
+    assert!(
+        matches!(adopted.outcome, Outcome::AnswerAdopted { bloom: b, question: q } if b == bloom && q == question_digest),
+        "the answer adopts the exact question",
+    );
+    assert!(
+        adopted.effects.iter().any(|effect| matches!(
+            effect,
+            Decision::RedispatchStage { question: q, answer: a, .. } if *q == question_digest && *a == answer_digest,
+        )),
+        "the re-dispatch carries both the question and the answer digests",
+    );
+    assert!(!released.blooms.get(&bloom).unwrap().holds.contains(&question_digest), "the hold is released");
+
+    // With the hold gone and every member integrated, the bloom resolves.
+    let resolved = reduce(&released, &event("r2", Fact::Resolve { bloom, tree: digest(40), lineage: vec![] }));
+    assert!(matches!(resolved.outcome, Outcome::Resolved(_)), "resolve proceeds once the hold clears");
+}
+
+// ADR-0151 — the reducer's structural adoption gate: a non-author statement can
+// never become intent (NotInstructionCapable), and an author-signed statement
+// whose parents name no open hold releases nothing (NoMatchingHold). The hold
+// persists in both refusals.
+#[test]
+fn an_answer_that_does_not_adopt_a_held_question_is_refused() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let question = parked_question("wp");
+    let question_digest = question.id();
+    let park_ev = Evidence { subject: digest(70), kind: EvidenceKind::Question, detail: question_digest };
+    let (held, _) = step(&snapshot, &event("park", Fact::AdmitEvidence { bloom, evidence: park_ev }));
+
+    // A non-author statement (an observation) is never instruction-capable.
+    let observed = Statement {
+        words: b"i saw a reply".to_vec(),
+        provenance: Provenance::ObservationAttestation(Observation { source: "github".into() }),
+        parents: vec![question_digest],
+    };
+    let refused = reduce(&held, &event("obs", Fact::AdoptAnswer { bloom, answer: observed }));
+    assert!(matches!(refused.outcome, Outcome::AdoptAnswerRejected(AdoptAnswerError::NotInstructionCapable)));
+
+    // An author signature that adopts an unheld digest releases nothing.
+    let wrong = answer_adopting(digest(222));
+    let no_match = reduce(&held, &event("wrong", Fact::AdoptAnswer { bloom, answer: wrong }));
+    assert!(matches!(no_match.outcome, Outcome::AdoptAnswerRejected(AdoptAnswerError::NoMatchingHold)));
+
+    assert!(held.blooms.get(&bloom).unwrap().holds.contains(&question_digest), "a refused answer leaves the hold");
 }
 
 // m4 — an unknown bloom and a not-yet-resolved bloom each land-refuse with their

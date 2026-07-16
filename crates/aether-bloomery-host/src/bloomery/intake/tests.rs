@@ -2,7 +2,7 @@
 //! consume-once), the dispatch-record write, and the pull-loop cycle driven
 //! end-to-end with the reducer as the oracle.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use aether_bloomery::{
@@ -97,6 +97,7 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
             status: BloomStatus::Sealed,
             claims: BTreeMap::new(),
             evidence: Vec::new(),
+            holds: BTreeSet::new(),
             superseded_by: None,
         },
     );
@@ -150,6 +151,44 @@ fn a_matching_upload_admits_a_bound_integrate_fact() {
     assert!(claim.evidence.validates(&claim.candidate), "evidence binds to the candidate the reducer re-checks");
 
     // Consume-once: the same nonce no longer resolves, so a replay refuses.
+    assert!(matches!(
+        admit_uploaded(&mut store, &upload).unwrap(),
+        AdmitDecision::Refused(IntakeRefusal::UnknownNonce(_))
+    ));
+}
+
+#[test]
+fn a_parked_upload_admits_a_question_evidence_fact_and_consumes_the_order() {
+    // The parked path (ADR-0151): a matched nonce + displayed digest with a
+    // `Parked` verdict normalizes to a `Fact::AdmitEvidence` carrying `Question`
+    // evidence — never a `Fact::Integrate` — bound to the displayed digest, and
+    // the order is consumed (a decision pending is not a stage failure, but the
+    // nonce is spent). The reducer folds the pending-decision hold from this.
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let workpiece = WorkpieceId("wp-return".to_owned());
+    let candidate = Digest::from_bytes([5; 32]);
+    let record = dispatch_record("n-park", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
+    record_dispatch(&mut store, &record).unwrap();
+
+    let upload = UploadedEvidence {
+        nonce: Nonce("n-park".to_owned()),
+        subject: candidate,
+        verdict: StageVerdict::Parked,
+        detail: Digest::from_bytes([8; 32]),
+    };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
+        panic!("a matching parked upload is admitted");
+    };
+    let Fact::AdmitEvidence { bloom: admitted_bloom, evidence } = &admission.event.fact else {
+        panic!("the admitted parked event is a Fact::AdmitEvidence, not an Integrate");
+    };
+    assert_eq!(*admitted_bloom, bloom);
+    assert_eq!(evidence.kind, EvidenceKind::Question);
+    assert!(evidence.validates(&candidate), "the question evidence binds to the displayed digest");
+    assert_eq!(evidence.detail, Digest::from_bytes([8; 32]), "detail names the produced Question artifact");
+
+    // Consume-once: the nonce is spent, so a replay refuses.
     assert!(matches!(
         admit_uploaded(&mut store, &upload).unwrap(),
         AdmitDecision::Refused(IntakeRefusal::UnknownNonce(_))

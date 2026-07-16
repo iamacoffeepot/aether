@@ -32,6 +32,10 @@ pub enum StageVerdict {
     VerificationFailed,
     /// A review finding was recorded.
     ReviewFinding,
+    /// The attempt parked on a decision point (ADR-0151): its product is a
+    /// `Question` artifact, admitted as evidence *about* the attempt, never a
+    /// resolution and never a failure.
+    Parked,
 }
 
 impl StageVerdict {
@@ -40,6 +44,7 @@ impl StageVerdict {
             Self::Approved => EvidenceKind::Approval,
             Self::VerificationPassed | Self::VerificationFailed => EvidenceKind::VerificationResult,
             Self::ReviewFinding => EvidenceKind::ReviewFinding,
+            Self::Parked => EvidenceKind::Question,
         }
     }
 }
@@ -262,6 +267,7 @@ mod tests {
             (StageVerdict::VerificationPassed, EvidenceKind::VerificationResult),
             (StageVerdict::VerificationFailed, EvidenceKind::VerificationResult),
             (StageVerdict::ReviewFinding, EvidenceKind::ReviewFinding),
+            (StageVerdict::Parked, EvidenceKind::Question),
         ];
         for (verdict, kind) in cases {
             let result = StageResult { subject, verdict, detail: digest(0) };

@@ -5,8 +5,8 @@
 #![allow(clippy::unwrap_used)]
 
 use aether_bloomery::{
-    BloomId, BloomStatus, BloomView, Digest, Evidence, EvidenceKind, MemberView, ProjectionBackend, ResolutionClaim,
-    ViewDocument, WorkpieceId,
+    BloomId, BloomStatus, BloomView, Digest, Evidence, EvidenceKind, MemberView, PendingDecisionView,
+    ProjectionBackend, ResolutionClaim, StageId, ViewDocument, WorkpieceId,
 };
 use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
 
@@ -26,12 +26,14 @@ fn view(resolve_second: bool) -> ViewDocument {
         scope_revision: digest(10),
         approval: approval(digest(10)),
         resolution: None,
+        pending_decision: None,
     };
     let mut member_b = MemberView {
         workpiece: WorkpieceId("coolant-loop".into()),
         scope_revision: digest(20),
         approval: approval(digest(20)),
         resolution: None,
+        pending_decision: None,
     };
     if resolve_second {
         member_b.resolution = Some(ResolutionClaim {
@@ -103,6 +105,40 @@ fn a_changed_view_updates_in_place() {
         .find(|body| body.contains("Workpiece `coolant-loop`"))
         .expect("the coolant-loop member issue exists");
     assert!(coolant_body.contains("- Resolution: integrated"), "the member issue reflects its resolution");
+}
+
+/// The two-member bloom with the first member held on a parked question.
+fn held_view() -> ViewDocument {
+    let mut document = view(false);
+    document.blooms[0].members[0].pending_decision = Some(PendingDecisionView {
+        question: digest(90),
+        stage: StageId::Construct,
+        prompt: "tie between A and B".into(),
+        options: vec!["A".into(), "B".into()],
+        blocked: "construct is held".into(),
+    });
+    document
+}
+
+#[test]
+fn a_held_member_projects_an_idempotent_question_comment() {
+    // ADR-0151: a parked question projects one comment on the held member's
+    // workpiece issue (visible where a person looks), carrying the question digest
+    // in stable metadata. Re-reconciling the same hold is a no-op — the marker's
+    // content digest matches, so no second comment is written.
+    let projection = GithubProjection::new(FakeGithub::new());
+
+    // The unheld baseline: one approval comment per member.
+    projection.reconcile_view(&view(false)).expect("baseline reconcile");
+    assert_eq!(projection.client().comment_count(), 2);
+
+    // Reconciling the held view adds exactly one question comment.
+    projection.reconcile_view(&held_view()).expect("held reconcile");
+    assert_eq!(projection.client().comment_count(), 3, "the held member's question projects one comment");
+
+    // Re-reconciling the identical held view writes nothing new (idempotent).
+    projection.reconcile_view(&held_view()).expect("idempotent reconcile");
+    assert_eq!(projection.client().comment_count(), 3, "re-reconciling the same hold is a no-op");
 }
 
 #[test]

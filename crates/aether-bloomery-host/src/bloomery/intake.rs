@@ -143,13 +143,15 @@ pub enum IntakeRefusal {
 }
 
 /// An accepted attempt result: the reducer [`Event`] the upload normalized to
-/// (a [`Fact::Integrate`]) and the [`Admit`] wire payload for #3497's
-/// `aether.bloomery.admit` ingress.
+/// (a [`Fact::Integrate`] for a resolving verdict, or a [`Fact::AdmitEvidence`]
+/// carrying a `Question` for a parked one) and the [`Admit`] wire payload for
+/// #3497's `aether.bloomery.admit` ingress.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Admission {
     /// The `aether.bloomery.admit` payload to send to the control core.
     pub admit: Admit,
-    /// The decoded event the admit carries — a [`Fact::Integrate`].
+    /// The decoded event the admit carries — a [`Fact::Integrate`] or a
+    /// [`Fact::AdmitEvidence`] (parked).
     pub event: Event,
 }
 
@@ -245,11 +247,15 @@ impl Error for DispatchError {
 /// Submit a work order through the executor shell and record its outstanding
 /// reducer context, in one host step (#3502). Submits first, so a submit that
 /// fails records nothing; the registry row is written only for a dispatch that
-/// actually reached the worker lane.
+/// actually reached the worker lane. A record write that faults *after* a
+/// successful submit best-effort cancels the just-submitted run before
+/// propagating — the order would otherwise run untracked, with no registry row
+/// to resolve its evidence against.
 ///
 /// # Errors
 /// [`DispatchError::Submit`] if the executor refused the dispatch, or
-/// [`DispatchError::Store`] if the registry write faulted after submit.
+/// [`DispatchError::Store`] if the registry write faulted after submit (the
+/// submitted run is best-effort cancelled first).
 pub fn dispatch_and_record(
     shell: &ExecutorShell,
     store: &mut dyn StoreBackend,
@@ -257,7 +263,13 @@ pub fn dispatch_and_record(
     record: &DispatchRecord,
 ) -> Result<WorkHandle, DispatchError> {
     let handle = shell.submit(order).map_err(DispatchError::Submit)?;
-    record_dispatch(store, record).map_err(DispatchError::Store)?;
+    if let Err(store_error) = record_dispatch(store, record) {
+        // The order reached the worker lane but its reducer context never
+        // landed, so it is untracked either way; best-effort cancel the run
+        // rather than leak an untracked dispatch, then surface the store fault.
+        let _ = shell.cancel(&handle);
+        return Err(DispatchError::Store(store_error));
+    }
     Ok(handle)
 }
 
@@ -296,15 +308,28 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     // both hold. Build the whole admission — including the fallible event encode
     // — *before* consuming the order: consuming first and then failing the encode
     // would lose the evidence with the nonce already spent and no retry.
-    let claim = ResolutionClaim {
-        workpiece: record.workpiece.clone(),
-        scope_revision: record.scope_revision,
-        candidate: record.candidate,
-        evidence,
-    };
-    let event = Event {
-        idempotency_key: IdempotencyKey(format!("aether.bloomery.integrate:{}", record.nonce.0)),
-        fact: Fact::Integrate { bloom: record.bloom, claim },
+    //
+    // A parked attempt normalizes to a Question evidence admitted through
+    // Fact::AdmitEvidence (ADR-0151) — never a Fact::Integrate, and never a
+    // failure: the order is consumed, but the parked outcome burns no stage
+    // retry, because a decision pending is not a defect. Every other verdict is
+    // a resolution claim integrated the existing way.
+    let event = if upload.verdict == StageVerdict::Parked {
+        Event {
+            idempotency_key: IdempotencyKey(format!("aether.bloomery.park:{}", record.nonce.0)),
+            fact: Fact::AdmitEvidence { bloom: record.bloom, evidence },
+        }
+    } else {
+        let claim = ResolutionClaim {
+            workpiece: record.workpiece.clone(),
+            scope_revision: record.scope_revision,
+            candidate: record.candidate,
+            evidence,
+        };
+        Event {
+            idempotency_key: IdempotencyKey(format!("aether.bloomery.integrate:{}", record.nonce.0)),
+            fact: Fact::Integrate { bloom: record.bloom, claim },
+        }
     };
     let admit = Admit { event: to_vec(&event)? };
     // Consume-once, only now that the admission is fully constructed. A lost race

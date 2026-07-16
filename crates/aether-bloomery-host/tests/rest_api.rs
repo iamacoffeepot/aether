@@ -28,7 +28,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, thread};
 
-use aether_bloomery::{BloomDraft, Digest, Evidence, EvidenceKind, Membership, StageCatalog, Workpiece, WorkpieceId};
+use aether_bloomery::{
+    BloomDraft, Digest, Evidence, EvidenceKind, KeyId, Membership, Provenance, SignatureEnvelope, StageCatalog,
+    Statement, Workpiece, WorkpieceId,
+};
 use serde_json::Value;
 
 /// Locate the control-core wasm artifact, preferring `release` over `debug`.
@@ -237,6 +240,34 @@ fn rest_api_drives_a_bloom_end_to_end() {
         // A missing artifact is a clean 404, not a hang.
         let (status, _) = try_http(http_port, "GET", &format!("/artifacts/{}", "0".repeat(64)), None).unwrap();
         assert_eq!(status, 404, "missing artifact");
+
+        // The answer route (ADR-0151). A malformed statement body is a clean 400,
+        // not a panic; a malformed bloom id is a 400.
+        let (status, _) =
+            try_http(http_port, "POST", &format!("/blooms/{bloom_id}/answer"), Some(b"not a statement")).unwrap();
+        assert_eq!(status, 400, "malformed answer body");
+        let (status, _) = try_http(http_port, "POST", "/blooms/xyz/answer", Some(b"{}")).unwrap();
+        assert_eq!(status, 400, "malformed bloom id");
+
+        // A valid author-signed answer that adopts no held question reduces to a
+        // clean rejection outcome — the sealed bloom carries no parked hold — 200
+        // carrying the reducer's refusal, mirroring how seal rejections surface.
+        let answer = Statement {
+            words: b"answer: choose A".to_vec(),
+            provenance: Provenance::AuthorSignature(SignatureEnvelope {
+                signer: KeyId("owner".to_owned()),
+                signature: vec![],
+            }),
+            parents: vec![Digest::from_bytes([222; 32])],
+        };
+        let (status, answered) = send_json(
+            http_port,
+            "POST",
+            &format!("/blooms/{bloom_id}/answer"),
+            &serde_json::to_value(&answer).unwrap(),
+        );
+        assert_eq!(status, 200, "answer admitted: {answered:?}");
+        assert_eq!(answered["outcome"]["AdoptAnswerRejected"], "NoMatchingHold", "no parked hold to adopt");
     });
 
     let _ = child.kill();

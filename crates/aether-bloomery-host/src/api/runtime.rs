@@ -45,8 +45,8 @@ use serde::de::DeserializeOwned;
 
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{
-    Admit, AdmitResult, BloomDraft, BloomId, BloomView, Digest, Event, Fact, IdempotencyKey, Outcome, Query,
-    QueryResult, ReplayJournal, ReplayJournalResult, ViewDocument, Workpiece,
+    Admit, AdmitResult, BloomDraft, BloomId, BloomView, Digest, Event, Fact, FakeKeyProvider, IdempotencyKey, Outcome,
+    Query, QueryResult, ReplayJournal, ReplayJournalResult, Statement, ViewDocument, Workpiece, digest_of,
 };
 use aether_capabilities::http::{
     HttpHeader, HttpMethod, HttpServerCapability, HttpServerRequest, HttpServerResponse, RegisterRouteSelf,
@@ -76,6 +76,15 @@ const CONTROL_CORE_PATH: &str = "aether.component/aether.embedded:aether.bloomer
 /// dispatches to [`BloomeryApiCapability::on_request`] under the
 /// [`HttpServerRequest`] kind, which switches on method + remaining path.
 const ROUTE_PREFIXES: [&str; 6] = ["/workpieces", "/drafts", "/blooms", "/view", "/journal", "/artifacts"];
+
+/// Per-process ceilings on the pre-seal shaping maps. Staged workpieces and
+/// open drafts are pure in-memory shaping state with no durable owner to evict
+/// them, so the router caps each map and rejects growth past the cap rather
+/// than letting an operator (or a runaway client) grow it without bound
+/// (CLAUDE.md §Runtime: error rather than grow unboundedly). Capacity frees
+/// only when the shaping session restarts.
+const MAX_STAGED_WORKPIECES: usize = 1024;
+const MAX_OPEN_DRAFTS: usize = 1024;
 
 /// The control-plane REST router state: the pre-seal shaping maps plus the
 /// in-flight reply-correlation table.
@@ -210,6 +219,7 @@ impl ApiCapabilityState {
             (HttpMethod::Get, ["blooms" | "view"]) => self.query(ctx, None),
             (HttpMethod::Get, ["blooms", id]) => self.query_bloom(ctx, id),
             (HttpMethod::Post, ["blooms", id, "supersede"]) => self.supersede(ctx, id, &body),
+            (HttpMethod::Post, ["blooms", id, "answer"]) => self.answer_bloom(ctx, id, &body),
             (HttpMethod::Get, ["journal"]) => Routed::Deferred(self.send_tracked(ctx, store_mailbox(), &ReplayJournal)),
             (HttpMethod::Get, ["artifacts", digest]) => {
                 Routed::Deferred(self.send_tracked(ctx, artifacts_mailbox(), &Get { digest: (*digest).to_owned() }))
@@ -224,12 +234,21 @@ impl ApiCapabilityState {
             Ok(workpiece) => workpiece,
             Err(error) => return Routed::Reply(error_response(400, &format!("invalid workpiece body: {error}"))),
         };
+        // Re-staging an existing id overwrites in place; only a net-new id grows
+        // the map, so the cap gates new keys and lets an idempotent re-stage
+        // through at the ceiling.
+        if !self.staged.contains_key(&workpiece.id.0) && self.staged.len() >= MAX_STAGED_WORKPIECES {
+            return Routed::Reply(error_response(429, "staged-workpiece budget exhausted"));
+        }
         self.staged.insert(workpiece.id.0.clone(), workpiece.clone());
         Routed::Reply(json(201, &workpiece))
     }
 
     /// `POST /drafts` — open a fresh empty draft under a new handle.
     fn open_draft(&mut self) -> Routed {
+        if self.drafts.len() >= MAX_OPEN_DRAFTS {
+            return Routed::Reply(error_response(429, "open-draft budget exhausted"));
+        }
         let draft_id = self.next_draft;
         self.next_draft += 1;
         let draft = BloomDraft::default();
@@ -317,6 +336,36 @@ impl ApiCapabilityState {
             ctx,
             &Event { idempotency_key: IdempotencyKey(key), fact: Fact::Supersede { predecessor, successor } },
         )
+    }
+
+    /// `POST /blooms/{id}/answer` — adopt an answer to a parked question,
+    /// releasing its hold and re-dispatching the held stage (ADR-0151).
+    ///
+    /// The body is the native author-signed answer statement. The route is the
+    /// cryptographic trust gate: it `verify_authority`-checks the signature
+    /// before admitting (the reducer holds no key material and only re-checks the
+    /// structural adoption), mirroring the intake broker's evidence gate. A body
+    /// that is not a decodable statement is a `400`; one whose signature does not
+    /// verify is a `400`; a valid answer admits `Fact::AdoptAnswer` and defers on
+    /// the reducer outcome the same way seal / supersede do.
+    fn answer_bloom(&self, ctx: &NativeCtx<'_, Manual>, id: &str, body: &[u8]) -> Routed {
+        let bloom = match digest_from_hex(id) {
+            Some(digest) => BloomId(digest),
+            None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
+        };
+        let answer: Statement = match serde_json::from_slice(body) {
+            Ok(answer) => answer,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid answer statement: {error}"))),
+        };
+        // The signature is the host-side trust gate (v1 keys are the fake
+        // always-valid provider, ADR-0149 §The value vocabulary; key custody is a
+        // later arc). A statement that is not an author signature, or whose
+        // signature does not verify, can never become intent.
+        if !answer.verify_authority(&FakeKeyProvider) {
+            return Routed::Reply(error_response(400, "answer statement is not an author signature or did not verify"));
+        }
+        let key = format!("aether.bloomery.answer:{}", hex_encode(digest_of(&answer).as_bytes()));
+        self.admit(ctx, &Event { idempotency_key: IdempotencyKey(key), fact: Fact::AdoptAnswer { bloom, answer } })
     }
 
     /// `GET /blooms` and `GET /view` — read the whole live projection.

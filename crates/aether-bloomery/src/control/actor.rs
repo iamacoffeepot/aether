@@ -30,6 +30,7 @@ use super::{
     Admit, AdmitResult, Commit, CommitResult, MembershipMutation, OutboxPayload, Query, QueryResult, ReplayJournal,
     ReplayJournalResult,
 };
+use crate::digest::Digest;
 use crate::reduce::{Decision, Decisions, Event, Outcome, Snapshot, reduce, view_of};
 use aether_actor::{
     ActorInitError, MailSender, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
@@ -43,6 +44,11 @@ const STORE: &str = "aether.store";
 /// The outbox topic a landing receipt enqueues under, so #3499's republisher
 /// can route it.
 const RECEIPT_TOPIC: &str = "aether.bloomery.landing_receipt";
+
+/// The outbox topic a stage re-dispatch enqueues under, so the dispatch consumer
+/// (#3505) re-assembles the held attempt naming both question and answer digests
+/// (ADR-0151). Producer-only here, like [`RECEIPT_TOPIC`].
+const REDISPATCH_TOPIC: &str = "aether.bloomery.redispatch";
 
 /// An admit awaiting its durable commit reply — the reply handle to answer, the
 /// decoded event, and the decisions to apply to the snapshot once the store
@@ -202,7 +208,11 @@ impl WasmActor for ControlCore {
         let Some(handle) = ctx.reply_target() else {
             return;
         };
-        let document = view_of(&self.snapshot);
+        // The live-read path holds no artifact access, so it resolves no question
+        // bytes: a held member surfaces its pending decision only on the outward
+        // mirror path, which resolves the Question artifact. The digest-only hold
+        // still gates resolution in the reducer regardless (ADR-0151).
+        let document = view_of(&self.snapshot, |_| None);
         // On an encode failure reply the error path rather than substituting an
         // empty payload a reader would decode as a valid-but-blank projection.
         let result = match mail.bloom {
@@ -259,15 +269,30 @@ fn project(
             Decision::EmitReceipt(receipt) => {
                 outbox.push(OutboxPayload { topic: RECEIPT_TOPIC.to_owned(), payload: to_vec(receipt)? });
             }
+            Decision::RedispatchStage { bloom, question, answer } => {
+                let payload = RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer };
+                outbox.push(OutboxPayload { topic: REDISPATCH_TOPIC.to_owned(), payload: to_vec(&payload)? });
+            }
             Decision::InheritClaim { .. }
             | Decision::RecordResolution { .. }
             | Decision::RecordEvidence { .. }
+            | Decision::ReleaseHold { .. }
             | Decision::MarkSuperseded { .. }
             | Decision::SetResolved { .. }
             | Decision::AdvanceMainline { .. } => {}
         }
     }
     Ok((releases, claims, outbox))
+}
+
+/// The re-dispatch outbox payload: the bloom, the released question, and the
+/// adopting answer, each by digest. Opaque bytes the dispatch consumer (#3505)
+/// decodes to re-assemble the held attempt naming both digests (ADR-0151).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RedispatchPayload {
+    bloom: Digest,
+    question: Digest,
+    answer: Digest,
 }
 
 /// Encode a reducer [`Outcome`] into an [`AdmitResult`], mapping an encode

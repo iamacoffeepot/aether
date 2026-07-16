@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use aether_bloomery::{
     BloomDraft, BloomRecord, BloomSpec, BloomStatus, Decisions, Digest, Event, Evidence, EvidenceKind, Fact,
@@ -108,6 +108,13 @@ pub fn splice_bloom(snapshot: &mut Snapshot, spec: &BloomSpec, status: BloomStat
     }
     snapshot.blooms.insert(
         bloom,
-        BloomRecord { spec: spec.clone(), status, claims: BTreeMap::new(), evidence: Vec::new(), superseded_by: None },
+        BloomRecord {
+            spec: spec.clone(),
+            status,
+            claims: BTreeMap::new(),
+            evidence: Vec::new(),
+            holds: BTreeSet::new(),
+            superseded_by: None,
+        },
     );
 }

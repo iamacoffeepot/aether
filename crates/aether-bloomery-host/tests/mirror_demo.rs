@@ -70,7 +70,7 @@ fn synthetic_bloom_snapshot() -> Snapshot {
 #[test]
 fn a_synthetic_bloom_projects_a_carbon_copy_and_rebuilds_after_deletion() {
     let snapshot = synthetic_bloom_snapshot();
-    let view = view_of(&snapshot);
+    let view = view_of(&snapshot, |_| None);
 
     // Mount the projection cap shell over a fake GitHub; keep a handle to
     // introspect what the shell projects.

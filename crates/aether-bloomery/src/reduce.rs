@@ -23,11 +23,12 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use crate::digest::Digest;
+use crate::digest::{Digest, digest_of};
 use crate::ids::{BloomId, IdempotencyKey, WorkpieceId};
-use crate::port::{BloomView, MemberView, ViewDocument};
+use crate::port::{BloomView, MemberView, PendingDecisionView, ViewDocument};
 use crate::values::{
-    BloomSpec, Evidence, EvidenceKind, LandingReceipt, Membership, ResolutionClaim, ResolvedBloom, StageCatalog,
+    BloomSpec, Evidence, EvidenceKind, LandingReceipt, Membership, Question, ResolutionClaim, ResolvedBloom,
+    StageCatalog, Statement,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -64,6 +65,15 @@ pub struct BloomRecord {
     /// any member toward resolution. A resolution claim never lands here; it
     /// enters through `Fact::Integrate` and lives in [`claims`](Self::claims).
     pub evidence: Vec<Evidence>,
+    /// The open pending-decision holds — the digests of the [`Question`]
+    /// artifacts a parked attempt raised that no adopting answer has released
+    /// yet (ADR-0151). Derived member state, folded from the evidence log: an
+    /// admitted [`EvidenceKind::Question`] inserts its `detail` digest here, and
+    /// an adopting answer removes it. A non-empty set blocks the bloom from
+    /// resolving; the [`Question`]'s own `workpiece` (resolved from the digest)
+    /// is what binds a hold to its member in the outward view. Journal-derived,
+    /// replay-rebuilt like the rest of the record.
+    pub holds: BTreeSet<Digest>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -145,6 +155,30 @@ pub enum Fact {
         /// The new mainline head.
         new_head: Digest,
     },
+    /// Adopt an answer to a parked question, releasing its hold and
+    /// re-dispatching the held stage (ADR-0151). The answer is a native
+    /// [`Statement`] whose `parents` name the held question's exact digest —
+    /// the observation→intent adoption ADR-0149 §The boundary defines, reused:
+    /// an answer is intent, not evidence, so it enters here and not through
+    /// [`Fact::AdmitEvidence`]. The reducer admits it only when it is
+    /// instruction-capable (an author signature) and its parents name an open
+    /// hold; the cryptographic `verify_authority` gate is the host answer
+    /// route's, before admission (the reducer holds no key material), mirroring
+    /// how the intake broker is the trust gate for evidence the reducer only
+    /// re-checks for binding.
+    ///
+    /// Appended to the closed [`Fact`] enum past ADR-0151's evidence-admission
+    /// variant to realize the ADR's answer path ("releases the hold and
+    /// re-dispatches the held stage") as its own admitted fact, distinct from
+    /// the evidence door — appended, not inserted, so the wire discriminants of
+    /// the prior facts are unchanged.
+    AdoptAnswer {
+        /// The bloom the parked question belongs to.
+        bloom: BloomId,
+        /// The adopting answer statement — instruction-capable, its parents
+        /// naming the held question digest.
+        answer: Statement,
+    },
 }
 
 /// The result of reducing one event: an outcome plus the ordered effects that
@@ -208,6 +242,17 @@ pub enum Outcome {
     Landed(LandingReceipt),
     /// A land was refused, naming why.
     LandRejected(LandError),
+    /// An answer was adopted: its held question's hold was released and the
+    /// held stage re-dispatched (ADR-0151). Appended, so the prior outcomes'
+    /// wire discriminants are unchanged.
+    AnswerAdopted {
+        /// The bloom the released question belonged to.
+        bloom: BloomId,
+        /// The released question's digest — the exact digest the answer adopted.
+        question: Digest,
+    },
+    /// An answer adoption was refused.
+    AdoptAnswerRejected(AdoptAnswerError),
 }
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -243,7 +288,8 @@ pub enum Decision {
         claim: ResolutionClaim,
     },
     /// Append non-integrating evidence to a bloom's evidence log (from
-    /// admission).
+    /// admission). A [`EvidenceKind::Question`] entry additionally folds its
+    /// `detail` digest into the record's open holds (see [`BloomRecord::holds`]).
     RecordEvidence {
         /// The bloom the evidence is recorded on.
         bloom: BloomId,
@@ -273,6 +319,31 @@ pub enum Decision {
     },
     /// Emit a landing receipt to the outbox.
     EmitReceipt(LandingReceipt),
+    /// Release a member's pending-decision hold (from an adopted answer) —
+    /// removes the named question digest from the bloom's open holds so the
+    /// bloom can resolve once every member is integrated. Appended so the prior
+    /// decisions' wire discriminants are unchanged.
+    ReleaseHold {
+        /// The bloom the hold is released on.
+        bloom: BloomId,
+        /// The released question's digest.
+        question: Digest,
+    },
+    /// Re-dispatch a held stage with the adopted answer in its input closure
+    /// (from an adopted answer). A snapshot-inert outbox effect — like
+    /// [`Decision::EmitReceipt`], it carries no store-projection row and is
+    /// republished to the dispatch consumer, which re-assembles the attempt's
+    /// prompt manifest naming both the question and the answer digests
+    /// (ADR-0151).
+    RedispatchStage {
+        /// The bloom whose held stage is re-dispatched.
+        bloom: BloomId,
+        /// The question whose hold was released.
+        question: Digest,
+        /// The adopting answer's digest — grounds the re-dispatched attempt's
+        /// instruction slot.
+        answer: Digest,
+    },
 }
 
 /// One member already claimed by a foreign active bloom — the conflict that
@@ -367,6 +438,28 @@ pub enum ResolveError {
         /// The unresolved member.
         workpiece: WorkpieceId,
     },
+    /// A member's stage is held on a parked question that no answer has released
+    /// yet (ADR-0151) — a bloom with a held member cannot resolve.
+    PendingDecision {
+        /// An open question digest holding the bloom.
+        question: Digest,
+    },
+}
+
+/// Why an answer adoption was refused (ADR-0151).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum AdoptAnswerError {
+    /// The bloom is not known or not active (only a `Sealed` bloom holds a
+    /// pending decision — a resolved, landed, or superseded bloom is past it).
+    UnknownOrInactiveBloom,
+    /// The answer statement is not instruction-capable — only an author
+    /// signature can become intent (ADR-0149 §The value vocabulary), so a
+    /// non-author statement can never adopt a question.
+    NotInstructionCapable,
+    /// The answer's parents name no open hold on this bloom — an answer adopts
+    /// a question by naming its exact digest; one that names no held question
+    /// releases nothing.
+    NoMatchingHold,
 }
 
 /// A land refused because mainline had moved off the bloom's sealed base.
@@ -401,6 +494,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event) -> Decisions {
         Fact::Supersede { predecessor, successor } => reduce_supersede(snapshot, predecessor, successor),
         Fact::Integrate { bloom, claim } => reduce_integrate(snapshot, bloom, claim),
         Fact::AdmitEvidence { bloom, evidence } => reduce_admit_evidence(snapshot, bloom, evidence),
+        Fact::AdoptAnswer { bloom, answer } => reduce_adopt_answer(snapshot, bloom, answer),
         Fact::Resolve { bloom, tree, lineage } => reduce_resolve(snapshot, bloom, tree, lineage),
         Fact::Land { bloom, new_head } => reduce_land(snapshot, bloom, new_head),
     }
@@ -592,10 +686,12 @@ fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &ResolutionClai
 /// against a `Sealed` bloom, before it resolves — and the same
 /// bind-to-its-own-class refusal: a resolving [`ResolutionClaim`] enters through
 /// [`Fact::Integrate`] and an [`EvidenceKind::Approval`] seals a member, so
-/// neither is bound to the free evidence-log door. The three non-integrating
-/// classes (`VerificationResult`, `ReviewFinding`, `StudyRecord`) are what this
-/// log records; a mis-routed integrating/approval class is
-/// [`AdmitEvidenceError::EvidenceNotBound`]. The evidence carries its own
+/// neither is bound to the free evidence-log door. The four non-integrating
+/// classes (`VerificationResult`, `ReviewFinding`, `StudyRecord`, `Question`)
+/// are what this log records; a mis-routed integrating/approval class is
+/// [`AdmitEvidenceError::EvidenceNotBound`]. A `Question` entry additionally
+/// derives a pending-decision hold in the fold (see [`BloomRecord::holds`]).
+/// The evidence carries its own
 /// subject digest, so no separate candidate binding is threaded through the
 /// fact (unlike integrate, which binds a claim's evidence to its candidate).
 fn reduce_admit_evidence(snapshot: &Snapshot, bloom: &BloomId, evidence: &Evidence) -> Decisions {
@@ -610,7 +706,10 @@ fn reduce_admit_evidence(snapshot: &Snapshot, bloom: &BloomId, evidence: &Eviden
     // (ADR-0151: a `ResolutionClaim` never enters through `AdmitEvidence`).
     if !matches!(
         evidence.kind,
-        EvidenceKind::VerificationResult | EvidenceKind::ReviewFinding | EvidenceKind::StudyRecord
+        EvidenceKind::VerificationResult
+            | EvidenceKind::ReviewFinding
+            | EvidenceKind::StudyRecord
+            | EvidenceKind::Question
     ) {
         return Decisions::rejected(Outcome::AdmitEvidenceRejected(AdmitEvidenceError::EvidenceNotBound));
     }
@@ -620,12 +719,61 @@ fn reduce_admit_evidence(snapshot: &Snapshot, bloom: &BloomId, evidence: &Eviden
     }
 }
 
+/// Adopt an answer to a parked question (ADR-0151, [`Fact::AdoptAnswer`]).
+///
+/// The reducer's structural gate: the bloom is active, the answer is
+/// instruction-capable (an author signature — only that provenance becomes
+/// intent), and its `parents` name a digest that is an open hold on the bloom.
+/// On admit it releases that hold and re-dispatches the held stage with the
+/// answer digest in the attempt's input closure. The cryptographic
+/// `verify_authority` check is the host answer route's, upstream of admission
+/// (the reducer holds no key material) — the same trust split the intake broker
+/// uses for evidence, where the reducer re-checks binding but not the signature.
+///
+/// An answer whose parents name several open holds releases the first one in
+/// digest order; a parked question raises one hold per member, so the common
+/// case names exactly one.
+fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: &Statement) -> Decisions {
+    let Some(record) = snapshot.blooms.get(bloom) else {
+        return Decisions::rejected(Outcome::AdoptAnswerRejected(AdoptAnswerError::UnknownOrInactiveBloom));
+    };
+    if record.status != BloomStatus::Sealed {
+        return Decisions::rejected(Outcome::AdoptAnswerRejected(AdoptAnswerError::UnknownOrInactiveBloom));
+    }
+    // Only an author signature can become intent — a non-author statement can
+    // never adopt a question (ADR-0149 §The value vocabulary).
+    if !answer.is_instruction_capable() {
+        return Decisions::rejected(Outcome::AdoptAnswerRejected(AdoptAnswerError::NotInstructionCapable));
+    }
+    // The answer adopts a question by naming its exact digest in its parents;
+    // the first parent that is an open hold is the released question (holds is a
+    // BTreeSet, so the scan is deterministic).
+    let Some(question) = answer.parents.iter().find(|parent| record.holds.contains(parent)).copied() else {
+        return Decisions::rejected(Outcome::AdoptAnswerRejected(AdoptAnswerError::NoMatchingHold));
+    };
+    let answer_digest = digest_of(answer);
+    Decisions {
+        outcome: Outcome::AnswerAdopted { bloom: *bloom, question },
+        effects: alloc::vec![
+            Decision::ReleaseHold { bloom: *bloom, question },
+            Decision::RedispatchStage { bloom: *bloom, question, answer: answer_digest },
+        ],
+    }
+}
+
 fn reduce_resolve(snapshot: &Snapshot, bloom: &BloomId, tree: &Digest, lineage: &[Digest]) -> Decisions {
     let Some(record) = snapshot.blooms.get(bloom) else {
         return Decisions::rejected(Outcome::ResolveRejected(ResolveError::UnknownOrInactiveBloom));
     };
     if record.status != BloomStatus::Sealed {
         return Decisions::rejected(Outcome::ResolveRejected(ResolveError::UnknownOrInactiveBloom));
+    }
+    // A member held on a parked question cannot integrate, so a bloom with any
+    // open hold cannot resolve (ADR-0151) — refused before the per-member claim
+    // scan so the pending decision is the named reason, not a bare
+    // MemberNotIntegrated.
+    if let Some(question) = record.holds.iter().next().copied() {
+        return Decisions::rejected(Outcome::ResolveRejected(ResolveError::PendingDecision { question }));
     }
     // Every frozen member must carry a resolution claim before the bloom can
     // resolve — a resolved bloom carries a claim for every member (ADR-0149
@@ -734,8 +882,24 @@ impl Snapshot {
                     // Append in admission order — the evidence log is a growing
                     // journal-derived history, not a keyed latest-wins map.
                     record.evidence.push(evidence.clone());
+                    // A question admission derives a pending-decision hold as part
+                    // of this same fold (ADR-0151, no new fact): the question digest
+                    // (the evidence detail) blocks the bloom until an answer releases
+                    // it.
+                    if evidence.kind == EvidenceKind::Question {
+                        record.holds.insert(evidence.detail);
+                    }
                 }
             }
+            Decision::ReleaseHold { bloom, question } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.holds.remove(question);
+                }
+            }
+            // Snapshot-inert: re-dispatch is an outbox effect the store projects,
+            // rebuilt on replay from the journaled AdoptAnswer fact — it carries no
+            // in-snapshot state, like EmitReceipt's outbox row.
+            Decision::RedispatchStage { .. } => {}
             Decision::MarkSuperseded { bloom, by } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.status = BloomStatus::Superseded;
@@ -761,7 +925,14 @@ impl Snapshot {
 
 impl BloomRecord {
     fn sealed(spec: BloomSpec) -> Self {
-        Self { spec, status: BloomStatus::Sealed, claims: BTreeMap::new(), evidence: Vec::new(), superseded_by: None }
+        Self {
+            spec,
+            status: BloomStatus::Sealed,
+            claims: BTreeMap::new(),
+            evidence: Vec::new(),
+            holds: BTreeSet::new(),
+            superseded_by: None,
+        }
     }
 }
 
@@ -774,17 +945,48 @@ impl BloomRecord {
 ///
 /// Each [`BloomRecord`] becomes a [`BloomView`] (its sealed-spec id, status,
 /// and successor), and each sealed [`crate::Membership`] a [`MemberView`]
-/// carrying the member's scope revision, approval evidence, and — matched by
+/// carrying the member's scope revision, approval evidence, — matched by
 /// workpiece from the record's accumulated claims — its resolution claim once
-/// integrated (`None` until then).
+/// integrated (`None` until then), and — matched by workpiece from the
+/// [`Question`] each open hold resolves to — its pending-decision hold (`None`
+/// when the member is not held).
+///
+/// `resolve_question` resolves an open hold's question digest to its
+/// [`Question`] bytes, the same injected read-only resolver
+/// [`grade`](crate::study_report::grade) uses for study records: the reducer's
+/// snapshot holds question *digests*, not the rendered prompt/options or the
+/// member the hold binds to, so a snapshot-only signature could carry neither.
+/// A hold whose bytes the resolver cannot read (a caller with no artifact
+/// access, e.g. the live-query path) surfaces no `pending_decision` on its
+/// member, exactly as an unresolvable study record contributes no cost to a
+/// grade.
 ///
 /// [#3471]: https://github.com/iamacoffeepot/aether/issues/3471
 #[must_use]
-pub fn view_of(snapshot: &Snapshot) -> ViewDocument {
+pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option<Question>) -> ViewDocument {
     let blooms = snapshot
         .blooms
         .values()
         .map(|record| {
+            // Resolve each open hold once, then bind it to the member it names —
+            // a parked question raises one hold per member, so the map is small.
+            let held: Vec<(WorkpieceId, PendingDecisionView)> = record
+                .holds
+                .iter()
+                .filter_map(|digest| {
+                    let question = resolve_question(digest)?;
+                    Some((
+                        question.workpiece.clone(),
+                        PendingDecisionView {
+                            question: *digest,
+                            stage: question.stage,
+                            prompt: question.prompt,
+                            options: question.options,
+                            blocked: question.blocked,
+                        },
+                    ))
+                })
+                .collect();
             let members = record
                 .spec
                 .members()
@@ -794,6 +996,10 @@ pub fn view_of(snapshot: &Snapshot) -> ViewDocument {
                     scope_revision: member.scope_revision,
                     approval: member.approval.clone(),
                     resolution: record.claims.get(&member.workpiece).cloned(),
+                    pending_decision: held
+                        .iter()
+                        .find(|(workpiece, _)| *workpiece == member.workpiece)
+                        .map(|(_, view)| view.clone()),
                 })
                 .collect();
             BloomView { id: record.spec.id(), status: record.status, superseded_by: record.superseded_by, members }

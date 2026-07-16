@@ -75,17 +75,19 @@ pub use manifest::{
 };
 pub use port::{
     BloomView, Checkpoint, Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, IntegrateOutcome, LandOutcome,
-    MemberView, ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument, WorkHandle, WorkOrder,
+    MemberView, PendingDecisionView, ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument, WorkHandle,
+    WorkOrder,
 };
 pub use reduce::{
-    AdmitEvidenceError, BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, IntegrateError,
-    LandError, Outcome, ResolveError, SealConflict, SealError, Snapshot, SupersedeError, reduce, view_of,
+    AdmitEvidenceError, AdoptAnswerError, BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact,
+    IntegrateError, LandError, Outcome, ResolveError, SealConflict, SealError, Snapshot, SupersedeError, reduce,
+    view_of,
 };
 pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
 pub use study_report::{BloomGrade, StudyReport, grade};
 pub use values::{
     AgentProfile, Artifact, Attempt, BloomDraft, BloomSpec, Budget, Evidence, EvidenceKind, Forecast, LandingReceipt,
-    Membership, ModelOverride, NetworkProfile, Observation, Provenance, ReasoningEffort, ResolutionClaim,
+    Membership, ModelOverride, NetworkProfile, Observation, Provenance, Question, ReasoningEffort, ResolutionClaim,
     ResolvedBloom, ResolvedModel, ScopeRevision, StageBinding, StageCatalog, StageReceipt, Statement, StudyCost,
     StudyRecord, ToolPolicy, Transformation, Workpiece,
 };
