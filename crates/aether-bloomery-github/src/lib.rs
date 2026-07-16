@@ -11,12 +11,12 @@
 //!
 //! GitHub is a **shadow copy of Bloomery's internals** — a carbon-copy
 //! tracking surface, never a source of intent. The adapter consumes a
-//! self-contained [`ViewDocument`] (the pure projection of the journal that
-//! [`aether_bloomery::view_of`] assembles) and projects it: each workpiece to
-//! an issue, each bloom to its aggregate umbrella issue, and each piece of
-//! evidence to a check-run or comment. Every projection carries the internal
+//! self-contained [`ViewDocument`](aether_bloomery::ViewDocument) (the pure
+//! projection of the journal that [`aether_bloomery::view_of`] assembles) and
+//! projects it: each workpiece to an issue, each bloom to its aggregate
+//! umbrella issue, and evidence to comments. Every projection carries the internal
 //! Bloomery id plus a content digest in stable metadata (an HTML-comment
-//! [`marker`] in issue/comment bodies, the native `external_id` on
+//! [`Marker`] in issue/comment bodies, the native `external_id` on
 //! check-runs), so the projection is **idempotent** — reconciling the same
 //! document twice is a no-op — and **rebuildable from the journal** after a
 //! deletion: a deleted projection leaves no marker to find, so the reconcile
@@ -46,7 +46,8 @@ mod projection;
 pub mod testing;
 
 pub use client::{
-    CheckConclusion, CheckRun, Comment, GithubApi, GithubError, Issue, NewCheckRun, NewComment, NewIssue, ReqwestGithub,
+    CheckConclusion, CheckRun, Comment, GithubApi, GithubError, HttpRequest, HttpResponse, HttpTransport, Issue,
+    Method, NewCheckRun, NewComment, NewIssue, ReqwestGithub, ReqwestTransport,
 };
 pub use config::GithubConfig;
 pub use inward::{InwardError, StageResult, StageVerdict, normalize_stage_result};

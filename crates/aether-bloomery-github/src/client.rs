@@ -23,7 +23,7 @@
 //! [`ReqwestGithub`] is generic over a small [`HttpTransport`] seam, so the
 //! request-shaping (URL / headers / body) and error-mapping logic is unit
 //! tested against a recording fake with no network. End-to-end projection
-//! logic is tested against the higher-level [`crate::testing::FakeGithub`],
+//! logic is tested against the higher-level `FakeGithub`,
 //! which models the object store rather than the HTTP transport.
 //!
 //! [#3460]: https://github.com/iamacoffeepot/aether/issues/3460
@@ -122,7 +122,7 @@ pub struct NewCheckRun {
 }
 
 /// The GitHub client contract the projection depends on. Both the real
-/// [`ReqwestGithub`] and the test [`crate::testing::FakeGithub`] implement it,
+/// [`ReqwestGithub`] and the test `FakeGithub` implement it,
 /// so the projection logic is exercised without a token or network.
 pub trait GithubApi {
     /// Find the issue whose marker carries `key`, if any. The projection's
