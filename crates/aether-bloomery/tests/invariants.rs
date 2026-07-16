@@ -243,6 +243,35 @@ fn seal_rejects_a_known_bloom_id() {
     }
 }
 
+// Seal catalog admission — the frozen stage_catalog must be the line the
+// pipeline runs (ADR-0149 §The line): a spec promising a foreign catalog is
+// inadmissible, since a bloom is graded against the catalog it promised. The
+// default `draft` stamps the line digest, so every other seal test covers the
+// positive case; this pins the rejection and names the found digest.
+#[test]
+fn seal_rejects_an_unknown_stage_catalog() {
+    let base = Snapshot::new(digest(1));
+    let mut foreign = draft(1, vec![membership("wp", 10)]);
+    foreign.stage_catalog = digest(99);
+    let decided = reduce(&base, &event("foreign", Fact::Seal(foreign.seal())));
+    match decided.outcome {
+        Outcome::SealRejected(SealError::UnknownStageCatalog { found }) => assert_eq!(found, digest(99)),
+        other => panic!("expected UnknownStageCatalog, got {other:?}"),
+    }
+}
+
+// The zero-default catalog is the specific case the invariant closes: before
+// this slice a draft could seal against `Digest::default()` and be graded
+// against no catalog at all.
+#[test]
+fn seal_rejects_the_default_stage_catalog() {
+    let base = Snapshot::new(digest(1));
+    let mut zero = draft(1, vec![membership("wp", 10)]);
+    zero.stage_catalog = Digest::default();
+    let decided = reduce(&base, &event("zero", Fact::Seal(zero.seal())));
+    assert!(matches!(decided.outcome, Outcome::SealRejected(SealError::UnknownStageCatalog { .. })));
+}
+
 // C3 — a Resolved bloom is supersedable: the ADR's primary supersession trigger
 // is a failed land, which happens at Resolved, so this must not wedge.
 #[test]
@@ -326,6 +355,29 @@ fn supersede_rejects_an_invalid_successor_membership() {
     let decided = reduce(&snapshot, &event("empty", Fact::Supersede { predecessor, successor: empty }));
     assert_eq!(decided.outcome, Outcome::SupersedeRejected(SupersedeError::InvalidMember(SealError::EmptyMembership)));
     assert!(decided.effects.is_empty());
+}
+
+// Supersede catalog admission — the successor is held to seal's catalog
+// admission too (ADR-0149 §The line): a superseding spec promising a foreign
+// catalog is refused, wrapped as InvalidMember alongside the other seal-validity
+// failures a successor is held to.
+#[test]
+fn supersede_rejects_an_unknown_stage_catalog() {
+    let mut snapshot = Snapshot::new(digest(1));
+    let predecessor_spec = draft(1, vec![membership("own", 10)]).seal();
+    let predecessor = predecessor_spec.id();
+    splice_bloom(&mut snapshot, &predecessor_spec, BloomStatus::Sealed);
+
+    // A valid membership (so member admission passes) but a foreign catalog.
+    let mut foreign = draft(2, vec![membership("own", 10)]);
+    foreign.stage_catalog = digest(99);
+    let decided = reduce(&snapshot, &event("foreign", Fact::Supersede { predecessor, successor: foreign.seal() }));
+    match decided.outcome {
+        Outcome::SupersedeRejected(SupersedeError::InvalidMember(SealError::UnknownStageCatalog { found })) => {
+            assert_eq!(found, digest(99));
+        }
+        other => panic!("expected InvalidMember(UnknownStageCatalog), got {other:?}"),
+    }
 }
 
 // Invariant 7 (M3) — a successor atomically inherits its predecessor's claims,
