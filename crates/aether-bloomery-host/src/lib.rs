@@ -17,10 +17,15 @@
 //!   digest-addressed artifact bytes and their derivation-DAG parents; a
 //!   second consumer of the one addressing core (ADR-0116 reuse-not-rival),
 //!   never evicting.
+//! - [`api`] — the native `aether.bloomery.api` capability, a REST control
+//!   ingress mounted on the `aether.http.server` cap (ADR-0108) that drives the
+//!   bloom lifecycle from `curl` — stage / shape / seal / supersede and read
+//!   the live blooms, view document, journal, and artifacts (ADR-0149
+//!   §Packaging, #3498).
 //! - [`bloomery`] — [`BloomeryChassis`], a
 //!   coordinator-shaped chassis (no render/audio surface) that registers the
-//!   store, artifacts, trace, and RPC capabilities behind a signal-blocking
-//!   driver.
+//!   store, artifacts, trace, RPC, and HTTP (REST control api) capabilities
+//!   behind a signal-blocking driver.
 //!
 //! Recovery is journal replay + outbox republish: reopen the same database
 //! file, replay the journal through the reducer, and republish undelivered
@@ -30,7 +35,11 @@ pub mod artifacts;
 pub mod store;
 
 #[cfg(feature = "runtime")]
+pub mod api;
+#[cfg(feature = "runtime")]
 pub mod bloomery;
 
+#[cfg(feature = "runtime")]
+pub use api::BloomeryApiCapability;
 #[cfg(feature = "runtime")]
 pub use bloomery::{BloomeryChassis, BloomeryEnv};

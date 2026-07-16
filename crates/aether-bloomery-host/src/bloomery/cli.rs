@@ -8,7 +8,7 @@
 use clap::Parser;
 
 use crate::artifacts::ArtifactsOverlay;
-use crate::bloomery::chassis::{ControlCoreOverlay, RpcPortOverlay};
+use crate::bloomery::chassis::{ControlCoreOverlay, HttpPortOverlay, RpcPortOverlay};
 use crate::store::StoreOverlay;
 
 /// The `bloomery` binary's clap root. The overlays carry the derive-emitted
@@ -20,6 +20,10 @@ pub struct BloomeryCli {
     /// `--rpc-port` shadows `AETHER_RPC_PORT` — the RPC ingress bind port.
     #[command(flatten)]
     pub rpc: RpcPortOverlay,
+
+    /// `--http-port` shadows `AETHER_HTTP_PORT` — the REST control-API bind port.
+    #[command(flatten)]
+    pub http: HttpPortOverlay,
 
     /// `--store-path` shadows `AETHER_STORE_PATH` — the `SQLite` journal file
     /// (`:memory:` for a non-durable store).

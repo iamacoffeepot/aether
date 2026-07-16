@@ -84,6 +84,7 @@
   - [Writing a component](recipes/writing-a-component.md)
   - [Writing a behavior](recipes/writing-a-behavior.md)
   - [Serving HTTP from a component](recipes/serving-http.md)
+  - [Driving a bloom over the REST control API](recipes/bloomery-rest-api.md)
   - [Debugging a hung settlement](recipes/debugging-a-hung-settlement.md)
 
 # Testing and verification
