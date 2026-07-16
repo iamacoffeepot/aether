@@ -31,6 +31,13 @@
 //! **#3505 → #3502**: #3505 will call [`record_dispatch`] / [`dispatch_and_record`]
 //! when it dispatches. This slice drives the write API directly in its own
 //! tests; the production loop closes when #3505 wires dispatch to it.
+//!
+//! [`run_intake_cycle`] is the substantive pull primitive — inspect → stream →
+//! broker → admit — that a production loop drives. The *periodic scheduler* that
+//! calls it on an interval (and the ADR-0090 poll-interval `Config` knob that
+//! paces it) land with that production loop rather than here: until #3505 wires
+//! dispatch, there are no tracked runs to poll, so a live timer would poll an
+//! empty handle set and an interval knob would have no reader.
 
 use std::error::Error;
 use std::fmt;
@@ -44,23 +51,6 @@ use aether_data::wire::{Error as WireError, to_vec};
 
 use super::executor::ExecutorShell;
 use crate::store::{OutstandingOrder, RecordOutcome, StoreBackend};
-
-/// The intake pull-loop cadence (ADR-0090 derive-`Config`, argv > env >
-/// default). The production loop — wired with the dispatch path (#3505) —
-/// inspects tracked runs on this interval before streaming their evidence.
-#[derive(Clone, Debug, aether_substrate::Config)]
-#[config(env_prefix = "AETHER_INTAKE", cli_prefix = "intake")]
-pub struct IntakeConfig {
-    /// Seconds between intake poll cycles.
-    #[config(default = 5)]
-    pub poll_interval_secs: u64,
-}
-
-impl Default for IntakeConfig {
-    fn default() -> Self {
-        Self { poll_interval_secs: 5 }
-    }
-}
 
 /// A work order's reducer context, captured host-side at dispatch time — the
 /// typed form of an [`OutstandingOrder`](crate::store::OutstandingOrder) registry
@@ -303,11 +293,9 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
         }
     };
     // Provenance (a real outstanding order) and binding (the displayed digest)
-    // both hold — consume the order (consume-once) and admit. A lost race to
-    // consumption between the lookup and here reads as a replay.
-    if !store.consume_order(&record.nonce.0)? {
-        return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
-    }
+    // both hold. Build the whole admission — including the fallible event encode
+    // — *before* consuming the order: consuming first and then failing the encode
+    // would lose the evidence with the nonce already spent and no retry.
     let claim = ResolutionClaim {
         workpiece: record.workpiece.clone(),
         scope_revision: record.scope_revision,
@@ -319,6 +307,11 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
         fact: Fact::Integrate { bloom: record.bloom, claim },
     };
     let admit = Admit { event: to_vec(&event)? };
+    // Consume-once, only now that the admission is fully constructed. A lost race
+    // to consumption between the lookup and here reads as a replay.
+    if !store.consume_order(&record.nonce.0)? {
+        return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
+    }
     Ok(AdmitDecision::Admitted(Box::new(Admission { admit, event })))
 }
 
