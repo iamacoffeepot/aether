@@ -80,6 +80,7 @@ pub use reduce::{
 pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
 pub use values::{
     AgentProfile, Artifact, Attempt, BloomDraft, BloomSpec, Budget, Evidence, EvidenceKind, Forecast, LandingReceipt,
-    Membership, NetworkProfile, Observation, Provenance, ReasoningEffort, ResolutionClaim, ResolvedBloom, StageBinding,
-    StageCatalog, StageReceipt, Statement, ToolPolicy, Transformation, Workpiece,
+    Membership, ModelOverride, NetworkProfile, Observation, Provenance, ReasoningEffort, ResolutionClaim,
+    ResolvedBloom, ResolvedModel, ScopeRevision, StageBinding, StageCatalog, StageReceipt, Statement, ToolPolicy,
+    Transformation, Workpiece,
 };

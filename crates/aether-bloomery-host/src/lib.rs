@@ -19,17 +19,31 @@
 //!   digest-addressed artifact bytes and their derivation-DAG parents; a
 //!   second consumer of the one addressing core (ADR-0116 reuse-not-rival),
 //!   never evicting.
+//! - [`source`] — the native `aether.source` capability. A mail front over the
+//!   existing `SourceShell` (`bloomery/source.rs`): the guest sends
+//!   `aether.source.*` transact mail for the port operations — snapshot /
+//!   checkpoint / checkpoints / integrate / land — and the capability, which
+//!   holds the token and network client, runs them and replies. ADR-0149 bars
+//!   the wasm guest from touching tokens, shells, or the network directly, the
+//!   same gap the store port already closed with `StoreCapability`.
+//! - [`api`] — the native `aether.bloomery.api` capability, a REST control
+//!   ingress mounted on the `aether.http.server` cap (ADR-0108) that drives the
+//!   bloom lifecycle from `curl` — stage / shape / seal / supersede and read
+//!   the live blooms, view document, journal, and artifacts (ADR-0149
+//!   §Packaging, #3498).
 //! - [`bloomery`] — [`BloomeryChassis`], a
 //!   coordinator-shaped chassis (no render/audio surface) that registers the
-//!   store, artifacts, trace, RPC, and the `aether.bloomery.mirror`
-//!   outbox-consumer capability behind a signal-blocking driver. It also holds
-//!   the GitHub port cap shells — `ProjectionShell` (outward mirror),
-//!   `SourceShell` (git source), and `ExecutorShell` (the Actions dispatch
-//!   backend, ADR-0149 migration step 2) — each mounting an
-//!   `aether-bloomery-github` backend behind an `Arc<dyn …>` so no core module
-//!   names a GitHub type. The mirror driver polls the store outbox and drives
-//!   the `ProjectionShell` / `SourceShell` so a live bloomery continuously
-//!   projects its journal to GitHub (config-gated off when unconfigured).
+//!   store, artifacts, source, trace, RPC, HTTP (REST control api), and the
+//!   `aether.bloomery.mirror` outbox-consumer capability behind a
+//!   signal-blocking driver. It also holds the GitHub port cap shells —
+//!   `ProjectionShell` (outward mirror), `SourceShell` (git source), and
+//!   `ExecutorShell` (the Actions dispatch backend, ADR-0149 migration step 2)
+//!   — each mounting an `aether-bloomery-github` backend behind an
+//!   `Arc<dyn …>` so no core module names a GitHub type. The mirror driver
+//!   polls the store outbox and drives the `ProjectionShell` so a live bloomery
+//!   continuously projects its journal to GitHub (config-gated off when
+//!   unconfigured); `SourceShell` is also wired behind the `aether.source`
+//!   capability above.
 //!
 //! Recovery is journal replay + outbox republish: reopen the same database
 //! file, replay the journal through the reducer, and republish undelivered
@@ -38,10 +52,15 @@
 //! succeeds (at-least-once with idempotent reconcile).
 
 pub mod artifacts;
+pub mod source;
 pub mod store;
 
 #[cfg(feature = "runtime")]
+pub mod api;
+#[cfg(feature = "runtime")]
 pub mod bloomery;
 
+#[cfg(feature = "runtime")]
+pub use api::BloomeryApiCapability;
 #[cfg(feature = "runtime")]
 pub use bloomery::{BloomeryChassis, BloomeryEnv};

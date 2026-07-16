@@ -31,10 +31,13 @@ fn free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Fork the `bloomery` bin against `db` on `port`.
+/// Fork the `bloomery` bin against `db` on `port`. The bin now also binds a
+/// default REST control-API port (#3498), so hand it a free HTTP port too — a
+/// fixed default would collide across the suite's concurrently-spawned bins.
 fn spawn(port: u16, db: &str) -> Child {
     Command::new(env!("CARGO_BIN_EXE_bloomery"))
         .env("AETHER_RPC_PORT", port.to_string())
+        .env("AETHER_HTTP_PORT", free_port().to_string())
         .env("AETHER_STORE_PATH", db)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
