@@ -1,0 +1,43 @@
+[package]
+name = "aether-bloomery-github"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The port traits (`ProjectionBackend`) and the value vocabulary
+# (`ViewDocument`, `Evidence`, `LandingReceipt`, `Digest`, …) this adapter
+# renders outward. The adapter depends *inward* on the control core, never
+# the reverse (ADR-0149 §The boundary) — that is what keeps the static-link
+# DAG cycle-free.
+aether-bloomery = { path = "../aether-bloomery" }
+# The adapter owns its own async-free HTTP client directly rather than
+# routing through the guest-facing `aether.http` egress cap: the landed
+# ports are synchronous (`fn reconcile_view(&self, …) -> Result`), so the
+# blocking client is the natural fit and correlation stays per-request. TLS
+# is native-tls (system OpenSSL, universally present on the Ubuntu CI
+# runners); tests never touch the network (they inject a fake), so the
+# `blocking`/`json`/`default-tls` surface is compile-only in CI.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "default-tls"] }
+serde = { workspace = true, features = ["derive", "std"] }
+# Request/response bodies and the marker change-detection digest are JSON;
+# the digest is sha256 over a value's canonical JSON so a re-render with the
+# same content is a byte-stable marker and the reconcile no-ops.
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[features]
+# Exposes the in-process `FakeGithub` double so a downstream crate (the host
+# demo, #3459 step 7) can drive the projection against it without a live
+# token or network.
+testing = []
+
+[dev-dependencies]
+# Self-dependency with `testing` on, so this crate's own integration tests
+# (`tests/projection.rs`) see the `FakeGithub` double the feature exposes —
+# an integration test links the lib without the `test` cfg, so the feature is
+# the only way to reach a test-only module from `tests/`.
+aether-bloomery-github = { path = ".", features = ["testing"] }
+
+[lints]
+workspace = true
