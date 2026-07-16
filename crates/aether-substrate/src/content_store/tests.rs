@@ -4,7 +4,7 @@
 //! component projections are tested against the real manifests in
 //! `aether-capabilities`.
 
-use super::{ContentStore, EvictionPolicy, Selector, now_nanos};
+use super::{ContentStore, EvictionPolicy, Selector, hash_hex, now_nanos};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::{env, fs, process};
@@ -184,5 +184,25 @@ fn legacy_sidecar_without_sequence_restores_at_zero() {
     let store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
     let seq = store.entries().find(|entry| entry.hash == hash).map(|entry| entry.uploaded_seq);
     assert_eq!(seq, Some(0), "a legacy sidecar restores at sequence zero");
+    let _ = fs::remove_dir_all(&root);
+}
+
+// Tripwire: a bytes-write failure must never leave a name pointer at an
+// unindexed hash — pre-creating a directory at the entry's bytes path forces
+// `atomic_write`'s rename to fail, so this fails on the unguarded code and
+// passes once the name insert is gated on `self.entries.contains_key`.
+#[test]
+fn failed_write_leaves_no_dangling_name_pointer() {
+    let root = temp_root("failed-write");
+    let mut store: ContentStore<Meta> = ContentStore::open(&root, EvictionPolicy::None).expect("open store");
+    let bytes = b"never-lands";
+    let hash = hash_hex(bytes);
+    fs::create_dir_all(root.join("entries").join(&hash)).expect("pre-create a directory at the bytes path");
+
+    let returned = store.upload(bytes, meta("x"), Some("svc".to_owned()));
+
+    assert_eq!(returned, hash, "upload still returns the content hash");
+    assert!(!store.contains(&hash), "the failed write leaves the hash unindexed");
+    assert_eq!(store.name_for(&hash), None, "no dangling name pointer at an unindexed hash");
     let _ = fs::remove_dir_all(&root);
 }

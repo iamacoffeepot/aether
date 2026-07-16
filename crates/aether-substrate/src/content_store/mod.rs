@@ -205,7 +205,9 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
                 tracing::warn!(target: TARGET, hash = %hash, error = %e, "content store: writing entry bytes failed");
             } else if let Err(e) = write_sidecar(&manifest_path, &sidecar) {
                 tracing::warn!(target: TARGET, hash = %hash, error = %e, "content store: writing entry manifest failed");
-                let _ = fs::remove_file(&bytes_path);
+                if let Err(cleanup_e) = fs::remove_file(&bytes_path) {
+                    tracing::warn!(target: TARGET, hash = %hash, error = %cleanup_e, "content store: cleaning up orphaned entry bytes after failed sidecar write");
+                }
             } else {
                 let bytes_len = bytes.len() as u64;
                 self.entries.insert(
@@ -217,7 +219,9 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
             }
         }
 
-        if let Some(name) = name {
+        if let Some(name) = name
+            && self.entries.contains_key(&hash)
+        {
             self.names.insert(name, hash.clone());
             self.persist_names();
         }
