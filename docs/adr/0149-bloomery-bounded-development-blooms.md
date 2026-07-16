@@ -106,9 +106,11 @@ separate, later arc. The fail-closed prompt closure is structural and is enforce
 
 The pipeline is a closed stage vocabulary compiled into Rust — sketch, scope, approve, construct, verify,
 refine, review, integrate, aggregate verify/review, land, study — not a workflow language. A **stage
-binding** declares the artifact kinds one stage consumes and produces, the agent profile that runs it
-(`iama-{stage}`, an attempt-scoped worker identity, never a resident actor or a delegable authority), the
-skill or process it executes, its completion gate, and its retry budget. The full catalog is itself a digest
+binding** declares the artifact kinds one stage consumes and produces, the agent profile that runs it (a
+digest-addressed, versioned `AgentProfile` artifact — model, reasoning effort, tool policy — referenced by
+digest, so a receipt attests the exact configuration that ran; the `iama-{stage}` worker identity, an
+attempt-scoped identity never a resident actor or a delegable authority, is *derived from the stage*, not
+stored), the skill or process it executes, its completion gate, and its retry budget. The full catalog is itself a digest
 the bloom freezes at seal. An **attempt** executes one binding against one subject; agents return proposed
 artifacts and evidence only — the reducer alone advances state. A **transformation** is the portable unit of
 execution: a typed command (`verify.clippy`, `construct.implement`) with declared inputs, outputs, image,

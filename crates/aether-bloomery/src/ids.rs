@@ -74,3 +74,33 @@ stage_vocabulary! {
     Land,
     Study,
 }
+
+impl StageId {
+    /// The attempt-scoped worker identity that runs this stage (`iama-{stage}`,
+    /// ADR-0149 §The line): *who* runs, derived from the stage itself — as
+    /// distinct from *how* it runs, the [`AgentProfile`] a binding references by
+    /// digest. An exhaustive match, so a new stage must name its identity; the
+    /// identity is never stored on a binding or receipt, only derived here.
+    ///
+    /// [`AgentProfile`]: crate::values::AgentProfile
+    #[must_use]
+    pub fn worker_identity(self) -> String {
+        let slug = match self {
+            Self::Sketch => "sketch",
+            Self::Scope => "scope",
+            Self::Approve => "approve",
+            Self::Construct => "construct",
+            Self::Verify => "verify",
+            Self::Refine => "refine",
+            Self::Review => "review",
+            Self::Integrate => "integrate",
+            Self::AggregateVerify => "aggregate-verify",
+            Self::AggregateReview => "aggregate-review",
+            Self::Land => "land",
+            Self::Study => "study",
+        };
+        let mut identity = String::from("iama-");
+        identity.push_str(slug);
+        identity
+    }
+}
