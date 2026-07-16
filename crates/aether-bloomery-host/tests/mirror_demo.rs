@@ -17,8 +17,8 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomDraft, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Snapshot, WorkpieceId, reduce,
-    view_of,
+    BloomDraft, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Snapshot, StageCatalog,
+    WorkpieceId, reduce, view_of,
 };
 use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
 use aether_bloomery_host::bloomery::ProjectionShell;
@@ -46,6 +46,7 @@ fn synthetic_bloom_snapshot() -> Snapshot {
     let spec = BloomDraft {
         proposals: vec![membership("reactor-core", 10), membership("coolant-loop", 20)],
         base,
+        stage_catalog: StageCatalog::line_digest(),
         ..BloomDraft::default()
     }
     .seal();
