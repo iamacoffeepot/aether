@@ -163,9 +163,17 @@ pub enum EnqueueOutboxResult {
 
 /// Read every undelivered outbox entry, in sequence order (non-destructive —
 /// republish, then [`AckOutbox`] the delivered range).
+///
+/// The outbox is partitioned by `topic` so disjoint consumers never race on the
+/// shared `delivered` flag (ADR-0149 §Outbox consumption): `topic: Some(t)`
+/// drains only that topic's undelivered entries; `topic: None` drains all (the
+/// legacy recovery-drill path).
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.store.drain_outbox")]
-pub struct DrainOutbox;
+pub struct DrainOutbox {
+    /// The topic to drain, or `None` for every topic.
+    pub topic: Option<String>,
+}
 
 /// One undelivered outbox entry.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -194,10 +202,16 @@ pub enum DrainOutboxResult {
     },
 }
 
-/// Mark every outbox entry up to and including `through_sequence` as delivered.
+/// Mark every outbox entry up to and including `through_sequence` as delivered,
+/// scoped to a topic so acking one consumer's delivered prefix never marks
+/// another's entries delivered (ADR-0149 §Outbox consumption). `topic: Some(t)`
+/// acks only that topic's entries; `topic: None` acks across every topic (the
+/// legacy path).
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
 #[kind(name = "aether.store.ack_outbox")]
 pub struct AckOutbox {
+    /// The topic to acknowledge within, or `None` for every topic.
+    pub topic: Option<String>,
     /// Acknowledge every outbox entry with a sequence at or below this.
     pub through_sequence: u64,
 }

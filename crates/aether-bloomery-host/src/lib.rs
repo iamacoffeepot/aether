@@ -8,9 +8,11 @@
 //!
 //! - [`store`] — the native `aether.store` capability. `SQLite` in WAL mode holds
 //!   the append-only journal (with inbox dedup by idempotency key), a
-//!   transactional outbox, and the active-membership table whose uniqueness
-//!   constraint makes bloom sealing all-or-nothing. The guest sees typed
-//!   `aether.store.*` transact mail, never SQL.
+//!   transactional outbox **partitioned by topic** (so disjoint consumers drain
+//!   and ack their own rows without racing on the shared `delivered` flag), and
+//!   the active-membership table whose uniqueness constraint makes bloom sealing
+//!   all-or-nothing. The guest sees typed `aether.store.*` transact mail, never
+//!   SQL.
 //! - [`artifacts`] — the native `aether.artifacts` capability. An eviction-free
 //!   consumer of the extracted content-address core
 //!   ([`aether_substrate::content_store`]) holding the canonical
@@ -39,19 +41,23 @@
 //!   §Packaging, #3498).
 //! - [`bloomery`] — [`BloomeryChassis`], a
 //!   coordinator-shaped chassis (no render/audio surface) that registers the
-//!   store, artifacts, source, trace, RPC, and HTTP (REST control api)
-//!   capabilities behind a signal-blocking driver. It also holds the remaining
-//!   GitHub port cap shells — `ProjectionShell` (outward mirror) and
+//!   store, artifacts, source, trace, RPC, HTTP (REST control api), and the
+//!   `aether.bloomery.mirror` outbox-consumer capability behind a
+//!   signal-blocking driver. It also holds the GitHub port cap shells —
+//!   `ProjectionShell` (outward mirror), `SourceShell` (git source), and
 //!   `ExecutorShell` (the Actions dispatch backend, ADR-0149 migration step 2)
 //!   — each mounting an `aether-bloomery-github` backend behind an
-//!   `Arc<dyn …>` so no core module names a GitHub type. Those shells ship
-//!   ahead of their chassis-boot wiring, which lands with the reducer runtime
-//!   that drives them; `SourceShell` is past that point, already wired behind
-//!   the `aether.source` capability above.
+//!   `Arc<dyn …>` so no core module names a GitHub type. The mirror driver
+//!   polls the store outbox and drives the `ProjectionShell` so a live bloomery
+//!   continuously projects its journal to GitHub (config-gated off when
+//!   unconfigured); `SourceShell` is also wired behind the `aether.source`
+//!   capability above.
 //!
 //! Recovery is journal replay + outbox republish: reopen the same database
 //! file, replay the journal through the reducer, and republish undelivered
-//! outbox entries.
+//! outbox entries — the mirror driver's first drain pass on boot is that
+//! republish, acking each topic's delivered prefix only after the GitHub write
+//! succeeds (at-least-once with idempotent reconcile).
 
 pub mod artifacts;
 pub mod session;

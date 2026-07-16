@@ -45,6 +45,13 @@ pub struct GithubMirrorConfig {
     /// port, a separate slice, so carried-but-unused here.
     #[config(default = false)]
     pub cas_land_enabled: bool,
+    /// How often the outbox-consumer mirror driver ([`super::MirrorDriverCapability`])
+    /// polls the store outbox for undelivered projection entries, in seconds.
+    /// The connection knobs and the poll cadence share this config because one
+    /// GitHub-mirror configuration governs the whole outbound path; the source
+    /// shell ignores it (`to_github_config` drops it).
+    #[config(default = 5)]
+    pub poll_interval_secs: u64,
     /// The wrapper workflow file the executor port dispatches (ADR-0149
     /// §Execution on Actions, [#3500]). Carried on this shared GitHub-connection
     /// config the same way `cas_land_enabled` is — one config serves the mirror,
@@ -66,6 +73,7 @@ impl Default for GithubMirrorConfig {
             repo: String::new(),
             api_base: "https://api.github.com".to_owned(),
             cas_land_enabled: false,
+            poll_interval_secs: 5,
             executor_workflow_file: "bloomery-transform.yml".to_owned(),
             executor_dispatch_ref: "refs/heads/main".to_owned(),
         }

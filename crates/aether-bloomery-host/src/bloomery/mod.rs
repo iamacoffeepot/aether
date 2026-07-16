@@ -9,6 +9,7 @@ mod driver;
 mod executor;
 mod intake;
 mod mirror;
+mod mirror_driver;
 mod source;
 
 pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};
@@ -22,4 +23,7 @@ pub use intake::{
     run_intake_cycle,
 };
 pub use mirror::{GithubMirrorConfig, GithubMirrorOverlay, ProjectionShell};
+pub use mirror_driver::{
+    DrainTick, MirrorDriverCapability, MirrorDriverState, TOPIC_LANDING_RECEIPT, TOPIC_VIEW_DOCUMENT,
+};
 pub use source::SourceShell;

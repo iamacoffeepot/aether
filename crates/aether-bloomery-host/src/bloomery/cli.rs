@@ -9,13 +9,13 @@ use clap::Parser;
 
 use crate::artifacts::ArtifactsOverlay;
 use crate::bloomery::chassis::{ControlCoreOverlay, HttpPortOverlay, RpcPortOverlay};
+use crate::bloomery::mirror::GithubMirrorOverlay;
 use crate::session::SessionOverlay;
-use crate::source::SourceOverlay;
 use crate::store::StoreOverlay;
 
 /// The `bloomery` binary's clap root. The overlays carry the derive-emitted
-/// `--rpc-port` / `--store-path` / `--artifacts-root` flags; `--describe` prints
-/// the binary manifest and exits before boot (ADR-0115).
+/// `--rpc-port` / `--store-path` / `--artifacts-root` / `--github-*` flags;
+/// `--describe` prints the binary manifest and exits before boot (ADR-0115).
 #[derive(Parser, Debug, Default, Clone)]
 #[command(name = "bloomery", about = "Bloomery coordinator chassis — SQLite journal store + RPC ingress. ADR-0149.")]
 pub struct BloomeryCli {
@@ -37,6 +37,15 @@ pub struct BloomeryCli {
     #[command(flatten)]
     pub artifacts: ArtifactsOverlay,
 
+    /// `--github-*` shadow `AETHER_GITHUB_*` / `GITHUB_TOKEN` — the shared GitHub
+    /// connection knobs (token / owner / repo / api-base / cas-land-enabled) plus
+    /// the mirror poll cadence. One flag set serves both the outbox-consumer
+    /// mirror driver and the git source-port capability (`SourceOverlay` is a
+    /// re-export of `GithubMirrorOverlay`); unset → unconfigured, so the mirror
+    /// driver mounts disabled.
+    #[command(flatten)]
+    pub github: GithubMirrorOverlay,
+
     /// `--session-db-path` / `--session-cache-ttl-cutoff-mins` /
     /// `--session-lease-ttl-mins` / `--session-context-cap-tokens` shadow the
     /// `AETHER_SESSION_*` env — the executor session-reuse pool knobs.
@@ -47,12 +56,6 @@ pub struct BloomeryCli {
     /// component wasm to autoload at boot (unset → no autoload).
     #[command(flatten)]
     pub control_core: ControlCoreOverlay,
-
-    /// `--github-token` / `--github-owner` / `--github-repo` / `--github-api-base` /
-    /// `--github-cas-land-enabled` shadow `GITHUB_TOKEN` / `AETHER_GITHUB_*` env —
-    /// the git source-port capability's GitHub connection knobs.
-    #[command(flatten)]
-    pub source: SourceOverlay,
 
     /// Print this binary's `BinaryManifest` (chassis kind, linked caps, build
     /// provenance) as JSON and exit before boot (ADR-0115). The hub's binary

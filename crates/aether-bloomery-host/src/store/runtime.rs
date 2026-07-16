@@ -143,11 +143,13 @@ pub trait StoreBackend: Send {
     fn release_membership(&mut self, bloom: &[u8]) -> rusqlite::Result<u32>;
     /// Enqueue an outbox entry; returns its sequence.
     fn enqueue_outbox(&mut self, topic: &str, payload: &[u8]) -> rusqlite::Result<u64>;
-    /// Read every undelivered outbox entry, in sequence order.
-    fn drain_outbox(&mut self) -> rusqlite::Result<Vec<OutboxEntry>>;
-    /// Mark every outbox entry at or below `through_sequence` delivered; returns
-    /// how many were newly acknowledged.
-    fn ack_outbox(&mut self, through_sequence: u64) -> rusqlite::Result<u32>;
+    /// Read undelivered outbox entries, in sequence order — scoped to `topic`
+    /// when `Some`, across every topic when `None`.
+    fn drain_outbox(&mut self, topic: Option<&str>) -> rusqlite::Result<Vec<OutboxEntry>>;
+    /// Mark outbox entries at or below `through_sequence` delivered — scoped to
+    /// `topic` when `Some`, across every topic when `None`; returns how many
+    /// were newly acknowledged.
+    fn ack_outbox(&mut self, topic: Option<&str>, through_sequence: u64) -> rusqlite::Result<u32>;
     /// Read the whole journal, in sequence order — the recovery replay source.
     fn replay_journal(&mut self) -> rusqlite::Result<Vec<JournalRecord>>;
 }
@@ -379,24 +381,41 @@ impl StoreBackend for SqliteStore {
         Ok(u64::try_from(self.conn.last_insert_rowid()).unwrap_or_default())
     }
 
-    fn drain_outbox(&mut self) -> rusqlite::Result<Vec<OutboxEntry>> {
-        let mut stmt =
-            self.conn.prepare("SELECT sequence, topic, payload FROM outbox WHERE delivered = 0 ORDER BY sequence")?;
-        let rows = stmt.query_map([], |row| {
+    fn drain_outbox(&mut self, topic: Option<&str>) -> rusqlite::Result<Vec<OutboxEntry>> {
+        // The topic predicate is appended only when scoped, so `None` keeps the
+        // whole-outbox drain the recovery drill uses.
+        let sql = match topic {
+            Some(_) => {
+                "SELECT sequence, topic, payload FROM outbox WHERE delivered = 0 AND topic = ?1 ORDER BY sequence"
+            }
+            None => "SELECT sequence, topic, payload FROM outbox WHERE delivered = 0 ORDER BY sequence",
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let map_row = |row: &rusqlite::Row<'_>| {
             Ok(OutboxEntry {
                 sequence: u64::try_from(row.get::<_, i64>(0)?).unwrap_or_default(),
                 topic: row.get(1)?,
                 payload: row.get(2)?,
             })
-        })?;
-        rows.collect()
+        };
+        match topic {
+            Some(topic) => stmt.query_map(rusqlite::params![topic], map_row)?.collect(),
+            None => stmt.query_map([], map_row)?.collect(),
+        }
     }
 
-    fn ack_outbox(&mut self, through_sequence: u64) -> rusqlite::Result<u32> {
-        let acked = self.conn.execute(
-            "UPDATE outbox SET delivered = 1 WHERE sequence <= ?1 AND delivered = 0",
-            rusqlite::params![i64::try_from(through_sequence).unwrap_or(i64::MAX)],
-        )?;
+    fn ack_outbox(&mut self, topic: Option<&str>, through_sequence: u64) -> rusqlite::Result<u32> {
+        let through = i64::try_from(through_sequence).unwrap_or(i64::MAX);
+        let acked = match topic {
+            Some(topic) => self.conn.execute(
+                "UPDATE outbox SET delivered = 1 WHERE sequence <= ?1 AND delivered = 0 AND topic = ?2",
+                rusqlite::params![through, topic],
+            )?,
+            None => self.conn.execute(
+                "UPDATE outbox SET delivered = 1 WHERE sequence <= ?1 AND delivered = 0",
+                rusqlite::params![through],
+            )?,
+        };
         Ok(u32::try_from(acked).unwrap_or(u32::MAX))
     }
 
@@ -507,21 +526,22 @@ impl NativeActor for StoreCapability {
         }
     }
 
+    // The `#[handler::single]` contract requires the mail by value; these
+    // handlers only read the topic / sequence, so clippy sees a by-ref
+    // opportunity the macro signature cannot take.
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
-    fn on_drain_outbox(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: DrainOutbox) -> DrainOutboxResult {
-        match state.backend.drain_outbox() {
+    fn on_drain_outbox(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: DrainOutbox) -> DrainOutboxResult {
+        match state.backend.drain_outbox(mail.topic.as_deref()) {
             Ok(entries) => DrainOutboxResult::Ok { entries },
             Err(error) => DrainOutboxResult::Err { error: error.to_string() },
         }
     }
 
-    // The `#[handler::single]` contract requires the mail by value; `AckOutbox`
-    // is a single-`Copy`-field struct, so clippy sees a by-ref opportunity the
-    // macro signature cannot take.
     #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_ack_outbox(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: AckOutbox) -> AckOutboxResult {
-        match state.backend.ack_outbox(mail.through_sequence) {
+        match state.backend.ack_outbox(mail.topic.as_deref(), mail.through_sequence) {
             Ok(acked) => AckOutboxResult::Ok { acked },
             Err(error) => AckOutboxResult::Err { error: error.to_string() },
         }
