@@ -34,6 +34,15 @@ pub struct KeyId(pub String);
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub struct IdempotencyKey(pub String);
 
+/// A work order's idempotency nonce (ADR-0149 §The boundary, the executor
+/// port). `workflow_dispatch` returns no run id, so the nonce is the durable
+/// correlation key: the executor embeds it in the dispatched run's name and
+/// resolves nonce → run on demand. Distinct from [`IdempotencyKey`], which
+/// dedups admitted *facts* at the reducer; a nonce correlates a dispatched
+/// *worker* at the executor boundary.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+pub struct Nonce(pub String);
+
 /// The closed stage vocabulary of the line (ADR-0149 §The line): the
 /// pipeline is these stages compiled into Rust, not a workflow language.
 /// The set is closed and exhaustively matched — a new stage is a code

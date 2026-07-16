@@ -33,9 +33,10 @@
 //!   a versioned policy artifact rejects the attempt before dispatch.
 //! - [`mod@reduce`] — the pure control core: [`reduce`](reduce::reduce) owns
 //!   every state transition, with no I/O, no engine boot, no GitHub types.
-//! - [`port`] — the [`SourceBackend`] / [`ProjectionBackend`] trait shapes
-//!   adapters implement and the host mounts. Kept here so adapters depend
-//!   inward on this crate, cycle-free (ADR-0149 §The boundary).
+//! - [`port`] — the [`SourceBackend`] / [`ProjectionBackend`] /
+//!   [`ExecutorBackend`] trait shapes adapters implement and the host mounts.
+//!   Kept here so adapters depend inward on this crate, cycle-free (ADR-0149
+//!   §The boundary).
 //!
 //! [#3458]: https://github.com/iamacoffeepot/aether/issues/3458
 
@@ -52,13 +53,13 @@ pub mod sign;
 pub mod values;
 
 pub use digest::{ContentAddressed, Digest, digest_of};
-pub use ids::{BloomId, IdempotencyKey, KeyId, StageId, WorkpieceId};
+pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};
 pub use manifest::{
     ClosureViolation, MANIFEST_CLOSURE_BUDGET, PromptManifest, ProvenanceIndex, Slot, SlotRole, assemble_manifest,
 };
 pub use port::{
-    BloomView, Checkpoint, IntegrateOutcome, LandOutcome, MemberView, ProjectionBackend, SourceBackend, SourceSnapshot,
-    ViewDocument,
+    BloomView, Checkpoint, Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, IntegrateOutcome, LandOutcome,
+    MemberView, ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument, WorkHandle, WorkOrder,
 };
 pub use reduce::{
     BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, IntegrateError, LandError, Outcome,
@@ -67,6 +68,6 @@ pub use reduce::{
 pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
 pub use values::{
     Artifact, Attempt, BloomDraft, BloomSpec, Budget, Evidence, EvidenceKind, Forecast, LandingReceipt, Membership,
-    Observation, Provenance, ResolutionClaim, ResolvedBloom, StageBinding, StageCatalog, StageReceipt, Statement,
-    Transformation, Workpiece,
+    NetworkProfile, Observation, Provenance, ResolutionClaim, ResolvedBloom, StageBinding, StageCatalog, StageReceipt,
+    Statement, Transformation, Workpiece,
 };
