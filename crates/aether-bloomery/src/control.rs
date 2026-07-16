@@ -235,6 +235,12 @@ pub enum QueryResult {
     },
 }
 
+/// The `aether.source.*` claim transact-mail kinds the control core sends to
+/// the native source-port capability. Always compiled (like the store's
+/// [`Commit`] family) so the host can re-export them inward, cycle-free.
+mod source_mail;
+pub use source_mail::{ClaimResult, ClaimSeal, ReleaseSeal, TransferSeal};
+
 #[cfg(feature = "runtime")]
 mod actor;
 #[cfg(feature = "runtime")]

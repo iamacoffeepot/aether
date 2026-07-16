@@ -168,76 +168,16 @@ pub enum LandResult {
     },
 }
 
-/// Acquire `bloom`'s claim refs — one per member workpiece plus the single
-/// mainline-admission ref — all-or-nothing (ADR-0150 §The claim registry,
-/// mirroring [`aether_bloomery::SourceBackend::claim_seal`]).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.claim_seal")]
-pub struct ClaimSeal {
-    /// The `aether_data::wire`-encoded claiming [`aether_bloomery::BloomId`].
-    pub bloom: Vec<u8>,
-    /// One `aether_data::wire`-encoded [`aether_bloomery::WorkpieceId`] per member.
-    pub workpieces: Vec<Vec<u8>>,
-}
-
-/// Transfer the seal from `predecessor` to `successor` on a supersession
-/// (ADR-0150 §The claim registry, mirroring
-/// [`aether_bloomery::SourceBackend::transfer_seal`]): fast-forward the
-/// `carried` refs and the admission ref, fresh-acquire `net_new`, release
-/// `dropped`.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.transfer_seal")]
-pub struct TransferSeal {
-    /// The `aether_data::wire`-encoded predecessor [`aether_bloomery::BloomId`].
-    pub predecessor: Vec<u8>,
-    /// The `aether_data::wire`-encoded successor [`aether_bloomery::BloomId`].
-    pub successor: Vec<u8>,
-    /// The workpieces fast-forwarded from predecessor to successor, each
-    /// `aether_data::wire`-encoded [`aether_bloomery::WorkpieceId`].
-    pub carried: Vec<Vec<u8>>,
-    /// The successor's fresh-acquired workpieces, each `aether_data::wire`-encoded.
-    pub net_new: Vec<Vec<u8>>,
-    /// The predecessor's released workpieces, each `aether_data::wire`-encoded.
-    pub dropped: Vec<Vec<u8>>,
-}
-
-/// Release `bloom`'s claim refs — the member workpieces plus the admission ref —
-/// each by a fast-forward CAS to a tombstone (ADR-0150 §The claim registry,
-/// mirroring [`aether_bloomery::SourceBackend::release_seal`]).
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.source.release_seal")]
-pub struct ReleaseSeal {
-    /// The `aether_data::wire`-encoded releasing [`aether_bloomery::BloomId`].
-    pub bloom: Vec<u8>,
-    /// One `aether_data::wire`-encoded [`aether_bloomery::WorkpieceId`] per member.
-    pub workpieces: Vec<Vec<u8>>,
-}
-
-/// Reply to [`ClaimSeal`], [`TransferSeal`], and [`ReleaseSeal`], mirroring
-/// [`aether_bloomery::ClaimOutcome`]. The three ops share one reply because they
-/// return the same outcome — a clean [`ClaimOutcome::Held`] refusal is not an
-/// error (the [`aether_bloomery::LandOutcome`] / [`LandResult`] shape).
-///
-/// [`ClaimOutcome::Held`]: aether_bloomery::ClaimOutcome::Held
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.source.claim_result")]
-pub enum ClaimResult {
-    /// Every targeted ref was acquired / transferred / released.
-    Acquired,
-    /// A targeted ref was already held by another bloom, so the operation was
-    /// refused (rolled back to leave no partial claim).
-    Held {
-        /// The `aether_data::wire`-encoded conflicting [`aether_bloomery::ClaimRefKind`].
-        ref_kind: Vec<u8>,
-        /// The `aether_data::wire`-encoded [`aether_bloomery::BloomId`] holding it.
-        held_by: Vec<u8>,
-    },
-    /// The operation failed for a non-refusal reason.
-    Err {
-        /// A human-readable failure reason.
-        error: String,
-    },
-}
+// The `aether.source.{claim_seal,transfer_seal,release_seal}` request kinds and
+// their shared `aether.source.claim_result` reply are defined in
+// `aether-bloomery` (`control/source_mail.rs`), not here, so the wasm
+// `ControlCore` actor's `on_admit` can construct and send them — the same
+// cross-crate-cycle relocation the store's `Commit` family uses (ADR-0150 §The
+// claim registry; owner directive on #3547). Re-exported inward so this
+// capability's `SourceCapability` and its public API keep naming them under
+// `aether.source::{…}` unchanged. The `#[kind(name = "…")]` wire identity rides
+// the move; only the definition site changed.
+pub use aether_bloomery::{ClaimResult, ClaimSeal, ReleaseSeal, TransferSeal};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

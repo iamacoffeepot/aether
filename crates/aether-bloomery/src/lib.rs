@@ -65,8 +65,8 @@ pub mod values;
 #[cfg(feature = "runtime")]
 pub use control::ControlCore;
 pub use control::{
-    Admit, AdmitResult, Commit, CommitResult, JournalRecord, MembershipMutation, OutboxPayload, Query, QueryResult,
-    ReplayJournal, ReplayJournalResult,
+    Admit, AdmitResult, ClaimResult, ClaimSeal, Commit, CommitResult, JournalRecord, MembershipMutation, OutboxPayload,
+    Query, QueryResult, ReleaseSeal, ReplayJournal, ReplayJournalResult, TransferSeal,
 };
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};
@@ -80,8 +80,8 @@ pub use port::{
 };
 pub use reduce::{
     AdmitEvidenceError, AdoptAnswerError, BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact,
-    IntegrateError, LandError, Outcome, ResolveError, SealConflict, SealError, Snapshot, SupersedeError, reduce,
-    view_of,
+    IntegrateError, LandError, Outcome, ResolveError, SealConflict, SealError, Snapshot, SupersedeError,
+    is_active_unlanded, reduce, view_of,
 };
 pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
 pub use study_report::{BloomGrade, StudyReport, grade};
