@@ -84,6 +84,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - run: python3 scripts/test-surface-match.py
       - run: python3 .agents/skills/approve/scripts/test_resolve_approval_tier.py
+      - run: bash scripts/test-agent-tick-lib.sh
 
   clippy:
     name: Clippy
