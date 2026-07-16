@@ -81,9 +81,9 @@ impl StageCatalog {
     ///
     /// The per-binding tag/gate strings are the initial vocabulary — refinable
     /// without an ADR (a change re-digests the catalog); the load-bearing
-    /// invariants are one binding per stage and the exhaustive
-    /// [`binding_of`](Self::binding_of) match, so a thirteenth stage is a
-    /// compile error until its binding is authored.
+    /// invariants are one binding per stage and the exhaustive `binding_of`
+    /// match, so a thirteenth stage is a compile error until its binding is
+    /// authored.
     #[must_use]
     pub fn line() -> Self {
         Self { bindings: Self::STAGES.into_iter().map(Self::binding_of).collect() }
