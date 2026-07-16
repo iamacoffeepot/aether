@@ -17,7 +17,7 @@ pub use kinds::*;
 #[cfg(feature = "runtime")]
 mod config;
 #[cfg(feature = "runtime")]
-pub use config::StoreConfig;
+pub use config::{StoreConfig, StoreOverlay};
 
 use aether_actor::actor;
 

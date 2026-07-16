@@ -8,13 +8,16 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
+use aether_actor::Addressable;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::trace::TraceDispatchCapability;
+use aether_kinds::BinaryManifest;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::ConfigError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
+use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
 use crate::store::{StoreCapability, StoreConfig};
 
@@ -51,14 +54,33 @@ pub struct BloomeryEnv {
 }
 
 impl BloomeryEnv {
-    /// Resolve every knob from `AETHER_*` env (and literal defaults). Each knob
-    /// rides the ADR-0090 derive-`Config` path — no naked env reads.
+    /// Resolve every knob from `AETHER_*` env (and literal defaults), with no
+    /// argv overlay — the env-only entry point. Delegates to
+    /// [`Self::from_env_with_argv`] with an empty [`BloomeryCli`], so the two
+    /// paths resolve identically when argv is absent.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError`] when a known env value fails its parser.
+    /// See [`Self::from_env_with_argv`].
     pub fn from_env() -> Result<Self, ConfigError> {
-        Ok(Self { rpc_port: RpcPortConfig::try_from_env()?.port, store: StoreConfig::try_from_env()? })
+        Self::from_env_with_argv(&BloomeryCli::default())
+    }
+
+    /// ADR-0090 unit d: resolve every knob argv > `AETHER_*` env > default.
+    /// `--rpc-port` shadows `AETHER_RPC_PORT` and `--store-path` shadows
+    /// `AETHER_STORE_PATH`, each riding the derive-`Config` argv-then-env path
+    /// (no naked env reads). Mirrors the hub's `HubEnv::from_env_with_argv`;
+    /// takes `&BloomeryCli` by reference so the bin keeps `cli` for its
+    /// `--describe` branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when a known env value (or argv overlay value)
+    /// fails its parser.
+    pub fn from_env_with_argv(cli: &BloomeryCli) -> Result<Self, ConfigError> {
+        let rpc_port = RpcPortConfig::try_from_argv_then_env(cli.rpc.clone().into_layer())?.port;
+        let store = StoreConfig::try_from_argv_then_env(cli.store.clone().into_layer())?;
+        Ok(Self { rpc_port, store })
     }
 }
 
@@ -73,6 +95,27 @@ impl Chassis for BloomeryChassis {
 }
 
 impl BloomeryChassis {
+    /// The `--describe` manifest (ADR-0115): the chassis profile, the mailbox
+    /// namespaces this binary links, and the `build.rs` provenance. Bloomery is
+    /// a minimal coordinator chassis — it links the trace dispatcher, the store,
+    /// and the RPC server — so it lists those three directly. The hub's binary
+    /// store forks `<binary> --describe` once at upload time to capture this.
+    #[must_use]
+    pub fn describe_manifest() -> BinaryManifest {
+        let caps = vec![
+            <TraceDispatchCapability as Addressable>::NAMESPACE.to_owned(),
+            <StoreCapability as Addressable>::NAMESPACE.to_owned(),
+            <RpcServerCapability as Addressable>::NAMESPACE.to_owned(),
+        ];
+        BinaryManifest {
+            chassis: Self::PROFILE.to_owned(),
+            caps,
+            git_sha: env!("AETHER_GIT_SHA").to_owned(),
+            profile: env!("AETHER_BUILD_PROFILE").to_owned(),
+            target: env!("AETHER_TARGET_TRIPLE").to_owned(),
+        }
+    }
+
     fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {
         let BloomeryEnv { rpc_port, store } = env;
         let boot = SubstrateBoot::builder("aether-bloomery", env!("CARGO_PKG_VERSION")).build()?;

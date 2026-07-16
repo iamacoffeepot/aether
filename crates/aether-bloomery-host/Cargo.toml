@@ -26,11 +26,13 @@ default = ["runtime"]
 runtime = [
     "dep:aether-substrate",
     "dep:aether-capabilities",
+    "dep:aether-kinds",
     "dep:rusqlite",
     "dep:tracing",
     "dep:clap",
     "dep:confique",
     "dep:anyhow",
+    "dep:serde_json",
     "dep:signal-hook",
 ]
 
@@ -47,6 +49,8 @@ serde = { workspace = true, features = ["derive", "alloc"] }
 # Runtime-only (native).
 aether-substrate = { path = "../aether-substrate", optional = true }
 aether-capabilities = { path = "../aether-capabilities", optional = true }
+# The substrate kind vocabulary — `BinaryManifest` for the `--describe` probe.
+aether-kinds = { path = "../aether-kinds", optional = true }
 # SQLite in WAL mode: the durable single-writer journal / inbox / outbox /
 # active-membership store. `bundled` compiles SQLite from source.
 rusqlite = { workspace = true, optional = true }
@@ -57,6 +61,8 @@ tracing = { workspace = true, features = ["std", "attributes"], optional = true 
 clap = { workspace = true, optional = true }
 confique = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
+# `--describe` serializes the `BinaryManifest` to JSON on stdout.
+serde_json = { workspace = true, optional = true }
 
 # The signal-blocking driver (SIGINT/SIGTERM) mirrors the hub chassis.
 [target.'cfg(unix)'.dependencies]

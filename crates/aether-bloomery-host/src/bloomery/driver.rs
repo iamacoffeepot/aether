@@ -49,9 +49,16 @@ fn shutdown_signal() -> &'static str {
     let mut signals = match Signals::new([SIGINT, SIGTERM]) {
         Ok(signals) => signals,
         Err(error) => {
-            tracing::error!("aether-bloomery-host: signal handler install failed: {error}; parking thread");
-            thread::park();
-            return "park";
+            tracing::error!(
+                "aether-bloomery-host: signal handler install failed: {error}; \
+                 parking thread — SIGKILL is the only exit"
+            );
+            // `park` can wake spuriously, so loop it: this path must never
+            // return and drop the boot, matching the doc-comment contract that
+            // it parks until the process is killed.
+            loop {
+                thread::park();
+            }
         }
     };
     match signals.forever().next() {
@@ -68,6 +75,10 @@ fn shutdown_signal() -> &'static str {
 fn shutdown_signal() -> &'static str {
     use std::thread;
 
-    thread::park();
-    "park"
+    // `park` can wake spuriously, so loop it: this path never returns — the
+    // process exits only on a kill signal (the doc-comment contract). The
+    // diverging `loop` coerces to the shared `&'static str` return.
+    loop {
+        thread::park();
+    }
 }

@@ -188,3 +188,89 @@ fn reopen_converges_via_journal_replay_and_outbox_republish() {
     // A re-delivered seal event is deduped (inbox survived the restart).
     assert_eq!(store.append_event("seal-1", b"anything").unwrap(), AppendOutcome::Duplicate);
 }
+
+fn temp_db(dir: &tempfile::TempDir) -> String {
+    dir.path().join("bloomery.db").to_str().unwrap().to_owned()
+}
+
+#[test]
+fn crash_mid_seal_batch_leaves_no_torn_membership() {
+    // The claim_seal boundary. A multi-member seal whose *last* member conflicts
+    // must persist nothing — and that atomicity has to survive a crash+restart,
+    // not just an in-memory rollback. Model the crash by dropping the connection
+    // right after the failed seal and reopening the file: if claim_seal ever
+    // regressed to committing per member instead of once, `free-a` / `free-b`
+    // would be torn-committed and survive the reopen.
+    // Tripwire: after restart the free members are still claimable.
+    let dir = tempfile::tempdir().unwrap();
+    let path = temp_db(&dir);
+    {
+        let mut store = SqliteStore::open(&path).unwrap();
+        store.claim_seal(b"held", &members(&["wp-last"])).unwrap();
+        // `free-a` and `free-b` insert cleanly; `wp-last` conflicts → the whole
+        // transaction rolls back before commit.
+        assert_eq!(
+            store.claim_seal(b"batch", &members(&["free-a", "free-b", "wp-last"])).unwrap(),
+            SealOutcome::Conflict("wp-last".to_owned()),
+        );
+    }
+    // Restart against the same file: the partial inserts must not have survived.
+    let mut store = SqliteStore::open(&path).unwrap();
+    assert_eq!(store.claim_seal(b"fresh", &members(&["free-a", "free-b"])).unwrap(), SealOutcome::Sealed);
+}
+
+#[test]
+fn crash_mid_supersede_leaves_predecessor_and_third_intact() {
+    // The supersede boundary. supersede is DELETE(predecessor) + INSERT(successor
+    // members) in one transaction; a successor member colliding with a third
+    // bloom must roll the DELETE back too, durably. Model the crash by dropping
+    // after the failed supersede and reopening: a partially-applied supersede
+    // (DELETE committed, INSERTs not) would strand the predecessor's workpiece
+    // unclaimed after restart.
+    // Tripwire: after restart the predecessor still holds w1 and the third holds w9.
+    let dir = tempfile::tempdir().unwrap();
+    let path = temp_db(&dir);
+    {
+        let mut store = SqliteStore::open(&path).unwrap();
+        store.claim_seal(b"pred", &members(&["w1"])).unwrap();
+        store.claim_seal(b"third", &members(&["w9"])).unwrap();
+        // succ re-admits w1 (freed by the DELETE) then wants w9 → conflict, whole
+        // rollback restoring pred's claim on w1.
+        assert_eq!(
+            store.supersede(b"pred", b"succ", &members(&["w1", "w9"])).unwrap(),
+            SealOutcome::Conflict("w9".to_owned()),
+        );
+    }
+    let mut store = SqliteStore::open(&path).unwrap();
+    // Predecessor's claim survived (the DELETE rolled back durably)...
+    assert_eq!(store.claim_seal(b"probe1", &members(&["w1"])).unwrap(), SealOutcome::Conflict("w1".to_owned()));
+    // ...and the third bloom still holds w9.
+    assert_eq!(store.claim_seal(b"probe2", &members(&["w9"])).unwrap(), SealOutcome::Conflict("w9".to_owned()));
+}
+
+#[test]
+fn crash_between_enqueue_and_ack_preserves_the_entry_for_republish() {
+    // The outbox boundary. A crash after enqueue but before ack must leave the
+    // entry drainable so restart republishes it; a crash after ack must leave it
+    // gone. Model each point with a drop+reopen — this is what proves an outbox
+    // insert commits durably on its own and an ack is not lost.
+    // Tripwire: an un-acked entry survives the restart, an acked one does not.
+    let dir = tempfile::tempdir().unwrap();
+    let path = temp_db(&dir);
+
+    // Crash after enqueue, before ack.
+    {
+        let mut store = SqliteStore::open(&path).unwrap();
+        store.enqueue_outbox("receipt", b"r1").unwrap();
+    }
+    let mut store = SqliteStore::open(&path).unwrap();
+    let drained = store.drain_outbox().unwrap();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].payload, b"r1");
+
+    // Ack, then crash: the acked entry must not come back on restart.
+    store.ack_outbox(drained[0].sequence).unwrap();
+    drop(store);
+    let mut store_after_ack = SqliteStore::open(&path).unwrap();
+    assert!(store_after_ack.drain_outbox().unwrap().is_empty());
+}
