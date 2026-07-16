@@ -9,6 +9,7 @@ use clap::Parser;
 
 use crate::artifacts::ArtifactsOverlay;
 use crate::bloomery::chassis::{ControlCoreOverlay, HttpPortOverlay, RpcPortOverlay};
+use crate::session::SessionOverlay;
 use crate::source::SourceOverlay;
 use crate::store::StoreOverlay;
 
@@ -35,6 +36,12 @@ pub struct BloomeryCli {
     /// artifacts content-store root (unset → the computed data-dir default).
     #[command(flatten)]
     pub artifacts: ArtifactsOverlay,
+
+    /// `--session-db-path` / `--session-cache-ttl-cutoff-mins` /
+    /// `--session-lease-ttl-mins` / `--session-context-cap-tokens` shadow the
+    /// `AETHER_SESSION_*` env — the executor session-reuse pool knobs.
+    #[command(flatten)]
+    pub session: SessionOverlay,
 
     /// `--control-core-wasm` shadows `AETHER_CONTROL_CORE_WASM` — the control-core
     /// component wasm to autoload at boot (unset → no autoload).
