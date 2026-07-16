@@ -8,9 +8,11 @@
 //!
 //! - [`store`] — the native `aether.store` capability. `SQLite` in WAL mode holds
 //!   the append-only journal (with inbox dedup by idempotency key), a
-//!   transactional outbox, and the active-membership table whose uniqueness
-//!   constraint makes bloom sealing all-or-nothing. The guest sees typed
-//!   `aether.store.*` transact mail, never SQL.
+//!   transactional outbox **partitioned by topic** (so disjoint consumers drain
+//!   and ack their own rows without racing on the shared `delivered` flag), and
+//!   the active-membership table whose uniqueness constraint makes bloom sealing
+//!   all-or-nothing. The guest sees typed `aether.store.*` transact mail, never
+//!   SQL.
 //! - [`artifacts`] — the native `aether.artifacts` capability. An eviction-free
 //!   consumer of the extracted content-address core
 //!   ([`aether_substrate::content_store`]) holding the canonical
@@ -19,12 +21,17 @@
 //!   never evicting.
 //! - [`bloomery`] — [`BloomeryChassis`], a
 //!   coordinator-shaped chassis (no render/audio surface) that registers the
-//!   store, artifacts, trace, and RPC capabilities behind a signal-blocking
-//!   driver.
+//!   store, artifacts, trace, RPC, and the `aether.bloomery.mirror`
+//!   outbox-consumer capability behind a signal-blocking driver. The mirror
+//!   driver polls the store outbox and drives the `ProjectionShell` /
+//!   `SourceShell` so a live bloomery continuously projects its journal to
+//!   GitHub (config-gated off when unconfigured).
 //!
 //! Recovery is journal replay + outbox republish: reopen the same database
 //! file, replay the journal through the reducer, and republish undelivered
-//! outbox entries.
+//! outbox entries — the mirror driver's first drain pass on boot is that
+//! republish, acking each topic's delivered prefix only after the GitHub write
+//! succeeds (at-least-once with idempotent reconcile).
 
 pub mod artifacts;
 pub mod store;

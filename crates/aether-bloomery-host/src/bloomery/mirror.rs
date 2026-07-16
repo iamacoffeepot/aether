@@ -45,6 +45,13 @@ pub struct GithubMirrorConfig {
     /// port, a separate slice, so carried-but-unused here.
     #[config(default = false)]
     pub cas_land_enabled: bool,
+    /// How often the outbox-consumer mirror driver ([`super::MirrorDriverCapability`])
+    /// polls the store outbox for undelivered projection entries, in seconds.
+    /// The connection knobs and the poll cadence share this config because one
+    /// GitHub-mirror configuration governs the whole outbound path; the source
+    /// shell ignores it (`to_github_config` drops it).
+    #[config(default = 5)]
+    pub poll_interval_secs: u64,
 }
 
 impl Default for GithubMirrorConfig {
@@ -55,6 +62,7 @@ impl Default for GithubMirrorConfig {
             repo: String::new(),
             api_base: "https://api.github.com".to_owned(),
             cas_land_enabled: false,
+            poll_interval_secs: 5,
         }
     }
 }
@@ -129,6 +137,7 @@ mod tests {
             repo: "shadow".into(),
             api_base: "https://ghe.example/api/v3".into(),
             cas_land_enabled: true,
+            poll_interval_secs: 5,
         };
         let projected = config.to_github_config();
         assert_eq!(projected.repo_path(), "octo/shadow");

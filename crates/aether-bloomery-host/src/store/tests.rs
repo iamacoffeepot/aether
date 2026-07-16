@@ -143,17 +143,42 @@ fn outbox_enqueue_drain_ack_cycle() {
     assert_eq!(store.enqueue_outbox("receipt", b"r1").unwrap(), 1);
     assert_eq!(store.enqueue_outbox("receipt", b"r2").unwrap(), 2);
 
-    let drained = store.drain_outbox().unwrap();
+    let drained = store.drain_outbox(None).unwrap();
     assert_eq!(drained.len(), 2);
     assert_eq!(drained[0].sequence, 1);
     assert_eq!(drained[0].payload, b"r1");
     assert_eq!(drained[1].payload, b"r2");
 
     // Ack the first only — the second stays undelivered for republish.
-    assert_eq!(store.ack_outbox(1).unwrap(), 1);
-    let remaining = store.drain_outbox().unwrap();
+    assert_eq!(store.ack_outbox(None, 1).unwrap(), 1);
+    let remaining = store.drain_outbox(None).unwrap();
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].sequence, 2);
+}
+
+#[test]
+fn outbox_topic_scoped_drain_and_ack_are_independent() {
+    // Two consumers share one outbox partitioned by topic (ADR-0149 §Outbox
+    // consumption): draining and acking one topic must never touch the other's
+    // rows, so disjoint consumers never race on the shared `delivered` flag.
+    let mut store = memory();
+    assert_eq!(store.enqueue_outbox("view_document", b"v1").unwrap(), 1);
+    assert_eq!(store.enqueue_outbox("landing_receipt", b"r1").unwrap(), 2);
+    assert_eq!(store.enqueue_outbox("view_document", b"v2").unwrap(), 3);
+
+    // A topic-scoped drain sees only its own topic's entries, in sequence order.
+    let views = store.drain_outbox(Some("view_document")).unwrap();
+    assert_eq!(views.iter().map(|e| e.sequence).collect::<Vec<_>>(), vec![1, 3]);
+    let receipts = store.drain_outbox(Some("landing_receipt")).unwrap();
+    assert_eq!(receipts.iter().map(|e| e.sequence).collect::<Vec<_>>(), vec![2]);
+
+    // Tripwire: acking `view_document` through its highest sequence (3) must not
+    // mark the `landing_receipt` entry at sequence 2 delivered — a topic-blind
+    // `sequence <= 3` ack would wrongly sweep it up.
+    assert_eq!(store.ack_outbox(Some("view_document"), 3).unwrap(), 2);
+    assert!(store.drain_outbox(Some("view_document")).unwrap().is_empty());
+    let receipts_after = store.drain_outbox(Some("landing_receipt")).unwrap();
+    assert_eq!(receipts_after.iter().map(|e| e.sequence).collect::<Vec<_>>(), vec![2], "the other topic is untouched");
 }
 
 #[test]
@@ -181,7 +206,7 @@ fn reopen_converges_via_journal_replay_and_outbox_republish() {
     // Membership survived: a second seal of the same workpiece still loses.
     assert_eq!(store.claim_seal(b"bloom-2", &members(&["wp"])).unwrap(), SealOutcome::Conflict("wp".to_owned()));
     // Outbox republish: the undelivered receipt is drainable.
-    let outbox = store.drain_outbox().unwrap();
+    let outbox = store.drain_outbox(None).unwrap();
     assert_eq!(outbox.len(), 1);
     assert_eq!(outbox[0].topic, "landing_receipt");
     assert_eq!(outbox[0].payload, b"receipt-bytes");
@@ -264,13 +289,13 @@ fn crash_between_enqueue_and_ack_preserves_the_entry_for_republish() {
         store.enqueue_outbox("receipt", b"r1").unwrap();
     }
     let mut store = SqliteStore::open(&path).unwrap();
-    let drained = store.drain_outbox().unwrap();
+    let drained = store.drain_outbox(None).unwrap();
     assert_eq!(drained.len(), 1);
     assert_eq!(drained[0].payload, b"r1");
 
     // Ack, then crash: the acked entry must not come back on restart.
-    store.ack_outbox(drained[0].sequence).unwrap();
+    store.ack_outbox(None, drained[0].sequence).unwrap();
     drop(store);
     let mut store_after_ack = SqliteStore::open(&path).unwrap();
-    assert!(store_after_ack.drain_outbox().unwrap().is_empty());
+    assert!(store_after_ack.drain_outbox(None).unwrap().is_empty());
 }

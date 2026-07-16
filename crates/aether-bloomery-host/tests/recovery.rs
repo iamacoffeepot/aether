@@ -166,7 +166,7 @@ fn kill_and_restart_converges_over_rpc() {
     assert_eq!(seal_again, ClaimSealResult::Conflict { workpiece: "wp".into() });
 
     // Outbox republish: the undelivered landing receipt is still drainable.
-    let drained: DrainOutboxResult = call(&mut stream, 3, &DrainOutbox);
+    let drained: DrainOutboxResult = call(&mut stream, 3, &DrainOutbox { topic: None });
     match drained {
         DrainOutboxResult::Ok { entries } => {
             assert_eq!(entries.len(), 1);

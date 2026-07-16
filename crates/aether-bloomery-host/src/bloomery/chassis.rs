@@ -18,8 +18,10 @@ use aether_substrate::config::ConfigError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
 use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
+use crate::bloomery::MirrorDriverCapability;
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
+use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::store::{StoreCapability, StoreConfig};
 
 /// The default RPC port when `AETHER_RPC_PORT` is unset (distinct from the hub's
@@ -54,6 +56,9 @@ pub struct BloomeryEnv {
     pub store: StoreConfig,
     /// The eviction-free artifacts content-store configuration.
     pub artifacts: ArtifactsConfig,
+    /// The GitHub outward-mirror configuration driving the outbox consumer.
+    /// Unconfigured (empty token/owner/repo) mounts the mirror driver disabled.
+    pub mirror: GithubMirrorConfig,
 }
 
 impl BloomeryEnv {
@@ -84,7 +89,11 @@ impl BloomeryEnv {
         let rpc_port = RpcPortConfig::try_from_argv_then_env(cli.rpc.clone().into_layer())?.port;
         let store = StoreConfig::try_from_argv_then_env(cli.store.clone().into_layer())?;
         let artifacts = ArtifactsConfig::try_from_argv_then_env(cli.artifacts.clone().into_layer())?;
-        Ok(Self { rpc_port, store, artifacts })
+        // Env-only (argv > env > default with no argv overlay yet): the mirror
+        // has no `--github-*` flags until an operator needs them, so it resolves
+        // from `AETHER_GITHUB_*` / `GITHUB_TOKEN` and defaults to unconfigured.
+        let mirror = GithubMirrorConfig::try_from_env()?;
+        Ok(Self { rpc_port, store, artifacts, mirror })
     }
 }
 
@@ -111,6 +120,7 @@ impl BloomeryChassis {
             <TraceDispatchCapability as Addressable>::NAMESPACE.to_owned(),
             <StoreCapability as Addressable>::NAMESPACE.to_owned(),
             <ArtifactsCapability as Addressable>::NAMESPACE.to_owned(),
+            <MirrorDriverCapability as Addressable>::NAMESPACE.to_owned(),
             <RpcServerCapability as Addressable>::NAMESPACE.to_owned(),
         ];
         BinaryManifest {
@@ -123,7 +133,7 @@ impl BloomeryChassis {
     }
 
     fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let BloomeryEnv { rpc_port, store, artifacts } = env;
+        let BloomeryEnv { rpc_port, store, artifacts, mirror } = env;
         let boot = SubstrateBoot::builder("aether-bloomery", env!("CARGO_PKG_VERSION")).build()?;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
@@ -136,6 +146,7 @@ impl BloomeryChassis {
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<StoreCapability>(store)
             .with_actor::<ArtifactsCapability>(artifacts)
+            .with_actor::<MirrorDriverCapability>(mirror)
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: rpc_addr.to_string(),
                 peer_kind: PeerKind::Substrate {
@@ -152,23 +163,26 @@ impl BloomeryChassis {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{ArtifactsConfig, BloomeryChassis, BloomeryEnv, Chassis};
+    use super::{ArtifactsConfig, BloomeryChassis, BloomeryEnv, Chassis, GithubMirrorConfig};
     use crate::store::StoreConfig;
 
     #[test]
     fn chassis_boots_and_claims_its_mailboxes() {
         // Port 0 → an OS-assigned ephemeral RPC port; the default `:memory:`
         // store touches no filesystem, and the artifacts store points at a temp
-        // root so the test opens no data dir. A successful `build` boots every
-        // passive (store, artifacts, trace, rpc) and claims each mailbox — a
+        // root so the test opens no data dir. The default (unconfigured) mirror
+        // mounts the driver disabled — no timer, no network — so the chassis
+        // boots clean without a token. A successful `build` boots every passive
+        // (store, artifacts, mirror, trace, rpc) and claims each mailbox — a
         // claim conflict or a failed store open would surface as a `BootError`,
-        // so `build` returning `Ok` is the assertion that the `aether.store` and
-        // `aether.artifacts` mailboxes were claimed.
+        // so `build` returning `Ok` is the assertion that the `aether.store`,
+        // `aether.artifacts`, and `aether.bloomery.mirror` mailboxes were claimed.
         let artifacts_root = tempfile::tempdir().unwrap();
         let env = BloomeryEnv {
             rpc_port: 0,
             store: StoreConfig::default(),
             artifacts: ArtifactsConfig { root: Some(artifacts_root.path().to_str().unwrap().to_owned()) },
+            mirror: GithubMirrorConfig::default(),
         };
         let chassis = BloomeryChassis::build(env).expect("bloomery chassis boots and claims its mailboxes");
         assert_eq!(BloomeryChassis::PROFILE, "bloomery");
