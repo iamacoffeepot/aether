@@ -7,7 +7,9 @@
 
 #![allow(clippy::unwrap_used)]
 
-use super::runtime::{AppendOutcome, CommitOutcome, SealOutcome, SqliteStore, StoreBackend};
+use super::runtime::{
+    AppendOutcome, CommitOutcome, OutstandingOrder, RecordOutcome, SealOutcome, SqliteStore, StoreBackend,
+};
 use aether_bloomery::{MembershipMutation, OutboxPayload};
 
 fn memory() -> SqliteStore {
@@ -275,6 +277,64 @@ fn reopen_converges_via_journal_replay_and_outbox_republish() {
     assert_eq!(outbox[0].payload, b"receipt-bytes");
     // A re-delivered seal event is deduped (inbox survived the restart).
     assert_eq!(store.append_event("seal-1", b"anything").unwrap(), AppendOutcome::Duplicate);
+}
+
+fn order(nonce: &str) -> OutstandingOrder {
+    OutstandingOrder {
+        nonce: nonce.to_owned(),
+        bloom: vec![1; 32],
+        workpiece: "wp-return".to_owned(),
+        scope_revision: vec![2; 32],
+        candidate: vec![5; 32],
+        displayed_digest: vec![5; 32],
+    }
+}
+
+#[test]
+fn outstanding_order_records_looks_up_and_consumes() {
+    // The evidence-intake registry contract (#3502): a recorded order resolves
+    // by nonce, and consuming it makes a re-lookup miss — the consume-once
+    // semantics a replayed upload's nonce is refused by.
+    let mut store = memory();
+    assert_eq!(store.record_order(&order("n-1")).unwrap(), RecordOutcome::Recorded);
+
+    let found = store.lookup_order("n-1").unwrap().expect("a recorded order resolves by nonce");
+    assert_eq!(found, order("n-1"));
+
+    // Consume it: the row is removed, and a re-lookup misses.
+    assert!(store.consume_order("n-1").unwrap(), "consuming a live order removes it");
+    assert_eq!(store.lookup_order("n-1").unwrap(), None, "a consumed order no longer resolves");
+    // Tripwire: consuming an already-consumed nonce reports no removal — the
+    // replay-refused signal the broker gates on.
+    assert!(!store.consume_order("n-1").unwrap(), "an already-consumed nonce removes nothing");
+}
+
+#[test]
+fn recording_a_replayed_nonce_is_an_idempotent_no_op() {
+    // A second record of the same nonce must not overwrite or duplicate the row.
+    let mut store = memory();
+    assert_eq!(store.record_order(&order("dup")).unwrap(), RecordOutcome::Recorded);
+    let mut second = order("dup");
+    second.workpiece = "different".to_owned();
+    assert_eq!(store.record_order(&second).unwrap(), RecordOutcome::Duplicate);
+    // The original row is untouched (the duplicate's `workpiece` never applied).
+    assert_eq!(store.lookup_order("dup").unwrap().unwrap().workpiece, "wp-return");
+}
+
+#[test]
+fn outstanding_order_survives_a_restart() {
+    // Evidence returns after an arbitrary delay, so an order must survive a
+    // `kill -9` + restart to stay matchable — the reason the registry is the
+    // persisted store rather than an in-memory map. Model the restart with a
+    // temp-file DB dropped and reopened.
+    let dir = tempfile::tempdir().unwrap();
+    let path = temp_db(&dir);
+    {
+        let mut store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.record_order(&order("survivor")).unwrap(), RecordOutcome::Recorded);
+    }
+    let mut store = SqliteStore::open(&path).unwrap();
+    assert_eq!(store.lookup_order("survivor").unwrap().expect("a recorded order survives restart"), order("survivor"));
 }
 
 fn temp_db(dir: &tempfile::TempDir) -> String {

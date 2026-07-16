@@ -34,7 +34,10 @@ pub struct StoreCapability;
 #[cfg(feature = "runtime")]
 mod runtime;
 #[cfg(feature = "runtime")]
-pub use runtime::{AppendOutcome, CommitOutcome, SealOutcome, SqliteStore, StoreBackend, StoreCapabilityState};
+pub use runtime::{
+    AppendOutcome, CommitOutcome, OutstandingOrder, RecordOutcome, SealOutcome, SqliteStore, StoreBackend,
+    StoreCapabilityState,
+};
 
 #[cfg(all(test, feature = "runtime"))]
 mod tests;
