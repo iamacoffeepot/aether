@@ -106,7 +106,8 @@ pub fn splice_bloom(snapshot: &mut Snapshot, spec: &BloomSpec, status: BloomStat
     for member in spec.members() {
         snapshot.active.insert(member.workpiece.clone(), bloom);
     }
-    snapshot
-        .blooms
-        .insert(bloom, BloomRecord { spec: spec.clone(), status, claims: BTreeMap::new(), superseded_by: None });
+    snapshot.blooms.insert(
+        bloom,
+        BloomRecord { spec: spec.clone(), status, claims: BTreeMap::new(), evidence: Vec::new(), superseded_by: None },
+    );
 }

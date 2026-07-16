@@ -34,6 +34,9 @@
 //!   a versioned policy artifact rejects the attempt before dispatch.
 //! - [`mod@reduce`] — the pure control core: [`reduce`](reduce::reduce) owns
 //!   every state transition, with no I/O, no engine boot, no GitHub types.
+//! - [`study_report`] — the pure forecast grade: [`grade`](study_report::grade)
+//!   folds a bloom's admitted study records into actual cost / time / retries
+//!   and grades them against the sealed [`Forecast`] (ADR-0151).
 //! - [`port`] — the [`SourceBackend`] / [`ProjectionBackend`] /
 //!   [`ExecutorBackend`] trait shapes adapters implement and the host mounts.
 //!   Kept here so adapters depend inward on this crate, cycle-free (ADR-0149
@@ -56,6 +59,7 @@ pub mod manifest;
 pub mod port;
 pub mod reduce;
 pub mod sign;
+pub mod study_report;
 pub mod values;
 
 #[cfg(feature = "runtime")]
@@ -74,10 +78,11 @@ pub use port::{
     MemberView, ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument, WorkHandle, WorkOrder,
 };
 pub use reduce::{
-    BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, IntegrateError, LandError, Outcome,
-    ResolveError, SealConflict, SealError, Snapshot, SupersedeError, reduce, view_of,
+    AdmitEvidenceError, BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, IntegrateError,
+    LandError, Outcome, ResolveError, SealConflict, SealError, Snapshot, SupersedeError, reduce, view_of,
 };
 pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
+pub use study_report::{BloomGrade, StudyReport, grade};
 pub use values::{
     AgentProfile, Artifact, Attempt, BloomDraft, BloomSpec, Budget, Evidence, EvidenceKind, Forecast, LandingReceipt,
     Membership, ModelOverride, NetworkProfile, Observation, Provenance, ReasoningEffort, ResolutionClaim,

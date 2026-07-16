@@ -237,9 +237,9 @@ fn commit_key(result: &CommitResult) -> &str {
 /// Project a decided event's effects into the store commit's typed axes: the
 /// membership releases and claims the `active_membership` table applies, and
 /// the outbox payloads it enqueues. The snapshot-only effects (inherit / record
-/// resolution / mark superseded / set resolved / advance mainline) carry no
-/// durable store row — they are rebuilt on replay by `reduce` + `apply` from
-/// the journaled event.
+/// resolution / record evidence / mark superseded / set resolved / advance
+/// mainline) carry no durable store row — they are rebuilt on replay by
+/// `reduce` + `apply` from the journaled event.
 #[allow(clippy::type_complexity)]
 fn project(
     decisions: &Decisions,
@@ -261,6 +261,7 @@ fn project(
             }
             Decision::InheritClaim { .. }
             | Decision::RecordResolution { .. }
+            | Decision::RecordEvidence { .. }
             | Decision::MarkSuperseded { .. }
             | Decision::SetResolved { .. }
             | Decision::AdvanceMainline { .. } => {}

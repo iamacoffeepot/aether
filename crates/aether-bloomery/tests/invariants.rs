@@ -14,8 +14,8 @@
 mod common;
 
 use aether_bloomery::{
-    Artifact, BloomStatus, Digest, Evidence, EvidenceKind, Fact, LandError, Outcome, ResolveError, SealError, Snapshot,
-    SupersedeError, reduce,
+    AdmitEvidenceError, Artifact, BloomStatus, Digest, Evidence, EvidenceKind, Fact, LandError, Outcome, ResolveError,
+    SealError, Snapshot, SupersedeError, reduce,
 };
 use aether_data::wire::to_vec;
 use common::{claim, digest, draft, event, membership, sealed_and_resolved, splice_bloom, step, workpiece};
@@ -444,6 +444,80 @@ fn re_integration_overwrites_the_stale_claim() {
         }
         other => panic!("expected Resolved, got {other:?}"),
     }
+}
+
+// ADR-0151 — a study-record evidence admitted against a sealed bloom is recorded
+// in the per-bloom evidence log, in admission order, and the reducer reports the
+// bloom + subject it recorded against. A freshly sealed bloom starts with an
+// empty log. Tripwire: the `AdmitEvidence` arm or the `RecordEvidence` apply
+// effect dropping the append.
+#[test]
+fn admit_evidence_records_it_in_the_bloom_log() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    assert!(snapshot.blooms.get(&bloom).unwrap().evidence.is_empty(), "a freshly sealed bloom logs no evidence");
+
+    let study = Evidence { subject: digest(70), kind: EvidenceKind::StudyRecord, detail: digest(80) };
+    let (after, decided) = step(&snapshot, &event("admit", Fact::AdmitEvidence { bloom, evidence: study.clone() }));
+    match decided.outcome {
+        Outcome::EvidenceAdmitted { bloom: b, subject } => {
+            assert_eq!(b, bloom);
+            assert_eq!(subject, digest(70));
+        }
+        other => panic!("expected EvidenceAdmitted, got {other:?}"),
+    }
+    assert_eq!(after.blooms.get(&bloom).unwrap().evidence, vec![study]);
+}
+
+// ADR-0151 — admission binds to the evidence-log door: an unknown or inactive
+// bloom is `UnknownOrInactiveBloom`, and an integrating class (a `ResolutionClaim`
+// integrates, an `Approval` seals a member) is `EvidenceNotBound` — a resolution
+// claim never enters through `AdmitEvidence`.
+#[test]
+fn admit_evidence_refuses_unknown_bloom_and_the_wrong_door() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+
+    // Unknown bloom — nothing sealed yet.
+    let study = Evidence { subject: digest(70), kind: EvidenceKind::StudyRecord, detail: digest(80) };
+    let unknown = reduce(&base, &event("u", Fact::AdmitEvidence { bloom, evidence: study }));
+    assert!(matches!(unknown.outcome, Outcome::AdmitEvidenceRejected(AdmitEvidenceError::UnknownOrInactiveBloom)));
+    assert!(unknown.effects.is_empty());
+
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    // A resolution claim is bound to the integrate door, not the evidence log.
+    let claim_ev = Evidence { subject: digest(70), kind: EvidenceKind::ResolutionClaim, detail: digest(80) };
+    let mis_routed = reduce(&snapshot, &event("c", Fact::AdmitEvidence { bloom, evidence: claim_ev }));
+    assert!(matches!(mis_routed.outcome, Outcome::AdmitEvidenceRejected(AdmitEvidenceError::EvidenceNotBound)));
+
+    // An approval seals a member; it is not free-log evidence either.
+    let approval = Evidence { subject: digest(70), kind: EvidenceKind::Approval, detail: digest(80) };
+    let also_mis = reduce(&snapshot, &event("a", Fact::AdmitEvidence { bloom, evidence: approval }));
+    assert!(matches!(also_mis.outcome, Outcome::AdmitEvidenceRejected(AdmitEvidenceError::EvidenceNotBound)));
+}
+
+// ADR-0151 — a replayed admission is a no-op: the existing `seen`-set guard
+// covers `AdmitEvidence` for free, so a resent idempotency key reduces to
+// `Duplicate` and the log does not grow a second copy.
+#[test]
+fn a_replayed_admission_is_a_duplicate() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let study = Evidence { subject: digest(70), kind: EvidenceKind::StudyRecord, detail: digest(80) };
+    let admit = event("admit", Fact::AdmitEvidence { bloom, evidence: study });
+    let (once, _) = step(&snapshot, &admit);
+    assert_eq!(once.blooms.get(&bloom).unwrap().evidence.len(), 1);
+
+    let (twice, replay) = step(&once, &admit);
+    assert!(matches!(replay.outcome, Outcome::Duplicate));
+    assert_eq!(twice.blooms.get(&bloom).unwrap().evidence.len(), 1, "a replayed key does not re-append");
 }
 
 // m4 — an unknown bloom and a not-yet-resolved bloom each land-refuse with their
