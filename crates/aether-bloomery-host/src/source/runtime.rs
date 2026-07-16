@@ -13,15 +13,40 @@
 //! over an explicit [`SourceShell`].
 
 use aether_actor::runtime;
-use aether_bloomery::{BloomId, Checkpoint, Digest, IntegrateOutcome, LandOutcome};
+use aether_bloomery::{BloomId, Checkpoint, ClaimOutcome, Digest, IntegrateOutcome, LandOutcome, WorkpieceId};
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::SourceCapability;
 use super::kinds::{
-    Integrate, IntegrateResult, Land, LandResult, ListCheckpoints, ListCheckpointsResult, RecordCheckpoint,
-    RecordCheckpointResult, Snapshot, SnapshotResult,
+    ClaimResult, ClaimSeal, Integrate, IntegrateResult, Land, LandResult, ListCheckpoints, ListCheckpointsResult,
+    RecordCheckpoint, RecordCheckpointResult, ReleaseSeal, Snapshot, SnapshotResult, TransferSeal,
 };
 use crate::bloomery::SourceShell;
+
+/// Decode one `aether_data::wire`-encoded [`WorkpieceId`] per entry, or a
+/// [`ClaimResult::Err`] naming the first decode failure.
+fn decode_workpieces(encoded: &[Vec<u8>]) -> Result<Vec<WorkpieceId>, ClaimResult> {
+    let mut workpieces = Vec::with_capacity(encoded.len());
+    for bytes in encoded {
+        match from_bytes(bytes) {
+            Ok(workpiece) => workpieces.push(workpiece),
+            Err(error) => return Err(ClaimResult::Err { error: error.to_string() }),
+        }
+    }
+    Ok(workpieces)
+}
+
+/// Encode a [`ClaimOutcome`] into its [`ClaimResult`] reply — the shared
+/// mapping the claim / transfer / release handlers converge on.
+fn claim_result(outcome: ClaimOutcome) -> ClaimResult {
+    match outcome {
+        ClaimOutcome::Acquired => ClaimResult::Acquired,
+        ClaimOutcome::Held { ref_kind, held_by } => match (to_vec(&ref_kind), to_vec(&held_by)) {
+            (Ok(ref_kind), Ok(held_by)) => ClaimResult::Held { ref_kind, held_by },
+            (Err(error), _) | (_, Err(error)) => ClaimResult::Err { error: error.to_string() },
+        },
+    }
+}
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
@@ -155,6 +180,79 @@ impl SourceCapabilityState {
             Err(error) => LandResult::Err { error: error.to_string() },
         }
     }
+
+    /// Decode `bloom` / `workpieces`, run the all-or-nothing seal `op` (acquire
+    /// or release), and encode the outcome — the shared body of
+    /// [`claim_seal`](Self::claim_seal) and [`release_seal`](Self::release_seal),
+    /// which differ only in the shell op they drive.
+    fn seal_op(
+        &self,
+        bloom: &[u8],
+        workpieces: &[Vec<u8>],
+        op: impl FnOnce(&SourceShell, &BloomId, &[WorkpieceId]) -> Result<ClaimOutcome, aether_bloomery_github::SourceError>,
+    ) -> ClaimResult {
+        let bloom: BloomId = match from_bytes(bloom) {
+            Ok(bloom) => bloom,
+            Err(error) => return ClaimResult::Err { error: error.to_string() },
+        };
+        let workpieces = match decode_workpieces(workpieces) {
+            Ok(workpieces) => workpieces,
+            Err(reply) => return reply,
+        };
+        match op(&self.shell, &bloom, &workpieces) {
+            Ok(outcome) => claim_result(outcome),
+            Err(error) => ClaimResult::Err { error: error.to_string() },
+        }
+    }
+
+    /// Decode `bloom` / `workpieces`, acquire the seal, and encode the outcome.
+    #[must_use]
+    pub fn claim_seal(&self, bloom: &[u8], workpieces: &[Vec<u8>]) -> ClaimResult {
+        self.seal_op(bloom, workpieces, SourceShell::claim_seal)
+    }
+
+    /// Decode `bloom` / `workpieces`, release the seal, and encode the outcome.
+    #[must_use]
+    pub fn release_seal(&self, bloom: &[u8], workpieces: &[Vec<u8>]) -> ClaimResult {
+        self.seal_op(bloom, workpieces, SourceShell::release_seal)
+    }
+
+    /// Decode the operands, transfer the seal from predecessor to successor, and
+    /// encode the outcome.
+    #[must_use]
+    pub fn transfer_seal(
+        &self,
+        predecessor: &[u8],
+        successor: &[u8],
+        carried: &[Vec<u8>],
+        net_new: &[Vec<u8>],
+        dropped: &[Vec<u8>],
+    ) -> ClaimResult {
+        let predecessor: BloomId = match from_bytes(predecessor) {
+            Ok(predecessor) => predecessor,
+            Err(error) => return ClaimResult::Err { error: error.to_string() },
+        };
+        let successor: BloomId = match from_bytes(successor) {
+            Ok(successor) => successor,
+            Err(error) => return ClaimResult::Err { error: error.to_string() },
+        };
+        let carried = match decode_workpieces(carried) {
+            Ok(carried) => carried,
+            Err(reply) => return reply,
+        };
+        let net_new = match decode_workpieces(net_new) {
+            Ok(net_new) => net_new,
+            Err(reply) => return reply,
+        };
+        let dropped = match decode_workpieces(dropped) {
+            Ok(dropped) => dropped,
+            Err(reply) => return reply,
+        };
+        match self.shell.transfer_seal(&predecessor, &successor, &carried, &net_new, &dropped) {
+            Ok(outcome) => claim_result(outcome),
+            Err(error) => ClaimResult::Err { error: error.to_string() },
+        }
+    }
 }
 
 #[runtime]
@@ -209,5 +307,23 @@ impl NativeActor for SourceCapability {
     #[handler::single]
     fn on_land(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Land) -> LandResult {
         state.land(&mail.bloom, &mail.expected_base, &mail.new_head)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    #[handler::single]
+    fn on_claim_seal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ClaimSeal) -> ClaimResult {
+        state.claim_seal(&mail.bloom, &mail.workpieces)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    #[handler::single]
+    fn on_transfer_seal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: TransferSeal) -> ClaimResult {
+        state.transfer_seal(&mail.predecessor, &mail.successor, &mail.carried, &mail.net_new, &mail.dropped)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    #[handler::single]
+    fn on_release_seal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ReleaseSeal) -> ClaimResult {
+        state.release_seal(&mail.bloom, &mail.workpieces)
     }
 }

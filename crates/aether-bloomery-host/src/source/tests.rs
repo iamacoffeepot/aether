@@ -11,17 +11,29 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{BloomId, Digest};
+use aether_bloomery::{BloomId, ClaimRefKind, Digest, WorkpieceId};
 use aether_bloomery_github::GitSource;
 use aether_bloomery_github::testing::FakeGithub;
 use aether_data::wire::{from_bytes, to_vec};
 
-use super::kinds::{LandResult, SnapshotResult};
+use super::kinds::{ClaimResult, LandResult, SnapshotResult};
 use super::runtime::SourceCapabilityState;
 use crate::bloomery::SourceShell;
 
 fn digest(seed: u8) -> Digest {
     Digest::from_bytes([seed; 32])
+}
+
+fn workpiece(id: &str) -> WorkpieceId {
+    WorkpieceId(id.to_owned())
+}
+
+/// State over a plain `cas_land_enabled = false` [`GitSource`] with no seeded
+/// namespace — the claim ops act on their own claim refs, not the integration
+/// branch, so they need no base commit.
+fn claim_state() -> SourceCapabilityState {
+    let backend = GitSource::new(FakeGithub::new(), false);
+    SourceCapabilityState::new(SourceShell::new(Arc::new(backend)))
 }
 
 /// Seed a fake with a base commit and a mainline ref at it, create the bloom's
@@ -69,4 +81,64 @@ fn land_maps_a_moved_base_to_base_moved() {
     };
     assert_eq!(from_bytes::<Digest>(&expected).unwrap(), base, "expected carries the caller's stale base");
     assert_eq!(from_bytes::<Digest>(&actual).unwrap(), moved, "actual carries mainline's real current head");
+}
+
+#[test]
+fn claim_seal_decodes_the_members_and_encodes_acquired() {
+    let state = claim_state();
+    let claimant = BloomId(digest(1));
+    let workpieces = [to_vec(&workpiece("wp-1")).unwrap(), to_vec(&workpiece("wp-2")).unwrap()];
+
+    let reply = state.claim_seal(&to_vec(&claimant).unwrap(), &workpieces);
+
+    assert_eq!(reply, ClaimResult::Acquired, "a fresh acquire of both members and the admission ref");
+}
+
+#[test]
+fn claim_seal_conflict_encodes_held_with_the_wire_ref_kind_and_holder() {
+    // The Held branch wire-encodes both `ref_kind` and `held_by` — this crate's
+    // own outcome→reply mapping, mirroring `land`'s BaseMoved encoding.
+    let state = claim_state();
+    let holder = BloomId(digest(1));
+    let contender = BloomId(digest(2));
+    let w1 = [to_vec(&workpiece("wp-1")).unwrap()];
+    assert_eq!(state.claim_seal(&to_vec(&holder).unwrap(), &w1), ClaimResult::Acquired);
+
+    let reply = state.claim_seal(&to_vec(&contender).unwrap(), &w1);
+
+    let ClaimResult::Held { ref_kind, held_by } = reply else {
+        panic!("expected Held, got {reply:?}")
+    };
+    assert_eq!(
+        from_bytes::<ClaimRefKind>(&ref_kind).unwrap(),
+        ClaimRefKind::Workpiece(workpiece("wp-1")),
+        "ref_kind carries the conflicting member ref",
+    );
+    assert_eq!(from_bytes::<BloomId>(&held_by).unwrap(), holder, "held_by carries the current holder");
+}
+
+#[test]
+fn transfer_seal_decodes_every_partition_and_encodes_acquired() {
+    let state = claim_state();
+    let predecessor = BloomId(digest(1));
+    let successor = BloomId(digest(2));
+    let w1 = [to_vec(&workpiece("wp-1")).unwrap()];
+    assert_eq!(state.claim_seal(&to_vec(&predecessor).unwrap(), &w1), ClaimResult::Acquired);
+
+    // Carry the sole member (and the admission ref) from predecessor to successor.
+    let reply = state.transfer_seal(&to_vec(&predecessor).unwrap(), &to_vec(&successor).unwrap(), &w1, &[], &[]);
+
+    assert_eq!(reply, ClaimResult::Acquired, "the carried member and admission ref moved to the successor");
+}
+
+#[test]
+fn release_seal_decodes_the_members_and_encodes_acquired() {
+    let state = claim_state();
+    let holder = BloomId(digest(1));
+    let w1 = [to_vec(&workpiece("wp-1")).unwrap()];
+    assert_eq!(state.claim_seal(&to_vec(&holder).unwrap(), &w1), ClaimResult::Acquired);
+
+    let reply = state.release_seal(&to_vec(&holder).unwrap(), &w1);
+
+    assert_eq!(reply, ClaimResult::Acquired, "the held member and admission ref were released");
 }
