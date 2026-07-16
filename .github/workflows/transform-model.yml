@@ -1,0 +1,68 @@
+name: Transform (model lane, BYO)
+
+# ADR-0149 §Execution's WORKER-SIDE model lane (#3511) — the sibling of the
+# zero-secret mechanical `transform.yml`. The `construct.implement` lane runs
+# headless Claude, so it needs a Claude credential; that credential is
+# non-delegable and holder-restricted (BYO-worker). A contributor runs THIS
+# wrapper in their own fork with their own Claude secret: it checks out the exact
+# digest a resolved work order names, runs the same `cargo xtask transform
+# construct.implement` entrypoint at the coordinator-resolved model + effort, and
+# uploads the nonce-tagged result-record evidence.
+#
+# The BYO boundary is the whole point: the coordinator dispatches by nonce+digest
+# and validates the returned evidence by nonce+digest — it never sets this
+# secret and never sees the credential. Do NOT add the Claude secret to the
+# coordinator repo; that would collapse the boundary this lane exists to keep.
+# `transform.yml` stays zero-secret and is the only lane the coordinator runs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Exact digest to check out"
+        required: true
+      nonce:
+        description: "Idempotency nonce stamped into evidence.json"
+        required: true
+      model:
+        description: "Coordinator-resolved model (from the sealed scope-revision override)"
+        required: true
+      effort:
+        description: "Coordinator-resolved reasoning effort tier"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  transform-model:
+    name: Transform (model lane)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+      - name: Install the Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Run the construct lane (worker-side, BYO credential)
+        # The worker's own Claude secret, set in the worker's fork — never the
+        # coordinator's. The result-record derivation runs node over the
+        # transcript; the credential reaches only this step.
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          AETHER_CONSTRUCT_EFFORT: ${{ inputs.effort }}
+        run: >-
+          cargo xtask transform construct.implement
+          --out evidence
+          --nonce ${{ inputs.nonce }}
+          --model ${{ inputs.model }}
+          --effort ${{ inputs.effort }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-${{ inputs.nonce }}
+          path: evidence
