@@ -28,7 +28,7 @@ use crate::bloomery::MirrorDriverCapability;
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
 use crate::bloomery::mirror::GithubMirrorConfig;
-use crate::source::{SourceCapability, SourceConfig};
+use crate::source::SourceCapability;
 use crate::store::{StoreCapability, StoreConfig};
 
 /// The default RPC port when `AETHER_RPC_PORT` is unset (distinct from the hub's
@@ -102,11 +102,11 @@ pub struct BloomeryEnv {
     pub store: StoreConfig,
     /// The eviction-free artifacts content-store configuration.
     pub artifacts: ArtifactsConfig,
-    /// The GitHub outward-mirror configuration driving the outbox consumer.
-    /// Unconfigured (empty token/owner/repo) mounts the mirror driver disabled.
-    pub mirror: GithubMirrorConfig,
-    /// The git source-port capability's GitHub connection configuration.
-    pub source: SourceConfig,
+    /// The shared GitHub connection configuration serving both the outbox-consumer
+    /// mirror driver and the git source-port capability (one config, not two —
+    /// `SourceConfig` is a re-export of `GithubMirrorConfig`). Unconfigured
+    /// (empty token/owner/repo) mounts the mirror driver disabled.
+    pub github: GithubMirrorConfig,
     /// Path to the control-core component wasm to autoload at boot; unset → no
     /// autoload (the control core is loaded on demand over RPC).
     pub control_core_wasm: Option<String>,
@@ -141,10 +141,9 @@ impl BloomeryEnv {
         let http_port = HttpPortConfig::try_from_argv_then_env(cli.http.clone().into_layer())?.port;
         let store = StoreConfig::try_from_argv_then_env(cli.store.clone().into_layer())?;
         let artifacts = ArtifactsConfig::try_from_argv_then_env(cli.artifacts.clone().into_layer())?;
-        let mirror = GithubMirrorConfig::try_from_argv_then_env(cli.github.clone().into_layer())?;
-        let source = SourceConfig::try_from_argv_then_env(cli.source.clone().into_layer())?;
+        let github = GithubMirrorConfig::try_from_argv_then_env(cli.github.clone().into_layer())?;
         let control_core_wasm = ControlCoreConfig::try_from_argv_then_env(cli.control_core.clone().into_layer())?.wasm;
-        Ok(Self { rpc_port, http_port, store, artifacts, mirror, source, control_core_wasm })
+        Ok(Self { rpc_port, http_port, store, artifacts, github, control_core_wasm })
     }
 }
 
@@ -189,7 +188,7 @@ impl BloomeryChassis {
     }
 
     fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let BloomeryEnv { rpc_port, http_port, store, artifacts, mirror, source, control_core_wasm } = env;
+        let BloomeryEnv { rpc_port, http_port, store, artifacts, github, control_core_wasm } = env;
         let boot = SubstrateBoot::builder("aether-bloomery", env!("CARGO_PKG_VERSION")).build()?;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
@@ -215,8 +214,8 @@ impl BloomeryChassis {
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<StoreCapability>(store)
             .with_actor::<ArtifactsCapability>(artifacts)
-            .with_actor::<MirrorDriverCapability>(mirror)
-            .with_actor::<SourceCapability>(source)
+            .with_actor::<MirrorDriverCapability>(github.clone())
+            .with_actor::<SourceCapability>(github)
             .with_actor::<ComponentHostCapability>(component_host)
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: rpc_addr.to_string(),
@@ -261,24 +260,22 @@ impl BloomeryChassis {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{ArtifactsConfig, BloomeryChassis, BloomeryEnv, Chassis, GithubMirrorConfig};
-    use crate::source::SourceConfig;
     use crate::store::StoreConfig;
 
     #[test]
     fn chassis_boots_and_claims_its_mailboxes() {
         // Port 0 → an OS-assigned ephemeral RPC port; the default `:memory:`
         // store touches no filesystem, and the artifacts store points at a temp
-        // root so the test opens no data dir. The default (unconfigured) mirror
-        // mounts the driver disabled — no timer, no network — so the chassis
-        // boots clean without a token, and the default source config connects no
-        // network (`ReqwestGithub::new` builds a client with no request). A
-        // successful `build` boots every passive (store, artifacts, mirror,
-        // source, trace, component host, rpc) and claims each mailbox — a claim
-        // conflict or a failed store/shell open would surface as a `BootError`,
-        // so `build` returning `Ok` is the assertion that the `aether.store`,
-        // `aether.artifacts`, `aether.bloomery.mirror`, `aether.source`, and
-        // `aether.component` mailboxes were claimed (the component host is the
-        // reducer-actor load surface, ADR-0149 §Packaging).
+        // root so the test opens no data dir. The default (unconfigured) shared
+        // GitHub config mounts the mirror driver disabled — no timer, no network
+        // — and connects no source network (`ReqwestGithub::new` builds a client
+        // with no request). A successful `build` boots every passive (store,
+        // artifacts, mirror, source, trace, component host, rpc) and claims each
+        // mailbox — a claim conflict or a failed store/shell open would surface
+        // as a `BootError`, so `build` returning `Ok` is the assertion that the
+        // `aether.store`, `aether.artifacts`, `aether.bloomery.mirror`,
+        // `aether.source`, and `aether.component` mailboxes were claimed (the
+        // component host is the reducer-actor load surface, ADR-0149 §Packaging).
         let artifacts_root = tempfile::tempdir().unwrap();
         let env = BloomeryEnv {
             rpc_port: 0,
@@ -287,8 +284,7 @@ mod tests {
             http_port: 0,
             store: StoreConfig::default(),
             artifacts: ArtifactsConfig { root: Some(artifacts_root.path().to_str().unwrap().to_owned()) },
-            mirror: GithubMirrorConfig::default(),
-            source: SourceConfig::default(),
+            github: GithubMirrorConfig::default(),
             // No autoload: this test asserts the passive caps claim their
             // mailboxes; component autoload is exercised by the control_loop
             // integration test.
