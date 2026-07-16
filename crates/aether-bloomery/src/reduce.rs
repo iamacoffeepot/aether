@@ -26,7 +26,9 @@ use serde::{Deserialize, Serialize};
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, WorkpieceId};
 use crate::port::{BloomView, MemberView, ViewDocument};
-use crate::values::{BloomSpec, EvidenceKind, LandingReceipt, Membership, ResolutionClaim, ResolvedBloom};
+use crate::values::{
+    BloomSpec, EvidenceKind, LandingReceipt, Membership, ResolutionClaim, ResolvedBloom, StageCatalog,
+};
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
 /// core). Holds nothing that is not derivable from the journal.
@@ -267,6 +269,16 @@ pub enum SealError {
     /// A sealed or resolved bloom already occupies the mainline. V1 permits one
     /// unlanded bloom per mainline; a successor seals via supersession instead.
     ActiveBloomExists(BloomId),
+    /// The sealing spec froze a stage-catalog digest that is not the line the
+    /// pipeline runs ([`StageCatalog::line_digest`]). An executed bloom is
+    /// graded against the exact catalog it promised (ADR-0149 §The line), so a
+    /// bloom that promises an unknown line — including the zero default — is
+    /// inadmissible. V1 knows exactly one catalog; the `found` field leaves room
+    /// for a known-catalog *set* later.
+    UnknownStageCatalog {
+        /// The unrecognized catalog digest the spec sealed.
+        found: Digest,
+    },
 }
 
 /// Why a supersession was refused.
@@ -360,6 +372,12 @@ fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec) -> Decisions {
     if let Err(error) = validate_member_admission(spec.members()) {
         return Decisions::rejected(Outcome::SealRejected(error));
     }
+    // The frozen catalog must be the line the pipeline runs — a bloom is graded
+    // against the exact catalog it promised (ADR-0149 §The line), so an unknown
+    // catalog (including the zero default) is inadmissible.
+    if let Err(error) = validate_stage_catalog(spec) {
+        return Decisions::rejected(Outcome::SealRejected(error));
+    }
     // All-or-nothing admission: any member already in a foreign active bloom
     // aborts the whole seal, naming the conflict — a failed batch admission
     // leaves no claims (ADR-0149 §The bloom).
@@ -406,6 +424,22 @@ fn validate_member_admission(members: &[Membership]) -> Result<(), SealError> {
     Ok(())
 }
 
+/// The seal-time stage-catalog admission: the sealing spec's frozen catalog
+/// digest must equal [`StageCatalog::line_digest`], the one line the pipeline
+/// runs (ADR-0149 §The line). Both the first-door seal and the second-door
+/// supersession run it, so a successor promises the same known line a fresh
+/// seal does. The error is a [`SealError`] — seal's vocabulary is canonical;
+/// supersession wraps it as [`SupersedeError::InvalidMember`]. V1 has exactly
+/// one known catalog, so the check is equality; the typed variant leaves room
+/// for a known-catalog set later.
+fn validate_stage_catalog(spec: &BloomSpec) -> Result<(), SealError> {
+    let found = spec.stage_catalog();
+    if found != StageCatalog::line_digest() {
+        return Err(SealError::UnknownStageCatalog { found });
+    }
+    Ok(())
+}
+
 /// The first member already held by an active bloom other than `exempt`, if
 /// any. `exempt` names a predecessor whose holds are being released in the same
 /// decision set (supersession) and so are not conflicts.
@@ -445,6 +479,11 @@ fn reduce_supersede(snapshot: &Snapshot, predecessor: &BloomId, successor: &Bloo
     // anything — an empty, duplicate-workpiece, or unapproved successor is
     // refused here rather than admitted on invalid members (ADR-0149).
     if let Err(error) = validate_member_admission(successor.members()) {
+        return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
+    }
+    // A superseding spec is held to seal's catalog admission too — it must
+    // promise the same known line (ADR-0149 §The line).
+    if let Err(error) = validate_stage_catalog(successor) {
         return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::InvalidMember(error)));
     }
     // Supersession is a second door into `active`, so it runs the same

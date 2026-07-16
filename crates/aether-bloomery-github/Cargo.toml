@@ -10,7 +10,9 @@ license.workspace = true
 # renders outward. The adapter depends *inward* on the control core, never
 # the reverse (ADR-0149 §The boundary) — that is what keeps the static-link
 # DAG cycle-free.
-aether-bloomery = { path = "../aether-bloomery" }
+# The pure reducer + value vocabulary. `default-features = false` links only
+# the rlib core, never the guest-SDK `runtime` feature (issue #3497).
+aether-bloomery = { path = "../aether-bloomery", default-features = false }
 # The adapter owns its own async-free HTTP client directly rather than
 # routing through the guest-facing `aether.http` egress cap: the landed
 # ports are synchronous (`fn reconcile_view(&self, …) -> Result`), so the

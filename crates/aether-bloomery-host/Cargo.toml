@@ -45,7 +45,11 @@ aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 # The bloom-protocol value types the store journals (as wire bytes) and the
 # host replays through the reducer.
-aether-bloomery = { path = "../aether-bloomery" }
+# The pure reducer + value vocabulary + control-plane mail kinds. `default-features
+# = false` links only the rlib core, never the guest-SDK `runtime` feature (the
+# wasm control actor + `export!`) — the host mounts that actor as a wasm component,
+# it never links it natively (issue #3497).
+aether-bloomery = { path = "../aether-bloomery", default-features = false }
 serde = { workspace = true, features = ["derive", "alloc"] }
 
 # Runtime-only (native).

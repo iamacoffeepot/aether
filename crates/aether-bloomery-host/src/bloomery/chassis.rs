@@ -5,13 +5,17 @@
 //! dispatch), the `SQLite`-backed `StoreCapability`, `RpcServerCapability` (the
 //! external typed-mail ingress the Demo dials), and a signal-blocking driver.
 
+use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use aether_actor::Addressable;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::trace::TraceDispatchCapability;
-use aether_kinds::BinaryManifest;
+use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
+use aether_data::{Kind, mailbox_id_from_name};
+use aether_kinds::{BinaryManifest, LoadComponent};
+use aether_substrate::Mail;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::ConfigError;
@@ -42,6 +46,22 @@ impl Default for RpcPortConfig {
     }
 }
 
+/// The boot-autoload knob (ADR-0149 §Packaging), resolved argv > env > default.
+/// When set, the chassis autoloads the control-core wasm actor at boot so the
+/// coordinator comes up as a running control loop with no external
+/// `aether.component.load` step. Unset → the bin boots the passive caps only and
+/// the control core is loaded on demand over RPC. Bloomery links exactly one
+/// autoloadable component, so this is a single wasm path rather than a
+/// multi-entry manifest.
+#[derive(Clone, Debug, Default, aether_substrate::Config)]
+#[config(env_prefix = "AETHER_CONTROL_CORE", cli_prefix = "control-core")]
+pub struct ControlCoreConfig {
+    /// Path to the control-core component wasm to autoload at boot
+    /// (`AETHER_CONTROL_CORE_WASM` / `--control-core-wasm`). Unset → no autoload.
+    #[config(cli_long = "control-core-wasm")]
+    pub wasm: Option<String>,
+}
+
 /// The unit marker for the Bloomery chassis (ADR-0071).
 pub struct BloomeryChassis;
 
@@ -54,6 +74,9 @@ pub struct BloomeryEnv {
     pub store: StoreConfig,
     /// The eviction-free artifacts content-store configuration.
     pub artifacts: ArtifactsConfig,
+    /// Path to the control-core component wasm to autoload at boot; unset → no
+    /// autoload (the control core is loaded on demand over RPC).
+    pub control_core_wasm: Option<String>,
 }
 
 impl BloomeryEnv {
@@ -84,7 +107,8 @@ impl BloomeryEnv {
         let rpc_port = RpcPortConfig::try_from_argv_then_env(cli.rpc.clone().into_layer())?.port;
         let store = StoreConfig::try_from_argv_then_env(cli.store.clone().into_layer())?;
         let artifacts = ArtifactsConfig::try_from_argv_then_env(cli.artifacts.clone().into_layer())?;
-        Ok(Self { rpc_port, store, artifacts })
+        let control_core_wasm = ControlCoreConfig::try_from_argv_then_env(cli.control_core.clone().into_layer())?.wasm;
+        Ok(Self { rpc_port, store, artifacts, control_core_wasm })
     }
 }
 
@@ -111,6 +135,7 @@ impl BloomeryChassis {
             <TraceDispatchCapability as Addressable>::NAMESPACE.to_owned(),
             <StoreCapability as Addressable>::NAMESPACE.to_owned(),
             <ArtifactsCapability as Addressable>::NAMESPACE.to_owned(),
+            <ComponentHostCapability as Addressable>::NAMESPACE.to_owned(),
             <RpcServerCapability as Addressable>::NAMESPACE.to_owned(),
         ];
         BinaryManifest {
@@ -123,19 +148,32 @@ impl BloomeryChassis {
     }
 
     fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let BloomeryEnv { rpc_port, store, artifacts } = env;
+        let BloomeryEnv { rpc_port, store, artifacts, control_core_wasm } = env;
         let boot = SubstrateBoot::builder("aether-bloomery", env!("CARGO_PKG_VERSION")).build()?;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
+        // A second handle for the post-build autoload drain: `mailer` is moved
+        // into the builder, so the drain pushes through this clone.
+        let autoload_mailer = Arc::clone(&boot.queue);
         let rpc_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port);
+        // The component host lets the coordinator load the control-core wasm
+        // actor (ADR-0149 §Packaging) — the reducer runtime that owns the live
+        // snapshot. Built from the same wasmtime engine/linker/outbound the boot
+        // set up, mirroring the headless chassis.
+        let component_host = ComponentHostConfig {
+            engine: Arc::clone(&boot.engine),
+            linker: Arc::clone(&boot.linker),
+            hub_outbound: Arc::clone(&boot.outbound),
+        };
 
         // The driver owns the boot and drops it on the shutdown signal.
         let driver = BloomeryDriverCapability { boot };
 
-        Builder::<Self>::new(registry, mailer)
+        let built = Builder::<Self>::new(registry, mailer)
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<StoreCapability>(store)
             .with_actor::<ArtifactsCapability>(artifacts)
+            .with_actor::<ComponentHostCapability>(component_host)
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: rpc_addr.to_string(),
                 peer_kind: PeerKind::Substrate {
@@ -145,7 +183,24 @@ impl BloomeryChassis {
                 },
             })
             .driver(driver)
-            .build()
+            .build()?;
+
+        // Autoload the control-core component if a wasm path is configured, so
+        // the coordinator comes up as a running control loop with no external
+        // load step. Fire-and-forward after `build` (the component-host mailbox
+        // is claimed and the worker pool is up), mirroring the bundle chassis
+        // autoload drain — the component is live shortly after `run` begins.
+        if let Some(path) = control_core_wasm {
+            let wasm = fs::read(&path).map_err(|error| BootError::Other(Box::new(error)))?;
+            let payload = LoadComponent { wasm, name: None, config: Vec::new(), export: None }.encode_into_bytes();
+            // Boot-time wire mail to the well-known component-host mailbox — a
+            // reference id derivation, not sibling-cap addressing (the
+            // `autoload_mail` precedent).
+            #[allow(clippy::disallowed_methods)]
+            let recipient = mailbox_id_from_name(<ComponentHostCapability as Addressable>::NAMESPACE);
+            autoload_mailer.push(Mail::new(recipient, LoadComponent::ID, payload, 1));
+        }
+        Ok(built)
     }
 }
 
@@ -160,15 +215,21 @@ mod tests {
         // Port 0 → an OS-assigned ephemeral RPC port; the default `:memory:`
         // store touches no filesystem, and the artifacts store points at a temp
         // root so the test opens no data dir. A successful `build` boots every
-        // passive (store, artifacts, trace, rpc) and claims each mailbox — a
-        // claim conflict or a failed store open would surface as a `BootError`,
-        // so `build` returning `Ok` is the assertion that the `aether.store` and
-        // `aether.artifacts` mailboxes were claimed.
+        // passive (store, artifacts, trace, component host, rpc) and claims each
+        // mailbox — a claim conflict or a failed store open would surface as a
+        // `BootError`, so `build` returning `Ok` is the assertion that the
+        // `aether.store`, `aether.artifacts`, and `aether.component` mailboxes
+        // were claimed (the component host is the reducer-actor load surface,
+        // ADR-0149 §Packaging).
         let artifacts_root = tempfile::tempdir().unwrap();
         let env = BloomeryEnv {
             rpc_port: 0,
             store: StoreConfig::default(),
             artifacts: ArtifactsConfig { root: Some(artifacts_root.path().to_str().unwrap().to_owned()) },
+            // No autoload: this test asserts the passive caps claim their
+            // mailboxes; component autoload is exercised by the control_loop
+            // integration test.
+            control_core_wasm: None,
         };
         let chassis = BloomeryChassis::build(env).expect("bloomery chassis boots and claims its mailboxes");
         assert_eq!(BloomeryChassis::PROFILE, "bloomery");
