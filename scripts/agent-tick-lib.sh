@@ -120,3 +120,31 @@ answer_stale() {
   age=$(( $(date -u +%s) - $(date -u -d "$ts" +%s) ))
   [ "$age" -ge "$STRAND_GRACE_SECS" ]
 }
+
+# Umbrella classification predicates (#3484). A non-empty ## Sub-issues section
+# no longer means "pure umbrella" on its own: an implementable slice can list
+# spun-out DEPENDENTS under ## Sub-issues while carrying its own plan (#3458).
+# The discriminator is a child back-reference — a listed child that names this
+# parent under its own ## Depends on is a dependent, not a decomposition child —
+# so the tick composes these two predicates and only rests/auto-closes as an
+# umbrella when NOT every listed child back-references. Both read a body on
+# stdin, so the calling convention is concrete.
+
+# sub_issue_numbers — reads a parent body on stdin, prints the child issue
+# numbers from its ## Sub-issues section (the extraction the tick used inline,
+# lifted verbatim so behavior is preserved).
+sub_issue_numbers() {
+  awk '/^## Sub-issues/{f=1; next} /^## /{f=0} f' \
+    | grep -oE '^[[:space:]]*-[[:space:]]+#[0-9]+' \
+    | grep -oE '[0-9]+' | sort -u || true
+}
+
+# body_depends_on — $1 = parent number; reads a child body on stdin; returns 0
+# iff the child's ## Depends on section names #<parent> as a whole token. The
+# awk keeps the header line (`print` before `next`) so the inline
+# `## Depends on: #NNN` form is matched alongside the canonical bullet form; the
+# anchored grep matches #3458 without matching #34580.
+body_depends_on() {
+  awk '/^## Depends on/{f=1; print; next} /^## /{f=0} f' \
+    | grep -qE "(^|[^0-9])#$1([^0-9]|\$)"
+}

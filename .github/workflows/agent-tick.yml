@@ -738,33 +738,53 @@ jobs:
                 # never gets a PR and so is structurally unreachable by the
                 # PR-driven reconciler. Otherwise it rests. A parse failure
                 # (no child references found) rests rather than closes.
-                sub_issues="$(gh api "repos/${REPO}/issues/${num}" --jq '.body // ""' \
-                  | awk '/^## Sub-issues/{f=1; next} /^## /{f=0} f' \
+                #
+                # But a non-empty ## Sub-issues is NOT a pure umbrella when every
+                # listed child back-references this issue via its own ## Depends
+                # on (#3484): that is an implementable slice with spun-out
+                # DEPENDENTS (#3458), which must dispatch implement rather than
+                # deadlock waiting on children that cannot start until it lands.
+                # The back-reference is the slice-vs-umbrella discriminator. Bind
+                # the body once (closes the unbound-$body set -u gap) and derive
+                # sub_issues from it without a re-fetch.
+                body="$(gh api "repos/${REPO}/issues/${num}" --jq '.body // ""')"
+                sub_issues="$(awk '/^## Sub-issues/{f=1; next} /^## /{f=0} f' <<<"$body" \
                   | grep -v '^[[:space:]]*$' || true)"
                 if [ -n "$sub_issues" ]; then
-                  children="$(grep -oE '^[[:space:]]*-[[:space:]]+#[0-9]+' <<<"$sub_issues" \
-                    | grep -oE '[0-9]+' | sort -u || true)"
-                  found=0 open_children=0
+                  children="$(sub_issue_numbers <<<"$body")"
+                  found=0 open_children=0 backref_all=1
                   for child in $children; do
                     found=$((found + 1))
                     child_state="$(gh api "repos/${REPO}/issues/${child}" --jq '.state' || echo unknown)"
                     [ "$child_state" = "closed" ] || open_children=$((open_children + 1))
+                    child_body="$(gh api "repos/${REPO}/issues/${child}" --jq '.body // ""' || echo "")"
+                    body_depends_on "$num" <<<"$child_body" || backref_all=0
                   done
-                  if [ "$found" -ge 1 ] && [ "$open_children" -eq 0 ]; then
-                    gh api -X DELETE "repos/${REPO}/issues/${num}/labels/phase:ready" >/dev/null \
-                      || { d="umbrella close could not delete phase:ready"; trace WARN "#${num}" "$d"; cat_warnings="${cat_warnings}- warn #${num}: ${d}"$'\n'; }
-                    gh api -X PATCH "repos/${REPO}/issues/${num}" -f state=closed -f state_reason=completed >/dev/null \
-                      || { d="umbrella close PATCH failed"; trace WARN "#${num}" "$d"; cat_warnings="${cat_warnings}- warn #${num}: ${d}"$'\n'; }
-                    printf 'Pure umbrella auto-closed by the tick: all %s listed children are closed (#3212).\n' "$found" > /tmp/umbrella-close.md
-                    gh api -X POST "repos/${REPO}/issues/${num}/comments" -F body=@/tmp/umbrella-close.md >/dev/null \
-                      || { d="umbrella close comment failed"; trace WARN "#${num}" "$d"; cat_warnings="${cat_warnings}- warn #${num}: ${d}"$'\n'; }
-                    trace CLOSED "#${num}" "pure umbrella, all ${found} children closed"
-                    cat_dispatched="${cat_dispatched}#${num} — pure umbrella auto-closed (${found} children closed)"$'\n'
+                  if [ "$found" -ge 1 ] && [ "$backref_all" -eq 1 ]; then
+                    # Implementable slice with spun-out dependents — every listed
+                    # child back-references this parent via its ## Depends on, so
+                    # they cannot start until it lands. Fall through to implement
+                    # rather than rest as an umbrella (#3484).
+                    trace DISPATCH "#${num}" "implementable slice — all ${found} children back-reference via ## Depends on"
                   else
-                    trace SKIP "#${num}" "pure umbrella, ${open_children}/${found} children still open — resting at phase:ready"
-                    cat_resting="${cat_resting}#${num} — pure umbrella, ${open_children}/${found} children still open"$'\n'
+                    # Decomposition umbrella — children do not all back-reference.
+                    # Auto-close when every listed child is closed, else rest.
+                    if [ "$found" -ge 1 ] && [ "$open_children" -eq 0 ]; then
+                      gh api -X DELETE "repos/${REPO}/issues/${num}/labels/phase:ready" >/dev/null \
+                        || { d="umbrella close could not delete phase:ready"; trace WARN "#${num}" "$d"; cat_warnings="${cat_warnings}- warn #${num}: ${d}"$'\n'; }
+                      gh api -X PATCH "repos/${REPO}/issues/${num}" -f state=closed -f state_reason=completed >/dev/null \
+                        || { d="umbrella close PATCH failed"; trace WARN "#${num}" "$d"; cat_warnings="${cat_warnings}- warn #${num}: ${d}"$'\n'; }
+                      printf 'Pure umbrella auto-closed by the tick: all %s listed children are closed (#3212).\n' "$found" > /tmp/umbrella-close.md
+                      gh api -X POST "repos/${REPO}/issues/${num}/comments" -F body=@/tmp/umbrella-close.md >/dev/null \
+                        || { d="umbrella close comment failed"; trace WARN "#${num}" "$d"; cat_warnings="${cat_warnings}- warn #${num}: ${d}"$'\n'; }
+                      trace CLOSED "#${num}" "pure umbrella, all ${found} children closed"
+                      cat_dispatched="${cat_dispatched}#${num} — pure umbrella auto-closed (${found} children closed)"$'\n'
+                    else
+                      trace SKIP "#${num}" "pure umbrella, ${open_children}/${found} children still open — resting at phase:ready"
+                      cat_resting="${cat_resting}#${num} — pure umbrella, ${open_children}/${found} children still open"$'\n'
+                    fi
+                    continue
                   fi
-                  continue
                 fi
                 task="implement"; ref="$num" ;;
               phase:building|phase:findings)
