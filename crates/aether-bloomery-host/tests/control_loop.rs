@@ -30,7 +30,7 @@ use std::{env, fs, thread};
 
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Outcome,
-    Query, QueryResult, ViewDocument, WorkpieceId,
+    Query, QueryResult, StageCatalog, ViewDocument, WorkpieceId,
 };
 use aether_capabilities::rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
 use aether_codec::frame::{read_frame, write_frame};
@@ -165,8 +165,16 @@ fn seal_event(key: &str, base: u8, workpiece: &str) -> Event {
             detail: Digest::from_bytes([200; 32]),
         },
     };
-    let spec =
-        BloomDraft { proposals: vec![member], base: Digest::from_bytes([base; 32]), ..BloomDraft::default() }.seal();
+    // The seal must freeze the one line the pipeline runs (#3506): the reducer
+    // rejects a bloom whose stage-catalog digest is not `StageCatalog::line_digest`
+    // (the zero default is inadmissible).
+    let spec = BloomDraft {
+        proposals: vec![member],
+        base: Digest::from_bytes([base; 32]),
+        stage_catalog: StageCatalog::line_digest(),
+        ..BloomDraft::default()
+    }
+    .seal();
     Event { idempotency_key: IdempotencyKey(key.to_owned()), fact: Fact::Seal(spec) }
 }
 
