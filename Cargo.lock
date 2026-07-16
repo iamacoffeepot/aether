@@ -106,6 +106,7 @@ dependencies = [
  "aether-actor",
  "aether-bloomery",
  "aether-capabilities",
+ "aether-codec",
  "aether-data",
  "aether-substrate",
  "anyhow",

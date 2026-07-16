@@ -70,7 +70,10 @@ inventory = { workspace = true }
 [dev-dependencies]
 # The recovery + contract tests round-trip real bloom-protocol events through
 # the journal (`aether_bloomery` value types encoded with `aether_data::wire`)
-# and use temp-file databases for the reopen tests.
+# and use temp-file databases for the reopen tests. The cross-process recovery
+# test dials the `bloomery` bin over raw wire frames (`aether_codec::frame`,
+# the FleetBench pattern).
+aether-codec = { path = "../aether-codec" }
 tempfile = "3"
 
 [lints]
