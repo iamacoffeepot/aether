@@ -6,14 +6,17 @@ final-status-level = "slow"
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 1 }
 
-# The kit scenario integration binaries cold-load and compile
-# `aether_kit.wasm` in each test. CI measurements in #2805 put the
-# camera scenario around 56.5s and mesh around 52-53s against the default
-# 60s cap. The terrain workbench scenario likewise cold-loads the kit wasm
-# and crossed 60s under the CI software renderer, so give only these known
-# wasm-heavy binaries extra headroom.
+# Every binary under `crates/aether-kit/tests/` cold-loads and compiles
+# `aether_kit.wasm` and boots a wgpu `TestBench`, so they are one slow
+# class rather than a fixed allowlist: #2805 measured the camera scenario
+# around 56.5s and mesh around 52-53s against the default 60s cap, and
+# iamacoffeepot/aether#3527 saw two more binaries (`mark_scenario`,
+# `proposal_scenario`) cross 60s the same way, exactly the allowlist gap a
+# per-binary filter leaves open for the next one. `kind(test)` scopes the
+# cap to the integration binaries; the crate's `kind(lib)` unit tests keep
+# the 60s default.
 [[profile.ci.overrides]]
-filter = "package(=aether-kit) & (binary(camera_scenario) | binary(mesh_scenario) | binary(terrain_workbench_scenario))"
+filter = "package(=aether-kit) & kind(test)"
 slow-timeout = { period = "120s", terminate-after = 1 }
 
 # The `aether-substrate-bundle` integration tests (FleetBench + the engines /
