@@ -241,7 +241,6 @@ mod tests {
             // mailboxes; component autoload is exercised by the control_loop
             // integration test.
             control_core_wasm: None,
-
         };
         let chassis = BloomeryChassis::build(env).expect("bloomery chassis boots and claims its mailboxes");
         assert_eq!(BloomeryChassis::PROFILE, "bloomery");
