@@ -65,11 +65,11 @@ impl StageCatalog {
     /// The per-binding tag/gate strings are the initial vocabulary — refinable
     /// without an ADR (a change re-digests the catalog); the load-bearing
     /// invariant is one binding per stage, and it holds by construction: the
-    /// catalog maps [`binding_of`](Self::binding_of) over the generated
-    /// [`StageId::ALL`], which is complete and duplicate-free by construction,
-    /// and `binding_of`'s exhaustive match forces a binding for every variant —
-    /// so a thirteenth stage enters the catalog automatically and is a compile
-    /// error until its binding is authored.
+    /// catalog maps `binding_of` over the generated [`StageId::ALL`], which is
+    /// complete and duplicate-free by construction, and `binding_of`'s
+    /// exhaustive match forces a binding for every variant — so a thirteenth
+    /// stage enters the catalog automatically and is a compile error until its
+    /// binding is authored.
     #[must_use]
     pub fn line() -> Self {
         Self { bindings: StageId::ALL.iter().copied().map(Self::binding_of).collect() }
