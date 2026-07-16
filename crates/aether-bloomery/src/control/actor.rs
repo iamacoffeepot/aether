@@ -184,12 +184,11 @@ impl WasmActor for ControlCore {
         let document = view_of(&self.snapshot);
         let result = match mail.bloom {
             None => QueryResult::Document { document: to_vec(&document).unwrap_or_default() },
-            Some(bytes) => {
-                match document.blooms.iter().find(|view| view.id.0.as_bytes().as_slice() == bytes.as_slice()) {
-                    Some(view) => QueryResult::Bloom { view: to_vec(view).unwrap_or_default() },
-                    None => QueryResult::NotFound,
-                }
-            }
+            Some(bytes) => document
+                .blooms
+                .iter()
+                .find(|view| view.id.0.as_bytes().as_slice() == bytes.as_slice())
+                .map_or(QueryResult::NotFound, |view| QueryResult::Bloom { view: to_vec(view).unwrap_or_default() }),
         };
         ctx.reply_to(handle, &result);
     }
