@@ -312,6 +312,14 @@ impl GitDataApi for FakeGithub {
         Ok(refs)
     }
 
+    fn delete_ref(&self, name: &str) -> Result<(), GithubError> {
+        // Deleting an absent ref is the clean idempotent outcome (GitHub answers
+        // 404/422, which the real client maps to Ok), so a release retried after
+        // a crash is a no-op.
+        self.lock().refs.remove(name);
+        Ok(())
+    }
+
     fn get_commit(&self, sha: &str) -> Result<GitCommit, GithubError> {
         self.lock()
             .commits

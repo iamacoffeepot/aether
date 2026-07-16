@@ -70,8 +70,9 @@ pub use manifest::{
     ClosureViolation, MANIFEST_CLOSURE_BUDGET, PromptManifest, ProvenanceIndex, Slot, SlotRole, assemble_manifest,
 };
 pub use port::{
-    BloomView, Checkpoint, Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, IntegrateOutcome, LandOutcome,
-    MemberView, ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument, WorkHandle, WorkOrder,
+    BloomView, Checkpoint, ClaimOutcome, ClaimRefKind, Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend,
+    IntegrateOutcome, LandOutcome, MemberView, ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument,
+    WorkHandle, WorkOrder,
 };
 pub use reduce::{
     BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact, IntegrateError, LandError, Outcome,

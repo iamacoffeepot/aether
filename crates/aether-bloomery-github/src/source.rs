@@ -36,7 +36,8 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    BloomId, Checkpoint, Digest, IntegrateOutcome, LandOutcome, LandingReceipt, SourceBackend, SourceSnapshot,
+    BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, Digest, IntegrateOutcome, LandOutcome, LandingReceipt,
+    SourceBackend, SourceSnapshot, WorkpieceId,
 };
 
 use crate::client::{GitDataApi, GithubError};
@@ -93,6 +94,26 @@ impl From<GithubError> for SourceError {
 
 /// The mainline ref this backend compare-and-swaps on `land`.
 const MAINLINE_REF: &str = "heads/main";
+
+/// The per-workpiece claim ref prefix (short `refs/`-less form the client
+/// prepends `refs/` to). One ref per member workpiece under it carries the
+/// claiming bloom id, its atomic create the distributed lock (ADR-0150).
+const CLAIM_PREFIX: &str = "bloomery/claims/";
+
+/// The single mainline-admission ref (short form): held while any bloom is
+/// sealed-and-unlanded on the mainline, so a second instance's seal is refused
+/// across instances (ADR-0150). Released by the landing receipt or an explicit
+/// supersession.
+const ADMISSION_REF: &str = "bloomery/admission/mainline";
+
+/// The result of acquiring one shared ref: newly created, already held by the
+/// same bloom (idempotent — a crash-retried acquire re-converges), or held by a
+/// different bloom (the conflict that aborts the all-or-nothing acquire).
+enum AcquireOne {
+    Created,
+    AlreadyMine,
+    Held(BloomId),
+}
 
 /// Render a digest as the 64-lowercase-hex git object sha. `pub` (not
 /// `pub(crate)`) because it lives in a private module — its reach is already
@@ -193,6 +214,36 @@ impl<C: GitDataApi> GitSource<C> {
         let commit = self.client.get_commit(sha)?;
         digest_from_hex(&commit.tree)
             .ok_or_else(|| SourceError::Malformed(format!("commit tree sha `{}`", commit.tree)))
+    }
+
+    /// The claim ref for a member workpiece. The workpiece id is a stable slug;
+    /// it is interpolated directly, mirroring how checkpoint refs carry the tree
+    /// hex.
+    fn claim_ref(workpiece: &WorkpieceId) -> String {
+        format!("{CLAIM_PREFIX}{}", workpiece.0)
+    }
+
+    /// Try to take one shared ref for `bloom_sha` (the claiming bloom id as its
+    /// git-object hex, the digest-as-sha convention this backend uses
+    /// throughout). A create that GitHub refuses with 422 (ref exists) reads the
+    /// holder: the same bloom is the idempotent no-op, a different bloom the
+    /// conflict.
+    fn acquire_one(&self, name: &str, bloom_sha: &str) -> Result<AcquireOne, SourceError> {
+        match self.client.create_ref(name, bloom_sha) {
+            Ok(_) => Ok(AcquireOne::Created),
+            Err(GithubError::Status { status: 422, .. }) => {
+                let existing = self.client.get_ref(name)?.ok_or_else(|| SourceError::MissingRef(name.to_owned()))?;
+                if existing.sha == bloom_sha {
+                    Ok(AcquireOne::AlreadyMine)
+                } else {
+                    let held_by = digest_from_hex(&existing.sha)
+                        .map(BloomId)
+                        .ok_or_else(|| SourceError::Malformed(format!("claim ref `{name}` sha `{}`", existing.sha)))?;
+                    Ok(AcquireOne::Held(held_by))
+                }
+            }
+            Err(error) => Err(SourceError::Github(error)),
+        }
     }
 }
 
@@ -295,14 +346,61 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
             Err(error) => Err(SourceError::Github(error)),
         }
     }
+
+    fn claim_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<ClaimOutcome, Self::Error> {
+        let bloom_sha = to_hex(&bloom.0);
+        // The refs to take, in order: every per-workpiece claim ref, then the
+        // single mainline-admission ref. `created` tracks only the refs *this*
+        // call created, so a conflict rolls back exactly those and never a ref
+        // a prior (crashed) acquire of this same bloom left behind.
+        let mut targets: Vec<(String, ClaimRefKind)> = workpieces
+            .iter()
+            .map(|workpiece| (Self::claim_ref(workpiece), ClaimRefKind::Workpiece(workpiece.clone())))
+            .collect();
+        targets.push((ADMISSION_REF.to_owned(), ClaimRefKind::MainlineAdmission));
+
+        let mut created: Vec<String> = Vec::new();
+        for (name, ref_kind) in targets {
+            match self.acquire_one(&name, &bloom_sha)? {
+                AcquireOne::Created => created.push(name),
+                AcquireOne::AlreadyMine => {}
+                AcquireOne::Held(held_by) => {
+                    for name in &created {
+                        self.client.delete_ref(name)?;
+                    }
+                    return Ok(ClaimOutcome::Held { ref_kind, held_by });
+                }
+            }
+        }
+        Ok(ClaimOutcome::Acquired)
+    }
+
+    fn release_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<(), Self::Error> {
+        let bloom_sha = to_hex(&bloom.0);
+        let mut names: Vec<String> = workpieces.iter().map(Self::claim_ref).collect();
+        names.push(ADMISSION_REF.to_owned());
+        for name in names {
+            // Delete only a ref this bloom holds — never another bloom's, so a
+            // release can never free a peer's live claim.
+            if let Some(existing) = self.client.get_ref(&name)?
+                && existing.sha == bloom_sha
+            {
+                self.client.delete_ref(&name)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use aether_bloomery::{BloomId, Checkpoint, Digest, IntegrateOutcome, LandOutcome, SourceBackend};
+    use aether_bloomery::{
+        BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, Digest, IntegrateOutcome, LandOutcome, SourceBackend,
+        WorkpieceId,
+    };
 
-    use super::{GitSource, SourceError, digest_from_hex, to_hex};
+    use super::{ADMISSION_REF, GitSource, SourceError, digest_from_hex, to_hex};
     use crate::testing::FakeGithub;
 
     fn digest(seed: u8) -> Digest {
@@ -311,6 +409,10 @@ mod tests {
 
     fn bloom() -> BloomId {
         BloomId(digest(1))
+    }
+
+    fn workpiece(name: &str) -> WorkpieceId {
+        WorkpieceId(name.to_owned())
     }
 
     // A fake seeded with a commit at `base_tree`, its mainline ref pointing at
@@ -423,5 +525,84 @@ mod tests {
             }
             LandOutcome::Landed(_) => panic!("expected BaseMoved, got Landed"),
         }
+    }
+
+    #[test]
+    fn claim_seal_acquires_every_workpiece_ref_and_the_admission_ref() {
+        let fake = FakeGithub::new();
+        let source = GitSource::new(fake.clone(), false);
+        let members = [workpiece("reactor-core"), workpiece("coolant-loop")];
+
+        assert_eq!(source.claim_seal(&bloom(), &members).unwrap(), ClaimOutcome::Acquired);
+        // Each per-workpiece ref and the single admission ref now carry this
+        // bloom's id (its digest as the ref's git-object hex).
+        let bloom_sha = to_hex(&bloom().0);
+        assert_eq!(fake.ref_target("bloomery/claims/reactor-core").as_deref(), Some(bloom_sha.as_str()));
+        assert_eq!(fake.ref_target("bloomery/claims/coolant-loop").as_deref(), Some(bloom_sha.as_str()));
+        assert_eq!(fake.ref_target(ADMISSION_REF).as_deref(), Some(bloom_sha.as_str()));
+    }
+
+    #[test]
+    fn claim_seal_reports_a_workpiece_conflict_and_its_holder() {
+        let fake = FakeGithub::new();
+        let source = GitSource::new(fake.clone(), false);
+        let first = bloom();
+        let second = BloomId(digest(2));
+
+        source.claim_seal(&first, &[workpiece("reactor-core")]).unwrap();
+        // A second bloom claiming the same workpiece is refused, naming the ref
+        // kind and the bloom already holding it.
+        let outcome = source.claim_seal(&second, &[workpiece("reactor-core")]).unwrap();
+        assert_eq!(
+            outcome,
+            ClaimOutcome::Held { ref_kind: ClaimRefKind::Workpiece(workpiece("reactor-core")), held_by: first }
+        );
+    }
+
+    #[test]
+    fn claim_seal_reports_an_admission_conflict_and_rolls_back_partial_claims() {
+        let fake = FakeGithub::new();
+        let source = GitSource::new(fake.clone(), false);
+        let first = bloom();
+        let second = BloomId(digest(2));
+
+        // `first` holds the mainline-admission ref (disjoint workpieces).
+        source.claim_seal(&first, &[workpiece("alpha")]).unwrap();
+        // `second`'s workpiece is free, but the admission ref is held → the whole
+        // acquire is refused against the admission ref, and the workpiece ref
+        // `second` created on the way is rolled back.
+        let outcome = source.claim_seal(&second, &[workpiece("beta")]).unwrap();
+        assert_eq!(outcome, ClaimOutcome::Held { ref_kind: ClaimRefKind::MainlineAdmission, held_by: first });
+        assert!(!fake.ref_exists("bloomery/claims/beta"), "the partial workpiece claim was rolled back");
+    }
+
+    #[test]
+    fn claim_seal_is_idempotent_for_the_same_bloom() {
+        let fake = FakeGithub::new();
+        let source = GitSource::new(fake.clone(), false);
+        let members = [workpiece("reactor-core")];
+
+        source.claim_seal(&bloom(), &members).unwrap();
+        // A crash-retried acquire by the same bloom re-converges — its own refs
+        // are not a conflict.
+        assert_eq!(source.claim_seal(&bloom(), &members).unwrap(), ClaimOutcome::Acquired);
+    }
+
+    #[test]
+    fn release_seal_deletes_only_this_blooms_refs() {
+        let fake = FakeGithub::new();
+        let source = GitSource::new(fake.clone(), false);
+        let mine = bloom();
+        let other = BloomId(digest(2));
+
+        source.claim_seal(&mine, &[workpiece("reactor-core")]).unwrap();
+        // A peer holds an unrelated workpiece claim (but not the admission ref,
+        // released below): seed it directly so release must leave it be.
+        fake.seed_ref("bloomery/claims/peer-owned", &to_hex(&other.0));
+
+        source.release_seal(&mine, &[workpiece("reactor-core")]).unwrap();
+        assert!(!fake.ref_exists("bloomery/claims/reactor-core"), "this bloom's claim released");
+        assert!(!fake.ref_exists(ADMISSION_REF), "this bloom's admission ref released");
+        assert!(fake.ref_exists("bloomery/claims/peer-owned"), "a peer's claim is never touched");
     }
 }

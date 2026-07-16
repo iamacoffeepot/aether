@@ -228,6 +228,15 @@ pub trait GitDataApi {
     /// A transport fault or an error status.
     fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GithubError>;
 
+    /// Delete ref `name` (`heads/…` form). A ref that does not exist is a clean
+    /// `Ok(())`, not an error, so releasing a claim ref is idempotent — a
+    /// crash-retried release, or a release of a claim never acquired, is a
+    /// no-op rather than a fault.
+    ///
+    /// # Errors
+    /// A transport fault or a non-404/422 error status.
+    fn delete_ref(&self, name: &str) -> Result<(), GithubError>;
+
     /// Read commit object `sha` (for its tree).
     ///
     /// # Errors
@@ -280,6 +289,8 @@ pub enum Method {
     Post,
     /// `PATCH`.
     Patch,
+    /// `DELETE`.
+    Delete,
 }
 
 /// One outbound request the transport executes.
@@ -340,6 +351,7 @@ impl HttpTransport for ReqwestTransport {
             Method::Get => ReqwestMethod::GET,
             Method::Post => ReqwestMethod::POST,
             Method::Patch => ReqwestMethod::PATCH,
+            Method::Delete => ReqwestMethod::DELETE,
         };
         let mut builder = self
             .client
@@ -758,6 +770,17 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         Ok(gh.into_git_ref())
     }
 
+    fn delete_ref(&self, name: &str) -> Result<(), GithubError> {
+        // GitHub answers a ref delete with 204 No Content; a ref that is already
+        // gone is 422 ("Reference does not exist") or 404 — both are the clean
+        // idempotent outcome a release wants, not a fault.
+        match self.request(Method::Delete, self.git_url(&format!("refs/{name}")), None) {
+            Ok(_) => Ok(()),
+            Err(GithubError::Status { status: 404 | 422, .. }) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GithubError> {
         // matching-refs is paginated (100/page), so a bloom with more than one
         // page of checkpoints must be walked to the end — a single GET would
@@ -969,6 +992,25 @@ mod tests {
         let sent: serde_json::Value = serde_json::from_str(&request.body.unwrap()).unwrap();
         assert_eq!(sent["sha"], "new");
         assert_eq!(sent["force"], false);
+    }
+
+    #[test]
+    fn delete_ref_targets_the_short_ref_route() {
+        // A 204 No Content delete with an empty body; the route is the short
+        // `refs/<name>` form the release path deletes claim refs on.
+        let github = client(204, "");
+        github.delete_ref("bloomery/claims/reactor-core").expect("204 delete is Ok");
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(request.method, Method::Delete);
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/git/refs/bloomery/claims/reactor-core");
+    }
+
+    #[test]
+    fn delete_ref_tolerates_an_already_gone_ref() {
+        // Releasing a claim that was never taken (or a crash-retried release)
+        // must be a no-op, not a fault: GitHub's 422 "does not exist" maps to Ok.
+        let github = client(422, r#"{"message":"Reference does not exist"}"#);
+        github.delete_ref("bloomery/claims/gone").expect("an absent ref deletes cleanly");
     }
 
     #[test]

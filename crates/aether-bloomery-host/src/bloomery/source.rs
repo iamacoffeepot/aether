@@ -23,7 +23,10 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{BloomId, Checkpoint, Digest, IntegrateOutcome, LandOutcome, SourceBackend, SourceSnapshot};
+use aether_bloomery::{
+    BloomId, Checkpoint, ClaimOutcome, Digest, IntegrateOutcome, LandOutcome, SourceBackend, SourceSnapshot,
+    WorkpieceId,
+};
 use aether_bloomery_github::{GitSource, GithubError, ReqwestGithub, SourceError};
 
 use super::mirror::GithubMirrorConfig;
@@ -101,5 +104,24 @@ impl SourceShell {
     /// [`LandOutcome::BaseMoved`], not an error).
     pub fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, SourceError> {
         self.backend.land(bloom, expected_base, new_head)
+    }
+
+    /// Acquire the shared seal claim for `bloom` over `workpieces` + the
+    /// mainline-admission ref, all-or-nothing (ADR-0150).
+    ///
+    /// # Errors
+    /// A transport or backend fault, distinct from the clean
+    /// [`ClaimOutcome::Held`] refusal.
+    pub fn claim_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<ClaimOutcome, SourceError> {
+        self.backend.claim_seal(bloom, workpieces)
+    }
+
+    /// Release the shared seal claim for `bloom` over `workpieces` + the
+    /// mainline-admission ref. Idempotent.
+    ///
+    /// # Errors
+    /// A transport or backend fault.
+    pub fn release_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<(), SourceError> {
+        self.backend.release_seal(bloom, workpieces)
     }
 }
