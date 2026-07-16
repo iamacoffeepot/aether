@@ -300,6 +300,14 @@ impl GitDataApi for FakeGithub {
         Ok(GitRef { name: name.to_owned(), sha: sha.to_owned() })
     }
 
+    fn delete_ref(&self, name: &str) -> Result<(), GithubError> {
+        // Name-only: an absent ref is the clean idempotent Ok — the fake models
+        // GitHub's already-gone tolerance the source port's cleanup delete relies
+        // on.
+        self.lock().refs.remove(name);
+        Ok(())
+    }
+
     fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GithubError> {
         let state = self.lock();
         let mut refs: Vec<GitRef> = state

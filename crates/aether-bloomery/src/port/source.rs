@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
-use crate::ids::BloomId;
+use crate::ids::{BloomId, WorkpieceId};
 use crate::values::LandingReceipt;
 
 /// A snapshot of the source at a base: its head and tree digests.
@@ -69,6 +69,45 @@ pub enum LandOutcome {
     },
 }
 
+/// Which claim ref a [`ClaimOutcome::Held`] conflict is on (ADR-0150 §The claim
+/// registry): a per-workpiece claim ref, or the single mainline-admission ref.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ClaimRefKind {
+    /// The per-workpiece claim ref (`refs/bloomery/claims/<workpiece-id>`).
+    Workpiece(WorkpieceId),
+    /// The single mainline-admission ref (`refs/bloomery/admission/mainline`) —
+    /// Bloomery's "one sealed, unlanded bloom per mainline" invariant as a
+    /// shared repository ref.
+    MainlineAdmission,
+}
+
+/// The outcome of an all-or-nothing claim acquire, transfer, or release over the
+/// commit-chain claim refs (ADR-0150 §The claim registry, amended PR #3539).
+/// Mirrors [`LandOutcome`]: a clean [`Held`] refusal is not an error.
+///
+/// The refs are realized as **commit-chain claim handles** so a supersession
+/// transfers a claim by fast-forward compare-and-swap rather than a race-prone
+/// release-then-re-acquire, and a release linearizes on a CAS-to-tombstone
+/// rather than a check-then-delete.
+///
+/// [`Held`]: ClaimOutcome::Held
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ClaimOutcome {
+    /// Every targeted ref was acquired / transferred / released.
+    Acquired,
+    /// A targeted ref was already held by another bloom, so the operation was
+    /// refused — an acquire that hits this rolls back every ref it created, a
+    /// transfer's fast-forward CAS lost cleanly (the ref is never momentarily
+    /// absent), and a release spared a ref it does not own. Reports the first
+    /// conflicting ref and its holder.
+    Held {
+        /// Which ref the conflict was on.
+        ref_kind: ClaimRefKind,
+        /// The bloom currently holding it.
+        held_by: BloomId,
+    },
+}
+
 /// The versioning-substrate boundary. Git remains the substrate; this port is
 /// how Bloomery reads and advances it (ADR-0149 §The boundary). The
 /// implementation does the I/O — this trait is the contract.
@@ -124,4 +163,49 @@ pub trait SourceBackend {
     /// Backend-defined — a transport or backend fault, distinct from the
     /// clean base-moved refusal.
     fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, Self::Error>;
+
+    /// Acquire `bloom`'s claim refs — one per member `workpieces` plus the
+    /// single mainline-admission ref — all-or-nothing (ADR-0150 §The claim
+    /// registry). Each is created as a fresh commit-chain claim handle; a ref
+    /// that already exists is another bloom's hold, reported as the first
+    /// [`ClaimOutcome::Held`] with the whole acquire rolled back so no partial
+    /// claim survives.
+    ///
+    /// # Errors
+    /// Backend-defined — a transport or backend fault, distinct from the clean
+    /// [`ClaimOutcome::Held`] refusal.
+    fn claim_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<ClaimOutcome, Self::Error>;
+
+    /// Transfer the seal from `predecessor` to `successor` on a supersession
+    /// (ADR-0150 §The claim registry, amended PR #3539): fast-forward compare-
+    /// and-swap the `carried` workpiece refs and the admission ref from
+    /// predecessor to successor, fresh-acquire the successor's `net_new`
+    /// workpieces, and release the `dropped` ones. A carried ref a concurrent
+    /// mutation moved off the predecessor loses the CAS cleanly, and a `net_new`
+    /// workpiece a foreign bloom holds is a conflict — both the clean
+    /// [`ClaimOutcome::Held`], not an error.
+    ///
+    /// # Errors
+    /// Backend-defined — a transport or backend fault, distinct from the clean
+    /// refusal.
+    fn transfer_seal(
+        &self,
+        predecessor: &BloomId,
+        successor: &BloomId,
+        carried: &[WorkpieceId],
+        net_new: &[WorkpieceId],
+        dropped: &[WorkpieceId],
+    ) -> Result<ClaimOutcome, Self::Error>;
+
+    /// Release `bloom`'s claim refs — the member `workpieces` plus the admission
+    /// ref — each by a fast-forward CAS to a tombstone commit (the linearization
+    /// point) followed by a name-only cleanup delete (ADR-0150 §The claim
+    /// registry, amended PR #3539). The CAS read-guard retires the check-then-
+    /// delete TOCTOU: a ref held by another bloom is spared and reported as
+    /// [`ClaimOutcome::Held`], never deleted.
+    ///
+    /// # Errors
+    /// Backend-defined — a transport or backend fault, distinct from the clean
+    /// refusal.
+    fn release_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<ClaimOutcome, Self::Error>;
 }
