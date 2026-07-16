@@ -362,7 +362,7 @@ mod tests {
 
         let mut snapshot = Snapshot::new(base);
         snapshot = snapshot.apply(&event, &reduce(&snapshot, &event));
-        to_vec(&view_of(&snapshot)).unwrap()
+        to_vec(&view_of(&snapshot, |_| None)).unwrap()
     }
 
     #[test]

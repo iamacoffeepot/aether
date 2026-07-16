@@ -30,7 +30,8 @@
 use std::fmt::Write as _;
 
 use aether_bloomery::{
-    BloomId, BloomView, Digest, Evidence, LandingReceipt, MemberView, ProjectionBackend, ResolutionClaim, ViewDocument,
+    BloomId, BloomView, Digest, Evidence, LandingReceipt, MemberView, PendingDecisionView, ProjectionBackend,
+    ResolutionClaim, ViewDocument,
 };
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
@@ -85,6 +86,19 @@ impl<C: GithubApi> GithubProjection<C> {
             let key = format!("resolution:{}", member.workpiece.0);
             let digest = content_digest("bloomery.view.resolution", resolution);
             self.upsert_comment(issue_number, &key, digest, &render_resolution_body(resolution))?;
+        }
+
+        // A parked question projects as a comment on the workpiece issue —
+        // visible where a person already looks (ADR-0151). Keyed by workpiece so
+        // it upserts in place, and content-digested over the pending decision so
+        // re-reconciling the same hold is a no-op. The rendered body carries the
+        // question digest as the stable metadata an answer adopts; a projected
+        // comment is an outward mirror only — never a command (ADR-0149 §The
+        // boundary).
+        if let Some(pending) = &member.pending_decision {
+            let key = format!("question:{}", member.workpiece.0);
+            let digest = content_digest("bloomery.view.pending_decision", pending);
+            self.upsert_comment(issue_number, &key, digest, &render_pending_decision_body(pending))?;
         }
         Ok(())
     }
@@ -232,6 +246,25 @@ fn render_resolution_body(resolution: &ResolutionClaim) -> String {
         resolution.workpiece.0,
         short_hex(&resolution.scope_revision)
     )
+}
+
+fn render_pending_decision_body(pending: &PendingDecisionView) -> String {
+    let mut body = format!("**Decision needed** — parked on question `{}`.\n\n", short_hex(&pending.question));
+    let _ = writeln!(body, "{}\n", pending.prompt);
+    let _ = writeln!(body, "- Held stage: {:?}", pending.stage);
+    let _ = writeln!(body, "- Blocked: {}", pending.blocked);
+    if !pending.options.is_empty() {
+        let _ = writeln!(body, "\nOptions:");
+        for (index, option) in pending.options.iter().enumerate() {
+            let _ = writeln!(body, "{}. {option}", index + 1);
+        }
+    }
+    let _ = writeln!(
+        body,
+        "\nAnswer natively — a signed statement adopting question `{}`; a comment never becomes a command.",
+        short_hex(&pending.question)
+    );
+    body
 }
 
 fn render_receipt_body(receipt: &LandingReceipt) -> String {

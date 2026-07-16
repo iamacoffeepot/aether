@@ -162,6 +162,29 @@ fn derived_instruction_chain_is_admissible_and_authors_its_closure() {
     assert_eq!(manifest.slots[0].parent_closure, vec![digest(11), digest(12)]);
 }
 
+#[test]
+fn a_redispatched_attempt_grounds_on_the_answer_and_its_closure_names_the_question() {
+    // ADR-0151: a re-dispatched held stage's prompt derives from both the adopted
+    // answer (a signed statement — the instruction ground) and the parked question
+    // (context). Assembly grounds the instruction slot on the answer and authors a
+    // closure naming both digests, so the audit trail shows why the retry diverged
+    // from its predecessor — the "manifest names both question and answer" property
+    // falling out of the existing fail-closed machinery, no new type.
+    let answer = digest(20);
+    let question = digest(21);
+    let prompt = digest(22);
+    let mut statements = HashMap::new();
+    statements.insert(answer, signed_statement());
+    let mut parents = HashMap::new();
+    parents.insert(prompt, vec![answer, question]);
+    let index = TestIndex { statements, parents, ..Default::default() };
+
+    let manifest = assemble_manifest(vec![instruction(prompt)], &index, &FakeKeyProvider).unwrap();
+    let closure = &manifest.slots[0].parent_closure;
+    assert!(closure.contains(&answer), "the closure names the answer it grounded on");
+    assert!(closure.contains(&question), "and the question, so the audit shows why the retry diverged");
+}
+
 proptest! {
     // The caller-declared parent_closure is never trusted for grounding: no
     // matter what digests it forges — including ones the index records as

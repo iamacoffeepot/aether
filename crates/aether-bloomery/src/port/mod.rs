@@ -29,5 +29,5 @@ mod projection;
 mod source;
 
 pub use executor::{Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
-pub use projection::{BloomView, MemberView, ProjectionBackend, ViewDocument};
+pub use projection::{BloomView, MemberView, PendingDecisionView, ProjectionBackend, ViewDocument};
 pub use source::{Checkpoint, IntegrateOutcome, LandOutcome, SourceBackend, SourceSnapshot};

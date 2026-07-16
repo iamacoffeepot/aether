@@ -143,13 +143,15 @@ pub enum IntakeRefusal {
 }
 
 /// An accepted attempt result: the reducer [`Event`] the upload normalized to
-/// (a [`Fact::Integrate`]) and the [`Admit`] wire payload for #3497's
-/// `aether.bloomery.admit` ingress.
+/// (a [`Fact::Integrate`] for a resolving verdict, or a [`Fact::AdmitEvidence`]
+/// carrying a `Question` for a parked one) and the [`Admit`] wire payload for
+/// #3497's `aether.bloomery.admit` ingress.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Admission {
     /// The `aether.bloomery.admit` payload to send to the control core.
     pub admit: Admit,
-    /// The decoded event the admit carries — a [`Fact::Integrate`].
+    /// The decoded event the admit carries — a [`Fact::Integrate`] or a
+    /// [`Fact::AdmitEvidence`] (parked).
     pub event: Event,
 }
 
@@ -296,15 +298,28 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     // both hold. Build the whole admission — including the fallible event encode
     // — *before* consuming the order: consuming first and then failing the encode
     // would lose the evidence with the nonce already spent and no retry.
-    let claim = ResolutionClaim {
-        workpiece: record.workpiece.clone(),
-        scope_revision: record.scope_revision,
-        candidate: record.candidate,
-        evidence,
-    };
-    let event = Event {
-        idempotency_key: IdempotencyKey(format!("aether.bloomery.integrate:{}", record.nonce.0)),
-        fact: Fact::Integrate { bloom: record.bloom, claim },
+    //
+    // A parked attempt normalizes to a Question evidence admitted through
+    // Fact::AdmitEvidence (ADR-0151) — never a Fact::Integrate, and never a
+    // failure: the order is consumed, but the parked outcome burns no stage
+    // retry, because a decision pending is not a defect. Every other verdict is
+    // a resolution claim integrated the existing way.
+    let event = if upload.verdict == StageVerdict::Parked {
+        Event {
+            idempotency_key: IdempotencyKey(format!("aether.bloomery.park:{}", record.nonce.0)),
+            fact: Fact::AdmitEvidence { bloom: record.bloom, evidence },
+        }
+    } else {
+        let claim = ResolutionClaim {
+            workpiece: record.workpiece.clone(),
+            scope_revision: record.scope_revision,
+            candidate: record.candidate,
+            evidence,
+        };
+        Event {
+            idempotency_key: IdempotencyKey(format!("aether.bloomery.integrate:{}", record.nonce.0)),
+            fact: Fact::Integrate { bloom: record.bloom, claim },
+        }
     };
     let admit = Admit { event: to_vec(&event)? };
     // Consume-once, only now that the admission is fully constructed. A lost race

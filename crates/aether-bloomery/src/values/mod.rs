@@ -8,6 +8,7 @@
 
 mod bloom;
 mod profile;
+mod question;
 mod scope_revision;
 mod stage;
 mod statement;
@@ -15,6 +16,7 @@ mod study;
 
 pub use bloom::{BloomDraft, BloomSpec, LandingReceipt, Membership, ResolutionClaim, ResolvedBloom};
 pub use profile::{AgentProfile, ReasoningEffort, ToolPolicy};
+pub use question::Question;
 pub use scope_revision::{ModelOverride, ResolvedModel, ScopeRevision};
 pub use stage::{Attempt, NetworkProfile, StageBinding, StageCatalog, Transformation};
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
@@ -106,6 +108,11 @@ pub enum EvidenceKind {
     /// A normalized per-attempt cost record — the study evidence a forecast
     /// grade reads (ADR-0151). Its `detail` names a [`StudyRecord`] artifact.
     StudyRecord,
+    /// A parked attempt's decision request — evidence *about* the attempt, never
+    /// intent (ADR-0151). Its `detail` names a [`Question`] artifact, and
+    /// admitting it folds a per-member pending-decision hold that blocks the
+    /// bloom from resolving until an adopting answer releases it.
+    Question,
 }
 
 /// A sealed bloom's predetermined resource ceiling (ADR-0149 §The bloom):
