@@ -227,6 +227,12 @@ pub enum QueryResult {
     },
     /// No bloom with the requested id is known.
     NotFound,
+    /// Encoding the requested projection into wire bytes failed — the read
+    /// could not be served rather than being answered with an empty payload.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
 }
 
 #[cfg(feature = "runtime")]

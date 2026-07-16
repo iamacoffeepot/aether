@@ -34,7 +34,7 @@ use crate::reduce::{Decision, Decisions, Event, Outcome, Snapshot, reduce, view_
 use aether_actor::{
     ActorInitError, MailSender, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
-use aether_data::wire::{from_bytes, to_vec};
+use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 use std::collections::BTreeMap;
 
 /// The runtime name of the store capability the control core drives.
@@ -98,18 +98,41 @@ impl WasmActor for ControlCore {
         // rebuilt by replay), so it needs no durable commit — reply immediately.
         if matches!(decisions.outcome, Outcome::Duplicate) {
             if let Some(handle) = reply {
-                ctx.reply_to(handle, &AdmitResult::Ok { outcome: to_vec(&decisions.outcome).unwrap_or_default() });
+                ctx.reply_to(handle, &admit_ok(&decisions.outcome));
             }
             return;
         }
         let key = event.idempotency_key.0.clone();
-        let (releases, claims, outbox) = project(&decisions);
+        // Projecting the decision encodes each outbox receipt; a receipt-encode
+        // failure must reject the admit, not commit an empty payload the
+        // republisher would later route as a valid-but-blank receipt.
+        let (releases, claims, outbox) = match project(&decisions) {
+            Ok(effects) => effects,
+            Err(error) => {
+                if let Some(handle) = reply {
+                    ctx.reply_to(handle, &AdmitResult::Err { error: format!("admit receipt encode failed: {error}") });
+                }
+                return;
+            }
+        };
         // Every non-duplicate admitted event is journaled — even a rejected one,
         // so a replay stays a no-op and the key is durably consumed (the reducer's
         // `apply` records the key for a rejected outcome too). A rejection carries
         // empty membership/outbox effects, so the commit is a bare journal append.
         let commit = Commit { idempotency_key: key.clone(), event: raw, releases, claims, outbox };
-        self.pending.insert(key, Pending { reply, event, decisions });
+        // A second admit with the same key while the first is still in flight would
+        // silently displace the first's pending entry, stranding its admitter with
+        // no reply — answer the displaced admitter rather than dropping it.
+        if let Some(displaced) = self.pending.insert(key, Pending { reply, event, decisions })
+            && let Some(handle) = displaced.reply
+        {
+            ctx.reply_to(
+                handle,
+                &AdmitResult::Err {
+                    error: "superseded by a concurrent admit with the same idempotency key".to_owned(),
+                },
+            );
+        }
         ctx.send_to_named(STORE, &commit);
     }
 
@@ -126,14 +149,12 @@ impl WasmActor for ControlCore {
         let result = match mail {
             CommitResult::Applied { .. } => {
                 self.snapshot = self.snapshot.apply(&event, &decisions);
-                AdmitResult::Ok { outcome: to_vec(&decisions.outcome).unwrap_or_default() }
+                admit_ok(&decisions.outcome)
             }
             // The store already held this key durably though our snapshot did not
             // — a rare divergence (a reply racing a concurrent replay). Reply
             // Duplicate and do not double-apply.
-            CommitResult::Duplicate { .. } => {
-                AdmitResult::Ok { outcome: to_vec(&Outcome::Duplicate).unwrap_or_default() }
-            }
+            CommitResult::Duplicate { .. } => admit_ok(&Outcome::Duplicate),
             // The durable uniqueness backstop refused a claim the reducer's
             // snapshot screen missed — do not apply; report the conflict.
             CommitResult::Conflict { workpiece, .. } => {
@@ -182,13 +203,21 @@ impl WasmActor for ControlCore {
             return;
         };
         let document = view_of(&self.snapshot);
+        // On an encode failure reply the error path rather than substituting an
+        // empty payload a reader would decode as a valid-but-blank projection.
         let result = match mail.bloom {
-            None => QueryResult::Document { document: to_vec(&document).unwrap_or_default() },
+            None => match to_vec(&document) {
+                Ok(document) => QueryResult::Document { document },
+                Err(error) => QueryResult::Err { error: format!("document encode failed: {error}") },
+            },
             Some(bytes) => document
                 .blooms
                 .iter()
                 .find(|view| view.id.0.as_bytes().as_slice() == bytes.as_slice())
-                .map_or(QueryResult::NotFound, |view| QueryResult::Bloom { view: to_vec(view).unwrap_or_default() }),
+                .map_or(QueryResult::NotFound, |view| match to_vec(view) {
+                    Ok(view) => QueryResult::Bloom { view },
+                    Err(error) => QueryResult::Err { error: format!("bloom view encode failed: {error}") },
+                }),
         };
         ctx.reply_to(handle, &result);
     }
@@ -211,7 +240,10 @@ fn commit_key(result: &CommitResult) -> &str {
 /// resolution / mark superseded / set resolved / advance mainline) carry no
 /// durable store row — they are rebuilt on replay by `reduce` + `apply` from
 /// the journaled event.
-fn project(decisions: &Decisions) -> (Vec<MembershipMutation>, Vec<MembershipMutation>, Vec<OutboxPayload>) {
+#[allow(clippy::type_complexity)]
+fn project(
+    decisions: &Decisions,
+) -> Result<(Vec<MembershipMutation>, Vec<MembershipMutation>, Vec<OutboxPayload>), WireError> {
     let mut releases = Vec::new();
     let mut claims = Vec::new();
     let mut outbox = Vec::new();
@@ -225,10 +257,7 @@ fn project(decisions: &Decisions) -> (Vec<MembershipMutation>, Vec<MembershipMut
                     .push(MembershipMutation { workpiece: workpiece.0.clone(), bloom: bloom.0.as_bytes().to_vec() });
             }
             Decision::EmitReceipt(receipt) => {
-                outbox.push(OutboxPayload {
-                    topic: RECEIPT_TOPIC.to_owned(),
-                    payload: to_vec(receipt).unwrap_or_default(),
-                });
+                outbox.push(OutboxPayload { topic: RECEIPT_TOPIC.to_owned(), payload: to_vec(receipt)? });
             }
             Decision::InheritClaim { .. }
             | Decision::RecordResolution { .. }
@@ -237,7 +266,17 @@ fn project(decisions: &Decisions) -> (Vec<MembershipMutation>, Vec<MembershipMut
             | Decision::AdvanceMainline { .. } => {}
         }
     }
-    (releases, claims, outbox)
+    Ok((releases, claims, outbox))
+}
+
+/// Encode a reducer [`Outcome`] into an [`AdmitResult`], mapping an encode
+/// failure to the `Err` reply rather than an empty `Ok` payload the admitter
+/// would decode as a valid-but-blank outcome.
+fn admit_ok(outcome: &Outcome) -> AdmitResult {
+    match to_vec(outcome) {
+        Ok(outcome) => AdmitResult::Ok { outcome },
+        Err(error) => AdmitResult::Err { error: format!("admit outcome encode failed: {error}") },
+    }
 }
 
 aether_actor::export!(ControlCore);
