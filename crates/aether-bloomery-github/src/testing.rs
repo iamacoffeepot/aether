@@ -19,10 +19,15 @@
 // clutters the store methods.
 #![allow(clippy::significant_drop_tightening)]
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use crate::client::{Comment, GithubApi, GithubError, Issue, NewComment, NewIssue};
+use aether_bloomery::Digest;
+use sha2::{Digest as _, Sha256};
+
+use crate::client::{Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, Issue, NewComment, NewIssue};
 use crate::marker::parse_marker;
+use crate::source::{digest_from_hex, to_hex};
 
 #[derive(Clone)]
 struct StoredIssue {
@@ -44,6 +49,11 @@ struct State {
     next_comment: u64,
     issues: Vec<StoredIssue>,
     comments: Vec<StoredComment>,
+    // The git object store the source port drives: ref name (`heads/…`) → sha,
+    // and commit sha → tree sha. Trees themselves are opaque shas the port
+    // treats as digest-addressed handles, so they need no separate store.
+    refs: HashMap<String, String>,
+    commits: HashMap<String, String>,
 }
 
 /// An in-memory GitHub double implementing [`GithubApi`].
@@ -99,6 +109,134 @@ impl FakeGithub {
         let mut state = self.lock();
         state.issues.retain(|issue| issue.number != number);
         state.comments.retain(|comment| comment.issue_number != number);
+    }
+
+    /// Seed a commit object carrying `tree_sha` (no parents) and return its
+    /// sha — a source-port test's way to place a base commit the port can
+    /// snapshot or a namespace can be created on.
+    #[must_use]
+    pub fn seed_commit(&self, tree_sha: &str) -> String {
+        let sha = commit_sha("seed", tree_sha, &[]);
+        self.lock().commits.insert(sha.clone(), tree_sha.to_owned());
+        sha
+    }
+
+    /// Seed a ref (`heads/…` form) pointing at `sha`.
+    pub fn seed_ref(&self, name: &str, sha: &str) {
+        self.lock().refs.insert(name.to_owned(), sha.to_owned());
+    }
+
+    /// Whether ref `name` (`heads/…` form) currently exists.
+    #[must_use]
+    pub fn ref_exists(&self, name: &str) -> bool {
+        self.lock().refs.contains_key(name)
+    }
+
+    /// The sha ref `name` points at, if it exists.
+    #[must_use]
+    pub fn ref_target(&self, name: &str) -> Option<String> {
+        self.lock().refs.get(name).cloned()
+    }
+
+    /// Seed a base commit carrying `tree` and return the commit's digest — the
+    /// digest-typed form a source-port demo works in, hiding the hex-of-digest
+    /// object-sha encoding the port owns.
+    ///
+    /// # Panics
+    /// Never in practice — the seeded commit sha is always the 64-hex a digest
+    /// round-trips through; a panic here is a broken invariant in the fake.
+    #[must_use]
+    pub fn seed_base_commit(&self, tree: &Digest) -> Digest {
+        let sha = self.seed_commit(&to_hex(tree));
+        digest_from_hex(&sha).expect("a seeded commit sha is 64-hex")
+    }
+
+    /// Seed a ref (`heads/…` form) pointing at the commit `target`.
+    pub fn seed_ref_at(&self, name: &str, target: &Digest) {
+        self.seed_ref(name, &to_hex(target));
+    }
+
+    /// The commit digest ref `name` points at, if it exists — the digest-typed
+    /// [`ref_target`](Self::ref_target).
+    #[must_use]
+    pub fn ref_digest(&self, name: &str) -> Option<Digest> {
+        self.ref_target(name).and_then(|sha| digest_from_hex(&sha))
+    }
+}
+
+// A deterministic commit sha: sha256 over the message, tree, and parents,
+// rendered as 64 lowercase hex so it round-trips through the port's
+// `digest_from_hex`. Deterministic so a re-seed of the same content is stable.
+fn commit_sha(message: &str, tree: &str, parents: &[String]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(message.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(tree.as_bytes());
+    for parent in parents {
+        hasher.update([0u8]);
+        hasher.update(parent.as_bytes());
+    }
+    let bytes: [u8; 32] = hasher.finalize().into();
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
+    }
+    out
+}
+
+impl GitDataApi for FakeGithub {
+    fn get_ref(&self, name: &str) -> Result<Option<GitRef>, GithubError> {
+        let state = self.lock();
+        Ok(state.refs.get(name).map(|sha| GitRef { name: name.to_owned(), sha: sha.clone() }))
+    }
+
+    fn create_ref(&self, name: &str, sha: &str) -> Result<GitRef, GithubError> {
+        let mut state = self.lock();
+        if state.refs.contains_key(name) {
+            return Err(GithubError::Status { status: 422, body: format!("ref {name} already exists") });
+        }
+        state.refs.insert(name.to_owned(), sha.to_owned());
+        Ok(GitRef { name: name.to_owned(), sha: sha.to_owned() })
+    }
+
+    fn update_ref(&self, name: &str, sha: &str, _force: bool) -> Result<GitRef, GithubError> {
+        // The fake does not model commit ancestry, so it cannot enforce the
+        // fast-forward-only meaning of `force:false`; the source backend does
+        // its compare-and-swap by reading and comparing before it updates, so a
+        // plain set here is faithful to how the port drives the store.
+        let mut state = self.lock();
+        if !state.refs.contains_key(name) {
+            return Err(GithubError::Status { status: 404, body: format!("no ref {name}") });
+        }
+        state.refs.insert(name.to_owned(), sha.to_owned());
+        Ok(GitRef { name: name.to_owned(), sha: sha.to_owned() })
+    }
+
+    fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GithubError> {
+        let state = self.lock();
+        let mut refs: Vec<GitRef> = state
+            .refs
+            .iter()
+            .filter(|(name, _)| name.starts_with(prefix))
+            .map(|(name, sha)| GitRef { name: name.clone(), sha: sha.clone() })
+            .collect();
+        refs.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(refs)
+    }
+
+    fn get_commit(&self, sha: &str) -> Result<GitCommit, GithubError> {
+        self.lock()
+            .commits
+            .get(sha)
+            .map(|tree| GitCommit { sha: sha.to_owned(), tree: tree.clone() })
+            .ok_or_else(|| GithubError::Status { status: 404, body: format!("no commit {sha}") })
+    }
+
+    fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GithubError> {
+        let sha = commit_sha(message, tree, parents);
+        self.lock().commits.insert(sha.clone(), tree.to_owned());
+        Ok(GitCommit { sha, tree: tree.to_owned() })
     }
 }
 

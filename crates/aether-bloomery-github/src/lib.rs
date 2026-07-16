@@ -41,15 +41,17 @@ mod config;
 mod inward;
 mod marker;
 mod projection;
+mod source;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
 pub use client::{
-    CheckConclusion, CheckRun, Comment, GithubApi, GithubError, HttpRequest, HttpResponse, HttpTransport, Issue,
-    Method, NewCheckRun, NewComment, NewIssue, ReqwestGithub, ReqwestTransport,
+    CheckConclusion, CheckRun, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, HttpRequest,
+    HttpResponse, HttpTransport, Issue, Method, NewCheckRun, NewComment, NewIssue, ReqwestGithub, ReqwestTransport,
 };
 pub use config::GithubConfig;
 pub use inward::{InwardError, StageResult, StageVerdict, normalize_stage_result};
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
 pub use projection::GithubProjection;
+pub use source::{GitSource, SourceError};
