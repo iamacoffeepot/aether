@@ -77,6 +77,15 @@ const CONTROL_CORE_PATH: &str = "aether.component/aether.embedded:aether.bloomer
 /// [`HttpServerRequest`] kind, which switches on method + remaining path.
 const ROUTE_PREFIXES: [&str; 6] = ["/workpieces", "/drafts", "/blooms", "/view", "/journal", "/artifacts"];
 
+/// Per-process ceilings on the pre-seal shaping maps. Staged workpieces and
+/// open drafts are pure in-memory shaping state with no durable owner to evict
+/// them, so the router caps each map and rejects growth past the cap rather
+/// than letting an operator (or a runaway client) grow it without bound
+/// (CLAUDE.md §Runtime: error rather than grow unboundedly). Capacity frees
+/// only when the shaping session restarts.
+const MAX_STAGED_WORKPIECES: usize = 1024;
+const MAX_OPEN_DRAFTS: usize = 1024;
+
 /// The control-plane REST router state: the pre-seal shaping maps plus the
 /// in-flight reply-correlation table.
 pub struct ApiCapabilityState {
@@ -225,12 +234,21 @@ impl ApiCapabilityState {
             Ok(workpiece) => workpiece,
             Err(error) => return Routed::Reply(error_response(400, &format!("invalid workpiece body: {error}"))),
         };
+        // Re-staging an existing id overwrites in place; only a net-new id grows
+        // the map, so the cap gates new keys and lets an idempotent re-stage
+        // through at the ceiling.
+        if !self.staged.contains_key(&workpiece.id.0) && self.staged.len() >= MAX_STAGED_WORKPIECES {
+            return Routed::Reply(error_response(429, "staged-workpiece budget exhausted"));
+        }
         self.staged.insert(workpiece.id.0.clone(), workpiece.clone());
         Routed::Reply(json(201, &workpiece))
     }
 
     /// `POST /drafts` — open a fresh empty draft under a new handle.
     fn open_draft(&mut self) -> Routed {
+        if self.drafts.len() >= MAX_OPEN_DRAFTS {
+            return Routed::Reply(error_response(429, "open-draft budget exhausted"));
+        }
         let draft_id = self.next_draft;
         self.next_draft += 1;
         let draft = BloomDraft::default();

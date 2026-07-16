@@ -247,11 +247,15 @@ impl Error for DispatchError {
 /// Submit a work order through the executor shell and record its outstanding
 /// reducer context, in one host step (#3502). Submits first, so a submit that
 /// fails records nothing; the registry row is written only for a dispatch that
-/// actually reached the worker lane.
+/// actually reached the worker lane. A record write that faults *after* a
+/// successful submit best-effort cancels the just-submitted run before
+/// propagating — the order would otherwise run untracked, with no registry row
+/// to resolve its evidence against.
 ///
 /// # Errors
 /// [`DispatchError::Submit`] if the executor refused the dispatch, or
-/// [`DispatchError::Store`] if the registry write faulted after submit.
+/// [`DispatchError::Store`] if the registry write faulted after submit (the
+/// submitted run is best-effort cancelled first).
 pub fn dispatch_and_record(
     shell: &ExecutorShell,
     store: &mut dyn StoreBackend,
@@ -259,7 +263,13 @@ pub fn dispatch_and_record(
     record: &DispatchRecord,
 ) -> Result<WorkHandle, DispatchError> {
     let handle = shell.submit(order).map_err(DispatchError::Submit)?;
-    record_dispatch(store, record).map_err(DispatchError::Store)?;
+    if let Err(store_error) = record_dispatch(store, record) {
+        // The order reached the worker lane but its reducer context never
+        // landed, so it is untracked either way; best-effort cancel the run
+        // rather than leak an untracked dispatch, then surface the store fault.
+        let _ = shell.cancel(&handle);
+        return Err(DispatchError::Store(store_error));
+    }
     Ok(handle)
 }
 
