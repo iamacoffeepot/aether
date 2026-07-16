@@ -39,10 +39,15 @@
 //!
 //! [#3458]: https://github.com/iamacoffeepot/aether/issues/3458
 
-#![no_std]
-
+// `std`, not `#![no_std]` (issue #3497): the crate emits a `cdylib` control-core
+// wasm component (ADR-0149 §Packaging, the `aether-kit` precedent), and a
+// `cdylib` target must build for the native host — where a `#![no_std]` crate has
+// no global allocator. `std` compiles to `wasm32` like every component here, and
+// no consumer requires `no_std`. The pure core still leans on `alloc` paths, so
+// the crate is kept `alloc`-explicit for a clean wasm-safe surface.
 extern crate alloc;
 
+pub mod control;
 pub mod digest;
 pub mod ids;
 pub mod manifest;
@@ -51,6 +56,12 @@ pub mod reduce;
 pub mod sign;
 pub mod values;
 
+#[cfg(feature = "runtime")]
+pub use control::ControlCore;
+pub use control::{
+    Admit, AdmitResult, Commit, CommitResult, JournalRecord, MembershipMutation, OutboxPayload, Query, QueryResult,
+    ReplayJournal, ReplayJournalResult,
+};
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, StageId, WorkpieceId};
 pub use manifest::{
