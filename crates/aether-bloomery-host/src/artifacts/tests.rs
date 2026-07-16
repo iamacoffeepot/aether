@@ -25,7 +25,7 @@ fn parents(names: &[&str]) -> Vec<String> {
 }
 
 fn put_digest(state: &mut ArtifactsCapabilityState, bytes: &[u8], ps: &[&str]) -> String {
-    match state.put(bytes, parents(ps)) {
+    match state.put(bytes, &parents(ps)) {
         PutResult::Ok { digest } => digest,
         PutResult::Err { error } => panic!("put failed: {error:?}"),
     }

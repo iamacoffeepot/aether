@@ -73,8 +73,8 @@ impl ArtifactsCapabilityState {
     /// Store `bytes` content-addressed with their declared `parents`, replying
     /// the digest. The `on_put` handler is a thin wrapper over this; it carries
     /// the durability check.
-    pub fn put(&mut self, bytes: &[u8], parents: Vec<String>) -> PutResult {
-        let digest = self.store.upload(bytes, ArtifactMeta { parents: parents.clone() }, None);
+    pub fn put(&mut self, bytes: &[u8], parents: &[String]) -> PutResult {
+        let digest = self.store.upload(bytes, ArtifactMeta { parents: parents.to_vec() }, None);
         // `upload` swallows a write failure (logs a warn, leaves the entry
         // unindexed) and still returns the hash, so `contains` is the honest
         // durability check: an unindexed digest means the bytes never landed.
@@ -138,7 +138,7 @@ impl NativeActor for ArtifactsCapability {
     #[handler::single]
     fn on_put(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Put) -> PutResult {
         let Put { bytes, parents } = mail;
-        state.put(&bytes, parents)
+        state.put(&bytes, &parents)
     }
 
     #[handler::single]
