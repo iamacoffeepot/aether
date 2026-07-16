@@ -82,6 +82,10 @@ struct State {
     next_run: u64,
     dispatches: Vec<StoredDispatch>,
     runs: Vec<StoredRun>,
+    // Ref names armed to fail their next `delete_ref` with an injected error —
+    // each fails once, then behaves normally. Lets a test drive the rollback
+    // path that must attempt every delete even when one fails.
+    fail_deletes: Vec<String>,
 }
 
 /// An in-memory GitHub double implementing [`GithubApi`].
@@ -129,6 +133,14 @@ impl FakeGithub {
     #[must_use]
     pub fn issue_body(&self, number: u64) -> Option<String> {
         self.lock().issues.iter().find(|issue| issue.number == number).map(|issue| issue.body.clone())
+    }
+
+    /// Arm a one-shot delete failure for ref `name`: its next `delete_ref`
+    /// returns an injected error, then subsequent deletes behave normally. Lets
+    /// a test exercise the rollback path that must attempt every delete even
+    /// after one fails.
+    pub fn fail_delete(&self, name: &str) {
+        self.lock().fail_deletes.push(name.to_owned());
     }
 
     /// Delete issue `number` and its comments — an operator removing a
@@ -313,10 +325,17 @@ impl GitDataApi for FakeGithub {
     }
 
     fn delete_ref(&self, name: &str) -> Result<(), GithubError> {
+        let mut state = self.lock();
+        // An armed one-shot failure fires once — a transport fault a rollback
+        // must survive without abandoning the deletes behind it.
+        if let Some(pos) = state.fail_deletes.iter().position(|armed| armed == name) {
+            state.fail_deletes.remove(pos);
+            return Err(GithubError::Status { status: 500, body: format!("injected delete failure for {name}") });
+        }
         // Deleting an absent ref is the clean idempotent outcome (GitHub answers
         // 404/422, which the real client maps to Ok), so a release retried after
         // a crash is a no-op.
-        self.lock().refs.remove(name);
+        state.refs.remove(name);
         Ok(())
     }
 

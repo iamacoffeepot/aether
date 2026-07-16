@@ -365,10 +365,18 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
                 AcquireOne::Created => created.push(name),
                 AcquireOne::AlreadyMine => {}
                 AcquireOne::Held(held_by) => {
+                    // Roll back every ref this call created — attempting all of
+                    // them even if one delete fails, so a mid-rollback error
+                    // never leaks the refs behind it as stale claims. The first
+                    // error is surfaced only after the whole rollback is
+                    // attempted; on a clean rollback the conflict is reported.
+                    let mut rollback_error = None;
                     for name in &created {
-                        self.client.delete_ref(name)?;
+                        if let Err(error) = self.client.delete_ref(name) {
+                            rollback_error.get_or_insert(SourceError::Github(error));
+                        }
                     }
-                    return Ok(ClaimOutcome::Held { ref_kind, held_by });
+                    return rollback_error.map_or(Ok(ClaimOutcome::Held { ref_kind, held_by }), Err);
                 }
             }
         }
@@ -380,8 +388,19 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         let mut names: Vec<String> = workpieces.iter().map(Self::claim_ref).collect();
         names.push(ADMISSION_REF.to_owned());
         for name in names {
-            // Delete only a ref this bloom holds — never another bloom's, so a
-            // release can never free a peer's live claim.
+            // Delete only a ref this bloom currently holds — read the ref and
+            // guard the delete on its sha, so a release never frees a peer's
+            // claim. This read-then-delete is the tightest guard the platform
+            // allows: GitHub's git-refs API has no atomic compare-and-delete
+            // (DELETE is name-only), and the fast-forward CAS `integrate`/`land`
+            // use on commit refs via `update_ref(force:false)` does not apply to
+            // a claim ref, which points at the bloom-id object sha with no
+            // commit ancestry to fast-forward. The residual read-to-delete
+            // window is bounded by the single-writer-per-bloom convention — only
+            // this bloom's own coordinator releases its claims — so a peer can
+            // create the ref in that window only under a double-release of one
+            // bloom's claims, the same crash-retry case the read guard already
+            // narrows.
             if let Some(existing) = self.client.get_ref(&name)?
                 && existing.sha == bloom_sha
             {
@@ -573,6 +592,33 @@ mod tests {
         let outcome = source.claim_seal(&second, &[workpiece("beta")]).unwrap();
         assert_eq!(outcome, ClaimOutcome::Held { ref_kind: ClaimRefKind::MainlineAdmission, held_by: first });
         assert!(!fake.ref_exists("bloomery/claims/beta"), "the partial workpiece claim was rolled back");
+    }
+
+    #[test]
+    fn claim_seal_rollback_attempts_every_delete_past_a_failed_one() {
+        // Tripwire: a `?` short-circuit in the rollback loop leaks the refs
+        // behind a failed delete as stale claims (the resource-leak finding).
+        let fake = FakeGithub::new();
+        let source = GitSource::new(fake.clone(), false);
+        let first = bloom();
+        let second = BloomId(digest(2));
+
+        // `first` holds "shared" (and the admission ref).
+        source.claim_seal(&first, &[workpiece("shared")]).unwrap();
+
+        // `second` creates two free claim refs, then conflicts on "shared" and
+        // rolls both back. Arm a failure on the first rollback delete: the loop
+        // must still attempt the second and surface the error rather than
+        // abandon the cleanup on the first `?`.
+        fake.fail_delete("bloomery/claims/free-a");
+        let outcome = source.claim_seal(&second, &[workpiece("free-a"), workpiece("free-b"), workpiece("shared")]);
+
+        assert!(matches!(outcome, Err(SourceError::Github(_))), "the rollback delete failure is surfaced");
+        assert!(fake.ref_exists("bloomery/claims/free-a"), "the failed delete left free-a behind (its error surfaced)");
+        assert!(
+            !fake.ref_exists("bloomery/claims/free-b"),
+            "the rollback still deleted free-b past the failed free-a delete — no short-circuit"
+        );
     }
 
     #[test]
