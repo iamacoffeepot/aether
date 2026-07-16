@@ -50,23 +50,6 @@ impl ContentAddressed for StageCatalog {
 }
 
 impl StageCatalog {
-    /// Every stage of the line, in execution order. The one place the closed
-    /// vocabulary's order is written; [`line`](Self::line) maps it to bindings.
-    const STAGES: [StageId; 12] = [
-        StageId::Sketch,
-        StageId::Scope,
-        StageId::Approve,
-        StageId::Construct,
-        StageId::Verify,
-        StageId::Refine,
-        StageId::Review,
-        StageId::Integrate,
-        StageId::AggregateVerify,
-        StageId::AggregateReview,
-        StageId::Land,
-        StageId::Study,
-    ];
-
     /// The catalog's content-addressed digest — the value a bloom freezes at
     /// seal.
     #[must_use]
@@ -81,12 +64,15 @@ impl StageCatalog {
     ///
     /// The per-binding tag/gate strings are the initial vocabulary — refinable
     /// without an ADR (a change re-digests the catalog); the load-bearing
-    /// invariants are one binding per stage and the exhaustive `binding_of`
-    /// match, so a thirteenth stage is a compile error until its binding is
-    /// authored.
+    /// invariant is one binding per stage, and it holds by construction: the
+    /// catalog maps [`binding_of`](Self::binding_of) over the generated
+    /// [`StageId::ALL`], which is complete and duplicate-free by construction,
+    /// and `binding_of`'s exhaustive match forces a binding for every variant —
+    /// so a thirteenth stage enters the catalog automatically and is a compile
+    /// error until its binding is authored.
     #[must_use]
     pub fn line() -> Self {
-        Self { bindings: Self::STAGES.into_iter().map(Self::binding_of).collect() }
+        Self { bindings: StageId::ALL.iter().copied().map(Self::binding_of).collect() }
     }
 
     /// The [`line`](Self::line) catalog's digest — the only stage-catalog digest
@@ -217,15 +203,16 @@ pub enum NetworkProfile {
 mod tests {
     use super::*;
 
-    // The line has exactly one binding per stage, in `STAGES` order. A stage
-    // dropped or duplicated in `line()` breaks this; a thirteenth `StageId` is
-    // already a compile error in `binding_of`'s exhaustive match.
+    // The line has exactly one binding per stage, in `StageId::ALL` order. A
+    // stage dropped or reordered in `line()` breaks this; `StageId::ALL` is
+    // generated with the enum, so it cannot drop a variant, and a thirteenth
+    // `StageId` is already a compile error in `binding_of`'s exhaustive match.
     #[test]
     fn line_binds_every_stage_exactly_once() {
         let catalog = StageCatalog::line();
-        assert_eq!(catalog.bindings.len(), StageCatalog::STAGES.len());
+        assert_eq!(catalog.bindings.len(), StageId::ALL.len());
         let bound: Vec<StageId> = catalog.bindings.iter().map(|binding| binding.stage).collect();
-        assert_eq!(bound, StageCatalog::STAGES.to_vec());
+        assert_eq!(bound, StageId::ALL.to_vec());
     }
 
     // Every binding runs under the attempt-scoped `iama-{stage}` profile
