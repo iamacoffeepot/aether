@@ -9,6 +9,7 @@ use clap::Parser;
 
 use crate::artifacts::ArtifactsOverlay;
 use crate::bloomery::chassis::{ControlCoreOverlay, HttpPortOverlay, RpcPortOverlay};
+use crate::source::SourceOverlay;
 use crate::store::StoreOverlay;
 
 /// The `bloomery` binary's clap root. The overlays carry the derive-emitted
@@ -39,6 +40,12 @@ pub struct BloomeryCli {
     /// component wasm to autoload at boot (unset → no autoload).
     #[command(flatten)]
     pub control_core: ControlCoreOverlay,
+
+    /// `--github-token` / `--github-owner` / `--github-repo` / `--github-api-base` /
+    /// `--github-cas-land-enabled` shadow `GITHUB_TOKEN` / `AETHER_GITHUB_*` env —
+    /// the git source-port capability's GitHub connection knobs.
+    #[command(flatten)]
+    pub source: SourceOverlay,
 
     /// Print this binary's `BinaryManifest` (chassis kind, linked caps, build
     /// provenance) as JSON and exit before boot (ADR-0115). The hub's binary
