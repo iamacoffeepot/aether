@@ -207,28 +207,20 @@ class MatcherTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stdout, "human\n")
 
-    def test_surface_declares_manifest(self) -> None:
-        self.assertTrue(surface_match.surface_declares_manifest(["Cargo.toml"]))
-        self.assertTrue(surface_match.surface_declares_manifest(["crates/aether-data/Cargo.toml"]))
-        self.assertTrue(
-            surface_match.surface_declares_manifest(["docs/guide/**", "crates/aether-data/Cargo.toml"])
-        )
-        self.assertFalse(surface_match.surface_declares_manifest(["crates/aether-data/**", "docs/guide/**"]))
-        self.assertFalse(surface_match.surface_declares_manifest([]))
-
     def test_cargo_lock_exempt_when_manifest_declared(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             policy = root / "policy.yml"
             policy.write_text(POLICY, encoding="utf-8")
 
-            # Case A: a declared manifest exempts root Cargo.lock (and a nested
-            # x/Cargo.lock stays flagged — the exemption is root-only).
+            # Case A: an in-surface, changed manifest exempts root Cargo.lock
+            # (and a nested x/Cargo.lock stays flagged — the exemption is
+            # root-only).
             globs_a = root / "globs-a.txt"
             paths_a = root / "paths-a.txt"
             globs_a.write_text("crates/aether-data/Cargo.toml\ncrates/aether-data/**\n", encoding="utf-8")
             paths_a.write_text(
-                "Cargo.lock\ncrates/aether-data/src/lib.rs\nx/Cargo.lock\n",
+                "Cargo.lock\ncrates/aether-data/Cargo.toml\ncrates/aether-data/src/lib.rs\nx/Cargo.lock\n",
                 encoding="utf-8",
             )
             completed_a = subprocess.run(
@@ -242,7 +234,7 @@ class MatcherTests(unittest.TestCase):
             self.assertNotIn("Cargo.lock", escaping_paths)
             self.assertIn("x/Cargo.lock", escaping_paths)
 
-            # Case B: no declared manifest, root Cargo.lock still escapes.
+            # Case B: no in-surface manifest change, root Cargo.lock still escapes.
             globs_b = root / "globs-b.txt"
             paths_b = root / "paths-b.txt"
             globs_b.write_text("docs/guide/**\n", encoding="utf-8")
@@ -255,6 +247,45 @@ class MatcherTests(unittest.TestCase):
             )
             self.assertEqual(completed_b.returncode, 0, completed_b.stderr)
             self.assertTrue(completed_b.stdout.startswith("Cargo.lock\t"))
+
+    def test_cargo_lock_exempt_under_wildcard_subtree_covering_changed_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            policy = root / "policy.yml"
+            policy.write_text(POLICY, encoding="utf-8")
+
+            # Positive: a `/**` subtree surface that covers a changed manifest
+            # exempts root Cargo.lock — the #3490 shape (#3492).
+            globs_pos = root / "globs-pos.txt"
+            paths_pos = root / "paths-pos.txt"
+            globs_pos.write_text("crates/aether-bloomery-host/**\n", encoding="utf-8")
+            paths_pos.write_text(
+                "crates/aether-bloomery-host/Cargo.toml\ncrates/aether-bloomery-host/src/lib.rs\nCargo.lock\n",
+                encoding="utf-8",
+            )
+            completed_pos = subprocess.run(
+                [sys.executable, "-I", str(SCRIPT), str(globs_pos), str(paths_pos), str(policy)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed_pos.returncode, 0, completed_pos.stderr)
+            self.assertNotIn("Cargo.lock", [line.split("\t")[0] for line in completed_pos.stdout.splitlines()])
+
+            # Negative: the same `/**` subtree surface with no manifest change
+            # in the diff — Cargo.lock still escapes.
+            globs_neg = root / "globs-neg.txt"
+            paths_neg = root / "paths-neg.txt"
+            globs_neg.write_text("crates/aether-bloomery-host/**\n", encoding="utf-8")
+            paths_neg.write_text("Cargo.lock\n", encoding="utf-8")
+            completed_neg = subprocess.run(
+                [sys.executable, "-I", str(SCRIPT), str(globs_neg), str(paths_neg), str(policy)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed_neg.returncode, 0, completed_neg.stderr)
+            self.assertTrue(completed_neg.stdout.startswith("Cargo.lock\t"))
 
     def test_containment_cli_and_root_anchor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
