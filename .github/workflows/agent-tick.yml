@@ -819,7 +819,29 @@ jobs:
                     continue
                   fi
                 fi
-                task="implement"; ref="$num" ;;
+                # #3520: a phase:findings PR that has gone dirty against main
+                # (a sibling landed edits to the same files) has no CI to reach
+                # — GitHub runs no pull_request CI on a non-mergeable head — so
+                # the findings Refine loop the implement box would run can only
+                # park. Mirror what a dirty phase:held PR gets through /land:
+                # redirect the dispatch to resolve, which already owns the
+                # merge + CI-drive + re-request. mergeable_state is computed
+                # asynchronously and can read "unknown" transiently, so only a
+                # definitive "dirty" redirects — anything else falls through to
+                # the implement default and is re-checked next tick.
+                findings_dirty=""
+                if [ "$phase" = "phase:findings" ] && [ -n "$pr_ref" ]; then
+                  mergeable_state="$(gh api "repos/${REPO}/pulls/${pr_ref}" --jq '.mergeable_state' 2>/dev/null || echo unknown)"
+                  if [ "$mergeable_state" = "dirty" ]; then
+                    findings_dirty=1
+                  fi
+                fi
+                if [ -n "$findings_dirty" ]; then
+                  trace DISPATCH "#${num}" "phase:findings, PR #${pr_ref} dirty — redirecting to resolve"
+                  task="resolve"; ref="$pr_ref"
+                else
+                  task="implement"; ref="$num"
+                fi ;;
               phase:held) task="land"; ref="" ;;
               *) continue ;;
             esac
