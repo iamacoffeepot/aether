@@ -12,15 +12,19 @@
 //!
 //! A wasm actor cannot block on a host reply, so an admit is a two-message
 //! exchange. [`ControlCore::on_admit`] reduces the event, projects the decision
-//! into a [`Commit`], stashes the pending admit (its reply handle, the decoded
-//! event, and the decisions) keyed by idempotency key, and sends the commit to
-//! `aether.store`. The store is addressed by runtime name (`send_to_named`) —
-//! its capability type lives in `aether-bloomery-host`, which depends on this
-//! crate, so a typed `resolve_actor` mailbox would be a package cycle. That
-//! escape hatch carries no typed reply context, so [`CommitResult`] echoes the
-//! idempotency key and [`ControlCore::on_commit_result`] correlates on it,
-//! applies the decision to the snapshot (only on `Applied`), and replies the
-//! outcome to the original admitter.
+//! into a [`Commit`], stashes the pending admit (the reply handles awaiting it,
+//! the decoded event, and the decisions) keyed by idempotency key, and sends the
+//! commit to `aether.store`. Only the *first* admit for a key opens that entry
+//! and forwards a commit; a same-key admit arriving while the commit is still
+//! outstanding attaches its reply to the entry's waiters rather than reducing or
+//! committing again — a resent idempotency key is the same operation and gets the
+//! same answer. The store is addressed by runtime name (`send_to_named`) — its
+//! capability type lives in `aether-bloomery-host`, which depends on this crate,
+//! so a typed `resolve_actor` mailbox would be a package cycle. That escape hatch
+//! carries no typed reply context, so [`CommitResult`] echoes the idempotency key
+//! and [`ControlCore::on_commit_result`] correlates on it, applies the decision
+//! to the snapshot (only on `Applied`), and fans the one outcome out to every
+//! waiting admitter.
 //!
 //! Boot **does not** drain or ack the outbox — outbox republish belongs to the
 //! consumer capabilities (#3499). This actor only *enqueues* outbox entries,
@@ -50,11 +54,12 @@ const RECEIPT_TOPIC: &str = "aether.bloomery.landing_receipt";
 /// (ADR-0151). Producer-only here, like [`RECEIPT_TOPIC`].
 const REDISPATCH_TOPIC: &str = "aether.bloomery.redispatch";
 
-/// An admit awaiting its durable commit reply — the reply handle to answer, the
-/// decoded event, and the decisions to apply to the snapshot once the store
+/// An admit awaiting its durable commit reply — the reply handles to answer
+/// (one per same-key admit that arrived while the first was still in flight),
+/// the decoded event, and the decisions to apply to the snapshot once the store
 /// confirms the commit landed.
 struct Pending {
-    reply: Option<ReplyHandle>,
+    waiters: Vec<ReplyHandle>,
     event: Event,
     decisions: Decisions,
 }
@@ -80,12 +85,13 @@ impl WasmActor for ControlCore {
         ctx.send_to_named(STORE, &ReplayJournal);
     }
 
-    /// The `aether.bloomery.admit` ingress. Decode the event, reduce it against
-    /// the live snapshot, and either reply immediately (a duplicate needs no
-    /// commit) or send the combined [`Commit`] to the store and answer on its
-    /// reply. Manual class: it issues its own replies (the decode-error and
-    /// duplicate paths reply here; the committed path replies in
-    /// [`Self::on_commit_result`]).
+    /// The `aether.bloomery.admit` ingress. Decode the event; if its key is
+    /// already in flight, attach this reply to that entry's waiters and return
+    /// (no second commit). Otherwise reduce against the live snapshot and either
+    /// reply immediately (a duplicate needs no commit) or open the in-flight entry
+    /// and send the combined [`Commit`] to the store, answering on its reply.
+    /// Manual class: it issues its own replies (the decode-error and duplicate
+    /// paths reply here; the committed path replies in [`Self::on_commit_result`]).
     #[handler::manual]
     fn on_admit(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: Admit) {
         let reply = ctx.reply_target();
@@ -99,6 +105,17 @@ impl WasmActor for ControlCore {
                 return;
             }
         };
+        let key = event.idempotency_key.0.clone();
+        // A second admit for a key whose first admit is still awaiting its store
+        // commit is the same logical operation (idempotency): attach its reply to
+        // the in-flight entry's waiters and return — no second reduce, project, or
+        // Commit. `on_commit_result` fans the one resolved outcome out to every
+        // waiter, so a resent key gets the first admit's real answer rather than a
+        // spurious "superseded" error.
+        if let Some(pending) = self.pending.get_mut(&key) {
+            pending.waiters.extend(reply);
+            return;
+        }
         let decisions = reduce(&self.snapshot, &event);
         // A duplicate key is already in `seen` (applied in this process's life or
         // rebuilt by replay), so it needs no durable commit — reply immediately.
@@ -108,7 +125,6 @@ impl WasmActor for ControlCore {
             }
             return;
         }
-        let key = event.idempotency_key.0.clone();
         // Projecting the decision encodes each outbox receipt; a receipt-encode
         // failure must reject the admit, not commit an empty payload the
         // republisher would later route as a valid-but-blank receipt.
@@ -126,19 +142,10 @@ impl WasmActor for ControlCore {
         // `apply` records the key for a rejected outcome too). A rejection carries
         // empty membership/outbox effects, so the commit is a bare journal append.
         let commit = Commit { idempotency_key: key.clone(), event: raw, releases, claims, outbox };
-        // A second admit with the same key while the first is still in flight would
-        // silently displace the first's pending entry, stranding its admitter with
-        // no reply — answer the displaced admitter rather than dropping it.
-        if let Some(displaced) = self.pending.insert(key, Pending { reply, event, decisions })
-            && let Some(handle) = displaced.reply
-        {
-            ctx.reply_to(
-                handle,
-                &AdmitResult::Err {
-                    error: "superseded by a concurrent admit with the same idempotency key".to_owned(),
-                },
-            );
-        }
+        // First admit for this key: open the in-flight entry with its reply as the
+        // sole initial waiter, and forward the one Commit. The get_mut check above
+        // guarantees no entry exists for this key, so this never displaces one.
+        self.pending.insert(key, Pending { waiters: reply.into_iter().collect(), event, decisions });
         ctx.send_to_named(STORE, &commit);
     }
 
@@ -148,7 +155,7 @@ impl WasmActor for ControlCore {
     #[handler::manual]
     fn on_commit_result(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: CommitResult) {
         let key = commit_key(&mail).to_owned();
-        let Some(Pending { reply, event, decisions }) = self.pending.remove(&key) else {
+        let Some(Pending { waiters, event, decisions }) = self.pending.remove(&key) else {
             // No admit is waiting on this key — a stray or double reply.
             return;
         };
@@ -168,7 +175,10 @@ impl WasmActor for ControlCore {
             }
             CommitResult::Err { error, .. } => AdmitResult::Err { error },
         };
-        if let Some(handle) = reply {
+        // Fan the one resolved outcome out to every admitter that attached to this
+        // key while its commit was in flight — the first admit plus any same-key
+        // retries, each of which is the same idempotent operation.
+        for handle in waiters {
             ctx.reply_to(handle, &result);
         }
     }
