@@ -121,6 +121,27 @@ pub struct NewCheckRun {
     pub conclusion: CheckConclusion,
 }
 
+/// A git ref as the source port reads and writes it: its short name (the
+/// `heads/…` form, no leading `refs/`) and the 40/64-hex object sha it targets.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct GitRef {
+    /// The ref name in `heads/…` form (no `refs/` prefix).
+    pub name: String,
+    /// The object sha the ref points at.
+    pub sha: String,
+}
+
+/// A git commit object: its own sha and the tree sha it carries. The source
+/// port reads a commit to derive a snapshot's tree, and creates one to advance
+/// an integration branch to a candidate tree.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct GitCommit {
+    /// The commit object sha.
+    pub sha: String,
+    /// The tree sha this commit points at.
+    pub tree: String,
+}
+
 /// The GitHub client contract the projection depends on. Both the real
 /// [`ReqwestGithub`] and the test `FakeGithub` implement it,
 /// so the projection logic is exercised without a token or network.
@@ -162,6 +183,61 @@ pub trait GithubApi {
     /// # Errors
     /// The projection surface is unreachable or returned an error status.
     fn update_comment(&self, comment_id: u64, body: &str) -> Result<(), GithubError>;
+}
+
+/// The Git Data REST surface the source port drives (blob/tree/commit/ref over
+/// HTTP, no working copy on disk — ADR-0149's git source port, [#3465]). A
+/// sibling of [`GithubApi`] rather than an extension of it: the projection has
+/// no use for refs and the source port has no use for issues, so segregating
+/// the two keeps each backend generic over only the surface it touches. Both
+/// [`ReqwestGithub`] and the test `FakeGithub` implement it, so the source
+/// backend is exercised with no token or network.
+///
+/// Ref names are the short `heads/…` form (no leading `refs/`); the client
+/// prepends `refs/` only where the create endpoint requires the full form.
+///
+/// [#3465]: https://github.com/iamacoffeepot/aether/issues/3465
+pub trait GitDataApi {
+    /// Read the ref named `name` (`heads/…` form), or `None` if it does not
+    /// exist — a clean 404 is `Ok(None)`, not an error.
+    ///
+    /// # Errors
+    /// A transport fault or a non-404 error status.
+    fn get_ref(&self, name: &str) -> Result<Option<GitRef>, GithubError>;
+
+    /// Create ref `name` at `sha`.
+    ///
+    /// # Errors
+    /// A transport fault or an error status (e.g. the ref already exists).
+    fn create_ref(&self, name: &str, sha: &str) -> Result<GitRef, GithubError>;
+
+    /// Move ref `name` to `sha`. With `force` false the update is
+    /// fast-forward-only — GitHub rejects a non-fast-forward with a 422, the
+    /// compare-and-swap guard the source port's `land` and `integrate` rely on.
+    ///
+    /// # Errors
+    /// A transport fault or an error status — a `Status { status: 422, .. }`
+    /// is the non-fast-forward refusal a caller maps to its CAS-lost outcome.
+    fn update_ref(&self, name: &str, sha: &str, force: bool) -> Result<GitRef, GithubError>;
+
+    /// List every ref under `prefix` (`heads/…` form) — the enumeration a
+    /// successor bloom walks to reuse checkpoints drift did not invalidate.
+    ///
+    /// # Errors
+    /// A transport fault or an error status.
+    fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GithubError>;
+
+    /// Read commit object `sha` (for its tree).
+    ///
+    /// # Errors
+    /// A transport fault or an error status.
+    fn get_commit(&self, sha: &str) -> Result<GitCommit, GithubError>;
+
+    /// Create a commit carrying `tree` with `parents`.
+    ///
+    /// # Errors
+    /// A transport fault or an error status.
+    fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GithubError>;
 }
 
 /// A client or transport failure. A clean not-found is `Ok(None)` at the API
@@ -316,6 +392,23 @@ impl<T: HttpTransport> ReqwestGithub<T> {
             Err(GithubError::Status { status: response.status, body: response.body })
         }
     }
+
+    // Like `request`, but a 404 is the clean "not present" answer (`Ok(None)`)
+    // rather than an error — a ref lookup that misses is not a fault.
+    fn request_opt(&self, method: Method, url: String) -> Result<Option<HttpResponse>, GithubError> {
+        let response = self.transport.execute(HttpRequest { method, url, headers: Vec::new(), body: None })?;
+        if (200..300).contains(&response.status) {
+            Ok(Some(response))
+        } else if response.status == 404 {
+            Ok(None)
+        } else {
+            Err(GithubError::Status { status: response.status, body: response.body })
+        }
+    }
+
+    fn git_url(&self, suffix: &str) -> String {
+        format!("{}/repos/{}/git/{suffix}", self.api_base, self.repo_path)
+    }
 }
 
 impl ReqwestGithub<ReqwestTransport> {
@@ -345,6 +438,45 @@ struct GhComment {
     id: u64,
     #[serde(default)]
     body: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GhRefObject {
+    sha: String,
+}
+
+#[derive(Deserialize)]
+struct GhRef {
+    #[serde(rename = "ref")]
+    ref_name: String,
+    object: GhRefObject,
+}
+
+impl GhRef {
+    // The API returns the fully-qualified `refs/heads/…`; the source port works
+    // in the short `heads/…` form, so strip the `refs/` the create endpoint
+    // required.
+    fn into_git_ref(self) -> GitRef {
+        let name = self.ref_name.strip_prefix("refs/").unwrap_or(&self.ref_name).to_owned();
+        GitRef { name, sha: self.object.sha }
+    }
+}
+
+#[derive(Deserialize)]
+struct GhTreeRef {
+    sha: String,
+}
+
+#[derive(Deserialize)]
+struct GhCommit {
+    sha: String,
+    tree: GhTreeRef,
+}
+
+impl GhCommit {
+    fn into_git_commit(self) -> GitCommit {
+        GitCommit { sha: self.sha, tree: self.tree.sha }
+    }
 }
 
 fn decode<D: for<'de> Deserialize<'de>>(response: &HttpResponse) -> Result<D, GithubError> {
@@ -430,6 +562,62 @@ impl<T: HttpTransport> GithubApi for ReqwestGithub<T> {
     }
 }
 
+impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
+    fn get_ref(&self, name: &str) -> Result<Option<GitRef>, GithubError> {
+        let Some(response) = self.request_opt(Method::Get, self.git_url(&format!("ref/{name}")))? else {
+            return Ok(None);
+        };
+        let gh: GhRef = decode(&response)?;
+        Ok(Some(gh.into_git_ref()))
+    }
+
+    fn create_ref(&self, name: &str, sha: &str) -> Result<GitRef, GithubError> {
+        let payload = serde_json::json!({ "ref": format!("refs/{name}"), "sha": sha }).to_string();
+        let response = self.request(Method::Post, self.git_url("refs"), Some(payload))?;
+        let gh: GhRef = decode(&response)?;
+        Ok(gh.into_git_ref())
+    }
+
+    fn update_ref(&self, name: &str, sha: &str, force: bool) -> Result<GitRef, GithubError> {
+        let payload = serde_json::json!({ "sha": sha, "force": force }).to_string();
+        let response = self.request(Method::Patch, self.git_url(&format!("refs/{name}")), Some(payload))?;
+        let gh: GhRef = decode(&response)?;
+        Ok(gh.into_git_ref())
+    }
+
+    fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GithubError> {
+        // matching-refs is paginated (100/page), so a bloom with more than one
+        // page of checkpoints must be walked to the end — a single GET would
+        // silently truncate the enumeration and drop reusable checkpoints. Same
+        // page-walk as find_issue / find_comment: stop when a page is short.
+        let base = self.git_url(&format!("matching-refs/{prefix}"));
+        let mut out = Vec::new();
+        for page in 1..=MAX_LIST_PAGES {
+            let response = self.request(Method::Get, format!("{base}?per_page={PER_PAGE}&page={page}"), None)?;
+            let refs: Vec<GhRef> = decode(&response)?;
+            let count = refs.len();
+            out.extend(refs.into_iter().map(GhRef::into_git_ref));
+            if count < PER_PAGE as usize {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    fn get_commit(&self, sha: &str) -> Result<GitCommit, GithubError> {
+        let response = self.request(Method::Get, self.git_url(&format!("commits/{sha}")), None)?;
+        let gh: GhCommit = decode(&response)?;
+        Ok(gh.into_git_commit())
+    }
+
+    fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GithubError> {
+        let payload = serde_json::json!({ "message": message, "tree": tree, "parents": parents }).to_string();
+        let response = self.request(Method::Post, self.git_url("commits"), Some(payload))?;
+        let gh: GhCommit = decode(&response)?;
+        Ok(gh.into_git_commit())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -499,5 +687,82 @@ mod tests {
             }
             other => panic!("expected Status, got {other:?}"),
         }
+    }
+
+    use super::GitDataApi;
+
+    #[test]
+    fn get_ref_maps_404_to_none() {
+        // Tripwire: a missing ref is the clean `Ok(None)` the source port reads
+        // as "namespace not yet created", never a `Status` error.
+        let github = client(404, r#"{"message":"Not Found"}"#);
+        assert_eq!(github.get_ref("heads/bloom/x/integration").expect("404 is Ok(None)"), None);
+    }
+
+    #[test]
+    fn get_ref_strips_the_refs_prefix_and_targets_the_ref_route() {
+        let github = client(200, r#"{"ref":"refs/heads/bloom/x/integration","object":{"sha":"abc"}}"#);
+        let git_ref = github.get_ref("heads/bloom/x/integration").expect("2xx decodes").expect("present");
+        assert_eq!(git_ref.name, "heads/bloom/x/integration");
+        assert_eq!(git_ref.sha, "abc");
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(request.method, Method::Get);
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/git/ref/heads/bloom/x/integration");
+    }
+
+    #[test]
+    fn create_ref_posts_the_fully_qualified_ref() {
+        let github = client(201, r#"{"ref":"refs/heads/bloom/x/checkpoint/aa","object":{"sha":"c0ffee"}}"#);
+        github.create_ref("heads/bloom/x/checkpoint/aa", "c0ffee").expect("2xx create decodes");
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(request.method, Method::Post);
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/git/refs");
+        let sent: serde_json::Value = serde_json::from_str(&request.body.unwrap()).unwrap();
+        // The create endpoint takes the full `refs/…` form, not the short one.
+        assert_eq!(sent["ref"], "refs/heads/bloom/x/checkpoint/aa");
+        assert_eq!(sent["sha"], "c0ffee");
+    }
+
+    #[test]
+    fn update_ref_carries_the_force_flag() {
+        // Tripwire: the CAS guard is `force:false` in the body — a slip to
+        // `true` would silently clobber a concurrent advance.
+        let github = client(200, r#"{"ref":"refs/heads/main","object":{"sha":"new"}}"#);
+        github.update_ref("heads/main", "new", false).expect("2xx patch");
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(request.method, Method::Patch);
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/git/refs/heads/main");
+        let sent: serde_json::Value = serde_json::from_str(&request.body.unwrap()).unwrap();
+        assert_eq!(sent["sha"], "new");
+        assert_eq!(sent["force"], false);
+    }
+
+    #[test]
+    fn create_commit_posts_tree_and_parents() {
+        let github = client(201, r#"{"sha":"newcommit","tree":{"sha":"treesha"}}"#);
+        let commit = github.create_commit("checkpoint", "treesha", &["parentsha".to_owned()]).expect("2xx decodes");
+        assert_eq!(commit.sha, "newcommit");
+        assert_eq!(commit.tree, "treesha");
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/git/commits");
+        let sent: serde_json::Value = serde_json::from_str(&request.body.unwrap()).unwrap();
+        assert_eq!(sent["tree"], "treesha");
+        assert_eq!(sent["parents"][0], "parentsha");
+    }
+
+    #[test]
+    fn list_matching_refs_paginates_the_prefix_route() {
+        // A short first page (1 < PER_PAGE) ends the walk after one request; the
+        // URL carries the pagination query so a >100-checkpoint bloom is walked
+        // to the end rather than silently truncated to the first page.
+        let github = client(200, r#"[{"ref":"refs/heads/bloom/x/checkpoint/aa","object":{"sha":"s"}}]"#);
+        let refs = github.list_matching_refs("heads/bloom/x/checkpoint/").expect("2xx decodes");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "heads/bloom/x/checkpoint/aa");
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(
+            request.url,
+            "https://api.github.com/repos/octo/shadow/git/matching-refs/heads/bloom/x/checkpoint/?per_page=100&page=1"
+        );
     }
 }
