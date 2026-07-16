@@ -62,9 +62,63 @@ pub enum CommitOutcome {
     Conflict(String),
 }
 
+/// One outstanding work order the host dispatched and is waiting on evidence
+/// for (ADR-0149 migration step 2, evidence intake — issue #3502). The
+/// host-side dispatch-record that links a dispatched worker's idempotency
+/// `nonce` back to the reducer context the returning evidence needs, so the
+/// portable core [`aether_bloomery::WorkOrder`] stays `{ transformation, nonce }`
+/// and never carries orchestration state. Persisted (not in-memory) because
+/// evidence returns after an arbitrary delay — a worker run takes minutes — so
+/// the order must survive a host restart to stay matchable, and consumed on
+/// accept so a replayed nonce refuses.
+///
+/// The digest-typed columns (`bloom`, `scope_revision`, `candidate`,
+/// `displayed_digest`) are the raw digest bytes, matching the opaque-bytes
+/// convention the `bloom` axis of [`MembershipMutation`] already uses; the
+/// native intake reconstructs the typed values from them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutstandingOrder {
+    /// The dispatched worker's idempotency nonce — the registry key the
+    /// returning evidence is matched by.
+    pub nonce: String,
+    /// The bloom the resolved candidate integrates into (its `BloomId` digest
+    /// bytes).
+    pub bloom: Vec<u8>,
+    /// The member workpiece this order resolves.
+    pub workpiece: String,
+    /// The scope revision the candidate was integrated against (digest bytes).
+    pub scope_revision: Vec<u8>,
+    /// The exact candidate digest the evidence must bind to (digest bytes).
+    pub candidate: Vec<u8>,
+    /// The digest Bloomery displayed for this order — the evidence's bound
+    /// digest must equal it (digest bytes).
+    pub displayed_digest: Vec<u8>,
+}
+
+/// The outcome of recording an [`OutstandingOrder`]: written, or its nonce was
+/// already outstanding (idempotent — nothing changed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordOutcome {
+    /// The order was recorded at its nonce.
+    Recorded,
+    /// The nonce was already outstanding — nothing was written.
+    Duplicate,
+}
+
 /// The durable store the capability drives. One method per transact-mail kind;
 /// each is one atomic `SQLite` transaction.
 pub trait StoreBackend: Send {
+    /// Record an outstanding work order at its nonce (the evidence-intake
+    /// registry write side, #3502). Idempotent: a nonce already outstanding is
+    /// a [`RecordOutcome::Duplicate`] no-op, never a second row.
+    fn record_order(&mut self, order: &OutstandingOrder) -> rusqlite::Result<RecordOutcome>;
+    /// Look an outstanding order up by nonce, or `None` if none is outstanding
+    /// (never dispatched, or already consumed).
+    fn lookup_order(&mut self, nonce: &str) -> rusqlite::Result<Option<OutstandingOrder>>;
+    /// Consume the outstanding order at `nonce` (delete it), returning whether a
+    /// row was removed. A consumed order makes a replayed nonce refuse — the
+    /// consume-once semantics the trust boundary rests on.
+    fn consume_order(&mut self, nonce: &str) -> rusqlite::Result<bool>;
     /// Apply a combined commit — journal the idempotency-keyed event, apply the
     /// membership releases then claims, and enqueue the outbox payloads — in
     /// **one** transaction (ADR-0149 §The control core). A duplicate key or a
@@ -139,6 +193,14 @@ CREATE TABLE IF NOT EXISTS outbox (
     payload   BLOB NOT NULL,
     delivered INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS outstanding_orders (
+    nonce            TEXT PRIMARY KEY,
+    bloom            BLOB NOT NULL,
+    workpiece        TEXT NOT NULL,
+    scope_revision   BLOB NOT NULL,
+    candidate        BLOB NOT NULL,
+    displayed_digest BLOB NOT NULL
+);
 ";
 
 /// Is a rusqlite error a UNIQUE / PRIMARY KEY constraint violation? A seal that
@@ -151,6 +213,51 @@ fn is_constraint_violation(error: &rusqlite::Error) -> bool {
 }
 
 impl StoreBackend for SqliteStore {
+    fn record_order(&mut self, order: &OutstandingOrder) -> rusqlite::Result<RecordOutcome> {
+        let changed = self.conn.execute(
+            "INSERT OR IGNORE INTO outstanding_orders \
+             (nonce, bloom, workpiece, scope_revision, candidate, displayed_digest) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                order.nonce,
+                order.bloom,
+                order.workpiece,
+                order.scope_revision,
+                order.candidate,
+                order.displayed_digest
+            ],
+        )?;
+        Ok(if changed == 0 {
+            RecordOutcome::Duplicate
+        } else {
+            RecordOutcome::Recorded
+        })
+    }
+
+    fn lookup_order(&mut self, nonce: &str) -> rusqlite::Result<Option<OutstandingOrder>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT nonce, bloom, workpiece, scope_revision, candidate, displayed_digest \
+             FROM outstanding_orders WHERE nonce = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![nonce], |row| {
+            Ok(OutstandingOrder {
+                nonce: row.get(0)?,
+                bloom: row.get(1)?,
+                workpiece: row.get(2)?,
+                scope_revision: row.get(3)?,
+                candidate: row.get(4)?,
+                displayed_digest: row.get(5)?,
+            })
+        })?;
+        // The nonce is the primary key, so there is at most one row.
+        rows.next().transpose()
+    }
+
+    fn consume_order(&mut self, nonce: &str) -> rusqlite::Result<bool> {
+        let removed = self.conn.execute("DELETE FROM outstanding_orders WHERE nonce = ?1", rusqlite::params![nonce])?;
+        Ok(removed > 0)
+    }
+
     fn commit(
         &mut self,
         idempotency_key: &str,
