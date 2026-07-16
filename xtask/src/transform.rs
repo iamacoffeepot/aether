@@ -110,6 +110,19 @@ struct Evidence {
     log: String,
 }
 
+/// The last `max` bytes of `s`, snapped forward to a char boundary — for
+/// carrying a bounded stderr tail into an operational-failure error.
+fn tail(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut start = s.len() - max;
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    &s[start..]
+}
+
 /// Stamp the broker-matched `nonce` and the command id onto the result record
 /// `agent-usage-record.mjs` derived, producing the construct lane's evidence
 /// envelope. Pure so the nonce binding is testable without running Claude or
@@ -204,6 +217,17 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
         claude.env("AETHER_CONSTRUCT_EFFORT", effort);
     }
     let run = claude.output().context("run headless claude")?;
+    // A non-zero exit is the CLI itself failing to run (auth, bad args, crash) —
+    // an operational failure, distinct from a task-level error, which a completed
+    // run records as `is_error` inside the transcript. Surface it rather than
+    // writing an empty/garbage result record and reporting success.
+    if !run.status.success() {
+        bail!(
+            "headless claude exited {}: {}",
+            run.status.code().map_or_else(|| "by signal".to_owned(), |c| c.to_string()),
+            tail(&String::from_utf8_lossy(&run.stderr), 1000),
+        );
+    }
 
     let transcript_path = args.out.join("transcript.jsonl");
     fs::write(&transcript_path, &run.stdout).with_context(|| format!("write {}", transcript_path.display()))?;
@@ -215,6 +239,15 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
         .arg(&transcript_path)
         .output()
         .context("derive result record via agent-usage-record.mjs")?;
+    // The derivation script never exits non-zero on a short transcript (it emits
+    // a `no_result` envelope), so a non-zero exit is node itself failing —
+    // surface it rather than stamping evidence over empty stdout.
+    if !record.status.success() {
+        bail!(
+            "result-record derivation (agent-usage-record.mjs) failed: {}",
+            tail(&String::from_utf8_lossy(&record.stderr), 1000),
+        );
+    }
     let record_json = String::from_utf8_lossy(&record.stdout);
 
     let evidence = stamp_construct_evidence(args.nonce.as_deref(), &record_json);
@@ -250,6 +283,17 @@ mod tests {
         // construct.implement is the model lane's id, not a verify id — it must
         // not resolve a verify invocation.
         assert!(verify_command(CONSTRUCT_IMPLEMENT).is_none());
+    }
+
+    #[test]
+    fn tail_snaps_to_a_char_boundary_without_panicking() {
+        use super::tail;
+        assert_eq!(tail("short", 10), "short", "under the cap returns the whole string");
+        assert_eq!(tail("abcdef", 3), "def", "the ascii byte cut is already a char boundary");
+        // "aébc" is 5 bytes; the byte cut (5 - 3 = byte 2) lands inside the
+        // 2-byte 'é'. Snapping forward to byte 3 drops the partial char rather
+        // than slicing mid-char and panicking.
+        assert_eq!(tail("aébc", 3), "bc");
     }
 
     #[test]
