@@ -17,6 +17,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::ConfigError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
+use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
 use crate::store::{StoreCapability, StoreConfig};
@@ -51,6 +52,8 @@ pub struct BloomeryEnv {
     pub rpc_port: u16,
     /// The `SQLite` journal store configuration.
     pub store: StoreConfig,
+    /// The eviction-free artifacts content-store configuration.
+    pub artifacts: ArtifactsConfig,
 }
 
 impl BloomeryEnv {
@@ -80,7 +83,8 @@ impl BloomeryEnv {
     pub fn from_env_with_argv(cli: &BloomeryCli) -> Result<Self, ConfigError> {
         let rpc_port = RpcPortConfig::try_from_argv_then_env(cli.rpc.clone().into_layer())?.port;
         let store = StoreConfig::try_from_argv_then_env(cli.store.clone().into_layer())?;
-        Ok(Self { rpc_port, store })
+        let artifacts = ArtifactsConfig::try_from_argv_then_env(cli.artifacts.clone().into_layer())?;
+        Ok(Self { rpc_port, store, artifacts })
     }
 }
 
@@ -98,13 +102,15 @@ impl BloomeryChassis {
     /// The `--describe` manifest (ADR-0115): the chassis profile, the mailbox
     /// namespaces this binary links, and the `build.rs` provenance. Bloomery is
     /// a minimal coordinator chassis — it links the trace dispatcher, the store,
-    /// and the RPC server — so it lists those three directly. The hub's binary
-    /// store forks `<binary> --describe` once at upload time to capture this.
+    /// the artifacts record, and the RPC server — so it lists those directly.
+    /// The hub's binary store forks `<binary> --describe` once at upload time to
+    /// capture this.
     #[must_use]
     pub fn describe_manifest() -> BinaryManifest {
         let caps = vec![
             <TraceDispatchCapability as Addressable>::NAMESPACE.to_owned(),
             <StoreCapability as Addressable>::NAMESPACE.to_owned(),
+            <ArtifactsCapability as Addressable>::NAMESPACE.to_owned(),
             <RpcServerCapability as Addressable>::NAMESPACE.to_owned(),
         ];
         BinaryManifest {
@@ -117,7 +123,7 @@ impl BloomeryChassis {
     }
 
     fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let BloomeryEnv { rpc_port, store } = env;
+        let BloomeryEnv { rpc_port, store, artifacts } = env;
         let boot = SubstrateBoot::builder("aether-bloomery", env!("CARGO_PKG_VERSION")).build()?;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
@@ -129,6 +135,7 @@ impl BloomeryChassis {
         Builder::<Self>::new(registry, mailer)
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<StoreCapability>(store)
+            .with_actor::<ArtifactsCapability>(artifacts)
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: rpc_addr.to_string(),
                 peer_kind: PeerKind::Substrate {
@@ -145,17 +152,24 @@ impl BloomeryChassis {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{BloomeryChassis, BloomeryEnv, Chassis};
+    use super::{ArtifactsConfig, BloomeryChassis, BloomeryEnv, Chassis};
     use crate::store::StoreConfig;
 
     #[test]
     fn chassis_boots_and_claims_its_mailboxes() {
         // Port 0 → an OS-assigned ephemeral RPC port; the default `:memory:`
-        // store touches no filesystem. A successful `build` boots every passive
-        // (store, trace, rpc) and claims each mailbox — a claim conflict or a
-        // failed store open would surface as a `BootError`, so `build` returning
-        // `Ok` is the assertion that the `aether.store` mailbox was claimed.
-        let env = BloomeryEnv { rpc_port: 0, store: StoreConfig::default() };
+        // store touches no filesystem, and the artifacts store points at a temp
+        // root so the test opens no data dir. A successful `build` boots every
+        // passive (store, artifacts, trace, rpc) and claims each mailbox — a
+        // claim conflict or a failed store open would surface as a `BootError`,
+        // so `build` returning `Ok` is the assertion that the `aether.store` and
+        // `aether.artifacts` mailboxes were claimed.
+        let artifacts_root = tempfile::tempdir().unwrap();
+        let env = BloomeryEnv {
+            rpc_port: 0,
+            store: StoreConfig::default(),
+            artifacts: ArtifactsConfig { root: Some(artifacts_root.path().to_str().unwrap().to_owned()) },
+        };
         let chassis = BloomeryChassis::build(env).expect("bloomery chassis boots and claims its mailboxes");
         assert_eq!(BloomeryChassis::PROFILE, "bloomery");
         // Dropped without `run()` — teardown, no signal wait.
