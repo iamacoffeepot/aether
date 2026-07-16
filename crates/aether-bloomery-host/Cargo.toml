@@ -27,6 +27,7 @@ runtime = [
     "dep:aether-substrate",
     "dep:aether-capabilities",
     "dep:aether-kinds",
+    "dep:aether-bloomery-github",
     "dep:rusqlite",
     "dep:tracing",
     "dep:clap",
@@ -51,6 +52,10 @@ aether-substrate = { path = "../aether-substrate", optional = true }
 aether-capabilities = { path = "../aether-capabilities", optional = true }
 # The substrate kind vocabulary — `BinaryManifest` for the `--describe` probe.
 aether-kinds = { path = "../aether-kinds", optional = true }
+# The outward projection mirror the host mounts behind the projection cap
+# shell (#3459). Native (reqwest) — runtime-only, never in the wasm marker
+# build.
+aether-bloomery-github = { path = "../aether-bloomery-github", optional = true }
 # SQLite in WAL mode: the durable single-writer journal / inbox / outbox /
 # active-membership store. `bundled` compiles SQLite from source.
 rusqlite = { workspace = true, optional = true }
@@ -80,6 +85,9 @@ inventory = { workspace = true }
 # test dials the `bloomery` bin over raw wire frames (`aether_codec::frame`,
 # the FleetBench pattern).
 aether-codec = { path = "../aether-codec" }
+# The mirror demo (#3459 step 7) drives the projection against the adapter's
+# in-process `FakeGithub` double, so it needs no token or network.
+aether-bloomery-github = { path = "../aether-bloomery-github", features = ["testing"] }
 tempfile = "3"
 
 [lints]
