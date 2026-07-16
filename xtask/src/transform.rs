@@ -1,12 +1,18 @@
 //! `cargo xtask transform` — ADR-0149 §Execution's portable execution
-//! unit: a typed `command` id maps to the exact cargo invocation CI
-//! runs, executes it, and writes nonce-tagged evidence bytes a broker
-//! can validate. This is the mechanical-verify lane only
-//! (`verify.fmt` / `verify.clippy` / `verify.docs`) — `verify.test`
-//! is deliberately out of scope (issue #3501 Design notes: CI's
-//! actual test lane pre-builds with `cargo xtask dist` and runs under
-//! nextest with a heavier toolchain, so mirroring it here would break
-//! this slice's byte-for-byte parity claim).
+//! unit: a typed `command` id maps to the exact invocation the lane runs,
+//! executes it, and writes nonce-tagged evidence bytes a broker can
+//! validate. Two lanes share this entrypoint:
+//!
+//! - The **mechanical verify lane** (`verify.fmt` / `verify.clippy` /
+//!   `verify.docs`, #3501) — a zero-secret cargo invocation byte-for-byte
+//!   with CI. `verify.test` is deliberately out of scope (CI's test lane
+//!   pre-builds with `cargo xtask dist` under a heavier toolchain).
+//! - The **model-driven construct lane** (`construct.implement`, #3511) —
+//!   runs headless Claude at the resolved model + reasoning effort and writes
+//!   the nonce-tagged **result record** (cost / tokens / turns), derived from
+//!   the run transcript by `scripts/agent-usage-record.mjs`. Unlike the verify
+//!   lane it needs a credential, so it runs **worker-side** (BYO); the
+//!   coordinator never sees it.
 
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Output};
@@ -18,7 +24,7 @@ use serde::Serialize;
 
 #[derive(Args)]
 pub struct TransformArgs {
-    /// Typed verify command id (`verify.fmt` / `verify.clippy` / `verify.docs`).
+    /// Typed command id — a `verify.*` mechanical id or `construct.implement`.
     command: String,
     /// Directory evidence bytes are written to (created if missing).
     #[arg(long)]
@@ -27,6 +33,15 @@ pub struct TransformArgs {
     /// stamped into `evidence.json`.
     #[arg(long)]
     nonce: Option<String>,
+    /// The model the `construct.implement` lane runs headless Claude under —
+    /// the effective model the coordinator resolved from the sealed
+    /// scope-revision (#3511). Ignored by the verify lane.
+    #[arg(long)]
+    model: Option<String>,
+    /// The reasoning-effort tier the `construct.implement` lane runs at (the
+    /// resolved effort, #3511). Ignored by the verify lane.
+    #[arg(long)]
+    effort: Option<String>,
 }
 
 /// One CI-mirroring cargo invocation for a `verify.*` command id.
@@ -64,8 +79,28 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
     }
 }
 
-/// `<out>/evidence.json` schema — the untrusted claim a broker
-/// validates by `nonce` and re-checks against `status`.
+/// The typed id of the model-driven construct lane (#3511). Recognized here so
+/// an unknown id stays unmapped exactly as in the verify lane.
+const CONSTRUCT_IMPLEMENT: &str = "construct.implement";
+
+/// The headless-Claude argv the `construct.implement` lane runs (#3511): `-p`
+/// non-interactive at the resolved `model`, emitting the stream-json transcript
+/// `scripts/agent-usage-record.mjs` derives the result record from. Pure so the
+/// model wiring is testable without spawning Claude; the reasoning effort rides
+/// the `AETHER_CONSTRUCT_EFFORT` env (a worker-side knob), not an argv flag.
+fn construct_argv(model: &str) -> Vec<String> {
+    vec![
+        "-p".to_owned(),
+        "--model".to_owned(),
+        model.to_owned(),
+        "--output-format".to_owned(),
+        "stream-json".to_owned(),
+        "--verbose".to_owned(),
+    ]
+}
+
+/// `<out>/evidence.json` schema for the verify lane — the untrusted claim a
+/// broker validates by `nonce` and re-checks against `status`.
 #[derive(Serialize)]
 struct Evidence {
     command: String,
@@ -73,6 +108,21 @@ struct Evidence {
     status: &'static str,
     exit_code: Option<i32>,
     log: String,
+}
+
+/// Stamp the broker-matched `nonce` and the command id onto the result record
+/// `agent-usage-record.mjs` derived, producing the construct lane's evidence
+/// envelope. Pure so the nonce binding is testable without running Claude or
+/// node; a malformed record is carried verbatim under `record_raw` so evidence
+/// is never dropped.
+fn stamp_construct_evidence(nonce: Option<&str>, record_json: &str) -> serde_json::Value {
+    let record: serde_json::Value =
+        serde_json::from_str(record_json).unwrap_or_else(|_| serde_json::json!({ "record_raw": record_json }));
+    serde_json::json!({
+        "command": CONSTRUCT_IMPLEMENT,
+        "nonce": nonce,
+        "result_record": record,
+    })
 }
 
 /// Assembles the evidence record from a captured run's status — pure
@@ -97,6 +147,9 @@ fn build_evidence(command: &str, nonce: Option<String>, status: ExitStatus, log_
 /// non-zero with no evidence written, distinct from a verify that ran
 /// and failed.
 pub fn run(args: &TransformArgs) -> Result<()> {
+    if args.command == CONSTRUCT_IMPLEMENT {
+        return run_construct(args);
+    }
     let Some(invocation) = verify_command(&args.command) else {
         bail!("unrecognized transform command id: {} (verify.test is out of scope this slice)", args.command);
     };
@@ -133,9 +186,48 @@ fn spawn(invocation: &VerifyInvocation) -> Result<Output> {
         .context("run command")
 }
 
+/// The `construct.implement` lane: run headless Claude at the resolved model,
+/// capture the stream-json transcript, derive the result record via
+/// `agent-usage-record.mjs`, and write it as nonce-tagged evidence. This lane
+/// needs a Claude credential, so it runs worker-side (BYO) — never on the
+/// coordinator's zero-secret path.
+fn run_construct(args: &TransformArgs) -> Result<()> {
+    let model = args.model.as_deref().context("construct.implement requires --model (the resolved model)")?;
+    fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
+
+    // Run headless Claude at the resolved model; the reasoning effort rides an
+    // env knob. The prompt/subject is the worker's checked-out tree at the
+    // pinned digest, piped on stdin by the wrapper.
+    let mut claude = Command::new("claude");
+    claude.args(construct_argv(model));
+    if let Some(effort) = &args.effort {
+        claude.env("AETHER_CONSTRUCT_EFFORT", effort);
+    }
+    let run = claude.output().context("run headless claude")?;
+
+    let transcript_path = args.out.join("transcript.jsonl");
+    fs::write(&transcript_path, &run.stdout).with_context(|| format!("write {}", transcript_path.display()))?;
+
+    // Derive the result record over the whole transcript (faithful reuse of the
+    // fleet ledger's derivation, `scripts/agent-usage-record.mjs`).
+    let record = Command::new("node")
+        .args(["scripts/agent-usage-record.mjs", "--transcript"])
+        .arg(&transcript_path)
+        .output()
+        .context("derive result record via agent-usage-record.mjs")?;
+    let record_json = String::from_utf8_lossy(&record.stdout);
+
+    let evidence = stamp_construct_evidence(args.nonce.as_deref(), &record_json);
+    let evidence_path = args.out.join("evidence.json");
+    let mut json = serde_json::to_string_pretty(&evidence).context("serialize construct evidence")?;
+    json.push('\n');
+    fs::write(&evidence_path, json).with_context(|| format!("write {}", evidence_path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_evidence, verify_command};
+    use super::{CONSTRUCT_IMPLEMENT, build_evidence, construct_argv, stamp_construct_evidence, verify_command};
 
     #[test]
     fn known_ids_map_to_ci_parity_argv() {
@@ -155,6 +247,34 @@ mod tests {
     fn unknown_and_verify_test_ids_are_unmapped() {
         assert!(verify_command("verify.test").is_none());
         assert!(verify_command("verify.bogus").is_none());
+        // construct.implement is the model lane's id, not a verify id — it must
+        // not resolve a verify invocation.
+        assert!(verify_command(CONSTRUCT_IMPLEMENT).is_none());
+    }
+
+    #[test]
+    fn construct_argv_carries_the_resolved_model_and_stream_json() {
+        let argv = construct_argv("claude-opus-4-8");
+        assert_eq!(argv.first().map(String::as_str), Some("-p"), "headless, non-interactive");
+        let model_at = argv.iter().position(|a| a == "--model").expect("argv pins the model");
+        assert_eq!(argv[model_at + 1], "claude-opus-4-8", "the resolved model rides argv");
+        // The stream-json transcript is what the result-record derivation reads.
+        assert!(argv.windows(2).any(|w| w == ["--output-format", "stream-json"]), "emits the stream-json transcript");
+    }
+
+    #[test]
+    fn construct_evidence_binds_the_nonce_and_carries_the_result_record() {
+        let record = r#"{"cost_usd":0.42,"num_turns":3,"input":1000}"#;
+        let evidence = stamp_construct_evidence(Some("nonce-7"), record);
+        assert_eq!(evidence["command"], CONSTRUCT_IMPLEMENT);
+        assert_eq!(evidence["nonce"], "nonce-7", "the broker-matched nonce binds the evidence");
+        assert_eq!(evidence["result_record"]["cost_usd"], 0.42, "the derived cost/turns record is carried");
+        assert_eq!(evidence["result_record"]["num_turns"], 3);
+
+        // A malformed derivation is carried verbatim, never dropped.
+        let raw = stamp_construct_evidence(None, "not json");
+        assert_eq!(raw["result_record"]["record_raw"], "not json");
+        assert!(raw["nonce"].is_null());
     }
 
     #[test]
