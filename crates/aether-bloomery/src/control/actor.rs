@@ -45,6 +45,14 @@ use std::collections::BTreeMap;
 /// The runtime name of the store capability the control core drives.
 const STORE: &str = "aether.store";
 
+/// The cap on same-key admits attached to one in-flight commit. A well-behaved
+/// client sends one admit per key and at most a few retries; without a bound a
+/// client spamming one key while its commit is outstanding would grow the
+/// waiter `Vec` without limit, pinning memory on the single snapshot owner. An
+/// admit past the cap is refused rather than queued (CLAUDE.md §Runtime: error
+/// rather than grow unboundedly).
+const MAX_WAITERS_PER_KEY: usize = 64;
+
 /// The outbox topic a landing receipt enqueues under, so #3499's republisher
 /// can route it.
 const RECEIPT_TOPIC: &str = "aether.bloomery.landing_receipt";
@@ -113,6 +121,15 @@ impl WasmActor for ControlCore {
         // waiter, so a resent key gets the first admit's real answer rather than a
         // spurious "superseded" error.
         if let Some(pending) = self.pending.get_mut(&key) {
+            if pending.waiters.len() >= MAX_WAITERS_PER_KEY {
+                if let Some(handle) = reply {
+                    ctx.reply_to(
+                        handle,
+                        &AdmitResult::Err { error: "too many concurrent admits for this idempotency key".to_owned() },
+                    );
+                }
+                return;
+            }
             pending.waiters.extend(reply);
             return;
         }
