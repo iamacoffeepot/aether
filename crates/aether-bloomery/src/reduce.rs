@@ -396,6 +396,10 @@ pub enum SupersedeError {
     /// The successor's id equals the predecessor: a bloom cannot supersede
     /// itself into a bloom superseded by itself.
     SelfSupersession,
+    /// A bloom with this id already exists (distinct from the predecessor) —
+    /// admitting it would resurrect and overwrite that bloom's record, wiping
+    /// status and claims, mirroring [`SealError::KnownBloom`].
+    KnownSuccessor(BloomId),
     /// A successor member is already claimed by a foreign active bloom (the
     /// predecessor's own holds, released in the same decision set, are exempt).
     MembershipConflict(SealConflict),
@@ -614,6 +618,13 @@ fn reduce_supersede(snapshot: &Snapshot, predecessor: &BloomId, successor: &Bloo
     let successor_id = successor.id();
     if successor_id == *predecessor {
         return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::SelfSupersession));
+    }
+    // The successor is a second admission into `active`; a successor id that
+    // collides with some other already-known bloom would resurrect and
+    // overwrite that bloom's record, mirroring `reduce_seal`'s `KnownBloom`
+    // guard on the seal door.
+    if snapshot.blooms.contains_key(&successor_id) {
+        return Decisions::rejected(Outcome::SupersedeRejected(SupersedeError::KnownSuccessor(successor_id)));
     }
     // The successor is a fresh membership set claiming into `active`, so it must
     // pass the same per-member admission a seal runs before it claims or inherits

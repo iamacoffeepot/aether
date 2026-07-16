@@ -304,6 +304,29 @@ fn self_supersession_is_refused() {
     assert!(matches!(decided.outcome, Outcome::SupersedeRejected(SupersedeError::SelfSupersession)));
 }
 
+// C4 — a successor id that collides with some *other* already-known bloom is
+// refused rather than resurrecting and overwriting that bloom's record,
+// mirroring `reduce_seal`'s `KnownBloom` guard on the seal door.
+#[test]
+fn supersede_rejects_a_known_successor_id() {
+    let mut snapshot = Snapshot::new(digest(1));
+    // A landed bloom whose id the successor will collide with.
+    let known = draft(9, vec![membership("landed", 10)]).seal();
+    splice_bloom(&mut snapshot, &known, BloomStatus::Landed);
+    // A fresh, unrelated predecessor to supersede.
+    let predecessor_spec = draft(1, vec![membership("own", 20)]).seal();
+    let predecessor = predecessor_spec.id();
+    splice_bloom(&mut snapshot, &predecessor_spec, BloomStatus::Sealed);
+
+    let (after, decided) = step(&snapshot, &event("sup", Fact::Supersede { predecessor, successor: known.clone() }));
+    match decided.outcome {
+        Outcome::SupersedeRejected(SupersedeError::KnownSuccessor(id)) => assert_eq!(id, known.id()),
+        other => panic!("expected KnownSuccessor, got {other:?}"),
+    }
+    // The colliding bloom's record is untouched by the rejected supersession.
+    assert_eq!(after.blooms.get(&known.id()).unwrap().status, BloomStatus::Landed);
+}
+
 // C2 — supersede runs the same all-or-nothing active scan as seal: a successor
 // member held by an *unrelated* active bloom aborts the supersession rather than
 // silently double-claiming it. Built from a spliced snapshot with two active
