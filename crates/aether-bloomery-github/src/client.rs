@@ -28,6 +28,7 @@
 //!
 //! [#3460]: https://github.com/iamacoffeepot/aether/issues/3460
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
@@ -409,6 +410,10 @@ impl<T: HttpTransport> ReqwestGithub<T> {
     fn git_url(&self, suffix: &str) -> String {
         format!("{}/repos/{}/git/{suffix}", self.api_base, self.repo_path)
     }
+
+    fn actions_url(&self, suffix: &str) -> String {
+        format!("{}/repos/{}/actions/{suffix}", self.api_base, self.repo_path)
+    }
 }
 
 impl ReqwestGithub<ReqwestTransport> {
@@ -477,6 +482,174 @@ impl GhCommit {
     fn into_git_commit(self) -> GitCommit {
         GitCommit { sha: self.sha, tree: self.tree.sha }
     }
+}
+
+#[derive(Deserialize)]
+struct GhRun {
+    id: u64,
+    #[serde(default)]
+    display_title: String,
+    status: String,
+    #[serde(default)]
+    conclusion: Option<String>,
+}
+
+impl GhRun {
+    // Fold GitHub's richer `status` × `conclusion` string sets into the port's
+    // three-way lifecycle. The github-string knowledge lives here (the only
+    // crate permitted to name GitHub); the executor maps the resulting typed
+    // enums onto the port's `ExecutionStatus`.
+    fn into_workflow_run(self) -> WorkflowRun {
+        let status = match self.status.as_str() {
+            "completed" => RunStatus::Completed,
+            "in_progress" => RunStatus::InProgress,
+            // queued / waiting / requested / pending — all pre-run.
+            _ => RunStatus::Queued,
+        };
+        let conclusion = self.conclusion.as_deref().map(|c| match c {
+            "success" => RunConclusion::Success,
+            "cancelled" => RunConclusion::Cancelled,
+            "neutral" | "skipped" | "action_required" => RunConclusion::Neutral,
+            // failure / timed_out / stale / startup_failure — all a failed run.
+            _ => RunConclusion::Failure,
+        });
+        WorkflowRun { id: self.id, display_title: self.display_title, status, conclusion }
+    }
+}
+
+#[derive(Deserialize)]
+struct GhRunList {
+    #[serde(default)]
+    workflow_runs: Vec<GhRun>,
+}
+
+#[derive(Deserialize)]
+struct GhArtifact {
+    id: u64,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    size_in_bytes: u64,
+}
+
+impl GhArtifact {
+    fn into_artifact(self) -> Artifact {
+        Artifact { id: self.id, name: self.name, size_bytes: self.size_in_bytes }
+    }
+}
+
+#[derive(Deserialize)]
+struct GhArtifactList {
+    #[serde(default)]
+    artifacts: Vec<GhArtifact>,
+}
+
+/// A workflow run's lifecycle state, folded from GitHub's `status` field. The
+/// pre-run states (queued / waiting / requested / pending) all collapse to
+/// [`RunStatus::Queued`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RunStatus {
+    /// Dispatched but not yet started.
+    Queued,
+    /// In progress.
+    InProgress,
+    /// Finished — carries a [`RunConclusion`].
+    Completed,
+}
+
+/// A completed run's conclusion, folded from GitHub's `conclusion` field onto
+/// the four the executor distinguishes (the failure-shaped conclusions —
+/// `timed_out` / `stale` / `startup_failure` — collapse to
+/// [`RunConclusion::Failure`], the neither-shaped — `skipped` /
+/// `action_required` — to [`RunConclusion::Neutral`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RunConclusion {
+    /// The run succeeded.
+    Success,
+    /// The run failed.
+    Failure,
+    /// Neither pass nor fail.
+    Neutral,
+    /// The run was cancelled.
+    Cancelled,
+}
+
+/// A workflow run as the executor reads it: its id, the display title (the
+/// wrapper's `run-name`, carrying the nonce), and its folded lifecycle state.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct WorkflowRun {
+    /// The run's native id — the handle `get_run` / `cancel_run` /
+    /// `list_run_artifacts` take.
+    pub id: u64,
+    /// The run's display title (the wrapper sets `run-name` to embed the
+    /// nonce, so `find_run` matches against this).
+    pub display_title: String,
+    /// The folded lifecycle state.
+    pub status: RunStatus,
+    /// The folded conclusion, present once `status` is [`RunStatus::Completed`].
+    pub conclusion: Option<RunConclusion>,
+}
+
+/// One artifact a run uploaded: its id, name, and size.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Artifact {
+    /// The artifact's native id, for a later fetch.
+    pub id: u64,
+    /// The artifact name (carries the nonce so `stream_evidence` can filter).
+    pub name: String,
+    /// The artifact's size in bytes.
+    pub size_bytes: u64,
+}
+
+/// The GitHub Actions REST surface the executor port drives — `workflow_dispatch`
+/// plus the run + artifacts API. A sibling of [`GithubApi`] / [`GitDataApi`]
+/// (each backend is generic over only the surface it touches), implemented by
+/// both [`ReqwestGithub`] and the test `FakeGithub` so the executor is
+/// exercised with no token or network.
+///
+/// `workflow_dispatch` answers `204 No Content` with no run id, so there is no
+/// "return the dispatched run" method: the executor resolves nonce → run
+/// through [`find_run`](ActionsApi::find_run), matching the nonce the wrapper
+/// embeds in the run's name.
+pub trait ActionsApi {
+    /// Dispatch `workflow_file` at `git_ref` with the string `inputs` — the
+    /// `POST …/actions/workflows/{file}/dispatches` that answers `204`.
+    ///
+    /// # Errors
+    /// A transport fault or an error status (e.g. the ref or workflow is
+    /// unknown).
+    fn dispatch_workflow(
+        &self,
+        workflow_file: &str,
+        git_ref: &str,
+        inputs: &BTreeMap<String, String>,
+    ) -> Result<(), GithubError>;
+
+    /// Find the most recent run of `workflow_file` whose name embeds `nonce`,
+    /// or `None` if none has appeared yet — the nonce → run resolution the
+    /// nonce-as-handle design rests on.
+    ///
+    /// # Errors
+    /// A transport fault or an error status.
+    fn find_run(&self, workflow_file: &str, nonce: &str) -> Result<Option<WorkflowRun>, GithubError>;
+
+    /// Read run `run_id` (for its status + conclusion).
+    ///
+    /// # Errors
+    /// A transport fault or an error status.
+    fn get_run(&self, run_id: u64) -> Result<WorkflowRun, GithubError>;
+
+    /// Cancel run `run_id` — the `POST …/runs/{id}/cancel`.
+    ///
+    /// # Errors
+    /// A transport fault or an error status.
+    fn cancel_run(&self, run_id: u64) -> Result<(), GithubError>;
+
+    /// List run `run_id`'s uploaded artifacts.
+    ///
+    /// # Errors
+    /// A transport fault or an error status.
+    fn list_run_artifacts(&self, run_id: u64) -> Result<Vec<Artifact>, GithubError>;
 }
 
 fn decode<D: for<'de> Deserialize<'de>>(response: &HttpResponse) -> Result<D, GithubError> {
@@ -618,6 +791,67 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
     }
 }
 
+impl<T: HttpTransport> ActionsApi for ReqwestGithub<T> {
+    fn dispatch_workflow(
+        &self,
+        workflow_file: &str,
+        git_ref: &str,
+        inputs: &BTreeMap<String, String>,
+    ) -> Result<(), GithubError> {
+        let payload = serde_json::json!({ "ref": git_ref, "inputs": inputs }).to_string();
+        // `workflow_dispatch` answers 204 No Content with no run id; `request`
+        // accepts the empty 2xx body and the executor resolves the run by nonce.
+        self.request(Method::Post, self.actions_url(&format!("workflows/{workflow_file}/dispatches")), Some(payload))?;
+        Ok(())
+    }
+
+    fn find_run(&self, workflow_file: &str, nonce: &str) -> Result<Option<WorkflowRun>, GithubError> {
+        // The runs list is newest-first, so the first name-embedding-nonce match
+        // is the run this nonce dispatched. Page-walk like the other list ops.
+        let base = self.actions_url(&format!("workflows/{workflow_file}/runs"));
+        for page in 1..=MAX_LIST_PAGES {
+            let response = self.request(Method::Get, format!("{base}?per_page={PER_PAGE}&page={page}"), None)?;
+            let list: GhRunList = decode(&response)?;
+            let count = list.workflow_runs.len();
+            for gh in list.workflow_runs {
+                if gh.display_title.contains(nonce) {
+                    return Ok(Some(gh.into_workflow_run()));
+                }
+            }
+            if count < PER_PAGE as usize {
+                break;
+            }
+        }
+        Ok(None)
+    }
+
+    fn get_run(&self, run_id: u64) -> Result<WorkflowRun, GithubError> {
+        let response = self.request(Method::Get, self.actions_url(&format!("runs/{run_id}")), None)?;
+        let gh: GhRun = decode(&response)?;
+        Ok(gh.into_workflow_run())
+    }
+
+    fn cancel_run(&self, run_id: u64) -> Result<(), GithubError> {
+        self.request(Method::Post, self.actions_url(&format!("runs/{run_id}/cancel")), None)?;
+        Ok(())
+    }
+
+    fn list_run_artifacts(&self, run_id: u64) -> Result<Vec<Artifact>, GithubError> {
+        let base = self.actions_url(&format!("runs/{run_id}/artifacts"));
+        let mut out = Vec::new();
+        for page in 1..=MAX_LIST_PAGES {
+            let response = self.request(Method::Get, format!("{base}?per_page={PER_PAGE}&page={page}"), None)?;
+            let list: GhArtifactList = decode(&response)?;
+            let count = list.artifacts.len();
+            out.extend(list.artifacts.into_iter().map(GhArtifact::into_artifact));
+            if count < PER_PAGE as usize {
+                break;
+            }
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -748,6 +982,102 @@ mod tests {
         let sent: serde_json::Value = serde_json::from_str(&request.body.unwrap()).unwrap();
         assert_eq!(sent["tree"], "treesha");
         assert_eq!(sent["parents"][0], "parentsha");
+    }
+
+    use super::{ActionsApi, RunConclusion, RunStatus};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn dispatch_workflow_posts_ref_and_inputs_and_tolerates_204() {
+        // Tripwire: the dispatch route is `workflows/{file}/dispatches` and the
+        // body carries `ref` + `inputs`; a 204 No Content (empty body) is a
+        // success, never a decode attempt.
+        let github = client(204, "");
+        let mut inputs = BTreeMap::new();
+        inputs.insert("command".to_owned(), "verify.clippy".to_owned());
+        inputs.insert("nonce".to_owned(), "n-abc".to_owned());
+        github.dispatch_workflow("bloomery-transform.yml", "refs/heads/main", &inputs).expect("204 is success");
+
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(request.method, Method::Post);
+        assert_eq!(
+            request.url,
+            "https://api.github.com/repos/octo/shadow/actions/workflows/bloomery-transform.yml/dispatches"
+        );
+        let sent: serde_json::Value = serde_json::from_str(&request.body.unwrap()).unwrap();
+        assert_eq!(sent["ref"], "refs/heads/main");
+        assert_eq!(sent["inputs"]["command"], "verify.clippy");
+        assert_eq!(sent["inputs"]["nonce"], "n-abc");
+    }
+
+    #[test]
+    fn find_run_scans_the_runs_route_and_matches_the_nonce_in_the_title() {
+        let body = r#"{"workflow_runs":[
+            {"id":7,"display_title":"transform verify.clippy n-abc","status":"in_progress","conclusion":null},
+            {"id":8,"display_title":"transform verify.clippy n-xyz","status":"completed","conclusion":"success"}
+        ]}"#;
+        let github = client(200, body);
+        let run = github.find_run("bloomery-transform.yml", "n-abc").expect("2xx decodes").expect("a match");
+        assert_eq!(run.id, 7);
+        assert_eq!(run.status, RunStatus::InProgress);
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(
+            request.url,
+            "https://api.github.com/repos/octo/shadow/actions/workflows/bloomery-transform.yml/runs?per_page=100&page=1"
+        );
+    }
+
+    #[test]
+    fn find_run_returns_none_when_no_title_embeds_the_nonce() {
+        let body =
+            r#"{"workflow_runs":[{"id":8,"display_title":"transform x n-other","status":"queued","conclusion":null}]}"#;
+        let github = client(200, body);
+        assert_eq!(github.find_run("bloomery-transform.yml", "n-abc").expect("2xx decodes"), None);
+    }
+
+    #[test]
+    fn get_run_folds_a_completed_success() {
+        let github = client(200, r#"{"id":9,"display_title":"t","status":"completed","conclusion":"success"}"#);
+        let run = github.get_run(9).expect("2xx decodes");
+        assert_eq!(run.status, RunStatus::Completed);
+        assert_eq!(run.conclusion, Some(RunConclusion::Success));
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(request.method, Method::Get);
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/actions/runs/9");
+    }
+
+    #[test]
+    fn get_run_folds_timed_out_to_failure_and_skipped_to_neutral() {
+        // Tripwire: the failure-shaped conclusions collapse to Failure, the
+        // neither-shaped to Neutral — a slip would misreport a run's verdict.
+        let timed = client(200, r#"{"id":1,"display_title":"t","status":"completed","conclusion":"timed_out"}"#);
+        assert_eq!(timed.get_run(1).unwrap().conclusion, Some(RunConclusion::Failure));
+        let skipped = client(200, r#"{"id":2,"display_title":"t","status":"completed","conclusion":"skipped"}"#);
+        assert_eq!(skipped.get_run(2).unwrap().conclusion, Some(RunConclusion::Neutral));
+    }
+
+    #[test]
+    fn cancel_run_posts_the_cancel_route() {
+        let github = client(202, "");
+        github.cancel_run(9).expect("202 is success");
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(request.method, Method::Post);
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/actions/runs/9/cancel");
+    }
+
+    #[test]
+    fn list_run_artifacts_decodes_the_artifacts_route() {
+        let github = client(200, r#"{"artifacts":[{"id":5,"name":"evidence-n-abc","size_in_bytes":128}]}"#);
+        let artifacts = github.list_run_artifacts(9).expect("2xx decodes");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].id, 5);
+        assert_eq!(artifacts[0].name, "evidence-n-abc");
+        assert_eq!(artifacts[0].size_bytes, 128);
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(
+            request.url,
+            "https://api.github.com/repos/octo/shadow/actions/runs/9/artifacts?per_page=100&page=1"
+        );
     }
 
     #[test]

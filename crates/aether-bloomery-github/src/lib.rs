@@ -25,19 +25,26 @@
 //!
 //! # Scope of this slice
 //!
-//! The **git source port** (snapshot / branch namespace / integrate / CAS
-//! land) is a **separate sibling slice** — ADR-0149's amendment [#3460] split
-//! it out and this crate is the outward projection mirror only. What ships
-//! here is the projection backend, its stable-metadata marker, the inward
-//! stage-result normalizer (port *shape* only, no ingestion wiring), the thin
-//! GitHub HTTP client the projection drives, and a fake GitHub double for
-//! token- and network-free tests.
+//! What ships here has grown one port per sibling slice, each adapter over the
+//! same thin HTTP client and fake double: the outward **projection mirror**
+//! (issues / comments, [#3459]) with its stable-metadata marker and the inward
+//! stage-result normalizer; the **git source port** (snapshot / branch
+//! namespace / integrate / CAS land, [#3465]) over the Git Data API; and the
+//! **Actions executor port** ([`ActionsExecutor`], migration step 2 [#3500]) —
+//! the four-message [`ExecutorBackend`](aether_bloomery::ExecutorBackend) that
+//! dispatches a resolved work order by `workflow_dispatch` and maps
+//! inspect / cancel / stream-evidence onto the Actions run + artifacts API. The
+//! fake GitHub double models each surface for token- and network-free tests.
+//!
+//! [#3465]: https://github.com/iamacoffeepot/aether/issues/3465
+//! [#3500]: https://github.com/iamacoffeepot/aether/issues/3500
 //!
 //! [#3459]: https://github.com/iamacoffeepot/aether/issues/3459
 //! [#3460]: https://github.com/iamacoffeepot/aether/issues/3460
 
 mod client;
 mod config;
+mod executor;
 mod inward;
 mod marker;
 mod projection;
@@ -47,10 +54,12 @@ mod source;
 pub mod testing;
 
 pub use client::{
-    CheckConclusion, CheckRun, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, HttpRequest,
-    HttpResponse, HttpTransport, Issue, Method, NewCheckRun, NewComment, NewIssue, ReqwestGithub, ReqwestTransport,
+    ActionsApi, Artifact, CheckConclusion, CheckRun, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError,
+    HttpRequest, HttpResponse, HttpTransport, Issue, Method, NewCheckRun, NewComment, NewIssue, ReqwestGithub,
+    ReqwestTransport, RunConclusion, RunStatus, WorkflowRun,
 };
 pub use config::GithubConfig;
+pub use executor::{ActionsExecutor, ExecutorError};
 pub use inward::{InwardError, StageResult, StageVerdict, normalize_stage_result};
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
 pub use projection::GithubProjection;
