@@ -18,6 +18,27 @@ fn members(names: &[&str]) -> Vec<String> {
 }
 
 #[test]
+fn journal_round_trips_a_real_bloom_event() {
+    use aether_bloomery::{BloomId, Digest, Event, Fact, IdempotencyKey};
+    use aether_data::wire::{from_bytes, to_vec};
+
+    // The store journals a real, wire-encoded bloom-protocol event (the shape the
+    // host persists), and replay hands the exact bytes back for the reducer to
+    // decode — the recovery contract, byte-for-byte.
+    let mut store = memory();
+    let event = Event {
+        idempotency_key: IdempotencyKey("land-1".to_owned()),
+        fact: Fact::Land { bloom: BloomId(Digest::from_bytes([7; 32])), new_head: Digest::from_bytes([9; 32]) },
+    };
+    store.append_event("land-1", &to_vec(&event).unwrap()).unwrap();
+
+    let journal = store.replay_journal().unwrap();
+    assert_eq!(journal.len(), 1);
+    let decoded: Event = from_bytes(&journal[0].event).unwrap();
+    assert_eq!(decoded, event);
+}
+
+#[test]
 fn append_then_replay_round_trips_in_order() {
     let mut store = memory();
     assert_eq!(store.append_event("k1", b"alpha").unwrap(), AppendOutcome::Applied(1));

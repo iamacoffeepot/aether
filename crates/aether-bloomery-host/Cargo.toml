@@ -31,7 +31,6 @@ runtime = [
     "dep:clap",
     "dep:confique",
     "dep:anyhow",
-    "dep:serde_json",
     "dep:signal-hook",
 ]
 
@@ -52,10 +51,12 @@ aether-capabilities = { path = "../aether-capabilities", optional = true }
 # active-membership store. `bundled` compiles SQLite from source.
 rusqlite = { workspace = true, optional = true }
 tracing = { workspace = true, features = ["std", "attributes"], optional = true }
+# clap + confique back the ADR-0090 derive-`Config` output (the clap overlay
+# and confique layer the macro emits) — referenced only through macro
+# expansion, so cargo-machete needs the ignore below.
 clap = { workspace = true, optional = true }
 confique = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
 
 # The signal-blocking driver (SIGINT/SIGTERM) mirrors the hub chassis.
 [target.'cfg(unix)'.dependencies]
@@ -67,10 +68,16 @@ signal-hook = { version = "0.3", optional = true }
 inventory = { workspace = true }
 
 [dev-dependencies]
-# The recovery integration test dials the bloomery bin over raw wire frames
-# (the FleetBench pattern) and round-trips journal events.
-aether-codec = { path = "../aether-codec" }
+# The recovery + contract tests round-trip real bloom-protocol events through
+# the journal (`aether_bloomery` value types encoded with `aether_data::wire`)
+# and use temp-file databases for the reopen tests.
 tempfile = "3"
 
 [lints]
 workspace = true
+
+# clap / confique / inventory are pulled in only through the derive-`Config`
+# and derive-`Kind` macro output (a clap overlay, a confique layer, an
+# `inventory::submit!`), which cargo-machete's source-only scan cannot see.
+[package.metadata.cargo-machete]
+ignored = ["clap", "confique", "inventory"]
