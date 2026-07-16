@@ -39,7 +39,7 @@ Either mode opens the PR **as a draft**, drives CI green, and holds it in draft 
 
    This is the REST issues endpoint (per `/scope` §REST-vs-GraphQL routing), not `gh issue list`, which is GraphQL-backed and drains the contended pool.
 
-2. **Gate-check each candidate.** Run the same [per-issue preconditions](#preconditions) the single-issue path runs — `phase:ready` present, no `## Sub-issues` umbrella, `## Implementation plan` present, exactly one `model:*` label. Drop any issue that fails and record the reason; the sweep does not silently skip — every dropped issue is listed in the plan with its drop reason.
+2. **Gate-check each candidate.** Run the same [per-issue preconditions](#preconditions) the single-issue path runs — `phase:ready` present, not a decomposition umbrella (a non-empty `## Sub-issues` drops only when its listed children don't all back-reference this issue via their own `## Depends on` — see the preconditions row), `## Implementation plan` present, exactly one `model:*` label. Drop any issue that fails and record the reason; the sweep does not silently skip — every dropped issue is listed in the plan with its drop reason.
 
 3. **Pack and order.** Apply the **Batched dispatch** rules above (under the hybrid background-agent mode): budget-based packing against the `size:*`-label priors refined by each body read, crate-affinity co-queueing with the trivial-mechanical exception, broadest-exploration-first ordering within each queue. Concurrency equals the number of packed queues, bounded by the per-model context-budget packing threshold (§Batched dispatch), not a flat agent count — the binding axis is per-agent context, not the REST pool.
 
@@ -79,7 +79,7 @@ Either mode opens the PR **as a draft**, drives CI green, and holds it in draft 
    Dropped:
      #1620  Phase=Design, not Ready
      #1622  no ## Implementation plan
-     #1607  umbrella (has ## Sub-issues)
+     #1607  decomposition umbrella (## Sub-issues children don't back-reference)
 
    Confirm dispatch? (the agents spawn only on your go-ahead)
    ```
@@ -110,7 +110,7 @@ The sweep never auto-confirms and never dispatches the serial tail (push / PR / 
 | Check | Refusal |
 |-------|---------|
 | `phase:ready` label present | "Issue is not Ready (no `phase:ready` label). Use `/scope` + `/approve` first." |
-| §Sub-issues section absent or empty | "Issue is an umbrella with sub-issues. Delegate the children, not the parent." (The malformed-umbrella case — a non-empty `## Sub-issues` alongside a substantial own plan — is refused upstream at `/approve`'s Umbrella integrity gate, so any issue that reaches `/implement` with a non-empty `## Sub-issues` is a pure umbrella and correct to drop.) |
+| §Sub-issues section absent, empty, **or** every listed child back-references this issue | "Issue is a decomposition umbrella with sub-issues. Delegate the children, not the parent." (A non-empty `## Sub-issues` is **not** an umbrella when every listed child back-references this issue via its own `## Depends on: #<this>` — that is an implementable slice with spun-out dependents (#3484, the #3458 shape), which proceeds. Read each listed child's body and check the back-reference: all children back-reference → proceed; otherwise it is a decomposition umbrella and drops here. The malformed-umbrella case — non-back-referencing children alongside a parent plan that duplicates their work — is refused upstream at `/approve`'s Umbrella integrity gate.) |
 | Exactly one `model:*` label | "Missing model:* label (or more than one). Re-run `/scope`'s Plan step or stamp the label by hand." |
 | Issue body has `## Implementation plan` | "Missing implementation plan — issue isn't fully scoped. Re-run `/scope`." |
 | `gh auth status` has `repo` scope | "Run `gh auth refresh` (repo scope is standard)." |
