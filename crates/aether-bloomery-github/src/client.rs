@@ -586,9 +586,22 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
     }
 
     fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GithubError> {
-        let response = self.request(Method::Get, self.git_url(&format!("matching-refs/{prefix}")), None)?;
-        let refs: Vec<GhRef> = decode(&response)?;
-        Ok(refs.into_iter().map(GhRef::into_git_ref).collect())
+        // matching-refs is paginated (100/page), so a bloom with more than one
+        // page of checkpoints must be walked to the end — a single GET would
+        // silently truncate the enumeration and drop reusable checkpoints. Same
+        // page-walk as find_issue / find_comment: stop when a page is short.
+        let base = self.git_url(&format!("matching-refs/{prefix}"));
+        let mut out = Vec::new();
+        for page in 1..=MAX_LIST_PAGES {
+            let response = self.request(Method::Get, format!("{base}?per_page={PER_PAGE}&page={page}"), None)?;
+            let refs: Vec<GhRef> = decode(&response)?;
+            let count = refs.len();
+            out.extend(refs.into_iter().map(GhRef::into_git_ref));
+            if count < PER_PAGE as usize {
+                break;
+            }
+        }
+        Ok(out)
     }
 
     fn get_commit(&self, sha: &str) -> Result<GitCommit, GithubError> {
@@ -738,12 +751,18 @@ mod tests {
     }
 
     #[test]
-    fn list_matching_refs_targets_the_prefix_route() {
+    fn list_matching_refs_paginates_the_prefix_route() {
+        // A short first page (1 < PER_PAGE) ends the walk after one request; the
+        // URL carries the pagination query so a >100-checkpoint bloom is walked
+        // to the end rather than silently truncated to the first page.
         let github = client(200, r#"[{"ref":"refs/heads/bloom/x/checkpoint/aa","object":{"sha":"s"}}]"#);
         let refs = github.list_matching_refs("heads/bloom/x/checkpoint/").expect("2xx decodes");
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "heads/bloom/x/checkpoint/aa");
         let request = github.transport.last.borrow().clone().unwrap();
-        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/git/matching-refs/heads/bloom/x/checkpoint/");
+        assert_eq!(
+            request.url,
+            "https://api.github.com/repos/octo/shadow/git/matching-refs/heads/bloom/x/checkpoint/?per_page=100&page=1"
+        );
     }
 }
