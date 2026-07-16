@@ -19,6 +19,14 @@
 //!   digest-addressed artifact bytes and their derivation-DAG parents; a
 //!   second consumer of the one addressing core (ADR-0116 reuse-not-rival),
 //!   never evicting.
+//! - [`session`] — the native `aether.session` capability, the executor
+//!   session-reuse pool. An executor-lane optimization (not an ADR-0149
+//!   control-core port): it pools headless-Claude sessions for the model-driven
+//!   runner lane (#3511), keyed by `(model, effort, task)`, age-bounded by the
+//!   prompt-cache TTL (#3264) and gated on a static-prefix head-hash freshness
+//!   check (#3422), so a resumed attempt reuses the cached prefix instead of
+//!   re-writing it. It holds pool metadata + the lease in its own small `SQLite`
+//!   table; session transcript bytes live in [`artifacts`], content-addressed.
 //! - [`source`] — the native `aether.source` capability. A mail front over the
 //!   existing `SourceShell` (`bloomery/source.rs`): the guest sends
 //!   `aether.source.*` transact mail for the port operations — snapshot /
@@ -52,6 +60,7 @@
 //! succeeds (at-least-once with idempotent reconcile).
 
 pub mod artifacts;
+pub mod session;
 pub mod source;
 pub mod store;
 

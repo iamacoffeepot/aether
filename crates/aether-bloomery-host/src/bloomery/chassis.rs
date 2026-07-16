@@ -28,6 +28,7 @@ use crate::bloomery::MirrorDriverCapability;
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
 use crate::bloomery::mirror::GithubMirrorConfig;
+use crate::session::{SessionConfig, SessionPoolCapability};
 use crate::source::SourceCapability;
 use crate::store::{StoreCapability, StoreConfig};
 
@@ -107,6 +108,8 @@ pub struct BloomeryEnv {
     /// `SourceConfig` is a re-export of `GithubMirrorConfig`). Unconfigured
     /// (empty token/owner/repo) mounts the mirror driver disabled.
     pub github: GithubMirrorConfig,
+    /// The executor session-reuse pool configuration.
+    pub session: SessionConfig,
     /// Path to the control-core component wasm to autoload at boot; unset → no
     /// autoload (the control core is loaded on demand over RPC).
     pub control_core_wasm: Option<String>,
@@ -142,8 +145,9 @@ impl BloomeryEnv {
         let store = StoreConfig::try_from_argv_then_env(cli.store.clone().into_layer())?;
         let artifacts = ArtifactsConfig::try_from_argv_then_env(cli.artifacts.clone().into_layer())?;
         let github = GithubMirrorConfig::try_from_argv_then_env(cli.github.clone().into_layer())?;
+        let session = SessionConfig::try_from_argv_then_env(cli.session.clone().into_layer())?;
         let control_core_wasm = ControlCoreConfig::try_from_argv_then_env(cli.control_core.clone().into_layer())?.wasm;
-        Ok(Self { rpc_port, http_port, store, artifacts, github, control_core_wasm })
+        Ok(Self { rpc_port, http_port, store, artifacts, github, session, control_core_wasm })
     }
 }
 
@@ -172,6 +176,7 @@ impl BloomeryChassis {
             <StoreCapability as Addressable>::NAMESPACE.to_owned(),
             <ArtifactsCapability as Addressable>::NAMESPACE.to_owned(),
             <MirrorDriverCapability as Addressable>::NAMESPACE.to_owned(),
+            <SessionPoolCapability as Addressable>::NAMESPACE.to_owned(),
             <SourceCapability as Addressable>::NAMESPACE.to_owned(),
             <ComponentHostCapability as Addressable>::NAMESPACE.to_owned(),
             <RpcServerCapability as Addressable>::NAMESPACE.to_owned(),
@@ -188,7 +193,7 @@ impl BloomeryChassis {
     }
 
     fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let BloomeryEnv { rpc_port, http_port, store, artifacts, github, control_core_wasm } = env;
+        let BloomeryEnv { rpc_port, http_port, store, artifacts, github, session, control_core_wasm } = env;
         let boot = SubstrateBoot::builder("aether-bloomery", env!("CARGO_PKG_VERSION")).build()?;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
@@ -216,6 +221,7 @@ impl BloomeryChassis {
             .with_actor::<ArtifactsCapability>(artifacts)
             .with_actor::<MirrorDriverCapability>(github.clone())
             .with_actor::<SourceCapability>(github)
+            .with_actor::<SessionPoolCapability>(session)
             .with_actor::<ComponentHostCapability>(component_host)
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: rpc_addr.to_string(),
@@ -259,7 +265,7 @@ impl BloomeryChassis {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{ArtifactsConfig, BloomeryChassis, BloomeryEnv, Chassis, GithubMirrorConfig};
+    use super::{ArtifactsConfig, BloomeryChassis, BloomeryEnv, Chassis, GithubMirrorConfig, SessionConfig};
     use crate::store::StoreConfig;
 
     #[test]
@@ -269,13 +275,15 @@ mod tests {
         // root so the test opens no data dir. The default (unconfigured) shared
         // GitHub config mounts the mirror driver disabled — no timer, no network
         // — and connects no source network (`ReqwestGithub::new` builds a client
-        // with no request). A successful `build` boots every passive (store,
-        // artifacts, mirror, source, trace, component host, rpc) and claims each
+        // with no request); the default `:memory:` session pool touches no
+        // filesystem. A successful `build` boots every passive (store, artifacts,
+        // mirror, source, session, trace, component host, rpc) and claims each
         // mailbox — a claim conflict or a failed store/shell open would surface
         // as a `BootError`, so `build` returning `Ok` is the assertion that the
         // `aether.store`, `aether.artifacts`, `aether.bloomery.mirror`,
-        // `aether.source`, and `aether.component` mailboxes were claimed (the
-        // component host is the reducer-actor load surface, ADR-0149 §Packaging).
+        // `aether.session`, `aether.source`, and `aether.component` mailboxes
+        // were claimed (the component host is the reducer-actor load surface,
+        // ADR-0149 §Packaging).
         let artifacts_root = tempfile::tempdir().unwrap();
         let env = BloomeryEnv {
             rpc_port: 0,
@@ -285,6 +293,9 @@ mod tests {
             store: StoreConfig::default(),
             artifacts: ArtifactsConfig { root: Some(artifacts_root.path().to_str().unwrap().to_owned()) },
             github: GithubMirrorConfig::default(),
+            // The default `:memory:` pool touches no filesystem, so the session
+            // cap claims `aether.session` without a data-dir open.
+            session: SessionConfig::default(),
             // No autoload: this test asserts the passive caps claim their
             // mailboxes; component autoload is exercised by the control_loop
             // integration test.
