@@ -104,6 +104,26 @@ impl<C: ActionsApi> ActionsExecutor<C> {
     }
 }
 
+// Does `name` carry `nonce` as a delimiter-bounded segment? The wrapper embeds
+// the nonce in an artifact's name between non-alphanumeric delimiters (or at a
+// name edge, e.g. `evidence-{nonce}-log`). A raw `contains` would let a nonce
+// that is a prefix of a longer one (`n-1` inside `n-12`) pull an unrelated
+// concern's evidence into this order's set, so a match counts only when the
+// character on each side of the occurrence is a boundary — a non-alphanumeric
+// character or the string's edge. The nonce itself may contain `-`, so a
+// split-on-delimiter test would over-segment it; bounding each occurrence is
+// the delimiter-safe form.
+fn name_carries_nonce(name: &str, nonce: &str) -> bool {
+    if nonce.is_empty() {
+        return false;
+    }
+    name.match_indices(nonce).any(|(start, matched)| {
+        let before_is_boundary = name[..start].chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric());
+        let after_is_boundary = name[start + matched.len()..].chars().next().is_none_or(|c| !c.is_ascii_alphanumeric());
+        before_is_boundary && after_is_boundary
+    })
+}
+
 // Map a resolved run's folded lifecycle onto the port's `ExecutionStatus`.
 fn map_status(run: &WorkflowRun) -> ExecutionStatus {
     match run.status {
@@ -155,9 +175,11 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
         // Filter to the order's nonce: a run's uploaded artifacts embed the
         // nonce in their name (the wrapper's convention), so evidence from an
         // unrelated concern sharing the run does not leak into this order's set.
+        // The match is delimiter-bounded (see `name_carries_nonce`) so a nonce
+        // that is a prefix of a longer one does not pull the wrong artifacts.
         Ok(artifacts
             .into_iter()
-            .filter(|a| a.name.contains(&handle.nonce.0))
+            .filter(|a| name_carries_nonce(&a.name, &handle.nonce.0))
             .map(|a| EvidenceRef {
                 name: a.name,
                 nonce: handle.nonce.clone(),
@@ -281,6 +303,30 @@ mod tests {
         let ids: Vec<u64> = evidence.iter().map(|e| e.artifact_id).collect();
         assert_eq!(ids, vec![1, 2], "only the nonce's artifacts, the unrelated one filtered out");
         assert!(evidence.iter().all(|e| e.nonce == Nonce("n-4".to_owned())));
+    }
+
+    #[test]
+    fn stream_evidence_does_not_leak_a_superstring_nonce() {
+        // A run hosts this order's `n-4` artifacts alongside a sibling concern
+        // whose nonce `n-42` embeds `n-4` as a prefix. A raw substring filter
+        // would leak the `n-42` artifact into `n-4`'s evidence; the
+        // delimiter-bounded match must not, since the character after the `n-4`
+        // occurrence in `evidence-n-42-log` is the alphanumeric `2`.
+        let fake = FakeGithub::new();
+        let exec = executor(fake.clone());
+        let handle = exec.submit(&order("n-4")).unwrap();
+        let run_id = fake.seed_run("n-4", RunStatus::Completed, Some(RunConclusion::Success));
+        fake.seed_run_artifacts(
+            run_id,
+            vec![
+                Artifact { id: 1, name: "evidence-n-4-log".to_owned(), size_bytes: 10 },
+                Artifact { id: 2, name: "evidence-n-42-log".to_owned(), size_bytes: 20 },
+            ],
+        );
+
+        let evidence = exec.stream_evidence(&handle).unwrap();
+        let ids: Vec<u64> = evidence.iter().map(|e| e.artifact_id).collect();
+        assert_eq!(ids, vec![1], "the n-42 artifact must not leak into n-4's evidence set");
     }
 
     #[test]
