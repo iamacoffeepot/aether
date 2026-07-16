@@ -46,7 +46,7 @@ fn commit_journals_claims_and_outbox_in_one_transaction() {
     // Membership: a foreign bloom claiming an overlapping workpiece loses.
     assert_eq!(store.claim_seal(b"other", &members(&["wp-1"])).unwrap(), SealOutcome::Conflict("wp-1".to_owned()));
     // Outbox: the enqueued receipt is drainable.
-    let outbox = store.drain_outbox().unwrap();
+    let outbox = store.drain_outbox(None).unwrap();
     assert_eq!(outbox.len(), 1);
     assert_eq!(outbox[0].topic, "landing_receipt");
     assert_eq!(outbox[0].payload, b"receipt");
@@ -99,7 +99,7 @@ fn commit_membership_conflict_rolls_back_journal_and_releases() {
     // `taken` still held by the third bloom, and — the release rolled back too —
     // `pred` still holds `w-held`.
     assert!(store.replay_journal().unwrap().is_empty());
-    assert!(store.drain_outbox().unwrap().is_empty());
+    assert!(store.drain_outbox(None).unwrap().is_empty());
     assert_eq!(store.claim_seal(b"probe", &members(&["free"])).unwrap(), SealOutcome::Sealed);
     assert_eq!(store.claim_seal(b"probe2", &members(&["taken"])).unwrap(), SealOutcome::Conflict("taken".to_owned()));
     assert_eq!(store.claim_seal(b"probe3", &members(&["w-held"])).unwrap(), SealOutcome::Conflict("w-held".to_owned()));
