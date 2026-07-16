@@ -144,6 +144,66 @@ where
     }
 }
 
+/// Pipeline two typed `Call`s to `mailbox` — write **both** frames before reading
+/// either reply — so the second request sits in the actor's mailbox while the
+/// first's store round-trip is still outstanding, forcing the in-flight
+/// same-key admit interleaving. Returns each cid's reply of the expected kind.
+fn call_pair<Req, Reply>(
+    stream: &mut TcpStream,
+    cids: (u64, u64),
+    mailbox: MailboxId,
+    requests: (&Req, &Req),
+) -> (Reply, Reply)
+where
+    Req: Kind + Serialize,
+    Reply: Kind,
+{
+    for (cid, request) in [(cids.0, requests.0), (cids.1, requests.1)] {
+        let frame = WireFrame::Call {
+            cid: Some(cid),
+            envelope: MailEnvelope {
+                to: MailboxAddress { engine: None, mailbox },
+                from: None,
+                kind: Req::ID,
+                correlation_id: None,
+                payload: request.encode_into_bytes(),
+            },
+        };
+        write_frame(stream, &frame).unwrap();
+    }
+
+    let mut first: Option<Reply> = None;
+    let mut second: Option<Reply> = None;
+    let mut ended = 0;
+    while ended < 2 {
+        match read_frame(stream).unwrap() {
+            WireFrame::ReplyEvent { cid, envelope } => {
+                if envelope.kind == Reply::ID
+                    && let Some(reply) = Reply::decode_from_bytes(&envelope.payload)
+                {
+                    if cid == cids.0 {
+                        first = Some(reply);
+                    } else if cid == cids.1 {
+                        second = Some(reply);
+                    } else {
+                        panic!("ReplyEvent for an unexpected cid {cid}");
+                    }
+                }
+            }
+            WireFrame::ReplyEnd { cid, result } => {
+                result.unwrap();
+                assert!(cid == cids.0 || cid == cids.1, "ReplyEnd for an unexpected cid {cid}");
+                ended += 1;
+            }
+            other => panic!("unexpected frame during pipelined pair: {other:?}"),
+        }
+    }
+    (
+        first.expect("the first cid produced a reply of the expected kind"),
+        second.expect("the second cid produced a reply of the expected kind"),
+    )
+}
+
 /// Load the control-core component and return its assigned mailbox id.
 fn load_control_core(stream: &mut TcpStream, cid: u64, wasm: &[u8]) -> MailboxId {
     let load = LoadComponent { wasm: wasm.to_vec(), name: None, config: Vec::new(), export: None };
@@ -269,6 +329,62 @@ fn control_loop_converges_through_the_reducer_across_a_restart() {
     // just the raw store.
     let second = admit(&mut stream, 20, control, &seal_event("seal-2", 5, "wp"));
     assert!(matches!(second, Outcome::SealRejected(_)), "the overlapping seal is refused: {second:?}");
+
+    drop(stream);
+    kill9(child);
+}
+
+#[test]
+fn concurrent_same_key_admits_each_get_a_coherent_ok() {
+    let Some(wasm_path) = control_core_wasm() else {
+        assert!(
+            env::var_os("AETHER_REQUIRE_RUNTIME").is_none(),
+            "AETHER_REQUIRE_RUNTIME set but the control-core wasm is not pre-built"
+        );
+        eprintln!(
+            "skipping: control-core wasm not built; run \
+             `cargo build -p aether-bloomery --target wasm32-unknown-unknown`"
+        );
+        return;
+    };
+    let wasm = fs::read(&wasm_path).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("bloomery.db");
+    let db = db.to_str().unwrap();
+
+    let port = free_port();
+    let child = spawn(port, db);
+    let mut stream = connect(port);
+    handshake(&mut stream);
+    let control = load_control_core(&mut stream, 1, &wasm);
+
+    // Two admits sharing one idempotency key, pipelined before either reply is
+    // read, so the second sits in the mailbox while the first's store round-trip
+    // is still outstanding — the in-flight interleaving. Tripwire: the pre-fix
+    // code displaced the first pending entry on the second admit and answered the
+    // first admitter `Err "superseded by a concurrent admit…"` even though its
+    // commit landed; the fan-out fix opens one commit per key and hands every
+    // same-key admitter the one resolved outcome.
+    let admit = Admit { event: to_vec(&seal_event("dup-key", 0, "wp")).unwrap() };
+    let (first, second): (AdmitResult, AdmitResult) = call_pair(&mut stream, (2, 3), control, (&admit, &admit));
+    for (label, result) in [("first", &first), ("second", &second)] {
+        match result {
+            AdmitResult::Ok { outcome } => {
+                let outcome: Outcome = from_bytes(outcome).expect("outcome decodes");
+                assert!(
+                    matches!(outcome, Outcome::Sealed(_) | Outcome::Duplicate),
+                    "the {label} same-key admit gets a coherent outcome, never a rejection or stray error: {outcome:?}"
+                );
+            }
+            AdmitResult::Err { error } => panic!("the {label} same-key admit got a spurious error: {error}"),
+        }
+    }
+
+    // Exactly one bloom: one journal row, one applied decision — the deduped
+    // second admit opened no second commit and forced no double-apply.
+    let document = query_until_blooms(&mut stream, 10, control, 1);
+    assert_eq!(document.blooms.len(), 1, "one bloom from the deduped same-key admit pair: {:?}", document.blooms);
 
     drop(stream);
     kill9(child);
