@@ -11,10 +11,17 @@
 use super::StoreCapability;
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, ClaimSeal, ClaimSealResult, DrainOutbox,
-    DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, JournalRecord, OutboxEntry, ReleaseMembership,
-    ReleaseMembershipResult, ReplayJournal, ReplayJournalResult, Supersede, SupersedeResult,
+    DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, OutboxEntry, ReleaseMembership, ReleaseMembershipResult,
+    Supersede, SupersedeResult,
 };
 use aether_actor::runtime;
+// The control-plane transact-mails the wasm control actor drives — `Commit` and
+// the `ReplayJournal` family — are defined in `aether-bloomery` to avoid a
+// package cycle (the actor lives there; host depends on it). Host imports them
+// inward for its `StoreCapability` handlers (issue #3497).
+use aether_bloomery::{
+    Commit, CommitResult, JournalRecord, MembershipMutation, OutboxPayload, ReplayJournal, ReplayJournalResult,
+};
 use rusqlite::Connection;
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -40,9 +47,36 @@ pub enum SealOutcome {
     Conflict(String),
 }
 
+/// The outcome of a combined [`Commit`]: the whole decision journaled +
+/// applied at a new sequence, the idempotency key already present (no-op), or
+/// a claimed workpiece already held by an active bloom (the whole commit rolled
+/// back).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitOutcome {
+    /// The event journaled and every membership/outbox effect applied, at this
+    /// journal sequence.
+    Applied(u64),
+    /// The idempotency key was already journaled — nothing was applied.
+    Duplicate,
+    /// A claimed workpiece was already active; the whole transaction rolled back.
+    Conflict(String),
+}
+
 /// The durable store the capability drives. One method per transact-mail kind;
 /// each is one atomic `SQLite` transaction.
 pub trait StoreBackend: Send {
+    /// Apply a combined commit — journal the idempotency-keyed event, apply the
+    /// membership releases then claims, and enqueue the outbox payloads — in
+    /// **one** transaction (ADR-0149 §The control core). A duplicate key or a
+    /// membership conflict applies nothing.
+    fn commit(
+        &mut self,
+        idempotency_key: &str,
+        event: &[u8],
+        releases: &[MembershipMutation],
+        claims: &[MembershipMutation],
+        outbox: &[OutboxPayload],
+    ) -> rusqlite::Result<CommitOutcome>;
     /// Append a journal event, deduplicated by `idempotency_key`.
     fn append_event(&mut self, idempotency_key: &str, event: &[u8]) -> rusqlite::Result<AppendOutcome>;
     /// Claim every workpiece for `bloom` under the active-membership uniqueness
@@ -117,6 +151,61 @@ fn is_constraint_violation(error: &rusqlite::Error) -> bool {
 }
 
 impl StoreBackend for SqliteStore {
+    fn commit(
+        &mut self,
+        idempotency_key: &str,
+        event: &[u8],
+        releases: &[MembershipMutation],
+        claims: &[MembershipMutation],
+        outbox: &[OutboxPayload],
+    ) -> rusqlite::Result<CommitOutcome> {
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            "INSERT OR IGNORE INTO journal (idempotency_key, event) VALUES (?1, ?2)",
+            rusqlite::params![idempotency_key, event],
+        )?;
+        if changed == 0 {
+            // The key was already journaled — the whole commit is a no-op. The
+            // transaction rolls back on drop, so no membership/outbox row applies
+            // twice on a replayed key (the durable inbox-dedup backstop).
+            return Ok(CommitOutcome::Duplicate);
+        }
+        // A rowid is a non-negative i64; the fallback never triggers.
+        let sequence = u64::try_from(tx.last_insert_rowid()).unwrap_or_default();
+        // Releases before claims: a superseding successor reclaims a workpiece
+        // its predecessor freed in this same transaction (ADR-0149 §The bloom).
+        for release in releases {
+            tx.execute(
+                "DELETE FROM active_membership WHERE workpiece = ?1 AND bloom = ?2",
+                rusqlite::params![release.workpiece, release.bloom],
+            )?;
+        }
+        for claim in claims {
+            let insert = tx.execute(
+                "INSERT INTO active_membership (workpiece, bloom) VALUES (?1, ?2)",
+                rusqlite::params![claim.workpiece, claim.bloom],
+            );
+            match insert {
+                Ok(_) => {}
+                Err(error) if is_constraint_violation(&error) => {
+                    // The transaction rolls back on drop — the journal append and
+                    // every release roll back too, so a conflicted commit applies
+                    // nothing (ADR-0149 all-or-nothing admission).
+                    return Ok(CommitOutcome::Conflict(claim.workpiece.clone()));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        for entry in outbox {
+            tx.execute(
+                "INSERT INTO outbox (topic, payload) VALUES (?1, ?2)",
+                rusqlite::params![entry.topic, entry.payload],
+            )?;
+        }
+        tx.commit()?;
+        Ok(CommitOutcome::Applied(sequence))
+    }
+
     fn append_event(&mut self, idempotency_key: &str, event: &[u8]) -> rusqlite::Result<AppendOutcome> {
         let changed = self.conn.execute(
             "INSERT OR IGNORE INTO journal (idempotency_key, event) VALUES (?1, ?2)",
@@ -242,6 +331,17 @@ impl NativeActor for StoreCapability {
         let store = SqliteStore::open(&config.path).map_err(|error| BootError::Other(Box::new(error)))?;
         tracing::info!(target: "aether_bloomery_host::store", path = %config.path, "store opened (WAL)");
         Ok(StoreCapabilityState { backend: Box::new(store) })
+    }
+
+    #[handler::single]
+    fn on_commit(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Commit) -> CommitResult {
+        let Commit { idempotency_key, event, releases, claims, outbox } = mail;
+        match state.backend.commit(&idempotency_key, &event, &releases, &claims, &outbox) {
+            Ok(CommitOutcome::Applied(sequence)) => CommitResult::Applied { idempotency_key, sequence },
+            Ok(CommitOutcome::Duplicate) => CommitResult::Duplicate { idempotency_key },
+            Ok(CommitOutcome::Conflict(workpiece)) => CommitResult::Conflict { idempotency_key, workpiece },
+            Err(error) => CommitResult::Err { idempotency_key, error: error.to_string() },
+        }
     }
 
     #[handler::single]
