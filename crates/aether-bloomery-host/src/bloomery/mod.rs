@@ -11,6 +11,7 @@ mod intake;
 mod mirror;
 mod mirror_driver;
 mod source;
+mod study;
 
 pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};
 pub use cli::BloomeryCli;
@@ -27,3 +28,7 @@ pub use mirror_driver::{
     DrainTick, MirrorDriverCapability, MirrorDriverState, TOPIC_LANDING_RECEIPT, TOPIC_VIEW_DOCUMENT,
 };
 pub use source::SourceShell;
+pub use study::{
+    StudyAdmission, StudyAdmitDecision, StudyIntakeError, StudyRefusal, UploadedStudyRecord, admit_study,
+    rebuild_study_index,
+};

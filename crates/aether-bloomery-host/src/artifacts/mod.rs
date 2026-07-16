@@ -31,7 +31,7 @@ pub struct ArtifactsCapability;
 #[cfg(feature = "runtime")]
 mod runtime;
 #[cfg(feature = "runtime")]
-pub use runtime::{ArtifactMeta, ArtifactsCapabilityState, resolve_root};
+pub use runtime::{ArtifactEntry, ArtifactMeta, ArtifactsCapabilityState, resolve_root};
 
 #[cfg(all(test, feature = "runtime"))]
 mod tests;

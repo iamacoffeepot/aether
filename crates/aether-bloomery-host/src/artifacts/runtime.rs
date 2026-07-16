@@ -35,6 +35,19 @@ pub struct ArtifactMeta {
     pub parents: Vec<String>,
 }
 
+/// One stored artifact as a projection rebuild reads it (issue #3523): its
+/// content-store digest, recorded derivation parents, and full bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtifactEntry {
+    /// The content-store digest the bytes are addressed by.
+    pub digest: String,
+    /// The recorded derivation-DAG parents (an accepted study artifact names
+    /// its graded attempt digest here).
+    pub parents: Vec<String>,
+    /// The stored bytes.
+    pub bytes: Vec<u8>,
+}
+
 /// Resolve the store root: an explicit `--artifacts-root` / `AETHER_ARTIFACTS_ROOT`
 /// wins; otherwise the platform data dir (`data_dir/aether/bloomery-artifacts`),
 /// falling back to a temp-dir path when no data dir is resolvable. Mirrors the
@@ -102,6 +115,29 @@ impl ArtifactsCapabilityState {
             }
         }
         PutResult::Ok { digest }
+    }
+
+    /// Every stored entry's digest, derivation parents, and bytes — the
+    /// enumeration a projection rebuild reads (issue #3523). The eviction-free
+    /// store is the only truth a rebuildable index projects over, so the rebuild
+    /// scans it here rather than trusting the projection it is reconstructing.
+    /// Entries whose bytes cannot be read from disk are skipped (a rebuild is
+    /// best-effort over what is durably present, never a hard failure).
+    pub fn scan(&mut self) -> Vec<ArtifactEntry> {
+        // Collect the (digest, parents) refs first: `get` borrows the store
+        // mutably (it bumps recency), so it cannot run inside the `entries`
+        // borrow.
+        let refs: Vec<(String, Vec<String>)> =
+            self.store.entries().map(|entry| (entry.hash.to_owned(), entry.metadata.parents.clone())).collect();
+        let mut out = Vec::with_capacity(refs.len());
+        for (digest, parents) in refs {
+            if let Some(resolved) = self.store.get(&Selector::Hash(digest.clone()))
+                && let Ok(bytes) = fs::read(&resolved.path)
+            {
+                out.push(ArtifactEntry { digest, parents, bytes });
+            }
+        }
+        out
     }
 
     /// Resolve `digest` to its bytes + recorded parents, replying `NotFound`

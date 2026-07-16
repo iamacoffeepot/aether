@@ -60,7 +60,10 @@ pub use client::{
 };
 pub use config::GithubConfig;
 pub use executor::{ActionsExecutor, ExecutorError};
-pub use inward::{InwardError, StageResult, StageVerdict, normalize_stage_result};
+pub use inward::{
+    InwardError, StageResult, StageVerdict, StudyRecordError, StudyResult, normalize_stage_result,
+    normalize_study_result, parse_study_cost,
+};
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
 pub use projection::GithubProjection;
 pub use source::{GitSource, SourceError};

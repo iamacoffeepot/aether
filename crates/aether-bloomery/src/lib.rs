@@ -81,6 +81,6 @@ pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
 pub use values::{
     AgentProfile, Artifact, Attempt, BloomDraft, BloomSpec, Budget, Evidence, EvidenceKind, Forecast, LandingReceipt,
     Membership, ModelOverride, NetworkProfile, Observation, Provenance, ReasoningEffort, ResolutionClaim,
-    ResolvedBloom, ResolvedModel, ScopeRevision, StageBinding, StageCatalog, StageReceipt, Statement, ToolPolicy,
-    Transformation, Workpiece,
+    ResolvedBloom, ResolvedModel, ScopeRevision, StageBinding, StageCatalog, StageReceipt, Statement, StudyCost,
+    StudyRecord, ToolPolicy, Transformation, Workpiece,
 };
