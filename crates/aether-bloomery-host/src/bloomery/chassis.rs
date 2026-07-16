@@ -10,6 +10,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use aether_actor::Addressable;
+use aether_capabilities::http::{HttpServerCapability, HttpServerConfig};
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::trace::TraceDispatchCapability;
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
@@ -21,6 +22,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::ConfigError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
+use crate::api::BloomeryApiCapability;
 use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
@@ -44,6 +46,27 @@ pub struct RpcPortConfig {
 impl Default for RpcPortConfig {
     fn default() -> Self {
         Self { port: DEFAULT_RPC_PORT }
+    }
+}
+
+/// The default REST control-API port when `AETHER_HTTP_PORT` is unset —
+/// distinct from the RPC port so the two ingresses coexist on one host.
+pub const DEFAULT_HTTP_PORT: u16 = 8910;
+
+/// The REST control-API ingress port knob, resolved argv > `AETHER_HTTP_PORT` >
+/// default. The `aether.http.server` cap binds this on localhost; the operator
+/// drives the bloom lifecycle over it with `curl` (ADR-0149 §Packaging, #3498).
+#[derive(Clone, Debug, aether_substrate::Config)]
+#[config(env_prefix = "AETHER_HTTP", cli_prefix = "http")]
+pub struct HttpPortConfig {
+    /// The localhost port the REST control API binds.
+    #[config(default = 8910)]
+    pub port: u16,
+}
+
+impl Default for HttpPortConfig {
+    fn default() -> Self {
+        Self { port: DEFAULT_HTTP_PORT }
     }
 }
 
@@ -71,6 +94,8 @@ pub struct BloomeryChassis;
 pub struct BloomeryEnv {
     /// The localhost RPC ingress port.
     pub rpc_port: u16,
+    /// The localhost REST control-API ingress port.
+    pub http_port: u16,
     /// The `SQLite` journal store configuration.
     pub store: StoreConfig,
     /// The eviction-free artifacts content-store configuration.
@@ -108,11 +133,12 @@ impl BloomeryEnv {
     /// fails its parser.
     pub fn from_env_with_argv(cli: &BloomeryCli) -> Result<Self, ConfigError> {
         let rpc_port = RpcPortConfig::try_from_argv_then_env(cli.rpc.clone().into_layer())?.port;
+        let http_port = HttpPortConfig::try_from_argv_then_env(cli.http.clone().into_layer())?.port;
         let store = StoreConfig::try_from_argv_then_env(cli.store.clone().into_layer())?;
         let artifacts = ArtifactsConfig::try_from_argv_then_env(cli.artifacts.clone().into_layer())?;
         let source = SourceConfig::try_from_argv_then_env(cli.source.clone().into_layer())?;
         let control_core_wasm = ControlCoreConfig::try_from_argv_then_env(cli.control_core.clone().into_layer())?.wasm;
-        Ok(Self { rpc_port, store, artifacts, source, control_core_wasm })
+        Ok(Self { rpc_port, http_port, store, artifacts, source, control_core_wasm })
     }
 }
 
@@ -130,7 +156,8 @@ impl BloomeryChassis {
     /// The `--describe` manifest (ADR-0115): the chassis profile, the mailbox
     /// namespaces this binary links, and the `build.rs` provenance. Bloomery is
     /// a minimal coordinator chassis — it links the trace dispatcher, the store,
-    /// the artifacts record, and the RPC server — so it lists those directly.
+    /// the artifacts record, the RPC server, and the HTTP ingress + REST control
+    /// api (#3498) — so it lists those directly.
     /// The hub's binary store forks `<binary> --describe` once at upload time to
     /// capture this.
     #[must_use]
@@ -142,6 +169,8 @@ impl BloomeryChassis {
             <SourceCapability as Addressable>::NAMESPACE.to_owned(),
             <ComponentHostCapability as Addressable>::NAMESPACE.to_owned(),
             <RpcServerCapability as Addressable>::NAMESPACE.to_owned(),
+            <HttpServerCapability as Addressable>::NAMESPACE.to_owned(),
+            <BloomeryApiCapability as Addressable>::NAMESPACE.to_owned(),
         ];
         BinaryManifest {
             chassis: Self::PROFILE.to_owned(),
@@ -153,7 +182,7 @@ impl BloomeryChassis {
     }
 
     fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let BloomeryEnv { rpc_port, store, artifacts, source, control_core_wasm } = env;
+        let BloomeryEnv { rpc_port, http_port, store, artifacts, source, control_core_wasm } = env;
         let boot = SubstrateBoot::builder("aether-bloomery", env!("CARGO_PKG_VERSION")).build()?;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
@@ -161,6 +190,7 @@ impl BloomeryChassis {
         // into the builder, so the drain pushes through this clone.
         let autoload_mailer = Arc::clone(&boot.queue);
         let rpc_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port);
+        let http_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), http_port);
         // The component host lets the coordinator load the control-core wasm
         // actor (ADR-0149 §Packaging) — the reducer runtime that owns the live
         // snapshot. Built from the same wasmtime engine/linker/outbound the boot
@@ -188,6 +218,15 @@ impl BloomeryChassis {
                     kinds: vec![],
                 },
             })
+            // The REST control ingress (ADR-0149 §Packaging, #3498): the HTTP
+            // server cap binds localhost, and the api cap claims the control
+            // routes on it. RPC stays mounted above for fleet plumbing.
+            .with_actor::<HttpServerCapability>(HttpServerConfig {
+                enabled: true,
+                bind_addr: http_addr.to_string(),
+                ..HttpServerConfig::default()
+            })
+            .with_actor::<BloomeryApiCapability>(())
             .driver(driver)
             .build()?;
 
@@ -233,6 +272,9 @@ mod tests {
         let artifacts_root = tempfile::tempdir().unwrap();
         let env = BloomeryEnv {
             rpc_port: 0,
+            // Port 0 → an OS-assigned ephemeral HTTP port, so the REST ingress
+            // (and its api cap) claim their mailboxes without a fixed-port clash.
+            http_port: 0,
             store: StoreConfig::default(),
             artifacts: ArtifactsConfig { root: Some(artifacts_root.path().to_str().unwrap().to_owned()) },
             source: SourceConfig::default(),

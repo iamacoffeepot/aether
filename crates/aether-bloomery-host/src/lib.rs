@@ -24,17 +24,22 @@
 //!   holds the token and network client, runs them and replies. ADR-0149 bars
 //!   the wasm guest from touching tokens, shells, or the network directly, the
 //!   same gap the store port already closed with `StoreCapability`.
+//! - [`api`] — the native `aether.bloomery.api` capability, a REST control
+//!   ingress mounted on the `aether.http.server` cap (ADR-0108) that drives the
+//!   bloom lifecycle from `curl` — stage / shape / seal / supersede and read
+//!   the live blooms, view document, journal, and artifacts (ADR-0149
+//!   §Packaging, #3498).
 //! - [`bloomery`] — [`BloomeryChassis`], a
 //!   coordinator-shaped chassis (no render/audio surface) that registers the
-//!   store, artifacts, source, trace, and RPC capabilities behind a
-//!   signal-blocking driver. It also holds the remaining GitHub port cap
-//!   shells — `ProjectionShell` (outward mirror) and `ExecutorShell` (the
-//!   Actions dispatch backend, ADR-0149 migration step 2) — each mounting an
-//!   `aether-bloomery-github` backend behind an `Arc<dyn …>` so no core module
-//!   names a GitHub type. Those shells ship ahead of their chassis-boot
-//!   wiring, which lands with the reducer runtime that drives them;
-//!   `SourceShell` is past that point, already wired behind the
-//!   `aether.source` capability above.
+//!   store, artifacts, source, trace, RPC, and HTTP (REST control api)
+//!   capabilities behind a signal-blocking driver. It also holds the remaining
+//!   GitHub port cap shells — `ProjectionShell` (outward mirror) and
+//!   `ExecutorShell` (the Actions dispatch backend, ADR-0149 migration step 2)
+//!   — each mounting an `aether-bloomery-github` backend behind an
+//!   `Arc<dyn …>` so no core module names a GitHub type. Those shells ship
+//!   ahead of their chassis-boot wiring, which lands with the reducer runtime
+//!   that drives them; `SourceShell` is past that point, already wired behind
+//!   the `aether.source` capability above.
 //!
 //! Recovery is journal replay + outbox republish: reopen the same database
 //! file, replay the journal through the reducer, and republish undelivered
@@ -45,7 +50,11 @@ pub mod source;
 pub mod store;
 
 #[cfg(feature = "runtime")]
+pub mod api;
+#[cfg(feature = "runtime")]
 pub mod bloomery;
 
+#[cfg(feature = "runtime")]
+pub use api::BloomeryApiCapability;
 #[cfg(feature = "runtime")]
 pub use bloomery::{BloomeryChassis, BloomeryEnv};
