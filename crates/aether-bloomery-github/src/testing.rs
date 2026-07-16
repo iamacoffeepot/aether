@@ -243,11 +243,19 @@ impl FakeGithub {
     }
 
     /// Attach `artifacts` to the run with id `run_id` — seed a run first.
+    ///
+    /// # Panics
+    /// If `run_id` names no seeded run — an unknown id is a test-setup bug, so
+    /// it panics rather than silently no-op'ing, matching the file's other
+    /// id-lookup mutators (`update_issue` / `cancel_run` return `Err(404)`).
     pub fn seed_run_artifacts(&self, run_id: u64, artifacts: Vec<Artifact>) {
         let mut state = self.lock();
-        if let Some(run) = state.runs.iter_mut().find(|r| r.id == run_id) {
-            run.artifacts = artifacts;
-        }
+        let run = state
+            .runs
+            .iter_mut()
+            .find(|r| r.id == run_id)
+            .expect("seed_run_artifacts: unknown run_id — seed a run first");
+        run.artifacts = artifacts;
     }
 }
 

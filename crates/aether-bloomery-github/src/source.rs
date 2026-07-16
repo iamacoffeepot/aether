@@ -408,16 +408,25 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         let targets = Self::claim_targets(workpieces, true);
         let mut created: Vec<String> = Vec::new();
         for (kind, name) in &targets {
-            // A fresh root claim commit per member, then an atomic create. A 422
-            // is another bloom's existing hold: resolve the holder, roll back
-            // every ref this acquire created, and report the first conflict.
-            let commit = self.create_claim_commit(bloom, &[])?;
+            // A fresh root claim commit per member, then an atomic create. Every
+            // failure path — the commit create, the ref create, and (below) the
+            // holder resolution — first rolls back every ref this acquire already
+            // created, so an aborted acquire never leaks a partial claim.
+            let commit = match self.create_claim_commit(bloom, &[]) {
+                Ok(commit) => commit,
+                Err(error) => {
+                    self.rollback(&created)?;
+                    return Err(error);
+                }
+            };
             match self.client.create_ref(name, &commit) {
                 Ok(_) => created.push(name.clone()),
+                // A 422 is another bloom's existing hold. Roll back our own refs
+                // first — the conflicting ref is another bloom's, never among
+                // them — then resolve and report the first conflict.
                 Err(GithubError::Status { status: 422, .. }) => {
-                    let held_by = self.require_holder(name)?;
                     self.rollback(&created)?;
-                    return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by });
+                    return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by: self.require_holder(name)? });
                 }
                 Err(error) => {
                     self.rollback(&created)?;

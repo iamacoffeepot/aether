@@ -266,12 +266,23 @@ pub enum GithubError {
     Transport(String),
     /// A 2xx response whose body did not decode as expected.
     Decode(String),
+    /// A paginated list walk hit the `MAX_LIST_PAGES` cap without reaching a
+    /// short (final) page, so the enumeration is incomplete. Surfaced as an
+    /// error rather than folded into a `Ok(None)` / silently truncated `Ok`,
+    /// which would misreport a not-yet-searched item as absent.
+    PaginationExhausted {
+        /// What was being listed (for diagnostics).
+        what: String,
+    },
 }
 
 impl fmt::Display for GithubError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Status { status, body } => write!(f, "github returned status {status}: {body}"),
+            Self::PaginationExhausted { what } => {
+                write!(f, "github pagination exhausted listing {what} without a final page")
+            }
             Self::Transport(msg) => write!(f, "github transport error: {msg}"),
             Self::Decode(msg) => write!(f, "github response decode error: {msg}"),
         }
@@ -687,11 +698,14 @@ impl<T: HttpTransport> GithubApi for ReqwestGithub<T> {
                     return Ok(Some(Issue { number: gh.number, title: gh.title, body, marker }));
                 }
             }
+            // A short page is the end of the list — searched to the end, not
+            // found. Falling off the page cap instead means the walk truncated,
+            // so a still-unsearched issue must not be reported as absent.
             if count < PER_PAGE as usize {
-                break;
+                return Ok(None);
             }
         }
-        Ok(None)
+        Err(GithubError::PaginationExhausted { what: "issues".to_owned() })
     }
 
     fn create_issue(&self, new: &NewIssue) -> Result<Issue, GithubError> {
@@ -723,10 +737,10 @@ impl<T: HttpTransport> GithubApi for ReqwestGithub<T> {
                 }
             }
             if count < PER_PAGE as usize {
-                break;
+                return Ok(None);
             }
         }
-        Ok(None)
+        Err(GithubError::PaginationExhausted { what: "issue comments".to_owned() })
     }
 
     fn create_comment(&self, new: &NewComment) -> Result<Comment, GithubError> {
@@ -800,10 +814,12 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
             let count = refs.len();
             out.extend(refs.into_iter().map(GhRef::into_git_ref));
             if count < PER_PAGE as usize {
-                break;
+                return Ok(out);
             }
         }
-        Ok(out)
+        // Falling off the page cap means the enumeration truncated — a silently
+        // short ref list would drop reusable checkpoints, so surface it.
+        Err(GithubError::PaginationExhausted { what: "matching refs".to_owned() })
     }
 
     fn get_commit(&self, sha: &str) -> Result<GitCommit, GithubError> {
@@ -848,10 +864,10 @@ impl<T: HttpTransport> ActionsApi for ReqwestGithub<T> {
                 }
             }
             if count < PER_PAGE as usize {
-                break;
+                return Ok(None);
             }
         }
-        Ok(None)
+        Err(GithubError::PaginationExhausted { what: "workflow runs".to_owned() })
     }
 
     fn get_run(&self, run_id: u64) -> Result<WorkflowRun, GithubError> {
@@ -874,10 +890,10 @@ impl<T: HttpTransport> ActionsApi for ReqwestGithub<T> {
             let count = list.artifacts.len();
             out.extend(list.artifacts.into_iter().map(GhArtifact::into_artifact));
             if count < PER_PAGE as usize {
-                break;
+                return Ok(out);
             }
         }
-        Ok(out)
+        Err(GithubError::PaginationExhausted { what: "run artifacts".to_owned() })
     }
 }
 
@@ -949,6 +965,20 @@ mod tests {
                 assert!(body.contains("Validation Failed"));
             }
             other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn find_issue_signals_pagination_exhaustion_rather_than_a_false_not_found() {
+        // Tripwire: when every page is full to the cap and none matches, the walk
+        // truncated — it must surface `PaginationExhausted`, never fold a
+        // not-yet-searched issue into a `Ok(None)` "absent".
+        let full_page: Vec<String> =
+            (0..100).map(|i| format!(r#"{{"number":{i},"title":"t","body":"no marker"}}"#)).collect();
+        let github = client(200, &format!("[{}]", full_page.join(",")));
+        match github.find_issue("never-present").unwrap_err() {
+            GithubError::PaginationExhausted { what } => assert_eq!(what, "issues"),
+            other => panic!("expected PaginationExhausted, got {other:?}"),
         }
     }
 
