@@ -71,8 +71,8 @@ impl ArtifactsCapabilityState {
     }
 
     /// Store `bytes` content-addressed with their declared `parents`, replying
-    /// the digest. The [`on_put`](ArtifactsCapability::on_put) handler is a
-    /// thin wrapper over this; it carries the durability check.
+    /// the digest. The `on_put` handler is a thin wrapper over this; it carries
+    /// the durability check.
     pub fn put(&mut self, bytes: &[u8], parents: Vec<String>) -> PutResult {
         let digest = self.store.upload(bytes, ArtifactMeta { parents }, None);
         // `upload` swallows a write failure (logs a warn, leaves the entry
@@ -87,8 +87,7 @@ impl ArtifactsCapabilityState {
 
     /// Resolve `digest` to its bytes + recorded parents, replying `NotFound`
     /// for an absent digest and `AdapterError` for a disk read failure of an
-    /// indexed entry. The [`on_get`](ArtifactsCapability::on_get) handler
-    /// delegates here.
+    /// indexed entry. The `on_get` handler delegates here.
     pub fn get(&mut self, digest: String) -> GetResult {
         match self.store.get(&Selector::Hash(digest.clone())) {
             Some(resolved) => match fs::read(&resolved.path) {
