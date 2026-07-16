@@ -17,16 +17,24 @@
 //!   digest-addressed artifact bytes and their derivation-DAG parents; a
 //!   second consumer of the one addressing core (ADR-0116 reuse-not-rival),
 //!   never evicting.
+//! - [`source`] — the native `aether.source` capability. A mail front over the
+//!   existing `SourceShell` (`bloomery/source.rs`): the guest sends
+//!   `aether.source.*` transact mail for the port operations — snapshot /
+//!   checkpoint / checkpoints / integrate / land — and the capability, which
+//!   holds the token and network client, runs them and replies. ADR-0149 bars
+//!   the wasm guest from touching tokens, shells, or the network directly, the
+//!   same gap the store port already closed with `StoreCapability`.
 //! - [`bloomery`] — [`BloomeryChassis`], a
 //!   coordinator-shaped chassis (no render/audio surface) that registers the
-//!   store, artifacts, trace, and RPC capabilities behind a signal-blocking
-//!   driver.
+//!   store, artifacts, source, trace, and RPC capabilities behind a
+//!   signal-blocking driver.
 //!
 //! Recovery is journal replay + outbox republish: reopen the same database
 //! file, replay the journal through the reducer, and republish undelivered
 //! outbox entries.
 
 pub mod artifacts;
+pub mod source;
 pub mod store;
 
 #[cfg(feature = "runtime")]

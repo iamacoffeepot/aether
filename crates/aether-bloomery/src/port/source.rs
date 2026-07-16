@@ -4,12 +4,14 @@
 
 use alloc::vec::Vec;
 
+use serde::{Deserialize, Serialize};
+
 use crate::digest::Digest;
 use crate::ids::BloomId;
 use crate::values::LandingReceipt;
 
 /// A snapshot of the source at a base: its head and tree digests.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SourceSnapshot {
     /// The base head digest the snapshot was taken at.
     pub head: Digest,
@@ -19,7 +21,7 @@ pub struct SourceSnapshot {
 
 /// A per-bloom integration checkpoint — a single-writer integration branch's
 /// current tree, reusable across a drift-induced supersession.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Checkpoint {
     /// The bloom this checkpoint belongs to.
     pub bloom: BloomId,
@@ -29,7 +31,7 @@ pub struct Checkpoint {
 
 /// The outcome of integrating one candidate onto a bloom's integration
 /// branch.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum IntegrateOutcome {
     /// The candidate integrated; the branch now carries `tree`.
     Integrated {
@@ -54,7 +56,7 @@ pub enum IntegrateOutcome {
 /// The outcome of a compare-and-swap land. If mainline is no longer the
 /// sealed base, the swap is refused — the bloom is not rebased under its
 /// evidence; a successor seals on the new head (ADR-0149 §The bloom).
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LandOutcome {
     /// The swap succeeded; mainline moved and a receipt was issued.
     Landed(LandingReceipt),
