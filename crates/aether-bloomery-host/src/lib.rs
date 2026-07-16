@@ -20,7 +20,12 @@
 //! - [`bloomery`] — [`BloomeryChassis`], a
 //!   coordinator-shaped chassis (no render/audio surface) that registers the
 //!   store, artifacts, trace, and RPC capabilities behind a signal-blocking
-//!   driver.
+//!   driver. It also holds the GitHub port cap shells — `ProjectionShell`
+//!   (outward mirror), `SourceShell` (git source), and `ExecutorShell` (the
+//!   Actions dispatch backend, ADR-0149 migration step 2) — each mounting an
+//!   `aether-bloomery-github` backend behind an `Arc<dyn …>` so no core module
+//!   names a GitHub type. The shells ship ahead of their chassis-boot wiring,
+//!   which lands with the reducer runtime that drives them.
 //!
 //! Recovery is journal replay + outbox republish: reopen the same database
 //! file, replay the journal through the reducer, and republish undelivered

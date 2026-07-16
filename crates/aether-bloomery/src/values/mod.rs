@@ -13,7 +13,7 @@ mod statement;
 
 pub use bloom::{BloomDraft, BloomSpec, LandingReceipt, Membership, ResolutionClaim, ResolvedBloom};
 pub use profile::{AgentProfile, ReasoningEffort, ToolPolicy};
-pub use stage::{Attempt, StageBinding, StageCatalog, Transformation};
+pub use stage::{Attempt, NetworkProfile, StageBinding, StageCatalog, Transformation};
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 
 use alloc::string::String;

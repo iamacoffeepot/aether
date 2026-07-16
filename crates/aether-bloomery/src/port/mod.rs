@@ -10,9 +10,11 @@
 //! adapter would be a package-level dependency cycle. Adapters depend inward
 //! on this crate, never the reverse.
 //!
-//! Only the two ports with a first consumer in the crate DAG ship here. The
-//! `store` / `executor` / `signing` port shapes arrive with their first
-//! consumers, not speculatively (ADR-0149 §The boundary).
+//! The `source` / `projection` / `executor` ports ship here — each with a
+//! first consumer in the crate DAG. The executor's is migration step 2's
+//! Actions dispatch backend ([#3500]). The `store` / `signing` port shapes
+//! arrive with their first consumers, not speculatively (ADR-0149 §The
+//! boundary).
 //!
 //! These are pure trait definitions over the value vocabulary — the
 //! implementations do the I/O; the contracts are protocol semantics. No I/O
@@ -20,9 +22,12 @@
 //!
 //! [#3458]: https://github.com/iamacoffeepot/aether/issues/3458
 //! [#3459]: https://github.com/iamacoffeepot/aether/issues/3459
+//! [#3500]: https://github.com/iamacoffeepot/aether/issues/3500
 
+mod executor;
 mod projection;
 mod source;
 
+pub use executor::{Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
 pub use projection::{BloomView, MemberView, ProjectionBackend, ViewDocument};
 pub use source::{Checkpoint, IntegrateOutcome, LandOutcome, SourceBackend, SourceSnapshot};
