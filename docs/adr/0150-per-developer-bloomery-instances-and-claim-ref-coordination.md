@@ -45,9 +45,17 @@ is an atomic ref creation via the Git Data surface (the source client already ca
 the ref existing *is* the claim, and a seal whose member is already claimed aborts whole, naming the
 conflict — the same failure shape ADR-0149's store constraint produces today. ADR-0149's one sealed,
 unlanded bloom per mainline is enforced the same way: sealing takes a single mainline-admission ref,
-released by the landing receipt or an explicit supersession. Claim refs are working handles carrying the
-claiming bloom id; release and supersession are recorded with the bloom's receipts, so the ref namespace
-is auditable against journals. The local store's uniqueness constraint remains as each instance's
+released by the landing receipt or an explicit supersession. When a supersession seals a successor, the
+predecessor's refs **transfer** rather than release: the mainline-admission ref and every carried-over
+workpiece ref are compare-and-swapped from the predecessor's value to the successor's (a concurrent
+mutation loses cleanly), fresh refs are created only for the successor's net-new workpieces, and plain
+release applies only to members the successor drops — release-on-supersession without a successor is
+the abandonment case only *(amended 2026-07-16: the original sentence read as release-on-supersession
+unconditionally, which frees the admission ref while the successor is a sealed, unlanded bloom and lets
+a second instance seal against the same mainline — found by the critic pass on the claim-coordination
+slice, PR #3529)*. Claim refs are working handles carrying the
+claiming bloom id; release, transfer, and supersession are recorded with the bloom's receipts, so the ref
+namespace is auditable against journals. The local store's uniqueness constraint remains as each instance's
 backstop; the ref namespace is the inter-instance truth for claims — the one datum whose truth
 deliberately lives outside the instance journal.
 
