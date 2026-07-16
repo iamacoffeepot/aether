@@ -83,9 +83,10 @@ fn land_maps_a_moved_base_to_base_moved() {
 fn claim_seal_decodes_calls_the_shell_and_encodes_an_acquired_outcome() {
     let (state, _fake, bloom, _base) = state_over_fake(false);
 
-    let reply = state.claim_seal(&to_vec(&bloom).unwrap(), &encoded_workpieces(&["reactor-core"]));
+    let reply =
+        state.claim_seal("seal-key".to_owned(), &to_vec(&bloom).unwrap(), &encoded_workpieces(&["reactor-core"]));
 
-    let ClaimSealResult::Ok { outcome } = reply else {
+    let ClaimSealResult::Ok { outcome, .. } = reply else {
         panic!("expected Ok, got {reply:?}")
     };
     assert_eq!(from_bytes::<ClaimOutcome>(&outcome).unwrap(), ClaimOutcome::Acquired);
@@ -96,12 +97,13 @@ fn claim_seal_encodes_a_held_conflict_outcome() {
     let (state, _fake, first, _base) = state_over_fake(false);
     // `first` takes the workpiece; a second bloom's claim must encode a `Held`
     // naming the ref kind and holder.
-    let _ = state.claim_seal(&to_vec(&first).unwrap(), &encoded_workpieces(&["reactor-core"]));
+    let _ = state.claim_seal("seal-key".to_owned(), &to_vec(&first).unwrap(), &encoded_workpieces(&["reactor-core"]));
     let second = BloomId(digest(2));
 
-    let reply = state.claim_seal(&to_vec(&second).unwrap(), &encoded_workpieces(&["reactor-core"]));
+    let reply =
+        state.claim_seal("seal-key-2".to_owned(), &to_vec(&second).unwrap(), &encoded_workpieces(&["reactor-core"]));
 
-    let ClaimSealResult::Ok { outcome } = reply else {
+    let ClaimSealResult::Ok { outcome, .. } = reply else {
         panic!("expected Ok, got {reply:?}")
     };
     assert_eq!(
@@ -113,11 +115,31 @@ fn claim_seal_encodes_a_held_conflict_outcome() {
 #[test]
 fn release_seal_decodes_and_releases() {
     let (state, fake, bloom, _base) = state_over_fake(false);
-    let _ = state.claim_seal(&to_vec(&bloom).unwrap(), &encoded_workpieces(&["reactor-core"]));
+    let _ = state.claim_seal("seal-key".to_owned(), &to_vec(&bloom).unwrap(), &encoded_workpieces(&["reactor-core"]));
     assert!(fake.ref_exists("bloomery/claims/reactor-core"), "claim taken");
 
     let reply = state.release_seal(&to_vec(&bloom).unwrap(), &encoded_workpieces(&["reactor-core"]));
 
     assert_eq!(reply, ReleaseSealResult::Ok);
     assert!(!fake.ref_exists("bloomery/claims/reactor-core"), "claim released");
+}
+
+#[test]
+fn an_unconfigured_cap_acquires_locally_without_touching_github() {
+    // Local-backstop-only mode (ADR-0150): an unconfigured instance's seal path
+    // never reaches GitHub — claim_seal is a no-op `Acquired` and no ref is
+    // written, so exclusivity rests on the local SQLite constraint alone.
+    let fake = FakeGithub::new();
+    let backend = GitSource::new(fake.clone(), false);
+    let state = SourceCapabilityState::new_unconfigured(SourceShell::new(Arc::new(backend)));
+    let bloom = BloomId(digest(1));
+
+    let reply =
+        state.claim_seal("seal-key".to_owned(), &to_vec(&bloom).unwrap(), &encoded_workpieces(&["reactor-core"]));
+
+    let ClaimSealResult::Ok { outcome, .. } = reply else {
+        panic!("expected Ok, got {reply:?}")
+    };
+    assert_eq!(from_bytes::<ClaimOutcome>(&outcome).unwrap(), ClaimOutcome::Acquired);
+    assert!(!fake.ref_exists("bloomery/claims/reactor-core"), "unconfigured mode writes no claim ref");
 }

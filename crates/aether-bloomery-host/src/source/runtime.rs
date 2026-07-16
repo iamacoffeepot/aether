@@ -14,7 +14,7 @@
 
 use aether_actor::runtime;
 use aether_bloomery::{
-    BloomId, Checkpoint, ClaimSeal, ClaimSealResult, Digest, IntegrateOutcome, LandOutcome, ReleaseSeal,
+    BloomId, Checkpoint, ClaimOutcome, ClaimSeal, ClaimSealResult, Digest, IntegrateOutcome, LandOutcome, ReleaseSeal,
     ReleaseSealResult, WorkpieceId,
 };
 use aether_data::wire::{from_bytes, to_vec};
@@ -29,16 +29,32 @@ use crate::bloomery::SourceShell;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 
-/// Runtime state for [`SourceCapability`]: the shell the dispatcher owns.
+/// Runtime state for [`SourceCapability`]: the shell the dispatcher owns, plus
+/// whether the GitHub connection is configured. An unconfigured instance runs
+/// the seal-claim path in **local-backstop-only** mode (ADR-0150): it never
+/// reaches GitHub, so `claim_seal` / `release_seal` short-circuit to
+/// `Acquired` / `Ok` and the instance's exclusivity rests on the local SQLite
+/// constraint alone — the single-instance / untokened-dev case, and what keeps
+/// a seal from depending on GitHub reachability when no coordination is needed.
 pub struct SourceCapabilityState {
     shell: SourceShell,
+    configured: bool,
 }
 
 impl SourceCapabilityState {
     /// Build state over an explicit shell — the seam the handler tests drive.
+    /// Configured (the claim path reaches the shell) so tests exercise the real
+    /// acquire/release logic against the fake-GitHub-backed shell.
     #[must_use]
     pub fn new(shell: SourceShell) -> Self {
-        Self { shell }
+        Self { shell, configured: true }
+    }
+
+    /// Build state in local-backstop-only mode (unconfigured) — the seam a test
+    /// drives to exercise the GitHub-free seal-claim short-circuit.
+    #[must_use]
+    pub fn new_unconfigured(shell: SourceShell) -> Self {
+        Self { shell, configured: false }
     }
 
     /// Decode `base`, snapshot the source there, and encode the outcome.
@@ -160,29 +176,42 @@ impl SourceCapabilityState {
     }
 
     /// Decode `bloom` / `workpieces`, acquire the shared seal claim, and encode
-    /// the [`ClaimOutcome`](aether_bloomery::ClaimOutcome) into the reply.
+    /// the [`ClaimOutcome`](aether_bloomery::ClaimOutcome) into the reply,
+    /// echoing `idempotency_key` for the admitter's correlation.
     #[must_use]
-    pub fn claim_seal(&self, bloom: &[u8], workpieces: &[Vec<u8>]) -> ClaimSealResult {
+    pub fn claim_seal(&self, idempotency_key: String, bloom: &[u8], workpieces: &[Vec<u8>]) -> ClaimSealResult {
+        // Local-backstop-only mode: no GitHub, so the acquire is a no-op success
+        // and exclusivity rests on the local SQLite constraint (ADR-0150).
+        if !self.configured {
+            return match to_vec(&ClaimOutcome::Acquired) {
+                Ok(outcome) => ClaimSealResult::Ok { idempotency_key, outcome },
+                Err(error) => ClaimSealResult::Err { idempotency_key, error: error.to_string() },
+            };
+        }
         let bloom: BloomId = match from_bytes(bloom) {
             Ok(bloom) => bloom,
-            Err(error) => return ClaimSealResult::Err { error: error.to_string() },
+            Err(error) => return ClaimSealResult::Err { idempotency_key, error: error.to_string() },
         };
         let workpieces = match decode_workpieces(workpieces) {
             Ok(workpieces) => workpieces,
-            Err(error) => return ClaimSealResult::Err { error },
+            Err(error) => return ClaimSealResult::Err { idempotency_key, error },
         };
         match self.shell.claim_seal(&bloom, &workpieces) {
             Ok(outcome) => match to_vec(&outcome) {
-                Ok(outcome) => ClaimSealResult::Ok { outcome },
-                Err(error) => ClaimSealResult::Err { error: error.to_string() },
+                Ok(outcome) => ClaimSealResult::Ok { idempotency_key, outcome },
+                Err(error) => ClaimSealResult::Err { idempotency_key, error: error.to_string() },
             },
-            Err(error) => ClaimSealResult::Err { error: error.to_string() },
+            Err(error) => ClaimSealResult::Err { idempotency_key, error: error.to_string() },
         }
     }
 
     /// Decode `bloom` / `workpieces` and release the shared seal claim.
     #[must_use]
     pub fn release_seal(&self, bloom: &[u8], workpieces: &[Vec<u8>]) -> ReleaseSealResult {
+        // Local-backstop-only mode: nothing was acquired, so nothing to release.
+        if !self.configured {
+            return ReleaseSealResult::Ok;
+        }
         let bloom: BloomId = match from_bytes(bloom) {
             Ok(bloom) => bloom,
             Err(error) => return ReleaseSealResult::Err { error: error.to_string() },
@@ -213,9 +242,14 @@ impl NativeActor for SourceCapability {
     const NAMESPACE: &'static str = "aether.source";
 
     fn init(config: super::SourceConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<SourceCapabilityState, BootError> {
+        // Unconfigured (empty token / owner / repo) → local-backstop-only: the
+        // seal-claim path never reaches GitHub (ADR-0150), matching the mirror
+        // driver's disabled mode. The shell still connects (client construction
+        // touches no network) so the pre-migration source ops stay available.
+        let configured = !(config.token.is_empty() || config.owner.is_empty() || config.repo.is_empty());
         let shell = SourceShell::connect(&config).map_err(|error| BootError::Other(Box::new(error)))?;
-        tracing::info!(target: "aether_bloomery_host::source", "source shell connected");
-        Ok(SourceCapabilityState { shell })
+        tracing::info!(target: "aether_bloomery_host::source", configured, "source shell connected");
+        Ok(SourceCapabilityState { shell, configured })
     }
 
     // The `#[handler::single]` contract requires the mail by value; every
@@ -262,7 +296,7 @@ impl NativeActor for SourceCapability {
     #[allow(clippy::needless_pass_by_value)]
     #[handler::single]
     fn on_claim_seal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ClaimSeal) -> ClaimSealResult {
-        state.claim_seal(&mail.bloom, &mail.workpieces)
+        state.claim_seal(mail.idempotency_key, &mail.bloom, &mail.workpieces)
     }
 
     #[allow(clippy::needless_pass_by_value)]

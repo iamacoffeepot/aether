@@ -248,6 +248,12 @@ pub enum QueryResult {
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.source.claim_seal")]
 pub struct ClaimSeal {
+    /// The admit's idempotency key, echoed on the reply. The source cap is
+    /// addressed by runtime name (`send_to_named`), which carries no typed
+    /// reply context, so — exactly as [`Commit`] / [`CommitResult`] correlate —
+    /// this key is the axis the control actor matches the reply to the seal it
+    /// is still holding.
+    pub idempotency_key: String,
     /// The `aether_data::wire`-encoded claiming [`BloomId`](crate::ids::BloomId).
     pub bloom: Vec<u8>,
     /// One `aether_data::wire`-encoded member [`WorkpieceId`](crate::ids::WorkpieceId)
@@ -259,18 +265,23 @@ pub struct ClaimSeal {
 /// Reply to [`ClaimSeal`]. `Ok` carries the wire-encoded
 /// [`ClaimOutcome`](crate::port::ClaimOutcome) (`Acquired`, or `Held` naming the
 /// conflicting ref and its holder) so the admitter decodes it back and maps a
-/// `Held` to the matching `SealError`; `Err` is a transport/backend fault.
+/// `Held` to the matching `SealError`; `Err` is a transport/backend fault. Both
+/// echo the `idempotency_key` for correlation.
 #[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[kind(name = "aether.source.claim_seal_result")]
 pub enum ClaimSealResult {
     /// The acquire resolved to a [`ClaimOutcome`](crate::port::ClaimOutcome),
     /// wire-encoded.
     Ok {
+        /// The admit's idempotency key (correlation).
+        idempotency_key: String,
         /// The wire-encoded `ClaimOutcome`.
         outcome: Vec<u8>,
     },
     /// The acquire faulted (transport or backend).
     Err {
+        /// The admit's idempotency key (correlation).
+        idempotency_key: String,
         /// A human-readable failure reason.
         error: String,
     },
