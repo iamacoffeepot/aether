@@ -79,10 +79,17 @@ but sibling members proceed normally.
 **The answer is adopted intent, and only that.** An answer is a native `Statement` with
 `Provenance::AuthorSignature` whose parents name the question's exact digest — the same adoption shape
 ADR-0149 §The boundary defines for observations, reused unchanged; there is no new answer value type
-and no new signing surface. Admission of the answer statement (through the existing native intent
-path, verified by `verify_authority`) releases the hold and re-dispatches the held stage with the
-answer artifact in the attempt's input closure; the new attempt's prompt manifest names both the
-question and the answer digests, so the audit trail shows why the retry diverged from its predecessor.
+and no new signing surface. Admission is a second ratified fact, `Fact::AnswerQuestion { bloom,
+answer }` *(amended 2026-07-16: the original sentence routed the answer "through the existing native
+intent path", but no generic intent door exists — each intent class is its own fact (`Seal`,
+`Supersede`, `Land`), so the answer needs its own, and this amendment is the "another ADR" bar the
+Consequences set for the next variant; found by the implement pass on the parked-question slice)*: the
+reducer verifies the statement is instruction-capable (`verify_authority`) and that its parents name a
+question digest currently holding one of the bloom's members, releases that hold, and emits the
+re-dispatch decision carrying the answer in the held stage's input closure; the new attempt's prompt
+manifest names both the question and the answer digests, so the audit trail shows why the retry
+diverged from its predecessor. A statement failing either check is refused — answering is as narrow as
+the hold it releases, and a generic adoption door stays unratified until a second adopter exists.
 Who may sign an answer is key policy, not reducer logic: the owner's key, or a key the owner has
 delegated stead authority to, exactly as approval statements work today.
 
@@ -98,8 +105,9 @@ command (ADR-0149 §The boundary, unchanged).
   verification failure, review finding, study record, or question is journal-recorded state, and
   host-side indexes over evidence demote to rebuildable projections. #3525 and #3533 unblock and scope
   against this ADR; #3523's shipped normalizer gains a reducer admission to feed.
-- `Fact` grows one variant and `EvidenceKind` two. Both remain closed enums; this ADR is the recorded
-  ratification the closure demands, and the bar for the *next* variant is another ADR.
+- `Fact` grows two variants (`AdmitEvidence`, and `AnswerQuestion` per the 2026-07-16 amendment) and
+  `EvidenceKind` two. Both remain closed enums; this ADR is the recorded ratification the closure
+  demands, and the bar for the *next* variant is another ADR.
 - `Forecast` gains `predicted_retries`, so sealing a bloom now demands a retry prediction — the
   forecast side of the study grade stops being partial.
 - A parked workpiece holds its bloom open indefinitely until answered or superseded. That is the
