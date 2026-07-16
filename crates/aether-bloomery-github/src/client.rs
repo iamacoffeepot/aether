@@ -221,6 +221,15 @@ pub trait GitDataApi {
     /// is the non-fast-forward refusal a caller maps to its CAS-lost outcome.
     fn update_ref(&self, name: &str, sha: &str, force: bool) -> Result<GitRef, GithubError>;
 
+    /// Delete ref `name` (`heads/…` short form). A ref that is already gone — a
+    /// 404 or the 422 GitHub answers for a non-existent ref — is the clean
+    /// idempotent `Ok(())`, not a fault: release's name-only cleanup delete runs
+    /// after a tombstone CAS and an acquire's rollback re-deletes freely.
+    ///
+    /// # Errors
+    /// A transport fault or an error status other than the already-gone 404/422.
+    fn delete_ref(&self, name: &str) -> Result<(), GithubError>;
+
     /// List every ref under `prefix` (`heads/…` form) — the enumeration a
     /// successor bloom walks to reuse checkpoints drift did not invalidate.
     ///
@@ -257,12 +266,23 @@ pub enum GithubError {
     Transport(String),
     /// A 2xx response whose body did not decode as expected.
     Decode(String),
+    /// A paginated list walk hit the `MAX_LIST_PAGES` cap without reaching a
+    /// short (final) page, so the enumeration is incomplete. Surfaced as an
+    /// error rather than folded into a `Ok(None)` / silently truncated `Ok`,
+    /// which would misreport a not-yet-searched item as absent.
+    PaginationExhausted {
+        /// What was being listed (for diagnostics).
+        what: String,
+    },
 }
 
 impl fmt::Display for GithubError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Status { status, body } => write!(f, "github returned status {status}: {body}"),
+            Self::PaginationExhausted { what } => {
+                write!(f, "github pagination exhausted listing {what} without a final page")
+            }
             Self::Transport(msg) => write!(f, "github transport error: {msg}"),
             Self::Decode(msg) => write!(f, "github response decode error: {msg}"),
         }
@@ -271,7 +291,7 @@ impl fmt::Display for GithubError {
 
 impl Error for GithubError {}
 
-/// The HTTP verb an adapter request uses. Only the three the projection needs.
+/// The HTTP verb an adapter request uses.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Method {
     /// `GET`.
@@ -280,6 +300,8 @@ pub enum Method {
     Post,
     /// `PATCH`.
     Patch,
+    /// `DELETE`.
+    Delete,
 }
 
 /// One outbound request the transport executes.
@@ -340,6 +362,7 @@ impl HttpTransport for ReqwestTransport {
             Method::Get => ReqwestMethod::GET,
             Method::Post => ReqwestMethod::POST,
             Method::Patch => ReqwestMethod::PATCH,
+            Method::Delete => ReqwestMethod::DELETE,
         };
         let mut builder = self
             .client
@@ -675,11 +698,14 @@ impl<T: HttpTransport> GithubApi for ReqwestGithub<T> {
                     return Ok(Some(Issue { number: gh.number, title: gh.title, body, marker }));
                 }
             }
+            // A short page is the end of the list — searched to the end, not
+            // found. Falling off the page cap instead means the walk truncated,
+            // so a still-unsearched issue must not be reported as absent.
             if count < PER_PAGE as usize {
-                break;
+                return Ok(None);
             }
         }
-        Ok(None)
+        Err(GithubError::PaginationExhausted { what: "issues".to_owned() })
     }
 
     fn create_issue(&self, new: &NewIssue) -> Result<Issue, GithubError> {
@@ -711,10 +737,10 @@ impl<T: HttpTransport> GithubApi for ReqwestGithub<T> {
                 }
             }
             if count < PER_PAGE as usize {
-                break;
+                return Ok(None);
             }
         }
-        Ok(None)
+        Err(GithubError::PaginationExhausted { what: "issue comments".to_owned() })
     }
 
     fn create_comment(&self, new: &NewComment) -> Result<Comment, GithubError> {
@@ -758,6 +784,23 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         Ok(gh.into_git_ref())
     }
 
+    fn delete_ref(&self, name: &str) -> Result<(), GithubError> {
+        // Name-only DELETE on the qualified `refs/{name}` route. A 404/422 means
+        // the ref is already gone — the idempotent outcome release's cleanup
+        // delete and an acquire's rollback both rely on, not a fault.
+        let response = self.transport.execute(HttpRequest {
+            method: Method::Delete,
+            url: self.git_url(&format!("refs/{name}")),
+            headers: Vec::new(),
+            body: None,
+        })?;
+        if (200..300).contains(&response.status) || response.status == 404 || response.status == 422 {
+            Ok(())
+        } else {
+            Err(GithubError::Status { status: response.status, body: response.body })
+        }
+    }
+
     fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GithubError> {
         // matching-refs is paginated (100/page), so a bloom with more than one
         // page of checkpoints must be walked to the end — a single GET would
@@ -771,10 +814,12 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
             let count = refs.len();
             out.extend(refs.into_iter().map(GhRef::into_git_ref));
             if count < PER_PAGE as usize {
-                break;
+                return Ok(out);
             }
         }
-        Ok(out)
+        // Falling off the page cap means the enumeration truncated — a silently
+        // short ref list would drop reusable checkpoints, so surface it.
+        Err(GithubError::PaginationExhausted { what: "matching refs".to_owned() })
     }
 
     fn get_commit(&self, sha: &str) -> Result<GitCommit, GithubError> {
@@ -819,10 +864,10 @@ impl<T: HttpTransport> ActionsApi for ReqwestGithub<T> {
                 }
             }
             if count < PER_PAGE as usize {
-                break;
+                return Ok(None);
             }
         }
-        Ok(None)
+        Err(GithubError::PaginationExhausted { what: "workflow runs".to_owned() })
     }
 
     fn get_run(&self, run_id: u64) -> Result<WorkflowRun, GithubError> {
@@ -845,10 +890,10 @@ impl<T: HttpTransport> ActionsApi for ReqwestGithub<T> {
             let count = list.artifacts.len();
             out.extend(list.artifacts.into_iter().map(GhArtifact::into_artifact));
             if count < PER_PAGE as usize {
-                break;
+                return Ok(out);
             }
         }
-        Ok(out)
+        Err(GithubError::PaginationExhausted { what: "run artifacts".to_owned() })
     }
 }
 
@@ -923,6 +968,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn find_issue_signals_pagination_exhaustion_rather_than_a_false_not_found() {
+        // Tripwire: when every page is full to the cap and none matches, the walk
+        // truncated — it must surface `PaginationExhausted`, never fold a
+        // not-yet-searched issue into a `Ok(None)` "absent".
+        let full_page: Vec<String> =
+            (0..100).map(|i| format!(r#"{{"number":{i},"title":"t","body":"no marker"}}"#)).collect();
+        let github = client(200, &format!("[{}]", full_page.join(",")));
+        match github.find_issue("never-present").unwrap_err() {
+            GithubError::PaginationExhausted { what } => assert_eq!(what, "issues"),
+            other => panic!("expected PaginationExhausted, got {other:?}"),
+        }
+    }
+
     use super::GitDataApi;
 
     #[test]
@@ -969,6 +1028,27 @@ mod tests {
         let sent: serde_json::Value = serde_json::from_str(&request.body.unwrap()).unwrap();
         assert_eq!(sent["sha"], "new");
         assert_eq!(sent["force"], false);
+    }
+
+    #[test]
+    fn delete_ref_deletes_the_qualified_ref_route() {
+        let github = client(204, "");
+        github.delete_ref("bloomery/claims/wp-1").expect("204 is success");
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(request.method, Method::Delete);
+        assert_eq!(request.url, "https://api.github.com/repos/octo/shadow/git/refs/bloomery/claims/wp-1");
+    }
+
+    #[test]
+    fn delete_ref_treats_already_gone_as_ok() {
+        // Tripwire: a 404/422 (the ref is already gone) is the clean idempotent
+        // outcome release's name-only cleanup delete and an acquire's rollback
+        // depend on — never a `Status` error that would fail an interrupted
+        // release's re-delete.
+        let gone_404 = client(404, r#"{"message":"Not Found"}"#);
+        gone_404.delete_ref("bloomery/claims/absent").expect("404 is Ok");
+        let gone_422 = client(422, r#"{"message":"Reference does not exist"}"#);
+        gone_422.delete_ref("bloomery/claims/absent").expect("422 is Ok");
     }
 
     #[test]

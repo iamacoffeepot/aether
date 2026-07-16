@@ -243,11 +243,19 @@ impl FakeGithub {
     }
 
     /// Attach `artifacts` to the run with id `run_id` — seed a run first.
+    ///
+    /// # Panics
+    /// If `run_id` names no seeded run — an unknown id is a test-setup bug, so
+    /// it panics rather than silently no-op'ing, matching the file's other
+    /// id-lookup mutators (`update_issue` / `cancel_run` return `Err(404)`).
     pub fn seed_run_artifacts(&self, run_id: u64, artifacts: Vec<Artifact>) {
         let mut state = self.lock();
-        if let Some(run) = state.runs.iter_mut().find(|r| r.id == run_id) {
-            run.artifacts = artifacts;
-        }
+        let run = state
+            .runs
+            .iter_mut()
+            .find(|r| r.id == run_id)
+            .expect("seed_run_artifacts: unknown run_id — seed a run first");
+        run.artifacts = artifacts;
     }
 }
 
@@ -298,6 +306,14 @@ impl GitDataApi for FakeGithub {
         }
         state.refs.insert(name.to_owned(), sha.to_owned());
         Ok(GitRef { name: name.to_owned(), sha: sha.to_owned() })
+    }
+
+    fn delete_ref(&self, name: &str) -> Result<(), GithubError> {
+        // Name-only: an absent ref is the clean idempotent Ok — the fake models
+        // GitHub's already-gone tolerance the source port's cleanup delete relies
+        // on.
+        self.lock().refs.remove(name);
+        Ok(())
     }
 
     fn list_matching_refs(&self, prefix: &str) -> Result<Vec<GitRef>, GithubError> {
