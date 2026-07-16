@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{BloomId, Digest};
+use aether_bloomery::{BloomId, ClaimOutcome, ClaimRefKind, ClaimSealResult, Digest, ReleaseSealResult, WorkpieceId};
 use aether_bloomery_github::GitSource;
 use aether_bloomery_github::testing::FakeGithub;
 use aether_data::wire::{from_bytes, to_vec};
@@ -22,6 +22,14 @@ use crate::bloomery::SourceShell;
 
 fn digest(seed: u8) -> Digest {
     Digest::from_bytes([seed; 32])
+}
+
+fn workpiece(name: &str) -> WorkpieceId {
+    WorkpieceId(name.to_owned())
+}
+
+fn encoded_workpieces(names: &[&str]) -> Vec<Vec<u8>> {
+    names.iter().map(|name| to_vec(&workpiece(name)).unwrap()).collect()
 }
 
 /// Seed a fake with a base commit and a mainline ref at it, create the bloom's
@@ -69,4 +77,47 @@ fn land_maps_a_moved_base_to_base_moved() {
     };
     assert_eq!(from_bytes::<Digest>(&expected).unwrap(), base, "expected carries the caller's stale base");
     assert_eq!(from_bytes::<Digest>(&actual).unwrap(), moved, "actual carries mainline's real current head");
+}
+
+#[test]
+fn claim_seal_decodes_calls_the_shell_and_encodes_an_acquired_outcome() {
+    let (state, _fake, bloom, _base) = state_over_fake(false);
+
+    let reply = state.claim_seal(&to_vec(&bloom).unwrap(), &encoded_workpieces(&["reactor-core"]));
+
+    let ClaimSealResult::Ok { outcome } = reply else {
+        panic!("expected Ok, got {reply:?}")
+    };
+    assert_eq!(from_bytes::<ClaimOutcome>(&outcome).unwrap(), ClaimOutcome::Acquired);
+}
+
+#[test]
+fn claim_seal_encodes_a_held_conflict_outcome() {
+    let (state, _fake, first, _base) = state_over_fake(false);
+    // `first` takes the workpiece; a second bloom's claim must encode a `Held`
+    // naming the ref kind and holder.
+    let _ = state.claim_seal(&to_vec(&first).unwrap(), &encoded_workpieces(&["reactor-core"]));
+    let second = BloomId(digest(2));
+
+    let reply = state.claim_seal(&to_vec(&second).unwrap(), &encoded_workpieces(&["reactor-core"]));
+
+    let ClaimSealResult::Ok { outcome } = reply else {
+        panic!("expected Ok, got {reply:?}")
+    };
+    assert_eq!(
+        from_bytes::<ClaimOutcome>(&outcome).unwrap(),
+        ClaimOutcome::Held { ref_kind: ClaimRefKind::Workpiece(workpiece("reactor-core")), held_by: first }
+    );
+}
+
+#[test]
+fn release_seal_decodes_and_releases() {
+    let (state, fake, bloom, _base) = state_over_fake(false);
+    let _ = state.claim_seal(&to_vec(&bloom).unwrap(), &encoded_workpieces(&["reactor-core"]));
+    assert!(fake.ref_exists("bloomery/claims/reactor-core"), "claim taken");
+
+    let reply = state.release_seal(&to_vec(&bloom).unwrap(), &encoded_workpieces(&["reactor-core"]));
+
+    assert_eq!(reply, ReleaseSealResult::Ok);
+    assert!(!fake.ref_exists("bloomery/claims/reactor-core"), "claim released");
 }

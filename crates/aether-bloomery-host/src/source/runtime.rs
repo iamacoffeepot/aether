@@ -13,7 +13,10 @@
 //! over an explicit [`SourceShell`].
 
 use aether_actor::runtime;
-use aether_bloomery::{BloomId, Checkpoint, Digest, IntegrateOutcome, LandOutcome};
+use aether_bloomery::{
+    BloomId, Checkpoint, ClaimSeal, ClaimSealResult, Digest, IntegrateOutcome, LandOutcome, ReleaseSeal,
+    ReleaseSealResult, WorkpieceId,
+};
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::SourceCapability;
@@ -155,6 +158,51 @@ impl SourceCapabilityState {
             Err(error) => LandResult::Err { error: error.to_string() },
         }
     }
+
+    /// Decode `bloom` / `workpieces`, acquire the shared seal claim, and encode
+    /// the [`ClaimOutcome`](aether_bloomery::ClaimOutcome) into the reply.
+    #[must_use]
+    pub fn claim_seal(&self, bloom: &[u8], workpieces: &[Vec<u8>]) -> ClaimSealResult {
+        let bloom: BloomId = match from_bytes(bloom) {
+            Ok(bloom) => bloom,
+            Err(error) => return ClaimSealResult::Err { error: error.to_string() },
+        };
+        let workpieces = match decode_workpieces(workpieces) {
+            Ok(workpieces) => workpieces,
+            Err(error) => return ClaimSealResult::Err { error },
+        };
+        match self.shell.claim_seal(&bloom, &workpieces) {
+            Ok(outcome) => match to_vec(&outcome) {
+                Ok(outcome) => ClaimSealResult::Ok { outcome },
+                Err(error) => ClaimSealResult::Err { error: error.to_string() },
+            },
+            Err(error) => ClaimSealResult::Err { error: error.to_string() },
+        }
+    }
+
+    /// Decode `bloom` / `workpieces` and release the shared seal claim.
+    #[must_use]
+    pub fn release_seal(&self, bloom: &[u8], workpieces: &[Vec<u8>]) -> ReleaseSealResult {
+        let bloom: BloomId = match from_bytes(bloom) {
+            Ok(bloom) => bloom,
+            Err(error) => return ReleaseSealResult::Err { error: error.to_string() },
+        };
+        let workpieces = match decode_workpieces(workpieces) {
+            Ok(workpieces) => workpieces,
+            Err(error) => return ReleaseSealResult::Err { error },
+        };
+        match self.shell.release_seal(&bloom, &workpieces) {
+            Ok(()) => ReleaseSealResult::Ok,
+            Err(error) => ReleaseSealResult::Err { error: error.to_string() },
+        }
+    }
+}
+
+/// Decode a claim request's `workpieces` — one `aether_data::wire`-encoded
+/// [`WorkpieceId`] per entry — into the typed list, or a human-readable error
+/// naming the entry that did not decode.
+fn decode_workpieces(encoded: &[Vec<u8>]) -> Result<Vec<WorkpieceId>, String> {
+    encoded.iter().map(|bytes| from_bytes::<WorkpieceId>(bytes).map_err(|error| error.to_string())).collect()
 }
 
 #[runtime]
@@ -209,5 +257,17 @@ impl NativeActor for SourceCapability {
     #[handler::single]
     fn on_land(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Land) -> LandResult {
         state.land(&mail.bloom, &mail.expected_base, &mail.new_head)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    #[handler::single]
+    fn on_claim_seal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ClaimSeal) -> ClaimSealResult {
+        state.claim_seal(&mail.bloom, &mail.workpieces)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    #[handler::single]
+    fn on_release_seal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ReleaseSeal) -> ReleaseSealResult {
+        state.release_seal(&mail.bloom, &mail.workpieces)
     }
 }

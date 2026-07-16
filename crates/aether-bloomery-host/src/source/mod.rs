@@ -17,6 +17,12 @@
 pub mod kinds;
 pub use kinds::*;
 
+// The seal-claim mail kinds are defined in `aether-bloomery` (like `Commit` /
+// `CommitResult`) so the wasm control-core can construct and send them without
+// a package cycle; re-exported here so this capability's handlers name them in
+// scope, mirroring the store cap's re-export of its control-defined kinds.
+pub use aether_bloomery::{ClaimSeal, ClaimSealResult, ReleaseSeal, ReleaseSealResult};
+
 #[cfg(feature = "runtime")]
 mod config;
 #[cfg(feature = "runtime")]

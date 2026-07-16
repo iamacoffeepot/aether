@@ -61,8 +61,8 @@ pub mod values;
 #[cfg(feature = "runtime")]
 pub use control::ControlCore;
 pub use control::{
-    Admit, AdmitResult, Commit, CommitResult, JournalRecord, MembershipMutation, OutboxPayload, Query, QueryResult,
-    ReplayJournal, ReplayJournalResult,
+    Admit, AdmitResult, ClaimSeal, ClaimSealResult, Commit, CommitResult, JournalRecord, MembershipMutation,
+    OutboxPayload, Query, QueryResult, ReleaseSeal, ReleaseSealResult, ReplayJournal, ReplayJournalResult,
 };
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};

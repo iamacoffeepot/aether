@@ -235,6 +235,74 @@ pub enum QueryResult {
     },
 }
 
+/// Acquire the shared seal claim for a bloom before committing its `Seal`
+/// (ADR-0150, #3513). The wasm control-core `on_admit` sends this to the native
+/// `aether.source` capability, which cannot live in the guest (it holds the
+/// token) — so, like [`Commit`], the kind is defined here in `aether-bloomery`
+/// so both the guest sender and the host handler share one definition
+/// (the host depends on this crate; the reverse would be a package cycle).
+/// The bloom id and each workpiece id ride as their canonical
+/// [`aether_data::wire`] bytes (the same opaque-bytes convention the rest of
+/// the `aether.source.*` family uses — those value types are serde-encoded but
+/// not `Schema`).
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.source.claim_seal")]
+pub struct ClaimSeal {
+    /// The `aether_data::wire`-encoded claiming [`BloomId`](crate::ids::BloomId).
+    pub bloom: Vec<u8>,
+    /// One `aether_data::wire`-encoded member [`WorkpieceId`](crate::ids::WorkpieceId)
+    /// per entry — the per-workpiece claim refs to take, alongside the single
+    /// mainline-admission ref.
+    pub workpieces: Vec<Vec<u8>>,
+}
+
+/// Reply to [`ClaimSeal`]. `Ok` carries the wire-encoded
+/// [`ClaimOutcome`](crate::port::ClaimOutcome) (`Acquired`, or `Held` naming the
+/// conflicting ref and its holder) so the admitter decodes it back and maps a
+/// `Held` to the matching `SealError`; `Err` is a transport/backend fault.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.source.claim_seal_result")]
+pub enum ClaimSealResult {
+    /// The acquire resolved to a [`ClaimOutcome`](crate::port::ClaimOutcome),
+    /// wire-encoded.
+    Ok {
+        /// The wire-encoded `ClaimOutcome`.
+        outcome: Vec<u8>,
+    },
+    /// The acquire faulted (transport or backend).
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
+/// Release the shared seal claim for a bloom on the supersede / land paths
+/// (ADR-0150, #3513) — delete its per-workpiece claim refs and the
+/// mainline-admission ref. Idempotent on the adapter side, so a crash-retried
+/// release is a no-op. Same wire-bytes convention as [`ClaimSeal`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.source.release_seal")]
+pub struct ReleaseSeal {
+    /// The `aether_data::wire`-encoded [`BloomId`](crate::ids::BloomId) releasing.
+    pub bloom: Vec<u8>,
+    /// One `aether_data::wire`-encoded member [`WorkpieceId`](crate::ids::WorkpieceId)
+    /// per entry.
+    pub workpieces: Vec<Vec<u8>>,
+}
+
+/// Reply to [`ReleaseSeal`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.source.release_seal_result")]
+pub enum ReleaseSealResult {
+    /// The claim refs were released (or were already gone).
+    Ok,
+    /// The release faulted (transport or backend).
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
 #[cfg(feature = "runtime")]
 mod actor;
 #[cfg(feature = "runtime")]
