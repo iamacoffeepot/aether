@@ -34,9 +34,9 @@
 //!   a versioned policy artifact rejects the attempt before dispatch.
 //! - [`mod@reduce`] — the pure control core: [`reduce`](reduce::reduce) owns
 //!   every state transition, with no I/O, no engine boot, no GitHub types.
-//! - [`study_report`] — the pure forecast grade: [`grade`](study_report::grade)
-//!   folds a bloom's admitted study records into actual cost / time / retries
-//!   and grades them against the sealed [`Forecast`] (ADR-0151).
+//! - [`study_report`] — the pure forecast grade: [`grade`] folds a bloom's
+//!   admitted study records into actual cost / time / retries and grades them
+//!   against the sealed [`Forecast`] (ADR-0151).
 //! - [`port`] — the [`SourceBackend`] / [`ProjectionBackend`] /
 //!   [`ExecutorBackend`] trait shapes adapters implement and the host mounts.
 //!   Kept here so adapters depend inward on this crate, cycle-free (ADR-0149
