@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use aether_bloomery::{
     BloomDraft, BloomRecord, BloomSpec, BloomStatus, Decisions, Digest, Event, Evidence, EvidenceKind, Fact,
-    IdempotencyKey, Membership, ResolutionClaim, Snapshot, WorkpieceId, reduce,
+    IdempotencyKey, Membership, ResolutionClaim, Snapshot, StageCatalog, WorkpieceId, reduce,
 };
 
 /// A distinct digest named by one seed byte.
@@ -31,9 +31,16 @@ pub fn membership(name: &str, revision: u8) -> Membership {
     }
 }
 
-/// A draft sealing on `base` with the given memberships.
+/// A draft sealing on `base` with the given memberships. Stamps the line
+/// catalog digest so the draft seals admissibly through `reduce` (the reducer
+/// rejects the zero-default catalog).
 pub fn draft(base: u8, members: Vec<Membership>) -> BloomDraft {
-    BloomDraft { proposals: members, base: digest(base), ..BloomDraft::default() }
+    BloomDraft {
+        proposals: members,
+        base: digest(base),
+        stage_catalog: StageCatalog::line_digest(),
+        ..BloomDraft::default()
+    }
 }
 
 /// A resolution claim integrated at `revision`, whose evidence binds to its
