@@ -23,7 +23,10 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{BloomId, Checkpoint, Digest, IntegrateOutcome, LandOutcome, SourceBackend, SourceSnapshot};
+use aether_bloomery::{
+    BloomId, Checkpoint, ClaimOutcome, Digest, IntegrateOutcome, LandOutcome, SourceBackend, SourceSnapshot,
+    WorkpieceId,
+};
 use aether_bloomery_github::{GitSource, GithubError, ReqwestGithub, SourceError};
 
 use super::mirror::GithubMirrorConfig;
@@ -101,5 +104,43 @@ impl SourceShell {
     /// [`LandOutcome::BaseMoved`], not an error).
     pub fn land(&self, bloom: &BloomId, expected_base: &Digest, new_head: &Digest) -> Result<LandOutcome, SourceError> {
         self.backend.land(bloom, expected_base, new_head)
+    }
+
+    /// Acquire `bloom`'s claim refs — one per member workpiece plus the
+    /// admission ref — all-or-nothing.
+    ///
+    /// # Errors
+    /// A transport or backend fault, distinct from the clean
+    /// [`ClaimOutcome::Held`] refusal.
+    pub fn claim_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<ClaimOutcome, SourceError> {
+        self.backend.claim_seal(bloom, workpieces)
+    }
+
+    /// Transfer the seal from `predecessor` to `successor`: fast-forward the
+    /// `carried` refs and the admission ref, fresh-acquire `net_new`, release
+    /// `dropped`.
+    ///
+    /// # Errors
+    /// A transport or backend fault, distinct from the clean
+    /// [`ClaimOutcome::Held`] refusal.
+    pub fn transfer_seal(
+        &self,
+        predecessor: &BloomId,
+        successor: &BloomId,
+        carried: &[WorkpieceId],
+        net_new: &[WorkpieceId],
+        dropped: &[WorkpieceId],
+    ) -> Result<ClaimOutcome, SourceError> {
+        self.backend.transfer_seal(predecessor, successor, carried, net_new, dropped)
+    }
+
+    /// Release `bloom`'s claim refs — the member workpieces plus the admission
+    /// ref — each by a CAS to a tombstone.
+    ///
+    /// # Errors
+    /// A transport or backend fault, distinct from the clean
+    /// [`ClaimOutcome::Held`] refusal.
+    pub fn release_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<ClaimOutcome, SourceError> {
+        self.backend.release_seal(bloom, workpieces)
     }
 }
