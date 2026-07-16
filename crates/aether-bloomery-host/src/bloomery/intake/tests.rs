@@ -90,9 +90,16 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
     let bloom = spec.id();
     let mut snapshot = Snapshot::new(Digest::default());
     snapshot.active.insert(workpiece.clone(), bloom);
-    snapshot
-        .blooms
-        .insert(bloom, BloomRecord { spec, status: BloomStatus::Sealed, claims: BTreeMap::new(), superseded_by: None });
+    snapshot.blooms.insert(
+        bloom,
+        BloomRecord {
+            spec,
+            status: BloomStatus::Sealed,
+            claims: BTreeMap::new(),
+            evidence: Vec::new(),
+            superseded_by: None,
+        },
+    );
     (snapshot, bloom)
 }
 

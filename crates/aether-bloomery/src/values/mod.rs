@@ -103,6 +103,9 @@ pub enum EvidenceKind {
     ReviewFinding,
     /// A per-member resolution claim on the final tree.
     ResolutionClaim,
+    /// A normalized per-attempt cost record — the study evidence a forecast
+    /// grade reads (ADR-0151). Its `detail` names a [`StudyRecord`] artifact.
+    StudyRecord,
 }
 
 /// A sealed bloom's predetermined resource ceiling (ADR-0149 §The bloom):
@@ -126,4 +129,7 @@ pub struct Forecast {
     pub predicted_cost: u64,
     /// The predicted wall-clock time in seconds.
     pub predicted_secs: u64,
+    /// The predicted number of stage retries — the retry axis of the grade
+    /// (ADR-0151; `Budget::retry_cap` precedents the shape).
+    pub predicted_retries: u32,
 }

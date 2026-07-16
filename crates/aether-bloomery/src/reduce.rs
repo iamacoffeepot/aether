@@ -27,7 +27,7 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, WorkpieceId};
 use crate::port::{BloomView, MemberView, ViewDocument};
 use crate::values::{
-    BloomSpec, EvidenceKind, LandingReceipt, Membership, ResolutionClaim, ResolvedBloom, StageCatalog,
+    BloomSpec, Evidence, EvidenceKind, LandingReceipt, Membership, ResolutionClaim, ResolvedBloom, StageCatalog,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -58,6 +58,12 @@ pub struct BloomRecord {
     /// overwrites the stale candidate rather than accumulating beside it —
     /// resolve reads exactly one current claim per member (ADR-0149 §The bloom).
     pub claims: BTreeMap<WorkpieceId, ResolutionClaim>,
+    /// The non-integrating evidence admitted against this bloom, in admission
+    /// order (ADR-0151). Journal-derived, replay-rebuilt — a study record,
+    /// verification result, or review finding is recorded here without advancing
+    /// any member toward resolution. A resolution claim never lands here; it
+    /// enters through `Fact::Integrate` and lives in [`claims`](Self::claims).
+    pub evidence: Vec<Evidence>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -105,6 +111,18 @@ pub enum Fact {
         bloom: BloomId,
         /// The per-member resolution claim.
         claim: ResolutionClaim,
+    },
+    /// Admit non-integrating evidence (a study record, verification result, or
+    /// review finding) into a bloom's evidence log (ADR-0151). The
+    /// [`EvidenceKind`] discriminant separates the classes; admission binds the
+    /// evidence to its own subject and never advances a member toward
+    /// resolution. A resolving [`ResolutionClaim`] never enters here — that is
+    /// [`Fact::Integrate`]'s terminal.
+    AdmitEvidence {
+        /// The bloom the evidence is admitted against.
+        bloom: BloomId,
+        /// The evidence, bound to the exact subject digest it names.
+        evidence: Evidence,
     },
     /// Resolve a bloom into its one artifact, once every member is integrated.
     Resolve {
@@ -173,6 +191,15 @@ pub enum Outcome {
     },
     /// An integration was refused.
     IntegrateRejected(IntegrateError),
+    /// Non-integrating evidence was admitted into a bloom's evidence log.
+    EvidenceAdmitted {
+        /// The bloom the evidence was admitted against.
+        bloom: BloomId,
+        /// The exact digest the admitted evidence attests to.
+        subject: Digest,
+    },
+    /// An evidence admission was refused.
+    AdmitEvidenceRejected(AdmitEvidenceError),
     /// A bloom resolved into its one artifact.
     Resolved(ResolvedBloom),
     /// A resolve was refused.
@@ -214,6 +241,14 @@ pub enum Decision {
         bloom: BloomId,
         /// The recorded claim.
         claim: ResolutionClaim,
+    },
+    /// Append non-integrating evidence to a bloom's evidence log (from
+    /// admission).
+    RecordEvidence {
+        /// The bloom the evidence is recorded on.
+        bloom: BloomId,
+        /// The admitted evidence.
+        evidence: Evidence,
     },
     /// Mark a bloom superseded by a successor.
     MarkSuperseded {
@@ -311,6 +346,17 @@ pub enum IntegrateError {
     EvidenceNotBound,
 }
 
+/// Why an evidence admission was refused (ADR-0151).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum AdmitEvidenceError {
+    /// The bloom is not known or not active (only a `Sealed` bloom admits
+    /// evidence — a resolved, landed, or superseded bloom is past recording).
+    UnknownOrInactiveBloom,
+    /// The evidence does not bind to its own subject — no evidence validates a
+    /// digest it does not name (ADR-0149 §The value vocabulary).
+    EvidenceNotBound,
+}
+
 /// Why a resolve was refused.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ResolveError {
@@ -354,6 +400,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event) -> Decisions {
         Fact::Seal(spec) => reduce_seal(snapshot, spec),
         Fact::Supersede { predecessor, successor } => reduce_supersede(snapshot, predecessor, successor),
         Fact::Integrate { bloom, claim } => reduce_integrate(snapshot, bloom, claim),
+        Fact::AdmitEvidence { bloom, evidence } => reduce_admit_evidence(snapshot, bloom, evidence),
         Fact::Resolve { bloom, tree, lineage } => reduce_resolve(snapshot, bloom, tree, lineage),
         Fact::Land { bloom, new_head } => reduce_land(snapshot, bloom, new_head),
     }
@@ -540,6 +587,39 @@ fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &ResolutionClai
     }
 }
 
+/// Admit non-integrating evidence into a bloom's evidence log (ADR-0151). Runs
+/// the same active-bloom guard `reduce_integrate` does — evidence records only
+/// against a `Sealed` bloom, before it resolves — and the same
+/// bind-to-its-own-class refusal: a resolving [`ResolutionClaim`] enters through
+/// [`Fact::Integrate`] and an [`EvidenceKind::Approval`] seals a member, so
+/// neither is bound to the free evidence-log door. The three non-integrating
+/// classes (`VerificationResult`, `ReviewFinding`, `StudyRecord`) are what this
+/// log records; a mis-routed integrating/approval class is
+/// [`AdmitEvidenceError::EvidenceNotBound`]. The evidence carries its own
+/// subject digest, so no separate candidate binding is threaded through the
+/// fact (unlike integrate, which binds a claim's evidence to its candidate).
+fn reduce_admit_evidence(snapshot: &Snapshot, bloom: &BloomId, evidence: &Evidence) -> Decisions {
+    let Some(record) = snapshot.blooms.get(bloom) else {
+        return Decisions::rejected(Outcome::AdmitEvidenceRejected(AdmitEvidenceError::UnknownOrInactiveBloom));
+    };
+    if record.status != BloomStatus::Sealed {
+        return Decisions::rejected(Outcome::AdmitEvidenceRejected(AdmitEvidenceError::UnknownOrInactiveBloom));
+    }
+    // Only the non-integrating classes bind to the evidence log — a resolution
+    // claim integrates and an approval seals, each through its own door
+    // (ADR-0151: a `ResolutionClaim` never enters through `AdmitEvidence`).
+    if !matches!(
+        evidence.kind,
+        EvidenceKind::VerificationResult | EvidenceKind::ReviewFinding | EvidenceKind::StudyRecord
+    ) {
+        return Decisions::rejected(Outcome::AdmitEvidenceRejected(AdmitEvidenceError::EvidenceNotBound));
+    }
+    Decisions {
+        outcome: Outcome::EvidenceAdmitted { bloom: *bloom, subject: evidence.subject },
+        effects: alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }],
+    }
+}
+
 fn reduce_resolve(snapshot: &Snapshot, bloom: &BloomId, tree: &Digest, lineage: &[Digest]) -> Decisions {
     let Some(record) = snapshot.blooms.get(bloom) else {
         return Decisions::rejected(Outcome::ResolveRejected(ResolveError::UnknownOrInactiveBloom));
@@ -649,6 +729,13 @@ impl Snapshot {
                     record.claims.insert(claim.workpiece.clone(), claim.clone());
                 }
             }
+            Decision::RecordEvidence { bloom, evidence } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    // Append in admission order — the evidence log is a growing
+                    // journal-derived history, not a keyed latest-wins map.
+                    record.evidence.push(evidence.clone());
+                }
+            }
             Decision::MarkSuperseded { bloom, by } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.status = BloomStatus::Superseded;
@@ -674,7 +761,7 @@ impl Snapshot {
 
 impl BloomRecord {
     fn sealed(spec: BloomSpec) -> Self {
-        Self { spec, status: BloomStatus::Sealed, claims: BTreeMap::new(), superseded_by: None }
+        Self { spec, status: BloomStatus::Sealed, claims: BTreeMap::new(), evidence: Vec::new(), superseded_by: None }
     }
 }
 

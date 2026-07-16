@@ -7,12 +7,15 @@
 //! sealed bloom's [`Forecast`](super::Forecast).
 //!
 //! A study record is a standalone artifact, **not** an
-//! [`Evidence`](super::Evidence): it never enters the reducer through the closed
-//! [`EvidenceKind`](super::EvidenceKind) / `Fact` vocabulary (that reducer-side
-//! admission is deferred to #3525). Its canonical bytes are the truth — `put`
-//! into `aether.artifacts` with the graded attempt digest as a derivation
-//! parent — so the per-bloom study index the host projects over them is always
-//! rebuildable and never a second source of truth.
+//! [`Evidence`](super::Evidence) itself: an [`EvidenceKind::StudyRecord`] verdict
+//! admitted through `Fact::AdmitEvidence` names this record by its `detail`
+//! digest (ADR-0151), and a study report resolves that digest back to these
+//! bytes. Its canonical bytes are the truth — `put` into `aether.artifacts` with
+//! the graded attempt digest as a derivation parent — so both the per-bloom study
+//! index the host projects and the reducer's evidence log stay rebuildable and
+//! never a second source of truth.
+//!
+//! [`EvidenceKind::StudyRecord`]: super::EvidenceKind::StudyRecord
 
 use serde::{Deserialize, Serialize};
 
