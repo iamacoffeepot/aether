@@ -7,12 +7,13 @@
 
 use clap::Parser;
 
+use crate::artifacts::ArtifactsOverlay;
 use crate::bloomery::chassis::RpcPortOverlay;
 use crate::store::StoreOverlay;
 
-/// The `bloomery` binary's clap root. The two overlays carry the derive-emitted
-/// `--rpc-port` / `--store-path` flags; `--describe` prints the binary manifest
-/// and exits before boot (ADR-0115).
+/// The `bloomery` binary's clap root. The overlays carry the derive-emitted
+/// `--rpc-port` / `--store-path` / `--artifacts-root` flags; `--describe` prints
+/// the binary manifest and exits before boot (ADR-0115).
 #[derive(Parser, Debug, Default, Clone)]
 #[command(name = "bloomery", about = "Bloomery coordinator chassis — SQLite journal store + RPC ingress. ADR-0149.")]
 pub struct BloomeryCli {
@@ -24,6 +25,11 @@ pub struct BloomeryCli {
     /// (`:memory:` for a non-durable store).
     #[command(flatten)]
     pub store: StoreOverlay,
+
+    /// `--artifacts-root` shadows `AETHER_ARTIFACTS_ROOT` — the eviction-free
+    /// artifacts content-store root (unset → the computed data-dir default).
+    #[command(flatten)]
+    pub artifacts: ArtifactsOverlay,
 
     /// Print this binary's `BinaryManifest` (chassis kind, linked caps, build
     /// provenance) as JSON and exit before boot (ADR-0115). The hub's binary

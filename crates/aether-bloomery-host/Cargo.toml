@@ -27,6 +27,7 @@ runtime = [
     "dep:aether-substrate",
     "dep:aether-capabilities",
     "dep:aether-kinds",
+    "dep:dirs",
     "dep:aether-bloomery-github",
     "dep:rusqlite",
     "dep:tracing",
@@ -52,6 +53,9 @@ aether-substrate = { path = "../aether-substrate", optional = true }
 aether-capabilities = { path = "../aether-capabilities", optional = true }
 # The substrate kind vocabulary — `BinaryManifest` for the `--describe` probe.
 aether-kinds = { path = "../aether-kinds", optional = true }
+# Platform data-dir resolution for the artifacts store-root default (mirrors
+# the hub engines cap's `resolve_engine_store_root`).
+dirs = { version = "6", optional = true }
 # The outward projection mirror the host mounts behind the projection cap
 # shell (#3459). Native (reqwest) — runtime-only, never in the wasm marker
 # build.

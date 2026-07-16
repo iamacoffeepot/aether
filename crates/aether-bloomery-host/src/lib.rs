@@ -11,14 +11,22 @@
 //!   transactional outbox, and the active-membership table whose uniqueness
 //!   constraint makes bloom sealing all-or-nothing. The guest sees typed
 //!   `aether.store.*` transact mail, never SQL.
+//! - [`artifacts`] — the native `aether.artifacts` capability. An eviction-free
+//!   consumer of the extracted content-address core
+//!   ([`aether_substrate::content_store`]) holding the canonical
+//!   digest-addressed artifact bytes and their derivation-DAG parents; a
+//!   second consumer of the one addressing core (ADR-0116 reuse-not-rival),
+//!   never evicting.
 //! - [`bloomery`] — [`BloomeryChassis`], a
 //!   coordinator-shaped chassis (no render/audio surface) that registers the
-//!   store, trace, and RPC capabilities behind a signal-blocking driver.
+//!   store, artifacts, trace, and RPC capabilities behind a signal-blocking
+//!   driver.
 //!
 //! Recovery is journal replay + outbox republish: reopen the same database
 //! file, replay the journal through the reducer, and republish undelivered
 //! outbox entries.
 
+pub mod artifacts;
 pub mod store;
 
 #[cfg(feature = "runtime")]
