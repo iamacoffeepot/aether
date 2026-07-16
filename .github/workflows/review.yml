@@ -523,6 +523,12 @@ jobs:
           POOL_SESSION_ID: ${{ steps.pool-checkout.outputs.session_id }}
           REVIEW_CLASS: ${{ steps.resolve.outputs.review_class }}
           REVIEW_PASS: ${{ steps.resolve.outputs.review_pass }}
+          # The wait contract the prompt states ("raises the wait ceiling to
+          # forty minutes", the #3086 dogfood shape): without this the fan-out
+          # path inherits the ten-minute default and a size:l review's
+          # background workflow is killed at ~600s with no rollup (#3536,
+          # run 29503476220). Matches dogfood.yml; job timeout-minutes is 45.
+          CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "2400000"
         run: |
           # Pass- and profile-conditional task prompt. A CONFIRM pass (issue #3390,
           # judged in-session since #3404) takes precedence over the class split: the
