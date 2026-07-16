@@ -22,10 +22,14 @@
 //! - [`bloomery`] — [`BloomeryChassis`], a
 //!   coordinator-shaped chassis (no render/audio surface) that registers the
 //!   store, artifacts, trace, RPC, and the `aether.bloomery.mirror`
-//!   outbox-consumer capability behind a signal-blocking driver. The mirror
-//!   driver polls the store outbox and drives the `ProjectionShell` /
-//!   `SourceShell` so a live bloomery continuously projects its journal to
-//!   GitHub (config-gated off when unconfigured).
+//!   outbox-consumer capability behind a signal-blocking driver. It also holds
+//!   the GitHub port cap shells — `ProjectionShell` (outward mirror),
+//!   `SourceShell` (git source), and `ExecutorShell` (the Actions dispatch
+//!   backend, ADR-0149 migration step 2) — each mounting an
+//!   `aether-bloomery-github` backend behind an `Arc<dyn …>` so no core module
+//!   names a GitHub type. The mirror driver polls the store outbox and drives
+//!   the `ProjectionShell` / `SourceShell` so a live bloomery continuously
+//!   projects its journal to GitHub (config-gated off when unconfigured).
 //!
 //! Recovery is journal replay + outbox republish: reopen the same database
 //! file, replay the journal through the reducer, and republish undelivered

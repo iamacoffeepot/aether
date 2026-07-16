@@ -52,6 +52,17 @@ pub struct GithubMirrorConfig {
     /// shell ignores it (`to_github_config` drops it).
     #[config(default = 5)]
     pub poll_interval_secs: u64,
+    /// The wrapper workflow file the executor port dispatches (ADR-0149
+    /// §Execution on Actions, [#3500]). Carried on this shared GitHub-connection
+    /// config the same way `cas_land_enabled` is — one config serves the mirror,
+    /// source, and executor caps rather than duplicating the connection knobs.
+    ///
+    /// [#3500]: https://github.com/iamacoffeepot/aether/issues/3500
+    #[config(default = "bloomery-transform.yml")]
+    pub executor_workflow_file: String,
+    /// The protected git ref the executor pins the wrapper dispatch at.
+    #[config(default = "refs/heads/main")]
+    pub executor_dispatch_ref: String,
 }
 
 impl Default for GithubMirrorConfig {
@@ -63,6 +74,8 @@ impl Default for GithubMirrorConfig {
             api_base: "https://api.github.com".to_owned(),
             cas_land_enabled: false,
             poll_interval_secs: 5,
+            executor_workflow_file: "bloomery-transform.yml".to_owned(),
+            executor_dispatch_ref: "refs/heads/main".to_owned(),
         }
     }
 }
@@ -137,7 +150,7 @@ mod tests {
             repo: "shadow".into(),
             api_base: "https://ghe.example/api/v3".into(),
             cas_land_enabled: true,
-            poll_interval_secs: 5,
+            ..GithubMirrorConfig::default()
         };
         let projected = config.to_github_config();
         assert_eq!(projected.repo_path(), "octo/shadow");

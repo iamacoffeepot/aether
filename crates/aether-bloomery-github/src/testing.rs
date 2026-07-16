@@ -19,13 +19,16 @@
 // clutters the store methods.
 #![allow(clippy::significant_drop_tightening)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::Digest;
 use sha2::{Digest as _, Sha256};
 
-use crate::client::{Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, Issue, NewComment, NewIssue};
+use crate::client::{
+    ActionsApi, Artifact, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, Issue, NewComment, NewIssue,
+    RunConclusion, RunStatus, WorkflowRun,
+};
 use crate::marker::parse_marker;
 use crate::source::{digest_from_hex, to_hex};
 
@@ -43,6 +46,24 @@ struct StoredComment {
     body: String,
 }
 
+#[derive(Clone)]
+struct StoredDispatch {
+    workflow_file: String,
+    git_ref: String,
+    nonce: String,
+    inputs: BTreeMap<String, String>,
+}
+
+#[derive(Clone)]
+struct StoredRun {
+    id: u64,
+    nonce: String,
+    display_title: String,
+    status: RunStatus,
+    conclusion: Option<RunConclusion>,
+    artifacts: Vec<Artifact>,
+}
+
 #[derive(Default)]
 struct State {
     next_issue: u64,
@@ -54,6 +75,13 @@ struct State {
     // treats as digest-addressed handles, so they need no separate store.
     refs: HashMap<String, String>,
     commits: HashMap<String, String>,
+    // The Actions surface the executor port drives: recorded dispatches (a
+    // `workflow_dispatch` creates no resolvable run synchronously, so a
+    // dispatched-but-unseeded nonce inspects `Unknown`), and the runs a test
+    // seeds — keyed by the nonce the wrapper would embed in the run name.
+    next_run: u64,
+    dispatches: Vec<StoredDispatch>,
+    runs: Vec<StoredRun>,
 }
 
 /// An in-memory GitHub double implementing [`GithubApi`].
@@ -162,6 +190,65 @@ impl FakeGithub {
     pub fn ref_digest(&self, name: &str) -> Option<Digest> {
         self.ref_target(name).and_then(|sha| digest_from_hex(&sha))
     }
+
+    /// The nonces of the dispatches recorded so far, in dispatch order — an
+    /// executor test's way to assert a `submit` reached the Actions surface.
+    #[must_use]
+    pub fn dispatched_nonces(&self) -> Vec<String> {
+        self.lock().dispatches.iter().map(|d| d.nonce.clone()).collect()
+    }
+
+    /// The `ref` a dispatch was posted against (the `workflow_dispatch` body
+    /// ref — the protected pinned ref), for the dispatch carrying `nonce`.
+    #[must_use]
+    pub fn dispatched_ref(&self, nonce: &str) -> Option<String> {
+        self.lock().dispatches.iter().find(|d| d.nonce == nonce).map(|d| d.git_ref.clone())
+    }
+
+    /// The workflow file a dispatch targeted, for the dispatch carrying `nonce`.
+    #[must_use]
+    pub fn dispatched_workflow(&self, nonce: &str) -> Option<String> {
+        self.lock().dispatches.iter().find(|d| d.nonce == nonce).map(|d| d.workflow_file.clone())
+    }
+
+    /// The full input map a dispatch carried, for the dispatch carrying
+    /// `nonce` — so a test can assert the `command` / `ref` / `nonce` shaping.
+    #[must_use]
+    pub fn dispatched_inputs(&self, nonce: &str) -> Option<BTreeMap<String, String>> {
+        self.lock().dispatches.iter().find(|d| d.nonce == nonce).map(|d| d.inputs.clone())
+    }
+
+    /// Seed (or update) a resolvable run for `nonce` with the given lifecycle
+    /// state, returning its run id. The display title embeds the nonce exactly
+    /// as the wrapper's `run-name` would, so `find_run` resolves it.
+    #[must_use]
+    pub fn seed_run(&self, nonce: &str, status: RunStatus, conclusion: Option<RunConclusion>) -> u64 {
+        let mut state = self.lock();
+        if let Some(run) = state.runs.iter_mut().find(|r| r.nonce == nonce) {
+            run.status = status;
+            run.conclusion = conclusion;
+            return run.id;
+        }
+        state.next_run += 1;
+        let id = state.next_run;
+        state.runs.push(StoredRun {
+            id,
+            nonce: nonce.to_owned(),
+            display_title: format!("transform {nonce}"),
+            status,
+            conclusion,
+            artifacts: Vec::new(),
+        });
+        id
+    }
+
+    /// Attach `artifacts` to the run with id `run_id` — seed a run first.
+    pub fn seed_run_artifacts(&self, run_id: u64, artifacts: Vec<Artifact>) {
+        let mut state = self.lock();
+        if let Some(run) = state.runs.iter_mut().find(|r| r.id == run_id) {
+            run.artifacts = artifacts;
+        }
+    }
 }
 
 // A deterministic commit sha: sha256 over the message, tree, and parents,
@@ -237,6 +324,74 @@ impl GitDataApi for FakeGithub {
         let sha = commit_sha(message, tree, parents);
         self.lock().commits.insert(sha.clone(), tree.to_owned());
         Ok(GitCommit { sha, tree: tree.to_owned() })
+    }
+}
+
+// The nonce a run's stored `StoredRun` carries mirrors the wrapper's contract:
+// the run name embeds the nonce. `find_run` resolves by that nonce key rather
+// than scanning titles — the fake models the *resolution semantics*; the
+// real client's title-scan is asserted in `client`'s RecordingTransport tests.
+impl ActionsApi for FakeGithub {
+    fn dispatch_workflow(
+        &self,
+        workflow_file: &str,
+        git_ref: &str,
+        inputs: &BTreeMap<String, String>,
+    ) -> Result<(), GithubError> {
+        let nonce = inputs.get("nonce").cloned().unwrap_or_default();
+        self.lock().dispatches.push(StoredDispatch {
+            workflow_file: workflow_file.to_owned(),
+            git_ref: git_ref.to_owned(),
+            nonce,
+            inputs: inputs.clone(),
+        });
+        Ok(())
+    }
+
+    fn find_run(&self, _workflow_file: &str, nonce: &str) -> Result<Option<WorkflowRun>, GithubError> {
+        Ok(self.lock().runs.iter().find(|r| r.nonce == nonce).map(StoredRun::to_workflow_run))
+    }
+
+    fn get_run(&self, run_id: u64) -> Result<WorkflowRun, GithubError> {
+        self.lock()
+            .runs
+            .iter()
+            .find(|r| r.id == run_id)
+            .map(StoredRun::to_workflow_run)
+            .ok_or_else(|| GithubError::Status { status: 404, body: format!("no run {run_id}") })
+    }
+
+    fn cancel_run(&self, run_id: u64) -> Result<(), GithubError> {
+        let mut state = self.lock();
+        let Some(run) = state.runs.iter_mut().find(|r| r.id == run_id) else {
+            return Err(GithubError::Status { status: 404, body: format!("no run {run_id}") });
+        };
+        // A cancel drives the run to a completed/cancelled terminal state, so a
+        // follow-up inspect reports `Cancelled` — the observable effect a test
+        // asserts.
+        run.status = RunStatus::Completed;
+        run.conclusion = Some(RunConclusion::Cancelled);
+        Ok(())
+    }
+
+    fn list_run_artifacts(&self, run_id: u64) -> Result<Vec<Artifact>, GithubError> {
+        self.lock()
+            .runs
+            .iter()
+            .find(|r| r.id == run_id)
+            .map(|r| r.artifacts.clone())
+            .ok_or_else(|| GithubError::Status { status: 404, body: format!("no run {run_id}") })
+    }
+}
+
+impl StoredRun {
+    fn to_workflow_run(&self) -> WorkflowRun {
+        WorkflowRun {
+            id: self.id,
+            display_title: self.display_title.clone(),
+            status: self.status,
+            conclusion: self.conclusion,
+        }
     }
 }
 
