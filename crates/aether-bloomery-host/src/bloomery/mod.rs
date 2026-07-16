@@ -10,6 +10,7 @@ mod executor;
 mod intake;
 mod mirror;
 mod source;
+mod study;
 
 pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};
 pub use cli::BloomeryCli;
@@ -23,3 +24,7 @@ pub use intake::{
 };
 pub use mirror::{GithubMirrorConfig, GithubMirrorOverlay, ProjectionShell};
 pub use source::SourceShell;
+pub use study::{
+    StudyAdmission, StudyAdmitDecision, StudyIntakeError, StudyRefusal, UploadedStudyRecord, admit_study,
+    rebuild_study_index,
+};

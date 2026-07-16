@@ -105,6 +105,26 @@ pub enum RecordOutcome {
     Duplicate,
 }
 
+/// One row of the per-bloom study index (issue #3523): a graded attempt's
+/// (`bloom`, `attempt_digest`) key and the content-store digest of the
+/// `StudyRecord` artifact it resolves to. A *rebuildable projection* over the
+/// artifact bytes — the study intake writes it on accept and the rebuild path
+/// reconstructs it from the `aether.artifacts` store — so it is never a second
+/// source of truth (ADR-0149: "the journal plus the content-addressed artifact
+/// bytes are the only truth"). The digest-typed columns are raw bytes, matching
+/// the [`OutstandingOrder`] convention; `study_artifact` is the content store's
+/// hex digest string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StudyRow {
+    /// The sealed bloom the graded attempt belongs to (its `BloomId` digest
+    /// bytes).
+    pub bloom: Vec<u8>,
+    /// The exact attempt digest the study record grades (digest bytes).
+    pub attempt_digest: Vec<u8>,
+    /// The content-store digest of the `StudyRecord` artifact.
+    pub study_artifact: String,
+}
+
 /// The durable store the capability drives. One method per transact-mail kind;
 /// each is one atomic `SQLite` transaction.
 pub trait StoreBackend: Send {
@@ -119,6 +139,21 @@ pub trait StoreBackend: Send {
     /// row was removed. A consumed order makes a replayed nonce refuse — the
     /// consume-once semantics the trust boundary rests on.
     fn consume_order(&mut self, nonce: &str) -> rusqlite::Result<bool>;
+    /// Record a per-bloom study index row (issue #3523): the study artifact
+    /// digest for a graded attempt, keyed by (`bloom`, `attempt_digest`).
+    /// Last-writer-wins on the key — a re-admit of the same attempt overwrites,
+    /// so the projection converges to the latest accepted study artifact rather
+    /// than erroring, and a rebuild that re-inserts the same rows is idempotent.
+    fn record_study(&mut self, bloom: &[u8], attempt_digest: &[u8], study_artifact: &str) -> rusqlite::Result<()>;
+    /// The study artifact digest recorded for (`bloom`, `attempt_digest`), or
+    /// `None` when no study record has been admitted for that attempt.
+    fn lookup_study(&mut self, bloom: &[u8], attempt_digest: &[u8]) -> rusqlite::Result<Option<String>>;
+    /// Drop every study index row — the first half of a projection rebuild
+    /// (`clear` then re-`record` from the artifact bytes).
+    fn clear_study_index(&mut self) -> rusqlite::Result<()>;
+    /// Every study index row, in (`bloom`, `attempt_digest`) order — the rebuild
+    /// oracle a test folds against.
+    fn study_rows(&mut self) -> rusqlite::Result<Vec<StudyRow>>;
     /// Apply a combined commit — journal the idempotency-keyed event, apply the
     /// membership releases then claims, and enqueue the outbox payloads — in
     /// **one** transaction (ADR-0149 §The control core). A duplicate key or a
@@ -201,6 +236,12 @@ CREATE TABLE IF NOT EXISTS outstanding_orders (
     candidate        BLOB NOT NULL,
     displayed_digest BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS study_index (
+    bloom          BLOB NOT NULL,
+    attempt_digest BLOB NOT NULL,
+    study_artifact TEXT NOT NULL,
+    PRIMARY KEY (bloom, attempt_digest)
+);
 ";
 
 /// Is a rusqlite error a UNIQUE / PRIMARY KEY constraint violation? A seal that
@@ -256,6 +297,37 @@ impl StoreBackend for SqliteStore {
     fn consume_order(&mut self, nonce: &str) -> rusqlite::Result<bool> {
         let removed = self.conn.execute("DELETE FROM outstanding_orders WHERE nonce = ?1", rusqlite::params![nonce])?;
         Ok(removed > 0)
+    }
+
+    fn record_study(&mut self, bloom: &[u8], attempt_digest: &[u8], study_artifact: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO study_index (bloom, attempt_digest, study_artifact) VALUES (?1, ?2, ?3)",
+            rusqlite::params![bloom, attempt_digest, study_artifact],
+        )?;
+        Ok(())
+    }
+
+    fn lookup_study(&mut self, bloom: &[u8], attempt_digest: &[u8]) -> rusqlite::Result<Option<String>> {
+        let mut stmt =
+            self.conn.prepare("SELECT study_artifact FROM study_index WHERE bloom = ?1 AND attempt_digest = ?2")?;
+        let mut rows = stmt.query_map(rusqlite::params![bloom, attempt_digest], |row| row.get::<_, String>(0))?;
+        // The (bloom, attempt_digest) pair is the primary key, so at most one row.
+        rows.next().transpose()
+    }
+
+    fn clear_study_index(&mut self) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM study_index", [])?;
+        Ok(())
+    }
+
+    fn study_rows(&mut self) -> rusqlite::Result<Vec<StudyRow>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT bloom, attempt_digest, study_artifact FROM study_index ORDER BY bloom, attempt_digest")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(StudyRow { bloom: row.get(0)?, attempt_digest: row.get(1)?, study_artifact: row.get(2)? })
+        })?;
+        rows.collect()
     }
 
     fn commit(
