@@ -74,15 +74,34 @@ impl ArtifactsCapabilityState {
     /// the digest. The `on_put` handler is a thin wrapper over this; it carries
     /// the durability check.
     pub fn put(&mut self, bytes: &[u8], parents: Vec<String>) -> PutResult {
-        let digest = self.store.upload(bytes, ArtifactMeta { parents }, None);
+        let digest = self.store.upload(bytes, ArtifactMeta { parents: parents.clone() }, None);
         // `upload` swallows a write failure (logs a warn, leaves the entry
         // unindexed) and still returns the hash, so `contains` is the honest
         // durability check: an unindexed digest means the bytes never landed.
-        if self.store.contains(&digest) {
-            PutResult::Ok { digest }
-        } else {
-            PutResult::Err { error: ArtifactsError::AdapterError("artifact bytes were not persisted".to_owned()) }
+        if !self.store.contains(&digest) {
+            return PutResult::Err {
+                error: ArtifactsError::AdapterError("artifact bytes were not persisted".to_owned()),
+            };
         }
+        // Content-addressed dedup keeps the *original* sidecar metadata: a
+        // re-upload of identical bytes under fresh `parents` bumps recency but
+        // never rewrites the recorded parents (`ContentStore::upload`). Surface
+        // any newly-submitted parent the store dropped rather than replying Ok
+        // as if the derivation edge landed — otherwise the new provenance
+        // silently vanishes.
+        if let Some(resolved) = self.store.get(&Selector::Hash(digest.clone())) {
+            let recorded = &resolved.metadata.parents;
+            let dropped: Vec<&String> = parents.iter().filter(|p| !recorded.contains(p)).collect();
+            if !dropped.is_empty() {
+                tracing::warn!(
+                    target: "aether_bloomery_host::artifacts",
+                    digest = %digest,
+                    ?dropped,
+                    "artifact re-upload deduped to an existing entry; newly-submitted derivation parents were not recorded (the store keeps the original metadata)"
+                );
+            }
+        }
+        PutResult::Ok { digest }
     }
 
     /// Resolve `digest` to its bytes + recorded parents, replying `NotFound`
