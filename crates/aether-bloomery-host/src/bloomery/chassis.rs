@@ -11,6 +11,7 @@ use std::sync::Arc;
 use aether_actor::Addressable;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::trace::TraceDispatchCapability;
+use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_kinds::BinaryManifest;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
@@ -111,6 +112,7 @@ impl BloomeryChassis {
             <TraceDispatchCapability as Addressable>::NAMESPACE.to_owned(),
             <StoreCapability as Addressable>::NAMESPACE.to_owned(),
             <ArtifactsCapability as Addressable>::NAMESPACE.to_owned(),
+            <ComponentHostCapability as Addressable>::NAMESPACE.to_owned(),
             <RpcServerCapability as Addressable>::NAMESPACE.to_owned(),
         ];
         BinaryManifest {
@@ -128,6 +130,15 @@ impl BloomeryChassis {
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
         let rpc_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), rpc_port);
+        // The component host lets the coordinator load the control-core wasm
+        // actor (ADR-0149 §Packaging) — the reducer runtime that owns the live
+        // snapshot. Built from the same wasmtime engine/linker/outbound the boot
+        // set up, mirroring the headless chassis.
+        let component_host = ComponentHostConfig {
+            engine: Arc::clone(&boot.engine),
+            linker: Arc::clone(&boot.linker),
+            hub_outbound: Arc::clone(&boot.outbound),
+        };
 
         // The driver owns the boot and drops it on the shutdown signal.
         let driver = BloomeryDriverCapability { boot };
@@ -136,6 +147,7 @@ impl BloomeryChassis {
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<StoreCapability>(store)
             .with_actor::<ArtifactsCapability>(artifacts)
+            .with_actor::<ComponentHostCapability>(component_host)
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: rpc_addr.to_string(),
                 peer_kind: PeerKind::Substrate {
@@ -160,10 +172,12 @@ mod tests {
         // Port 0 → an OS-assigned ephemeral RPC port; the default `:memory:`
         // store touches no filesystem, and the artifacts store points at a temp
         // root so the test opens no data dir. A successful `build` boots every
-        // passive (store, artifacts, trace, rpc) and claims each mailbox — a
-        // claim conflict or a failed store open would surface as a `BootError`,
-        // so `build` returning `Ok` is the assertion that the `aether.store` and
-        // `aether.artifacts` mailboxes were claimed.
+        // passive (store, artifacts, trace, component host, rpc) and claims each
+        // mailbox — a claim conflict or a failed store open would surface as a
+        // `BootError`, so `build` returning `Ok` is the assertion that the
+        // `aether.store`, `aether.artifacts`, and `aether.component` mailboxes
+        // were claimed (the component host is the reducer-actor load surface,
+        // ADR-0149 §Packaging).
         let artifacts_root = tempfile::tempdir().unwrap();
         let env = BloomeryEnv {
             rpc_port: 0,
