@@ -153,6 +153,7 @@ jobs:
           DISPATCH_PR: ${{ github.event.inputs.pr }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          AGENT_DOGFOOD_ENABLED: ${{ vars.AGENT_DOGFOOD_ENABLED }}
         run: |
           set -euo pipefail
 
@@ -474,10 +475,17 @@ jobs:
 
             # Fact — dogfood owed: the closing issue carries a filled Dogfood
             # brief that is not N/A (the same section read dogfood.yml gates on).
+            # Gated on AGENT_DOGFOOD_ENABLED: dogfood is retired for now (the
+            # dogfood.yml review-completion chain is retired and it runs only on
+            # deliberate dispatch), so with the var unset/false the gate never
+            # engages and a non-N/A brief cannot strand a PR at phase:qa waiting
+            # on a verdict that no longer arrives automatically. Set the repo var
+            # AGENT_DOGFOOD_ENABLED=true to re-arm the gate.
             issue_body="$(gh api "repos/${REPO}/issues/${issue}" --jq '.body')"
             brief="$(awk '/^## Dogfood brief/{f=1; next} /^## /{f=0} f' <<<"$issue_body")"
             dogfood_owed=0
-            if [ -n "$brief" ] && ! grep -qE '^[[:space:]]*N/A' <<<"$brief"; then
+            if [ "${AGENT_DOGFOOD_ENABLED:-false}" = "true" ] \
+              && [ -n "$brief" ] && ! grep -qE '^[[:space:]]*N/A' <<<"$brief"; then
               dogfood_owed=1
             fi
 
