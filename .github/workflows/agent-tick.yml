@@ -811,6 +811,13 @@ jobs:
                     cat_resting="${cat_resting}#${num} — building, CI pending on PR #${pr_ref}"$'\n'
                     continue
                   fi
+                  gate_failing="$(gh pr checks "$pr_ref" --json name,bucket \
+                    --jq 'any(.name == "Approval gate" and .bucket == "fail")' 2>/dev/null || echo false)"
+                  if [ "$gate_failing" = "true" ]; then
+                    trace SKIP "#${num}" "phase:building, Approval gate failing on PR #${pr_ref} — needs a surface widen/waiver, not a re-implement"
+                    cat_resting="${cat_resting}#${num} — building, Approval gate failing on PR #${pr_ref}"$'\n'
+                    continue
+                  fi
                 fi
                 task="implement"; ref="$num" ;;
               phase:held) task="land"; ref="" ;;
