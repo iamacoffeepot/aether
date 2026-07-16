@@ -6,6 +6,13 @@
 //! artifact through the manifest. `dist/` is additive — the substrate
 //! `target/` tree is still populated identically, so in-process scenario
 //! tests (which read `target/…`) are untouched.
+//!
+//! `transform` is ADR-0149 §Execution's portable execution unit: it
+//! runs one typed `verify.fmt` / `verify.clippy` / `verify.docs`
+//! command — the same cargo invocation CI runs — identically on a
+//! laptop and under the thin `transform.yml` wrapper workflow.
+//! `verify.test` parity is a follow-up (issue #3501) — CI's actual
+//! test lane is a heavier shape this slice doesn't reproduce.
 
 // xtask is a developer-facing build tool: emitting build progress + a
 // summary to the terminal is its purpose. The workspace
@@ -14,6 +21,7 @@
 #![allow(clippy::print_stdout)]
 
 mod inventory;
+mod transform;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -29,6 +37,7 @@ use crate::inventory::{
     BuildPlan, CHASSIS_BINS, CHASSIS_PACKAGE, Component, behavior_build_plans, build_plans, discover_behavior_variants,
     discover_behaviors, discover_components,
 };
+use crate::transform::TransformArgs;
 
 /// Wasm triple the components cross-build to.
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
@@ -47,6 +56,12 @@ enum Commands {
     /// Build a standalone, hub-less executable: a chassis with an ordered
     /// component set (plus configs) embedded at build time (#1529).
     Bundle(BundleArgs),
+    /// ADR-0149 §Execution's portable execution unit: run one typed
+    /// mechanical-verify command (`verify.fmt` / `verify.clippy` /
+    /// `verify.docs`) — the same cargo invocation CI runs — and write
+    /// nonce-tagged evidence bytes. `verify.test` parity is a
+    /// follow-up (issue #3501).
+    Transform(TransformArgs),
 }
 
 #[derive(Args)]
@@ -177,6 +192,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Dist(args) => run_dist(&args),
         Commands::Bundle(args) => run_bundle(&args),
+        Commands::Transform(args) => transform::run(&args),
     }
 }
 

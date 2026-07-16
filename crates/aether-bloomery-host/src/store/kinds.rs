@@ -232,34 +232,10 @@ pub enum AckOutboxResult {
     },
 }
 
-/// Read the whole journal, in sequence order — the recovery replay source.
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
-#[kind(name = "aether.store.replay_journal")]
-pub struct ReplayJournal;
-
-/// One journaled event.
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct JournalRecord {
-    /// The event's journal sequence.
-    pub sequence: u64,
-    /// The event's idempotency key.
-    pub idempotency_key: String,
-    /// The event's canonical `aether_data::wire` bytes.
-    pub event: Vec<u8>,
-}
-
-/// Reply to [`ReplayJournal`].
-#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[kind(name = "aether.store.replay_journal_result")]
-pub enum ReplayJournalResult {
-    /// The journal, in sequence order.
-    Ok {
-        /// Every journaled event, oldest first.
-        records: Vec<JournalRecord>,
-    },
-    /// The replay failed.
-    Err {
-        /// A human-readable failure reason.
-        error: String,
-    },
-}
+// The journal-replay transact-mails — `ReplayJournal`, `JournalRecord`,
+// `ReplayJournalResult` — live in `aether_bloomery::control` alongside `Commit`,
+// not here: the wasm control actor (`aether-bloomery`) sends `ReplayJournal` at
+// boot and folds the reply, and `aether-bloomery-host` depends on
+// `aether-bloomery`, so the reverse edge would be a package cycle. One
+// definition both sides share; the `#[kind(name = "aether.store.replay_journal…")]`
+// literal is the wire identity wherever the type is declared (issue #3497).

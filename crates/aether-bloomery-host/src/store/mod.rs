@@ -14,6 +14,12 @@
 pub mod kinds;
 pub use kinds::*;
 
+// The control-plane transact-mails the wasm control actor drives are defined in
+// `aether-bloomery` (cycle avoidance — issue #3497), but they are part of the
+// `aether.store.*` surface a store client uses, so re-export them here at the
+// same `aether_bloomery_host::store` path external consumers already reach.
+pub use aether_bloomery::{Commit, CommitResult, JournalRecord, ReplayJournal, ReplayJournalResult};
+
 #[cfg(feature = "runtime")]
 mod config;
 #[cfg(feature = "runtime")]
@@ -28,7 +34,7 @@ pub struct StoreCapability;
 #[cfg(feature = "runtime")]
 mod runtime;
 #[cfg(feature = "runtime")]
-pub use runtime::{AppendOutcome, SealOutcome, SqliteStore, StoreBackend, StoreCapabilityState};
+pub use runtime::{AppendOutcome, CommitOutcome, SealOutcome, SqliteStore, StoreBackend, StoreCapabilityState};
 
 #[cfg(all(test, feature = "runtime"))]
 mod tests;

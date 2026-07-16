@@ -4,19 +4,51 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+# Pure rlib for the native host + a cdylib the `runtime`-featured control-core
+# actor compiles to a wasm component `cargo xtask dist` discovers structurally
+# (case-a: a lib cdylib depending on `aether-actor`). Matches the `aether-kit`
+# rlib/cdylib precedent (ADR-0149 §Packaging). The crate is `std` — dropping
+# the earlier `#![no_std]` (issue #3497): no consumer requires it (host + github
+# adapter are std), a `cdylib` target must build for the native host and a
+# `#![no_std]` native cdylib has no allocator, and `std` compiles to `wasm32`
+# like every other component in this workspace.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Chassis/component default: the control-core wasm actor + its `export!` FFI
+# (the SDK `aether-actor` dep). `cargo xtask dist` builds components with
+# default features, so the actor must be default-on to reach the wasm cdylib.
+# A native marker consumer that wants only the pure reducer + value vocabulary
+# does `default-features = false` (host / github adapter / capabilities), so its
+# rlib link never pulls the guest SDK — the `aether-bloomery-host` pattern.
+default = ["runtime"]
+runtime = ["dep:aether-actor"]
+
 [dependencies]
 # The canonical wire format (ADR-0118) backs content-addressing: a
 # `Digest` is sha256 over a value's `aether_data::wire` bytes, so digests
 # reuse the workspace's own canonical encoding rather than a parallel one.
-# `aether-data` is no_std + alloc, keeping this crate wasm-safe. The
-# `derive` feature is not needed — the value vocabulary is content-
-# addressed and serde-encoded, not a mail-kind set.
-aether-data = { path = "../aether-data" }
+# The `derive` feature drives `#[derive(Kind, Schema)]` on the control-plane
+# mail vocabulary (`control.rs`): the store-family transact-mails the control
+# actor drives plus the `aether.bloomery.{admit,query}` ingress.
+aether-data = { path = "../aether-data", features = ["derive"] }
+# The guest actor SDK (`WasmActor` / `WasmCtx` / `#[actor]` / `export!`), gated
+# behind `runtime` so a marker consumer's rlib link never pulls it. `aether-actor`
+# is the SDK and never depends back on `aether-bloomery`, so no cycle.
+aether-actor = { path = "../aether-actor", optional = true }
 # Content-addressing needs a collision-resistant hash, consistent with the
-# hub binary store (ADR-0115). Default features off keeps the core no_std
-# for the later cdylib-actors slice of ADR-0149.
+# hub binary store (ADR-0115). Default features off keeps the wasm build lean.
 sha2 = { workspace = true, default-features = false }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+
+# `#[derive(aether_data::Kind)]` (the `control.rs` mail vocabulary) emits an
+# `inventory::submit!` referencing `::inventory` only on native targets, to
+# materialize the descriptor list the host's wire codec reads. Wasm guests skip
+# it (the descriptor rides the `aether.kinds` custom section, ADR-0028), so the
+# dep is gated out of the wasm cdylib build.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+inventory = { workspace = true }
 
 [dev-dependencies]
 # The seven named invariants ride property tests (ADR-0149 migration

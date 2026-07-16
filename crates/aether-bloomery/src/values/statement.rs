@@ -80,8 +80,14 @@ pub struct Observation {
 pub struct StageReceipt {
     /// The stage that ran.
     pub stage: StageId,
-    /// The attempt-scoped worker identity (`iama-{stage}`).
-    pub profile: String,
+    /// The exact [`AgentProfile`] that ran, attested by digest — the value
+    /// that makes "a configured agent profile ran one process" verifiable: a
+    /// reader recomputes the profile's address to confirm the configuration.
+    /// *Who* ran is not stored: the `iama-{stage}` worker identity is derived
+    /// from [`stage`](Self::stage) via [`StageId::worker_identity`].
+    ///
+    /// [`AgentProfile`]: crate::values::AgentProfile
+    pub profile: Digest,
     /// The exact inputs consumed, by digest.
     pub inputs: Vec<Digest>,
     /// The exact outputs produced, by digest.

@@ -7,7 +7,8 @@
 
 #![allow(clippy::unwrap_used)]
 
-use super::runtime::{AppendOutcome, SealOutcome, SqliteStore, StoreBackend};
+use super::runtime::{AppendOutcome, CommitOutcome, SealOutcome, SqliteStore, StoreBackend};
+use aether_bloomery::{MembershipMutation, OutboxPayload};
 
 fn memory() -> SqliteStore {
     SqliteStore::open(":memory:").unwrap()
@@ -15,6 +16,93 @@ fn memory() -> SqliteStore {
 
 fn members(names: &[&str]) -> Vec<String> {
     names.iter().map(|s| (*s).to_owned()).collect()
+}
+
+fn claim(workpiece: &str, bloom: &[u8]) -> MembershipMutation {
+    MembershipMutation { workpiece: workpiece.to_owned(), bloom: bloom.to_vec() }
+}
+
+#[test]
+fn commit_journals_claims_and_outbox_in_one_transaction() {
+    // The combined commit is the control-loop primitive: one transact-mail that
+    // journals the event, claims membership, and enqueues the outbox atomically.
+    // A successful commit leaves all three durable.
+    let mut store = memory();
+    let outcome = store
+        .commit(
+            "seal-1",
+            b"sealed-bloom-event",
+            &[],
+            &[claim("wp-1", b"bloom-a"), claim("wp-2", b"bloom-a")],
+            &[OutboxPayload { topic: "landing_receipt".to_owned(), payload: b"receipt".to_vec() }],
+        )
+        .unwrap();
+    assert_eq!(outcome, CommitOutcome::Applied(1));
+
+    // Journal: the event is present and byte-identical.
+    let journal = store.replay_journal().unwrap();
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].event, b"sealed-bloom-event");
+    // Membership: a foreign bloom claiming an overlapping workpiece loses.
+    assert_eq!(store.claim_seal(b"other", &members(&["wp-1"])).unwrap(), SealOutcome::Conflict("wp-1".to_owned()));
+    // Outbox: the enqueued receipt is drainable.
+    let outbox = store.drain_outbox().unwrap();
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].topic, "landing_receipt");
+    assert_eq!(outbox[0].payload, b"receipt");
+}
+
+#[test]
+fn commit_dedupes_a_replayed_idempotency_key_and_applies_nothing() {
+    // A commit whose key was already journaled is a whole no-op: no second
+    // journal row, and — the point of the durable backstop — no double-applied
+    // membership claim. Tripwire: a replayed commit must not re-claim membership.
+    let mut store = memory();
+    assert_eq!(store.commit("dup", b"first", &[], &[claim("wp", b"bloom-a")], &[]).unwrap(), CommitOutcome::Applied(1),);
+    // Re-deliver the same key with a *different* claim: it must not apply.
+    assert_eq!(
+        store.commit("dup", b"second", &[], &[claim("wp-2", b"bloom-a")], &[]).unwrap(),
+        CommitOutcome::Duplicate,
+    );
+    let journal = store.replay_journal().unwrap();
+    assert_eq!(journal.len(), 1);
+    assert_eq!(journal[0].event, b"first");
+    // The duplicate's `wp-2` claim never applied — a fresh bloom can seal it.
+    assert_eq!(store.claim_seal(b"fresh", &members(&["wp-2"])).unwrap(), SealOutcome::Sealed);
+}
+
+#[test]
+fn commit_membership_conflict_rolls_back_journal_and_releases() {
+    // A claimed workpiece already held by a *foreign* bloom (one this commit does
+    // not release) aborts the whole commit: the journal append, the free claims,
+    // and every release roll back too. Tripwire: a conflicted commit persists
+    // nothing at all.
+    let mut store = memory();
+    assert_eq!(store.claim_seal(b"pred", &members(&["w-held"])).unwrap(), SealOutcome::Sealed);
+    assert_eq!(store.claim_seal(b"third", &members(&["taken"])).unwrap(), SealOutcome::Sealed);
+    // A supersede-shaped commit: release `pred`'s `w-held`, claim `free` (ok),
+    // then claim `taken` — held by a *third* bloom it does not release → conflict,
+    // whole rollback.
+    assert_eq!(
+        store
+            .commit(
+                "conflicted",
+                b"event-bytes",
+                &[claim("w-held", b"pred")],
+                &[claim("free", b"succ"), claim("taken", b"succ")],
+                &[OutboxPayload { topic: "t".to_owned(), payload: b"p".to_vec() }],
+            )
+            .unwrap(),
+        CommitOutcome::Conflict("taken".to_owned()),
+    );
+    // Nothing persisted: no journal row, no outbox entry, `free` still claimable,
+    // `taken` still held by the third bloom, and — the release rolled back too —
+    // `pred` still holds `w-held`.
+    assert!(store.replay_journal().unwrap().is_empty());
+    assert!(store.drain_outbox().unwrap().is_empty());
+    assert_eq!(store.claim_seal(b"probe", &members(&["free"])).unwrap(), SealOutcome::Sealed);
+    assert_eq!(store.claim_seal(b"probe2", &members(&["taken"])).unwrap(), SealOutcome::Conflict("taken".to_owned()));
+    assert_eq!(store.claim_seal(b"probe3", &members(&["w-held"])).unwrap(), SealOutcome::Conflict("w-held".to_owned()));
 }
 
 #[test]

@@ -8,7 +8,7 @@
 use clap::Parser;
 
 use crate::artifacts::ArtifactsOverlay;
-use crate::bloomery::chassis::RpcPortOverlay;
+use crate::bloomery::chassis::{ControlCoreOverlay, RpcPortOverlay};
 use crate::bloomery::mirror::GithubMirrorOverlay;
 use crate::store::StoreOverlay;
 
@@ -37,6 +37,11 @@ pub struct BloomeryCli {
     /// unconfigured, so the mirror driver mounts disabled).
     #[command(flatten)]
     pub github: GithubMirrorOverlay,
+
+    /// `--control-core-wasm` shadows `AETHER_CONTROL_CORE_WASM` — the control-core
+    /// component wasm to autoload at boot (unset → no autoload).
+    #[command(flatten)]
+    pub control_core: ControlCoreOverlay,
 
     /// Print this binary's `BinaryManifest` (chassis kind, linked caps, build
     /// provenance) as JSON and exit before boot (ADR-0115). The hub's binary

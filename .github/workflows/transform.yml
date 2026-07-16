@@ -1,0 +1,43 @@
+name: Transform
+
+# ADR-0149 §Execution's thin worker wrapper: `workflow_dispatch`-only, checks
+# out the exact digest a resolved work order names, runs the same
+# `cargo xtask transform` entrypoint a contributor runs locally, and uploads
+# the resulting nonce-tagged evidence bytes. No decision logic lives here —
+# the wrapper checks out, runs, uploads, and nothing else. Untrusted lanes
+# run zero-secret on ephemeral hosted runners per the ADR, so this workflow
+# carries `permissions: { contents: read }` and no secrets.
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Typed verify command id (verify.fmt / verify.clippy / verify.docs)"
+        required: true
+      ref:
+        description: "Exact digest to check out"
+        required: true
+      nonce:
+        description: "Idempotency nonce stamped into evidence.json"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  transform:
+    name: Transform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo xtask transform ${{ inputs.command }} --out evidence --nonce ${{ inputs.nonce }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: evidence-${{ inputs.nonce }}
+          path: evidence
