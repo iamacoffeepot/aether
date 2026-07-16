@@ -33,7 +33,7 @@ use super::{
 use crate::ids::{BloomId, WorkpieceId};
 use crate::port::{ClaimOutcome, ClaimRefKind};
 use crate::reduce::{
-    BloomStatus, Decision, Decisions, Event, Fact, Outcome, SealConflict, SealError, Snapshot, reduce, view_of,
+    Decision, Decisions, Event, Fact, Outcome, SealConflict, SealError, Snapshot, is_active_unlanded, reduce, view_of,
 };
 use aether_actor::{
     ActorInitError, MailSender, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
@@ -350,14 +350,19 @@ impl ControlCore {
     /// *orphan* ref — one no active bloom owns — needs a claim-ref enumeration
     /// the source port does not yet expose; ADR-0150 leaves that cross-instance
     /// staleness to the deferred coordination service.
+    ///
+    /// "Active-unlanded" is [`is_active_unlanded`] — `Sealed` **or**
+    /// `Resolved` — the very predicate `reduce` gates a seal on: a `Resolved`
+    /// bloom (its artifact built, awaiting land) still holds the mainline-
+    /// admission ref and its per-member claim refs, so a crash-and-reboot after
+    /// the seal→resolve transition must re-assert them too, or the reboot
+    /// strands the `Resolved` bloom's refs and a foreign instance could seal
+    /// over its workpieces. Sharing the one predicate keeps this reconcile from
+    /// ever disagreeing with the seal guard on which blooms own refs.
+    /// `Superseded` / `Landed` blooms released their refs and are skipped.
     fn reconcile_claim_refs(&self, ctx: &mut WasmCtx<'_>) {
-        for (bloom, record) in &self.snapshot.blooms {
-            if record.status != BloomStatus::Sealed {
-                continue;
-            }
-            let workpieces: Vec<WorkpieceId> =
-                record.spec.members().iter().map(|member| member.workpiece.clone()).collect();
-            if let Ok(request) = encode_claim(RECONCILE_KEY, bloom, &workpieces) {
+        for (bloom, workpieces) in reassert_targets(&self.snapshot) {
+            if let Ok(request) = encode_claim(RECONCILE_KEY, &bloom, &workpieces) {
                 ctx.send_to_named(SOURCE, &request);
             }
         }
@@ -444,6 +449,22 @@ fn seal_error_from(ref_kind: ClaimRefKind, held_by: BloomId) -> SealError {
         ClaimRefKind::Workpiece(workpiece) => SealError::MembershipConflict(SealConflict { workpiece, held_by }),
         ClaimRefKind::MainlineAdmission => SealError::ActiveBloomExists(held_by),
     }
+}
+
+/// The blooms whose shared claim + admission refs the boot reconcile
+/// re-asserts, each with its member workpieces — every active-unlanded
+/// ([`is_active_unlanded`]) bloom in the replayed snapshot. A `Superseded` or
+/// `Landed` bloom released its refs, so it contributes none.
+fn reassert_targets(snapshot: &Snapshot) -> Vec<(BloomId, Vec<WorkpieceId>)> {
+    snapshot
+        .blooms
+        .iter()
+        .filter(|(_, record)| is_active_unlanded(record.status))
+        .map(|(bloom, record)| {
+            let workpieces = record.spec.members().iter().map(|member| member.workpiece.clone()).collect();
+            (*bloom, workpieces)
+        })
+        .collect()
 }
 
 /// Group a decision's `ReleaseMembership` effects into per-bloom workpiece lists
@@ -539,12 +560,15 @@ aether_actor::export!(ControlCore);
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use alloc::collections::BTreeMap;
+
     use crate::digest::Digest;
     use crate::ids::{BloomId, WorkpieceId};
     use crate::port::ClaimRefKind;
-    use crate::reduce::{Decision, Decisions, Outcome, SealError};
+    use crate::reduce::{BloomRecord, BloomStatus, Decision, Decisions, Outcome, SealError, Snapshot};
+    use crate::values::{BloomDraft, BloomSpec, Evidence, EvidenceKind, Membership};
 
-    use super::{release_targets, seal_error_from};
+    use super::{reassert_targets, release_targets, seal_error_from};
 
     fn bloom(seed: u8) -> BloomId {
         BloomId(Digest::from_bytes([seed; 32]))
@@ -552,6 +576,21 @@ mod tests {
 
     fn workpiece(name: &str) -> WorkpieceId {
         WorkpieceId(name.to_owned())
+    }
+
+    /// A sealed one-member spec — enough to key a [`BloomRecord`] and carry a
+    /// single workpiece the reconcile re-asserts.
+    fn single_member_spec(name: &str) -> BloomSpec {
+        let scope_revision = Digest::from_bytes([7; 32]);
+        let approval =
+            Evidence { subject: scope_revision, kind: EvidenceKind::Approval, detail: Digest::from_bytes([9; 32]) };
+        let membership = Membership { workpiece: workpiece(name), scope_revision, approval };
+        BloomDraft { proposals: alloc::vec![membership], ..BloomDraft::default() }.seal()
+    }
+
+    fn record_at(name: &str, status: BloomStatus) -> (BloomId, BloomRecord) {
+        let spec = single_member_spec(name);
+        (spec.id(), BloomRecord { spec, status, claims: BTreeMap::new(), superseded_by: None })
     }
 
     #[test]
@@ -598,5 +637,34 @@ mod tests {
         let targets = release_targets(&decisions);
 
         assert_eq!(targets, vec![(landed, vec![workpiece("a"), workpiece("b")])]);
+    }
+
+    #[test]
+    fn reassert_targets_covers_resolved_not_just_sealed() {
+        // Tripwire: the boot reconcile re-asserts every *active-unlanded* bloom's
+        // refs — `Sealed` AND `Resolved`. A `Resolved` bloom (artifact built,
+        // awaiting land) still holds its per-member claim + mainline-admission
+        // refs, so a reconcile that skipped it (the `Sealed`-only regression)
+        // would strand them on a reboot and let a foreign instance seal over its
+        // workpieces. `Superseded` / `Landed` blooms released their refs and are
+        // excluded.
+        let mut snapshot = Snapshot::default();
+        for (name, status) in [
+            ("sealed-wp", BloomStatus::Sealed),
+            ("resolved-wp", BloomStatus::Resolved),
+            ("superseded-wp", BloomStatus::Superseded),
+            ("landed-wp", BloomStatus::Landed),
+        ] {
+            let (id, record) = record_at(name, status);
+            snapshot.blooms.insert(id, record);
+        }
+
+        let reasserted: Vec<WorkpieceId> = reassert_targets(&snapshot).into_iter().flat_map(|(_, wps)| wps).collect();
+
+        assert!(reasserted.contains(&workpiece("sealed-wp")), "a Sealed bloom is re-asserted");
+        assert!(reasserted.contains(&workpiece("resolved-wp")), "a Resolved bloom is re-asserted");
+        assert!(!reasserted.contains(&workpiece("superseded-wp")), "a Superseded bloom is not re-asserted");
+        assert!(!reasserted.contains(&workpiece("landed-wp")), "a Landed bloom is not re-asserted");
+        assert_eq!(reasserted.len(), 2, "exactly the two active-unlanded blooms are re-asserted");
     }
 }

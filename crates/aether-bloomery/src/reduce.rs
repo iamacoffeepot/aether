@@ -450,14 +450,20 @@ fn membership_conflict(snapshot: &Snapshot, members: &[Membership], exempt: Opti
     })
 }
 
+/// Whether a status counts as active-unlanded: still `Sealed` or `Resolved`,
+/// so it holds its shared claim + mainline-admission refs and blocks a second
+/// seal. The single definition the one-active-bloom-per-mainline guard here and
+/// the boot ref-reconcile in `control::actor` both read, so the two can never
+/// disagree on which blooms own refs (the drift a `Sealed`-only reconcile
+/// caused — a rebooted `Resolved` bloom stranding its refs).
+pub(crate) fn is_active_unlanded(status: BloomStatus) -> bool {
+    matches!(status, BloomStatus::Sealed | BloomStatus::Resolved)
+}
+
 /// The id of a bloom still `Sealed` or `Resolved` (an unlanded active bloom),
 /// if any — the input to the V1 one-active-bloom-per-mainline guard.
 fn active_unlanded_bloom(snapshot: &Snapshot) -> Option<BloomId> {
-    snapshot
-        .blooms
-        .iter()
-        .find(|(_, record)| matches!(record.status, BloomStatus::Sealed | BloomStatus::Resolved))
-        .map(|(id, _)| *id)
+    snapshot.blooms.iter().find(|(_, record)| is_active_unlanded(record.status)).map(|(id, _)| *id)
 }
 
 fn reduce_supersede(snapshot: &Snapshot, predecessor: &BloomId, successor: &BloomSpec) -> Decisions {
