@@ -23,8 +23,9 @@
 //!   in which every artifact names its parents by digest: [`Artifact`],
 //!   [`Statement`] + [`Provenance`], [`Workpiece`], the one-way bloom
 //!   lifecycle ([`BloomDraft`] → [`BloomSpec`] → [`ResolvedBloom`] →
-//!   [`LandingReceipt`]), [`Evidence`], [`StageBinding`] / [`StageCatalog`],
-//!   [`Attempt`], [`Transformation`].
+//!   [`LandingReceipt`]), [`Evidence`], [`StageBinding`] / [`StageCatalog`]
+//!   and the [`AgentProfile`] a binding references, [`Attempt`],
+//!   [`Transformation`].
 //! - [`sign`] — the [`KeyProvider`] trait and its fake always-valid
 //!   implementation. ADR-0149 ships the signature *shapes*; key custody is
 //!   a later arc.
@@ -66,7 +67,7 @@ pub use reduce::{
 };
 pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
 pub use values::{
-    Artifact, Attempt, BloomDraft, BloomSpec, Budget, Evidence, EvidenceKind, Forecast, LandingReceipt, Membership,
-    Observation, Provenance, ResolutionClaim, ResolvedBloom, StageBinding, StageCatalog, StageReceipt, Statement,
-    Transformation, Workpiece,
+    AgentProfile, Artifact, Attempt, BloomDraft, BloomSpec, Budget, Evidence, EvidenceKind, Forecast, LandingReceipt,
+    Membership, Observation, Provenance, ReasoningEffort, ResolutionClaim, ResolvedBloom, StageBinding, StageCatalog,
+    StageReceipt, Statement, ToolPolicy, Transformation, Workpiece,
 };
