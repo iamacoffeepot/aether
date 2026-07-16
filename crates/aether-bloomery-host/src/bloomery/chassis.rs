@@ -89,10 +89,7 @@ impl BloomeryEnv {
         let rpc_port = RpcPortConfig::try_from_argv_then_env(cli.rpc.clone().into_layer())?.port;
         let store = StoreConfig::try_from_argv_then_env(cli.store.clone().into_layer())?;
         let artifacts = ArtifactsConfig::try_from_argv_then_env(cli.artifacts.clone().into_layer())?;
-        // Env-only (argv > env > default with no argv overlay yet): the mirror
-        // has no `--github-*` flags until an operator needs them, so it resolves
-        // from `AETHER_GITHUB_*` / `GITHUB_TOKEN` and defaults to unconfigured.
-        let mirror = GithubMirrorConfig::try_from_env()?;
+        let mirror = GithubMirrorConfig::try_from_argv_then_env(cli.github.clone().into_layer())?;
         Ok(Self { rpc_port, store, artifacts, mirror })
     }
 }

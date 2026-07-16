@@ -9,11 +9,12 @@ use clap::Parser;
 
 use crate::artifacts::ArtifactsOverlay;
 use crate::bloomery::chassis::RpcPortOverlay;
+use crate::bloomery::mirror::GithubMirrorOverlay;
 use crate::store::StoreOverlay;
 
 /// The `bloomery` binary's clap root. The overlays carry the derive-emitted
-/// `--rpc-port` / `--store-path` / `--artifacts-root` flags; `--describe` prints
-/// the binary manifest and exits before boot (ADR-0115).
+/// `--rpc-port` / `--store-path` / `--artifacts-root` / `--github-*` flags;
+/// `--describe` prints the binary manifest and exits before boot (ADR-0115).
 #[derive(Parser, Debug, Default, Clone)]
 #[command(name = "bloomery", about = "Bloomery coordinator chassis — SQLite journal store + RPC ingress. ADR-0149.")]
 pub struct BloomeryCli {
@@ -30,6 +31,12 @@ pub struct BloomeryCli {
     /// artifacts content-store root (unset → the computed data-dir default).
     #[command(flatten)]
     pub artifacts: ArtifactsOverlay,
+
+    /// `--github-*` shadow `AETHER_GITHUB_*` / `GITHUB_TOKEN` — the outward-mirror
+    /// connection knobs and poll cadence driving the outbox consumer (unset →
+    /// unconfigured, so the mirror driver mounts disabled).
+    #[command(flatten)]
+    pub github: GithubMirrorOverlay,
 
     /// Print this binary's `BinaryManifest` (chassis kind, linked caps, build
     /// provenance) as JSON and exit before boot (ADR-0115). The hub's binary

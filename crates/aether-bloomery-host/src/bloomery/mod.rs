@@ -12,7 +12,7 @@ mod source;
 pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};
 pub use cli::BloomeryCli;
 pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
-pub use mirror::{GithubMirrorConfig, ProjectionShell};
+pub use mirror::{GithubMirrorConfig, GithubMirrorOverlay, ProjectionShell};
 pub use mirror_driver::{
     DrainTick, MirrorDriverCapability, MirrorDriverState, TOPIC_LANDING_RECEIPT, TOPIC_VIEW_DOCUMENT,
 };

@@ -92,6 +92,10 @@ aether-codec = { path = "../aether-codec" }
 # The mirror demo (#3459 step 7) drives the projection against the adapter's
 # in-process `FakeGithub` double, so it needs no token or network.
 aether-bloomery-github = { path = "../aether-bloomery-github", features = ["testing"] }
+# The mirror-driver actor-path test drives the capability's handlers through the
+# substrate cap-test fixture (`aether_substrate::testing`), gated behind the
+# `test-support` feature so the fixture module is compiled for tests.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 tempfile = "3"
 
 [lints]

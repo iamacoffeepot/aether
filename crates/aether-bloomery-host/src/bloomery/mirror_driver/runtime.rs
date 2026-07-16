@@ -292,19 +292,49 @@ mod tests {
     //! compilation cover; this pins the behavior that actually mirrors and acks.
 
     use std::sync::Arc;
+    use std::sync::mpsc::Receiver;
+    use std::time::Duration;
 
     use aether_bloomery::{
         BloomDraft, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Snapshot, WorkpieceId,
         reduce, view_of,
     };
     use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
-    use aether_data::wire::to_vec;
+    use aether_data::wire::{from_bytes, to_vec};
+    use aether_data::{MailId, MailboxId, Source};
+    use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::actor::native::ctx::NativeCtx;
+    use aether_substrate::mail::outbound::EgressEvent;
+    use aether_substrate::testing::test_mailer_and_rx;
+    use serde::de::DeserializeOwned;
 
-    use super::{ProjectionShell, TOPIC_VIEW_DOCUMENT, project_batch};
+    use super::{
+        AckOutbox, DrainOutbox, DrainOutboxResult, DrainTick, Kind, MirrorDriverCapability, MirrorDriverState,
+        OutboxEntry, ProjectionShell, TOPIC_LANDING_RECEIPT, TOPIC_VIEW_DOCUMENT, project_batch,
+    };
     use crate::store::{SqliteStore, StoreBackend};
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
+    }
+
+    /// Drain egress collecting the payloads of every `UnresolvedMail` carrying
+    /// kind `K`, until `want` of them have arrived (each cross-cap send bubbles
+    /// to the loopback outbound as an `UnresolvedMail` because the peer mailbox
+    /// is unregistered under `new_for_test`).
+    fn collect_sends<K: Kind + DeserializeOwned>(rx: &Receiver<EgressEvent>, want: usize) -> Vec<K> {
+        let mut got = Vec::new();
+        while got.len() < want {
+            let event = rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("test: the expected cross-cap send arrives within the deadline");
+            if let EgressEvent::UnresolvedMail { kind_id, payload, .. } = event
+                && kind_id == K::ID
+            {
+                got.push(from_bytes::<K>(&payload).expect("test: send payload decodes"));
+            }
+        }
+        got
     }
 
     /// A sealed single-member bloom's view document, encoded as the outbox
@@ -384,5 +414,53 @@ mod tests {
                 "republished entry now acked"
             );
         }
+    }
+    #[test]
+    fn mail_driven_drain_projects_and_acks_through_the_actor_path() {
+        // Drive the capability's handlers through the substrate cap-test fixture
+        // — the actual actor/mail path (`on_drain_tick` → topic-scoped
+        // `DrainOutbox` sends, then `on_drain_result` → the `spawn_detached`
+        // worker → `project_batch` → `AckOutbox` send), over a fake-GitHub-backed
+        // shell. Cross-cap sends to the unregistered `aether.store` mailbox bubble
+        // to the loopback outbound, so the test reads them off egress.
+        let (mailer, rx) = test_mailer_and_rx();
+        let self_mailbox = MailboxId(0);
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), self_mailbox));
+
+        let fake = FakeGithub::new();
+        let shell = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
+        let mut state = MirrorDriverState::with_shells(Some(shell), None, Arc::clone(&mailer), self_mailbox);
+
+        // on_drain_tick fans one topic-scoped drain per owned projection topic.
+        {
+            let mut ctx = NativeCtx::new_dispatching(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            MirrorDriverCapability::on_drain_tick(&mut state, ctx.as_single(), DrainTick::default());
+        }
+        binding.flush_outbound();
+        let mut drained_topics: Vec<Option<String>> =
+            collect_sends::<DrainOutbox>(&rx, 2).into_iter().map(|d| d.topic).collect();
+        drained_topics.sort();
+        assert_eq!(
+            drained_topics,
+            vec![Some(TOPIC_LANDING_RECEIPT.to_owned()), Some(TOPIC_VIEW_DOCUMENT.to_owned())],
+            "each owned projection topic is drained, scoped by topic",
+        );
+
+        // on_drain_result projects the entry and — on success — the detached
+        // worker acks the delivered prefix. The ack landing on egress proves the
+        // worker ran (it sends the ack only after the reconcile returns Ok).
+        let entry = OutboxEntry { sequence: 7, topic: TOPIC_VIEW_DOCUMENT.to_owned(), payload: encoded_view() };
+        {
+            let mut ctx = NativeCtx::new_dispatching(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            MirrorDriverCapability::on_drain_result(
+                &mut state,
+                ctx.as_single(),
+                DrainOutboxResult::Ok { entries: vec![entry] },
+            );
+        }
+        let acks = collect_sends::<AckOutbox>(&rx, 1);
+        assert_eq!(fake.issue_count(), 2, "the worker reconciled the carbon copy before acking");
+        assert_eq!(acks[0].topic.as_deref(), Some(TOPIC_VIEW_DOCUMENT));
+        assert_eq!(acks[0].through_sequence, 7, "the ack covers the delivered entry's sequence");
     }
 }
