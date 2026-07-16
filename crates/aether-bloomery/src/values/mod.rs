@@ -8,11 +8,13 @@
 
 mod bloom;
 mod profile;
+mod scope_revision;
 mod stage;
 mod statement;
 
 pub use bloom::{BloomDraft, BloomSpec, LandingReceipt, Membership, ResolutionClaim, ResolvedBloom};
 pub use profile::{AgentProfile, ReasoningEffort, ToolPolicy};
+pub use scope_revision::{ModelOverride, ResolvedModel, ScopeRevision};
 pub use stage::{Attempt, NetworkProfile, StageBinding, StageCatalog, Transformation};
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 
