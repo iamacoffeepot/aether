@@ -544,8 +544,7 @@ mod tests {
 
     #[test]
     fn claim_seal_reports_a_workpiece_conflict_and_its_holder() {
-        let fake = FakeGithub::new();
-        let source = GitSource::new(fake.clone(), false);
+        let source = GitSource::new(FakeGithub::new(), false);
         let first = bloom();
         let second = BloomId(digest(2));
 
@@ -578,8 +577,7 @@ mod tests {
 
     #[test]
     fn claim_seal_is_idempotent_for_the_same_bloom() {
-        let fake = FakeGithub::new();
-        let source = GitSource::new(fake.clone(), false);
+        let source = GitSource::new(FakeGithub::new(), false);
         let members = [workpiece("reactor-core")];
 
         source.claim_seal(&bloom(), &members).unwrap();

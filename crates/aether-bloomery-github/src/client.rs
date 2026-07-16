@@ -775,8 +775,7 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         // gone is 422 ("Reference does not exist") or 404 — both are the clean
         // idempotent outcome a release wants, not a fault.
         match self.request(Method::Delete, self.git_url(&format!("refs/{name}")), None) {
-            Ok(_) => Ok(()),
-            Err(GithubError::Status { status: 404 | 422, .. }) => Ok(()),
+            Ok(_) | Err(GithubError::Status { status: 404 | 422, .. }) => Ok(()),
             Err(error) => Err(error),
         }
     }

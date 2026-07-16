@@ -32,7 +32,9 @@ use super::{
 };
 use crate::ids::{BloomId, WorkpieceId};
 use crate::port::{ClaimOutcome, ClaimRefKind};
-use crate::reduce::{Decision, Decisions, Event, Fact, Outcome, SealConflict, SealError, Snapshot, reduce, view_of};
+use crate::reduce::{
+    BloomStatus, Decision, Decisions, Event, Fact, Outcome, SealConflict, SealError, Snapshot, reduce, view_of,
+};
 use aether_actor::{
     ActorInitError, MailSender, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
@@ -52,6 +54,13 @@ const SOURCE: &str = "aether.source";
 /// The outbox topic a landing receipt enqueues under, so #3499's republisher
 /// can route it.
 const RECEIPT_TOPIC: &str = "aether.bloomery.landing_receipt";
+
+/// The correlation key the boot ref-reconcile stamps on its re-assert
+/// [`ClaimSeal`]s. NUL-prefixed so it can never equal a real admit's
+/// [`IdempotencyKey`](crate::ids::IdempotencyKey): the reconcile reply lands at
+/// [`ControlCore::on_claim_result`], finds no waiting seal under this key, and
+/// is ignored — the re-assert is fire-and-forget.
+const RECONCILE_KEY: &str = "\u{0}bloomery.reconcile";
 
 /// What to do with the shared claim refs once a commit settles (ADR-0150).
 enum PostCommit {
@@ -118,6 +127,7 @@ impl WasmActor for ControlCore {
     /// reply. Manual class: it issues its own replies (the decode-error and
     /// duplicate paths reply here; the committed path replies in
     /// [`Self::on_commit_result`]).
+    #[allow(clippy::needless_pass_by_value)]
     #[handler::manual]
     fn on_admit(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: Admit) {
         let reply = ctx.reply_target();
@@ -250,11 +260,11 @@ impl WasmActor for ControlCore {
         match post_commit {
             PostCommit::ReleaseOnApplied(targets) if applied => {
                 for (bloom, workpieces) in targets {
-                    self.send_release(ctx, &bloom, &workpieces);
+                    send_release(ctx, &bloom, &workpieces);
                 }
             }
             PostCommit::RollbackSealOnFailure(bloom, workpieces) if !applied => {
-                self.send_release(ctx, &bloom, &workpieces);
+                send_release(ctx, &bloom, &workpieces);
             }
             _ => {}
         }
@@ -268,7 +278,7 @@ impl WasmActor for ControlCore {
     /// next release or is reclaimed by the boot reconcile. (The guest crate
     /// carries no `tracing`, so the error is not surfaced here; the ref-level
     /// truth is auditable via the bloom id the ref carries.)
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value, clippy::unused_self)]
     #[handler::single]
     fn on_release_result(&mut self, _ctx: &mut WasmCtx<'_>, _mail: super::ReleaseSealResult) {}
 
@@ -295,6 +305,7 @@ impl WasmActor for ControlCore {
             let decisions = reduce(&self.snapshot, &event);
             self.snapshot = self.snapshot.apply(&event, &decisions);
         }
+        self.reconcile_claim_refs(ctx);
     }
 
     /// The `aether.bloomery.query` read surface. With `bloom` unset, reply the
@@ -329,6 +340,29 @@ impl WasmActor for ControlCore {
 }
 
 impl ControlCore {
+    /// Re-assert the shared claim refs of every active (sealed-unlanded) bloom
+    /// at boot (ADR-0150 §The ref ↔ local-store split): after journal replay
+    /// rebuilds the snapshot, each active bloom idempotently re-creates its
+    /// per-member + admission refs, healing any a crash dropped between the
+    /// acquire and the commit — so no owned bloom lacks its refs. Fire-and-
+    /// forget: the re-assert reply lands at [`Self::on_claim_result`] under
+    /// [`RECONCILE_KEY`], matches no waiting seal, and is ignored. Reclaiming an
+    /// *orphan* ref — one no active bloom owns — needs a claim-ref enumeration
+    /// the source port does not yet expose; ADR-0150 leaves that cross-instance
+    /// staleness to the deferred coordination service.
+    fn reconcile_claim_refs(&self, ctx: &mut WasmCtx<'_>) {
+        for (bloom, record) in &self.snapshot.blooms {
+            if record.status != BloomStatus::Sealed {
+                continue;
+            }
+            let workpieces: Vec<WorkpieceId> =
+                record.spec.members().iter().map(|member| member.workpiece.clone()).collect();
+            if let Ok(request) = encode_claim(RECONCILE_KEY, bloom, &workpieces) {
+                ctx.send_to_named(SOURCE, &request);
+            }
+        }
+    }
+
     /// Project the decisions, stash the pending admit, and send the combined
     /// [`Commit`] to the store — the shared tail for a direct admit and for a
     /// seal that has just acquired its shared claim refs. `post_commit` is the
@@ -347,7 +381,7 @@ impl ControlCore {
         // admitted bytes; an encode failure rolls back an acquired seal claim.
         let raw = match to_vec(&event) {
             Ok(raw) => raw,
-            Err(error) => return self.fail_commit(ctx, reply, post_commit, format!("admit encode failed: {error}")),
+            Err(error) => return fail_commit(ctx, reply, post_commit, format!("admit encode failed: {error}")),
         };
         // Projecting the decision encodes each outbox receipt; a receipt-encode
         // failure must reject the admit, not commit an empty payload the
@@ -355,7 +389,7 @@ impl ControlCore {
         let (releases, claims, outbox) = match project(&decisions) {
             Ok(effects) => effects,
             Err(error) => {
-                return self.fail_commit(ctx, reply, post_commit, format!("admit receipt encode failed: {error}"));
+                return fail_commit(ctx, reply, post_commit, format!("admit receipt encode failed: {error}"));
             }
         };
         let commit = Commit { idempotency_key: key.clone(), event: raw, releases, claims, outbox };
@@ -369,33 +403,27 @@ impl ControlCore {
         }
         ctx.send_to_named(STORE, &commit);
     }
+}
 
-    /// Reply the commit-setup failure and roll back an acquired seal claim so no
-    /// ref is stranded (a land / supersede release has not run yet, so there is
-    /// nothing to undo for those).
-    fn fail_commit(
-        &self,
-        ctx: &mut WasmCtx<'_, Manual>,
-        reply: Option<ReplyHandle>,
-        post_commit: PostCommit,
-        error: String,
-    ) {
-        if let Some(handle) = reply {
-            ctx.reply_to(handle, &AdmitResult::Err { error });
-        }
-        if let PostCommit::RollbackSealOnFailure(bloom, workpieces) = post_commit {
-            self.send_release(ctx, &bloom, &workpieces);
-        }
+/// Reply the commit-setup failure and roll back an acquired seal claim so no
+/// ref is stranded (a land / supersede release has not run yet, so there is
+/// nothing to undo for those).
+fn fail_commit(ctx: &mut WasmCtx<'_, Manual>, reply: Option<ReplyHandle>, post_commit: PostCommit, error: String) {
+    if let Some(handle) = reply {
+        ctx.reply_to(handle, &AdmitResult::Err { error });
     }
+    if let PostCommit::RollbackSealOnFailure(bloom, workpieces) = post_commit {
+        send_release(ctx, &bloom, &workpieces);
+    }
+}
 
-    /// Send a best-effort [`ReleaseSeal`] for `(bloom, workpieces)`. A
-    /// wire-encode failure is dropped rather than surfaced (the guest carries no
-    /// `tracing`): the ref it would have released is reclaimed by the boot
-    /// reconcile, so a lost release cannot strand a claim permanently.
-    fn send_release(&self, ctx: &mut WasmCtx<'_, Manual>, bloom: &BloomId, workpieces: &[WorkpieceId]) {
-        if let Ok(request) = encode_release(bloom, workpieces) {
-            ctx.send_to_named(SOURCE, &request);
-        }
+/// Send a best-effort [`ReleaseSeal`] for `(bloom, workpieces)`. A wire-encode
+/// failure is dropped rather than surfaced (the guest carries no `tracing`):
+/// the ref it would have released is reclaimed by the boot reconcile, so a lost
+/// release cannot strand a claim permanently.
+fn send_release(ctx: &mut WasmCtx<'_, Manual>, bloom: &BloomId, workpieces: &[WorkpieceId]) {
+    if let Ok(request) = encode_release(bloom, workpieces) {
+        ctx.send_to_named(SOURCE, &request);
     }
 }
 

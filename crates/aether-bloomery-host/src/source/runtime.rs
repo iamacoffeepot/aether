@@ -33,7 +33,7 @@ pub use aether_substrate::chassis::error::BootError;
 /// whether the GitHub connection is configured. An unconfigured instance runs
 /// the seal-claim path in **local-backstop-only** mode (ADR-0150): it never
 /// reaches GitHub, so `claim_seal` / `release_seal` short-circuit to
-/// `Acquired` / `Ok` and the instance's exclusivity rests on the local SQLite
+/// `Acquired` / `Ok` and the instance's exclusivity rests on the local `SQLite`
 /// constraint alone — the single-instance / untokened-dev case, and what keeps
 /// a seal from depending on GitHub reachability when no coordination is needed.
 pub struct SourceCapabilityState {
