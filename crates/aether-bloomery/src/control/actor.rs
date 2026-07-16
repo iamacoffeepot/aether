@@ -75,7 +75,7 @@ struct Pending {
 /// The control-core actor: the live [`Snapshot`] plus the in-flight admits
 /// awaiting their commit replies, queued per idempotency key.
 ///
-/// Each same-key admit gets its own [`Pending`] entry and its own [`Commit`], so
+/// Each same-key admit gets its own `Pending` entry and its own [`Commit`], so
 /// every admit's inbound chain stays open (extended by that commit) until its
 /// reply is sent — a second admit that merely stashed a reply handle and returned
 /// would let its chain settle at handler return, closing its reply stream before
