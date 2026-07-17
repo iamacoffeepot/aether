@@ -659,7 +659,13 @@ pub fn reduce(snapshot: &Snapshot, event: &Event) -> Decisions {
 /// its frozen scope revision. The cursor advance folds into the snapshot; the
 /// dispatch is a snapshot-inert outbox effect the host submits (ADR-0149 §The
 /// line).
-fn entry_dispatch_effects(bloom: BloomId, member: &Membership) -> [Decision; 2] {
+///
+/// `checkout` is the git commit the attempt's worker checks out — the bloom's
+/// sealed base (`spec.base()`), threaded onto the transformation so the worker
+/// builds the candidate against the exact sealed source (ADR-0149 §Execution,
+/// #3572). It is distinct from the member's `scope_revision` subject, which is
+/// the aether content digest the returned evidence binds to.
+fn entry_dispatch_effects(bloom: BloomId, member: &Membership, checkout: Digest) -> [Decision; 2] {
     let stage = StageCatalog::entry_stage();
     [
         Decision::AdvanceStage {
@@ -671,7 +677,7 @@ fn entry_dispatch_effects(bloom: BloomId, member: &Membership) -> [Decision; 2] 
             bloom,
             workpiece: member.workpiece.clone(),
             stage,
-            transformation: Transformation::for_member_stage(stage, member.scope_revision),
+            transformation: Transformation::for_member_stage(stage, member.scope_revision, checkout),
         },
     ]
 }
@@ -716,7 +722,7 @@ fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec) -> Decisions {
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom });
     }
     for member in spec.members() {
-        effects.extend(entry_dispatch_effects(bloom, member));
+        effects.extend(entry_dispatch_effects(bloom, member, spec.base()));
     }
     Decisions { outcome: Outcome::Sealed(bloom), effects }
 }
@@ -1014,6 +1020,11 @@ fn reduce_attempt_completed(
     }
     let attempts = cursor.map_or(1, |progress| progress.attempts);
     let subject = member.scope_revision;
+    // The git commit a re-dispatched attempt's worker checks out: the bloom's
+    // sealed base, resolved off the bloom record for every member-line stage
+    // (ADR-0149 §Execution, #3572). Distinct from `subject`, the evidence-binding
+    // scope-revision digest.
+    let checkout = record.spec.base();
     // The attempt result is journaled evidence about the member, recorded whatever
     // the gate decides.
     let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
@@ -1030,7 +1041,7 @@ fn reduce_attempt_completed(
             bloom: *bloom,
             workpiece: workpiece.clone(),
             stage: next,
-            transformation: Transformation::for_member_stage(next, subject),
+            transformation: Transformation::for_member_stage(next, subject, checkout),
         });
         return Decisions {
             outcome: Outcome::AttemptAdvanced { bloom: *bloom, workpiece: workpiece.clone(), from: stage, to: next },
@@ -1053,7 +1064,7 @@ fn reduce_attempt_completed(
             bloom: *bloom,
             workpiece: workpiece.clone(),
             stage,
-            transformation: Transformation::for_member_stage(stage, subject),
+            transformation: Transformation::for_member_stage(stage, subject, checkout),
         });
         return Decisions {
             outcome: Outcome::AttemptRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, attempt },

@@ -17,9 +17,9 @@
 //! name (`run-name:`), and this backend resolves nonce → run on demand through
 //! [`ActionsApi::find_run`]. That resolution is the shared correlation contract
 //! with the wrapper workflow ([#3501], a sibling): the wrapper fixes the
-//! `command` / `ref` / `nonce` dispatch inputs, the run-name nonce embedding,
-//! and the workflow filename; either issue can land first with the other
-//! conforming.
+//! `command` / `subject` / `nonce` dispatch inputs (the `subject` carrying the
+//! order's checkout target, #3572), the run-name nonce embedding, and the
+//! workflow filename; either issue can land first with the other conforming.
 //!
 //! [#3500]: https://github.com/iamacoffeepot/aether/issues/3500
 //! [#3501]: https://github.com/iamacoffeepot/aether/issues/3501
@@ -31,6 +31,7 @@ use std::fmt;
 use aether_bloomery::{Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, WorkHandle, WorkOrder};
 
 use crate::client::{ActionsApi, GithubError, RunConclusion, RunStatus, WorkflowRun};
+use crate::source::to_hex;
 
 /// An executor-port fault. Its own type because the port needs an arm the value
 /// vocabulary does not carry — a message asked to act on a run that does not
@@ -147,12 +148,24 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
 
     fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
         // Shape the transformation + order into the wrapper's dispatch inputs.
-        // The `ref` input mirrors the protected pinned ref the dispatch runs at
-        // (the wrapper checks out what it was pinned to) — the exact input set
-        // is the shared contract with #3501.
+        //
+        // Two refs, held structurally apart (ADR-0149 §Execution, #3572):
+        //
+        // - The `workflow_dispatch` fires at `self.git_ref` — the protected,
+        //   pinned ref — passed as `dispatch_workflow`'s own positional argument,
+        //   so the wrapper *definition* that runs is always the reviewed one
+        //   (invariant 1: the workflow definition stays pinned).
+        // - The `subject` input carries the order's checkout target — the git
+        //   commit the wrapper feeds `actions/checkout`, hex-rendered from the
+        //   transformation's `checkout` digest (the sealed source a resolved work
+        //   order names). This is the tree the work runs *on*, distinct from the
+        //   scope-revision `inputs[0]` that binds the returned evidence.
+        //
+        // The two are separate keys precisely so a caller can never again put the
+        // pinned ref where the checkout target belongs (the stub bug this fixes).
         let mut inputs = BTreeMap::new();
         inputs.insert("command".to_owned(), order.transformation.command.clone());
-        inputs.insert("ref".to_owned(), self.git_ref.clone());
+        inputs.insert("subject".to_owned(), to_hex(&order.transformation.checkout));
         inputs.insert("nonce".to_owned(), order.nonce.0.clone());
         self.client.dispatch_workflow(&self.workflow_file, &self.git_ref, &inputs)?;
         Ok(WorkHandle::new(order.nonce.clone()))
@@ -194,22 +207,26 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use aether_bloomery::{
-        Budget, Conclusion, ExecutionStatus, ExecutorBackend, NetworkProfile, Nonce, Transformation, WorkHandle,
-        WorkOrder,
+        Budget, Conclusion, Digest, ExecutionStatus, ExecutorBackend, NetworkProfile, Nonce, Transformation,
+        WorkHandle, WorkOrder,
     };
 
-    use super::{ActionsExecutor, ExecutorError};
+    use super::{ActionsExecutor, ExecutorError, to_hex};
     use crate::client::{Artifact, RunConclusion, RunStatus};
     use crate::testing::FakeGithub;
 
     const WORKFLOW: &str = "bloomery-transform.yml";
     const PINNED_REF: &str = "refs/heads/main";
+    // A distinctive checkout target so the dispatched `subject` input is
+    // recognizable — hex-rendered, this is `"22"` repeated 32 times.
+    const CHECKOUT: [u8; 32] = [0x22; 32];
 
     fn order(nonce: &str) -> WorkOrder {
         WorkOrder {
             transformation: Transformation {
                 command: "verify.clippy".to_owned(),
                 inputs: Vec::new(),
+                checkout: Digest::from_bytes(CHECKOUT),
                 outputs: Vec::new(),
                 image: "iama/verify:1".to_owned(),
                 limits: Budget::default(),
@@ -231,11 +248,21 @@ mod tests {
         assert_eq!(handle, WorkHandle::new(Nonce("n-1".to_owned())));
         assert_eq!(fake.dispatched_nonces(), vec!["n-1".to_owned()]);
         assert_eq!(fake.dispatched_workflow("n-1").as_deref(), Some(WORKFLOW));
+        // Invariant 1 (#3572): the dispatch itself fires at the protected pinned
+        // ref — the workflow *definition* that runs is always the reviewed one.
         assert_eq!(fake.dispatched_ref("n-1").as_deref(), Some(PINNED_REF));
-        // The command / ref / nonce shaping is the contract with the wrapper.
+        // The command / subject / nonce shaping is the contract with the wrapper.
+        // `subject` is the order's checkout target (the sealed source the worker
+        // checks out), never the pinned ref — the two are structurally separate.
         let inputs = fake.dispatched_inputs("n-1").unwrap();
         assert_eq!(inputs.get("command").map(String::as_str), Some("verify.clippy"));
-        assert_eq!(inputs.get("ref").map(String::as_str), Some(PINNED_REF));
+        assert_eq!(inputs.get("subject").map(String::as_str), Some(to_hex(&Digest::from_bytes(CHECKOUT)).as_str()));
+        assert_ne!(
+            inputs.get("subject").map(String::as_str),
+            Some(PINNED_REF),
+            "the checkout target is not the pinned ref"
+        );
+        assert!(!inputs.contains_key("ref"), "the ambiguous `ref` input is retired in favor of `subject`");
         assert_eq!(inputs.get("nonce").map(String::as_str), Some("n-1"));
     }
 

@@ -140,11 +140,13 @@ impl StageCatalog {
                 StageId::Sketch => (&["bloom.intent"], &["bloom.sketch"], "sketch", "issue-well-formed", 1),
                 StageId::Scope => (&["bloom.sketch"], &["bloom.scope"], "scope", "plan-present", 1),
                 StageId::Approve => (&["bloom.scope"], &["bloom.ready"], "approve", "phase-ready", 1),
-                StageId::Construct => (&["bloom.ready"], &["bloom.candidate"], "implement", "pr-open", 2),
+                StageId::Construct => (&["bloom.ready"], &["bloom.candidate"], "construct.implement", "pr-open", 2),
                 StageId::Verify => {
                     (&["bloom.candidate"], &["bloom.verify_evidence"], "transform.verify", "ci-green", 3)
                 }
-                StageId::Refine => (&["bloom.verify_evidence"], &["bloom.candidate"], "implement", "ci-green", 3),
+                StageId::Refine => {
+                    (&["bloom.verify_evidence"], &["bloom.candidate"], "construct.implement", "ci-green", 3)
+                }
                 StageId::Review => (&["bloom.candidate"], &["bloom.review_rollup"], "review", "review-approved", 2),
                 StageId::Integrate => {
                     (&["bloom.candidate"], &["bloom.integration"], "integrate", "integration-checkpoint", 2)
@@ -231,6 +233,20 @@ pub struct Transformation {
     pub command: String,
     /// The digest-pinned inputs.
     pub inputs: Vec<Digest>,
+    /// The exact git commit this attempt's worker checks out — the sealed
+    /// source the candidate is built against (ADR-0149 §Execution: "the wrapper
+    /// checks out the exact digest a resolved work order names"). Resolved per
+    /// stage by the reducer: today the bloom's sealed base for every member-line
+    /// stage; a future per-member integration checkpoint for the later stages.
+    ///
+    /// Distinct from [`inputs`](Self::inputs): `inputs[0]` is the scope-revision
+    /// digest that *binds the returned evidence* — an aether content address
+    /// (`sha256` over the revision's wire bytes) orthogonal to git, never a
+    /// checkoutable object. This is the git commit the wrapper feeds
+    /// `actions/checkout`; the executor renders it as the dispatch's checkout
+    /// input while the `workflow_dispatch` itself stays pinned at the protected
+    /// ref (the checkout target moves, the workflow definition does not).
+    pub checkout: Digest,
     /// The declared output names the broker accepts.
     pub outputs: Vec<String>,
     /// The execution image.
@@ -249,6 +265,12 @@ impl Transformation {
     /// and re-resolve the effective model identically, so the dispatched model is a
     /// function of the frozen revision, not a dispatch-time choice.
     ///
+    /// `checkout` is the git commit the attempt's worker checks out — the sealed
+    /// source the candidate is built against, which the reducer resolves per stage
+    /// (the bloom's sealed base for every member-line stage today). It is a
+    /// separate axis from `subject`: `subject` binds the evidence, `checkout` names
+    /// the tree the work runs on. See [`checkout`](Self::checkout).
+    ///
     /// The per-stage lane details (typed command, execution image, network
     /// posture) are the initial calibration — refinable without an ADR, like the
     /// catalog's tag/gate strings. Security splits by lane (ADR-0149 §Execution on
@@ -258,7 +280,7 @@ impl Transformation {
     /// never full network. A stage outside [`StageCatalog::MEMBER_LINE`] is not a
     /// dispatched per-member stage and has no lane here.
     #[must_use]
-    pub fn for_member_stage(stage: StageId, subject: Digest) -> Self {
+    pub fn for_member_stage(stage: StageId, subject: Digest, checkout: Digest) -> Self {
         let (command, image, network): (&str, &str, NetworkProfile) = match stage {
             // The mechanical Verify lane runs zero-egress; every model-driven lane
             // (Construct / Refine, and the non-member stages that fall through to
@@ -280,6 +302,7 @@ impl Transformation {
         Self {
             command: String::from(command),
             inputs: alloc::vec![subject],
+            checkout,
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
             image: String::from(image),
             limits: Budget::default(),
@@ -348,9 +371,12 @@ mod tests {
     // so it drifts the moment any consumes/produces/profile/process/gate/retry
     // value changes — catching an unintended catalog edit. Recompute-and-repin
     // only when a change *intends* to alter the authored line.
+    // Repinned for #3572: the Construct and Refine bindings' `process` re-pointed
+    // from the retired `implement` skill to the native `construct.implement`
+    // transform lane — an intended catalog edit, so the golden is recomputed.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x00, 0x8d, 0x8d, 0xf5, 0x13, 0x79, 0x9c, 0x0f, 0xac, 0x34, 0x16, 0x7f, 0xf6, 0x9e, 0x9d, 0x21, 0xbe, 0x0e,
-        0xac, 0xb6, 0xc3, 0x58, 0xe8, 0x9c, 0x6f, 0x38, 0x8f, 0xa4, 0x74, 0xf5, 0x8a, 0x85,
+        0x9e, 0x3f, 0x80, 0x6f, 0xa8, 0x13, 0x8f, 0x84, 0x70, 0x1b, 0xb8, 0x50, 0xe2, 0x74, 0xe1, 0x23, 0x39, 0x47,
+        0x9d, 0x64, 0xe0, 0x5f, 0x82, 0xdc, 0xc6, 0x23, 0x44, 0x19, 0x34, 0xb2, 0x87, 0x3a,
     ];
 
     #[test]
@@ -384,11 +410,44 @@ mod tests {
     #[test]
     fn member_stage_transformation_pins_subject_and_splits_egress_by_lane() {
         let subject = Digest::from_bytes([7; 32]);
-        let construct = Transformation::for_member_stage(StageId::Construct, subject);
+        let checkout = Digest::from_bytes([9; 32]);
+        let construct = Transformation::for_member_stage(StageId::Construct, subject, checkout);
         assert_eq!(construct.inputs, alloc::vec![subject]);
         assert_eq!(construct.outputs, alloc::vec![String::from(RESULT_RECORD_OUTPUT)]);
         assert_eq!(construct.network, NetworkProfile::Restricted);
-        assert_eq!(Transformation::for_member_stage(StageId::Verify, subject).network, NetworkProfile::None);
-        assert_eq!(Transformation::for_member_stage(StageId::Review, subject).network, NetworkProfile::Restricted);
+        assert_eq!(Transformation::for_member_stage(StageId::Verify, subject, checkout).network, NetworkProfile::None);
+        assert_eq!(
+            Transformation::for_member_stage(StageId::Review, subject, checkout).network,
+            NetworkProfile::Restricted
+        );
+    }
+
+    // The checkout target is a separate axis from the evidence-binding subject:
+    // `checkout` is the git commit the worker checks out (the sealed source),
+    // `inputs[0]` is the scope-revision digest the returned evidence binds to.
+    // Tripwire: a construction that conflated the two — dropping `checkout` or
+    // mirroring `subject` into it — would break the subject-threading contract
+    // #3572 established for the model lanes.
+    #[test]
+    fn member_stage_transformation_carries_the_checkout_distinct_from_the_subject() {
+        let subject = Digest::from_bytes([7; 32]);
+        let checkout = Digest::from_bytes([9; 32]);
+        let construct = Transformation::for_member_stage(StageId::Construct, subject, checkout);
+        assert_eq!(construct.checkout, checkout, "the checkout target is threaded onto the transformation");
+        assert_eq!(construct.inputs, alloc::vec![subject], "the subject stays the evidence-binding input, untouched");
+        assert_ne!(construct.checkout, construct.inputs[0], "checkout and subject are independent axes");
+    }
+
+    // Step-6 tripwire (#3572): the Construct and Refine bindings name the native
+    // `construct.implement` transform lane, never the retired `implement` skill.
+    // Deleting `.claude/skills/implement` (#3566) is gated on this — a binding that
+    // still named `implement` would point the lane at a skill no longer in the tree.
+    #[test]
+    fn construct_and_refine_bindings_name_the_native_lane_not_the_retired_skill() {
+        for stage in [StageId::Construct, StageId::Refine] {
+            let binding = StageCatalog::binding_of(stage);
+            assert_eq!(binding.process, "construct.implement", "{stage:?} must name the native construct lane");
+            assert_ne!(binding.process, "implement", "{stage:?} must not name the retired `implement` skill");
+        }
     }
 }
