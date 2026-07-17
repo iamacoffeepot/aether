@@ -281,12 +281,15 @@ pub enum QueryResult {
 /// the native source-port capability. Always compiled (like the store's
 /// [`Commit`] family) so the host can re-export them inward, cycle-free.
 mod source_mail;
-pub use source_mail::{ClaimResult, ClaimSeal, ReleaseSeal, TransferSeal};
+pub use source_mail::{
+    ClaimResult, ClaimSeal, CompleteRelease, CompleteTransfer, EnumerateClaims, EnumerateClaimsResult, ReleaseSeal,
+    TransferSeal,
+};
 
 mod claim_plan;
 pub use claim_plan::{
-    ReconcileOp, held_to_seal_error, held_to_supersede_error, reconcile_op, release_reclaim_mail, release_seal_mail,
-    seal_claim_mail, transfer_seal_mail,
+    HealOp, ReconcileOp, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_reclaim_mail,
+    release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
 
 #[cfg(feature = "runtime")]

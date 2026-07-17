@@ -13,13 +13,16 @@
 //! over an explicit [`SourceShell`].
 
 use aether_actor::runtime;
-use aether_bloomery::{BloomId, Checkpoint, ClaimOutcome, Digest, IntegrateOutcome, LandOutcome, WorkpieceId};
+use aether_bloomery::{
+    BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, Digest, IntegrateOutcome, LandOutcome, WorkpieceId,
+};
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::SourceCapability;
 use super::kinds::{
-    ClaimResult, ClaimSeal, Integrate, IntegrateResult, Land, LandResult, ListCheckpoints, ListCheckpointsResult,
-    RecordCheckpoint, RecordCheckpointResult, ReleaseSeal, Snapshot, SnapshotResult, TransferSeal,
+    ClaimResult, ClaimSeal, CompleteRelease, CompleteTransfer, EnumerateClaims, EnumerateClaimsResult, Integrate,
+    IntegrateResult, Land, LandResult, ListCheckpoints, ListCheckpointsResult, RecordCheckpoint,
+    RecordCheckpointResult, ReleaseSeal, Snapshot, SnapshotResult, TransferSeal,
 };
 use crate::bloomery::SourceShell;
 
@@ -281,6 +284,84 @@ impl SourceCapabilityState {
             Err(error) => ClaimResult::Err { error: error.to_string() },
         }
     }
+
+    /// Enumerate every live claim ref, classified by holder, and encode each into
+    /// the reply — the boot reconcile's deep-heal detection surface (ADR-0150
+    /// amended PR #3556). Claim registry disabled → an empty enumeration: an
+    /// unconfigured bin holds no refs.
+    #[must_use]
+    pub fn enumerate_claims(&self) -> EnumerateClaimsResult {
+        if !self.claims_enabled {
+            return EnumerateClaimsResult::Ok { states: Vec::new() };
+        }
+        match self.shell.enumerate_claims() {
+            Ok(states) => {
+                let mut encoded = Vec::with_capacity(states.len());
+                for state in &states {
+                    match to_vec(state) {
+                        Ok(bytes) => encoded.push(bytes),
+                        Err(error) => return EnumerateClaimsResult::Err { error: error.to_string() },
+                    }
+                }
+                EnumerateClaimsResult::Ok { states: encoded }
+            }
+            Err(error) => EnumerateClaimsResult::Err { error: error.to_string() },
+        }
+    }
+
+    /// Decode the operands, complete the per-ref transfer, and encode the outcome.
+    #[must_use]
+    pub fn complete_transfer(&self, predecessor: &[u8], successor: &[u8], ref_kind: &[u8]) -> ClaimResult {
+        let predecessor: BloomId = match from_bytes(predecessor) {
+            Ok(predecessor) => predecessor,
+            Err(error) => return ClaimResult::Err { error: error.to_string() },
+        };
+        let successor: BloomId = match from_bytes(successor) {
+            Ok(successor) => successor,
+            Err(error) => return ClaimResult::Err { error: error.to_string() },
+        };
+        let ref_kind: ClaimRefKind = match from_bytes(ref_kind) {
+            Ok(ref_kind) => ref_kind,
+            Err(error) => return ClaimResult::Err { error: error.to_string() },
+        };
+        // Claim registry disabled — the no-op the seal ops take; operands decoded
+        // first so a malformed request never reads as `Acquired` (see `seal_op`).
+        if !self.claims_enabled {
+            return ClaimResult::Acquired;
+        }
+        match self.shell.complete_transfer(&predecessor, &successor, &ref_kind) {
+            Ok(outcome) => claim_result(outcome),
+            Err(error) => ClaimResult::Err { error: error.to_string() },
+        }
+    }
+
+    /// Decode the operands, complete the per-ref release, and encode the outcome.
+    /// An **empty** `bloom` is the `None` holder — the holder-agnostic tombstone
+    /// sweep; a non-empty `bloom` releases that holder's ref.
+    #[must_use]
+    pub fn complete_release(&self, bloom: &[u8], ref_kind: &[u8]) -> ClaimResult {
+        let expected_holder: Option<BloomId> = if bloom.is_empty() {
+            None
+        } else {
+            match from_bytes(bloom) {
+                Ok(bloom) => Some(bloom),
+                Err(error) => return ClaimResult::Err { error: error.to_string() },
+            }
+        };
+        let ref_kind: ClaimRefKind = match from_bytes(ref_kind) {
+            Ok(ref_kind) => ref_kind,
+            Err(error) => return ClaimResult::Err { error: error.to_string() },
+        };
+        // Claim registry disabled — the no-op the seal ops take (operands decoded
+        // first regardless).
+        if !self.claims_enabled {
+            return ClaimResult::Acquired;
+        }
+        match self.shell.complete_release(expected_holder.as_ref(), &ref_kind) {
+            Ok(outcome) => claim_result(outcome),
+            Err(error) => ClaimResult::Err { error: error.to_string() },
+        }
+    }
 }
 
 #[runtime]
@@ -364,5 +445,27 @@ impl NativeActor for SourceCapability {
     #[handler::single]
     fn on_release_seal(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: ReleaseSeal) -> ClaimResult {
         state.release_seal(&mail.bloom, &mail.workpieces)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    #[handler::single]
+    fn on_enumerate_claims(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        _mail: EnumerateClaims,
+    ) -> EnumerateClaimsResult {
+        state.enumerate_claims()
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    #[handler::single]
+    fn on_complete_transfer(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: CompleteTransfer) -> ClaimResult {
+        state.complete_transfer(&mail.predecessor, &mail.successor, &mail.ref_kind)
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    #[handler::single]
+    fn on_complete_release(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: CompleteRelease) -> ClaimResult {
+        state.complete_release(&mail.bloom, &mail.ref_kind)
     }
 }

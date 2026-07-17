@@ -1,8 +1,11 @@
 //! The `aether.source.*` claim transact-mail kinds the wasm control core sends
 //! to the native source-port capability (ADR-0150 §The claim registry).
 //!
-//! These four kinds — [`ClaimSeal`], [`TransferSeal`], [`ReleaseSeal`], and the
-//! shared [`ClaimResult`] reply — are *defined here* in `aether-bloomery` rather
+//! These kinds — the seal/transfer/release ops ([`ClaimSeal`], [`TransferSeal`],
+//! [`ReleaseSeal`]) with their shared [`ClaimResult`] reply, plus the
+//! boot-reconcile deep-heal ops ([`EnumerateClaims`] with [`EnumerateClaimsResult`],
+//! and [`CompleteTransfer`] / [`CompleteRelease`], amended PR #3556) — are
+//! *defined here* in `aether-bloomery` rather
 //! than in `aether-bloomery-host` alongside the rest of the `aether.source.*`
 //! family, for the same reason the store's [`Commit`](super::Commit) family
 //! lives here: the wasm [`ControlCore`](super::ControlCore) actor's `on_admit`
@@ -69,6 +72,67 @@ pub struct ReleaseSeal {
     pub bloom: Vec<u8>,
     /// One `aether_data::wire`-encoded [`WorkpieceId`](crate::ids::WorkpieceId) per member.
     pub workpieces: Vec<Vec<u8>>,
+}
+
+/// Enumerate every live claim ref, classified by holder (ADR-0150 §The claim
+/// registry, amended PR #3556, mirroring
+/// [`aether_bloomery::SourceBackend::enumerate_claims`](crate::port::SourceBackend::enumerate_claims)).
+/// The boot reconcile drives this once after the V1 re-assert / re-release to
+/// detect the deep-heal states — a tombstoned ref to sweep, a ref stranded on a
+/// superseded predecessor to complete.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.source.enumerate_claims")]
+pub struct EnumerateClaims;
+
+/// Reply to [`EnumerateClaims`]: every live claim ref as a wire-encoded
+/// [`ClaimRefState`](crate::port::ClaimRefState).
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.source.enumerate_claims_result")]
+pub enum EnumerateClaimsResult {
+    /// The enumeration succeeded.
+    Ok {
+        /// One `aether_data::wire`-encoded [`ClaimRefState`](crate::port::ClaimRefState) per live ref.
+        states: Vec<Vec<u8>>,
+    },
+    /// The enumeration failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
+/// Idempotent per-ref transfer completion — case-3 primitive **(a)** (ADR-0150
+/// §The claim registry, amended PR #3556, mirroring
+/// [`aether_bloomery::SourceBackend::complete_transfer`](crate::port::SourceBackend::complete_transfer)):
+/// fast-forward one carried/admission ref from `predecessor` to `successor`. A
+/// ref already at the successor is the no-op that lets the boot re-drive
+/// converge. Shares the [`ClaimResult`] reply.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.source.complete_transfer")]
+pub struct CompleteTransfer {
+    /// The `aether_data::wire`-encoded predecessor [`BloomId`](crate::ids::BloomId).
+    pub predecessor: Vec<u8>,
+    /// The `aether_data::wire`-encoded successor [`BloomId`](crate::ids::BloomId).
+    pub successor: Vec<u8>,
+    /// The `aether_data::wire`-encoded [`ClaimRefKind`](crate::port::ClaimRefKind) to move.
+    pub ref_kind: Vec<u8>,
+}
+
+/// Idempotent per-ref release completion (ADR-0150 §The claim registry, amended
+/// PR #3556, mirroring
+/// [`aether_bloomery::SourceBackend::complete_release`](crate::port::SourceBackend::complete_release)):
+/// sweep a tombstoned ref or release a ref stranded on a superseded predecessor.
+/// An **empty** `bloom` is the `None` holder — the tombstone-sweep case that
+/// authorizes no live holder; a non-empty `bloom` releases that holder's ref.
+/// Shares the [`ClaimResult`] reply.
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.source.complete_release")]
+pub struct CompleteRelease {
+    /// The `aether_data::wire`-encoded expected-holder [`BloomId`](crate::ids::BloomId),
+    /// or **empty** for the holder-agnostic tombstone sweep (`None`).
+    pub bloom: Vec<u8>,
+    /// The `aether_data::wire`-encoded [`ClaimRefKind`](crate::port::ClaimRefKind) to release.
+    pub ref_kind: Vec<u8>,
 }
 
 /// Reply to [`ClaimSeal`], [`TransferSeal`], and [`ReleaseSeal`], mirroring

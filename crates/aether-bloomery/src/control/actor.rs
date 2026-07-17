@@ -31,15 +31,16 @@
 //! atomically inside the commit.
 
 use super::claim_plan::{
-    ReconcileOp, held_to_seal_error, held_to_supersede_error, reconcile_op, release_seal_mail, seal_claim_mail,
-    transfer_seal_mail,
+    HealOp, ReconcileOp, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail,
+    seal_claim_mail, transfer_seal_mail,
 };
 use super::{
-    Admit, AdmitResult, ClaimResult, ClaimSeal, Commit, CommitResult, DispatchPayload, MembershipMutation,
-    OutboxPayload, Query, QueryResult, RedispatchPayload, ReplayJournal, ReplayJournalResult, TransferSeal,
+    Admit, AdmitResult, ClaimResult, ClaimSeal, Commit, CommitResult, DispatchPayload, EnumerateClaims,
+    EnumerateClaimsResult, MembershipMutation, OutboxPayload, Query, QueryResult, RedispatchPayload, ReplayJournal,
+    ReplayJournalResult, TransferSeal,
 };
 use crate::ids::BloomId;
-use crate::port::ClaimRefKind;
+use crate::port::{ClaimRefKind, ClaimRefState};
 use crate::reduce::{Decision, Decisions, Event, Fact, Outcome, Snapshot, reduce, view_of};
 use aether_actor::{
     ActorInitError, MailSender, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
@@ -389,6 +390,37 @@ impl WasmActor for ControlCore {
         self.reconcile_claim_refs(ctx);
     }
 
+    /// Fold the enumerated claim refs into the boot-reconcile deep heals (ADR-0150
+    /// §The claim registry, amended PR #3556). The decode-then-plan is
+    /// [`plan_heals`](super::claim_plan::plan_heals) — pure and tested against the
+    /// real source capability in the `claim_reconcile` integration test — this
+    /// handler only decodes the enumeration and sends what it plans. Each heal is
+    /// idempotent, so its `ClaimResult` reply is discarded (an uncorrelated
+    /// arrival at [`Self::on_claim_result`], ignored like the V1 re-release); a
+    /// crash between the enumeration and a heal re-plans on the next boot. An
+    /// enumeration or per-state decode failure is unrecoverable at boot, so it
+    /// fail-fasts (ADR-0063), mirroring [`Self::on_replay_result`].
+    #[handler::single]
+    fn on_enumerate_claims_result(&mut self, ctx: &mut WasmCtx<'_>, mail: EnumerateClaimsResult) {
+        let states = match mail {
+            EnumerateClaimsResult::Ok { states } => states,
+            EnumerateClaimsResult::Err { error } => {
+                ctx.fatal_abort(format!("boot claim-ref enumeration failed: {error}"));
+            }
+        };
+        let states: Vec<ClaimRefState> = match states.iter().map(|bytes| from_bytes(bytes)).collect() {
+            Ok(states) => states,
+            Err(error) => ctx.fatal_abort(format!("boot claim-ref enumeration: a ref state did not decode: {error}")),
+        };
+        for op in plan_heals(&self.snapshot, &states) {
+            match op {
+                Ok(HealOp::Transfer(mail)) => ctx.send_to_named(SOURCE, &mail),
+                Ok(HealOp::Release(mail)) => ctx.send_to_named(SOURCE, &mail),
+                Err(error) => ctx.fatal_abort(format!("boot claim-ref deep heal: ref mail did not encode: {error}")),
+            }
+        }
+    }
+
     /// The `aether.bloomery.query` read surface. With `bloom` unset, reply the
     /// whole [`ViewDocument`](crate::port::ViewDocument); with `bloom` set to a
     /// digest, reply that one bloom's [`BloomView`](crate::port::BloomView) (or
@@ -496,6 +528,11 @@ impl ControlCore {
                 )),
             }
         }
+        // Then drive the deep heals (ADR-0150 §The claim registry, amended PR
+        // #3556): enumerate every live ref so [`Self::on_enumerate_claims_result`]
+        // can sweep tombstones and finish half-transfers the per-bloom V1 walk
+        // above cannot see. Fire-and-forget: the reply routes back to that handler.
+        ctx.send_to_named(SOURCE, &EnumerateClaims);
     }
 }
 

@@ -22,22 +22,24 @@
 //!   shared type), so building the mail with one side's type and decoding with
 //!   the other holds the two byte-compatible.
 //!
-//! Deeper heals — own-orphan reclaim, tombstone sweep, half-transfer completion
-//! — are the deep-heal slice's (#3555, ADR-0150 as amended 2026-07-17) and are
-//! deliberately absent here.
+//! The deep heals the deep-heal slice added (#3555, ADR-0150 as amended PR #3556)
+//! — the tombstone sweep and the own-bloom half-transfer completion — drive the
+//! pure `plan_heals` fold over the capability's real enumeration the same way,
+//! covering their restart convergence below. Own-orphan reclaim (case 1) stays
+//! deferred to its own follow-on and is deliberately absent.
 
 #![allow(clippy::unwrap_used)]
 
 use std::sync::Arc;
 
 use aether_bloomery::control::{
-    ReconcileOp, held_to_seal_error, held_to_supersede_error, reconcile_op, release_reclaim_mail, release_seal_mail,
-    seal_claim_mail, transfer_seal_mail,
+    HealOp, ReconcileOp, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_reclaim_mail,
+    release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
 use aether_bloomery::{
-    BloomDraft, BloomId, BloomSpec, ClaimRefKind, ClaimSeal, Decisions, Digest, Event, Evidence, EvidenceKind, Fact,
-    IdempotencyKey, Membership, ReleaseSeal, ResolutionClaim, SealConflict, SealError, Snapshot, StageCatalog,
-    SupersedeError, TransferSeal, WorkpieceId, reduce,
+    BloomDraft, BloomId, BloomSpec, ClaimRefKind, ClaimRefState, ClaimSeal, Decisions, Digest, EnumerateClaimsResult,
+    Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, ReleaseSeal, ResolutionClaim, SealConflict,
+    SealError, Snapshot, StageCatalog, SupersedeError, TransferSeal, WorkpieceId, reduce,
 };
 use aether_bloomery_github::GitSource;
 use aether_bloomery_github::testing::FakeGithub;
@@ -367,4 +369,128 @@ fn boot_reconcile_re_asserts_a_sealed_blooms_lost_refs_without_tearing_an_intact
     let contender = spec(1, vec![membership("w1", 31)]);
     let (ref_kind, held_by) = decode_held(&drive_seal(&state, &seal_claim_mail(&contender.id(), &contender).unwrap()));
     assert_eq!((ref_kind, held_by), (ClaimRefKind::Workpiece(workpiece("w1")), sealed.id()));
+}
+
+/// Point `name` at a commit whose tree is `holder`'s id — a live claim ref
+/// staged directly, for a `name` outside the `bloomery/claims/<wp>` shape
+/// [`stage_foreign_hold`] covers (e.g. the admission ref).
+fn stage_hold_at(fake: &FakeGithub, name: &str, holder: &BloomId) {
+    let commit = fake.seed_base_commit(&holder.0);
+    fake.seed_ref_at(name, &commit);
+}
+
+/// Point `name` at a tombstone commit (all-zero tree) — the ref state an
+/// interrupted `release_seal` leaves after its CAS-to-tombstone linearized but
+/// its name-only cleanup delete never ran.
+fn stage_tombstone(fake: &FakeGithub, name: &str) {
+    let commit = fake.seed_base_commit(&Digest::from_bytes([0u8; 32]));
+    fake.seed_ref_at(name, &commit);
+}
+
+/// Enumerate the live claim refs through the capability, decoding each state —
+/// the surface the boot reconcile folds through [`plan_heals`].
+fn drive_enumerate(state: &SourceCapabilityState) -> Vec<ClaimRefState> {
+    let EnumerateClaimsResult::Ok { states } = state.enumerate_claims() else {
+        panic!("expected an Ok enumeration")
+    };
+    states.iter().map(|bytes| from_bytes(bytes).unwrap()).collect()
+}
+
+/// Run the boot-reconcile deep-heal walk: enumerate, fold through `plan_heals`
+/// against the replay-rebuilt `snapshot`, and drive each planned heal through the
+/// capability — exactly what [`ControlCore`]'s `on_enumerate_claims_result` does.
+fn drive_heals(state: &SourceCapabilityState, snapshot: &Snapshot) {
+    for op in plan_heals(snapshot, &drive_enumerate(state)) {
+        match op.unwrap() {
+            HealOp::Transfer(mail) => {
+                assert_eq!(
+                    state.complete_transfer(&mail.predecessor, &mail.successor, &mail.ref_kind),
+                    ClaimResult::Acquired,
+                );
+            }
+            HealOp::Release(mail) => {
+                assert_eq!(state.complete_release(&mail.bloom, &mail.ref_kind), ClaimResult::Acquired);
+            }
+        }
+    }
+}
+
+#[test]
+fn boot_reconcile_sweeps_a_tombstoned_ref_an_interrupted_release_stranded() {
+    // A release CAS-to-tombstoned a member ref but the process died before its
+    // name-only cleanup delete ran: the repository holds a tombstone marker no
+    // bloom owns. The V1 walk (per-bloom, by status) never sees it — only the
+    // enumeration-driven sweep reclaims the name.
+    let (state, fake) = claim_state();
+    let landed = spec(1, vec![membership("w1", 11)]);
+    let snapshot = seal(&landed, 1);
+    let (snapshot, _) = land(snapshot, &landed, 40, 41);
+    stage_tombstone(&fake, &claim_ref("w1"));
+
+    drive_heals(&state, &snapshot);
+
+    assert!(!fake.ref_exists(&claim_ref("w1")), "the tombstoned ref name was swept");
+    // Idempotent: a second boot over the now-absent ref sweeps nothing new.
+    drive_heals(&state, &snapshot);
+    assert!(!fake.ref_exists(&claim_ref("w1")));
+    // The freed workpiece is claimable — no legitimate seal is blocked by the
+    // stranded tombstone.
+    let next = spec(41, vec![membership("w1", 21)]);
+    assert_eq!(drive_seal(&state, &seal_claim_mail(&next.id(), &next).unwrap()), ClaimResult::Acquired);
+}
+
+#[test]
+fn boot_reconcile_completes_a_half_transferred_supersede() {
+    // A supersession P→S crashed mid-`transfer_seal`: the admission ref already
+    // fast-forwarded to S, but the carried member w2 is still at P and the dropped
+    // member w1 was never released. The journal records P superseded by S (members
+    // {w2, w3}); the deep heal completes the carried ref to S and releases the
+    // stranded drop.
+    let (state, fake) = claim_state();
+    let predecessor = spec(1, vec![membership("w1", 11), membership("w2", 12)]);
+    let snapshot = seal(&predecessor, 1);
+    let successor = spec(1, vec![membership("w2", 12), membership("w3", 13)]);
+    let (snapshot, decisions) = step(
+        &snapshot,
+        &event("supersede", Fact::Supersede { predecessor: predecessor.id(), successor: successor.clone() }),
+    );
+    assert!(matches!(decisions.outcome, aether_bloomery::Outcome::Superseded { .. }));
+
+    // Stage the half-transfer repository state: admission at S (moved), w2 and w1
+    // still at P.
+    stage_hold_at(&fake, ADMISSION_REF, &successor.id());
+    stage_hold_at(&fake, &claim_ref("w2"), &predecessor.id());
+    stage_hold_at(&fake, &claim_ref("w1"), &predecessor.id());
+
+    drive_heals(&state, &snapshot);
+
+    // The carried ref completed to the successor: a contender on w2 is refused by
+    // S's hold, not P's.
+    let contender = spec(1, vec![membership("w2", 12)]);
+    let (ref_kind, held_by) = decode_held(&drive_seal(&state, &seal_claim_mail(&contender.id(), &contender).unwrap()));
+    assert_eq!((ref_kind, held_by), (ClaimRefKind::Workpiece(workpiece("w2")), successor.id()));
+    // The dropped member was released — its workpiece is claimable again.
+    assert!(!fake.ref_exists(&claim_ref("w1")), "the stranded dropped ref was released");
+    // Idempotent: a second boot over the converged state re-drives to no effect.
+    drive_heals(&state, &snapshot);
+    assert!(!fake.ref_exists(&claim_ref("w1")));
+}
+
+#[test]
+fn boot_reconcile_deep_heal_leaves_a_foreign_held_ref_untouched() {
+    // A ref held by a bloom this journal does not know as a superseded predecessor
+    // is report-only (ADR-0150's foreign-staleness boundary): the deep heal plans
+    // nothing for it, so an active peer's live claim survives the reconcile.
+    let (state, fake) = claim_state();
+    // The local journal is empty of this bloom; the repository holds its ref.
+    let foreign = BloomId(digest(70));
+    stage_foreign_hold(&fake, "w1", &foreign);
+    let snapshot = Snapshot::new(digest(1));
+
+    drive_heals(&state, &snapshot);
+
+    assert!(fake.ref_exists(&claim_ref("w1")), "a foreign live claim is never healed away");
+    let local = spec(1, vec![membership("w1", 11)]);
+    let (_, held_by) = decode_held(&drive_seal(&state, &seal_claim_mail(&local.id(), &local).unwrap()));
+    assert_eq!(held_by, foreign, "the foreign hold still blocks a local seal");
 }

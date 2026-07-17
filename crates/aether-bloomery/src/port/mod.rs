@@ -31,5 +31,6 @@ mod source;
 pub use executor::{Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
 pub use projection::{BloomView, MemberView, PendingDecisionView, ProjectionBackend, ViewDocument};
 pub use source::{
-    Checkpoint, ClaimOutcome, ClaimRefKind, IntegrateOutcome, LandOutcome, SourceBackend, SourceSnapshot,
+    Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, IntegrateOutcome, LandOutcome, SourceBackend,
+    SourceSnapshot,
 };

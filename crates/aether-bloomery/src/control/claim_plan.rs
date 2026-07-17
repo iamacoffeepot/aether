@@ -17,9 +17,9 @@ use alloc::vec::Vec;
 
 use aether_data::wire::{Error as WireError, to_vec};
 
-use super::{ClaimSeal, ReleaseSeal, TransferSeal};
+use super::{ClaimSeal, CompleteRelease, CompleteTransfer, ReleaseSeal, TransferSeal};
 use crate::ids::{BloomId, WorkpieceId};
-use crate::port::ClaimRefKind;
+use crate::port::{ClaimHolder, ClaimRefKind, ClaimRefState};
 use crate::reduce::{
     BloomRecord, BloomStatus, Decision, Decisions, SealConflict, SealError, Snapshot, SupersedeError,
     is_active_unlanded,
@@ -62,6 +62,114 @@ pub fn reconcile_op(record: &BloomRecord) -> Option<Result<ReconcileOp, WireErro
     } else {
         None
     }
+}
+
+/// One boot-reconcile deep heal (ADR-0150 §The claim registry, amended PR #3556)
+/// — the fire-and-forget mail a folded [`ClaimRefState`] implies. Both ops are
+/// idempotent, so a crash between the enumeration and the heal re-plans and
+/// re-drives cleanly on the next boot.
+#[derive(Debug, Clone)]
+pub enum HealOp {
+    /// Complete an interrupted supersede transfer of one carried/admission ref
+    /// from its stranded predecessor to the recorded successor (case-3 (a)).
+    Transfer(CompleteTransfer),
+    /// Sweep a tombstoned ref (an interrupted release's stranded cleanup, case 2)
+    /// or release a dropped ref stranded on a superseded predecessor (case 3's
+    /// dropped subset). The empty-`bloom` sweep and the holder-named release are
+    /// the two [`CompleteRelease`] shapes.
+    Release(CompleteRelease),
+}
+
+/// Fold the enumerated claim refs into the boot-reconcile deep heals (ADR-0150
+/// §The claim registry, amended PR #3556): a tombstone sweep (case 2) and an
+/// own-bloom half-transfer completion (case 3). Pure — a function of the
+/// replay-rebuilt `snapshot` and the enumeration — so the same `claim_reconcile`
+/// integration test drives it through the real source capability, exactly as it
+/// drives [`reconcile_op`].
+///
+/// Own-orphan reclaim (case 1) is **not** planned here: it needs the write-ahead
+/// intent journal deferred to its own follow-on, and a foreign hold cannot be
+/// told from an own orphan without an instance id the claim commit does not carry
+/// — so a ref held by a bloom this journal does not know as a superseded
+/// predecessor is left untouched (report-only, the boundary ADR-0150 draws).
+#[must_use]
+pub fn plan_heals(snapshot: &Snapshot, states: &[ClaimRefState]) -> Vec<Result<HealOp, WireError>> {
+    let mut ops = Vec::new();
+    for state in states {
+        match &state.holder {
+            // A tombstoned ref is an interrupted release whose CAS-to-tombstone
+            // linearized but whose name-only cleanup delete never ran — sweep it.
+            // Holder-agnostic and safe for any instance: a tombstone *is* released.
+            ClaimHolder::Tombstoned => ops.push(sweep_mail(&state.ref_kind).map(HealOp::Release)),
+            // A ref still held by a superseded predecessor is a crashed transfer's
+            // stranded ref. A carried/admission ref completes to the successor; a
+            // dropped ref the successor never re-admitted is released. A ref held by
+            // an active bloom (V1 re-assert owns it) or a foreign bloom (report-only)
+            // is left untouched.
+            ClaimHolder::Held(holder) => {
+                if let Some(successor) = superseded_successor(snapshot, holder) {
+                    if transferred_to_successor(snapshot, &state.ref_kind, &successor) {
+                        ops.push(transfer_heal_mail(holder, &successor, &state.ref_kind).map(HealOp::Transfer));
+                    } else {
+                        ops.push(release_heal_mail(holder, &state.ref_kind).map(HealOp::Release));
+                    }
+                }
+            }
+        }
+    }
+    ops
+}
+
+/// The successor a replayed bloom was superseded by, or `None` if the bloom is
+/// not a superseded predecessor this journal recorded — the ownership proof that
+/// gates case-3 healing (a ref held by a non-superseded bloom is left untouched).
+fn superseded_successor(snapshot: &Snapshot, bloom: &BloomId) -> Option<BloomId> {
+    let record = snapshot.blooms.get(bloom)?;
+    matches!(record.status, BloomStatus::Superseded).then_some(record.superseded_by).flatten()
+}
+
+/// Whether a predecessor-held ref should transfer to the successor (a carried
+/// member or the admission ref) rather than be released (a member the successor
+/// dropped). Mirrors `partition_members`: the admission ref is always carried, a
+/// workpiece is carried exactly when the successor re-admits it. A successor
+/// absent from the snapshot (never observed in practice — a superseded
+/// predecessor's successor is a live bloom) conservatively treats a member as
+/// dropped, so its stranded ref is released rather than moved to a phantom holder.
+fn transferred_to_successor(snapshot: &Snapshot, ref_kind: &ClaimRefKind, successor: &BloomId) -> bool {
+    match ref_kind {
+        ClaimRefKind::MainlineAdmission => true,
+        ClaimRefKind::Workpiece(workpiece) => snapshot
+            .blooms
+            .get(successor)
+            .is_some_and(|record| record.spec.members().iter().any(|member| member.workpiece == *workpiece)),
+    }
+}
+
+/// The tombstone-sweep [`CompleteRelease`] mail — an **empty** `bloom` (the
+/// `None` holder) so the sweep deletes the tombstone without authorizing any live
+/// holder.
+fn sweep_mail(ref_kind: &ClaimRefKind) -> Result<CompleteRelease, WireError> {
+    Ok(CompleteRelease { bloom: Vec::new(), ref_kind: to_vec(ref_kind)? })
+}
+
+/// The stranded-drop [`CompleteRelease`] mail — the predecessor named as the
+/// authorized holder, so the release CAS-tombstones and deletes exactly its ref.
+fn release_heal_mail(holder: &BloomId, ref_kind: &ClaimRefKind) -> Result<CompleteRelease, WireError> {
+    Ok(CompleteRelease { bloom: to_vec(holder)?, ref_kind: to_vec(ref_kind)? })
+}
+
+/// The half-transfer-completion [`CompleteTransfer`] mail — fast-forward one
+/// carried/admission ref from the stranded predecessor to the recorded successor.
+fn transfer_heal_mail(
+    predecessor: &BloomId,
+    successor: &BloomId,
+    ref_kind: &ClaimRefKind,
+) -> Result<CompleteTransfer, WireError> {
+    Ok(CompleteTransfer {
+        predecessor: to_vec(predecessor)?,
+        successor: to_vec(successor)?,
+        ref_kind: to_vec(ref_kind)?,
+    })
 }
 
 /// Encode each workpiece to its canonical [`aether_data::wire`] bytes — the
