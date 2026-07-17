@@ -49,6 +49,12 @@ serde = { workspace = true, default-features = false, features = ["derive", "all
 # dep is gated out of the wasm cdylib build.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 inventory = { workspace = true }
+# The real ed25519 `KeyProvider` (`Ed25519KeyProvider`) is native-only: the
+# host custodies key material and the core manifest-closure gate + its tests
+# construct the provider, but the wasm control actor never does (it holds no
+# keys, ADR-0149 §The boundary). Gating it out of the wasm cdylib keeps the
+# component lean and off curve25519-dalek's wasm build surface.
+ed25519-dalek = { workspace = true }
 
 [dev-dependencies]
 # The seven named invariants ride property tests (ADR-0149 migration

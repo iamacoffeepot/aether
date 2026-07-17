@@ -32,7 +32,22 @@ use aether_bloomery::{
     BloomDraft, Digest, Evidence, EvidenceKind, KeyId, Membership, Provenance, SignatureEnvelope, StageCatalog,
     Statement, Workpiece, WorkpieceId,
 };
+use ed25519_dalek::{Signer, SigningKey};
 use serde_json::Value;
+
+/// The deterministic authorized signer the test configures the `aether.signing`
+/// allowlist with and signs the answer statement with — a fixed seed, so the
+/// public key in the allowlist matches the private key that signs.
+fn owner_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[42u8; 32])
+}
+
+/// The `AETHER_SIGNING_ALLOWLIST` value trusting `owner` at [`owner_signing_key`]'s
+/// public half (`key-id:hex-public-key`).
+fn owner_allowlist() -> String {
+    let hex: String = owner_signing_key().verifying_key().to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    format!("owner:{hex}")
+}
 
 /// Locate the control-core wasm artifact, preferring `release` over `debug`.
 fn control_core_wasm() -> Option<PathBuf> {
@@ -60,6 +75,7 @@ fn spawn(http_port: u16, rpc_port: u16, wasm: &PathBuf) -> Child {
         .env("AETHER_HTTP_PORT", http_port.to_string())
         .env("AETHER_RPC_PORT", rpc_port.to_string())
         .env("AETHER_STORE_PATH", ":memory:")
+        .env("AETHER_SIGNING_ALLOWLIST", owner_allowlist())
         .env("AETHER_CONTROL_CORE_WASM", wasm)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -249,14 +265,39 @@ fn rest_api_drives_a_bloom_end_to_end() {
         let (status, _) = try_http(http_port, "POST", "/blooms/xyz/answer", Some(b"{}")).unwrap();
         assert_eq!(status, 400, "malformed bloom id");
 
-        // A valid author-signed answer that adopts no held question reduces to a
-        // clean rejection outcome — the sealed bloom carries no parked hold — 200
-        // carrying the reducer's refusal, mirroring how seal rejections surface.
-        let answer = Statement {
-            words: b"answer: choose A".to_vec(),
+        // An author-signed answer whose signature does NOT verify against the
+        // configured allowlist is rejected at the gate — a 400, never admitted.
+        // The signature is empty (not a 64-byte ed25519 signature), so the real
+        // provider refuses it where the fake always-valid provider would have
+        // admitted it.
+        let words = b"answer: choose A".to_vec();
+        let unsigned = Statement {
+            words: words.clone(),
             provenance: Provenance::AuthorSignature(SignatureEnvelope {
                 signer: KeyId("owner".to_owned()),
                 signature: vec![],
+            }),
+            parents: vec![Digest::from_bytes([222; 32])],
+        };
+        let (status, _) = send_json(
+            http_port,
+            "POST",
+            &format!("/blooms/{bloom_id}/answer"),
+            &serde_json::to_value(&unsigned).unwrap(),
+        );
+        assert_eq!(status, 400, "an answer with an unverifiable signature is rejected at the gate");
+
+        // A genuine author signature by the allowlisted `owner` verifies and
+        // admits; adopting no held question reduces to a clean rejection outcome
+        // — the sealed bloom carries no parked hold — 200 carrying the reducer's
+        // refusal, mirroring how seal rejections surface. This is the real
+        // custody path: the answer verified against the host-local allowlist, not
+        // the retired always-valid stub.
+        let answer = Statement {
+            words: words.clone(),
+            provenance: Provenance::AuthorSignature(SignatureEnvelope {
+                signer: KeyId("owner".to_owned()),
+                signature: owner_signing_key().sign(&words).to_bytes().to_vec(),
             }),
             parents: vec![Digest::from_bytes([222; 32])],
         };

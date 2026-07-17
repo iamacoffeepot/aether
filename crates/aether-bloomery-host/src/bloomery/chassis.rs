@@ -30,6 +30,7 @@ use crate::bloomery::driver::BloomeryDriverCapability;
 use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::{ExecutorDriverCapability, MirrorDriverCapability};
 use crate::session::{SessionConfig, SessionPoolCapability};
+use crate::signing::{SigningCapability, SigningConfig};
 use crate::source::SourceCapability;
 use crate::store::{StoreCapability, StoreConfig};
 
@@ -111,6 +112,10 @@ pub struct BloomeryEnv {
     pub github: GithubMirrorConfig,
     /// The executor session-reuse pool configuration.
     pub session: SessionConfig,
+    /// The `aether.signing` capability's host-local authorized-signer allowlist
+    /// (ADR-0149 step 3, ADR-0150). Unconfigured → no authorized signers, so the
+    /// answer gate rejects every signature (fail-closed).
+    pub signing: SigningConfig,
     /// Path to the control-core component wasm to autoload at boot; unset → no
     /// autoload (the control core is loaded on demand over RPC).
     pub control_core_wasm: Option<String>,
@@ -147,8 +152,9 @@ impl BloomeryEnv {
         let artifacts = ArtifactsConfig::try_from_argv_then_env(cli.artifacts.clone().into_layer())?;
         let github = GithubMirrorConfig::try_from_argv_then_env(cli.github.clone().into_layer())?;
         let session = SessionConfig::try_from_argv_then_env(cli.session.clone().into_layer())?;
+        let signing = SigningConfig::try_from_argv_then_env(cli.signing.clone().into_layer())?;
         let control_core_wasm = ControlCoreConfig::try_from_argv_then_env(cli.control_core.clone().into_layer())?.wasm;
-        Ok(Self { rpc_port, http_port, store, artifacts, github, session, control_core_wasm })
+        Ok(Self { rpc_port, http_port, store, artifacts, github, session, signing, control_core_wasm })
     }
 }
 
@@ -181,6 +187,7 @@ impl BloomeryChassis {
             <SessionPoolCapability as Addressable>::NAMESPACE.to_owned(),
             <SourceCapability as Addressable>::NAMESPACE.to_owned(),
             <AppAuthCapability as Addressable>::NAMESPACE.to_owned(),
+            <SigningCapability as Addressable>::NAMESPACE.to_owned(),
             <ComponentHostCapability as Addressable>::NAMESPACE.to_owned(),
             <RpcServerCapability as Addressable>::NAMESPACE.to_owned(),
             <HttpServerCapability as Addressable>::NAMESPACE.to_owned(),
@@ -196,7 +203,7 @@ impl BloomeryChassis {
     }
 
     fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {
-        let BloomeryEnv { rpc_port, http_port, store, artifacts, github, session, control_core_wasm } = env;
+        let BloomeryEnv { rpc_port, http_port, store, artifacts, github, session, signing, control_core_wasm } = env;
         let boot = SubstrateBoot::builder("aether-bloomery", env!("CARGO_PKG_VERSION")).build()?;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
@@ -236,6 +243,10 @@ impl BloomeryChassis {
             // actor is the custody owner and fails boot on a misconfigured key.
             .with_actor::<AppAuthCapability>(github)
             .with_actor::<SessionPoolCapability>(session)
+            // The statement-signature custody point (ADR-0149 step 3): the
+            // answer gate dials it to verify author signatures against the
+            // host-local allowlist rather than the fake always-valid provider.
+            .with_actor::<SigningCapability>(signing)
             .with_actor::<ComponentHostCapability>(component_host)
             .with_actor::<RpcServerCapability>(RpcServerConfig {
                 bind_addr: rpc_addr.to_string(),
@@ -280,6 +291,7 @@ impl BloomeryChassis {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{ArtifactsConfig, BloomeryChassis, BloomeryEnv, Chassis, GithubMirrorConfig, SessionConfig};
+    use crate::signing::SigningConfig;
     use crate::store::StoreConfig;
 
     #[test]
@@ -295,11 +307,12 @@ mod tests {
         // mailbox — a claim conflict or a failed store/shell open would surface
         // as a `BootError`, so `build` returning `Ok` is the assertion that the
         // `aether.store`, `aether.artifacts`, `aether.bloomery.mirror`,
-        // `aether.session`, `aether.source`, `aether.app_auth`, and
-        // `aether.component` mailboxes were claimed (the component host is the
+        // `aether.session`, `aether.source`, `aether.app_auth`, `aether.signing`,
+        // and `aether.component` mailboxes were claimed (the component host is the
         // reducer-actor load surface, ADR-0149 §Packaging). The default
         // (unconfigured) github config mounts `aether.app_auth` inert — it reads
-        // no key and opens no network.
+        // no key and opens no network — and the signing cap's default allowlist is
+        // empty, so its boot parses no keys.
         let artifacts_root = tempfile::tempdir().unwrap();
         let env = BloomeryEnv {
             rpc_port: 0,
@@ -312,6 +325,9 @@ mod tests {
             // The default `:memory:` pool touches no filesystem, so the session
             // cap claims `aether.session` without a data-dir open.
             session: SessionConfig::default(),
+            // The default (unconfigured) allowlist mounts the signing cap with no
+            // authorized signers — it claims `aether.signing` without parsing keys.
+            signing: SigningConfig::default(),
             // No autoload: this test asserts the passive caps claim their
             // mailboxes; component autoload is exercised by the control_loop
             // integration test.

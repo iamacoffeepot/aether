@@ -28,6 +28,7 @@ runtime = [
     "dep:aether-capabilities",
     "dep:aether-kinds",
     "dep:dirs",
+    "dep:ed25519-dalek",
     "dep:aether-bloomery-github",
     "dep:jsonwebtoken",
     "dep:rusqlite",
@@ -61,6 +62,11 @@ aether-kinds = { path = "../aether-kinds", optional = true }
 # Platform data-dir resolution for the artifacts store-root default (mirrors
 # the hub engines cap's `resolve_engine_store_root`).
 dirs = { version = "6", optional = true }
+# The `aether.signing` capability parses its host-local allowlist config into
+# ed25519 verifying keys (ADR-0149 step 3, ADR-0150). The pure verifier
+# (`Ed25519KeyProvider`) lives in `aether-bloomery`; this cap constructs it from
+# `VerifyingKey`s decoded here.
+ed25519-dalek = { workspace = true, optional = true }
 # The outward projection mirror the host mounts behind the projection cap
 # shell (#3459). Native (reqwest) — runtime-only, never in the wasm marker
 # build.
@@ -105,6 +111,10 @@ aether-bloomery-github = { path = "../aether-bloomery-github", features = ["test
 # substrate cap-test fixture (`aether_substrate::testing`), gated behind the
 # `test-support` feature so the fixture module is compiled for tests.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+# The REST answer-gate test signs a real author statement and configures the
+# `aether.signing` allowlist with its public key, so it needs the signing half
+# of the same ed25519 primitive the capability verifies with.
+ed25519-dalek = { workspace = true }
 tempfile = "3"
 
 [lints]

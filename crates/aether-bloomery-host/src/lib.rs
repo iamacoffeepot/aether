@@ -34,6 +34,14 @@
 //!   holds the token and network client, runs them and replies. ADR-0149 bars
 //!   the wasm guest from touching tokens, shells, or the network directly, the
 //!   same gap the store port already closed with `StoreCapability`.
+//! - [`signing`] — the native `aether.signing` capability, the single
+//!   statement-signature custody point (ADR-0149 step 3, ADR-0150/ADR-0151). It
+//!   loads the authorized-signer allowlist host-local (credentials never leave
+//!   the machine), constructs the real `Ed25519KeyProvider`, and serves an
+//!   `aether.signing.verify` request the live answer gate dials — replacing the
+//!   fake always-valid provider the gate verified against inline. Who may sign
+//!   in a person's stead is the allowlist, capability key policy, never reducer
+//!   logic.
 //! - [`api`] — the native `aether.bloomery.api` capability, a REST control
 //!   ingress mounted on the `aether.http.server` cap (ADR-0108) that drives the
 //!   bloom lifecycle from `curl` — stage / shape / seal / supersede and read
@@ -62,6 +70,7 @@
 pub mod app_auth;
 pub mod artifacts;
 pub mod session;
+pub mod signing;
 pub mod source;
 pub mod store;
 
