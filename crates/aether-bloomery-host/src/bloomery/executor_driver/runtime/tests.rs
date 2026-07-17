@@ -12,8 +12,9 @@ use aether_bloomery_github::{ActionsExecutor, Artifact, RunConclusion, RunStatus
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::{DISPATCH_TOPIC, NameEvidenceClaims, drain_and_dispatch, pull_and_admit};
-use crate::bloomery::ExecutorShell;
 use crate::bloomery::intake::attempt_artifact_name;
+use crate::bloomery::local_executor::testing::FixedRunner;
+use crate::bloomery::{ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle};
 use crate::store::{SqliteStore, StoreBackend};
 
 const WORKFLOW: &str = "bloomery-transform.yml";
@@ -144,4 +145,44 @@ fn pull_and_admit_admits_a_matching_construct_result_as_attempt_completed() {
     }
     // A non-terminal member stage — Construct has a successor in the line.
     assert!(StageCatalog::next_member_stage(StageId::Construct).is_some());
+}
+
+#[test]
+fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
+    // The whole local lane end-to-end: a Construct dispatch routes to the local
+    // backend (a stub `cargo xtask transform`), the run completes, and the pull
+    // side decodes the backend-synthesized evidence name and admits it — no
+    // GitHub, no fork, no secret. The construct record carries no `status`, so the
+    // verdict folds from the (stubbed) success exit to a passing attempt.
+    let base = tempfile::TempDir::new().unwrap();
+    let actions = Arc::new(ActionsExecutor::new(FakeGithub::new(), WORKFLOW, PINNED_REF));
+    let runner = FixedRunner {
+        evidence: r#"{"command":"construct.implement","nonce":"x","result_record":{"schema":1}}"#.to_owned(),
+        lifecycle: RunLifecycle::Exited { success: true },
+    };
+    let local = Arc::new(LocalExecutor::new(Arc::new(runner), base.path(), None, None));
+    let routing = RoutingExecutor::new(actions, local, vec!["construct.".to_owned()]);
+    let shell = ExecutorShell::new(Arc::new(routing));
+
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let bloom = BloomId(digest(1));
+    let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-local", 5);
+
+    let (mut tracked, ack_through) = drain_and_dispatch(&mut store, &shell).unwrap();
+    store.ack_outbox(Some(DISPATCH_TOPIC), ack_through.unwrap()).unwrap();
+    assert_eq!(tracked.len(), 1, "the construct order dispatched to the local backend");
+    assert_eq!(tracked[0].nonce.0, format!("dispatch-{sequence}"), "the handle carries the dispatch nonce");
+
+    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked);
+    assert_eq!(admits.len(), 1, "the completed local run's result admits to the control core");
+    assert!(tracked.is_empty(), "the admitted order was consumed");
+    let event: aether_bloomery::Event = from_bytes(&admits[0].event).unwrap();
+    match event.fact {
+        Fact::AttemptCompleted { workpiece, stage, passed, .. } => {
+            assert_eq!(workpiece, WorkpieceId("wp-local".to_owned()));
+            assert_eq!(stage, StageId::Construct);
+            assert!(passed, "a local construct success admits as a passing attempt");
+        }
+        other => panic!("expected a Fact::AttemptCompleted, got {other:?}"),
+    }
 }
