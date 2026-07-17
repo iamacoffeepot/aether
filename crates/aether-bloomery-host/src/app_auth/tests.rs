@@ -15,9 +15,7 @@ use aether_bloomery_github::{GithubError, InstallationToken, TokenSource};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Validation, decode};
 use serde::Deserialize;
 
-use super::kinds::MintTokenResult;
 use super::minter::{AppTokenSource, InstallationTokenExchange};
-use super::runtime::AppAuthCapabilityState;
 use crate::bloomery::GithubMirrorConfig;
 
 // A throwaway 2048-bit RSA keypair (never a real credential) — the fixture the
@@ -204,17 +202,4 @@ fn an_unparseable_expiry_forces_a_re_mint_rather_than_trusting_it() {
     assert_eq!(source.token().expect("first mint"), "ghs_minted_0");
     assert_eq!(source.token().expect("re-mint"), "ghs_minted_1");
     assert_eq!(exchange.calls.load(Ordering::SeqCst), 2);
-}
-
-#[test]
-fn mint_handler_reports_disabled_without_configuration_and_the_expiry_with_it() {
-    // Unconfigured custody → the introspection reply says Disabled (static-PAT
-    // path), never a spurious mint.
-    assert_eq!(AppAuthCapabilityState::new(None).mint(), MintTokenResult::Disabled);
-
-    // Configured custody → Minted carrying the expiry, never the token bytes.
-    let source =
-        AppTokenSource::with_exchange(1, 2, test_key(), 300, Arc::new(CountingExchange::new("2099-01-01T00:00:00Z")));
-    let state = AppAuthCapabilityState::new(Some(Arc::new(source)));
-    assert_eq!(state.mint(), MintTokenResult::Minted { expires_at: "2099-01-01T00:00:00Z".to_owned() });
 }

@@ -150,8 +150,7 @@ impl AppTokenSource {
 
     /// The current installation token — the cached one while the wall clock is
     /// still before its skew-adjusted GitHub-reported expiry, else a freshly
-    /// minted-and-cached one. The introspection handler reads the full token (for
-    /// its expiry); [`TokenSource::token`] projects out the bearer.
+    /// minted-and-cached one. [`TokenSource::token`] projects out the bearer.
     ///
     /// # Errors
     /// JWT signing failed or the token exchange was refused.
@@ -159,7 +158,7 @@ impl AppTokenSource {
     // caller finding the token stale waits for the in-flight mint rather than
     // racing a second exchange against GitHub.
     #[allow(clippy::significant_drop_tightening)]
-    pub fn current(&self) -> Result<InstallationToken, GithubError> {
+    fn current(&self) -> Result<InstallationToken, GithubError> {
         let mut cache = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(cached) = cache.as_ref()
             && now_unix()? < cached.refresh_at_unix

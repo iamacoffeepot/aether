@@ -23,7 +23,6 @@ use aether_substrate::config::ConfigError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
 use crate::api::BloomeryApiCapability;
-use crate::app_auth::AppAuthCapability;
 use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
@@ -186,7 +185,6 @@ impl BloomeryChassis {
             <ExecutorDriverCapability as Addressable>::NAMESPACE.to_owned(),
             <SessionPoolCapability as Addressable>::NAMESPACE.to_owned(),
             <SourceCapability as Addressable>::NAMESPACE.to_owned(),
-            <AppAuthCapability as Addressable>::NAMESPACE.to_owned(),
             <SigningCapability as Addressable>::NAMESPACE.to_owned(),
             <ComponentHostCapability as Addressable>::NAMESPACE.to_owned(),
             <RpcServerCapability as Addressable>::NAMESPACE.to_owned(),
@@ -235,13 +233,13 @@ impl BloomeryChassis {
             // executor port, and admits matched results back to the control core.
             // Reuses the one GitHub-connection config the mirror + source caps do.
             .with_actor::<ExecutorDriverCapability>(github.clone())
-            .with_actor::<SourceCapability>(github.clone())
-            // App-key custody (ADR-0149 §Migration step 3): the addressable
-            // custody identity that reads the host-local App key at boot and
-            // exposes the `aether.app_auth.mint` confirmation surface. The port
-            // shells authenticate via their own in-process `TokenSource`; this
-            // actor is the custody owner and fails boot on a misconfigured key.
-            .with_actor::<AppAuthCapability>(github)
+            // App-key custody (ADR-0149 §Migration step 3) is not a mounted
+            // mailbox: the host-local minter (`app_auth::AppTokenSource`) is an
+            // in-process `TokenSource` the port shells' client pulls from in
+            // `connect_client`, reading the App key and failing fast there
+            // (ADR-0150). This cap wires that same shared github config into the
+            // source shell.
+            .with_actor::<SourceCapability>(github)
             .with_actor::<SessionPoolCapability>(session)
             // The statement-signature custody point (ADR-0149 step 3): the
             // answer gate dials it to verify author signatures against the
@@ -307,12 +305,13 @@ mod tests {
         // mailbox — a claim conflict or a failed store/shell open would surface
         // as a `BootError`, so `build` returning `Ok` is the assertion that the
         // `aether.store`, `aether.artifacts`, `aether.bloomery.mirror`,
-        // `aether.session`, `aether.source`, `aether.app_auth`, `aether.signing`,
-        // and `aether.component` mailboxes were claimed (the component host is the
-        // reducer-actor load surface, ADR-0149 §Packaging). The default
-        // (unconfigured) github config mounts `aether.app_auth` inert — it reads
-        // no key and opens no network — and the signing cap's default allowlist is
-        // empty, so its boot parses no keys.
+        // `aether.session`, `aether.source`, `aether.signing`, and
+        // `aether.component` mailboxes were claimed (the component host is the
+        // reducer-actor load surface, ADR-0149 §Packaging). App-key custody is
+        // not a mounted mailbox — the shells' `connect_client` reads the key
+        // in-process (ADR-0150), so the default (unconfigured) github config
+        // reads no key and opens no network — and the signing cap's default
+        // allowlist is empty, so its boot parses no keys.
         let artifacts_root = tempfile::tempdir().unwrap();
         let env = BloomeryEnv {
             rpc_port: 0,
