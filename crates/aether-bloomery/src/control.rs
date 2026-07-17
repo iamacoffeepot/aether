@@ -60,6 +60,44 @@ pub struct OutboxPayload {
     pub payload: Vec<u8>,
 }
 
+/// The re-dispatch outbox payload (ADR-0151): the bloom, the released question,
+/// and the adopting answer, each by digest. The wasm control actor enqueues it
+/// under the `aether.bloomery.redispatch` topic from a
+/// [`Decision::RedispatchStage`](crate::reduce::Decision::RedispatchStage); the
+/// executor dispatch consumer (#3505) decodes it to re-assemble the held attempt
+/// naming both digests. Defined here (always compiled) so the host consumer can
+/// decode it inward, cycle-free — like [`OutboxPayload`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RedispatchPayload {
+    /// The bloom whose held stage is re-dispatched.
+    pub bloom: crate::digest::Digest,
+    /// The released question's digest.
+    pub question: crate::digest::Digest,
+    /// The adopting answer's digest.
+    pub answer: crate::digest::Digest,
+}
+
+/// The per-member attempt dispatch outbox payload (ADR-0149 §The line): the
+/// bloom, the member, the stage, and the fully-built portable
+/// [`Transformation`](crate::values::Transformation) the executor dispatch
+/// consumer (#3505) wraps in a work order (adding an idempotency nonce) and
+/// submits through the executor port. The wasm control actor enqueues it under the
+/// `aether.bloomery.dispatch` topic from a
+/// [`Decision::DispatchAttempt`](crate::reduce::Decision::DispatchAttempt).
+/// Defined here (always compiled) so the host consumer can decode it inward,
+/// cycle-free — like [`OutboxPayload`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DispatchPayload {
+    /// The bloom the dispatched member belongs to.
+    pub bloom: crate::digest::Digest,
+    /// The member workpiece the attempt runs against.
+    pub workpiece: crate::ids::WorkpieceId,
+    /// The stage the attempt executes.
+    pub stage: crate::ids::StageId,
+    /// The portable transformation to submit.
+    pub transformation: crate::values::Transformation,
+}
+
 /// The combined atomic store commit (ADR-0149 §The control core). One
 /// transact-mail carrying the idempotency-keyed journal event plus the
 /// reducer's membership mutations and outbox payloads, applied in a **single**

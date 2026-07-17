@@ -10,17 +10,13 @@
 //! identical rule, so the dispatched model is exactly the one the bloom froze
 //! and the study stage grades cost against exactly that.
 
-use aether_bloomery::{
-    Budget, NetworkProfile, Nonce, ResolvedModel, ScopeRevision, StageCatalog, StageId, Transformation, WorkOrder,
-};
+use aether_bloomery::{Nonce, ResolvedModel, ScopeRevision, StageCatalog, StageId, Transformation, WorkOrder};
 
 /// The typed command id the model-driven construct lane dispatches. The runner's
 /// `xtask transform` entrypoint maps this id to a headless-Claude invocation.
+/// The canonical lane details live in [`Transformation::for_member_stage`]; this
+/// constant is retained for the study/dispatch consumers that name the command.
 pub const CONSTRUCT_IMPLEMENT_COMMAND: &str = "construct.implement";
-
-/// The execution image the construct lane runs under — the headless-Claude
-/// runner, sibling to the mechanical verify lane's `iama/verify:*`.
-const CONSTRUCT_IMAGE: &str = "iama/construct-claude:1";
 
 /// Build the `construct.implement` work order for a member and report the
 /// effective model + effort it resolves to.
@@ -30,22 +26,14 @@ const CONSTRUCT_IMAGE: &str = "iama/construct-claude:1";
 /// coordinator's view of what will run, which the runner re-derives identically
 /// from the same sealed content. The order pins the exact scope-revision digest
 /// it resolved (`transformation.inputs`), so the dispatched model is a function
-/// of the frozen revision, not a dispatch-time choice.
+/// of the frozen revision, not a dispatch-time choice. The transformation itself
+/// is built by the shared [`Transformation::for_member_stage`] the reducer also
+/// dispatches through, so the host and the reducer never drift on the lane shape.
 #[must_use]
 pub fn build_construct_order(scope_revision: &ScopeRevision, nonce: Nonce) -> (WorkOrder, ResolvedModel) {
     let profile = StageCatalog::profile_of(StageId::Construct);
     let resolved = scope_revision.model_override.resolve(&profile);
-    let transformation = Transformation {
-        command: CONSTRUCT_IMPLEMENT_COMMAND.to_owned(),
-        inputs: vec![scope_revision.digest()],
-        outputs: vec!["result_record".to_owned()],
-        image: CONSTRUCT_IMAGE.to_owned(),
-        limits: Budget::default(),
-        // The model lane reaches the model API, so — unlike the zero-egress
-        // mechanical verify lane — it runs under a restricted egress allowlist,
-        // never full network (ADR-0149 §Execution on Actions).
-        network: NetworkProfile::Restricted,
-    };
+    let transformation = Transformation::for_member_stage(StageId::Construct, scope_revision.digest());
     (WorkOrder { transformation, nonce }, resolved)
 }
 

@@ -16,6 +16,12 @@ use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::StageId;
 use crate::values::{AgentProfile, Budget, ReasoningEffort, ToolPolicy};
 
+/// The declared output name every dispatched attempt uploads its result record
+/// under — the study/verdict envelope the intake broker binds to the displayed
+/// digest (ADR-0149 §The line). The construct lane's original constant; hoisted
+/// here so every per-member stage's [`Transformation`] declares the same output.
+pub const RESULT_RECORD_OUTPUT: &str = "result_record";
+
 /// One stage's declared contract (ADR-0149 §The line).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct StageBinding {
@@ -83,6 +89,45 @@ impl StageCatalog {
     #[must_use]
     pub fn line_digest() -> Digest {
         Self::line().digest()
+    }
+
+    /// The per-member stage line a sealed bloom's members walk (ADR-0149 §The
+    /// line): the dispatched sub-sequence `Construct → Verify → Refine → Review`.
+    /// Its head [`entry_stage`](Self::entry_stage) is the stage a member enters at
+    /// seal; passing its terminal `Review` produces the member's
+    /// [`ResolutionClaim`](crate::values::ResolutionClaim), which folds into the
+    /// existing integrate path rather than dispatching a further attempt. The
+    /// bloom-level tail (`Integrate` / `AggregateVerify` / `AggregateReview` /
+    /// `Land` / `Study`) is the coarse lifecycle the reducer already owns — never
+    /// a dispatched per-member stage.
+    pub const MEMBER_LINE: &'static [StageId] =
+        &[StageId::Construct, StageId::Verify, StageId::Refine, StageId::Review];
+
+    /// The stage a sealed bloom's members enter the line at — the head of
+    /// [`MEMBER_LINE`](Self::MEMBER_LINE), `Construct`.
+    #[must_use]
+    pub const fn entry_stage() -> StageId {
+        StageId::Construct
+    }
+
+    /// The stage a member advances to after `stage`'s completion gate passes, or
+    /// `None` at the per-member terminus (`Review`) — a passing `Review` integrates
+    /// the member instead of dispatching a successor. `None` for any stage outside
+    /// [`MEMBER_LINE`](Self::MEMBER_LINE): the bloom-level tail is not a dispatched
+    /// per-member progression.
+    #[must_use]
+    pub fn next_member_stage(stage: StageId) -> Option<StageId> {
+        let index = Self::MEMBER_LINE.iter().position(|member_stage| *member_stage == stage)?;
+        Self::MEMBER_LINE.get(index + 1).copied()
+    }
+
+    /// The retry budget of a stage's binding in the line catalog — the attempt
+    /// allowance the reducer's completion gate caps re-dispatch at (ADR-0149 §The
+    /// line). `None` for a stage the catalog does not bind (unreachable for the
+    /// closed [`StageId`] set, but total by construction).
+    #[must_use]
+    pub fn retry_budget_of(stage: StageId) -> Option<u32> {
+        Self::line().bindings.into_iter().find(|binding| binding.stage == stage).map(|binding| binding.retry_budget)
     }
 
     /// The authored binding for one stage. An exhaustive `match` over the closed
@@ -196,6 +241,49 @@ pub struct Transformation {
     pub network: NetworkProfile,
 }
 
+impl Transformation {
+    /// The portable transformation one per-member stage dispatches against
+    /// `subject` — the frozen scope-revision digest the attempt pins as its input
+    /// (ADR-0149 §The line). The reducer builds this from the sealed catalog when
+    /// it decides to dispatch; the model-driven lanes re-read the pinned revision
+    /// and re-resolve the effective model identically, so the dispatched model is a
+    /// function of the frozen revision, not a dispatch-time choice.
+    ///
+    /// The per-stage lane details (typed command, execution image, network
+    /// posture) are the initial calibration — refinable without an ADR, like the
+    /// catalog's tag/gate strings. Security splits by lane (ADR-0149 §Execution on
+    /// Actions): the mechanical `Verify` lane runs zero-egress
+    /// ([`NetworkProfile::None`]); the model-driven `Construct` / `Refine` /
+    /// `Review` lanes reach the model API under a restricted egress allowlist,
+    /// never full network. A stage outside [`StageCatalog::MEMBER_LINE`] is not a
+    /// dispatched per-member stage and has no lane here.
+    #[must_use]
+    pub fn for_member_stage(stage: StageId, subject: Digest) -> Self {
+        let (command, image, network): (&str, &str, NetworkProfile) = match stage {
+            StageId::Construct => ("construct.implement", "iama/construct-claude:1", NetworkProfile::Restricted),
+            StageId::Verify => ("verify.check", "iama/verify:1", NetworkProfile::None),
+            StageId::Refine => ("construct.implement", "iama/construct-claude:1", NetworkProfile::Restricted),
+            StageId::Review => ("review.critic", "iama/review-claude:1", NetworkProfile::Restricted),
+            StageId::Sketch
+            | StageId::Scope
+            | StageId::Approve
+            | StageId::Integrate
+            | StageId::AggregateVerify
+            | StageId::AggregateReview
+            | StageId::Land
+            | StageId::Study => ("construct.implement", "iama/construct-claude:1", NetworkProfile::Restricted),
+        };
+        Self {
+            command: String::from(command),
+            inputs: alloc::vec![subject],
+            outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
+            image: String::from(image),
+            limits: Budget::default(),
+            network,
+        }
+    }
+}
+
 /// The network posture a transformation runs under. Untrusted lanes run with
 /// no egress (ADR-0149 §Execution on Actions).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -268,5 +356,35 @@ mod tests {
             GOLDEN_LINE_DIGEST,
             "authored stage catalog drifted from the pinned golden digest"
         );
+    }
+
+    // ADR-0149 §The line — the per-member line is the linear sub-sequence
+    // Construct → Verify → Refine → Review, entered at Construct and terminating
+    // (no successor) at Review. Tripwire: a reordered or dropped member-line stage
+    // breaks the dispatched progression the reducer walks.
+    #[test]
+    fn member_line_is_construct_verify_refine_review() {
+        assert_eq!(StageCatalog::entry_stage(), StageId::Construct);
+        assert_eq!(StageCatalog::next_member_stage(StageId::Construct), Some(StageId::Verify));
+        assert_eq!(StageCatalog::next_member_stage(StageId::Verify), Some(StageId::Refine));
+        assert_eq!(StageCatalog::next_member_stage(StageId::Refine), Some(StageId::Review));
+        assert_eq!(StageCatalog::next_member_stage(StageId::Review), None, "Review is the per-member terminus");
+        // A bloom-level tail stage is not part of the dispatched per-member line.
+        assert_eq!(StageCatalog::next_member_stage(StageId::Integrate), None);
+    }
+
+    // The per-member dispatch transformation pins the given subject as its single
+    // input and declares the shared result-record output; the mechanical Verify
+    // lane runs zero-egress while the model lanes run under restricted egress
+    // (ADR-0149 §Execution on Actions).
+    #[test]
+    fn member_stage_transformation_pins_subject_and_splits_egress_by_lane() {
+        let subject = Digest::from_bytes([7; 32]);
+        let construct = Transformation::for_member_stage(StageId::Construct, subject);
+        assert_eq!(construct.inputs, alloc::vec![subject]);
+        assert_eq!(construct.outputs, alloc::vec![String::from(RESULT_RECORD_OUTPUT)]);
+        assert_eq!(construct.network, NetworkProfile::Restricted);
+        assert_eq!(Transformation::for_member_stage(StageId::Verify, subject).network, NetworkProfile::None);
+        assert_eq!(Transformation::for_member_stage(StageId::Review, subject).network, NetworkProfile::Restricted);
     }
 }
