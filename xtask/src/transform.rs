@@ -339,13 +339,17 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
     }
     claude.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = claude.spawn().context("run headless claude")?;
-    child
-        .stdin
-        .take()
-        .context("headless claude stdin was not captured")?
-        .write_all(prompt.as_bytes())
-        .context("pipe the assembled prompt to headless claude")?;
+    // Pipe the prompt on a separate thread and reap the child unconditionally: if
+    // the write races an early exit (broken pipe) or the prompt outgrows the OS
+    // pipe buffer, returning on the write error before `wait_with_output` would
+    // drop `child` un-waited — `Child`'s `Drop` neither waits nor reaps — leaving a
+    // zombie (or a live, still-billing process) behind. Waiting first, then
+    // surfacing the writer's error, guarantees the child is reaped on every path.
+    let mut stdin = child.stdin.take().context("headless claude stdin was not captured")?;
+    let prompt_bytes = prompt.into_bytes();
+    let writer = std::thread::spawn(move || stdin.write_all(&prompt_bytes));
     let run = child.wait_with_output().context("await headless claude")?;
+    writer.join().expect("prompt-writer thread panicked").context("pipe the assembled prompt to headless claude")?;
     // A non-zero exit is the CLI itself failing to run (auth, bad args, crash) —
     // an operational failure, distinct from a task-level error, which a completed
     // run records as `is_error` inside the transcript. Surface it rather than
