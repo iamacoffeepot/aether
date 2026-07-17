@@ -164,8 +164,8 @@ async fn terminate_substrate_bad_engine_id_is_tool_error() {
 /// `SpawnSubstrateResponse.mails` is dropped.
 #[test]
 fn spawn_response_without_mails_is_bare_engine_info() {
-    let response = crate::args::SpawnSubstrateResponse {
-        engine: crate::args::EngineInfo {
+    let response = SpawnSubstrateResponse {
+        engine: EngineInfo {
             engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
             rpc_port: 8901,
             last_heartbeat_age_millis: 0,
