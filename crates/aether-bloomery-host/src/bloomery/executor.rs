@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
-use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, ReqwestGithub};
+use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError};
 
 use super::mirror::GithubMirrorConfig;
 
@@ -54,7 +54,7 @@ impl ExecutorShell {
     /// # Errors
     /// The underlying `reqwest` client could not be constructed.
     pub fn connect(config: &GithubMirrorConfig) -> Result<Self, GithubError> {
-        let client = ReqwestGithub::new(&config.to_github_config())?;
+        let client = config.connect_client()?;
         let backend =
             ActionsExecutor::new(client, config.executor_workflow_file.clone(), config.executor_dispatch_ref.clone());
         Ok(Self::new(Arc::new(backend)))

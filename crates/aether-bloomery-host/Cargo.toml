@@ -29,6 +29,7 @@ runtime = [
     "dep:aether-kinds",
     "dep:dirs",
     "dep:aether-bloomery-github",
+    "dep:jsonwebtoken",
     "dep:rusqlite",
     "dep:tracing",
     "dep:clap",
@@ -64,6 +65,10 @@ dirs = { version = "6", optional = true }
 # shell (#3459). Native (reqwest) — runtime-only, never in the wasm marker
 # build.
 aether-bloomery-github = { path = "../aether-bloomery-github", optional = true }
+# RS256 GitHub-App JWT minting for the `app_auth` installation-token custody
+# (ADR-0149 §Migration step 3). Uses `ring`, already in the dependency tree via
+# reqwest/rustls. Native-only — runtime-only, never in the wasm marker build.
+jsonwebtoken = { version = "9", optional = true }
 # SQLite in WAL mode: the durable single-writer journal / inbox / outbox /
 # active-membership store. `bundled` compiles SQLite from source.
 rusqlite = { workspace = true, optional = true }

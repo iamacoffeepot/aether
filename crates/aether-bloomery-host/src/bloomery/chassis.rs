@@ -23,6 +23,7 @@ use aether_substrate::config::ConfigError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
 use crate::api::BloomeryApiCapability;
+use crate::app_auth::AppAuthCapability;
 use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
@@ -179,6 +180,7 @@ impl BloomeryChassis {
             <ExecutorDriverCapability as Addressable>::NAMESPACE.to_owned(),
             <SessionPoolCapability as Addressable>::NAMESPACE.to_owned(),
             <SourceCapability as Addressable>::NAMESPACE.to_owned(),
+            <AppAuthCapability as Addressable>::NAMESPACE.to_owned(),
             <ComponentHostCapability as Addressable>::NAMESPACE.to_owned(),
             <RpcServerCapability as Addressable>::NAMESPACE.to_owned(),
             <HttpServerCapability as Addressable>::NAMESPACE.to_owned(),
@@ -226,7 +228,13 @@ impl BloomeryChassis {
             // executor port, and admits matched results back to the control core.
             // Reuses the one GitHub-connection config the mirror + source caps do.
             .with_actor::<ExecutorDriverCapability>(github.clone())
-            .with_actor::<SourceCapability>(github)
+            .with_actor::<SourceCapability>(github.clone())
+            // App-key custody (ADR-0149 §Migration step 3): the addressable
+            // custody identity that reads the host-local App key at boot and
+            // exposes the `aether.app_auth.mint` confirmation surface. The port
+            // shells authenticate via their own in-process `TokenSource`; this
+            // actor is the custody owner and fails boot on a misconfigured key.
+            .with_actor::<AppAuthCapability>(github)
             .with_actor::<SessionPoolCapability>(session)
             .with_actor::<ComponentHostCapability>(component_host)
             .with_actor::<RpcServerCapability>(RpcServerConfig {
@@ -287,9 +295,11 @@ mod tests {
         // mailbox — a claim conflict or a failed store/shell open would surface
         // as a `BootError`, so `build` returning `Ok` is the assertion that the
         // `aether.store`, `aether.artifacts`, `aether.bloomery.mirror`,
-        // `aether.session`, `aether.source`, and `aether.component` mailboxes
-        // were claimed (the component host is the reducer-actor load surface,
-        // ADR-0149 §Packaging).
+        // `aether.session`, `aether.source`, `aether.app_auth`, and
+        // `aether.component` mailboxes were claimed (the component host is the
+        // reducer-actor load surface, ADR-0149 §Packaging). The default
+        // (unconfigured) github config mounts `aether.app_auth` inert — it reads
+        // no key and opens no network.
         let artifacts_root = tempfile::tempdir().unwrap();
         let env = BloomeryEnv {
             rpc_port: 0,
