@@ -193,9 +193,9 @@ fn drain_and_dispatch(
             tracing::warn!(
                 target: "aether_bloomery_host::executor",
                 sequence = entry.sequence,
-                "dispatch transformation carries no subject input; skipping",
+                "dispatch transformation carries no subject input; stopping the ack prefix to re-drain",
             );
-            continue;
+            break;
         };
         let nonce = Nonce(format!("dispatch-{}", entry.sequence));
         let order = WorkOrder { transformation: payload.transformation, nonce: nonce.clone() };
@@ -244,7 +244,18 @@ fn pull_and_admit(
     // Drop the handles whose order was consumed on admit — a still-outstanding
     // order (order lookup Some) stays tracked to poll again; a store fault leaves
     // it tracked to retry rather than silently dropping it.
-    tracked.retain(|handle| store.lookup_order(&handle.nonce.0).ok().flatten().is_some());
+    tracked.retain(|handle| match store.lookup_order(&handle.nonce.0) {
+        Ok(order) => order.is_some(),
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_bloomery_host::executor",
+                nonce = %handle.nonce.0,
+                %error,
+                "order lookup failed; keeping the handle tracked to retry",
+            );
+            true
+        }
+    });
     sink.0.into_iter().map(|admission| admission.admit).collect()
 }
 

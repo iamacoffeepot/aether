@@ -447,6 +447,74 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
     );
 }
 
+#[test]
+fn a_failing_terminal_review_admits_attempt_completed_not_integrate() {
+    // Tripwire: the completion gate applies across the whole member line, the
+    // terminal Review included. A *failing* Review upload admits as a
+    // Fact::AttemptCompleted { passed: false } — never a Fact::Integrate — so the
+    // reducer retries/wedges it rather than recording a failing review as resolved.
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let workpiece = WorkpieceId("wp-review".to_owned());
+    let candidate = Digest::from_bytes([5; 32]);
+    // dispatch_record's default stage is the terminal Review.
+    let record = dispatch_record("n-rev", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
+    assert_eq!(record.stage, StageId::Review, "the record is at the terminal Review stage");
+    record_dispatch(&mut store, &record).unwrap();
+
+    let upload = UploadedEvidence {
+        nonce: Nonce("n-rev".to_owned()),
+        subject: candidate,
+        verdict: StageVerdict::ReviewFinding,
+        detail: Digest::from_bytes([7; 32]),
+    };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
+        panic!("a matching failing-review upload is admitted (the gate decides its fate, not the broker)");
+    };
+    let Fact::AttemptCompleted { stage, passed, .. } = &admission.event.fact else {
+        panic!("a failing terminal Review admits AttemptCompleted, not Integrate");
+    };
+    assert_eq!(*stage, StageId::Review);
+    assert!(!*passed, "a ReviewFinding verdict fails the gate");
+
+    // The order is consumed on accept, like any admitted result.
+    assert!(matches!(
+        admit_uploaded(&mut store, &upload).unwrap(),
+        AdmitDecision::Refused(IntakeRefusal::UnknownNonce(_))
+    ));
+}
+
+#[test]
+fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
+    // A well-formed dispatch only ever carries a member-line stage (Construct /
+    // Verify / Refine / Review); an order at any other stage is corrupt. It is
+    // refused as OutOfLineStage rather than folded into the member's resolution,
+    // and (like a digest mismatch) the order is NOT consumed.
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let workpiece = WorkpieceId("wp-off".to_owned());
+    let candidate = Digest::from_bytes([5; 32]);
+    let mut record = dispatch_record("n-off", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
+    record.stage = StageId::AggregateVerify;
+    record_dispatch(&mut store, &record).unwrap();
+
+    let upload = UploadedEvidence {
+        nonce: Nonce("n-off".to_owned()),
+        subject: candidate,
+        verdict: StageVerdict::VerificationPassed,
+        detail: Digest::from_bytes([7; 32]),
+    };
+    match admit_uploaded(&mut store, &upload).unwrap() {
+        AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(stage)) => {
+            assert_eq!(stage, StageId::AggregateVerify);
+        }
+        other => panic!("expected OutOfLineStage refusal, got {other:?}"),
+    }
+    // The order stayed live — the refusal precedes the consume, so a corrected
+    // dispatch could still land it.
+    assert!(store.lookup_order("n-off").unwrap().is_some(), "an out-of-line refusal leaves the order live");
+}
+
 // Tripwire: the attempt-artifact name codec round-trips (#3505). The wrapper
 // encodes an attempt result into an artifact name and the pull-side
 // `NameEvidenceClaims` decodes it from the reference; the two must be inverse, and

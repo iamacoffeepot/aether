@@ -65,6 +65,42 @@ fn drain_and_dispatch_submits_each_dispatch_and_records_its_order() {
 }
 
 #[test]
+fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
+    // Tripwire: a dispatch entry carrying no subject input stops the ack prefix at
+    // the last success (a `break`, like the decode/submit-failure paths) rather than
+    // being skipped and acked past by a later success in the same drain — a swallowed
+    // entry would never re-drain.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let shell = shell(FakeGithub::new());
+    let bloom = BloomId(digest(1));
+
+    // A well-formed dispatch, then a subject-less one, then another well-formed one.
+    let (first, _) = enqueue_construct_dispatch(&mut store, bloom, "wp-a", 5);
+    let mut subjectless = Transformation::for_member_stage(StageId::Construct, digest(9));
+    subjectless.inputs.clear();
+    let payload = DispatchPayload {
+        bloom: bloom.0,
+        workpiece: WorkpieceId("wp-none".to_owned()),
+        stage: StageId::Construct,
+        transformation: subjectless,
+    };
+    store.enqueue_outbox(DISPATCH_TOPIC, &to_vec(&payload).unwrap()).unwrap();
+    enqueue_construct_dispatch(&mut store, bloom, "wp-c", 7);
+
+    let (handles, ack_through) = drain_and_dispatch(&mut store, &shell).unwrap();
+
+    // Only the first entry submitted; the drain broke at the subject-less entry, so
+    // the ack prefix stops there rather than jumping past it to the third entry.
+    assert_eq!(handles.len(), 1, "only the entry before the subject-less one submitted");
+    assert_eq!(ack_through, Some(first), "the ack prefix stops at the last success, not a later one");
+
+    // The subject-less entry and the one behind it re-drain — nothing acked them away.
+    store.ack_outbox(Some(DISPATCH_TOPIC), ack_through.unwrap()).unwrap();
+    let remaining = store.drain_outbox(Some(DISPATCH_TOPIC)).unwrap();
+    assert_eq!(remaining.len(), 2, "the subject-less entry and the one behind it are not acked past");
+}
+
+#[test]
 fn pull_and_admit_admits_a_matching_construct_result_as_attempt_completed() {
     // The full loop: dispatch a Construct attempt, then a completed run uploads a
     // name-encoded passing result; the pull side decodes it via NameEvidenceClaims,

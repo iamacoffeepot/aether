@@ -827,10 +827,80 @@ fn a_failing_attempt_retries_within_budget_then_wedges() {
     );
 }
 
+// ADR-0149 §The line — Tripwire: the completion gate applies across the whole
+// member line, the terminal `Review` included. A *failing* `Review` retries within
+// its budget (2) and wedges on exhaustion here — it is never silently integrated;
+// only a *passing* `Review` leaves this path (through `Fact::Integrate`).
+#[test]
+fn a_failing_terminal_review_retries_within_budget_then_wedges() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (mut snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    // Advance the member Construct → Verify → Refine → Review with passing gates.
+    for stage in [StageId::Construct, StageId::Verify, StageId::Refine] {
+        let pass = event(
+            &format!("adv-{stage:?}"),
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage,
+                passed: true,
+                evidence: attempt_evidence(),
+            },
+        );
+        let (next, _) = step(&snapshot, &pass);
+        snapshot = next;
+    }
+    assert_eq!(
+        snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap().stage,
+        StageId::Review,
+        "the member advanced to the terminal Review stage",
+    );
+
+    let fail = |key: &str| {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Review,
+                passed: false,
+                evidence: attempt_evidence(),
+            },
+        )
+    };
+
+    // Review's retry_budget is 2: the first fail retries Review in place to attempt
+    // 2 — a re-dispatch of Review, never an Integrate of the failing review.
+    let (after1, d1) = step(&snapshot, &fail("r-fail-1"));
+    match d1.outcome {
+        Outcome::AttemptRetried { stage, attempt, .. } => {
+            assert_eq!(stage, StageId::Review);
+            assert_eq!(attempt, 2);
+        }
+        other => panic!("expected AttemptRetried, got {other:?}"),
+    }
+    assert!(
+        d1.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { stage: StageId::Review, .. })),
+        "a failing terminal Review re-dispatches Review",
+    );
+
+    // Attempt 2 fails: the budget is exhausted, so the member wedges — no dispatch,
+    // and no ResolutionClaim was ever produced from the failing verdict.
+    let (_after2, d2) = step(&after1, &fail("r-fail-2"));
+    assert!(matches!(d2.outcome, Outcome::AttemptWedged { stage: StageId::Review, .. }));
+    assert!(
+        !d2.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. })),
+        "a wedged terminal Review stops dispatching",
+    );
+}
+
 // ADR-0149 §The line — an attempt completion is refused when it does not name the
-// member's current cursor stage, when it names the terminal `Review` (which
-// integrates through `Fact::Integrate`, never completes here), for a non-member,
-// and for an unknown bloom.
+// member's current cursor stage, when it names the terminal `Review` with a
+// *passing* verdict (which integrates through `Fact::Integrate`, never completes
+// here), for a non-member, and for an unknown bloom.
 #[test]
 fn attempt_completion_refuses_mismatch_terminal_non_member_and_unknown() {
     let base = Snapshot::new(digest(1));

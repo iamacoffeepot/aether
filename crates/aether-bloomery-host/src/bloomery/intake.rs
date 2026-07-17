@@ -149,6 +149,10 @@ pub enum IntakeRefusal {
         /// The digest the upload actually claimed.
         claimed: Digest,
     },
+    /// The order's stage is not in the dispatched member line (Construct / Verify /
+    /// Refine / Review) — a well-formed dispatch only ever carries a member-line
+    /// stage, so this is a corrupt order. Refused rather than silently integrated.
+    OutOfLineStage(StageId),
 }
 
 /// An accepted attempt result: the reducer [`Event`] the upload normalized to
@@ -341,8 +345,13 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     //   reducer advances the member's cursor on a passing verdict, re-dispatches
     //   the stage within its retry budget on a failing one, and wedges once the
     //   budget is exhausted.
-    // - The terminal Review (no successor stage) admits its resolving verdict as a
-    //   Fact::Integrate — the member's ResolutionClaim, the existing integrate path.
+    // - The terminal Review admits by verdict: a *passing* one produces the member's
+    //   ResolutionClaim through Fact::Integrate (the existing integrate path); a
+    //   *failing* one admits as Fact::AttemptCompleted so the reducer retries within
+    //   Review's retry budget and wedges on exhaustion — the completion gate applies
+    //   across the whole member line, so a failing review is never silently integrated.
+    // - An out-of-line stage (not in the member line) is a corrupt order and is
+    //   refused, never routed to Integrate.
     let event = if upload.verdict == StageVerdict::Parked {
         Event {
             idempotency_key: IdempotencyKey(format!("aether.bloomery.park:{}", record.nonce.0)),
@@ -359,17 +368,35 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
                 evidence,
             },
         }
-    } else {
-        let claim = ResolutionClaim {
-            workpiece: record.workpiece.clone(),
-            scope_revision: record.scope_revision,
-            candidate: record.candidate,
-            evidence,
-        };
-        Event {
-            idempotency_key: IdempotencyKey(format!("aether.bloomery.integrate:{}", record.nonce.0)),
-            fact: Fact::Integrate { bloom: record.bloom, claim },
+    } else if record.stage == StageId::Review {
+        if verdict_passed(upload.verdict) {
+            let claim = ResolutionClaim {
+                workpiece: record.workpiece.clone(),
+                scope_revision: record.scope_revision,
+                candidate: record.candidate,
+                evidence,
+            };
+            Event {
+                idempotency_key: IdempotencyKey(format!("aether.bloomery.integrate:{}", record.nonce.0)),
+                fact: Fact::Integrate { bloom: record.bloom, claim },
+            }
+        } else {
+            Event {
+                idempotency_key: IdempotencyKey(format!("aether.bloomery.attempt:{}", record.nonce.0)),
+                fact: Fact::AttemptCompleted {
+                    bloom: record.bloom,
+                    workpiece: record.workpiece.clone(),
+                    stage: record.stage,
+                    passed: false,
+                    evidence,
+                },
+            }
         }
+    } else {
+        // An out-of-line stage never comes from a well-formed dispatch; refuse it
+        // rather than folding a non-line result into the member's resolution. The
+        // order stays live (unconsumed) — the refusal precedes the consume below.
+        return Ok(AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(record.stage)));
     };
     let admit = Admit { event: to_vec(&event)? };
     // Consume-once, only now that the admission is fully constructed. A lost race

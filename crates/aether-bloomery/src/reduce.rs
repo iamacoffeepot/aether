@@ -969,9 +969,11 @@ fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: &Statement)
 /// a failing gate re-dispatches the same stage while the stage's `retry_budget`
 /// allows and wedges the member once it is exhausted (a wedged member stops
 /// dispatching — a supersession is the escape). The attempt's evidence is recorded
-/// in the bloom's evidence log either way. The terminal `Review` stage never
-/// completes here — its passing result integrates the member through
-/// [`Fact::Integrate`], so a `Review` completion is [`AttemptCompletedError::TerminalStage`].
+/// in the bloom's evidence log either way. The completion gate applies across the
+/// whole member line, the terminal `Review` included: a *passing* `Review` integrates
+/// the member through [`Fact::Integrate`] and never completes here (a passing terminal
+/// completion is a mis-route, [`AttemptCompletedError::TerminalStage`]), but a *failing*
+/// `Review` retries within budget and wedges on exhaustion here like any other stage.
 fn reduce_attempt_completed(
     snapshot: &Snapshot,
     bloom: &BloomId,
@@ -991,12 +993,16 @@ fn reduce_attempt_completed(
             workpiece.clone(),
         )));
     };
-    // Only a non-terminal member stage completes here — a passing `Review`
-    // integrates through `Fact::Integrate`, so `next_member_stage` returning
-    // `None` marks a mis-routed terminal (or out-of-line) completion.
-    let Some(next) = StageCatalog::next_member_stage(stage) else {
+    // A *passing* terminal `Review` is a mis-route — a passing Review integrates
+    // through `Fact::Integrate` and never completes here, so a passing completion
+    // whose stage has no successor is rejected. A *failing* `Review` does complete
+    // here (retry/wedge below), so the guard fires only on the passing terminal
+    // case; a mis-routed passing terminal is caught before the cursor check so it
+    // reads as `TerminalStage` rather than a `StageMismatch`.
+    let next = StageCatalog::next_member_stage(stage);
+    if passed && next.is_none() {
         return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(stage)));
-    };
+    }
     // The completion must name the member's current cursor stage; a result for a
     // stage the member has already left is stale/out-of-order and is not acted on.
     let cursor = record.progress.get(workpiece).copied();
@@ -1011,7 +1017,10 @@ fn reduce_attempt_completed(
     // The attempt result is journaled evidence about the member, recorded whatever
     // the gate decides.
     let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
-    if passed {
+    // A passing gate advances the cursor to the next member stage and dispatches
+    // it. `next` is `Some` on this branch — a passing terminal completion was
+    // rejected above, so a passing stage always has a successor.
+    if let Some(next) = next.filter(|_| passed) {
         effects.push(Decision::AdvanceStage {
             bloom: *bloom,
             workpiece: workpiece.clone(),
@@ -1030,7 +1039,8 @@ fn reduce_attempt_completed(
     }
     // A failing gate re-dispatches the same stage while its retry budget allows;
     // an exhausted budget wedges the member — it stops dispatching rather than
-    // looping (the tripwire).
+    // looping (the tripwire). Uniform across the line: a failing terminal `Review`
+    // retries within its budget and wedges here too, never a silent integrate.
     let budget = StageCatalog::retry_budget_of(stage).unwrap_or(1);
     if attempts < budget {
         let attempt = attempts + 1;
