@@ -10,7 +10,6 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 use aether_bloomery_github::{GithubError, InstallationToken, TokenSource};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Validation, decode};
@@ -122,14 +121,36 @@ fn from_config_fails_fast_when_the_key_file_is_absent() {
 }
 
 #[test]
+fn connect_client_takes_the_app_branch_when_configured_and_the_static_branch_otherwise() {
+    // The host wiring under test (plan step 4): `connect_client` branches on
+    // `app_auth_configured`. The App branch reads the host-local key and builds a
+    // minted-token client; the static branch builds the backward-compatible
+    // PAT client. Assert the branch is taken by its distinguishing behavior — a
+    // configured-but-missing-key config errors (only the App branch reads a key),
+    // while the same knobs pointed at a real key, and an unconfigured config,
+    // both construct a client.
+    use std::io::Write as _;
+
+    // Unconfigured → the static-PAT branch constructs a client (no key read).
+    assert!(GithubMirrorConfig::default().connect_client().is_ok(), "static-PAT path builds a client");
+
+    // Configured with an absent key → the App branch is taken and fails fast
+    // (the static branch would have succeeded, so the error proves the branch).
+    let missing = configured(12345, "/nonexistent/does-not-exist.pem", 42);
+    assert!(missing.connect_client().is_err(), "App path reads the key and fails fast when it is absent");
+
+    // Configured with a real key on disk → the App branch constructs a
+    // minted-token client.
+    let mut key_file = tempfile::NamedTempFile::new().unwrap();
+    key_file.write_all(TEST_PRIVATE_KEY.as_bytes()).unwrap();
+    let path = key_file.path().to_str().unwrap().to_owned();
+    let with_key = configured(12345, &path, 42);
+    assert!(with_key.connect_client().is_ok(), "App path builds a client from a present key");
+}
+
+#[test]
 fn mint_jwt_signs_a_verifiable_rs256_token_issued_by_the_app() {
-    let source = AppTokenSource::with_exchange(
-        999,
-        42,
-        test_key(),
-        Duration::from_mins(5),
-        Arc::new(CountingExchange::new("e")),
-    );
+    let source = AppTokenSource::with_exchange(999, 42, test_key(), 300, Arc::new(CountingExchange::new("e")));
     let jwt = source.mint_jwt().expect("the fixture key signs a JWT");
 
     // The public key verifies the signature (proving the private key signed it)
@@ -146,10 +167,10 @@ fn mint_jwt_signs_a_verifiable_rs256_token_issued_by_the_app() {
 
 #[test]
 fn a_fresh_token_is_cached_and_reused_without_re_minting() {
-    // A normal skew (5 min) against a 1-hour lifetime → the first mint is reused
-    // on the next call: exactly one exchange, and the same token both times.
-    let exchange = Arc::new(CountingExchange::new("2026-07-17T13:00:00Z"));
-    let source = AppTokenSource::with_exchange(1, 2, test_key(), Duration::from_mins(5), exchange.clone());
+    // A token whose GitHub-reported expiry is far in the future is still fresh on
+    // the next call: exactly one exchange, and the same token both times.
+    let exchange = Arc::new(CountingExchange::new("2099-01-01T00:00:00Z"));
+    let source = AppTokenSource::with_exchange(1, 2, test_key(), 300, exchange.clone());
 
     let first = source.token().expect("first mint");
     let second = source.token().expect("cached reuse");
@@ -160,11 +181,25 @@ fn a_fresh_token_is_cached_and_reused_without_re_minting() {
 
 #[test]
 fn a_stale_token_is_re_minted_before_expiry() {
-    // A skew wider than the token lifetime forces every call into the
-    // refresh-before-expiry branch — the cadence that keeps a live token ahead
-    // of expiry. Each call re-mints, yielding a fresh token.
-    let exchange = Arc::new(CountingExchange::new("2026-07-17T13:00:00Z"));
-    let source = AppTokenSource::with_exchange(1, 2, test_key(), Duration::from_hours(2), exchange.clone());
+    // A token already past its GitHub-reported expiry is stale, so every call
+    // re-mints — the cadence driven by the real reported expiry, not an assumed
+    // lifetime. Each call yields a fresh token.
+    let exchange = Arc::new(CountingExchange::new("2000-01-01T00:00:00Z"));
+    let source = AppTokenSource::with_exchange(1, 2, test_key(), 300, exchange.clone());
+
+    assert_eq!(source.token().expect("first mint"), "ghs_minted_0");
+    assert_eq!(source.token().expect("re-mint"), "ghs_minted_1");
+    assert_eq!(exchange.calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn an_unparseable_expiry_forces_a_re_mint_rather_than_trusting_it() {
+    // GitHub should always return a strict RFC3339 expiry, but if it ever returns
+    // something unparseable the source must not trust a token of unknown
+    // lifetime: it caches a stale deadline (0) so the next call re-mints —
+    // fail-safe, never fail-open on a malformed expiry.
+    let exchange = Arc::new(CountingExchange::new("not-a-timestamp"));
+    let source = AppTokenSource::with_exchange(1, 2, test_key(), 300, exchange.clone());
 
     assert_eq!(source.token().expect("first mint"), "ghs_minted_0");
     assert_eq!(source.token().expect("re-mint"), "ghs_minted_1");
@@ -178,13 +213,8 @@ fn mint_handler_reports_disabled_without_configuration_and_the_expiry_with_it() 
     assert_eq!(AppAuthCapabilityState::new(None).mint(), MintTokenResult::Disabled);
 
     // Configured custody → Minted carrying the expiry, never the token bytes.
-    let source = AppTokenSource::with_exchange(
-        1,
-        2,
-        test_key(),
-        Duration::from_mins(5),
-        Arc::new(CountingExchange::new("2026-07-17T13:00:00Z")),
-    );
+    let source =
+        AppTokenSource::with_exchange(1, 2, test_key(), 300, Arc::new(CountingExchange::new("2099-01-01T00:00:00Z")));
     let state = AppAuthCapabilityState::new(Some(Arc::new(source)));
-    assert_eq!(state.mint(), MintTokenResult::Minted { expires_at: "2026-07-17T13:00:00Z".to_owned() });
+    assert_eq!(state.mint(), MintTokenResult::Minted { expires_at: "2099-01-01T00:00:00Z".to_owned() });
 }
