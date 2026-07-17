@@ -446,3 +446,48 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
         "the advance dispatches the next (Verify) attempt",
     );
 }
+
+// Tripwire: the attempt-artifact name codec round-trips (#3505). The wrapper
+// encodes an attempt result into an artifact name and the pull-side
+// `NameEvidenceClaims` decodes it from the reference; the two must be inverse, and
+// the nonce is authoritative from the reference (what the port matched the run
+// by), not the name's trailing segment. A drift in either half strands every
+// returning attempt result at the broker.
+#[test]
+fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
+    use aether_bloomery::EvidenceRef;
+
+    use super::{NameEvidenceClaims, attempt_artifact_name};
+
+    let claims = NameEvidenceClaims;
+    let cases = [
+        (StageVerdict::Approved, 5u8, 9u8),
+        (StageVerdict::VerificationPassed, 200, 201),
+        (StageVerdict::VerificationFailed, 0, 255),
+        (StageVerdict::ReviewFinding, 42, 7),
+        (StageVerdict::Parked, 17, 18),
+    ];
+    for (verdict, subject_seed, detail_seed) in cases {
+        let nonce = Nonce("dispatch-42".to_owned());
+        let subject = Digest::from_bytes([subject_seed; 32]);
+        let detail = Digest::from_bytes([detail_seed; 32]);
+        let name = attempt_artifact_name(&nonce, &subject, verdict, &detail);
+        let reference = EvidenceRef { name, nonce: nonce.clone(), artifact_id: 1, size_bytes: 10 };
+
+        let decoded = claims.claim_for(&reference).expect("a well-formed attempt name decodes");
+        assert_eq!(decoded.nonce, nonce);
+        assert_eq!(decoded.subject, subject);
+        assert_eq!(decoded.verdict, verdict);
+        assert_eq!(decoded.detail, detail);
+    }
+
+    // A non-attempt artifact name (a study record, a stray log) is skipped, not
+    // mis-decoded into a bogus attempt result.
+    let stray = EvidenceRef {
+        name: "study.dispatch-42.log".to_owned(),
+        nonce: Nonce("dispatch-42".to_owned()),
+        artifact_id: 2,
+        size_bytes: 3,
+    };
+    assert!(claims.claim_for(&stray).is_none(), "a non-attempt name yields no claim");
+}

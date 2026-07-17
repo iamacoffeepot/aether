@@ -24,10 +24,10 @@ use aether_substrate::{Chassis, SubstrateBoot};
 
 use crate::api::BloomeryApiCapability;
 use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
-use crate::bloomery::MirrorDriverCapability;
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
 use crate::bloomery::mirror::GithubMirrorConfig;
+use crate::bloomery::{ExecutorDriverCapability, MirrorDriverCapability};
 use crate::session::{SessionConfig, SessionPoolCapability};
 use crate::source::SourceCapability;
 use crate::store::{StoreCapability, StoreConfig};
@@ -176,6 +176,7 @@ impl BloomeryChassis {
             <StoreCapability as Addressable>::NAMESPACE.to_owned(),
             <ArtifactsCapability as Addressable>::NAMESPACE.to_owned(),
             <MirrorDriverCapability as Addressable>::NAMESPACE.to_owned(),
+            <ExecutorDriverCapability as Addressable>::NAMESPACE.to_owned(),
             <SessionPoolCapability as Addressable>::NAMESPACE.to_owned(),
             <SourceCapability as Addressable>::NAMESPACE.to_owned(),
             <ComponentHostCapability as Addressable>::NAMESPACE.to_owned(),
@@ -220,6 +221,11 @@ impl BloomeryChassis {
             .with_actor::<StoreCapability>(store)
             .with_actor::<ArtifactsCapability>(artifacts)
             .with_actor::<MirrorDriverCapability>(github.clone())
+            // The executor dispatch driver (#3505): drains the reducer's
+            // `aether.bloomery.dispatch` decisions, submits them through the
+            // executor port, and admits matched results back to the control core.
+            // Reuses the one GitHub-connection config the mirror + source caps do.
+            .with_actor::<ExecutorDriverCapability>(github.clone())
             .with_actor::<SourceCapability>(github)
             .with_actor::<SessionPoolCapability>(session)
             .with_actor::<ComponentHostCapability>(component_host)

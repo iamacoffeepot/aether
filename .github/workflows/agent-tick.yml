@@ -248,8 +248,15 @@ name: Agent tick
 # mode a periodic scanner should have.
 
 on:
-  schedule:
-    - cron: "7,27,47 * * * *"
+  # Staged tick retirement (ADR-0149 migration step 2, #3505): the cron `schedule`
+  # backstop is removed — Bloomery's executor dispatch driver
+  # (`aether.bloomery.executor`) now decides what to dispatch, so the periodic
+  # board-scan wavefront no longer owns scheduling. `workflow_run` (the completion
+  # chain) and `workflow_dispatch` (manual kick) are kept so the tick survives as a
+  # manual/transitional fallback rather than deleted machinery, and the
+  # `AGENT_ENABLED` kill switch + wave governor below stay intact. Deleting this
+  # workflow file is a follow-up sweep once the executor dispatch path has run the
+  # board live.
   workflow_run:
     workflows: ["Agent work"]
     types: [completed]

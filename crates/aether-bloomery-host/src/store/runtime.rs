@@ -22,6 +22,8 @@ use aether_actor::runtime;
 use aether_bloomery::{
     Commit, CommitResult, JournalRecord, MembershipMutation, OutboxPayload, ReplayJournal, ReplayJournalResult,
 };
+use std::time::Duration;
+
 use rusqlite::Connection;
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -213,6 +215,11 @@ impl SqliteStore {
         // committed transaction survives an application crash (`kill -9`).
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // A busy timeout so a second connection to the same file (the executor
+        // dispatch driver opens its own to drive the intake registry, #3505) waits
+        // for the WAL write lock rather than failing fast with SQLITE_BUSY; WAL is
+        // still single-writer, so the timeout serializes the rare concurrent write.
+        conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch(MIGRATIONS)?;
         Ok(Self { conn })
     }
