@@ -1188,19 +1188,16 @@ impl Snapshot {
                     record.holds.remove(question);
                 }
             }
-            // Snapshot-inert: re-dispatch is an outbox effect the store projects,
-            // rebuilt on replay from the journaled AdoptAnswer fact — it carries no
-            // in-snapshot state, like EmitReceipt's outbox row.
-            Decision::RedispatchStage { .. } => {}
             Decision::AdvanceStage { bloom, workpiece, progress } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.progress.insert(workpiece.clone(), *progress);
                 }
             }
-            // Snapshot-inert: a dispatch is an outbox effect the host submits,
-            // rebuilt on replay from the journaled fact — the cursor it pairs with
-            // rides its sibling `AdvanceStage`, like `RedispatchStage`/`EmitReceipt`.
-            Decision::DispatchAttempt { .. } => {}
+            // Snapshot-inert outbox effects the store projects and republishes,
+            // rebuilt on replay from the journaled fact — they carry no in-snapshot
+            // state, like EmitReceipt's outbox row. A dispatch's paired cursor rides
+            // its sibling AdvanceStage; a re-dispatch's hold release rides ReleaseHold.
+            Decision::RedispatchStage { .. } | Decision::DispatchAttempt { .. } => {}
             Decision::MarkSuperseded { bloom, by } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.status = BloomStatus::Superseded;

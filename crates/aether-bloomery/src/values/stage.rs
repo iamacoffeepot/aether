@@ -260,11 +260,15 @@ impl Transformation {
     #[must_use]
     pub fn for_member_stage(stage: StageId, subject: Digest) -> Self {
         let (command, image, network): (&str, &str, NetworkProfile) = match stage {
-            StageId::Construct => ("construct.implement", "iama/construct-claude:1", NetworkProfile::Restricted),
+            // The mechanical Verify lane runs zero-egress; every model-driven lane
+            // (Construct / Refine, and the non-member stages that fall through to
+            // the construct lane here) reaches the model API under restricted
+            // egress. Review is its own model lane.
             StageId::Verify => ("verify.check", "iama/verify:1", NetworkProfile::None),
-            StageId::Refine => ("construct.implement", "iama/construct-claude:1", NetworkProfile::Restricted),
             StageId::Review => ("review.critic", "iama/review-claude:1", NetworkProfile::Restricted),
-            StageId::Sketch
+            StageId::Construct
+            | StageId::Refine
+            | StageId::Sketch
             | StageId::Scope
             | StageId::Approve
             | StageId::Integrate

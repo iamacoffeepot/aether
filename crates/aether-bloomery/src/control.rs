@@ -35,6 +35,10 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+use crate::digest::Digest;
+use crate::ids::{StageId, WorkpieceId};
+use crate::values::Transformation;
+
 /// One active-membership mutation the store applies inside the combined
 /// [`Commit`] transaction: a workpiece claimed (or released) for a bloom. The
 /// bloom is its [`BloomId`](crate::ids::BloomId) digest's raw bytes, matching
@@ -70,11 +74,11 @@ pub struct OutboxPayload {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RedispatchPayload {
     /// The bloom whose held stage is re-dispatched.
-    pub bloom: crate::digest::Digest,
+    pub bloom: Digest,
     /// The released question's digest.
-    pub question: crate::digest::Digest,
+    pub question: Digest,
     /// The adopting answer's digest.
-    pub answer: crate::digest::Digest,
+    pub answer: Digest,
 }
 
 /// The per-member attempt dispatch outbox payload (ADR-0149 §The line): the
@@ -89,13 +93,13 @@ pub struct RedispatchPayload {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DispatchPayload {
     /// The bloom the dispatched member belongs to.
-    pub bloom: crate::digest::Digest,
+    pub bloom: Digest,
     /// The member workpiece the attempt runs against.
-    pub workpiece: crate::ids::WorkpieceId,
+    pub workpiece: WorkpieceId,
     /// The stage the attempt executes.
-    pub stage: crate::ids::StageId,
+    pub stage: StageId,
     /// The portable transformation to submit.
-    pub transformation: crate::values::Transformation,
+    pub transformation: Transformation,
 }
 
 /// The combined atomic store commit (ADR-0149 §The control core). One
