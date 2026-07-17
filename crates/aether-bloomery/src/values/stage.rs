@@ -168,9 +168,13 @@ impl StageCatalog {
                     "aggregate-review-approved",
                     2,
                 ),
-                StageId::Land => {
-                    (&["bloom.aggregate_verify", "bloom.aggregate_review"], &["bloom.receipt"], "land", "landed", 1)
-                }
+                StageId::Land => (
+                    &["bloom.aggregate_verify", "bloom.aggregate_review"],
+                    &["bloom.receipt"],
+                    "source.cas_land",
+                    "landed",
+                    1,
+                ),
                 StageId::Study => (&["bloom.receipt"], &["bloom.study"], "retrospect", "study-recorded", 1),
             };
         StageBinding {
@@ -298,6 +302,9 @@ impl Transformation {
             StageId::Scope => unreachable!(
                 "Scope is a pre-seal operator-harness process staged via the REST control API, never a dispatched member transformation"
             ),
+            StageId::Land => unreachable!(
+                "Land is a host-native source-port CAS (LandDriverCapability, #3559), never a dispatched member transformation"
+            ),
             StageId::Construct
             | StageId::Refine
             | StageId::Sketch
@@ -305,7 +312,6 @@ impl Transformation {
             | StageId::Integrate
             | StageId::AggregateVerify
             | StageId::AggregateReview
-            | StageId::Land
             | StageId::Study => ("construct.implement", "iama/construct-claude:1", NetworkProfile::Restricted),
         };
         Self {
@@ -386,9 +392,12 @@ mod tests {
     // Repinned again on the #3572→main merge: main's Scope binding `process`
     // re-point to `aether.bloomery.api` (#3570) folds into the same catalog, so
     // the merged line carries both edits and the golden is recomputed once more.
+    // Repinned for #3573: the Land binding's `process` re-pointed from the
+    // retired `land` skill to the native `source.cas_land` lane — an intended
+    // catalog edit, so the golden is recomputed once more.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x8d, 0x80, 0xf6, 0x85, 0x7e, 0xe8, 0x16, 0x13, 0xfe, 0x1d, 0x74, 0x7a, 0xce, 0x7b, 0xc3, 0x36, 0x48, 0x8b,
-        0xa8, 0xfa, 0x66, 0xa6, 0x6a, 0x90, 0xdc, 0xb2, 0x89, 0xce, 0xca, 0x22, 0xd7, 0x36,
+        0x78, 0xfc, 0xf3, 0xc2, 0xf8, 0x24, 0x09, 0x72, 0xeb, 0x31, 0xa9, 0xa6, 0xd8, 0xab, 0x3e, 0x20, 0x41, 0x47,
+        0x95, 0x8e, 0x41, 0xf9, 0x60, 0x5b, 0x3b, 0x6e, 0x58, 0x21, 0xcf, 0x25, 0x48, 0xc9,
     ];
 
     #[test]
@@ -423,6 +432,17 @@ mod tests {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
         let _ = Transformation::for_member_stage(StageId::Scope, subject, checkout);
+    }
+
+    // Land is a host-native source-port CAS (LandDriverCapability, #3559), never
+    // a dispatched member transformation — a mis-dispatch must fail loudly rather
+    // than silently running the Claude construct lane on a zero-secret worker.
+    #[test]
+    #[should_panic(expected = "host-native source-port CAS")]
+    fn for_member_stage_panics_on_land() {
+        let subject = Digest::from_bytes([7; 32]);
+        let checkout = Digest::from_bytes([9; 32]);
+        let _ = Transformation::for_member_stage(StageId::Land, subject, checkout);
     }
 
     // The per-member dispatch transformation pins the given subject as its single
