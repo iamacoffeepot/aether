@@ -31,6 +31,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 use reqwest::Method as ReqwestMethod;
 use reqwest::blocking::Client as BlockingClient;
@@ -336,23 +337,77 @@ pub trait HttpTransport {
     fn execute(&self, request: HttpRequest) -> Result<HttpResponse, GithubError>;
 }
 
-/// The production transport: a `reqwest::blocking` client.
-pub struct ReqwestTransport {
-    client: BlockingClient,
+/// The source of the bearer token each request authenticates with. The client
+/// resolves a token from this on every request rather than freezing one at
+/// construction, so a rotating credential — a GitHub-App installation token the
+/// host mints and refreshes (ADR-0149 §Migration step 3) — is picked up without
+/// reconstructing the client. The backward-compatible static-PAT path is a
+/// [`StaticTokenSource`].
+///
+/// `Send + Sync` because the client lives in a capability's runtime state, held
+/// behind an `Arc` and driven from the actor's dispatch thread.
+pub trait TokenSource: Send + Sync {
+    /// The current bearer token.
+    ///
+    /// # Errors
+    /// The token could not be produced — e.g. a minting source's exchange with
+    /// the credential authority failed.
+    fn token(&self) -> Result<String, GithubError>;
+}
+
+/// A fixed bearer token — the backward-compatible personal-access-token path.
+/// `GithubConfig.token` becomes one of these, so the mirror / unconfigured /
+/// test paths keep authenticating with a static string.
+pub struct StaticTokenSource {
     token: String,
 }
 
+impl StaticTokenSource {
+    /// Wrap a fixed bearer `token`.
+    #[must_use]
+    pub fn new(token: String) -> Self {
+        Self { token }
+    }
+}
+
+impl TokenSource for StaticTokenSource {
+    fn token(&self) -> Result<String, GithubError> {
+        Ok(self.token.clone())
+    }
+}
+
+/// A minted GitHub-App installation token and the moment it expires (the
+/// `expires_at` GitHub returns, an RFC3339 timestamp string kept for
+/// diagnostics). The host's App-auth custody caches this and re-mints before
+/// expiry.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct InstallationToken {
+    /// The installation access token — the bearer a
+    /// [`TokenSource`] hands the client.
+    pub token: String,
+    /// The token's expiry as GitHub reports it (RFC3339), for diagnostics.
+    pub expires_at: String,
+}
+
+/// The production transport: a `reqwest::blocking` client. The bearer token is
+/// not held here — the client resolves it per request from a [`TokenSource`]
+/// and passes it in the request's `Authorization` header, so the transport only
+/// executes requests.
+pub struct ReqwestTransport {
+    client: BlockingClient,
+}
+
 impl ReqwestTransport {
-    /// Build a transport bearing `token`.
+    /// Build the transport's `reqwest::blocking` client.
     ///
     /// # Errors
     /// The `reqwest` client could not be constructed.
-    pub fn new(token: String) -> Result<Self, GithubError> {
+    pub fn new() -> Result<Self, GithubError> {
         let client = BlockingClient::builder()
             .user_agent("aether-bloomery-github")
             .build()
             .map_err(|error| GithubError::Transport(error.to_string()))?;
-        Ok(Self { client, token })
+        Ok(Self { client })
     }
 }
 
@@ -364,10 +419,12 @@ impl HttpTransport for ReqwestTransport {
             Method::Patch => ReqwestMethod::PATCH,
             Method::Delete => ReqwestMethod::DELETE,
         };
+        // The `Authorization` bearer rides in `request.headers` (the client
+        // stamps it from its `TokenSource`), so the transport applies the
+        // caller's headers uniformly and holds no token itself.
         let mut builder = self
             .client
             .request(method, &request.url)
-            .bearer_auth(&self.token)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28");
         for (name, value) in &request.headers {
@@ -387,6 +444,7 @@ impl HttpTransport for ReqwestTransport {
 /// maps responses into the projection's models.
 pub struct ReqwestGithub<T: HttpTransport = ReqwestTransport> {
     transport: T,
+    token_source: Arc<dyn TokenSource>,
     api_base: String,
     repo_path: String,
 }
@@ -398,18 +456,33 @@ const MAX_LIST_PAGES: u32 = 100;
 const PER_PAGE: u32 = 100;
 
 impl<T: HttpTransport> ReqwestGithub<T> {
-    /// Build a client over `transport`, rooted at `api_base` (no trailing
-    /// slash) for `owner/repo`.
-    pub fn with_transport(transport: T, api_base: impl Into<String>, repo_path: impl Into<String>) -> Self {
-        Self { transport, api_base: api_base.into(), repo_path: repo_path.into() }
+    /// Build a client over `transport` bearing tokens from `token_source`,
+    /// rooted at `api_base` (no trailing slash) for `owner/repo`.
+    pub fn with_transport(
+        transport: T,
+        token_source: Arc<dyn TokenSource>,
+        api_base: impl Into<String>,
+        repo_path: impl Into<String>,
+    ) -> Self {
+        Self { transport, token_source, api_base: api_base.into(), repo_path: repo_path.into() }
     }
 
     fn issues_url(&self) -> String {
         format!("{}/repos/{}/issues", self.api_base, self.repo_path)
     }
 
+    // Resolve the current bearer from the token source and stamp it as the
+    // request's `Authorization` header, then execute. Every request routes
+    // through here so a rotating (App-minted) token is picked up per request
+    // and the transport stays token-agnostic.
+    fn dispatch(&self, method: Method, url: String, body: Option<String>) -> Result<HttpResponse, GithubError> {
+        let token = self.token_source.token()?;
+        let headers = vec![("Authorization".to_owned(), format!("Bearer {token}"))];
+        self.transport.execute(HttpRequest { method, url, headers, body })
+    }
+
     fn request(&self, method: Method, url: String, body: Option<String>) -> Result<HttpResponse, GithubError> {
-        let response = self.transport.execute(HttpRequest { method, url, headers: Vec::new(), body })?;
+        let response = self.dispatch(method, url, body)?;
         if (200..300).contains(&response.status) {
             Ok(response)
         } else {
@@ -420,7 +493,7 @@ impl<T: HttpTransport> ReqwestGithub<T> {
     // Like `request`, but a 404 is the clean "not present" answer (`Ok(None)`)
     // rather than an error — a ref lookup that misses is not a fault.
     fn request_opt(&self, method: Method, url: String) -> Result<Option<HttpResponse>, GithubError> {
-        let response = self.transport.execute(HttpRequest { method, url, headers: Vec::new(), body: None })?;
+        let response = self.dispatch(method, url, None)?;
         if (200..300).contains(&response.status) {
             Ok(Some(response))
         } else if response.status == 404 {
@@ -428,6 +501,23 @@ impl<T: HttpTransport> ReqwestGithub<T> {
         } else {
             Err(GithubError::Status { status: response.status, body: response.body })
         }
+    }
+
+    /// Mint an installation access token for `installation_id` — the
+    /// `POST /app/installations/{id}/access_tokens` exchange (ADR-0149
+    /// §Migration step 3). The client's [`TokenSource`] must bear the App JWT
+    /// for this call; the host's App-auth custody builds a JWT-bearing client
+    /// solely to drive this exchange, then authenticates every other request
+    /// with the returned installation token.
+    ///
+    /// # Errors
+    /// The exchange surface is unreachable or returned an error status, or the
+    /// 2xx body did not decode as an installation token.
+    pub fn create_installation_token(&self, installation_id: u64) -> Result<InstallationToken, GithubError> {
+        let url = format!("{}/app/installations/{installation_id}/access_tokens", self.api_base);
+        let response = self.request(Method::Post, url, None)?;
+        let gh: GhInstallationToken = decode(&response)?;
+        Ok(InstallationToken { token: gh.token, expires_at: gh.expires_at })
     }
 
     fn git_url(&self, suffix: &str) -> String {
@@ -440,14 +530,38 @@ impl<T: HttpTransport> ReqwestGithub<T> {
 }
 
 impl ReqwestGithub<ReqwestTransport> {
-    /// Build a client over the production `reqwest::blocking` transport.
+    /// Build a client over the production `reqwest::blocking` transport, bearing
+    /// the static PAT from `config` — the backward-compatible path.
     ///
     /// # Errors
     /// The `reqwest` client could not be constructed.
     pub fn new(config: &crate::GithubConfig) -> Result<Self, GithubError> {
-        let transport = ReqwestTransport::new(config.token.clone())?;
-        Ok(Self::with_transport(transport, config.api_base.clone(), config.repo_path()))
+        let source = Arc::new(StaticTokenSource::new(config.token.clone()));
+        Self::with_token_source(source, config.api_base.clone(), config.repo_path())
     }
+
+    /// Build a client over the production `reqwest::blocking` transport, bearing
+    /// tokens from `token_source` — the App-minted-token path (ADR-0149
+    /// §Migration step 3), where the source is the host's cached-and-refreshing
+    /// installation-token custody.
+    ///
+    /// # Errors
+    /// The `reqwest` client could not be constructed.
+    pub fn with_token_source(
+        token_source: Arc<dyn TokenSource>,
+        api_base: impl Into<String>,
+        repo_path: impl Into<String>,
+    ) -> Result<Self, GithubError> {
+        let transport = ReqwestTransport::new()?;
+        Ok(Self::with_transport(transport, token_source, api_base, repo_path))
+    }
+}
+
+#[derive(Deserialize)]
+struct GhInstallationToken {
+    token: String,
+    #[serde(default)]
+    expires_at: String,
 }
 
 #[derive(Deserialize)]
@@ -788,12 +902,7 @@ impl<T: HttpTransport> GitDataApi for ReqwestGithub<T> {
         // Name-only DELETE on the qualified `refs/{name}` route. A 404/422 means
         // the ref is already gone — the idempotent outcome release's cleanup
         // delete and an acquire's rollback both rely on, not a fault.
-        let response = self.transport.execute(HttpRequest {
-            method: Method::Delete,
-            url: self.git_url(&format!("refs/{name}")),
-            headers: Vec::new(),
-            body: None,
-        })?;
+        let response = self.dispatch(Method::Delete, self.git_url(&format!("refs/{name}")), None)?;
         if (200..300).contains(&response.status) || response.status == 404 || response.status == 422 {
             Ok(())
         } else {
@@ -902,7 +1011,12 @@ impl<T: HttpTransport> ActionsApi for ReqwestGithub<T> {
 mod tests {
     use std::cell::RefCell;
 
-    use super::{GithubApi, GithubError, HttpRequest, HttpResponse, HttpTransport, Method, NewIssue, ReqwestGithub};
+    use std::sync::{Arc, Mutex};
+
+    use super::{
+        GithubApi, GithubError, HttpRequest, HttpResponse, HttpTransport, Method, NewIssue, ReqwestGithub,
+        StaticTokenSource, TokenSource,
+    };
 
     // Records the last request and replays a queued response — the seam that
     // lets us assert URL/method/body shaping and status→error mapping with no
@@ -925,8 +1039,71 @@ mod tests {
         }
     }
 
+    // A token source whose value can change between requests — the seam for
+    // asserting the client re-reads a rotating token per request.
+    struct MutableTokenSource {
+        value: Mutex<String>,
+    }
+
+    impl TokenSource for MutableTokenSource {
+        fn token(&self) -> Result<String, GithubError> {
+            Ok(self.value.lock().expect("token lock").clone())
+        }
+    }
+
     fn client(status: u16, body: &str) -> ReqwestGithub<RecordingTransport> {
-        ReqwestGithub::with_transport(RecordingTransport::new(status, body), "https://api.github.com", "octo/shadow")
+        ReqwestGithub::with_transport(
+            RecordingTransport::new(status, body),
+            Arc::new(StaticTokenSource::new("t0ken".to_owned())),
+            "https://api.github.com",
+            "octo/shadow",
+        )
+    }
+
+    // The `Authorization: Bearer …` header the client stamps from its source.
+    fn bearer(request: &HttpRequest) -> String {
+        request
+            .headers
+            .iter()
+            .find(|(name, _)| name == "Authorization")
+            .map(|(_, value)| value.clone())
+            .expect("a request carries an Authorization header")
+    }
+
+    #[test]
+    fn each_request_bearer_is_read_from_the_token_source() {
+        // Tripwire: the client resolves the bearer per request from its source,
+        // so a rotated token (an App re-mint) is picked up without rebuilding the
+        // client — a slip back to a construction-frozen token would keep sending
+        // the stale value.
+        let source = Arc::new(MutableTokenSource { value: Mutex::new("first".to_owned()) });
+        let github = ReqwestGithub::with_transport(
+            RecordingTransport::new(200, "{}"),
+            source.clone(),
+            "https://api.github.com",
+            "octo/shadow",
+        );
+
+        github.update_issue(1, "t", "b").expect("2xx patch");
+        assert_eq!(bearer(&github.transport.last.borrow().clone().unwrap()), "Bearer first");
+
+        *source.value.lock().unwrap() = "second".to_owned();
+        github.update_issue(1, "t", "b").expect("2xx patch");
+        assert_eq!(bearer(&github.transport.last.borrow().clone().unwrap()), "Bearer second");
+    }
+
+    #[test]
+    fn create_installation_token_posts_the_app_route_and_decodes_token_and_expiry() {
+        // Tripwire: the exchange is `POST /app/installations/{id}/access_tokens`
+        // (App-level, not repo-scoped) and decodes both the token and its
+        // expiry — the shape the host's App-auth custody caches.
+        let github = client(201, r#"{"token":"ghs_minted","expires_at":"2026-07-17T13:00:00Z"}"#);
+        let minted = github.create_installation_token(42).expect("2xx decodes");
+        assert_eq!(minted.token, "ghs_minted");
+        assert_eq!(minted.expires_at, "2026-07-17T13:00:00Z");
+        let request = github.transport.last.borrow().clone().unwrap();
+        assert_eq!(request.method, Method::Post);
+        assert_eq!(request.url, "https://api.github.com/app/installations/42/access_tokens");
     }
 
     #[test]
