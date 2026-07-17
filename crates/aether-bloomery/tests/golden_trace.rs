@@ -71,16 +71,20 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // Repinned when `reduce_seal` began emitting per-member entry-stage dispatch
 // (`AdvanceStage` + `DispatchAttempt`) effects on seal (ADR-0149 §The line,
 // #3505) — an intended change to the decided output, so the golden is recomputed.
+// Repinned again for #3572: `Transformation` gained a `checkout` field (the git
+// commit the attempt's worker checks out, threaded onto every `DispatchAttempt`
+// as the bloom's sealed base) and the Construct/Refine bindings re-pointed to
+// `construct.implement` — intended changes to the decided output.
 // Repinned again when the Scope binding's `process` re-pointed to
 // `aether.bloomery.api` (#3570) — the sealed spec's stage catalog digest is
 // part of the decided output, so an intended catalog edit re-digests here too.
-// Repinned again when the Approve binding's `process` re-pointed to the
-// host-side pre-seal admission gate `aether.bloomery.approve_gate` (#3571) —
-// the sealed spec's stage catalog digest is part of the decided output, so an
-// intended catalog edit re-digests here too.
+// Repinned again on the #3571→main merge when the Approve binding's `process`
+// re-pointed to the host-side pre-seal admission gate `aether.bloomery.approve_gate`
+// (#3571) — the merged decision stream carries the #3570, #3571, and #3572 edits,
+// so the golden is recomputed once more.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0x35, 0x30, 0xb4, 0x95, 0xcb, 0x7d, 0x04, 0x5a, 0x13, 0xaf, 0x14, 0xa3, 0x81, 0xd3, 0xf8, 0x46, 0x13, 0xec, 0xc8,
-    0x93, 0x89, 0x54, 0xc0, 0xfc, 0xa1, 0x48, 0x31, 0x7f, 0x20, 0x91, 0x3c, 0x1f,
+    0x45, 0x4d, 0x50, 0xad, 0x89, 0xed, 0x84, 0x76, 0x49, 0x7a, 0x7f, 0xa6, 0xf8, 0x99, 0xb6, 0xec, 0x19, 0x7f, 0xff,
+    0x89, 0xeb, 0x6c, 0x6f, 0x6d, 0x63, 0x39, 0xe2, 0x1d, 0x8e, 0x15, 0x7f, 0xfb,
 ];
 
 #[test]

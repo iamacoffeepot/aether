@@ -35,7 +35,7 @@ fn enqueue_construct_dispatch(store: &mut SqliteStore, bloom: BloomId, workpiece
         bloom: bloom.0,
         workpiece: WorkpieceId(workpiece.to_owned()),
         stage: StageId::Construct,
-        transformation: Transformation::for_member_stage(StageId::Construct, digest(subject)),
+        transformation: Transformation::for_member_stage(StageId::Construct, digest(subject), digest(0xC0)),
     };
     let sequence = store.enqueue_outbox(DISPATCH_TOPIC, &to_vec(&payload).unwrap()).unwrap();
     (sequence, subject)
@@ -76,7 +76,7 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
 
     // A well-formed dispatch, then a subject-less one, then another well-formed one.
     let (first, _) = enqueue_construct_dispatch(&mut store, bloom, "wp-a", 5);
-    let mut subjectless = Transformation::for_member_stage(StageId::Construct, digest(9));
+    let mut subjectless = Transformation::for_member_stage(StageId::Construct, digest(9), digest(0xC0));
     subjectless.inputs.clear();
     let payload = DispatchPayload {
         bloom: bloom.0,

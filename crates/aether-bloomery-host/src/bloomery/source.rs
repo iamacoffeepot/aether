@@ -27,7 +27,7 @@ use aether_bloomery::{
     BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome, LandOutcome,
     SourceBackend, SourceSnapshot, WorkpieceId,
 };
-use aether_bloomery_github::{GitSource, GithubError, ReqwestGithub, SourceError};
+use aether_bloomery_github::{GitSource, GithubError, SourceError};
 
 use super::mirror::GithubMirrorConfig;
 
@@ -53,7 +53,7 @@ impl SourceShell {
     /// # Errors
     /// The underlying `reqwest` client could not be constructed.
     pub fn connect(config: &GithubMirrorConfig) -> Result<Self, GithubError> {
-        let client = ReqwestGithub::new(&config.to_github_config())?;
+        let client = config.connect_client()?;
         Ok(Self::new(Arc::new(GitSource::new(client, config.cas_land_enabled))))
     }
 

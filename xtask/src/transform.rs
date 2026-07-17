@@ -8,15 +8,20 @@
 //!   with CI. `verify.test` is deliberately out of scope (CI's test lane
 //!   pre-builds with `cargo xtask dist` under a heavier toolchain).
 //! - The **model-driven construct lane** (`construct.implement`, #3511) —
-//!   runs headless Claude at the resolved model + reasoning effort and writes
-//!   the nonce-tagged **result record** (cost / tokens / turns), derived from
-//!   the run transcript by `scripts/agent-usage-record.mjs`. Unlike the verify
-//!   lane it needs a credential, so it runs **worker-side** (BYO); the
+//!   runs headless Claude at the resolved model + reasoning effort against the
+//!   checked-out **subject** tree, and writes the nonce-tagged **result record**
+//!   (cost / tokens / turns) derived in-repo from the run transcript (#3572; the
+//!   lane no longer shells out to `scripts/agent-usage-record.mjs`, which #3565
+//!   deletes). The lane assembles its prompt from its own in-repo instruction
+//!   source (`construct_instructions.md`) plus the subject — it owns its process
+//!   natively rather than delegating to `.claude/skills/implement`. Unlike the
+//!   verify lane it needs a credential, so it runs **worker-side** (BYO); the
 //!   coordinator never sees it.
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus, Output};
-use std::{fs, process};
+use std::process::{Command, ExitStatus, Output, Stdio};
+use std::{fs, process, thread};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -33,6 +38,13 @@ pub struct TransformArgs {
     /// stamped into `evidence.json`.
     #[arg(long)]
     nonce: Option<String>,
+    /// The git commit this attempt's worker checked out — the sealed subject the
+    /// `construct.implement` lane builds against (#3572). Threaded end-to-end from
+    /// the executor's `subject` dispatch input; named in the assembled prompt so
+    /// the transcript records which tree the work ran on. Ignored by the verify
+    /// lane.
+    #[arg(long)]
+    subject: Option<String>,
     /// The model the `construct.implement` lane runs headless Claude under —
     /// the effective model the coordinator resolved from the sealed
     /// scope-revision (#3511). Ignored by the verify lane.
@@ -85,9 +97,10 @@ const CONSTRUCT_IMPLEMENT: &str = "construct.implement";
 
 /// The headless-Claude argv the `construct.implement` lane runs (#3511): `-p`
 /// non-interactive at the resolved `model`, emitting the stream-json transcript
-/// `scripts/agent-usage-record.mjs` derives the result record from. Pure so the
-/// model wiring is testable without spawning Claude; the reasoning effort rides
-/// the `AETHER_CONSTRUCT_EFFORT` env (a worker-side knob), not an argv flag.
+/// the in-repo result-record derivation reads. Pure so the model wiring is
+/// testable without spawning Claude; the reasoning effort rides the
+/// `AETHER_CONSTRUCT_EFFORT` env (a worker-side knob), not an argv flag, and the
+/// assembled prompt is piped on the child's stdin (not an argv positional).
 fn construct_argv(model: &str) -> Vec<String> {
     vec![
         "-p".to_owned(),
@@ -97,6 +110,29 @@ fn construct_argv(model: &str) -> Vec<String> {
         "stream-json".to_owned(),
         "--verbose".to_owned(),
     ]
+}
+
+/// The lane-owned in-repo instruction source (#3572). Embedded at build time so
+/// the construct lane owns its process natively — the prompt is assembled from
+/// this text, never from `.claude/skills/implement` in the worker's checkout.
+const CONSTRUCT_INSTRUCTIONS: &str = include_str!("construct_instructions.md");
+
+/// Assemble the headless-Claude prompt for the construct lane from the lane-owned
+/// `instructions` and the checked-out `subject` — pure so the assembly is testable
+/// without spawning Claude (#3572). The subject header names the exact sealed tree
+/// the worker is on, so the prompt (and the transcript that echoes it) records
+/// which subject the candidate was built against.
+fn assemble_construct_prompt(instructions: &str, subject: Option<&str>) -> String {
+    let subject_line = subject.map_or_else(
+        || "You are working in the checked-out subject tree — the sealed source this work order named.".to_owned(),
+        |subject| {
+            format!(
+                "You are working in the checked-out subject tree at commit `{subject}` — \
+                 the exact sealed source this work order named.",
+            )
+        },
+    );
+    format!("{instructions}\n\n## Subject\n\n{subject_line}\n")
 }
 
 /// `<out>/evidence.json` schema for the verify lane — the untrusted claim a
@@ -123,19 +159,99 @@ fn tail(s: &str, max: usize) -> &str {
     &s[start..]
 }
 
-/// Stamp the broker-matched `nonce` and the command id onto the result record
-/// `agent-usage-record.mjs` derived, producing the construct lane's evidence
-/// envelope. Pure so the nonce binding is testable without running Claude or
-/// node; a malformed record is carried verbatim under `record_raw` so evidence
-/// is never dropped.
-fn stamp_construct_evidence(nonce: Option<&str>, record_json: &str) -> serde_json::Value {
-    let record: serde_json::Value =
-        serde_json::from_str(record_json).unwrap_or_else(|_| serde_json::json!({ "record_raw": record_json }));
+/// Stamp the broker-matched `nonce` and the command id onto the derived result
+/// `record`, producing the construct lane's evidence envelope. Pure so the nonce
+/// binding is testable without running Claude (#3572).
+fn stamp_construct_evidence(nonce: Option<&str>, record: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "command": CONSTRUCT_IMPLEMENT,
         "nonce": nonce,
         "result_record": record,
     })
+}
+
+/// Derive the construct lane's result record from the headless-Claude stream-json
+/// `transcript` — the in-repo, node-free replacement (#3572) for the retired
+/// `scripts/agent-usage-record.mjs` shell-out (#3565 deletes that script). Pure,
+/// and faithful to the ledger derivation: the terminal `result` event carries
+/// cost / turns / duration / usage, and the first non-haiku assistant call's usage
+/// is the warm-resume cache-hit signal. A transcript with no terminal `result` (a
+/// run that died early) yields a `no_result` record rather than an error, so
+/// evidence is never dropped.
+fn derive_result_record(transcript: &str) -> serde_json::Value {
+    use serde_json::{Map, Value, json};
+
+    let mut result: Option<Value> = None;
+    let mut first_main: Option<Value> = None;
+    for line in transcript.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match event.get("type").and_then(Value::as_str) {
+            Some("result") => result = Some(event),
+            Some("assistant") if first_main.is_none() => {
+                let message = event.get("message").cloned().unwrap_or(Value::Null);
+                let model = message.get("model").and_then(Value::as_str).unwrap_or_default();
+                if model.contains("haiku") {
+                    continue;
+                }
+                if let Some(usage) = message.get("usage") {
+                    first_main = Some(
+                        json!({ "model": message.get("model").cloned().unwrap_or(Value::Null), "usage": usage.clone() }),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let or_zero = |value: &Value, key: &str| value.get(key).cloned().unwrap_or_else(|| json!(0));
+    let or_null = |value: &Value, key: &str| value.get(key).cloned().unwrap_or(Value::Null);
+
+    let mut record = Map::new();
+    record.insert("schema".to_owned(), json!(1));
+    for field in ["task", "ref", "run_id", "conclusion", "model", "created_at", "pool"] {
+        record.insert(field.to_owned(), Value::Null);
+    }
+
+    match &first_main {
+        Some(first) => {
+            let usage = first.get("usage").cloned().unwrap_or(Value::Null);
+            record.insert("first_call_model".to_owned(), or_null(first, "model"));
+            record.insert("first_call_cache_read".to_owned(), or_zero(&usage, "cache_read_input_tokens"));
+            record.insert("first_call_cache_write".to_owned(), or_zero(&usage, "cache_creation_input_tokens"));
+            record.insert("first_call_input".to_owned(), or_zero(&usage, "input_tokens"));
+        }
+        None => {
+            for field in ["first_call_model", "first_call_cache_read", "first_call_cache_write", "first_call_input"] {
+                record.insert(field.to_owned(), Value::Null);
+            }
+        }
+    }
+
+    let Some(result) = result else {
+        // A run that died before the terminal record — legible, cost unknown.
+        record.insert("no_result".to_owned(), json!(true));
+        return Value::Object(record);
+    };
+    let usage = result.get("usage").cloned().unwrap_or(Value::Null);
+    let cache_creation = usage.get("cache_creation").cloned().unwrap_or(Value::Null);
+    record.insert("num_turns".to_owned(), or_null(&result, "num_turns"));
+    record.insert("cost_usd".to_owned(), or_null(&result, "total_cost_usd"));
+    record.insert("duration_ms".to_owned(), or_null(&result, "duration_ms"));
+    record.insert("is_error".to_owned(), or_null(&result, "is_error"));
+    record.insert("input".to_owned(), or_zero(&usage, "input_tokens"));
+    record.insert("cache_write".to_owned(), or_zero(&usage, "cache_creation_input_tokens"));
+    record.insert("cache_write_1h".to_owned(), or_zero(&cache_creation, "ephemeral_1h_input_tokens"));
+    record.insert("cache_write_5m".to_owned(), or_zero(&cache_creation, "ephemeral_5m_input_tokens"));
+    record.insert("cache_read".to_owned(), or_zero(&usage, "cache_read_input_tokens"));
+    record.insert("output".to_owned(), or_zero(&usage, "output_tokens"));
+    // The terminal record whole — keeps every meter on disk for downstream study.
+    record.insert("result".to_owned(), result);
+    Value::Object(record)
 }
 
 /// Assembles the evidence record from a captured run's status — pure
@@ -199,24 +315,44 @@ fn spawn(invocation: &VerifyInvocation) -> Result<Output> {
         .context("run command")
 }
 
-/// The `construct.implement` lane: run headless Claude at the resolved model,
-/// capture the stream-json transcript, derive the result record via
-/// `agent-usage-record.mjs`, and write it as nonce-tagged evidence. This lane
-/// needs a Claude credential, so it runs worker-side (BYO) — never on the
-/// coordinator's zero-secret path.
+/// The `construct.implement` lane: assemble the prompt from the lane's in-repo
+/// instruction source plus the checked-out subject, run headless Claude at the
+/// resolved model, capture the stream-json transcript, derive the result record
+/// in-repo, and write it as nonce-tagged evidence (#3572). This lane needs a
+/// Claude credential, so it runs worker-side (BYO) — never on the coordinator's
+/// zero-secret path.
 fn run_construct(args: &TransformArgs) -> Result<()> {
     let model = args.model.as_deref().context("construct.implement requires --model (the resolved model)")?;
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
+    // The lane owns its process: the prompt is assembled from the in-repo
+    // instruction source and the checked-out subject, never from a skill in the
+    // worker's checkout. It is piped on the child's stdin.
+    let prompt = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, args.subject.as_deref());
+
     // Run headless Claude at the resolved model; the reasoning effort rides an
-    // env knob. The prompt/subject is the worker's checked-out tree at the
-    // pinned digest, piped on stdin by the wrapper.
+    // env knob.
     let mut claude = Command::new("claude");
     claude.args(construct_argv(model));
     if let Some(effort) = &args.effort {
         claude.env("AETHER_CONSTRUCT_EFFORT", effort);
     }
-    let run = claude.output().context("run headless claude")?;
+    claude.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = claude.spawn().context("run headless claude")?;
+    // Pipe the prompt on a separate thread and reap the child unconditionally: if
+    // the write races an early exit (broken pipe) or the prompt outgrows the OS
+    // pipe buffer, returning on the write error before `wait_with_output` would
+    // drop `child` un-waited — `Child`'s `Drop` neither waits nor reaps — leaving a
+    // zombie (or a live, still-billing process) behind. Waiting first, then
+    // surfacing the writer's error, guarantees the child is reaped on every path.
+    let mut stdin = child.stdin.take().context("headless claude stdin was not captured")?;
+    let prompt_bytes = prompt.into_bytes();
+    // Infra thread in a build tool — no settlement/trace umbrella applies here;
+    // it exists only to pipe stdin while the main thread reaps the child.
+    #[allow(clippy::disallowed_methods)]
+    let writer = thread::spawn(move || stdin.write_all(&prompt_bytes));
+    let run = child.wait_with_output().context("await headless claude")?;
+    writer.join().expect("prompt-writer thread panicked").context("pipe the assembled prompt to headless claude")?;
     // A non-zero exit is the CLI itself failing to run (auth, bad args, crash) —
     // an operational failure, distinct from a task-level error, which a completed
     // run records as `is_error` inside the transcript. Surface it rather than
@@ -232,25 +368,11 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
     let transcript_path = args.out.join("transcript.jsonl");
     fs::write(&transcript_path, &run.stdout).with_context(|| format!("write {}", transcript_path.display()))?;
 
-    // Derive the result record over the whole transcript (faithful reuse of the
-    // fleet ledger's derivation, `scripts/agent-usage-record.mjs`).
-    let record = Command::new("node")
-        .args(["scripts/agent-usage-record.mjs", "--transcript"])
-        .arg(&transcript_path)
-        .output()
-        .context("derive result record via agent-usage-record.mjs")?;
-    // The derivation script never exits non-zero on a short transcript (it emits
-    // a `no_result` envelope), so a non-zero exit is node itself failing —
-    // surface it rather than stamping evidence over empty stdout.
-    if !record.status.success() {
-        bail!(
-            "result-record derivation (agent-usage-record.mjs) failed: {}",
-            tail(&String::from_utf8_lossy(&record.stderr), 1000),
-        );
-    }
-    let record_json = String::from_utf8_lossy(&record.stdout);
+    // Derive the result record over the whole transcript, in-repo (no node
+    // shell-out): the terminal `result` plus the first-call cache signal.
+    let record = derive_result_record(&String::from_utf8_lossy(&run.stdout));
 
-    let evidence = stamp_construct_evidence(args.nonce.as_deref(), &record_json);
+    let evidence = stamp_construct_evidence(args.nonce.as_deref(), &record);
     let evidence_path = args.out.join("evidence.json");
     let mut json = serde_json::to_string_pretty(&evidence).context("serialize construct evidence")?;
     json.push('\n');
@@ -260,7 +382,10 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CONSTRUCT_IMPLEMENT, build_evidence, construct_argv, stamp_construct_evidence, verify_command};
+    use super::{
+        CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, assemble_construct_prompt, build_evidence, construct_argv,
+        derive_result_record, stamp_construct_evidence, verify_command,
+    };
 
     #[test]
     fn known_ids_map_to_ci_parity_argv() {
@@ -308,17 +433,70 @@ mod tests {
 
     #[test]
     fn construct_evidence_binds_the_nonce_and_carries_the_result_record() {
-        let record = r#"{"cost_usd":0.42,"num_turns":3,"input":1000}"#;
-        let evidence = stamp_construct_evidence(Some("nonce-7"), record);
+        let record = serde_json::json!({ "cost_usd": 0.42, "num_turns": 3, "input": 1000 });
+        let evidence = stamp_construct_evidence(Some("nonce-7"), &record);
         assert_eq!(evidence["command"], CONSTRUCT_IMPLEMENT);
         assert_eq!(evidence["nonce"], "nonce-7", "the broker-matched nonce binds the evidence");
         assert_eq!(evidence["result_record"]["cost_usd"], 0.42, "the derived cost/turns record is carried");
         assert_eq!(evidence["result_record"]["num_turns"], 3);
 
-        // A malformed derivation is carried verbatim, never dropped.
-        let raw = stamp_construct_evidence(None, "not json");
-        assert_eq!(raw["result_record"]["record_raw"], "not json");
-        assert!(raw["nonce"].is_null());
+        let no_nonce = stamp_construct_evidence(None, &serde_json::json!({ "no_result": true }));
+        assert!(no_nonce["nonce"].is_null());
+        assert_eq!(no_nonce["result_record"]["no_result"], true, "the derived record is carried whole");
+    }
+
+    // The prompt is assembled from the lane's own in-repo instruction source plus
+    // the checked-out subject — the construct lane owns its process natively and
+    // never reads `.claude/skills/implement` (#3572). Pure: no Claude spawn.
+    #[test]
+    fn construct_prompt_assembles_from_the_in_repo_instructions_and_subject() {
+        let prompt = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"));
+        assert!(prompt.starts_with(CONSTRUCT_INSTRUCTIONS), "the lane's own instruction source leads the prompt");
+        assert!(prompt.contains("## Subject"), "the checked-out subject is appended as its own section");
+        assert!(prompt.contains("abc123"), "the exact checked-out commit is named in the prompt");
+        assert!(
+            !prompt.contains(".claude/skills/implement"),
+            "the native lane never delegates to the retired implement skill",
+        );
+
+        // With no subject supplied, the prompt still stands and names no commit.
+        let subjectless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None);
+        assert!(subjectless.contains("## Subject"));
+        assert!(subjectless.starts_with(CONSTRUCT_INSTRUCTIONS));
+    }
+
+    // The result record is derived in-repo from the stream-json transcript — the
+    // node-free replacement (#3572) for the `agent-usage-record.mjs` shell-out.
+    #[test]
+    fn result_record_derives_the_terminal_result_and_first_call_from_the_transcript() {
+        let transcript = concat!(
+            r#"{"type":"assistant","message":{"model":"claude-3-5-haiku","usage":{"input_tokens":9}}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":100,"cache_read_input_tokens":40,"cache_creation_input_tokens":7}}}"#,
+            "\n",
+            "\n",
+            r#"{"type":"result","num_turns":3,"total_cost_usd":0.42,"is_error":false,"usage":{"input_tokens":1000,"output_tokens":200,"cache_read_input_tokens":50,"cache_creation":{"ephemeral_1h_input_tokens":11,"ephemeral_5m_input_tokens":22}}}"#,
+        );
+        let record = derive_result_record(transcript);
+        assert_eq!(record["schema"], 1);
+        assert_eq!(record["num_turns"], 3);
+        assert_eq!(record["cost_usd"], 0.42);
+        assert_eq!(record["is_error"], false);
+        assert_eq!(record["output"], 200);
+        assert_eq!(record["cache_write_5m"], 22, "the ephemeral-5m split is flattened out of cache_creation");
+        // The first non-haiku assistant call is the warm-resume cache signal; the
+        // haiku line before it is skipped.
+        assert_eq!(record["first_call_model"], "claude-opus-4-8");
+        assert_eq!(record["first_call_cache_read"], 40);
+        assert_eq!(record["result"]["num_turns"], 3, "the terminal record is carried whole");
+
+        // A transcript with no terminal `result` is a legible `no_result` row,
+        // never an error — evidence is never dropped.
+        let died_early = r#"{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":5}}}"#;
+        let partial = derive_result_record(died_early);
+        assert_eq!(partial["no_result"], true);
+        assert_eq!(partial["first_call_input"], 5);
+        assert!(partial.get("cost_usd").is_none(), "a died-early row carries no cost columns");
     }
 
     #[test]

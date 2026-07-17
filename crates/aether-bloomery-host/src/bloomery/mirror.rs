@@ -22,6 +22,8 @@ use std::sync::Arc;
 use aether_bloomery::{LandingReceipt, ProjectionBackend, ViewDocument};
 use aether_bloomery_github::{GithubConfig, GithubError, GithubProjection, ReqwestGithub};
 
+use crate::app_auth::AppTokenSource;
+
 /// The GitHub outward-mirror connection knobs (ADR-0090 derive-`Config`).
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_GITHUB", cli_prefix = "github")]
@@ -84,6 +86,27 @@ pub struct GithubMirrorConfig {
     /// (*who* may sign) — the two are never folded (ADR-0151).
     #[config(env = "AETHER_APPROVAL_POLICY_FILE", default = "bloomery/approval-policy.yml")]
     pub approval_policy_file: String,
+    /// The GitHub App id whose minted installation token supersedes the static
+    /// `token` when App-auth is configured (ADR-0149 §Migration step 3). `0`
+    /// (the default) means App-auth is off and the static `token` authenticates.
+    /// Carried on this shared config so the mirror, source, and executor caps
+    /// all authenticate the same way.
+    #[config(default = 0)]
+    pub app_id: u64,
+    /// Absolute path to the GitHub App's private-key PEM, held host-local
+    /// (ADR-0150 — the key bytes never leave the machine, never cross into wasm
+    /// or a config echo; the custody reads the file, mints a JWT, and discards
+    /// the key). Empty (the default) means App-auth is off.
+    #[config(default = "")]
+    pub app_private_key_path: String,
+    /// The installation id the App mints access tokens for. `0` (the default)
+    /// means App-auth is off.
+    #[config(default = 0)]
+    pub app_installation_id: u64,
+    /// Seconds before an installation token's expiry to re-mint it (the refresh
+    /// skew). `0` resolves to the 300-second default.
+    #[config(default = 300)]
+    pub app_token_skew_secs: u64,
 }
 
 impl Default for GithubMirrorConfig {
@@ -99,6 +122,10 @@ impl Default for GithubMirrorConfig {
             executor_dispatch_ref: "refs/heads/main".to_owned(),
             store_path: ":memory:".to_owned(),
             approval_policy_file: "bloomery/approval-policy.yml".to_owned(),
+            app_id: 0,
+            app_private_key_path: String::new(),
+            app_installation_id: 0,
+            app_token_skew_secs: 300,
         }
     }
 }
@@ -113,6 +140,36 @@ impl GithubMirrorConfig {
             repo: self.repo.clone(),
             api_base: self.api_base.clone(),
             cas_land_enabled: self.cas_land_enabled,
+        }
+    }
+
+    /// Whether GitHub-App auth is configured — all three App knobs present. When
+    /// off, the static `token` authenticates; when on, a minted installation
+    /// token supersedes it (ADR-0149 §Migration step 3).
+    #[must_use]
+    pub fn app_auth_configured(&self) -> bool {
+        self.app_id != 0 && !self.app_private_key_path.is_empty() && self.app_installation_id != 0
+    }
+
+    /// Build the adapter client the port shells drive: an App-minted-token
+    /// client when [`app_auth_configured`](Self::app_auth_configured), else the
+    /// backward-compatible static-PAT client. The App path reads the host-local
+    /// private key and hands the client a cached-and-refreshing
+    /// [`AppTokenSource`] (ADR-0150 custody); the key file's absence fails fast
+    /// here rather than silently falling back to the static token. Each shell
+    /// that calls this holds its own token cache — a handful of independent
+    /// mint cadences at boot, never a per-request mail hop (the design's
+    /// in-process `TokenSource` handle).
+    ///
+    /// # Errors
+    /// The `reqwest` client could not be constructed, or (App path) the private
+    /// key file is unreadable or not a valid RSA PEM.
+    pub fn connect_client(&self) -> Result<ReqwestGithub, GithubError> {
+        if self.app_auth_configured() {
+            let source = Arc::new(AppTokenSource::from_config(self)?);
+            ReqwestGithub::with_token_source(source, self.api_base.clone(), self.to_github_config().repo_path())
+        } else {
+            ReqwestGithub::new(&self.to_github_config())
         }
     }
 }
@@ -137,7 +194,7 @@ impl ProjectionShell {
     /// # Errors
     /// The underlying `reqwest` client could not be constructed.
     pub fn connect(config: &GithubMirrorConfig) -> Result<Self, GithubError> {
-        let client = ReqwestGithub::new(&config.to_github_config())?;
+        let client = config.connect_client()?;
         Ok(Self::new(Arc::new(GithubProjection::new(client))))
     }
 

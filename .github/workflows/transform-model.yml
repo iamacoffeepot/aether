@@ -15,11 +15,25 @@ name: Transform (model lane, BYO)
 # coordinator repo; that would collapse the boundary this lane exists to keep.
 # `transform.yml` stays zero-secret and is the only lane the coordinator runs.
 
+# Invariants this lane must preserve (ADR-0149 §Execution, #3572):
+#   1. The workflow DEFINITION stays pinned. The coordinator fires this dispatch
+#      at the protected `executor_dispatch_ref`, so the wrapper text that runs is
+#      always the reviewed one; only the CHECKOUT TARGET below moves per order.
+#   2. Subjects are sealed content. The `subject` this checks out is the git
+#      commit a sealed bloom's resolved work order named — admission at seal is
+#      what makes the tree trusted enough to build against.
+#   3. The credential boundary is unchanged. The BYO Claude token reaches only
+#      the construct step; the nonce-stamped evidence contract is untouched.
 on:
   workflow_dispatch:
     inputs:
-      ref:
-        description: "Exact digest to check out"
+      subject:
+        # The checkout TARGET (invariants 1 & 2) — the exact git commit the
+        # resolved work order names, distinct from the pinned dispatch ref the
+        # coordinator fires this workflow at. Named `subject`, not `ref`, so it
+        # can never be confused with that dispatch ref (the confusion the stub
+        # `submit` fell into, populating the checkout input with the pinned ref).
+        description: "Exact git commit the attempt's worker checks out (the sealed source the work order names)"
         required: true
       nonce:
         description: "Idempotency nonce stamped into evidence.json"
@@ -41,7 +55,9 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: ${{ inputs.ref }}
+          # Invariant 1: the checkout target is the order's subject, NOT the
+          # pinned ref this workflow was dispatched at — the tree the work runs on.
+          ref: ${{ inputs.subject }}
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -58,6 +74,7 @@ jobs:
         run: >-
           cargo xtask transform construct.implement
           --out evidence
+          --subject ${{ inputs.subject }}
           --nonce ${{ inputs.nonce }}
           --model ${{ inputs.model }}
           --effort ${{ inputs.effort }}

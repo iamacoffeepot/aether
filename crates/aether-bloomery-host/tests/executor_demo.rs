@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    Budget, Conclusion, ExecutionStatus, NetworkProfile, Nonce, Transformation, WorkHandle, WorkOrder,
+    Budget, Conclusion, Digest, ExecutionStatus, NetworkProfile, Nonce, Transformation, WorkHandle, WorkOrder,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{ActionsExecutor, Artifact, RunConclusion, RunStatus};
@@ -34,6 +34,7 @@ fn work_order(nonce: &str) -> WorkOrder {
         transformation: Transformation {
             command: "construct.implement".to_owned(),
             inputs: Vec::new(),
+            checkout: Digest::from_bytes([0xC0; 32]),
             outputs: vec!["patch".to_owned()],
             image: "iama/construct:1".to_owned(),
             limits: Budget::default(),

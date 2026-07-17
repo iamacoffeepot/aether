@@ -55,8 +55,8 @@ pub mod testing;
 
 pub use client::{
     ActionsApi, Artifact, CheckConclusion, CheckRun, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError,
-    HttpRequest, HttpResponse, HttpTransport, Issue, Method, NewCheckRun, NewComment, NewIssue, ReqwestGithub,
-    ReqwestTransport, RunConclusion, RunStatus, WorkflowRun,
+    HttpRequest, HttpResponse, HttpTransport, InstallationToken, Issue, Method, NewCheckRun, NewComment, NewIssue,
+    ReqwestGithub, ReqwestTransport, RunConclusion, RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
 };
 pub use config::GithubConfig;
 pub use executor::{ActionsExecutor, ExecutorError};
