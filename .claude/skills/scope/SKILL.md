@@ -263,7 +263,7 @@ Every op with a REST endpoint rides REST (`gh api <path>`); only the one PR-draf
 |----|------------------------|
 | Create issue | `-X POST repos/{owner}/aether/issues -f title=… -f body=… -f 'labels[]=type:x' -f 'labels[]=crate:y'` |
 | Edit issue body | `-X PATCH repos/{owner}/aether/issues/{n} -f body=…` |
-| Comment | `-X POST repos/{owner}/aether/issues/{n}/comments -f body=…` |
+| Comment | `-X POST repos/{owner}/aether/issues/{n}/comments -f body=…` (inline string; a file body uses `-F body=@<file>` — the `@`-expansion form, `-f` sends the literal string) |
 | Add label | `-X POST repos/{owner}/aether/issues/{n}/labels -f 'labels[]=…'` (adds; does not replace other labels) |
 | Swap label set | `-X PUT repos/{owner}/aether/issues/{n}/labels -f 'labels[]=…' …` (replaces the whole set atomically — the [Phase label reconcile](#phase-label-reconcile) form) |
 | Remove one label | `-X DELETE repos/{owner}/aether/issues/{n}/labels/{label}` |
