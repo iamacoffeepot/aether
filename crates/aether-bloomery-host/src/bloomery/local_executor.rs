@@ -265,6 +265,10 @@ impl ExecutorBackend for LocalExecutor {
         })
     }
 
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "run is a &mut reborrow; the guard must outlive the kill and evict"
+    )]
     fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
         let mut runs = self.lock();
         let Some(run) = runs.get_mut(&handle.nonce.0) else {
