@@ -83,7 +83,7 @@ pub struct RedispatchPayload {
 
 /// The per-member attempt dispatch outbox payload (ADR-0149 §The line): the
 /// bloom, the member, the stage, and the fully-built portable
-/// [`Transformation`](crate::values::Transformation) the executor dispatch
+/// [`Transformation`] the executor dispatch
 /// consumer (#3505) wraps in a work order (adding an idempotency nonce) and
 /// submits through the executor port. The wasm control actor enqueues it under the
 /// `aether.bloomery.dispatch` topic from a
