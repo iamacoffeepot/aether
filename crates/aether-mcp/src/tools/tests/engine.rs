@@ -80,6 +80,7 @@ async fn spawn_substrate_missing_binary_is_tool_error() {
             target: None,
             args: vec![],
             components: vec![],
+            mails: vec![],
         }))
         .await;
     assert!(result.is_err(), "an unresolvable selector should be a tool error");
@@ -109,6 +110,7 @@ async fn spawn_substrate_unresolvable_component_selector_is_tool_error() {
                 export: None,
                 replicas: None,
             }],
+            mails: vec![],
         }))
         .await;
     assert!(result.is_err(), "an unresolvable component selector should abort the spawn as a tool error");
@@ -137,6 +139,7 @@ async fn spawn_substrate_replicas_zero_is_tool_error() {
                 export: None,
                 replicas: Some(0),
             }],
+            mails: vec![],
         }))
         .await;
     assert!(result.is_err(), "replicas: 0 must be a tool error, not a silent no-op");
@@ -151,4 +154,27 @@ async fn terminate_substrate_bad_engine_id_is_tool_error() {
     let result =
         mcp.terminate_substrate(Parameters(TerminateSubstrateArgs { engine_id: "not-a-uuid".to_owned() })).await;
     assert!(result.is_err(), "a malformed engine_id should be a tool error");
+}
+
+/// Tripwire: a `spawn_substrate` reply that carried no init-mail
+/// bundle (issue 3580) serializes to the exact bare `EngineInfo`
+/// shape — engine fields flattened to the top level, no `mails` key —
+/// so the no-bundle contract existing callers parse is unchanged.
+/// Drifts if the `#[serde(flatten)]` or the `skip_serializing_if` on
+/// `SpawnSubstrateResponse.mails` is dropped.
+#[test]
+fn spawn_response_without_mails_is_bare_engine_info() {
+    let response = crate::args::SpawnSubstrateResponse {
+        engine: crate::args::EngineInfo {
+            engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+            rpc_port: 8901,
+            last_heartbeat_age_millis: 0,
+        },
+        mails: None,
+    };
+    let value = serde_json::to_value(&response).expect("spawn response serializes");
+    let mut keys: Vec<&str> =
+        value.as_object().expect("spawn response is an object").keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["engine_id", "last_heartbeat_age_millis", "rpc_port"]);
 }

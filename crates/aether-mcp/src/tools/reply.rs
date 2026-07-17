@@ -1,7 +1,7 @@
 use super::bytes::{render_bytes_reply, reply_inline_max_bytes};
 use super::{
-    EngineId, Kind, KindDescriptor, KindId, MailEnvelope, MailId, Mcp, McpError, NamedMail, ReplyEventJson,
-    ReplyProjection, TracedMailSpec, descriptors, internal_msg, kind_id_from_parts, tagged_id,
+    Kind, KindDescriptor, KindId, MailEnvelope, MailId, McpError, ReplyEventJson, ReplyProjection, descriptors,
+    internal_msg, kind_id_from_parts, tagged_id,
 };
 use aether_kinds::trace::DispatchTracedAck;
 use base64::Engine as _;
@@ -142,19 +142,4 @@ pub(super) fn decode_traced_ack(events: &[MailEnvelope]) -> Result<MailId, McpEr
 /// list of downstream cap replies to surface as `replies` (issue 1242).
 pub(super) fn strip_ack(events: &[MailEnvelope]) -> &[MailEnvelope] {
     events.get(1..).unwrap_or(&[])
-}
-impl Mcp {
-    /// Encode a `send_mail_traced` batch into the same `NamedMail`
-    /// shape `CaptureFrame` carries: name-level addressing + schema-
-    /// encoded payload. The substrate's `TraceObserver` resolves the
-    /// names through its registry at dispatch time. Same lookup path
-    /// `encode_capture_bundle` uses (per-engine merged view, ADR-0091),
-    /// just over `TracedMailSpec` instead of `CaptureMailSpec`.
-    pub(super) async fn encode_traced_bundle(
-        &self,
-        engine: EngineId,
-        specs: &[TracedMailSpec],
-    ) -> anyhow::Result<Vec<NamedMail>> {
-        self.encode_named_mail_bundle(engine, specs).await
-    }
 }

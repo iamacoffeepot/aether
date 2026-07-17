@@ -17,21 +17,27 @@ async fn send_mail_reports_per_item_errors() {
             mails: vec![
                 MailSpec {
                     engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
-                    recipient_name: "aether.fs".to_owned(),
-                    kind_name: "not.a.real.kind".to_owned(),
-                    params: None,
+                    mail: EngineMailSpec {
+                        recipient_name: "aether.fs".to_owned(),
+                        kind_name: "not.a.real.kind".to_owned(),
+                        params: None,
+                    },
                 },
                 MailSpec {
                     engine_id: "not-a-uuid".to_owned(),
-                    recipient_name: "aether.fs".to_owned(),
-                    kind_name: "aether.fs.list".to_owned(),
-                    params: None,
+                    mail: EngineMailSpec {
+                        recipient_name: "aether.fs".to_owned(),
+                        kind_name: "aether.fs.list".to_owned(),
+                        params: None,
+                    },
                 },
                 MailSpec {
                     engine_id: "00000000-0000-0000-0000-000000000002".to_owned(),
-                    recipient_name: "aether.fs".to_owned(),
-                    kind_name: "aether.fs.list".to_owned(),
-                    params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+                    mail: EngineMailSpec {
+                        recipient_name: "aether.fs".to_owned(),
+                        kind_name: "aether.fs.list".to_owned(),
+                        params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+                    },
                 },
             ],
             fire_and_forget: false,
@@ -56,7 +62,7 @@ async fn send_mail_traced_bad_spec_is_tool_error() {
     let result = mcp
         .send_mail_traced(Parameters(SendMailTracedArgs {
             engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
-            mails: vec![TracedMailSpec {
+            mails: vec![EngineMailSpec {
                 recipient_name: "aether.render".to_owned(),
                 kind_name: "not.a.real.kind".to_owned(),
                 params: None,
@@ -91,9 +97,11 @@ async fn send_mail_fire_and_forget_is_non_blocking() {
                 // reply, so a blocking call would wait — fire-and-
                 // forget returns at once.
                 engine_id: "00000000-0000-0000-0000-000000000099".to_owned(),
-                recipient_name: "aether.fs".to_owned(),
-                kind_name: "aether.fs.list".to_owned(),
-                params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+                mail: EngineMailSpec {
+                    recipient_name: "aether.fs".to_owned(),
+                    kind_name: "aether.fs.list".to_owned(),
+                    params: Some(serde_json::json!({ "namespace": "save", "prefix": "" })),
+                },
             }],
             fire_and_forget: true,
             replies: ReplyProjection::All,
