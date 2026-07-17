@@ -21,7 +21,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Output, Stdio};
-use std::{fs, process};
+use std::{fs, process, thread};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -347,7 +347,10 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
     // surfacing the writer's error, guarantees the child is reaped on every path.
     let mut stdin = child.stdin.take().context("headless claude stdin was not captured")?;
     let prompt_bytes = prompt.into_bytes();
-    let writer = std::thread::spawn(move || stdin.write_all(&prompt_bytes));
+    // Infra thread in a build tool — no settlement/trace umbrella applies here;
+    // it exists only to pipe stdin while the main thread reaps the child.
+    #[allow(clippy::disallowed_methods)]
+    let writer = thread::spawn(move || stdin.write_all(&prompt_bytes));
     let run = child.wait_with_output().context("await headless claude")?;
     writer.join().expect("prompt-writer thread panicked").context("pipe the assembled prompt to headless claude")?;
     // A non-zero exit is the CLI itself failing to run (auth, bad args, crash) —
