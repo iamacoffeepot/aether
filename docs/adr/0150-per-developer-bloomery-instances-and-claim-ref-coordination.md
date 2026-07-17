@@ -59,6 +59,19 @@ namespace is auditable against journals. The local store's uniqueness constraint
 backstop; the ref namespace is the inter-instance truth for claims — the one datum whose truth
 deliberately lives outside the instance journal.
 
+An instance heals **its own** interrupted operations at boot — a heal is in scope exactly when the
+instance's journal proves ownership of every ref it touches *(amended 2026-07-17: drawn while scoping
+the deep-heal slice, #3555)*. The claim-registry port grows two ops for this: claim-ref **enumeration**
+(the Git Data surface already lists refs by prefix) and an **idempotent per-ref transfer completion**
+that treats a ref already at the successor's value as a no-op, so re-driving an interrupted supersede
+converges without changing the transfer op's landed CAS semantics. On these, boot reconcile sweeps a
+tombstoned ref an interrupted release left behind and completes a half-transferred supersede its own
+journal records. Reclaiming an **own orphan** — a ref this instance created but whose admit never
+reached its journal — needs a write-ahead intent record in the seal-admit choreography and is a named
+follow-on, deliberately not folded into this amendment: a change to the durable admission sequence is
+decided on its own, not as a rider. Foreign refs are never healed, only reported: the dead-instance
+staleness boundary below stands.
+
 **A queryable coordination service is a named follow-on, not part of this decision.** A thin claims +
 bloom-admission service (which a cloud-hosted instance could host) buys "who holds what, which bloom
 lands next" visibility that ref enumeration answers poorly, at the cost of a new operational surface and
