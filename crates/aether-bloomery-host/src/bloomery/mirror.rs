@@ -42,10 +42,12 @@ pub struct GithubMirrorConfig {
     /// base. No trailing slash.
     #[config(default = "https://api.github.com")]
     pub api_base: String,
-    /// Whether compare-and-swap mainline landing is permitted. Off by default
-    /// (ADR-0149 gates it to migration step 3); consumed by the git source
-    /// port, a separate slice, so carried-but-unused here.
-    #[config(default = false)]
+    /// Whether compare-and-swap mainline landing is permitted. On by default
+    /// (ADR-0149 migration step 3 moved landing authority to the source port —
+    /// the CAS `land` is the landing of record); consumed by the git source
+    /// port to gate [`GitSource::land`](aether_bloomery_github::GitSource) and by
+    /// the land driver ([`super::LandDriverCapability`]) that drives it.
+    #[config(default = true)]
     pub cas_land_enabled: bool,
     /// How often the outbox-consumer mirror driver ([`super::MirrorDriverCapability`])
     /// polls the store outbox for undelivered projection entries, in seconds.
@@ -132,7 +134,7 @@ impl Default for GithubMirrorConfig {
             owner: String::new(),
             repo: String::new(),
             api_base: "https://api.github.com".to_owned(),
-            cas_land_enabled: false,
+            cas_land_enabled: true,
             poll_interval_secs: 5,
             executor_workflow_file: "bloomery-transform.yml".to_owned(),
             executor_dispatch_ref: "refs/heads/main".to_owned(),

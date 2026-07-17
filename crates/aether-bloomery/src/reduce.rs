@@ -466,6 +466,26 @@ pub enum Decision {
         /// The member's new stage cursor.
         progress: StageProgress,
     },
+    /// Drive the source-port compare-and-swap land of a just-resolved bloom —
+    /// the transactional-outbox intent the host's land driver drains and issues
+    /// through the source port's `aether.source.land` op (ADR-0149 §The boundary,
+    /// migration step 3). Emitted alongside [`Decision::SetResolved`] the moment a
+    /// bloom resolves: resolution is land-readiness (a resolved bloom carries its
+    /// one artifact and every member's claim), so the land decision rides the same
+    /// resolve commit. A snapshot-inert outbox effect like [`Decision::EmitReceipt`]
+    /// / [`Decision::DispatchAttempt`] — the actual mainline advance folds in later
+    /// from the driver's [`Fact::Land`] admit, never from this decision. Appended so
+    /// the prior decisions' wire discriminants are unchanged.
+    DispatchLand {
+        /// The resolving bloom to land.
+        bloom: BloomId,
+        /// The sealed base the CAS lands on — a moved mainline forces
+        /// supersession, never a land onto the new head (ADR-0149 §The bloom).
+        expected_base: Digest,
+        /// The head mainline advances to on a successful land — the bloom's one
+        /// resolved artifact tree.
+        new_head: Digest,
+    },
 }
 
 /// One member already claimed by a foreign active bloom — the conflict that
@@ -1101,9 +1121,18 @@ fn reduce_resolve(snapshot: &Snapshot, bloom: &BloomId, tree: &Digest, lineage: 
         resolution_claims.push(claim.clone());
     }
     let resolved = ResolvedBloom { bloom: *bloom, tree: *tree, lineage: lineage.to_vec(), resolution_claims };
+    // Resolution is land-readiness: the bloom now carries its one artifact and a
+    // claim for every member, so the source-port CAS land can be driven. Emit the
+    // land decision on the same resolve commit — the host land driver drains it,
+    // issues the CAS against `expected_base`, and admits `Fact::Land` on success
+    // (ADR-0149 migration step 3). `new_head` is the resolved artifact tree, the
+    // head mainline advances to; the reducer never does the I/O.
     Decisions {
         outcome: Outcome::Resolved(resolved.clone()),
-        effects: alloc::vec![Decision::SetResolved { bloom: *bloom, resolved }],
+        effects: alloc::vec![
+            Decision::SetResolved { bloom: *bloom, resolved },
+            Decision::DispatchLand { bloom: *bloom, expected_base: record.spec.base(), new_head: *tree },
+        ],
     }
 }
 
@@ -1218,7 +1247,7 @@ impl Snapshot {
             // rebuilt on replay from the journaled fact — they carry no in-snapshot
             // state, like EmitReceipt's outbox row. A dispatch's paired cursor rides
             // its sibling AdvanceStage; a re-dispatch's hold release rides ReleaseHold.
-            Decision::RedispatchStage { .. } | Decision::DispatchAttempt { .. } => {}
+            Decision::RedispatchStage { .. } | Decision::DispatchAttempt { .. } | Decision::DispatchLand { .. } => {}
             Decision::MarkSuperseded { bloom, by } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.status = BloomStatus::Superseded;

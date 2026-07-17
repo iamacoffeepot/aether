@@ -29,8 +29,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::sync::mpsc;
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use aether_actor::{MailSender, runtime};
@@ -44,14 +42,18 @@ use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
 use super::MirrorDriverCapability;
+use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::bloomery::{GithubMirrorConfig, ProjectionShell, SourceShell};
 use crate::store::{AckOutbox, AckOutboxResult, DrainOutbox, DrainOutboxResult, OutboxEntry, StoreCapability};
 
 /// The outbox topic carrying `ViewDocument` payloads — reconciled onto the
 /// outward mirror.
 pub const TOPIC_VIEW_DOCUMENT: &str = "view_document";
-/// The outbox topic carrying `LandingReceipt` payloads — projected outward.
-pub const TOPIC_LANDING_RECEIPT: &str = "landing_receipt";
+/// The outbox topic carrying `LandingReceipt` payloads — projected outward. Must
+/// equal the control actor's producer constant (`RECEIPT_TOPIC` in
+/// `aether-bloomery`), which enqueues receipts under this exact string; a
+/// mismatch silently strands every receipt undrained.
+pub const TOPIC_LANDING_RECEIPT: &str = "aether.bloomery.landing_receipt";
 
 /// The self-addressed wake the poll timer fires each interval; its handler
 /// drains the store outbox. Zero-field — the timer carries only the schedule.
@@ -89,43 +91,6 @@ impl MirrorDriverState {
     ) -> Self {
         Self { projection, _source: source, mailer, self_mailbox, _timer: None }
     }
-}
-
-/// Owns the poll-timer sidecar thread. The thread sleeps `interval` on a
-/// `recv_timeout` over the stop channel and fires a [`DrainTick`] wake at the
-/// driver's own mailbox each interval; `Drop` disconnects the channel (so the
-/// thread's next `recv_timeout` returns `Disconnected` and it exits) then joins.
-/// Mirrors the engine proxy's heartbeat sidecar.
-struct TimerHandle {
-    stop: Option<mpsc::Sender<()>>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Drop for TimerHandle {
-    fn drop(&mut self) {
-        drop(self.stop.take());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-/// Spawn the poll-timer sidecar. Fires a [`DrainTick`] at `self_mailbox` every
-/// `interval` until the returned handle drops.
-fn spawn_timer(mailer: Arc<Mailer>, self_mailbox: MailboxId, interval: Duration) -> TimerHandle {
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    // Infra timer below the mail layer, like the RPC reader / heartbeat
-    // sidecars: it only fires a wake-mail (no inbound chain to inherit).
-    #[allow(clippy::disallowed_methods, reason = "infra timer thread; the wake carries no caller context")]
-    let thread = thread::Builder::new()
-        .name("aether-bloomery-mirror-drain".into())
-        .spawn(move || {
-            while stop_rx.recv_timeout(interval) == Err(mpsc::RecvTimeoutError::Timeout) {
-                mailer.push(Mail::new(self_mailbox, DrainTick::ID, DrainTick::default().encode_into_bytes(), 1));
-            }
-        })
-        .expect("spawn aether-bloomery-mirror-drain timer thread");
-    TimerHandle { stop: Some(stop_tx), thread: Some(thread) }
 }
 
 /// Decode `entry`'s payload for its topic and drive the matching shell call.
@@ -203,7 +168,14 @@ impl NativeActor for MirrorDriverCapability {
         let projection = ProjectionShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
         let source = SourceShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
         let interval = Duration::from_secs(config.poll_interval_secs.max(1));
-        let timer = spawn_timer(Arc::clone(&mailer), self_mailbox, interval);
+        let timer = spawn_timer(
+            Arc::clone(&mailer),
+            self_mailbox,
+            DrainTick::ID,
+            DrainTick::default().encode_into_bytes(),
+            "aether-bloomery-mirror-drain",
+            interval,
+        );
         tracing::info!(
             target: "aether_bloomery_host::mirror",
             owner = %config.owner,
@@ -296,8 +268,8 @@ mod tests {
     use std::time::Duration;
 
     use aether_bloomery::{
-        BloomDraft, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Snapshot, StageCatalog,
-        WorkpieceId, reduce, view_of,
+        BloomDraft, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandingReceipt, Membership,
+        Snapshot, StageCatalog, WorkpieceId, reduce, view_of,
     };
     use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
     use aether_data::wire::{from_bytes, to_vec};
@@ -423,6 +395,31 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn a_landing_receipt_projects_a_comment_on_its_topic() {
+        // ADR-0149 migration step 3: a gate-enabled land emits a `LandingReceipt`
+        // the control actor enqueues under the receipt topic, which the mirror
+        // driver drains and projects as a comment on the bloom's umbrella issue.
+        // This pins the receipt path — and that the consumer topic matches the
+        // producer's, the mismatch step 3 reconciled (a stranded receipt would
+        // drain nothing and project no comment).
+        let fake = FakeGithub::new();
+        let shell = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
+        let mut store = SqliteStore::open(":memory:").unwrap();
+
+        let receipt = LandingReceipt { bloom: BloomId(digest(1)), previous_base: digest(10), new_head: digest(20) };
+        store.enqueue_outbox(TOPIC_LANDING_RECEIPT, &to_vec(&receipt).unwrap()).unwrap();
+
+        let entries = store.drain_outbox(Some(TOPIC_LANDING_RECEIPT)).unwrap();
+        assert_eq!(entries.len(), 1, "the enqueued receipt is drainable on the receipt topic");
+
+        let acks = project_batch(&shell, &entries);
+        assert_eq!(fake.comment_count(), 1, "the receipt projects one landing comment on the umbrella issue");
+        assert_eq!(acks.len(), 1);
+        assert_eq!(acks[0].topic.as_deref(), Some(TOPIC_LANDING_RECEIPT), "the ack covers the receipt topic");
+        assert_eq!(acks[0].through_sequence, entries[0].sequence);
+    }
+
     #[test]
     fn mail_driven_drain_projects_and_acks_through_the_actor_path() {
         // Drive the capability's handlers through the substrate cap-test fixture
