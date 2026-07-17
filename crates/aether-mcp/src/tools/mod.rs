@@ -48,12 +48,12 @@ use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router
 use crate::args::ActorCostArgs;
 use crate::args::ActorLogsArgs;
 use crate::args::{
-    ApplyTerrainBrushArgs, CaptureFrameArgs, CaptureMailSpec, CommitTerrainProposalArgs, ComponentSpec,
-    DescribeComponentArgs, DescribeHandlersArgs, DescribeKindsArgs, DiscardTerrainProposalArgs, ListBinariesArgs,
+    ApplyTerrainBrushArgs, CaptureFrameArgs, CommitTerrainProposalArgs, ComponentSpec, DescribeComponentArgs,
+    DescribeHandlersArgs, DescribeKindsArgs, DiscardTerrainProposalArgs, EngineMailSpec, ListBinariesArgs,
     ListComponentsArgs, ListEnginesArgs, LoadComponentArgs, MailIdJson, MailNodeJson, MailSpec, ProposeTerrainEditArgs,
     ReplaceComponentArgs, ReplyEventJson, ReplyProjection, RunTerrainAutomatonArgs, SendMailArgs, SendMailTracedArgs,
     SetTerrainProposalPreviewArgs, SpawnSubstrateArgs, TerminateSubstrateArgs, TerrainEditorArgs, TerrainMarksArgs,
-    TracedMailSpec, UploadBinaryArgs, UploadComponentArgs,
+    UploadBinaryArgs, UploadComponentArgs,
 };
 use crate::reverse::EngineNames;
 use crate::rpc::RpcSession;
@@ -77,40 +77,6 @@ mod render;
 mod reply;
 mod state;
 mod terrain;
-
-trait NamedMailSpec: Sync {
-    fn recipient_name(&self) -> &str;
-    fn kind_name(&self) -> &str;
-    fn params(&self) -> Option<&serde_json::Value>;
-}
-
-impl NamedMailSpec for CaptureMailSpec {
-    fn recipient_name(&self) -> &str {
-        &self.recipient_name
-    }
-
-    fn kind_name(&self) -> &str {
-        &self.kind_name
-    }
-
-    fn params(&self) -> Option<&serde_json::Value> {
-        self.params.as_ref()
-    }
-}
-
-impl NamedMailSpec for TracedMailSpec {
-    fn recipient_name(&self) -> &str {
-        &self.recipient_name
-    }
-
-    fn kind_name(&self) -> &str {
-        &self.kind_name
-    }
-
-    fn params(&self) -> Option<&serde_json::Value> {
-        self.params.as_ref()
-    }
-}
 
 #[cfg(test)]
 use self::bytes::{
@@ -256,7 +222,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Fork+exec a substrate binary as a child of the hub, resolved from the hub's content-addressed binary store (ADR-0115) — not a host path. Pass `selector` to pick the binary: a content `hash`, a `name@version`, or a `name` (upload_binary first if it isn't stored). Omit `selector` to select the stored `default` headless chassis; the standard tunnel helper stages it, but a bare spawn returns a selector-resolution error when no matching artifact exists. When `selector` is omitted you may instead attribute-query with `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (linked-cap superset), and `target` (build triple). The hub resolves the selector to the stored bytes, materializes them to an executable temp file, assigns a free localhost RPC port (injected as AETHER_RPC_PORT), forks it, and connects a proxy. Returns the engine_id and rpc_port on success; errors if the selector resolves to no stored binary or the substrate fails to come up. A spawn that fails after the hub allocated an engine_id carries that id in the error (and records a matching spawn_failed entry in list_engines.recently_died), so you can correlate and reap rather than guess. Pass `components` (each {selector, name?, config?, config_path?, export?, replicas?}) to bring the engine up with those components already loaded in one call — each selector is a content hash, name, or module@actor resolved against the hub's component registry (ADR-0116; upload_component first). `config` is inline JSON and `config_path` is a JSON file path; aether-mcp schema-encodes either one to the component's Config kind, stages the resulting bytes next to the staged wasm, and writes a boot-manifest the hub injects as AETHER_BOOT_MANIFEST. The spawned substrate reads the staged wasm/config byte files itself (single-host), so no follow-up load_component is needed. Set replicas: N on an entry (issue 2626) to fan it out into N instances at boot from one spec, one shared config — each named {base}-{index} for index in 0..N (base = name > export > default actor namespace) — and readiness waits for every expected lineage string to appear. That check does not deduplicate colliding expected names or compare live bytes with the requested selector, so give every boot instance a unique derived name and describe or safely probe each one after spawn. This pairs with #[router(shared)] (ADR-0136) to scale an HTTP handler to N instances with no hand-named entries. replicas: 0 is a tool error."
+        description = "Fork+exec a substrate binary as a child of the hub, resolved from the hub's content-addressed binary store (ADR-0115) — not a host path. Pass `selector` to pick the binary: a content `hash`, a `name@version`, or a `name` (upload_binary first if it isn't stored). Omit `selector` to select the stored `default` headless chassis; the standard tunnel helper stages it, but a bare spawn returns a selector-resolution error when no matching artifact exists. When `selector` is omitted you may instead attribute-query with `chassis` (\"headless\"/\"desktop\"/\"hub\"), `caps` (linked-cap superset), and `target` (build triple). The hub resolves the selector to the stored bytes, materializes them to an executable temp file, assigns a free localhost RPC port (injected as AETHER_RPC_PORT), forks it, and connects a proxy. Returns the engine_id and rpc_port on success; errors if the selector resolves to no stored binary or the substrate fails to come up. A spawn that fails after the hub allocated an engine_id carries that id in the error (and records a matching spawn_failed entry in list_engines.recently_died), so you can correlate and reap rather than guess. Pass `components` (each {selector, name?, config?, config_path?, export?, replicas?}) to bring the engine up with those components already loaded in one call — each selector is a content hash, name, or module@actor resolved against the hub's component registry (ADR-0116; upload_component first). `config` is inline JSON and `config_path` is a JSON file path; aether-mcp schema-encodes either one to the component's Config kind, stages the resulting bytes next to the staged wasm, and writes a boot-manifest the hub injects as AETHER_BOOT_MANIFEST. The spawned substrate reads the staged wasm/config byte files itself (single-host), so no follow-up load_component is needed. Set replicas: N on an entry (issue 2626) to fan it out into N instances at boot from one spec, one shared config — each named {base}-{index} for index in 0..N (base = name > export > default actor namespace) — and readiness waits for every expected lineage string to appear. That check does not deduplicate colliding expected names or compare live bytes with the requested selector, so give every boot instance a unique derived name and describe or safely probe each one after spawn. This pairs with #[router(shared)] (ADR-0136) to scale an HTTP handler to N instances with no hand-named entries. replicas: 0 is a tool error. Pass `mails` (each {recipient_name, kind_name, params?} — a send_mail item without engine_id) to dispatch init mail once the engine and every boot component are ready, so world bring-up — create a camera, load a mesh, seed state — completes in this same call: each item is settled like a send_mail item (chain awaited, terminal replies kept) and reported per-item in the response's `mails` list, so a failed init surfaces here rather than at first observation. Items encode after boot against the live engine's merged kind view, so boot components' own kinds resolve; a bad entry becomes that item's error status and aborts neither the spawn nor its siblings. Keep capture_frame.mails for frame-scoped placement at observation time, not initialization. With no `mails` the response stays the bare engine-info shape."
     )]
     pub async fn spawn_substrate(&self, Parameters(args): Parameters<SpawnSubstrateArgs>) -> Result<String, McpError> {
         guard_response_size("spawn_substrate", engine::spawn_substrate(self, args).await)

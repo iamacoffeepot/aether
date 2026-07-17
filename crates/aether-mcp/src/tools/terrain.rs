@@ -15,7 +15,7 @@ use crate::args::{
 use super::ids::parse_engine_id;
 use super::render::{internal, internal_msg, json};
 use super::reply::decode_reply_events;
-use super::{MailSpec, Mcp};
+use super::{EngineMailSpec, MailSpec, Mcp};
 
 const MARK_GET: &str = "aether.kit.mark.get";
 const MARK_GET_RESULT: &str = "aether.kit.mark.get_result";
@@ -34,9 +34,7 @@ pub(super) async fn call_terrain_kind(
     let (events, timed_out) = mcp
         .deliver_one(MailSpec {
             engine_id: engine_id.to_owned(),
-            recipient_name: mailbox.to_owned(),
-            kind_name: request_kind.to_owned(),
-            params,
+            mail: EngineMailSpec { recipient_name: mailbox.to_owned(), kind_name: request_kind.to_owned(), params },
         })
         .await
         .map_err(internal)?;

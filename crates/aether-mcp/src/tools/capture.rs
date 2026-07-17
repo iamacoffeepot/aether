@@ -1,21 +1,21 @@
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-use aether_data::{EngineId, Kind};
+use aether_data::Kind;
 use aether_kinds::{
-    CaptureFrame, CaptureFrameResult, FrameCheck, FrameRect, FrameReduction, FrameVerdict, NamedMail, SimilarityCheck,
+    CaptureFrame, CaptureFrameResult, FrameCheck, FrameRect, FrameReduction, FrameVerdict, SimilarityCheck,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, Content};
 
-use crate::args::{CaptureCheckSpec, CaptureFrameArgs, CaptureMailSpec};
+use crate::args::{CaptureCheckSpec, CaptureFrameArgs};
 
 use super::envelope::engine_envelope;
 use super::ids::parse_engine_id;
 use super::render::{internal, internal_msg};
-use super::{Mcp, NamedMailSpec, RENDER_CAP};
+use super::{Mcp, RENDER_CAP};
 
 const CAPTURE_IMAGE_DEFAULT_MAX_DIMENSION: u32 = 768;
 
@@ -363,44 +363,6 @@ pub(super) fn save_capture_png(path: &Path, bytes: &[u8]) -> Result<(PathBuf, us
     Ok((path.to_path_buf(), bytes.len()))
 }
 
-impl Mcp {
-    pub(super) async fn encode_named_mail_bundle<S: NamedMailSpec>(
-        &self,
-        engine: EngineId,
-        specs: &[S],
-    ) -> anyhow::Result<Vec<NamedMail>> {
-        let mut out = Vec::with_capacity(specs.len());
-        for spec in specs {
-            let params = spec.params().cloned().unwrap_or(serde_json::Value::Null);
-            let kind_name = spec.kind_name();
-            let (_desc, payload) = self
-                .resolve_and_encode(engine, kind_name, params)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e} (kind {kind_name})"))?;
-            out.push(NamedMail {
-                recipient_name: spec.recipient_name().to_string(),
-                kind_name: kind_name.to_string(),
-                payload,
-                count: 1,
-            });
-        }
-        Ok(out)
-    }
-
-    /// Encode a `capture_frame` mail bundle: resolve each spec's kind
-    /// against the per-engine merged view (ADR-0091, static prefill +
-    /// cached `ListKinds` reply), schema-encode its params, and wrap
-    /// into the substrate-side `aether_kinds::NamedMail` shape
-    /// (name-level addressing + pre-encoded payload).
-    pub(super) async fn encode_capture_bundle(
-        &self,
-        engine: EngineId,
-        specs: &[CaptureMailSpec],
-    ) -> anyhow::Result<Vec<NamedMail>> {
-        self.encode_named_mail_bundle(engine, specs).await
-    }
-}
-
 pub(super) async fn capture_frame(mcp: &Mcp, args: CaptureFrameArgs) -> Result<CallToolResult, McpError> {
     let engine = parse_engine_id(&args.engine_id)?;
     // A relative save_path is invalid-params before anything else runs
@@ -426,11 +388,11 @@ pub(super) async fn capture_frame(mcp: &Mcp, args: CaptureFrameArgs) -> Result<C
     // (e.g. an `aether.kit.mesh.load` pre-mail) encodes correctly
     // after `load_component`.
     let mails = mcp
-        .encode_capture_bundle(engine, &args.mails)
+        .encode_mail_bundle(engine, &args.mails)
         .await
         .map_err(|e| McpError::invalid_params(format!("capture_frame mails bundle: {e}"), None))?;
     let after_mails = mcp
-        .encode_capture_bundle(engine, &args.after_mails)
+        .encode_mail_bundle(engine, &args.after_mails)
         .await
         .map_err(|e| McpError::invalid_params(format!("capture_frame after_mails bundle: {e}"), None))?;
     // Map the verdict request: an unknown reduction name is a clean

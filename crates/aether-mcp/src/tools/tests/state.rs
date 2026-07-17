@@ -187,9 +187,11 @@ async fn lookup_descriptor_picks_up_a_post_load_kind_via_inventory() {
     let envelope = mcp
         .build_mail_envelope(MailSpec {
             engine_id: engine.0.to_string(),
-            recipient_name: "aether.embedded:test".to_owned(),
-            kind_name: component_kind.name.clone(),
-            params: Some(serde_json::Value::String("hello".to_owned())),
+            mail: EngineMailSpec {
+                recipient_name: "aether.embedded:test".to_owned(),
+                kind_name: component_kind.name.clone(),
+                params: Some(serde_json::Value::String("hello".to_owned())),
+            },
         })
         .await
         .expect("build_mail_envelope encodes the component-defined kind");

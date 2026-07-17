@@ -53,7 +53,7 @@ async fn capture_frame_bad_bundle_is_tool_error() {
     let result = mcp
         .capture_frame(Parameters(CaptureFrameArgs {
             engine_id: "00000000-0000-0000-0000-000000000001".to_owned(),
-            mails: vec![CaptureMailSpec {
+            mails: vec![EngineMailSpec {
                 recipient_name: "aether.render".to_owned(),
                 kind_name: "not.a.real.kind".to_owned(),
                 params: None,

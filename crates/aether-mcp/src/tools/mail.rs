@@ -5,7 +5,9 @@ use aether_data::{EngineId, Kind, MailId, Uuid, mailbox_id_from_path};
 use aether_kinds::trace::{DescribeTreeResult, DispatchTraced, TRACE_MAILBOX_NAME, TraceTail, TraceTailResult};
 use rmcp::ErrorData as McpError;
 
-use crate::args::{MailStatus, ReplyEventJson, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse};
+use crate::args::{
+    MailSpec, MailStatus, ReplyEventJson, ReplyProjection, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
+};
 
 use super::envelope::{engine_envelope, engine_envelope_by_id};
 use super::ids::{mail_id_to_json, parse_engine_id, render_compact_tree};
@@ -18,56 +20,72 @@ pub(super) async fn send_mail(mcp: &Mcp, args: SendMailArgs) -> Result<String, M
     let reply_projection = args.replies;
     let mut statuses = Vec::with_capacity(args.mails.len());
     for (index, spec) in args.mails.into_iter().enumerate() {
-        let mut replies = Vec::new();
-        let mut timed_out = false;
         let status = if fire_and_forget {
-            match mcp.deliver_one_fire(spec).await {
+            let status = match mcp.deliver_one_fire(spec).await {
                 Ok(()) => "dispatched".to_owned(),
                 Err(e) => format!("error: {e}"),
-            }
+            };
+            MailStatus { index, status, replies: Vec::new(), timed_out: false }
         } else {
-            // Capture the engine id and the handler's declared reply kind
-            // (ADR-0109 / issue 1803) before `deliver_one` consumes the
-            // spec, so `decode_reply_events` can search the per-engine kind
-            // cache for component-defined reply kinds (issue 1804).
-            let engine = Uuid::parse_str(&spec.engine_id).ok().map(EngineId);
-            let declared_reply = engine.and_then(|e| {
-                let mbx = mailbox_id_from_path(&spec.recipient_name);
-                let cache = mcp.components.lock().expect("component cache mutex is never poisoned");
-                cache.get(&(e, mbx)).and_then(|caps| {
-                    caps.handlers
-                        .iter()
-                        .find(|h| h.name == spec.kind_name)
-                        // ADR-0112 / ADR-0134: a single-class handler names
-                        // one static reply kind and a multi-class handler
-                        // names its element kind — both are what a driver
-                        // decodes, so search the cache for either. A manual
-                        // / silent handler yields no declared kind.
-                        .and_then(|h| match h.reply {
-                            aether_data::ReplyContract::One(id) | aether_data::ReplyContract::Multi(id) => Some(id),
-                            _ => None,
-                        })
-                })
-            });
-            match mcp.deliver_one(spec).await {
-                Ok((events, hit_timeout)) => {
-                    let engine_kinds = engine.map(|e| mcp.snapshot_engine_kinds(e)).unwrap_or_default();
-                    replies =
-                        project_replies(decode_reply_events(&events, &engine_kinds, declared_reply), reply_projection);
-                    timed_out = hit_timeout;
-                    if hit_timeout {
-                        "timeout"
-                    } else {
-                        "delivered"
-                    }
-                    .to_owned()
-                }
-                Err(e) => format!("error: {e}"),
-            }
+            settle_mail_item(mcp, index, spec, reply_projection).await
         };
-        statuses.push(MailStatus { index, status, replies, timed_out });
+        statuses.push(status);
     }
     json(&statuses)
+}
+
+/// Settle one mail item the `send_mail` way: dispatch it, await the
+/// chain, decode + project the correlated replies, and fold any
+/// transport / encode failure into the item's status string rather than
+/// a call error. Shared by `send_mail`'s settled path and
+/// `spawn_substrate`'s post-boot init bundle (issue 3580).
+pub(super) async fn settle_mail_item(
+    mcp: &Mcp,
+    index: usize,
+    spec: MailSpec,
+    reply_projection: ReplyProjection,
+) -> MailStatus {
+    // Capture the engine id and the handler's declared reply kind
+    // (ADR-0109 / issue 1803) before `deliver_one` consumes the
+    // spec, so `decode_reply_events` can search the per-engine kind
+    // cache for component-defined reply kinds (issue 1804).
+    let engine = Uuid::parse_str(&spec.engine_id).ok().map(EngineId);
+    let declared_reply = engine.and_then(|e| {
+        let mbx = mailbox_id_from_path(&spec.mail.recipient_name);
+        let cache = mcp.components.lock().expect("component cache mutex is never poisoned");
+        cache.get(&(e, mbx)).and_then(|caps| {
+            caps.handlers
+                .iter()
+                .find(|h| h.name == spec.mail.kind_name)
+                // ADR-0112 / ADR-0134: a single-class handler names
+                // one static reply kind and a multi-class handler
+                // names its element kind — both are what a driver
+                // decodes, so search the cache for either. A manual
+                // / silent handler yields no declared kind.
+                .and_then(|h| match h.reply {
+                    aether_data::ReplyContract::One(id) | aether_data::ReplyContract::Multi(id) => Some(id),
+                    _ => None,
+                })
+        })
+    });
+
+    let mut replies = Vec::new();
+    let mut timed_out = false;
+    let status = match mcp.deliver_one(spec).await {
+        Ok((events, hit_timeout)) => {
+            let engine_kinds = engine.map(|e| mcp.snapshot_engine_kinds(e)).unwrap_or_default();
+            replies = project_replies(decode_reply_events(&events, &engine_kinds, declared_reply), reply_projection);
+            timed_out = hit_timeout;
+            if hit_timeout {
+                "timeout"
+            } else {
+                "delivered"
+            }
+            .to_owned()
+        }
+        Err(e) => format!("error: {e}"),
+    };
+    MailStatus { index, status, replies, timed_out }
 }
 
 pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Result<String, McpError> {
@@ -80,7 +98,7 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
     // the per-engine merged view so a component's own kinds
     // encode after `load_component`.
     let mails = mcp
-        .encode_traced_bundle(engine, &args.mails)
+        .encode_mail_bundle(engine, &args.mails)
         .await
         .map_err(|e| McpError::invalid_params(format!("send_mail_traced batch: {e}"), None))?;
     let timeout_ms = args.settlement_timeout_ms.unwrap_or(AWAIT_TIMEOUT_DEFAULT_MS).min(AWAIT_TIMEOUT_CAP_MS);
