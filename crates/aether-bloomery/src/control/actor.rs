@@ -35,10 +35,10 @@ use super::claim_plan::{
     seal_claim_mail, transfer_seal_mail,
 };
 use super::{
-    Admit, AdmitResult, ClaimResult, ClaimSeal, Commit, CommitResult, EnumerateClaims, EnumerateClaimsResult,
-    MembershipMutation, OutboxPayload, Query, QueryResult, ReplayJournal, ReplayJournalResult, TransferSeal,
+    Admit, AdmitResult, ClaimResult, ClaimSeal, Commit, CommitResult, DispatchPayload, EnumerateClaims,
+    EnumerateClaimsResult, MembershipMutation, OutboxPayload, Query, QueryResult, RedispatchPayload, ReplayJournal,
+    ReplayJournalResult, TransferSeal,
 };
-use crate::digest::Digest;
 use crate::ids::BloomId;
 use crate::port::{ClaimRefKind, ClaimRefState};
 use crate::reduce::{Decision, Decisions, Event, Fact, Outcome, Snapshot, reduce, view_of};
@@ -78,6 +78,12 @@ const RECEIPT_TOPIC: &str = "aether.bloomery.landing_receipt";
 /// (#3505) re-assembles the held attempt naming both question and answer digests
 /// (ADR-0151). Producer-only here, like [`RECEIPT_TOPIC`].
 const REDISPATCH_TOPIC: &str = "aether.bloomery.redispatch";
+
+/// The outbox topic a per-member attempt dispatch enqueues under, so the executor
+/// dispatch consumer (#3505) drains it, wraps the transformation in a work order,
+/// and submits it through the executor port (ADR-0149 §The line). Producer-only
+/// here, like [`RECEIPT_TOPIC`] / [`REDISPATCH_TOPIC`].
+const DISPATCH_TOPIC: &str = "aether.bloomery.dispatch";
 
 /// An admit awaiting its durable commit reply — the reply handle to answer, the
 /// decoded event, and the decisions to apply to the snapshot once the store
@@ -570,26 +576,26 @@ fn project(
                 let payload = RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer };
                 outbox.push(OutboxPayload { topic: REDISPATCH_TOPIC.to_owned(), payload: to_vec(&payload)? });
             }
+            Decision::DispatchAttempt { bloom, workpiece, stage, transformation } => {
+                let payload = DispatchPayload {
+                    bloom: bloom.0,
+                    workpiece: workpiece.clone(),
+                    stage: *stage,
+                    transformation: transformation.clone(),
+                };
+                outbox.push(OutboxPayload { topic: DISPATCH_TOPIC.to_owned(), payload: to_vec(&payload)? });
+            }
             Decision::InheritClaim { .. }
             | Decision::RecordResolution { .. }
             | Decision::RecordEvidence { .. }
             | Decision::ReleaseHold { .. }
+            | Decision::AdvanceStage { .. }
             | Decision::MarkSuperseded { .. }
             | Decision::SetResolved { .. }
             | Decision::AdvanceMainline { .. } => {}
         }
     }
     Ok((releases, claims, outbox))
-}
-
-/// The re-dispatch outbox payload: the bloom, the released question, and the
-/// adopting answer, each by digest. Opaque bytes the dispatch consumer (#3505)
-/// decodes to re-assemble the held attempt naming both digests (ADR-0151).
-#[derive(serde::Serialize, serde::Deserialize)]
-struct RedispatchPayload {
-    bloom: Digest,
-    question: Digest,
-    answer: Digest,
 }
 
 /// Encode a reducer [`Outcome`] into an [`AdmitResult`], mapping an encode

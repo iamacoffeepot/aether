@@ -301,6 +301,7 @@ mod tests {
             scope_revision: Digest::from_bytes([2; 32]),
             candidate: attempt,
             displayed_digest: attempt,
+            stage: aether_bloomery::StageId::Review,
         };
         record_dispatch(store, &record).unwrap();
     }

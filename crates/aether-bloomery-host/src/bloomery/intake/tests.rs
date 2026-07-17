@@ -6,8 +6,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomDraft, BloomId, BloomRecord, BloomStatus, Budget, Digest, Evidence, EvidenceKind, EvidenceRef, Fact, Forecast,
-    Membership, NetworkProfile, Nonce, Outcome, Snapshot, Transformation, WorkHandle, WorkOrder, WorkpieceId, reduce,
+    BloomDraft, BloomId, BloomRecord, BloomStatus, Budget, Decision, Digest, Event, Evidence, EvidenceKind,
+    EvidenceRef, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce, Outcome, Snapshot, StageCatalog,
+    StageId, Transformation, WorkHandle, WorkOrder, WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{ActionsExecutor, Artifact, RunConclusion, RunStatus, StageVerdict};
@@ -60,6 +61,10 @@ fn dispatch_record(
         scope_revision,
         candidate,
         displayed_digest: candidate,
+        // The terminal per-member stage, so a resolving verdict admits as a
+        // `Fact::Integrate` — the existing accept/refuse tests' oracle. The
+        // non-terminal `AttemptCompleted` path is exercised by its own test.
+        stage: StageId::Review,
     }
 }
 
@@ -98,6 +103,7 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
             claims: BTreeMap::new(),
             evidence: Vec::new(),
             holds: BTreeSet::new(),
+            progress: BTreeMap::new(),
             superseded_by: None,
         },
     );
@@ -351,4 +357,205 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
     assert!(sink.0.is_empty(), "a refused upload never reaches the reducer");
     // The order stayed live — the mismatch did not consume it.
     assert!(store.lookup_order("n-bad").unwrap().is_some());
+}
+
+// A sealed single-member bloom driven through the *reducer's* seal, so the
+// member's stage cursor is seeded at the entry stage and the entry dispatch is
+// emitted (#3505) — the state the per-member advance composition starts from.
+fn sealed_via_reducer(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot, BloomId) {
+    let member = Membership {
+        workpiece: workpiece.clone(),
+        scope_revision,
+        approval: Evidence {
+            subject: scope_revision,
+            kind: EvidenceKind::Approval,
+            detail: Digest::from_bytes([3; 32]),
+        },
+    };
+    let spec = BloomDraft {
+        proposals: vec![member],
+        base: Digest::default(),
+        stage_catalog: StageCatalog::line_digest(),
+        ..BloomDraft::default()
+    }
+    .seal();
+    let bloom = spec.id();
+    let snapshot = Snapshot::new(Digest::default());
+    let seal = Event { idempotency_key: IdempotencyKey("seal".to_owned()), fact: Fact::Seal(spec) };
+    let decisions = reduce(&snapshot, &seal);
+    let snapshot = snapshot.apply(&seal, &decisions);
+    (snapshot, bloom)
+}
+
+#[test]
+fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_advances_to_verify() {
+    // The per-member line composition (#3505), end to end over the intake broker
+    // and the reducer: a Construct dispatch's passing result admits as a
+    // Fact::AttemptCompleted (not a Fact::Integrate — Construct is non-terminal),
+    // and folding it through the reducer advances the member Construct → Verify and
+    // dispatches the next attempt.
+    let mut store = store();
+    let workpiece = WorkpieceId("wp-line".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+    let (snapshot, bloom) = sealed_via_reducer(&workpiece, scope_revision);
+    // Seal seeded the member at the entry stage.
+    assert_eq!(
+        snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece).unwrap().stage,
+        StageId::Construct,
+        "seal seeds the member at Construct",
+    );
+
+    // Record a Construct dispatch order and admit a passing result for it.
+    let candidate = Digest::from_bytes([5; 32]);
+    let mut record = dispatch_record("n-c", bloom, &workpiece, scope_revision, candidate);
+    record.stage = StageId::Construct;
+    record_dispatch(&mut store, &record).unwrap();
+
+    let upload = UploadedEvidence {
+        nonce: Nonce("n-c".to_owned()),
+        subject: candidate,
+        verdict: StageVerdict::VerificationPassed,
+        detail: Digest::from_bytes([7; 32]),
+    };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
+        panic!("a matching Construct upload is admitted");
+    };
+    let Fact::AttemptCompleted { stage, passed, .. } = &admission.event.fact else {
+        panic!("a non-terminal stage admits AttemptCompleted, not Integrate");
+    };
+    assert_eq!(*stage, StageId::Construct);
+    assert!(*passed, "a VerificationPassed verdict passes the gate");
+
+    // Fold it through the reducer: the member advances to Verify and dispatches it.
+    let decisions = reduce(&snapshot, &admission.event);
+    assert!(matches!(
+        decisions.outcome,
+        Outcome::AttemptAdvanced { from: StageId::Construct, to: StageId::Verify, .. }
+    ));
+    let next = snapshot.apply(&admission.event, &decisions);
+    assert_eq!(
+        next.blooms.get(&bloom).unwrap().progress.get(&workpiece).unwrap().stage,
+        StageId::Verify,
+        "the member advanced to Verify",
+    );
+    assert!(
+        decisions
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Decision::DispatchAttempt { stage: StageId::Verify, .. })),
+        "the advance dispatches the next (Verify) attempt",
+    );
+}
+
+#[test]
+fn a_failing_terminal_review_admits_attempt_completed_not_integrate() {
+    // Tripwire: the completion gate applies across the whole member line, the
+    // terminal Review included. A *failing* Review upload admits as a
+    // Fact::AttemptCompleted { passed: false } — never a Fact::Integrate — so the
+    // reducer retries/wedges it rather than recording a failing review as resolved.
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let workpiece = WorkpieceId("wp-review".to_owned());
+    let candidate = Digest::from_bytes([5; 32]);
+    // dispatch_record's default stage is the terminal Review.
+    let record = dispatch_record("n-rev", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
+    assert_eq!(record.stage, StageId::Review, "the record is at the terminal Review stage");
+    record_dispatch(&mut store, &record).unwrap();
+
+    let upload = UploadedEvidence {
+        nonce: Nonce("n-rev".to_owned()),
+        subject: candidate,
+        verdict: StageVerdict::ReviewFinding,
+        detail: Digest::from_bytes([7; 32]),
+    };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
+        panic!("a matching failing-review upload is admitted (the gate decides its fate, not the broker)");
+    };
+    let Fact::AttemptCompleted { stage, passed, .. } = &admission.event.fact else {
+        panic!("a failing terminal Review admits AttemptCompleted, not Integrate");
+    };
+    assert_eq!(*stage, StageId::Review);
+    assert!(!*passed, "a ReviewFinding verdict fails the gate");
+
+    // The order is consumed on accept, like any admitted result.
+    assert!(matches!(
+        admit_uploaded(&mut store, &upload).unwrap(),
+        AdmitDecision::Refused(IntakeRefusal::UnknownNonce(_))
+    ));
+}
+
+#[test]
+fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
+    // A well-formed dispatch only ever carries a member-line stage (Construct /
+    // Verify / Refine / Review); an order at any other stage is corrupt. It is
+    // refused as OutOfLineStage rather than folded into the member's resolution,
+    // and (like a digest mismatch) the order is NOT consumed.
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let workpiece = WorkpieceId("wp-off".to_owned());
+    let candidate = Digest::from_bytes([5; 32]);
+    let mut record = dispatch_record("n-off", bloom, &workpiece, Digest::from_bytes([2; 32]), candidate);
+    record.stage = StageId::AggregateVerify;
+    record_dispatch(&mut store, &record).unwrap();
+
+    let upload = UploadedEvidence {
+        nonce: Nonce("n-off".to_owned()),
+        subject: candidate,
+        verdict: StageVerdict::VerificationPassed,
+        detail: Digest::from_bytes([7; 32]),
+    };
+    match admit_uploaded(&mut store, &upload).unwrap() {
+        AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(stage)) => {
+            assert_eq!(stage, StageId::AggregateVerify);
+        }
+        other => panic!("expected OutOfLineStage refusal, got {other:?}"),
+    }
+    // The order stayed live — the refusal precedes the consume, so a corrected
+    // dispatch could still land it.
+    assert!(store.lookup_order("n-off").unwrap().is_some(), "an out-of-line refusal leaves the order live");
+}
+
+// Tripwire: the attempt-artifact name codec round-trips (#3505). The wrapper
+// encodes an attempt result into an artifact name and the pull-side
+// `NameEvidenceClaims` decodes it from the reference; the two must be inverse, and
+// the nonce is authoritative from the reference (what the port matched the run
+// by), not the name's trailing segment. A drift in either half strands every
+// returning attempt result at the broker.
+#[test]
+fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
+    use aether_bloomery::EvidenceRef;
+
+    use super::{NameEvidenceClaims, attempt_artifact_name};
+
+    let claims = NameEvidenceClaims;
+    let cases = [
+        (StageVerdict::Approved, 5u8, 9u8),
+        (StageVerdict::VerificationPassed, 200, 201),
+        (StageVerdict::VerificationFailed, 0, 255),
+        (StageVerdict::ReviewFinding, 42, 7),
+        (StageVerdict::Parked, 17, 18),
+    ];
+    for (verdict, subject_seed, detail_seed) in cases {
+        let nonce = Nonce("dispatch-42".to_owned());
+        let subject = Digest::from_bytes([subject_seed; 32]);
+        let detail = Digest::from_bytes([detail_seed; 32]);
+        let name = attempt_artifact_name(&nonce, &subject, verdict, &detail);
+        let reference = EvidenceRef { name, nonce: nonce.clone(), artifact_id: 1, size_bytes: 10 };
+
+        let decoded = claims.claim_for(&reference).expect("a well-formed attempt name decodes");
+        assert_eq!(decoded.nonce, nonce);
+        assert_eq!(decoded.subject, subject);
+        assert_eq!(decoded.verdict, verdict);
+        assert_eq!(decoded.detail, detail);
+    }
+
+    // A non-attempt artifact name (a study record, a stray log) is skipped, not
+    // mis-decoded into a bogus attempt result.
+    let stray = EvidenceRef {
+        name: "study.dispatch-42.log".to_owned(),
+        nonce: Nonce("dispatch-42".to_owned()),
+        artifact_id: 2,
+        size_bytes: 3,
+    };
+    assert!(claims.claim_for(&stray).is_none(), "a non-attempt name yields no claim");
 }

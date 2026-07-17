@@ -14,9 +14,9 @@
 mod common;
 
 use aether_bloomery::{
-    AdmitEvidenceError, AdoptAnswerError, Artifact, BloomStatus, Decision, Digest, Evidence, EvidenceKind, Fact, KeyId,
-    LandError, Observation, Outcome, Provenance, Question, ResolveError, SealError, SignatureEnvelope, Snapshot,
-    StageId, Statement, SupersedeError, reduce,
+    AdmitEvidenceError, AdoptAnswerError, Artifact, AttemptCompletedError, BloomStatus, Decision, Digest, Evidence,
+    EvidenceKind, Fact, KeyId, LandError, Observation, Outcome, Provenance, Question, ResolveError, SealError,
+    SignatureEnvelope, Snapshot, StageCatalog, StageId, Statement, SupersedeError, reduce,
 };
 use aether_data::wire::to_vec;
 use common::{claim, digest, draft, event, membership, sealed_and_resolved, splice_bloom, step, workpiece};
@@ -703,7 +703,297 @@ fn landing_releases_memberships() {
     assert!(!after.active.contains_key(&workpiece("wp")), "landing frees the workpiece");
 }
 
+// The evidence a completed attempt carries. The reducer does not re-check its
+// binding in `AttemptCompleted` (the intake trust boundary enforces it before
+// admission), so any well-formed evidence stands in.
+fn attempt_evidence() -> Evidence {
+    Evidence { subject: digest(70), kind: EvidenceKind::VerificationResult, detail: digest(80) }
+}
+
+// ADR-0149 §The line — a seal seeds each member's cursor at the entry stage
+// (`Construct`, attempt 1) and dispatches its first attempt. Tripwire: the seal
+// decision carries exactly one `DispatchAttempt` per member at the entry stage,
+// and the folded snapshot reflects the seeded cursor.
+#[test]
+fn seal_dispatches_each_member_at_the_entry_stage() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (after, decided) = step(&base, &event("seal", Fact::Seal(spec)));
+    assert!(matches!(decided.outcome, Outcome::Sealed(_)));
+
+    let dispatched: Vec<(_, _)> = decided
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Decision::DispatchAttempt { workpiece, stage, .. } => Some((workpiece.clone(), *stage)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dispatched.len(), 2, "one dispatch per member");
+    assert!(dispatched.iter().all(|(_, stage)| *stage == StageCatalog::entry_stage()));
+
+    let record = after.blooms.get(&bloom).unwrap();
+    for name in ["alpha", "beta"] {
+        let progress = record.progress.get(&workpiece(name)).expect("each member's cursor is seeded");
+        assert_eq!(progress.stage, StageId::Construct);
+        assert_eq!(progress.attempts, 1);
+    }
+}
+
+// ADR-0149 §The line — Tripwire: a passing gate advances exactly one stage and
+// dispatches the next. A passing `Construct` advances the cursor to `Verify` and
+// dispatches one `Verify` attempt.
+#[test]
+fn a_passing_attempt_advances_one_stage_and_dispatches_the_next() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let pass = event(
+        "c-pass",
+        Fact::AttemptCompleted {
+            bloom,
+            workpiece: workpiece("wp"),
+            stage: StageId::Construct,
+            passed: true,
+            evidence: attempt_evidence(),
+        },
+    );
+    let (after, decided) = step(&snapshot, &pass);
+    match decided.outcome {
+        Outcome::AttemptAdvanced { from, to, .. } => {
+            assert_eq!(from, StageId::Construct);
+            assert_eq!(to, StageId::Verify);
+        }
+        other => panic!("expected AttemptAdvanced, got {other:?}"),
+    }
+    let dispatched: Vec<StageId> = decided
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Decision::DispatchAttempt { stage, .. } => Some(*stage),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dispatched, vec![StageId::Verify], "exactly one dispatch, at the next stage");
+    let progress = after.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
+    assert_eq!(progress.stage, StageId::Verify);
+    assert_eq!(progress.attempts, 1);
+}
+
+// ADR-0149 §The line — Tripwire: a failing gate re-dispatches within the stage's
+// retry budget, and an exhausted budget stops dispatching (wedges) rather than
+// looping. `Construct`'s budget is 2, so the first fail retries in place to
+// attempt 2 and the second wedges.
+#[test]
+fn a_failing_attempt_retries_within_budget_then_wedges() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let fail = |key: &str| {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: false,
+                evidence: attempt_evidence(),
+            },
+        )
+    };
+
+    let (after1, d1) = step(&snapshot, &fail("c-fail-1"));
+    match d1.outcome {
+        Outcome::AttemptRetried { stage, attempt, .. } => {
+            assert_eq!(stage, StageId::Construct);
+            assert_eq!(attempt, 2);
+        }
+        other => panic!("expected AttemptRetried, got {other:?}"),
+    }
+    assert_eq!(d1.effects.iter().filter(|e| matches!(e, Decision::DispatchAttempt { .. })).count(), 1);
+    assert_eq!(after1.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap().attempts, 2);
+
+    // Attempt 2 fails: the budget is exhausted, so the member wedges — no dispatch.
+    let (_after2, d2) = step(&after1, &fail("c-fail-2"));
+    assert!(matches!(d2.outcome, Outcome::AttemptWedged { stage: StageId::Construct, .. }));
+    assert!(
+        !d2.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. })),
+        "a wedged member stops dispatching",
+    );
+}
+
+// ADR-0149 §The line — Tripwire: the completion gate applies across the whole
+// member line, the terminal `Review` included. A *failing* `Review` retries within
+// its budget (2) and wedges on exhaustion here — it is never silently integrated;
+// only a *passing* `Review` leaves this path (through `Fact::Integrate`).
+#[test]
+fn a_failing_terminal_review_retries_within_budget_then_wedges() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (mut snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    // Advance the member Construct → Verify → Refine → Review with passing gates.
+    for stage in [StageId::Construct, StageId::Verify, StageId::Refine] {
+        let pass = event(
+            &format!("adv-{stage:?}"),
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage,
+                passed: true,
+                evidence: attempt_evidence(),
+            },
+        );
+        let (next, _) = step(&snapshot, &pass);
+        snapshot = next;
+    }
+    assert_eq!(
+        snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap().stage,
+        StageId::Review,
+        "the member advanced to the terminal Review stage",
+    );
+
+    let fail = |key: &str| {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Review,
+                passed: false,
+                evidence: attempt_evidence(),
+            },
+        )
+    };
+
+    // Review's retry_budget is 2: the first fail retries Review in place to attempt
+    // 2 — a re-dispatch of Review, never an Integrate of the failing review.
+    let (after1, d1) = step(&snapshot, &fail("r-fail-1"));
+    match d1.outcome {
+        Outcome::AttemptRetried { stage, attempt, .. } => {
+            assert_eq!(stage, StageId::Review);
+            assert_eq!(attempt, 2);
+        }
+        other => panic!("expected AttemptRetried, got {other:?}"),
+    }
+    assert!(
+        d1.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { stage: StageId::Review, .. })),
+        "a failing terminal Review re-dispatches Review",
+    );
+
+    // Attempt 2 fails: the budget is exhausted, so the member wedges — no dispatch,
+    // and no ResolutionClaim was ever produced from the failing verdict.
+    let (_after2, d2) = step(&after1, &fail("r-fail-2"));
+    assert!(matches!(d2.outcome, Outcome::AttemptWedged { stage: StageId::Review, .. }));
+    assert!(
+        !d2.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. })),
+        "a wedged terminal Review stops dispatching",
+    );
+}
+
+// ADR-0149 §The line — an attempt completion is refused when it does not name the
+// member's current cursor stage, when it names the terminal `Review` with a
+// *passing* verdict (which integrates through `Fact::Integrate`, never completes
+// here), for a non-member, and for an unknown bloom.
+#[test]
+fn attempt_completion_refuses_mismatch_terminal_non_member_and_unknown() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let completion = |key: &str, wp: &str, stage: StageId| {
+        event(
+            key,
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece(wp),
+                stage,
+                passed: true,
+                evidence: attempt_evidence(),
+            },
+        )
+    };
+
+    // The cursor is at Construct; a completion naming Verify is a stage mismatch.
+    let mismatch = reduce(&snapshot, &completion("m", "wp", StageId::Verify));
+    assert!(matches!(
+        mismatch.outcome,
+        Outcome::AttemptCompletedRejected(AttemptCompletedError::StageMismatch {
+            expected: StageId::Construct,
+            got: StageId::Verify,
+        }),
+    ));
+
+    // The terminal Review never completes here.
+    let terminal = reduce(&snapshot, &completion("t", "wp", StageId::Review));
+    assert!(matches!(
+        terminal.outcome,
+        Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(StageId::Review)),
+    ));
+
+    // A non-member workpiece.
+    let stranger = reduce(&snapshot, &completion("n", "ghost", StageId::Construct));
+    assert!(matches!(stranger.outcome, Outcome::AttemptCompletedRejected(AttemptCompletedError::NotAMember(_))));
+
+    // An unknown bloom (nothing sealed on `base`).
+    let unknown = reduce(&base, &completion("u", "wp", StageId::Construct));
+    assert!(matches!(
+        unknown.outcome,
+        Outcome::AttemptCompletedRejected(AttemptCompletedError::UnknownOrInactiveBloom),
+    ));
+}
+
 proptest! {
+    // ADR-0149 §The line — the per-member cursor only ever advances forward one
+    // step through MEMBER_LINE (on a passing gate) or holds in place (on a
+    // failing gate / a wedge); it never moves backward or off the line. Driving a
+    // random pass/fail sequence through reduce+apply is journal replay, so this
+    // also pins that replay reconstructs in-flight line position.
+    #[test]
+    fn cursor_advances_forward_or_holds_in_place(passes in prop::collection::vec(any::<bool>(), 0..8)) {
+        let base = Snapshot::new(digest(1));
+        let spec = draft(1, vec![membership("wp", 10)]).seal();
+        let bloom = spec.id();
+        let (mut snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+        let line = StageCatalog::MEMBER_LINE;
+
+        for (i, passed) in passes.into_iter().enumerate() {
+            let cursor = snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).copied().unwrap();
+            // The terminal cursor integrates elsewhere — stop before it.
+            if StageCatalog::next_member_stage(cursor.stage).is_none() {
+                break;
+            }
+            let prev_index = line.iter().position(|stage| *stage == cursor.stage).unwrap();
+            let ev = event(
+                &format!("a-{i}"),
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: workpiece("wp"),
+                    stage: cursor.stage,
+                    passed,
+                    evidence: attempt_evidence(),
+                },
+            );
+            let (next, _) = step(&snapshot, &ev);
+            snapshot = next;
+
+            let new = snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
+            let new_index = line.iter().position(|stage| *stage == new.stage).unwrap();
+            if passed {
+                prop_assert_eq!(new_index, prev_index + 1, "a pass advances exactly one stage");
+            } else {
+                prop_assert_eq!(new_index, prev_index, "a fail holds the cursor in place");
+            }
+        }
+    }
+
     // Invariant 8 — typed content addressing (ADR-0149 §The value vocabulary).
     // A content-addressed value's digest hashes its type's DOMAIN tag ahead of
     // the wire bytes, so it is never the bare sha256 of those bytes — the

@@ -7,6 +7,7 @@ mod cli;
 mod construct;
 mod driver;
 mod executor;
+mod executor_driver;
 mod intake;
 mod mirror;
 mod mirror_driver;
@@ -18,10 +19,11 @@ pub use cli::BloomeryCli;
 pub use construct::{CONSTRUCT_IMPLEMENT_COMMAND, build_construct_order};
 pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
 pub use executor::ExecutorShell;
+pub use executor_driver::{DISPATCH_TOPIC, DispatchTick, ExecutorDriverCapability, ExecutorDriverState};
 pub use intake::{
     Admission, AdmitDecision, AdmitSink, CycleError, CycleReport, DispatchError, DispatchRecord, EvidenceClaims,
-    IntakeError, IntakeRefusal, UploadedEvidence, admit_uploaded, dispatch_and_record, record_dispatch,
-    run_intake_cycle,
+    IntakeError, IntakeRefusal, NameEvidenceClaims, UploadedEvidence, admit_uploaded, attempt_artifact_name,
+    dispatch_and_record, record_dispatch, run_intake_cycle,
 };
 pub use mirror::{GithubMirrorConfig, GithubMirrorOverlay, ProjectionShell};
 pub use mirror_driver::{

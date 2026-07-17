@@ -63,6 +63,14 @@ pub struct GithubMirrorConfig {
     /// The protected git ref the executor pins the wrapper dispatch at.
     #[config(default = "refs/heads/main")]
     pub executor_dispatch_ref: String,
+    /// The `SQLite` store path the executor dispatch driver ([`super::ExecutorDriverCapability`])
+    /// opens its own connection to, to drive the intake registry directly (#3505).
+    /// Reads the **same** `AETHER_STORE_PATH` env the [`StoreConfig`](crate::store::StoreConfig)
+    /// resolves, so the driver's connection targets the store the `StoreCapability`
+    /// owns; carried on this shared config the same way the executor knobs are (one
+    /// config serves the mirror, source, and executor caps).
+    #[config(env = "AETHER_STORE_PATH", default = ":memory:")]
+    pub store_path: String,
 }
 
 impl Default for GithubMirrorConfig {
@@ -76,6 +84,7 @@ impl Default for GithubMirrorConfig {
             poll_interval_secs: 5,
             executor_workflow_file: "bloomery-transform.yml".to_owned(),
             executor_dispatch_ref: "refs/heads/main".to_owned(),
+            store_path: ":memory:".to_owned(),
         }
     }
 }

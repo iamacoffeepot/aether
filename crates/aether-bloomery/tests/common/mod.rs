@@ -114,6 +114,7 @@ pub fn splice_bloom(snapshot: &mut Snapshot, spec: &BloomSpec, status: BloomStat
             claims: BTreeMap::new(),
             evidence: Vec::new(),
             holds: BTreeSet::new(),
+            progress: BTreeMap::new(),
             superseded_by: None,
         },
     );

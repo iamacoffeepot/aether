@@ -312,6 +312,7 @@ fn order(nonce: &str) -> OutstandingOrder {
         scope_revision: vec![2; 32],
         candidate: vec![5; 32],
         displayed_digest: vec![5; 32],
+        stage: vec![9],
     }
 }
 

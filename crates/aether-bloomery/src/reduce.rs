@@ -24,11 +24,11 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::{Digest, digest_of};
-use crate::ids::{BloomId, IdempotencyKey, WorkpieceId};
+use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::port::{BloomView, MemberView, PendingDecisionView, ViewDocument};
 use crate::values::{
     BloomSpec, Evidence, EvidenceKind, LandingReceipt, Membership, Question, ResolutionClaim, ResolvedBloom,
-    StageCatalog, Statement,
+    StageCatalog, Statement, Transformation,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -74,8 +74,31 @@ pub struct BloomRecord {
     /// is what binds a hold to its member in the outward view. Journal-derived,
     /// replay-rebuilt like the rest of the record.
     pub holds: BTreeSet<Digest>,
+    /// The per-member stage cursor (ADR-0149 §The line): for each member
+    /// workpiece, the [`StageId`] it currently sits at plus its attempt count
+    /// against that stage's `retry_budget`. Rebuilt from the journal like the rest
+    /// of the record — a seal seeds every member at the entry stage
+    /// ([`StageCatalog::entry_stage`]), a passing attempt advances the cursor, and
+    /// a failing one bumps the attempt count in place — so replay reconstructs
+    /// in-flight line position. A member drops out of the map only implicitly (it
+    /// never does in V1; the record is discarded whole on supersession).
+    pub progress: BTreeMap<WorkpieceId, StageProgress>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
+}
+
+/// One member's position in the per-member line: the stage it currently sits at
+/// and how many attempts it has made against that stage (ADR-0149 §The line). The
+/// attempt count is capped at the stage's `retry_budget`; a member at
+/// `attempts == retry_budget` whose latest attempt failed is wedged — it stops
+/// dispatching rather than looping.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct StageProgress {
+    /// The stage the member currently sits at.
+    pub stage: StageId,
+    /// The number of attempts dispatched against this stage so far (`1` on the
+    /// first dispatch). Never exceeds the stage's `retry_budget`.
+    pub attempts: u32,
 }
 
 /// A bloom's position in the one-way lifecycle.
@@ -179,6 +202,37 @@ pub enum Fact {
         /// naming the held question digest.
         answer: Statement,
     },
+    /// A dispatched per-member attempt completed with evidence (ADR-0149 §The
+    /// line). Admitted when a nonce/digest-matched attempt result arrives from
+    /// evidence intake (#3502) for a non-terminal member stage
+    /// (`Construct` / `Verify` / `Refine`). The reducer evaluates the stage's
+    /// completion gate against `passed` and the member's cursor: a passing gate
+    /// advances the cursor and dispatches the next stage; a failing one
+    /// re-dispatches the same stage while the `retry_budget` allows and wedges the
+    /// member once it is exhausted. The terminal `Review` stage's passing result
+    /// integrates the member through [`Fact::Integrate`] instead — the intake is
+    /// stage-aware and never routes a `Review` result here.
+    ///
+    /// `passed` is the completion gate's outcome as the intake broker read it from
+    /// the worker's verdict — the reducer owns the *advance* decision the gate
+    /// gates (advance / retry / wedge), never delegating that to the host; the
+    /// host only reports the raw pass/fail observation. Appended past
+    /// [`Fact::AdoptAnswer`] so the prior facts' wire discriminants are unchanged.
+    AttemptCompleted {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The member workpiece whose attempt completed.
+        workpiece: WorkpieceId,
+        /// The stage the completed attempt ran — must be the member's current
+        /// cursor stage, or the completion is a stale/mismatched result.
+        stage: StageId,
+        /// The completion gate's pass/fail outcome for this attempt.
+        passed: bool,
+        /// The evidence the attempt produced, bound to its subject. Recorded in
+        /// the bloom's evidence log; the binding is enforced at the intake trust
+        /// boundary before admission (#3502) and re-checkable there like a claim's.
+        evidence: Evidence,
+    },
 }
 
 /// The result of reducing one event: an outcome plus the ordered effects that
@@ -253,6 +307,43 @@ pub enum Outcome {
     },
     /// An answer adoption was refused.
     AdoptAnswerRejected(AdoptAnswerError),
+    /// A passing attempt advanced the member to its next stage, dispatching it.
+    /// Appended, so the prior outcomes' wire discriminants are unchanged.
+    AttemptAdvanced {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The advanced member.
+        workpiece: WorkpieceId,
+        /// The stage that passed.
+        from: StageId,
+        /// The stage the member advanced to and dispatched.
+        to: StageId,
+    },
+    /// A failing attempt re-dispatched the same stage within its retry budget.
+    AttemptRetried {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The retried member.
+        workpiece: WorkpieceId,
+        /// The stage re-dispatched.
+        stage: StageId,
+        /// The attempt count after the re-dispatch (≤ the stage's retry budget).
+        attempt: u32,
+    },
+    /// A failing attempt exhausted its stage's retry budget: the member wedged and
+    /// stops dispatching (a supersession is the escape). No further attempt is
+    /// dispatched — the bloom cannot resolve until the member is superseded.
+    AttemptWedged {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The wedged member.
+        workpiece: WorkpieceId,
+        /// The stage that exhausted its retry budget.
+        stage: StageId,
+    },
+    /// An attempt completion was refused (unknown bloom, non-member, or a stage
+    /// that is not the member's current cursor).
+    AttemptCompletedRejected(AttemptCompletedError),
 }
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -343,6 +434,37 @@ pub enum Decision {
         /// The adopting answer's digest — grounds the re-dispatched attempt's
         /// instruction slot.
         answer: Digest,
+    },
+    /// Dispatch an attempt of `stage` against `workpiece`'s subject in `bloom` —
+    /// the transactional-outbox intent the host drains and submits through the
+    /// executor port (ADR-0149 §The line / §The boundary). The reducer *decides*
+    /// to dispatch; it never does I/O. A snapshot-inert outbox effect like
+    /// [`Decision::EmitReceipt`] / [`Decision::RedispatchStage`] — it carries no
+    /// in-snapshot state and is rebuilt on replay from the journaled fact.
+    /// Appended so the prior decisions' wire discriminants are unchanged.
+    DispatchAttempt {
+        /// The bloom the dispatched member belongs to.
+        bloom: BloomId,
+        /// The member workpiece the attempt runs against.
+        workpiece: WorkpieceId,
+        /// The stage this attempt executes.
+        stage: StageId,
+        /// The fully-built portable transformation the host wraps in a work order
+        /// (adding the idempotency nonce) and submits through the executor port.
+        transformation: Transformation,
+    },
+    /// Advance a member's stage cursor to `progress` — the snapshot-folding
+    /// counterpart to a [`Decision::DispatchAttempt`]. Overwrites the member's
+    /// entry in the record's progress map (see [`BloomRecord::progress`]); a seal
+    /// seeds each member here, a passing attempt moves the cursor forward, a
+    /// failing one bumps the attempt count in place.
+    AdvanceStage {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The member whose cursor advances.
+        workpiece: WorkpieceId,
+        /// The member's new stage cursor.
+        progress: StageProgress,
     },
 }
 
@@ -466,6 +588,31 @@ pub enum AdoptAnswerError {
     NoMatchingHold,
 }
 
+/// Why an attempt completion was refused (ADR-0149 §The line).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum AttemptCompletedError {
+    /// The bloom is not known or not active (only a `Sealed` bloom runs a line —
+    /// a resolved, landed, or superseded bloom is past dispatch).
+    UnknownOrInactiveBloom,
+    /// The completion names a workpiece that is not a member of the bloom.
+    NotAMember(WorkpieceId),
+    /// The completed stage is not the member's current cursor stage — a stale,
+    /// duplicated, or out-of-order attempt result the reducer will not act on.
+    /// (A resent idempotency key is caught earlier as [`Outcome::Duplicate`]; this
+    /// is a *different* result naming a stage the member has already left.)
+    StageMismatch {
+        /// The stage the member's cursor currently sits at.
+        expected: StageId,
+        /// The stage the completion named.
+        got: StageId,
+    },
+    /// The named stage is the terminal `Review` (or otherwise outside the
+    /// non-terminal per-member line): a passing `Review` integrates the member
+    /// through [`Fact::Integrate`] and never completes here, so a `Review`
+    /// completion is mis-routed.
+    TerminalStage(StageId),
+}
+
 /// A land refused because mainline had moved off the bloom's sealed base.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BaseMismatch {
@@ -499,9 +646,34 @@ pub fn reduce(snapshot: &Snapshot, event: &Event) -> Decisions {
         Fact::Integrate { bloom, claim } => reduce_integrate(snapshot, bloom, claim),
         Fact::AdmitEvidence { bloom, evidence } => reduce_admit_evidence(snapshot, bloom, evidence),
         Fact::AdoptAnswer { bloom, answer } => reduce_adopt_answer(snapshot, bloom, answer),
+        Fact::AttemptCompleted { bloom, workpiece, stage, passed, evidence } => {
+            reduce_attempt_completed(snapshot, bloom, workpiece, *stage, *passed, evidence)
+        }
         Fact::Resolve { bloom, tree, lineage } => reduce_resolve(snapshot, bloom, tree, lineage),
         Fact::Land { bloom, new_head } => reduce_land(snapshot, bloom, new_head),
     }
+}
+
+/// Build the seal-time entry-stage dispatch effects for one member: seed its
+/// cursor at the entry stage (attempt 1) and dispatch the first attempt against
+/// its frozen scope revision. The cursor advance folds into the snapshot; the
+/// dispatch is a snapshot-inert outbox effect the host submits (ADR-0149 §The
+/// line).
+fn entry_dispatch_effects(bloom: BloomId, member: &Membership) -> [Decision; 2] {
+    let stage = StageCatalog::entry_stage();
+    [
+        Decision::AdvanceStage {
+            bloom,
+            workpiece: member.workpiece.clone(),
+            progress: StageProgress { stage, attempts: 1 },
+        },
+        Decision::DispatchAttempt {
+            bloom,
+            workpiece: member.workpiece.clone(),
+            stage,
+            transformation: Transformation::for_member_stage(stage, member.scope_revision),
+        },
+    ]
 }
 
 fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec) -> Decisions {
@@ -535,11 +707,17 @@ fn reduce_seal(snapshot: &Snapshot, spec: &BloomSpec) -> Decisions {
     if let Some(active) = active_unlanded_bloom(snapshot) {
         return Decisions::rejected(Outcome::SealRejected(SealError::ActiveBloomExists(active)));
     }
-    let effects = spec
-        .members()
-        .iter()
-        .map(|member| Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom })
-        .collect();
+    // Claim each member, then seed its cursor at the entry stage and dispatch its
+    // first attempt — a sealed bloom's members enter the line at `Construct`
+    // (ADR-0149 §The line). The claims come first so the dispatch effects attach
+    // to a member already in `active`.
+    let mut effects = Vec::with_capacity(spec.members().len() * 3);
+    for member in spec.members() {
+        effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom });
+    }
+    for member in spec.members() {
+        effects.extend(entry_dispatch_effects(bloom, member));
+    }
     Decisions { outcome: Outcome::Sealed(bloom), effects }
 }
 
@@ -779,6 +957,112 @@ fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: &Statement)
     }
 }
 
+/// Reduce a per-member attempt completion (ADR-0149 §The line, [`Fact::AttemptCompleted`]).
+///
+/// The reducer alone advances line position: it reads the member's cursor,
+/// evaluates the stage's completion gate against the host-reported `passed`
+/// signal, and decides advance / retry / wedge — the host submits transformations
+/// and reports raw outcomes but never advances state (the ADR-0149 invariant, and
+/// the reason the "host evaluates the gate" alternative was rejected).
+///
+/// A passing gate advances the cursor to the next member stage and dispatches it;
+/// a failing gate re-dispatches the same stage while the stage's `retry_budget`
+/// allows and wedges the member once it is exhausted (a wedged member stops
+/// dispatching — a supersession is the escape). The attempt's evidence is recorded
+/// in the bloom's evidence log either way. The completion gate applies across the
+/// whole member line, the terminal `Review` included: a *passing* `Review` integrates
+/// the member through [`Fact::Integrate`] and never completes here (a passing terminal
+/// completion is a mis-route, [`AttemptCompletedError::TerminalStage`]), but a *failing*
+/// `Review` retries within budget and wedges on exhaustion here like any other stage.
+fn reduce_attempt_completed(
+    snapshot: &Snapshot,
+    bloom: &BloomId,
+    workpiece: &WorkpieceId,
+    stage: StageId,
+    passed: bool,
+    evidence: &Evidence,
+) -> Decisions {
+    let Some(record) = snapshot.blooms.get(bloom) else {
+        return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::UnknownOrInactiveBloom));
+    };
+    if record.status != BloomStatus::Sealed {
+        return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::UnknownOrInactiveBloom));
+    }
+    let Some(member) = record.spec.members().iter().find(|member| member.workpiece == *workpiece) else {
+        return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::NotAMember(
+            workpiece.clone(),
+        )));
+    };
+    // A *passing* terminal `Review` is a mis-route — a passing Review integrates
+    // through `Fact::Integrate` and never completes here, so a passing completion
+    // whose stage has no successor is rejected. A *failing* `Review` does complete
+    // here (retry/wedge below), so the guard fires only on the passing terminal
+    // case; a mis-routed passing terminal is caught before the cursor check so it
+    // reads as `TerminalStage` rather than a `StageMismatch`.
+    let next = StageCatalog::next_member_stage(stage);
+    if passed && next.is_none() {
+        return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(stage)));
+    }
+    // The completion must name the member's current cursor stage; a result for a
+    // stage the member has already left is stale/out-of-order and is not acted on.
+    let cursor = record.progress.get(workpiece).copied();
+    if cursor.map(|progress| progress.stage) != Some(stage) {
+        return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::StageMismatch {
+            expected: cursor.map_or_else(StageCatalog::entry_stage, |progress| progress.stage),
+            got: stage,
+        }));
+    }
+    let attempts = cursor.map_or(1, |progress| progress.attempts);
+    let subject = member.scope_revision;
+    // The attempt result is journaled evidence about the member, recorded whatever
+    // the gate decides.
+    let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
+    // A passing gate advances the cursor to the next member stage and dispatches
+    // it. `next` is `Some` on this branch — a passing terminal completion was
+    // rejected above, so a passing stage always has a successor.
+    if let Some(next) = next.filter(|_| passed) {
+        effects.push(Decision::AdvanceStage {
+            bloom: *bloom,
+            workpiece: workpiece.clone(),
+            progress: StageProgress { stage: next, attempts: 1 },
+        });
+        effects.push(Decision::DispatchAttempt {
+            bloom: *bloom,
+            workpiece: workpiece.clone(),
+            stage: next,
+            transformation: Transformation::for_member_stage(next, subject),
+        });
+        return Decisions {
+            outcome: Outcome::AttemptAdvanced { bloom: *bloom, workpiece: workpiece.clone(), from: stage, to: next },
+            effects,
+        };
+    }
+    // A failing gate re-dispatches the same stage while its retry budget allows;
+    // an exhausted budget wedges the member — it stops dispatching rather than
+    // looping (the tripwire). Uniform across the line: a failing terminal `Review`
+    // retries within its budget and wedges here too, never a silent integrate.
+    let budget = StageCatalog::retry_budget_of(stage).unwrap_or(1);
+    if attempts < budget {
+        let attempt = attempts + 1;
+        effects.push(Decision::AdvanceStage {
+            bloom: *bloom,
+            workpiece: workpiece.clone(),
+            progress: StageProgress { stage, attempts: attempt },
+        });
+        effects.push(Decision::DispatchAttempt {
+            bloom: *bloom,
+            workpiece: workpiece.clone(),
+            stage,
+            transformation: Transformation::for_member_stage(stage, subject),
+        });
+        return Decisions {
+            outcome: Outcome::AttemptRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, attempt },
+            effects,
+        };
+    }
+    Decisions { outcome: Outcome::AttemptWedged { bloom: *bloom, workpiece: workpiece.clone(), stage }, effects }
+}
+
 fn reduce_resolve(snapshot: &Snapshot, bloom: &BloomId, tree: &Digest, lineage: &[Digest]) -> Decisions {
     let Some(record) = snapshot.blooms.get(bloom) else {
         return Decisions::rejected(Outcome::ResolveRejected(ResolveError::UnknownOrInactiveBloom));
@@ -914,10 +1198,16 @@ impl Snapshot {
                     record.holds.remove(question);
                 }
             }
-            // Snapshot-inert: re-dispatch is an outbox effect the store projects,
-            // rebuilt on replay from the journaled AdoptAnswer fact — it carries no
-            // in-snapshot state, like EmitReceipt's outbox row.
-            Decision::RedispatchStage { .. } => {}
+            Decision::AdvanceStage { bloom, workpiece, progress } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.progress.insert(workpiece.clone(), *progress);
+                }
+            }
+            // Snapshot-inert outbox effects the store projects and republishes,
+            // rebuilt on replay from the journaled fact — they carry no in-snapshot
+            // state, like EmitReceipt's outbox row. A dispatch's paired cursor rides
+            // its sibling AdvanceStage; a re-dispatch's hold release rides ReleaseHold.
+            Decision::RedispatchStage { .. } | Decision::DispatchAttempt { .. } => {}
             Decision::MarkSuperseded { bloom, by } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.status = BloomStatus::Superseded;
@@ -949,6 +1239,7 @@ impl BloomRecord {
             claims: BTreeMap::new(),
             evidence: Vec::new(),
             holds: BTreeSet::new(),
+            progress: BTreeMap::new(),
             superseded_by: None,
         }
     }

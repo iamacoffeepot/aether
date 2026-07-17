@@ -44,10 +44,10 @@ use std::fmt;
 
 use aether_bloomery::{
     Admit, BloomId, Digest, Event, EvidenceRef, ExecutionStatus, Fact, IdempotencyKey, Nonce, ResolutionClaim,
-    WorkHandle, WorkOrder, WorkpieceId,
+    StageCatalog, StageId, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::{ExecutorError, InwardError, StageResult, StageVerdict, normalize_stage_result};
-use aether_data::wire::{Error as WireError, to_vec};
+use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
 use super::executor::ExecutorShell;
 use crate::store::{OutstandingOrder, RecordOutcome, StoreBackend};
@@ -76,6 +76,11 @@ pub struct DispatchRecord {
     pub candidate: Digest,
     /// The digest Bloomery displayed for this order.
     pub displayed_digest: Digest,
+    /// The line stage this order dispatched (#3505). Routes the returning result:
+    /// a non-terminal per-member stage (`Construct` / `Verify` / `Refine`) admits
+    /// as a `Fact::AttemptCompleted` advancing the member's cursor; the terminal
+    /// `Review` admits as a `Fact::Integrate`; a parked outcome as a `Question`.
+    pub stage: StageId,
 }
 
 impl DispatchRecord {
@@ -87,6 +92,9 @@ impl DispatchRecord {
             scope_revision: self.scope_revision.as_bytes().to_vec(),
             candidate: self.candidate.as_bytes().to_vec(),
             displayed_digest: self.displayed_digest.as_bytes().to_vec(),
+            // The StageId as its canonical wire bytes — a stable, compact column
+            // the intake decodes back on admit (never a hand-rolled int mapping).
+            stage: to_vec(&self.stage).unwrap_or_default(),
         }
     }
 
@@ -98,6 +106,7 @@ impl DispatchRecord {
             scope_revision: digest_from_slice(&order.scope_revision)?,
             candidate: digest_from_slice(&order.candidate)?,
             displayed_digest: digest_from_slice(&order.displayed_digest)?,
+            stage: from_bytes(&order.stage).ok()?,
         })
     }
 }
@@ -140,6 +149,10 @@ pub enum IntakeRefusal {
         /// The digest the upload actually claimed.
         claimed: Digest,
     },
+    /// The order's stage is not in the dispatched member line (Construct / Verify /
+    /// Refine / Review) — a well-formed dispatch only ever carries a member-line
+    /// stage, so this is a corrupt order. Refused rather than silently integrated.
+    OutOfLineStage(StageId),
 }
 
 /// An accepted attempt result: the reducer [`Event`] the upload normalized to
@@ -273,6 +286,18 @@ pub fn dispatch_and_record(
     Ok(handle)
 }
 
+/// Whether a non-parked stage verdict passes its completion gate (#3505). A
+/// passing gate advances the member; a failing one re-dispatches within the retry
+/// budget. `Parked` never reaches here — it routes to the `Question` hold path
+/// (ADR-0151) before this is consulted.
+fn verdict_passed(verdict: StageVerdict) -> bool {
+    // Approved / VerificationPassed pass the gate; VerificationFailed and
+    // ReviewFinding fail it. A parked verdict routes to the Question path before
+    // the gate is consulted, so a stray one here reads as non-passing — never a
+    // false advance.
+    matches!(verdict, StageVerdict::Approved | StageVerdict::VerificationPassed)
+}
+
 /// The broker accept-gate + normalize → admit (#3502, the trust boundary).
 ///
 /// Look the upload's nonce up in the outstanding-order registry; admit only when
@@ -309,27 +334,69 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     // — *before* consuming the order: consuming first and then failing the encode
     // would lose the evidence with the nonce already spent and no retry.
     //
-    // A parked attempt normalizes to a Question evidence admitted through
-    // Fact::AdmitEvidence (ADR-0151) — never a Fact::Integrate, and never a
-    // failure: the order is consumed, but the parked outcome burns no stage
-    // retry, because a decision pending is not a defect. Every other verdict is
-    // a resolution claim integrated the existing way.
+    // Route the attempt result by stage (#3505):
+    //
+    // - A parked attempt normalizes to a Question evidence admitted through
+    //   Fact::AdmitEvidence (ADR-0151) — never a Fact::Integrate, and never a
+    //   failure: the order is consumed, but the parked outcome burns no stage
+    //   retry, because a decision pending is not a defect.
+    // - A non-terminal per-member stage (Construct / Verify / Refine, i.e. one
+    //   with a successor in the member line) admits as Fact::AttemptCompleted: the
+    //   reducer advances the member's cursor on a passing verdict, re-dispatches
+    //   the stage within its retry budget on a failing one, and wedges once the
+    //   budget is exhausted.
+    // - The terminal Review admits by verdict: a *passing* one produces the member's
+    //   ResolutionClaim through Fact::Integrate (the existing integrate path); a
+    //   *failing* one admits as Fact::AttemptCompleted so the reducer retries within
+    //   Review's retry budget and wedges on exhaustion — the completion gate applies
+    //   across the whole member line, so a failing review is never silently integrated.
+    // - An out-of-line stage (not in the member line) is a corrupt order and is
+    //   refused, never routed to Integrate.
     let event = if upload.verdict == StageVerdict::Parked {
         Event {
             idempotency_key: IdempotencyKey(format!("aether.bloomery.park:{}", record.nonce.0)),
             fact: Fact::AdmitEvidence { bloom: record.bloom, evidence },
         }
-    } else {
-        let claim = ResolutionClaim {
-            workpiece: record.workpiece.clone(),
-            scope_revision: record.scope_revision,
-            candidate: record.candidate,
-            evidence,
-        };
+    } else if StageCatalog::next_member_stage(record.stage).is_some() {
         Event {
-            idempotency_key: IdempotencyKey(format!("aether.bloomery.integrate:{}", record.nonce.0)),
-            fact: Fact::Integrate { bloom: record.bloom, claim },
+            idempotency_key: IdempotencyKey(format!("aether.bloomery.attempt:{}", record.nonce.0)),
+            fact: Fact::AttemptCompleted {
+                bloom: record.bloom,
+                workpiece: record.workpiece.clone(),
+                stage: record.stage,
+                passed: verdict_passed(upload.verdict),
+                evidence,
+            },
         }
+    } else if record.stage == StageId::Review {
+        if verdict_passed(upload.verdict) {
+            let claim = ResolutionClaim {
+                workpiece: record.workpiece.clone(),
+                scope_revision: record.scope_revision,
+                candidate: record.candidate,
+                evidence,
+            };
+            Event {
+                idempotency_key: IdempotencyKey(format!("aether.bloomery.integrate:{}", record.nonce.0)),
+                fact: Fact::Integrate { bloom: record.bloom, claim },
+            }
+        } else {
+            Event {
+                idempotency_key: IdempotencyKey(format!("aether.bloomery.attempt:{}", record.nonce.0)),
+                fact: Fact::AttemptCompleted {
+                    bloom: record.bloom,
+                    workpiece: record.workpiece.clone(),
+                    stage: record.stage,
+                    passed: false,
+                    evidence,
+                },
+            }
+        }
+    } else {
+        // An out-of-line stage never comes from a well-formed dispatch; refuse it
+        // rather than folding a non-line result into the member's resolution. The
+        // order stays live (unconsumed) — the refusal precedes the consume below.
+        return Ok(AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(record.stage)));
     };
     let admit = Admit { event: to_vec(&event)? };
     // Consume-once, only now that the admission is fully constructed. A lost race
@@ -351,6 +418,97 @@ pub trait EvidenceClaims {
     /// The attempt result the referenced upload carries, or `None` when the
     /// reference is not a decodable attempt result.
     fn claim_for(&self, evidence: &EvidenceRef) -> Option<UploadedEvidence>;
+}
+
+/// The artifact-name prefix an attempt-result upload carries. The full name is
+/// `attempt.<verdict>.<subject_hex>.<detail_hex>.<nonce>` — the thin wrapper
+/// (#3501) names its evidence artifact this way, and the executor port's
+/// nonce-scoped [`ExecutorShell::stream_evidence`] returns it because the trailing
+/// `nonce` segment is delimiter-bounded (ADR-0149 §The line).
+const ATTEMPT_ARTIFACT_PREFIX: &str = "attempt";
+
+/// The artifact name the wrapper uploads an attempt result under, encoding the
+/// verdict and the subject/detail digests so the pull-side [`NameEvidenceClaims`]
+/// can decode it from the name alone — no artifact-byte fetch (the executor port
+/// surfaces only references, and GitHub artifacts are opaque zips). The nonce is
+/// the trailing delimiter-bounded segment `stream_evidence` filters on.
+#[must_use]
+pub fn attempt_artifact_name(nonce: &Nonce, subject: &Digest, verdict: StageVerdict, detail: &Digest) -> String {
+    format!("{ATTEMPT_ARTIFACT_PREFIX}.{}.{}.{}.{}", verdict_token(verdict), hex_of(subject), hex_of(detail), nonce.0)
+}
+
+/// The production [`EvidenceClaims`]: decode an attempt result from the pulled
+/// [`EvidenceRef`]'s **name** (the data channel a nonce-scoped GitHub artifact
+/// exposes without a byte fetch), pairing the name-encoded verdict + subject +
+/// detail with the reference's own nonce. A reference whose name is not a
+/// well-formed attempt artifact is skipped (`None`) — the same seam a study
+/// artifact or a stray upload rides past. CI-verifiable against `FakeGithub`,
+/// whose `seed_run_artifacts` sets the artifact name this decodes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NameEvidenceClaims;
+
+impl EvidenceClaims for NameEvidenceClaims {
+    fn claim_for(&self, reference: &EvidenceRef) -> Option<UploadedEvidence> {
+        let rest = reference.name.strip_prefix(ATTEMPT_ARTIFACT_PREFIX)?.strip_prefix('.')?;
+        // verdict . subject_hex . detail_hex . <nonce…>; the nonce may itself
+        // contain '.', so bound the split to the three leading fields.
+        let mut fields = rest.splitn(4, '.');
+        let verdict = verdict_from_token(fields.next()?)?;
+        let subject = digest_from_hex(fields.next()?)?;
+        let detail = digest_from_hex(fields.next()?)?;
+        // The nonce is authoritative from the reference (what the port matched the
+        // run by), not the name's trailing segment.
+        Some(UploadedEvidence { nonce: reference.nonce.clone(), subject, verdict, detail })
+    }
+}
+
+/// The stable one-token spelling of a verdict in an attempt artifact name.
+fn verdict_token(verdict: StageVerdict) -> &'static str {
+    match verdict {
+        StageVerdict::Approved => "approved",
+        StageVerdict::VerificationPassed => "pass",
+        StageVerdict::VerificationFailed => "fail",
+        StageVerdict::ReviewFinding => "finding",
+        StageVerdict::Parked => "parked",
+    }
+}
+
+/// Decode a verdict token; `None` for an unrecognized token (a non-attempt name).
+fn verdict_from_token(token: &str) -> Option<StageVerdict> {
+    Some(match token {
+        "approved" => StageVerdict::Approved,
+        "pass" => StageVerdict::VerificationPassed,
+        "fail" => StageVerdict::VerificationFailed,
+        "finding" => StageVerdict::ReviewFinding,
+        "parked" => StageVerdict::Parked,
+        _ => return None,
+    })
+}
+
+/// Lowercase-hex a digest's 32 bytes.
+fn hex_of(digest: &Digest) -> String {
+    let mut hex = String::with_capacity(64);
+    for byte in digest.as_bytes() {
+        // Two lowercase hex nibbles per byte.
+        hex.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        hex.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
+    }
+    hex
+}
+
+/// Decode a 64-char lowercase-hex string into a [`Digest`]; `None` on any
+/// non-hex character or a wrong length (a malformed / non-attempt name).
+fn digest_from_hex(hex: &str) -> Option<Digest> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        let high = hex.as_bytes()[index * 2] as char;
+        let low = hex.as_bytes()[index * 2 + 1] as char;
+        *byte = (u8::try_from(high.to_digit(16)?).ok()? << 4) | u8::try_from(low.to_digit(16)?).ok()?;
+    }
+    Some(Digest::from_bytes(bytes))
 }
 
 /// Where an admitted attempt result goes — #3497's `aether.bloomery.admit`
