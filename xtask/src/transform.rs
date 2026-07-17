@@ -96,20 +96,23 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
 const CONSTRUCT_IMPLEMENT: &str = "construct.implement";
 
 /// The headless-Claude argv the `construct.implement` lane runs (#3511): `-p`
-/// non-interactive at the resolved `model`, emitting the stream-json transcript
-/// the in-repo result-record derivation reads. Pure so the model wiring is
-/// testable without spawning Claude; the reasoning effort rides the
-/// `AETHER_CONSTRUCT_EFFORT` env (a worker-side knob), not an argv flag, and the
-/// assembled prompt is piped on the child's stdin (not an argv positional).
-fn construct_argv(model: &str) -> Vec<String> {
-    vec![
-        "-p".to_owned(),
-        "--model".to_owned(),
-        model.to_owned(),
-        "--output-format".to_owned(),
-        "stream-json".to_owned(),
-        "--verbose".to_owned(),
-    ]
+/// non-interactive, emitting the stream-json transcript the in-repo
+/// result-record derivation reads. `--model` is included only when `model` is
+/// `Some` — when the caller resolves no model, the flag is omitted and `claude
+/// -p` falls back to the operator's ambient default model (#3592). Pure so the
+/// model wiring is testable without spawning Claude; the reasoning effort rides
+/// the `AETHER_CONSTRUCT_EFFORT` env (a worker-side knob), not an argv flag, and
+/// the assembled prompt is piped on the child's stdin (not an argv positional).
+fn construct_argv(model: Option<&str>) -> Vec<String> {
+    let mut argv = vec!["-p".to_owned()];
+    if let Some(model) = model {
+        argv.push("--model".to_owned());
+        argv.push(model.to_owned());
+    }
+    argv.push("--output-format".to_owned());
+    argv.push("stream-json".to_owned());
+    argv.push("--verbose".to_owned());
+    argv
 }
 
 /// The lane-owned in-repo instruction source (#3572). Embedded at build time so
@@ -317,12 +320,13 @@ fn spawn(invocation: &VerifyInvocation) -> Result<Output> {
 
 /// The `construct.implement` lane: assemble the prompt from the lane's in-repo
 /// instruction source plus the checked-out subject, run headless Claude at the
-/// resolved model, capture the stream-json transcript, derive the result record
+/// resolved model (or the operator's ambient default when none is resolved,
+/// #3592), capture the stream-json transcript, derive the result record
 /// in-repo, and write it as nonce-tagged evidence (#3572). This lane needs a
 /// Claude credential, so it runs worker-side (BYO) — never on the coordinator's
 /// zero-secret path.
 fn run_construct(args: &TransformArgs) -> Result<()> {
-    let model = args.model.as_deref().context("construct.implement requires --model (the resolved model)")?;
+    let model = args.model.as_deref();
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
     // The lane owns its process: the prompt is assembled from the in-repo
@@ -423,12 +427,23 @@ mod tests {
 
     #[test]
     fn construct_argv_carries_the_resolved_model_and_stream_json() {
-        let argv = construct_argv("claude-opus-4-8");
+        let argv = construct_argv(Some("claude-opus-4-8"));
         assert_eq!(argv.first().map(String::as_str), Some("-p"), "headless, non-interactive");
         let model_at = argv.iter().position(|a| a == "--model").expect("argv pins the model");
         assert_eq!(argv[model_at + 1], "claude-opus-4-8", "the resolved model rides argv");
         // The stream-json transcript is what the result-record derivation reads.
         assert!(argv.windows(2).any(|w| w == ["--output-format", "stream-json"]), "emits the stream-json transcript");
+    }
+
+    #[test]
+    fn construct_argv_omits_model_when_none_falls_back_to_ambient() {
+        let argv = construct_argv(None);
+        assert_eq!(argv.first().map(String::as_str), Some("-p"), "headless, non-interactive");
+        assert!(!argv.iter().any(|a| a == "--model"), "no resolved model means no --model flag (ambient default)");
+        assert!(
+            argv.windows(2).any(|w| w == ["--output-format", "stream-json"]),
+            "still emits the stream-json transcript"
+        );
     }
 
     #[test]
