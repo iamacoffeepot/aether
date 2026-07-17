@@ -24,8 +24,8 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomId, Checkpoint, ClaimOutcome, Digest, IntegrateOutcome, LandOutcome, SourceBackend, SourceSnapshot,
-    WorkpieceId,
+    BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome, LandOutcome,
+    SourceBackend, SourceSnapshot, WorkpieceId,
 };
 use aether_bloomery_github::{GitSource, GithubError, ReqwestGithub, SourceError};
 
@@ -142,5 +142,43 @@ impl SourceShell {
     /// [`ClaimOutcome::Held`] refusal.
     pub fn release_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<ClaimOutcome, SourceError> {
         self.backend.release_seal(bloom, workpieces)
+    }
+
+    /// Enumerate every live claim ref, classified by holder — the boot
+    /// reconcile's deep-heal detection surface (ADR-0150 amended PR #3556).
+    ///
+    /// # Errors
+    /// The claim-ref namespace could not be read.
+    pub fn enumerate_claims(&self) -> Result<Vec<ClaimRefState>, SourceError> {
+        self.backend.enumerate_claims()
+    }
+
+    /// Idempotent per-ref transfer completion: fast-forward one `ref_kind` from
+    /// `predecessor` to `successor` (a ref already at the successor is a no-op).
+    ///
+    /// # Errors
+    /// A transport or backend fault, distinct from the clean
+    /// [`ClaimOutcome::Held`] refusal.
+    pub fn complete_transfer(
+        &self,
+        predecessor: &BloomId,
+        successor: &BloomId,
+        ref_kind: &ClaimRefKind,
+    ) -> Result<ClaimOutcome, SourceError> {
+        self.backend.complete_transfer(predecessor, successor, ref_kind)
+    }
+
+    /// Idempotent per-ref release completion: sweep a tombstoned ref (`None`
+    /// holder) or release a ref held by `Some(bloom)`.
+    ///
+    /// # Errors
+    /// A transport or backend fault, distinct from the clean
+    /// [`ClaimOutcome::Held`] refusal.
+    pub fn complete_release(
+        &self,
+        expected_holder: Option<&BloomId>,
+        ref_kind: &ClaimRefKind,
+    ) -> Result<ClaimOutcome, SourceError> {
+        self.backend.complete_release(expected_holder, ref_kind)
     }
 }
