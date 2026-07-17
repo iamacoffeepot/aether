@@ -95,6 +95,23 @@ fn out_of_grammar_surface_resolves_human() {
 }
 
 #[test]
+fn a_surface_past_the_segment_cap_folds_to_human_not_deep_recursion() {
+    // Tripwire: a declared surface deeper than the grammar's segment cap drives
+    // the intersects matcher, whose recursion is bounded by segment count; the
+    // cap must refuse it at the grammar boundary (→ Human, fail-closed) rather
+    // than recurse per path segment. A 4000-segment path would overflow the
+    // stack if the cap were removed.
+    let deep = vec!["a"; 4000].join("/");
+    assert_eq!(tier(&deep), Tier::Human, "an over-cap surface must fold to human");
+
+    // The same ceiling gates the policy side: an over-cap policy glob fails the
+    // parse closed rather than becoming a rule the matcher recurses over.
+    let deep_rule = vec!["a"; 4000].join("/");
+    let policy_text = format!("default: judge\nrules:\n  - glob: {deep_rule}\n    tier: auto\n");
+    assert!(ApprovalPolicy::parse(&policy_text).is_none(), "an over-cap policy glob must fail the parse");
+}
+
+#[test]
 fn most_restrictive_across_the_declared_surface_wins() {
     let surface = vec!["docs/guide/**".to_owned(), "crates/aether-data/src/lib.rs".to_owned()];
     assert_eq!(policy().resolve_surface(&surface), Tier::Human);

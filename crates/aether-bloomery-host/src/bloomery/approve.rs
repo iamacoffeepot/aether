@@ -262,10 +262,21 @@ fn has_meta(pattern: &str) -> bool {
     pattern.chars().any(|c| META.contains(&c))
 }
 
+/// The hard ceiling on path-segments in any glob the gate accepts. Declared
+/// surfaces are user-controlled and drive [`intersects`], whose recursion depth
+/// is bounded by policy-plus-surface segment count; a glob past this cap is
+/// refused at the grammar boundary (a policy glob fails the parse, a surface
+/// glob folds to `Human`) rather than allowed to recurse, per CLAUDE.md's
+/// recursion rule that user-controlled data enforce a depth/budget cap that
+/// returns an error instead of overflowing the stack. 64 is far above any real
+/// repository path depth, so it never rejects a legitimate surface.
+const MAX_GLOB_SEGMENTS: usize = 64;
+
 /// Whether a policy glob is inside the canonical, provable grammar — a port of
 /// `surface-match.py`'s `valid_policy_glob`. ASCII only, no leading `!#-`, no
 /// backslash or control chars, no empty / `.` / `..` segment, no trailing slash
-/// or `//`, and `**` only as a complete segment.
+/// or `//`, `**` only as a complete segment, and at most [`MAX_GLOB_SEGMENTS`]
+/// segments.
 #[must_use]
 fn valid_policy_glob(pattern: &str) -> bool {
     if pattern.is_empty() || !pattern.is_ascii() || pattern.starts_with(['!', '#', '-']) {
@@ -279,6 +290,9 @@ fn valid_policy_glob(pattern: &str) -> bool {
         return false;
     }
     let segments: Vec<&str> = body.split('/').collect();
+    if segments.len() > MAX_GLOB_SEGMENTS {
+        return false;
+    }
     if segments.iter().any(|segment| matches!(*segment, "" | "." | "..")) {
         return false;
     }
@@ -287,8 +301,9 @@ fn valid_policy_glob(pattern: &str) -> bool {
 
 /// Whether a declared-surface pattern is inside the validated grammar — a port of
 /// `surface-match.py`'s `valid_surface_glob`. A concrete repository-relative path,
-/// or a literal directory prefix followed by one final `/**`. Declared surfaces
-/// are untrusted, so anything else is refused before it can reach matching.
+/// or a literal directory prefix followed by one final `/**`, of at most
+/// [`MAX_GLOB_SEGMENTS`] segments. Declared surfaces are untrusted, so anything
+/// else is refused before it can reach matching.
 #[must_use]
 fn valid_surface_glob(pattern: &str) -> bool {
     if pattern.is_empty()
@@ -297,6 +312,9 @@ fn valid_surface_glob(pattern: &str) -> bool {
         return false;
     }
     if pattern.starts_with(['/', '-', '!', '#']) || pattern.ends_with('/') {
+        return false;
+    }
+    if pattern.split('/').count() > MAX_GLOB_SEGMENTS {
         return false;
     }
     if pattern.split('/').any(|segment| matches!(segment, "" | "." | "..")) {
