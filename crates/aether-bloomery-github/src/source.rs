@@ -300,11 +300,12 @@ impl<C: GitDataApi> GitSource<C> {
     // tombstone child commit (the linearization point) then a name-only cleanup
     // delete. An absent ref is skipped (idempotent); a ref already at the tombstone
     // commit is *already released* — an interrupted release's CAS linearized but its
-    // cleanup delete did not run — so the name-only delete is finished and the walk
-    // continues (ADR-0150 §The claim registry, amended PR #3556: the release path is
-    // idempotent over its own tombstone). A ref a *different* bloom holds is spared
-    // and reported as `Held` — the CAS read-guard that retires the check-then-delete
-    // TOCTOU.
+    // cleanup delete did not run — so the cleanup delete is finished (behind the
+    // same CAS reassertion, so a fresh claim that reused the name in the read→delete
+    // window is spared rather than clobbered) and the walk continues (ADR-0150 §The
+    // claim registry, amended PR #3556: the release path is idempotent over its own
+    // tombstone). A ref a *different* bloom holds is spared and reported as `Held` —
+    // the CAS read-guard that retires the check-then-delete TOCTOU.
     //
     // `owner` is `Some(bloom)` for the whole-op release paths — `release_seal`
     // (workpieces + admission) and `transfer_seal`'s dropped-member cleanup
@@ -323,9 +324,21 @@ impl<C: GitDataApi> GitSource<C> {
             let holder = BloomId(self.read_commit_tree(&current.sha)?);
             // An already-tombstoned ref is released regardless of `owner` — the
             // tombstone *is* the released state, so finishing the interrupted
-            // cleanup delete is pure name reclamation, safe for any instance.
+            // cleanup delete is pure name reclamation, safe for any instance. But
+            // guard the cleanup with the same CAS the live-holder branch uses: a
+            // blind name-only delete would race a fresh claim that reused the name
+            // in the window since the read, so re-assert the observed tombstone via
+            // a no-op fast-forward first. If the ref moved to an unrelated fresh
+            // claim commit that reassertion 422s (the new commit is not a
+            // fast-forward descendant of the stale tombstone), so the name has
+            // already been reclaimed by that holder — skip the delete and move on
+            // rather than clobbering a claim we never owned.
             if holder.0 == TOMBSTONE_TREE {
-                self.client.delete_ref(name)?;
+                match self.client.update_ref(name, &current.sha, false) {
+                    Ok(_) => self.client.delete_ref(name)?,
+                    Err(GithubError::Status { status: 422, .. }) => {}
+                    Err(error) => return Err(SourceError::Github(error)),
+                }
                 continue;
             }
             // A live ref is released only when `owner` names its holder; a `None`
