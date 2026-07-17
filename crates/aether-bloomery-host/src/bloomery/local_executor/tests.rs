@@ -94,18 +94,38 @@ fn inspect_is_unknown_for_an_untracked_nonce() {
 }
 
 #[test]
-fn cancel_drives_a_tracked_run_to_cancelled() {
+fn cancel_evicts_the_tracked_run() {
     let base = TempDir::new().unwrap();
     let exec = executor(&base, "{}", RunLifecycle::Running);
     let handle = exec.submit(&construct_order(digest(5), "n-c")).unwrap();
     assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Running);
 
+    // A cancel kills the child and evicts the run — a subsequent inspect reports
+    // the clean Unknown (never the killed child's exit as a plain completion), and
+    // the registry no longer parks the terminal entry.
     exec.cancel(&handle).unwrap();
     assert_eq!(
         exec.inspect(&handle).unwrap(),
-        ExecutionStatus::Cancelled,
-        "a cancelled run reports Cancelled, not its exit"
+        ExecutionStatus::Unknown,
+        "a cancelled run is evicted, so it reports Unknown rather than its exit"
     );
+}
+
+#[test]
+fn stream_evidence_evicts_the_consumed_run() {
+    // Once the evidence is read, the run is consumed: the registry drops it so a
+    // long-lived backend tracks only in-flight orders, and a re-inspect of the
+    // same handle reports the clean Unknown.
+    let base = TempDir::new().unwrap();
+    let exec = executor(&base, r#"{"command":"verify.check","status":"pass"}"#, RunLifecycle::Exited { success: true });
+    let handle = exec.submit(&construct_order(digest(5), "n-e")).unwrap();
+
+    exec.stream_evidence(&handle).unwrap();
+    assert_eq!(exec.inspect(&handle).unwrap(), ExecutionStatus::Unknown, "the consumed run is evicted after its read");
+    match exec.stream_evidence(&handle) {
+        Err(LocalExecutorError::NoRunForNonce(_)) => {}
+        other => panic!("expected NoRunForNonce after eviction, got {other:?}"),
+    }
 }
 
 #[test]

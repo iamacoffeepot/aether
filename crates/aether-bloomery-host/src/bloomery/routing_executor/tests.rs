@@ -43,11 +43,13 @@ impl<E: Send + Sync> ExecutorBackend for Recorder<E> {
         Ok(ExecutionStatus::Unknown)
     }
 
-    fn cancel(&self, _handle: &WorkHandle) -> Result<(), E> {
+    fn cancel(&self, handle: &WorkHandle) -> Result<(), E> {
+        self.seen.lock().unwrap().push(handle.nonce.0.clone());
         Ok(())
     }
 
-    fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, E> {
+    fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, E> {
+        self.seen.lock().unwrap().push(handle.nonce.0.clone());
         Ok(Vec::new())
     }
 }
@@ -95,6 +97,22 @@ fn a_config_override_repoints_a_verify_lane_to_local() {
 
     assert_eq!(*local_seen.lock().unwrap(), vec!["n-v".to_owned()], "the override routes verify to local");
     assert!(actions_seen.lock().unwrap().is_empty(), "nothing reached the Actions backend");
+}
+
+#[test]
+fn a_terminal_message_evicts_the_routing_record() {
+    // `routed` must track in-flight orders, not the process's lifetime total: the
+    // last message for an order drops its lane record. `stream_evidence` is that
+    // last message here, so the following cancel — finding no record — falls back
+    // to the Actions arm instead of re-resolving to the local arm the submit used.
+    let (router, actions_seen, local_seen) = router(vec!["construct.".to_owned()]);
+    let handle = router.submit(&order("construct.implement", "n-c")).unwrap();
+
+    router.stream_evidence(&handle).unwrap();
+    router.cancel(&handle).unwrap();
+
+    assert_eq!(*local_seen.lock().unwrap(), vec!["n-c", "n-c"], "submit + stream both routed to the local arm");
+    assert_eq!(*actions_seen.lock().unwrap(), vec!["n-c"], "after eviction the cancel falls back to the Actions arm");
 }
 
 #[test]

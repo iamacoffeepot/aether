@@ -162,9 +162,6 @@ struct Run {
     // checkout is the tree the work runs on, the subject is what the evidence is
     // about. Binding to the checkout would refuse at intake as a digest mismatch.
     subject: Digest,
-    // Set by `cancel`, so a subsequent `inspect` reports `Cancelled` rather than
-    // reading the killed child's exit as a plain completion.
-    cancelled: bool,
 }
 
 /// The local-process executor backend: an in-process registry of tracked runs
@@ -239,7 +236,7 @@ impl ExecutorBackend for LocalExecutor {
             effort: is_construct.then_some(self.construct_effort.as_deref()).flatten(),
         };
         let process = self.runner.start(&spec)?;
-        self.lock().insert(nonce, Run { process, evidence_dir, subject, cancelled: false });
+        self.lock().insert(nonce, Run { process, evidence_dir, subject });
         Ok(WorkHandle::new(order.nonce.clone()))
     }
 
@@ -255,11 +252,10 @@ impl ExecutorBackend for LocalExecutor {
             let Some(run) = runs.get_mut(&handle.nonce.0) else {
                 // Not tracked here is the clean Unknown, never an error — the same
                 // "dispatch async, not visible yet" state the Actions backend reports.
+                // A cancelled run has been evicted, so it also reports Unknown here
+                // rather than reading the killed child's exit as a plain completion.
                 return Ok(ExecutionStatus::Unknown);
             };
-            if run.cancelled {
-                return Ok(ExecutionStatus::Cancelled);
-            }
             run.process.poll()
         };
         Ok(match lifecycle {
@@ -275,8 +271,9 @@ impl ExecutorBackend for LocalExecutor {
             return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
         };
         run.process.kill()?;
-        run.cancelled = true;
-        drop(runs);
+        // A cancel is terminal — evict the killed run so the registry tracks only
+        // in-flight orders rather than parking `cancelled` entries forever.
+        runs.remove(&handle.nonce.0);
         Ok(())
     }
 
@@ -299,6 +296,10 @@ impl ExecutorBackend for LocalExecutor {
         let evidence_path = evidence_dir.join("evidence.json");
         let bytes = fs::read(&evidence_path)
             .map_err(|error| LocalExecutorError::Evidence(format!("{}: {error}", evidence_path.display())))?;
+        // The evidence has been consumed — evict the run so the registry tracks
+        // only in-flight orders rather than growing for the process's lifetime. A
+        // failed read leaves the entry above so a later cycle can retry it.
+        self.lock().remove(&handle.nonce.0);
         // Verdict from the run's own evidence: the verify lane stamps a `status`
         // ("pass"/"fail"); the construct lane's record carries none, so its verdict
         // folds from the child's terminal exit. A passing outcome maps to
@@ -386,8 +387,9 @@ impl RunProcess for ChildProcess {
 
     fn kill(&mut self) -> Result<(), LocalExecutorError> {
         self.child.kill().map_err(LocalExecutorError::Io)?;
-        // Reap so the killed child does not linger as a zombie.
-        let _ = self.child.wait();
+        // Reap so the killed child does not linger as a zombie; a reap fault is a
+        // real failure folded into the returned error, not silently swallowed.
+        self.child.wait().map_err(LocalExecutorError::Io)?;
         Ok(())
     }
 }

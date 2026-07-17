@@ -105,14 +105,25 @@ impl ExecutorBackend for RoutingExecutor {
             Lane::Actions => self.actions.cancel(handle)?,
             Lane::Local => self.local.cancel(handle)?,
         }
+        // A cancel is terminal — drop the routing record so `routed` tracks
+        // in-flight orders, not the lifetime total.
+        self.lock().remove(&handle.nonce.0);
         Ok(())
     }
 
     fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
-        Ok(match self.lane_of(&handle.nonce.0) {
+        let refs = match self.lane_of(&handle.nonce.0) {
             Lane::Actions => self.actions.stream_evidence(handle)?,
             Lane::Local => self.local.stream_evidence(handle)?,
-        })
+        };
+        // `stream_evidence` is the last message the intake cycle sends for a
+        // completed order (`run_intake_cycle` inspects, then streams, then the
+        // driver prunes the handle), so evict the routing record here to bound
+        // `routed`. Eviction cannot ride `inspect` instead: the cycle streams the
+        // same nonce immediately after a `Completed` inspect, and dropping the
+        // record there would misroute that stream to the Actions fallback.
+        self.lock().remove(&handle.nonce.0);
+        Ok(refs)
     }
 }
 
