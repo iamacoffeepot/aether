@@ -9,8 +9,10 @@ mod driver;
 mod executor;
 mod executor_driver;
 mod intake;
+mod land_driver;
 mod mirror;
 mod mirror_driver;
+mod poll_timer;
 mod source;
 mod study;
 
@@ -25,6 +27,7 @@ pub use intake::{
     IntakeError, IntakeRefusal, NameEvidenceClaims, UploadedEvidence, admit_uploaded, attempt_artifact_name,
     dispatch_and_record, record_dispatch, run_intake_cycle,
 };
+pub use land_driver::{LAND_TOPIC, LandDriverCapability, LandDriverState, LandTick};
 pub use mirror::{GithubMirrorConfig, GithubMirrorOverlay, ProjectionShell};
 pub use mirror_driver::{
     DrainTick, MirrorDriverCapability, MirrorDriverState, TOPIC_LANDING_RECEIPT, TOPIC_VIEW_DOCUMENT,

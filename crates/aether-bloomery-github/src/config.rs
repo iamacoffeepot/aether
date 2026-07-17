@@ -9,8 +9,8 @@
 //! `no core module names a GitHub type` boundary intact: the env/argv layer
 //! never sees a github-crate type either.
 
-/// Where the adapter talks to GitHub, and whether the (out-of-scope this
-/// slice) compare-and-swap mainline land is permitted.
+/// Where the adapter talks to GitHub, and whether the compare-and-swap
+/// mainline land is permitted (live since ADR-0149 migration step 3).
 #[derive(Clone, Debug)]
 pub struct GithubConfig {
     /// The bearer token the client authenticates with.
@@ -22,10 +22,9 @@ pub struct GithubConfig {
     /// The REST API base — `https://api.github.com` for github.com, or a
     /// GitHub Enterprise base. No trailing slash.
     pub api_base: String,
-    /// Whether compare-and-swap mainline landing is permitted. Defaults off
-    /// (ADR-0149 gates it to migration step 3); the git source port that
-    /// consumes it is a separate slice, so this flag is carried but unused
-    /// here.
+    /// Whether compare-and-swap mainline landing is permitted. On since
+    /// ADR-0149 migration step 3 moved landing authority to the source port;
+    /// the git source port gates [`GitSource::land`](crate::GitSource) on it.
     pub cas_land_enabled: bool,
 }
 

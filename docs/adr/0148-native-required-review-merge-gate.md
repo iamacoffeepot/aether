@@ -1,7 +1,19 @@
 # ADR-0148: Native required-review merge gate
 
-- **Status:** Accepted
+- **Status:** Accepted (demoted to defense-in-depth, 2026-07-17 — see note below)
 - **Date:** 2026-07-12
+
+> **Demotion note (2026-07-17, ADR-0149 migration step 3).** Landing authority
+> moved to the Bloomery source port's compare-and-swap `land` (#3559): a resolved
+> bloom reaches mainline by the source-port CAS advancing the mainline ref, not by
+> a GitHub squash-merge under branch protection. This ADR's native required-review
+> gate is therefore **demoted to defense-in-depth** around the GitHub-hosted
+> mainline — it still blocks a stray direct PR merge and keeps the review history
+> legible in the GitHub UI, but it is no longer the merge authority of record for
+> bloom-driven change. The gate's mechanism (the `iamacritic` reviewer App, the
+> identity constraints, the reconciler signals) is unchanged; only its standing
+> relative to the source-port CAS is. Retiring the surrounding ADR-0146 `/land`
+> machinery is #3562's scope, staged separately.
 
 ## Context
 

@@ -703,6 +703,35 @@ fn landing_releases_memberships() {
     assert!(!after.active.contains_key(&workpiece("wp")), "landing frees the workpiece");
 }
 
+// ADR-0149 migration step 3 — resolution is land-readiness: the resolve decision
+// emits a DispatchLand naming the sealed base and the resolved artifact tree, so
+// the host land driver can drive the source-port compare-and-swap that is now the
+// landing of record. Tripwire: the land decision missing from the resolve, or
+// carrying a base other than `spec.base()` / a head other than the resolved tree.
+#[test]
+fn resolve_emits_the_land_decision() {
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let mut snapshot = Snapshot::new(digest(1));
+    let (next, _) = step(&snapshot, &event("seal", Fact::Seal(spec.clone())));
+    snapshot = next;
+    let (next, _) = step(&snapshot, &event("integrate", Fact::Integrate { bloom, claim: claim("wp", 10, 100) }));
+    snapshot = next;
+
+    let resolved = reduce(&snapshot, &event("resolve", Fact::Resolve { bloom, tree: digest(40), lineage: vec![] }));
+
+    assert!(matches!(resolved.outcome, Outcome::Resolved(_)), "the bloom resolves");
+    let land = resolved.effects.iter().find_map(|effect| match effect {
+        Decision::DispatchLand { bloom: landed, expected_base, new_head } if *landed == bloom => {
+            Some((*expected_base, *new_head))
+        }
+        _ => None,
+    });
+    let (expected_base, new_head) = land.expect("resolve emits a DispatchLand for the resolved bloom");
+    assert_eq!(expected_base, spec.base(), "the land compares against the sealed base");
+    assert_eq!(new_head, digest(40), "the land advances mainline to the resolved artifact tree");
+}
+
 // The evidence a completed attempt carries. The reducer does not re-check its
 // binding in `AttemptCompleted` (the intake trust boundary enforces it before
 // admission), so any well-formed evidence stands in.
