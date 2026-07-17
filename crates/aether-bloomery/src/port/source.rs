@@ -108,6 +108,33 @@ pub enum ClaimOutcome {
     },
 }
 
+/// Who a live claim ref points at, as [`enumerate_claims`](SourceBackend::enumerate_claims)
+/// classifies it (ADR-0150 §The claim registry, amended PR #3556). An absent ref
+/// is not a holder — it is simply not enumerated.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ClaimHolder {
+    /// The ref points at a live claim commit whose tree is this bloom's id.
+    Held(BloomId),
+    /// The ref points at the all-zero tombstone commit an interrupted
+    /// `release_seal` left after its CAS-to-tombstone linearized but its
+    /// name-only cleanup delete did not run — a sweep-me marker, not a holder.
+    Tombstoned,
+}
+
+/// One enumerated claim ref: which ref it is and who holds it (ADR-0150 §The
+/// claim registry, amended PR #3556). The boot reconcile folds a
+/// [`Vec<ClaimRefState>`](ClaimRefState) into its deep heals — a
+/// [`Tombstoned`](ClaimHolder::Tombstoned) ref is swept, and a ref
+/// [`Held`](ClaimHolder::Held) by a superseded predecessor is driven to its
+/// successor (or released if the successor dropped it).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ClaimRefState {
+    /// Which claim ref this is.
+    pub ref_kind: ClaimRefKind,
+    /// Who currently holds it.
+    pub holder: ClaimHolder,
+}
+
 /// The versioning-substrate boundary. Git remains the substrate; this port is
 /// how Bloomery reads and advances it (ADR-0149 §The boundary). The
 /// implementation does the I/O — this trait is the contract.
@@ -208,4 +235,65 @@ pub trait SourceBackend {
     /// Backend-defined — a transport or backend fault, distinct from the clean
     /// refusal.
     fn release_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<ClaimOutcome, Self::Error>;
+
+    /// Enumerate every live claim ref — the per-workpiece refs plus the
+    /// mainline-admission ref — classifying each by its commit tree into a
+    /// [`ClaimHolder`] (ADR-0150 §The claim registry, amended PR #3556). Read-
+    /// only; the boot reconcile drives it to detect the deep-heal states the V1
+    /// re-assert / re-release cannot: a [`Tombstoned`](ClaimHolder::Tombstoned)
+    /// ref an interrupted release stranded, and a ref
+    /// [`Held`](ClaimHolder::Held) by a superseded predecessor a crashed
+    /// `transfer_seal` never moved. An absent ref is not enumerated.
+    ///
+    /// # Errors
+    /// Backend-defined — e.g. the claim-ref namespace could not be read.
+    fn enumerate_claims(&self) -> Result<Vec<ClaimRefState>, Self::Error>;
+
+    /// Idempotent per-ref transfer completion (ADR-0150 §The claim registry,
+    /// amended PR #3556 — case-3 primitive **(a)**): fast-forward compare-and-swap
+    /// one `ref_kind` from `predecessor` to `successor`. A ref at `predecessor`
+    /// fast-forwards to `successor` ([`ClaimOutcome::Acquired`]); a ref **already
+    /// at `successor` is [`Acquired`](ClaimOutcome::Acquired) — the no-op that
+    /// lets a boot re-drive converge**; a ref at any other holder is the clean
+    /// [`ClaimOutcome::Held`]. This leaves [`transfer_seal`](Self::transfer_seal)'s
+    /// all-or-nothing landed CAS untouched — it re-drives one already-decided
+    /// transfer per ref rather than re-attempting the whole op, so a mixed split
+    /// (some carried refs at the successor, some still at the predecessor) is
+    /// finished without short-circuiting on the first ref already moved.
+    ///
+    /// # Errors
+    /// Backend-defined — a transport or backend fault, distinct from the clean
+    /// [`ClaimOutcome::Held`] refusal.
+    fn complete_transfer(
+        &self,
+        predecessor: &BloomId,
+        successor: &BloomId,
+        ref_kind: &ClaimRefKind,
+    ) -> Result<ClaimOutcome, Self::Error>;
+
+    /// Idempotent per-ref release completion (ADR-0150 §The claim registry,
+    /// amended PR #3556) — the per-`ref_kind` form of [`release_seal`](Self::release_seal)
+    /// the boot reconcile drives on the enumerated deep-heal refs, freed from
+    /// `release_seal`'s fixed member-set-plus-admission signature. Two callers:
+    ///
+    /// - **Tombstone sweep** — `expected_holder` is `None`: a
+    ///   [`Tombstoned`](ClaimHolder::Tombstoned) ref is deleted (finishing an
+    ///   interrupted release's name-only cleanup), and a non-tombstoned ref is
+    ///   spared as [`ClaimOutcome::Held`] rather than touched. Safe for any
+    ///   instance — a tombstone *is* the released state.
+    /// - **Stranded-drop release** — `expected_holder` is `Some(bloom)`: a ref
+    ///   held by `bloom` is CAS-to-tombstoned then deleted (the same linearizing
+    ///   release [`release_seal`](Self::release_seal) runs); an already-tombstoned
+    ///   ref is swept; a ref a foreign bloom holds is spared as
+    ///   [`ClaimOutcome::Held`]. The `Some(bloom)` guard is the exclusivity check —
+    ///   the caller names the holder whose release it is authorizing.
+    ///
+    /// # Errors
+    /// Backend-defined — a transport or backend fault, distinct from the clean
+    /// [`ClaimOutcome::Held`] refusal.
+    fn complete_release(
+        &self,
+        expected_holder: Option<&BloomId>,
+        ref_kind: &ClaimRefKind,
+    ) -> Result<ClaimOutcome, Self::Error>;
 }

@@ -65,8 +65,9 @@ pub mod values;
 #[cfg(feature = "runtime")]
 pub use control::ControlCore;
 pub use control::{
-    Admit, AdmitResult, ClaimResult, ClaimSeal, Commit, CommitResult, JournalRecord, MembershipMutation, OutboxPayload,
-    Query, QueryResult, ReleaseSeal, ReplayJournal, ReplayJournalResult, TransferSeal,
+    Admit, AdmitResult, ClaimResult, ClaimSeal, Commit, CommitResult, CompleteRelease, CompleteTransfer,
+    EnumerateClaims, EnumerateClaimsResult, JournalRecord, MembershipMutation, OutboxPayload, Query, QueryResult,
+    ReleaseSeal, ReplayJournal, ReplayJournalResult, TransferSeal,
 };
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};
@@ -74,9 +75,9 @@ pub use manifest::{
     ClosureViolation, MANIFEST_CLOSURE_BUDGET, PromptManifest, ProvenanceIndex, Slot, SlotRole, assemble_manifest,
 };
 pub use port::{
-    BloomView, Checkpoint, ClaimOutcome, ClaimRefKind, Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend,
-    IntegrateOutcome, LandOutcome, MemberView, PendingDecisionView, ProjectionBackend, SourceBackend, SourceSnapshot,
-    ViewDocument, WorkHandle, WorkOrder,
+    BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, Conclusion, EvidenceRef,
+    ExecutionStatus, ExecutorBackend, IntegrateOutcome, LandOutcome, MemberView, PendingDecisionView,
+    ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument, WorkHandle, WorkOrder,
 };
 pub use reduce::{
     AdmitEvidenceError, AdoptAnswerError, BaseMismatch, BloomRecord, BloomStatus, Decision, Decisions, Event, Fact,

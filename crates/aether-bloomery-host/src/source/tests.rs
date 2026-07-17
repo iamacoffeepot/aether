@@ -11,12 +11,12 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{BloomId, ClaimRefKind, Digest, WorkpieceId};
+use aether_bloomery::{BloomId, ClaimHolder, ClaimRefKind, ClaimRefState, Digest, WorkpieceId};
 use aether_bloomery_github::GitSource;
 use aether_bloomery_github::testing::FakeGithub;
 use aether_data::wire::{from_bytes, to_vec};
 
-use super::kinds::{ClaimResult, LandResult, SnapshotResult};
+use super::kinds::{ClaimResult, EnumerateClaimsResult, LandResult, SnapshotResult};
 use super::runtime::SourceCapabilityState;
 use crate::bloomery::SourceShell;
 
@@ -141,4 +141,59 @@ fn release_seal_decodes_the_members_and_encodes_acquired() {
     let reply = state.release_seal(&to_vec(&holder).unwrap(), &w1);
 
     assert_eq!(reply, ClaimResult::Acquired, "the held member and admission ref were released");
+}
+
+#[test]
+fn enumerate_claims_encodes_the_live_ref_states() {
+    // The reply wire-encodes one `ClaimRefState` per live ref — this crate's own
+    // outcome→reply mapping over the shell enumeration, mirroring `land`'s encode.
+    let state = claim_state();
+    let holder = BloomId(digest(1));
+    assert_eq!(
+        state.claim_seal(&to_vec(&holder).unwrap(), &[to_vec(&workpiece("wp-1")).unwrap()]),
+        ClaimResult::Acquired
+    );
+
+    let EnumerateClaimsResult::Ok { states } = state.enumerate_claims() else {
+        panic!("expected Ok enumeration")
+    };
+    let mut decoded: Vec<ClaimRefState> = states.iter().map(|bytes| from_bytes(bytes).unwrap()).collect();
+    decoded.sort_by(|a, b| format!("{:?}", a.ref_kind).cmp(&format!("{:?}", b.ref_kind)));
+    assert_eq!(
+        decoded,
+        vec![
+            ClaimRefState { ref_kind: ClaimRefKind::MainlineAdmission, holder: ClaimHolder::Held(holder) },
+            ClaimRefState { ref_kind: ClaimRefKind::Workpiece(workpiece("wp-1")), holder: ClaimHolder::Held(holder) },
+        ],
+    );
+}
+
+#[test]
+fn complete_transfer_decodes_the_operands_and_encodes_acquired() {
+    let state = claim_state();
+    let (predecessor, successor) = (BloomId(digest(1)), BloomId(digest(2)));
+    assert_eq!(
+        state.claim_seal(&to_vec(&predecessor).unwrap(), &[to_vec(&workpiece("wp-1")).unwrap()]),
+        ClaimResult::Acquired
+    );
+
+    let ref_kind = to_vec(&ClaimRefKind::Workpiece(workpiece("wp-1"))).unwrap();
+    let reply = state.complete_transfer(&to_vec(&predecessor).unwrap(), &to_vec(&successor).unwrap(), &ref_kind);
+
+    assert_eq!(reply, ClaimResult::Acquired, "the per-ref transfer moved the carried ref to the successor");
+}
+
+#[test]
+fn complete_release_decodes_the_operands_and_encodes_acquired() {
+    let state = claim_state();
+    let holder = BloomId(digest(1));
+    assert_eq!(
+        state.claim_seal(&to_vec(&holder).unwrap(), &[to_vec(&workpiece("wp-1")).unwrap()]),
+        ClaimResult::Acquired
+    );
+
+    let ref_kind = to_vec(&ClaimRefKind::Workpiece(workpiece("wp-1"))).unwrap();
+    let reply = state.complete_release(&to_vec(&holder).unwrap(), &ref_kind);
+
+    assert_eq!(reply, ClaimResult::Acquired, "naming the holder releases exactly its ref");
 }

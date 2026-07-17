@@ -177,7 +177,10 @@ pub enum LandResult {
 // capability's `SourceCapability` and its public API keep naming them under
 // `aether.source::{…}` unchanged. The `#[kind(name = "…")]` wire identity rides
 // the move; only the definition site changed.
-pub use aether_bloomery::{ClaimResult, ClaimSeal, ReleaseSeal, TransferSeal};
+pub use aether_bloomery::{
+    ClaimResult, ClaimSeal, CompleteRelease, CompleteTransfer, EnumerateClaims, EnumerateClaimsResult, ReleaseSeal,
+    TransferSeal,
+};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

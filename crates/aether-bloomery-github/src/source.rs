@@ -36,8 +36,8 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, Digest, IntegrateOutcome, LandOutcome, LandingReceipt,
-    SourceBackend, SourceSnapshot, WorkpieceId,
+    BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome, LandOutcome,
+    LandingReceipt, SourceBackend, SourceSnapshot, WorkpieceId,
 };
 
 use crate::client::{GitDataApi, GithubError};
@@ -212,6 +212,22 @@ impl<C: GitDataApi> GitSource<C> {
         format!("bloomery/claims/{}", workpiece.0)
     }
 
+    // The `heads/…`-form ref name a single `ClaimRefKind` addresses — the per-ref
+    // dual of `claim_targets`, for the boot-reconcile deep-heal ops that act on
+    // one enumerated ref at a time (ADR-0150 §The claim registry, amended PR #3556).
+    fn ref_name(ref_kind: &ClaimRefKind) -> String {
+        match ref_kind {
+            ClaimRefKind::Workpiece(workpiece) => Self::workpiece_claim_ref(workpiece),
+            ClaimRefKind::MainlineAdmission => ADMISSION_REF.to_owned(),
+        }
+    }
+
+    // The prefix every per-workpiece claim ref lives under — the enumeration base
+    // `enumerate_claims` walks, mirroring `checkpoint_prefix`.
+    fn claims_prefix() -> &'static str {
+        "bloomery/claims/"
+    }
+
     // The typed claim targets an acquire / transfer / release walks: the
     // per-workpiece claim refs paired with their `ClaimRefKind`, and — appended
     // when `with_admission` — the single mainline-admission ref. Pairing the
@@ -245,6 +261,18 @@ impl<C: GitDataApi> GitSource<C> {
         }
     }
 
+    // Classify the ref pointing at `sha` for enumeration: the all-zero tombstone
+    // tree is a swept-me marker, any other tree is the holding bloom's id (the
+    // "commit tree = hex of bloom id" convention claim commits carry).
+    fn classify_holder(&self, sha: &str) -> Result<ClaimHolder, SourceError> {
+        let tree = self.read_commit_tree(sha)?;
+        Ok(if tree == TOMBSTONE_TREE {
+            ClaimHolder::Tombstoned
+        } else {
+            ClaimHolder::Held(BloomId(tree))
+        })
+    }
+
     // Resolve the holder of a ref an acquire/transfer/release just found held —
     // the ref must exist (a 422/absent-holder here is a race, surfaced as a
     // fault rather than a fabricated holder).
@@ -268,15 +296,25 @@ impl<C: GitDataApi> GitSource<C> {
         first_error.map_or(Ok(()), |error| Err(SourceError::Github(error)))
     }
 
-    // Release each of `targets` this `bloom` holds by a fast-forward CAS to a
+    // Release each of `targets` the named `owner` holds by a fast-forward CAS to a
     // tombstone child commit (the linearization point) then a name-only cleanup
-    // delete. An absent ref is skipped (idempotent); a ref another bloom holds is
-    // spared and reported as `Held` — the CAS read-guard that retires the
-    // check-then-delete TOCTOU. Shared by `release_seal` (workpieces + admission)
-    // and `transfer_seal`'s dropped-member cleanup (workpieces only).
+    // delete. An absent ref is skipped (idempotent); a ref already at the tombstone
+    // commit is *already released* — an interrupted release's CAS linearized but its
+    // cleanup delete did not run — so the cleanup delete is finished (behind the
+    // same CAS reassertion, so a fresh claim that reused the name in the read→delete
+    // window is spared rather than clobbered) and the walk continues (ADR-0150 §The
+    // claim registry, amended PR #3556: the release path is idempotent over its own
+    // tombstone). A ref a *different* bloom holds is spared and reported as `Held` —
+    // the CAS read-guard that retires the check-then-delete TOCTOU.
+    //
+    // `owner` is `Some(bloom)` for the whole-op release paths — `release_seal`
+    // (workpieces + admission) and `transfer_seal`'s dropped-member cleanup
+    // (workpieces only) — and `None` for the boot-reconcile tombstone sweep, which
+    // authorizes no live holder: a `None` owner sweeps a tombstone and spares any
+    // live ref rather than deleting it.
     fn release_targets(
         &self,
-        bloom: &BloomId,
+        owner: Option<&BloomId>,
         targets: &[(ClaimRefKind, String)],
     ) -> Result<ClaimOutcome, SourceError> {
         for (kind, name) in targets {
@@ -284,7 +322,28 @@ impl<C: GitDataApi> GitSource<C> {
                 continue;
             };
             let holder = BloomId(self.read_commit_tree(&current.sha)?);
-            if holder != *bloom {
+            // An already-tombstoned ref is released regardless of `owner` — the
+            // tombstone *is* the released state, so finishing the interrupted
+            // cleanup delete is pure name reclamation, safe for any instance. But
+            // guard the cleanup with the same CAS the live-holder branch uses: a
+            // blind name-only delete would race a fresh claim that reused the name
+            // in the window since the read, so re-assert the observed tombstone via
+            // a no-op fast-forward first. If the ref moved to an unrelated fresh
+            // claim commit that reassertion 422s (the new commit is not a
+            // fast-forward descendant of the stale tombstone), so the name has
+            // already been reclaimed by that holder — skip the delete and move on
+            // rather than clobbering a claim we never owned.
+            if holder.0 == TOMBSTONE_TREE {
+                match self.client.update_ref(name, &current.sha, false) {
+                    Ok(_) => self.client.delete_ref(name)?,
+                    Err(GithubError::Status { status: 422, .. }) => {}
+                    Err(error) => return Err(SourceError::Github(error)),
+                }
+                continue;
+            }
+            // A live ref is released only when `owner` names its holder; a `None`
+            // sweep, or a mismatch, spares it and reports the holder.
+            if owner != Some(&holder) {
                 return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by: holder });
             }
             let tombstone =
@@ -488,13 +547,81 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         // Release the members the successor drops (the predecessor's holds). This
         // is best-effort cleanup of refs the predecessor owns, so its outcome is
         // not reported — a genuine fault still propagates.
-        self.release_targets(predecessor, &Self::claim_targets(dropped, false))?;
+        self.release_targets(Some(predecessor), &Self::claim_targets(dropped, false))?;
 
         Ok(ClaimOutcome::Acquired)
     }
 
     fn release_seal(&self, bloom: &BloomId, workpieces: &[WorkpieceId]) -> Result<ClaimOutcome, Self::Error> {
-        self.release_targets(bloom, &Self::claim_targets(workpieces, true))
+        self.release_targets(Some(bloom), &Self::claim_targets(workpieces, true))
+    }
+
+    fn enumerate_claims(&self) -> Result<Vec<ClaimRefState>, Self::Error> {
+        // Mirror `checkpoints`: list every per-workpiece claim ref under the shared
+        // prefix, then read the single admission ref by name. Classify each by its
+        // commit tree — the tombstone sentinel is the all-zero tree `release_seal`
+        // writes, everything else is the holding bloom's id (ADR-0150 §The claim
+        // registry, amended PR #3556).
+        let prefix = Self::claims_prefix();
+        let mut states = Vec::new();
+        for git_ref in self.client.list_matching_refs(prefix)? {
+            let raw = git_ref.name.strip_prefix(prefix).unwrap_or(&git_ref.name);
+            let ref_kind = ClaimRefKind::Workpiece(WorkpieceId(raw.to_owned()));
+            states.push(ClaimRefState { ref_kind, holder: self.classify_holder(&git_ref.sha)? });
+        }
+        if let Some(admission) = self.client.get_ref(ADMISSION_REF)? {
+            states.push(ClaimRefState {
+                ref_kind: ClaimRefKind::MainlineAdmission,
+                holder: self.classify_holder(&admission.sha)?,
+            });
+        }
+        Ok(states)
+    }
+
+    fn complete_transfer(
+        &self,
+        predecessor: &BloomId,
+        successor: &BloomId,
+        ref_kind: &ClaimRefKind,
+    ) -> Result<ClaimOutcome, Self::Error> {
+        let name = Self::ref_name(ref_kind);
+        let Some(current) = self.client.get_ref(&name)? else {
+            // A half-transfer never leaves a carried ref absent — `transfer_seal`
+            // fast-forward-CASes each ref (never delete-then-create), so a ref is
+            // always at the predecessor or the successor mid-flight, never gone.
+            // An absent ref is thus nothing to converge: the convergent no-op.
+            return Ok(ClaimOutcome::Acquired);
+        };
+        let holder = BloomId(self.read_commit_tree(&current.sha)?);
+        // Already at the successor — the ref this crash-interrupted transfer already
+        // moved. The idempotent no-op that lets the boot re-drive converge.
+        if holder == *successor {
+            return Ok(ClaimOutcome::Acquired);
+        }
+        // At any holder other than the predecessor — a foreign hold or a concurrent
+        // mutation. The clean `Held`, never a stomp.
+        if holder != *predecessor {
+            return Ok(ClaimOutcome::Held { ref_kind: ref_kind.clone(), held_by: holder });
+        }
+        // At the predecessor — finish the fast-forward CAS to the successor, the
+        // successor commit parented on the current one so `update_ref(force:false)`
+        // is a genuine fast-forward (the same lineage `transfer_seal` builds).
+        let successor_commit = self.create_claim_commit(successor, &[current.sha])?;
+        match self.client.update_ref(&name, &successor_commit, false) {
+            Ok(_) => Ok(ClaimOutcome::Acquired),
+            Err(GithubError::Status { status: 422, .. }) => {
+                Ok(ClaimOutcome::Held { ref_kind: ref_kind.clone(), held_by: self.require_holder(&name)? })
+            }
+            Err(error) => Err(SourceError::Github(error)),
+        }
+    }
+
+    fn complete_release(
+        &self,
+        expected_holder: Option<&BloomId>,
+        ref_kind: &ClaimRefKind,
+    ) -> Result<ClaimOutcome, Self::Error> {
+        self.release_targets(expected_holder, &[(ref_kind.clone(), Self::ref_name(ref_kind))])
     }
 }
 
@@ -504,11 +631,11 @@ mod tests {
     use std::slice::from_ref;
 
     use aether_bloomery::{
-        BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, Digest, IntegrateOutcome, LandOutcome, SourceBackend,
-        WorkpieceId,
+        BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome,
+        LandOutcome, SourceBackend, WorkpieceId,
     };
 
-    use super::{ADMISSION_REF, GitSource, SourceError, digest_from_hex, to_hex};
+    use super::{ADMISSION_REF, GitSource, SourceError, TOMBSTONE_TREE, digest_from_hex, to_hex};
     use crate::testing::FakeGithub;
 
     fn digest(seed: u8) -> Digest {
@@ -790,5 +917,126 @@ mod tests {
         let outcome = source.release_seal(&stranger, from_ref(&w1)).unwrap();
         assert_eq!(outcome, ClaimOutcome::Held { ref_kind: ClaimRefKind::Workpiece(w1.clone()), held_by: owner });
         assert!(fake.ref_exists(&claim_ref(&w1)), "the foreign hold is spared, not deleted");
+    }
+
+    // Point `name` at a tombstone commit (all-zero tree) directly — the ref state
+    // an interrupted `release_seal` leaves after its CAS-to-tombstone linearized
+    // but its name-only cleanup delete never ran.
+    fn seed_tombstone(fake: &FakeGithub, name: &str) {
+        let commit = fake.seed_commit(&to_hex(&TOMBSTONE_TREE));
+        fake.seed_ref(name, &commit);
+    }
+
+    // Point `name` at a claim commit whose tree is `holder`'s id — a live hold
+    // staged directly, sidestepping `claim_seal`'s admission-ref coupling.
+    fn seed_hold(fake: &FakeGithub, name: &str, holder: &BloomId) {
+        let commit = fake.seed_commit(&to_hex(&holder.0));
+        fake.seed_ref(name, &commit);
+    }
+
+    #[test]
+    fn enumerate_claims_classifies_held_tombstoned_and_admission_refs() {
+        let fake = FakeGithub::new();
+        let source = GitSource::new(fake.clone(), false);
+        let holder = bloom_id(1);
+        let (w1, w2) = (workpiece("wp-1"), workpiece("wp-2"));
+        // w1 held by the claimant (which also takes the admission ref); w2 left at a
+        // tombstone by an interrupted release.
+        source.claim_seal(&holder, from_ref(&w1)).unwrap();
+        seed_tombstone(&fake, &claim_ref(&w2));
+
+        let mut states = source.enumerate_claims().unwrap();
+        states.sort_by(|a, b| format!("{:?}", a.ref_kind).cmp(&format!("{:?}", b.ref_kind)));
+
+        assert_eq!(
+            states,
+            vec![
+                ClaimRefState { ref_kind: ClaimRefKind::MainlineAdmission, holder: ClaimHolder::Held(holder) },
+                ClaimRefState { ref_kind: ClaimRefKind::Workpiece(w1), holder: ClaimHolder::Held(holder) },
+                ClaimRefState { ref_kind: ClaimRefKind::Workpiece(w2), holder: ClaimHolder::Tombstoned },
+            ],
+        );
+    }
+
+    #[test]
+    fn complete_transfer_moves_a_predecessor_held_ref_and_no_ops_at_the_successor() {
+        let fake = FakeGithub::new();
+        let source = GitSource::new(fake, false);
+        let (predecessor, successor) = (bloom_id(1), bloom_id(2));
+        let w1 = workpiece("wp-1");
+        source.claim_seal(&predecessor, from_ref(&w1)).unwrap();
+        let ref_kind = ClaimRefKind::Workpiece(w1.clone());
+
+        // A predecessor-held ref fast-forwards to the successor.
+        assert_eq!(source.complete_transfer(&predecessor, &successor, &ref_kind).unwrap(), ClaimOutcome::Acquired);
+        assert_eq!(source.claim_holder(&claim_ref(&w1)).unwrap(), Some(successor));
+
+        // Re-driving the same completion over the already-moved ref is the no-op
+        // that lets a boot re-drive converge — Acquired, ref unchanged.
+        assert_eq!(source.complete_transfer(&predecessor, &successor, &ref_kind).unwrap(), ClaimOutcome::Acquired);
+        assert_eq!(source.claim_holder(&claim_ref(&w1)).unwrap(), Some(successor));
+    }
+
+    #[test]
+    fn complete_transfer_on_a_foreign_held_ref_is_held() {
+        // Tripwire: the per-ref completion never stomps a ref a third bloom holds —
+        // a holder that is neither predecessor nor successor is the clean Held.
+        let fake = FakeGithub::new();
+        let source = GitSource::new(fake, false);
+        let (predecessor, successor, foreign) = (bloom_id(1), bloom_id(2), bloom_id(3));
+        let w1 = workpiece("wp-1");
+        source.claim_seal(&foreign, from_ref(&w1)).unwrap();
+        let ref_kind = ClaimRefKind::Workpiece(w1.clone());
+
+        let outcome = source.complete_transfer(&predecessor, &successor, &ref_kind).unwrap();
+        assert_eq!(outcome, ClaimOutcome::Held { ref_kind, held_by: foreign });
+        assert_eq!(source.claim_holder(&claim_ref(&w1)).unwrap(), Some(foreign), "the foreign hold is untouched");
+    }
+
+    #[test]
+    fn complete_release_sweeps_a_tombstone_and_spares_a_live_foreign_ref() {
+        // Tripwire: the sweep (`None` holder) deletes a tombstoned ref's name but
+        // must never delete a live ref it does not own.
+        let fake = FakeGithub::new();
+        let source = GitSource::new(fake.clone(), false);
+        let (w1, w2) = (workpiece("wp-1"), workpiece("wp-2"));
+        seed_tombstone(&fake, &claim_ref(&w1));
+        source.claim_seal(&bloom_id(9), from_ref(&w2)).unwrap();
+
+        // The tombstoned ref is swept.
+        assert_eq!(
+            source.complete_release(None, &ClaimRefKind::Workpiece(w1.clone())).unwrap(),
+            ClaimOutcome::Acquired
+        );
+        assert!(!fake.ref_exists(&claim_ref(&w1)), "the tombstoned ref name was reclaimed");
+
+        // A live ref under a `None` sweep is spared (reported Held), never deleted.
+        let outcome = source.complete_release(None, &ClaimRefKind::Workpiece(w2.clone())).unwrap();
+        assert_eq!(outcome, ClaimOutcome::Held { ref_kind: ClaimRefKind::Workpiece(w2.clone()), held_by: bloom_id(9) });
+        assert!(fake.ref_exists(&claim_ref(&w2)), "a live ref is not swept");
+    }
+
+    #[test]
+    fn complete_release_releases_a_holder_named_ref_and_spares_a_foreign_one() {
+        let fake = FakeGithub::new();
+        let source = GitSource::new(fake.clone(), false);
+        let (owner, foreign) = (bloom_id(1), bloom_id(2));
+        let (mine, theirs) = (workpiece("wp-mine"), workpiece("wp-theirs"));
+        source.claim_seal(&owner, from_ref(&mine)).unwrap();
+        // Stage the foreign hold directly — a second `claim_seal` would conflict on
+        // the admission ref the owner already holds and roll its member back.
+        seed_hold(&fake, &claim_ref(&theirs), &foreign);
+
+        // Naming the owner releases exactly its ref (the stranded-drop release path).
+        assert_eq!(
+            source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(mine.clone())).unwrap(),
+            ClaimOutcome::Acquired
+        );
+        assert!(!fake.ref_exists(&claim_ref(&mine)), "the owner's ref was released");
+
+        // A ref a foreign bloom holds is spared even when a holder is named.
+        let outcome = source.complete_release(Some(&owner), &ClaimRefKind::Workpiece(theirs.clone())).unwrap();
+        assert_eq!(outcome, ClaimOutcome::Held { ref_kind: ClaimRefKind::Workpiece(theirs.clone()), held_by: foreign });
+        assert!(fake.ref_exists(&claim_ref(&theirs)), "the foreign ref is spared");
     }
 }
