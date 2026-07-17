@@ -47,8 +47,9 @@ impl SourceShell {
     }
 
     /// Connect a live GitHub-backed source port from resolved config. The
-    /// `cas_land_enabled` knob gates `land` — off by default until ADR-0149
-    /// migration step 3.
+    /// `cas_land_enabled` knob gates `land` — on by default since ADR-0149
+    /// migration step 3 made the CAS `land` the landing of record; a `false`
+    /// knob is the explicit kill switch.
     ///
     /// # Errors
     /// The underlying `reqwest` client could not be constructed.
