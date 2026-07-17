@@ -9,11 +9,14 @@
 
 use std::collections::{HashMap, HashSet};
 
+use std::collections::BTreeMap;
+
 use aether_bloomery::{
-    ClosureViolation, Digest, KeyProvider, MANIFEST_CLOSURE_BUDGET, Provenance, ProvenanceIndex, SignatureEnvelope,
-    Slot, SlotRole, Statement, assemble_manifest,
+    ClosureViolation, Digest, Ed25519KeyProvider, KeyProvider, MANIFEST_CLOSURE_BUDGET, Provenance, ProvenanceIndex,
+    SignatureEnvelope, Slot, SlotRole, Statement, assemble_manifest,
 };
-use aether_bloomery::{FakeKeyProvider, KeyId, Observation};
+use aether_bloomery::{KeyId, Observation};
+use ed25519_dalek::{Signer, SigningKey};
 use proptest::prelude::*;
 
 fn digest(seed: u8) -> Digest {
@@ -59,13 +62,26 @@ impl KeyProvider for RejectingKeyProvider {
     }
 }
 
+/// The deterministic authorized signer (fixed seed, no rng) — its public half
+/// backs [`real_provider`] and its private half signs [`signed_statement`], so
+/// the statement genuinely verifies against the provider.
+fn owner_key() -> SigningKey {
+    SigningKey::from_bytes(&[7u8; 32])
+}
+
+/// The real ed25519 provider trusting exactly the `owner` signer — the same
+/// custody shape the host `aether.signing` capability constructs, so the
+/// closure gate's tests run against the real verifier, not the fake stub.
+fn real_provider() -> Ed25519KeyProvider {
+    Ed25519KeyProvider::new(BTreeMap::from([(KeyId("owner".into()), owner_key().verifying_key())]))
+}
+
 fn signed_statement() -> Statement {
+    let words = b"do the thing".to_vec();
+    let signature = owner_key().sign(&words).to_bytes().to_vec();
     Statement {
-        words: b"do the thing".to_vec(),
-        provenance: Provenance::AuthorSignature(SignatureEnvelope {
-            signer: KeyId("owner".into()),
-            signature: vec![1, 2, 3],
-        }),
+        words,
+        provenance: Provenance::AuthorSignature(SignatureEnvelope { signer: KeyId("owner".into()), signature }),
         parents: vec![],
     }
 }
@@ -88,7 +104,7 @@ fn instruction_slot_grounded_by_signed_statement_is_admissible() {
     statements.insert(digest(1), signed_statement());
     let index = TestIndex { statements, policies: HashSet::new(), ..Default::default() };
 
-    let manifest = assemble_manifest(vec![instruction(digest(1))], &index, &FakeKeyProvider).unwrap();
+    let manifest = assemble_manifest(vec![instruction(digest(1))], &index, &real_provider()).unwrap();
     assert_eq!(manifest.slots.len(), 1);
 }
 
@@ -98,7 +114,7 @@ fn instruction_slot_grounded_by_policy_is_admissible() {
     policies.insert(digest(2));
     let index = TestIndex { statements: HashMap::new(), policies, ..Default::default() };
 
-    let manifest = assemble_manifest(vec![instruction(digest(2))], &index, &FakeKeyProvider).unwrap();
+    let manifest = assemble_manifest(vec![instruction(digest(2))], &index, &real_provider()).unwrap();
     assert_eq!(manifest.slots.len(), 1);
 }
 
@@ -106,7 +122,7 @@ fn instruction_slot_grounded_by_policy_is_admissible() {
 fn ungrounded_instruction_slot_is_rejected() {
     let index = TestIndex { statements: HashMap::new(), policies: HashSet::new(), ..Default::default() };
 
-    let violation = assemble_manifest(vec![instruction(digest(3))], &index, &FakeKeyProvider).unwrap_err();
+    let violation = assemble_manifest(vec![instruction(digest(3))], &index, &real_provider()).unwrap_err();
     assert_eq!(violation, ClosureViolation::UngroundedInstruction { slot: digest(3) });
 }
 
@@ -116,7 +132,7 @@ fn observation_backed_instruction_slot_is_rejected() {
     statements.insert(digest(4), observed_statement());
     let index = TestIndex { statements, policies: HashSet::new(), ..Default::default() };
 
-    let violation = assemble_manifest(vec![instruction(digest(4))], &index, &FakeKeyProvider).unwrap_err();
+    let violation = assemble_manifest(vec![instruction(digest(4))], &index, &real_provider()).unwrap_err();
     assert_eq!(violation, ClosureViolation::NonAuthorInstruction { slot: digest(4) });
 }
 
@@ -137,7 +153,7 @@ fn ungrounded_context_slot_is_admissible() {
     let index = TestIndex { statements: HashMap::new(), policies: HashSet::new(), ..Default::default() };
     let context = Slot { artifact: digest(6), role: SlotRole::Context, parent_closure: vec![] };
 
-    let manifest = assemble_manifest(vec![context], &index, &FakeKeyProvider).unwrap();
+    let manifest = assemble_manifest(vec![context], &index, &real_provider()).unwrap();
     assert_eq!(manifest.slots.len(), 1);
 }
 
@@ -156,7 +172,7 @@ fn derived_instruction_chain_is_admissible_and_authors_its_closure() {
 
     // The caller-declared closure is deliberately bogus; the assembler ignores it.
     let slot = Slot { artifact: digest(10), role: SlotRole::Instruction, parent_closure: vec![digest(99)] };
-    let manifest = assemble_manifest(vec![slot], &index, &FakeKeyProvider).unwrap();
+    let manifest = assemble_manifest(vec![slot], &index, &real_provider()).unwrap();
 
     assert_eq!(manifest.slots.len(), 1);
     assert_eq!(manifest.slots[0].parent_closure, vec![digest(11), digest(12)]);
@@ -179,7 +195,7 @@ fn a_redispatched_attempt_grounds_on_the_answer_and_its_closure_names_the_questi
     parents.insert(prompt, vec![answer, question]);
     let index = TestIndex { statements, parents, ..Default::default() };
 
-    let manifest = assemble_manifest(vec![instruction(prompt)], &index, &FakeKeyProvider).unwrap();
+    let manifest = assemble_manifest(vec![instruction(prompt)], &index, &real_provider()).unwrap();
     let closure = &manifest.slots[0].parent_closure;
     assert!(closure.contains(&answer), "the closure names the answer it grounded on");
     assert!(closure.contains(&question), "and the question, so the audit shows why the retry diverged");
@@ -212,7 +228,7 @@ proptest! {
             role: SlotRole::Instruction,
             parent_closure: forged.iter().map(|&seed| digest(seed)).collect(),
         };
-        let violation = assemble_manifest(vec![slot], &index, &FakeKeyProvider).unwrap_err();
+        let violation = assemble_manifest(vec![slot], &index, &real_provider()).unwrap_err();
         prop_assert_eq!(violation, ClosureViolation::UngroundedInstruction { slot: digest(artifact_seed) });
     }
 
@@ -238,7 +254,7 @@ proptest! {
         }
         let index = TestIndex { parents, ..Default::default() };
 
-        let violation = assemble_manifest(vec![instruction(digest(chain[0]))], &index, &FakeKeyProvider).unwrap_err();
+        let violation = assemble_manifest(vec![instruction(digest(chain[0]))], &index, &real_provider()).unwrap_err();
         prop_assert_eq!(violation, ClosureViolation::UngroundedInstruction { slot: digest(chain[0]) });
     }
 }
@@ -254,7 +270,7 @@ fn overlong_closure_exceeds_budget() {
     let index = TestIndex { parents, ..Default::default() };
 
     let slot = Slot { artifact: digest_n(0), role: SlotRole::Instruction, parent_closure: vec![] };
-    let violation = assemble_manifest(vec![slot], &index, &FakeKeyProvider).unwrap_err();
+    let violation = assemble_manifest(vec![slot], &index, &real_provider()).unwrap_err();
     assert_eq!(violation, ClosureViolation::ClosureBudgetExceeded { slot: digest_n(0) });
 }
 
@@ -269,7 +285,7 @@ fn high_fanout_exceeds_budget() {
     let index = TestIndex { parents, ..Default::default() };
 
     let slot = Slot { artifact: digest_n(0), role: SlotRole::Instruction, parent_closure: vec![] };
-    let violation = assemble_manifest(vec![slot], &index, &FakeKeyProvider).unwrap_err();
+    let violation = assemble_manifest(vec![slot], &index, &real_provider()).unwrap_err();
     assert_eq!(violation, ClosureViolation::ClosureBudgetExceeded { slot: digest_n(0) });
 }
 
@@ -284,6 +300,6 @@ fn cyclic_parent_graph_terminates_and_rejects() {
     parents.insert(digest(42), vec![digest(40)]);
     let index = TestIndex { parents, ..Default::default() };
 
-    let violation = assemble_manifest(vec![instruction(digest(40))], &index, &FakeKeyProvider).unwrap_err();
+    let violation = assemble_manifest(vec![instruction(digest(40))], &index, &real_provider()).unwrap_err();
     assert_eq!(violation, ClosureViolation::UngroundedInstruction { slot: digest(40) });
 }
