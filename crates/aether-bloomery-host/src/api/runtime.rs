@@ -45,8 +45,8 @@ use serde::de::DeserializeOwned;
 
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{
-    Admit, AdmitResult, BloomDraft, BloomId, BloomView, Digest, Event, Fact, FakeKeyProvider, IdempotencyKey, Outcome,
-    Query, QueryResult, ReplayJournal, ReplayJournalResult, Statement, ViewDocument, Workpiece, digest_of,
+    Admit, AdmitResult, BloomDraft, BloomId, BloomView, Digest, Event, Fact, IdempotencyKey, Outcome, Query,
+    QueryResult, ReplayJournal, ReplayJournalResult, Statement, ViewDocument, Workpiece, digest_of,
 };
 use aether_capabilities::http::{
     HttpHeader, HttpMethod, HttpServerCapability, HttpServerRequest, HttpServerResponse, RegisterRouteSelf,
@@ -65,6 +65,7 @@ use super::dto::{
     SupersedeRequest, WorkpiecesView,
 };
 use crate::artifacts::{ArtifactsError, Get, GetResult};
+use crate::signing::{Verify, VerifyResult};
 
 /// The runtime name of the control-core wasm component's mailbox — the
 /// ADR-0099 lineage address the component host registers the autoloaded actor
@@ -102,16 +103,40 @@ pub struct ApiCapabilityState {
     /// Deferred HTTP replies awaiting a downstream cap reply, keyed by the
     /// downstream dispatch's `MailId.correlation_id`.
     pending: HashMap<u64, InboundMail>,
+    /// Answer requests awaiting a signature verification from the
+    /// `aether.signing` capability, keyed by the verify dispatch's
+    /// `MailId.correlation_id`. On a verified reply the held request admits its
+    /// stashed `Fact::AdoptAnswer` event (re-deferring into `pending` on the
+    /// reducer reply); on a rejection it answers `400`.
+    verifying: HashMap<u64, VerifyPending>,
 }
 
-/// A route's disposition: an immediate response (the in-memory shaping routes)
-/// or a deferral keyed by the downstream dispatch correlation (the durable
-/// read/write routes).
+/// An answer request held across the signature-verification round trip: the
+/// reply obligation and the adoption event to admit once (and only if) the
+/// signature verifies.
+struct VerifyPending {
+    /// The held HTTP reply obligation.
+    inbound: InboundMail,
+    /// The `Fact::AdoptAnswer` event to admit on a verified signature.
+    event: Event,
+}
+
+/// A route's disposition: an immediate response (the in-memory shaping routes),
+/// a deferral keyed by the downstream dispatch correlation (the durable
+/// read/write routes), or a signature-gated deferral (the answer route).
 enum Routed {
     /// Reply now with this response.
     Reply(HttpServerResponse),
     /// Await the downstream reply correlated by this id.
     Deferred(u64),
+    /// Await the `aether.signing` verify reply correlated by this id, then admit
+    /// `event` on a verified signature or answer `400` on a rejection.
+    DeferredVerify {
+        /// The verify dispatch correlation the reply will echo.
+        correlation: u64,
+        /// The adoption event to admit once the signature verifies.
+        event: Box<Event>,
+    },
 }
 
 #[runtime]
@@ -129,6 +154,7 @@ impl NativeActor for BloomeryApiCapability {
             drafts: BTreeMap::new(),
             next_draft: 1,
             pending: HashMap::new(),
+            verifying: HashMap::new(),
         })
     }
 
@@ -159,6 +185,9 @@ impl NativeActor for BloomeryApiCapability {
             Routed::Deferred(correlation) => {
                 state.pending.insert(correlation, inbound);
             }
+            Routed::DeferredVerify { correlation, event } => {
+                state.verifying.insert(correlation, VerifyPending { inbound, event: *event });
+            }
         }
     }
 
@@ -187,13 +216,25 @@ impl NativeActor for BloomeryApiCapability {
         state.answer(ctx, &artifact_response(mail));
     }
 
+    /// The `aether.signing` capability's reply to an answer-gate verify. A
+    /// verified signature admits the held adoption event (re-deferring on the
+    /// reducer reply the same way seal / supersede do); a rejection or a decode
+    /// error is a `400` — the fake always-valid provider is gone from the gate.
+    #[handler::manual]
+    fn on_verify_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: VerifyResult) {
+        state.resolve_verify(ctx, mail);
+    }
+
     /// A downstream chain settled. If its request is still pending, the
-    /// downstream produced no reply (a dropped or unloaded control core) —
-    /// answer `504` rather than leave the client hung.
+    /// downstream produced no reply (a dropped or unloaded control core, or a
+    /// dropped signing capability) — answer `504` rather than leave the client
+    /// hung.
     #[handler::manual]
     fn on_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_, Manual>, mail: Settled) {
         if let Some(inbound) = state.pending.remove(&mail.root.correlation_id) {
             inbound.reply(&error_response(504, "control-plane request settled without a reply"));
+        } else if let Some(VerifyPending { inbound, .. }) = state.verifying.remove(&mail.root.correlation_id) {
+            inbound.reply(&error_response(504, "signature verification settled without a reply"));
         }
     }
 }
@@ -342,12 +383,15 @@ impl ApiCapabilityState {
     /// releasing its hold and re-dispatching the held stage (ADR-0151).
     ///
     /// The body is the native author-signed answer statement. The route is the
-    /// cryptographic trust gate: it `verify_authority`-checks the signature
-    /// before admitting (the reducer holds no key material and only re-checks the
-    /// structural adoption), mirroring the intake broker's evidence gate. A body
-    /// that is not a decodable statement is a `400`; one whose signature does not
-    /// verify is a `400`; a valid answer admits `Fact::AdoptAnswer` and defers on
-    /// the reducer outcome the same way seal / supersede do.
+    /// cryptographic trust gate: it dials the `aether.signing` capability to
+    /// verify the signature against the host-custodied authorized-signer
+    /// allowlist (ADR-0149 step 3, ADR-0150/ADR-0151) before admitting — the
+    /// reducer holds no key material and only re-checks the structural adoption.
+    /// A body that is not a decodable statement is a `400`; one whose signature
+    /// does not verify is a `400` (answered from the verify reply); a valid
+    /// answer admits `Fact::AdoptAnswer` and defers on the reducer outcome the
+    /// same way seal / supersede do. Custody lives behind the port, so the fake
+    /// always-valid provider no longer appears at the live gate.
     fn answer_bloom(&self, ctx: &NativeCtx<'_, Manual>, id: &str, body: &[u8]) -> Routed {
         let bloom = match digest_from_hex(id) {
             Some(digest) => BloomId(digest),
@@ -357,15 +401,44 @@ impl ApiCapabilityState {
             Ok(answer) => answer,
             Err(error) => return Routed::Reply(error_response(400, &format!("invalid answer statement: {error}"))),
         };
-        // The signature is the host-side trust gate (v1 keys are the fake
-        // always-valid provider, ADR-0149 §The value vocabulary; key custody is a
-        // later arc). A statement that is not an author signature, or whose
-        // signature does not verify, can never become intent.
-        if !answer.verify_authority(&FakeKeyProvider) {
-            return Routed::Reply(error_response(400, "answer statement is not an author signature or did not verify"));
-        }
+        let statement = match to_vec(&answer) {
+            Ok(bytes) => bytes,
+            Err(error) => return Routed::Reply(error_response(500, &format!("answer encode failed: {error}"))),
+        };
+        // Build the adoption event up front and hold it across the verify round
+        // trip; it admits only if the signature verifies (`resolve_verify`).
         let key = format!("aether.bloomery.answer:{}", hex_encode(digest_of(&answer).as_bytes()));
-        self.admit(ctx, &Event { idempotency_key: IdempotencyKey(key), fact: Fact::AdoptAnswer { bloom, answer } })
+        let event = Event { idempotency_key: IdempotencyKey(key), fact: Fact::AdoptAnswer { bloom, answer } };
+        let correlation = self.send_tracked(ctx, signing_mailbox(), &Verify { statement });
+        Routed::DeferredVerify { correlation, event: Box::new(event) }
+    }
+
+    /// Resolve a held answer request from the `aether.signing` verify reply: a
+    /// verified signature admits the stashed adoption event (re-deferring on the
+    /// reducer reply); a `verified: false` verdict or an undecodable-statement
+    /// error is a `400`.
+    fn resolve_verify(&mut self, ctx: &NativeCtx<'_, Manual>, result: VerifyResult) {
+        let correlation = ctx.reply_target().correlation_id;
+        let Some(VerifyPending { inbound, event }) = self.verifying.remove(&correlation) else {
+            return;
+        };
+        match result {
+            VerifyResult::Ok { verified: true } => match to_vec(&event) {
+                Ok(bytes) => {
+                    let correlation = self.send_tracked(ctx, control_mailbox(), &Admit { event: bytes });
+                    self.pending.insert(correlation, inbound);
+                }
+                Err(error) => {
+                    inbound.reply(&error_response(500, &format!("event encode failed: {error}")));
+                }
+            },
+            VerifyResult::Ok { verified: false } => {
+                inbound.reply(&error_response(400, "answer statement is not an author signature or did not verify"));
+            }
+            VerifyResult::Err { error } => {
+                inbound.reply(&error_response(400, &format!("answer statement did not verify: {error}")));
+            }
+        }
     }
 
     /// `GET /blooms` and `GET /view` — read the whole live projection.
@@ -514,6 +587,10 @@ fn artifacts_mailbox() -> MailboxId {
 }
 
 /// The autoloaded control-core component's lineage mailbox.
+fn signing_mailbox() -> MailboxId {
+    mailbox_id_from_path("aether.signing")
+}
+
 fn control_mailbox() -> MailboxId {
     mailbox_id_from_path(CONTROL_CORE_PATH)
 }
