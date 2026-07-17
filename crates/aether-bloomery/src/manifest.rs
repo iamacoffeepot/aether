@@ -169,6 +169,15 @@ impl Advance {
 /// closure the walk actually traced (the caller-declared value is ignored), so
 /// the manifest records what the assembler verified.
 ///
+/// `keys` is the verification port ([`KeyProvider`]). This gate has no
+/// production caller yet — it is reachable only from tests today — so it takes
+/// the trait object rather than naming a concrete provider. The first
+/// `assemble_manifest` consumer (a future stage-lane manifest assembler) injects
+/// the host's real [`Ed25519KeyProvider`](crate::sign::Ed25519KeyProvider) here,
+/// the same custody the live answer gate already dials the `aether.signing`
+/// capability for (ADR-0149 step 3); the tests exercise it against that real
+/// provider so the wiring is proven ahead of that consumer.
+///
 /// # Errors
 ///
 /// Returns the first [`ClosureViolation`] an instruction slot triggers. A slot

@@ -11,6 +11,7 @@ use crate::artifacts::ArtifactsOverlay;
 use crate::bloomery::chassis::{ControlCoreOverlay, HttpPortOverlay, RpcPortOverlay};
 use crate::bloomery::mirror::GithubMirrorOverlay;
 use crate::session::SessionOverlay;
+use crate::signing::SigningOverlay;
 use crate::store::StoreOverlay;
 
 /// The `bloomery` binary's clap root. The overlays carry the derive-emitted
@@ -51,6 +52,12 @@ pub struct BloomeryCli {
     /// `AETHER_SESSION_*` env — the executor session-reuse pool knobs.
     #[command(flatten)]
     pub session: SessionOverlay,
+
+    /// `--signing-allowlist` shadows `AETHER_SIGNING_ALLOWLIST` — the host-local
+    /// authorized-signer allowlist (`key-id:hex-public-key` entries) the
+    /// `aether.signing` capability verifies answer signatures against.
+    #[command(flatten)]
+    pub signing: SigningOverlay,
 
     /// `--control-core-wasm` shadows `AETHER_CONTROL_CORE_WASM` — the control-core
     /// component wasm to autoload at boot (unset → no autoload).

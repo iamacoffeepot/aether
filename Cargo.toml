@@ -79,6 +79,12 @@ base64 = "0.22"
 bytemuck = { version = "1.19", default-features = false }
 confique = { version = "0.4", default-features = false }
 cpal = "0.17"
+# ed25519 signature verification behind the `KeyProvider` port (ADR-0149
+# step 3, ADR-0150/ADR-0151): the real author-signature trust gate custodied
+# by the host `aether.signing` capability. `default-features = false` keeps
+# the verify-only surface lean (no `rand`); the pure `Ed25519KeyProvider`
+# lives in `aether-bloomery` (native-gated) and the host cap parses key bytes.
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
 hound = "3"
 inventory = "0.3"
 png = "0.18"
