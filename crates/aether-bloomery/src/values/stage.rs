@@ -146,7 +146,16 @@ impl StageCatalog {
                 // dispatched worker lane. `process` names that api cap's
                 // `NAMESPACE`, not a skill slug.
                 StageId::Scope => (&["bloom.sketch"], &["bloom.scope"], "aether.bloomery.api", "plan-present", 1),
-                StageId::Approve => (&["bloom.scope"], &["bloom.ready"], "approve", "phase-ready", 1),
+                // Approve is a pre-seal host-side admission gate (ADR-0149 §The
+                // line, ADR-0151): the coordinator's own host resolves the
+                // workpiece's declared surface to an approval tier and forms the
+                // membership `approval` before `Fact::Seal`, never a dispatched
+                // worker lane (the member-line dispatch loop never reaches this
+                // pre-seal stage). `process` names that host gate, not the retired
+                // `.claude/skills/approve` skill slug.
+                StageId::Approve => {
+                    (&["bloom.scope"], &["bloom.ready"], "aether.bloomery.approve_gate", "phase-ready", 1)
+                }
                 StageId::Construct => (&["bloom.ready"], &["bloom.candidate"], "implement", "pr-open", 2),
                 StageId::Verify => {
                     (&["bloom.candidate"], &["bloom.verify_evidence"], "transform.verify", "ci-green", 3)
@@ -358,8 +367,8 @@ mod tests {
     // value changes — catching an unintended catalog edit. Recompute-and-repin
     // only when a change *intends* to alter the authored line.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x83, 0xc5, 0xd6, 0xc8, 0xdd, 0x11, 0x79, 0x71, 0xa1, 0x28, 0x51, 0x7b, 0x30, 0x88, 0xba, 0x9b, 0x98, 0x75,
-        0x41, 0xd1, 0x75, 0xb6, 0x7a, 0x0f, 0x91, 0xdf, 0xbe, 0x35, 0x17, 0x32, 0x2c, 0x4e,
+        0x29, 0xd7, 0x27, 0xb4, 0xe3, 0x22, 0x6d, 0xb4, 0x93, 0xe4, 0x2d, 0x68, 0x0e, 0xf4, 0xcc, 0xb6, 0x68, 0x60,
+        0xce, 0x61, 0x59, 0xa4, 0x97, 0x6a, 0xb6, 0x76, 0x3e, 0x29, 0x9d, 0x61, 0x38, 0x0e,
     ];
 
     #[test]
