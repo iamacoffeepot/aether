@@ -46,10 +46,10 @@ use aether_bloomery::{
     Admit, BloomId, Digest, Event, EvidenceRef, ExecutionStatus, Fact, IdempotencyKey, Nonce, ResolutionClaim,
     StageCatalog, StageId, WorkHandle, WorkOrder, WorkpieceId,
 };
-use aether_bloomery_github::{ExecutorError, InwardError, StageResult, StageVerdict, normalize_stage_result};
+use aether_bloomery_github::{InwardError, StageResult, StageVerdict, normalize_stage_result};
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
-use super::executor::ExecutorShell;
+use super::executor::{ExecutorPortError, ExecutorShell};
 use crate::store::{OutstandingOrder, RecordOutcome, StoreBackend};
 
 /// A work order's reducer context, captured host-side at dispatch time — the
@@ -234,7 +234,7 @@ pub fn record_dispatch(store: &mut dyn StoreBackend, record: &DispatchRecord) ->
 #[derive(Debug)]
 pub enum DispatchError {
     /// The executor refused or could not reach the dispatch surface.
-    Submit(ExecutorError),
+    Submit(ExecutorPortError),
     /// The registry write faulted after a successful submit.
     Store(rusqlite::Error),
 }
@@ -534,9 +534,9 @@ pub struct CycleReport {
 #[derive(Debug)]
 pub enum CycleError {
     /// Inspecting a run faulted.
-    Inspect(ExecutorError),
+    Inspect(ExecutorPortError),
     /// Streaming a run's evidence faulted.
-    Stream(ExecutorError),
+    Stream(ExecutorPortError),
     /// The broker faulted on the registry or an event encode.
     Intake(IntakeError),
 }
