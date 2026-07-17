@@ -138,7 +138,14 @@ impl StageCatalog {
         let (consumes, produces, process, completion_gate, retry_budget): (&[&str], &[&str], &str, &str, u32) =
             match stage {
                 StageId::Sketch => (&["bloom.intent"], &["bloom.sketch"], "sketch", "issue-well-formed", 1),
-                StageId::Scope => (&["bloom.sketch"], &["bloom.scope"], "scope", "plan-present", 1),
+                // Scope is a pre-seal operator-harness process (ADR-0149 §The
+                // line, ADR-0150): the operator's own developer-side Bloomery
+                // session authors the scope revision and stages it through the
+                // REST control API (`aether.bloomery.api`'s `POST /workpieces`,
+                // `PATCH /drafts/{id}`, `POST /drafts/{id}/seal`) — never a
+                // dispatched worker lane. `process` names that api cap's
+                // `NAMESPACE`, not a skill slug.
+                StageId::Scope => (&["bloom.sketch"], &["bloom.scope"], "aether.bloomery.api", "plan-present", 1),
                 StageId::Approve => (&["bloom.scope"], &["bloom.ready"], "approve", "phase-ready", 1),
                 StageId::Construct => (&["bloom.ready"], &["bloom.candidate"], "implement", "pr-open", 2),
                 StageId::Verify => {
@@ -266,10 +273,12 @@ impl Transformation {
             // egress. Review is its own model lane.
             StageId::Verify => ("verify.check", "iama/verify:1", NetworkProfile::None),
             StageId::Review => ("review.critic", "iama/review-claude:1", NetworkProfile::Restricted),
+            StageId::Scope => unreachable!(
+                "Scope is a pre-seal operator-harness process staged via the REST control API, never a dispatched member transformation"
+            ),
             StageId::Construct
             | StageId::Refine
             | StageId::Sketch
-            | StageId::Scope
             | StageId::Approve
             | StageId::Integrate
             | StageId::AggregateVerify
@@ -349,8 +358,8 @@ mod tests {
     // value changes — catching an unintended catalog edit. Recompute-and-repin
     // only when a change *intends* to alter the authored line.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x00, 0x8d, 0x8d, 0xf5, 0x13, 0x79, 0x9c, 0x0f, 0xac, 0x34, 0x16, 0x7f, 0xf6, 0x9e, 0x9d, 0x21, 0xbe, 0x0e,
-        0xac, 0xb6, 0xc3, 0x58, 0xe8, 0x9c, 0x6f, 0x38, 0x8f, 0xa4, 0x74, 0xf5, 0x8a, 0x85,
+        0x83, 0xc5, 0xd6, 0xc8, 0xdd, 0x11, 0x79, 0x71, 0xa1, 0x28, 0x51, 0x7b, 0x30, 0x88, 0xba, 0x9b, 0x98, 0x75,
+        0x41, 0xd1, 0x75, 0xb6, 0x7a, 0x0f, 0x91, 0xdf, 0xbe, 0x35, 0x17, 0x32, 0x2c, 0x4e,
     ];
 
     #[test]
@@ -375,6 +384,15 @@ mod tests {
         assert_eq!(StageCatalog::next_member_stage(StageId::Review), None, "Review is the per-member terminus");
         // A bloom-level tail stage is not part of the dispatched per-member line.
         assert_eq!(StageCatalog::next_member_stage(StageId::Integrate), None);
+    }
+
+    // Scope is a pre-seal operator-harness process, never a dispatched member
+    // transformation — `for_member_stage` must not build a lane for it.
+    #[test]
+    #[should_panic(expected = "operator-harness process")]
+    fn for_member_stage_panics_on_scope() {
+        let subject = Digest::from_bytes([7; 32]);
+        let _ = Transformation::for_member_stage(StageId::Scope, subject);
     }
 
     // The per-member dispatch transformation pins the given subject as its single
