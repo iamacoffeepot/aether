@@ -146,7 +146,16 @@ impl StageCatalog {
                 // dispatched worker lane. `process` names that api cap's
                 // `NAMESPACE`, not a skill slug.
                 StageId::Scope => (&["bloom.sketch"], &["bloom.scope"], "aether.bloomery.api", "plan-present", 1),
-                StageId::Approve => (&["bloom.scope"], &["bloom.ready"], "approve", "phase-ready", 1),
+                // Approve is a pre-seal host-side admission gate (ADR-0149 §The
+                // line, ADR-0151): the coordinator's own host resolves the
+                // workpiece's declared surface to an approval tier and forms the
+                // membership `approval` before `Fact::Seal`, never a dispatched
+                // worker lane (the member-line dispatch loop never reaches this
+                // pre-seal stage). `process` names that host gate, not the retired
+                // `.claude/skills/approve` skill slug.
+                StageId::Approve => {
+                    (&["bloom.scope"], &["bloom.ready"], "aether.bloomery.approve_gate", "phase-ready", 1)
+                }
                 StageId::Construct => (&["bloom.ready"], &["bloom.candidate"], "construct.implement", "pr-open", 2),
                 StageId::Verify => {
                     (&["bloom.candidate"], &["bloom.verify_evidence"], "transform.verify", "ci-green", 3)
@@ -389,15 +398,20 @@ mod tests {
     // Repinned for #3572: the Construct and Refine bindings' `process` re-pointed
     // from the retired `implement` skill to the native `construct.implement`
     // transform lane — an intended catalog edit, so the golden is recomputed.
-    // Repinned again on the #3572→main merge: main's Scope binding `process`
-    // re-point to `aether.bloomery.api` (#3570) folds into the same catalog, so
-    // the merged line carries both edits and the golden is recomputed once more.
-    // Repinned for #3573: the Land binding's `process` re-pointed from the
+    // Repinned again when the Scope binding's `process` re-pointed to
+    // `aether.bloomery.api` (#3570) — an intended catalog edit.
+    // Repinned again for #3573: the Land binding's `process` re-pointed from the
     // retired `land` skill to the native `source.cas_land` lane — an intended
-    // catalog edit, so the golden is recomputed once more.
+    // catalog edit.
+    // Repinned again on the #3571→main merge: main already carries the #3570 Scope
+    // (`aether.bloomery.api`), #3572 Construct/Refine (`construct.implement`), and
+    // #3573 Land (`source.cas_land`) re-points; this branch adds the #3571 Approve
+    // `process` re-point to the host-side pre-seal admission gate
+    // `aether.bloomery.approve_gate`, so the merged catalog line carries all four
+    // intended edits and the golden is recomputed once more.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x78, 0xfc, 0xf3, 0xc2, 0xf8, 0x24, 0x09, 0x72, 0xeb, 0x31, 0xa9, 0xa6, 0xd8, 0xab, 0x3e, 0x20, 0x41, 0x47,
-        0x95, 0x8e, 0x41, 0xf9, 0x60, 0x5b, 0x3b, 0x6e, 0x58, 0x21, 0xcf, 0x25, 0x48, 0xc9,
+        0x86, 0xea, 0xbb, 0x50, 0xd1, 0x23, 0x97, 0x9b, 0xb6, 0x91, 0xb0, 0x7c, 0xc9, 0xf5, 0xde, 0x07, 0x35, 0xb6,
+        0xde, 0x04, 0x60, 0x2b, 0x97, 0x9e, 0xf7, 0x95, 0xbb, 0xf3, 0xb9, 0xcd, 0xe2, 0x7a,
     ];
 
     #[test]

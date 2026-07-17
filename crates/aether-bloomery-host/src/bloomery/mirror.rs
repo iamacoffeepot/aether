@@ -75,6 +75,19 @@ pub struct GithubMirrorConfig {
     /// config serves the mirror, source, and executor caps).
     #[config(env = "AETHER_STORE_PATH", default = ":memory:")]
     pub store_path: String,
+    /// The in-repo tier-policy artifact the pre-seal approve gate
+    /// ([`super::Gate`] / [`super::ApprovalPolicy`], ADR-0149 §The line /
+    /// ADR-0151) resolves a workpiece's declared surface against — the
+    /// Bloomery-owned successor to
+    /// `.github/approval-policy.yml`. A repository-relative path read host-side
+    /// like [`executor_workflow_file`](Self::executor_workflow_file) names an
+    /// in-repo workflow file; carried on this shared config the same way, so one
+    /// Bloomery-host configuration serves the mirror, source, executor, and
+    /// approve-gate readers rather than duplicating the knob. Tier policy (*what*
+    /// tier) is a **distinct reader** from the signing capability's key policy
+    /// (*who* may sign) — the two are never folded (ADR-0151).
+    #[config(env = "AETHER_APPROVAL_POLICY_FILE", default = "bloomery/approval-policy.yml")]
+    pub approval_policy_file: String,
     /// The GitHub App id whose minted installation token supersedes the static
     /// `token` when App-auth is configured (ADR-0149 §Migration step 3). `0`
     /// (the default) means App-auth is off and the static `token` authenticates.
@@ -139,6 +152,7 @@ impl Default for GithubMirrorConfig {
             executor_workflow_file: "bloomery-transform.yml".to_owned(),
             executor_dispatch_ref: "refs/heads/main".to_owned(),
             store_path: ":memory:".to_owned(),
+            approval_policy_file: "bloomery/approval-policy.yml".to_owned(),
             app_id: 0,
             app_private_key_path: String::new(),
             app_installation_id: 0,

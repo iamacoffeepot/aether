@@ -2,6 +2,7 @@
 
 pub use aether_substrate::Chassis;
 
+mod approve;
 mod chassis;
 mod cli;
 mod construct;
@@ -18,6 +19,10 @@ mod routing_executor;
 mod source;
 mod study;
 
+pub use approve::{
+    AdmissionRequest, AdrTouch, ApprovalPolicy, Completeness, Decision, Gate, Incompleteness, PolicyError,
+    StatementRejected, Tier, approval_from_statement,
+};
 pub use chassis::{BloomeryChassis, BloomeryEnv, DEFAULT_RPC_PORT, RpcPortConfig};
 pub use cli::BloomeryCli;
 pub use construct::{CONSTRUCT_IMPLEMENT_COMMAND, build_construct_order};

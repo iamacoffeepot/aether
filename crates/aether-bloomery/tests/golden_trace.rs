@@ -73,10 +73,11 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // #3505) — an intended change to the decided output, so the golden is recomputed.
 // Repinned again for #3572: `Transformation` gained a `checkout` field (the git
 // commit the attempt's worker checks out, threaded onto every `DispatchAttempt`
-// as the bloom's sealed base) — an intended change to the decided output.
-// Repinned again on the #3572→main merge: main's Scope binding `process`
-// re-point to `aether.bloomery.api` (#3570) also re-digests the sealed spec's
-// stage catalog, so the merged decision stream carries both edits.
+// as the bloom's sealed base) and the Construct/Refine bindings re-pointed to
+// `construct.implement` — intended changes to the decided output.
+// Repinned again when the Scope binding's `process` re-pointed to
+// `aether.bloomery.api` (#3570) — the sealed spec's stage catalog digest is
+// part of the decided output, so an intended catalog edit re-digests here too.
 // Repinned again for #3559: `reduce_resolve` now emits a `DispatchLand` effect
 // alongside `SetResolved` (resolution is land-readiness, ADR-0149 migration
 // step 3), so the resolve step's decided output gained the land decision — an
@@ -84,9 +85,13 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // Repinned again for #3573: the Land binding's `process` re-pointed from the
 // retired `land` skill to the native `source.cas_land` lane re-digests the
 // sealed spec's stage catalog, so the merged decision stream carries this edit.
+// Repinned again on the #3571→main merge when the Approve binding's `process`
+// re-pointed to the host-side pre-seal admission gate `aether.bloomery.approve_gate`
+// (#3571) — the merged decision stream carries the #3559, #3570, #3572, and #3573
+// edits plus this Approve re-point, so the golden is recomputed once more.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0xc2, 0xbe, 0x28, 0xd0, 0xa0, 0x77, 0x94, 0x11, 0x11, 0x65, 0x0f, 0x29, 0x66, 0x33, 0x89, 0x83, 0x88, 0x4e, 0x19,
-    0x8f, 0x80, 0xa4, 0x13, 0x03, 0x00, 0x58, 0x45, 0x3e, 0xb9, 0x70, 0xe3, 0xc7,
+    0x63, 0x1a, 0x52, 0x47, 0xb8, 0xbe, 0x71, 0xdb, 0xf4, 0x09, 0x74, 0x3a, 0x14, 0x93, 0x63, 0x7d, 0xf4, 0xb9, 0x79,
+    0xb6, 0xfd, 0xde, 0x1d, 0x55, 0x8a, 0x60, 0xa2, 0x8c, 0x9c, 0xd4, 0x4c, 0x6b,
 ];
 
 #[test]
