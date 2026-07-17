@@ -597,7 +597,7 @@ fn membership_conflict(snapshot: &Snapshot, members: &[Membership], exempt: Opti
 
 /// Whether a bloom's status is active-and-unlanded — `Sealed` or `Resolved`.
 /// The one predicate the V1 one-active-bloom-per-mainline seal guard
-/// ([`active_unlanded_bloom`]) and the boot-time claim-ref reconcile
+/// (`active_unlanded_bloom`) and the boot-time claim-ref reconcile
 /// (`control::actor`) both read, so the "which blooms hold claim refs" question
 /// has a single answer both sides cannot drift from (ADR-0150 §The claim
 /// registry).

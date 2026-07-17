@@ -54,13 +54,26 @@ pub use aether_substrate::chassis::error::BootError;
 /// Runtime state for [`SourceCapability`]: the shell the dispatcher owns.
 pub struct SourceCapabilityState {
     shell: SourceShell,
+    /// Whether the inter-instance claim registry is live. Off when the GitHub
+    /// connection is unconfigured (empty token / owner / repo), mirroring the
+    /// mirror driver's "unconfigured → disabled" mount
+    /// (`bloomery/mirror_driver/runtime.rs`): a solo / offline / test bin has no
+    /// shared repository to hold refs in, so the claim ops no-op to
+    /// [`ClaimResult::Acquired`] and the seal path relies on the store's
+    /// active-membership uniqueness backstop alone (ADR-0150 demotes that
+    /// constraint to the instance-local backstop; the ref namespace is the
+    /// *inter-instance* truth, and there is none to coordinate against here).
+    /// A configured bin enforces the refs.
+    claims_enabled: bool,
 }
 
 impl SourceCapabilityState {
-    /// Build state over an explicit shell — the seam the handler tests drive.
+    /// Build state over an explicit shell with the claim registry live — the
+    /// seam the handler tests drive (they assert real acquire / transfer /
+    /// release behavior against a fake backend).
     #[must_use]
     pub fn new(shell: SourceShell) -> Self {
-        Self { shell }
+        Self { shell, claims_enabled: true }
     }
 
     /// Decode `base`, snapshot the source there, and encode the outcome.
@@ -191,6 +204,13 @@ impl SourceCapabilityState {
         workpieces: &[Vec<u8>],
         op: impl FnOnce(&SourceShell, &BloomId, &[WorkpieceId]) -> Result<ClaimOutcome, aether_bloomery_github::SourceError>,
     ) -> ClaimResult {
+        // Claim registry disabled (unconfigured GitHub connection): no shared
+        // repository to hold refs in, so the acquire / release is a no-op that
+        // never reaches the network — the store backstop enforces single-instance
+        // exclusivity on its own.
+        if !self.claims_enabled {
+            return ClaimResult::Acquired;
+        }
         let bloom: BloomId = match from_bytes(bloom) {
             Ok(bloom) => bloom,
             Err(error) => return ClaimResult::Err { error: error.to_string() },
@@ -228,6 +248,11 @@ impl SourceCapabilityState {
         net_new: &[Vec<u8>],
         dropped: &[Vec<u8>],
     ) -> ClaimResult {
+        // Claim registry disabled — see [`seal_op`](Self::seal_op): the transfer
+        // is a no-op that never reaches the network.
+        if !self.claims_enabled {
+            return ClaimResult::Acquired;
+        }
         let predecessor: BloomId = match from_bytes(predecessor) {
             Ok(predecessor) => predecessor,
             Err(error) => return ClaimResult::Err { error: error.to_string() },
@@ -263,9 +288,20 @@ impl NativeActor for SourceCapability {
     const NAMESPACE: &'static str = "aether.source";
 
     fn init(config: super::SourceConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<SourceCapabilityState, BootError> {
+        // Same "unconfigured → disabled" predicate the mirror driver mounts on
+        // (`bloomery/mirror_driver/runtime.rs`): with no token / owner / repo
+        // there is no shared repository to hold claim refs in, so the claim
+        // registry is off and the seal path leans on the store backstop. The
+        // shell is still connected (it opens no network until driven) so a
+        // later-configured bin needs no re-mount.
+        let claims_enabled = !(config.token.is_empty() || config.owner.is_empty() || config.repo.is_empty());
         let shell = SourceShell::connect(&config).map_err(|error| BootError::Other(Box::new(error)))?;
-        tracing::info!(target: "aether_bloomery_host::source", "source shell connected");
-        Ok(SourceCapabilityState { shell })
+        tracing::info!(
+            target: "aether_bloomery_host::source",
+            claims_enabled,
+            "source shell connected"
+        );
+        Ok(SourceCapabilityState { shell, claims_enabled })
     }
 
     // The `#[handler::single]` contract requires the mail by value; every
