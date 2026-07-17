@@ -241,6 +241,12 @@ pub enum QueryResult {
 mod source_mail;
 pub use source_mail::{ClaimResult, ClaimSeal, ReleaseSeal, TransferSeal};
 
+mod claim_plan;
+pub use claim_plan::{
+    ReconcileOp, held_to_seal_error, held_to_supersede_error, reconcile_op, release_reclaim_mail, release_seal_mail,
+    seal_claim_mail, transfer_seal_mail,
+};
+
 #[cfg(feature = "runtime")]
 mod actor;
 #[cfg(feature = "runtime")]

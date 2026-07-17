@@ -30,23 +30,23 @@
 //! consumer capabilities (#3499). This actor only *enqueues* outbox entries,
 //! atomically inside the commit.
 
+use super::claim_plan::{
+    ReconcileOp, held_to_seal_error, held_to_supersede_error, reconcile_op, release_seal_mail, seal_claim_mail,
+    transfer_seal_mail,
+};
 use super::{
     Admit, AdmitResult, ClaimResult, ClaimSeal, Commit, CommitResult, MembershipMutation, OutboxPayload, Query,
-    QueryResult, ReleaseSeal, ReplayJournal, ReplayJournalResult, TransferSeal,
+    QueryResult, ReplayJournal, ReplayJournalResult, TransferSeal,
 };
 use crate::digest::Digest;
-use crate::ids::{BloomId, WorkpieceId};
+use crate::ids::BloomId;
 use crate::port::ClaimRefKind;
-use crate::reduce::{
-    BloomStatus, Decision, Decisions, Event, Fact, Outcome, SealConflict, SealError, Snapshot, SupersedeError,
-    is_active_unlanded, reduce, view_of,
-};
-use crate::values::BloomSpec;
+use crate::reduce::{Decision, Decisions, Event, Fact, Outcome, Snapshot, reduce, view_of};
 use aether_actor::{
     ActorInitError, MailSender, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 /// The runtime name of the store capability the control core drives.
 const STORE: &str = "aether.store";
@@ -469,167 +469,28 @@ impl ControlCore {
 
     /// Boot-time claim-ref reconcile (ADR-0150 §The claim registry). After
     /// replay rebuilds the snapshot, converge each bloom's refs to the holding
-    /// its status implies — both operations idempotent via the source's CAS
-    /// read-guard, so a crash between a ref op and its local commit heals:
-    ///
-    /// - **Active-and-unlanded** (`Sealed | Resolved`, via the
-    ///   [`is_active_unlanded`] predicate the seal guard shares, so the two never
-    ///   drift): re-assert the member + admission refs with `claim_seal`. An
-    ///   intact holding rolls its own create back to a no-op (the refs already
-    ///   name this bloom), a fully-lost ref set is re-acquired.
-    /// - **Landed**: re-release the member + admission refs with `release_seal`,
-    ///   healing a land whose fire-and-forget release ([`Self::on_commit_result`])
-    ///   never reached the source. Re-releasing already-freed refs is a no-op, and
-    ///   the CAS read-guard spares a ref a successor bloom has since re-claimed —
-    ///   so this never stomps a live holding.
-    ///
-    /// Deeper heals a wasm actor cannot drive over claim/transfer/release alone —
-    /// reclaiming a foreign-held orphan, sweeping a tombstoned ref, healing a
-    /// half-transfer — stay the deferred coordination service's job (ADR-0150
-    /// notes cross-instance staleness is not self-healing). A ref-mail encode
-    /// failure is unrecoverable at boot, so it fail-fasts (ADR-0063), mirroring
-    /// the record-decode handling [`Self::on_replay_result`] uses on the same
-    /// boot path — never a silent `.ok()` drop that would strand the ref.
+    /// its status implies. The per-record decision is
+    /// [`reconcile_op`](super::claim_plan::reconcile_op) — pure and tested
+    /// against the real source capability in `aether-bloomery-host`'s
+    /// `claim_reconcile` integration test — this walk only sends what it plans.
+    /// Both ops are idempotent via the source's CAS read-guard, so a crash
+    /// between a ref op and its local commit heals on the next boot; a ref-mail
+    /// encode failure is unrecoverable at boot, so it fail-fasts (ADR-0063),
+    /// mirroring the record-decode handling [`Self::on_replay_result`] uses on
+    /// the same boot path — never a silent `.ok()` drop that would strand the
+    /// ref.
     fn reconcile_claim_refs(&mut self, ctx: &mut WasmCtx<'_>) {
         for record in self.snapshot.blooms.values() {
-            let bloom = record.spec.id();
-            if is_active_unlanded(record.status) {
-                match seal_claim_mail(&bloom, &record.spec) {
-                    Ok(mail) => ctx.send_to_named(SOURCE, &mail),
-                    Err(error) => ctx.fatal_abort(format!(
-                        "boot claim-ref reconcile: bloom {bloom:?} claim mail did not encode: {error}"
-                    )),
-                }
-            } else if matches!(record.status, BloomStatus::Landed) {
-                match release_reclaim_mail(&bloom, &record.spec) {
-                    Ok(mail) => ctx.send_to_named(SOURCE, &mail),
-                    Err(error) => ctx.fatal_abort(format!(
-                        "boot claim-ref reconcile: bloom {bloom:?} release mail did not encode: {error}"
-                    )),
-                }
+            match reconcile_op(record) {
+                None => {}
+                Some(Ok(ReconcileOp::Assert(mail))) => ctx.send_to_named(SOURCE, &mail),
+                Some(Ok(ReconcileOp::Release(mail))) => ctx.send_to_named(SOURCE, &mail),
+                Some(Err(error)) => ctx.fatal_abort(format!(
+                    "boot claim-ref reconcile: bloom {:?} ref mail did not encode: {error}",
+                    record.spec.id()
+                )),
             }
         }
-    }
-}
-
-/// Encode each workpiece to its canonical [`aether_data::wire`] bytes — the
-/// per-member axis the `aether.source.*` claim mail carries (the port value
-/// types are serde-encoded but not `Schema`).
-fn encode_workpieces<'a>(workpieces: impl Iterator<Item = &'a WorkpieceId>) -> Result<Vec<Vec<u8>>, WireError> {
-    workpieces.map(to_vec).collect()
-}
-
-/// The `claim_seal` mail for an accepted seal (also the boot-reconcile
-/// re-assertion): acquire the member refs plus the mainline-admission ref (the
-/// host adds the admission ref from the bloom, ADR-0150).
-fn seal_claim_mail(bloom: &BloomId, spec: &BloomSpec) -> Result<ClaimSeal, WireError> {
-    Ok(ClaimSeal {
-        bloom: to_vec(bloom)?,
-        workpieces: encode_workpieces(spec.members().iter().map(|member| &member.workpiece))?,
-    })
-}
-
-/// The `transfer_seal` mail for an accepted supersession: partition the
-/// successor's members against the predecessor's (mirroring `reduce_supersede`)
-/// — carried = shared, net-new = successor-only, dropped = predecessor-only —
-/// so the predecessor's carried + admission refs fast-forward to the successor
-/// (the admission ref never momentarily free), net-new refs are fresh-acquired,
-/// and dropped refs released. The predecessor is in the snapshot (the reducer
-/// accepted the supersession), so a missing record yields empty carried/dropped
-/// sets rather than a panic.
-fn transfer_seal_mail(
-    snapshot: &Snapshot,
-    predecessor: &BloomId,
-    successor: &BloomSpec,
-) -> Result<TransferSeal, WireError> {
-    let predecessor_members: BTreeSet<&WorkpieceId> = snapshot
-        .blooms
-        .get(predecessor)
-        .map(|record| record.spec.members().iter().map(|member| &member.workpiece).collect())
-        .unwrap_or_default();
-    let successor_members: BTreeSet<&WorkpieceId> =
-        successor.members().iter().map(|member| &member.workpiece).collect();
-    let (carried, net_new, dropped) = partition_members(&predecessor_members, &successor_members);
-    Ok(TransferSeal {
-        predecessor: to_vec(predecessor)?,
-        successor: to_vec(&successor.id())?,
-        carried: encode_workpieces(carried.into_iter())?,
-        net_new: encode_workpieces(net_new.into_iter())?,
-        dropped: encode_workpieces(dropped.into_iter())?,
-    })
-}
-
-/// Partition a supersession's members into the transfer axes, mirroring
-/// `reduce_supersede`'s membership handling: `carried` = shared (fast-forwarded
-/// predecessor→successor), `net_new` = successor-only (fresh-acquired),
-/// `dropped` = predecessor-only (released). Sorted by the `BTreeSet` iteration,
-/// so the mail is deterministic.
-fn partition_members<'a>(
-    predecessor: &BTreeSet<&'a WorkpieceId>,
-    successor: &BTreeSet<&'a WorkpieceId>,
-) -> (Vec<&'a WorkpieceId>, Vec<&'a WorkpieceId>, Vec<&'a WorkpieceId>) {
-    let carried = successor.iter().copied().filter(|w| predecessor.contains(w)).collect();
-    let net_new = successor.iter().copied().filter(|w| !predecessor.contains(w)).collect();
-    let dropped = predecessor.iter().copied().filter(|w| !successor.contains(w)).collect();
-    (carried, net_new, dropped)
-}
-
-/// The `release_seal` mail for a durably-landed bloom: release the member refs
-/// the land freed (the [`Decision::ReleaseMembership`] effects) plus the
-/// admission ref (the host adds it). A land carries a release per member, all
-/// naming the landed bloom; `None` if a land somehow carries none.
-fn release_seal_mail(decisions: &Decisions) -> Option<Result<ReleaseSeal, WireError>> {
-    let mut bloom = None;
-    let mut workpieces = Vec::new();
-    for effect in &decisions.effects {
-        if let Decision::ReleaseMembership { workpiece, bloom: released_from } = effect {
-            bloom = Some(*released_from);
-            workpieces.push(workpiece);
-        }
-    }
-    let bloom = bloom?;
-    Some((|| Ok(ReleaseSeal { bloom: to_vec(&bloom)?, workpieces: encode_workpieces(workpieces.into_iter())? }))())
-}
-
-/// The `release_seal` mail for a boot-reconcile re-release of a `Landed` bloom:
-/// release every member ref plus the admission ref (the host adds it), mirroring
-/// the land-time release ([`release_seal_mail`]) but built from the retained
-/// spec rather than the land's decisions. Idempotent via the source's CAS
-/// read-guard — a release of already-freed refs is a no-op and a ref a successor
-/// has re-claimed is spared — so re-issuing at boot heals a land whose
-/// fire-and-forget release was lost to a crash without stomping a live holding.
-fn release_reclaim_mail(bloom: &BloomId, spec: &BloomSpec) -> Result<ReleaseSeal, WireError> {
-    Ok(ReleaseSeal {
-        bloom: to_vec(bloom)?,
-        workpieces: encode_workpieces(spec.members().iter().map(|member| &member.workpiece))?,
-    })
-}
-
-/// Map a seal's [`ClaimResult::Held`] to the matching [`SealError`] — a
-/// per-workpiece ref is a membership conflict, the mainline-admission ref is
-/// the one-active-bloom-per-mainline conflict — so a cross-instance refusal
-/// reads exactly as the local reducer's own (ADR-0150).
-fn held_to_seal_error(ref_kind: &ClaimRefKind, held_by: BloomId) -> SealError {
-    match ref_kind {
-        ClaimRefKind::Workpiece(workpiece) => {
-            SealError::MembershipConflict(SealConflict { workpiece: workpiece.clone(), held_by })
-        }
-        ClaimRefKind::MainlineAdmission => SealError::ActiveBloomExists(held_by),
-    }
-}
-
-/// Map a supersession's [`ClaimResult::Held`] to a [`SupersedeError`]. A
-/// foreign hold on a net-new member is a membership conflict (mirroring
-/// `reduce_supersede`'s `membership_conflict`); a lost admission-ref transfer
-/// CAS has no clean `SupersedeError` (it is a concurrent mutation, not a
-/// logical refusal), so it returns `None` and the caller surfaces a retryable
-/// error instead.
-fn held_to_supersede_error(ref_kind: &ClaimRefKind, held_by: BloomId) -> Option<SupersedeError> {
-    match ref_kind {
-        ClaimRefKind::Workpiece(workpiece) => {
-            Some(SupersedeError::MembershipConflict(SealConflict { workpiece: workpiece.clone(), held_by }))
-        }
-        ClaimRefKind::MainlineAdmission => None,
     }
 }
 
@@ -706,68 +567,3 @@ fn admit_ok(outcome: &Outcome) -> AdmitResult {
 }
 
 aether_actor::export!(ControlCore);
-
-#[cfg(test)]
-mod tests {
-    use alloc::collections::BTreeSet;
-
-    use crate::digest::Digest;
-    use crate::ids::{BloomId, WorkpieceId};
-    use crate::port::ClaimRefKind;
-    use crate::reduce::{SealConflict, SealError, SupersedeError};
-
-    use super::{held_to_seal_error, held_to_supersede_error, partition_members};
-
-    fn workpiece(name: &str) -> WorkpieceId {
-        WorkpieceId(name.into())
-    }
-
-    #[test]
-    fn partition_splits_supersede_members_into_carried_net_new_and_dropped() {
-        // A supersession keeping w2, adding w3, dropping w1: the transfer must
-        // carry the shared ref, fresh-acquire the successor-only one, and release
-        // the predecessor-only one — the axes `transfer_seal` fast-forwards,
-        // creates, and releases respectively (ADR-0150). A swap here would free a
-        // still-claimed workpiece or leave a dropped one claimed.
-        let (w1, w2, w3) = (workpiece("w1"), workpiece("w2"), workpiece("w3"));
-        let predecessor: BTreeSet<&WorkpieceId> = [&w1, &w2].into_iter().collect();
-        let successor: BTreeSet<&WorkpieceId> = [&w2, &w3].into_iter().collect();
-        let (carried, net_new, dropped) = partition_members(&predecessor, &successor);
-        assert_eq!(carried, vec![&w2]);
-        assert_eq!(net_new, vec![&w3]);
-        assert_eq!(dropped, vec![&w1]);
-    }
-
-    #[test]
-    fn held_maps_to_the_matching_seal_refusal_vocabulary() {
-        // The cross-instance refusal must read exactly as the local reducer's: a
-        // per-workpiece hold is a membership conflict, the mainline-admission hold
-        // is the one-active-bloom refusal (ADR-0150). Mapping admission to a
-        // membership conflict (or vice versa) would misreport the reason.
-        let held_by = BloomId(Digest::of_wire_bytes(b"holder"));
-        let wp = workpiece("w1");
-        assert_eq!(
-            held_to_seal_error(&ClaimRefKind::Workpiece(wp.clone()), held_by),
-            SealError::MembershipConflict(SealConflict { workpiece: wp, held_by }),
-        );
-        assert_eq!(
-            held_to_seal_error(&ClaimRefKind::MainlineAdmission, held_by),
-            SealError::ActiveBloomExists(held_by)
-        );
-    }
-
-    #[test]
-    fn held_maps_to_the_matching_supersede_refusal_or_a_retryable_none() {
-        // A foreign net-new hold is a supersede membership conflict; a lost
-        // admission-ref transfer CAS has no clean SupersedeError, so it is `None`
-        // (the caller surfaces a retryable error rather than forcing a wrong
-        // variant).
-        let held_by = BloomId(Digest::of_wire_bytes(b"holder"));
-        let wp = workpiece("w1");
-        assert_eq!(
-            held_to_supersede_error(&ClaimRefKind::Workpiece(wp.clone()), held_by),
-            Some(SupersedeError::MembershipConflict(SealConflict { workpiece: wp, held_by })),
-        );
-        assert_eq!(held_to_supersede_error(&ClaimRefKind::MainlineAdmission, held_by), None);
-    }
-}
