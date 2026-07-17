@@ -95,3 +95,13 @@ fn parse_allowlist_rejects_a_malformed_entry() {
     assert!(parse_allowlist(Some("owner:not-hex")).is_err(), "malformed hex is a boot error");
     assert!(parse_allowlist(Some("owner-without-a-colon")).is_err(), "a missing separator is a boot error");
 }
+
+#[test]
+fn parse_allowlist_rejects_a_duplicate_key_id() {
+    // Two entries for the same key-id are ambiguous; keeping the last would
+    // silently override the first signer's key — a silent trust change, so it is
+    // a boot error rather than a last-wins resolution.
+    let key = signing_key(3);
+    let config = format!("owner:{a},owner:{a}", a = key_hex(&key));
+    assert!(parse_allowlist(Some(&config)).is_err(), "a duplicate key-id is a boot error");
+}

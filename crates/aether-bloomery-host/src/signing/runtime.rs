@@ -59,8 +59,9 @@ impl SigningCapabilityState {
 /// allowlist. Each comma-separated entry pairs a [`KeyId`] with a 32-byte
 /// ed25519 verifying key (64 hex chars); whitespace around entries is trimmed
 /// and empty entries are skipped, so a trailing comma is tolerated. A malformed
-/// entry (missing separator, bad hex, wrong length, non-canonical key point) is
-/// an error — the caller fails the boot rather than trusting a smaller set.
+/// entry (missing separator, bad hex, wrong length, non-canonical key point) or
+/// a duplicate key-id is an error — the caller fails the boot rather than
+/// trusting a smaller set or silently resolving a duplicate to one key.
 ///
 /// # Errors
 ///
@@ -81,7 +82,12 @@ pub fn parse_allowlist(allowlist: Option<&str>) -> Result<BTreeMap<KeyId, Verify
             decode_key_hex(hex.trim()).ok_or_else(|| format!("allowlist entry `{id}` has a malformed hex key"))?;
         let key = VerifyingKey::from_bytes(&bytes)
             .map_err(|error| format!("allowlist entry `{id}` is not a valid ed25519 key: {error}"))?;
-        parsed.insert(KeyId(id.trim().to_owned()), key);
+        // A duplicate key-id is ambiguous — silently keeping the last would let a
+        // later entry override an earlier signer's key without notice, a silent
+        // trust change. Fail the boot instead.
+        if parsed.insert(KeyId(id.trim().to_owned()), key).is_some() {
+            return Err(format!("allowlist entry `{}` duplicates an earlier key-id", id.trim()));
+        }
     }
     Ok(parsed)
 }
