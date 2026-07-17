@@ -595,14 +595,21 @@ fn membership_conflict(snapshot: &Snapshot, members: &[Membership], exempt: Opti
     })
 }
 
+/// Whether a bloom's status is active-and-unlanded — `Sealed` or `Resolved`.
+/// The one predicate the V1 one-active-bloom-per-mainline seal guard
+/// (`active_unlanded_bloom`) and the boot-time claim-ref reconcile
+/// (`control::actor`) both read, so the "which blooms hold claim refs" question
+/// has a single answer both sides cannot drift from (ADR-0150 §The claim
+/// registry).
+#[must_use]
+pub fn is_active_unlanded(status: BloomStatus) -> bool {
+    matches!(status, BloomStatus::Sealed | BloomStatus::Resolved)
+}
+
 /// The id of a bloom still `Sealed` or `Resolved` (an unlanded active bloom),
 /// if any — the input to the V1 one-active-bloom-per-mainline guard.
 fn active_unlanded_bloom(snapshot: &Snapshot) -> Option<BloomId> {
-    snapshot
-        .blooms
-        .iter()
-        .find(|(_, record)| matches!(record.status, BloomStatus::Sealed | BloomStatus::Resolved))
-        .map(|(id, _)| *id)
+    snapshot.blooms.iter().find(|(_, record)| is_active_unlanded(record.status)).map(|(id, _)| *id)
 }
 
 fn reduce_supersede(snapshot: &Snapshot, predecessor: &BloomId, successor: &BloomSpec) -> Decisions {

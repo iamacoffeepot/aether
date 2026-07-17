@@ -30,12 +30,18 @@
 //! consumer capabilities (#3499). This actor only *enqueues* outbox entries,
 //! atomically inside the commit.
 
+use super::claim_plan::{
+    ReconcileOp, held_to_seal_error, held_to_supersede_error, reconcile_op, release_seal_mail, seal_claim_mail,
+    transfer_seal_mail,
+};
 use super::{
-    Admit, AdmitResult, Commit, CommitResult, MembershipMutation, OutboxPayload, Query, QueryResult, ReplayJournal,
-    ReplayJournalResult,
+    Admit, AdmitResult, ClaimResult, ClaimSeal, Commit, CommitResult, MembershipMutation, OutboxPayload, Query,
+    QueryResult, ReplayJournal, ReplayJournalResult, TransferSeal,
 };
 use crate::digest::Digest;
-use crate::reduce::{Decision, Decisions, Event, Outcome, Snapshot, reduce, view_of};
+use crate::ids::BloomId;
+use crate::port::ClaimRefKind;
+use crate::reduce::{Decision, Decisions, Event, Fact, Outcome, Snapshot, reduce, view_of};
 use aether_actor::{
     ActorInitError, MailSender, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
@@ -45,12 +51,23 @@ use std::collections::{BTreeMap, VecDeque};
 /// The runtime name of the store capability the control core drives.
 const STORE: &str = "aether.store";
 
+/// The runtime name of the native source-port capability the control core
+/// drives for the cross-instance claim-ref interposition (ADR-0150 §The claim
+/// registry). Addressed by runtime name like [`STORE`] — its capability type
+/// lives in `aether-bloomery-host` (a package cycle away), so the seal
+/// transact-mail kinds are defined here (`super::source_mail`) and the reply
+/// (`ClaimResult`) is correlated by the host-minted correlation id rather than a
+/// typed reply mailbox.
+const SOURCE: &str = "aether.source";
+
 /// The cap on same-key admits in flight at once. A well-behaved client sends one
 /// admit per key and at most a few retries; without a bound a client spamming one
 /// key while its commits are outstanding would grow the per-key queue without
 /// limit, pinning memory on the single snapshot owner. An admit past the cap is
 /// refused rather than queued (CLAUDE.md §Runtime: error rather than grow
-/// unboundedly).
+/// unboundedly). The claim-gated (seal/supersede) admits awaiting a `ClaimResult`
+/// count toward the same per-key cap ([`ControlCore::inflight_for_key`]), so the
+/// pre-commit ref stage cannot dodge the back-pressure.
 const MAX_INFLIGHT_PER_KEY: usize = 64;
 
 /// The outbox topic a landing receipt enqueues under, so #3499's republisher
@@ -72,6 +89,34 @@ struct Pending {
     decisions: Decisions,
 }
 
+/// Which claim door an admit gated on, so a [`ClaimResult::Held`] maps to the
+/// right refusal vocabulary — a seal reports a [`SealError`], a supersession a
+/// [`SupersedeError`], each reading exactly as the local reducer's own refusal.
+enum ClaimKind {
+    Seal,
+    Supersede,
+}
+
+/// The pre-commit claim mail an accepted seal/supersession sends — an acquire
+/// over the member + admission refs, or a predecessor→successor transfer.
+enum SourceClaim {
+    Seal(ClaimSeal),
+    Transfer(TransferSeal),
+}
+
+/// A locally-accepted seal/supersession awaiting the shared claim-ref reply
+/// (ADR-0150). Carries everything the durable commit needs once the refs are
+/// acquired: the reply handle, the original event bytes (the journal source),
+/// the decoded event and its decisions, and which door to name a `Held`
+/// refusal after. Keyed by the host-minted correlation id.
+struct PendingClaim {
+    reply: Option<ReplyHandle>,
+    raw: Vec<u8>,
+    event: Event,
+    decisions: Decisions,
+    kind: ClaimKind,
+}
+
 /// The control-core actor: the live [`Snapshot`] plus the in-flight admits
 /// awaiting their commit replies, queued per idempotency key.
 ///
@@ -84,9 +129,14 @@ struct Pending {
 /// [`CommitResult::Duplicate`] no-op, so the pair still yields one journal row and
 /// one applied decision. The per-key queue is FIFO: the store replies in
 /// send order, so `on_commit_result` pops the front entry to match each reply.
+///
+/// `pending_claims` holds the accepted seals/supersessions awaiting their shared
+/// claim-ref replies (the pre-commit cross-instance exclusivity gate, ADR-0150),
+/// keyed by the host-minted correlation id `ClaimResult` echoes.
 pub struct ControlCore {
     snapshot: Snapshot,
     pending: BTreeMap<String, VecDeque<Pending>>,
+    pending_claims: BTreeMap<u64, PendingClaim>,
 }
 
 #[actor]
@@ -94,7 +144,7 @@ impl WasmActor for ControlCore {
     const NAMESPACE: &'static str = "aether.bloomery.control";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Self { snapshot: Snapshot::default(), pending: BTreeMap::new() })
+        Ok(Self { snapshot: Snapshot::default(), pending: BTreeMap::new(), pending_claims: BTreeMap::new() })
     }
 
     /// Boot replay: ask the store for the whole journal; [`Self::on_replay_result`]
@@ -133,7 +183,7 @@ impl WasmActor for ControlCore {
         // key while its commits are outstanding would grow the per-key queue
         // without bound. Refuse past the cap rather than queue (CLAUDE.md §Runtime:
         // error rather than grow unboundedly).
-        if self.pending.get(&key).is_some_and(|queue| queue.len() >= MAX_INFLIGHT_PER_KEY) {
+        if self.inflight_for_key(&key) >= MAX_INFLIGHT_PER_KEY {
             if let Some(handle) = reply {
                 ctx.reply_to(
                     handle,
@@ -154,28 +204,103 @@ impl WasmActor for ControlCore {
             }
             return;
         }
-        // Projecting the decision encodes each outbox receipt; a receipt-encode
-        // failure must reject the admit, not commit an empty payload the
-        // republisher would later route as a valid-but-blank receipt.
-        let (releases, claims, outbox) = match project(&decisions) {
-            Ok(effects) => effects,
-            Err(error) => {
-                if let Some(handle) = reply {
-                    ctx.reply_to(handle, &AdmitResult::Err { error: format!("admit receipt encode failed: {error}") });
-                }
-                return;
+        // A locally-accepted seal/supersession must first win the shared claim
+        // refs — the cross-instance exclusivity gate (ADR-0150 §The claim
+        // registry) — before its durable commit: a seal acquires its member +
+        // admission refs, a supersession transfers the predecessor's carried +
+        // admission refs and fresh-acquires net-new. The reply gates the commit
+        // in `on_claim_result`. A locally-rejected seal (or any non-seal fact)
+        // carries no successful outcome, so it needs no ref op and commits
+        // straight through — a rejected event still journals (bare append) so its
+        // key is durably consumed and a replay stays a no-op.
+        let claim = match (&event.fact, &decisions.outcome) {
+            (Fact::Seal(spec), Outcome::Sealed(bloom)) => {
+                Some(seal_claim_mail(bloom, spec).map(|mail| (SourceClaim::Seal(mail), ClaimKind::Seal)))
             }
+            (Fact::Supersede { predecessor, successor }, Outcome::Superseded { .. }) => Some(
+                transfer_seal_mail(&self.snapshot, predecessor, successor)
+                    .map(|mail| (SourceClaim::Transfer(mail), ClaimKind::Supersede)),
+            ),
+            _ => None,
         };
-        // Every non-duplicate admitted event is journaled — even a rejected one,
-        // so a replay stays a no-op and the key is durably consumed (the reducer's
-        // `apply` records the key for a rejected outcome too). A rejection carries
-        // empty membership/outbox effects, so the commit is a bare journal append.
-        let commit = Commit { idempotency_key: key.clone(), event: raw, releases, claims, outbox };
-        // Queue this admit's entry under its key (FIFO) and forward its Commit. A
-        // same-key admit already in flight enqueues behind its predecessor rather
-        // than displacing it, so no admitter is ever stranded without a reply.
-        self.pending.entry(key).or_default().push_back(Pending { reply, event, decisions });
-        ctx.send_to_named(STORE, &commit);
+        match claim {
+            None => self.commit_admit(ctx, reply, raw, event, decisions),
+            Some(Err(error)) => {
+                if let Some(handle) = reply {
+                    ctx.reply_to(handle, &AdmitResult::Err { error: format!("admit claim encode failed: {error}") });
+                }
+            }
+            Some(Ok((claim, kind))) => {
+                match &claim {
+                    SourceClaim::Seal(mail) => ctx.send_to_named(SOURCE, mail),
+                    SourceClaim::Transfer(mail) => ctx.send_to_named(SOURCE, mail),
+                }
+                // The host mints a correlation id for every send; the eventual
+                // `ClaimResult` echoes it, so `on_claim_result` recovers this
+                // exact pending admit via `in_reply_to`. `ClaimResult` carries no
+                // key of its own — this is the correlation axis the store's
+                // echoed idempotency key is for the commit path.
+                let correlation = ctx.prev_correlation();
+                self.pending_claims.insert(correlation, PendingClaim { reply, raw, event, decisions, kind });
+            }
+        }
+    }
+
+    /// The `aether.source` claim/transfer/release reply. Correlate on the
+    /// host-echoed correlation id (`ClaimResult` carries no key of its own). A
+    /// gated admit's [`ClaimResult::Acquired`] proceeds to the durable commit;
+    /// its [`ClaimResult::Held`] refuses the admit with the matching
+    /// `SealError`/`SupersedeError` (never committing, so a transient foreign
+    /// hold is retryable under a fresh key); a [`ClaimResult::Err`] fails it.
+    /// An uncorrelated reply — a fire-and-forget release or a boot-reconcile
+    /// re-assertion — has no pending entry and is ignored, like the store's
+    /// stray-reply path.
+    #[handler::manual]
+    fn on_claim_result(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: ClaimResult) {
+        let Some(correlation) = ctx.in_reply_to().map(|request| request.0) else {
+            return;
+        };
+        let Some(PendingClaim { reply, raw, event, decisions, kind }) = self.pending_claims.remove(&correlation) else {
+            return;
+        };
+        match mail {
+            ClaimResult::Acquired => self.commit_admit(ctx, reply, raw, event, decisions),
+            ClaimResult::Held { ref_kind, held_by } => {
+                let (Ok(ref_kind), Ok(held_by)) =
+                    (from_bytes::<ClaimRefKind>(&ref_kind), from_bytes::<BloomId>(&held_by))
+                else {
+                    if let Some(handle) = reply {
+                        ctx.reply_to(handle, &AdmitResult::Err { error: "claim held-reply did not decode".to_owned() });
+                    }
+                    return;
+                };
+                let refusal = match kind {
+                    ClaimKind::Seal => Some(Outcome::SealRejected(held_to_seal_error(&ref_kind, held_by))),
+                    ClaimKind::Supersede => held_to_supersede_error(&ref_kind, held_by).map(Outcome::SupersedeRejected),
+                };
+                if let Some(handle) = reply {
+                    match refusal {
+                        Some(outcome) => ctx.reply_to(handle, &admit_ok(&outcome)),
+                        // A lost admission-ref transfer CAS is a concurrent
+                        // mutation, not a clean logical supersede refusal — no
+                        // `SupersedeError` names it, so surface it for retry.
+                        None => ctx.reply_to(
+                            handle,
+                            &AdmitResult::Err {
+                                error: "supersede refused: the mainline-admission claim ref moved under a \
+                                        concurrent mutation; retry"
+                                    .to_owned(),
+                            },
+                        ),
+                    }
+                }
+            }
+            ClaimResult::Err { error } => {
+                if let Some(handle) = reply {
+                    ctx.reply_to(handle, &AdmitResult::Err { error: format!("claim op failed: {error}") });
+                }
+            }
+        }
     }
 
     /// The store's reply to a [`Commit`]. Correlate on the echoed idempotency
@@ -202,6 +327,19 @@ impl WasmActor for ControlCore {
         let result = match mail {
             CommitResult::Applied { .. } => {
                 self.snapshot = self.snapshot.apply(&event, &decisions);
+                // A durably-landed bloom frees its member + admission claim refs
+                // (ADR-0150 §The claim registry) — release with the local
+                // release, fire-and-forget: the boot reconcile re-releases any ref
+                // an interrupted release stranded (it re-issues `release_seal` for
+                // every `Landed` bloom, idempotent via the CAS read-guard). An
+                // encode failure or a land carrying no release effect leaves the
+                // refs for that reconcile — never a torn reply to the admitter,
+                // whose land already committed.
+                if matches!(decisions.outcome, Outcome::Landed(_))
+                    && let Some(Ok(release)) = release_seal_mail(&decisions)
+                {
+                    ctx.send_to_named(SOURCE, &release);
+                }
                 admit_ok(&decisions.outcome)
             }
             // The store already held this key durably though our snapshot did not
@@ -243,6 +381,7 @@ impl WasmActor for ControlCore {
             let decisions = reduce(&self.snapshot, &event);
             self.snapshot = self.snapshot.apply(&event, &decisions);
         }
+        self.reconcile_claim_refs(ctx);
     }
 
     /// The `aether.bloomery.query` read surface. With `bloom` unset, reply the
@@ -277,6 +416,81 @@ impl WasmActor for ControlCore {
                 }),
         };
         ctx.reply_to(handle, &result);
+    }
+}
+
+impl ControlCore {
+    /// The same-key admits in flight across both stages — the committed queue
+    /// plus the accepted seals/supersessions still awaiting their claim reply —
+    /// so the [`MAX_INFLIGHT_PER_KEY`] back-pressure the commit queue enforces
+    /// cannot be dodged by piling up pre-commit ref stages for one key.
+    fn inflight_for_key(&self, key: &str) -> usize {
+        let queued = self.pending.get(key).map_or(0, VecDeque::len);
+        let claiming = self.pending_claims.values().filter(|claim| claim.event.idempotency_key.0 == key).count();
+        queued + claiming
+    }
+
+    /// Project a decided event and send its combined [`Commit`] to the store —
+    /// the durable-write stage every admit reaches, whether directly (a fact
+    /// with no ref op, or a rejected seal) or after winning the shared claim
+    /// refs (an accepted seal/supersession, gated in [`Self::on_claim_result`]).
+    /// Queues the pending admit under its idempotency key (FIFO) so
+    /// [`Self::on_commit_result`] can answer the admitter on the store reply; a
+    /// same-key admit enqueues behind its predecessor rather than displacing it.
+    fn commit_admit(
+        &mut self,
+        ctx: &mut WasmCtx<'_, Manual>,
+        reply: Option<ReplyHandle>,
+        raw: Vec<u8>,
+        event: Event,
+        decisions: Decisions,
+    ) {
+        let key = event.idempotency_key.0.clone();
+        // Projecting the decision encodes each outbox receipt; a receipt-encode
+        // failure must reject the admit, not commit an empty payload the
+        // republisher would later route as a valid-but-blank receipt.
+        let (releases, claims, outbox) = match project(&decisions) {
+            Ok(effects) => effects,
+            Err(error) => {
+                if let Some(handle) = reply {
+                    ctx.reply_to(handle, &AdmitResult::Err { error: format!("admit receipt encode failed: {error}") });
+                }
+                return;
+            }
+        };
+        // Every non-duplicate admitted event is journaled — even a rejected one,
+        // so a replay stays a no-op and the key is durably consumed (the reducer's
+        // `apply` records the key for a rejected outcome too). A rejection carries
+        // empty membership/outbox effects, so the commit is a bare journal append.
+        let commit = Commit { idempotency_key: key.clone(), event: raw, releases, claims, outbox };
+        self.pending.entry(key).or_default().push_back(Pending { reply, event, decisions });
+        ctx.send_to_named(STORE, &commit);
+    }
+
+    /// Boot-time claim-ref reconcile (ADR-0150 §The claim registry). After
+    /// replay rebuilds the snapshot, converge each bloom's refs to the holding
+    /// its status implies. The per-record decision is
+    /// [`reconcile_op`](super::claim_plan::reconcile_op) — pure and tested
+    /// against the real source capability in `aether-bloomery-host`'s
+    /// `claim_reconcile` integration test — this walk only sends what it plans.
+    /// Both ops are idempotent via the source's CAS read-guard, so a crash
+    /// between a ref op and its local commit heals on the next boot; a ref-mail
+    /// encode failure is unrecoverable at boot, so it fail-fasts (ADR-0063),
+    /// mirroring the record-decode handling [`Self::on_replay_result`] uses on
+    /// the same boot path — never a silent `.ok()` drop that would strand the
+    /// ref.
+    fn reconcile_claim_refs(&mut self, ctx: &mut WasmCtx<'_>) {
+        for record in self.snapshot.blooms.values() {
+            match reconcile_op(record) {
+                None => {}
+                Some(Ok(ReconcileOp::Assert(mail))) => ctx.send_to_named(SOURCE, &mail),
+                Some(Ok(ReconcileOp::Release(mail))) => ctx.send_to_named(SOURCE, &mail),
+                Some(Err(error)) => ctx.fatal_abort(format!(
+                    "boot claim-ref reconcile: bloom {:?} ref mail did not encode: {error}",
+                    record.spec.id()
+                )),
+            }
+        }
     }
 }
 
