@@ -6,8 +6,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomDraft, BloomId, BloomRecord, BloomStatus, Budget, Digest, Evidence, EvidenceKind, EvidenceRef, Fact, Forecast,
-    Membership, NetworkProfile, Nonce, Outcome, Snapshot, Transformation, WorkHandle, WorkOrder, WorkpieceId, reduce,
+    BloomDraft, BloomId, BloomRecord, BloomStatus, Budget, Decision, Digest, Event, Evidence, EvidenceKind,
+    EvidenceRef, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce, Outcome, Snapshot, StageCatalog,
+    StageId, Transformation, WorkHandle, WorkOrder, WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{ActionsExecutor, Artifact, RunConclusion, RunStatus, StageVerdict};
@@ -60,6 +61,10 @@ fn dispatch_record(
         scope_revision,
         candidate,
         displayed_digest: candidate,
+        // The terminal per-member stage, so a resolving verdict admits as a
+        // `Fact::Integrate` — the existing accept/refuse tests' oracle. The
+        // non-terminal `AttemptCompleted` path is exercised by its own test.
+        stage: StageId::Review,
     }
 }
 
@@ -352,4 +357,92 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
     assert!(sink.0.is_empty(), "a refused upload never reaches the reducer");
     // The order stayed live — the mismatch did not consume it.
     assert!(store.lookup_order("n-bad").unwrap().is_some());
+}
+
+// A sealed single-member bloom driven through the *reducer's* seal, so the
+// member's stage cursor is seeded at the entry stage and the entry dispatch is
+// emitted (#3505) — the state the per-member advance composition starts from.
+fn sealed_via_reducer(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot, BloomId) {
+    let member = Membership {
+        workpiece: workpiece.clone(),
+        scope_revision,
+        approval: Evidence {
+            subject: scope_revision,
+            kind: EvidenceKind::Approval,
+            detail: Digest::from_bytes([3; 32]),
+        },
+    };
+    let spec = BloomDraft {
+        proposals: vec![member],
+        base: Digest::default(),
+        stage_catalog: StageCatalog::line_digest(),
+        ..BloomDraft::default()
+    }
+    .seal();
+    let bloom = spec.id();
+    let snapshot = Snapshot::new(Digest::default());
+    let seal = Event { idempotency_key: IdempotencyKey("seal".to_owned()), fact: Fact::Seal(spec) };
+    let decisions = reduce(&snapshot, &seal);
+    let snapshot = snapshot.apply(&seal, &decisions);
+    (snapshot, bloom)
+}
+
+#[test]
+fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_advances_to_verify() {
+    // The per-member line composition (#3505), end to end over the intake broker
+    // and the reducer: a Construct dispatch's passing result admits as a
+    // Fact::AttemptCompleted (not a Fact::Integrate — Construct is non-terminal),
+    // and folding it through the reducer advances the member Construct → Verify and
+    // dispatches the next attempt.
+    let mut store = store();
+    let workpiece = WorkpieceId("wp-line".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+    let (snapshot, bloom) = sealed_via_reducer(&workpiece, scope_revision);
+    // Seal seeded the member at the entry stage.
+    assert_eq!(
+        snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece).unwrap().stage,
+        StageId::Construct,
+        "seal seeds the member at Construct",
+    );
+
+    // Record a Construct dispatch order and admit a passing result for it.
+    let candidate = Digest::from_bytes([5; 32]);
+    let mut record = dispatch_record("n-c", bloom, &workpiece, scope_revision, candidate);
+    record.stage = StageId::Construct;
+    record_dispatch(&mut store, &record).unwrap();
+
+    let upload = UploadedEvidence {
+        nonce: Nonce("n-c".to_owned()),
+        subject: candidate,
+        verdict: StageVerdict::VerificationPassed,
+        detail: Digest::from_bytes([7; 32]),
+    };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
+        panic!("a matching Construct upload is admitted");
+    };
+    let Fact::AttemptCompleted { stage, passed, .. } = &admission.event.fact else {
+        panic!("a non-terminal stage admits AttemptCompleted, not Integrate");
+    };
+    assert_eq!(*stage, StageId::Construct);
+    assert!(*passed, "a VerificationPassed verdict passes the gate");
+
+    // Fold it through the reducer: the member advances to Verify and dispatches it.
+    let decisions = reduce(&snapshot, &admission.event);
+    assert!(matches!(
+        decisions.outcome,
+        Outcome::AttemptAdvanced { from: StageId::Construct, to: StageId::Verify, .. }
+    ));
+    let next = snapshot.apply(&admission.event, &decisions);
+    assert_eq!(
+        next.blooms.get(&bloom).unwrap().progress.get(&workpiece).unwrap().stage,
+        StageId::Verify,
+        "the member advanced to Verify",
+    );
+    assert!(
+        decisions
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Decision::DispatchAttempt { stage: StageId::Verify, .. })),
+        "the advance dispatches the next (Verify) attempt",
+    );
 }

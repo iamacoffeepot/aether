@@ -44,10 +44,10 @@ use std::fmt;
 
 use aether_bloomery::{
     Admit, BloomId, Digest, Event, EvidenceRef, ExecutionStatus, Fact, IdempotencyKey, Nonce, ResolutionClaim,
-    WorkHandle, WorkOrder, WorkpieceId,
+    StageCatalog, StageId, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::{ExecutorError, InwardError, StageResult, StageVerdict, normalize_stage_result};
-use aether_data::wire::{Error as WireError, to_vec};
+use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
 use super::executor::ExecutorShell;
 use crate::store::{OutstandingOrder, RecordOutcome, StoreBackend};
@@ -76,6 +76,11 @@ pub struct DispatchRecord {
     pub candidate: Digest,
     /// The digest Bloomery displayed for this order.
     pub displayed_digest: Digest,
+    /// The line stage this order dispatched (#3505). Routes the returning result:
+    /// a non-terminal per-member stage (`Construct` / `Verify` / `Refine`) admits
+    /// as a `Fact::AttemptCompleted` advancing the member's cursor; the terminal
+    /// `Review` admits as a `Fact::Integrate`; a parked outcome as a `Question`.
+    pub stage: StageId,
 }
 
 impl DispatchRecord {
@@ -87,6 +92,9 @@ impl DispatchRecord {
             scope_revision: self.scope_revision.as_bytes().to_vec(),
             candidate: self.candidate.as_bytes().to_vec(),
             displayed_digest: self.displayed_digest.as_bytes().to_vec(),
+            // The StageId as its canonical wire bytes — a stable, compact column
+            // the intake decodes back on admit (never a hand-rolled int mapping).
+            stage: to_vec(&self.stage).unwrap_or_default(),
         }
     }
 
@@ -98,6 +106,7 @@ impl DispatchRecord {
             scope_revision: digest_from_slice(&order.scope_revision)?,
             candidate: digest_from_slice(&order.candidate)?,
             displayed_digest: digest_from_slice(&order.displayed_digest)?,
+            stage: from_bytes(&order.stage).ok()?,
         })
     }
 }
@@ -273,6 +282,18 @@ pub fn dispatch_and_record(
     Ok(handle)
 }
 
+/// Whether a non-parked stage verdict passes its completion gate (#3505). A
+/// passing gate advances the member; a failing one re-dispatches within the retry
+/// budget. `Parked` never reaches here — it routes to the `Question` hold path
+/// (ADR-0151) before this is consulted.
+fn verdict_passed(verdict: StageVerdict) -> bool {
+    // Approved / VerificationPassed pass the gate; VerificationFailed and
+    // ReviewFinding fail it. A parked verdict routes to the Question path before
+    // the gate is consulted, so a stray one here reads as non-passing — never a
+    // false advance.
+    matches!(verdict, StageVerdict::Approved | StageVerdict::VerificationPassed)
+}
+
 /// The broker accept-gate + normalize → admit (#3502, the trust boundary).
 ///
 /// Look the upload's nonce up in the outstanding-order registry; admit only when
@@ -309,15 +330,34 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     // — *before* consuming the order: consuming first and then failing the encode
     // would lose the evidence with the nonce already spent and no retry.
     //
-    // A parked attempt normalizes to a Question evidence admitted through
-    // Fact::AdmitEvidence (ADR-0151) — never a Fact::Integrate, and never a
-    // failure: the order is consumed, but the parked outcome burns no stage
-    // retry, because a decision pending is not a defect. Every other verdict is
-    // a resolution claim integrated the existing way.
+    // Route the attempt result by stage (#3505):
+    //
+    // - A parked attempt normalizes to a Question evidence admitted through
+    //   Fact::AdmitEvidence (ADR-0151) — never a Fact::Integrate, and never a
+    //   failure: the order is consumed, but the parked outcome burns no stage
+    //   retry, because a decision pending is not a defect.
+    // - A non-terminal per-member stage (Construct / Verify / Refine, i.e. one
+    //   with a successor in the member line) admits as Fact::AttemptCompleted: the
+    //   reducer advances the member's cursor on a passing verdict, re-dispatches
+    //   the stage within its retry budget on a failing one, and wedges once the
+    //   budget is exhausted.
+    // - The terminal Review (no successor stage) admits its resolving verdict as a
+    //   Fact::Integrate — the member's ResolutionClaim, the existing integrate path.
     let event = if upload.verdict == StageVerdict::Parked {
         Event {
             idempotency_key: IdempotencyKey(format!("aether.bloomery.park:{}", record.nonce.0)),
             fact: Fact::AdmitEvidence { bloom: record.bloom, evidence },
+        }
+    } else if StageCatalog::next_member_stage(record.stage).is_some() {
+        Event {
+            idempotency_key: IdempotencyKey(format!("aether.bloomery.attempt:{}", record.nonce.0)),
+            fact: Fact::AttemptCompleted {
+                bloom: record.bloom,
+                workpiece: record.workpiece.clone(),
+                stage: record.stage,
+                passed: verdict_passed(upload.verdict),
+                evidence,
+            },
         }
     } else {
         let claim = ResolutionClaim {

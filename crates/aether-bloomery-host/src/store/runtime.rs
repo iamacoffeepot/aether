@@ -93,6 +93,12 @@ pub struct OutstandingOrder {
     /// The digest Bloomery displayed for this order — the evidence's bound
     /// digest must equal it (digest bytes).
     pub displayed_digest: Vec<u8>,
+    /// The line stage this order dispatched (a [`StageId`](aether_bloomery::StageId)
+    /// as its canonical `aether_data::wire` bytes, #3505). The intake routes the
+    /// returning result by stage: a non-terminal per-member stage admits as a
+    /// `Fact::AttemptCompleted` that advances the member's cursor, the terminal
+    /// `Review` as a `Fact::Integrate`, and a parked outcome as a `Question`.
+    pub stage: Vec<u8>,
 }
 
 /// The outcome of recording an [`OutstandingOrder`]: written, or its nonce was
@@ -236,7 +242,8 @@ CREATE TABLE IF NOT EXISTS outstanding_orders (
     workpiece        TEXT NOT NULL,
     scope_revision   BLOB NOT NULL,
     candidate        BLOB NOT NULL,
-    displayed_digest BLOB NOT NULL
+    displayed_digest BLOB NOT NULL,
+    stage            BLOB NOT NULL
 );
 CREATE TABLE IF NOT EXISTS study_index (
     bloom          BLOB NOT NULL,
@@ -259,15 +266,16 @@ impl StoreBackend for SqliteStore {
     fn record_order(&mut self, order: &OutstandingOrder) -> rusqlite::Result<RecordOutcome> {
         let changed = self.conn.execute(
             "INSERT OR IGNORE INTO outstanding_orders \
-             (nonce, bloom, workpiece, scope_revision, candidate, displayed_digest) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             rusqlite::params![
                 order.nonce,
                 order.bloom,
                 order.workpiece,
                 order.scope_revision,
                 order.candidate,
-                order.displayed_digest
+                order.displayed_digest,
+                order.stage
             ],
         )?;
         Ok(if changed == 0 {
@@ -279,7 +287,7 @@ impl StoreBackend for SqliteStore {
 
     fn lookup_order(&mut self, nonce: &str) -> rusqlite::Result<Option<OutstandingOrder>> {
         let mut stmt = self.conn.prepare(
-            "SELECT nonce, bloom, workpiece, scope_revision, candidate, displayed_digest \
+            "SELECT nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage \
              FROM outstanding_orders WHERE nonce = ?1",
         )?;
         let mut rows = stmt.query_map(rusqlite::params![nonce], |row| {
@@ -290,6 +298,7 @@ impl StoreBackend for SqliteStore {
                 scope_revision: row.get(3)?,
                 candidate: row.get(4)?,
                 displayed_digest: row.get(5)?,
+                stage: row.get(6)?,
             })
         })?;
         // The nonce is the primary key, so there is at most one row.
