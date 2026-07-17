@@ -130,6 +130,7 @@ fn partition_members<'a>(
 /// the land freed (the [`Decision::ReleaseMembership`] effects) plus the
 /// admission ref (the host adds it). A land carries a release per member, all
 /// naming the landed bloom; `None` if a land somehow carries none.
+#[must_use]
 pub fn release_seal_mail(decisions: &Decisions) -> Option<Result<ReleaseSeal, WireError>> {
     let mut bloom = None;
     let mut workpieces = Vec::new();
@@ -161,6 +162,7 @@ pub fn release_reclaim_mail(bloom: &BloomId, spec: &BloomSpec) -> Result<Release
 /// per-workpiece ref is a membership conflict, the mainline-admission ref is
 /// the one-active-bloom-per-mainline conflict — so a cross-instance refusal
 /// reads exactly as the local reducer's own (ADR-0150).
+#[must_use]
 pub fn held_to_seal_error(ref_kind: &ClaimRefKind, held_by: BloomId) -> SealError {
     match ref_kind {
         ClaimRefKind::Workpiece(workpiece) => {
@@ -176,6 +178,7 @@ pub fn held_to_seal_error(ref_kind: &ClaimRefKind, held_by: BloomId) -> SealErro
 /// CAS has no clean `SupersedeError` (it is a concurrent mutation, not a
 /// logical refusal), so it returns `None` and the caller surfaces a retryable
 /// error instead.
+#[must_use]
 pub fn held_to_supersede_error(ref_kind: &ClaimRefKind, held_by: BloomId) -> Option<SupersedeError> {
     match ref_kind {
         ClaimRefKind::Workpiece(workpiece) => {
