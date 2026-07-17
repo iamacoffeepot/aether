@@ -36,6 +36,7 @@ fn work_order(nonce: &str) -> WorkOrder {
         transformation: Transformation {
             command: "verify.clippy".to_owned(),
             inputs: Vec::new(),
+            checkout: Digest::from_bytes([0xC0; 32]),
             outputs: Vec::new(),
             image: "iama/verify:1".to_owned(),
             limits: Budget::default(),

@@ -10,7 +10,7 @@
 //! identical rule, so the dispatched model is exactly the one the bloom froze
 //! and the study stage grades cost against exactly that.
 
-use aether_bloomery::{Nonce, ResolvedModel, ScopeRevision, StageCatalog, StageId, Transformation, WorkOrder};
+use aether_bloomery::{Digest, Nonce, ResolvedModel, ScopeRevision, StageCatalog, StageId, Transformation, WorkOrder};
 
 /// The typed command id the model-driven construct lane dispatches. The runner's
 /// `xtask transform` entrypoint maps this id to a headless-Claude invocation.
@@ -29,11 +29,16 @@ pub const CONSTRUCT_IMPLEMENT_COMMAND: &str = "construct.implement";
 /// of the frozen revision, not a dispatch-time choice. The transformation itself
 /// is built by the shared [`Transformation::for_member_stage`] the reducer also
 /// dispatches through, so the host and the reducer never drift on the lane shape.
+///
+/// `base` is the bloom's sealed base — the git commit the attempt's worker checks
+/// out (ADR-0149 §Execution, #3572), threaded onto the transformation as its
+/// checkout target. It is a separate axis from the scope-revision subject: the
+/// subject binds the returned evidence, the base names the tree the work runs on.
 #[must_use]
-pub fn build_construct_order(scope_revision: &ScopeRevision, nonce: Nonce) -> (WorkOrder, ResolvedModel) {
+pub fn build_construct_order(scope_revision: &ScopeRevision, base: Digest, nonce: Nonce) -> (WorkOrder, ResolvedModel) {
     let profile = StageCatalog::profile_of(StageId::Construct);
     let resolved = scope_revision.model_override.resolve(&profile);
-    let transformation = Transformation::for_member_stage(StageId::Construct, scope_revision.digest());
+    let transformation = Transformation::for_member_stage(StageId::Construct, scope_revision.digest(), base);
     (WorkOrder { transformation, nonce }, resolved)
 }
 
@@ -46,7 +51,8 @@ mod tests {
     #[test]
     fn no_override_resolves_the_construct_profile_default() {
         let default_construct = StageCatalog::profile_of(StageId::Construct);
-        let (order, resolved) = build_construct_order(&ScopeRevision::default(), Nonce("n-1".to_owned()));
+        let base = Digest::from_bytes([5; 32]);
+        let (order, resolved) = build_construct_order(&ScopeRevision::default(), base, Nonce("n-1".to_owned()));
 
         assert_eq!(
             resolved.model, default_construct.model,
@@ -54,6 +60,7 @@ mod tests {
         );
         assert_eq!(resolved.effort, default_construct.effort, "unset override → the default effort");
         assert_eq!(order.transformation.command, CONSTRUCT_IMPLEMENT_COMMAND);
+        assert_eq!(order.transformation.checkout, base, "the sealed base is the attempt's checkout target");
         assert_eq!(order.nonce, Nonce("n-1".to_owned()));
     }
 
@@ -63,7 +70,7 @@ mod tests {
         let overridden = ScopeRevision {
             model_override: ModelOverride { model: Some("claude-sonnet-5".to_owned()), reasoning_effort: None },
         };
-        let (_, resolved) = build_construct_order(&overridden, Nonce("n-2".to_owned()));
+        let (_, resolved) = build_construct_order(&overridden, Digest::from_bytes([5; 32]), Nonce("n-2".to_owned()));
 
         assert_eq!(resolved.model, "claude-sonnet-5", "the set model override wins");
         assert_eq!(resolved.effort, default_construct.effort, "the unset effort still falls through to the default");
@@ -77,7 +84,7 @@ mod tests {
         let rev = ScopeRevision {
             model_override: ModelOverride { model: Some("claude-sonnet-5".to_owned()), reasoning_effort: None },
         };
-        let (order, _) = build_construct_order(&rev, Nonce("n-3".to_owned()));
+        let (order, _) = build_construct_order(&rev, Digest::from_bytes([5; 32]), Nonce("n-3".to_owned()));
         assert!(
             order.transformation.inputs.contains(&rev.digest()),
             "the dispatched order pins the exact scope-revision digest it resolved",
