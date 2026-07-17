@@ -204,13 +204,6 @@ impl SourceCapabilityState {
         workpieces: &[Vec<u8>],
         op: impl FnOnce(&SourceShell, &BloomId, &[WorkpieceId]) -> Result<ClaimOutcome, aether_bloomery_github::SourceError>,
     ) -> ClaimResult {
-        // Claim registry disabled (unconfigured GitHub connection): no shared
-        // repository to hold refs in, so the acquire / release is a no-op that
-        // never reaches the network — the store backstop enforces single-instance
-        // exclusivity on its own.
-        if !self.claims_enabled {
-            return ClaimResult::Acquired;
-        }
         let bloom: BloomId = match from_bytes(bloom) {
             Ok(bloom) => bloom,
             Err(error) => return ClaimResult::Err { error: error.to_string() },
@@ -219,6 +212,15 @@ impl SourceCapabilityState {
             Ok(workpieces) => workpieces,
             Err(reply) => return reply,
         };
+        // Claim registry disabled (unconfigured GitHub connection): no shared
+        // repository to hold refs in, so the acquire / release is a no-op that
+        // never reaches the network — the store backstop enforces single-instance
+        // exclusivity on its own. The operands are decoded first regardless, so a
+        // malformed request is rejected identically whether or not claims are
+        // enabled (a decode failure must never read as `Acquired`).
+        if !self.claims_enabled {
+            return ClaimResult::Acquired;
+        }
         match op(&self.shell, &bloom, &workpieces) {
             Ok(outcome) => claim_result(outcome),
             Err(error) => ClaimResult::Err { error: error.to_string() },
@@ -248,11 +250,6 @@ impl SourceCapabilityState {
         net_new: &[Vec<u8>],
         dropped: &[Vec<u8>],
     ) -> ClaimResult {
-        // Claim registry disabled — see [`seal_op`](Self::seal_op): the transfer
-        // is a no-op that never reaches the network.
-        if !self.claims_enabled {
-            return ClaimResult::Acquired;
-        }
         let predecessor: BloomId = match from_bytes(predecessor) {
             Ok(predecessor) => predecessor,
             Err(error) => return ClaimResult::Err { error: error.to_string() },
@@ -273,6 +270,12 @@ impl SourceCapabilityState {
             Ok(dropped) => dropped,
             Err(reply) => return reply,
         };
+        // Claim registry disabled — see [`seal_op`](Self::seal_op): the transfer
+        // is a no-op that never reaches the network, but the operands are decoded
+        // first regardless so a malformed request never reads as `Acquired`.
+        if !self.claims_enabled {
+            return ClaimResult::Acquired;
+        }
         match self.shell.transfer_seal(&predecessor, &successor, &carried, &net_new, &dropped) {
             Ok(outcome) => claim_result(outcome),
             Err(error) => ClaimResult::Err { error: error.to_string() },

@@ -38,8 +38,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, WorkpieceId};
 use crate::port::ClaimRefKind;
 use crate::reduce::{
-    Decision, Decisions, Event, Fact, Outcome, SealConflict, SealError, Snapshot, SupersedeError, is_active_unlanded,
-    reduce, view_of,
+    BloomStatus, Decision, Decisions, Event, Fact, Outcome, SealConflict, SealError, Snapshot, SupersedeError,
+    is_active_unlanded, reduce, view_of,
 };
 use crate::values::BloomSpec;
 use aether_actor::{
@@ -329,10 +329,12 @@ impl WasmActor for ControlCore {
                 self.snapshot = self.snapshot.apply(&event, &decisions);
                 // A durably-landed bloom frees its member + admission claim refs
                 // (ADR-0150 §The claim registry) — release with the local
-                // release, fire-and-forget: the boot reconcile re-asserts any ref
-                // an interrupted release stranded. An encode failure or a land
-                // carrying no release effect leaves the refs for the reconcile —
-                // never a torn reply to the admitter, whose land already committed.
+                // release, fire-and-forget: the boot reconcile re-releases any ref
+                // an interrupted release stranded (it re-issues `release_seal` for
+                // every `Landed` bloom, idempotent via the CAS read-guard). An
+                // encode failure or a land carrying no release effect leaves the
+                // refs for that reconcile — never a torn reply to the admitter,
+                // whose land already committed.
                 if matches!(decisions.outcome, Outcome::Landed(_))
                     && let Some(Ok(release)) = release_seal_mail(&decisions)
                 {
@@ -466,29 +468,46 @@ impl ControlCore {
     }
 
     /// Boot-time claim-ref reconcile (ADR-0150 §The claim registry). After
-    /// replay rebuilds the snapshot, re-assert every active-and-unlanded
-    /// (`Sealed | Resolved`, via the [`is_active_unlanded`] predicate the seal
-    /// guard shares, so the two never drift) bloom's member + admission claim
-    /// refs by re-sending `claim_seal` — fire-and-forget, so a crash between a
-    /// ref op and the local commit converges. `claim_seal` is the idempotent
-    /// lever this mail surface offers: an intact holding rolls its own create
-    /// back to a no-op (the refs already name this bloom), a fully-lost ref set
-    /// is re-acquired. Deeper heals a wasm actor cannot drive over
-    /// claim/transfer/release alone — reclaiming a foreign-held orphan, sweeping
-    /// a tombstoned ref, healing a half-transfer — stay the deferred coordination
-    /// service's job (ADR-0150 notes cross-instance staleness is not
-    /// self-healing). At most one bloom is active (the V1 one-per-mainline
-    /// invariant), so this is bounded.
+    /// replay rebuilds the snapshot, converge each bloom's refs to the holding
+    /// its status implies — both operations idempotent via the source's CAS
+    /// read-guard, so a crash between a ref op and its local commit heals:
+    ///
+    /// - **Active-and-unlanded** (`Sealed | Resolved`, via the
+    ///   [`is_active_unlanded`] predicate the seal guard shares, so the two never
+    ///   drift): re-assert the member + admission refs with `claim_seal`. An
+    ///   intact holding rolls its own create back to a no-op (the refs already
+    ///   name this bloom), a fully-lost ref set is re-acquired.
+    /// - **Landed**: re-release the member + admission refs with `release_seal`,
+    ///   healing a land whose fire-and-forget release ([`Self::on_commit_result`])
+    ///   never reached the source. Re-releasing already-freed refs is a no-op, and
+    ///   the CAS read-guard spares a ref a successor bloom has since re-claimed —
+    ///   so this never stomps a live holding.
+    ///
+    /// Deeper heals a wasm actor cannot drive over claim/transfer/release alone —
+    /// reclaiming a foreign-held orphan, sweeping a tombstoned ref, healing a
+    /// half-transfer — stay the deferred coordination service's job (ADR-0150
+    /// notes cross-instance staleness is not self-healing). A ref-mail encode
+    /// failure is unrecoverable at boot, so it fail-fasts (ADR-0063), mirroring
+    /// the record-decode handling [`Self::on_replay_result`] uses on the same
+    /// boot path — never a silent `.ok()` drop that would strand the ref.
     fn reconcile_claim_refs(&mut self, ctx: &mut WasmCtx<'_>) {
-        let reassert: Vec<ClaimSeal> = self
-            .snapshot
-            .blooms
-            .values()
-            .filter(|record| is_active_unlanded(record.status))
-            .filter_map(|record| seal_claim_mail(&record.spec.id(), &record.spec).ok())
-            .collect();
-        for mail in &reassert {
-            ctx.send_to_named(SOURCE, mail);
+        for record in self.snapshot.blooms.values() {
+            let bloom = record.spec.id();
+            if is_active_unlanded(record.status) {
+                match seal_claim_mail(&bloom, &record.spec) {
+                    Ok(mail) => ctx.send_to_named(SOURCE, &mail),
+                    Err(error) => ctx.fatal_abort(format!(
+                        "boot claim-ref reconcile: bloom {bloom:?} claim mail did not encode: {error}"
+                    )),
+                }
+            } else if matches!(record.status, BloomStatus::Landed) {
+                match release_reclaim_mail(&bloom, &record.spec) {
+                    Ok(mail) => ctx.send_to_named(SOURCE, &mail),
+                    Err(error) => ctx.fatal_abort(format!(
+                        "boot claim-ref reconcile: bloom {bloom:?} release mail did not encode: {error}"
+                    )),
+                }
+            }
         }
     }
 }
@@ -570,6 +589,20 @@ fn release_seal_mail(decisions: &Decisions) -> Option<Result<ReleaseSeal, WireEr
     }
     let bloom = bloom?;
     Some((|| Ok(ReleaseSeal { bloom: to_vec(&bloom)?, workpieces: encode_workpieces(workpieces.into_iter())? }))())
+}
+
+/// The `release_seal` mail for a boot-reconcile re-release of a `Landed` bloom:
+/// release every member ref plus the admission ref (the host adds it), mirroring
+/// the land-time release ([`release_seal_mail`]) but built from the retained
+/// spec rather than the land's decisions. Idempotent via the source's CAS
+/// read-guard — a release of already-freed refs is a no-op and a ref a successor
+/// has re-claimed is spared — so re-issuing at boot heals a land whose
+/// fire-and-forget release was lost to a crash without stomping a live holding.
+fn release_reclaim_mail(bloom: &BloomId, spec: &BloomSpec) -> Result<ReleaseSeal, WireError> {
+    Ok(ReleaseSeal {
+        bloom: to_vec(bloom)?,
+        workpieces: encode_workpieces(spec.members().iter().map(|member| &member.workpiece))?,
+    })
 }
 
 /// Map a seal's [`ClaimResult::Held`] to the matching [`SealError`] — a
