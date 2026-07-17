@@ -47,7 +47,7 @@ Options:
 Reply with an option number or free-form; your reply re-dispatches this job.
 ```
 
-Post the comment over REST (`gh api -X POST repos/iamacoffeepot/aether/issues/<n>/comments -F body=@<file>`, body written to a file first so its backticks and `$` are not shell-expanded) and apply both labels over REST (the same `…/labels` endpoints the original's phase reconcile uses). The question carries its load-bearing "why" first, then the options with their consequences, so the owner can decide from the comment alone.
+Post the comment over REST (`gh api -X POST repos/iamacoffeepot/aether/issues/<n>/comments -F body=@<file>`, body written to a file first so its backticks and `$` are not shell-expanded) and apply both labels over REST (the same `…/labels` endpoints the original's phase reconcile uses). Use `-F`/`--field`, never `-f`/`--raw-field`, for the body flag — `-f` sends the literal string, so `-f body=@<file>` posts the bare `@/tmp/…` path instead of the file's contents, and only `-F` expands `@file`. Before ending the turn, check the posted comment: a body matching `^@/` is malformed — repost it from the file with `-F` before proceeding. The question carries its load-bearing "why" first, then the options with their consequences, so the owner can decide from the comment alone.
 
 ## end-turn-not-wait
 
