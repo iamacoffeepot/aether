@@ -9,12 +9,14 @@ use rmcp::ErrorData as McpError;
 use tokio::time;
 
 use crate::args::{
-    DeadEngineInfo, EngineInfo, ListEnginesArgs, ListEnginesResponse, SpawnSubstrateArgs, TerminateSubstrateArgs,
+    DeadEngineInfo, EngineInfo, ListEnginesArgs, ListEnginesResponse, MailSpec, ReplyProjection, SpawnSubstrateArgs,
+    SpawnSubstrateResponse, TerminateSubstrateArgs,
 };
 
 use super::components::components_all_loaded;
 use super::envelope::{engine_envelope, local_envelope};
 use super::ids::parse_engine_id;
+use super::mail::settle_mail_item;
 use super::render::{death_reason_parts, internal, internal_msg, json};
 use super::{ENGINE_CAP, Mcp};
 
@@ -140,7 +142,25 @@ pub(super) async fn spawn_substrate(mcp: &Mcp, args: SpawnSubstrateArgs) -> Resu
         wait_for_loaded_components(mcp, &info.engine_id, &staged.expected_names).await?;
     }
 
-    json(&info)
+    // Init mail dispatches only after the readiness wait above, so a
+    // bundle addressed at a boot component never races its load, and
+    // each item encodes against the live engine's merged kind view
+    // (ADR-0091). Per-item best-effort like `send_mail` (issue 3580):
+    // the engine is already live at this point, so an item's failure is
+    // reported in its status, never converted into a whole-call error
+    // that would strand a spawned engine behind an error reply.
+    let mails = if args.mails.is_empty() {
+        None
+    } else {
+        let mut statuses = Vec::with_capacity(args.mails.len());
+        for (index, mail) in args.mails.into_iter().enumerate() {
+            let spec = MailSpec { engine_id: info.engine_id.clone(), mail };
+            statuses.push(settle_mail_item(mcp, index, spec, ReplyProjection::default()).await);
+        }
+        Some(statuses)
+    };
+
+    json(&SpawnSubstrateResponse { engine: info, mails })
 }
 
 pub(super) async fn terminate_substrate(mcp: &Mcp, args: TerminateSubstrateArgs) -> Result<String, McpError> {

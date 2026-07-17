@@ -34,8 +34,6 @@
 //! driver does) is a follow-up once the registry ops gain a mail surface.
 
 use std::sync::Arc;
-use std::sync::mpsc;
-use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use aether_actor::runtime;
@@ -54,6 +52,7 @@ use crate::bloomery::intake::{
     Admission, AdmitSink, DispatchRecord, NameEvidenceClaims, dispatch_and_record, run_intake_cycle,
 };
 use crate::bloomery::mirror::GithubMirrorConfig;
+use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::store::{SqliteStore, StoreBackend};
 
 /// The outbox topic the reducer enqueues a per-member attempt dispatch under —
@@ -113,42 +112,6 @@ impl ExecutorDriverState {
             _timer: None,
         }
     }
-}
-
-/// Owns the poll-timer sidecar thread — the mirror of the mirror driver's. Fires
-/// a [`DispatchTick`] at the driver's own mailbox every `interval` until dropped;
-/// `Drop` disconnects the stop channel (so the thread's next `recv_timeout`
-/// returns `Disconnected` and it exits) then joins.
-struct TimerHandle {
-    stop: Option<mpsc::Sender<()>>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Drop for TimerHandle {
-    fn drop(&mut self) {
-        drop(self.stop.take());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
-
-/// Spawn the poll-timer sidecar. Fires a [`DispatchTick`] at `self_mailbox` every
-/// `interval` until the returned handle drops.
-fn spawn_timer(mailer: Arc<Mailer>, self_mailbox: MailboxId, interval: Duration) -> TimerHandle {
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    // Infra timer below the mail layer, like the mirror drain sidecar: it only
-    // fires a wake-mail (no inbound chain to inherit).
-    #[allow(clippy::disallowed_methods, reason = "infra timer thread; the wake carries no caller context")]
-    let thread = thread::Builder::new()
-        .name("aether-bloomery-executor-dispatch".into())
-        .spawn(move || {
-            while stop_rx.recv_timeout(interval) == Err(mpsc::RecvTimeoutError::Timeout) {
-                mailer.push(Mail::new(self_mailbox, DispatchTick::ID, DispatchTick::default().encode_into_bytes(), 1));
-            }
-        })
-        .expect("spawn aether-bloomery-executor-dispatch timer thread");
-    TimerHandle { stop: Some(stop_tx), thread: Some(thread) }
 }
 
 /// Collect admitted attempt results so the handler can forward each to the control
@@ -294,7 +257,14 @@ impl NativeActor for ExecutorDriverCapability {
         let executor = ExecutorShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
         let store = SqliteStore::open(&config.store_path).map_err(|e| BootError::Other(Box::new(e)))?;
         let interval = Duration::from_secs(config.poll_interval_secs.max(1));
-        let timer = spawn_timer(Arc::clone(&mailer), self_mailbox, interval);
+        let timer = spawn_timer(
+            Arc::clone(&mailer),
+            self_mailbox,
+            DispatchTick::ID,
+            DispatchTick::default().encode_into_bytes(),
+            "aether-bloomery-executor-dispatch",
+            interval,
+        );
         tracing::info!(
             target: "aether_bloomery_host::executor",
             owner = %config.owner,

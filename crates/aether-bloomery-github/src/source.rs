@@ -51,8 +51,9 @@ pub enum SourceError {
     /// The underlying Git Data call failed (transport or non-2xx status).
     Github(GithubError),
     /// `land` was called while compare-and-swap mainline landing is gated off
-    /// (`cas_land_enabled` is false — ADR-0149 gates it to migration step 3).
-    /// Not a [`LandOutcome`]: the swap was never attempted.
+    /// (`cas_land_enabled` is false). The gate defaults on since ADR-0149
+    /// migration step 3, so this is now the explicit kill-switch state, not the
+    /// default. Not a [`LandOutcome`]: the swap was never attempted.
     LandingDisabled,
     /// An operation needed a ref that does not exist — e.g. `integrate` before
     /// the bloom's integration namespace was created, or `land` with no
@@ -69,7 +70,7 @@ impl fmt::Display for SourceError {
         match self {
             Self::Github(error) => write!(f, "git source backend: {error}"),
             Self::LandingDisabled => {
-                write!(f, "compare-and-swap land is disabled (cas_land_enabled is off, ADR-0149 migration step 3)")
+                write!(f, "compare-and-swap land is disabled (cas_land_enabled kill switch is off)")
             }
             Self::MissingRef(name) => write!(f, "git source backend: required ref `{name}` does not exist"),
             Self::Malformed(what) => write!(f, "git source backend: malformed {what}"),
@@ -145,8 +146,9 @@ pub fn digest_from_hex(sha: &str) -> Option<Digest> {
 }
 
 /// The git source backend over a [`GitDataApi`] client. Holds the
-/// `cas_land_enabled` gate — off by default, so `land` refuses until ADR-0149
-/// migration step 3 explicitly enables it.
+/// `cas_land_enabled` gate — on by default since ADR-0149 migration step 3 made
+/// the CAS `land` the landing of record; a `false` gate is the explicit kill
+/// switch under which `land` refuses.
 pub struct GitSource<C: GitDataApi> {
     client: C,
     cas_land_enabled: bool,
@@ -154,7 +156,8 @@ pub struct GitSource<C: GitDataApi> {
 
 impl<C: GitDataApi> GitSource<C> {
     /// Build a source backend over `client`, with mainline landing gated by
-    /// `cas_land_enabled` (pass `false` for every pre-migration-step-3 build).
+    /// `cas_land_enabled` (`false` is the kill switch under which `land`
+    /// refuses; production wires it on, per ADR-0149 migration step 3).
     pub const fn new(client: C, cas_land_enabled: bool) -> Self {
         Self { client, cas_land_enabled }
     }

@@ -27,7 +27,7 @@ use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
 use crate::bloomery::mirror::GithubMirrorConfig;
-use crate::bloomery::{ExecutorDriverCapability, MirrorDriverCapability};
+use crate::bloomery::{ExecutorDriverCapability, LandDriverCapability, MirrorDriverCapability};
 use crate::session::{SessionConfig, SessionPoolCapability};
 use crate::signing::{SigningCapability, SigningConfig};
 use crate::source::SourceCapability;
@@ -183,6 +183,7 @@ impl BloomeryChassis {
             <ArtifactsCapability as Addressable>::NAMESPACE.to_owned(),
             <MirrorDriverCapability as Addressable>::NAMESPACE.to_owned(),
             <ExecutorDriverCapability as Addressable>::NAMESPACE.to_owned(),
+            <LandDriverCapability as Addressable>::NAMESPACE.to_owned(),
             <SessionPoolCapability as Addressable>::NAMESPACE.to_owned(),
             <SourceCapability as Addressable>::NAMESPACE.to_owned(),
             <SigningCapability as Addressable>::NAMESPACE.to_owned(),
@@ -233,6 +234,12 @@ impl BloomeryChassis {
             // executor port, and admits matched results back to the control core.
             // Reuses the one GitHub-connection config the mirror + source caps do.
             .with_actor::<ExecutorDriverCapability>(github.clone())
+            // The land driver (#3559, ADR-0149 migration step 3): drains the
+            // reducer's `aether.bloomery.land` decisions, issues the source-port
+            // compare-and-swap that is now the landing of record, and admits
+            // `Fact::Land` back to the control core. Reuses the one
+            // GitHub-connection config the mirror + executor + source caps do.
+            .with_actor::<LandDriverCapability>(github.clone())
             // App-key custody (ADR-0149 §Migration step 3) is not a mounted
             // mailbox: the host-local minter (`app_auth::AppTokenSource`) is an
             // in-process `TokenSource` the port shells' client pulls from in
@@ -301,12 +308,13 @@ mod tests {
         // — and connects no source network (`ReqwestGithub::new` builds a client
         // with no request); the default `:memory:` session pool touches no
         // filesystem. A successful `build` boots every passive (store, artifacts,
-        // mirror, source, session, trace, component host, rpc) and claims each
-        // mailbox — a claim conflict or a failed store/shell open would surface
-        // as a `BootError`, so `build` returning `Ok` is the assertion that the
-        // `aether.store`, `aether.artifacts`, `aether.bloomery.mirror`,
-        // `aether.session`, `aether.source`, `aether.signing`, and
-        // `aether.component` mailboxes were claimed (the component host is the
+        // mirror, executor, land, source, session, trace, component host, rpc) and
+        // claims each mailbox — a claim conflict or a failed store/shell open would
+        // surface as a `BootError`, so `build` returning `Ok` is the assertion that
+        // the `aether.store`, `aether.artifacts`, `aether.bloomery.mirror`,
+        // `aether.bloomery.land`, `aether.session`, `aether.source`,
+        // `aether.signing`, and `aether.component` mailboxes were claimed (the
+        // land driver mounts disabled under the default config; the component host is the
         // reducer-actor load surface, ADR-0149 §Packaging). App-key custody is
         // not a mounted mailbox — the shells' `connect_client` reads the key
         // in-process (ADR-0150), so the default (unconfigured) github config

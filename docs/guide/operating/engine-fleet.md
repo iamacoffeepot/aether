@@ -126,6 +126,17 @@ presence for unique expected names, not component identity/completeness under a
 collision. Give specs unique names, then describe and safely probe every expected
 lineage.
 
+`spawn_substrate` may also take a `mails` list — init mail (each entry
+`{recipient_name, kind_name, params?}`, a `send_mail` item without `engine_id`)
+dispatched after the readiness wait above, so an entry addressed at a boot
+component never races its load. Each item settles like a `send_mail` item and
+the response carries a per-item `mails` status list alongside the engine
+information, so a failed init is visible in the spawn reply itself. Items are
+best-effort: the engine is live by the time the bundle runs, so one item's
+failure aborts neither the spawn nor its siblings — read the statuses. This is
+the world-initialization surface; keep `capture_frame.mails` for frame-scoped
+placement at observation time.
+
 ## Liveness and death evidence
 
 Each live row includes `last_heartbeat_age_millis`. It is an observation of the

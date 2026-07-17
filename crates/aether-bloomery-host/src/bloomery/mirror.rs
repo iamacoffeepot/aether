@@ -42,10 +42,12 @@ pub struct GithubMirrorConfig {
     /// base. No trailing slash.
     #[config(default = "https://api.github.com")]
     pub api_base: String,
-    /// Whether compare-and-swap mainline landing is permitted. Off by default
-    /// (ADR-0149 gates it to migration step 3); consumed by the git source
-    /// port, a separate slice, so carried-but-unused here.
-    #[config(default = false)]
+    /// Whether compare-and-swap mainline landing is permitted. On by default
+    /// (ADR-0149 migration step 3 moved landing authority to the source port —
+    /// the CAS `land` is the landing of record); consumed by the git source
+    /// port to gate [`GitSource::land`](aether_bloomery_github::GitSource) and by
+    /// the land driver ([`super::LandDriverCapability`]) that drives it.
+    #[config(default = true)]
     pub cas_land_enabled: bool,
     /// How often the outbox-consumer mirror driver ([`super::MirrorDriverCapability`])
     /// polls the store outbox for undelivered projection entries, in seconds.
@@ -107,6 +109,35 @@ pub struct GithubMirrorConfig {
     /// skew). `0` resolves to the 300-second default.
     #[config(default = 300)]
     pub app_token_skew_secs: u64,
+    /// Whether the executor mounts the local-process backend for the model lane
+    /// (ADR-0150, #3586). On by default: the `construct.*` lanes route to a local
+    /// process under ambient `claude` auth rather than a shared-runner wrapper,
+    /// so no Claude credential is ever staged into a GitHub secret. Off falls back
+    /// to the bare Actions backend (every lane on shared runners).
+    #[config(default = true)]
+    pub local_lane_enabled: bool,
+    /// The comma-separated command-id prefixes the executor routes to the local
+    /// backend (the rest go to Actions). Default `construct.` routes the
+    /// model-driven construct lanes local; adding e.g. `verify.` is the release
+    /// valve that flips a heavy mechanical lane local (Actions outage, quota,
+    /// offline work). Parsed by [`local_lane_prefixes`](Self::local_lane_prefixes).
+    #[config(default = "construct.")]
+    pub local_lane_commands: String,
+    /// The scratch-worktree base dir the local backend checks each order's subject
+    /// into (keyed by nonce). Should be absolute in production so the checkout
+    /// resolves regardless of the coordinator's cwd.
+    #[config(default = ".bloomery/local-worktrees")]
+    pub local_worktree_base: String,
+    /// The model the local `construct.implement` lane runs headless Claude under.
+    /// Empty (the default) threads no `--model`; the coordinator-resolved
+    /// per-revision model (#3511) is a follow-up — this config default is the
+    /// stopgap until the resolved model rides the dispatch payload.
+    #[config(default = "")]
+    pub local_construct_model: String,
+    /// The reasoning-effort tier the local `construct.implement` lane runs at.
+    /// Empty (the default) threads no `--effort`.
+    #[config(default = "")]
+    pub local_construct_effort: String,
 }
 
 impl Default for GithubMirrorConfig {
@@ -116,7 +147,7 @@ impl Default for GithubMirrorConfig {
             owner: String::new(),
             repo: String::new(),
             api_base: "https://api.github.com".to_owned(),
-            cas_land_enabled: false,
+            cas_land_enabled: true,
             poll_interval_secs: 5,
             executor_workflow_file: "bloomery-transform.yml".to_owned(),
             executor_dispatch_ref: "refs/heads/main".to_owned(),
@@ -126,6 +157,11 @@ impl Default for GithubMirrorConfig {
             app_private_key_path: String::new(),
             app_installation_id: 0,
             app_token_skew_secs: 300,
+            local_lane_enabled: true,
+            local_lane_commands: "construct.".to_owned(),
+            local_worktree_base: ".bloomery/local-worktrees".to_owned(),
+            local_construct_model: String::new(),
+            local_construct_effort: String::new(),
         }
     }
 }
@@ -141,6 +177,20 @@ impl GithubMirrorConfig {
             api_base: self.api_base.clone(),
             cas_land_enabled: self.cas_land_enabled,
         }
+    }
+
+    /// The local-lane command-id prefixes, parsed from the comma-separated
+    /// [`local_lane_commands`](Self::local_lane_commands) knob: split on commas,
+    /// trimmed, empties dropped. An order whose command starts with any of these
+    /// routes to the local backend.
+    #[must_use]
+    pub fn local_lane_prefixes(&self) -> Vec<String> {
+        self.local_lane_commands
+            .split(',')
+            .map(str::trim)
+            .filter(|prefix| !prefix.is_empty())
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Whether GitHub-App auth is configured — all three App knobs present. When
@@ -236,5 +286,16 @@ mod tests {
         assert_eq!(projected.repo_path(), "octo/shadow");
         assert_eq!(projected.api_base, "https://ghe.example/api/v3");
         assert!(projected.cas_land_enabled);
+    }
+
+    #[test]
+    fn local_lane_prefixes_parses_the_comma_list() {
+        // The one bit of logic the config owns for the router: split, trim, drop
+        // empties — a whitespace-padded or trailing-comma value still parses clean.
+        let config = GithubMirrorConfig { local_lane_commands: " construct. , verify. ,".into(), ..Default::default() };
+        assert_eq!(config.local_lane_prefixes(), vec!["construct.".to_owned(), "verify.".to_owned()]);
+
+        // The default routes only the model-driven construct lanes local.
+        assert_eq!(GithubMirrorConfig::default().local_lane_prefixes(), vec!["construct.".to_owned()]);
     }
 }

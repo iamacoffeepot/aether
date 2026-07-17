@@ -2,12 +2,13 @@ use super::bytes::resolve_bytes_params;
 use super::components::{ResolvedComponent, StagedBootManifest};
 use super::ids::{mail_node_to_json, node_reversible_ids};
 use super::{
-    AWAIT_TIMEOUT_DEFAULT_MS, AsyncMutex, ComponentSelector, ComponentSpec, ENGINE_CAP, EngineId, EngineNames,
-    INVENTORY_CAP, Kind, KindDescriptor, KindId, ListKinds, ListKindsResult, MailEnvelope, MailNodeJson, MailNodeWire,
-    MailSpec, MailboxAddress, Manifest, ManifestResult, Mcp, McpError, Resolve, ResolveComponent,
-    ResolveComponentResult, ResolveResult, SchemaType, Uuid, component_config_bytes, descriptors, engine_envelope,
-    frame_size_aware_error, internal_msg, local_envelope, mailbox_id_from_path, max_frame_size, reject_zero_replicas,
-    replica_base_name, replica_names, selector_with_explicit_export, tagged_id, validate_recipient_scope, wire,
+    AWAIT_TIMEOUT_DEFAULT_MS, AsyncMutex, ComponentSelector, ComponentSpec, ENGINE_CAP, EngineId, EngineMailSpec,
+    EngineNames, INVENTORY_CAP, Kind, KindDescriptor, KindId, ListKinds, ListKindsResult, MailEnvelope, MailNodeJson,
+    MailNodeWire, MailSpec, MailboxAddress, Manifest, ManifestResult, Mcp, McpError, NamedMail, Resolve,
+    ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType, Uuid, component_config_bytes, descriptors,
+    engine_envelope, frame_size_aware_error, internal_msg, local_envelope, mailbox_id_from_path, max_frame_size,
+    reject_zero_replicas, replica_base_name, replica_names, selector_with_explicit_export, tagged_id,
+    validate_recipient_scope, wire,
 };
 use aether_data::canonical::kind_id_from_parts;
 use std::collections::HashMap;
@@ -218,12 +219,12 @@ impl Mcp {
         // and folds to a registry key, so cap its scope depth / byte size
         // before it reaches `mailbox_id_from_path` (the fold itself stays
         // infallible for static callers). A breach fails this mail item.
-        validate_recipient_scope(&spec.recipient_name)?;
+        validate_recipient_scope(&spec.mail.recipient_name)?;
         let engine = EngineId(
             Uuid::parse_str(&spec.engine_id).map_err(|e| anyhow::anyhow!("engine_id is not a valid UUID: {e}"))?,
         );
-        let params = spec.params.unwrap_or(serde_json::Value::Null);
-        let (desc, payload) = self.resolve_and_encode(engine, &spec.kind_name, params).await?;
+        let params = spec.mail.params.unwrap_or(serde_json::Value::Null);
+        let (desc, payload) = self.resolve_and_encode(engine, &spec.mail.kind_name, params).await?;
         Ok(MailEnvelope {
             to: MailboxAddress {
                 engine: Some(engine),
@@ -233,7 +234,7 @@ impl Mcp {
                 // reaches its lineage-folded id. A root-cap name is a
                 // single segment and folds to the same id `hash(name)`
                 // gives.
-                mailbox: mailbox_id_from_path(&spec.recipient_name),
+                mailbox: mailbox_id_from_path(&spec.mail.recipient_name),
             },
             from: None,
             kind: KindId(kind_id_from_parts(&desc.name, &desc.schema)),
@@ -242,12 +243,40 @@ impl Mcp {
         })
     }
 
+    /// Encode a mail bundle for a surface whose engine is already fixed
+    /// by its own args — `spawn_substrate.mails`, `capture_frame.mails`
+    /// / `after_mails`, `send_mail_traced.mails`: resolve each spec's
+    /// kind against the per-engine merged view (ADR-0091, static
+    /// prefill + cached `ListKinds` reply), schema-encode its params,
+    /// and wrap into the substrate-side `aether_kinds::NamedMail` shape
+    /// (name-level addressing + pre-encoded payload).
+    pub(super) async fn encode_mail_bundle(
+        &self,
+        engine: EngineId,
+        specs: &[EngineMailSpec],
+    ) -> anyhow::Result<Vec<NamedMail>> {
+        let mut out = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let params = spec.params.clone().unwrap_or(serde_json::Value::Null);
+            let (_desc, payload) = self
+                .resolve_and_encode(engine, &spec.kind_name, params)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e} (kind {})", spec.kind_name))?;
+            out.push(NamedMail {
+                recipient_name: spec.recipient_name.clone(),
+                kind_name: spec.kind_name.clone(),
+                payload,
+                count: 1,
+            });
+        }
+        Ok(out)
+    }
+
     /// Resolve `params` against the engine's live schema for `kind_name`
     /// and schema-encode them, refreshing the per-engine kind cache once
     /// on a staleness signal (ADR-0091 §3). The single shared encode path
-    /// behind `send_mail` ([`Self::build_mail_envelope`]),
-    /// `send_mail_traced` ([`Self::encode_traced_bundle`]), and
-    /// `capture_frame` ([`Self::encode_capture_bundle`]).
+    /// behind `send_mail` ([`Self::build_mail_envelope`]) and every
+    /// engine-fixed bundle surface ([`Self::encode_mail_bundle`]).
     ///
     /// Two staleness triggers refresh the cache from
     /// `aether.inventory.kinds`, both bounded to exactly one refresh

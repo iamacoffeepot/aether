@@ -78,13 +78,20 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // Repinned again when the Scope binding's `process` re-pointed to
 // `aether.bloomery.api` (#3570) — the sealed spec's stage catalog digest is
 // part of the decided output, so an intended catalog edit re-digests here too.
+// Repinned again for #3559: `reduce_resolve` now emits a `DispatchLand` effect
+// alongside `SetResolved` (resolution is land-readiness, ADR-0149 migration
+// step 3), so the resolve step's decided output gained the land decision — an
+// intended change, recomputed.
+// Repinned again for #3573: the Land binding's `process` re-pointed from the
+// retired `land` skill to the native `source.cas_land` lane re-digests the
+// sealed spec's stage catalog, so the merged decision stream carries this edit.
 // Repinned again on the #3571→main merge when the Approve binding's `process`
 // re-pointed to the host-side pre-seal admission gate `aether.bloomery.approve_gate`
-// (#3571) — the merged decision stream carries the #3570, #3571, and #3572 edits,
-// so the golden is recomputed once more.
+// (#3571) — the merged decision stream carries the #3559, #3570, #3572, and #3573
+// edits plus this Approve re-point, so the golden is recomputed once more.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0x45, 0x4d, 0x50, 0xad, 0x89, 0xed, 0x84, 0x76, 0x49, 0x7a, 0x7f, 0xa6, 0xf8, 0x99, 0xb6, 0xec, 0x19, 0x7f, 0xff,
-    0x89, 0xeb, 0x6c, 0x6f, 0x6d, 0x63, 0x39, 0xe2, 0x1d, 0x8e, 0x15, 0x7f, 0xfb,
+    0x63, 0x1a, 0x52, 0x47, 0xb8, 0xbe, 0x71, 0xdb, 0xf4, 0x09, 0x74, 0x3a, 0x14, 0x93, 0x63, 0x7d, 0xf4, 0xb9, 0x79,
+    0xb6, 0xfd, 0xde, 0x1d, 0x55, 0x8a, 0x60, 0xa2, 0x8c, 0x9c, 0xd4, 0x4c, 0x6b,
 ];
 
 #[test]

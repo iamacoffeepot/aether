@@ -36,8 +36,8 @@ use super::claim_plan::{
 };
 use super::{
     Admit, AdmitResult, ClaimResult, ClaimSeal, Commit, CommitResult, DispatchPayload, EnumerateClaims,
-    EnumerateClaimsResult, MembershipMutation, OutboxPayload, Query, QueryResult, RedispatchPayload, ReplayJournal,
-    ReplayJournalResult, TransferSeal,
+    EnumerateClaimsResult, LandPayload, MembershipMutation, OutboxPayload, Query, QueryResult, RedispatchPayload,
+    ReplayJournal, ReplayJournalResult, TransferSeal,
 };
 use crate::ids::BloomId;
 use crate::port::{ClaimRefKind, ClaimRefState};
@@ -84,6 +84,12 @@ const REDISPATCH_TOPIC: &str = "aether.bloomery.redispatch";
 /// and submits it through the executor port (ADR-0149 §The line). Producer-only
 /// here, like [`RECEIPT_TOPIC`] / [`REDISPATCH_TOPIC`].
 const DISPATCH_TOPIC: &str = "aether.bloomery.dispatch";
+
+/// The outbox topic a land dispatch enqueues under, so the land driver (ADR-0149
+/// migration step 3) drains it and issues the source-port compare-and-swap land.
+/// Producer-only here, like the other dispatch topics; the land driver's
+/// consumer-side constant mirrors this string.
+const LAND_TOPIC: &str = "aether.bloomery.land";
 
 /// An admit awaiting its durable commit reply — the reply handle to answer, the
 /// decoded event, and the decisions to apply to the snapshot once the store
@@ -584,6 +590,10 @@ fn project(
                     transformation: transformation.clone(),
                 };
                 outbox.push(OutboxPayload { topic: DISPATCH_TOPIC.to_owned(), payload: to_vec(&payload)? });
+            }
+            Decision::DispatchLand { bloom, expected_base, new_head } => {
+                let payload = LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head };
+                outbox.push(OutboxPayload { topic: LAND_TOPIC.to_owned(), payload: to_vec(&payload)? });
             }
             Decision::InheritClaim { .. }
             | Decision::RecordResolution { .. }

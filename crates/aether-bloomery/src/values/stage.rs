@@ -177,9 +177,13 @@ impl StageCatalog {
                     "aggregate-review-approved",
                     2,
                 ),
-                StageId::Land => {
-                    (&["bloom.aggregate_verify", "bloom.aggregate_review"], &["bloom.receipt"], "land", "landed", 1)
-                }
+                StageId::Land => (
+                    &["bloom.aggregate_verify", "bloom.aggregate_review"],
+                    &["bloom.receipt"],
+                    "source.cas_land",
+                    "landed",
+                    1,
+                ),
                 StageId::Study => (&["bloom.receipt"], &["bloom.study"], "retrospect", "study-recorded", 1),
             };
         StageBinding {
@@ -307,6 +311,9 @@ impl Transformation {
             StageId::Scope => unreachable!(
                 "Scope is a pre-seal operator-harness process staged via the REST control API, never a dispatched member transformation"
             ),
+            StageId::Land => unreachable!(
+                "Land is a host-native source-port CAS (LandDriverCapability, #3559), never a dispatched member transformation"
+            ),
             StageId::Construct
             | StageId::Refine
             | StageId::Sketch
@@ -314,7 +321,6 @@ impl Transformation {
             | StageId::Integrate
             | StageId::AggregateVerify
             | StageId::AggregateReview
-            | StageId::Land
             | StageId::Study => ("construct.implement", "iama/construct-claude:1", NetworkProfile::Restricted),
         };
         Self {
@@ -392,15 +398,20 @@ mod tests {
     // Repinned for #3572: the Construct and Refine bindings' `process` re-pointed
     // from the retired `implement` skill to the native `construct.implement`
     // transform lane — an intended catalog edit, so the golden is recomputed.
+    // Repinned again when the Scope binding's `process` re-pointed to
+    // `aether.bloomery.api` (#3570) — an intended catalog edit.
+    // Repinned again for #3573: the Land binding's `process` re-pointed from the
+    // retired `land` skill to the native `source.cas_land` lane — an intended
+    // catalog edit.
     // Repinned again on the #3571→main merge: main already carries the #3570 Scope
-    // (`aether.bloomery.api`) and #3572 Construct/Refine (`construct.implement`)
-    // re-points; this branch adds the #3571 Approve `process` re-point to the
-    // host-side pre-seal admission gate `aether.bloomery.approve_gate`, so the
-    // merged catalog line carries all three intended edits and the golden is
-    // recomputed once more.
+    // (`aether.bloomery.api`), #3572 Construct/Refine (`construct.implement`), and
+    // #3573 Land (`source.cas_land`) re-points; this branch adds the #3571 Approve
+    // `process` re-point to the host-side pre-seal admission gate
+    // `aether.bloomery.approve_gate`, so the merged catalog line carries all four
+    // intended edits and the golden is recomputed once more.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x0c, 0x05, 0x89, 0x22, 0xc1, 0xbc, 0x27, 0x0e, 0x40, 0x19, 0x1f, 0x5f, 0x4b, 0x15, 0xc7, 0x2e, 0x58, 0xb8,
-        0xc9, 0xc2, 0x0b, 0x91, 0xe1, 0x1c, 0x69, 0x64, 0x56, 0x58, 0x95, 0x47, 0xaf, 0x1f,
+        0x86, 0xea, 0xbb, 0x50, 0xd1, 0x23, 0x97, 0x9b, 0xb6, 0x91, 0xb0, 0x7c, 0xc9, 0xf5, 0xde, 0x07, 0x35, 0xb6,
+        0xde, 0x04, 0x60, 0x2b, 0x97, 0x9e, 0xf7, 0x95, 0xbb, 0xf3, 0xb9, 0xcd, 0xe2, 0x7a,
     ];
 
     #[test]
@@ -435,6 +446,17 @@ mod tests {
         let subject = Digest::from_bytes([7; 32]);
         let checkout = Digest::from_bytes([9; 32]);
         let _ = Transformation::for_member_stage(StageId::Scope, subject, checkout);
+    }
+
+    // Land is a host-native source-port CAS (LandDriverCapability, #3559), never
+    // a dispatched member transformation — a mis-dispatch must fail loudly rather
+    // than silently running the Claude construct lane on a zero-secret worker.
+    #[test]
+    #[should_panic(expected = "host-native source-port CAS")]
+    fn for_member_stage_panics_on_land() {
+        let subject = Digest::from_bytes([7; 32]);
+        let checkout = Digest::from_bytes([9; 32]);
+        let _ = Transformation::for_member_stage(StageId::Land, subject, checkout);
     }
 
     // The per-member dispatch transformation pins the given subject as its single

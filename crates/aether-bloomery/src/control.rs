@@ -102,6 +102,24 @@ pub struct DispatchPayload {
     pub transformation: Transformation,
 }
 
+/// The land dispatch outbox payload (ADR-0149 §The boundary, migration step 3):
+/// the resolved bloom plus the compare-and-swap arguments the host's land driver
+/// issues through the source port's `aether.source.land` op. The wasm control
+/// actor enqueues it under the `aether.bloomery.land` topic from a
+/// [`Decision::DispatchLand`](crate::reduce::Decision::DispatchLand) the moment a
+/// bloom resolves. Defined here (always compiled) so the host consumer can decode
+/// it inward, cycle-free — like [`OutboxPayload`] / [`DispatchPayload`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct LandPayload {
+    /// The resolved bloom to land.
+    pub bloom: Digest,
+    /// The sealed base the CAS lands on — a moved mainline is a clean base-moved
+    /// refusal, not a land onto the new head.
+    pub expected_base: Digest,
+    /// The head mainline advances to on a successful land.
+    pub new_head: Digest,
+}
+
 /// The combined atomic store commit (ADR-0149 §The control core). One
 /// transact-mail carrying the idempotency-keyed journal event plus the
 /// reducer's membership mutations and outbox payloads, applied in a **single**

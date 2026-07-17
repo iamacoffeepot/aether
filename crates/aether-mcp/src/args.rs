@@ -43,6 +43,20 @@ pub struct SpawnSubstrateArgs {
     /// (default) boots a bare engine.
     #[serde(default)]
     pub components: Vec<ComponentSpec>,
+    /// Init mail to dispatch once the engine — and every `components`
+    /// entry — is ready (issue 3580): the world-becoming half of a
+    /// bring-up in the same call, e.g. create a camera, load a mesh,
+    /// seed state. Each item is settled like a `send_mail` item
+    /// (dispatched, chain awaited, terminal replies collected) and
+    /// reported per-item in the response's `mails`, so a failed init
+    /// surfaces in the spawn reply rather than at first observation.
+    /// Items encode after boot against the live engine's merged kind
+    /// view (ADR-0091), so a boot component's own kinds resolve; a bad
+    /// entry becomes that item's `"error: …"` status and aborts neither
+    /// the spawn nor its sibling items. Keep `capture_frame.mails` for
+    /// frame-scoped placement only. Empty (default) dispatches nothing.
+    #[serde(default)]
+    pub mails: Vec<EngineMailSpec>,
 }
 
 /// One component in a `spawn_substrate` boot list. Mirrors the
@@ -244,15 +258,20 @@ pub enum ReplyProjection {
     None,
 }
 
-/// One item in a `send_mail` batch.
+/// One mail addressed on an engine the surrounding call has already
+/// fixed — the single item shape behind every mail-bundle surface:
+/// `spawn_substrate.mails`, `capture_frame.mails` / `after_mails`,
+/// `send_mail_traced.mails`, and (with its engine named per item
+/// through [`MailSpec`]'s flatten) `send_mail.mails`.
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct MailSpec {
-    /// Engine UUID the mail targets (from `list_engines`).
-    pub engine_id: String,
-    /// Mailbox name on that engine (e.g. `"aether.fs"`).
+pub struct EngineMailSpec {
+    /// Mailbox name on the target engine (e.g. `"aether.render"`, or a
+    /// loaded component's lineage such as
+    /// `"aether.component/aether.embedded:aether.kit.camera"`).
     pub recipient_name: String,
-    /// Kind name (e.g. `"aether.fs.list"`), resolved against the
-    /// substrate kind vocabulary baked into `aether-mcp`.
+    /// Kind name (e.g. `"aether.fs.list"`), resolved against the target
+    /// engine's merged kind view (ADR-0091) — a loaded component's own
+    /// kinds are addressable.
     pub kind_name: String,
     /// Structured params, schema-encoded to wire bytes against the
     /// kind's descriptor. Omit or `null` for a fieldless kind. For a
@@ -262,6 +281,18 @@ pub struct MailSpec {
     /// `{"$text": s}` UTF-8-encodes.
     #[serde(default)]
     pub params: Option<serde_json::Value>,
+}
+
+/// One item in a `send_mail` batch: an [`EngineMailSpec`] plus the
+/// engine it targets — `send_mail` is the one bundle surface whose
+/// items each name their own engine. The flatten keeps the JSON shape
+/// the flat four-field record it has always been.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MailSpec {
+    /// Engine UUID the mail targets (from `list_engines`).
+    pub engine_id: String,
+    #[serde(flatten)]
+    pub mail: EngineMailSpec,
 }
 
 /// Stable terrain-mark identity in the task-level MCP vocabulary.
@@ -578,6 +609,20 @@ pub struct EngineInfo {
     pub last_heartbeat_age_millis: u64,
 }
 
+/// `spawn_substrate` output: the spawned engine plus, when the spawn
+/// carried an init-mail bundle (issue 3580), that bundle's per-item
+/// outcomes. With no bundle the `mails` key is absent, so the JSON is
+/// exactly the bare [`EngineInfo`] shape.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct SpawnSubstrateResponse {
+    #[serde(flatten)]
+    pub engine: EngineInfo,
+    /// Per-item outcome for each entry in the spawn's `mails` bundle,
+    /// in request order. `None` (absent) when the spawn carried none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mails: Option<Vec<MailStatus>>,
+}
+
 /// One recently-departed engine, as reported in `list_engines`'
 /// `recently_died` sidecar (issue 1906).
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -795,21 +840,6 @@ pub struct DescribeComponentArgs {
     /// non-empty rustdoc line (summary convention; issue 3006).
     #[serde(default)]
     pub full: bool,
-}
-
-/// One mail in a `capture_frame` bundle. Like [`MailSpec`] but without
-/// `engine_id` — every bundle entry is dispatched on the engine being
-/// captured, so the engine is already fixed by `CaptureFrameArgs`.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct CaptureMailSpec {
-    /// Mailbox name on the captured engine (e.g. `"aether.render"`).
-    pub recipient_name: String,
-    /// Kind name, resolved against the substrate kind vocabulary.
-    pub kind_name: String,
-    /// Structured params, schema-encoded to wire bytes. Omit or
-    /// `null` for a fieldless kind.
-    #[serde(default)]
-    pub params: Option<serde_json::Value>,
 }
 
 /// `actor_logs` arguments — pull entries out of one actor's
@@ -1052,7 +1082,7 @@ pub struct SendMailTracedArgs {
     /// One or more mail items, dispatched as children of one shared
     /// trace root. A bad spec aborts the whole batch before any mail
     /// moves (mirrors `capture_frame`'s bundle semantics).
-    pub mails: Vec<TracedMailSpec>,
+    pub mails: Vec<EngineMailSpec>,
     /// Cap on wall-clock wait for the batch's chain to settle, in
     /// milliseconds. Defaults to 300000 (300s); clamped to 600000
     /// (600s) — sized to clear a provider cap's API timeout (e.g. the
@@ -1071,21 +1101,6 @@ pub struct SendMailTracedArgs {
     /// `node_count`; timeout and fire-and-forget responses include neither.
     #[serde(default)]
     pub full: bool,
-}
-
-/// One mail in a `send_mail_traced` batch. Like [`CaptureMailSpec`] but
-/// scoped to the trace-dispatch surface — the engine is fixed once at
-/// the batch level by [`SendMailTracedArgs::engine_id`].
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct TracedMailSpec {
-    /// Mailbox name on the target engine (e.g. `"aether.render"`).
-    pub recipient_name: String,
-    /// Kind name, resolved against the substrate kind vocabulary.
-    pub kind_name: String,
-    /// Structured params, schema-encoded to wire bytes. Omit or
-    /// `null` for a fieldless kind.
-    #[serde(default)]
-    pub params: Option<serde_json::Value>,
 }
 
 /// `send_mail_traced` response. One combined trace tree for the whole
@@ -1244,11 +1259,11 @@ pub struct CaptureFrameArgs {
     /// whose effects should appear in the image. Resolved atomically:
     /// any bad entry aborts the whole capture.
     #[serde(default)]
-    pub mails: Vec<CaptureMailSpec>,
+    pub mails: Vec<EngineMailSpec>,
     /// Mail dispatched *after* readback — cleanup such as restoring a
     /// flag the caller flipped for the capture.
     #[serde(default)]
-    pub after_mails: Vec<CaptureMailSpec>,
+    pub after_mails: Vec<EngineMailSpec>,
     /// Reductions to score substrate-side on the captured frame's raw
     /// RGBA, returned as a `verdict` text block. When this is non-empty,
     /// `include_image` defaults to `false`; set it explicitly to keep an
