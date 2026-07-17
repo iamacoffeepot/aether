@@ -908,6 +908,7 @@ jobs:
       # Fenced like every pool step: a metering slip never reddens a review.
       - name: Meter the review into the spend ledger
         if: always() && steps.resolve.outputs.proceed == 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        continue-on-error: true
         env:
           PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
           JOB_STATUS: ${{ job.status }}
@@ -926,12 +927,12 @@ jobs:
           if [ "${AGENT_POOL_ENABLE:-}" = "true" ]; then
             warm=false; [ -n "${POOL_SESSION_ID:-}" ] && warm=true
             verdict="null"; reason=""; compliance="null"
-            if [ -f "$GITHUB_WORKSPACE/pool-verdict.json" ]; then
+            if [ -f "$GITHUB_WORKSPACE/pool-verdict.json" ] && jq -e empty "$GITHUB_WORKSPACE/pool-verdict.json" 2>/dev/null; then
               verdict="$(jq -r '.repool // "unknown"' "$GITHUB_WORKSPACE/pool-verdict.json")"
               reason="$(jq -r '.reason // ""' "$GITHUB_WORKSPACE/pool-verdict.json")"
               compliance="true"
             elif [ "$warm" = true ]; then
-              compliance="false"   # warm session was asked to write a verdict and did not
+              compliance="false"   # warm session was asked to write a verdict and did not (or it was malformed)
             fi
             retire="$( [ -f /tmp/pool-deposit-reason.txt ] && cat /tmp/pool-deposit-reason.txt || true )"
             jq -nc \
