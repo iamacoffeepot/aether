@@ -167,6 +167,12 @@ struct Run {
     // checkout is the tree the work runs on, the subject is what the evidence is
     // about. Binding to the checkout would refuse at intake as a digest mismatch.
     subject: Digest,
+    // Whether this run is the model-driven construct lane, decided at submit from
+    // the order's command. The completion gate is lane-specific: a construct run's
+    // verdict demands a substantive conclusion (#3596), a verify run's rides its
+    // stamped `status`, so the gate must know which lane produced the evidence —
+    // and must know it even when the evidence bytes do not decode (fail-closed).
+    is_construct: bool,
 }
 
 /// The local-process executor backend: an in-process registry of tracked runs
@@ -245,7 +251,7 @@ impl ExecutorBackend for LocalExecutor {
             task: is_construct.then_some(order.transformation.description.as_deref()).flatten(),
         };
         let process = self.runner.start(&spec)?;
-        self.lock().insert(nonce, Run { process, evidence_dir, subject });
+        self.lock().insert(nonce, Run { process, evidence_dir, subject, is_construct });
         Ok(WorkHandle::new(order.nonce.clone()))
     }
 
@@ -295,7 +301,7 @@ impl ExecutorBackend for LocalExecutor {
         // Pull the run's on-disk location, binding digest, and terminal exit out of
         // the guarded region, then drop the lock — the evidence read is blocking IO
         // and must not hold the registry mutex.
-        let (evidence_dir, subject, exited_success) = {
+        let (evidence_dir, subject, exited_success, is_construct) = {
             let mut runs = self.lock();
             let Some(run) = runs.get_mut(&handle.nonce.0) else {
                 return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
@@ -304,6 +310,7 @@ impl ExecutorBackend for LocalExecutor {
                 run.evidence_dir.clone(),
                 run.subject,
                 matches!(run.process.poll(), RunLifecycle::Exited { success: true }),
+                run.is_construct,
             )
         };
         let evidence_path = evidence_dir.join("evidence.json");
@@ -313,13 +320,19 @@ impl ExecutorBackend for LocalExecutor {
         // only in-flight orders rather than growing for the process's lifetime. A
         // failed read leaves the entry above so a later cycle can retry it.
         self.lock().remove(&handle.nonce.0);
-        // Verdict from the run's own evidence: the verify lane stamps a `status`
-        // ("pass"/"fail"); the construct lane's record carries none, so its verdict
-        // folds from the child's terminal exit. A passing outcome maps to
-        // VerificationPassed — the only non-approval verdict the completion gate
-        // reads as passing (`verdict_passed`), so a produced construct candidate
-        // advances the member.
-        let passed = parse_status(&bytes).unwrap_or(exited_success);
+        // Verdict from the run's own evidence, lane-specific. The construct lane's
+        // gate demands a substantive conclusion (#3596) — a terminal `result` with
+        // `is_error == false` AND a produced candidate — and is fail-closed on any
+        // shortfall (dead run, errored run, empty candidate, unparseable evidence),
+        // so it never falls back to the child's terminal exit (an empty run exits
+        // zero). The verify lane stamps a `status` ("pass"/"fail"); the raw
+        // `exited_success` fallback survives only for a non-construct evidence shape
+        // that stamps no status.
+        let passed = if is_construct {
+            construct_conclusion(&bytes)
+        } else {
+            parse_status(&bytes).unwrap_or(exited_success)
+        };
         let verdict = if passed {
             StageVerdict::VerificationPassed
         } else {
@@ -449,6 +462,29 @@ fn parse_status(bytes: &[u8]) -> Option<bool> {
         "fail" => Some(false),
         _ => None,
     }
+}
+
+/// Whether a construct lane's `evidence.json` byte string shows a **substantive
+/// conclusion** (#3596): the run reached a terminal `result` with
+/// `is_error == false` *and* left a candidate change in the working tree
+/// (`produced_candidate == true`). The construct lane's whole job is to produce a
+/// focused candidate change, so a run that merely exited zero with nothing to
+/// review must not advance the member. Fail-closed — a `no_result` record (a run
+/// that died early), an errored run (`is_error == true`), an empty candidate
+/// (`produced_candidate` absent or `false`), or bytes that do not decode all
+/// return `false`.
+fn construct_conclusion(bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let produced_candidate = value.get("produced_candidate").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    // A terminal `result` with is_error == false is the "the run concluded"
+    // signal; a `no_result` record carries no `is_error` field, and an errored run
+    // carries `is_error == true` — both fail this test.
+    let concluded =
+        value.get("result_record").and_then(|record| record.get("is_error")).and_then(serde_json::Value::as_bool)
+            == Some(false);
+    concluded && produced_candidate
 }
 
 /// A deterministic spawn seam for tests: writes a fixed `evidence.json` into the

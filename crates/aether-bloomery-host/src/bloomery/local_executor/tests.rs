@@ -34,13 +34,14 @@ fn construct_order(subject: Digest, nonce: &str) -> aether_bloomery::WorkOrder {
 
 #[test]
 fn submit_inspect_stream_synthesizes_an_admissible_evidence_ref() {
-    // A construct run whose record carries no `status` — its verdict folds from the
-    // child's exit (success → VerificationPassed) so a produced candidate advances
-    // the member. The synthesized ref must round-trip through NameEvidenceClaims
-    // with the subject bound to the order's subject input, the digest intake binds.
+    // A construct run that concluded substantively — a terminal `result` with
+    // is_error == false and a produced candidate — folds to VerificationPassed so
+    // it advances the member (#3596). The synthesized ref must round-trip through
+    // NameEvidenceClaims with the subject bound to the order's subject input, the
+    // digest intake binds.
     let base = TempDir::new().unwrap();
     let subject = digest(5);
-    let evidence = r#"{"command":"construct.implement","nonce":"n-1","result_record":{"schema":1}}"#;
+    let evidence = r#"{"command":"construct.implement","nonce":"n-1","produced_candidate":true,"result_record":{"schema":1,"is_error":false,"result":{"num_turns":3}}}"#;
     let exec = executor(&base, evidence, RunLifecycle::Exited { success: true });
 
     let handle = exec.submit(&construct_order(subject, "n-1")).unwrap();
@@ -57,7 +58,11 @@ fn submit_inspect_stream_synthesizes_an_admissible_evidence_ref() {
     let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes as an attempt result");
     assert_eq!(upload.nonce, Nonce("n-1".to_owned()));
     assert_eq!(upload.subject, subject, "the evidence binds to the order's subject input, not the checkout");
-    assert_eq!(upload.verdict, StageVerdict::VerificationPassed, "a construct success folds to a passing verdict");
+    assert_eq!(
+        upload.verdict,
+        StageVerdict::VerificationPassed,
+        "a substantive construct conclusion folds to a passing verdict"
+    );
     assert_eq!(upload.detail, Digest::of_wire_bytes(evidence.as_bytes()), "the detail is the evidence content address");
 }
 
@@ -126,6 +131,57 @@ fn stream_evidence_evicts_the_consumed_run() {
         Err(LocalExecutorError::NoRunForNonce(_)) => {}
         other => panic!("expected NoRunForNonce after eviction, got {other:?}"),
     }
+}
+
+// Fold the verdict a construct run's `evidence.json` yields through the whole
+// `stream_evidence` path (the fixed-runner seam), decoded back off the
+// synthesized ref — the gate's substantive-conclusion contract end-to-end
+// (#3596). The stubbed child exits zero throughout, so a failing verdict proves
+// the gate reads the evidence, not the child's exit.
+fn construct_verdict(evidence: &str) -> StageVerdict {
+    let base = TempDir::new().unwrap();
+    let exec = executor(&base, evidence, RunLifecycle::Exited { success: true });
+    let handle = exec.submit(&construct_order(digest(5), "n-g")).unwrap();
+    let refs = exec.stream_evidence(&handle).unwrap();
+    NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes").verdict
+}
+
+#[test]
+fn construct_gate_passes_a_substantive_conclusion() {
+    // A terminal `result` with is_error == false AND a produced candidate — the
+    // only shape that advances the member.
+    let ev = r#"{"command":"construct.implement","nonce":"n-g","produced_candidate":true,"result_record":{"is_error":false,"result":{"num_turns":3}}}"#;
+    assert_eq!(construct_verdict(ev), StageVerdict::VerificationPassed);
+}
+
+#[test]
+fn construct_gate_fails_an_empty_candidate_run_despite_a_clean_exit() {
+    // The exact 2026-07-17 bloom-trial bug: is_error == false and the child exits
+    // zero, but the run left no candidate — nothing to review, so it must NOT
+    // advance the member. The old `exited_success` fallthrough passed this.
+    let ev = r#"{"command":"construct.implement","nonce":"n-g","produced_candidate":false,"result_record":{"is_error":false,"result":{"num_turns":6}}}"#;
+    assert_eq!(construct_verdict(ev), StageVerdict::VerificationFailed);
+}
+
+#[test]
+fn construct_gate_fails_an_errored_run_even_with_a_candidate() {
+    let ev = r#"{"command":"construct.implement","nonce":"n-g","produced_candidate":true,"result_record":{"is_error":true,"result":{}}}"#;
+    assert_eq!(construct_verdict(ev), StageVerdict::VerificationFailed);
+}
+
+#[test]
+fn construct_gate_fails_a_dead_run_with_no_terminal_result() {
+    // A `no_result` record (the run died before its terminal event) carries no
+    // `is_error` field — fail-closed even with a candidate present.
+    let ev = r#"{"command":"construct.implement","nonce":"n-g","produced_candidate":true,"result_record":{"no_result":true}}"#;
+    assert_eq!(construct_verdict(ev), StageVerdict::VerificationFailed);
+}
+
+#[test]
+fn construct_gate_fails_unparseable_evidence() {
+    // Bytes that do not decode as a construct record are fail-closed — the run is
+    // known to be the construct lane (the Run's flag), so the exit is never read.
+    assert_eq!(construct_verdict("not json at all"), StageVerdict::VerificationFailed);
 }
 
 #[test]
