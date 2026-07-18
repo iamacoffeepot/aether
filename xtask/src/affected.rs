@@ -28,7 +28,7 @@ use determinator::Determinator;
 use determinator::rules::DeterminatorRules;
 use guppy::graph::{DependencyDirection, PackageGraph};
 
-use crate::inventory::{CHASSIS_PACKAGE, WASM_CONSUMER_PACKAGES, discover_behaviors, discover_components};
+use crate::inventory::{CHASSIS_PACKAGE, discover_behaviors, discover_components};
 
 /// Paths whose change invalidates the selection premise: they shape the
 /// dependency graph, the toolchain, the test configuration, or the
@@ -87,8 +87,8 @@ struct Selection {
     /// Affected workspace package names (empty when `run_all` is set —
     /// the full invocation ignores the list).
     packages: BTreeSet<String>,
-    /// Whether [`CHASSIS_PACKAGE`] is in the selection, i.e. whether the
-    /// `cargo xtask dist` wasm pre-build is needed before the tests run.
+    /// Whether the `cargo xtask dist` wasm pre-build is needed before
+    /// the tests run — see [`derive_wasm_needed`].
     wasm_needed: bool,
 }
 
@@ -120,7 +120,15 @@ pub fn run(args: &AffectedArgs) -> Result<()> {
             .map(|component| component.package)
             .chain(discover_behaviors(&metadata).into_iter().map(|behavior| behavior.package))
             .collect();
-        select(&graph, &changed, &wasm_sources)?
+        let wasm_consumers: BTreeSet<String> = metadata
+            .packages
+            .iter()
+            .filter(|package| {
+                package.dependencies.iter().any(|dependency| wasm_sources.contains(dependency.name.as_str()))
+            })
+            .map(|package| package.name.to_string())
+            .collect();
+        select(&graph, &changed, &wasm_sources, &wasm_consumers)?
     };
 
     report(&selection, changed.len());
@@ -146,7 +154,12 @@ fn global_screen(changed: &[String]) -> Option<&str> {
 /// that could reshape the graph is already screened to `run_all` by
 /// [`global_screen`] (a member-crate dependency edit always touches
 /// `Cargo.lock`).
-fn select(graph: &PackageGraph, changed: &[String], wasm_sources: &BTreeSet<String>) -> Result<Selection> {
+fn select(
+    graph: &PackageGraph,
+    changed: &[String],
+    wasm_sources: &BTreeSet<String>,
+    wasm_consumers: &BTreeSet<String>,
+) -> Result<Selection> {
     let rules = DeterminatorRules::parse(PATH_RULES_TOML).context("parse built-in determinator path rules")?;
     let mut determinator = Determinator::new(graph, graph);
     determinator.set_rules(&rules).context("apply determinator path rules")?;
@@ -167,11 +180,24 @@ fn select(graph: &PackageGraph, changed: &[String], wasm_sources: &BTreeSet<Stri
     }
 
     inject_wasm_coupling(&mut packages, wasm_sources);
-    // Any affected wasm-consumer package (the chassis bundle, or a crate whose own
-    // tests load component wasm) forces the pre-build — cargo's graph cannot see the
-    // runtime wasm load, so this coupling is declared, not derived.
-    let wasm_needed = packages.iter().any(|name| WASM_CONSUMER_PACKAGES.contains(&name.as_str()));
+    let wasm_needed = derive_wasm_needed(&packages, wasm_sources, wasm_consumers);
     Ok(Selection { run_all: None, packages, wasm_needed })
+}
+
+/// Whether the `cargo xtask dist` wasm pre-build must run before the
+/// selected tests: the chassis package's scenario tests execute component
+/// wasm, a wasm-source crate's own tests may read its wasm, and a crate
+/// that depends on a wasm source can execute that source's wasm at test
+/// time (issue #3617 — `aether-bloomery-host`'s control-loop tests run
+/// `aether-bloomery`'s control-core wasm and hard-fail under
+/// `AETHER_REQUIRE_RUNTIME` when it was not pre-built).
+fn derive_wasm_needed(
+    packages: &BTreeSet<String>,
+    wasm_sources: &BTreeSet<String>,
+    wasm_consumers: &BTreeSet<String>,
+) -> bool {
+    packages.contains(CHASSIS_PACKAGE)
+        || packages.iter().any(|name| wasm_sources.contains(name) || wasm_consumers.contains(name))
 }
 
 /// The coupling cargo's graph cannot see: [`CHASSIS_PACKAGE`]'s scenario
@@ -284,35 +310,54 @@ mod tests {
     }
 
     #[test]
+    fn wasm_needed_covers_consumers_beyond_the_chassis() {
+        // The canary shape from issue #3617: aether-bloomery-host is not
+        // the chassis and not a wasm source, but its tests execute
+        // aether-bloomery's control-core wasm — deriving wasm_needed from
+        // chassis membership alone skipped the dist pre-build and
+        // hard-failed under AETHER_REQUIRE_RUNTIME.
+        let wasm_sources = string_set(&["aether-bloomery"]);
+        let wasm_consumers = string_set(&["aether-bloomery-host"]);
+        assert!(
+            derive_wasm_needed(&string_set(&["aether-bloomery-host"]), &wasm_sources, &wasm_consumers),
+            "a selected wasm-consumer crate needs the pre-build"
+        );
+        assert!(
+            derive_wasm_needed(&string_set(&["aether-bloomery"]), &wasm_sources, &wasm_consumers),
+            "a selected wasm-source crate needs the pre-build"
+        );
+        assert!(
+            !derive_wasm_needed(&string_set(&["aether-math"]), &wasm_sources, &wasm_consumers),
+            "a crate with no wasm relationship must not force the pre-build"
+        );
+    }
+
+    #[test]
     fn real_graph_closure_and_conservative_fallback() {
         let graph = guppy::MetadataCommand::new().build_graph().expect("build package graph");
         let no_wasm_sources = BTreeSet::new();
+        let no_wasm_consumers = BTreeSet::new();
 
         // A leaf-crate change selects that crate but not the chassis
         // package — the payoff case this tool exists for. An inverted or
-        // over-wide closure shows up here. `aether-bloomery-host` is outside the
-        // chassis package's dependency tree, so it is the leaf that proves the
-        // closure is not over-wide; it is *also* a wasm consumer (its integration
-        // tests fork the `bloomery` bin that autoloads the control-core wasm), so a
-        // change to it forces the pre-build even with no component crate affected —
-        // the runtime coupling cargo's graph cannot see (#3599).
-        let leaf = select(&graph, &strings(&["crates/aether-bloomery-host/src/lib.rs"]), &no_wasm_sources)
-            .expect("select over leaf change");
+        // over-wide closure shows up here.
+        let leaf =
+            select(&graph, &strings(&["crates/aether-bloomery-host/src/lib.rs"]), &no_wasm_sources, &no_wasm_consumers)
+                .expect("select over leaf change");
         assert!(leaf.run_all.is_none(), "leaf change must not run everything");
         assert!(leaf.packages.contains("aether-bloomery-host"), "changed crate must be selected");
         assert!(!leaf.packages.contains(CHASSIS_PACKAGE), "unrelated chassis package must not be selected");
-        assert!(leaf.wasm_needed, "aether-bloomery-host is a wasm consumer, so its change needs the pre-build");
 
         // A path matching no package and no rule must fall back to the
         // whole workspace — silent deselection of unknown inputs is the
         // one failure mode this tool must never have.
-        let unknown = select(&graph, &strings(&["mystery-toplevel-input.txt"]), &no_wasm_sources)
+        let unknown = select(&graph, &strings(&["mystery-toplevel-input.txt"]), &no_wasm_sources, &no_wasm_consumers)
             .expect("select over unknown path");
         assert!(unknown.run_all.is_some(), "unknown path must run everything");
 
         // The bloomery/** rule maps the cross-boundary test input to its
         // reader instead of falling back to run-everything.
-        let policy = select(&graph, &strings(&["bloomery/approval-policy.yml"]), &no_wasm_sources)
+        let policy = select(&graph, &strings(&["bloomery/approval-policy.yml"]), &no_wasm_sources, &no_wasm_consumers)
             .expect("select over bloomery config change");
         assert!(policy.run_all.is_none(), "bloomery config maps to a package, not run_all");
         assert!(policy.packages.contains("aether-bloomery-host"), "bloomery config change must select its reader");

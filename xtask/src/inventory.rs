@@ -36,16 +36,6 @@ const BEHAVIOR_FEATURE_TOKEN: &str = "dep:aether-behavior";
 /// resolve) without the per-package isolation the wasm components need.
 pub const CHASSIS_PACKAGE: &str = "aether-substrate-bundle";
 
-/// Workspace packages whose *own* tests execute component wasm and therefore
-/// need the `cargo xtask dist` pre-build before they run — a coupling cargo's
-/// dependency graph cannot see (the wasm is loaded at runtime, not linked). The
-/// chassis bundle's scenario tests are the original consumer; `aether-bloomery-host`
-/// is a second one — its `tests/{rest_api,control_loop}.rs` fork the `bloomery`
-/// bin, which autoloads the control-core `aether_bloomery.wasm`, and CI's
-/// `AETHER_REQUIRE_RUNTIME=1` turns a missing wasm into a hard failure. When any of
-/// these is in the affected set, CI must pre-build the wasm.
-pub const WASM_CONSUMER_PACKAGES: &[&str] = &[CHASSIS_PACKAGE, "aether-bloomery-host"];
-
 /// Chassis (host-target) binaries packaged into `dist/bin/`. Each name is
 /// both the `--bin` selector and the output filename.
 pub const CHASSIS_BINS: &[&str] = &["aether-substrate", "aether-substrate-headless", "aether-substrate-hub"];
