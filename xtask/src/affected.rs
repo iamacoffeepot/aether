@@ -28,7 +28,7 @@ use determinator::Determinator;
 use determinator::rules::DeterminatorRules;
 use guppy::graph::{DependencyDirection, PackageGraph};
 
-use crate::inventory::{CHASSIS_PACKAGE, discover_behaviors, discover_components};
+use crate::inventory::{CHASSIS_PACKAGE, WASM_CONSUMER_PACKAGES, discover_behaviors, discover_components};
 
 /// Paths whose change invalidates the selection premise: they shape the
 /// dependency graph, the toolchain, the test configuration, or the
@@ -167,7 +167,10 @@ fn select(graph: &PackageGraph, changed: &[String], wasm_sources: &BTreeSet<Stri
     }
 
     inject_wasm_coupling(&mut packages, wasm_sources);
-    let wasm_needed = packages.contains(CHASSIS_PACKAGE);
+    // Any affected wasm-consumer package (the chassis bundle, or a crate whose own
+    // tests load component wasm) forces the pre-build — cargo's graph cannot see the
+    // runtime wasm load, so this coupling is declared, not derived.
+    let wasm_needed = packages.iter().any(|name| WASM_CONSUMER_PACKAGES.contains(&name.as_str()));
     Ok(Selection { run_all: None, packages, wasm_needed })
 }
 
@@ -287,13 +290,18 @@ mod tests {
 
         // A leaf-crate change selects that crate but not the chassis
         // package — the payoff case this tool exists for. An inverted or
-        // over-wide closure shows up here.
+        // over-wide closure shows up here. `aether-bloomery-host` is outside the
+        // chassis package's dependency tree, so it is the leaf that proves the
+        // closure is not over-wide; it is *also* a wasm consumer (its integration
+        // tests fork the `bloomery` bin that autoloads the control-core wasm), so a
+        // change to it forces the pre-build even with no component crate affected —
+        // the runtime coupling cargo's graph cannot see (#3599).
         let leaf = select(&graph, &strings(&["crates/aether-bloomery-host/src/lib.rs"]), &no_wasm_sources)
             .expect("select over leaf change");
         assert!(leaf.run_all.is_none(), "leaf change must not run everything");
         assert!(leaf.packages.contains("aether-bloomery-host"), "changed crate must be selected");
         assert!(!leaf.packages.contains(CHASSIS_PACKAGE), "unrelated chassis package must not be selected");
-        assert!(!leaf.wasm_needed, "no wasm source affected, no pre-build needed");
+        assert!(leaf.wasm_needed, "aether-bloomery-host is a wasm consumer, so its change needs the pre-build");
 
         // A path matching no package and no rule must fall back to the
         // whole workspace — silent deselection of unknown inputs is the
