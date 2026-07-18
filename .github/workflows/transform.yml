@@ -1,4 +1,5 @@
 name: Transform
+run-name: transform ${{ inputs.command }} ${{ inputs.nonce }}
 
 # ADR-0149 §Execution's thin worker wrapper: `workflow_dispatch`-only, checks
 # out the exact digest a resolved work order names, runs the same
