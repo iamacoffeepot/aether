@@ -172,14 +172,41 @@ fn tail(s: &str, max: usize) -> &str {
     &s[start..]
 }
 
-/// Stamp the broker-matched `nonce` and the command id onto the derived result
-/// `record`, producing the construct lane's evidence envelope. Pure so the nonce
-/// binding is testable without running Claude (#3572).
-fn stamp_construct_evidence(nonce: Option<&str>, record: &serde_json::Value) -> serde_json::Value {
+/// Stamp the broker-matched `nonce`, the command id, and the candidate-produced
+/// signal onto the derived result `record`, producing the construct lane's
+/// evidence envelope. `produced_candidate` records whether the run left a
+/// candidate change in the working tree (#3596) — the completion gate reads it
+/// alongside the terminal-`result`/`is_error` signal to demand a substantive
+/// conclusion, not mere non-error. Pure so the binding is testable without
+/// running Claude or git (#3572).
+fn stamp_construct_evidence(
+    nonce: Option<&str>,
+    produced_candidate: bool,
+    record: &serde_json::Value,
+) -> serde_json::Value {
     serde_json::json!({
         "command": CONSTRUCT_IMPLEMENT,
         "nonce": nonce,
+        "produced_candidate": produced_candidate,
         "result_record": record,
+    })
+}
+
+/// Whether `git status --porcelain` stdout signals a candidate change in the
+/// working tree: a non-empty (whitespace-trimmed) output means the construct run
+/// left something to review, an empty one means it did nothing (#3596). Pure so
+/// the mapping is testable without spawning git.
+fn porcelain_signals_candidate(stdout: &str) -> bool {
+    !stdout.trim().is_empty()
+}
+
+/// Inspect the working tree (cwd — the checked-out worktree the construct lane
+/// runs in) for a candidate change the run left, via `git status --porcelain`.
+/// Fail-closed: a git that will not run cannot prove a candidate, so it reads as
+/// none (the completion gate then rejects the attempt).
+fn capture_produced_candidate() -> bool {
+    Command::new("git").args(["status", "--porcelain"]).output().is_ok_and(|output| {
+        output.status.success() && porcelain_signals_candidate(&String::from_utf8_lossy(&output.stdout))
     })
 }
 
@@ -366,11 +393,13 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
     #[allow(clippy::disallowed_methods)]
     let writer = thread::spawn(move || stdin.write_all(&prompt_bytes));
     let run = child.wait_with_output().context("await headless claude")?;
-    writer.join().expect("prompt-writer thread panicked").context("pipe the assembled prompt to headless claude")?;
     // A non-zero exit is the CLI itself failing to run (auth, bad args, crash) —
     // an operational failure, distinct from a task-level error, which a completed
     // run records as `is_error` inside the transcript. Surface it rather than
-    // writing an empty/garbage result record and reporting success.
+    // writing an empty/garbage result record and reporting success. Check it
+    // *before* the writer's result: an early child exit makes the stdin write race
+    // a broken pipe, so joining the writer first would surface that downstream
+    // symptom and mask the child's real exit cause.
     if !run.status.success() {
         bail!(
             "headless claude exited {}: {}",
@@ -378,6 +407,10 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
             tail(&String::from_utf8_lossy(&run.stderr), 1000),
         );
     }
+    // The child exited zero, so a writer error here is an unexplained broken pipe
+    // (or an OS-buffer overrun) worth propagating rather than a symptom of the exit
+    // above.
+    writer.join().expect("prompt-writer thread panicked").context("pipe the assembled prompt to headless claude")?;
 
     let transcript_path = args.out.join("transcript.jsonl");
     fs::write(&transcript_path, &run.stdout).with_context(|| format!("write {}", transcript_path.display()))?;
@@ -386,7 +419,13 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
     // shell-out): the terminal `result` plus the first-call cache signal.
     let record = derive_result_record(&String::from_utf8_lossy(&run.stdout));
 
-    let evidence = stamp_construct_evidence(args.nonce.as_deref(), &record);
+    // Inspect the worktree (cwd) for the candidate change the run's whole job is
+    // to leave (#3596): the gate demands a substantive conclusion, and an empty
+    // diff is nothing to review. Captured after the child is reaped so it reflects
+    // the run's final tree.
+    let produced_candidate = capture_produced_candidate();
+
+    let evidence = stamp_construct_evidence(args.nonce.as_deref(), produced_candidate, &record);
     let evidence_path = args.out.join("evidence.json");
     let mut json = serde_json::to_string_pretty(&evidence).context("serialize construct evidence")?;
     json.push('\n');
@@ -398,7 +437,7 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
 mod tests {
     use super::{
         CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, assemble_construct_prompt, build_evidence, construct_argv,
-        derive_result_record, stamp_construct_evidence, verify_command,
+        derive_result_record, porcelain_signals_candidate, stamp_construct_evidence, verify_command,
     };
 
     #[test]
@@ -457,17 +496,34 @@ mod tests {
     }
 
     #[test]
-    fn construct_evidence_binds_the_nonce_and_carries_the_result_record() {
+    fn construct_evidence_binds_the_nonce_carries_the_record_and_the_candidate_signal() {
         let record = serde_json::json!({ "cost_usd": 0.42, "num_turns": 3, "input": 1000 });
-        let evidence = stamp_construct_evidence(Some("nonce-7"), &record);
+        let evidence = stamp_construct_evidence(Some("nonce-7"), true, &record);
         assert_eq!(evidence["command"], CONSTRUCT_IMPLEMENT);
         assert_eq!(evidence["nonce"], "nonce-7", "the broker-matched nonce binds the evidence");
+        assert_eq!(
+            evidence["produced_candidate"], true,
+            "the candidate-produced signal is stamped for the gate (#3596)"
+        );
         assert_eq!(evidence["result_record"]["cost_usd"], 0.42, "the derived cost/turns record is carried");
         assert_eq!(evidence["result_record"]["num_turns"], 3);
 
-        let no_nonce = stamp_construct_evidence(None, &serde_json::json!({ "no_result": true }));
+        // An empty-candidate run stamps `false` so the gate can reject it while the
+        // derived record is still carried whole.
+        let no_nonce = stamp_construct_evidence(None, false, &serde_json::json!({ "no_result": true }));
         assert!(no_nonce["nonce"].is_null());
+        assert_eq!(no_nonce["produced_candidate"], false, "an empty-candidate run stamps false");
         assert_eq!(no_nonce["result_record"]["no_result"], true, "the derived record is carried whole");
+    }
+
+    // The candidate signal is a pure map of `git status --porcelain` stdout: any
+    // non-empty (trimmed) output is a candidate change, an empty one is not (#3596).
+    #[test]
+    fn porcelain_signals_a_candidate_only_when_the_worktree_is_dirty() {
+        assert!(!porcelain_signals_candidate(""), "a clean worktree left no candidate");
+        assert!(!porcelain_signals_candidate("   \n  \n"), "whitespace-only output is still no candidate");
+        assert!(porcelain_signals_candidate(" M xtask/src/transform.rs\n"), "a modified file is a candidate");
+        assert!(porcelain_signals_candidate("?? new_file.rs\n"), "a new untracked file is a candidate");
     }
 
     // The prompt is assembled from the lane's own in-repo instruction source plus
