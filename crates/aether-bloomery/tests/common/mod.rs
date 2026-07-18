@@ -90,7 +90,12 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
         snapshot = snapshot.apply(&ev, &reduce(&snapshot, &ev));
         seed = seed.wrapping_add(1);
     }
-    let resolve = event("resolve", Fact::Resolve { bloom, tree: digest(tree), lineage: vec![] });
+    // A distinct integrated head digest from the artifact tree (#3615) — this
+    // setup does not land, so the exact value only needs to differ from `tree`.
+    let resolve = event(
+        "resolve",
+        Fact::Resolve { bloom, tree: digest(tree), head: digest(tree.wrapping_add(1)), lineage: vec![] },
+    );
     snapshot = snapshot.apply(&resolve, &reduce(&snapshot, &resolve));
     (snapshot, spec)
 }

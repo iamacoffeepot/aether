@@ -47,6 +47,17 @@ pub struct Snapshot {
     pub seen: BTreeSet<IdempotencyKey>,
 }
 
+impl Snapshot {
+    /// The genesis mainline base digest — the well-known head every fresh
+    /// snapshot starts at (via [`Default`]) and every bloom seals against before
+    /// any land. The boot genesis reconcile seeds this exact digest ↔ the
+    /// repository's real head commit sha, so the first land's base
+    /// reverse-resolves to it instead of faulting `UnresolvedCorrespondence`
+    /// (issue #3615). Exposed as a named constant so the reconcile and the
+    /// control core address the same genesis base.
+    pub const GENESIS_MAINLINE: Digest = Digest::from_bytes([0; 32]);
+}
+
 /// The per-bloom projection record.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct BloomRecord {
@@ -163,6 +174,10 @@ pub enum Fact {
         bloom: BloomId,
         /// The final integrated tree digest.
         tree: Digest,
+        /// The landable head commit's digest (distinct from `tree`), carried
+        /// from the integrate outcome so the emitted `DispatchLand` swaps
+        /// mainline onto a commit rather than the artifact tree.
+        head: Digest,
         /// The integration lineage.
         lineage: Vec<Digest>,
     },
@@ -669,7 +684,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event) -> Decisions {
         Fact::AttemptCompleted { bloom, workpiece, stage, passed, evidence } => {
             reduce_attempt_completed(snapshot, bloom, workpiece, *stage, *passed, evidence)
         }
-        Fact::Resolve { bloom, tree, lineage } => reduce_resolve(snapshot, bloom, tree, lineage),
+        Fact::Resolve { bloom, tree, head, lineage } => reduce_resolve(snapshot, bloom, tree, head, lineage),
         Fact::Land { bloom, new_head } => reduce_land(snapshot, bloom, new_head),
     }
 }
@@ -1094,7 +1109,7 @@ fn reduce_attempt_completed(
     Decisions { outcome: Outcome::AttemptWedged { bloom: *bloom, workpiece: workpiece.clone(), stage }, effects }
 }
 
-fn reduce_resolve(snapshot: &Snapshot, bloom: &BloomId, tree: &Digest, lineage: &[Digest]) -> Decisions {
+fn reduce_resolve(snapshot: &Snapshot, bloom: &BloomId, tree: &Digest, head: &Digest, lineage: &[Digest]) -> Decisions {
     let Some(record) = snapshot.blooms.get(bloom) else {
         return Decisions::rejected(Outcome::ResolveRejected(ResolveError::UnknownOrInactiveBloom));
     };
@@ -1120,18 +1135,20 @@ fn reduce_resolve(snapshot: &Snapshot, bloom: &BloomId, tree: &Digest, lineage: 
         };
         resolution_claims.push(claim.clone());
     }
-    let resolved = ResolvedBloom { bloom: *bloom, tree: *tree, lineage: lineage.to_vec(), resolution_claims };
+    let resolved =
+        ResolvedBloom { bloom: *bloom, tree: *tree, head: *head, lineage: lineage.to_vec(), resolution_claims };
     // Resolution is land-readiness: the bloom now carries its one artifact and a
     // claim for every member, so the source-port CAS land can be driven. Emit the
     // land decision on the same resolve commit — the host land driver drains it,
     // issues the CAS against `expected_base`, and admits `Fact::Land` on success
-    // (ADR-0149 migration step 3). `new_head` is the resolved artifact tree, the
-    // head mainline advances to; the reducer never does the I/O.
+    // (ADR-0149 migration step 3). `new_head` is the resolved integrated head
+    // commit's digest (distinct from the artifact `tree`), the head mainline
+    // advances to; the reducer never does the I/O.
     Decisions {
         outcome: Outcome::Resolved(resolved.clone()),
         effects: alloc::vec![
             Decision::SetResolved { bloom: *bloom, resolved },
-            Decision::DispatchLand { bloom: *bloom, expected_base: record.spec.base(), new_head: *tree },
+            Decision::DispatchLand { bloom: *bloom, expected_base: record.spec.base(), new_head: *head },
         ],
     }
 }

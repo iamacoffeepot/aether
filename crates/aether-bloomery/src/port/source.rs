@@ -37,6 +37,13 @@ pub enum IntegrateOutcome {
     Integrated {
         /// The resulting integrated tree.
         tree: Digest,
+        /// The landable head commit's digest, distinct from the artifact
+        /// `tree`. The integrator builds a real commit over `tree` and records
+        /// `head ↔ commit`; carrying `head` separately keeps the `tree`
+        /// correspondence (which `StaleCheckpoint`/`snapshot` reverse-read)
+        /// from being clobbered when the produced commit is recorded, so
+        /// `land` can CAS mainline onto a commit rather than a bare tree.
+        head: Digest,
     },
     /// The candidate conflicted at `at` and was not integrated.
     Conflict {
@@ -147,6 +154,19 @@ pub trait SourceBackend {
     /// # Errors
     /// Backend-defined — e.g. `base` is unknown or the source is unreachable.
     fn snapshot(&self, base: &Digest) -> Result<SourceSnapshot, Self::Error>;
+
+    /// Read the repository's live mainline head as a raw git object sha,
+    /// resolving no correspondence. This is the genesis reconcile's entry point
+    /// (issue #3615): at boot the mainline base digest has no recorded
+    /// correspondence yet, so `snapshot` — which forward-resolves the base
+    /// digest to a sha — cannot run; the reconcile reads the real head sha here
+    /// and seeds `Snapshot::default().mainline ↔ that sha` before the first
+    /// snapshot.
+    ///
+    /// # Errors
+    /// Backend-defined — e.g. the mainline ref is missing or the source is
+    /// unreachable.
+    fn mainline_head_sha(&self) -> Result<String, Self::Error>;
 
     /// Record an integration checkpoint for `bloom` at `tree`.
     ///

@@ -90,7 +90,7 @@ proptest! {
         let base = Snapshot::new(digest(2));
         let (after_seal, sealed) = step(&base, &event("s", Fact::Seal(sealed_only)));
         prop_assert!(matches!(sealed.outcome, Outcome::Sealed(_)));
-        let early = reduce(&after_seal, &event("r", Fact::Resolve { bloom: bloom2, tree: digest(40), lineage: vec![] }));
+        let early = reduce(&after_seal, &event("r", Fact::Resolve { bloom: bloom2, tree: digest(40), head: digest(41), lineage: vec![] }));
         let member_not_integrated =
             matches!(early.outcome, Outcome::ResolveRejected(ResolveError::MemberNotIntegrated { .. }));
         prop_assert!(member_not_integrated);
@@ -460,7 +460,8 @@ fn re_integration_overwrites_the_stale_claim() {
     assert_eq!(record.claims.get(&workpiece("wp")).unwrap().candidate, digest(200));
 
     // Resolve reads the refined claim.
-    let resolved = reduce(&snapshot, &event("r", Fact::Resolve { bloom, tree: digest(40), lineage: vec![] }));
+    let resolved =
+        reduce(&snapshot, &event("r", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
     match resolved.outcome {
         Outcome::Resolved(bloom) => {
             assert_eq!(bloom.resolution_claims.len(), 1);
@@ -588,7 +589,8 @@ fn a_question_admission_holds_the_bloom_and_blocks_resolve() {
     // Even with the (single) member integrated, the open hold blocks resolve.
     let claim = claim("wp", 10, 100);
     let (integrated, _) = step(&held, &event("int", Fact::Integrate { bloom, claim }));
-    let resolve = reduce(&integrated, &event("r", Fact::Resolve { bloom, tree: digest(40), lineage: vec![] }));
+    let resolve =
+        reduce(&integrated, &event("r", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
     assert!(
         matches!(resolve.outcome, Outcome::ResolveRejected(ResolveError::PendingDecision { question: q }) if q == question_digest),
         "an open hold blocks resolve, named by the held question",
@@ -615,7 +617,8 @@ fn an_adopted_answer_releases_the_hold_and_redispatches() {
     (snapshot, _) = step(&snapshot, &event("int-held", Fact::Integrate { bloom, claim: claim("held", 10, 100) }));
 
     // Both members integrated, but the hold still blocks resolve.
-    let blocked = reduce(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), lineage: vec![] }));
+    let blocked =
+        reduce(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
     assert!(matches!(blocked.outcome, Outcome::ResolveRejected(ResolveError::PendingDecision { .. })));
 
     // The answer adopts the held question: hold released, re-dispatch emitted.
@@ -636,7 +639,8 @@ fn an_adopted_answer_releases_the_hold_and_redispatches() {
     assert!(!released.blooms.get(&bloom).unwrap().holds.contains(&question_digest), "the hold is released");
 
     // With the hold gone and every member integrated, the bloom resolves.
-    let resolved = reduce(&released, &event("r2", Fact::Resolve { bloom, tree: digest(40), lineage: vec![] }));
+    let resolved =
+        reduce(&released, &event("r2", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
     assert!(matches!(resolved.outcome, Outcome::Resolved(_)), "resolve proceeds once the hold clears");
 }
 
@@ -704,10 +708,12 @@ fn landing_releases_memberships() {
 }
 
 // ADR-0149 migration step 3 — resolution is land-readiness: the resolve decision
-// emits a DispatchLand naming the sealed base and the resolved artifact tree, so
-// the host land driver can drive the source-port compare-and-swap that is now the
-// landing of record. Tripwire: the land decision missing from the resolve, or
-// carrying a base other than `spec.base()` / a head other than the resolved tree.
+// emits a DispatchLand naming the sealed base and the resolved integrated *head*
+// commit (distinct from the artifact tree, #3615), so the host land driver can
+// drive the source-port compare-and-swap that is now the landing of record.
+// Tripwire: the land decision missing from the resolve, or carrying a base other
+// than `spec.base()` / a head other than the resolved integrated head (regressing
+// to the artifact tree would re-introduce the tree-vs-head conflation #3615 split).
 #[test]
 fn resolve_emits_the_land_decision() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
@@ -718,7 +724,9 @@ fn resolve_emits_the_land_decision() {
     let (next, _) = step(&snapshot, &event("integrate", Fact::Integrate { bloom, claim: claim("wp", 10, 100) }));
     snapshot = next;
 
-    let resolved = reduce(&snapshot, &event("resolve", Fact::Resolve { bloom, tree: digest(40), lineage: vec![] }));
+    let tree = digest(40);
+    let head = digest(41);
+    let resolved = reduce(&snapshot, &event("resolve", Fact::Resolve { bloom, tree, head, lineage: vec![] }));
 
     assert!(matches!(resolved.outcome, Outcome::Resolved(_)), "the bloom resolves");
     let land = resolved.effects.iter().find_map(|effect| match effect {
@@ -729,7 +737,19 @@ fn resolve_emits_the_land_decision() {
     });
     let (expected_base, new_head) = land.expect("resolve emits a DispatchLand for the resolved bloom");
     assert_eq!(expected_base, spec.base(), "the land compares against the sealed base");
-    assert_eq!(new_head, digest(40), "the land advances mainline to the resolved artifact tree");
+    assert_eq!(new_head, head, "the land advances mainline to the resolved integrated head, not the artifact tree");
+    assert_ne!(new_head, tree, "the integrated head is distinct from the artifact tree (#3615)");
+}
+
+// Tripwire: the genesis reconcile (aether-bloomery-host) seeds
+// `Snapshot::GENESIS_MAINLINE`, and the control core starts every fresh snapshot
+// at `Snapshot::default().mainline` — the two must name the same genesis base or
+// the seeded correspondence and the reducer's first land address different
+// digests (#3615). This drifts the moment either the `Default` seed or the const
+// changes, so it guards the reconcile-vs-core agreement the split relies on.
+#[test]
+fn genesis_mainline_const_matches_the_default_snapshot_base() {
+    assert_eq!(Snapshot::default().mainline, Snapshot::GENESIS_MAINLINE);
 }
 
 // The evidence a completed attempt carries. The reducer does not re-check its

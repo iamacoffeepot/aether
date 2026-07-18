@@ -114,6 +114,9 @@ pub enum IntegrateResult {
     Integrated {
         /// The `aether_data::wire`-encoded resulting [`aether_bloomery::Digest`].
         tree: Vec<u8>,
+        /// The `aether_data::wire`-encoded landable head commit's
+        /// [`aether_bloomery::Digest`], distinct from `tree` (issue #3615).
+        head: Vec<u8>,
     },
     /// The candidate conflicted and was not integrated.
     Conflict {
@@ -201,6 +204,24 @@ mod tests {
         expected.extend_from_slice(&1u32.to_le_bytes()); // `Conflict` is declared second (index 1).
         expected.extend_from_slice(&3u32.to_le_bytes()); // `at`'s byte count.
         expected.extend_from_slice(&[1, 2, 3]);
+        let bytes = to_vec(&value).unwrap();
+        assert_eq!(bytes, expected);
+        assert_eq!(from_bytes::<IntegrateResult>(&bytes).unwrap(), value);
+    }
+
+    #[test]
+    fn integrated_variant_carries_a_distinct_head_and_pins_its_encoded_shape() {
+        // Tripwire: the `Integrated` variant (declared first, index 0) carries
+        // `tree` then `head` as two length-prefixed `Vec<u8>` fields (#3615) — a
+        // field-order or missing-field drift trips the pinned layout here rather
+        // than surfacing only as a cross-version decode mismatch.
+        let value = IntegrateResult::Integrated { tree: vec![1, 2], head: vec![3, 4, 5] };
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&0u32.to_le_bytes()); // `Integrated` is declared first (index 0).
+        expected.extend_from_slice(&2u32.to_le_bytes()); // `tree`'s byte count.
+        expected.extend_from_slice(&[1, 2]);
+        expected.extend_from_slice(&3u32.to_le_bytes()); // `head`'s byte count.
+        expected.extend_from_slice(&[3, 4, 5]);
         let bytes = to_vec(&value).unwrap();
         assert_eq!(bytes, expected);
         assert_eq!(from_bytes::<IntegrateResult>(&bytes).unwrap(), value);
