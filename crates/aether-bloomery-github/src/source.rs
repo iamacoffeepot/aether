@@ -107,7 +107,7 @@ const ADMISSION_REF: &str = "bloomery/admission/mainline";
 /// tree. Correct for a real (sha1) GitHub repo today; the amendment defers the
 /// object-format transition, so a future sha256 repo's empty tree is a
 /// different sha (§Side findings).
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// The `Bloom-Id` message-line prefix a claim commit carries its holder on
 /// (ADR-0150 amendment, #3598): `Bloom-Id: sha256-<hex>` for a live hold,
@@ -121,14 +121,14 @@ const BLOOM_ID_SHA256_PREFIX: &str = "sha256-";
 
 /// Render a claim commit's message: a legible lead line plus the parseable
 /// `Bloom-Id: sha256-<hex>` line [`parse_bloom_line`] resolves back.
-fn render_claim_message(bloom: &BloomId) -> String {
+pub fn render_claim_message(bloom: &BloomId) -> String {
     format!("bloomery claim\n\n{BLOOM_ID_PREFIX}{BLOOM_ID_SHA256_PREFIX}{}", to_hex(&bloom.0))
 }
 
 /// Render a tombstone claim commit's message: the same shape as
 /// [`render_claim_message`], carrying the `tombstone` sentinel instead of a
 /// bloom id.
-fn render_tombstone_message() -> String {
+pub fn render_tombstone_message() -> String {
     format!("bloomery claim tombstone\n\n{BLOOM_ID_PREFIX}{BLOOM_ID_TOMBSTONE}")
 }
 

@@ -22,7 +22,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use aether_bloomery::Digest;
+use aether_bloomery::{BloomId, Digest};
 use sha2::{Digest as _, Sha256};
 
 use crate::client::{
@@ -30,7 +30,7 @@ use crate::client::{
     RunConclusion, RunStatus, WorkflowRun,
 };
 use crate::marker::parse_marker;
-use crate::source::{digest_from_hex, to_hex};
+use crate::source::{EMPTY_TREE, digest_from_hex, render_claim_message, render_tombstone_message, to_hex};
 
 #[derive(Clone)]
 struct StoredIssue {
@@ -199,6 +199,24 @@ impl FakeGithub {
     /// Seed a ref (`heads/…` form) pointing at the commit `target`.
     pub fn seed_ref_at(&self, name: &str, target: &Digest) {
         self.seed_ref(name, &to_hex(target));
+    }
+
+    /// Point claim ref `name` at a fresh commit carrying `holder`'s id on the
+    /// claim registry's `Bloom-Id` message convention (empty tree, ADR-0150
+    /// amendment #3598) — a claim-registry consumer's way to stage another
+    /// instance's live hold directly, sidestepping `claim_seal`.
+    pub fn seed_claim_hold(&self, name: &str, holder: &BloomId) {
+        let sha = self.seed_commit_with_message(&render_claim_message(holder), EMPTY_TREE);
+        self.seed_ref(name, &sha);
+    }
+
+    /// Point claim ref `name` at a fresh tombstone commit (empty tree +
+    /// `Bloom-Id: tombstone`) — the ref state an interrupted `release_seal`
+    /// leaves after its CAS-to-tombstone linearized but its name-only cleanup
+    /// delete never ran.
+    pub fn seed_claim_tombstone(&self, name: &str) {
+        let sha = self.seed_commit_with_message(&render_tombstone_message(), EMPTY_TREE);
+        self.seed_ref(name, &sha);
     }
 
     /// The commit digest ref `name` points at, if it exists — the digest-typed
