@@ -46,6 +46,13 @@ use aether_bloomery_github::{CorrespondenceError, SharedCorrespondence, StageVer
 use super::CONSTRUCT_IMPLEMENT_COMMAND;
 use super::intake::attempt_artifact_name;
 
+/// The typed id of the model-driven review lane (`Transformation::for_member_stage`
+/// dispatches it for the Review stage). It rides the same model-lane plumbing as
+/// the construct command — subject/model/effort/task argv — but not the
+/// construct-specific evidence gate: its verdict comes from the `status` its own
+/// evidence stamps.
+const REVIEW_CRITIC_COMMAND: &str = "review.critic";
+
 /// A local-process executor-port fault. Its own type because the port needs an
 /// arm the value vocabulary does not carry — a message asked to act on a run
 /// that does not resolve for its nonce — alongside the worktree / spawn / io /
@@ -309,21 +316,26 @@ impl ExecutorBackend for LocalExecutor {
         // (the scope-revision digest the broker displayed), falling back to the
         // checkout only for a malformed order that carries no input.
         let subject = order.transformation.inputs.first().copied().unwrap_or(order.transformation.checkout);
-        // Model/effort ride only the model-driven construct lane, mirroring
-        // `transform-model.yml`'s argv; a verify lane ignores them.
+        // Model/effort/task ride the model-driven lanes (construct and the
+        // review critic), mirroring `transform-model.yml`'s argv; a verify lane
+        // ignores them. `is_construct` stays narrower — it selects the
+        // construct-specific evidence gate (substantive-conclusion, #3596),
+        // which the review lane's `status`-stamped evidence must not ride.
         let is_construct = order.transformation.command == CONSTRUCT_IMPLEMENT_COMMAND;
+        let is_model_lane = is_construct || order.transformation.command == REVIEW_CRITIC_COMMAND;
         let spec = RunSpec {
             command: &order.transformation.command,
             checkout_hex: &checkout_hex,
             worktree_dir: &worktree_dir,
             evidence_dir: &evidence_dir,
             nonce: &nonce,
-            model: is_construct.then_some(self.construct_model.as_deref()).flatten(),
-            effort: is_construct.then_some(self.construct_effort.as_deref()).flatten(),
+            model: is_model_lane.then_some(self.construct_model.as_deref()).flatten(),
+            effort: is_model_lane.then_some(self.construct_effort.as_deref()).flatten(),
             // The work-order description rides the order's transformation (#3595),
-            // populated at dispatch from durable state; only the construct lane
-            // names it, mirroring the model/effort gate.
-            task: is_construct.then_some(order.transformation.description.as_deref()).flatten(),
+            // populated at dispatch from durable state; the model lanes name it
+            // (the critic judges the candidate against it), mirroring the
+            // model/effort gate.
+            task: is_model_lane.then_some(order.transformation.description.as_deref()).flatten(),
         };
         let process = self.runner.start(&spec)?;
         self.lock().insert(nonce, Run { process, worktree_dir, evidence_dir, subject, is_construct });
@@ -507,7 +519,7 @@ impl TransformRunner for ProcessTransformRunner {
             .args(["xtask", "transform", spec.command, "--out"])
             .arg(spec.evidence_dir)
             .args(["--nonce", spec.nonce]);
-        if spec.command == CONSTRUCT_IMPLEMENT_COMMAND {
+        if spec.command == CONSTRUCT_IMPLEMENT_COMMAND || spec.command == REVIEW_CRITIC_COMMAND {
             cargo.args(["--subject", spec.checkout_hex]);
             if let Some(model) = spec.model {
                 cargo.args(["--model", model]);

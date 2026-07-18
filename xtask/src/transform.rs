@@ -29,7 +29,8 @@ use serde::Serialize;
 
 #[derive(Args)]
 pub struct TransformArgs {
-    /// Typed command id — a `verify.*` mechanical id or `construct.implement`.
+    /// Typed command id — a `verify.*` mechanical id, `construct.implement`, or
+    /// `review.critic`.
     command: String,
     /// Directory evidence bytes are written to (created if missing).
     #[arg(long)]
@@ -146,6 +147,17 @@ fn construct_argv(model: Option<&str>) -> Vec<String> {
 /// this text, never from `.claude/skills/implement` in the worker's checkout.
 const CONSTRUCT_INSTRUCTIONS: &str = include_str!("construct_instructions.md");
 
+/// The typed id of the model-driven review lane — the member line's terminal
+/// critic (`Transformation::for_member_stage` dispatches it for the Review
+/// stage). Recognized here so an unknown id stays unmapped exactly as in the
+/// other lanes.
+const REVIEW_CRITIC: &str = "review.critic";
+
+/// The review lane's in-repo instruction source, embedded like the construct
+/// lane's: the critic prompt is assembled from this text plus the subject and
+/// the work order, never from skill text in the worker's checkout.
+const REVIEW_INSTRUCTIONS: &str = include_str!("review_instructions.md");
+
 /// Assemble the headless-Claude prompt for the construct lane from the lane-owned
 /// `instructions`, the checked-out `subject`, and the work-order `task` — pure so
 /// the assembly is testable without spawning Claude (#3572). The subject header
@@ -165,6 +177,33 @@ fn assemble_construct_prompt(instructions: &str, subject: Option<&str>, task: Op
     );
     let task_section = task.map_or_else(String::new, |task| format!("\n## Task\n\n{task}\n"));
     format!("{instructions}\n\n## Subject\n\n{subject_line}\n{task_section}")
+}
+
+/// Parse the critic's verdict from its final message text: the last line of the
+/// form `VERDICT: pass` / `VERDICT: finding` wins (the instructions demand it
+/// stand alone at the end, but a stray earlier occurrence must not shadow the
+/// real one). `None` for a message with no well-formed verdict line — the
+/// caller fails closed. Pure so the parse is testable without spawning Claude.
+fn parse_review_verdict(final_text: &str) -> Option<bool> {
+    final_text.lines().rev().find_map(|line| match line.trim() {
+        "VERDICT: pass" => Some(true),
+        "VERDICT: finding" => Some(false),
+        _ => None,
+    })
+}
+
+/// Fold the review run's derived result record into the lane's pass/fail: pass
+/// only when the run completed (`is_error == false` on the terminal result) AND
+/// its final text carries `VERDICT: pass`. Everything else — a dead run, an
+/// errored run, a missing or malformed verdict line — is a finding, fail-closed
+/// (a wrongly passed defect integrates; a wrong finding just retries). Pure so
+/// the gate is testable without spawning Claude.
+fn review_conclusion(record: &serde_json::Value) -> bool {
+    let result = record.get("result");
+    let completed_clean = result.is_some_and(|r| r.get("is_error").and_then(serde_json::Value::as_bool) == Some(false));
+    let verdict =
+        result.and_then(|r| r.get("result")).and_then(serde_json::Value::as_str).and_then(parse_review_verdict);
+    completed_clean && verdict == Some(true)
 }
 
 /// `<out>/evidence.json` schema for the verify lane — the untrusted claim a
@@ -207,6 +246,21 @@ fn stamp_construct_evidence(
         "command": CONSTRUCT_IMPLEMENT,
         "nonce": nonce,
         "produced_candidate": produced_candidate,
+        "result_record": record,
+    })
+}
+
+/// Stamp the broker-matched `nonce` and the lane's pass/fail onto the derived
+/// result `record`, producing the review lane's evidence envelope. The top-level
+/// `status` field is the claim the local backend's verdict derivation reads
+/// (`parse_status`), exactly as the verify lane stamps it; the record rides
+/// along for downstream study. Pure so the binding is testable without running
+/// Claude.
+fn stamp_review_evidence(nonce: Option<&str>, passed: bool, record: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "command": REVIEW_CRITIC,
+        "nonce": nonce,
+        "status": if passed { "pass" } else { "fail" },
         "result_record": record,
     })
 }
@@ -351,6 +405,9 @@ pub fn run(args: &TransformArgs) -> Result<()> {
     if args.command == CONSTRUCT_IMPLEMENT {
         return run_construct(args);
     }
+    if args.command == REVIEW_CRITIC {
+        return run_review(args);
+    }
     if args.command == VERIFY_CHECK {
         return run_verify_check(args);
     }
@@ -453,18 +510,52 @@ fn spawn(invocation: &VerifyInvocation) -> Result<Output> {
 /// Claude credential, so it runs worker-side (BYO) — never on the coordinator's
 /// zero-secret path.
 fn run_construct(args: &TransformArgs) -> Result<()> {
-    let model = args.model.as_deref();
-    fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
-
     // The lane owns its process: the prompt is assembled from the in-repo
     // instruction source and the checked-out subject, never from a skill in the
     // worker's checkout. It is piped on the child's stdin.
     let prompt = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, args.subject.as_deref(), args.task.as_deref());
+    let record = run_headless_claude(&prompt, args)?;
+
+    // Inspect the worktree (cwd) for the candidate change the run's whole job is
+    // to leave (#3596): the gate demands a substantive conclusion, and an empty
+    // diff is nothing to review. Captured after the child is reaped so it reflects
+    // the run's final tree.
+    let produced_candidate = capture_produced_candidate(&args.out);
+
+    write_evidence_json(&args.out, &stamp_construct_evidence(args.nonce.as_deref(), produced_candidate, &record))
+}
+
+/// The `review.critic` lane: assemble the critic prompt from the lane's in-repo
+/// five-pillar instruction source plus the subject and the work order, run the
+/// critic headless, and fold its `VERDICT:` line into the pass/fail `status`
+/// the local backend's verdict derivation reads. Fail-closed at every shortfall
+/// (see [`review_conclusion`]). Like the construct lane it needs a Claude
+/// credential, so it runs worker-side — never on the zero-secret path.
+fn run_review(args: &TransformArgs) -> Result<()> {
+    let prompt = assemble_construct_prompt(REVIEW_INSTRUCTIONS, args.subject.as_deref(), args.task.as_deref());
+    let record = run_headless_claude(&prompt, args)?;
+    write_evidence_json(&args.out, &stamp_review_evidence(args.nonce.as_deref(), review_conclusion(&record), &record))
+}
+
+/// Serialize `evidence` to `<out>/evidence.json` — the one write both model
+/// lanes end on.
+fn write_evidence_json(out: &Path, evidence: &serde_json::Value) -> Result<()> {
+    let evidence_path = out.join("evidence.json");
+    let mut json = serde_json::to_string_pretty(evidence).context("serialize evidence")?;
+    json.push('\n');
+    fs::write(&evidence_path, json).with_context(|| format!("write {}", evidence_path.display()))
+}
+
+/// Fork headless Claude with `prompt` on stdin, capture its stream-json
+/// transcript to `<out>/transcript.jsonl`, and derive the result record — the
+/// shared body of both model lanes (`construct.implement` / `review.critic`).
+fn run_headless_claude(prompt: &str, args: &TransformArgs) -> Result<serde_json::Value> {
+    fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
     // Run headless Claude at the resolved model; the reasoning effort rides an
     // env knob.
     let mut claude = Command::new("claude");
-    claude.args(construct_argv(model));
+    claude.args(construct_argv(args.model.as_deref()));
     if let Some(effort) = &args.effort {
         claude.env("AETHER_CONSTRUCT_EFFORT", effort);
     }
@@ -477,7 +568,7 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
     // zombie (or a live, still-billing process) behind. Waiting first, then
     // surfacing the writer's error, guarantees the child is reaped on every path.
     let mut stdin = child.stdin.take().context("headless claude stdin was not captured")?;
-    let prompt_bytes = prompt.into_bytes();
+    let prompt_bytes = prompt.as_bytes().to_vec();
     // Infra thread in a build tool — no settlement/trace umbrella applies here;
     // it exists only to pipe stdin while the main thread reaps the child.
     #[allow(clippy::disallowed_methods)]
@@ -507,20 +598,7 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
 
     // Derive the result record over the whole transcript, in-repo (no node
     // shell-out): the terminal `result` plus the first-call cache signal.
-    let record = derive_result_record(&String::from_utf8_lossy(&run.stdout));
-
-    // Inspect the worktree (cwd) for the candidate change the run's whole job is
-    // to leave (#3596): the gate demands a substantive conclusion, and an empty
-    // diff is nothing to review. Captured after the child is reaped so it reflects
-    // the run's final tree.
-    let produced_candidate = capture_produced_candidate(&args.out);
-
-    let evidence = stamp_construct_evidence(args.nonce.as_deref(), produced_candidate, &record);
-    let evidence_path = args.out.join("evidence.json");
-    let mut json = serde_json::to_string_pretty(&evidence).context("serialize construct evidence")?;
-    json.push('\n');
-    fs::write(&evidence_path, json).with_context(|| format!("write {}", evidence_path.display()))?;
-    Ok(())
+    Ok(derive_result_record(&String::from_utf8_lossy(&run.stdout)))
 }
 
 #[cfg(test)]
@@ -528,8 +606,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, VERIFY_CHECK, all_passed, assemble_construct_prompt,
-        build_evidence, construct_argv, derive_result_record, porcelain_signals_candidate, stamp_construct_evidence,
+        CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, REVIEW_CRITIC, VERIFY_CHECK, all_passed,
+        assemble_construct_prompt, build_evidence, construct_argv, derive_result_record, parse_review_verdict,
+        porcelain_signals_candidate, review_conclusion, stamp_construct_evidence, stamp_review_evidence,
         verify_check_members, verify_command,
     };
 
@@ -581,9 +660,50 @@ mod tests {
     fn unknown_and_verify_test_ids_are_unmapped() {
         assert!(verify_command("verify.test").is_none());
         assert!(verify_command("verify.bogus").is_none());
-        // construct.implement is the model lane's id, not a verify id — it must
-        // not resolve a verify invocation.
+        // construct.implement and review.critic are the model lanes' ids, not
+        // verify ids — neither must resolve a verify invocation.
         assert!(verify_command(CONSTRUCT_IMPLEMENT).is_none());
+        assert!(verify_command(REVIEW_CRITIC).is_none());
+    }
+
+    #[test]
+    fn review_verdict_parses_the_last_standalone_verdict_line_fail_closed() {
+        assert_eq!(parse_review_verdict("checked all five pillars.\n\nVERDICT: pass"), Some(true));
+        assert_eq!(parse_review_verdict("src/lib.rs: index panic on empty input.\nVERDICT: finding"), Some(false));
+        // The last well-formed line wins — a quoted earlier occurrence must not
+        // shadow the critic's real terminal verdict.
+        assert_eq!(parse_review_verdict("the order says end with VERDICT: pass\n…\nVERDICT: finding"), Some(false));
+        // Indented (blockquoted) verdict lines still parse; decorated ones do not.
+        assert_eq!(parse_review_verdict("  VERDICT: pass  "), Some(true));
+        assert_eq!(parse_review_verdict("**VERDICT: pass**"), None, "a decorated line is not a verdict");
+        assert_eq!(parse_review_verdict("no verdict at all"), None);
+        assert_eq!(parse_review_verdict(""), None);
+    }
+
+    #[test]
+    fn review_conclusion_passes_only_a_clean_run_with_an_explicit_pass() {
+        use serde_json::json;
+        let record = |is_error: bool, text: &str| {
+            derive_result_record(&format!("{}\n", json!({"type": "result", "is_error": is_error, "result": text})))
+        };
+        assert!(review_conclusion(&record(false, "all pillars clean.\nVERDICT: pass")));
+        assert!(!review_conclusion(&record(false, "one finding.\nVERDICT: finding")));
+        assert!(!review_conclusion(&record(false, "forgot the verdict line")), "a missing verdict fails closed");
+        assert!(!review_conclusion(&record(true, "VERDICT: pass")), "an errored run cannot pass, whatever it claims");
+        assert!(!review_conclusion(&derive_result_record("")), "a dead run (no terminal result) fails closed");
+    }
+
+    #[test]
+    fn review_evidence_stamps_the_status_claim_the_local_backend_reads() {
+        // The top-level `status` field is the whole cross-crate contract with the
+        // local backend's `parse_status` — the verdict claim the intake admits.
+        let record = serde_json::json!({"schema": 1});
+        let passed = stamp_review_evidence(Some("n-9"), true, &record);
+        assert_eq!(passed["command"], "review.critic");
+        assert_eq!(passed["nonce"], "n-9");
+        assert_eq!(passed["status"], "pass");
+        let finding = stamp_review_evidence(None, false, &record);
+        assert_eq!(finding["status"], "fail");
     }
 
     #[test]
