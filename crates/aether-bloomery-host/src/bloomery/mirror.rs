@@ -121,11 +121,13 @@ pub struct GithubMirrorConfig {
     #[config(default = true)]
     pub local_lane_enabled: bool,
     /// The comma-separated command-id prefixes the executor routes to the local
-    /// backend (the rest go to Actions). Default `construct.` routes the
-    /// model-driven construct lanes local; adding e.g. `verify.` is the release
-    /// valve that flips a heavy mechanical lane local (Actions outage, quota,
-    /// offline work). Parsed by [`local_lane_prefixes`](Self::local_lane_prefixes).
-    #[config(default = "construct.")]
+    /// backend (the rest go to Actions). The default routes both model-driven
+    /// lanes local — `construct.` (construct/refine) and `review.` (the critic,
+    /// which needs the model API the zero-secret runner deliberately lacks);
+    /// adding e.g. `verify.` is the release valve that flips a heavy mechanical
+    /// lane local (Actions outage, quota, offline work). Parsed by
+    /// [`local_lane_prefixes`](Self::local_lane_prefixes).
+    #[config(default = "construct.,review.")]
     pub local_lane_commands: String,
     /// The scratch-worktree base dir the local backend checks each order's subject
     /// into (keyed by nonce). Should be absolute in production so the checkout
@@ -168,7 +170,7 @@ impl Default for GithubMirrorConfig {
             app_installation_id: 0,
             app_token_skew_secs: 300,
             local_lane_enabled: true,
-            local_lane_commands: "construct.".to_owned(),
+            local_lane_commands: "construct.,review.".to_owned(),
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),
             local_construct_model: String::new(),
             local_construct_effort: String::new(),
@@ -326,7 +328,12 @@ mod tests {
         let config = GithubMirrorConfig { local_lane_commands: " construct. , verify. ,".into(), ..Default::default() };
         assert_eq!(config.local_lane_prefixes(), vec!["construct.".to_owned(), "verify.".to_owned()]);
 
-        // The default routes only the model-driven construct lanes local.
-        assert_eq!(GithubMirrorConfig::default().local_lane_prefixes(), vec!["construct.".to_owned()]);
+        // The default routes both model-driven lanes local — construct/refine
+        // and the review critic, which needs the model API the zero-secret
+        // runner deliberately lacks.
+        assert_eq!(
+            GithubMirrorConfig::default().local_lane_prefixes(),
+            vec!["construct.".to_owned(), "review.".to_owned()]
+        );
     }
 }
