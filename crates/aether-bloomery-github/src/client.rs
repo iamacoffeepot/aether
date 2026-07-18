@@ -133,15 +133,19 @@ pub struct GitRef {
     pub sha: String,
 }
 
-/// A git commit object: its own sha and the tree sha it carries. The source
-/// port reads a commit to derive a snapshot's tree, and creates one to advance
-/// an integration branch to a candidate tree.
+/// A git commit object: its own sha, the tree sha it carries, and its message.
+/// The source port reads a commit to derive a snapshot's tree, creates one to
+/// advance an integration branch to a candidate tree, and (the claim registry)
+/// carries a claiming bloom id on a parseable message line rather than in the
+/// tree — the tree of a claim commit is always the well-known empty tree.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct GitCommit {
     /// The commit object sha.
     pub sha: String,
     /// The tree sha this commit points at.
     pub tree: String,
+    /// The commit message.
+    pub message: String,
 }
 
 /// The GitHub client contract the projection depends on. Both the real
@@ -613,11 +617,12 @@ struct GhTreeRef {
 struct GhCommit {
     sha: String,
     tree: GhTreeRef,
+    message: String,
 }
 
 impl GhCommit {
     fn into_git_commit(self) -> GitCommit {
-        GitCommit { sha: self.sha, tree: self.tree.sha }
+        GitCommit { sha: self.sha, tree: self.tree.sha, message: self.message }
     }
 }
 
@@ -1230,7 +1235,7 @@ mod tests {
 
     #[test]
     fn create_commit_posts_tree_and_parents() {
-        let github = client(201, r#"{"sha":"newcommit","tree":{"sha":"treesha"}}"#);
+        let github = client(201, r#"{"sha":"newcommit","tree":{"sha":"treesha"},"message":"checkpoint"}"#);
         let commit = github.create_commit("checkpoint", "treesha", &["parentsha".to_owned()]).expect("2xx decodes");
         assert_eq!(commit.sha, "newcommit");
         assert_eq!(commit.tree, "treesha");
@@ -1239,6 +1244,19 @@ mod tests {
         let sent: serde_json::Value = serde_json::from_str(&request.body.unwrap()).unwrap();
         assert_eq!(sent["tree"], "treesha");
         assert_eq!(sent["parents"][0], "parentsha");
+    }
+
+    #[test]
+    fn get_commit_decodes_the_message() {
+        // Tripwire: the claim registry resolves a claim's holder from the
+        // commit message, not the tree — a message decode regression here would
+        // silently break every claim-holder read.
+        let github = client(
+            200,
+            r#"{"sha":"commitsha","tree":{"sha":"treesha"},"message":"bloomery claim\n\nBloom-Id: sha256-ab"}"#,
+        );
+        let commit = github.get_commit("commitsha").expect("2xx decodes");
+        assert_eq!(commit.message, "bloomery claim\n\nBloom-Id: sha256-ab");
     }
 
     use super::{ActionsApi, RunConclusion, RunStatus};
