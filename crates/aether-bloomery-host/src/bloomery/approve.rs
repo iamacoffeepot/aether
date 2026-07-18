@@ -46,6 +46,7 @@ use std::io;
 use std::path::Path;
 
 use aether_bloomery::{Digest, Evidence, EvidenceKind, KeyProvider, Observation, Provenance, Statement, digest_of};
+use serde::{Deserialize, Serialize};
 
 /// An approval tier over a declared surface. Ordered `Auto < Judge < Human` so
 /// most-restrictive-wins is a plain `max` (the `human > judge > auto` ranking of
@@ -533,6 +534,12 @@ pub struct AdmissionRequest {
     /// present — waives the tier (to `auto`), never the gate checks, and never a
     /// firing ADR gate.
     pub pre_approved: bool,
+    /// The digest of the exact projection facts the gate evaluated (issue #3583,
+    /// rider 3). An `auto`-tier approval folds this into its supporting record so
+    /// the sealed evidence attests precisely which facts the gate saw — the same
+    /// projection bytes, hashed, cannot then be swapped without moving the
+    /// approval's `detail`.
+    pub projection_digest: Digest,
 }
 
 /// The completeness facts a scope revision must satisfy before it is admissible.
@@ -542,7 +549,7 @@ pub struct AdmissionRequest {
 // signals the host projects, not a state machine — a two-variant enum per signal
 // would only rename `true`/`false` without adding meaning.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Completeness {
     /// `## Problem statement` present and non-empty.
     pub has_problem_statement: bool,
@@ -568,7 +575,7 @@ pub struct Completeness {
 /// The maturity of the ADRs a change touches — the axis the unconditional hard
 /// gate routes on (a glob matches paths, not maturity, so this cannot live in the
 /// policy file).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum AdrTouch {
     /// The change touches no ADR.
     None,
@@ -650,7 +657,7 @@ impl<'policy> Gate<'policy> {
             self.policy.resolve_surface(&request.declared_surface)
         };
         if tier == Tier::Auto {
-            Decision::AutoApproved(auto_approval(request.scope_revision))
+            Decision::AutoApproved(auto_approval(request.scope_revision, request.projection_digest))
         } else {
             Decision::RequiresStatement(tier)
         }
@@ -702,11 +709,17 @@ const AUTO_APPROVAL_WORDS: &[u8] = b"aether.bloomery.approve_gate: policy resolv
 /// approval is *context* (the gate observed the policy resolve `auto`), never
 /// instruction — so its supporting artifact is an
 /// [`Provenance::ObservationAttestation`], carrying no author signature.
-fn auto_approval(scope_revision: Digest) -> Evidence {
+///
+/// The supporting record's `parents` pin both the `scope_revision` the approval
+/// binds and the `projection_digest` of the exact facts the gate evaluated
+/// (issue #3583, rider 3), so the approval's `detail` attests precisely which
+/// projection produced the `auto` grant — a swapped projection moves the digest,
+/// and the digest is folded into `detail`.
+fn auto_approval(scope_revision: Digest, projection_digest: Digest) -> Evidence {
     let record = Statement {
         words: AUTO_APPROVAL_WORDS.to_vec(),
         provenance: Provenance::ObservationAttestation(Observation { source: AUTO_APPROVAL_SOURCE.to_owned() }),
-        parents: vec![scope_revision],
+        parents: vec![scope_revision, projection_digest],
     };
     Evidence { subject: scope_revision, kind: EvidenceKind::Approval, detail: digest_of(&record) }
 }

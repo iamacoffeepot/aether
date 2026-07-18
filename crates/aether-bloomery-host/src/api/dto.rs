@@ -16,7 +16,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use aether_bloomery::{Budget, Digest, Event, Forecast, Membership, Workpiece};
+use aether_bloomery::{Budget, Digest, Event, Forecast, Membership, Statement, Workpiece, WorkpieceId};
+
+use crate::bloomery::{AdrTouch, Completeness};
 
 /// A draft plus its server-minted handle. The handle keys the in-memory
 /// shaping state, so a subsequent `PATCH` / `seal` names the draft by it.
@@ -69,6 +71,38 @@ pub struct DraftPatch {
     pub forecast: Option<Forecast>,
 }
 
+/// The seal-time scope projection an operator supplies per draft membership so
+/// the pre-seal approve gate (issue #3583, the enforcement half of #3571) can
+/// decide the member's admission. It mirrors the gate's
+/// [`AdmissionRequest`](crate::bloomery::AdmissionRequest) inputs, keyed
+/// by `{workpiece, scope_revision}` so the host matches it to the exact draft
+/// proposal. These are seal-time-only inputs the gate consumes; they are never
+/// folded into the immutable sealed `BloomSpec` — the `SealRequest` is their only
+/// home (ADR-0150; the authenticated operator harness attests them).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemberProjection {
+    /// The workpiece this projection describes — matches a draft proposal's
+    /// `workpiece`.
+    pub workpiece: WorkpieceId,
+    /// The exact scope-revision digest — matches the proposal's `scope_revision`
+    /// and the digest the formed approval binds.
+    pub scope_revision: Digest,
+    /// The declared-surface globs the tier policy resolves over.
+    pub declared_surface: Vec<String>,
+    /// The nine completeness facts the gate fails closed on.
+    pub completeness: Completeness,
+    /// The ADR-maturity of the change, for the unconditional hard gate.
+    pub adr_touch: AdrTouch,
+    /// Whether an owner-actor-verified `approval:pre-approved` override is
+    /// present (waives the tier to `auto`, never the gate checks).
+    pub pre_approved: bool,
+    /// The owner-signed statement for an above-`auto` member. Consumed by the
+    /// deferred-verify enforcement (its live wiring is the follow-up child #3599);
+    /// an above-`auto` member fails closed until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_statement: Option<Statement>,
+}
+
 /// `POST /drafts/{id}/seal` body — optional. The idempotency key defaults to
 /// the sealed bloom's own id, so re-POSTing the same seal is a no-op duplicate.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -76,6 +110,12 @@ pub struct SealRequest {
     /// Override the admit idempotency key; defaults to the sealed bloom id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// The per-member scope projections the pre-seal approve gate decides over
+    /// (issue #3583). Every draft proposal must resolve one, matched by
+    /// `{workpiece, scope_revision}`; a proposal with no projection fails closed
+    /// (the seal is refused), so an empty list refuses any non-empty draft.
+    #[serde(default)]
+    pub projections: Vec<MemberProjection>,
     /// The operator-supplied, per-member work-order descriptions (#3595), keyed
     /// by workpiece id. Advisory model context the coordinator persists at seal
     /// so the construct lane's prompt can name a `## Task` — it binds no evidence
