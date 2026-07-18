@@ -412,17 +412,28 @@ impl ApiCapabilityState {
             return Routed::Reply(error_response(422, "approval policy unavailable; seal fails closed"));
         };
         let gate = Gate::new(policy);
+        // Indexed once so the member loop stays O(n + m) however many
+        // projections the request carries; first occurrence wins on a
+        // duplicate key, matching the linear scan this replaces.
+        let mut projections = HashMap::with_capacity(request.projections.len());
+        for projection in &request.projections {
+            projections.entry((&projection.workpiece, &projection.scope_revision)).or_insert(projection);
+        }
         let mut sealed_proposals = Vec::with_capacity(draft.proposals.len());
         for proposal in &draft.proposals {
             let member = &proposal.workpiece.0;
-            let Some(projection) = request.projections.iter().find(|projection| {
-                projection.workpiece == proposal.workpiece && projection.scope_revision == proposal.scope_revision
-            }) else {
+            let Some(&projection) = projections.get(&(&proposal.workpiece, &proposal.scope_revision)) else {
                 return Routed::Reply(error_response(
                     422,
                     &format!("member {member} has no scope projection; seal fails closed"),
                 ));
             };
+            // The digest binds the approval to the projection as evaluated. It
+            // is computed over the canonical wire re-encoding of the decoded
+            // struct, not the raw request slice: the JSON body carries no
+            // per-projection byte boundaries, and the canonical form is
+            // reproducible from the shared DTO by any party rather than
+            // sensitive to the sender's whitespace and field order.
             let projection_digest = match to_vec(projection) {
                 Ok(bytes) => Digest::of_wire_bytes(&bytes),
                 Err(error) => {
