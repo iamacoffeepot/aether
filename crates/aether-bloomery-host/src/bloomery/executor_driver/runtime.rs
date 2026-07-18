@@ -282,6 +282,18 @@ fn drain_and_dispatch(
     Ok((handles, ack_through, transient_failure))
 }
 
+/// The restart recovery set (issue #3641): one [`WorkHandle`] per nonce still
+/// outstanding in the store, so a dispatched-but-unresolved order (its outbox
+/// entry acked/delivered, but not yet admitted when the process stopped) is
+/// tracked again after a restart instead of being permanently stranded. Only
+/// the nonce is read — the admit path already re-reads the full
+/// [`crate::store::OutstandingOrder`] via `lookup_order` at match time, so
+/// decoding the other columns here would be dead work. Factored out of `init`
+/// so a test can exercise it without constructing a `NativeInitCtx`.
+fn seed_tracked(store: &mut dyn StoreBackend) -> rusqlite::Result<Vec<WorkHandle>> {
+    Ok(store.list_outstanding_nonces()?.into_iter().map(|nonce| WorkHandle::new(Nonce(nonce))).collect())
+}
+
 /// Pull matched attempt results for the tracked handles and return the [`Admit`]s
 /// to forward to the control core, pruning the handles whose order the broker
 /// consumed (a completed + admitted run). The factored-out network side, unit-
@@ -348,7 +360,12 @@ impl NativeActor for ExecutorDriverCapability {
         }
 
         let executor = ExecutorShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
-        let store = SqliteStore::open(&config.store_path).map_err(|e| BootError::Other(Box::new(e)))?;
+        let mut store = SqliteStore::open(&config.store_path).map_err(|e| BootError::Other(Box::new(e)))?;
+        // Restart recovery (#3641): a driver that cannot read its recovery set
+        // must not silently start with an empty one — that is the bug this
+        // seed exists to fix, so a read error fails boot rather than mounting
+        // with a stranded `tracked` vec.
+        let tracked = seed_tracked(&mut store).map_err(|e| BootError::Other(Box::new(e)))?;
         let interval = Duration::from_secs(config.poll_interval_secs.max(1));
         let timer = spawn_timer(
             Arc::clone(&mailer),
@@ -363,13 +380,14 @@ impl NativeActor for ExecutorDriverCapability {
             owner = %config.owner,
             repo = %config.repo,
             poll_interval_secs = config.poll_interval_secs,
+            retracked = tracked.len(),
             "executor dispatch driver mounted; polling the store for dispatch decisions",
         );
         Ok(ExecutorDriverState {
             executor: Some(executor),
             store: Some(store),
             claims: NameEvidenceClaims,
-            tracked: Vec::new(),
+            tracked,
             control_mailbox,
             mailer,
             self_mailbox,

@@ -147,6 +147,12 @@ pub trait StoreBackend: Send {
     /// row was removed. A consumed order makes a replayed nonce refuse — the
     /// consume-once semantics the trust boundary rests on.
     fn consume_order(&mut self, nonce: &str) -> rusqlite::Result<bool>;
+    /// Every nonce still outstanding — the restart recovery set (issue #3641):
+    /// the executor driver's `init` seeds its in-memory tracked-handle set from
+    /// this so a dispatched-but-unresolved order is polled again after a
+    /// restart, rather than only from the (already-consumed-nothing) empty
+    /// vec `init` used to start with.
+    fn list_outstanding_nonces(&mut self) -> rusqlite::Result<Vec<String>>;
     /// Record a per-bloom study index row (issue #3523): the study artifact
     /// digest for a graded attempt, keyed by (`bloom`, `attempt_digest`).
     /// Last-writer-wins on the key — a re-admit of the same attempt overwrites,
@@ -334,6 +340,12 @@ impl StoreBackend for SqliteStore {
     fn consume_order(&mut self, nonce: &str) -> rusqlite::Result<bool> {
         let removed = self.conn.execute("DELETE FROM outstanding_orders WHERE nonce = ?1", rusqlite::params![nonce])?;
         Ok(removed > 0)
+    }
+
+    fn list_outstanding_nonces(&mut self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT nonce FROM outstanding_orders")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect()
     }
 
     fn record_study(&mut self, bloom: &[u8], attempt_digest: &[u8], study_artifact: &str) -> rusqlite::Result<()> {

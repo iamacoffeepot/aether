@@ -19,6 +19,7 @@ use aether_data::wire::{from_bytes, to_vec};
 
 use super::{
     BACKOFF_CAP, DISPATCH_TOPIC, NameEvidenceClaims, backoff_delay, drain_and_dispatch, next_backoff, pull_and_admit,
+    seed_tracked,
 };
 use crate::bloomery::intake::attempt_artifact_name;
 use crate::bloomery::local_executor::testing::FixedRunner;
@@ -272,6 +273,52 @@ fn pull_and_admit_admits_a_matching_construct_result_as_attempt_completed() {
     }
     // A non-terminal member stage — Construct has a successor in the line.
     assert!(StageCatalog::next_member_stage(StageId::Construct).is_some());
+}
+
+#[test]
+fn seed_tracked_recovers_a_dispatched_order_across_a_restart() {
+    // The restart-shaped bug (#3641): a work order that was submitted and
+    // recorded but not yet admitted when the process stopped must be
+    // re-tracked at the next boot from the persisted `outstanding_orders`
+    // table — `init` used to start `tracked: Vec::new()` unconditionally, so
+    // this order would never be polled again.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bloomery.db").to_str().unwrap().to_owned();
+    let fake = FakeGithub::new();
+    let shell = shell(fake.clone());
+    let bloom = BloomId(digest(1));
+
+    let nonce = {
+        let mut store = SqliteStore::open(&path).unwrap();
+        let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
+        let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
+        assert_eq!(handles.len(), 1, "the order dispatched and was recorded before the simulated crash");
+        store.ack_outbox(Some(DISPATCH_TOPIC), ack_through.unwrap()).unwrap();
+        format!("dispatch-{sequence}")
+        // `store` drops here — the process stops before this dispatch's
+        // result was ever pulled, with no in-memory `tracked` surviving it.
+    };
+
+    // Restart: reopen the same file. A fresh driver state's `init` seeds
+    // `tracked` from the persisted registry instead of starting empty.
+    let mut store = SqliteStore::open(&path).unwrap();
+    let mut tracked = seed_tracked(&mut store).unwrap();
+    assert_eq!(
+        tracked.iter().map(|handle| handle.nonce.0.clone()).collect::<Vec<_>>(),
+        vec![nonce.clone()],
+        "the dispatched-but-unresolved order is re-tracked after restart",
+    );
+
+    // The run completed while the process was down; the first intake cycle
+    // after restart resumes inspecting the seeded handle and admits it.
+    let run_id = fake.seed_run(&nonce, RunStatus::Completed, Some(RunConclusion::Success));
+    let name =
+        attempt_artifact_name(&aether_bloomery::Nonce(nonce), &digest(5), StageVerdict::VerificationPassed, &digest(9));
+    fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name, size_bytes: 20 }]);
+
+    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked);
+    assert_eq!(admits.len(), 1, "the restart-seeded handle is inspected and its result admitted, not stranded");
+    assert!(tracked.is_empty(), "the order is consumed on admit and no longer tracked");
 }
 
 #[test]
