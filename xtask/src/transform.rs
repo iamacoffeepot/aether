@@ -19,7 +19,7 @@
 //!   coordinator never sees it.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
 use std::{fs, process, thread};
 
@@ -212,20 +212,33 @@ fn stamp_construct_evidence(
 }
 
 /// Whether `git status --porcelain` stdout signals a candidate change in the
-/// working tree: a non-empty (whitespace-trimmed) output means the construct run
-/// left something to review, an empty one means it did nothing (#3596). Pure so
-/// the mapping is testable without spawning git.
-fn porcelain_signals_candidate(stdout: &str) -> bool {
-    !stdout.trim().is_empty()
+/// working tree: a non-empty output means the construct run left something to
+/// review, an empty one means it did nothing (#3596). Entries whose path is under
+/// `out_dir` — the run's own evidence output tree — are ignored: the local base is
+/// relative (`.bloomery/local-worktrees`), so the `--out` dir can resolve inside
+/// the worktree cwd and its untracked output would otherwise read as a candidate
+/// (#3632). Pure so the mapping is testable without spawning git.
+fn porcelain_signals_candidate(stdout: &str, out_dir: &Path) -> bool {
+    stdout.lines().any(|line| {
+        if line.trim().is_empty() {
+            return false;
+        }
+        // Porcelain v1: two status chars, a space, then the path. A rename renders
+        // as `orig -> new`; the candidate is the new path.
+        let path = line.get(3..).unwrap_or("").trim();
+        let path = path.rsplit(" -> ").next().unwrap_or(path);
+        !path.is_empty() && !Path::new(path).starts_with(out_dir)
+    })
 }
 
 /// Inspect the working tree (cwd — the checked-out worktree the construct lane
-/// runs in) for a candidate change the run left, via `git status --porcelain`.
+/// runs in) for a candidate change the run left, via `git status --porcelain`,
+/// ignoring entries under the run's own `out_dir` evidence tree (#3632).
 /// Fail-closed: a git that will not run cannot prove a candidate, so it reads as
 /// none (the completion gate then rejects the attempt).
-fn capture_produced_candidate() -> bool {
+fn capture_produced_candidate(out_dir: &Path) -> bool {
     Command::new("git").args(["status", "--porcelain"]).output().is_ok_and(|output| {
-        output.status.success() && porcelain_signals_candidate(&String::from_utf8_lossy(&output.stdout))
+        output.status.success() && porcelain_signals_candidate(&String::from_utf8_lossy(&output.stdout), out_dir)
     })
 }
 
@@ -500,7 +513,7 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
     // to leave (#3596): the gate demands a substantive conclusion, and an empty
     // diff is nothing to review. Captured after the child is reaped so it reflects
     // the run's final tree.
-    let produced_candidate = capture_produced_candidate();
+    let produced_candidate = capture_produced_candidate(&args.out);
 
     let evidence = stamp_construct_evidence(args.nonce.as_deref(), produced_candidate, &record);
     let evidence_path = args.out.join("evidence.json");
@@ -512,6 +525,8 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
         CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, VERIFY_CHECK, all_passed, assemble_construct_prompt,
         build_evidence, construct_argv, derive_result_record, porcelain_signals_candidate, stamp_construct_evidence,
@@ -624,14 +639,39 @@ mod tests {
         assert_eq!(no_nonce["result_record"]["no_result"], true, "the derived record is carried whole");
     }
 
-    // The candidate signal is a pure map of `git status --porcelain` stdout: any
-    // non-empty (trimmed) output is a candidate change, an empty one is not (#3596).
+    // The candidate signal is a pure map of `git status --porcelain` stdout: a
+    // non-empty output is a candidate change, an empty one is not (#3596), and the
+    // run's own evidence output tree under `out_dir` never counts (#3632).
     #[test]
     fn porcelain_signals_a_candidate_only_when_the_worktree_is_dirty() {
-        assert!(!porcelain_signals_candidate(""), "a clean worktree left no candidate");
-        assert!(!porcelain_signals_candidate("   \n  \n"), "whitespace-only output is still no candidate");
-        assert!(porcelain_signals_candidate(" M xtask/src/transform.rs\n"), "a modified file is a candidate");
-        assert!(porcelain_signals_candidate("?? new_file.rs\n"), "a new untracked file is a candidate");
+        let out = Path::new(".bloomery/local-worktrees/n-evidence");
+        assert!(!porcelain_signals_candidate("", out), "a clean worktree left no candidate");
+        assert!(!porcelain_signals_candidate("   \n  \n", out), "whitespace-only output is still no candidate");
+        assert!(porcelain_signals_candidate(" M xtask/src/transform.rs\n", out), "a modified file is a candidate");
+        assert!(porcelain_signals_candidate("?? new_file.rs\n", out), "a new untracked file is a candidate");
+    }
+
+    // The run's own evidence tree (and any other output under `out_dir`) is not a
+    // candidate; a real source change alongside it still is (#3632).
+    #[test]
+    fn porcelain_ignores_the_runs_own_output_tree() {
+        let out = Path::new(".bloomery/local-worktrees/n-evidence");
+        assert!(
+            !porcelain_signals_candidate("?? .bloomery/local-worktrees/n-evidence/evidence.json\n", out),
+            "the run's own evidence output is not a candidate",
+        );
+        assert!(
+            !porcelain_signals_candidate("?? .bloomery/local-worktrees/n-evidence/\n", out),
+            "the untracked evidence directory itself is not a candidate",
+        );
+        assert!(
+            porcelain_signals_candidate("?? .bloomery/local-worktrees/n-evidence/evidence.json\n M src/lib.rs\n", out,),
+            "a real source change alongside the evidence tree is still a candidate",
+        );
+        assert!(
+            porcelain_signals_candidate("R  old_name.rs -> new_name.rs\n", out),
+            "a rename to a path outside the out dir is a candidate (new-path parse)",
+        );
     }
 
     // The prompt is assembled from the lane's own in-repo instruction source plus
