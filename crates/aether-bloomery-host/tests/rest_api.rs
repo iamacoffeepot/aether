@@ -318,11 +318,12 @@ fn assert_gate_fails_closed(http_port: u16, seal_path: &str) {
         send_json(http_port, "POST", seal_path, &seal_body(vec![projection(&["docs/guide/x.md"], incomplete)]));
     assert_eq!(status, 422, "incomplete projection fails closed");
 
-    // Above-auto surface: `crates/aether-data/**` resolves `human`, which this
-    // slice fails closed on (signed-statement enforcement is the follow-up child).
+    // Above-auto surface with no signed statement: `crates/aether-data/**`
+    // resolves `human`, and `projection` carries no `signed_statement`, so the
+    // deferred-verify path (#3599) fails it closed before any signing dispatch.
     let above_auto = seal_body(vec![projection(&["crates/aether-data/src/lib.rs"], complete())]);
     let (status, _) = send_json(http_port, "POST", seal_path, &above_auto);
-    assert_eq!(status, 422, "above-auto fails closed");
+    assert_eq!(status, 422, "above-auto with no signed statement fails closed");
 }
 
 #[test]
@@ -476,15 +477,34 @@ fn rest_api_drives_a_bloom_end_to_end() {
 /// projection carries a valid owner-signed statement admits with a gate-formed
 /// approval verified through the `aether.signing` capability; a missing,
 /// wrong-subject, or unverifiable statement refuses the whole seal (422, fail
-/// closed); and a mixed auto + above-auto draft admits only when the above-auto
-/// verification passes.
+/// closed).
 #[test]
 fn above_auto_deferred_verify_gates_the_seal() {
+    run_with_bloomery("above_auto_deferred_verify_gates_the_seal", assert_single_above_auto_seal);
+}
+
+/// The mixed half of the deferred-verify seal: a draft carrying one auto and one
+/// above-auto member admits only when the above-auto member's signature
+/// verifies. A separate process (own `:memory:` store, own mainline) from the
+/// single-member cases, since V1 permits only one active bloom per mainline and
+/// each case here seals its own.
+#[test]
+fn mixed_auto_and_above_auto_seal_admits_when_verified() {
+    run_with_bloomery("mixed_auto_and_above_auto_seal_admits_when_verified", |http_port| {
+        assert_mixed_above_auto_seal(http_port, member_revision());
+    });
+}
+
+/// Boot the `bloomery` bin, wait for both readiness signals (`/drafts` for the
+/// HTTP router, `/view` for the loaded control core), run `body` against its HTTP
+/// port inside a panic guard, then reap the child. Skips cleanly when the
+/// control-core wasm is not built (unless `AETHER_REQUIRE_RUNTIME` is set).
+fn run_with_bloomery(label: &str, body: impl FnOnce(u16) + std::panic::UnwindSafe) {
     let Some(wasm) = control_core_wasm() else {
         if env::var("AETHER_REQUIRE_RUNTIME").is_ok() {
             panic!("control-core wasm not built but AETHER_REQUIRE_RUNTIME is set");
         }
-        eprintln!("skipping above_auto_deferred_verify_gates_the_seal: control-core wasm not built");
+        eprintln!("skipping {label}: control-core wasm not built");
         return;
     };
 
@@ -495,28 +515,8 @@ fn above_auto_deferred_verify_gates_the_seal() {
 
     let result = std::panic::catch_unwind(|| {
         wait_for_200(http_port, "/drafts");
-
-        // Stage the two workpieces the drafts below propose.
-        for (wp, seed) in [("wp-1", 2u8), ("wp-2", 12u8)] {
-            let staged = Workpiece {
-                id: WorkpieceId(wp.to_owned()),
-                intent: Digest::from_bytes([seed; 32]),
-                scope_revision: Digest::from_bytes([seed + 1; 32]),
-            };
-            let (status, _) = send_json(http_port, "POST", "/workpieces", &serde_json::to_value(&staged).unwrap());
-            assert_eq!(status, 201, "stage {wp}");
-        }
-
-        // The control core answers queries once loaded — the write/live-read
-        // readiness signal.
         wait_for_200(http_port, "/view");
-
-        // (a/b/c) A single above-auto member draft: fail-closed on missing /
-        // wrong-subject / unverifiable statements, admit on a valid one.
-        assert_single_above_auto_seal(http_port);
-        // (d) A mixed auto + above-auto draft admits only when the above-auto
-        // member's signature verifies.
-        assert_mixed_above_auto_seal(http_port, member_revision());
+        body(http_port);
     });
 
     let _ = child.kill();
