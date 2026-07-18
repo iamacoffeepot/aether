@@ -95,6 +95,24 @@ if (FINDER_SHAPE !== 'merged' && FINDER_SHAPE !== 'specialist') throw new Error(
 const VERIFY_MODEL = A.verifyModel || 'sonnet'
 const NO_CHALLENGE = A.noChallenge === true || DEPTH === 'gate'
 
+// Secondary caller-side guard (#3608). The primary lever is the caller's
+// completeness self-check (scripts/review-args-completeness.mjs) — only the
+// caller can see a changed file dropped ENTIRELY, since the sandbox never learns
+// the authoritative changed-file set. But a testFile that reaches args with no
+// diff hunk is a drop this side CAN catch: it reads to the finders as unchanged
+// (the #3600 false "no test changes" finding), so fail loud rather than review
+// it blind. Only the pr profile, where every reviewable file is a changed file
+// that must carry a hunk; backfill legitimately runs whole-file with no diffs.
+if (PROFILE === 'pr' && HAS_DIFFS) {
+  const nullDiffTests = TEST_FILES.filter((f) => {
+    const d = DIFFS[f]
+    return d === undefined || d === null || (typeof d === 'string' && d.trim() === '')
+  })
+  if (nullDiffTests.length) {
+    throw new Error(`review: pr-profile testFiles reached args with no diff hunk (caller bug — a changed test with an empty diff reads as unchanged, #3608): ${nullDiffTests.join(', ')}`)
+  }
+}
+
 // Efforts are pinned, never inherited (issue #3428): the CI review session runs at the CLI's
 // default effort (xhigh), and the calibration sweep measured xhigh finders at lower recall than
 // high at nearly twice the price. Workflow subagents are fresh sessions, so pinning here has no

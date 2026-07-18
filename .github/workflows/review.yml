@@ -248,13 +248,25 @@ jobs:
           if grep -qE '\.rs$' <<<"$files"; then
             review_class=rust
             reviewable_count=$(grep -cE '\.rs$' <<<"$files")
+            reviewable_list="$(grep -E '\.rs$' <<<"$files" || true)"
           elif grep -qE "$light_re" <<<"$files"; then
             review_class=light
             reviewable_count=$(grep -cE "$light_re" <<<"$files")
+            reviewable_list="$(grep -E "$light_re" <<<"$files" || true)"
           else
             review_class=none
+            reviewable_list=""
           fi
           echo "review_class=$review_class" >> "$GITHUB_OUTPUT"
+
+          # The AUTHORITATIVE changed reviewable-file set (#3608). This is the
+          # deterministic list the review session must feed review.js in full —
+          # the session's own `git diff` acquisition can silently drop files
+          # (PR #3600), so it derives files ∪ testFiles from THIS list and runs
+          # scripts/review-args-completeness.mjs against its assembled args
+          # before invoking the workflow. Written repo-relative as a JSON array
+          # and threaded into /tmp/agent-task.json at "Stage the task parameters".
+          printf '%s' "$reviewable_list" | jq -R -s -c 'split("\n") | map(select(length > 0))' > /tmp/review-reviewable.json
 
           # Tier table (issue #3404) — ordered, fully mechanical, top match
           # wins. A matched tier routes to the session-less `approve` job via
@@ -420,8 +432,14 @@ jobs:
           DIFF_BASE: ${{ steps.resolve.outputs.diff_base }}
           REVIEW_PASS: ${{ steps.resolve.outputs.review_pass }}
         run: |
+          # reviewable_files is the authoritative changed reviewable set the
+          # resolve step computed (#3608) — the deep review session derives its
+          # file set from this and runs the completeness self-check against it.
+          # It rides the file, not the -p text, so the prompt stays byte-constant
+          # for the #3285 prompt cache.
           jq -nc --arg pr "$PR_NUMBER" --arg base "$DIFF_BASE" --arg head "$(git rev-parse HEAD)" --arg pass "$REVIEW_PASS" \
-            '{pr_number: $pr, diff_base: $base, head_sha: $head, review_pass: $pass}' > /tmp/agent-task.json
+            --argjson reviewable "$(cat /tmp/review-reviewable.json 2>/dev/null || echo '[]')" \
+            '{pr_number: $pr, diff_base: $base, head_sha: $head, review_pass: $pass, reviewable_files: $reviewable}' > /tmp/agent-task.json
 
       # Warm session pool (#3286; design of record: the #3264 design comment,
       # v1.5). Resume a deposited session whose beliefs are provably true at
@@ -623,11 +641,22 @@ jobs:
           bash-inside-YAML parses fine and leaves unrelated CI green.
           READ THE DIFF FIRST, THEN SIZE YOUR OWN MACHINERY (issue #3414). The tier table
           already decided this diff earns a review session; your call is how much machinery
-          above that floor to spend. Resolve the changed files matching .github/workflows/**,
-          .github/actions/**, and scripts/** (NOT .rs) and their per-file diffs from git:
-          'git diff --name-only <diff_base>...HEAD' and 'git diff <diff_base>...HEAD -- <file>'
-          per file, substituting the file's diff_base value. Read the issue text this PR
-          closes (use gh to find the PR's closing reference for the pr_number if needed).
+          above that floor to spend. Do NOT enumerate the reviewable files yourself with
+          'git diff --name-only': agent-task.json's reviewable_files field is the AUTHORITATIVE
+          changed reviewable-file set the resolve step computed (the .github/workflows/**,
+          .github/actions/**, scripts/** matches, NOT .rs), and it is the set you must review in
+          full on either path — a self-run 'git diff' can silently drop files, the exact defect
+          #3608 fixes. For each file in reviewable_files resolve its per-file diff with
+          'git diff <diff_base>...HEAD -- <file>' (substituting the file's diff_base value). Read
+          the issue text this PR closes (use gh to find the PR's closing reference for the
+          pr_number if needed).
+          COMPLETENESS SELF-CHECK (load-bearing — #3608, both paths): before you review (inline)
+          or invoke the workflow (fan-out), write your assembled args ({files, diffs}) to a temp
+          JSON file, write the reviewable_files array from agent-task.json to a second temp file,
+          and run 'node scripts/review-args-completeness.mjs <reviewable-file> <args-file>'. If it
+          exits non-zero, a changed reviewable file was dropped — do NOT review, do NOT invoke the
+          workflow, and do NOT write a rollup: fix your args and re-run the check, or leave the
+          failure in the transcript so the action records an actionable no-rollup attempt.
           Then judge how much this diff earns — you have two paths, and the choice is yours.
           INLINE PATH (the default for a small, simple light diff). When the diff is small
           enough that you can review it confidently in this one context, apply the light
@@ -717,10 +746,25 @@ jobs:
           review; its diff_base field is the diff base; its head_sha field is the
           checkout's HEAD.
           Invoke the repo's /review skill in INTEGRATED mode against <diff_base>...HEAD,
-          substituting the file's diff_base value: resolve the changed .rs files and their
-          per-file diffs from git, and read the issue text this PR closes (use gh to find
-          the PR's closing reference for the pr_number
-          if needed). Pass noBuild: true, depth: gate, diffBase: <diff_base> (read from the
+          substituting the file's diff_base value. Do NOT enumerate the reviewable files
+          yourself with 'git diff --name-only': agent-task.json's reviewable_files field is
+          the AUTHORITATIVE changed reviewable-file set the resolve step computed, and it is
+          the set you must review in full (a self-run 'git diff' can silently drop files, the
+          exact defect #3608 fixes). Derive files ∪ testFiles from reviewable_files, and
+          populate diffs for EVERY file in it with 'git diff <diff_base>...HEAD -- <file>'
+          (test files included — a changed test with no diff hunk reads to the finders as
+          unchanged). Read the issue text this PR closes (use gh to find the PR's closing
+          reference for the pr_number if needed).
+          COMPLETENESS SELF-CHECK (load-bearing — #3608): before invoking the workflow, write
+          your assembled args ({files, testFiles, diffs}) to a temp JSON file, write the
+          reviewable_files array from agent-task.json to a second temp file, and run
+          'node scripts/review-args-completeness.mjs <reviewable-file> <args-file>' (GITHUB_WORKSPACE
+          is set, so absolute args paths normalize to match the repo-relative authoritative list).
+          If it exits non-zero, a changed reviewable file was dropped from your args — do NOT
+          invoke the workflow and do NOT write a rollup: fix your args and re-run the check, or
+          if you cannot, leave the failure in the transcript so the action records an actionable
+          no-rollup attempt.
+          Pass noBuild: true, depth: gate, diffBase: <diff_base> (read from the
           file), and reviewMode: full in the /review invocation's workflow
           args — this runner has no Rust toolchain, so the high-severity correctness refuter must
           ground read-only rather than write and run a scratch cargo test, and diffBase + reviewMode
