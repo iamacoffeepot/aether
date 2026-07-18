@@ -14,8 +14,8 @@
 //! This trait is the port-level seam the [`GitSource`](crate::GitSource) backend
 //! resolves through, mirroring the [`GitDataApi`](crate::GitDataApi) /
 //! [`ActionsApi`](crate::ActionsApi) seams: the durable implementation lives in
-//! the host (a `SQLite`-backed table), and the in-process double
-//! ([`FakeGithub`](crate::testing::FakeGithub)) implements it for token- and
+//! the host (a `SQLite`-backed table), and the in-process double (`FakeGithub`,
+//! behind the `testing` feature) implements it for token- and
 //! network-free tests. The crate owns [`GitObjectId`] because it is the one
 //! crate permitted to reason about git object shas — core `aether_bloomery` keeps
 //! [`Digest`] a pure content-address with no git concept.
@@ -153,7 +153,7 @@ impl Error for CorrespondenceError {}
 /// real git shas through (ADR-0150). One record maps one bloom [`Digest`] to the
 /// real git object ([`GitObjectId`]) that carries its value, resolvable in both
 /// directions. The durable implementation lives in the host; the in-process
-/// [`FakeGithub`](crate::testing::FakeGithub) implements it for tests.
+/// `FakeGithub` double (behind the `testing` feature) implements it for tests.
 ///
 /// `&self` methods with interior mutability so the source backend — which holds
 /// the correspondence behind a shared handle and calls it from `SourceBackend`'s
