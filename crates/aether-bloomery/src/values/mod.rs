@@ -18,7 +18,7 @@ pub use bloom::{BloomDraft, BloomSpec, LandingReceipt, Membership, ResolutionCla
 pub use profile::{AgentProfile, ReasoningEffort, ToolPolicy};
 pub use question::Question;
 pub use scope_revision::{ModelOverride, ResolvedModel, ScopeRevision};
-pub use stage::{Attempt, NetworkProfile, StageBinding, StageCatalog, Transformation};
+pub use stage::{Attempt, CandidateRef, NetworkProfile, StageBinding, StageCatalog, Transformation};
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 pub use study::{StudyCost, StudyRecord};
 

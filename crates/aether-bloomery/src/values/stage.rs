@@ -253,16 +253,16 @@ pub struct Transformation {
     pub command: String,
     /// The digest-pinned inputs.
     pub inputs: Vec<Digest>,
-    /// The exact git commit this attempt's worker checks out — the sealed
-    /// source the candidate is built against (ADR-0149 §Execution: "the wrapper
-    /// checks out the exact digest a resolved work order names"). Resolved per
-    /// stage by the reducer: today the bloom's sealed base for every member-line
-    /// stage; a future per-member integration checkpoint for the later stages.
+    /// The exact git commit this attempt's worker checks out — the source the
+    /// attempt runs on (ADR-0149 §Execution: "the wrapper checks out the exact
+    /// digest a resolved work order names"). Resolved per stage by the reducer:
+    /// the bloom's sealed base until the member captures a candidate, then the
+    /// candidate's capture commit (ADR-0152, [`CandidateRef::checkout`]).
     ///
-    /// Distinct from [`inputs`](Self::inputs): `inputs[0]` is the scope-revision
-    /// digest that *binds the returned evidence* — an aether content address
-    /// (`sha256` over the revision's wire bytes) orthogonal to git, never a
-    /// checkoutable object. This is the git commit the wrapper feeds
+    /// Distinct from [`inputs`](Self::inputs): `inputs[0]` is the digest that
+    /// *binds the returned evidence* — the member's scope revision, or its
+    /// candidate tree once one exists ([`CandidateRef::tree`]) — an aether
+    /// content address orthogonal to git, never a checkoutable object. This is the git commit the wrapper feeds
     /// `actions/checkout`; the executor renders it as the dispatch's checkout
     /// input while the `workflow_dispatch` itself stays pinned at the protected
     /// ref (the checkout target moves, the workflow definition does not).
@@ -295,11 +295,11 @@ impl Transformation {
     /// and re-resolve the effective model identically, so the dispatched model is a
     /// function of the frozen revision, not a dispatch-time choice.
     ///
-    /// `checkout` is the git commit the attempt's worker checks out — the sealed
-    /// source the candidate is built against, which the reducer resolves per stage
-    /// (the bloom's sealed base for every member-line stage today). It is a
-    /// separate axis from `subject`: `subject` binds the evidence, `checkout` names
-    /// the tree the work runs on. See [`checkout`](Self::checkout).
+    /// `checkout` is the git commit the attempt's worker checks out, which the
+    /// reducer resolves per stage — the bloom's sealed base until the member has
+    /// a captured candidate, then that candidate's capture commit (ADR-0152). It
+    /// is a separate axis from `subject`: `subject` binds the evidence, `checkout`
+    /// names the tree the work runs on. See [`checkout`](Self::checkout).
     ///
     /// The per-stage lane details (typed command, execution image, network
     /// posture) are the initial calibration — refinable without an ADR, like the
@@ -346,6 +346,24 @@ impl Transformation {
             description: None,
         }
     }
+}
+
+/// A captured candidate — the source tree a model-lane attempt produced, as the
+/// two correspondence-mapped digests ADR-0152 defines. `tree` is the identity of
+/// the work: the digest evidence binds to, `ResolutionClaim.candidate` names, and
+/// the source port integrates. `checkout` is the vehicle: the capture commit
+/// wrapping that tree, which downstream stages check out exactly as they check
+/// out the sealed base. The host captures both after a model-lane run and reports
+/// them on the completion fact; the reducer stores the pair on the member's
+/// cursor and re-targets later dispatches from it. Content-derived, so a Refine
+/// that changes anything yields a new `tree` and prior evidence stops validating
+/// (ADR-0149 §supersession).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct CandidateRef {
+    /// The produced git tree's digest — the candidate's identity.
+    pub tree: Digest,
+    /// The capture commit's digest — what a downstream stage checks out.
+    pub checkout: Digest,
 }
 
 /// The network posture a transformation runs under. Untrusted lanes run with

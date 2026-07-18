@@ -27,8 +27,8 @@ use crate::digest::{Digest, digest_of};
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::port::{BloomView, MemberView, PendingDecisionView, ViewDocument};
 use crate::values::{
-    BloomSpec, Evidence, EvidenceKind, LandingReceipt, Membership, Question, ResolutionClaim, ResolvedBloom,
-    StageCatalog, Statement, Transformation,
+    BloomSpec, CandidateRef, Evidence, EvidenceKind, LandingReceipt, Membership, Question, ResolutionClaim,
+    ResolvedBloom, StageCatalog, Statement, Transformation,
 };
 
 /// The rebuildable projection state the reducer reads (ADR-0149 §The control
@@ -110,6 +110,12 @@ pub struct StageProgress {
     /// The number of attempts dispatched against this stage so far (`1` on the
     /// first dispatch). Never exceeds the stage's `retry_budget`.
     pub attempts: u32,
+    /// The candidate the member is currently at (ADR-0152) — written when a
+    /// passing completion carries one, carried forward otherwise, `None` until
+    /// the first capture (a member still constructing against the bare sealed
+    /// base). Later dispatches re-target from it: evidence binds `tree`, the
+    /// worker checks out `checkout`.
+    pub candidate: Option<CandidateRef>,
 }
 
 /// A bloom's position in the one-way lifecycle.
@@ -247,6 +253,11 @@ pub enum Fact {
         /// the bloom's evidence log; the binding is enforced at the intake trust
         /// boundary before admission (#3502) and re-checkable there like a claim's.
         evidence: Evidence,
+        /// The candidate the attempt captured (ADR-0152) — the host records it
+        /// after a model-lane run commits its work; absent on mechanical lanes
+        /// and runs that produced nothing. Adopted onto the member's cursor only
+        /// on a passing completion.
+        candidate: Option<CandidateRef>,
     },
 }
 
@@ -467,6 +478,16 @@ pub enum Decision {
         /// The fully-built portable transformation the host wraps in a work order
         /// (adding the idempotency nonce) and submits through the executor port.
         transformation: Transformation,
+        /// The member's frozen scope-revision digest, carried explicitly so the
+        /// host driver records it without inferring it from the transformation's
+        /// inputs (ADR-0152 — once a candidate exists, `inputs[0]` is the
+        /// candidate tree, not the revision).
+        scope_revision: Digest,
+        /// The candidate tree this attempt runs against, when the member has one
+        /// (ADR-0152). The host displays it as the digest returned evidence must
+        /// bind to; `None` dispatches against the scope revision (Construct, or
+        /// a member with no capture yet).
+        candidate: Option<Digest>,
     },
     /// Advance a member's stage cursor to `progress` — the snapshot-folding
     /// counterpart to a [`Decision::DispatchAttempt`]. Overwrites the member's
@@ -681,8 +702,8 @@ pub fn reduce(snapshot: &Snapshot, event: &Event) -> Decisions {
         Fact::Integrate { bloom, claim } => reduce_integrate(snapshot, bloom, claim),
         Fact::AdmitEvidence { bloom, evidence } => reduce_admit_evidence(snapshot, bloom, evidence),
         Fact::AdoptAnswer { bloom, answer } => reduce_adopt_answer(snapshot, bloom, answer),
-        Fact::AttemptCompleted { bloom, workpiece, stage, passed, evidence } => {
-            reduce_attempt_completed(snapshot, bloom, workpiece, *stage, *passed, evidence)
+        Fact::AttemptCompleted { bloom, workpiece, stage, passed, evidence, candidate } => {
+            reduce_attempt_completed(snapshot, bloom, workpiece, *stage, *passed, evidence, *candidate)
         }
         Fact::Resolve { bloom, tree, head, lineage } => reduce_resolve(snapshot, bloom, tree, head, lineage),
         Fact::Land { bloom, new_head } => reduce_land(snapshot, bloom, new_head),
@@ -706,13 +727,15 @@ fn entry_dispatch_effects(bloom: BloomId, member: &Membership, checkout: Digest)
         Decision::AdvanceStage {
             bloom,
             workpiece: member.workpiece.clone(),
-            progress: StageProgress { stage, attempts: 1 },
+            progress: StageProgress { stage, attempts: 1, candidate: None },
         },
         Decision::DispatchAttempt {
             bloom,
             workpiece: member.workpiece.clone(),
             stage,
             transformation: Transformation::for_member_stage(stage, member.scope_revision, checkout),
+            scope_revision: member.scope_revision,
+            candidate: None,
         },
     ]
 }
@@ -1022,6 +1045,7 @@ fn reduce_attempt_completed(
     stage: StageId,
     passed: bool,
     evidence: &Evidence,
+    captured: Option<CandidateRef>,
 ) -> Decisions {
     let Some(record) = snapshot.blooms.get(bloom) else {
         return Decisions::rejected(Outcome::AttemptCompletedRejected(AttemptCompletedError::UnknownOrInactiveBloom));
@@ -1054,12 +1078,22 @@ fn reduce_attempt_completed(
         }));
     }
     let attempts = cursor.map_or(1, |progress| progress.attempts);
-    let subject = member.scope_revision;
-    // The git commit a re-dispatched attempt's worker checks out: the bloom's
-    // sealed base, resolved off the bloom record for every member-line stage
-    // (ADR-0149 §Execution, #3572). Distinct from `subject`, the evidence-binding
-    // scope-revision digest.
-    let checkout = record.spec.base();
+    // The member's candidate after this completion (ADR-0152): a passing attempt
+    // adopts the capture it carried (a mechanical lane carries none — the prior
+    // candidate rides forward); a failing attempt adopts nothing, so its capture
+    // is discarded and the member stays at the candidate its last pass produced.
+    let prior = cursor.and_then(|progress| progress.candidate);
+    let candidate = if passed {
+        captured.or(prior)
+    } else {
+        prior
+    };
+    // The dispatch targets re-resolve from the cursor (ADR-0152): with a
+    // candidate present, the returned evidence binds its tree and the worker
+    // checks out its capture commit; without one, the member's frozen scope
+    // revision and the bloom's sealed base (ADR-0149 §Execution, #3572).
+    let (subject, checkout) = candidate
+        .map_or_else(|| (member.scope_revision, record.spec.base()), |current| (current.tree, current.checkout));
     // The attempt result is journaled evidence about the member, recorded whatever
     // the gate decides.
     let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
@@ -1070,13 +1104,15 @@ fn reduce_attempt_completed(
         effects.push(Decision::AdvanceStage {
             bloom: *bloom,
             workpiece: workpiece.clone(),
-            progress: StageProgress { stage: next, attempts: 1 },
+            progress: StageProgress { stage: next, attempts: 1, candidate },
         });
         effects.push(Decision::DispatchAttempt {
             bloom: *bloom,
             workpiece: workpiece.clone(),
             stage: next,
             transformation: Transformation::for_member_stage(next, subject, checkout),
+            scope_revision: member.scope_revision,
+            candidate: candidate.map(|current| current.tree),
         });
         return Decisions {
             outcome: Outcome::AttemptAdvanced { bloom: *bloom, workpiece: workpiece.clone(), from: stage, to: next },
@@ -1093,13 +1129,15 @@ fn reduce_attempt_completed(
         effects.push(Decision::AdvanceStage {
             bloom: *bloom,
             workpiece: workpiece.clone(),
-            progress: StageProgress { stage, attempts: attempt },
+            progress: StageProgress { stage, attempts: attempt, candidate },
         });
         effects.push(Decision::DispatchAttempt {
             bloom: *bloom,
             workpiece: workpiece.clone(),
             stage,
             transformation: Transformation::for_member_stage(stage, subject, checkout),
+            scope_revision: member.scope_revision,
+            candidate: candidate.map(|current| current.tree),
         });
         return Decisions {
             outcome: Outcome::AttemptRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, attempt },

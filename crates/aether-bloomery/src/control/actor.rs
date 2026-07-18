@@ -582,12 +582,14 @@ fn project(
                 let payload = RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer };
                 outbox.push(OutboxPayload { topic: REDISPATCH_TOPIC.to_owned(), payload: to_vec(&payload)? });
             }
-            Decision::DispatchAttempt { bloom, workpiece, stage, transformation } => {
+            Decision::DispatchAttempt { bloom, workpiece, stage, transformation, scope_revision, candidate } => {
                 let payload = DispatchPayload {
                     bloom: bloom.0,
                     workpiece: workpiece.clone(),
                     stage: *stage,
                     transformation: transformation.clone(),
+                    scope_revision: *scope_revision,
+                    candidate: *candidate,
                 };
                 outbox.push(OutboxPayload { topic: DISPATCH_TOPIC.to_owned(), payload: to_vec(&payload)? });
             }

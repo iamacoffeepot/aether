@@ -90,8 +90,8 @@ pub use sign::Ed25519KeyProvider;
 pub use sign::{FakeKeyProvider, KeyProvider, SignatureEnvelope};
 pub use study_report::{BloomGrade, StudyReport, grade};
 pub use values::{
-    AgentProfile, Artifact, Attempt, BloomDraft, BloomSpec, Budget, Evidence, EvidenceKind, Forecast, LandingReceipt,
-    Membership, ModelOverride, NetworkProfile, Observation, Provenance, Question, ReasoningEffort, ResolutionClaim,
-    ResolvedBloom, ResolvedModel, ScopeRevision, StageBinding, StageCatalog, StageReceipt, Statement, StudyCost,
-    StudyRecord, ToolPolicy, Transformation, Workpiece,
+    AgentProfile, Artifact, Attempt, BloomDraft, BloomSpec, Budget, CandidateRef, Evidence, EvidenceKind, Forecast,
+    LandingReceipt, Membership, ModelOverride, NetworkProfile, Observation, Provenance, Question, ReasoningEffort,
+    ResolutionClaim, ResolvedBloom, ResolvedModel, ScopeRevision, StageBinding, StageCatalog, StageReceipt, Statement,
+    StudyCost, StudyRecord, ToolPolicy, Transformation, Workpiece,
 };
