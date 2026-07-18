@@ -454,7 +454,7 @@ impl ApiCapabilityState {
                         422,
                         &format!(
                             "member {member} resolves tier {tier:?}; above-auto signed-statement enforcement \
-                             is the follow-up child of #3583 — seal fails closed until it lands"
+                             is the follow-up child #3599 — seal fails closed until it lands"
                         ),
                     ));
                 }

@@ -95,8 +95,8 @@ pub struct MemberProjection {
     /// present (waives the tier to `auto`, never the gate checks).
     pub pre_approved: bool,
     /// The owner-signed statement for an above-`auto` member. Consumed by the
-    /// deferred-verify enforcement (its live wiring is the follow-up child of
-    /// this slice); an above-`auto` member fails closed until then.
+    /// deferred-verify enforcement (its live wiring is the follow-up child #3599);
+    /// an above-`auto` member fails closed until then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_statement: Option<Statement>,
 }
