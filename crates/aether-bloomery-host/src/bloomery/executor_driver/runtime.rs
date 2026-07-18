@@ -33,11 +33,13 @@
 //! drain/ack through the store's `DrainOutbox`/`AckOutbox` mail (as the mirror
 //! driver does) is a follow-up once the registry ops gain a mail surface.
 
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aether_actor::runtime;
-use aether_bloomery::{Admit, BloomId, DispatchPayload, ExecutionStatus, Nonce, WorkHandle, WorkOrder};
+use aether_bloomery::{Admit, BloomId, Digest, DispatchPayload, ExecutionStatus, Fact, Nonce, WorkHandle, WorkOrder};
+use aether_bloomery_github::SharedCorrespondence;
 use aether_data::wire::from_bytes;
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 use aether_substrate::Mail;
@@ -195,6 +197,11 @@ pub struct ExecutorDriverState {
     // How long a tracked handle may stay unresolved before the tick warns
     // (#3635); `None` when `stale_warn_after_secs == 0` disables the sweep.
     stale_warn_after: Option<Duration>,
+    // The correspondence the push side resolves an admitted capture's commit
+    // through (ADR-0152); `None` on a disabled driver.
+    correspondence: Option<SharedCorrespondence>,
+    // The candidate-ref push seam (ADR-0152); production shells git.
+    pusher: Arc<dyn CandidatePush>,
 }
 
 impl ExecutorDriverState {
@@ -220,6 +227,8 @@ impl ExecutorDriverState {
             _timer: None,
             backoff: None,
             stale_warn_after: stale_warn_after(GithubMirrorConfig::default().stale_warn_after_secs),
+            correspondence: None,
+            pusher: Arc::new(GitCandidatePush),
         }
     }
 }
@@ -265,16 +274,17 @@ fn drain_and_dispatch(
             break;
         };
         // The transformation pins the subject as its first input; a well-formed
-        // per-member dispatch always carries one. The subject is the digest the
-        // returning evidence must bind to (candidate == displayed == subject).
-        let Some(subject) = payload.transformation.inputs.first().copied() else {
+        // per-member dispatch always carries one. The record's axes come from the
+        // payload's explicit fields (ADR-0152), so the input is only checked for
+        // well-formedness here — the executor backends re-derive it themselves.
+        if payload.transformation.inputs.is_empty() {
             tracing::warn!(
                 target: "aether_bloomery_host::executor",
                 sequence = entry.sequence,
                 "dispatch transformation carries no subject input; stopping the ack prefix to re-drain",
             );
             break;
-        };
+        }
         // Thread the member's advisory work-order description onto the construct
         // lane (#3595). Only the model-driven `construct.implement` lane reads it
         // (Construct / Refine); the mechanical verify/review lanes never name a
@@ -299,13 +309,19 @@ fn drain_and_dispatch(
         }
         let nonce = Nonce(format!("dispatch-{}", entry.sequence));
         let order = WorkOrder { transformation, nonce: nonce.clone() };
+        // The record's axes come from the payload's explicit fields (ADR-0152):
+        // the true scope revision always, and the displayed digest — what the
+        // returning evidence must bind to — the candidate tree when the member
+        // has one, else the scope revision. `subject` (inputs[0]) agrees with
+        // the displayed digest by reducer construction.
+        let displayed = payload.candidate.unwrap_or(payload.scope_revision);
         let record = DispatchRecord {
             nonce,
             bloom: BloomId(payload.bloom),
             workpiece: payload.workpiece,
-            scope_revision: subject,
-            candidate: subject,
-            displayed_digest: subject,
+            scope_revision: payload.scope_revision,
+            candidate: displayed,
+            displayed_digest: displayed,
             stage: payload.stage,
         };
         match dispatch_and_record(executor, store, &order, &record) {
@@ -346,6 +362,128 @@ fn drain_and_dispatch(
     Ok((handles, ack_through, transient_failure))
 }
 
+/// The candidate-ref push seam (ADR-0152): make an admitted capture commit
+/// reachable on the hosted repo, so a zero-secret Actions runner can check it
+/// out and the API-side integrate can resolve its tree. Production shells the
+/// operator's own authenticated clone; tests substitute a recorder.
+pub trait CandidatePush: Send + Sync {
+    /// Force-push `commit_hex` to `target_ref` on `origin`.
+    ///
+    /// # Errors
+    /// The push shell-out failed; the message is the diagnostic tail.
+    fn push(&self, commit_hex: &str, target_ref: &str) -> Result<(), String>;
+}
+
+/// The production push: `git push --force origin <sha>:<ref>` from the host
+/// process's own clone. The capture commit was created in a scratch worktree of
+/// this same repository, so its object is in the shared object store and
+/// pushable after the worktree is gone; the host's ambient credentials are the
+/// ADR-0150 trust domain (the worker itself never pushes).
+struct GitCandidatePush;
+
+impl CandidatePush for GitCandidatePush {
+    fn push(&self, commit_hex: &str, target_ref: &str) -> Result<(), String> {
+        let refspec = format!("{commit_hex}:{target_ref}");
+        let output = Command::new("git")
+            .args(["push", "--force", "origin"])
+            .arg(&refspec)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).into_owned())
+        }
+    }
+}
+
+/// The bloom-namespace ref an admitted candidate is pushed to —
+/// `refs/heads/bloom/<bloom hex>/candidate/<workpiece>` (ADR-0152), force-updated
+/// because refinement supersedes. The workpiece segment is sanitized to git-safe
+/// ref characters; ids are machine-authored, so this is a tripwire, not a codec.
+fn candidate_ref_name(bloom: &BloomId, workpiece: &str) -> String {
+    let safe: String = workpiece
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("refs/heads/bloom/{}/candidate/{safe}", digest_hex(&bloom.0))
+}
+
+/// Lowercase-hex a digest's 32 bytes (the bloom-namespace rendering the source
+/// port's refs use).
+fn digest_hex(digest: &Digest) -> String {
+    let mut hex = String::with_capacity(64);
+    for byte in digest.as_bytes() {
+        hex.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        hex.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
+    }
+    hex
+}
+
+/// Push each admitted passing capture to its bloom candidate ref (ADR-0152).
+/// Best-effort with loud warns: a failed push leaves the candidate local-only —
+/// a downstream Actions checkout of it will fail visibly and retry through the
+/// stage machinery, never silently run the wrong tree. A failing completion's
+/// capture is not pushed (the reducer discards it).
+fn push_admitted_candidates(
+    admissions: &[Admission],
+    correspondence: Option<&SharedCorrespondence>,
+    pusher: &dyn CandidatePush,
+) {
+    for admission in admissions {
+        let Fact::AttemptCompleted { bloom, workpiece, passed: true, candidate: Some(candidate), .. } =
+            &admission.event.fact
+        else {
+            continue;
+        };
+        let Some(correspondence) = correspondence else {
+            tracing::warn!(
+                target: "aether_bloomery_host::executor",
+                workpiece = %workpiece.0,
+                "admitted capture has no correspondence store to resolve its commit; candidate stays local-only",
+            );
+            continue;
+        };
+        let commit = match correspondence.resolve_git(&candidate.checkout) {
+            Ok(Some(commit)) => commit,
+            Ok(None) => {
+                tracing::warn!(
+                    target: "aether_bloomery_host::executor",
+                    workpiece = %workpiece.0,
+                    "admitted capture's checkout digest has no recorded git object; candidate stays local-only",
+                );
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(target: "aether_bloomery_host::executor", workpiece = %workpiece.0, %error, "capture correspondence read failed");
+                continue;
+            }
+        };
+        let target_ref = candidate_ref_name(bloom, &workpiece.0);
+        match pusher.push(&commit.to_hex(), &target_ref) {
+            Ok(()) => tracing::info!(
+                target: "aether_bloomery_host::executor",
+                workpiece = %workpiece.0,
+                target_ref = %target_ref,
+                "candidate capture pushed",
+            ),
+            Err(error) => tracing::warn!(
+                target: "aether_bloomery_host::executor",
+                workpiece = %workpiece.0,
+                target_ref = %target_ref,
+                %error,
+                "candidate push failed; candidate stays local-only",
+            ),
+        }
+    }
+}
+
 /// The restart recovery set (issue #3641): one [`WorkHandle`] per nonce still
 /// outstanding in the store, so a dispatched-but-unresolved order (its outbox
 /// entry acked/delivered, but not yet admitted when the process stopped) is
@@ -370,6 +508,8 @@ fn pull_and_admit(
     claims: NameEvidenceClaims,
     tracked: &mut Vec<TrackedHandle>,
     stale_warn_after: Option<Duration>,
+    correspondence: Option<&SharedCorrespondence>,
+    pusher: &dyn CandidatePush,
 ) -> Vec<Admit> {
     let mut sink = CollectingSink::default();
     let handles: Vec<WorkHandle> = tracked.iter().map(|tracked_handle| tracked_handle.handle.clone()).collect();
@@ -411,6 +551,11 @@ fn pull_and_admit(
         );
     }
 
+    // Make each admitted passing capture reachable on the hosted repo before the
+    // fact reaches the reducer — the very next tick can dispatch the follow-on
+    // stage to a zero-secret Actions runner that must fetch it (ADR-0152).
+    push_admitted_candidates(&sink.0, correspondence, pusher);
+
     sink.0.into_iter().map(|admission| admission.admit).collect()
 }
 
@@ -445,6 +590,8 @@ impl NativeActor for ExecutorDriverCapability {
                 _timer: None,
                 backoff: None,
                 stale_warn_after: stale_warn_after(config.stale_warn_after_secs),
+                correspondence: None,
+                pusher: Arc::new(GitCandidatePush),
             });
         }
 
@@ -477,6 +624,9 @@ impl NativeActor for ExecutorDriverCapability {
             retracked = tracked.len(),
             "executor dispatch driver mounted; polling the store for dispatch decisions",
         );
+        // The push side resolves an admitted capture's commit through its own
+        // correspondence handle on the shared store (ADR-0152).
+        let correspondence = config.connect_correspondence().map_err(|e| BootError::Other(Box::new(e)))?;
         Ok(ExecutorDriverState {
             executor: Some(executor),
             store: Some(store),
@@ -488,6 +638,8 @@ impl NativeActor for ExecutorDriverCapability {
             _timer: Some(timer),
             backoff: None,
             stale_warn_after: stale_warn_after(config.stale_warn_after_secs),
+            correspondence: Some(correspondence),
+            pusher: Arc::new(GitCandidatePush),
         })
     }
 
@@ -542,7 +694,17 @@ impl NativeActor for ExecutorDriverCapability {
 
         // Pull matched results and forward each admitted attempt to the control core.
         let stale_warn_after = state.stale_warn_after;
-        for admit in pull_and_admit(store, &executor, claims, &mut state.tracked, stale_warn_after) {
+        let correspondence = state.correspondence.clone();
+        let pusher = Arc::clone(&state.pusher);
+        for admit in pull_and_admit(
+            store,
+            &executor,
+            claims,
+            &mut state.tracked,
+            stale_warn_after,
+            correspondence.as_ref(),
+            pusher.as_ref(),
+        ) {
             // Fire-and-forget: the control actor's on_admit is reliable local mail,
             // and the reducer's idempotency key dedups a resend, so the settlement
             // handle is not needed here.

@@ -43,8 +43,8 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    Admit, BloomId, Digest, Event, EvidenceRef, ExecutionStatus, Fact, IdempotencyKey, Nonce, ResolutionClaim,
-    StageCatalog, StageId, WorkHandle, WorkOrder, WorkpieceId,
+    Admit, BloomId, CandidateRef, Digest, Event, EvidenceRef, ExecutionStatus, Fact, IdempotencyKey, Nonce,
+    ResolutionClaim, StageCatalog, StageId, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::{
     ExecutorError, GithubError, InwardError, StageResult, StageVerdict, normalize_stage_result,
@@ -133,6 +133,9 @@ pub struct UploadedEvidence {
     pub verdict: StageVerdict,
     /// The supporting artifact (the check output, the review record).
     pub detail: Digest,
+    /// The candidate the run captured (ADR-0152), authoritative from the port
+    /// reference like the nonce — host-recorded state, never name-decoded.
+    pub candidate: Option<CandidateRef>,
 }
 
 /// Why the broker refused an upload without touching the reducer.
@@ -385,11 +388,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
                 stage: record.stage,
                 passed: verdict_passed(upload.verdict),
                 evidence,
-                // Candidate capture is host-side work the local executor does
-                // after a model-lane run (#3649); until it reports one, the
-                // completion carries no capture and the member's cursor keeps
-                // its prior candidate.
-                candidate: None,
+                candidate: upload.candidate,
             },
         }
     } else if record.stage == StageId::Review {
@@ -413,9 +412,9 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
                     stage: record.stage,
                     passed: false,
                     evidence,
-                    // A failing attempt's capture is never adopted (ADR-0152),
-                    // and capture reporting itself lands with #3649.
-                    candidate: None,
+                    // Threaded for the journal's completeness; the reducer never
+                    // adopts a failing attempt's capture (ADR-0152).
+                    candidate: upload.candidate,
                 },
             }
         }
@@ -483,9 +482,15 @@ impl EvidenceClaims for NameEvidenceClaims {
         let verdict = verdict_from_token(fields.next()?)?;
         let subject = digest_from_hex(fields.next()?)?;
         let detail = digest_from_hex(fields.next()?)?;
-        // The nonce is authoritative from the reference (what the port matched the
-        // run by), not the name's trailing segment.
-        Some(UploadedEvidence { nonce: reference.nonce.clone(), subject, verdict, detail })
+        // The nonce and candidate are authoritative from the reference (what the
+        // port matched the run by / what the backend captured), not the name.
+        Some(UploadedEvidence {
+            nonce: reference.nonce.clone(),
+            subject,
+            verdict,
+            detail,
+            candidate: reference.candidate,
+        })
     }
 }
 

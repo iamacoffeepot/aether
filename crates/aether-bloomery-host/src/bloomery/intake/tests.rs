@@ -151,6 +151,7 @@ fn a_matching_upload_admits_a_bound_integrate_fact() {
         subject: candidate,
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
+        candidate: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching upload is admitted");
@@ -189,6 +190,7 @@ fn a_parked_upload_admits_a_question_evidence_fact_and_consumes_the_order() {
         subject: candidate,
         verdict: StageVerdict::Parked,
         detail: Digest::from_bytes([8; 32]),
+        candidate: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching parked upload is admitted");
@@ -217,6 +219,7 @@ fn an_unknown_nonce_is_refused() {
         subject: Digest::from_bytes([5; 32]),
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
+        candidate: None,
     };
     assert!(matches!(
         admit_uploaded(&mut store, &upload).unwrap(),
@@ -241,6 +244,7 @@ fn a_right_nonce_with_the_wrong_digest_is_refused_and_the_order_stays_live() {
         subject: Digest::from_bytes([9; 32]),
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
+        candidate: None,
     };
     match admit_uploaded(&mut store, &lying).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::DigestMismatch { displayed, claimed }) => {
@@ -308,6 +312,7 @@ fn intake_cycle_admits_a_matching_upload_and_the_reducer_integrates_it() {
             subject: candidate,
             verdict: StageVerdict::VerificationPassed,
             detail: Digest::from_bytes([7; 32]),
+            candidate: None,
         },
     );
     let claims = SeededClaims(claims);
@@ -354,6 +359,7 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
             subject: Digest::from_bytes([9; 32]),
             verdict: StageVerdict::VerificationPassed,
             detail: Digest::from_bytes([7; 32]),
+            candidate: None,
         },
     );
     let claims = SeededClaims(claims);
@@ -450,6 +456,7 @@ fn a_non_terminal_construct_result_admits_attempt_completed_and_the_reducer_adva
         subject: candidate,
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
+        candidate: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching Construct upload is admitted");
@@ -501,6 +508,7 @@ fn a_failing_terminal_review_admits_attempt_completed_not_integrate() {
         subject: candidate,
         verdict: StageVerdict::ReviewFinding,
         detail: Digest::from_bytes([7; 32]),
+        candidate: None,
     };
     let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
         panic!("a matching failing-review upload is admitted (the gate decides its fate, not the broker)");
@@ -537,6 +545,7 @@ fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
         subject: candidate,
         verdict: StageVerdict::VerificationPassed,
         detail: Digest::from_bytes([7; 32]),
+        candidate: None,
     };
     match admit_uploaded(&mut store, &upload).unwrap() {
         AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(stage)) => {
@@ -574,7 +583,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         let subject = Digest::from_bytes([subject_seed; 32]);
         let detail = Digest::from_bytes([detail_seed; 32]);
         let name = attempt_artifact_name(&nonce, &subject, verdict, &detail);
-        let reference = EvidenceRef { name, nonce: nonce.clone(), artifact_id: 1, size_bytes: 10 };
+        let reference = EvidenceRef { name, nonce: nonce.clone(), artifact_id: 1, size_bytes: 10, candidate: None };
 
         let decoded = claims.claim_for(&reference).expect("a well-formed attempt name decodes");
         assert_eq!(decoded.nonce, nonce);
@@ -590,6 +599,7 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         nonce: Nonce("dispatch-42".to_owned()),
         artifact_id: 2,
         size_bytes: 3,
+        candidate: None,
     };
     assert!(claims.claim_for(&stray).is_none(), "a non-attempt name yields no claim");
 }

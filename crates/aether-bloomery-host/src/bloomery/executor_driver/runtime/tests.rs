@@ -18,10 +18,11 @@ use aether_bloomery_github::{
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::{
-    BACKOFF_CAP, DISPATCH_TOPIC, NameEvidenceClaims, TrackedHandle, backoff_delay, drain_and_dispatch, is_stale,
-    next_backoff, pull_and_admit, seed_tracked, select_stale_handles,
+    BACKOFF_CAP, CandidatePush, DISPATCH_TOPIC, NameEvidenceClaims, TrackedHandle, backoff_delay, candidate_ref_name,
+    drain_and_dispatch, is_stale, next_backoff, pull_and_admit, push_admitted_candidates, seed_tracked,
+    select_stale_handles,
 };
-use crate::bloomery::intake::attempt_artifact_name;
+use crate::bloomery::intake::{Admission, attempt_artifact_name};
 use crate::bloomery::local_executor::testing::FixedRunner;
 use crate::bloomery::{ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle};
 use crate::store::{SqliteStore, StoreBackend};
@@ -59,6 +60,30 @@ impl ExecutorBackend for CapturingBackend {
 
     fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
         Ok(Vec::new())
+    }
+}
+
+// The inert candidate-push stub for tests that exercise the pull/admit loop
+// without asserting on the push side.
+struct NopPush;
+
+impl CandidatePush for NopPush {
+    fn push(&self, _commit_hex: &str, _target_ref: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+// A recording push seam, for asserting exactly which (commit, ref) pairs the
+// admitted-candidate push issued.
+#[derive(Default)]
+struct RecordingPush {
+    pushed: Mutex<Vec<(String, String)>>,
+}
+
+impl CandidatePush for RecordingPush {
+    fn push(&self, commit_hex: &str, target_ref: &str) -> Result<(), String> {
+        self.pushed.lock().unwrap().push((commit_hex.to_owned(), target_ref.to_owned()));
+        Ok(())
     }
 }
 
@@ -265,7 +290,7 @@ fn pull_and_admit_admits_a_matching_construct_result_as_attempt_completed() {
     let name = attempt_artifact_name(&Nonce(nonce), &digest(subject), StageVerdict::VerificationPassed, &digest(9));
     fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name, size_bytes: 20 }]);
 
-    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked, None);
+    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked, None, None, &NopPush);
 
     assert_eq!(admits.len(), 1, "the matching result admits");
     assert!(tracked.is_empty(), "the admitted order was consumed, so its handle is pruned");
@@ -327,7 +352,7 @@ fn seed_tracked_recovers_a_dispatched_order_across_a_restart() {
     let name = attempt_artifact_name(&Nonce(nonce), &digest(5), StageVerdict::VerificationPassed, &digest(9));
     fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name, size_bytes: 20 }]);
 
-    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked, None);
+    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked, None, None, &NopPush);
     assert_eq!(admits.len(), 1, "the restart-seeded handle is inspected and its result admitted, not stranded");
     assert!(tracked.is_empty(), "the order is consumed on admit and no longer tracked");
 }
@@ -352,6 +377,7 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
     let runner = FixedRunner {
         evidence: r#"{"command":"construct.implement","nonce":"x","produced_candidate":true,"result_record":{"schema":1,"is_error":false,"result":{"num_turns":3}}}"#.to_owned(),
         lifecycle: RunLifecycle::Exited { success: true },
+        captures: true,
     };
     let local = Arc::new(LocalExecutor::new(Arc::new(runner), correspondence, base.path(), None, None));
     let routing = RoutingExecutor::new(actions, local, vec!["construct.".to_owned()]);
@@ -367,7 +393,7 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
     assert_eq!(handles[0].nonce.0, format!("dispatch-{sequence}"), "the handle carries the dispatch nonce");
     let mut tracked = track(handles);
 
-    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked, None);
+    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked, None, None, &NopPush);
     assert_eq!(admits.len(), 1, "the completed local run's result admits to the control core");
     assert!(tracked.is_empty(), "the admitted order was consumed");
     let event: aether_bloomery::Event = from_bytes(&admits[0].event).unwrap();
@@ -509,4 +535,85 @@ fn select_stale_handles_selects_nothing_when_the_sweep_is_disabled() {
     let first_seen = now.checked_sub(Duration::from_hours(1)).unwrap();
     let mut tracked = vec![TrackedHandle::new(WorkHandle::new(wedged_nonce), first_seen)];
     assert!(select_stale_handles(&mut tracked, &[], now, None).is_empty(), "threshold: None disables the sweep");
+}
+
+// ADR-0152 — the record's axes come from the payload's explicit fields: with a
+// candidate present, the displayed digest (what returning evidence must bind) is
+// the candidate tree while the scope revision stays the true revision. Catches
+// the placeholder regression (all three stamped from inputs[0]).
+#[test]
+fn drain_stamps_the_record_axes_from_the_payload() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    let candidate_tree = digest(0xAB);
+    let payload = DispatchPayload {
+        bloom: bloom.0,
+        workpiece: WorkpieceId("wp-cand".to_owned()),
+        stage: StageId::Verify,
+        transformation: Transformation::for_member_stage(StageId::Verify, candidate_tree, digest(0xC0)),
+        scope_revision: digest(5),
+        candidate: Some(candidate_tree),
+    };
+    let sequence = store.enqueue_outbox(DISPATCH_TOPIC, &to_vec(&payload).unwrap()).unwrap();
+
+    drain_and_dispatch(&mut store, &shell).unwrap();
+
+    let order = store.lookup_order(&format!("dispatch-{sequence}")).unwrap().expect("the order recorded");
+    assert_eq!(order.scope_revision, digest(5).as_bytes().to_vec(), "the true scope revision survives");
+    assert_eq!(order.displayed_digest, candidate_tree.as_bytes().to_vec(), "evidence binds the candidate tree");
+    assert_eq!(order.candidate, candidate_tree.as_bytes().to_vec());
+}
+
+// ADR-0152 — an admitted passing capture is pushed to the bloom's candidate ref,
+// resolved through the correspondence to the capture commit; a failing or
+// capture-less admission pushes nothing. Catches a push against the wrong ref
+// namespace (a downstream Actions checkout would 404) and a push of discarded
+// (failing) work.
+#[test]
+fn admitted_passing_captures_push_to_the_bloom_candidate_ref() {
+    use aether_bloomery::{CandidateRef, Event, IdempotencyKey};
+    use aether_bloomery_github::Correspondence as _;
+
+    let bloom = BloomId(digest(1));
+    let capture = CandidateRef { tree: digest(0xAB), checkout: digest(0xAC) };
+    let store = FakeGithub::new();
+    store.seed_git_object(&capture.checkout);
+    let commit_hex = store.resolve_git(&capture.checkout).unwrap().unwrap().to_hex();
+    let admission = |passed: bool, candidate: Option<CandidateRef>| {
+        let fact = Fact::AttemptCompleted {
+            bloom,
+            workpiece: WorkpieceId("wp/cand".to_owned()),
+            stage: StageId::Construct,
+            passed,
+            evidence: aether_bloomery::Evidence {
+                subject: digest(9),
+                kind: aether_bloomery::EvidenceKind::VerificationResult,
+                detail: digest(8),
+            },
+            candidate,
+        };
+        let event = Event { idempotency_key: IdempotencyKey("k".to_owned()), fact };
+        Admission { admit: aether_bloomery::Admit { event: to_vec(&event).unwrap() }, event }
+    };
+
+    let pusher = RecordingPush::default();
+    let correspondence: aether_bloomery_github::SharedCorrespondence = Arc::new(store);
+    push_admitted_candidates(
+        &[admission(true, Some(capture)), admission(false, Some(capture)), admission(true, None)],
+        Some(&correspondence),
+        &pusher,
+    );
+
+    let issued = pusher.pushed.lock().unwrap().clone();
+    assert_eq!(issued.len(), 1, "only the passing capture pushes");
+    assert_eq!(issued[0].0, commit_hex, "the pushed sha is the capture commit, resolved via correspondence");
+    assert_eq!(
+        issued[0].1,
+        candidate_ref_name(&bloom, "wp/cand"),
+        "the target is the bloom candidate ref for the workpiece",
+    );
+    assert!(issued[0].1.starts_with("refs/heads/bloom/"), "the ref lives in the bloom namespace");
+    assert!(issued[0].1.ends_with("/candidate/wp-cand"), "the workpiece segment is sanitized to ref-safe characters");
 }

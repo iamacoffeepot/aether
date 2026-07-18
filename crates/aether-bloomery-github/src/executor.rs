@@ -257,6 +257,9 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
                 nonce: handle.nonce.clone(),
                 artifact_id: a.id,
                 size_bytes: a.size_bytes,
+                // The Actions lane is zero-secret (ADR-0150): its runner can
+                // push nothing, so it never captures a candidate.
+                candidate: None,
             })
             .collect())
     }
