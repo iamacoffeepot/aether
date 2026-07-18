@@ -72,7 +72,7 @@ pub struct DraftPatch {
 /// The seal-time scope projection an operator supplies per draft membership so
 /// the pre-seal approve gate (issue #3583, the enforcement half of #3571) can
 /// decide the member's admission. It mirrors the gate's
-/// [`AdmissionRequest`](crate::bloomery::approve::AdmissionRequest) inputs, keyed
+/// [`AdmissionRequest`](crate::bloomery::AdmissionRequest) inputs, keyed
 /// by `{workpiece, scope_revision}` so the host matches it to the exact draft
 /// proposal. These are seal-time-only inputs the gate consumes; they are never
 /// folded into the immutable sealed `BloomSpec` — the `SealRequest` is their only
