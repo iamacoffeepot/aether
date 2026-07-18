@@ -53,6 +53,7 @@ runs:
       run: |
         jq 'del(.hooks)' .claude/settings.json > /tmp/settings.json
         mv /tmp/settings.json .claude/settings.json
+        git update-index --skip-worktree .claude/settings.json
 
     # Pinned via AGENT_CLAUDE_CODE_VERSION (#3285): a CLI upgrade changes the
     # system-prompt bytes, which cold-misses the fleet-wide prompt cache and

@@ -105,6 +105,7 @@ while IFS= read -r line; do
       continue
     fi
     mv "$tmp" "$scratch/.claude/settings.json"
+    git -C "$scratch" update-index --skip-worktree .claude/settings.json
   fi
 
   # Pre-trust the scratch project so settings.json applies without a blocking
