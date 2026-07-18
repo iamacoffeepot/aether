@@ -279,8 +279,9 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
     // The whole local lane end-to-end: a Construct dispatch routes to the local
     // backend (a stub `cargo xtask transform`), the run completes, and the pull
     // side decodes the backend-synthesized evidence name and admits it — no
-    // GitHub, no fork, no secret. The construct record carries no `status`, so the
-    // verdict folds from the (stubbed) success exit to a passing attempt.
+    // GitHub, no fork, no secret. The construct record shows a substantive
+    // conclusion (terminal `result`, is_error == false, a produced candidate), so
+    // the gate folds it to a passing attempt (#3596).
     let base = tempfile::TempDir::new().unwrap();
     // A correspondence seeded with the dispatch checkout (`digest(0xC0)`) so both
     // backends resolve it — the local lane checks it out for the `git worktree add`.
@@ -291,7 +292,7 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
     };
     let actions = Arc::new(ActionsExecutor::new(FakeGithub::new(), Arc::clone(&correspondence), WORKFLOW, PINNED_REF));
     let runner = FixedRunner {
-        evidence: r#"{"command":"construct.implement","nonce":"x","result_record":{"schema":1}}"#.to_owned(),
+        evidence: r#"{"command":"construct.implement","nonce":"x","produced_candidate":true,"result_record":{"schema":1,"is_error":false,"result":{"num_turns":3}}}"#.to_owned(),
         lifecycle: RunLifecycle::Exited { success: true },
     };
     let local = Arc::new(LocalExecutor::new(Arc::new(runner), correspondence, base.path(), None, None));

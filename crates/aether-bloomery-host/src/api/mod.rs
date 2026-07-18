@@ -33,4 +33,5 @@ use crate::store::RecordDispatchDescriptionResult;
 #[actor(singleton)]
 pub struct BloomeryApiCapability;
 
-pub use runtime::ApiCapabilityState;
+pub use dto::{MemberProjection, SealRequest};
+pub use runtime::{ApiCapabilityState, ApiConfig};

@@ -38,6 +38,7 @@
 //!   chain settles without ever replying (a dropped or unloaded control core).
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -65,6 +66,7 @@ use super::dto::{
     SupersedeRequest, WorkpiecesView,
 };
 use crate::artifacts::{ArtifactsError, Get, GetResult};
+use crate::bloomery::{AdmissionRequest, ApprovalPolicy, Decision, Gate};
 use crate::signing::{Verify, VerifyResult};
 use crate::store::{RecordDispatchDescription, RecordDispatchDescriptionResult};
 
@@ -88,11 +90,27 @@ const ROUTE_PREFIXES: [&str; 6] = ["/workpieces", "/drafts", "/blooms", "/view",
 const MAX_STAGED_WORKPIECES: usize = 1024;
 const MAX_OPEN_DRAFTS: usize = 1024;
 
+/// Boot config for the REST control api cap: the tier-policy file the pre-seal
+/// approve gate loads at init (issue #3583). Threaded from the shared GitHub
+/// config's `approval_policy_file` at chassis build so one Bloomery configuration
+/// serves every reader. A policy that fails to load leaves the cap with no
+/// policy, so the gate fails **closed** — every member resolves `human` and its
+/// seal is refused, never silently `auto`.
+pub struct ApiConfig {
+    /// Repository-relative path to the Bloomery-owned tier policy
+    /// (`bloomery/approval-policy.yml`).
+    pub approval_policy_file: String,
+}
+
 /// The control-plane REST router state: the pre-seal shaping maps plus the
 /// in-flight reply-correlation table.
 pub struct ApiCapabilityState {
     /// This cap's own mailbox, the settlement-notice target.
     self_mailbox: MailboxId,
+    /// The parsed tier policy the pre-seal approve gate decides over (issue
+    /// #3583). `None` when the policy file was unreadable or malformed at init —
+    /// the gate then fails closed (no member resolves `auto`).
+    policy: Option<ApprovalPolicy>,
     /// Cached mailer for `send_envelope_detached` settlement subscriptions.
     mailer: Arc<Mailer>,
     /// Staged workpieces, keyed by their workpiece id.
@@ -143,13 +161,34 @@ enum Routed {
 #[runtime]
 impl NativeActor for BloomeryApiCapability {
     type State = ApiCapabilityState;
-    type Config = ();
+    type Config = ApiConfig;
     const NAMESPACE: &'static str = "aether.bloomery.api";
 
-    fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<ApiCapabilityState, BootError> {
-        tracing::info!(target: "aether_bloomery_host::api", "bloomery REST control api mounted");
+    fn init(config: ApiConfig, ctx: &mut NativeInitCtx<'_>) -> Result<ApiCapabilityState, BootError> {
+        // Load the tier policy once at init. An unreadable or malformed policy is
+        // not a boot failure — it leaves the cap policy-less, and the pre-seal
+        // gate then fails closed (every member resolves `human`, its seal is
+        // refused), which is the security-required posture: never silently `auto`.
+        let policy = match ApprovalPolicy::load(Path::new(&config.approval_policy_file)) {
+            Ok(policy) => Some(policy),
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_bloomery_host::api",
+                    path = %config.approval_policy_file,
+                    ?error,
+                    "approval policy unavailable; the pre-seal approve gate fails closed (no auto tier)"
+                );
+                None
+            }
+        };
+        tracing::info!(
+            target: "aether_bloomery_host::api",
+            policy_loaded = policy.is_some(),
+            "bloomery REST control api mounted"
+        );
         Ok(ApiCapabilityState {
             self_mailbox: ctx.self_id(),
+            policy,
             mailer: ctx.mailer(),
             staged: BTreeMap::new(),
             drafts: BTreeMap::new(),
@@ -356,8 +395,25 @@ impl ApiCapabilityState {
         Routed::Reply(json(200, &DraftView { draft_id: handle.to_string(), draft: draft.clone() }))
     }
 
-    /// `POST /drafts/{id}/seal` — freeze the draft into a `BloomSpec` and admit
-    /// `Fact::Seal` through the control core; the reply carries the outcome.
+    /// `POST /drafts/{id}/seal` — run the pre-seal approve gate over every
+    /// membership, then freeze the draft into a `BloomSpec` and admit `Fact::Seal`
+    /// through the control core (issue #3583, the enforcement half of #3571's gate
+    /// library).
+    ///
+    /// For each draft proposal the operator supplies a
+    /// [`MemberProjection`](super::dto::MemberProjection) in the `SealRequest`,
+    /// matched by `{workpiece, scope_revision}`. The host builds a
+    /// [`Gate::AdmissionRequest`](crate::bloomery::AdmissionRequest) from it and
+    /// runs [`Gate::evaluate`], replacing the proposal's operator-set `approval`
+    /// with the gate-formed one so the seal-time `validate_member_admission`
+    /// admits a policy-authored approval rather than an unchecked assertion.
+    ///
+    /// The gate is fail-closed at every branch: no loaded policy, a missing
+    /// projection, an `Incomplete` verdict, or an above-`auto` member all **refuse
+    /// the seal** (`422`) rather than admit. Above-`auto` members require the
+    /// deferred signature-verification path, whose live async wiring is this
+    /// slice's follow-up child — until it lands an above-`auto` member fails
+    /// closed here, never admitted on the operator's unverified assertion.
     fn seal_draft(&self, ctx: &NativeCtx<'_, Manual>, id: &str, body: &[u8]) -> Routed {
         let (_, draft) = match self.lookup_draft(id) {
             Ok(found) => found,
@@ -367,7 +423,73 @@ impl ApiCapabilityState {
             Ok(request) => request,
             Err(response) => return Routed::Reply(response),
         };
-        let spec = draft.seal();
+        // No policy → fail closed: never admit a seal the gate could not decide.
+        let Some(policy) = self.policy.as_ref() else {
+            return Routed::Reply(error_response(422, "approval policy unavailable; seal fails closed"));
+        };
+        let gate = Gate::new(policy);
+        // Indexed once so the member loop stays O(n + m) however many
+        // projections the request carries; first occurrence wins on a
+        // duplicate key, matching the linear scan this replaces.
+        let mut projections = HashMap::with_capacity(request.projections.len());
+        for projection in &request.projections {
+            projections.entry((&projection.workpiece, &projection.scope_revision)).or_insert(projection);
+        }
+        let mut sealed_proposals = Vec::with_capacity(draft.proposals.len());
+        for proposal in &draft.proposals {
+            let member = &proposal.workpiece.0;
+            let Some(&projection) = projections.get(&(&proposal.workpiece, &proposal.scope_revision)) else {
+                return Routed::Reply(error_response(
+                    422,
+                    &format!("member {member} has no scope projection; seal fails closed"),
+                ));
+            };
+            // The digest binds the approval to the projection as evaluated. It
+            // is computed over the canonical wire re-encoding of the decoded
+            // struct, not the raw request slice: the JSON body carries no
+            // per-projection byte boundaries, and the canonical form is
+            // reproducible from the shared DTO by any party rather than
+            // sensitive to the sender's whitespace and field order.
+            let projection_digest = match to_vec(projection) {
+                Ok(bytes) => Digest::of_wire_bytes(&bytes),
+                Err(error) => {
+                    return Routed::Reply(error_response(500, &format!("projection encode failed: {error}")));
+                }
+            };
+            let admission = AdmissionRequest {
+                scope_revision: proposal.scope_revision,
+                declared_surface: projection.declared_surface.clone(),
+                completeness: projection.completeness,
+                adr_touch: projection.adr_touch,
+                pre_approved: projection.pre_approved,
+                projection_digest,
+            };
+            match gate.evaluate(&admission) {
+                Decision::AutoApproved(approval) => {
+                    let mut sealed = proposal.clone();
+                    sealed.approval = approval;
+                    sealed_proposals.push(sealed);
+                }
+                Decision::Incomplete(incompleteness) => {
+                    return Routed::Reply(error_response(
+                        422,
+                        &format!("member {member} is incomplete: {incompleteness:?}"),
+                    ));
+                }
+                Decision::RequiresStatement(tier) => {
+                    return Routed::Reply(error_response(
+                        422,
+                        &format!(
+                            "member {member} resolves tier {tier:?}; above-auto signed-statement enforcement \
+                             is the follow-up child #3599 — seal fails closed until it lands"
+                        ),
+                    ));
+                }
+            }
+        }
+        let mut gated = draft;
+        gated.proposals = sealed_proposals;
+        let spec = gated.seal();
         // Persist each member's advisory work-order description keyed by the
         // sealed bloom id, before the seal defers — the text is operator-supplied
         // context (#3595) the executor driver reads back at dispatch, and the api

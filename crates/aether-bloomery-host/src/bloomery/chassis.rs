@@ -22,7 +22,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::ConfigError;
 use aether_substrate::{Chassis, SubstrateBoot};
 
-use crate::api::BloomeryApiCapability;
+use crate::api::{ApiConfig, BloomeryApiCapability};
 use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
@@ -203,6 +203,9 @@ impl BloomeryChassis {
 
     fn build_inner(env: BloomeryEnv) -> Result<BuiltChassis<Self>, BootError> {
         let BloomeryEnv { rpc_port, http_port, store, artifacts, github, session, signing, control_core_wasm } = env;
+        // Capture the tier-policy path before `github` is moved into the source
+        // cap below; the api cap's pre-seal approve gate loads it at init (#3583).
+        let approval_policy_file = github.approval_policy_file.clone();
         let boot = SubstrateBoot::builder("aether-bloomery", env!("CARGO_PKG_VERSION")).build()?;
         let registry = Arc::clone(&boot.registry);
         let mailer = Arc::clone(&boot.queue);
@@ -269,7 +272,7 @@ impl BloomeryChassis {
                 bind_addr: http_addr.to_string(),
                 ..HttpServerConfig::default()
             })
-            .with_actor::<BloomeryApiCapability>(())
+            .with_actor::<BloomeryApiCapability>(ApiConfig { approval_policy_file })
             .driver(driver)
             .build()?;
 

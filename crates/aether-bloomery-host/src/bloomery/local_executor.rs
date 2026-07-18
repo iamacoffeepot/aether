@@ -176,15 +176,24 @@ pub trait TransformRunner: Send + Sync {
     /// # Errors
     /// The worktree checkout or the child spawn failed.
     fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError>;
+
+    /// Release a run's scratch worktree once it reaches a terminal state — a
+    /// cancel, or a consumed evidence read. Best-effort teardown that the backend
+    /// logs on failure rather than propagating, so a leaked-worktree cleanup miss
+    /// never fails the cancel the kill already completed or the evidence stream.
+    ///
+    /// # Errors
+    /// The worktree teardown (the `git worktree remove` shell-out) failed.
+    fn release(&self, worktree_dir: &Path) -> Result<(), LocalExecutorError>;
 }
 
 /// One tracked run: the spawned child, its scratch worktree, where its evidence
 /// lands, and the digest the returning evidence must bind to.
 struct Run {
     process: Box<dyn RunProcess>,
-    // The scratch worktree the checkout was materialized into. An evicted run
-    // (cancelled, or its evidence consumed) reclaims it so a scratch checkout's
-    // lifetime is bounded by the run's rather than surviving it indefinitely.
+    // The scratch worktree `start` materialized the checkout into, released on the
+    // run's terminal path (cancel, or evidence consumed) so a long-lived backend
+    // does not leak one `git worktree` per order.
     worktree_dir: PathBuf,
     evidence_dir: PathBuf,
     // The digest the intake broker binds the evidence to — the order's subject
@@ -193,6 +202,12 @@ struct Run {
     // checkout is the tree the work runs on, the subject is what the evidence is
     // about. Binding to the checkout would refuse at intake as a digest mismatch.
     subject: Digest,
+    // Whether this run is the model-driven construct lane, decided at submit from
+    // the order's command. The completion gate is lane-specific: a construct run's
+    // verdict demands a substantive conclusion (#3596), a verify run's rides its
+    // stamped `status`, so the gate must know which lane produced the evidence —
+    // and must know it even when the evidence bytes do not decode (fail-closed).
+    is_construct: bool,
 }
 
 /// The local-process executor backend: an in-process registry of tracked runs
@@ -251,6 +266,20 @@ impl LocalExecutor {
     fn lock(&self) -> MutexGuard<'_, HashMap<String, Run>> {
         self.runs.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    // Release a terminal run's scratch worktree off the registry lock (the teardown
+    // is a blocking git shell-out), folding a failure into a warn rather than the
+    // terminal op's result — the child is already dead / the evidence already read,
+    // so a cleanup miss must not fail the cancel or the evidence stream.
+    fn release_worktree(&self, worktree_dir: &Path) {
+        if let Err(error) = self.runner.release(worktree_dir) {
+            tracing::warn!(
+                worktree = %worktree_dir.display(),
+                %error,
+                "local executor backend: scratch worktree release failed",
+            );
+        }
+    }
 }
 
 impl ExecutorBackend for LocalExecutor {
@@ -289,7 +318,7 @@ impl ExecutorBackend for LocalExecutor {
             task: is_construct.then_some(order.transformation.description.as_deref()).flatten(),
         };
         let process = self.runner.start(&spec)?;
-        self.lock().insert(nonce, Run { process, worktree_dir, evidence_dir, subject });
+        self.lock().insert(nonce, Run { process, worktree_dir, evidence_dir, subject, is_construct });
         Ok(WorkHandle::new(order.nonce.clone()))
     }
 
@@ -318,30 +347,23 @@ impl ExecutorBackend for LocalExecutor {
         })
     }
 
-    #[allow(
-        clippy::significant_drop_tightening,
-        reason = "run is a &mut reborrow; the guard must outlive the kill and evict"
-    )]
     fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
-        let mut runs = self.lock();
-        let Some(run) = runs.get_mut(&handle.nonce.0) else {
-            return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
+        // Kill and evict under the lock, then pull the run's worktree out so the
+        // teardown runs off the lock. A failed kill returns early, leaving both the
+        // entry and the worktree in place.
+        let worktree_dir = {
+            let mut runs = self.lock();
+            let Some(run) = runs.get_mut(&handle.nonce.0) else {
+                return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
+            };
+            run.process.kill()?;
+            let worktree_dir = run.worktree_dir.clone();
+            // A cancel is terminal — evict the killed run so the registry tracks only
+            // in-flight orders rather than parking `cancelled` entries forever.
+            runs.remove(&handle.nonce.0);
+            worktree_dir
         };
-        // A kill error is only fatal while the child is genuinely still alive: if
-        // a re-poll shows it already exited, the kill's complaint is already
-        // satisfied, so the run is evicted regardless rather than parked forever
-        // as an uncancellable entry.
-        if let Err(error) = run.process.kill()
-            && matches!(run.process.poll(), RunLifecycle::Running)
-        {
-            return Err(error);
-        }
-        // A cancel is terminal — evict the killed run so the registry tracks only
-        // in-flight orders rather than parking `cancelled` entries forever, and
-        // reclaim its scratch worktree so the checkout does not outlive the run.
-        let worktree_dir = run.worktree_dir.clone();
-        runs.remove(&handle.nonce.0);
-        remove_worktree(&worktree_dir);
+        self.release_worktree(&worktree_dir);
         Ok(())
     }
 
@@ -350,16 +372,17 @@ impl ExecutorBackend for LocalExecutor {
         // Pull the run's on-disk location, binding digest, and terminal exit out of
         // the guarded region, then drop the lock — the evidence read is blocking IO
         // and must not hold the registry mutex.
-        let (worktree_dir, evidence_dir, subject, exited_success) = {
+        let (evidence_dir, subject, exited_success, is_construct, worktree_dir) = {
             let mut runs = self.lock();
             let Some(run) = runs.get_mut(&handle.nonce.0) else {
                 return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
             };
             (
-                run.worktree_dir.clone(),
                 run.evidence_dir.clone(),
                 run.subject,
                 matches!(run.process.poll(), RunLifecycle::Exited { success: true }),
+                run.is_construct,
+                run.worktree_dir.clone(),
             )
         };
         let evidence_path = evidence_dir.join("evidence.json");
@@ -370,14 +393,23 @@ impl ExecutorBackend for LocalExecutor {
         // reclaim its scratch worktree so the checkout does not outlive the run. A
         // failed read leaves the entry above so a later cycle can retry it.
         self.lock().remove(&handle.nonce.0);
-        remove_worktree(&worktree_dir);
-        // Verdict from the run's own evidence: the verify lane stamps a `status`
-        // ("pass"/"fail"); the construct lane's record carries none, so its verdict
-        // folds from the child's terminal exit. A passing outcome maps to
-        // VerificationPassed — the only non-approval verdict the completion gate
-        // reads as passing (`verdict_passed`), so a produced construct candidate
-        // advances the member.
-        let passed = parse_status(&bytes).unwrap_or(exited_success);
+        // The run is terminal now the evidence is read — release its scratch
+        // worktree. (The failed-read path above returns early, keeping both the
+        // registry entry and the worktree for a later retry.)
+        self.release_worktree(&worktree_dir);
+        // Verdict from the run's own evidence, lane-specific. The construct lane's
+        // gate demands a substantive conclusion (#3596) — a terminal `result` with
+        // `is_error == false` AND a produced candidate — and is fail-closed on any
+        // shortfall (dead run, errored run, empty candidate, unparseable evidence),
+        // so it never falls back to the child's terminal exit (an empty run exits
+        // zero). The verify lane stamps a `status` ("pass"/"fail"); the raw
+        // `exited_success` fallback survives only for a non-construct evidence shape
+        // that stamps no status.
+        let passed = if is_construct {
+            construct_conclusion(&bytes)
+        } else {
+            parse_status(&bytes).unwrap_or(exited_success)
+        };
         let verdict = if passed {
             StageVerdict::VerificationPassed
         } else {
@@ -438,17 +470,24 @@ impl TransformRunner for ProcessTransformRunner {
                 cargo.args(["--task", task]);
             }
         }
-        let child = match cargo.spawn() {
-            Ok(child) => child,
-            Err(error) => {
-                // The worktree was materialized above; a failed spawn must not
-                // leave that scratch checkout orphaned, so reclaim it before
-                // surfacing the spawn fault.
-                remove_worktree(spec.worktree_dir);
-                return Err(LocalExecutorError::Spawn(error));
-            }
-        };
+        let child = cargo.spawn().map_err(LocalExecutorError::Spawn)?;
         Ok(Box::new(ChildProcess { child }))
+    }
+
+    fn release(&self, worktree_dir: &Path) -> Result<(), LocalExecutorError> {
+        // Tear the scratch worktree back down on the run's terminal path. `--force`
+        // discards the run's working-tree changes (the candidate has already been
+        // read as evidence) and drops the admin entry `git worktree add` registered,
+        // so a long-lived backend does not leak one worktree per order.
+        let removed = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(worktree_dir)
+            .output()
+            .map_err(LocalExecutorError::Spawn)?;
+        if !removed.status.success() {
+            return Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&removed.stderr), 1000)));
+        }
+        Ok(())
     }
 }
 
@@ -475,16 +514,6 @@ impl RunProcess for ChildProcess {
         self.child.wait().map_err(LocalExecutorError::Io)?;
         Ok(())
     }
-}
-
-/// Best-effort teardown of a run's scratch worktree once the run is evicted (a
-/// cancel, a consumed-evidence stream, or a failed spawn). `git worktree remove
-/// --force` reclaims the checkout so it does not outlive the run; the removal is
-/// deliberately best-effort — a stub-runner test materialized no real worktree,
-/// and a genuinely-wedged remove must not fail the eviction it accompanies — so
-/// its outcome is dropped.
-fn remove_worktree(dir: &Path) {
-    let _ = Command::new("git").args(["worktree", "remove", "--force"]).arg(dir).output();
 }
 
 /// `Some(s)` for a non-empty config string, `None` for the empty default.
@@ -518,6 +547,29 @@ fn parse_status(bytes: &[u8]) -> Option<bool> {
     }
 }
 
+/// Whether a construct lane's `evidence.json` byte string shows a **substantive
+/// conclusion** (#3596): the run reached a terminal `result` with
+/// `is_error == false` *and* left a candidate change in the working tree
+/// (`produced_candidate == true`). The construct lane's whole job is to produce a
+/// focused candidate change, so a run that merely exited zero with nothing to
+/// review must not advance the member. Fail-closed — a `no_result` record (a run
+/// that died early), an errored run (`is_error == true`), an empty candidate
+/// (`produced_candidate` absent or `false`), or bytes that do not decode all
+/// return `false`.
+fn construct_conclusion(bytes: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let produced_candidate = value.get("produced_candidate").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    // A terminal `result` with is_error == false is the "the run concluded"
+    // signal; a `no_result` record carries no `is_error` field, and an errored run
+    // carries `is_error == true` — both fail this test.
+    let concluded =
+        value.get("result_record").and_then(|record| record.get("is_error")).and_then(serde_json::Value::as_bool)
+            == Some(false);
+    concluded && produced_candidate
+}
+
 /// A deterministic spawn seam for tests: writes a fixed `evidence.json` into the
 /// run's output dir and hands back a process pinned to a fixed lifecycle — the
 /// whole seam, without a real repo or Claude credential. Shared by this module's
@@ -525,6 +577,7 @@ fn parse_status(bytes: &[u8]) -> Option<bool> {
 #[cfg(test)]
 pub mod testing {
     use std::fs;
+    use std::path::Path;
 
     use super::{LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 
@@ -541,6 +594,12 @@ pub mod testing {
             fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
             fs::write(spec.evidence_dir.join("evidence.json"), &self.evidence).map_err(LocalExecutorError::Io)?;
             Ok(Box::new(FixedProcess { lifecycle: self.lifecycle }))
+        }
+
+        // The stub never materializes a real worktree (`start` writes only the
+        // evidence dir), so there is nothing to tear down.
+        fn release(&self, _worktree_dir: &Path) -> Result<(), LocalExecutorError> {
+            Ok(())
         }
     }
 
