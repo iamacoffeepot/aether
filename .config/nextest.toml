@@ -19,6 +19,24 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 filter = "package(=aether-kit) & kind(test)"
 slow-timeout = { period = "120s", terminate-after = 1 }
 
+# `terrain_workbench_scenario` is the crate's heaviest integration binary —
+# four cold wasm component loads (mark/world/terra/workbench) plus a font
+# load and six GPU captures in one test, versus siblings that load one or
+# two components — and iamacoffeepot/aether#3627 saw it cross the 120s
+# class cap on main's full-suite job (~123.8s on two back-to-back pushes).
+# Locally the scenario completes in ~3s: our dev box has hardware GPU
+# acceleration and 8 idle cores, while CI's shared 2-core runner falls back
+# to a software rasterizer under full-suite contention (the same dev-box
+# vs. CI gap #1275 measured for the derive-crate fixtures below), so a
+# local timing isn't a usable headroom baseline here. Every wait in the
+# test is bounded (`wait_for_idle` panics after 16 frames), so this is
+# slow-but-completing rather than a hang; widen generously, matching the
+# `fleetbench_replace` precedent below, and keep the package-wide cap
+# intact for the crate's other ten integration binaries.
+[[profile.ci.overrides]]
+filter = "package(=aether-kit) & binary(terrain_workbench_scenario)"
+slow-timeout = { period = "300s", terminate-after = 1 }
+
 # The `aether-substrate-bundle` integration tests (FleetBench + the engines /
 # routing fleet suites) fork real debug `aether-substrate` processes and wait
 # for them to bind. Run concurrently they make timely progress but stretch
