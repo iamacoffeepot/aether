@@ -32,8 +32,68 @@ use aether_bloomery::{
     BloomDraft, Digest, Evidence, EvidenceKind, KeyId, Membership, Provenance, SignatureEnvelope, StageCatalog,
     Statement, Workpiece, WorkpieceId,
 };
+use aether_bloomery_host::api::{MemberProjection, SealRequest};
+use aether_bloomery_host::bloomery::{AdrTouch, Completeness};
 use ed25519_dalek::{Signer, SigningKey};
 use serde_json::Value;
+
+/// The scope revision `valid_draft`'s single member pins — the seal projection
+/// must key its projection to this exact revision to match the proposal.
+fn member_revision() -> Digest {
+    Digest::from_bytes([7; 32])
+}
+
+/// A `Completeness` with every gate check satisfied — the base a negative case
+/// flips one field of.
+fn complete() -> Completeness {
+    Completeness {
+        has_problem_statement: true,
+        has_design_notes: true,
+        has_implementation_plan: true,
+        referenced_adr_prs_merged: true,
+        model_routing_count: 1,
+        blocked: false,
+        declared_surface_fresh: true,
+        dependencies_all_closed: true,
+        umbrella_integrity: true,
+    }
+}
+
+/// A member projection for `wp-1` over `surface` with a complete, non-ADR,
+/// non-pre-approved revision — the seal-time input the pre-seal gate decides.
+fn projection(surface: &[&str], completeness: Completeness) -> MemberProjection {
+    MemberProjection {
+        workpiece: WorkpieceId("wp-1".to_owned()),
+        scope_revision: member_revision(),
+        declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
+        completeness,
+        adr_touch: AdrTouch::None,
+        pre_approved: false,
+        signed_statement: None,
+    }
+}
+
+/// A `SealRequest` carrying `projections`, serialized to a JSON value for the
+/// seal route.
+fn seal_body(projections: Vec<MemberProjection>) -> Value {
+    serde_json::to_value(SealRequest { idempotency_key: None, projections }).unwrap()
+}
+
+/// Write a self-contained tier policy to a temp dir and return it plus the
+/// policy path. `docs/guide/**` resolves `auto`; `crates/aether-data/**` resolves
+/// `human` (above-auto); the default is `judge`. Kept independent of the evolving
+/// repo policy so the gate cases are deterministic.
+fn test_policy() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("approval-policy.yml");
+    std::fs::write(
+        &path,
+        "default: judge\nrules:\n  - glob: \"docs/guide/**\"\n    tier: auto\n  - glob: \"crates/aether-data/**\"\n    tier: human\n",
+    )
+    .unwrap();
+    let path = path.to_str().unwrap().to_owned();
+    (dir, path)
+}
 
 /// The deterministic authorized signer the test configures the `aether.signing`
 /// allowlist with and signs the answer statement with — a fixed seed, so the
@@ -69,13 +129,15 @@ fn free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Fork the `bloomery` bin with the HTTP ingress and control core autoloaded.
-fn spawn(http_port: u16, rpc_port: u16, wasm: &PathBuf) -> Child {
+/// Fork the `bloomery` bin with the HTTP ingress and control core autoloaded,
+/// pointing the pre-seal approve gate at `policy_path` (#3583).
+fn spawn(http_port: u16, rpc_port: u16, wasm: &PathBuf, policy_path: &str) -> Child {
     Command::new(env!("CARGO_BIN_EXE_bloomery"))
         .env("AETHER_HTTP_PORT", http_port.to_string())
         .env("AETHER_RPC_PORT", rpc_port.to_string())
         .env("AETHER_STORE_PATH", ":memory:")
         .env("AETHER_SIGNING_ALLOWLIST", owner_allowlist())
+        .env("AETHER_APPROVAL_POLICY_FILE", policy_path)
         .env("AETHER_CONTROL_CORE_WASM", wasm)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -185,6 +247,31 @@ fn valid_draft(workpiece: &str) -> BloomDraft {
     }
 }
 
+/// Assert the pre-seal approve gate (#3583) refuses `seal_path` at every
+/// fail-closed branch: a missing projection, an incomplete one, and an
+/// above-auto surface each return `422` before admit, leaving the draft
+/// unchanged for the caller's subsequent successful seal.
+fn assert_gate_fails_closed(http_port: u16, seal_path: &str) {
+    // Missing projection: an empty seal body has no projection for the member —
+    // never admitted on the operator's unchecked approval.
+    let (status, _) = try_http(http_port, "POST", seal_path, None).unwrap();
+    assert_eq!(status, 422, "no projection fails closed");
+
+    // Incomplete projection: an otherwise-auto surface with a completeness check
+    // flipped false is refused.
+    let mut incomplete = complete();
+    incomplete.has_problem_statement = false;
+    let (status, _) =
+        send_json(http_port, "POST", seal_path, &seal_body(vec![projection(&["docs/guide/x.md"], incomplete)]));
+    assert_eq!(status, 422, "incomplete projection fails closed");
+
+    // Above-auto surface: `crates/aether-data/**` resolves `human`, which this
+    // slice fails closed on (signed-statement enforcement is the follow-up child).
+    let above_auto = seal_body(vec![projection(&["crates/aether-data/src/lib.rs"], complete())]);
+    let (status, _) = send_json(http_port, "POST", seal_path, &above_auto);
+    assert_eq!(status, 422, "above-auto fails closed");
+}
+
 #[test]
 fn rest_api_drives_a_bloom_end_to_end() {
     let Some(wasm) = control_core_wasm() else {
@@ -197,7 +284,9 @@ fn rest_api_drives_a_bloom_end_to_end() {
 
     let http_port = free_port();
     let rpc_port = free_port();
-    let mut child = spawn(http_port, rpc_port, &wasm);
+    // The gate loads this policy at init; kept alive for the child's lifetime.
+    let (_policy_dir, policy_path) = test_policy();
+    let mut child = spawn(http_port, rpc_port, &wasm, &policy_path);
 
     // Run the whole flow in a closure so a panic still reaps the child.
     let result = std::panic::catch_unwind(|| {
@@ -232,12 +321,24 @@ fn rest_api_drives_a_bloom_end_to_end() {
         // live-read readiness signal.
         wait_for_200(http_port, "/view");
 
-        // Seal the draft (no body — the idempotency key defaults to the bloom
-        // id). The outcome names the sealed bloom id (rendered as the BloomId
-        // digest's serde byte array; hex-encode it for the `{id}` route).
-        let (status, seal_body) = try_http(http_port, "POST", &format!("/drafts/{draft_id}/seal"), None).unwrap();
-        let sealed: Value = serde_json::from_slice(&seal_body).unwrap();
-        assert_eq!(status, 200, "seal draft: {sealed:?}");
+        // The pre-seal approve gate (#3583) fails closed at every branch — a
+        // missing projection, an incomplete one, and an above-auto surface each
+        // refuse the seal (422) before admit, so the draft is unchanged.
+        let seal_path = format!("/drafts/{draft_id}/seal");
+        assert_gate_fails_closed(http_port, &seal_path);
+
+        // Auto surface + complete projection: the gate forms the approval and the
+        // seal admits. The outcome names the sealed bloom id (rendered as the
+        // BloomId digest's serde byte array; hex-encode it for the `{id}` route).
+        let (status, body) = try_http(
+            http_port,
+            "POST",
+            &seal_path,
+            Some(&serde_json::to_vec(&seal_body(vec![projection(&["docs/guide/x.md"], complete())])).unwrap()),
+        )
+        .unwrap();
+        let sealed: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status, 200, "auto-tier seal admits: {sealed:?}");
         let bloom_id = bloom_hex(&sealed["outcome"]["Sealed"]);
         assert_eq!(bloom_id.len(), 64, "sealed bloom id is a 32-byte digest");
 

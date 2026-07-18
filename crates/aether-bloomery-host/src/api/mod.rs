@@ -32,4 +32,5 @@ use crate::signing::VerifyResult;
 #[actor(singleton)]
 pub struct BloomeryApiCapability;
 
+pub use dto::{MemberProjection, SealRequest};
 pub use runtime::{ApiCapabilityState, ApiConfig};
