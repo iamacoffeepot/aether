@@ -12,6 +12,8 @@
 //! They carry no `aether_data::Kind` — they are HTTP-JSON bodies, not mailbox
 //! mail, and never cross the wire codec.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use aether_bloomery::{Budget, Digest, Event, Forecast, Membership, Workpiece};
@@ -74,6 +76,14 @@ pub struct SealRequest {
     /// Override the admit idempotency key; defaults to the sealed bloom id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// The operator-supplied, per-member work-order descriptions (#3595), keyed
+    /// by workpiece id. Advisory model context the coordinator persists at seal
+    /// so the construct lane's prompt can name a `## Task` — it binds no evidence
+    /// and never enters the content-addressed spec, so it rides the seal *request*
+    /// rather than the sealed draft. A member absent from the map dispatches with
+    /// no task (the subject-only prompt), never blocking the seal.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub descriptions: BTreeMap<String, String>,
 }
 
 /// `POST /blooms/{id}/supersede` body — names the open draft to seal as the

@@ -135,12 +135,11 @@ fn claim_state() -> (SourceCapabilityState, FakeGithub) {
     (SourceCapabilityState::new(SourceShell::new(Arc::new(backend))), fake)
 }
 
-/// Point a workpiece's claim ref at a commit whose tree is `holder`'s id —
-/// the holding another instance's seal leaves in the shared repository, staged
+/// Point a workpiece's claim ref at a commit carrying `holder`'s id — the
+/// holding another instance's seal leaves in the shared repository, staged
 /// directly (ADR-0150: the ref namespace is the inter-instance truth).
 fn stage_foreign_hold(fake: &FakeGithub, name: &str, holder: &BloomId) {
-    let commit = fake.seed_base_commit(&holder.0);
-    fake.seed_ref_at(&format!("bloomery/claims/{name}"), &commit);
+    fake.seed_claim_hold(&format!("bloomery/claims/{name}"), holder);
 }
 
 fn claim_ref(name: &str) -> String {
@@ -371,20 +370,18 @@ fn boot_reconcile_re_asserts_a_sealed_blooms_lost_refs_without_tearing_an_intact
     assert_eq!((ref_kind, held_by), (ClaimRefKind::Workpiece(workpiece("w1")), sealed.id()));
 }
 
-/// Point `name` at a commit whose tree is `holder`'s id — a live claim ref
-/// staged directly, for a `name` outside the `bloomery/claims/<wp>` shape
+/// Point `name` at a commit carrying `holder`'s id — a live claim ref staged
+/// directly, for a `name` outside the `bloomery/claims/<wp>` shape
 /// [`stage_foreign_hold`] covers (e.g. the admission ref).
 fn stage_hold_at(fake: &FakeGithub, name: &str, holder: &BloomId) {
-    let commit = fake.seed_base_commit(&holder.0);
-    fake.seed_ref_at(name, &commit);
+    fake.seed_claim_hold(name, holder);
 }
 
-/// Point `name` at a tombstone commit (all-zero tree) — the ref state an
-/// interrupted `release_seal` leaves after its CAS-to-tombstone linearized but
-/// its name-only cleanup delete never ran.
+/// Point `name` at a tombstone commit (empty tree + `Bloom-Id: tombstone`) —
+/// the ref state an interrupted `release_seal` leaves after its
+/// CAS-to-tombstone linearized but its name-only cleanup delete never ran.
 fn stage_tombstone(fake: &FakeGithub, name: &str) {
-    let commit = fake.seed_base_commit(&Digest::from_bytes([0u8; 32]));
-    fake.seed_ref_at(name, &commit);
+    fake.seed_claim_tombstone(name);
 }
 
 /// Enumerate the live claim refs through the capability, decoding each state —

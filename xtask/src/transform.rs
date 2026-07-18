@@ -54,6 +54,13 @@ pub struct TransformArgs {
     /// resolved effort, #3511). Ignored by the verify lane.
     #[arg(long)]
     effort: Option<String>,
+    /// The advisory, human-readable work-order description the
+    /// `construct.implement` lane names in its prompt's `## Task` section (#3595)
+    /// — the operator-supplied text the coordinator persisted at seal and the
+    /// executor threaded onto the dispatch. Absent when none was persisted (a
+    /// subject-only prompt); ignored by the verify lane.
+    #[arg(long)]
+    task: Option<String>,
 }
 
 /// One CI-mirroring cargo invocation for a `verify.*` command id.
@@ -121,11 +128,13 @@ fn construct_argv(model: Option<&str>) -> Vec<String> {
 const CONSTRUCT_INSTRUCTIONS: &str = include_str!("construct_instructions.md");
 
 /// Assemble the headless-Claude prompt for the construct lane from the lane-owned
-/// `instructions` and the checked-out `subject` — pure so the assembly is testable
-/// without spawning Claude (#3572). The subject header names the exact sealed tree
-/// the worker is on, so the prompt (and the transcript that echoes it) records
-/// which subject the candidate was built against.
-fn assemble_construct_prompt(instructions: &str, subject: Option<&str>) -> String {
+/// `instructions`, the checked-out `subject`, and the work-order `task` — pure so
+/// the assembly is testable without spawning Claude (#3572). The subject header
+/// names the exact sealed tree the worker is on; the `## Task` section carries the
+/// operator's work-order description (#3595) so the model is told *what* to build,
+/// not just *where*. A `None` task appends no section — the subject-only prompt
+/// still stands (the fail-legible path for a member with no persisted description).
+fn assemble_construct_prompt(instructions: &str, subject: Option<&str>, task: Option<&str>) -> String {
     let subject_line = subject.map_or_else(
         || "You are working in the checked-out subject tree — the sealed source this work order named.".to_owned(),
         |subject| {
@@ -135,7 +144,8 @@ fn assemble_construct_prompt(instructions: &str, subject: Option<&str>) -> Strin
             )
         },
     );
-    format!("{instructions}\n\n## Subject\n\n{subject_line}\n")
+    let task_section = task.map_or_else(String::new, |task| format!("\n## Task\n\n{task}\n"));
+    format!("{instructions}\n\n## Subject\n\n{subject_line}\n{task_section}")
 }
 
 /// `<out>/evidence.json` schema for the verify lane — the untrusted claim a
@@ -332,7 +342,7 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
     // The lane owns its process: the prompt is assembled from the in-repo
     // instruction source and the checked-out subject, never from a skill in the
     // worker's checkout. It is piped on the child's stdin.
-    let prompt = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, args.subject.as_deref());
+    let prompt = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, args.subject.as_deref(), args.task.as_deref());
 
     // Run headless Claude at the resolved model; the reasoning effort rides an
     // env knob.
@@ -465,7 +475,7 @@ mod tests {
     // never reads `.claude/skills/implement` (#3572). Pure: no Claude spawn.
     #[test]
     fn construct_prompt_assembles_from_the_in_repo_instructions_and_subject() {
-        let prompt = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"));
+        let prompt = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), Some("thread the work order"));
         assert!(prompt.starts_with(CONSTRUCT_INSTRUCTIONS), "the lane's own instruction source leads the prompt");
         assert!(prompt.contains("## Subject"), "the checked-out subject is appended as its own section");
         assert!(prompt.contains("abc123"), "the exact checked-out commit is named in the prompt");
@@ -474,10 +484,25 @@ mod tests {
             "the native lane never delegates to the retired implement skill",
         );
 
+        // The work-order description is appended under its own `## Task` section
+        // (#3595) so the model is told what to build, not just where. Match the
+        // heading on its own line (`\n## Task\n`), since the instruction text
+        // itself references the section name inline as a code span.
+        assert!(prompt.contains("\n## Task\n"), "the work-order description is appended as its own section");
+        assert!(prompt.contains("thread the work order"), "the task text is named in the prompt");
+
         // With no subject supplied, the prompt still stands and names no commit.
-        let subjectless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None);
+        let subjectless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, None, Some("still has a task"));
         assert!(subjectless.contains("## Subject"));
+        assert!(subjectless.contains("\n## Task\n"));
         assert!(subjectless.starts_with(CONSTRUCT_INSTRUCTIONS));
+
+        // With no task, the prompt still stands and appends no `## Task` section —
+        // the fail-legible subject-only path for a member with no description.
+        let taskless = assemble_construct_prompt(CONSTRUCT_INSTRUCTIONS, Some("abc123"), None);
+        assert!(taskless.contains("## Subject"));
+        assert!(!taskless.contains("\n## Task\n"), "no persisted description means no task section");
+        assert!(taskless.starts_with(CONSTRUCT_INSTRUCTIONS));
     }
 
     // The result record is derived in-repo from the stream-json transcript — the

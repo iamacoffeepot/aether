@@ -275,6 +275,16 @@ pub struct Transformation {
     pub limits: Budget,
     /// The network profile the lane permits.
     pub network: NetworkProfile,
+    /// The advisory, human-readable work-order description the construct lane
+    /// names in its assembled prompt's `## Task` section (#3595). It is model
+    /// *context*, not signed instruction: it binds no evidence and never enters
+    /// the content-addressed `BloomSpec`/`Membership` vocabulary, so the reducer
+    /// authors it `None` ([`for_member_stage`](Self::for_member_stage)) and the
+    /// host populates it at dispatch from durable state keyed by the member — a
+    /// missing description leaves it `None`, a legible subject-only run rather
+    /// than a blind dispatch.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 impl Transformation {
@@ -331,6 +341,9 @@ impl Transformation {
             image: String::from(image),
             limits: Budget::default(),
             network,
+            // The reducer holds only digests; the operator's work-order text is
+            // advisory context the host threads on at dispatch, never here.
+            description: None,
         }
     }
 }
@@ -492,6 +505,21 @@ mod tests {
         assert_eq!(construct.checkout, checkout, "the checkout target is threaded onto the transformation");
         assert_eq!(construct.inputs, alloc::vec![subject], "the subject stays the evidence-binding input, untouched");
         assert_ne!(construct.checkout, construct.inputs[0], "checkout and subject are independent axes");
+    }
+
+    // The reducer never authors the advisory work-order description (#3595): it
+    // holds only digests, so `for_member_stage` builds every lane with
+    // `description: None`. The host populates it at dispatch from durable state —
+    // a construction that filled it in here would leak un-threaded text and mask
+    // a missing-description warn.
+    #[test]
+    fn for_member_stage_authors_no_description() {
+        let subject = Digest::from_bytes([7; 32]);
+        let checkout = Digest::from_bytes([9; 32]);
+        assert!(
+            Transformation::for_member_stage(StageId::Construct, subject, checkout).description.is_none(),
+            "the reducer holds only digests; the description is threaded on at dispatch",
+        );
     }
 
     // Step-6 tripwire (#3572): the Construct and Refine bindings name the native

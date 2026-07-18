@@ -22,7 +22,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use aether_bloomery::Digest;
+use aether_bloomery::{BloomId, Digest};
 use sha2::{Digest as _, Sha256};
 
 use crate::client::{
@@ -31,7 +31,7 @@ use crate::client::{
 };
 use crate::correspondence::{Correspondence, CorrespondenceError, GitObjectId};
 use crate::marker::parse_marker;
-use crate::source::{digest_from_hex, to_hex};
+use crate::source::{EMPTY_TREE, digest_from_hex, render_claim_message, render_tombstone_message, to_hex};
 
 #[derive(Clone)]
 struct StoredIssue {
@@ -65,6 +65,12 @@ struct StoredRun {
     artifacts: Vec<Artifact>,
 }
 
+#[derive(Clone)]
+struct StoredCommit {
+    tree: String,
+    message: String,
+}
+
 #[derive(Default)]
 struct State {
     next_issue: u64,
@@ -75,7 +81,7 @@ struct State {
     // and commit sha → tree sha. Trees themselves are opaque shas the port
     // treats as digest-addressed handles, so they need no separate store.
     refs: HashMap<String, String>,
-    commits: HashMap<String, String>,
+    commits: HashMap<String, StoredCommit>,
     // The Actions surface the executor port drives: recorded dispatches (a
     // `workflow_dispatch` creates no resolvable run synchronously, so a
     // dispatched-but-unseeded nonce inspects `Unknown`), and the runs a test
@@ -150,8 +156,19 @@ impl FakeGithub {
     /// snapshot or a namespace can be created on.
     #[must_use]
     pub fn seed_commit(&self, tree_sha: &str) -> String {
-        let sha = commit_sha("seed", tree_sha, &[]);
-        self.lock().commits.insert(sha.clone(), tree_sha.to_owned());
+        self.seed_commit_with_message("seed", tree_sha)
+    }
+
+    /// Seed a commit object carrying `tree_sha` and an explicit `message` (no
+    /// parents) and return its sha — a claim-registry test's way to place a
+    /// commit directly at the empty-tree + `Bloom-Id` message convention,
+    /// sidestepping `claim_seal`.
+    #[must_use]
+    pub fn seed_commit_with_message(&self, message: &str, tree_sha: &str) -> String {
+        let sha = commit_sha(message, tree_sha, &[]);
+        self.lock()
+            .commits
+            .insert(sha.clone(), StoredCommit { tree: tree_sha.to_owned(), message: message.to_owned() });
         sha
     }
 
@@ -195,6 +212,24 @@ impl FakeGithub {
     /// Seed a ref (`heads/…` form) pointing at the commit `target`.
     pub fn seed_ref_at(&self, name: &str, target: &Digest) {
         self.seed_ref(name, &to_hex(target));
+    }
+
+    /// Point claim ref `name` at a fresh commit carrying `holder`'s id on the
+    /// claim registry's `Bloom-Id` message convention (empty tree, ADR-0150
+    /// amendment #3598) — a claim-registry consumer's way to stage another
+    /// instance's live hold directly, sidestepping `claim_seal`.
+    pub fn seed_claim_hold(&self, name: &str, holder: &BloomId) {
+        let sha = self.seed_commit_with_message(&render_claim_message(holder), EMPTY_TREE);
+        self.seed_ref(name, &sha);
+    }
+
+    /// Point claim ref `name` at a fresh tombstone commit (empty tree +
+    /// `Bloom-Id: tombstone`) — the ref state an interrupted `release_seal`
+    /// leaves after its CAS-to-tombstone linearized but its name-only cleanup
+    /// delete never ran.
+    pub fn seed_claim_tombstone(&self, name: &str) {
+        let sha = self.seed_commit_with_message(&render_tombstone_message(), EMPTY_TREE);
+        self.seed_ref(name, &sha);
     }
 
     /// The commit digest ref `name` points at, if it exists — the digest-typed
@@ -366,14 +401,14 @@ impl GitDataApi for FakeGithub {
         self.lock()
             .commits
             .get(sha)
-            .map(|tree| GitCommit { sha: sha.to_owned(), tree: tree.clone() })
+            .map(|stored| GitCommit { sha: sha.to_owned(), tree: stored.tree.clone(), message: stored.message.clone() })
             .ok_or_else(|| GithubError::Status { status: 404, body: format!("no commit {sha}") })
     }
 
     fn create_commit(&self, message: &str, tree: &str, parents: &[String]) -> Result<GitCommit, GithubError> {
         let sha = commit_sha(message, tree, parents);
-        self.lock().commits.insert(sha.clone(), tree.to_owned());
-        Ok(GitCommit { sha, tree: tree.to_owned() })
+        self.lock().commits.insert(sha.clone(), StoredCommit { tree: tree.to_owned(), message: message.to_owned() });
+        Ok(GitCommit { sha, tree: tree.to_owned(), message: message.to_owned() })
     }
 }
 

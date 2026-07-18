@@ -11,13 +11,15 @@ use aether_bloomery::{
     StageId, Transformation, WorkHandle, WorkOrder, WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{ActionsExecutor, Artifact, RunConclusion, RunStatus, StageVerdict};
+use aether_bloomery_github::{
+    ActionsExecutor, Artifact, ExecutorError, GithubError, RunConclusion, RunStatus, StageVerdict,
+};
 
 use super::{
-    Admission, AdmitDecision, AdmitSink, DispatchRecord, EvidenceClaims, IntakeRefusal, UploadedEvidence,
-    admit_uploaded, dispatch_and_record, record_dispatch, run_intake_cycle,
+    Admission, AdmitDecision, AdmitSink, DispatchError, DispatchRecord, EvidenceClaims, IntakeRefusal,
+    UploadedEvidence, admit_uploaded, dispatch_and_record, record_dispatch, run_intake_cycle,
 };
-use crate::bloomery::ExecutorShell;
+use crate::bloomery::{ExecutorPortError, ExecutorShell, LocalExecutorError};
 use crate::store::{SqliteStore, StoreBackend};
 
 const WORKFLOW: &str = "bloomery-transform.yml";
@@ -44,6 +46,7 @@ fn work_order(nonce: &str) -> WorkOrder {
             image: "iama/verify:1".to_owned(),
             limits: Budget::default(),
             network: NetworkProfile::None,
+            description: None,
         },
         nonce: Nonce(nonce.to_owned()),
     }
@@ -562,4 +565,47 @@ fn attempt_artifact_name_round_trips_through_name_evidence_claims() {
         size_bytes: 3,
     };
     assert!(claims.claim_for(&stray).is_none(), "a non-attempt name yields no claim");
+}
+
+// Tripwire: 429 is a rate-limit, not a permanent refusal — the one classification
+// edge that would silently regress into hammering GitHub if it flipped, since
+// every other 4xx and every 5xx sit on opposite, unambiguous sides of the split.
+#[test]
+fn dispatch_error_is_permanent_classifies_github_status_by_code() {
+    let github_status = |status: u16| {
+        DispatchError::Submit(ExecutorPortError::Actions(ExecutorError::Github(GithubError::Status {
+            status,
+            body: "refused".to_owned(),
+        })))
+    };
+
+    assert!(github_status(404).is_permanent(), "a 404 wrong-workflow refusal is permanent");
+    assert!(github_status(422).is_permanent(), "a 422 contract-mismatch refusal is permanent");
+    assert!(!github_status(429).is_permanent(), "429 is a rate-limit, not a permanent refusal");
+    assert!(!github_status(500).is_permanent(), "a 5xx is transient");
+    assert!(!github_status(399).is_permanent(), "below the 4xx range is transient");
+}
+
+#[test]
+fn dispatch_error_is_permanent_is_false_for_every_non_status_fault() {
+    let transport = DispatchError::Submit(ExecutorPortError::Actions(ExecutorError::Github(GithubError::Transport(
+        "connection reset".to_owned(),
+    ))));
+    let decode = DispatchError::Submit(ExecutorPortError::Actions(ExecutorError::Github(GithubError::Decode(
+        "bad body".to_owned(),
+    ))));
+    let pagination =
+        DispatchError::Submit(ExecutorPortError::Actions(ExecutorError::Github(GithubError::PaginationExhausted {
+            what: "runs".to_owned(),
+        })));
+    let no_run =
+        DispatchError::Submit(ExecutorPortError::Actions(ExecutorError::NoRunForNonce(Nonce("dispatch-1".to_owned()))));
+    let local = DispatchError::Submit(ExecutorPortError::Local(LocalExecutorError::NoRunForNonce(Nonce(
+        "dispatch-1".to_owned(),
+    ))));
+    let store = DispatchError::Store(rusqlite::Error::QueryReturnedNoRows);
+
+    for error in [transport, decode, pagination, no_run, local, store] {
+        assert!(!error.is_permanent(), "{error} is a transient fault, not permanent");
+    }
 }

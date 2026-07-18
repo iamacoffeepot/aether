@@ -275,6 +275,7 @@ mod tests {
                 image: "iama/verify:1".to_owned(),
                 limits: Budget::default(),
                 network: NetworkProfile::None,
+                description: None,
             },
             nonce: Nonce(nonce.to_owned()),
         }

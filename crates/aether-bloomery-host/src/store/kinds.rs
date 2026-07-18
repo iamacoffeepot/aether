@@ -232,6 +232,36 @@ pub enum AckOutboxResult {
     },
 }
 
+/// Persist a member's advisory work-order description (#3595), keyed by the
+/// sealed bloom id and workpiece. The coordinator writes one per member at seal
+/// so the text survives to dispatch, where the executor driver reads it back and
+/// threads it onto the construct lane's prompt. Advisory model context that binds
+/// no evidence and never enters the content-addressed spec — a plain projection
+/// row, not a journalled event. Last-writer-wins on (`bloom`, `workpiece`).
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
+#[kind(name = "aether.store.record_dispatch_description")]
+pub struct RecordDispatchDescription {
+    /// The sealed bloom's id (its digest's raw bytes).
+    pub bloom: Vec<u8>,
+    /// The member workpiece the description belongs to.
+    pub workpiece: String,
+    /// The operator-supplied, human-readable work-order description.
+    pub description: String,
+}
+
+/// Reply to [`RecordDispatchDescription`].
+#[derive(aether_data::Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[kind(name = "aether.store.record_dispatch_description_result")]
+pub enum RecordDispatchDescriptionResult {
+    /// The description row was written.
+    Ok,
+    /// The write failed.
+    Err {
+        /// A human-readable failure reason.
+        error: String,
+    },
+}
+
 // The journal-replay transact-mails — `ReplayJournal`, `JournalRecord`,
 // `ReplayJournalResult` — live in `aether_bloomery::control` alongside `Commit`,
 // not here: the wasm control actor (`aether-bloomery`) sends `ReplayJournal` at
