@@ -277,6 +277,47 @@ fn recording_executor(
     (LocalExecutor::new(Arc::new(runner), correspondence(), base.path(), None, None), released)
 }
 
+// A spawn seam that records the `RunSpec::evidence_dir` it was handed — the value
+// the child would resolve `--out` against — so a test can assert `submit` passes an
+// absolute path across the child-cwd/relative-path seam the other stubs sidestep.
+struct CapturingRunner {
+    evidence_dir: Arc<Mutex<Option<PathBuf>>>,
+}
+
+impl TransformRunner for CapturingRunner {
+    fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
+        *self.evidence_dir.lock().unwrap() = Some(spec.evidence_dir.to_owned());
+        Ok(Box::new(RecordingProcess { lifecycle: RunLifecycle::Running }))
+    }
+
+    fn release(&self, _worktree_dir: &Path) -> Result<(), LocalExecutorError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn submit_resolves_a_relative_base_to_an_absolute_evidence_dir() {
+    // The child runs with `current_dir(worktree_dir)`, so a *relative* `--out`
+    // resolves against the child's cwd (the scratch worktree) while `stream_evidence`
+    // reads it against the coordinator's cwd — the two diverge and the intake polls a
+    // path the run never wrote (the live 2026-07-18 bug). Tripwire: the evidence
+    // out-path handed to the spawn must be absolute so the child writes where
+    // `stream_evidence` reads, regardless of the coordinator's cwd or a relative
+    // configured `local_worktree_base`.
+    let captured = Arc::new(Mutex::new(None));
+    let runner = CapturingRunner { evidence_dir: Arc::clone(&captured) };
+    let exec =
+        LocalExecutor::new(Arc::new(runner), correspondence(), PathBuf::from(".bloomery/local-worktrees"), None, None);
+
+    exec.submit(&construct_order(digest(5), &test_nonce("abs"))).unwrap();
+
+    let evidence_dir = captured.lock().unwrap().clone().expect("submit spawned the run");
+    assert!(
+        evidence_dir.is_absolute(),
+        "the evidence out-path handed to the spawn must be absolute, got {evidence_dir:?}"
+    );
+}
+
 #[test]
 fn cancel_releases_the_scratch_worktree() {
     // A cancel is terminal — the killed run's scratch worktree is torn down so a
@@ -310,18 +351,49 @@ fn a_consumed_evidence_read_releases_the_scratch_worktree() {
 
 #[test]
 fn a_failed_evidence_read_retains_the_worktree_for_retry() {
-    // No evidence.json written → the read faults. The run stays tracked for a later
-    // retry (the entry is intentionally kept), so its worktree must NOT be released
-    // — releasing it would strip the checkout a retry needs.
+    // No evidence.json written yet AND the run is still Running → the missing file is
+    // transient. The run stays tracked for a later retry (the entry is intentionally
+    // kept), so its worktree must NOT be released — releasing it would strip the
+    // checkout a retry needs. (An *Exited* run with no evidence is terminal instead —
+    // see `an_exited_run_with_no_evidence_yields_a_failed_verdict_and_evicts`.)
     let base = TempDir::new().unwrap();
-    let (exec, released) = recording_executor(&base, None, RunLifecycle::Exited { success: true });
+    let (exec, released) = recording_executor(&base, None, RunLifecycle::Running);
     let handle = exec.submit(&construct_order(digest(5), &test_nonce("retry"))).unwrap();
 
     assert!(matches!(exec.stream_evidence(&handle), Err(LocalExecutorError::Evidence(_))));
     assert!(released.lock().unwrap().is_empty(), "a retryable failed read must not release the worktree");
     assert_eq!(
         exec.inspect(&handle).unwrap(),
-        ExecutionStatus::Completed { conclusion: Conclusion::Success },
-        "the run is retained after a failed read",
+        ExecutionStatus::Running,
+        "the still-running run is retained after a transient failed read",
+    );
+}
+
+#[test]
+fn an_exited_run_with_no_evidence_yields_a_failed_verdict_and_evicts() {
+    // An Exited run that left no evidence.json will never produce one — re-driving
+    // the read against it loops forever (the live 2026-07-18 bloom-trial bug). It is
+    // terminal: `stream_evidence` synthesizes a fail-closed VerificationFailed attempt
+    // (feeding the retry/wedge machinery), evicts the run, and releases its worktree —
+    // rather than the eternal error re-drive.
+    let base = TempDir::new().unwrap();
+    let (exec, released) = recording_executor(&base, None, RunLifecycle::Exited { success: true });
+    let nonce = test_nonce("exited-no-evidence");
+    let handle = exec.submit(&construct_order(digest(5), &nonce)).unwrap();
+
+    let refs = exec.stream_evidence(&handle).unwrap();
+    assert_eq!(refs.len(), 1, "one synthesized failure ref for the evidence-less exit");
+    let upload = NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes as an attempt result");
+    assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "an exited run with no visible evidence fails closed");
+
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Unknown,
+        "the terminal evidence-less run is evicted, not retained for an eternal re-drive",
+    );
+    assert_eq!(
+        released.lock().unwrap().as_slice(),
+        &[base.path().join(&nonce)],
+        "the terminal evidence-less run releases its scratch worktree",
     );
 }
