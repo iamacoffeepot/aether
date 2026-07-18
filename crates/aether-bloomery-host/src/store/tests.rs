@@ -348,6 +348,25 @@ fn recording_a_replayed_nonce_is_an_idempotent_no_op() {
 }
 
 #[test]
+fn list_outstanding_nonces_reflects_recorded_and_consumed_orders() {
+    // The restart recovery set (#3641): every nonce still outstanding, so the
+    // executor driver's init can re-track a dispatched-but-unresolved order
+    // after a crash instead of starting with an empty `tracked` vec.
+    let mut store = memory();
+    assert_eq!(store.list_outstanding_nonces().unwrap(), Vec::<String>::new());
+
+    assert_eq!(store.record_order(&order("n-1")).unwrap(), RecordOutcome::Recorded);
+    assert_eq!(store.record_order(&order("n-2")).unwrap(), RecordOutcome::Recorded);
+    let mut nonces = store.list_outstanding_nonces().unwrap();
+    nonces.sort();
+    assert_eq!(nonces, vec!["n-1".to_owned(), "n-2".to_owned()]);
+
+    // Consuming one drops it from the enumeration; the other stays outstanding.
+    assert!(store.consume_order("n-1").unwrap());
+    assert_eq!(store.list_outstanding_nonces().unwrap(), vec!["n-2".to_owned()]);
+}
+
+#[test]
 fn outstanding_order_survives_a_restart() {
     // Evidence returns after an arbitrary delay, so an order must survive a
     // `kill -9` + restart to stay matchable — the reason the registry is the
