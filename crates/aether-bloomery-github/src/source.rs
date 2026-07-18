@@ -529,10 +529,13 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
             // failure path — the commit create, the ref create, and (below) the
             // holder resolution — first rolls back every ref this acquire already
             // created, so an aborted acquire never leaks a partial claim.
+            // Rollback is best-effort here: a rollback fault must never mask the
+            // triggering error/outcome below, which is what the caller needs to
+            // see — so its own Result is deliberately dropped, not `?`-propagated.
             let commit = match self.create_claim_commit(bloom, &[]) {
                 Ok(commit) => commit,
                 Err(error) => {
-                    self.rollback(&created)?;
+                    let _ = self.rollback(&created);
                     return Err(error);
                 }
             };
@@ -542,11 +545,11 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
                 // first — the conflicting ref is another bloom's, never among
                 // them — then resolve and report the first conflict.
                 Err(GithubError::Status { status: 422, .. }) => {
-                    self.rollback(&created)?;
+                    let _ = self.rollback(&created);
                     return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by: self.require_holder(name)? });
                 }
                 Err(error) => {
-                    self.rollback(&created)?;
+                    let _ = self.rollback(&created);
                     return Err(SourceError::Github(error));
                 }
             }
