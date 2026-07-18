@@ -46,8 +46,8 @@ use serde::de::DeserializeOwned;
 
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{
-    Admit, AdmitResult, BloomDraft, BloomId, BloomView, Digest, Event, Fact, IdempotencyKey, Outcome, Query,
-    QueryResult, ReplayJournal, ReplayJournalResult, Statement, ViewDocument, Workpiece, digest_of,
+    Admit, AdmitResult, BloomDraft, BloomId, BloomView, Digest, Event, Fact, IdempotencyKey, Membership, Outcome,
+    Query, QueryResult, ReplayJournal, ReplayJournalResult, Statement, ViewDocument, Workpiece, digest_of,
 };
 use aether_capabilities::http::{
     HttpHeader, HttpMethod, HttpServerCapability, HttpServerRequest, HttpServerResponse, RegisterRouteSelf,
@@ -62,8 +62,8 @@ pub use aether_substrate::chassis::error::BootError;
 
 use super::BloomeryApiCapability;
 use super::dto::{
-    DraftPatch, DraftView, DraftsView, ErrorView, JournalEntry, JournalView, OutcomeView, SealRequest,
-    SupersedeRequest, WorkpiecesView,
+    DraftPatch, DraftView, DraftsView, ErrorView, JournalEntry, JournalView, MemberProjection, OutcomeView,
+    SealRequest, SupersedeRequest, WorkpiecesView,
 };
 use crate::artifacts::{ArtifactsError, Get, GetResult};
 use crate::bloomery::{
@@ -91,6 +91,12 @@ const ROUTE_PREFIXES: [&str; 6] = ["/workpieces", "/drafts", "/blooms", "/view",
 /// only when the shaping session restarts.
 const MAX_STAGED_WORKPIECES: usize = 1024;
 const MAX_OPEN_DRAFTS: usize = 1024;
+
+/// Ceiling on the outstanding deferred-seal count — the `seals` map (and its
+/// paired `seal_verifications`) grow one entry per above-auto seal in flight, so
+/// cap the map the same way `staged` / `drafts` are capped and refuse a new
+/// deferred seal at the ceiling before dispatching any verification (issue #3599).
+const MAX_OPEN_SEALS: usize = 1024;
 
 /// Ceiling on one seal's membership count. Each above-auto member fans out one
 /// `aether.signing` `Verify` dispatch and one held `SealVerify` correlation, so a
@@ -562,86 +568,13 @@ impl ApiCapabilityState {
             return Routed::Reply(error_response(422, "approval policy unavailable; seal fails closed"));
         };
         let gate = Gate::new(policy);
-        // Indexed once so the member loop stays O(n + m) however many
-        // projections the request carries; first occurrence wins on a
-        // duplicate key, matching the linear scan this replaces.
-        let mut projections = HashMap::with_capacity(request.projections.len());
-        for projection in &request.projections {
-            projections.entry((&projection.workpiece, &projection.scope_revision)).or_insert(projection);
-        }
-        // Pass 1: resolve every membership synchronously. An auto member is
-        // gate-formed in place; an above-auto member is pre-checked and queued
-        // for the deferred `aether.signing` verification. Any missing projection,
-        // `Incomplete` verdict, missing statement, or failing pre-check refuses
-        // the seal (422, fail closed) *before* any signing dispatch.
-        let mut sealed_proposals = Vec::with_capacity(draft.proposals.len());
-        let mut pending_verifications: Vec<(usize, Digest, Statement)> = Vec::new();
-        for (index, proposal) in draft.proposals.iter().enumerate() {
-            let member = &proposal.workpiece.0;
-            let Some(&projection) = projections.get(&(&proposal.workpiece, &proposal.scope_revision)) else {
-                return Routed::Reply(error_response(
-                    422,
-                    &format!("member {member} has no scope projection; seal fails closed"),
-                ));
+        // Pass 1: resolve every membership synchronously (fail-closed 422 on any
+        // shortfall, before any signing dispatch).
+        let (sealed_proposals, pending_verifications) =
+            match resolve_seal_memberships(&gate, &draft.proposals, &request.projections) {
+                Ok(resolved) => resolved,
+                Err(response) => return Routed::Reply(response),
             };
-            // The digest binds the approval to the projection as evaluated. It
-            // is computed over the canonical wire re-encoding of the decoded
-            // struct, not the raw request slice: the JSON body carries no
-            // per-projection byte boundaries, and the canonical form is
-            // reproducible from the shared DTO by any party rather than
-            // sensitive to the sender's whitespace and field order.
-            let projection_digest = match to_vec(projection) {
-                Ok(bytes) => Digest::of_wire_bytes(&bytes),
-                Err(error) => {
-                    return Routed::Reply(error_response(500, &format!("projection encode failed: {error}")));
-                }
-            };
-            let admission = AdmissionRequest {
-                scope_revision: proposal.scope_revision,
-                declared_surface: projection.declared_surface.clone(),
-                completeness: projection.completeness,
-                adr_touch: projection.adr_touch,
-                pre_approved: projection.pre_approved,
-                projection_digest,
-            };
-            match gate.evaluate(&admission) {
-                Decision::AutoApproved(approval) => {
-                    let mut sealed = proposal.clone();
-                    sealed.approval = approval;
-                    sealed_proposals.push(sealed);
-                }
-                Decision::Incomplete(incompleteness) => {
-                    return Routed::Reply(error_response(
-                        422,
-                        &format!("member {member} is incomplete: {incompleteness:?}"),
-                    ));
-                }
-                Decision::RequiresStatement(_tier) => {
-                    // Above-auto: consume the member projection's signed statement,
-                    // run the two synchronous pre-checks (subject + author
-                    // signature), and queue it for the async signature verify. A
-                    // missing or pre-check-failing statement fails closed here,
-                    // before any signing dispatch. The proposal's placeholder
-                    // approval is overwritten by the verified evidence before seal.
-                    let Some(statement) = projection.signed_statement.as_ref() else {
-                        return Routed::Reply(error_response(
-                            422,
-                            &format!(
-                                "member {member} resolves above auto but carries no signed statement; seal fails closed"
-                            ),
-                        ));
-                    };
-                    if let Err(rejected) = precheck_statement(proposal.scope_revision, statement) {
-                        return Routed::Reply(error_response(
-                            422,
-                            &format!("member {member} signed statement rejected: {rejected:?}; seal fails closed"),
-                        ));
-                    }
-                    sealed_proposals.push(proposal.clone());
-                    pending_verifications.push((index, proposal.scope_revision, statement.clone()));
-                }
-            }
-        }
         let mut gated = draft;
         gated.proposals = sealed_proposals;
         // Pass 2. No above-auto member → seal synchronously (the all-auto fast
@@ -658,6 +591,14 @@ impl ApiCapabilityState {
             Self::persist_descriptions(ctx, &spec, &request.descriptions);
             let key = request.idempotency_key.unwrap_or_else(|| hex_encode(spec.id().0.as_bytes()));
             return self.admit(ctx, &Event { idempotency_key: IdempotencyKey(key), fact: Fact::Seal(spec) });
+        }
+        // Deferred path only: cap the outstanding `seals` map before dispatching any
+        // `Verify`, so a flood of above-auto seals cannot grow the in-flight seal /
+        // seal-verification state without bound (the all-auto fast path above never
+        // touches `seals`, so it is deliberately not gated here). Mirrors the
+        // `staged` / `drafts` admission caps.
+        if self.seals.len() >= MAX_OPEN_SEALS {
+            return Routed::Reply(error_response(429, "outstanding-seal budget exhausted"));
         }
         let mut verifications = Vec::with_capacity(pending_verifications.len());
         for (member_index, scope_revision, statement) in pending_verifications {
@@ -1016,6 +957,94 @@ fn control_mailbox() -> MailboxId {
 /// A `Content-Type: application/json` header set.
 fn json_headers() -> Vec<HttpHeader> {
     vec![HttpHeader { name: "content-type".to_owned(), value: "application/json".to_owned() }]
+}
+
+/// One above-auto member queued for the deferred signature verify: its proposal
+/// index, scope-revision digest, and signed statement — Pass 1's carry into Pass 2.
+type PendingVerification = (usize, Digest, Statement);
+
+/// Pass 1 of a seal: resolve every draft membership synchronously against the
+/// `gate`. An auto member is gate-formed in place; an above-auto member has its
+/// signed statement pre-checked and is queued (its `(index, scope_revision,
+/// statement)`) for the deferred `aether.signing` verify. Any missing projection,
+/// `Incomplete` verdict, missing statement, or failing pre-check returns the
+/// fail-closed `422` response instead — resolved before any signing dispatch.
+///
+/// Extracted from [`seal_draft`](BloomeryApiCapability::seal_draft) so that hot
+/// path stays under the line ceiling; the two returned vectors are its Pass-2
+/// input (the gated proposals and the above-auto members still to verify).
+fn resolve_seal_memberships(
+    gate: &Gate<'_>,
+    proposals: &[Membership],
+    request_projections: &[MemberProjection],
+) -> Result<(Vec<Membership>, Vec<PendingVerification>), HttpServerResponse> {
+    // Indexed once so the member loop stays O(n + m) however many projections the
+    // request carries; first occurrence wins on a duplicate key, matching the
+    // linear scan this replaces.
+    let mut projections = HashMap::with_capacity(request_projections.len());
+    for projection in request_projections {
+        projections.entry((&projection.workpiece, &projection.scope_revision)).or_insert(projection);
+    }
+    let mut sealed_proposals = Vec::with_capacity(proposals.len());
+    let mut pending_verifications: Vec<PendingVerification> = Vec::new();
+    for (index, proposal) in proposals.iter().enumerate() {
+        let member = &proposal.workpiece.0;
+        let Some(&projection) = projections.get(&(&proposal.workpiece, &proposal.scope_revision)) else {
+            return Err(error_response(422, &format!("member {member} has no scope projection; seal fails closed")));
+        };
+        // The digest binds the approval to the projection as evaluated. It is
+        // computed over the canonical wire re-encoding of the decoded struct, not
+        // the raw request slice: the JSON body carries no per-projection byte
+        // boundaries, and the canonical form is reproducible from the shared DTO by
+        // any party rather than sensitive to the sender's whitespace and field order.
+        let projection_digest = match to_vec(projection) {
+            Ok(bytes) => Digest::of_wire_bytes(&bytes),
+            Err(error) => return Err(error_response(500, &format!("projection encode failed: {error}"))),
+        };
+        let admission = AdmissionRequest {
+            scope_revision: proposal.scope_revision,
+            declared_surface: projection.declared_surface.clone(),
+            completeness: projection.completeness,
+            adr_touch: projection.adr_touch,
+            pre_approved: projection.pre_approved,
+            projection_digest,
+        };
+        match gate.evaluate(&admission) {
+            Decision::AutoApproved(approval) => {
+                let mut sealed = proposal.clone();
+                sealed.approval = approval;
+                sealed_proposals.push(sealed);
+            }
+            Decision::Incomplete(incompleteness) => {
+                return Err(error_response(422, &format!("member {member} is incomplete: {incompleteness:?}")));
+            }
+            Decision::RequiresStatement(_tier) => {
+                // Above-auto: consume the member projection's signed statement, run
+                // the two synchronous pre-checks (subject + author signature), and
+                // queue it for the async signature verify. A missing or
+                // pre-check-failing statement fails closed here, before any signing
+                // dispatch. The proposal's placeholder approval is overwritten by the
+                // verified evidence before seal.
+                let Some(statement) = projection.signed_statement.as_ref() else {
+                    return Err(error_response(
+                        422,
+                        &format!(
+                            "member {member} resolves above auto but carries no signed statement; seal fails closed"
+                        ),
+                    ));
+                };
+                if let Err(rejected) = precheck_statement(proposal.scope_revision, statement) {
+                    return Err(error_response(
+                        422,
+                        &format!("member {member} signed statement rejected: {rejected:?}; seal fails closed"),
+                    ));
+                }
+                sealed_proposals.push(proposal.clone());
+                pending_verifications.push((index, proposal.scope_revision, statement.clone()));
+            }
+        }
+    }
+    Ok((sealed_proposals, pending_verifications))
 }
 
 /// A JSON response over a serializable value; a `500` if it fails to encode.
