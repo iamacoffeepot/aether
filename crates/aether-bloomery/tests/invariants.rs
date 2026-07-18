@@ -1180,3 +1180,32 @@ proptest! {
         prop_assert_ne!(artifact.id(), untagged);
     }
 }
+
+// ADR-0152 — only the claim that completes the set dispatches integration, and
+// its candidate list is every member's claimed candidate in member order.
+// Catches both failure shapes: dispatching on every integrate (N redundant
+// folds), and never dispatching (resolutions that never reach the git side).
+#[test]
+fn the_completing_integrate_dispatches_the_integration_fold_in_member_order() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let spec_base = spec.base();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let (snapshot, first) = step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: claim("alpha", 10, 21) }));
+    assert!(matches!(first.outcome, Outcome::Integrated { .. }));
+    assert!(
+        !first.effects.iter().any(|e| matches!(e, Decision::DispatchIntegration { .. })),
+        "a partial claim set dispatches no integration",
+    );
+
+    let (_, second) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 22) }));
+    match second.effects.iter().find(|e| matches!(e, Decision::DispatchIntegration { .. })) {
+        Some(Decision::DispatchIntegration { base, candidates, .. }) => {
+            assert_eq!(*base, spec_base, "the fold bootstraps at the sealed base");
+            assert_eq!(candidates, &vec![digest(21), digest(22)], "every member's candidate, in member order");
+        }
+        other => panic!("expected a DispatchIntegration, got {other:?}"),
+    }
+}

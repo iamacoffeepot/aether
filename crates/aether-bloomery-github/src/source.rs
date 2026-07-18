@@ -53,7 +53,8 @@ use std::sync::Arc;
 
 use aether_bloomery::{
     BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ContentAddressed, Digest,
-    IntegrateOutcome, LandOutcome, LandingReceipt, SourceBackend, SourceSnapshot, WorkpieceId, digest_of,
+    IntegrateOutcome, IntegrationPosition, LandOutcome, LandingReceipt, SourceBackend, SourceSnapshot, WorkpieceId,
+    digest_of,
 };
 use serde::Serialize;
 
@@ -83,6 +84,20 @@ struct IntegratedHead {
 
 impl ContentAddressed for IntegratedHead {
     const DOMAIN: &'static str = "aether.bloomery.github.integrated-head";
+}
+
+/// The minted digest of an integration-branch tree no digest names yet — the
+/// freshly-bootstrapped branch still at the base commit (ADR-0152). A
+/// content-address over the git tree object id, so re-minting the same tree
+/// yields the identical digest and the first `integrate`'s expected-compare
+/// resolves. Distinct by domain from every other digest over the same bytes.
+#[derive(Serialize)]
+struct IntegrationTreeAddress<'a> {
+    object: &'a [u8],
+}
+
+impl ContentAddressed for IntegrationTreeAddress<'_> {
+    const DOMAIN: &'static str = "aether.bloomery.github.integration-tree";
 }
 
 /// A source-port fault, distinct from the clean [`IntegrateOutcome`] /
@@ -344,6 +359,44 @@ impl<C: GitDataApi> GitSource<C> {
         Ok(())
     }
 
+    // The integration branch's current position: its tree digest —
+    // minting-and-recording a correspondence for a tree no digest names yet
+    // (the freshly-created branch still at the base commit — the base's head
+    // digest maps to its *commit*, never its tree; minted content-derived over
+    // the tree object id, so a re-read returns the identical digest and the
+    // first integrate's expected-compare resolves) — plus the landable head the
+    // current commit reverse-resolves to once the branch has advanced past the
+    // base (each integrate records `head ↔ commit`), so an interrupted fold
+    // recovers its resolve head (ADR-0152).
+    fn current_integration_position(
+        &self,
+        bloom: &BloomId,
+        base_sha: &str,
+    ) -> Result<IntegrationPosition, SourceError> {
+        let integration = Self::integration_ref(bloom);
+        let current = self.client.get_ref(&integration)?.ok_or(SourceError::MissingRef(integration))?;
+        let commit = self.client.get_commit(&current.sha)?;
+        let tree_object = GitObjectId::from_hex(&commit.tree)
+            .ok_or_else(|| SourceError::Malformed(format!("integration tree sha `{}`", commit.tree)))?;
+        let tree = if let Some(tree) = self.correspondence.resolve_digest(&tree_object)? {
+            tree
+        } else {
+            let minted = digest_of(&IntegrationTreeAddress { object: tree_object.bytes() });
+            self.correspondence.record(&minted, &tree_object)?;
+            minted
+        };
+        let head = if current.sha == base_sha {
+            // The un-advanced branch's commit is the base commit, whose
+            // correspondence names the base digest — not a landable head.
+            None
+        } else {
+            let commit_object = GitObjectId::from_hex(&current.sha)
+                .ok_or_else(|| SourceError::Malformed(format!("integration commit sha `{}`", current.sha)))?;
+            self.correspondence.resolve_digest(&commit_object)?
+        };
+        Ok(IntegrationPosition { checkpoint: Checkpoint { bloom: *bloom, tree }, head })
+    }
+
     fn ensure_ref(&self, name: &str, sha: &str) -> Result<(), SourceError> {
         if self.client.get_ref(name)?.is_none() {
             self.client.create_ref(name, sha)?;
@@ -567,6 +620,12 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
             out.push(Checkpoint { bloom: *bloom, tree });
         }
         Ok(out)
+    }
+
+    fn integration_checkpoint(&self, bloom: &BloomId, base: &Digest) -> Result<IntegrationPosition, Self::Error> {
+        let base_sha = self.resolve_git_sha(base, "namespace base head digest")?;
+        self.create_namespace(bloom, base)?;
+        self.current_integration_position(bloom, &base_sha)
     }
 
     fn integrate(

@@ -109,6 +109,23 @@ pub struct DispatchPayload {
     pub candidate: Option<Digest>,
 }
 
+/// The integration dispatch outbox payload (ADR-0152 §Resolution drives
+/// integration): the wasm control actor enqueues it under the
+/// `aether.bloomery.integrate` topic from a
+/// [`Decision::DispatchIntegration`](crate::reduce::Decision::DispatchIntegration);
+/// the host integrate driver drains it, folds each candidate tree onto the
+/// bloom's integration branch in member order, and admits the resulting
+/// [`Fact::Resolve`](crate::reduce::Fact::Resolve).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct IntegratePayload {
+    /// The bloom whose members all carry claims.
+    pub bloom: Digest,
+    /// The sealed base the integration branch bootstraps at.
+    pub base: Digest,
+    /// Every member's claimed candidate tree, in member order.
+    pub candidates: Vec<Digest>,
+}
+
 /// The land dispatch outbox payload (ADR-0149 §The boundary, migration step 3):
 /// the resolved bloom plus the compare-and-swap arguments the host's land driver
 /// issues through the source port's `aether.source.land` op. The wasm control

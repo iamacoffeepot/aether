@@ -24,8 +24,8 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome, LandOutcome, Snapshot,
-    SourceBackend, SourceSnapshot, WorkpieceId,
+    BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome, IntegrationPosition,
+    LandOutcome, Snapshot, SourceBackend, SourceSnapshot, WorkpieceId,
 };
 use aether_bloomery_github::{
     CorrespondenceError, GitObjectId, GitSource, GithubError, SharedCorrespondence, SourceError,
@@ -133,6 +133,17 @@ impl SourceShell {
     /// The integration branch could not be read.
     pub fn checkpoints(&self, bloom: &BloomId) -> Result<Vec<Checkpoint>, SourceError> {
         self.backend.checkpoints(bloom)
+    }
+
+    /// Bootstrap (idempotently) `bloom`'s integration namespace at `base` and
+    /// return the branch's current position — where an integration fold starts
+    /// or resumes, plus the recovered landable head when the branch has already
+    /// advanced (ADR-0152).
+    ///
+    /// # Errors
+    /// The base has no recorded correspondence, or the ref reads/writes failed.
+    pub fn integration_checkpoint(&self, bloom: &BloomId, base: &Digest) -> Result<IntegrationPosition, SourceError> {
+        self.backend.integration_checkpoint(bloom, base)
     }
 
     /// Integrate `candidate` onto `bloom`'s integration branch, guarded by the
