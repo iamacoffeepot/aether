@@ -600,12 +600,22 @@ impl ApiCapabilityState {
         if self.seals.len() >= MAX_OPEN_SEALS {
             return Routed::Reply(error_response(429, "outstanding-seal budget exhausted"));
         }
-        let mut verifications = Vec::with_capacity(pending_verifications.len());
+        // Encode every above-auto member's statement before dispatching any
+        // `Verify`: a `to_vec` fault inside the dispatch loop would 500 only
+        // after members 1..k-1 had already been sent to `aether.signing`,
+        // stranding those verifications with no held seal to correlate them.
+        // Pre-encoding lets an encode failure bail with the 500 while the
+        // dispatch state is still empty.
+        let mut encoded = Vec::with_capacity(pending_verifications.len());
         for (member_index, scope_revision, statement) in pending_verifications {
             let statement_bytes = match to_vec(&statement) {
                 Ok(bytes) => bytes,
                 Err(error) => return Routed::Reply(error_response(500, &format!("statement encode failed: {error}"))),
             };
+            encoded.push((member_index, scope_revision, statement, statement_bytes));
+        }
+        let mut verifications = Vec::with_capacity(encoded.len());
+        for (member_index, scope_revision, statement, statement_bytes) in encoded {
             let correlation = self.send_tracked(ctx, signing_mailbox(), &Verify { statement: statement_bytes });
             verifications.push(PendingVerify { correlation, member_index, scope_revision, statement });
         }
