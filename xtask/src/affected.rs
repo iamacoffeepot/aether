@@ -100,8 +100,8 @@ pub fn run(args: &AffectedArgs) -> Result<()> {
         None => git_stdout(&["merge-base", "origin/main", "HEAD"], repo_root)?.trim().to_string(),
     };
 
-    let diff = git_stdout(&["diff", "--name-only", &base, "HEAD"], repo_root)?;
-    let changed: Vec<String> = diff.lines().map(str::to_string).filter(|line| !line.is_empty()).collect();
+    let diff = git_stdout(&["diff", "--name-only", "-z", &base, "HEAD"], repo_root)?;
+    let changed: Vec<String> = diff.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect();
 
     let selection = if changed.is_empty() {
         Selection { run_all: None, packages: BTreeSet::new(), wasm_needed: false }
