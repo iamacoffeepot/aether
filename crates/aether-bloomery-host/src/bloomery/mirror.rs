@@ -142,6 +142,12 @@ pub struct GithubMirrorConfig {
     /// Empty (the default) threads no `--effort`.
     #[config(default = "")]
     pub local_construct_effort: String,
+    /// How long (in seconds) a tracked dispatch may stay unresolved before the
+    /// executor driver logs a `warn` naming the wedge ([`super::ExecutorDriverCapability`],
+    /// #3635) — observability only, never a behavior change to admission or
+    /// re-drive. `0` disables the warn.
+    #[config(default = 1800)]
+    pub stale_warn_after_secs: u64,
 }
 
 impl Default for GithubMirrorConfig {
@@ -166,6 +172,7 @@ impl Default for GithubMirrorConfig {
             local_worktree_base: ".bloomery/local-worktrees".to_owned(),
             local_construct_model: String::new(),
             local_construct_effort: String::new(),
+            stale_warn_after_secs: 1800,
         }
     }
 }

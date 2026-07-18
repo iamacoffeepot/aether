@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    BloomId, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, StageCatalog, StageId,
+    BloomId, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Nonce, StageCatalog, StageId,
     Transformation, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
@@ -18,7 +18,8 @@ use aether_bloomery_github::{
 use aether_data::wire::{from_bytes, to_vec};
 
 use super::{
-    BACKOFF_CAP, DISPATCH_TOPIC, NameEvidenceClaims, backoff_delay, drain_and_dispatch, next_backoff, pull_and_admit,
+    BACKOFF_CAP, DISPATCH_TOPIC, NameEvidenceClaims, TrackedHandle, backoff_delay, drain_and_dispatch, is_stale,
+    next_backoff, pull_and_admit, select_stale_handles,
 };
 use crate::bloomery::intake::attempt_artifact_name;
 use crate::bloomery::local_executor::testing::FixedRunner;
@@ -105,6 +106,14 @@ fn failing_shell(status: u16) -> ExecutorShell {
 
 fn digest(seed: u8) -> aether_bloomery::Digest {
     aether_bloomery::Digest::from_bytes([seed; 32])
+}
+
+// Wrap freshly-dispatched handles into `TrackedHandle`s the way `on_dispatch_tick`
+// does at its `state.tracked.extend` site, so a test can drive `pull_and_admit`
+// directly without the mail harness.
+fn track(handles: Vec<WorkHandle>) -> Vec<TrackedHandle> {
+    let now = Instant::now();
+    handles.into_iter().map(|handle| TrackedHandle::new(handle, now)).collect()
 }
 
 // Enqueue one per-member Construct dispatch on the dispatch topic (the bytes the
@@ -240,23 +249,19 @@ fn pull_and_admit_admits_a_matching_construct_result_as_attempt_completed() {
     let bloom = BloomId(digest(1));
     let (sequence, subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
 
-    let (mut tracked, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
     store.ack_outbox(Some(DISPATCH_TOPIC), ack_through.unwrap()).unwrap();
+    let mut tracked = track(handles);
     let nonce = format!("dispatch-{sequence}");
 
     // The run completes and uploads a passing attempt result named so the port's
     // nonce-scoped stream returns it and NameEvidenceClaims decodes it. The
     // subject must equal the displayed digest (the order's) for the broker.
     let run_id = fake.seed_run(&nonce, RunStatus::Completed, Some(RunConclusion::Success));
-    let name = attempt_artifact_name(
-        &aether_bloomery::Nonce(nonce),
-        &digest(subject),
-        StageVerdict::VerificationPassed,
-        &digest(9),
-    );
+    let name = attempt_artifact_name(&Nonce(nonce), &digest(subject), StageVerdict::VerificationPassed, &digest(9));
     fake.seed_run_artifacts(run_id, vec![Artifact { id: 1, name, size_bytes: 20 }]);
 
-    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked);
+    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked, None);
 
     assert_eq!(admits.len(), 1, "the matching result admits");
     assert!(tracked.is_empty(), "the admitted order was consumed, so its handle is pruned");
@@ -303,12 +308,13 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
     let bloom = BloomId(digest(1));
     let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-local", 5);
 
-    let (mut tracked, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
     store.ack_outbox(Some(DISPATCH_TOPIC), ack_through.unwrap()).unwrap();
-    assert_eq!(tracked.len(), 1, "the construct order dispatched to the local backend");
-    assert_eq!(tracked[0].nonce.0, format!("dispatch-{sequence}"), "the handle carries the dispatch nonce");
+    assert_eq!(handles.len(), 1, "the construct order dispatched to the local backend");
+    assert_eq!(handles[0].nonce.0, format!("dispatch-{sequence}"), "the handle carries the dispatch nonce");
+    let mut tracked = track(handles);
 
-    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked);
+    let admits = pull_and_admit(&mut store, &shell, NameEvidenceClaims, &mut tracked, None);
     assert_eq!(admits.len(), 1, "the completed local run's result admits to the control core");
     assert!(tracked.is_empty(), "the admitted order was consumed");
     let event: aether_bloomery::Event = from_bytes(&admits[0].event).unwrap();
@@ -402,4 +408,52 @@ fn next_backoff_resets_the_count_on_a_changed_head_sequence() {
     let restarted = next_backoff(Some(&stuck), Some(9)).unwrap();
     assert_eq!(restarted.sequence, 9);
     assert_eq!(restarted.failures, 1, "a changed head sequence resets the consecutive-failure count");
+}
+
+#[test]
+fn is_stale_is_true_only_at_or_past_the_threshold() {
+    let first_seen = Instant::now();
+    let threshold = Duration::from_mins(30);
+    assert!(!is_stale(first_seen, (first_seen + threshold).checked_sub(Duration::from_secs(1)).unwrap(), threshold));
+    assert!(is_stale(first_seen, first_seen + threshold, threshold));
+    assert!(is_stale(first_seen, first_seen + Duration::from_hours(1), threshold));
+}
+
+#[test]
+fn select_stale_handles_warns_once_for_a_wedged_handle_and_never_for_a_fresh_one() {
+    // #3635: a handle tracked past the threshold selects for exactly one warning
+    // naming its last observed (pending) status; a handle tracked well within the
+    // threshold never selects, and a repeat sweep at the same instant does not
+    // re-select the already-warned handle.
+    let now = Instant::now();
+    let threshold = Duration::from_mins(30);
+    let wedged_nonce = Nonce("dispatch-wedged".to_owned());
+    let fresh_nonce = Nonce("dispatch-fresh".to_owned());
+    let mut tracked = vec![
+        TrackedHandle::new(
+            WorkHandle::new(wedged_nonce.clone()),
+            now.checked_sub(threshold + Duration::from_secs(1)).unwrap(),
+        ),
+        TrackedHandle::new(WorkHandle::new(fresh_nonce.clone()), now.checked_sub(Duration::from_secs(5)).unwrap()),
+    ];
+    let pending = vec![(wedged_nonce.clone(), ExecutionStatus::Running), (fresh_nonce, ExecutionStatus::Queued)];
+
+    let warnings = select_stale_handles(&mut tracked, &pending, now, Some(threshold));
+    assert_eq!(warnings.len(), 1, "only the past-threshold handle selects");
+    let (nonce, age, status) = &warnings[0];
+    assert_eq!(*nonce, wedged_nonce);
+    assert!(*age >= threshold);
+    assert_eq!(*status, ExecutionStatus::Running, "the wedged handle's warning carries its last observed status");
+
+    let repeat = select_stale_handles(&mut tracked, &pending, now, Some(threshold));
+    assert!(repeat.is_empty(), "an already-warned handle does not re-select on the next sweep");
+}
+
+#[test]
+fn select_stale_handles_selects_nothing_when_the_sweep_is_disabled() {
+    let now = Instant::now();
+    let wedged_nonce = Nonce("dispatch-wedged".to_owned());
+    let first_seen = now.checked_sub(Duration::from_hours(1)).unwrap();
+    let mut tracked = vec![TrackedHandle::new(WorkHandle::new(wedged_nonce), first_seen)];
+    assert!(select_stale_handles(&mut tracked, &[], now, None).is_empty(), "threshold: None disables the sweep");
 }
