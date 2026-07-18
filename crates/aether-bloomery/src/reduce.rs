@@ -522,6 +522,23 @@ pub enum Decision {
         /// resolved artifact tree.
         new_head: Digest,
     },
+    /// Drive the bloom's git-side integration (ADR-0152 §Resolution drives
+    /// integration): emitted by the [`Fact::Integrate`] that completes the claim
+    /// set — every member now carries a resolution — so the host integrate
+    /// driver folds each claim's candidate tree onto the bloom's integration
+    /// branch in member order and admits the [`Fact::Resolve`] whose
+    /// `DispatchLand` the land driver then consumes. A snapshot-inert outbox
+    /// effect like [`Decision::DispatchAttempt`], appended so the prior
+    /// decisions' wire discriminants are unchanged.
+    DispatchIntegration {
+        /// The bloom whose members all carry claims.
+        bloom: BloomId,
+        /// The sealed base the integration branch bootstraps at.
+        base: Digest,
+        /// Every member's claimed candidate tree, in member order — the fold
+        /// sequence, and the resolve's integration lineage.
+        candidates: Vec<Digest>,
+    },
 }
 
 /// One member already claimed by a foreign active bloom — the conflict that
@@ -935,10 +952,34 @@ fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &ResolutionClai
     if !claim.evidence.validates(&claim.candidate) {
         return Decisions::rejected(Outcome::IntegrateRejected(IntegrateError::EvidenceNotBound));
     }
-    Decisions {
-        outcome: Outcome::Integrated { bloom: *bloom, workpiece: claim.workpiece.clone() },
-        effects: alloc::vec![Decision::RecordResolution { bloom: *bloom, claim: claim.clone() }],
+    let mut effects = alloc::vec![Decision::RecordResolution { bloom: *bloom, claim: claim.clone() }];
+    // The claim that completes the set dispatches integration (ADR-0152
+    // §Resolution drives integration): with every member now carrying a
+    // resolution, the host driver folds each claimed candidate tree onto the
+    // integration branch in member order and admits the resulting
+    // `Fact::Resolve`. The snapshot has not folded this claim yet, so the
+    // completeness check counts it alongside the recorded ones.
+    let complete = record
+        .spec
+        .members()
+        .iter()
+        .all(|member| member.workpiece == claim.workpiece || record.claims.contains_key(&member.workpiece));
+    if complete {
+        let candidates = record
+            .spec
+            .members()
+            .iter()
+            .filter_map(|member| {
+                if member.workpiece == claim.workpiece {
+                    Some(claim.candidate)
+                } else {
+                    record.claims.get(&member.workpiece).map(|recorded| recorded.candidate)
+                }
+            })
+            .collect();
+        effects.push(Decision::DispatchIntegration { bloom: *bloom, base: record.spec.base(), candidates });
     }
+    Decisions { outcome: Outcome::Integrated { bloom: *bloom, workpiece: claim.workpiece.clone() }, effects }
 }
 
 /// Admit non-integrating evidence into a bloom's evidence log (ADR-0151). Runs
@@ -1302,7 +1343,10 @@ impl Snapshot {
             // rebuilt on replay from the journaled fact — they carry no in-snapshot
             // state, like EmitReceipt's outbox row. A dispatch's paired cursor rides
             // its sibling AdvanceStage; a re-dispatch's hold release rides ReleaseHold.
-            Decision::RedispatchStage { .. } | Decision::DispatchAttempt { .. } | Decision::DispatchLand { .. } => {}
+            Decision::RedispatchStage { .. }
+            | Decision::DispatchAttempt { .. }
+            | Decision::DispatchLand { .. }
+            | Decision::DispatchIntegration { .. } => {}
             Decision::MarkSuperseded { bloom, by } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.status = BloomStatus::Superseded;

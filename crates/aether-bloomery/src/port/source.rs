@@ -29,6 +29,22 @@ pub struct Checkpoint {
     pub tree: Digest,
 }
 
+/// An integration branch's current position, as
+/// [`integration_checkpoint`](SourceBackend::integration_checkpoint) reads it:
+/// the checkpoint the next fold's CAS expects, and — when the branch's current
+/// commit reverse-resolves to a recorded landable head — that head digest, so a
+/// fold interrupted after its final integrate recovers the head for its resolve
+/// instead of wedging (ADR-0152).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct IntegrationPosition {
+    /// The branch's current checkpoint.
+    pub checkpoint: Checkpoint,
+    /// The landable head the current commit reverse-resolves to; `None` at the
+    /// freshly-bootstrapped base (whose commit resolves to the base digest, not
+    /// a head) or when no correspondence is recorded.
+    pub head: Option<Digest>,
+}
+
 /// The outcome of integrating one candidate onto a bloom's integration
 /// branch.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -173,6 +189,21 @@ pub trait SourceBackend {
     /// # Errors
     /// Backend-defined — e.g. the integration branch could not be written.
     fn checkpoint(&self, bloom: &BloomId, tree: &Digest) -> Result<Checkpoint, Self::Error>;
+
+    /// Bootstrap (idempotently) `bloom`'s integration namespace at `base` and
+    /// return the branch's current position — the checkpoint a first (or
+    /// resumed) [`integrate`](Self::integrate) folds against, plus the landable
+    /// head the branch's current commit reverse-resolves to when a prior
+    /// integrate recorded one (ADR-0152 §Resolution drives integration). A
+    /// fresh branch is created at the base commit; an existing branch is left
+    /// as is, so a driver restarting mid-fold reads where the fold stopped —
+    /// and a driver restarting *after* the final fold recovers the head it
+    /// needs for the resolve without re-integrating.
+    ///
+    /// # Errors
+    /// Backend-defined — e.g. the base has no recorded correspondence, or the
+    /// ref reads/writes failed.
+    fn integration_checkpoint(&self, bloom: &BloomId, base: &Digest) -> Result<IntegrationPosition, Self::Error>;
 
     /// Enumerate the recorded integration checkpoints for `bloom`, so a
     /// successor bloom can reuse the ones drift did not invalidate

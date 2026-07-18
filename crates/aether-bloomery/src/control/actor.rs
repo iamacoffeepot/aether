@@ -36,8 +36,8 @@ use super::claim_plan::{
 };
 use super::{
     Admit, AdmitResult, ClaimResult, ClaimSeal, Commit, CommitResult, DispatchPayload, EnumerateClaims,
-    EnumerateClaimsResult, LandPayload, MembershipMutation, OutboxPayload, Query, QueryResult, RedispatchPayload,
-    ReplayJournal, ReplayJournalResult, TransferSeal,
+    EnumerateClaimsResult, IntegratePayload, LandPayload, MembershipMutation, OutboxPayload, Query, QueryResult,
+    RedispatchPayload, ReplayJournal, ReplayJournalResult, TransferSeal,
 };
 use crate::ids::BloomId;
 use crate::port::{ClaimRefKind, ClaimRefState};
@@ -90,6 +90,12 @@ const DISPATCH_TOPIC: &str = "aether.bloomery.dispatch";
 /// Producer-only here, like the other dispatch topics; the land driver's
 /// consumer-side constant mirrors this string.
 const LAND_TOPIC: &str = "aether.bloomery.land";
+
+/// The outbox topic an integration dispatch enqueues under (ADR-0152), so the
+/// host integrate driver drains it and folds the claimed candidates onto the
+/// bloom's integration branch. Producer-only here, like the other dispatch
+/// topics; the integrate driver's consumer-side constant mirrors this string.
+const INTEGRATE_TOPIC: &str = "aether.bloomery.integrate";
 
 /// An admit awaiting its durable commit reply — the reply handle to answer, the
 /// decoded event, and the decisions to apply to the snapshot once the store
@@ -596,6 +602,10 @@ fn project(
             Decision::DispatchLand { bloom, expected_base, new_head } => {
                 let payload = LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head };
                 outbox.push(OutboxPayload { topic: LAND_TOPIC.to_owned(), payload: to_vec(&payload)? });
+            }
+            Decision::DispatchIntegration { bloom, base, candidates } => {
+                let payload = IntegratePayload { bloom: bloom.0, base: *base, candidates: candidates.clone() };
+                outbox.push(OutboxPayload { topic: INTEGRATE_TOPIC.to_owned(), payload: to_vec(&payload)? });
             }
             Decision::InheritClaim { .. }
             | Decision::RecordResolution { .. }

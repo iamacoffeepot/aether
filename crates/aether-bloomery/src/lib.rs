@@ -66,9 +66,9 @@ pub mod values;
 pub use control::ControlCore;
 pub use control::{
     Admit, AdmitResult, ClaimResult, ClaimSeal, Commit, CommitResult, CompleteRelease, CompleteTransfer,
-    DispatchPayload, EnumerateClaims, EnumerateClaimsResult, JournalRecord, LandPayload, MembershipMutation,
-    OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal, ReplayJournal, ReplayJournalResult,
-    TransferSeal,
+    DispatchPayload, EnumerateClaims, EnumerateClaimsResult, IntegratePayload, JournalRecord, LandPayload,
+    MembershipMutation, OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal, ReplayJournal,
+    ReplayJournalResult, TransferSeal,
 };
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};
@@ -77,8 +77,8 @@ pub use manifest::{
 };
 pub use port::{
     BloomView, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, Conclusion, EvidenceRef,
-    ExecutionStatus, ExecutorBackend, IntegrateOutcome, LandOutcome, MemberView, PendingDecisionView,
-    ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument, WorkHandle, WorkOrder,
+    ExecutionStatus, ExecutorBackend, IntegrateOutcome, IntegrationPosition, LandOutcome, MemberView,
+    PendingDecisionView, ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument, WorkHandle, WorkOrder,
 };
 pub use reduce::{
     AdmitEvidenceError, AdoptAnswerError, AttemptCompletedError, BaseMismatch, BloomRecord, BloomStatus, Decision,

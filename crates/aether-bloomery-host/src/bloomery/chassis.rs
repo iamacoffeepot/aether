@@ -27,7 +27,9 @@ use crate::artifacts::{ArtifactsCapability, ArtifactsConfig};
 use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
 use crate::bloomery::mirror::GithubMirrorConfig;
-use crate::bloomery::{ExecutorDriverCapability, LandDriverCapability, MirrorDriverCapability};
+use crate::bloomery::{
+    ExecutorDriverCapability, IntegrateDriverCapability, LandDriverCapability, MirrorDriverCapability,
+};
 use crate::session::{SessionConfig, SessionPoolCapability};
 use crate::signing::{SigningCapability, SigningConfig};
 use crate::source::SourceCapability;
@@ -184,6 +186,7 @@ impl BloomeryChassis {
             <MirrorDriverCapability as Addressable>::NAMESPACE.to_owned(),
             <ExecutorDriverCapability as Addressable>::NAMESPACE.to_owned(),
             <LandDriverCapability as Addressable>::NAMESPACE.to_owned(),
+            <IntegrateDriverCapability as Addressable>::NAMESPACE.to_owned(),
             <SessionPoolCapability as Addressable>::NAMESPACE.to_owned(),
             <SourceCapability as Addressable>::NAMESPACE.to_owned(),
             <SigningCapability as Addressable>::NAMESPACE.to_owned(),
@@ -243,6 +246,11 @@ impl BloomeryChassis {
             // `Fact::Land` back to the control core. Reuses the one
             // GitHub-connection config the mirror + executor + source caps do.
             .with_actor::<LandDriverCapability>(github.clone())
+            // The integrate driver (#3650, ADR-0152): drains the reducer's
+            // `aether.bloomery.integrate` decisions, folds the claimed candidate
+            // onto the bloom's integration branch, and admits `Fact::Resolve`
+            // back to the control core. Reuses the same GitHub-connection config.
+            .with_actor::<IntegrateDriverCapability>(github.clone())
             // App-key custody (ADR-0149 §Migration step 3) is not a mounted
             // mailbox: the host-local minter (`app_auth::AppTokenSource`) is an
             // in-process `TokenSource` the port shells' client pulls from in
