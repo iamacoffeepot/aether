@@ -20,6 +20,7 @@
 // print is a smell; here it is the intended output channel.
 #![allow(clippy::print_stdout)]
 
+mod affected;
 mod inventory;
 mod transform;
 
@@ -33,6 +34,7 @@ use cargo_metadata::MetadataCommand;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
+use crate::affected::AffectedArgs;
 use crate::inventory::{
     BuildPlan, CHASSIS_BINS, CHASSIS_PACKAGE, Component, behavior_build_plans, build_plans, discover_behavior_variants,
     discover_behaviors, discover_components,
@@ -62,6 +64,10 @@ enum Commands {
     /// nonce-tagged evidence bytes. `verify.test` parity is a
     /// follow-up (issue #3501).
     Transform(TransformArgs),
+    /// Compute the affected package set for PR CI test selection
+    /// (issue #3611): changed paths against a base ref, mapped through
+    /// the workspace graph's reverse-dependency closure.
+    Affected(AffectedArgs),
 }
 
 #[derive(Args)]
@@ -193,6 +199,7 @@ fn main() -> Result<()> {
         Commands::Dist(args) => run_dist(&args),
         Commands::Bundle(args) => run_bundle(&args),
         Commands::Transform(args) => transform::run(&args),
+        Commands::Affected(args) => affected::run(&args),
     }
 }
 

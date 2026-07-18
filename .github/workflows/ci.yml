@@ -271,22 +271,51 @@ jobs:
       # `receive_p32`; xtask keeps each build's feature resolve isolated.
       # The wasm lands under `target/wasm32-unknown-unknown/` (where the
       # scenario tests read it) as well as `dist/`.
+      #
+      # Issue #3611: PR runs test only the reverse-dependency closure of
+      # the changed paths (`cargo xtask affected` — guppy + determinator),
+      # so a leaf-crate PR skips the heavy bundle suites and the wasm
+      # pre-build. Selection is conservative: graph-shaping paths
+      # (lockfile, root manifest, toolchain, .cargo/, .config/,
+      # clippy.toml, ci.yml, xtask/) and any path matching no package and
+      # no rule run everything, and the couplings cargo's graph can't see
+      # (component/behavior wasm executed by the bundle's scenario tests;
+      # bloomery/ config read by aether-bloomery-host tests) are injected
+      # in xtask. Pushes to main always run the unconditional full suite
+      # below — squash-merge means main tests the exact landed tree, so a
+      # selection miss delays a red signal but never loses it. That same
+      # backstop answers the nextest-era removal of the previous
+      # changed-crate filter (per-crate filtering can mask cross-test
+      # contamination): contamination still surfaces on main's full run,
+      # and the Clippy job compiles the whole workspace on every PR, so
+      # only test execution narrows — never compile coverage.
+      - name: Compute affected packages (PR only)
+        id: affected
+        if: github.event_name == 'pull_request'
+        run: cargo xtask affected --base HEAD^1 --github-output
       - name: Pre-build component wasm for scenario tests
+        if: github.event_name != 'pull_request' || steps.affected.outputs.run_all == 'true' || steps.affected.outputs.wasm_needed == 'true'
         run: cargo xtask dist
-      # Run the full workspace test suite under nextest. The
-      # changed-crate filter the prior step had is gone — nextest's
-      # process-per-test isolation surfaces cross-test contamination
-      # that the per-crate filter could mask, and the CI profile's
-      # `slow-timeout` bounds runaway tests cleanly. The whole suite runs
-      # at full parallelism; the `aether-substrate-bundle` integration
-      # tests that fork real substrates carry a generous per-test
-      # slow-timeout in `.config/nextest.toml` so concurrent fork
+      # The CI profile's `slow-timeout` bounds runaway tests cleanly. The
+      # suite runs at full parallelism; the `aether-substrate-bundle`
+      # integration tests that fork real substrates carry a generous
+      # per-test slow-timeout in `.config/nextest.toml` so concurrent fork
       # contention stretches their wall-clock without tripping the
       # steady-state cap.
       - name: Install latest nextest release
         uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
       - name: Run tests (workspace, parallel)
+        if: github.event_name != 'pull_request' || steps.affected.outputs.run_all == 'true'
         run: cargo nextest run --all-features --profile ci
+        env:
+          AETHER_REQUIRE_RUNTIME: "1"
+      # `package_args` interpolates package names only (alphanumeric plus
+      # dashes, straight from the cargo workspace list), so the expansion
+      # is shell-safe. An empty affected set skips both test steps — the
+      # affected step's log records why.
+      - name: Run tests (affected packages)
+        if: github.event_name == 'pull_request' && steps.affected.outputs.run_all == 'false' && steps.affected.outputs.package_args != ''
+        run: cargo nextest run ${{ steps.affected.outputs.package_args }} --all-features --profile ci
         env:
           AETHER_REQUIRE_RUNTIME: "1"
       # iamacoffeepot/aether#2914: a failing direct TestBench visual
