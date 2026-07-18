@@ -4,7 +4,7 @@
 //! `init` / the timer / the ctx send are the thin glue the chassis-boot test and
 //! compilation cover; this pins the loop that actually dispatches and admits.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
@@ -22,8 +22,44 @@ use super::{
 };
 use crate::bloomery::intake::attempt_artifact_name;
 use crate::bloomery::local_executor::testing::FixedRunner;
-use crate::bloomery::{ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle};
+use crate::bloomery::{ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle};
 use crate::store::{SqliteStore, StoreBackend};
+
+// A capturing executor backend: it records every submitted `WorkOrder` so a test
+// can assert exactly what `drain_and_dispatch` built — the advisory description it
+// threaded onto the construct transformation (#3595) in particular. Only `submit`
+// is driven by the drain; the other port methods are inert stubs.
+#[derive(Default)]
+struct CapturingBackend {
+    orders: Mutex<Vec<WorkOrder>>,
+}
+
+impl CapturingBackend {
+    fn orders(&self) -> Vec<WorkOrder> {
+        self.orders.lock().unwrap().clone()
+    }
+}
+
+impl ExecutorBackend for CapturingBackend {
+    type Error = ExecutorPortError;
+
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        self.orders.lock().unwrap().push(order.clone());
+        Ok(WorkHandle::new(order.nonce.clone()))
+    }
+
+    fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+        Ok(ExecutionStatus::Unknown)
+    }
+
+    fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+        Ok(Vec::new())
+    }
+}
 
 const WORKFLOW: &str = "bloomery-transform.yml";
 const PINNED_REF: &str = "refs/heads/main";
@@ -103,6 +139,54 @@ fn drain_and_dispatch_submits_each_dispatch_and_records_its_order() {
     // Acking the prefix means the entry does not re-drain.
     store.ack_outbox(Some(DISPATCH_TOPIC), sequence).unwrap();
     assert!(store.drain_outbox(Some(DISPATCH_TOPIC)).unwrap().is_empty(), "the acked dispatch does not re-drain");
+}
+
+#[test]
+fn drain_threads_the_persisted_description_onto_the_construct_order() {
+    // The #3595 seal → dispatch seam over a real store + executor shell: the
+    // description the coordinator persisted at seal (modeled by the store write
+    // seal_draft performs) is looked up by (bloom, workpiece) and threaded onto
+    // the submitted construct order's transformation, so the construct lane can
+    // name it in its `## Task` prompt.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-line", "thread the work order into the prompt").unwrap();
+    enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
+
+    drain_and_dispatch(&mut store, &shell).unwrap();
+
+    let orders = backend.orders();
+    assert_eq!(orders.len(), 1, "the construct dispatch submitted");
+    assert_eq!(
+        orders[0].transformation.description.as_deref(),
+        Some("thread the work order into the prompt"),
+        "the persisted description reached the submitted construct order",
+    );
+}
+
+#[test]
+fn drain_leaves_the_description_none_and_still_dispatches_when_none_persisted() {
+    // The fail-legible path: a member with no persisted description dispatches
+    // subject-only (description `None`) rather than being dropped — the #3596
+    // completion gate then catches an empty-work run, but the dispatch itself
+    // must never silently vanish.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
+
+    let (handles, _, _) = drain_and_dispatch(&mut store, &shell).unwrap();
+
+    assert_eq!(handles.len(), 1, "a member with no description still dispatches, never dropped");
+    let orders = backend.orders();
+    assert_eq!(orders.len(), 1);
+    assert!(
+        orders[0].transformation.description.is_none(),
+        "no persisted description leaves the transformation None — a legible subject-only run",
+    );
 }
 
 #[test]

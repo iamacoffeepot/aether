@@ -448,3 +448,32 @@ fn crash_between_enqueue_and_ack_preserves_the_entry_for_republish() {
     let mut store_after_ack = SqliteStore::open(&path).unwrap();
     assert!(store_after_ack.drain_outbox(None).unwrap().is_empty());
 }
+
+#[test]
+fn dispatch_description_records_looks_up_and_is_key_scoped() {
+    // The #3595 dispatch-description projection: the operator's work-order text
+    // the coordinator persists at seal must read back verbatim for its
+    // (bloom, workpiece) key, an absent key misses (so the driver leaves the
+    // transformation `None` rather than dispatching blind), and last-writer-wins
+    // overwrites in place.
+    let mut store = memory();
+    let bloom = [0xB1; 32];
+    store.record_dispatch_description(&bloom, "wp-a", "thread the work order into the prompt").unwrap();
+
+    assert_eq!(
+        store.lookup_dispatch_description(&bloom, "wp-a").unwrap().as_deref(),
+        Some("thread the work order into the prompt"),
+        "a persisted description reads back verbatim for its member key",
+    );
+    // A different workpiece under the same bloom, and a different bloom, both miss.
+    assert_eq!(store.lookup_dispatch_description(&bloom, "wp-b").unwrap(), None, "an absent member has no description");
+    assert_eq!(
+        store.lookup_dispatch_description(&[0xB2; 32], "wp-a").unwrap(),
+        None,
+        "the key is scoped to the bloom, not the workpiece alone",
+    );
+
+    // Last-writer-wins on the key — a re-seal of the same member overwrites.
+    store.record_dispatch_description(&bloom, "wp-a", "revised work order").unwrap();
+    assert_eq!(store.lookup_dispatch_description(&bloom, "wp-a").unwrap().as_deref(), Some("revised work order"));
+}

@@ -47,6 +47,7 @@ use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
 use super::ExecutorDriverCapability;
+use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::ExecutorShell;
 use crate::bloomery::intake::{
     Admission, AdmitSink, DispatchRecord, NameEvidenceClaims, dispatch_and_record, run_intake_cycle,
@@ -210,8 +211,30 @@ fn drain_and_dispatch(
             );
             break;
         };
+        // Thread the member's advisory work-order description onto the construct
+        // lane (#3595). Only the model-driven `construct.implement` lane reads it
+        // (Construct / Refine); the mechanical verify/review lanes never name a
+        // task, so neither look it up nor warn on its absence. A store read fault
+        // propagates via `?` (re-drained next tick); a missing row leaves the
+        // description `None` and warns — a legible subject-only run, never a
+        // silent blind dispatch.
+        let mut transformation = payload.transformation;
+        if transformation.command == CONSTRUCT_IMPLEMENT_COMMAND {
+            if let Some(description) =
+                store.lookup_dispatch_description(payload.bloom.as_bytes(), &payload.workpiece.0)?
+            {
+                transformation.description = Some(description);
+            } else {
+                tracing::warn!(
+                    target: "aether_bloomery_host::executor",
+                    sequence = entry.sequence,
+                    workpiece = %payload.workpiece.0,
+                    "no work-order description persisted for the dispatched construct member; assembling a subject-only prompt",
+                );
+            }
+        }
         let nonce = Nonce(format!("dispatch-{}", entry.sequence));
-        let order = WorkOrder { transformation: payload.transformation, nonce: nonce.clone() };
+        let order = WorkOrder { transformation, nonce: nonce.clone() };
         let record = DispatchRecord {
             nonce,
             bloom: BloomId(payload.bloom),
