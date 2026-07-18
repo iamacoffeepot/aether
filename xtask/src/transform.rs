@@ -98,6 +98,25 @@ fn verify_command(id: &str) -> Option<VerifyInvocation> {
     }
 }
 
+/// The typed id of the verify umbrella (#3626) the reducer dispatches for the
+/// Verify stage (`Transformation::for_member_stage`) — distinct from the three
+/// concrete `verify.*` ids `verify_command` maps individually.
+const VERIFY_CHECK: &str = "verify.check";
+
+/// The ordered member ids `verify.check` fans out to, in CI-parity order.
+/// Pure so the umbrella membership is testable without spawning cargo; growing
+/// this list (e.g. a future `verify.test`) needs no change to the reducer's
+/// dispatched stage command.
+fn verify_check_members() -> &'static [&'static str] {
+    &["verify.fmt", "verify.clippy", "verify.docs"]
+}
+
+/// Aggregate `verify.check`'s member results: pass iff every member passed.
+/// Pure so the aggregation is testable without spawning cargo.
+fn all_passed(statuses: &[bool]) -> bool {
+    statuses.iter().all(|&passed| passed)
+}
+
 /// The typed id of the model-driven construct lane (#3511). Recognized here so
 /// an unknown id stays unmapped exactly as in the verify lane.
 const CONSTRUCT_IMPLEMENT: &str = "construct.implement";
@@ -319,6 +338,9 @@ pub fn run(args: &TransformArgs) -> Result<()> {
     if args.command == CONSTRUCT_IMPLEMENT {
         return run_construct(args);
     }
+    if args.command == VERIFY_CHECK {
+        return run_verify_check(args);
+    }
     let Some(invocation) = verify_command(&args.command) else {
         bail!("unrecognized transform command id: {} (verify.test is out of scope this slice)", args.command);
     };
@@ -344,6 +366,61 @@ pub fn run(args: &TransformArgs) -> Result<()> {
         Ok(())
     } else {
         process::exit(output.status.code().unwrap_or(1));
+    }
+}
+
+/// The `verify.check` umbrella (#3626): runs every member in
+/// `verify_check_members()` unconditionally — no short-circuit on first
+/// failure, so a partial failure still leaves every member's log for
+/// diagnosis — then writes one aggregate `evidence.json` whose `status`
+/// passes only when every member passed. Exit mirrors the aggregate, exactly
+/// as the single-command path mirrors its own verify's exit.
+fn run_verify_check(args: &TransformArgs) -> Result<()> {
+    fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
+
+    let mut log_names = Vec::with_capacity(verify_check_members().len());
+    let mut passed = Vec::with_capacity(verify_check_members().len());
+    let mut first_failure_code: Option<i32> = None;
+
+    for &id in verify_check_members() {
+        let invocation = verify_command(id).expect("verify_check_members ids all resolve via verify_command");
+        let output = spawn(&invocation)
+            .with_context(|| format!("spawn {} {}", invocation.program, invocation.args.join(" ")))?;
+
+        let log_name = format!("{id}.log");
+        let log_path = args.out.join(&log_name);
+        let mut log_bytes = output.stdout.clone();
+        log_bytes.extend_from_slice(&output.stderr);
+        fs::write(&log_path, &log_bytes).with_context(|| format!("write {}", log_path.display()))?;
+
+        if !output.status.success() && first_failure_code.is_none() {
+            first_failure_code = Some(output.status.code().unwrap_or(1));
+        }
+        log_names.push(log_name);
+        passed.push(output.status.success());
+    }
+
+    let all_pass = all_passed(&passed);
+    let evidence = Evidence {
+        command: VERIFY_CHECK.to_owned(),
+        nonce: args.nonce.clone(),
+        status: if all_pass {
+            "pass"
+        } else {
+            "fail"
+        },
+        exit_code: Some(first_failure_code.unwrap_or(0)),
+        log: log_names.join(", "),
+    };
+    let evidence_path = args.out.join("evidence.json");
+    let mut json = serde_json::to_string_pretty(&evidence).context("serialize evidence")?;
+    json.push('\n');
+    fs::write(&evidence_path, json).with_context(|| format!("write {}", evidence_path.display()))?;
+
+    if all_pass {
+        Ok(())
+    } else {
+        process::exit(first_failure_code.unwrap_or(1));
     }
 }
 
@@ -436,8 +513,9 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, assemble_construct_prompt, build_evidence, construct_argv,
-        derive_result_record, porcelain_signals_candidate, stamp_construct_evidence, verify_command,
+        CONSTRUCT_IMPLEMENT, CONSTRUCT_INSTRUCTIONS, VERIFY_CHECK, all_passed, assemble_construct_prompt,
+        build_evidence, construct_argv, derive_result_record, porcelain_signals_candidate, stamp_construct_evidence,
+        verify_check_members, verify_command,
     };
 
     #[test]
@@ -452,6 +530,36 @@ mod tests {
         assert_eq!(docs.args, &["doc", "--workspace", "--no-deps"]);
         assert_eq!(docs.env.len(), 1);
         assert_eq!(docs.env[0].0, "RUSTDOCFLAGS");
+    }
+
+    #[test]
+    fn verify_check_members_are_the_three_ci_parity_ids_in_order() {
+        // Tripwire: every id verify.check fans out to must resolve via
+        // verify_command, and the order must match ci.yml's fmt/clippy/docs
+        // jobs — a drift here breaks the umbrella-membership invariant.
+        assert_eq!(verify_check_members(), &["verify.fmt", "verify.clippy", "verify.docs"]);
+        for &id in verify_check_members() {
+            assert!(verify_command(id).is_some(), "{id} must resolve via verify_command");
+        }
+    }
+
+    #[test]
+    fn all_passed_is_pass_only_when_every_member_passed() {
+        assert!(all_passed(&[true, true, true]));
+        assert!(!all_passed(&[true, false, true]));
+        assert!(!all_passed(&[false, false, false]));
+        assert!(all_passed(&[]), "no members is vacuously all-passed");
+    }
+
+    #[test]
+    fn verify_check_is_the_umbrella_not_a_concrete_verify_id() {
+        // run's dispatch must route VERIFY_CHECK to run_verify_check before
+        // falling to the concrete verify_command lookup — verify_command itself
+        // does not (and must not) recognize the umbrella id, else an unrouted
+        // verify.check would silently run as a single (wrong) cargo invocation
+        // instead of falling to the unrecognized-id bail!.
+        assert!(verify_command(VERIFY_CHECK).is_none());
+        assert_ne!(VERIFY_CHECK, CONSTRUCT_IMPLEMENT);
     }
 
     #[test]
