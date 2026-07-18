@@ -395,9 +395,15 @@ impl NativeActor for SourceCapability {
     /// `UnresolvedCorrespondence`. Gated on a configured source (`claims_enabled`
     /// is the token/owner/repo-present predicate): an unconfigured shell opens no
     /// network, so the reconcile is skipped rather than issuing a doomed request.
-    /// A failure logs and continues — `wire` cannot fail boot, and a missed
-    /// genesis surfaces as a recoverable land-time fault a re-reconcile heals,
-    /// which is safer than crashing the chassis on a transient GitHub blip.
+    /// A failure logs and continues — `wire` cannot fail boot, so a transient
+    /// GitHub blip does not crash the chassis. There is no in-process re-drive:
+    /// this request/reply capability owns no timer, so unlike the
+    /// `mirror_driver` / `land_driver` / `executor_driver` polling drivers it
+    /// pushes no self-addressed tick to retry on a cadence. A missed genesis
+    /// therefore surfaces as a land-time `UnresolvedCorrespondence` fault, and
+    /// recovery is a process restart — which re-runs `init` then this boot
+    /// reconcile. That is the deliberate tradeoff against wiring a poll loop
+    /// into a capability that is otherwise stateless between requests.
     fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
         if !state.claims_enabled {
             return;
@@ -410,7 +416,7 @@ impl NativeActor for SourceCapability {
             Err(error) => tracing::warn!(
                 target: "aether_bloomery_host::source",
                 %error,
-                "genesis mainline reconcile failed; first land may fault until re-reconciled"
+                "genesis mainline reconcile failed; first land may fault until a process restart re-runs the boot reconcile"
             ),
         }
     }
