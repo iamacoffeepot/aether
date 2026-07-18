@@ -76,7 +76,7 @@ fn projection(surface: &[&str], completeness: Completeness) -> MemberProjection 
 /// A `SealRequest` carrying `projections`, serialized to a JSON value for the
 /// seal route.
 fn seal_body(projections: Vec<MemberProjection>) -> Value {
-    serde_json::to_value(SealRequest { idempotency_key: None, projections }).unwrap()
+    serde_json::to_value(SealRequest { idempotency_key: None, projections, ..Default::default() }).unwrap()
 }
 
 /// Write a self-contained tier policy to a temp dir and return it plus the
