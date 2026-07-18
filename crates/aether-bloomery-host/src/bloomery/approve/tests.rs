@@ -14,7 +14,7 @@ use ed25519_dalek::{Signer, SigningKey};
 
 use super::{
     AdmissionRequest, AdrTouch, ApprovalPolicy, Completeness, Decision, Gate, Incompleteness, StatementRejected, Tier,
-    approval_from_statement,
+    approval_from_statement, precheck_statement, verified_statement_approval,
 };
 
 /// The test tier policy — the same shape `test-surface-match.py`'s `POLICY` uses,
@@ -399,4 +399,41 @@ fn a_signature_outside_the_key_policy_is_rejected() {
     let keys = provider("owner", &key);
     let statement = signed_statement("intruder", &key, revision().as_bytes());
     assert_eq!(approval_from_statement(revision(), &statement, &keys), Err(StatementRejected::Unverified));
+}
+
+#[test]
+fn precheck_rejects_a_wrong_subject_and_a_non_author_statement_without_a_key_policy() {
+    let key = signing_key(7);
+    // A genuine author signature, but over another revision's bytes — the
+    // synchronous pre-check refuses it before any signature verification.
+    let other = Digest::from_bytes([1; 32]);
+    let wrong_subject = signed_statement("owner", &key, other.as_bytes());
+    assert_eq!(precheck_statement(revision(), &wrong_subject), Err(StatementRejected::WrongSubject));
+
+    // The right subject, but no author signature — never instruction-capable.
+    let non_author = Statement {
+        words: revision().as_bytes().to_vec(),
+        provenance: Provenance::ObservationAttestation(aether_bloomery::Observation { source: "adapter".to_owned() }),
+        parents: vec![],
+    };
+    assert_eq!(precheck_statement(revision(), &non_author), Err(StatementRejected::NotAnAuthorSignature));
+
+    // A correct-subject author signature passes the pre-check regardless of
+    // whether the signature itself verifies — that check is the caller's next step.
+    let ok = signed_statement("owner", &key, revision().as_bytes());
+    assert_eq!(precheck_statement(revision(), &ok), Ok(()));
+}
+
+#[test]
+fn verified_statement_approval_binds_the_revision_and_details_the_statement() {
+    let key = signing_key(7);
+    let statement = signed_statement("owner", &key, revision().as_bytes());
+    let evidence = verified_statement_approval(revision(), &statement);
+    assert_eq!(evidence.kind, EvidenceKind::Approval);
+    assert!(evidence.validates(&revision()), "the formed approval binds the revision");
+    assert_eq!(evidence.detail, digest_of(&statement), "the detail names the signed statement");
+    // The split helper forms the exact evidence the composed reader returns on a
+    // verified statement — the deferred-verify seal path reuses this format.
+    let keys = provider("owner", &key);
+    assert_eq!(approval_from_statement(revision(), &statement, &keys), Ok(evidence));
 }
