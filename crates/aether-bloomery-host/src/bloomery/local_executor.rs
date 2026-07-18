@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Path, PathBuf, absolute};
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::{fs, io};
@@ -287,8 +287,16 @@ impl ExecutorBackend for LocalExecutor {
 
     fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
         let nonce = order.nonce.0.clone();
-        let worktree_dir = self.base_dir.join(&nonce);
-        let evidence_dir = self.base_dir.join(format!("{nonce}-evidence"));
+        // Resolve both run paths absolute against the coordinator's own cwd before
+        // the spawn. The child runs with `current_dir(worktree_dir)`, so a relative
+        // `--out` (the config default `local_worktree_base` ships relative) would
+        // resolve against the *child's* cwd — the scratch worktree — while
+        // `stream_evidence` reads `evidence_dir` against the *coordinator's* cwd; the
+        // two diverge and the intake polls a path the run never wrote, forever.
+        // `std::path::absolute` is a lexical cwd-join that does not require the path
+        // to exist (unlike `canonicalize`).
+        let worktree_dir = absolute(self.base_dir.join(&nonce)).map_err(LocalExecutorError::Io)?;
+        let evidence_dir = absolute(self.base_dir.join(format!("{nonce}-evidence"))).map_err(LocalExecutorError::Io)?;
         // Resolve the sealed checkout digest to its real git object sha through the
         // correspondence store (ADR-0150) — the `git worktree add` target — rather
         // than hex-punning the digest into a name git cannot resolve.
@@ -372,22 +380,43 @@ impl ExecutorBackend for LocalExecutor {
         // Pull the run's on-disk location, binding digest, and terminal exit out of
         // the guarded region, then drop the lock — the evidence read is blocking IO
         // and must not hold the registry mutex.
-        let (evidence_dir, subject, exited_success, is_construct, worktree_dir) = {
+        let (evidence_dir, subject, lifecycle, is_construct, worktree_dir) = {
             let mut runs = self.lock();
             let Some(run) = runs.get_mut(&handle.nonce.0) else {
                 return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
             };
-            (
-                run.evidence_dir.clone(),
-                run.subject,
-                matches!(run.process.poll(), RunLifecycle::Exited { success: true }),
-                run.is_construct,
-                run.worktree_dir.clone(),
-            )
+            (run.evidence_dir.clone(), run.subject, run.process.poll(), run.is_construct, run.worktree_dir.clone())
         };
+        let exited_success = matches!(lifecycle, RunLifecycle::Exited { success: true });
         let evidence_path = evidence_dir.join("evidence.json");
-        let bytes = fs::read(&evidence_path)
-            .map_err(|error| LocalExecutorError::Evidence(format!("{}: {error}", evidence_path.display())))?;
+        let bytes = match fs::read(&evidence_path) {
+            Ok(bytes) => bytes,
+            // The run's own lifecycle is the terminal-vs-transient discriminator. An
+            // Exited run that has left no readable evidence never will — re-driving
+            // the read against it loops forever (the live 2026-07-18 bug), so this is
+            // terminal: evict, release the worktree, and synthesize a fail-closed
+            // VerificationFailed attempt that feeds the retry/wedge machinery rather
+            // than an error the intake re-drives. A Running run's missing file is
+            // transient — keep the entry and worktree for the next cycle's retry.
+            Err(read_error) => {
+                if matches!(lifecycle, RunLifecycle::Exited { .. }) {
+                    self.lock().remove(&handle.nonce.0);
+                    self.release_worktree(&worktree_dir);
+                    return Ok(vec![EvidenceRef {
+                        name: attempt_artifact_name(
+                            &handle.nonce,
+                            &subject,
+                            StageVerdict::VerificationFailed,
+                            &Digest::of_wire_bytes(&[]),
+                        ),
+                        nonce: handle.nonce.clone(),
+                        artifact_id: 0,
+                        size_bytes: 0,
+                    }]);
+                }
+                return Err(LocalExecutorError::Evidence(format!("{}: {read_error}", evidence_path.display())));
+            }
+        };
         // The evidence has been consumed — evict the run so the registry tracks
         // only in-flight orders rather than growing for the process's lifetime, and
         // reclaim its scratch worktree so the checkout does not outlive the run. A
