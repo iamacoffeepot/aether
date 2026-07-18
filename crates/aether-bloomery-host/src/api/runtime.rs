@@ -46,8 +46,8 @@ use serde::de::DeserializeOwned;
 
 use aether_actor::{Manual, runtime};
 use aether_bloomery::{
-    Admit, AdmitResult, BloomDraft, BloomId, BloomView, Digest, Event, Fact, IdempotencyKey, Outcome, Query,
-    QueryResult, ReplayJournal, ReplayJournalResult, Statement, ViewDocument, Workpiece, digest_of,
+    Admit, AdmitResult, BloomDraft, BloomId, BloomView, Digest, Event, Fact, IdempotencyKey, Membership, Outcome,
+    Query, QueryResult, ReplayJournal, ReplayJournalResult, Statement, ViewDocument, Workpiece, digest_of,
 };
 use aether_capabilities::http::{
     HttpHeader, HttpMethod, HttpServerCapability, HttpServerRequest, HttpServerResponse, RegisterRouteSelf,
@@ -62,11 +62,13 @@ pub use aether_substrate::chassis::error::BootError;
 
 use super::BloomeryApiCapability;
 use super::dto::{
-    DraftPatch, DraftView, DraftsView, ErrorView, JournalEntry, JournalView, OutcomeView, SealRequest,
-    SupersedeRequest, WorkpiecesView,
+    DraftPatch, DraftView, DraftsView, ErrorView, JournalEntry, JournalView, MemberProjection, OutcomeView,
+    SealRequest, SupersedeRequest, WorkpiecesView,
 };
 use crate::artifacts::{ArtifactsError, Get, GetResult};
-use crate::bloomery::{AdmissionRequest, ApprovalPolicy, Decision, Gate};
+use crate::bloomery::{
+    AdmissionRequest, ApprovalPolicy, Decision, Gate, precheck_statement, verified_statement_approval,
+};
 use crate::signing::{Verify, VerifyResult};
 use crate::store::{RecordDispatchDescription, RecordDispatchDescriptionResult};
 
@@ -89,6 +91,21 @@ const ROUTE_PREFIXES: [&str; 6] = ["/workpieces", "/drafts", "/blooms", "/view",
 /// only when the shaping session restarts.
 const MAX_STAGED_WORKPIECES: usize = 1024;
 const MAX_OPEN_DRAFTS: usize = 1024;
+
+/// Ceiling on the outstanding deferred-seal count — the `seals` map (and its
+/// paired `seal_verifications`) grow one entry per above-auto seal in flight, so
+/// cap the map the same way `staged` / `drafts` are capped and refuse a new
+/// deferred seal at the ceiling before dispatching any verification (issue #3599).
+const MAX_OPEN_SEALS: usize = 1024;
+
+/// Ceiling on one seal's membership count. Each above-auto member fans out one
+/// `aether.signing` `Verify` dispatch and one held `SealVerify` correlation, so a
+/// single seal request amplifies into N in-flight verifications plus a held
+/// `PendingSeal`; cap the draft's member count and refuse a seal past it before
+/// any dispatch, so one request cannot grow the in-flight `seals` /
+/// `seal_verifications` maps without bound (issue #3599). A bloom's realistic
+/// membership is a handful; the ceiling is generous headroom over that.
+const MAX_SEAL_MEMBERS: usize = 256;
 
 /// Boot config for the REST control api cap: the tier-policy file the pre-seal
 /// approve gate loads at init (issue #3583). Threaded from the shared GitHub
@@ -128,6 +145,18 @@ pub struct ApiCapabilityState {
     /// stashed `Fact::AdoptAnswer` event (re-deferring into `pending` on the
     /// reducer reply); on a rejection it answers `400`.
     verifying: HashMap<u64, VerifyPending>,
+    /// Seals held across N above-auto member signature verifications, keyed by a
+    /// minted `next_seal` handle. The held seal admits `Fact::Seal` only when
+    /// every above-auto member's signature has verified (issue #3599); any
+    /// rejection refuses the whole seal (`422`, fail closed) and tears down its
+    /// sibling verify correlations.
+    seals: HashMap<u64, PendingSeal>,
+    /// The next seal handle to mint.
+    next_seal: u64,
+    /// Each in-flight above-auto member verification, keyed by its `Verify`
+    /// dispatch `MailId.correlation_id`, back-pointing at the held [`PendingSeal`]
+    /// and the member it forms the approval for on a verified reply.
+    seal_verifications: HashMap<u64, SealVerify>,
 }
 
 /// An answer request held across the signature-verification round trip: the
@@ -138,6 +167,66 @@ struct VerifyPending {
     inbound: InboundMail,
     /// The `Fact::AdoptAnswer` event to admit on a verified signature.
     event: Event,
+}
+
+/// A seal held across N above-auto member signature verifications (issue #3599).
+/// The gate resolved every auto member synchronously (their approvals already
+/// sit in `gated.proposals`); each above-auto member's approval is slotted in as
+/// its signature verifies, and the last verification seals `gated` and admits
+/// `Fact::Seal`.
+struct PendingSeal {
+    /// The held HTTP reply obligation.
+    inbound: InboundMail,
+    /// The gated draft: auto members carry their gate-formed approval; each
+    /// above-auto member's approval is overwritten by
+    /// [`verified_statement_approval`] as its signature verifies.
+    gated: BloomDraft,
+    /// The operator-supplied per-member work-order descriptions (#3595),
+    /// persisted once the seal completes — the same fire-and-forget store write
+    /// the synchronous path makes.
+    descriptions: BTreeMap<String, String>,
+    /// The admit idempotency key override, defaulted to the sealed bloom id when
+    /// the last verification seals the spec.
+    idempotency_key: Option<String>,
+    /// Above-auto members whose signature has not yet verified; the verification
+    /// that drops this to zero seals and admits.
+    remaining: usize,
+}
+
+/// One in-flight above-auto member verification: which held seal and member it
+/// resolves, and the statement whose verified form becomes that member's
+/// approval evidence.
+struct SealVerify {
+    /// The held [`PendingSeal`] handle this verification belongs to.
+    seal: u64,
+    /// The index into the seal's `gated.proposals` of the member it forms.
+    member_index: usize,
+    /// The scope revision the formed approval binds.
+    scope_revision: Digest,
+    /// The signed statement whose verified form (`verified_statement_approval`)
+    /// becomes the member's approval.
+    statement: Statement,
+}
+
+/// The pre-wired parts of a deferred seal, handed from [`ApiCapabilityState::seal_draft`]
+/// to [`BloomeryApiCapability::on_request`] so the handle mint and map inserts
+/// (which need `&mut self`) happen there, mirroring how `DeferredVerify` defers
+/// its map insert to the ingress handler.
+struct PendingSealSetup {
+    gated: BloomDraft,
+    descriptions: BTreeMap<String, String>,
+    idempotency_key: Option<String>,
+    /// One entry per above-auto member — the dispatched `Verify` correlation and
+    /// the member it forms.
+    verifications: Vec<PendingVerify>,
+}
+
+/// One above-auto member's dispatched verification, pre-`PendingSeal`-handle.
+struct PendingVerify {
+    correlation: u64,
+    member_index: usize,
+    scope_revision: Digest,
+    statement: Statement,
 }
 
 /// A route's disposition: an immediate response (the in-memory shaping routes),
@@ -156,6 +245,10 @@ enum Routed {
         /// The adoption event to admit once the signature verifies.
         event: Box<Event>,
     },
+    /// Await N `aether.signing` verify replies for an above-auto seal (issue
+    /// #3599); the last verified reply seals and admits, any rejection refuses
+    /// the whole seal (`422`, fail closed).
+    DeferredSeal(Box<PendingSealSetup>),
 }
 
 #[runtime]
@@ -195,6 +288,9 @@ impl NativeActor for BloomeryApiCapability {
             next_draft: 1,
             pending: HashMap::new(),
             verifying: HashMap::new(),
+            seals: HashMap::new(),
+            next_seal: 1,
+            seal_verifications: HashMap::new(),
         })
     }
 
@@ -227,6 +323,19 @@ impl NativeActor for BloomeryApiCapability {
             }
             Routed::DeferredVerify { correlation, event } => {
                 state.verifying.insert(correlation, VerifyPending { inbound, event: *event });
+            }
+            Routed::DeferredSeal(setup) => {
+                let PendingSealSetup { gated, descriptions, idempotency_key, verifications } = *setup;
+                let seal = state.next_seal;
+                state.next_seal += 1;
+                let remaining = verifications.len();
+                for verify in verifications {
+                    let PendingVerify { correlation, member_index, scope_revision, statement } = verify;
+                    state
+                        .seal_verifications
+                        .insert(correlation, SealVerify { seal, member_index, scope_revision, statement });
+                }
+                state.seals.insert(seal, PendingSeal { inbound, gated, descriptions, idempotency_key, remaining });
             }
         }
     }
@@ -262,7 +371,16 @@ impl NativeActor for BloomeryApiCapability {
     /// error is a `400` — the fake always-valid provider is gone from the gate.
     #[handler::manual]
     fn on_verify_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: VerifyResult) {
-        state.resolve_verify(ctx, mail);
+        // The same `VerifyResult` kind carries both the answer-gate verify and an
+        // above-auto seal-member verify; the reply correlation says which. A seal
+        // verify resolves against the held `PendingSeal`, an answer verify against
+        // its held adoption event.
+        let correlation = ctx.reply_target().correlation_id;
+        if state.seal_verifications.contains_key(&correlation) {
+            state.resolve_seal_verify(ctx, correlation, mail);
+        } else {
+            state.resolve_verify(ctx, mail);
+        }
     }
 
     /// The store's reply to a fire-and-forget dispatch-description write (#3595).
@@ -290,6 +408,11 @@ impl NativeActor for BloomeryApiCapability {
             inbound.reply(&error_response(504, "control-plane request settled without a reply"));
         } else if let Some(VerifyPending { inbound, .. }) = state.verifying.remove(&mail.root.correlation_id) {
             inbound.reply(&error_response(504, "signature verification settled without a reply"));
+        } else if let Some(SealVerify { seal, .. }) = state.seal_verifications.remove(&mail.root.correlation_id) {
+            // An above-auto member's verify chain settled without a reply — the
+            // whole seal cannot complete, so fail it closed and tear down its
+            // still-outstanding siblings (a dropped signing capability).
+            state.fail_seal(seal, 504, "signature verification settled without a reply");
         }
     }
 }
@@ -409,11 +532,17 @@ impl ApiCapabilityState {
     /// admits a policy-authored approval rather than an unchecked assertion.
     ///
     /// The gate is fail-closed at every branch: no loaded policy, a missing
-    /// projection, an `Incomplete` verdict, or an above-`auto` member all **refuse
-    /// the seal** (`422`) rather than admit. Above-`auto` members require the
-    /// deferred signature-verification path, whose live async wiring is this
-    /// slice's follow-up child — until it lands an above-`auto` member fails
-    /// closed here, never admitted on the operator's unverified assertion.
+    /// projection, or an `Incomplete` verdict all **refuse the seal** (`422`)
+    /// rather than admit. An above-`auto` member takes the deferred
+    /// signature-verification path (issue #3599): its projection's
+    /// `signed_statement` is pre-checked synchronously (subject + author
+    /// signature), then its signature is verified through the `aether.signing`
+    /// capability's `Verify` round trip; the seal admits only once every
+    /// above-`auto` member verifies, and a missing / mis-subjected / non-author /
+    /// unverified statement refuses the whole seal (`422`, fail closed) — never
+    /// admitted on the operator's unverified assertion. A seal with any
+    /// above-`auto` member is therefore a deferred route ([`Routed::DeferredSeal`]);
+    /// an all-`auto` draft stays synchronous.
     fn seal_draft(&self, ctx: &NativeCtx<'_, Manual>, id: &str, body: &[u8]) -> Routed {
         let (_, draft) = match self.lookup_draft(id) {
             Ok(found) => found,
@@ -423,82 +552,79 @@ impl ApiCapabilityState {
             Ok(request) => request,
             Err(response) => return Routed::Reply(response),
         };
+        // Cap the seal's membership before any gate work or signing dispatch: each
+        // above-auto member fans out one `Verify` and one held `SealVerify`
+        // correlation, so an oversized draft would amplify one request into an
+        // unbounded number of in-flight verifications and held-seal state. Refuse
+        // past the ceiling (mirroring MAX_STAGED_WORKPIECES / MAX_OPEN_DRAFTS).
+        if draft.proposals.len() > MAX_SEAL_MEMBERS {
+            return Routed::Reply(error_response(
+                422,
+                &format!("draft has {} members; a seal is capped at {MAX_SEAL_MEMBERS}", draft.proposals.len()),
+            ));
+        }
         // No policy → fail closed: never admit a seal the gate could not decide.
         let Some(policy) = self.policy.as_ref() else {
             return Routed::Reply(error_response(422, "approval policy unavailable; seal fails closed"));
         };
         let gate = Gate::new(policy);
-        // Indexed once so the member loop stays O(n + m) however many
-        // projections the request carries; first occurrence wins on a
-        // duplicate key, matching the linear scan this replaces.
-        let mut projections = HashMap::with_capacity(request.projections.len());
-        for projection in &request.projections {
-            projections.entry((&projection.workpiece, &projection.scope_revision)).or_insert(projection);
-        }
-        let mut sealed_proposals = Vec::with_capacity(draft.proposals.len());
-        for proposal in &draft.proposals {
-            let member = &proposal.workpiece.0;
-            let Some(&projection) = projections.get(&(&proposal.workpiece, &proposal.scope_revision)) else {
-                return Routed::Reply(error_response(
-                    422,
-                    &format!("member {member} has no scope projection; seal fails closed"),
-                ));
+        // Pass 1: resolve every membership synchronously (fail-closed 422 on any
+        // shortfall, before any signing dispatch).
+        let (sealed_proposals, pending_verifications) =
+            match resolve_seal_memberships(&gate, &draft.proposals, &request.projections) {
+                Ok(resolved) => resolved,
+                Err(response) => return Routed::Reply(response),
             };
-            // The digest binds the approval to the projection as evaluated. It
-            // is computed over the canonical wire re-encoding of the decoded
-            // struct, not the raw request slice: the JSON body carries no
-            // per-projection byte boundaries, and the canonical form is
-            // reproducible from the shared DTO by any party rather than
-            // sensitive to the sender's whitespace and field order.
-            let projection_digest = match to_vec(projection) {
-                Ok(bytes) => Digest::of_wire_bytes(&bytes),
-                Err(error) => {
-                    return Routed::Reply(error_response(500, &format!("projection encode failed: {error}")));
-                }
-            };
-            let admission = AdmissionRequest {
-                scope_revision: proposal.scope_revision,
-                declared_surface: projection.declared_surface.clone(),
-                completeness: projection.completeness,
-                adr_touch: projection.adr_touch,
-                pre_approved: projection.pre_approved,
-                projection_digest,
-            };
-            match gate.evaluate(&admission) {
-                Decision::AutoApproved(approval) => {
-                    let mut sealed = proposal.clone();
-                    sealed.approval = approval;
-                    sealed_proposals.push(sealed);
-                }
-                Decision::Incomplete(incompleteness) => {
-                    return Routed::Reply(error_response(
-                        422,
-                        &format!("member {member} is incomplete: {incompleteness:?}"),
-                    ));
-                }
-                Decision::RequiresStatement(tier) => {
-                    return Routed::Reply(error_response(
-                        422,
-                        &format!(
-                            "member {member} resolves tier {tier:?}; above-auto signed-statement enforcement \
-                             is the follow-up child #3599 — seal fails closed until it lands"
-                        ),
-                    ));
-                }
-            }
-        }
         let mut gated = draft;
         gated.proposals = sealed_proposals;
-        let spec = gated.seal();
-        // Persist each member's advisory work-order description keyed by the
-        // sealed bloom id, before the seal defers — the text is operator-supplied
-        // context (#3595) the executor driver reads back at dispatch, and the api
-        // cap is mail-only, so it rides a store write rather than the sealed spec.
-        // Best-effort and fire-and-forget: a description write never gates the
-        // seal, and a member with none simply dispatches subject-only.
-        Self::persist_descriptions(ctx, &spec, &request.descriptions);
-        let key = request.idempotency_key.unwrap_or_else(|| hex_encode(spec.id().0.as_bytes()));
-        self.admit(ctx, &Event { idempotency_key: IdempotencyKey(key), fact: Fact::Seal(spec) })
+        // Pass 2. No above-auto member → seal synchronously (the all-auto fast
+        // path, byte-for-byte #3583). Otherwise defer: dispatch one `Verify` per
+        // above-auto member and hold the seal until every signature verifies.
+        if pending_verifications.is_empty() {
+            let spec = gated.seal();
+            // Persist each member's advisory work-order description keyed by the
+            // sealed bloom id, before the seal defers — the text is operator-supplied
+            // context (#3595) the executor driver reads back at dispatch, and the api
+            // cap is mail-only, so it rides a store write rather than the sealed spec.
+            // Best-effort and fire-and-forget: a description write never gates the
+            // seal, and a member with none simply dispatches subject-only.
+            Self::persist_descriptions(ctx, &spec, &request.descriptions);
+            let key = request.idempotency_key.unwrap_or_else(|| hex_encode(spec.id().0.as_bytes()));
+            return self.admit(ctx, &Event { idempotency_key: IdempotencyKey(key), fact: Fact::Seal(spec) });
+        }
+        // Deferred path only: cap the outstanding `seals` map before dispatching any
+        // `Verify`, so a flood of above-auto seals cannot grow the in-flight seal /
+        // seal-verification state without bound (the all-auto fast path above never
+        // touches `seals`, so it is deliberately not gated here). Mirrors the
+        // `staged` / `drafts` admission caps.
+        if self.seals.len() >= MAX_OPEN_SEALS {
+            return Routed::Reply(error_response(429, "outstanding-seal budget exhausted"));
+        }
+        // Encode every above-auto member's statement before dispatching any
+        // `Verify`: a `to_vec` fault inside the dispatch loop would 500 only
+        // after members 1..k-1 had already been sent to `aether.signing`,
+        // stranding those verifications with no held seal to correlate them.
+        // Pre-encoding lets an encode failure bail with the 500 while the
+        // dispatch state is still empty.
+        let mut encoded = Vec::with_capacity(pending_verifications.len());
+        for (member_index, scope_revision, statement) in pending_verifications {
+            let statement_bytes = match to_vec(&statement) {
+                Ok(bytes) => bytes,
+                Err(error) => return Routed::Reply(error_response(500, &format!("statement encode failed: {error}"))),
+            };
+            encoded.push((member_index, scope_revision, statement, statement_bytes));
+        }
+        let mut verifications = Vec::with_capacity(encoded.len());
+        for (member_index, scope_revision, statement, statement_bytes) in encoded {
+            let correlation = self.send_tracked(ctx, signing_mailbox(), &Verify { statement: statement_bytes });
+            verifications.push(PendingVerify { correlation, member_index, scope_revision, statement });
+        }
+        Routed::DeferredSeal(Box::new(PendingSealSetup {
+            gated,
+            descriptions: request.descriptions,
+            idempotency_key: request.idempotency_key,
+            verifications,
+        }))
     }
 
     /// Write one dispatch-description row per member the operator supplied text
@@ -616,6 +742,72 @@ impl ApiCapabilityState {
                 inbound.reply(&error_response(400, &format!("answer statement did not verify: {error}")));
             }
         }
+    }
+
+    /// Resolve one above-auto member verification for a held seal (issue #3599):
+    /// a verified signature forms the member's approval and decrements the seal's
+    /// countdown, sealing and admitting when the last one lands; a `verified:
+    /// false` verdict or an `Err` refuses the whole seal (`422`, fail closed) and
+    /// tears down its sibling correlations.
+    fn resolve_seal_verify(&mut self, ctx: &NativeCtx<'_, Manual>, correlation: u64, result: VerifyResult) {
+        let Some(SealVerify { seal, member_index, scope_revision, statement }) =
+            self.seal_verifications.remove(&correlation)
+        else {
+            return;
+        };
+        match result {
+            VerifyResult::Ok { verified: true } => {
+                // A sibling verification may have already failed the seal and torn
+                // it down; if so this verified reply has nothing to fill.
+                let Some(pending) = self.seals.get_mut(&seal) else {
+                    return;
+                };
+                pending.gated.proposals[member_index].approval =
+                    verified_statement_approval(scope_revision, &statement);
+                pending.remaining -= 1;
+                if pending.remaining > 0 {
+                    return;
+                }
+                // Last verification: seal the fully-approved draft and admit,
+                // deferring on the reducer reply exactly as the synchronous path.
+                let PendingSeal { inbound, gated, descriptions, idempotency_key, .. } =
+                    self.seals.remove(&seal).expect("seal present; just mutated it");
+                let spec = gated.seal();
+                Self::persist_descriptions(ctx, &spec, &descriptions);
+                let key = idempotency_key.unwrap_or_else(|| hex_encode(spec.id().0.as_bytes()));
+                match to_vec(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::Seal(spec) }) {
+                    Ok(bytes) => {
+                        let correlation = self.send_tracked(ctx, control_mailbox(), &Admit { event: bytes });
+                        self.pending.insert(correlation, inbound);
+                    }
+                    Err(error) => {
+                        inbound.reply(&error_response(500, &format!("event encode failed: {error}")));
+                    }
+                }
+            }
+            VerifyResult::Ok { verified: false } => {
+                self.fail_seal(seal, 422, "an above-auto member's signed statement did not verify; seal fails closed");
+            }
+            VerifyResult::Err { error } => {
+                self.fail_seal(
+                    seal,
+                    422,
+                    &format!("an above-auto member's signature verification failed: {error}; seal fails closed"),
+                );
+            }
+        }
+    }
+
+    /// Refuse a held seal and tear it down: reply `status`/`message` to the held
+    /// obligation and drop every sibling verify correlation still pointing at it,
+    /// so a late sibling reply (or settlement) is a no-op rather than a second
+    /// teardown or a double reply. A no-op if the seal was already torn down.
+    fn fail_seal(&mut self, seal: u64, status: u16, message: &str) {
+        let Some(PendingSeal { inbound, .. }) = self.seals.remove(&seal) else {
+            return;
+        };
+        self.seal_verifications.retain(|_, verify| verify.seal != seal);
+        inbound.reply(&error_response(status, message));
     }
 
     /// `GET /blooms` and `GET /view` — read the whole live projection.
@@ -775,6 +967,94 @@ fn control_mailbox() -> MailboxId {
 /// A `Content-Type: application/json` header set.
 fn json_headers() -> Vec<HttpHeader> {
     vec![HttpHeader { name: "content-type".to_owned(), value: "application/json".to_owned() }]
+}
+
+/// One above-auto member queued for the deferred signature verify: its proposal
+/// index, scope-revision digest, and signed statement — Pass 1's carry into Pass 2.
+type PendingVerification = (usize, Digest, Statement);
+
+/// Pass 1 of a seal: resolve every draft membership synchronously against the
+/// `gate`. An auto member is gate-formed in place; an above-auto member has its
+/// signed statement pre-checked and is queued (its `(index, scope_revision,
+/// statement)`) for the deferred `aether.signing` verify. Any missing projection,
+/// `Incomplete` verdict, missing statement, or failing pre-check returns the
+/// fail-closed `422` response instead — resolved before any signing dispatch.
+///
+/// Extracted from [`seal_draft`](BloomeryApiCapability::seal_draft) so that hot
+/// path stays under the line ceiling; the two returned vectors are its Pass-2
+/// input (the gated proposals and the above-auto members still to verify).
+fn resolve_seal_memberships(
+    gate: &Gate<'_>,
+    proposals: &[Membership],
+    request_projections: &[MemberProjection],
+) -> Result<(Vec<Membership>, Vec<PendingVerification>), HttpServerResponse> {
+    // Indexed once so the member loop stays O(n + m) however many projections the
+    // request carries; first occurrence wins on a duplicate key, matching the
+    // linear scan this replaces.
+    let mut projections = HashMap::with_capacity(request_projections.len());
+    for projection in request_projections {
+        projections.entry((&projection.workpiece, &projection.scope_revision)).or_insert(projection);
+    }
+    let mut sealed_proposals = Vec::with_capacity(proposals.len());
+    let mut pending_verifications: Vec<PendingVerification> = Vec::new();
+    for (index, proposal) in proposals.iter().enumerate() {
+        let member = &proposal.workpiece.0;
+        let Some(&projection) = projections.get(&(&proposal.workpiece, &proposal.scope_revision)) else {
+            return Err(error_response(422, &format!("member {member} has no scope projection; seal fails closed")));
+        };
+        // The digest binds the approval to the projection as evaluated. It is
+        // computed over the canonical wire re-encoding of the decoded struct, not
+        // the raw request slice: the JSON body carries no per-projection byte
+        // boundaries, and the canonical form is reproducible from the shared DTO by
+        // any party rather than sensitive to the sender's whitespace and field order.
+        let projection_digest = match to_vec(projection) {
+            Ok(bytes) => Digest::of_wire_bytes(&bytes),
+            Err(error) => return Err(error_response(500, &format!("projection encode failed: {error}"))),
+        };
+        let admission = AdmissionRequest {
+            scope_revision: proposal.scope_revision,
+            declared_surface: projection.declared_surface.clone(),
+            completeness: projection.completeness,
+            adr_touch: projection.adr_touch,
+            pre_approved: projection.pre_approved,
+            projection_digest,
+        };
+        match gate.evaluate(&admission) {
+            Decision::AutoApproved(approval) => {
+                let mut sealed = proposal.clone();
+                sealed.approval = approval;
+                sealed_proposals.push(sealed);
+            }
+            Decision::Incomplete(incompleteness) => {
+                return Err(error_response(422, &format!("member {member} is incomplete: {incompleteness:?}")));
+            }
+            Decision::RequiresStatement(_tier) => {
+                // Above-auto: consume the member projection's signed statement, run
+                // the two synchronous pre-checks (subject + author signature), and
+                // queue it for the async signature verify. A missing or
+                // pre-check-failing statement fails closed here, before any signing
+                // dispatch. The proposal's placeholder approval is overwritten by the
+                // verified evidence before seal.
+                let Some(statement) = projection.signed_statement.as_ref() else {
+                    return Err(error_response(
+                        422,
+                        &format!(
+                            "member {member} resolves above auto but carries no signed statement; seal fails closed"
+                        ),
+                    ));
+                };
+                if let Err(rejected) = precheck_statement(proposal.scope_revision, statement) {
+                    return Err(error_response(
+                        422,
+                        &format!("member {member} signed statement rejected: {rejected:?}; seal fails closed"),
+                    ));
+                }
+                sealed_proposals.push(proposal.clone());
+                pending_verifications.push((index, proposal.scope_revision, statement.clone()));
+            }
+        }
+    }
+    Ok((sealed_proposals, pending_verifications))
 }
 
 /// A JSON response over a serializable value; a `500` if it fails to encode.

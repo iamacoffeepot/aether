@@ -73,6 +73,41 @@ fn projection(surface: &[&str], completeness: Completeness) -> MemberProjection 
     }
 }
 
+/// A `wp` projection over `surface` at `revision`, complete and non-pre-approved,
+/// optionally carrying the above-auto `signed_statement` — the seal-time input
+/// the deferred-verify enforcement (#3599) decides.
+fn projection_at(
+    wp: &str,
+    revision: Digest,
+    surface: &[&str],
+    signed_statement: Option<Statement>,
+) -> MemberProjection {
+    MemberProjection {
+        workpiece: WorkpieceId(wp.to_owned()),
+        scope_revision: revision,
+        declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
+        completeness: complete(),
+        adr_touch: AdrTouch::None,
+        pre_approved: false,
+        signed_statement,
+    }
+}
+
+/// An author-signed statement over `revision`'s bytes by the allowlisted `owner`
+/// — the above-auto member's owner approval the seal path verifies through the
+/// `aether.signing` capability.
+fn owner_signed_statement(revision: Digest) -> Statement {
+    let words = revision.as_bytes().to_vec();
+    Statement {
+        words: words.clone(),
+        provenance: Provenance::AuthorSignature(SignatureEnvelope {
+            signer: KeyId("owner".to_owned()),
+            signature: owner_signing_key().sign(&words).to_bytes().to_vec(),
+        }),
+        parents: vec![],
+    }
+}
+
 /// A `SealRequest` carrying `projections`, serialized to a JSON value for the
 /// seal route.
 fn seal_body(projections: Vec<MemberProjection>) -> Value {
@@ -247,6 +282,24 @@ fn valid_draft(workpiece: &str) -> BloomDraft {
     }
 }
 
+/// A valid two-workpiece draft: `wp-1` at `member_revision()` and `wp-2` at a
+/// distinct revision, each approval binding its own scope revision. The seal
+/// gate re-forms both approvals from the request projections; the placeholder
+/// details here only have to be reducer-admissible before the gate replaces them.
+fn two_member_draft() -> BloomDraft {
+    let member = |wp: &str, revision: Digest| Membership {
+        workpiece: WorkpieceId(wp.to_owned()),
+        scope_revision: revision,
+        approval: Evidence { subject: revision, kind: EvidenceKind::Approval, detail: Digest::from_bytes([9; 32]) },
+    };
+    BloomDraft {
+        proposals: vec![member("wp-1", member_revision()), member("wp-2", Digest::from_bytes([8; 32]))],
+        base: Digest::from_bytes([1; 32]),
+        stage_catalog: StageCatalog::line_digest(),
+        ..BloomDraft::default()
+    }
+}
+
 /// Assert the pre-seal approve gate (#3583) refuses `seal_path` at every
 /// fail-closed branch: a missing projection, an incomplete one, and an
 /// above-auto surface each return `422` before admit, leaving the draft
@@ -265,11 +318,12 @@ fn assert_gate_fails_closed(http_port: u16, seal_path: &str) {
         send_json(http_port, "POST", seal_path, &seal_body(vec![projection(&["docs/guide/x.md"], incomplete)]));
     assert_eq!(status, 422, "incomplete projection fails closed");
 
-    // Above-auto surface: `crates/aether-data/**` resolves `human`, which this
-    // slice fails closed on (signed-statement enforcement is the follow-up child).
+    // Above-auto surface with no signed statement: `crates/aether-data/**`
+    // resolves `human`, and `projection` carries no `signed_statement`, so the
+    // deferred-verify path (#3599) fails it closed before any signing dispatch.
     let above_auto = seal_body(vec![projection(&["crates/aether-data/src/lib.rs"], complete())]);
     let (status, _) = send_json(http_port, "POST", seal_path, &above_auto);
-    assert_eq!(status, 422, "above-auto fails closed");
+    assert_eq!(status, 422, "above-auto with no signed statement fails closed");
 }
 
 #[test]
@@ -417,4 +471,164 @@ fn rest_api_drives_a_bloom_end_to_end() {
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }
+}
+
+/// The above-auto deferred-verify seal path (#3599): an above-auto member whose
+/// projection carries a valid owner-signed statement admits with a gate-formed
+/// approval verified through the `aether.signing` capability; a missing,
+/// wrong-subject, or unverifiable statement refuses the whole seal (422, fail
+/// closed).
+#[test]
+fn above_auto_deferred_verify_gates_the_seal() {
+    run_with_bloomery("above_auto_deferred_verify_gates_the_seal", assert_single_above_auto_seal);
+}
+
+/// The mixed half of the deferred-verify seal: a draft carrying one auto and one
+/// above-auto member admits only when the above-auto member's signature
+/// verifies. A separate process (own `:memory:` store, own mainline) from the
+/// single-member cases, since V1 permits only one active bloom per mainline and
+/// each case here seals its own.
+#[test]
+fn mixed_auto_and_above_auto_seal_admits_when_verified() {
+    run_with_bloomery("mixed_auto_and_above_auto_seal_admits_when_verified", |http_port| {
+        assert_mixed_above_auto_seal(http_port, member_revision());
+    });
+}
+
+/// Boot the `bloomery` bin, wait for both readiness signals (`/drafts` for the
+/// HTTP router, `/view` for the loaded control core), run `body` against its HTTP
+/// port inside a panic guard, then reap the child. Skips cleanly when the
+/// control-core wasm is not built (unless `AETHER_REQUIRE_RUNTIME` is set).
+fn run_with_bloomery(label: &str, body: impl FnOnce(u16) + std::panic::UnwindSafe) {
+    let Some(wasm) = control_core_wasm() else {
+        if env::var("AETHER_REQUIRE_RUNTIME").is_ok() {
+            panic!("control-core wasm not built but AETHER_REQUIRE_RUNTIME is set");
+        }
+        eprintln!("skipping {label}: control-core wasm not built");
+        return;
+    };
+
+    let http_port = free_port();
+    let rpc_port = free_port();
+    let (_policy_dir, policy_path) = test_policy();
+    let mut child = spawn(http_port, rpc_port, &wasm, &policy_path);
+
+    let result = std::panic::catch_unwind(|| {
+        wait_for_200(http_port, "/drafts");
+        wait_for_200(http_port, "/view");
+        body(http_port);
+    });
+
+    let _ = child.kill();
+    let _ = child.wait();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// Cases (a/b/c) of the deferred-verify seal on a single above-auto member
+/// (`wp-1` over `crates/aether-data`, which the test policy resolves `human`): a
+/// missing statement, a wrong-subject statement (synchronous pre-check), and an
+/// unverifiable signature (after the `aether.signing` round trip) each fail
+/// closed (422); a valid owner-signed statement admits with a gate-formed
+/// approval the reducer accepts.
+fn assert_single_above_auto_seal(http_port: u16) {
+    let (_, opened) = send_json(http_port, "POST", "/drafts", &Value::Null);
+    let draft_id = opened["draft_id"].as_str().unwrap().to_owned();
+    let (status, _) = send_json(
+        http_port,
+        "PATCH",
+        &format!("/drafts/{draft_id}"),
+        &serde_json::to_value(valid_draft("wp-1")).unwrap(),
+    );
+    assert_eq!(status, 200, "patch above-auto draft");
+    let seal_path = format!("/drafts/{draft_id}/seal");
+    let surface = ["crates/aether-data/src/lib.rs"];
+    let revision = member_revision();
+    let seal = |statement| seal_body(vec![projection_at("wp-1", revision, &surface, statement)]);
+
+    // (b) No signed statement → fail closed before any signing dispatch.
+    let (status, _) = send_json(http_port, "POST", &seal_path, &seal(None));
+    assert_eq!(status, 422, "above-auto with no signed statement fails closed");
+
+    // (c-subject) Signed over another revision → rejected at the synchronous
+    // pre-check, before any signing dispatch.
+    let wrong_subject = owner_signed_statement(Digest::from_bytes([1; 32]));
+    let (status, _) = send_json(http_port, "POST", &seal_path, &seal(Some(wrong_subject)));
+    assert_eq!(status, 422, "a wrong-subject statement fails closed at the pre-check");
+
+    // (c-signature) Correct subject + author signature that does NOT verify (an
+    // empty signature) → passes the pre-check, dispatched to `aether.signing`,
+    // refused there, failing the seal closed after the round trip.
+    let mis_signed = Statement {
+        words: revision.as_bytes().to_vec(),
+        provenance: Provenance::AuthorSignature(SignatureEnvelope {
+            signer: KeyId("owner".to_owned()),
+            signature: vec![],
+        }),
+        parents: vec![],
+    };
+    let (status, _) = send_json(http_port, "POST", &seal_path, &seal(Some(mis_signed)));
+    assert_eq!(status, 422, "a mis-signed statement fails closed after the signing round trip");
+
+    // (a) A valid owner-signed statement verifies and the seal admits with a
+    // gate-formed approval the reducer accepts.
+    let body = serde_json::to_vec(&seal(Some(owner_signed_statement(revision)))).unwrap();
+    let (status, body) = try_http(http_port, "POST", &seal_path, Some(&body)).unwrap();
+    let sealed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, 200, "above-auto seal admits: {sealed:?}");
+    let bloom_id = bloom_hex(&sealed["outcome"]["Sealed"]);
+    assert_eq!(bloom_id.len(), 64, "sealed bloom id is a 32-byte digest");
+
+    // The sealed above-auto member is live, its approval a gate-formed `Approval`
+    // bound to the revision (not the operator's placeholder).
+    let (status, view) = get_json(http_port, &format!("/blooms/{bloom_id}"));
+    assert_eq!(status, 200, "the sealed above-auto bloom is live");
+    let members = view["members"].as_array().unwrap();
+    assert_eq!(members.len(), 1, "one sealed member");
+    assert_eq!(members[0]["workpiece"], "wp-1");
+    assert_eq!(members[0]["approval"]["kind"], "Approval", "the above-auto member carries a gate-formed approval");
+}
+
+/// Case (d) of the deferred-verify seal: a mixed draft with an auto member
+/// (`wp-1`, `docs/guide`) and an above-auto member (`wp-2`, `crates/aether-data`)
+/// fails closed when the above-auto member is unsigned, and admits both members
+/// once its signature verifies.
+fn assert_mixed_above_auto_seal(http_port: u16, wp1_revision: Digest) {
+    let (_, opened) = send_json(http_port, "POST", "/drafts", &Value::Null);
+    let mixed_id = opened["draft_id"].as_str().unwrap().to_owned();
+    let (status, _) = send_json(
+        http_port,
+        "PATCH",
+        &format!("/drafts/{mixed_id}"),
+        &serde_json::to_value(two_member_draft()).unwrap(),
+    );
+    assert_eq!(status, 200, "patch mixed draft");
+    let mixed_seal = format!("/drafts/{mixed_id}/seal");
+    let wp2_revision = Digest::from_bytes([8; 32]);
+    let wp1_auto = projection_at("wp-1", wp1_revision, &["docs/guide/x.md"], None);
+    let wp2_above = |statement| projection_at("wp-2", wp2_revision, &["crates/aether-data/src/lib.rs"], statement);
+
+    // wp-2's statement omitted → the whole mixed seal fails closed even though
+    // wp-1 resolves auto.
+    let (status, _) = send_json(http_port, "POST", &mixed_seal, &seal_body(vec![wp1_auto.clone(), wp2_above(None)]));
+    assert_eq!(status, 422, "a mixed draft with an unsigned above-auto member fails closed");
+
+    // wp-2 validly signed → the mixed seal admits once the verification passes.
+    let (status, body) = try_http(
+        http_port,
+        "POST",
+        &mixed_seal,
+        Some(
+            &serde_json::to_vec(&seal_body(vec![wp1_auto, wp2_above(Some(owner_signed_statement(wp2_revision)))]))
+                .unwrap(),
+        ),
+    )
+    .unwrap();
+    let sealed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, 200, "mixed auto + above-auto seal admits when the above-auto member verifies: {sealed:?}");
+    let mixed_bloom = bloom_hex(&sealed["outcome"]["Sealed"]);
+    let (status, view) = get_json(http_port, &format!("/blooms/{mixed_bloom}"));
+    assert_eq!(status, 200, "the mixed bloom is live");
+    assert_eq!(view["members"].as_array().unwrap().len(), 2, "both members sealed");
 }
