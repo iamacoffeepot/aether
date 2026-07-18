@@ -83,3 +83,7 @@ pub mod bloomery;
 pub use api::BloomeryApiCapability;
 #[cfg(feature = "runtime")]
 pub use bloomery::{BloomeryChassis, BloomeryEnv};
+
+// Affected-selection timing canary (issue #3611 post-land verification) —
+// a comment-only leaf-crate change; this PR is closed unmerged after the
+// Test-job timing is recorded.
