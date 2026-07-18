@@ -400,6 +400,17 @@ impl ExecutorBackend for LocalExecutor {
             // transient — keep the entry and worktree for the next cycle's retry.
             Err(read_error) => {
                 if matches!(lifecycle, RunLifecycle::Exited { .. }) {
+                    // Log the real IO fault before folding it into a fail-closed
+                    // verdict — a permission/disk fault reads identically to a
+                    // genuinely-absent evidence file once synthesized, so the fault
+                    // must stay visible in the operator's logs (the same best-effort
+                    // warn convention `release_worktree` uses).
+                    tracing::warn!(
+                        nonce = %handle.nonce.0,
+                        evidence = %evidence_path.display(),
+                        error = %read_error,
+                        "local executor backend: exited run left no readable evidence — failing closed",
+                    );
                     self.lock().remove(&handle.nonce.0);
                     self.release_worktree(&worktree_dir);
                     return Ok(vec![EvidenceRef {
