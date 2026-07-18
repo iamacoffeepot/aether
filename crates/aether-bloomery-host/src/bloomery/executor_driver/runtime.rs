@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aether_actor::runtime;
-use aether_bloomery::{Admit, BloomId, DispatchPayload, Nonce, WorkHandle, WorkOrder};
+use aether_bloomery::{Admit, BloomId, DispatchPayload, ExecutionStatus, Nonce, WorkHandle, WorkOrder};
 use aether_data::wire::from_bytes;
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 use aether_substrate::Mail;
@@ -50,7 +50,7 @@ use super::ExecutorDriverCapability;
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::ExecutorShell;
 use crate::bloomery::intake::{
-    Admission, AdmitSink, DispatchRecord, NameEvidenceClaims, dispatch_and_record, run_intake_cycle,
+    Admission, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims, dispatch_and_record, run_intake_cycle,
 };
 use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
@@ -116,6 +116,66 @@ fn next_backoff(current: Option<&BackoffCursor>, transient_failure: Option<u64>)
     Some(BackoffCursor { sequence, failures, retry_after: Instant::now() + backoff_delay(failures) })
 }
 
+/// A tracked dispatch handle plus its staleness bookkeeping (#3635): `first_seen`
+/// marks when the handle was added to `tracked`, and `stale_warned` guards the
+/// tick's stale-sweep so a still-wedged handle warns once per crossing rather
+/// than every poll tick.
+struct TrackedHandle {
+    handle: WorkHandle,
+    first_seen: Instant,
+    stale_warned: bool,
+}
+
+impl TrackedHandle {
+    fn new(handle: WorkHandle, first_seen: Instant) -> Self {
+        Self { handle, first_seen, stale_warned: false }
+    }
+}
+
+/// Whether a handle first seen at `first_seen` has aged past `threshold` as of
+/// `now`. Pure so it is unit-testable without a clock, mirroring [`backoff_delay`].
+fn is_stale(first_seen: Instant, now: Instant, threshold: Duration) -> bool {
+    now.duration_since(first_seen) >= threshold
+}
+
+/// Project the config's `stale_warn_after_secs` knob into the threshold
+/// [`select_stale_handles`] takes — `0` disables the sweep entirely.
+fn stale_warn_after(stale_warn_after_secs: u64) -> Option<Duration> {
+    (stale_warn_after_secs > 0).then(|| Duration::from_secs(stale_warn_after_secs))
+}
+
+/// Select the tracked handles that just crossed the staleness threshold: past
+/// `threshold` age, not yet warned, paired with their last observed status from
+/// the cycle's `pending` report (defaulting to [`ExecutionStatus::Unknown`] when
+/// the cycle didn't report one — e.g. a handle tracked this same tick). Marks
+/// each selected handle `stale_warned` so a still-wedged handle warns once per
+/// crossing, not every tick. `threshold: None` (the `stale_warn_after_secs == 0`
+/// disabled case) selects nothing. Factored out of the tick so the selection is
+/// unit-testable with an injected `Instant`, mirroring [`next_backoff`].
+fn select_stale_handles(
+    tracked: &mut [TrackedHandle],
+    pending: &[(Nonce, ExecutionStatus)],
+    now: Instant,
+    threshold: Option<Duration>,
+) -> Vec<(Nonce, Duration, ExecutionStatus)> {
+    let Some(threshold) = threshold else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+    for tracked_handle in tracked.iter_mut() {
+        if tracked_handle.stale_warned || !is_stale(tracked_handle.first_seen, now, threshold) {
+            continue;
+        }
+        let status = pending
+            .iter()
+            .find(|(nonce, _)| *nonce == tracked_handle.handle.nonce)
+            .map_or(ExecutionStatus::Unknown, |(_, status)| status.clone());
+        warnings.push((tracked_handle.handle.nonce.clone(), now.duration_since(tracked_handle.first_seen), status));
+        tracked_handle.stale_warned = true;
+    }
+    warnings
+}
+
 /// Runtime state for [`ExecutorDriverCapability`]. The shell + store are `Some`
 /// only when configured; a disabled driver holds neither and spawns no timer.
 /// `tracked` accumulates the dispatched handles the pull side inspects each tick.
@@ -123,7 +183,7 @@ pub struct ExecutorDriverState {
     executor: Option<ExecutorShell>,
     store: Option<SqliteStore>,
     claims: NameEvidenceClaims,
-    tracked: Vec<WorkHandle>,
+    tracked: Vec<TrackedHandle>,
     control_mailbox: MailboxId,
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
@@ -132,6 +192,9 @@ pub struct ExecutorDriverState {
     _timer: Option<TimerHandle>,
     // Paces the transient re-drive (#3593); `None` when nothing is backing off.
     backoff: Option<BackoffCursor>,
+    // How long a tracked handle may stay unresolved before the tick warns
+    // (#3635); `None` when `stale_warn_after_secs == 0` disables the sweep.
+    stale_warn_after: Option<Duration>,
 }
 
 impl ExecutorDriverState {
@@ -156,6 +219,7 @@ impl ExecutorDriverState {
             self_mailbox,
             _timer: None,
             backoff: None,
+            stale_warn_after: stale_warn_after(GithubMirrorConfig::default().stale_warn_after_secs),
         }
     }
 }
@@ -296,33 +360,57 @@ fn seed_tracked(store: &mut dyn StoreBackend) -> rusqlite::Result<Vec<WorkHandle
 
 /// Pull matched attempt results for the tracked handles and return the [`Admit`]s
 /// to forward to the control core, pruning the handles whose order the broker
-/// consumed (a completed + admitted run). The factored-out network side, unit-
-/// testable like [`drain_and_dispatch`].
+/// consumed (a completed + admitted run). Also runs the staleness sweep
+/// (#3635): a handle still tracked past `stale_warn_after` warns once, naming
+/// its nonce, age, and last observed status — `stale_warn_after: None` disables
+/// it. The factored-out network side, unit-testable like [`drain_and_dispatch`].
 fn pull_and_admit(
     store: &mut dyn StoreBackend,
     executor: &ExecutorShell,
     claims: NameEvidenceClaims,
-    tracked: &mut Vec<WorkHandle>,
+    tracked: &mut Vec<TrackedHandle>,
+    stale_warn_after: Option<Duration>,
 ) -> Vec<Admit> {
     let mut sink = CollectingSink::default();
-    if let Err(error) = run_intake_cycle(store, executor, tracked, &claims, &mut sink) {
-        tracing::warn!(target: "aether_bloomery_host::executor", %error, "intake cycle failed; results re-drive next tick");
-    }
+    let handles: Vec<WorkHandle> = tracked.iter().map(|tracked_handle| tracked_handle.handle.clone()).collect();
+    let report = match run_intake_cycle(store, executor, &handles, &claims, &mut sink) {
+        Ok(report) => report,
+        Err(error) => {
+            tracing::warn!(target: "aether_bloomery_host::executor", %error, "intake cycle failed; results re-drive next tick");
+            CycleReport::default()
+        }
+    };
+
     // Drop the handles whose order was consumed on admit — a still-outstanding
     // order (order lookup Some) stays tracked to poll again; a store fault leaves
-    // it tracked to retry rather than silently dropping it.
-    tracked.retain(|handle| match store.lookup_order(&handle.nonce.0) {
+    // it tracked to retry rather than silently dropping it. Prune before the
+    // staleness sweep below, so a handle that just resolved and was consumed this
+    // same cycle never spuriously selects as stale (#3635 review finding): its
+    // nonce carries no `pending` entry once consumed, so a pre-prune sweep would
+    // read that absence as "no status observed" rather than "just resolved".
+    tracked.retain(|tracked_handle| match store.lookup_order(&tracked_handle.handle.nonce.0) {
         Ok(order) => order.is_some(),
         Err(error) => {
             tracing::warn!(
                 target: "aether_bloomery_host::executor",
-                nonce = %handle.nonce.0,
+                nonce = %tracked_handle.handle.nonce.0,
                 %error,
                 "order lookup failed; keeping the handle tracked to retry",
             );
             true
         }
     });
+
+    for (nonce, age, status) in select_stale_handles(tracked, &report.pending, Instant::now(), stale_warn_after) {
+        tracing::warn!(
+            target: "aether_bloomery_host::executor",
+            nonce = %nonce.0,
+            age_secs = age.as_secs(),
+            last_status = ?status,
+            "dispatched run has not resolved past the staleness threshold",
+        );
+    }
+
     sink.0.into_iter().map(|admission| admission.admit).collect()
 }
 
@@ -356,6 +444,7 @@ impl NativeActor for ExecutorDriverCapability {
                 self_mailbox,
                 _timer: None,
                 backoff: None,
+                stale_warn_after: stale_warn_after(config.stale_warn_after_secs),
             });
         }
 
@@ -365,7 +454,12 @@ impl NativeActor for ExecutorDriverCapability {
         // must not silently start with an empty one — that is the bug this
         // seed exists to fix, so a read error fails boot rather than mounting
         // with a stranded `tracked` vec.
-        let tracked = seed_tracked(&mut store).map_err(|e| BootError::Other(Box::new(e)))?;
+        let seeded_at = Instant::now();
+        let tracked: Vec<TrackedHandle> = seed_tracked(&mut store)
+            .map_err(|e| BootError::Other(Box::new(e)))?
+            .into_iter()
+            .map(|handle| TrackedHandle::new(handle, seeded_at))
+            .collect();
         let interval = Duration::from_secs(config.poll_interval_secs.max(1));
         let timer = spawn_timer(
             Arc::clone(&mailer),
@@ -393,6 +487,7 @@ impl NativeActor for ExecutorDriverCapability {
             self_mailbox,
             _timer: Some(timer),
             backoff: None,
+            stale_warn_after: stale_warn_after(config.stale_warn_after_secs),
         })
     }
 
@@ -435,7 +530,8 @@ impl NativeActor for ExecutorDriverCapability {
                     {
                         tracing::warn!(target: "aether_bloomery_host::executor", %error, "dispatch ack failed; entries re-drive");
                     }
-                    state.tracked.extend(handles);
+                    let now = Instant::now();
+                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
                     state.backoff = next_backoff(state.backoff.as_ref(), transient_failure);
                 }
                 Err(error) => {
@@ -445,7 +541,8 @@ impl NativeActor for ExecutorDriverCapability {
         }
 
         // Pull matched results and forward each admitted attempt to the control core.
-        for admit in pull_and_admit(store, &executor, claims, &mut state.tracked) {
+        let stale_warn_after = state.stale_warn_after;
+        for admit in pull_and_admit(store, &executor, claims, &mut state.tracked, stale_warn_after) {
             // Fire-and-forget: the control actor's on_admit is reliable local mail,
             // and the reducer's idempotency key dedups a resend, so the settlement
             // handle is not needed here.

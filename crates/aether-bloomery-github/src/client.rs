@@ -32,6 +32,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::Method as ReqwestMethod;
 use reqwest::blocking::Client as BlockingClient;
@@ -401,14 +402,38 @@ pub struct ReqwestTransport {
     client: BlockingClient,
 }
 
+/// Connect-phase bound for every GitHub HTTP hop through this transport.
+///
+/// Tied to the executor-driver wedge (#3640): `on_dispatch_tick` runs these
+/// calls inline on the cooperative chassis dispatcher, so an unbounded
+/// connect stalls the actor's `DispatcherSlot` forever.
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Total request-phase bound (connect + send + response) for every GitHub
+/// HTTP hop through this transport. See [`HTTP_CONNECT_TIMEOUT`].
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 impl ReqwestTransport {
-    /// Build the transport's `reqwest::blocking` client.
+    /// Build the transport's `reqwest::blocking` client with the production
+    /// timeouts.
     ///
     /// # Errors
     /// The `reqwest` client could not be constructed.
     pub fn new() -> Result<Self, GithubError> {
+        Self::with_timeouts(HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT)
+    }
+
+    /// Build the transport's `reqwest::blocking` client with explicit
+    /// connect/total timeouts, so a caller (e.g. a regression test) can drive
+    /// the real transport against a short deadline.
+    ///
+    /// # Errors
+    /// The `reqwest` client could not be constructed.
+    pub fn with_timeouts(connect: Duration, total: Duration) -> Result<Self, GithubError> {
         let client = BlockingClient::builder()
             .user_agent("aether-bloomery-github")
+            .connect_timeout(connect)
+            .timeout(total)
             .build()
             .map_err(|error| GithubError::Transport(error.to_string()))?;
         Ok(Self { client })
@@ -1369,5 +1394,39 @@ mod tests {
             request.url,
             "https://api.github.com/repos/octo/shadow/git/matching-refs/heads/bloom/x/checkpoint/?per_page=100&page=1"
         );
+    }
+
+    // Tripwire: the production GitHub transport must bound a stalled request.
+    // Without a timeout this test hangs forever, which is the #3640 wedge —
+    // an unbounded blocking call on the chassis dispatcher never returns, so
+    // the actor's `DispatcherSlot` never goes back to `Idle`.
+    #[test]
+    fn stalled_connection_returns_a_bounded_transport_error() {
+        use std::net::TcpListener;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        use super::ReqwestTransport;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        // A raw thread is fine here: it's a test-only stall server, not
+        // engine actor work, so the settlement/trace umbrella doesn't apply.
+        #[allow(clippy::disallowed_methods)]
+        thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                thread::sleep(Duration::from_mins(1));
+                drop(stream);
+            }
+        });
+
+        let transport = ReqwestTransport::with_timeouts(Duration::from_millis(250), Duration::from_millis(250))
+            .expect("client builds");
+        let request = HttpRequest { method: Method::Get, url: format!("http://{addr}/"), headers: vec![], body: None };
+
+        let started = Instant::now();
+        let result = transport.execute(request);
+        assert!(matches!(result, Err(GithubError::Transport(_))), "expected a transport error, got {result:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "transport did not bound the stalled request");
     }
 }

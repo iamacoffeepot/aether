@@ -539,7 +539,7 @@ pub trait AdmitSink {
 }
 
 /// What one [`run_intake_cycle`] observed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct CycleReport {
     /// Completed runs whose evidence was streamed.
     pub completed: u32,
@@ -547,6 +547,11 @@ pub struct CycleReport {
     pub admitted: u32,
     /// Uploads refused by the broker.
     pub refused: u32,
+    /// Handles inspected this cycle that were not yet `Completed`, paired with
+    /// their observed status (#3635) — feeds the executor driver's staleness
+    /// sweep so a wedged dispatch's last status is visible in its warn without a
+    /// second `inspect` call.
+    pub pending: Vec<(Nonce, ExecutionStatus)>,
 }
 
 /// A fault during an intake cycle.
@@ -599,6 +604,7 @@ pub fn run_intake_cycle(
     for handle in handles {
         let status = shell.inspect(handle).map_err(CycleError::Inspect)?;
         if !matches!(status, ExecutionStatus::Completed { .. }) {
+            report.pending.push((handle.nonce.clone(), status));
             continue;
         }
         report.completed += 1;
