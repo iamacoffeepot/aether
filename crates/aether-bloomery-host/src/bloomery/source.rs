@@ -243,7 +243,9 @@ mod tests {
     use aether_bloomery_github::testing::FakeGithub;
     use aether_bloomery_github::{GitSource, SharedCorrespondence};
 
-    use super::{Arc, BloomId, Digest, IntegrateOutcome, LandOutcome, Snapshot, SourceShell};
+    use super::{
+        Arc, BloomId, Digest, IntegrateOutcome, LandOutcome, Snapshot, SourceBackend, SourceError, SourceShell,
+    };
 
     #[test]
     fn seed_mainline_records_a_resolvable_base_correspondence() {
@@ -275,25 +277,36 @@ mod tests {
         // would carry to land is the distinct integrated-head digest recorded here.
         let fake = FakeGithub::new();
         let base_tree = Digest::from_bytes([10; 32]);
-        // The repo's real head commit and the mainline ref pointing at it. No
-        // `base ↔ head` correspondence is pre-seeded for the genesis base — the
-        // reconcile is what establishes it (a lazy first-snapshot seed would
-        // instead equate base and head and defeat CAS base-moved detection).
-        let head_commit = fake.seed_base_commit(&base_tree);
-        fake.seed_ref_at("heads/main", &head_commit);
-
+        // Seed the repo's real head commit + tree object and the mainline ref
+        // pointing at the commit, but record NO `base ↔ head` correspondence for
+        // the genesis base — the reconcile is what establishes it (a lazy
+        // first-snapshot seed would instead equate base and head and defeat CAS
+        // base-moved detection). Deliberately not `seed_base_commit`: that would
+        // pre-record a *second* digest for the head commit object, and the fake's
+        // reverse-resolve scans for any digest naming that object, so `land`'s
+        // base check would then non-deterministically read either digest.
+        // Genesis must be the sole digest for the head commit.
         let correspondence: SharedCorrespondence = Arc::new(fake.clone());
-        let backend = GitSource::new(fake.clone(), Arc::clone(&correspondence), true);
-        let bloom = BloomId(Digest::from_bytes([1; 32]));
-        backend.create_namespace(&bloom, &head_commit).unwrap();
-        let shell = SourceShell { backend: Arc::new(backend), correspondence: Some(Arc::clone(&correspondence)) };
+        fake.seed_git_object(&base_tree);
+        let tree_sha = correspondence.resolve_git(&base_tree).unwrap().unwrap().to_hex();
+        let head_sha = fake.seed_commit(&tree_sha);
+        fake.seed_ref("heads/main", &head_sha);
 
-        // Genesis reconcile establishes the initial correspondence authoritatively.
+        let concrete = Arc::new(GitSource::new(fake.clone(), Arc::clone(&correspondence), true));
+        let backend: Arc<dyn SourceBackend<Error = SourceError> + Send + Sync> = concrete.clone();
+        let bloom = BloomId(Digest::from_bytes([1; 32]));
+        let shell = SourceShell { backend, correspondence: Some(Arc::clone(&correspondence)) };
+
+        // Genesis reconcile establishes the initial correspondence authoritatively
+        // — the sole digest mapping for the head commit object.
         shell.reconcile_genesis_mainline().unwrap();
         assert!(
             correspondence.resolve_git(&Snapshot::GENESIS_MAINLINE).unwrap().is_some(),
             "the genesis base resolves to the repo's real head after the reconcile"
         );
+        // The integration namespace is cut from the genesis base (resolvable only
+        // after the reconcile), mirroring a real bloom's boot.
+        concrete.create_namespace(&bloom, &Snapshot::GENESIS_MAINLINE).unwrap();
 
         // The first snapshot at the genesis base now resolves (impossible before
         // the reconcile — the base had no correspondence to forward-resolve).
