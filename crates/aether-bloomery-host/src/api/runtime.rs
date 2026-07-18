@@ -92,6 +92,15 @@ const ROUTE_PREFIXES: [&str; 6] = ["/workpieces", "/drafts", "/blooms", "/view",
 const MAX_STAGED_WORKPIECES: usize = 1024;
 const MAX_OPEN_DRAFTS: usize = 1024;
 
+/// Ceiling on one seal's membership count. Each above-auto member fans out one
+/// `aether.signing` `Verify` dispatch and one held `SealVerify` correlation, so a
+/// single seal request amplifies into N in-flight verifications plus a held
+/// `PendingSeal`; cap the draft's member count and refuse a seal past it before
+/// any dispatch, so one request cannot grow the in-flight `seals` /
+/// `seal_verifications` maps without bound (issue #3599). A bloom's realistic
+/// membership is a handful; the ceiling is generous headroom over that.
+const MAX_SEAL_MEMBERS: usize = 256;
+
 /// Boot config for the REST control api cap: the tier-policy file the pre-seal
 /// approve gate loads at init (issue #3583). Threaded from the shared GitHub
 /// config's `approval_policy_file` at chassis build so one Bloomery configuration
@@ -537,6 +546,17 @@ impl ApiCapabilityState {
             Ok(request) => request,
             Err(response) => return Routed::Reply(response),
         };
+        // Cap the seal's membership before any gate work or signing dispatch: each
+        // above-auto member fans out one `Verify` and one held `SealVerify`
+        // correlation, so an oversized draft would amplify one request into an
+        // unbounded number of in-flight verifications and held-seal state. Refuse
+        // past the ceiling (mirroring MAX_STAGED_WORKPIECES / MAX_OPEN_DRAFTS).
+        if draft.proposals.len() > MAX_SEAL_MEMBERS {
+            return Routed::Reply(error_response(
+                422,
+                &format!("draft has {} members; a seal is capped at {MAX_SEAL_MEMBERS}", draft.proposals.len()),
+            ));
+        }
         // No policy → fail closed: never admit a seal the gate could not decide.
         let Some(policy) = self.policy.as_ref() else {
             return Routed::Reply(error_response(422, "approval policy unavailable; seal fails closed"));
