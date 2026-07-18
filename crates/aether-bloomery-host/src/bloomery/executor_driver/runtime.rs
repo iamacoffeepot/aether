@@ -34,7 +34,7 @@
 //! driver does) is a follow-up once the registry ops gain a mail surface.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aether_actor::runtime;
 use aether_bloomery::{Admit, BloomId, DispatchPayload, Nonce, WorkHandle, WorkOrder};
@@ -74,6 +74,48 @@ const CONTROL_CORE_PATH: &str = "aether.component/aether.embedded:aether.bloomer
 #[kind(name = "aether.bloomery.executor.dispatch_tick")]
 pub struct DispatchTick {}
 
+/// The transient-re-drive backoff base and cap (#3593): a sustained transient
+/// outage decays the poll-tick-flat re-drive cadence geometrically from `BASE`
+/// (the same order as the poll interval) up to `CAP`, rather than hammering at a
+/// flat 5s.
+const BACKOFF_BASE: Duration = Duration::from_secs(5);
+const BACKOFF_CAP: Duration = Duration::from_mins(5);
+
+/// The geometric backoff delay for the `failures`-th consecutive transient
+/// failure of the same head outbox entry — `BASE * 2^(failures - 1)`, clamped at
+/// `CAP`. Pure so it is unit-testable without a clock; `on_dispatch_tick` is the
+/// only caller that feeds it a live `Instant`.
+fn backoff_delay(failures: u32) -> Duration {
+    BACKOFF_BASE.saturating_mul(1u32.checked_shl(failures.saturating_sub(1)).unwrap_or(u32::MAX)).min(BACKOFF_CAP)
+}
+
+/// The transient-re-drive backoff cursor: which outbox `sequence` is failing, how
+/// many consecutive times, and the `Instant` before which the next drain is
+/// skipped. A permanent-refusal park or a successful drain clears it; a changed
+/// head sequence resets `failures` to 1 rather than continuing to grow a stale
+/// count.
+struct BackoffCursor {
+    sequence: u64,
+    failures: u32,
+    retry_after: Instant,
+}
+
+/// Advance the backoff cursor for a drain's outcome: `None` (nothing to drain, a
+/// success, or a permanent-refusal park) clears it; a transient failure of the
+/// same head `sequence` as `current` grows the consecutive-failure count, while a
+/// transient failure of a *different* sequence (the prior head cleared some other
+/// way) resets it to 1 rather than continuing to grow a stale count. Factored out
+/// of `on_dispatch_tick` so the cursor transition is unit-testable without a mail
+/// harness; only `retry_after`'s `Instant::now()` is impure.
+fn next_backoff(current: Option<&BackoffCursor>, transient_failure: Option<u64>) -> Option<BackoffCursor> {
+    let sequence = transient_failure?;
+    let failures = match current {
+        Some(cursor) if cursor.sequence == sequence => cursor.failures + 1,
+        _ => 1,
+    };
+    Some(BackoffCursor { sequence, failures, retry_after: Instant::now() + backoff_delay(failures) })
+}
+
 /// Runtime state for [`ExecutorDriverCapability`]. The shell + store are `Some`
 /// only when configured; a disabled driver holds neither and spawns no timer.
 /// `tracked` accumulates the dispatched handles the pull side inspects each tick.
@@ -88,6 +130,8 @@ pub struct ExecutorDriverState {
     // The poll timer sidecar; `None` when disabled. Held for its `Drop`, which
     // stops + joins the thread on teardown.
     _timer: Option<TimerHandle>,
+    // Paces the transient re-drive (#3593); `None` when nothing is backing off.
+    backoff: Option<BackoffCursor>,
 }
 
 impl ExecutorDriverState {
@@ -111,6 +155,7 @@ impl ExecutorDriverState {
             mailer,
             self_mailbox,
             _timer: None,
+            backoff: None,
         }
     }
 }
@@ -137,10 +182,15 @@ impl AdmitSink for CollectingSink {
 fn drain_and_dispatch(
     store: &mut dyn StoreBackend,
     executor: &ExecutorShell,
-) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>)> {
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
     let entries = store.drain_outbox(Some(DISPATCH_TOPIC))?;
     let mut handles = Vec::new();
     let mut ack_through = None;
+    // The outbox sequence of a transient submit failure that stopped the drain —
+    // `on_dispatch_tick` paces the next drain against it (#3593). `None` when the
+    // drain reached the end of the batch clean, or stopped on a decode/subject
+    // fault or a permanent-refusal park (neither re-drives on a timer).
+    let mut transient_failure = None;
     for entry in entries {
         let Ok(payload) = from_bytes::<DispatchPayload>(&entry.payload) else {
             tracing::warn!(
@@ -199,6 +249,24 @@ fn drain_and_dispatch(
                 handles.push(handle);
                 ack_through = Some(entry.sequence);
             }
+            Err(error) if error.is_permanent() => {
+                // A permanent refusal never clears on retry, so parking (acking
+                // past it) is what "wedge the member" means here: the entry
+                // leaves the outbox, the queue behind it unblocks, and the error
+                // log is the visible reason (member context + HTTP fault).
+                tracing::error!(
+                    target: "aether_bloomery_host::executor",
+                    sequence = entry.sequence,
+                    bloom = ?record.bloom.0,
+                    workpiece = %record.workpiece.0,
+                    stage = ?record.stage,
+                    nonce = %record.nonce.0,
+                    %error,
+                    "dispatch submit refused permanently; parking the entry instead of re-driving",
+                );
+                ack_through = Some(entry.sequence);
+                break;
+            }
             Err(error) => {
                 tracing::warn!(
                     target: "aether_bloomery_host::executor",
@@ -206,11 +274,12 @@ fn drain_and_dispatch(
                     %error,
                     "dispatch submit/record failed; stopping the ack prefix to re-drive",
                 );
+                transient_failure = Some(entry.sequence);
                 break;
             }
         }
     }
-    Ok((handles, ack_through))
+    Ok((handles, ack_through, transient_failure))
 }
 
 /// Pull matched attempt results for the tracked handles and return the [`Admit`]s
@@ -274,6 +343,7 @@ impl NativeActor for ExecutorDriverCapability {
                 mailer,
                 self_mailbox,
                 _timer: None,
+                backoff: None,
             });
         }
 
@@ -304,6 +374,7 @@ impl NativeActor for ExecutorDriverCapability {
             mailer,
             self_mailbox,
             _timer: Some(timer),
+            backoff: None,
         })
     }
 
@@ -334,18 +405,24 @@ impl NativeActor for ExecutorDriverCapability {
             return;
         };
 
-        // Drain + submit the newly-decided dispatches, acking the submitted prefix.
-        match drain_and_dispatch(store, &executor) {
-            Ok((handles, ack_through)) => {
-                if let Some(sequence) = ack_through
-                    && let Err(error) = store.ack_outbox(Some(DISPATCH_TOPIC), sequence)
-                {
-                    tracing::warn!(target: "aether_bloomery_host::executor", %error, "dispatch ack failed; entries re-drive");
+        // Skip the drain while inside a transient-failure backoff window (#3593) —
+        // paces the re-drive instead of hammering GitHub at the flat poll cadence.
+        let skip_drain = state.backoff.as_ref().is_some_and(|cursor| cursor.retry_after > Instant::now());
+        if !skip_drain {
+            // Drain + submit the newly-decided dispatches, acking the submitted prefix.
+            match drain_and_dispatch(store, &executor) {
+                Ok((handles, ack_through, transient_failure)) => {
+                    if let Some(sequence) = ack_through
+                        && let Err(error) = store.ack_outbox(Some(DISPATCH_TOPIC), sequence)
+                    {
+                        tracing::warn!(target: "aether_bloomery_host::executor", %error, "dispatch ack failed; entries re-drive");
+                    }
+                    state.tracked.extend(handles);
+                    state.backoff = next_backoff(state.backoff.as_ref(), transient_failure);
                 }
-                state.tracked.extend(handles);
-            }
-            Err(error) => {
-                tracing::warn!(target: "aether_bloomery_host::executor", %error, "dispatch drain failed");
+                Err(error) => {
+                    tracing::warn!(target: "aether_bloomery_host::executor", %error, "dispatch drain failed");
+                }
             }
         }
 
