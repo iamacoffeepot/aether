@@ -111,6 +111,11 @@ pub struct RunSpec<'a> {
     pub model: Option<&'a str>,
     /// The resolved reasoning-effort tier (`--effort`); `None` for a verify lane.
     pub effort: Option<&'a str>,
+    /// The advisory work-order description the construct lane names in its
+    /// prompt's `## Task` section (`--task`, #3595); `None` when the coordinator
+    /// persisted none (a subject-only prompt) or for a verify lane, which ignores
+    /// it exactly as it ignores `--model`.
+    pub task: Option<&'a str>,
 }
 
 /// A running (or finished) transform child — the lifecycle the backend maps onto
@@ -234,6 +239,10 @@ impl ExecutorBackend for LocalExecutor {
             nonce: &nonce,
             model: is_construct.then_some(self.construct_model.as_deref()).flatten(),
             effort: is_construct.then_some(self.construct_effort.as_deref()).flatten(),
+            // The work-order description rides the order's transformation (#3595),
+            // populated at dispatch from durable state; only the construct lane
+            // names it, mirroring the model/effort gate.
+            task: is_construct.then_some(order.transformation.description.as_deref()).flatten(),
         };
         let process = self.runner.start(&spec)?;
         self.lock().insert(nonce, Run { process, evidence_dir, subject });
@@ -366,6 +375,9 @@ impl TransformRunner for ProcessTransformRunner {
             }
             if let Some(effort) = spec.effort {
                 cargo.args(["--effort", effort]);
+            }
+            if let Some(task) = spec.task {
+                cargo.args(["--task", task]);
             }
         }
         let child = cargo.spawn().map_err(LocalExecutorError::Spawn)?;

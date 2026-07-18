@@ -11,8 +11,8 @@
 use super::StoreCapability;
 use super::kinds::{
     AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, ClaimSeal, ClaimSealResult, DrainOutbox,
-    DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, OutboxEntry, ReleaseMembership, ReleaseMembershipResult,
-    Supersede, SupersedeResult,
+    DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, OutboxEntry, RecordDispatchDescription,
+    RecordDispatchDescriptionResult, ReleaseMembership, ReleaseMembershipResult, Supersede, SupersedeResult,
 };
 use aether_actor::runtime;
 // The control-plane transact-mails the wasm control actor drives — `Commit` and
@@ -156,6 +156,19 @@ pub trait StoreBackend: Send {
     /// The study artifact digest recorded for (`bloom`, `attempt_digest`), or
     /// `None` when no study record has been admitted for that attempt.
     fn lookup_study(&mut self, bloom: &[u8], attempt_digest: &[u8]) -> rusqlite::Result<Option<String>>;
+    /// Record a member's advisory work-order description (#3595), keyed by
+    /// (`bloom`, `workpiece`). The coordinator persists it at seal so it survives
+    /// to dispatch — the api cap that holds the operator's text and the executor
+    /// driver that reads it at dispatch are different capabilities, so the store
+    /// is the only carrier between them. Last-writer-wins on the key: a re-seal of
+    /// the same member overwrites rather than erroring.
+    fn record_dispatch_description(&mut self, bloom: &[u8], workpiece: &str, description: &str)
+    -> rusqlite::Result<()>;
+    /// The advisory work-order description recorded for (`bloom`, `workpiece`), or
+    /// `None` when the coordinator persisted none — the executor driver leaves
+    /// [`Transformation::description`](aether_bloomery::Transformation) `None` and
+    /// warns rather than dispatching blind.
+    fn lookup_dispatch_description(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
     /// Drop every study index row — the first half of a projection rebuild
     /// (`clear` then re-`record` from the artifact bytes).
     fn clear_study_index(&mut self) -> rusqlite::Result<()>;
@@ -258,6 +271,12 @@ CREATE TABLE IF NOT EXISTS study_index (
     study_artifact TEXT NOT NULL,
     PRIMARY KEY (bloom, attempt_digest)
 );
+CREATE TABLE IF NOT EXISTS dispatch_description (
+    bloom       BLOB NOT NULL,
+    workpiece   TEXT NOT NULL,
+    description TEXT NOT NULL,
+    PRIMARY KEY (bloom, workpiece)
+);
 ";
 
 /// Is a rusqlite error a UNIQUE / PRIMARY KEY constraint violation? A seal that
@@ -330,6 +349,27 @@ impl StoreBackend for SqliteStore {
             self.conn.prepare("SELECT study_artifact FROM study_index WHERE bloom = ?1 AND attempt_digest = ?2")?;
         let mut rows = stmt.query_map(rusqlite::params![bloom, attempt_digest], |row| row.get::<_, String>(0))?;
         // The (bloom, attempt_digest) pair is the primary key, so at most one row.
+        rows.next().transpose()
+    }
+
+    fn record_dispatch_description(
+        &mut self,
+        bloom: &[u8],
+        workpiece: &str,
+        description: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO dispatch_description (bloom, workpiece, description) VALUES (?1, ?2, ?3)",
+            rusqlite::params![bloom, workpiece, description],
+        )?;
+        Ok(())
+    }
+
+    fn lookup_dispatch_description(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>> {
+        let mut stmt =
+            self.conn.prepare("SELECT description FROM dispatch_description WHERE bloom = ?1 AND workpiece = ?2")?;
+        let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| row.get::<_, String>(0))?;
+        // The (bloom, workpiece) pair is the primary key, so at most one row.
         rows.next().transpose()
     }
 
@@ -598,6 +638,19 @@ impl NativeActor for StoreCapability {
         match state.backend.release_membership(&bloom) {
             Ok(released) => ReleaseMembershipResult::Ok { released },
             Err(error) => ReleaseMembershipResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_record_dispatch_description(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_>,
+        mail: RecordDispatchDescription,
+    ) -> RecordDispatchDescriptionResult {
+        let RecordDispatchDescription { bloom, workpiece, description } = mail;
+        match state.backend.record_dispatch_description(&bloom, &workpiece, &description) {
+            Ok(()) => RecordDispatchDescriptionResult::Ok,
+            Err(error) => RecordDispatchDescriptionResult::Err { error: error.to_string() },
         }
     }
 
