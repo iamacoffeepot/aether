@@ -102,11 +102,52 @@ const MAINLINE_REF: &str = "heads/main";
 /// (ADR-0150 §The claim registry).
 const ADMISSION_REF: &str = "bloomery/admission/mainline";
 
-/// The tree a tombstone claim commit carries — the all-zero digest, distinct
-/// from any real bloom id (a bloom id is the digest of its non-empty canonical
-/// bytes), so a boot reconcile (layer (c)) can tell a tombstoned-but-undeleted
-/// ref an interrupted release left from a live claim.
-const TOMBSTONE_TREE: Digest = Digest::from_bytes([0u8; 32]);
+/// Git's canonical sha1 empty-tree object — always resolvable with no prior
+/// tree/blob write, so every claim commit points here instead of at a per-claim
+/// tree. Correct for a real (sha1) GitHub repo today; the amendment defers the
+/// object-format transition, so a future sha256 repo's empty tree is a
+/// different sha (§Side findings).
+pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// The `Bloom-Id` message-line prefix a claim commit carries its holder on
+/// (ADR-0150 amendment, #3598): `Bloom-Id: sha256-<hex>` for a live hold,
+/// `Bloom-Id: tombstone` for the sweep-me sentinel. Never a bare object sha —
+/// GitHub's Git Data API 500s on a `tree` naming a non-existent tree and its
+/// pre-receive hook rejects bare 64-hex in a ref name, the failures the first
+/// live bloom trial (2026-07-17) hit tree-punning a bloom id.
+const BLOOM_ID_PREFIX: &str = "Bloom-Id: ";
+const BLOOM_ID_TOMBSTONE: &str = "tombstone";
+const BLOOM_ID_SHA256_PREFIX: &str = "sha256-";
+
+/// Render a claim commit's message: a legible lead line plus the parseable
+/// `Bloom-Id: sha256-<hex>` line [`parse_bloom_line`] resolves back.
+pub fn render_claim_message(bloom: &BloomId) -> String {
+    format!("bloomery claim\n\n{BLOOM_ID_PREFIX}{BLOOM_ID_SHA256_PREFIX}{}", to_hex(&bloom.0))
+}
+
+/// Render a tombstone claim commit's message: the same shape as
+/// [`render_claim_message`], carrying the `tombstone` sentinel instead of a
+/// bloom id.
+pub fn render_tombstone_message() -> String {
+    format!("bloomery claim tombstone\n\n{BLOOM_ID_PREFIX}{BLOOM_ID_TOMBSTONE}")
+}
+
+/// Resolve a claim commit's holder from its message's `Bloom-Id` line — the
+/// inverse of [`render_claim_message`] / [`render_tombstone_message`].
+/// `SourceError::Malformed` for a message carrying no `Bloom-Id` line, or one
+/// whose value is neither `tombstone` nor a well-formed `sha256-<hex>` id.
+fn parse_bloom_line(message: &str) -> Result<ClaimHolder, SourceError> {
+    let Some(line) = message.lines().find_map(|line| line.strip_prefix(BLOOM_ID_PREFIX)) else {
+        return Err(SourceError::Malformed(format!("commit message `{message}` carries no Bloom-Id line")));
+    };
+    if line == BLOOM_ID_TOMBSTONE {
+        return Ok(ClaimHolder::Tombstoned);
+    }
+    line.strip_prefix(BLOOM_ID_SHA256_PREFIX)
+        .and_then(digest_from_hex)
+        .map(|digest| ClaimHolder::Held(BloomId(digest)))
+        .ok_or_else(|| SourceError::Malformed(format!("Bloom-Id line `{line}`")))
+}
 
 /// Render a digest as the 64-lowercase-hex git object sha. `pub` (not
 /// `pub(crate)`) because it lives in a private module — its reach is already
@@ -245,35 +286,47 @@ impl<C: GitDataApi> GitSource<C> {
         targets
     }
 
-    // A claim commit's tree IS the claiming bloom's id (hex-of-digest), so the
-    // holder is resolvable from the commit the ref points at via `get_commit` —
-    // the same "commit tree = hex of digest" convention `snapshot` uses. The
-    // message carries the id too, for human legibility on the shadow repo.
-    // Returns the created commit's sha (the value a ref is pointed at).
+    // A claim commit points at the well-known empty tree and carries the
+    // claiming bloom's id on a parseable `Bloom-Id` message line — never a real
+    // per-claim tree, which GitHub's Git Data API 500s on for a bloom id (a
+    // sha256 digest never names a real sha1 tree) and whose bare-hex ref-name
+    // form its pre-receive hook rejects outright. Returns the created commit's
+    // sha (the value a ref is pointed at).
     fn create_claim_commit(&self, bloom: &BloomId, parents: &[String]) -> Result<String, SourceError> {
-        let hex = to_hex(&bloom.0);
-        Ok(self.client.create_commit(&format!("bloomery claim {hex}"), &hex, parents)?.sha)
+        Ok(self.client.create_commit(&render_claim_message(bloom), EMPTY_TREE, parents)?.sha)
     }
 
-    // The bloom currently holding `name`, resolved from its claim commit's tree,
-    // or `None` if the ref does not exist.
+    // Resolve a claim commit's occupant the same way every non-tombstone-aware
+    // call site (claim_holder, transfer_seal, complete_transfer) has always
+    // read it: a live hold resolves to its bloom id; a lingering tombstone
+    // (an interrupted release whose cleanup delete never ran) resolves to a
+    // sentinel distinct from any real bloom id — grandfathering the pre-message
+    // "any current occupant" read those sites still expect, without ever
+    // writing the sentinel to git. `classify_holder` is the tombstone-aware
+    // entry point call sites that actually branch on tombstoned-vs-held
+    // (`release_targets`, `enumerate_claims`) use instead.
+    fn resolve_holder(&self, sha: &str) -> Result<BloomId, SourceError> {
+        Ok(match self.classify_holder(sha)? {
+            ClaimHolder::Held(bloom) => bloom,
+            ClaimHolder::Tombstoned => BloomId(Digest::default()),
+        })
+    }
+
+    // The bloom currently holding `name`, resolved from its claim commit's
+    // message, or `None` if the ref does not exist.
     fn claim_holder(&self, name: &str) -> Result<Option<BloomId>, SourceError> {
         match self.client.get_ref(name)? {
             None => Ok(None),
-            Some(git_ref) => Ok(Some(BloomId(self.read_commit_tree(&git_ref.sha)?))),
+            Some(git_ref) => Ok(Some(self.resolve_holder(&git_ref.sha)?)),
         }
     }
 
-    // Classify the ref pointing at `sha` for enumeration: the all-zero tombstone
-    // tree is a swept-me marker, any other tree is the holding bloom's id (the
-    // "commit tree = hex of bloom id" convention claim commits carry).
+    // Classify the ref pointing at `sha` for enumeration: parses the claim
+    // commit's message `Bloom-Id` line — `tombstone` is a swept-me marker,
+    // `sha256-<hex>` the holding bloom's id.
     fn classify_holder(&self, sha: &str) -> Result<ClaimHolder, SourceError> {
-        let tree = self.read_commit_tree(sha)?;
-        Ok(if tree == TOMBSTONE_TREE {
-            ClaimHolder::Tombstoned
-        } else {
-            ClaimHolder::Held(BloomId(tree))
-        })
+        let commit = self.client.get_commit(sha)?;
+        parse_bloom_line(&commit.message)
     }
 
     // Resolve the holder of a ref an acquire/transfer/release just found held —
@@ -324,7 +377,7 @@ impl<C: GitDataApi> GitSource<C> {
             let Some(current) = self.client.get_ref(name)? else {
                 continue;
             };
-            let holder = BloomId(self.read_commit_tree(&current.sha)?);
+            let claim_state = self.classify_holder(&current.sha)?;
             // An already-tombstoned ref is released regardless of `owner` — the
             // tombstone *is* the released state, so finishing the interrupted
             // cleanup delete is pure name reclamation, safe for any instance. But
@@ -336,7 +389,7 @@ impl<C: GitDataApi> GitSource<C> {
             // fast-forward descendant of the stale tombstone), so the name has
             // already been reclaimed by that holder — skip the delete and move on
             // rather than clobbering a claim we never owned.
-            if holder.0 == TOMBSTONE_TREE {
+            if matches!(claim_state, ClaimHolder::Tombstoned) {
                 match self.client.update_ref(name, &current.sha, false) {
                     Ok(_) => self.client.delete_ref(name)?,
                     Err(GithubError::Status { status: 422, .. }) => {}
@@ -344,13 +397,15 @@ impl<C: GitDataApi> GitSource<C> {
                 }
                 continue;
             }
+            let ClaimHolder::Held(holder) = claim_state else {
+                unreachable!("Tombstoned handled above")
+            };
             // A live ref is released only when `owner` names its holder; a `None`
             // sweep, or a mismatch, spares it and reports the holder.
             if owner != Some(&holder) {
                 return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by: holder });
             }
-            let tombstone =
-                self.client.create_commit("bloomery claim tombstone", &to_hex(&TOMBSTONE_TREE), &[current.sha])?;
+            let tombstone = self.client.create_commit(&render_tombstone_message(), EMPTY_TREE, &[current.sha])?;
             match self.client.update_ref(name, &tombstone.sha, false) {
                 Ok(_) => {}
                 // Lost the fast-forward CAS to a concurrent mutation — re-read the
@@ -474,10 +529,13 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
             // failure path — the commit create, the ref create, and (below) the
             // holder resolution — first rolls back every ref this acquire already
             // created, so an aborted acquire never leaks a partial claim.
+            // Rollback is best-effort here: a rollback fault must never mask the
+            // triggering error/outcome below, which is what the caller needs to
+            // see — so its own Result is deliberately dropped, not `?`-propagated.
             let commit = match self.create_claim_commit(bloom, &[]) {
                 Ok(commit) => commit,
                 Err(error) => {
-                    self.rollback(&created)?;
+                    let _ = self.rollback(&created);
                     return Err(error);
                 }
             };
@@ -487,11 +545,11 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
                 // first — the conflicting ref is another bloom's, never among
                 // them — then resolve and report the first conflict.
                 Err(GithubError::Status { status: 422, .. }) => {
-                    self.rollback(&created)?;
+                    let _ = self.rollback(&created);
                     return Ok(ClaimOutcome::Held { ref_kind: kind.clone(), held_by: self.require_holder(name)? });
                 }
                 Err(error) => {
-                    self.rollback(&created)?;
+                    let _ = self.rollback(&created);
                     return Err(SourceError::Github(error));
                 }
             }
@@ -511,7 +569,7 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         // predecessor to successor.
         for (kind, name) in Self::claim_targets(carried, true) {
             let current = self.client.get_ref(&name)?.ok_or_else(|| SourceError::MissingRef(name.clone()))?;
-            let holder = BloomId(self.read_commit_tree(&current.sha)?);
+            let holder = self.resolve_holder(&current.sha)?;
             if holder != *predecessor {
                 // A concurrent mutation moved the ref off the predecessor — the
                 // CAS loses cleanly, the ref never momentarily absent.
@@ -595,7 +653,7 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
             // An absent ref is thus nothing to converge: the convergent no-op.
             return Ok(ClaimOutcome::Acquired);
         };
-        let holder = BloomId(self.read_commit_tree(&current.sha)?);
+        let holder = self.resolve_holder(&current.sha)?;
         // Already at the successor — the ref this crash-interrupted transfer already
         // moved. The idempotent no-op that lets the boot re-drive converge.
         if holder == *successor {
@@ -638,7 +696,11 @@ mod tests {
         LandOutcome, SourceBackend, WorkpieceId,
     };
 
-    use super::{ADMISSION_REF, GitSource, SourceError, TOMBSTONE_TREE, digest_from_hex, to_hex};
+    use super::{
+        ADMISSION_REF, EMPTY_TREE, GitSource, SourceError, digest_from_hex, parse_bloom_line, render_claim_message,
+        render_tombstone_message, to_hex,
+    };
+    use crate::client::GitDataApi;
     use crate::testing::FakeGithub;
 
     fn digest(seed: u8) -> Digest {
@@ -674,6 +736,22 @@ mod tests {
         let source = GitSource::new(fake.clone(), false);
         source.create_namespace(&bloom(), &base).unwrap();
         (fake, bloom(), base)
+    }
+
+    #[test]
+    fn parse_bloom_line_round_trips_a_held_and_a_tombstoned_message_and_rejects_a_garbled_one() {
+        let held = bloom_id(42);
+        assert_eq!(parse_bloom_line(&render_claim_message(&held)).unwrap(), ClaimHolder::Held(held));
+        assert_eq!(parse_bloom_line(&render_tombstone_message()).unwrap(), ClaimHolder::Tombstoned);
+
+        match parse_bloom_line("no bloom-id line here") {
+            Err(SourceError::Malformed(_)) => {}
+            other => panic!("expected Malformed for a message with no Bloom-Id line, got {other:?}"),
+        }
+        match parse_bloom_line("bloomery claim\n\nBloom-Id: not-a-real-id") {
+            Err(SourceError::Malformed(_)) => {}
+            other => panic!("expected Malformed for a garbled Bloom-Id value, got {other:?}"),
+        }
     }
 
     #[test]
@@ -778,7 +856,7 @@ mod tests {
     #[test]
     fn claim_seal_acquires_every_member_and_the_admission_ref() {
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake, false);
+        let source = GitSource::new(fake.clone(), false);
         let claimant = bloom_id(1);
         let (w1, w2) = (workpiece("wp-1"), workpiece("wp-2"));
 
@@ -786,9 +864,14 @@ mod tests {
         assert_eq!(outcome, ClaimOutcome::Acquired);
 
         // Each member claim ref and the single admission ref resolves to the
-        // claiming bloom (the claim commit's tree carries its id).
+        // claiming bloom, from the claim commit's message — never its tree,
+        // which is always the well-known empty tree (a real per-claim tree is
+        // what 500s against a real GitHub repo).
         for name in [claim_ref(&w1), claim_ref(&w2), ADMISSION_REF.to_owned()] {
             assert_eq!(source.claim_holder(&name).unwrap(), Some(claimant), "{name} held by the claimant");
+            let sha = fake.ref_target(&name).unwrap();
+            let commit = source.client().get_commit(&sha).unwrap();
+            assert_eq!(commit.tree, EMPTY_TREE, "{name}'s claim commit points at the empty tree, not a real one");
         }
     }
 
@@ -864,7 +947,7 @@ mod tests {
         // A concurrent writer repoints the carried ref onto a third bloom's claim
         // commit between the predecessor's seal and the transfer.
         let w1_ref = claim_ref(&w1);
-        let intruder_commit = fake.seed_commit(&to_hex(&intruder.0));
+        let intruder_commit = fake.seed_commit_with_message(&render_claim_message(&intruder), EMPTY_TREE);
         fake.seed_ref(&w1_ref, &intruder_commit);
 
         let outcome = source.transfer_seal(&predecessor, &successor, from_ref(&w1), &[], &[]).unwrap();
@@ -922,18 +1005,19 @@ mod tests {
         assert!(fake.ref_exists(&claim_ref(&w1)), "the foreign hold is spared, not deleted");
     }
 
-    // Point `name` at a tombstone commit (all-zero tree) directly — the ref state
-    // an interrupted `release_seal` leaves after its CAS-to-tombstone linearized
-    // but its name-only cleanup delete never ran.
+    // Point `name` at a tombstone commit (empty tree + `Bloom-Id: tombstone`)
+    // directly — the ref state an interrupted `release_seal` leaves after its
+    // CAS-to-tombstone linearized but its name-only cleanup delete never ran.
     fn seed_tombstone(fake: &FakeGithub, name: &str) {
-        let commit = fake.seed_commit(&to_hex(&TOMBSTONE_TREE));
+        let commit = fake.seed_commit_with_message(&render_tombstone_message(), EMPTY_TREE);
         fake.seed_ref(name, &commit);
     }
 
-    // Point `name` at a claim commit whose tree is `holder`'s id — a live hold
-    // staged directly, sidestepping `claim_seal`'s admission-ref coupling.
+    // Point `name` at a claim commit carrying `holder`'s id on its `Bloom-Id`
+    // message line — a live hold staged directly, sidestepping `claim_seal`'s
+    // admission-ref coupling.
     fn seed_hold(fake: &FakeGithub, name: &str, holder: &BloomId) {
-        let commit = fake.seed_commit(&to_hex(&holder.0));
+        let commit = fake.seed_commit_with_message(&render_claim_message(holder), EMPTY_TREE);
         fake.seed_ref(name, &commit);
     }
 

@@ -4,24 +4,100 @@
 //! `init` / the timer / the ctx send are the thin glue the chassis-boot test and
 //! compilation cover; this pins the loop that actually dispatches and admits.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use aether_bloomery::{BloomId, DispatchPayload, Fact, StageCatalog, StageId, Transformation, WorkpieceId};
+use aether_bloomery::{
+    BloomId, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, StageCatalog, StageId,
+    Transformation, WorkHandle, WorkOrder, WorkpieceId,
+};
 use aether_bloomery_github::testing::FakeGithub;
-use aether_bloomery_github::{ActionsExecutor, Artifact, RunConclusion, RunStatus, StageVerdict};
+use aether_bloomery_github::{
+    ActionsExecutor, Artifact, ExecutorError, GithubError, RunConclusion, RunStatus, StageVerdict,
+};
 use aether_data::wire::{from_bytes, to_vec};
 
-use super::{DISPATCH_TOPIC, NameEvidenceClaims, drain_and_dispatch, pull_and_admit};
+use super::{
+    BACKOFF_CAP, DISPATCH_TOPIC, NameEvidenceClaims, backoff_delay, drain_and_dispatch, next_backoff, pull_and_admit,
+};
 use crate::bloomery::intake::attempt_artifact_name;
 use crate::bloomery::local_executor::testing::FixedRunner;
-use crate::bloomery::{ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle};
+use crate::bloomery::{ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle};
 use crate::store::{SqliteStore, StoreBackend};
+
+// A capturing executor backend: it records every submitted `WorkOrder` so a test
+// can assert exactly what `drain_and_dispatch` built — the advisory description it
+// threaded onto the construct transformation (#3595) in particular. Only `submit`
+// is driven by the drain; the other port methods are inert stubs.
+#[derive(Default)]
+struct CapturingBackend {
+    orders: Mutex<Vec<WorkOrder>>,
+}
+
+impl CapturingBackend {
+    fn orders(&self) -> Vec<WorkOrder> {
+        self.orders.lock().unwrap().clone()
+    }
+}
+
+impl ExecutorBackend for CapturingBackend {
+    type Error = ExecutorPortError;
+
+    fn submit(&self, order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        self.orders.lock().unwrap().push(order.clone());
+        Ok(WorkHandle::new(order.nonce.clone()))
+    }
+
+    fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+        Ok(ExecutionStatus::Unknown)
+    }
+
+    fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+        Ok(Vec::new())
+    }
+}
 
 const WORKFLOW: &str = "bloomery-transform.yml";
 const PINNED_REF: &str = "refs/heads/main";
 
 fn shell(fake: FakeGithub) -> ExecutorShell {
     ExecutorShell::new(Arc::new(ActionsExecutor::new(fake, WORKFLOW, PINNED_REF)))
+}
+
+/// A backend whose `submit` always refuses with a fixed HTTP status, for
+/// exercising `drain_and_dispatch`'s permanent-vs-transient branch. The fake
+/// GitHub client carries no fault-injection hook, so this test double lives
+/// host-side, mirroring `ActionsExecutor` at the same `ExecutorBackend` seam.
+struct FailingExecutor {
+    status: u16,
+}
+
+impl ExecutorBackend for FailingExecutor {
+    type Error = ExecutorError;
+
+    fn submit(&self, _order: &WorkOrder) -> Result<WorkHandle, Self::Error> {
+        Err(ExecutorError::Github(GithubError::Status { status: self.status, body: "refused".to_owned() }))
+    }
+
+    fn inspect(&self, _handle: &WorkHandle) -> Result<ExecutionStatus, Self::Error> {
+        Ok(ExecutionStatus::Unknown)
+    }
+
+    fn cancel(&self, _handle: &WorkHandle) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn stream_evidence(&self, _handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
+        Ok(Vec::new())
+    }
+}
+
+fn failing_shell(status: u16) -> ExecutorShell {
+    ExecutorShell::new(Arc::new(FailingExecutor { status }))
 }
 
 fn digest(seed: u8) -> aether_bloomery::Digest {
@@ -50,7 +126,7 @@ fn drain_and_dispatch_submits_each_dispatch_and_records_its_order() {
     let bloom = BloomId(digest(1));
     let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
 
-    let (handles, ack_through) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
 
     // One dispatch submitted, its order recorded, and the ack prefix covers it.
     assert_eq!(handles.len(), 1);
@@ -63,6 +139,54 @@ fn drain_and_dispatch_submits_each_dispatch_and_records_its_order() {
     // Acking the prefix means the entry does not re-drain.
     store.ack_outbox(Some(DISPATCH_TOPIC), sequence).unwrap();
     assert!(store.drain_outbox(Some(DISPATCH_TOPIC)).unwrap().is_empty(), "the acked dispatch does not re-drain");
+}
+
+#[test]
+fn drain_threads_the_persisted_description_onto_the_construct_order() {
+    // The #3595 seal → dispatch seam over a real store + executor shell: the
+    // description the coordinator persisted at seal (modeled by the store write
+    // seal_draft performs) is looked up by (bloom, workpiece) and threaded onto
+    // the submitted construct order's transformation, so the construct lane can
+    // name it in its `## Task` prompt.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-line", "thread the work order into the prompt").unwrap();
+    enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
+
+    drain_and_dispatch(&mut store, &shell).unwrap();
+
+    let orders = backend.orders();
+    assert_eq!(orders.len(), 1, "the construct dispatch submitted");
+    assert_eq!(
+        orders[0].transformation.description.as_deref(),
+        Some("thread the work order into the prompt"),
+        "the persisted description reached the submitted construct order",
+    );
+}
+
+#[test]
+fn drain_leaves_the_description_none_and_still_dispatches_when_none_persisted() {
+    // The fail-legible path: a member with no persisted description dispatches
+    // subject-only (description `None`) rather than being dropped — the #3596
+    // completion gate then catches an empty-work run, but the dispatch itself
+    // must never silently vanish.
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
+
+    let (handles, _, _) = drain_and_dispatch(&mut store, &shell).unwrap();
+
+    assert_eq!(handles.len(), 1, "a member with no description still dispatches, never dropped");
+    let orders = backend.orders();
+    assert_eq!(orders.len(), 1);
+    assert!(
+        orders[0].transformation.description.is_none(),
+        "no persisted description leaves the transformation None — a legible subject-only run",
+    );
 }
 
 #[test]
@@ -88,7 +212,7 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
     store.enqueue_outbox(DISPATCH_TOPIC, &to_vec(&payload).unwrap()).unwrap();
     enqueue_construct_dispatch(&mut store, bloom, "wp-c", 7);
 
-    let (handles, ack_through) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
 
     // Only the first entry submitted; the drain broke at the subject-less entry, so
     // the ack prefix stops there rather than jumping past it to the third entry.
@@ -113,7 +237,7 @@ fn pull_and_admit_admits_a_matching_construct_result_as_attempt_completed() {
     let bloom = BloomId(digest(1));
     let (sequence, subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
 
-    let (mut tracked, ack_through) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (mut tracked, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
     store.ack_outbox(Some(DISPATCH_TOPIC), ack_through.unwrap()).unwrap();
     let nonce = format!("dispatch-{sequence}");
 
@@ -168,7 +292,7 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
     let bloom = BloomId(digest(1));
     let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-local", 5);
 
-    let (mut tracked, ack_through) = drain_and_dispatch(&mut store, &shell).unwrap();
+    let (mut tracked, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
     store.ack_outbox(Some(DISPATCH_TOPIC), ack_through.unwrap()).unwrap();
     assert_eq!(tracked.len(), 1, "the construct order dispatched to the local backend");
     assert_eq!(tracked[0].nonce.0, format!("dispatch-{sequence}"), "the handle carries the dispatch nonce");
@@ -185,4 +309,86 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
         }
         other => panic!("expected a Fact::AttemptCompleted, got {other:?}"),
     }
+}
+
+#[test]
+fn drain_and_dispatch_parks_a_permanent_refusal_instead_of_re_driving() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let shell = failing_shell(404);
+    let bloom = BloomId(digest(1));
+    let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-wrong-workflow", 5);
+
+    let (handles, ack_through, transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
+
+    // The permanent refusal is acked past (parked), not left to re-drive, and it
+    // carries no transient-failure sequence for the backoff cursor to key off.
+    assert!(handles.is_empty(), "the refused entry never dispatched");
+    assert_eq!(ack_through, Some(sequence), "a permanent refusal acks the entry past rather than re-driving it");
+    assert_eq!(transient_failure, None, "a permanent park is not a transient failure the backoff cursor tracks");
+
+    store.ack_outbox(Some(DISPATCH_TOPIC), ack_through.unwrap()).unwrap();
+    assert!(store.drain_outbox(Some(DISPATCH_TOPIC)).unwrap().is_empty(), "the parked entry does not re-drain");
+}
+
+#[test]
+fn drain_and_dispatch_leaves_a_transient_refusal_undrained_to_retry() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let shell = failing_shell(500);
+    let bloom = BloomId(digest(1));
+    let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-flaky", 5);
+
+    let (handles, ack_through, transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
+
+    assert!(handles.is_empty(), "the refused entry never dispatched");
+    assert_eq!(ack_through, None, "a transient refusal stops the ack prefix so the entry re-drains");
+    assert_eq!(transient_failure, Some(sequence), "the transient failure names the head sequence for backoff");
+    assert_eq!(
+        store.drain_outbox(Some(DISPATCH_TOPIC)).unwrap().len(),
+        1,
+        "the un-acked entry re-drains on the next tick"
+    );
+}
+
+#[test]
+fn backoff_delay_is_monotonic_non_decreasing_and_clamped_at_the_cap() {
+    let mut previous = Duration::ZERO;
+    for failures in 1..=20 {
+        let delay = backoff_delay(failures);
+        assert!(delay >= previous, "backoff_delay({failures}) regressed below the prior failure count's delay");
+        assert!(delay <= BACKOFF_CAP, "backoff_delay({failures}) exceeded the cap");
+        previous = delay;
+    }
+    assert_eq!(backoff_delay(20), BACKOFF_CAP, "a long failure streak clamps at the cap rather than overflowing");
+}
+
+#[test]
+fn next_backoff_grows_on_the_same_sequence_and_clears_on_success() {
+    let before = Instant::now();
+
+    let first = next_backoff(None, Some(7)).expect("a transient failure opens a cursor");
+    assert_eq!(first.sequence, 7);
+    assert_eq!(first.failures, 1);
+    assert!(first.retry_after >= before + backoff_delay(1));
+
+    let second =
+        next_backoff(Some(&first), Some(7)).expect("a repeated failure of the same sequence keeps backing off");
+    assert_eq!(second.sequence, 7);
+    assert_eq!(second.failures, 2, "consecutive failures of the same head entry grow the count");
+    assert!(second.retry_after > first.retry_after, "a grown failure count pushes the retry window further out");
+
+    assert!(next_backoff(Some(&second), None).is_none(), "a success (no transient failure) clears the cursor");
+}
+
+#[test]
+fn next_backoff_resets_the_count_on_a_changed_head_sequence() {
+    let stuck = next_backoff(None, Some(7)).unwrap();
+    let stuck = next_backoff(Some(&stuck), Some(7)).unwrap();
+    assert_eq!(stuck.failures, 2);
+
+    // Sequence 7 cleared some other way (parked, or a later success) and a new
+    // head entry, sequence 9, now fails transiently — the count restarts at 1
+    // rather than continuing to grow the prior entry's tally.
+    let restarted = next_backoff(Some(&stuck), Some(9)).unwrap();
+    assert_eq!(restarted.sequence, 9);
+    assert_eq!(restarted.failures, 1, "a changed head sequence resets the consecutive-failure count");
 }

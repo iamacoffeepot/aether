@@ -59,6 +59,36 @@ namespace is auditable against journals. The local store's uniqueness constraint
 backstop; the ref namespace is the inter-instance truth for claims — the one datum whose truth
 deliberately lives outside the instance journal.
 
+**Digests map to real git objects through persisted, format-tagged correspondence, not by being git
+object shas** *(amended 2026-07-18: drawn from the first live bloom trial's claim-acquisition 500 and
+rejected refs, #3590)*. The claim-registry mechanics above, and the git source port generally, were
+first sliced on the premise that a bloomery `Digest` (a 32-byte sha256) **is** a git object sha rendered
+64 lowercase hex — true only against a hypothetical sha256-object-format repository. Real GitHub
+repositories are sha1 (20-byte, 40-hex) object format, and a bloom digest is the content-address of a
+bloom *value* (sha256 over aether-wire bytes), never the sha1 of any git object — so handing a digest to
+git as an object or ref name fails against a real repository. The mapping is fixed here:
+
+- **`Digest` stays a pure content-address.** No dual meaning, and no ADR-0149 value-vocabulary change.
+  The port persists the git-object↔bloom-digest correspondence as *data*: given a real commit or tree,
+  it records which bloom value that object carries. The git side of each correspondence is
+  **format-tagged bytes** — `sha1`/20 today, `sha256`/32 if GitHub ships SHA-256 repositories — so the
+  schema survives the object-format transition unchanged.
+- **Digest ≡ git-object-id is explicitly deferred.** Even a native SHA-256 git id (sha256 of git's
+  object serialization) never equals a bloom digest (sha256 of our record encoding), so collapsing the
+  two is a separate ADR-level decision layered on this seam, not a direction this slice builds toward.
+  Zero-padding a sha1 into the 32-byte digest slot is rejected for the same reason: it is exactly the
+  encoding a SHA-256 future obsoletes, and it dual-means `Digest`.
+- **The claim commit carries the bloom id in its message, over the empty tree.** A claim commit points
+  at git's well-known empty tree — no per-claim tree or blob write — and records the claiming bloom id
+  on a parseable message line (`Bloom-Id: sha256-<hex>`), read back on claim resolution. This replaces
+  the tree-is-the-bloom-id encoding the first slice used, whose synthetic tree sha the Git Data API
+  rejects (HTTP 500). Human-legible on the shadow repo, smallest server footprint, and adequate inside
+  this ADR's operator-trust boundary; the blob shape (a structured blob in a real minimal tree) is the
+  reviewed alternative should richer claim payloads later justify the extra per-claim tree write.
+- **Claim ref components are never bare object-id hex.** GitHub's pre-receive hook rejects ref-name
+  segments that look like object ids (and would under SHA-256 too), so any ref segment naming a digest
+  uses a prefixed form (`sha256-<hex>`) rather than bare hex.
+
 An instance heals **its own** interrupted operations at boot — a heal is in scope exactly when the
 instance's journal proves ownership of every ref it touches *(amended 2026-07-17: drawn while scoping
 the deep-heal slice, #3555)*. The claim-registry port grows two ops for this: claim-ref **enumeration**

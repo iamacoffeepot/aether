@@ -27,6 +27,7 @@ use aether_kinds::trace::Settled;
 
 use crate::artifacts::GetResult;
 use crate::signing::VerifyResult;
+use crate::store::RecordDispatchDescriptionResult;
 
 /// Addressing identity for the `aether.bloomery.api` capability (ADR-0122).
 #[actor(singleton)]

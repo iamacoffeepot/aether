@@ -68,6 +68,7 @@ use super::dto::{
 use crate::artifacts::{ArtifactsError, Get, GetResult};
 use crate::bloomery::{AdmissionRequest, ApprovalPolicy, Decision, Gate};
 use crate::signing::{Verify, VerifyResult};
+use crate::store::{RecordDispatchDescription, RecordDispatchDescriptionResult};
 
 /// The runtime name of the control-core wasm component's mailbox — the
 /// ADR-0099 lineage address the component host registers the autoloaded actor
@@ -262,6 +263,21 @@ impl NativeActor for BloomeryApiCapability {
     #[handler::manual]
     fn on_verify_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: VerifyResult) {
         state.resolve_verify(ctx, mail);
+    }
+
+    /// The store's reply to a fire-and-forget dispatch-description write (#3595).
+    /// The seal already replied to the operator from the admit outcome, so this
+    /// reply carries no obligation — absorb it (logging a failed write) rather
+    /// than letting it warn-drop as an unhandled kind.
+    #[handler::manual]
+    fn on_record_description_result(
+        _state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_, Manual>,
+        mail: RecordDispatchDescriptionResult,
+    ) {
+        if let RecordDispatchDescriptionResult::Err { error } = mail {
+            tracing::warn!(target: "aether_bloomery_host::api", %error, "dispatch-description write failed at seal");
+        }
     }
 
     /// A downstream chain settled. If its request is still pending, the
@@ -474,8 +490,47 @@ impl ApiCapabilityState {
         let mut gated = draft;
         gated.proposals = sealed_proposals;
         let spec = gated.seal();
+        // Persist each member's advisory work-order description keyed by the
+        // sealed bloom id, before the seal defers — the text is operator-supplied
+        // context (#3595) the executor driver reads back at dispatch, and the api
+        // cap is mail-only, so it rides a store write rather than the sealed spec.
+        // Best-effort and fire-and-forget: a description write never gates the
+        // seal, and a member with none simply dispatches subject-only.
+        Self::persist_descriptions(ctx, &spec, &request.descriptions);
         let key = request.idempotency_key.unwrap_or_else(|| hex_encode(spec.id().0.as_bytes()));
         self.admit(ctx, &Event { idempotency_key: IdempotencyKey(key), fact: Fact::Seal(spec) })
+    }
+
+    /// Write one dispatch-description row per member the operator supplied text
+    /// for, keyed by (sealed bloom id, workpiece). Fire-and-forget to the
+    /// `aether.store` mailbox — the reply is absorbed by
+    /// [`on_record_description_result`](BloomeryApiCapability::on_record_description_result);
+    /// the seal's own outcome is unaffected. A description for a member that later
+    /// fails to seal is an orphan row keyed by a bloom id that never dispatches —
+    /// harmless and never read.
+    fn persist_descriptions(
+        ctx: &NativeCtx<'_, Manual>,
+        spec: &aether_bloomery::BloomSpec,
+        descriptions: &BTreeMap<String, String>,
+    ) {
+        let bloom = spec.id().0.as_bytes().to_vec();
+        for member in spec.members() {
+            let Some(description) = descriptions.get(&member.workpiece.0) else {
+                continue;
+            };
+            let record = RecordDispatchDescription {
+                bloom: bloom.clone(),
+                workpiece: member.workpiece.0.clone(),
+                description: description.clone(),
+            };
+            // Fire-and-forget: the seal replies from its own admit outcome, so the
+            // returned MailId is deliberately dropped (no settlement subscription).
+            let _ = ctx.send_envelope_detached(
+                store_mailbox(),
+                <RecordDispatchDescription as Kind>::ID,
+                &record.encode_into_bytes(),
+            );
+        }
     }
 
     /// `POST /blooms/{id}/supersede` — seal the named successor draft and admit
@@ -836,5 +891,22 @@ mod tests {
         let parsed: SealRequest = parse_optional_body(br#"{"idempotency_key":"k"}"#).expect("well-formed body parses");
         assert_eq!(parsed.idempotency_key.as_deref(), Some("k"));
         assert!(parse_optional_body::<SealRequest>(b"not json").is_err());
+    }
+
+    #[test]
+    fn seal_request_descriptions_default_empty_and_parse_per_member() {
+        // The #3595 operator contract: `descriptions` is optional (a body without
+        // it still seals, not a 400 — the `#[serde(default)]` guard), and when
+        // present it maps each workpiece id to its work-order text. A regression
+        // dropping the default would break every description-less seal.
+        let none: SealRequest =
+            parse_optional_body(br#"{"idempotency_key":"k"}"#).expect("no descriptions still parses");
+        assert!(none.descriptions.is_empty(), "an absent descriptions map defaults empty rather than erroring");
+
+        let with: SealRequest =
+            parse_optional_body(br#"{"descriptions":{"wp-a":"build the thing","wp-b":"and the other"}}"#)
+                .expect("a descriptions map parses");
+        assert_eq!(with.descriptions.get("wp-a").map(String::as_str), Some("build the thing"));
+        assert_eq!(with.descriptions.get("wp-b").map(String::as_str), Some("and the other"));
     }
 }
