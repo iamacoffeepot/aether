@@ -14,8 +14,8 @@ on:
       command:
         description: "Typed verify command id (verify.fmt / verify.clippy / verify.docs)"
         required: true
-      ref:
-        description: "Exact digest to check out"
+      subject:
+        description: "Exact digest (checkout target) the resolved work order names"
         required: true
       nonce:
         description: "Idempotency nonce stamped into evidence.json"
@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.subject }}
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           components: rustfmt, clippy
