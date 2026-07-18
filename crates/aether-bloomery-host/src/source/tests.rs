@@ -32,7 +32,8 @@ fn workpiece(id: &str) -> WorkpieceId {
 /// namespace — the claim ops act on their own claim refs, not the integration
 /// branch, so they need no base commit.
 fn claim_state() -> SourceCapabilityState {
-    let backend = GitSource::new(FakeGithub::new(), false);
+    let fake = FakeGithub::new();
+    let backend = GitSource::new(fake.clone(), Arc::new(fake), false);
     SourceCapabilityState::new(SourceShell::new(Arc::new(backend)))
 }
 
@@ -46,7 +47,7 @@ fn state_over_fake(cas_land_enabled: bool) -> (SourceCapabilityState, FakeGithub
     fake.seed_ref_at("heads/main", &base);
 
     let bloom = BloomId(digest(1));
-    let backend = GitSource::new(fake.clone(), cas_land_enabled);
+    let backend = GitSource::new(fake.clone(), Arc::new(fake.clone()), cas_land_enabled);
     backend.create_namespace(&bloom, &base).unwrap();
     (SourceCapabilityState::new(SourceShell::new(Arc::new(backend))), fake, bloom, base)
 }
@@ -70,8 +71,10 @@ fn land_maps_a_moved_base_to_base_moved() {
     // with `LandingDisabled`; the moved-base branch is the mapping under test.
     let (state, fake, bloom, base) = state_over_fake(true);
     // Advance mainline past `base` behind the capability's back — the shape a
-    // concurrent land produces.
+    // concurrent land produces. Seed the moved head's git-object correspondence so
+    // the port reverse-resolves the real mainline object to it (ADR-0150).
     let moved = digest(77);
+    fake.seed_git_object(&moved);
     fake.seed_ref_at("heads/main", &moved);
 
     let reply = state.land(&to_vec(&bloom).unwrap(), &to_vec(&base).unwrap(), &to_vec(&digest(90)).unwrap());

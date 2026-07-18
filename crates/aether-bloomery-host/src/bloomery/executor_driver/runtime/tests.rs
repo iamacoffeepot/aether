@@ -21,7 +21,10 @@ const WORKFLOW: &str = "bloomery-transform.yml";
 const PINNED_REF: &str = "refs/heads/main";
 
 fn shell(fake: FakeGithub) -> ExecutorShell {
-    ExecutorShell::new(Arc::new(ActionsExecutor::new(fake, WORKFLOW, PINNED_REF)))
+    // The dispatched orders check out `digest(0xC0)`; seed its correspondence so
+    // `submit` resolves the subject (the fake's store is shared across clones).
+    fake.seed_git_object(&digest(0xC0));
+    ExecutorShell::new(Arc::new(ActionsExecutor::new(fake.clone(), Arc::new(fake), WORKFLOW, PINNED_REF)))
 }
 
 fn digest(seed: u8) -> aether_bloomery::Digest {
@@ -155,12 +158,19 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
     // GitHub, no fork, no secret. The construct record carries no `status`, so the
     // verdict folds from the (stubbed) success exit to a passing attempt.
     let base = tempfile::TempDir::new().unwrap();
-    let actions = Arc::new(ActionsExecutor::new(FakeGithub::new(), WORKFLOW, PINNED_REF));
+    // A correspondence seeded with the dispatch checkout (`digest(0xC0)`) so both
+    // backends resolve it — the local lane checks it out for the `git worktree add`.
+    let correspondence: aether_bloomery_github::SharedCorrespondence = {
+        let fake = FakeGithub::new();
+        fake.seed_git_object(&digest(0xC0));
+        Arc::new(fake)
+    };
+    let actions = Arc::new(ActionsExecutor::new(FakeGithub::new(), Arc::clone(&correspondence), WORKFLOW, PINNED_REF));
     let runner = FixedRunner {
         evidence: r#"{"command":"construct.implement","nonce":"x","result_record":{"schema":1}}"#.to_owned(),
         lifecycle: RunLifecycle::Exited { success: true },
     };
-    let local = Arc::new(LocalExecutor::new(Arc::new(runner), base.path(), None, None));
+    let local = Arc::new(LocalExecutor::new(Arc::new(runner), correspondence, base.path(), None, None));
     let routing = RoutingExecutor::new(actions, local, vec!["construct.".to_owned()]);
     let shell = ExecutorShell::new(Arc::new(routing));
 

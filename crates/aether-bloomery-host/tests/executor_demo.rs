@@ -48,7 +48,9 @@ fn work_order(nonce: &str) -> WorkOrder {
 // fake handle to seed/inspect the Actions surface.
 fn demo() -> (ExecutorShell, FakeGithub) {
     let fake = FakeGithub::new();
-    let backend = ActionsExecutor::new(fake.clone(), WORKFLOW, PINNED_REF);
+    // Seed the order's checkout correspondence so `submit` resolves the subject.
+    fake.seed_git_object(&Digest::from_bytes([0xC0; 32]));
+    let backend = ActionsExecutor::new(fake.clone(), Arc::new(fake.clone()), WORKFLOW, PINNED_REF);
     (ExecutorShell::new(Arc::new(backend)), fake)
 }
 

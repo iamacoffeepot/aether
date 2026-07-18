@@ -20,9 +20,10 @@
 use std::sync::Arc;
 
 use aether_bloomery::{LandingReceipt, ProjectionBackend, ViewDocument};
-use aether_bloomery_github::{GithubConfig, GithubError, GithubProjection, ReqwestGithub};
+use aether_bloomery_github::{GithubConfig, GithubError, GithubProjection, ReqwestGithub, SharedCorrespondence};
 
 use crate::app_auth::AppTokenSource;
+use crate::store::SqliteCorrespondence;
 
 /// The GitHub outward-mirror connection knobs (ADR-0090 derive-`Config`).
 #[derive(Clone, Debug, aether_substrate::Config)]
@@ -224,6 +225,26 @@ impl GithubMirrorConfig {
         } else {
             ReqwestGithub::new(&self.to_github_config())
         }
+    }
+
+    /// Open the persisted git-object↔bloom-digest correspondence the source and
+    /// executor ports resolve real git shas through (ADR-0150), over the **same**
+    /// `SQLite` [`store_path`](Self::store_path) the `StoreCapability` owns — one
+    /// persistence layer serves the journal and the correspondence. Every port
+    /// shell that resolves a digest to a git object opens its own connection to
+    /// that file (WAL serializes the rare concurrent write), so one config serves
+    /// the mirror, source, and executor caps.
+    ///
+    /// # Errors
+    /// The `SQLite` connection could not be opened or its migration failed.
+    pub fn connect_correspondence(&self) -> Result<SharedCorrespondence, GithubError> {
+        let store = SqliteCorrespondence::open(&self.store_path)
+            // The correspondence store faulting at open is a boot-time
+            // configuration failure; surface it through the shell's `GithubError`
+            // bound (a store fault, mapped onto the transport arm) rather than
+            // widening every shell's `connect` signature.
+            .map_err(|error| GithubError::Transport(format!("correspondence store: {error}")))?;
+        Ok(Arc::new(store))
     }
 }
 

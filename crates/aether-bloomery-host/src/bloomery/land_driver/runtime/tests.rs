@@ -22,7 +22,7 @@ fn digest(seed: u8) -> Digest {
 // A fake-GitHub-backed source shell with the CAS-land gate set explicitly, so a
 // test drives the same shell the running driver holds.
 fn shell(fake: FakeGithub, cas_land_enabled: bool) -> SourceShell {
-    SourceShell::new(Arc::new(GitSource::new(fake, cas_land_enabled)))
+    SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), cas_land_enabled)))
 }
 
 // Seed a fake with a base commit and a mainline ref at it, returning the fake and
@@ -44,10 +44,12 @@ fn enqueue_land(store: &mut SqliteStore, bloom: BloomId, expected_base: Digest, 
 #[test]
 fn landed_admits_a_fact_land_and_acks_the_entry() {
     let (fake, base) = seeded();
+    let new_head = digest(90);
+    // Seed the new head's git-object correspondence so the CAS resolves its target.
+    fake.seed_git_object(&new_head);
     let source = shell(fake, true);
     let mut store = SqliteStore::open(":memory:").unwrap();
     let bloom = BloomId(digest(1));
-    let new_head = digest(90);
     let sequence = enqueue_land(&mut store, bloom, base, new_head);
 
     let (admits, ack_through) = drain_and_land(&mut store, &source).unwrap();

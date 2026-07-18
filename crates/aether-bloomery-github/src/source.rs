@@ -8,14 +8,28 @@
 //! [`IntegrateOutcome`] / [`LandOutcome`]), and no GitHub type crosses into a
 //! core `aether_bloomery` module.
 //!
-//! # Digests are git object shas
+//! # Digests map to git objects through persisted correspondence
 //!
-//! A bloomery [`Digest`] is a 32-byte sha256; a git object addressed under the
-//! sha256 object format is the same 32 bytes, rendered as 64 lowercase hex. So
-//! this backend treats a commit or tree object sha as the hex of a `Digest` and
-//! back — the one representation choice the ADR carved out as implementation
-//! level (the four operations, the CAS-land gate, and "no core module names a
-//! GitHub type" are fixed; the ref layout and sha encoding are the slice's).
+//! A bloomery [`Digest`] is a 32-byte sha256 content-address of a bloom *value*
+//! — never the sha of any git object. Real GitHub is sha1 (20-byte / 40-hex)
+//! object format, so this backend cannot hex-pun a digest into an object sha
+//! (ADR-0150, amended 2026-07-18 for [#3590]). The mainline paths — `snapshot`,
+//! `create_namespace`, `integrate`, and the CAS `land` — resolve real git shas
+//! through a persisted [`Correspondence`] handle held next to the client:
+//! forward ([`Correspondence::resolve_git`]) to turn a digest into the git
+//! object that carries it, reverse ([`Correspondence::resolve_digest`]) to read a
+//! real object sha back to its digest. An object the store never recorded is the
+//! clean [`SourceError::UnresolvedCorrespondence`] — the honest boundary this
+//! slice draws — in place of the old fixed-64-hex `Malformed` that a real sha1
+//! repo tripped before any swap. `to_hex` survives only where a digest names a
+//! **ref-name segment** (the branch namespace below), never an object sha.
+//!
+//! The claim-registry paths still encode the bloom id in a synthetic commit
+//! tree (`read_commit_tree` / `digest_from_hex` on `to_hex(&bloom.0)`); the
+//! empty-tree-plus-message-line encoding ADR-0150 mandates for them is the
+//! sibling claim-encoding slice's ([#3590]'s other child), not this one's.
+//!
+//! [#3590]: https://github.com/iamacoffeepot/aether/issues/3590
 //!
 //! # The branch namespace
 //!
@@ -34,6 +48,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
 
 use aether_bloomery::{
     BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome, LandOutcome,
@@ -41,6 +56,12 @@ use aether_bloomery::{
 };
 
 use crate::client::{GitDataApi, GithubError};
+use crate::correspondence::{Correspondence, CorrespondenceError, GitObjectId};
+
+/// The persisted correspondence the source port resolves real git shas through,
+/// held behind a shared handle so a `SourceBackend`'s `&self` methods can drive
+/// it. The host mounts a `SQLite`-backed impl; tests mount an in-memory one.
+pub type SharedCorrespondence = Arc<dyn Correspondence + Send + Sync>;
 
 /// A source-port fault, distinct from the clean [`IntegrateOutcome`] /
 /// [`LandOutcome`] refusals (which are not errors). Its own type because the
@@ -60,9 +81,20 @@ pub enum SourceError {
     /// mainline ref.
     MissingRef(String),
     /// A ref name or object sha did not parse as the expected hex-of-`Digest`
-    /// form — a malformed checkpoint ref, or a commit/tree sha that is not a
-    /// 64-hex sha256.
+    /// form — a malformed checkpoint ref, or a git object sha that is not a
+    /// 40-hex sha1 / 64-hex sha256 (git never hands back such a string, so this
+    /// is a genuine transport-garbage fault, not an expected miss).
     Malformed(String),
+    /// A mainline path resolved a digest ↔ git object through the
+    /// [`Correspondence`] store and found none recorded — the honest boundary
+    /// this slice draws (ADR-0150): the object was never materialized or its
+    /// correspondence never seeded, so the port refuses cleanly rather than
+    /// hex-punning a digest git cannot resolve. `what` names which resolution
+    /// missed (mainline head, candidate tree, …).
+    UnresolvedCorrespondence(String),
+    /// The [`Correspondence`] store itself faulted (a durable read/write failed),
+    /// distinct from a clean absent correspondence.
+    Correspondence(CorrespondenceError),
 }
 
 impl fmt::Display for SourceError {
@@ -74,6 +106,10 @@ impl fmt::Display for SourceError {
             }
             Self::MissingRef(name) => write!(f, "git source backend: required ref `{name}` does not exist"),
             Self::Malformed(what) => write!(f, "git source backend: malformed {what}"),
+            Self::UnresolvedCorrespondence(what) => {
+                write!(f, "git source backend: no git-object correspondence recorded for {what}")
+            }
+            Self::Correspondence(error) => write!(f, "git source backend: {error}"),
         }
     }
 }
@@ -82,6 +118,7 @@ impl Error for SourceError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Github(error) => Some(error),
+            Self::Correspondence(error) => Some(error),
             _ => None,
         }
     }
@@ -90,6 +127,12 @@ impl Error for SourceError {
 impl From<GithubError> for SourceError {
     fn from(error: GithubError) -> Self {
         Self::Github(error)
+    }
+}
+
+impl From<CorrespondenceError> for SourceError {
+    fn from(error: CorrespondenceError) -> Self {
+        Self::Correspondence(error)
     }
 }
 
@@ -108,9 +151,12 @@ const ADMISSION_REF: &str = "bloomery/admission/mainline";
 /// ref an interrupted release left from a live claim.
 const TOMBSTONE_TREE: Digest = Digest::from_bytes([0u8; 32]);
 
-/// Render a digest as the 64-lowercase-hex git object sha. `pub` (not
-/// `pub(crate)`) because it lives in a private module — its reach is already
-/// crate-internal, and `pub(crate)` here would be redundant.
+/// Render a digest as 64 lowercase hex — the form a digest takes when it names
+/// a **ref-name segment** in the branch namespace (`heads/bloom/<hex>/…`), the
+/// one place a digest is still hex-rendered now that object shas resolve through
+/// the [`Correspondence`] store. `pub` (not `pub(crate)`) because it lives in a
+/// private module — its reach is already crate-internal, and `pub(crate)` here
+/// would be redundant.
 pub fn to_hex(digest: &Digest) -> String {
     let mut out = String::with_capacity(64);
     for byte in digest.as_bytes() {
@@ -130,9 +176,12 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-/// Parse a 64-hex git object sha back into a digest, or `None` if it is not
-/// exactly 64 hex characters. `pub` for the same private-module reason as
-/// [`to_hex`].
+/// Parse a 64-hex ref-name segment back into a digest, or `None` if it is not
+/// exactly 64 hex characters — the inverse of [`to_hex`] for the branch
+/// namespace's digest segments (checkpoint enumeration) and the claim-registry
+/// synthetic-tree encoding. **Not** for a git object sha: those are sha1/40 or
+/// sha256/32 and resolve through the [`Correspondence`] store. `pub` for the
+/// same private-module reason as [`to_hex`].
 pub fn digest_from_hex(sha: &str) -> Option<Digest> {
     if sha.len() != 64 {
         return None;
@@ -145,27 +194,61 @@ pub fn digest_from_hex(sha: &str) -> Option<Digest> {
     Some(Digest::from_bytes(bytes))
 }
 
-/// The git source backend over a [`GitDataApi`] client. Holds the
-/// `cas_land_enabled` gate — on by default since ADR-0149 migration step 3 made
-/// the CAS `land` the landing of record; a `false` gate is the explicit kill
-/// switch under which `land` refuses.
+/// The git source backend over a [`GitDataApi`] client and a persisted
+/// [`Correspondence`] handle (ADR-0150). The correspondence is the seam the
+/// mainline paths resolve real git shas through; the `cas_land_enabled` gate is
+/// on by default since ADR-0149 migration step 3 made the CAS `land` the landing
+/// of record — a `false` gate is the explicit kill switch under which `land`
+/// refuses.
 pub struct GitSource<C: GitDataApi> {
     client: C,
+    correspondence: SharedCorrespondence,
     cas_land_enabled: bool,
 }
 
 impl<C: GitDataApi> GitSource<C> {
-    /// Build a source backend over `client`, with mainline landing gated by
-    /// `cas_land_enabled` (`false` is the kill switch under which `land`
-    /// refuses; production wires it on, per ADR-0149 migration step 3).
-    pub const fn new(client: C, cas_land_enabled: bool) -> Self {
-        Self { client, cas_land_enabled }
+    /// Build a source backend over `client` and `correspondence`, with mainline
+    /// landing gated by `cas_land_enabled` (`false` is the kill switch under
+    /// which `land` refuses; production wires it on, per ADR-0149 migration
+    /// step 3).
+    pub fn new(client: C, correspondence: SharedCorrespondence, cas_land_enabled: bool) -> Self {
+        Self { client, correspondence, cas_land_enabled }
     }
 
     /// Borrow the underlying client (test introspection).
     #[must_use]
     pub const fn client(&self) -> &C {
         &self.client
+    }
+
+    // Forward-resolve a bloom digest to the real git object sha it corresponds
+    // to, or the clean `UnresolvedCorrespondence` when none was recorded. `what`
+    // names the resolution for the error message.
+    fn resolve_git_sha(&self, digest: &Digest, what: &str) -> Result<String, SourceError> {
+        self.correspondence
+            .resolve_git(digest)?
+            .map(|git| git.to_hex())
+            .ok_or_else(|| SourceError::UnresolvedCorrespondence(what.to_owned()))
+    }
+
+    // Reverse-resolve a real git object sha to the bloom digest it corresponds
+    // to. A sha that is not a 40/64-hex object id is `Malformed` (transport
+    // garbage); a well-formed sha with no recorded correspondence is the clean
+    // `UnresolvedCorrespondence` — the real-repo boundary that retires the old
+    // fixed-64-hex `Malformed` gate.
+    fn resolve_object_digest(&self, sha: &str, what: &str) -> Result<Digest, SourceError> {
+        let git =
+            GitObjectId::from_hex(sha).ok_or_else(|| SourceError::Malformed(format!("git object sha `{sha}`")))?;
+        self.correspondence.resolve_digest(&git)?.ok_or_else(|| SourceError::UnresolvedCorrespondence(what.to_owned()))
+    }
+
+    // The tree digest at real commit `sha`: read the commit for its real tree
+    // object sha, then reverse-resolve that object to its tree digest. The
+    // integration-branch dual of `read_commit_tree`, which stays on the claim
+    // path's synthetic-tree encoding.
+    fn integration_tree(&self, sha: &str) -> Result<Digest, SourceError> {
+        let commit = self.client.get_commit(sha)?;
+        self.resolve_object_digest(&commit.tree, "integration branch tree object")
     }
 
     fn integration_ref(bloom: &BloomId) -> String {
@@ -192,7 +275,7 @@ impl<C: GitDataApi> GitSource<C> {
     /// # Errors
     /// The Git Data ref reads/writes failed.
     pub fn create_namespace(&self, bloom: &BloomId, base: &Digest) -> Result<(), SourceError> {
-        let base_sha = to_hex(base);
+        let base_sha = self.resolve_git_sha(base, "namespace base head digest")?;
         self.ensure_ref(&Self::integration_ref(bloom), &base_sha)?;
         self.ensure_ref(&Self::attempt_ref(bloom, 1), &base_sha)?;
         Ok(())
@@ -370,7 +453,11 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
     type Error = SourceError;
 
     fn snapshot(&self, base: &Digest) -> Result<SourceSnapshot, Self::Error> {
-        let tree = self.read_commit_tree(&to_hex(base))?;
+        // Forward-resolve the base head digest to its real commit, read that
+        // commit, and reverse-resolve its real tree sha back to the tree digest.
+        let base_sha = self.resolve_git_sha(base, "snapshot base head digest")?;
+        let commit = self.client.get_commit(&base_sha)?;
+        let tree = self.resolve_object_digest(&commit.tree, "snapshot base tree object")?;
         Ok(SourceSnapshot { head: *base, tree })
     }
 
@@ -410,7 +497,7 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
     ) -> Result<IntegrateOutcome, Self::Error> {
         let integration = Self::integration_ref(bloom);
         let current = self.client.get_ref(&integration)?.ok_or_else(|| SourceError::MissingRef(integration.clone()))?;
-        let current_tree = self.read_commit_tree(&current.sha)?;
+        let current_tree = self.integration_tree(&current.sha)?;
 
         // Single-writer CAS: if the branch has advanced past the expected
         // checkpoint, refuse rather than clobber the concurrent advance.
@@ -418,16 +505,25 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
             return Ok(IntegrateOutcome::StaleCheckpoint { actual: current_tree });
         }
 
-        let commit = self.client.create_commit("bloomery integrate", &to_hex(candidate), &[current.sha])?;
+        // Resolve the candidate tree digest to its real git tree and create the
+        // integration commit over it. The resulting integrated tree stays
+        // resolvable through its own tree correspondence — which is exactly what
+        // the core's `land` resolves `new_head` (the resolved candidate *tree*,
+        // reduce.rs) through, and what `StaleCheckpoint` reverse-resolves the
+        // advanced branch's tree back to. Recording a *distinct* landable
+        // head-commit correspondence would both clobber that tree mapping and go
+        // unread; materializing a real landable head is the candidate-tree
+        // materialization follow-on this slice defers (§Side findings, #3603).
+        let candidate_tree_sha = self.resolve_git_sha(candidate, "candidate tree digest")?;
+        let commit = self.client.create_commit("bloomery integrate", &candidate_tree_sha, &[current.sha])?;
         match self.client.update_ref(&integration, &commit.sha, false) {
             Ok(_) => Ok(IntegrateOutcome::Integrated { tree: *candidate }),
             // A 422 is GitHub's non-fast-forward refusal: a concurrent writer
             // moved the branch between our read and our update. That is the
             // same stale-checkpoint condition — re-read and report it as such.
             Err(GithubError::Status { status: 422, .. }) => {
-                let actual = self.read_commit_tree(
-                    &self.client.get_ref(&integration)?.ok_or(SourceError::MissingRef(integration))?.sha,
-                )?;
+                let advanced = self.client.get_ref(&integration)?.ok_or(SourceError::MissingRef(integration))?.sha;
+                let actual = self.integration_tree(&advanced)?;
                 Ok(IntegrateOutcome::StaleCheckpoint { actual })
             }
             Err(error) => Err(SourceError::Github(error)),
@@ -440,13 +536,17 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         }
         let current =
             self.client.get_ref(MAINLINE_REF)?.ok_or_else(|| SourceError::MissingRef(MAINLINE_REF.to_owned()))?;
-        let actual = digest_from_hex(&current.sha)
-            .ok_or_else(|| SourceError::Malformed(format!("mainline sha `{}`", current.sha)))?;
+        // Reverse-resolve the real mainline object (a sha1/40-hex on a real repo,
+        // which the old fixed-64-hex gate rejected as `Malformed` before any swap)
+        // to the base digest, then compare against the sealed base.
+        let actual = self.resolve_object_digest(&current.sha, "mainline head object")?;
 
         if actual != *expected_base {
             return Ok(LandOutcome::BaseMoved { expected: *expected_base, actual });
         }
-        match self.client.update_ref(MAINLINE_REF, &to_hex(new_head), false) {
+        // Forward-resolve the new head digest to its real git object for the CAS.
+        let new_head_sha = self.resolve_git_sha(new_head, "land new head digest")?;
+        match self.client.update_ref(MAINLINE_REF, &new_head_sha, false) {
             Ok(_) => Ok(LandOutcome::Landed(LandingReceipt {
                 bloom: *bloom,
                 previous_base: *expected_base,
@@ -458,8 +558,7 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
                     .client
                     .get_ref(MAINLINE_REF)?
                     .ok_or_else(|| SourceError::MissingRef(MAINLINE_REF.to_owned()))?;
-                let actual = digest_from_hex(&current.sha)
-                    .ok_or_else(|| SourceError::Malformed(format!("mainline sha `{}`", current.sha)))?;
+                let actual = self.resolve_object_digest(&current.sha, "mainline head object")?;
                 Ok(LandOutcome::BaseMoved { expected: *expected_base, actual })
             }
             Err(error) => Err(SourceError::Github(error)),
@@ -638,11 +737,20 @@ mod tests {
         LandOutcome, SourceBackend, WorkpieceId,
     };
 
-    use super::{ADMISSION_REF, GitSource, SourceError, TOMBSTONE_TREE, digest_from_hex, to_hex};
+    use std::sync::Arc;
+
+    use super::{ADMISSION_REF, GitSource, SourceError, TOMBSTONE_TREE, to_hex};
     use crate::testing::FakeGithub;
 
     fn digest(seed: u8) -> Digest {
         Digest::from_bytes([seed; 32])
+    }
+
+    // A `GitSource` over `fake` as both its git-data client and its correspondence
+    // store — one in-process double serves both seams, so a test seeds git objects
+    // and their correspondences into the same fake.
+    fn git_source(fake: &FakeGithub, cas_land_enabled: bool) -> GitSource<FakeGithub> {
+        GitSource::new(fake.clone(), Arc::new(fake.clone()), cas_land_enabled)
     }
 
     fn bloom() -> BloomId {
@@ -668,10 +776,12 @@ mod tests {
     fn seeded() -> (FakeGithub, BloomId, Digest) {
         let fake = FakeGithub::new();
         let base_tree = digest(10);
-        let base_commit = fake.seed_commit(&to_hex(&base_tree));
-        fake.seed_ref("heads/main", &base_commit);
-        let base = digest_from_hex(&base_commit).unwrap();
-        let source = GitSource::new(fake.clone(), false);
+        // `seed_base_commit` records the base head ↔ commit and tree ↔ tree-object
+        // correspondences the mainline paths resolve through, and points mainline
+        // at the base commit.
+        let base = fake.seed_base_commit(&base_tree);
+        fake.seed_ref_at("heads/main", &base);
+        let source = git_source(&fake, false);
         source.create_namespace(&bloom(), &base).unwrap();
         (fake, bloom(), base)
     }
@@ -680,9 +790,8 @@ mod tests {
     fn snapshot_is_stable_for_a_base() {
         let fake = FakeGithub::new();
         let tree = digest(7);
-        let commit = fake.seed_commit(&to_hex(&tree));
-        let base = digest_from_hex(&commit).unwrap();
-        let source = GitSource::new(fake, false);
+        let base = fake.seed_base_commit(&tree);
+        let source = git_source(&fake, false);
 
         let first = source.snapshot(&base).unwrap();
         let second = source.snapshot(&base).unwrap();
@@ -701,7 +810,7 @@ mod tests {
     #[test]
     fn checkpoint_create_enumerate_and_reuse_across_a_successor() {
         let (fake, bloom, base) = seeded();
-        let source = GitSource::new(fake, false);
+        let source = git_source(&fake, false);
         // The base tree is the integration branch's current tree.
         let base_tree = source.snapshot(&base).unwrap().tree;
 
@@ -723,38 +832,69 @@ mod tests {
     }
 
     #[test]
-    fn integrate_accepts_a_matching_checkpoint_and_rejects_a_stale_one() {
+    fn integrate_resolves_the_candidate_tree_and_rejects_a_stale_checkpoint() {
         let (fake, bloom, base) = seeded();
-        let source = GitSource::new(fake, false);
+        let source = git_source(&fake, false);
         let base_tree = source.snapshot(&base).unwrap().tree;
         let expected = source.checkpoint(&bloom, &base_tree).unwrap();
 
-        // Matching checkpoint → integrated.
+        // The candidate tree must have a recorded git-object correspondence
+        // (materialized elsewhere); integrate resolves it for the commit's tree.
         let candidate = digest(50);
+        fake.seed_git_object(&candidate);
         let outcome = source.integrate(&bloom, &candidate, &expected).unwrap();
         assert_eq!(outcome, IntegrateOutcome::Integrated { tree: candidate });
 
-        // The branch has advanced; the same (now stale) checkpoint is refused.
+        // The branch has advanced; the same (now stale) checkpoint is refused,
+        // reverse-resolving the advanced branch's tree back to the candidate.
         let another = digest(60);
+        fake.seed_git_object(&another);
         let stale = source.integrate(&bloom, &another, &expected).unwrap();
         assert_eq!(stale, IntegrateOutcome::StaleCheckpoint { actual: candidate });
     }
 
     #[test]
-    fn land_is_refused_while_gated_and_cas_correct_when_enabled() {
+    fn integrate_errors_cleanly_when_the_candidate_tree_is_unrecorded() {
+        // A candidate whose tree was never materialized into git (no
+        // correspondence) is the clean typed `UnresolvedCorrespondence` — never a
+        // `Malformed` or a hex-punned sha git cannot resolve (ADR-0150 boundary).
         let (fake, bloom, base) = seeded();
+        let source = git_source(&fake, false);
+        let base_tree = source.snapshot(&base).unwrap().tree;
+        let expected = source.checkpoint(&bloom, &base_tree).unwrap();
+
+        match source.integrate(&bloom, &digest(77), &expected) {
+            Err(SourceError::UnresolvedCorrespondence(_)) => {}
+            other => panic!("expected UnresolvedCorrespondence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn land_reads_a_sha1_mainline_and_cas_advances_when_enabled() {
+        let fake = FakeGithub::new();
+        let bloom = bloom();
+        // A real sha1 (40-hex) mainline — the object format the reported failure
+        // (#3590) hit, which the old fixed-64-hex `digest_from_hex` gate rejected
+        // as `Malformed` before any swap. The correspondence resolves it.
+        let base = digest(10);
+        let mainline_sha1 = "a1".repeat(20);
+        assert_eq!(mainline_sha1.len(), 40, "a sha1 object id is 40 hex");
+        fake.seed_ref("heads/main", &mainline_sha1);
+        fake.seed_correspondence(&base, &mainline_sha1);
+        let new_head = digest(90);
+        fake.seed_git_object(&new_head);
 
         // Gated off (the default): a typed refusal, not a swap.
-        let gated = GitSource::new(fake.clone(), false);
-        let new_head = digest(90);
+        let gated = git_source(&fake, false);
         match gated.land(&bloom, &base, &new_head) {
             Err(SourceError::LandingDisabled) => {}
             other => panic!("expected LandingDisabled, got {other:?}"),
         }
-        assert_eq!(fake.ref_target("heads/main"), Some(to_hex(&base)), "mainline untouched while gated");
+        assert_eq!(fake.ref_target("heads/main"), Some(mainline_sha1), "mainline untouched while gated");
 
-        // Enabled: expected-base CAS advances mainline and issues a receipt.
-        let enabled = GitSource::new(fake.clone(), true);
+        // Enabled: reverse-resolve the sha1 mainline to the base, CAS to the new
+        // head's resolved object, and issue a receipt.
+        let enabled = git_source(&fake, true);
         match enabled.land(&bloom, &base, &new_head).unwrap() {
             LandOutcome::Landed(receipt) => {
                 assert_eq!(receipt.previous_base, base);
@@ -762,23 +902,52 @@ mod tests {
             }
             LandOutcome::BaseMoved { .. } => panic!("expected Landed, got BaseMoved"),
         }
-        assert_eq!(fake.ref_target("heads/main"), Some(to_hex(&new_head)), "mainline advanced to the new head");
+        assert_eq!(
+            fake.ref_target("heads/main"),
+            Some(to_hex(&new_head)),
+            "mainline advanced to the resolved new head"
+        );
+    }
 
-        // A stale expected base is the clean BaseMoved refusal.
+    #[test]
+    fn land_reports_base_moved_when_the_mainline_correspondence_mismatches() {
+        let fake = FakeGithub::new();
+        let bloom = bloom();
+        let actual_base = digest(10);
+        let mainline_sha1 = "b2".repeat(20);
+        fake.seed_ref("heads/main", &mainline_sha1);
+        fake.seed_correspondence(&actual_base, &mainline_sha1);
+        let enabled = git_source(&fake, true);
+
+        // A stale expected base is the clean BaseMoved refusal, carrying the base
+        // the mainline object actually resolves to.
         let stale_expected = digest(200);
         match enabled.land(&bloom, &stale_expected, &digest(91)).unwrap() {
             LandOutcome::BaseMoved { expected, actual } => {
                 assert_eq!(expected, stale_expected);
-                assert_eq!(actual, new_head);
+                assert_eq!(actual, actual_base);
             }
             LandOutcome::Landed(_) => panic!("expected BaseMoved, got Landed"),
         }
     }
 
     #[test]
+    fn land_errors_cleanly_when_the_mainline_correspondence_is_unrecorded() {
+        // A real sha1 mainline with no recorded correspondence is the clean
+        // `UnresolvedCorrespondence`, never the old `Malformed`-before-swap.
+        let fake = FakeGithub::new();
+        fake.seed_ref("heads/main", &"c3".repeat(20));
+        let enabled = git_source(&fake, true);
+        match enabled.land(&bloom(), &digest(10), &digest(90)) {
+            Err(SourceError::UnresolvedCorrespondence(_)) => {}
+            other => panic!("expected UnresolvedCorrespondence, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn claim_seal_acquires_every_member_and_the_admission_ref() {
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake, false);
+        let source = git_source(&fake, false);
         let claimant = bloom_id(1);
         let (w1, w2) = (workpiece("wp-1"), workpiece("wp-2"));
 
@@ -795,7 +964,7 @@ mod tests {
     #[test]
     fn claim_seal_workpiece_conflict_reports_the_ref_and_holder() {
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake, false);
+        let source = git_source(&fake, false);
         let (holder, contender) = (bloom_id(1), bloom_id(2));
         let w1 = workpiece("wp-1");
         source.claim_seal(&holder, from_ref(&w1)).unwrap();
@@ -809,7 +978,7 @@ mod tests {
     #[test]
     fn claim_seal_admission_conflict_reports_the_admission_ref() {
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake, false);
+        let source = git_source(&fake, false);
         let (holder, contender) = (bloom_id(1), bloom_id(2));
         // The holder takes the admission ref (empty member set → admission only).
         source.claim_seal(&holder, &[]).unwrap();
@@ -826,7 +995,7 @@ mod tests {
         // it created before the conflict is deleted, not just some, so a later
         // acquire on those members is not spuriously blocked.
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake.clone(), false);
+        let source = git_source(&fake, false);
         let (holder, contender) = (bloom_id(1), bloom_id(2));
         source.claim_seal(&holder, &[]).unwrap(); // holder owns the admission ref
 
@@ -841,7 +1010,7 @@ mod tests {
     #[test]
     fn transfer_seal_fast_forwards_carried_refs_and_admission_to_the_successor() {
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake, false);
+        let source = git_source(&fake, false);
         let (predecessor, successor) = (bloom_id(1), bloom_id(2));
         let w1 = workpiece("wp-1");
         source.claim_seal(&predecessor, from_ref(&w1)).unwrap();
@@ -856,7 +1025,7 @@ mod tests {
     #[test]
     fn transfer_seal_loses_cleanly_when_a_carried_ref_was_concurrently_moved() {
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake.clone(), false);
+        let source = git_source(&fake, false);
         let (predecessor, successor, intruder) = (bloom_id(1), bloom_id(2), bloom_id(3));
         let w1 = workpiece("wp-1");
         source.claim_seal(&predecessor, from_ref(&w1)).unwrap();
@@ -876,7 +1045,7 @@ mod tests {
     #[test]
     fn transfer_seal_fresh_acquires_net_new_and_releases_dropped_members() {
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake.clone(), false);
+        let source = git_source(&fake, false);
         let (predecessor, successor) = (bloom_id(1), bloom_id(2));
         let (carried, dropped, fresh) = (workpiece("wp-carried"), workpiece("wp-dropped"), workpiece("wp-fresh"));
         source.claim_seal(&predecessor, &[carried.clone(), dropped.clone()]).unwrap();
@@ -895,7 +1064,7 @@ mod tests {
     #[test]
     fn release_seal_tombstones_then_deletes_the_owned_refs() {
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake.clone(), false);
+        let source = git_source(&fake, false);
         let owner = bloom_id(1);
         let w1 = workpiece("wp-1");
         source.claim_seal(&owner, from_ref(&w1)).unwrap();
@@ -912,7 +1081,7 @@ mod tests {
         // Tripwire: the CAS read-guard that retires the check-then-delete TOCTOU —
         // a release must never delete a claim ref it does not own.
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake.clone(), false);
+        let source = git_source(&fake, false);
         let (owner, stranger) = (bloom_id(1), bloom_id(2));
         let w1 = workpiece("wp-1");
         source.claim_seal(&owner, from_ref(&w1)).unwrap();
@@ -940,7 +1109,7 @@ mod tests {
     #[test]
     fn enumerate_claims_classifies_held_tombstoned_and_admission_refs() {
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake.clone(), false);
+        let source = git_source(&fake, false);
         let holder = bloom_id(1);
         let (w1, w2) = (workpiece("wp-1"), workpiece("wp-2"));
         // w1 held by the claimant (which also takes the admission ref); w2 left at a
@@ -964,7 +1133,7 @@ mod tests {
     #[test]
     fn complete_transfer_moves_a_predecessor_held_ref_and_no_ops_at_the_successor() {
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake, false);
+        let source = git_source(&fake, false);
         let (predecessor, successor) = (bloom_id(1), bloom_id(2));
         let w1 = workpiece("wp-1");
         source.claim_seal(&predecessor, from_ref(&w1)).unwrap();
@@ -985,7 +1154,7 @@ mod tests {
         // Tripwire: the per-ref completion never stomps a ref a third bloom holds —
         // a holder that is neither predecessor nor successor is the clean Held.
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake, false);
+        let source = git_source(&fake, false);
         let (predecessor, successor, foreign) = (bloom_id(1), bloom_id(2), bloom_id(3));
         let w1 = workpiece("wp-1");
         source.claim_seal(&foreign, from_ref(&w1)).unwrap();
@@ -1001,7 +1170,7 @@ mod tests {
         // Tripwire: the sweep (`None` holder) deletes a tombstoned ref's name but
         // must never delete a live ref it does not own.
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake.clone(), false);
+        let source = git_source(&fake, false);
         let (w1, w2) = (workpiece("wp-1"), workpiece("wp-2"));
         seed_tombstone(&fake, &claim_ref(&w1));
         source.claim_seal(&bloom_id(9), from_ref(&w2)).unwrap();
@@ -1022,7 +1191,7 @@ mod tests {
     #[test]
     fn complete_release_releases_a_holder_named_ref_and_spares_a_foreign_one() {
         let fake = FakeGithub::new();
-        let source = GitSource::new(fake.clone(), false);
+        let source = git_source(&fake, false);
         let (owner, foreign) = (bloom_id(1), bloom_id(2));
         let (mine, theirs) = (workpiece("wp-mine"), workpiece("wp-theirs"));
         source.claim_seal(&owner, from_ref(&mine)).unwrap();

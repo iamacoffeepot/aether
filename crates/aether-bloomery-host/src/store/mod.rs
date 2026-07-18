@@ -32,6 +32,11 @@ use aether_actor::actor;
 pub struct StoreCapability;
 
 #[cfg(feature = "runtime")]
+mod correspondence;
+#[cfg(feature = "runtime")]
+pub use correspondence::SqliteCorrespondence;
+
+#[cfg(feature = "runtime")]
 mod runtime;
 #[cfg(feature = "runtime")]
 pub use runtime::{

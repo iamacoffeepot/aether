@@ -44,6 +44,7 @@
 
 mod client;
 mod config;
+mod correspondence;
 mod executor;
 mod inward;
 mod marker;
@@ -59,6 +60,7 @@ pub use client::{
     ReqwestGithub, ReqwestTransport, RunConclusion, RunStatus, StaticTokenSource, TokenSource, WorkflowRun,
 };
 pub use config::GithubConfig;
+pub use correspondence::{Correspondence, CorrespondenceError, GitObjectFormat, GitObjectId};
 pub use executor::{ActionsExecutor, ExecutorError};
 pub use inward::{
     InwardError, StageResult, StageVerdict, StudyRecordError, StudyResult, normalize_stage_result,
@@ -66,4 +68,4 @@ pub use inward::{
 };
 pub use marker::{Marker, check_run_external_id, parse_check_run_external_id, parse_marker, render_marker};
 pub use projection::GithubProjection;
-pub use source::{GitSource, SourceError};
+pub use source::{GitSource, SharedCorrespondence, SourceError};

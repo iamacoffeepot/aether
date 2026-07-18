@@ -29,6 +29,7 @@ use crate::client::{
     ActionsApi, Artifact, Comment, GitCommit, GitDataApi, GitRef, GithubApi, GithubError, Issue, NewComment, NewIssue,
     RunConclusion, RunStatus, WorkflowRun,
 };
+use crate::correspondence::{Correspondence, CorrespondenceError, GitObjectId};
 use crate::marker::parse_marker;
 use crate::source::{digest_from_hex, to_hex};
 
@@ -82,6 +83,11 @@ struct State {
     next_run: u64,
     dispatches: Vec<StoredDispatch>,
     runs: Vec<StoredRun>,
+    // The git-object↔bloom-digest correspondence the source/executor ports
+    // resolve real git shas through (ADR-0150), keyed forward by the 32-byte
+    // digest; the reverse direction scans for the matching object (a test store
+    // is small).
+    correspondence: HashMap<[u8; 32], GitObjectId>,
 }
 
 /// An in-memory GitHub double implementing [`GithubApi`].
@@ -175,8 +181,15 @@ impl FakeGithub {
     /// round-trips through; a panic here is a broken invariant in the fake.
     #[must_use]
     pub fn seed_base_commit(&self, tree: &Digest) -> Digest {
-        let sha = self.seed_commit(&to_hex(tree));
-        digest_from_hex(&sha).expect("a seeded commit sha is 64-hex")
+        let tree_sha = to_hex(tree);
+        let commit_sha = self.seed_commit(&tree_sha);
+        let base = digest_from_hex(&commit_sha).expect("a seeded commit sha is 64-hex");
+        // Record the correspondences the mainline paths resolve through: the base
+        // head digest ↔ its real commit object, and the tree digest ↔ the commit's
+        // real tree object, so `snapshot` / `create_namespace` / `land` resolve.
+        self.seed_correspondence(&base, &commit_sha);
+        self.seed_correspondence(tree, &tree_sha);
+        base
     }
 
     /// Seed a ref (`heads/…` form) pointing at the commit `target`.
@@ -189,6 +202,27 @@ impl FakeGithub {
     #[must_use]
     pub fn ref_digest(&self, name: &str) -> Option<Digest> {
         self.ref_target(name).and_then(|sha| digest_from_hex(&sha))
+    }
+
+    /// Record a git-object↔bloom-digest correspondence directly (a source /
+    /// executor test's way to stage the mapping the mainline paths resolve
+    /// through). `sha` is a real git object sha (sha1/40-hex or sha256/64-hex).
+    ///
+    /// # Panics
+    /// If `sha` is not a well-formed git object sha — a test-setup bug.
+    pub fn seed_correspondence(&self, digest: &Digest, sha: &str) {
+        let git = GitObjectId::from_hex(sha).expect("seed_correspondence: sha must be 40/64-hex");
+        self.lock().correspondence.insert(*digest.as_bytes(), git);
+    }
+
+    /// Record a correspondence for `digest` against a synthetic git object sha
+    /// derived from the digest's own hex — a source / executor test's convenient
+    /// way to stage a resolvable digest (a candidate tree, a land head) without a
+    /// matching git object in the store. The synthetic sha is `to_hex(digest)`, so
+    /// a test that points a ref at it uses [`seed_ref_at`](Self::seed_ref_at) with
+    /// the same digest.
+    pub fn seed_git_object(&self, digest: &Digest) {
+        self.seed_correspondence(digest, &to_hex(digest));
     }
 
     /// The nonces of the dispatches recorded so far, in dispatch order — an
@@ -340,6 +374,25 @@ impl GitDataApi for FakeGithub {
         let sha = commit_sha(message, tree, parents);
         self.lock().commits.insert(sha.clone(), tree.to_owned());
         Ok(GitCommit { sha, tree: tree.to_owned() })
+    }
+}
+
+impl Correspondence for FakeGithub {
+    fn record(&self, digest: &Digest, git: &GitObjectId) -> Result<(), CorrespondenceError> {
+        self.lock().correspondence.insert(*digest.as_bytes(), git.clone());
+        Ok(())
+    }
+
+    fn resolve_git(&self, digest: &Digest) -> Result<Option<GitObjectId>, CorrespondenceError> {
+        Ok(self.lock().correspondence.get(digest.as_bytes()).cloned())
+    }
+
+    fn resolve_digest(&self, git: &GitObjectId) -> Result<Option<Digest>, CorrespondenceError> {
+        Ok(self
+            .lock()
+            .correspondence
+            .iter()
+            .find_map(|(digest, object)| (object == git).then(|| Digest::from_bytes(*digest))))
     }
 }
 

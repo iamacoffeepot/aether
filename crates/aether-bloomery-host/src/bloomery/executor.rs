@@ -143,13 +143,18 @@ impl ExecutorShell {
     /// The underlying `reqwest` client could not be constructed.
     pub fn connect(config: &GithubMirrorConfig) -> Result<Self, GithubError> {
         let client = config.connect_client()?;
+        // Both backends resolve the order's checkout digest to a real git object
+        // through the same persisted correspondence (ADR-0150) — one store over
+        // the shared `store_path`, mirroring the source shell.
+        let correspondence = config.connect_correspondence()?;
         let actions = Arc::new(ActionsExecutor::new(
             client,
+            Arc::clone(&correspondence),
             config.executor_workflow_file.clone(),
             config.executor_dispatch_ref.clone(),
         ));
         if config.local_lane_enabled {
-            let local = Arc::new(LocalExecutor::from_config(config));
+            let local = Arc::new(LocalExecutor::from_config(config, correspondence));
             Ok(Self::new(Arc::new(RoutingExecutor::new(actions, local, config.local_lane_prefixes()))))
         } else {
             Ok(Self::new(actions))

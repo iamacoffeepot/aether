@@ -28,7 +28,10 @@ fn store() -> SqliteStore {
 }
 
 fn shell(fake: FakeGithub) -> ExecutorShell {
-    ExecutorShell::new(Arc::new(ActionsExecutor::new(fake, WORKFLOW, PINNED_REF)))
+    // The dispatched orders check out `[0xC0; 32]`; seed its correspondence so
+    // `submit` resolves the subject (the fake's store is shared across clones).
+    fake.seed_git_object(&Digest::from_bytes([0xC0; 32]));
+    ExecutorShell::new(Arc::new(ActionsExecutor::new(fake.clone(), Arc::new(fake), WORKFLOW, PINNED_REF)))
 }
 
 fn work_order(nonce: &str) -> WorkOrder {

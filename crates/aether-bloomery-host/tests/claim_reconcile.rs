@@ -131,7 +131,7 @@ fn land(snapshot: Snapshot, spec: &BloomSpec, tree: u8, head: u8) -> (Snapshot, 
 /// The source capability over a fresh in-process fake, claims live.
 fn claim_state() -> (SourceCapabilityState, FakeGithub) {
     let fake = FakeGithub::new();
-    let backend = GitSource::new(fake.clone(), false);
+    let backend = GitSource::new(fake.clone(), Arc::new(fake.clone()), false);
     (SourceCapabilityState::new(SourceShell::new(Arc::new(backend))), fake)
 }
 
