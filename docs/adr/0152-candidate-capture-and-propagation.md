@@ -1,6 +1,6 @@
 # ADR-0152: Candidate capture and propagation
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-18
 
 ## Context
