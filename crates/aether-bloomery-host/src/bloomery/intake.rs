@@ -46,7 +46,9 @@ use aether_bloomery::{
     Admit, BloomId, Digest, Event, EvidenceRef, ExecutionStatus, Fact, IdempotencyKey, Nonce, ResolutionClaim,
     StageCatalog, StageId, WorkHandle, WorkOrder, WorkpieceId,
 };
-use aether_bloomery_github::{InwardError, StageResult, StageVerdict, normalize_stage_result};
+use aether_bloomery_github::{
+    ExecutorError, GithubError, InwardError, StageResult, StageVerdict, normalize_stage_result,
+};
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
 use super::executor::{ExecutorPortError, ExecutorShell};
@@ -254,6 +256,23 @@ impl Error for DispatchError {
             Self::Submit(error) => Some(error),
             Self::Store(error) => Some(error),
         }
+    }
+}
+
+impl DispatchError {
+    /// Whether this fault is permanent — a GitHub HTTP refusal that will not
+    /// clear on retry (a 4xx other than the 429 rate-limit) — as opposed to a
+    /// transient fault that a re-drive can recover from: a 429, any 5xx,
+    /// transport/decode/pagination faults, `NoRunForNonce`, the whole local-lane
+    /// arm (worktree/spawn/io/evidence, never HTTP), and a post-submit registry
+    /// write fault.
+    #[must_use]
+    pub fn is_permanent(&self) -> bool {
+        matches!(
+            self,
+            Self::Submit(ExecutorPortError::Actions(ExecutorError::Github(GithubError::Status { status, .. })))
+                if (400..500).contains(status) && *status != 429
+        )
     }
 }
 
