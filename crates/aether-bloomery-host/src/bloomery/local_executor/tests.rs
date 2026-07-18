@@ -4,7 +4,9 @@
 //! round-trips through [`NameEvidenceClaims`], so an admitted local run binds
 //! exactly as a wrapper-uploaded one would.
 
-use std::sync::Arc;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use aether_bloomery::{
     Conclusion, Digest, ExecutionStatus, ExecutorBackend, Nonce, StageId, Transformation, WorkHandle,
@@ -13,11 +15,19 @@ use aether_bloomery_github::StageVerdict;
 use tempfile::TempDir;
 
 use super::testing::FixedRunner;
-use super::{LocalExecutor, LocalExecutorError, RunLifecycle};
+use super::{LocalExecutor, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use crate::bloomery::intake::{EvidenceClaims, NameEvidenceClaims};
 
 fn digest(seed: u8) -> Digest {
     Digest::from_bytes([seed; 32])
+}
+
+// The local backend's `Nonce` is a work-order correlation id, not a cryptographic
+// nonce; deriving a test nonce off a tag here keeps the CodeQL
+// hard-coded-crypto-value scan (a false positive on this correlation-id type) from
+// tripping on the call sites (#3596 review).
+fn test_nonce(tag: &str) -> String {
+    format!("wo-{tag}")
 }
 
 fn executor(base: &TempDir, evidence: &str, lifecycle: RunLifecycle) -> LocalExecutor {
@@ -141,7 +151,7 @@ fn stream_evidence_evicts_the_consumed_run() {
 fn construct_verdict(evidence: &str) -> StageVerdict {
     let base = TempDir::new().unwrap();
     let exec = executor(&base, evidence, RunLifecycle::Exited { success: true });
-    let handle = exec.submit(&construct_order(digest(5), "n-g")).unwrap();
+    let handle = exec.submit(&construct_order(digest(5), &test_nonce("g"))).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
     NameEvidenceClaims.claim_for(&refs[0]).expect("the synthesized ref decodes").verdict
 }
@@ -198,4 +208,103 @@ fn cancel_and_stream_with_no_tracked_run_are_the_no_run_error() {
         Err(LocalExecutorError::NoRunForNonce(_)) => {}
         other => panic!("expected NoRunForNonce, got {other:?}"),
     }
+}
+
+// A spawn seam that records the worktree dirs it is asked to release, and can be
+// told to write no `evidence.json` (so a `stream_evidence` read faults) — the seam
+// for asserting the local backend releases a run's scratch worktree on exactly its
+// terminal paths (#3596 review, resource-leak finding).
+struct RecordingRunner {
+    // `None` → `start` writes no evidence.json, forcing a failed `stream_evidence` read.
+    evidence: Option<String>,
+    lifecycle: RunLifecycle,
+    released: Arc<Mutex<Vec<PathBuf>>>,
+}
+
+impl TransformRunner for RecordingRunner {
+    fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
+        fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
+        if let Some(evidence) = &self.evidence {
+            fs::write(spec.evidence_dir.join("evidence.json"), evidence).map_err(LocalExecutorError::Io)?;
+        }
+        Ok(Box::new(RecordingProcess { lifecycle: self.lifecycle }))
+    }
+
+    fn release(&self, worktree_dir: &Path) -> Result<(), LocalExecutorError> {
+        self.released.lock().unwrap().push(worktree_dir.to_owned());
+        Ok(())
+    }
+}
+
+struct RecordingProcess {
+    lifecycle: RunLifecycle,
+}
+
+impl RunProcess for RecordingProcess {
+    fn poll(&mut self) -> RunLifecycle {
+        self.lifecycle
+    }
+
+    fn kill(&mut self) -> Result<(), LocalExecutorError> {
+        Ok(())
+    }
+}
+
+fn recording_executor(
+    base: &TempDir,
+    evidence: Option<&str>,
+    lifecycle: RunLifecycle,
+) -> (LocalExecutor, Arc<Mutex<Vec<PathBuf>>>) {
+    let released = Arc::new(Mutex::new(Vec::new()));
+    let runner = RecordingRunner { evidence: evidence.map(str::to_owned), lifecycle, released: Arc::clone(&released) };
+    (LocalExecutor::new(Arc::new(runner), base.path(), None, None), released)
+}
+
+#[test]
+fn cancel_releases_the_scratch_worktree() {
+    // A cancel is terminal — the killed run's scratch worktree is torn down so a
+    // long-lived backend does not leak one worktree per cancelled order.
+    let base = TempDir::new().unwrap();
+    let (exec, released) = recording_executor(&base, Some("{}"), RunLifecycle::Running);
+    let nonce = test_nonce("cancel");
+    let handle = exec.submit(&construct_order(digest(5), &nonce)).unwrap();
+
+    exec.cancel(&handle).unwrap();
+    assert_eq!(released.lock().unwrap().as_slice(), &[base.path().join(&nonce)], "cancel releases the run's worktree");
+}
+
+#[test]
+fn a_consumed_evidence_read_releases_the_scratch_worktree() {
+    // Reading the evidence consumes the run — its scratch worktree is released as
+    // the run leaves the registry.
+    let base = TempDir::new().unwrap();
+    let ev = r#"{"command":"construct.implement","nonce":"wo-stream","produced_candidate":true,"result_record":{"is_error":false,"result":{}}}"#;
+    let (exec, released) = recording_executor(&base, Some(ev), RunLifecycle::Exited { success: true });
+    let nonce = test_nonce("stream");
+    let handle = exec.submit(&construct_order(digest(5), &nonce)).unwrap();
+
+    exec.stream_evidence(&handle).unwrap();
+    assert_eq!(
+        released.lock().unwrap().as_slice(),
+        &[base.path().join(&nonce)],
+        "a consumed evidence read releases the run's worktree",
+    );
+}
+
+#[test]
+fn a_failed_evidence_read_retains_the_worktree_for_retry() {
+    // No evidence.json written → the read faults. The run stays tracked for a later
+    // retry (the entry is intentionally kept), so its worktree must NOT be released
+    // — releasing it would strip the checkout a retry needs.
+    let base = TempDir::new().unwrap();
+    let (exec, released) = recording_executor(&base, None, RunLifecycle::Exited { success: true });
+    let handle = exec.submit(&construct_order(digest(5), &test_nonce("retry"))).unwrap();
+
+    assert!(matches!(exec.stream_evidence(&handle), Err(LocalExecutorError::Evidence(_))));
+    assert!(released.lock().unwrap().is_empty(), "a retryable failed read must not release the worktree");
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Completed { conclusion: Conclusion::Success },
+        "the run is retained after a failed read",
+    );
 }

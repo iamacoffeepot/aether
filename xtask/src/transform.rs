@@ -393,11 +393,13 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
     #[allow(clippy::disallowed_methods)]
     let writer = thread::spawn(move || stdin.write_all(&prompt_bytes));
     let run = child.wait_with_output().context("await headless claude")?;
-    writer.join().expect("prompt-writer thread panicked").context("pipe the assembled prompt to headless claude")?;
     // A non-zero exit is the CLI itself failing to run (auth, bad args, crash) —
     // an operational failure, distinct from a task-level error, which a completed
     // run records as `is_error` inside the transcript. Surface it rather than
-    // writing an empty/garbage result record and reporting success.
+    // writing an empty/garbage result record and reporting success. Check it
+    // *before* the writer's result: an early child exit makes the stdin write race
+    // a broken pipe, so joining the writer first would surface that downstream
+    // symptom and mask the child's real exit cause.
     if !run.status.success() {
         bail!(
             "headless claude exited {}: {}",
@@ -405,6 +407,10 @@ fn run_construct(args: &TransformArgs) -> Result<()> {
             tail(&String::from_utf8_lossy(&run.stderr), 1000),
         );
     }
+    // The child exited zero, so a writer error here is an unexplained broken pipe
+    // (or an OS-buffer overrun) worth propagating rather than a symptom of the exit
+    // above.
+    writer.join().expect("prompt-writer thread panicked").context("pipe the assembled prompt to headless claude")?;
 
     let transcript_path = args.out.join("transcript.jsonl");
     fs::write(&transcript_path, &run.stdout).with_context(|| format!("write {}", transcript_path.display()))?;
