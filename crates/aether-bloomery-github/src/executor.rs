@@ -28,7 +28,9 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery::{Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, WorkHandle, WorkOrder};
+use aether_bloomery::{
+    Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, WorkHandle, WorkOrder,
+};
 
 use crate::client::{ActionsApi, GithubError, RunConclusion, RunStatus, WorkflowRun};
 use crate::correspondence::CorrespondenceError;
@@ -156,6 +158,17 @@ fn name_carries_nonce(name: &str, nonce: &str) -> bool {
     })
 }
 
+// Lowercase-hex a digest's 32 bytes — the evidence-binding form the wrapper's
+// `displayed` input carries and the intake's name decode reverses.
+fn digest_hex(digest: &Digest) -> String {
+    let mut hex = String::with_capacity(64);
+    for byte in digest.as_bytes() {
+        hex.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        hex.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
+    }
+    hex
+}
+
 // Map a resolved run's folded lifecycle onto the port's `ExecutionStatus`.
 fn map_status(run: &WorkflowRun) -> ExecutionStatus {
     match run.status {
@@ -204,6 +217,15 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
         inputs.insert("command".to_owned(), order.transformation.command.clone());
         inputs.insert("subject".to_owned(), subject);
         inputs.insert("nonce".to_owned(), order.nonce.0.clone());
+        // The scope-revision `inputs[0]` binds the returned evidence: the wrapper
+        // embeds it in the attempt artifact's name (`attempt.<verdict>.<subject_hex>.
+        // <detail_hex>.<nonce>`, #3501), which the pull-side `NameEvidenceClaims`
+        // decodes and the broker re-checks against the order's displayed digest.
+        // An input-less order (a bare smoke-run shape) omits it and the wrapper
+        // falls back to the legacy `evidence-<nonce>` name the intake skips.
+        if let Some(displayed) = order.transformation.inputs.first() {
+            inputs.insert("displayed".to_owned(), digest_hex(displayed));
+        }
         self.client.dispatch_workflow(&self.workflow_file, &self.git_ref, &inputs)?;
         Ok(WorkHandle::new(order.nonce.clone()))
     }
@@ -320,6 +342,28 @@ mod tests {
         );
         assert!(!inputs.contains_key("ref"), "the ambiguous `ref` input is retired in favor of `subject`");
         assert_eq!(inputs.get("nonce").map(String::as_str), Some("n-1"));
+        assert!(
+            !inputs.contains_key("displayed"),
+            "an input-less order has no evidence binding to hand the wrapper — legacy artifact-name fallback"
+        );
+    }
+
+    #[test]
+    fn submit_hands_the_wrapper_the_evidence_binding_digest_hex() {
+        // The scope-revision `inputs[0]` rides the dispatch as `displayed` so the
+        // wrapper can compose the `attempt.<verdict>.<subject_hex>.<detail_hex>.<nonce>`
+        // artifact name the intake's `NameEvidenceClaims` decodes (#3501).
+        let fake = FakeGithub::new();
+        let mut bound = order("n-2");
+        bound.transformation.inputs = vec![Digest::from_bytes([0x2a; 32])];
+        executor(fake.clone()).submit(&bound).unwrap();
+
+        let inputs = fake.dispatched_inputs("n-2").unwrap();
+        assert_eq!(
+            inputs.get("displayed").map(String::as_str),
+            Some(to_hex(&Digest::from_bytes([0x2a; 32])).as_str()),
+            "the evidence-binding digest reaches the wrapper as lowercase hex"
+        );
     }
 
     #[test]
