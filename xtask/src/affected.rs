@@ -155,7 +155,7 @@ fn select(graph: &PackageGraph, changed: &[String], wasm_sources: &BTreeSet<Stri
     let affected = determinator.compute().affected_set;
     let mut packages: BTreeSet<String> = affected
         .packages(DependencyDirection::Forward)
-        .filter(|package| package.in_workspace())
+        .filter(guppy::graph::PackageMetadata::in_workspace)
         .map(|package| package.name().to_string())
         .collect();
     if packages.len() == graph.workspace().iter().count() {
@@ -185,7 +185,7 @@ fn report(selection: &Selection, changed_count: usize) {
     match &selection.run_all {
         Some(reason) => println!("affected: run everything — {reason}"),
         None if selection.packages.is_empty() => {
-            println!("affected: no packages affected by {changed_count} changed path(s) — nothing to test")
+            println!("affected: no packages affected by {changed_count} changed path(s) — nothing to test");
         }
         None => {
             let list: Vec<&str> = selection.packages.iter().map(String::as_str).collect();
