@@ -17,7 +17,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::ids::Nonce;
-use crate::values::Transformation;
+use crate::values::{CandidateRef, Transformation};
 
 /// A fully-resolved unit of work to dispatch. The [`Transformation`] already
 /// carries the typed command id, digest-pinned inputs, declared outputs,
@@ -99,6 +99,11 @@ pub struct EvidenceRef {
     pub artifact_id: u64,
     /// The artifact's size in bytes.
     pub size_bytes: u64,
+    /// The candidate the run captured (ADR-0152) — reported by a backend that
+    /// commits a model-lane run's work itself (the local executor); `None` from
+    /// a zero-secret backend (the Actions lane captures nothing) and from every
+    /// mechanical or failing run.
+    pub candidate: Option<CandidateRef>,
 }
 
 /// The disposable-worker boundary (ADR-0149 §The boundary). Exactly the four

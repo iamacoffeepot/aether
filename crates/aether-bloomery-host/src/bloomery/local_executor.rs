@@ -38,10 +38,13 @@ use std::process::{Child, Command};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::{fs, io};
 
+use aether_bloomery::digest::ContentAddressed;
 use aether_bloomery::{
-    Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, WorkHandle, WorkOrder,
+    CandidateRef, Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, WorkHandle, WorkOrder,
+    digest_of,
 };
-use aether_bloomery_github::{CorrespondenceError, SharedCorrespondence, StageVerdict};
+use aether_bloomery_github::{CorrespondenceError, GitObjectId, SharedCorrespondence, StageVerdict};
+use serde::Serialize;
 
 use super::CONSTRUCT_IMPLEMENT_COMMAND;
 use super::intake::attempt_artifact_name;
@@ -192,6 +195,29 @@ pub trait TransformRunner: Send + Sync {
     /// # Errors
     /// The worktree teardown (the `git worktree remove` shell-out) failed.
     fn release(&self, worktree_dir: &Path) -> Result<(), LocalExecutorError>;
+
+    /// Capture a passed model-lane run's working-tree changes as the candidate
+    /// (ADR-0152): stage and commit everything in the run worktree under the
+    /// bloomery's own identity and return the produced commit + tree object ids,
+    /// or `Ok(None)` when the worktree is clean (nothing to capture). Runs on
+    /// the run's terminal path, before [`release`](Self::release) discards the
+    /// worktree — and only in the host's trust domain: the child never stages,
+    /// commits, or holds credentials.
+    ///
+    /// # Errors
+    /// A git shell-out (status / add / commit / rev-parse) failed.
+    fn capture(&self, worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError>;
+}
+
+/// What [`TransformRunner::capture`] produced: the capture commit wrapping the
+/// run's tree, and that tree itself — the git side of ADR-0152's two-digest
+/// [`CandidateRef`] (`checkout` ↔ commit, `tree` ↔ tree).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CapturedObjects {
+    /// The capture commit's object id (parent = the run's checkout).
+    pub commit: GitObjectId,
+    /// The captured tree's object id — the candidate's content identity.
+    pub tree: GitObjectId,
 }
 
 /// One tracked run: the spawned child, its scratch worktree, where its evidence
@@ -287,6 +313,78 @@ impl LocalExecutor {
             );
         }
     }
+
+    // Capture a passed construct-lane run's candidate (ADR-0152): commit the run
+    // worktree's changes through the runner seam, then record both produced git
+    // objects as correspondence rows under their content-derived digests. Every
+    // shortfall — a shell fault, a clean worktree (contradicting the passed
+    // substantive-conclusion gate), a store write fault — folds to `None` with a
+    // warn; the caller downgrades the verdict, so a lost capture reads as a
+    // failed attempt, never a pass whose work silently evaporated.
+    fn capture_candidate(&self, worktree_dir: &Path, nonce: &Nonce) -> Option<CandidateRef> {
+        let captured = match self.runner.capture(worktree_dir) {
+            Ok(Some(captured)) => captured,
+            Ok(None) => {
+                tracing::warn!(
+                    nonce = %nonce.0,
+                    "local executor backend: passed run left a clean worktree — nothing to capture, failing closed",
+                );
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(nonce = %nonce.0, %error, "local executor backend: candidate capture failed");
+                return None;
+            }
+        };
+        let candidate = CandidateRef {
+            tree: candidate_tree_digest(&captured.tree),
+            checkout: capture_commit_digest(&captured.commit),
+        };
+        match self
+            .correspondence
+            .record(&candidate.tree, &captured.tree)
+            .and_then(|()| self.correspondence.record(&candidate.checkout, &captured.commit))
+        {
+            Ok(()) => Some(candidate),
+            Err(error) => {
+                tracing::warn!(nonce = %nonce.0, %error, "local executor backend: candidate correspondence write failed");
+                None
+            }
+        }
+    }
+}
+
+/// The content-derived digest of a captured candidate tree: a domain-tagged
+/// address over the git tree object id, so the digest changes exactly when the
+/// captured content does — ADR-0152's supersession property falls out of the
+/// identity choice.
+#[derive(Serialize)]
+struct CandidateTreeAddress<'a> {
+    object: &'a [u8],
+}
+
+impl ContentAddressed for CandidateTreeAddress<'_> {
+    const DOMAIN: &'static str = "aether.bloomery.candidate.tree";
+}
+
+fn candidate_tree_digest(tree: &GitObjectId) -> Digest {
+    digest_of(&CandidateTreeAddress { object: tree.bytes() })
+}
+
+/// The content-derived digest of a capture commit — the [`CandidateRef::checkout`]
+/// axis, distinct from the tree's by domain tag so the two never collide even
+/// over equal object bytes.
+#[derive(Serialize)]
+struct CaptureCommitAddress<'a> {
+    object: &'a [u8],
+}
+
+impl ContentAddressed for CaptureCommitAddress<'_> {
+    const DOMAIN: &'static str = "aether.bloomery.candidate.checkout";
+}
+
+fn capture_commit_digest(commit: &GitObjectId) -> Digest {
+    digest_of(&CaptureCommitAddress { object: commit.bytes() })
 }
 
 impl ExecutorBackend for LocalExecutor {
@@ -435,20 +533,12 @@ impl ExecutorBackend for LocalExecutor {
                         nonce: handle.nonce.clone(),
                         artifact_id: 0,
                         size_bytes: 0,
+                        candidate: None,
                     }]);
                 }
                 return Err(LocalExecutorError::Evidence(format!("{}: {read_error}", evidence_path.display())));
             }
         };
-        // The evidence has been consumed — evict the run so the registry tracks
-        // only in-flight orders rather than growing for the process's lifetime, and
-        // reclaim its scratch worktree so the checkout does not outlive the run. A
-        // failed read leaves the entry above so a later cycle can retry it.
-        self.lock().remove(&handle.nonce.0);
-        // The run is terminal now the evidence is read — release its scratch
-        // worktree. (The failed-read path above returns early, keeping both the
-        // registry entry and the worktree for a later retry.)
-        self.release_worktree(&worktree_dir);
         // Verdict from the run's own evidence, lane-specific. The construct lane's
         // gate demands a substantive conclusion (#3596) — a terminal `result` with
         // `is_error == false` AND a produced candidate — and is fail-closed on any
@@ -457,11 +547,29 @@ impl ExecutorBackend for LocalExecutor {
         // zero). The verify lane stamps a `status` ("pass"/"fail"); the raw
         // `exited_success` fallback survives only for a non-construct evidence shape
         // that stamps no status.
-        let passed = if is_construct {
+        let concluded = if is_construct {
             construct_conclusion(&bytes)
         } else {
             parse_status(&bytes).unwrap_or(exited_success)
         };
+        // A passed construct-lane run's work is captured while its worktree still
+        // exists (ADR-0152) — commit + tree recorded as correspondence rows, the
+        // digest pair riding the evidence reference. Fail-closed: a passed run
+        // whose capture falls short downgrades to a failing verdict rather than
+        // admitting a pass whose work was lost with the worktree below.
+        let candidate = if is_construct && concluded {
+            self.capture_candidate(&worktree_dir, &handle.nonce)
+        } else {
+            None
+        };
+        let passed = concluded && (!is_construct || candidate.is_some());
+        // The evidence has been consumed and any candidate captured — evict the
+        // run so the registry tracks only in-flight orders rather than growing for
+        // the process's lifetime, and reclaim its scratch worktree so the checkout
+        // does not outlive the run. (The failed-read path above returns early,
+        // keeping both the registry entry and the worktree for a later retry.)
+        self.lock().remove(&handle.nonce.0);
+        self.release_worktree(&worktree_dir);
         let verdict = if passed {
             StageVerdict::VerificationPassed
         } else {
@@ -479,6 +587,7 @@ impl ExecutorBackend for LocalExecutor {
             // claim and the size is the file's length.
             artifact_id: 0,
             size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            candidate,
         }])
     }
 }
@@ -538,7 +647,7 @@ impl TransformRunner for ProcessTransformRunner {
     fn release(&self, worktree_dir: &Path) -> Result<(), LocalExecutorError> {
         // Tear the scratch worktree back down on the run's terminal path. `--force`
         // discards the run's working-tree changes (the candidate has already been
-        // read as evidence) and drops the admin entry `git worktree add` registered,
+        // captured and read) and drops the admin entry `git worktree add` registered,
         // so a long-lived backend does not leak one worktree per order.
         let removed = Command::new("git")
             .args(["worktree", "remove", "--force"])
@@ -550,6 +659,51 @@ impl TransformRunner for ProcessTransformRunner {
         }
         Ok(())
     }
+
+    fn capture(&self, worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+        // A clean worktree has nothing to capture — the caller fails the run
+        // closed rather than minting an empty candidate.
+        if git_in(worktree_dir, &["status", "--porcelain"])?.trim().is_empty() {
+            return Ok(None);
+        }
+        git_in(worktree_dir, &["add", "--all"])?;
+        // Commit under the bloomery's own fixed identity, in the host's trust
+        // domain (ADR-0152: the child never stages, commits, or holds
+        // credentials). `--no-verify` keeps repo hooks out of the capture path —
+        // the run's own gates already judged the work.
+        git_in(
+            worktree_dir,
+            &[
+                "-c",
+                "user.name=aether-bloomery",
+                "-c",
+                "user.email=bloomery@iamateapot.dev",
+                "commit",
+                "--no-verify",
+                "--message",
+                "bloomery: candidate capture",
+            ],
+        )?;
+        let commit_hex = git_in(worktree_dir, &["rev-parse", "HEAD"])?;
+        #[allow(clippy::literal_string_with_formatting_args, reason = "git revision syntax, not a format string")]
+        let tree_hex = git_in(worktree_dir, &["rev-parse", "HEAD^{tree}"])?;
+        let commit = GitObjectId::from_hex(commit_hex.trim()).ok_or_else(|| {
+            LocalExecutorError::Worktree(format!("malformed capture commit sha `{}`", commit_hex.trim()))
+        })?;
+        let tree = GitObjectId::from_hex(tree_hex.trim())
+            .ok_or_else(|| LocalExecutorError::Worktree(format!("malformed capture tree sha `{}`", tree_hex.trim())))?;
+        Ok(Some(CapturedObjects { commit, tree }))
+    }
+}
+
+// Run one git command inside `dir`, returning its stdout — the capture path's
+// shell helper, error-shaped like the worktree add/remove shell-outs above.
+fn git_in(dir: &Path, args: &[&str]) -> Result<String, LocalExecutorError> {
+    let output = Command::new("git").current_dir(dir).args(args).output().map_err(LocalExecutorError::Spawn)?;
+    if !output.status.success() {
+        return Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&output.stderr), 1000)));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// A live `cargo xtask transform` child.
@@ -685,7 +839,20 @@ pub mod testing {
     use std::fs;
     use std::path::Path;
 
-    use super::{LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner};
+    use aether_bloomery_github::GitObjectId;
+
+    use super::{CapturedObjects, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner};
+
+    /// The canned capture a [`FixedRunner`] with `captures: true` returns: a
+    /// fixed commit/tree object pair, so a test can assert the digests the
+    /// backend derives and records from it.
+    #[must_use]
+    pub fn canned_capture() -> CapturedObjects {
+        CapturedObjects {
+            commit: GitObjectId::from_hex(&"c".repeat(40)).expect("40 hex chars is a well-formed sha1"),
+            tree: GitObjectId::from_hex(&"d".repeat(40)).expect("40 hex chars is a well-formed sha1"),
+        }
+    }
 
     /// A runner that writes `evidence` and returns a process fixed at `lifecycle`.
     pub struct FixedRunner {
@@ -693,6 +860,9 @@ pub mod testing {
         pub evidence: String,
         /// The lifecycle every spawned process reports.
         pub lifecycle: RunLifecycle,
+        /// Whether `capture` returns the [`canned_capture`] pair (`true`) or a
+        /// clean-worktree `None` (`false`).
+        pub captures: bool,
     }
 
     impl TransformRunner for FixedRunner {
@@ -706,6 +876,10 @@ pub mod testing {
         // evidence dir), so there is nothing to tear down.
         fn release(&self, _worktree_dir: &Path) -> Result<(), LocalExecutorError> {
             Ok(())
+        }
+
+        fn capture(&self, _worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+            Ok(self.captures.then(canned_capture))
         }
     }
 

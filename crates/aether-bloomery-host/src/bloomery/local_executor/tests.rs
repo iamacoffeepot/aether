@@ -14,10 +14,13 @@ use aether_bloomery::{
 use aether_bloomery_github::StageVerdict;
 use tempfile::TempDir;
 
+use aether_bloomery_github::Correspondence as _;
 use aether_bloomery_github::testing::FakeGithub;
 
-use super::testing::FixedRunner;
-use super::{LocalExecutor, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner, strip_hooks};
+use super::testing::{FixedRunner, canned_capture};
+use super::{
+    CapturedObjects, LocalExecutor, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner, strip_hooks,
+};
 use crate::bloomery::intake::{EvidenceClaims, NameEvidenceClaims};
 
 fn digest(seed: u8) -> Digest {
@@ -42,7 +45,7 @@ fn test_nonce(tag: &str) -> String {
 }
 
 fn executor(base: &TempDir, evidence: &str, lifecycle: RunLifecycle) -> LocalExecutor {
-    let runner = FixedRunner { evidence: evidence.to_owned(), lifecycle };
+    let runner = FixedRunner { evidence: evidence.to_owned(), lifecycle, captures: true };
     LocalExecutor::new(
         Arc::new(runner),
         correspondence(),
@@ -251,6 +254,10 @@ impl TransformRunner for RecordingRunner {
         self.released.lock().unwrap().push(worktree_dir.to_owned());
         Ok(())
     }
+
+    fn capture(&self, _worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+        Ok(Some(canned_capture()))
+    }
 }
 
 struct RecordingProcess {
@@ -292,6 +299,10 @@ impl TransformRunner for CapturingRunner {
 
     fn release(&self, _worktree_dir: &Path) -> Result<(), LocalExecutorError> {
         Ok(())
+    }
+
+    fn capture(&self, _worktree_dir: &Path) -> Result<Option<CapturedObjects>, LocalExecutorError> {
+        Ok(None)
     }
 }
 
@@ -420,4 +431,64 @@ fn strip_hooks_leaves_a_hookless_body_unchanged_in_content() {
 #[test]
 fn strip_hooks_errs_on_malformed_json() {
     assert!(strip_hooks("{not json").is_err(), "malformed JSON surfaces as an error, not a silent no-op");
+}
+
+// ADR-0152 — a passing construct run's capture rides the evidence reference and
+// both digests resolve through the correspondence to the captured git objects.
+// Catches the gap this arc closes: the work being discarded with the worktree
+// after being read as a boolean.
+#[test]
+fn a_passing_construct_run_captures_its_candidate() {
+    let base = TempDir::new().unwrap();
+    let store = correspondence();
+    let evidence = r#"{"command":"construct.implement","nonce":"n-cap","produced_candidate":true,"result_record":{"schema":1,"is_error":false,"result":{"num_turns":3}}}"#;
+    let runner = FixedRunner {
+        evidence: evidence.to_owned(),
+        lifecycle: RunLifecycle::Exited { success: true },
+        captures: true,
+    };
+    let exec = LocalExecutor::new(Arc::new(runner), Arc::clone(&store) as _, base.path(), None, None);
+
+    let handle = exec.submit(&construct_order(digest(5), "n-cap")).unwrap();
+    let refs = exec.stream_evidence(&handle).unwrap();
+
+    let candidate = refs[0].candidate.expect("a passed construct run reports its capture");
+    let captured = canned_capture();
+    assert_eq!(
+        store.resolve_git(&candidate.tree).unwrap().as_ref(),
+        Some(&captured.tree),
+        "the tree digest resolves to the captured tree object",
+    );
+    assert_eq!(
+        store.resolve_git(&candidate.checkout).unwrap().as_ref(),
+        Some(&captured.commit),
+        "the checkout digest resolves to the capture commit",
+    );
+    assert_ne!(candidate.tree, candidate.checkout, "the two axes are domain-separated digests");
+    let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
+    assert_eq!(upload.verdict, StageVerdict::VerificationPassed);
+    assert_eq!(upload.candidate, Some(candidate), "the claim carries the capture to the intake");
+}
+
+// ADR-0152 — fail-closed: a construct run that concluded substantively but whose
+// capture found a clean worktree downgrades to a failing verdict instead of
+// admitting a pass whose work was lost. Catches the inverted gate (trusting the
+// child's produced_candidate stamp over the host's own capture).
+#[test]
+fn a_passing_construct_run_with_nothing_to_capture_fails_closed() {
+    let base = TempDir::new().unwrap();
+    let evidence = r#"{"command":"construct.implement","nonce":"n-void","produced_candidate":true,"result_record":{"schema":1,"is_error":false,"result":{"num_turns":3}}}"#;
+    let runner = FixedRunner {
+        evidence: evidence.to_owned(),
+        lifecycle: RunLifecycle::Exited { success: true },
+        captures: false,
+    };
+    let exec = LocalExecutor::new(Arc::new(runner), correspondence(), base.path(), None, None);
+
+    let handle = exec.submit(&construct_order(digest(5), "n-void")).unwrap();
+    let refs = exec.stream_evidence(&handle).unwrap();
+
+    assert!(refs[0].candidate.is_none());
+    let upload = NameEvidenceClaims.claim_for(&refs[0]).unwrap();
+    assert_eq!(upload.verdict, StageVerdict::VerificationFailed, "a lost capture is a failed attempt");
 }
