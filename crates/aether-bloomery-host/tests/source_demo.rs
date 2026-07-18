@@ -63,7 +63,12 @@ fn a_synthetic_bloom_snapshots_integrates_and_observes_gated_land() {
     let candidate = digest(50);
     fake.seed_git_object(&candidate);
     match shell.integrate(&bloom, &candidate, &checkpoint).unwrap() {
-        IntegrateOutcome::Integrated { tree } => assert_eq!(tree, candidate),
+        IntegrateOutcome::Integrated { tree, head } => {
+            assert_eq!(tree, candidate);
+            // The integrated head is a distinct landable digest from the
+            // artifact tree (#3615), recorded to the produced commit.
+            assert_ne!(head, tree, "the integrated head is distinct from the artifact tree");
+        }
         other => panic!("expected Integrated, got {other:?}"),
     }
 

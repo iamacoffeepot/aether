@@ -188,6 +188,10 @@ pub struct ResolvedBloom {
     pub bloom: BloomId,
     /// The final integrated tree digest.
     pub tree: Digest,
+    /// The landable head commit's digest (distinct from `tree`), carried from
+    /// the integrate outcome so `land` swaps mainline onto a commit rather than
+    /// the bare artifact tree.
+    pub head: Digest,
     /// The integration lineage (the checkpoints that built the tree).
     pub lineage: Vec<Digest>,
     /// One resolution claim per frozen member.

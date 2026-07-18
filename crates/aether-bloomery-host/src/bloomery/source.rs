@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome, LandOutcome,
+    BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome, LandOutcome, Snapshot,
     SourceBackend, SourceSnapshot, WorkpieceId,
 };
 use aether_bloomery_github::{
@@ -87,6 +87,28 @@ impl SourceShell {
             .ok_or_else(|| SourceError::Malformed(format!("mainline head sha `{head_commit_sha}`")))?;
         correspondence.record(base, &git)?;
         Ok(())
+    }
+
+    /// Establish the initial mainline-base correspondence at boot: read the
+    /// repository's live mainline head sha and seed
+    /// [`Snapshot::GENESIS_MAINLINE`] ↔ that sha (issue #3615). Run once, after
+    /// [`connect`](Self::connect) (which opens no network) and before the first
+    /// snapshot, mirroring the claim/deep-heal boot reconcile surface. The
+    /// control core starts every snapshot at `Snapshot::GENESIS_MAINLINE` and
+    /// blooms seal against it, so seeding that exact digest to the real head is
+    /// the authoritative initial correspondence: the first land's reverse-resolve
+    /// of the real mainline object returns the genesis base and the CAS proceeds
+    /// instead of faulting `UnresolvedCorrespondence`. Seeding
+    /// `base ↔ current-head` lazily on the first snapshot would instead equate
+    /// base and head and defeat `land`'s base-moved detection, so the genesis
+    /// read is the authoritative seam.
+    ///
+    /// # Errors
+    /// The mainline ref is unreachable, no correspondence store is mounted (a
+    /// fake-backed shell), the head sha is malformed, or the store write faulted.
+    pub fn reconcile_genesis_mainline(&self) -> Result<(), SourceError> {
+        let head_sha = self.backend.mainline_head_sha()?;
+        self.seed_mainline(&Snapshot::GENESIS_MAINLINE, &head_sha)
     }
 
     /// Snapshot the source at `base`.
@@ -221,7 +243,7 @@ mod tests {
     use aether_bloomery_github::testing::FakeGithub;
     use aether_bloomery_github::{GitSource, SharedCorrespondence};
 
-    use super::{Arc, Digest, SourceShell};
+    use super::{Arc, BloomId, Digest, IntegrateOutcome, LandOutcome, Snapshot, SourceShell};
 
     #[test]
     fn seed_mainline_records_a_resolvable_base_correspondence() {
@@ -241,6 +263,69 @@ mod tests {
         let resolved =
             correspondence.resolve_git(&base).unwrap().expect("the seeded base resolves to the mainline head");
         assert_eq!(resolved.to_hex(), head, "the resolved object is the real 40-hex sha1, not a hex-punned digest");
+    }
+
+    #[test]
+    fn genesis_reconcile_seeds_the_base_and_a_real_repo_snapshot_integrate_land_settles() {
+        // The #3615 end-to-end criterion over the fake: a boot genesis reconcile
+        // seeds `Snapshot::GENESIS_MAINLINE ↔ the repo's real head`, after which
+        // the first snapshot → integrate → land resolves with no `Malformed` and
+        // no `UnresolvedCorrespondence`. Drives the source shell (resolve is the
+        // core reducer's, exercised in the golden trace); the head the reducer
+        // would carry to land is the distinct integrated-head digest recorded here.
+        let fake = FakeGithub::new();
+        let base_tree = Digest::from_bytes([10; 32]);
+        // The repo's real head commit and the mainline ref pointing at it. No
+        // `base ↔ head` correspondence is pre-seeded for the genesis base — the
+        // reconcile is what establishes it (a lazy first-snapshot seed would
+        // instead equate base and head and defeat CAS base-moved detection).
+        let head_commit = fake.seed_base_commit(&base_tree);
+        fake.seed_ref_at("heads/main", &head_commit);
+
+        let correspondence: SharedCorrespondence = Arc::new(fake.clone());
+        let backend = GitSource::new(fake.clone(), Arc::clone(&correspondence), true);
+        let bloom = BloomId(Digest::from_bytes([1; 32]));
+        backend.create_namespace(&bloom, &head_commit).unwrap();
+        let shell = SourceShell { backend: Arc::new(backend), correspondence: Some(Arc::clone(&correspondence)) };
+
+        // Genesis reconcile establishes the initial correspondence authoritatively.
+        shell.reconcile_genesis_mainline().unwrap();
+        assert!(
+            correspondence.resolve_git(&Snapshot::GENESIS_MAINLINE).unwrap().is_some(),
+            "the genesis base resolves to the repo's real head after the reconcile"
+        );
+
+        // The first snapshot at the genesis base now resolves (impossible before
+        // the reconcile — the base had no correspondence to forward-resolve).
+        let snapshot = shell.snapshot(&Snapshot::GENESIS_MAINLINE).unwrap();
+        assert_eq!(snapshot.tree, base_tree, "the genesis snapshot carries the real base tree");
+
+        // Integrate a candidate: the produced commit is the landable head, a
+        // distinct digest from the artifact tree.
+        let checkpoint = shell.checkpoint(&bloom, &snapshot.tree).unwrap();
+        let candidate = Digest::from_bytes([50; 32]);
+        fake.seed_git_object(&candidate);
+        let head = match shell.integrate(&bloom, &candidate, &checkpoint).unwrap() {
+            IntegrateOutcome::Integrated { tree, head } => {
+                assert_eq!(tree, candidate);
+                assert_ne!(head, tree, "the integrated head is distinct from the artifact tree");
+                head
+            }
+            other => panic!("expected Integrated, got {other:?}"),
+        };
+
+        // Land the integrated head against the genesis base — the reverse-resolve
+        // of the real mainline object returns the genesis base and the CAS
+        // proceeds, settling with no Malformed / UnresolvedCorrespondence fault.
+        match shell.land(&bloom, &Snapshot::GENESIS_MAINLINE, &head).unwrap() {
+            LandOutcome::Landed(receipt) => {
+                assert_eq!(receipt.previous_base, Snapshot::GENESIS_MAINLINE);
+                assert_eq!(receipt.new_head, head, "mainline advanced onto the integrated head commit");
+            }
+            LandOutcome::BaseMoved { expected, actual } => {
+                panic!("expected Landed, got BaseMoved {{ expected: {expected:?}, actual: {actual:?} }}")
+            }
+        }
     }
 
     #[test]

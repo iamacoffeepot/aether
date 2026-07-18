@@ -27,7 +27,10 @@ fn script() -> Vec<Event> {
         event("seal", Fact::Seal(spec)),
         event("integrate-alpha", Fact::Integrate { bloom, claim: claim("alpha", 10, 20) }),
         event("integrate-beta", Fact::Integrate { bloom, claim: claim("beta", 11, 21) }),
-        event("resolve", Fact::Resolve { bloom, tree: digest(30), lineage: vec![digest(20), digest(21)] }),
+        event(
+            "resolve",
+            Fact::Resolve { bloom, tree: digest(30), head: digest(40), lineage: vec![digest(20), digest(21)] },
+        ),
         event("land", Fact::Land { bloom, new_head: digest(40) }),
     ]
 }
@@ -93,9 +96,13 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // field (the work-order text the construct lane names in its `## Task` prompt),
 // which the reducer authors `None` on every `DispatchAttempt` — an additive shape
 // change to the decided output, so the golden is recomputed.
+// Repinned again for #3615: `reduce_resolve` now emits `DispatchLand.new_head`
+// as the resolved integrated *head* commit digest (`Fact::Resolve.head`) rather
+// than the artifact `tree`, splitting the two so a land CAS-es mainline onto a
+// commit — an intended change to the resolve step's decided output, recomputed.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0x6f, 0x45, 0x1e, 0x6e, 0xd4, 0x69, 0xfc, 0x10, 0x71, 0x96, 0x03, 0xb6, 0x91, 0x05, 0x1b, 0xed, 0xf7, 0xa7, 0x47,
-    0xf9, 0x3d, 0x03, 0xf6, 0x85, 0x8e, 0x01, 0xa4, 0x59, 0x3c, 0xf6, 0x32, 0x1d,
+    0xd2, 0xcd, 0xe8, 0xa4, 0x00, 0x92, 0x54, 0xca, 0xbf, 0xbc, 0x7e, 0x87, 0x13, 0xf9, 0x9b, 0x75, 0x3a, 0x6c, 0x7d,
+    0x6d, 0x50, 0x4b, 0x3b, 0xff, 0x4e, 0x10, 0xc2, 0x23, 0x59, 0xbc, 0xa8, 0xb1,
 ];
 
 #[test]

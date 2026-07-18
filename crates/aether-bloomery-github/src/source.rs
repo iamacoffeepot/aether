@@ -52,9 +52,10 @@ use std::fmt;
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome, LandOutcome,
-    LandingReceipt, SourceBackend, SourceSnapshot, WorkpieceId,
+    BloomId, Checkpoint, ClaimHolder, ClaimOutcome, ClaimRefKind, ClaimRefState, ContentAddressed, Digest,
+    IntegrateOutcome, LandOutcome, LandingReceipt, SourceBackend, SourceSnapshot, WorkpieceId, digest_of,
 };
+use serde::Serialize;
 
 use crate::client::{GitDataApi, GithubError};
 use crate::correspondence::{Correspondence, CorrespondenceError, GitObjectId};
@@ -63,6 +64,26 @@ use crate::correspondence::{Correspondence, CorrespondenceError, GitObjectId};
 /// held behind a shared handle so a `SourceBackend`'s `&self` methods can drive
 /// it. The host mounts a `SQLite`-backed impl; tests mount an in-memory one.
 pub type SharedCorrespondence = Arc<dyn Correspondence + Send + Sync>;
+
+/// The value the integrated-head digest content-addresses (issue #3615): a
+/// bloom plus its integrated artifact tree. Its digest is distinct from the
+/// artifact `tree`'s own digest by construction — a separate
+/// [`ContentAddressed`] domain — so recording `head ↔ commit` in [`integrate`]
+/// never collides with the `tree ↔ tree-object` correspondence that `snapshot`
+/// and `StaleCheckpoint` reverse-read. The value is never re-derived by any
+/// other reader: `integrate` computes it once, records it, and hands it back in
+/// [`IntegrateOutcome::Integrated`] to carry through the core to `land`.
+///
+/// [`integrate`]: GitSource::integrate
+#[derive(Serialize)]
+struct IntegratedHead {
+    bloom: BloomId,
+    tree: Digest,
+}
+
+impl ContentAddressed for IntegratedHead {
+    const DOMAIN: &'static str = "aether.bloomery.github.integrated-head";
+}
 
 /// A source-port fault, distinct from the clean [`IntegrateOutcome`] /
 /// [`LandOutcome`] refusals (which are not errors). Its own type because the
@@ -511,6 +532,15 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         Ok(SourceSnapshot { head: *base, tree })
     }
 
+    fn mainline_head_sha(&self) -> Result<String, Self::Error> {
+        // Read the live mainline ref, resolving no correspondence — the genesis
+        // reconcile seeds the base↔head correspondence *from* this sha, so it
+        // cannot itself depend on a recorded correspondence (#3615).
+        let current =
+            self.client.get_ref(MAINLINE_REF)?.ok_or_else(|| SourceError::MissingRef(MAINLINE_REF.to_owned()))?;
+        Ok(current.sha)
+    }
+
     fn checkpoint(&self, bloom: &BloomId, tree: &Digest) -> Result<Checkpoint, Self::Error> {
         let name = Self::checkpoint_ref(bloom, tree);
         // Idempotent: the checkpoint's identity is its tree, encoded in the ref
@@ -558,16 +588,23 @@ impl<C: GitDataApi> SourceBackend for GitSource<C> {
         // Resolve the candidate tree digest to its real git tree and create the
         // integration commit over it. The resulting integrated tree stays
         // resolvable through its own tree correspondence — which is exactly what
-        // the core's `land` resolves `new_head` (the resolved candidate *tree*,
-        // reduce.rs) through, and what `StaleCheckpoint` reverse-resolves the
-        // advanced branch's tree back to. Recording a *distinct* landable
-        // head-commit correspondence would both clobber that tree mapping and go
-        // unread; materializing a real landable head is the candidate-tree
-        // materialization follow-on this slice defers (§Side findings, #3603).
+        // `StaleCheckpoint` reverse-resolves the advanced branch's tree back to,
+        // and what `snapshot` reads. The produced commit is the landable *head*:
+        // record it under a *distinct* head digest (a content-address over a
+        // head marker, uncollidable with the tree digest by construction, #3615)
+        // so `head ↔ commit` reverse-/forward-resolves independently of `tree ↔
+        // tree-object`, and carry that head back in the outcome for the core to
+        // thread through `land`'s `new_head`.
         let candidate_tree_sha = self.resolve_git_sha(candidate, "candidate tree digest")?;
         let commit = self.client.create_commit("bloomery integrate", &candidate_tree_sha, &[current.sha])?;
+        let head = digest_of(&IntegratedHead { bloom: *bloom, tree: *candidate });
         match self.client.update_ref(&integration, &commit.sha, false) {
-            Ok(_) => Ok(IntegrateOutcome::Integrated { tree: *candidate }),
+            Ok(_) => {
+                let commit_object = GitObjectId::from_hex(&commit.sha)
+                    .ok_or_else(|| SourceError::Malformed(format!("integrate commit sha `{}`", commit.sha)))?;
+                self.correspondence.record(&head, &commit_object)?;
+                Ok(IntegrateOutcome::Integrated { tree: *candidate, head })
+            }
             // A 422 is GitHub's non-fast-forward refusal: a concurrent writer
             // moved the branch between our read and our update. That is the
             // same stale-checkpoint condition — re-read and report it as such.
@@ -797,6 +834,7 @@ mod tests {
         render_tombstone_message, to_hex,
     };
     use crate::client::GitDataApi;
+    use crate::correspondence::Correspondence;
     use crate::testing::FakeGithub;
 
     fn digest(seed: u8) -> Digest {
@@ -916,7 +954,20 @@ mod tests {
         let candidate = digest(50);
         fake.seed_git_object(&candidate);
         let outcome = source.integrate(&bloom, &candidate, &expected).unwrap();
-        assert_eq!(outcome, IntegrateOutcome::Integrated { tree: candidate });
+        let IntegrateOutcome::Integrated { tree, head } = outcome else {
+            panic!("expected Integrated, got {outcome:?}");
+        };
+        assert_eq!(tree, candidate, "the integrated tree is the candidate tree");
+        // The head digest is distinct from the tree digest and resolves to the
+        // produced commit, while the tree digest still resolves to its own
+        // object — recording `head ↔ commit` does not clobber `tree ↔ tree`
+        // (issue #3615).
+        assert_ne!(head, tree, "the integrated head is a distinct digest from the artifact tree");
+        let head_object =
+            fake.resolve_git(&head).unwrap().expect("the integrated head resolves to the produced commit");
+        let tree_object =
+            fake.resolve_git(&tree).unwrap().expect("the artifact tree still resolves to its own git object");
+        assert_ne!(head_object, tree_object, "head and tree resolve to distinct git objects — no clobber");
 
         // The branch has advanced; the same (now stale) checkpoint is refused,
         // reverse-resolving the advanced branch's tree back to the candidate.

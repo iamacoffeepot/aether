@@ -118,7 +118,10 @@ fn land(snapshot: Snapshot, spec: &BloomSpec, tree: u8, head: u8) -> (Snapshot, 
         (snapshot, _) = step(&snapshot, &event(&format!("integrate-{seed}"), Fact::Integrate { bloom, claim }));
         seed = seed.wrapping_add(1);
     }
-    (snapshot, _) = step(&snapshot, &event("resolve", Fact::Resolve { bloom, tree: digest(tree), lineage: vec![] }));
+    (snapshot, _) = step(
+        &snapshot,
+        &event("resolve", Fact::Resolve { bloom, tree: digest(tree), head: digest(head), lineage: vec![] }),
+    );
     let (snapshot, decisions) = step(&snapshot, &event("land", Fact::Land { bloom, new_head: digest(head) }));
     assert!(
         matches!(decisions.outcome, aether_bloomery::Outcome::Landed(_)),

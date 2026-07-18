@@ -153,9 +153,9 @@ impl SourceCapabilityState {
             Err(error) => return IntegrateResult::Err { error: error.to_string() },
         };
         match self.shell.integrate(&bloom, &candidate, &expected) {
-            Ok(IntegrateOutcome::Integrated { tree }) => match to_vec(&tree) {
-                Ok(tree) => IntegrateResult::Integrated { tree },
-                Err(error) => IntegrateResult::Err { error: error.to_string() },
+            Ok(IntegrateOutcome::Integrated { tree, head }) => match (to_vec(&tree), to_vec(&head)) {
+                (Ok(tree), Ok(head)) => IntegrateResult::Integrated { tree, head },
+                (Err(error), _) | (_, Err(error)) => IntegrateResult::Err { error: error.to_string() },
             },
             Ok(IntegrateOutcome::Conflict { at }) => match to_vec(&at) {
                 Ok(at) => IntegrateResult::Conflict { at },
@@ -386,6 +386,33 @@ impl NativeActor for SourceCapability {
             "source shell connected"
         );
         Ok(SourceCapabilityState { shell, claims_enabled })
+    }
+
+    /// Genesis mainline-base reconcile (issue #3615): once the shell is
+    /// connected — post-`init`, which opens no network by contract — read the
+    /// repository's live mainline head and seed `Snapshot::GENESIS_MAINLINE ↔
+    /// head` so the first land's base reverse-resolves instead of faulting
+    /// `UnresolvedCorrespondence`. Gated on a configured source (`claims_enabled`
+    /// is the token/owner/repo-present predicate): an unconfigured shell opens no
+    /// network, so the reconcile is skipped rather than issuing a doomed request.
+    /// A failure logs and continues — `wire` cannot fail boot, and a missed
+    /// genesis surfaces as a recoverable land-time fault a re-reconcile heals,
+    /// which is safer than crashing the chassis on a transient GitHub blip.
+    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+        if !state.claims_enabled {
+            return;
+        }
+        match state.shell.reconcile_genesis_mainline() {
+            Ok(()) => tracing::info!(
+                target: "aether_bloomery_host::source",
+                "genesis mainline-base correspondence seeded"
+            ),
+            Err(error) => tracing::warn!(
+                target: "aether_bloomery_host::source",
+                %error,
+                "genesis mainline reconcile failed; first land may fault until re-reconciled"
+            ),
+        }
     }
 
     // The `#[handler::single]` contract requires the mail by value; every
