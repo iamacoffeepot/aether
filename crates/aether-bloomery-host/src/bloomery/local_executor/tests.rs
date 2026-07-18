@@ -5,6 +5,7 @@
 //! exactly as a wrapper-uploaded one would.
 
 use std::sync::Arc;
+use std::{fs, io};
 
 use aether_bloomery::{
     Conclusion, Digest, ExecutionStatus, ExecutorBackend, Nonce, StageId, Transformation, WorkHandle,
@@ -15,7 +16,7 @@ use tempfile::TempDir;
 use aether_bloomery_github::testing::FakeGithub;
 
 use super::testing::FixedRunner;
-use super::{LocalExecutor, LocalExecutorError, RunLifecycle};
+use super::{LocalExecutor, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use crate::bloomery::intake::{EvidenceClaims, NameEvidenceClaims};
 
 fn digest(seed: u8) -> Digest {
@@ -143,6 +144,47 @@ fn stream_evidence_evicts_the_consumed_run() {
         Err(LocalExecutorError::NoRunForNonce(_)) => {}
         other => panic!("expected NoRunForNonce after eviction, got {other:?}"),
     }
+}
+
+// A runner whose child has already exited by the time `cancel` reaches it:
+// `poll` reports Exited, but `kill` faults (the syscall complains that the
+// process is gone). The cancel path must read that as already-satisfied.
+struct KillErrorRunner;
+
+impl TransformRunner for KillErrorRunner {
+    fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError> {
+        fs::create_dir_all(spec.evidence_dir).map_err(LocalExecutorError::Io)?;
+        Ok(Box::new(KillErrorProcess))
+    }
+}
+
+struct KillErrorProcess;
+
+impl RunProcess for KillErrorProcess {
+    fn poll(&mut self) -> RunLifecycle {
+        RunLifecycle::Exited { success: true }
+    }
+
+    fn kill(&mut self) -> Result<(), LocalExecutorError> {
+        Err(LocalExecutorError::Io(io::Error::other("no such process")))
+    }
+}
+
+#[test]
+fn cancel_evicts_when_the_kill_faults_but_the_child_already_exited() {
+    // Tripwire: a kill error on an already-exited child is already satisfied — the
+    // run is evicted regardless (a re-inspect is the clean Unknown) rather than
+    // parked forever as an uncancellable entry that no later cancel can clear.
+    let base = TempDir::new().unwrap();
+    let exec = LocalExecutor::new(Arc::new(KillErrorRunner), correspondence(), base.path(), None, None);
+    let handle = exec.submit(&construct_order(digest(5), "n-k")).unwrap();
+
+    exec.cancel(&handle).unwrap();
+    assert_eq!(
+        exec.inspect(&handle).unwrap(),
+        ExecutionStatus::Unknown,
+        "a kill fault on an already-exited child still evicts the run",
+    );
 }
 
 #[test]

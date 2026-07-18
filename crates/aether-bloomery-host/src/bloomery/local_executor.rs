@@ -178,10 +178,14 @@ pub trait TransformRunner: Send + Sync {
     fn start(&self, spec: &RunSpec<'_>) -> Result<Box<dyn RunProcess>, LocalExecutorError>;
 }
 
-/// One tracked run: the spawned child, where its evidence lands, and the digest
-/// the returning evidence must bind to.
+/// One tracked run: the spawned child, its scratch worktree, where its evidence
+/// lands, and the digest the returning evidence must bind to.
 struct Run {
     process: Box<dyn RunProcess>,
+    // The scratch worktree the checkout was materialized into. An evicted run
+    // (cancelled, or its evidence consumed) reclaims it so a scratch checkout's
+    // lifetime is bounded by the run's rather than surviving it indefinitely.
+    worktree_dir: PathBuf,
     evidence_dir: PathBuf,
     // The digest the intake broker binds the evidence to — the order's subject
     // input (`transformation.inputs[0]`, what `drain_and_dispatch` records as the
@@ -285,7 +289,7 @@ impl ExecutorBackend for LocalExecutor {
             task: is_construct.then_some(order.transformation.description.as_deref()).flatten(),
         };
         let process = self.runner.start(&spec)?;
-        self.lock().insert(nonce, Run { process, evidence_dir, subject });
+        self.lock().insert(nonce, Run { process, worktree_dir, evidence_dir, subject });
         Ok(WorkHandle::new(order.nonce.clone()))
     }
 
@@ -323,10 +327,21 @@ impl ExecutorBackend for LocalExecutor {
         let Some(run) = runs.get_mut(&handle.nonce.0) else {
             return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
         };
-        run.process.kill()?;
+        // A kill error is only fatal while the child is genuinely still alive: if
+        // a re-poll shows it already exited, the kill's complaint is already
+        // satisfied, so the run is evicted regardless rather than parked forever
+        // as an uncancellable entry.
+        if let Err(error) = run.process.kill()
+            && matches!(run.process.poll(), RunLifecycle::Running)
+        {
+            return Err(error);
+        }
         // A cancel is terminal — evict the killed run so the registry tracks only
-        // in-flight orders rather than parking `cancelled` entries forever.
+        // in-flight orders rather than parking `cancelled` entries forever, and
+        // reclaim its scratch worktree so the checkout does not outlive the run.
+        let worktree_dir = run.worktree_dir.clone();
         runs.remove(&handle.nonce.0);
+        remove_worktree(&worktree_dir);
         Ok(())
     }
 
@@ -335,12 +350,13 @@ impl ExecutorBackend for LocalExecutor {
         // Pull the run's on-disk location, binding digest, and terminal exit out of
         // the guarded region, then drop the lock — the evidence read is blocking IO
         // and must not hold the registry mutex.
-        let (evidence_dir, subject, exited_success) = {
+        let (worktree_dir, evidence_dir, subject, exited_success) = {
             let mut runs = self.lock();
             let Some(run) = runs.get_mut(&handle.nonce.0) else {
                 return Err(LocalExecutorError::NoRunForNonce(handle.nonce.clone()));
             };
             (
+                run.worktree_dir.clone(),
                 run.evidence_dir.clone(),
                 run.subject,
                 matches!(run.process.poll(), RunLifecycle::Exited { success: true }),
@@ -350,9 +366,11 @@ impl ExecutorBackend for LocalExecutor {
         let bytes = fs::read(&evidence_path)
             .map_err(|error| LocalExecutorError::Evidence(format!("{}: {error}", evidence_path.display())))?;
         // The evidence has been consumed — evict the run so the registry tracks
-        // only in-flight orders rather than growing for the process's lifetime. A
+        // only in-flight orders rather than growing for the process's lifetime, and
+        // reclaim its scratch worktree so the checkout does not outlive the run. A
         // failed read leaves the entry above so a later cycle can retry it.
         self.lock().remove(&handle.nonce.0);
+        remove_worktree(&worktree_dir);
         // Verdict from the run's own evidence: the verify lane stamps a `status`
         // ("pass"/"fail"); the construct lane's record carries none, so its verdict
         // folds from the child's terminal exit. A passing outcome maps to
@@ -420,7 +438,16 @@ impl TransformRunner for ProcessTransformRunner {
                 cargo.args(["--task", task]);
             }
         }
-        let child = cargo.spawn().map_err(LocalExecutorError::Spawn)?;
+        let child = match cargo.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                // The worktree was materialized above; a failed spawn must not
+                // leave that scratch checkout orphaned, so reclaim it before
+                // surfacing the spawn fault.
+                remove_worktree(spec.worktree_dir);
+                return Err(LocalExecutorError::Spawn(error));
+            }
+        };
         Ok(Box::new(ChildProcess { child }))
     }
 }
@@ -448,6 +475,16 @@ impl RunProcess for ChildProcess {
         self.child.wait().map_err(LocalExecutorError::Io)?;
         Ok(())
     }
+}
+
+/// Best-effort teardown of a run's scratch worktree once the run is evicted (a
+/// cancel, a consumed-evidence stream, or a failed spawn). `git worktree remove
+/// --force` reclaims the checkout so it does not outlive the run; the removal is
+/// deliberately best-effort — a stub-runner test materialized no real worktree,
+/// and a genuinely-wedged remove must not fail the eviction it accompanies — so
+/// its outcome is dropped.
+fn remove_worktree(dir: &Path) {
+    let _ = Command::new("git").args(["worktree", "remove", "--force"]).arg(dir).output();
 }
 
 /// `Some(s)` for a non-empty config string, `None` for the empty default.

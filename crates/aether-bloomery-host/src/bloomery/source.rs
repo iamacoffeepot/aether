@@ -214,3 +214,41 @@ impl SourceShell {
         self.backend.complete_release(expected_holder, ref_kind)
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use aether_bloomery_github::testing::FakeGithub;
+    use aether_bloomery_github::{GitSource, SharedCorrespondence};
+
+    use super::{Arc, Digest, SourceShell};
+
+    #[test]
+    fn seed_mainline_records_a_resolvable_base_correspondence() {
+        // Tripwire: seed_mainline records the sealed base digest ↔ the repo's real
+        // (40-hex sha1) mainline head commit, so a later `resolve_git` reads it back
+        // — the record path the deferred boot reconcile drives, verified here
+        // without the live mainline read that supplies the sha.
+        let fake = FakeGithub::new();
+        let correspondence: SharedCorrespondence = Arc::new(fake.clone());
+        let backend = Arc::new(GitSource::new(fake, Arc::clone(&correspondence), true));
+        let shell = SourceShell { backend, correspondence: Some(Arc::clone(&correspondence)) };
+
+        let base = Digest::from_bytes([7; 32]);
+        let head = "3a3f8c0b9e1d2a4f6b8c0e2d4a6f8b0c1e3d5a7f";
+        shell.seed_mainline(&base, head).unwrap();
+
+        let resolved =
+            correspondence.resolve_git(&base).unwrap().expect("the seeded base resolves to the mainline head");
+        assert_eq!(resolved.to_hex(), head, "the resolved object is the real 40-hex sha1, not a hex-punned digest");
+    }
+
+    #[test]
+    fn seed_mainline_without_a_mounted_correspondence_errors() {
+        // Tripwire: a fake-backed shell (`new`) carries no correspondence store, so
+        // seed_mainline refuses cleanly rather than silently no-op-ing the record.
+        let fake = FakeGithub::new();
+        let shell = SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), true)));
+        assert!(shell.seed_mainline(&Digest::from_bytes([7; 32]), "3a3f8c0b9e1d2a4f6b8c0e2d4a6f8b0c1e3d5a7f").is_err());
+    }
+}
