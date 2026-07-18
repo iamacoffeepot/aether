@@ -6,19 +6,6 @@ final-status-level = "slow"
 fail-fast = false
 slow-timeout = { period = "60s", terminate-after = 1 }
 
-# Every binary under `crates/aether-kit/tests/` cold-loads and compiles
-# `aether_kit.wasm` and boots a wgpu `TestBench`, so they are one slow
-# class rather than a fixed allowlist: #2805 measured the camera scenario
-# around 56.5s and mesh around 52-53s against the default 60s cap, and
-# iamacoffeepot/aether#3527 saw two more binaries (`mark_scenario`,
-# `proposal_scenario`) cross 60s the same way, exactly the allowlist gap a
-# per-binary filter leaves open for the next one. `kind(test)` scopes the
-# cap to the integration binaries; the crate's `kind(lib)` unit tests keep
-# the 60s default.
-[[profile.ci.overrides]]
-filter = "package(=aether-kit) & kind(test)"
-slow-timeout = { period = "120s", terminate-after = 1 }
-
 # `terrain_workbench_scenario` is the crate's heaviest integration binary —
 # four cold wasm component loads (mark/world/terra/workbench) plus a font
 # load and six GPU captures in one test, versus siblings that load one or
@@ -33,9 +20,28 @@ slow-timeout = { period = "120s", terminate-after = 1 }
 # slow-but-completing rather than a hang; widen generously, matching the
 # `fleetbench_replace` precedent below, and keep the package-wide cap
 # intact for the crate's other ten integration binaries.
+#
+# Ordering constraint: this override must precede the package-wide
+# `kind(test)` class cap below — nextest applies the first matching
+# override per setting, so listed after the class cap the 300s widening
+# never applies and the test dies at 120s (the #3627 timeout recurring
+# on main even after the widening first landed).
 [[profile.ci.overrides]]
 filter = "package(=aether-kit) & binary(terrain_workbench_scenario)"
 slow-timeout = { period = "300s", terminate-after = 1 }
+
+# Every binary under `crates/aether-kit/tests/` cold-loads and compiles
+# `aether_kit.wasm` and boots a wgpu `TestBench`, so they are one slow
+# class rather than a fixed allowlist: #2805 measured the camera scenario
+# around 56.5s and mesh around 52-53s against the default 60s cap, and
+# iamacoffeepot/aether#3527 saw two more binaries (`mark_scenario`,
+# `proposal_scenario`) cross 60s the same way, exactly the allowlist gap a
+# per-binary filter leaves open for the next one. `kind(test)` scopes the
+# cap to the integration binaries; the crate's `kind(lib)` unit tests keep
+# the 60s default.
+[[profile.ci.overrides]]
+filter = "package(=aether-kit) & kind(test)"
+slow-timeout = { period = "120s", terminate-after = 1 }
 
 # The `aether-substrate-bundle` integration tests (FleetBench + the engines /
 # routing fleet suites) fork real debug `aether-substrate` processes and wait
