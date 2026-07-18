@@ -37,6 +37,45 @@ responsibilities.
 Do not copy a list from a CI log into a shell and run it. Logs are evidence;
 commands come from checked-in workflows and repository guidance.
 
+## Coupling-gap triage loop
+
+`cargo xtask affected` narrows a PR's CI to the workspace graph's
+reverse-dependency closure plus hand-injected path rules for couplings the
+cargo graph cannot express (`PATH_RULES_TOML` in `xtask/src/affected.rs`). A
+path matching nothing already escalates to `run_all`, so the one gap left is
+mis-attribution: a changed path that matched some package but has an
+additional consumer outside the graph (a runtime-read data file, fixture,
+golden file, or env contract in another crate). Pushes to `main` keep the
+unconditional full suite as the backstop, so a mis-attribution gap surfaces
+as a red full suite on `main` after the merged PR's narrowed CI was green.
+
+When that happens, work the loop:
+
+1. Discriminate the red's shape first. `main` also goes red from timeouts —
+   the full builds run long — so the signal is noisy. A **deterministic test
+   or compile failure in a package the PR did not select** is the coupling
+   signature; a timeout or infra red is not. Treat a recurring timeout red as
+   its own `type:flake` defect rather than background noise — a streak of
+   them can mask a real coupling red behind it, and "main is just red again"
+   is exactly how a gap survives.
+2. Identify which changed path should have selected which package. The
+   failing test names the consumer.
+3. Add one `[[path-rule]]` block (`globs` → `mark-changed`) to
+   `PATH_RULES_TOML`, mirroring the existing `bloomery/**` →
+   `aether-bloomery-host` rule, with a comment naming the coupling. The rule
+   PR self-validates: `xtask/` is in `RUN_ALL_PREFIXES`, so it runs the full
+   suite.
+4. Land the rule fix alongside (or before) the breakage fix so the selection
+   gap closes with the incident.
+
+Two future options worth a sentence each, not yet done: the Test job already
+computes the narrowed set, so persisting it (a run artifact or output line)
+would let a `main` red auto-correlate against a recently merged PR's
+unselected set, turning this triage mechanical. And if the rule count grows
+past a handful, revisit centralized rules vs. crate-local declaration (e.g.
+`[package.metadata.affected]` extra-paths read by `xtask`) as a deliberate
+design decision.
+
 ## Watching a draft PR
 
 Implementation PRs stay draft while CI/review/dogfood facts accumulate. The
