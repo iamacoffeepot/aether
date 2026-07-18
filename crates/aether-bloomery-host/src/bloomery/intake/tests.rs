@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use aether_bloomery::{
     BloomDraft, BloomId, BloomRecord, BloomStatus, Budget, Decision, Digest, Event, Evidence, EvidenceKind,
-    EvidenceRef, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce, Outcome, Snapshot, StageCatalog,
-    StageId, Transformation, WorkHandle, WorkOrder, WorkpieceId, reduce,
+    EvidenceRef, ExecutionStatus, Fact, Forecast, IdempotencyKey, Membership, NetworkProfile, Nonce, Outcome, Snapshot,
+    StageCatalog, StageId, Transformation, WorkHandle, WorkOrder, WorkpieceId, reduce,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -364,6 +364,33 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
     assert!(sink.0.is_empty(), "a refused upload never reaches the reducer");
     // The order stayed live — the mismatch did not consume it.
     assert!(store.lookup_order("n-bad").unwrap().is_some());
+}
+
+#[test]
+fn a_pending_handle_is_reported_and_neither_completed_nor_admitted() {
+    // A run that hasn't resolved yet (#3635) is skipped as before, but now
+    // surfaces in `report.pending` with its observed status — the data the
+    // executor driver's staleness sweep reads, rather than silence.
+    let workpiece = WorkpieceId("wp-pending".to_owned());
+    let scope_revision = Digest::from_bytes([2; 32]);
+    let candidate = Digest::from_bytes([5; 32]);
+
+    let fake = FakeGithub::new();
+    let shell = shell(fake.clone());
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let record = dispatch_record("n-pending", bloom, &workpiece, scope_revision, candidate);
+    let handle = dispatch_and_record(&shell, &mut store, &work_order("n-pending"), &record).unwrap();
+
+    let _ = fake.seed_run("n-pending", RunStatus::InProgress, None);
+
+    let claims = SeededClaims(HashMap::new());
+    let mut sink = Collector::default();
+
+    let report = run_intake_cycle(&mut store, &shell, &[handle], &claims, &mut sink).unwrap();
+    assert_eq!((report.completed, report.admitted, report.refused), (0, 0, 0));
+    assert_eq!(report.pending, vec![(Nonce("n-pending".to_owned()), ExecutionStatus::Running)]);
+    assert!(sink.0.is_empty());
 }
 
 // A sealed single-member bloom driven through the *reducer's* seal, so the
