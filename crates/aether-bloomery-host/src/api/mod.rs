@@ -32,4 +32,4 @@ use crate::signing::VerifyResult;
 #[actor(singleton)]
 pub struct BloomeryApiCapability;
 
-pub use runtime::ApiCapabilityState;
+pub use runtime::{ApiCapabilityState, ApiConfig};

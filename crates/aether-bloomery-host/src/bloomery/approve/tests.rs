@@ -200,6 +200,13 @@ fn revision() -> Digest {
     Digest::from_bytes([9; 32])
 }
 
+/// A fixed projection digest — the digest of the exact facts the gate evaluated
+/// (issue #3583, rider 3). Distinct from [`revision`] so a test can tell which of
+/// the two parents moves an auto approval's `detail`.
+fn projection() -> Digest {
+    Digest::from_bytes([7; 32])
+}
+
 /// An admission request over `surface` with a complete, non-ADR, non-pre-approved
 /// revision — the base a gate test varies.
 fn request(surface: &[&str]) -> AdmissionRequest {
@@ -209,6 +216,7 @@ fn request(surface: &[&str]) -> AdmissionRequest {
         completeness: complete(),
         adr_touch: AdrTouch::None,
         pre_approved: false,
+        projection_digest: projection(),
     }
 }
 
@@ -258,6 +266,26 @@ fn an_auto_tier_surface_forms_an_approval_bound_to_the_revision() {
     assert!(evidence.validates(&revision()), "the approval must bind the exact scope revision");
     // The detail names a distinct supporting artifact, not the revision itself.
     assert_ne!(evidence.detail, revision());
+}
+
+#[test]
+fn the_auto_approval_detail_binds_the_evaluated_projection() {
+    // Rider 3 (#3583): the auto approval's `detail` folds in the digest of the
+    // exact projection facts the gate evaluated, so the sealed evidence attests
+    // which projection produced the grant. A computed-value tripwire: swapping
+    // only the projection digest (same surface, same revision) must move the
+    // `detail`, or the binding is not actually threaded through.
+    let policy = policy();
+    let gate = gate_over(&policy);
+    let base = request(&["docs/guide/x.md"]);
+    let mut swapped = request(&["docs/guide/x.md"]);
+    swapped.projection_digest = Digest::from_bytes([3; 32]);
+    let (Decision::AutoApproved(a), Decision::AutoApproved(b)) = (gate.evaluate(&base), gate.evaluate(&swapped)) else {
+        panic!("both requests resolve auto");
+    };
+    // Same subject (the shared revision), different detail (the projection moved).
+    assert_eq!(a.subject, b.subject, "both approvals still bind the same scope revision");
+    assert_ne!(a.detail, b.detail, "a different evaluated projection must move the auto approval's detail");
 }
 
 #[test]
