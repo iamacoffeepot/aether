@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       command:
-        description: "Typed verify command id (verify.fmt / verify.clippy / verify.docs)"
+        description: "Typed verify command id (verify.fmt / verify.clippy / verify.docs, or the verify.check umbrella)"
         required: true
       subject:
         description: "Exact digest (checkout target) the resolved work order names"
