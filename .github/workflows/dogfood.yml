@@ -390,6 +390,7 @@ jobs:
         run: |
           jq 'del(.hooks)' .claude/settings.json > /tmp/settings.json
           mv /tmp/settings.json .claude/settings.json
+          git update-index --skip-worktree .claude/settings.json
 
       # The desktop chassis is not in ensure-tunnel.sh's own build list, but the
       # script DOES ingest target/release/aether-substrate into the hub's binary
