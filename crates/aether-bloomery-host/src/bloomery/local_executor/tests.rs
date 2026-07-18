@@ -14,12 +14,23 @@ use aether_bloomery::{
 use aether_bloomery_github::StageVerdict;
 use tempfile::TempDir;
 
+use aether_bloomery_github::testing::FakeGithub;
+
 use super::testing::FixedRunner;
 use super::{LocalExecutor, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use crate::bloomery::intake::{EvidenceClaims, NameEvidenceClaims};
 
 fn digest(seed: u8) -> Digest {
     Digest::from_bytes([seed; 32])
+}
+
+// A correspondence seeded with the one checkout target these orders carry
+// (`for_member_stage`'s third arg, `digest(0xC0)`), so `submit` resolves the
+// `git worktree add` target through it rather than hex-punning the digest.
+fn correspondence() -> Arc<FakeGithub> {
+    let fake = FakeGithub::new();
+    fake.seed_git_object(&digest(0xC0));
+    Arc::new(fake)
 }
 
 // The local backend's `Nonce` is a work-order correlation id, not a cryptographic
@@ -32,7 +43,13 @@ fn test_nonce(tag: &str) -> String {
 
 fn executor(base: &TempDir, evidence: &str, lifecycle: RunLifecycle) -> LocalExecutor {
     let runner = FixedRunner { evidence: evidence.to_owned(), lifecycle };
-    LocalExecutor::new(Arc::new(runner), base.path(), Some("claude-opus-4-8".to_owned()), Some("high".to_owned()))
+    LocalExecutor::new(
+        Arc::new(runner),
+        correspondence(),
+        base.path(),
+        Some("claude-opus-4-8".to_owned()),
+        Some("high".to_owned()),
+    )
 }
 
 fn construct_order(subject: Digest, nonce: &str) -> aether_bloomery::WorkOrder {
@@ -257,7 +274,7 @@ fn recording_executor(
 ) -> (LocalExecutor, Arc<Mutex<Vec<PathBuf>>>) {
     let released = Arc::new(Mutex::new(Vec::new()));
     let runner = RecordingRunner { evidence: evidence.map(str::to_owned), lifecycle, released: Arc::clone(&released) };
-    (LocalExecutor::new(Arc::new(runner), base.path(), None, None), released)
+    (LocalExecutor::new(Arc::new(runner), correspondence(), base.path(), None, None), released)
 }
 
 #[test]

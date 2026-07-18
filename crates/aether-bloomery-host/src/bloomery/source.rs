@@ -27,35 +27,66 @@ use aether_bloomery::{
     BloomId, Checkpoint, ClaimOutcome, ClaimRefKind, ClaimRefState, Digest, IntegrateOutcome, LandOutcome,
     SourceBackend, SourceSnapshot, WorkpieceId,
 };
-use aether_bloomery_github::{GitSource, GithubError, SourceError};
+use aether_bloomery_github::{
+    CorrespondenceError, GitObjectId, GitSource, GithubError, SharedCorrespondence, SourceError,
+};
 
 use super::mirror::GithubMirrorConfig;
 
 /// The source cap shell: the git source backend behind an `Arc<dyn …>`, so no
-/// core module ever names the concrete github-crate type.
+/// core module ever names the concrete github-crate type. A live (connected)
+/// shell also holds the correspondence handle so it can seed the mainline
+/// correspondence (ADR-0150); a fake-backed shell (`new`) seeds the double
+/// directly and carries none.
 #[derive(Clone)]
 pub struct SourceShell {
     backend: Arc<dyn SourceBackend<Error = SourceError> + Send + Sync>,
+    correspondence: Option<SharedCorrespondence>,
 }
 
 impl SourceShell {
     /// Mount an arbitrary source backend — the demo mounts a fake-backed one,
-    /// production a `ReqwestGithub`-backed one.
+    /// production a `ReqwestGithub`-backed one. Carries no seedable correspondence
+    /// handle (the fake-backed tests seed their double directly); use
+    /// [`connect`](Self::connect) for a live shell that can [`seed_mainline`](Self::seed_mainline).
     #[must_use]
     pub fn new(backend: Arc<dyn SourceBackend<Error = SourceError> + Send + Sync>) -> Self {
-        Self { backend }
+        Self { backend, correspondence: None }
     }
 
-    /// Connect a live GitHub-backed source port from resolved config. The
-    /// `cas_land_enabled` knob gates `land` — on by default since ADR-0149
-    /// migration step 3 made the CAS `land` the landing of record; a `false`
-    /// knob is the explicit kill switch.
+    /// Connect a live GitHub-backed source port from resolved config, over the
+    /// persisted correspondence (ADR-0150). The `cas_land_enabled` knob gates
+    /// `land` — on by default since ADR-0149 migration step 3 made the CAS `land`
+    /// the landing of record; a `false` knob is the explicit kill switch.
     ///
     /// # Errors
-    /// The underlying `reqwest` client could not be constructed.
+    /// The underlying `reqwest` client or the correspondence store could not be
+    /// constructed.
     pub fn connect(config: &GithubMirrorConfig) -> Result<Self, GithubError> {
         let client = config.connect_client()?;
-        Ok(Self::new(Arc::new(GitSource::new(client, config.cas_land_enabled))))
+        let correspondence = config.connect_correspondence()?;
+        let backend = Arc::new(GitSource::new(client, Arc::clone(&correspondence), config.cas_land_enabled));
+        Ok(Self { backend, correspondence: Some(correspondence) })
+    }
+
+    /// Seed the mainline correspondence: record the sealed `base` head digest ↔
+    /// the repository's real head commit sha `head_commit_sha`, so the first
+    /// `snapshot` / `land` has a correspondence to resolve (ADR-0150). The boot
+    /// reconcile that reads the live mainline ref supplies the real sha; this is
+    /// the entry point it records through.
+    ///
+    /// # Errors
+    /// No correspondence store is mounted (a fake-backed shell), the sha is not a
+    /// well-formed git object id, or the store write faulted.
+    pub fn seed_mainline(&self, base: &Digest, head_commit_sha: &str) -> Result<(), SourceError> {
+        let correspondence = self
+            .correspondence
+            .as_ref()
+            .ok_or_else(|| SourceError::Correspondence(CorrespondenceError::new("no correspondence store mounted")))?;
+        let git = GitObjectId::from_hex(head_commit_sha)
+            .ok_or_else(|| SourceError::Malformed(format!("mainline head sha `{head_commit_sha}`")))?;
+        correspondence.record(base, &git)?;
+        Ok(())
     }
 
     /// Snapshot the source at `base`.
@@ -181,5 +212,43 @@ impl SourceShell {
         ref_kind: &ClaimRefKind,
     ) -> Result<ClaimOutcome, SourceError> {
         self.backend.complete_release(expected_holder, ref_kind)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use aether_bloomery_github::testing::FakeGithub;
+    use aether_bloomery_github::{GitSource, SharedCorrespondence};
+
+    use super::{Arc, Digest, SourceShell};
+
+    #[test]
+    fn seed_mainline_records_a_resolvable_base_correspondence() {
+        // Tripwire: seed_mainline records the sealed base digest ↔ the repo's real
+        // (40-hex sha1) mainline head commit, so a later `resolve_git` reads it back
+        // — the record path the deferred boot reconcile drives, verified here
+        // without the live mainline read that supplies the sha.
+        let fake = FakeGithub::new();
+        let correspondence: SharedCorrespondence = Arc::new(fake.clone());
+        let backend = Arc::new(GitSource::new(fake, Arc::clone(&correspondence), true));
+        let shell = SourceShell { backend, correspondence: Some(Arc::clone(&correspondence)) };
+
+        let base = Digest::from_bytes([7; 32]);
+        let head = "3a3f8c0b9e1d2a4f6b8c0e2d4a6f8b0c1e3d5a7f";
+        shell.seed_mainline(&base, head).unwrap();
+
+        let resolved =
+            correspondence.resolve_git(&base).unwrap().expect("the seeded base resolves to the mainline head");
+        assert_eq!(resolved.to_hex(), head, "the resolved object is the real 40-hex sha1, not a hex-punned digest");
+    }
+
+    #[test]
+    fn seed_mainline_without_a_mounted_correspondence_errors() {
+        // Tripwire: a fake-backed shell (`new`) carries no correspondence store, so
+        // seed_mainline refuses cleanly rather than silently no-op-ing the record.
+        let fake = FakeGithub::new();
+        let shell = SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), true)));
+        assert!(shell.seed_mainline(&Digest::from_bytes([7; 32]), "3a3f8c0b9e1d2a4f6b8c0e2d4a6f8b0c1e3d5a7f").is_err());
     }
 }

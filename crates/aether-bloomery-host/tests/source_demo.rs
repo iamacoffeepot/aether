@@ -41,7 +41,7 @@ fn demo() -> (SourceShell, FakeGithub, BloomId, Digest) {
     fake.seed_ref_at("heads/main", &base);
 
     let bloom = BloomId(digest(1));
-    let backend = GitSource::new(fake.clone(), false);
+    let backend = GitSource::new(fake.clone(), Arc::new(fake.clone()), false);
     backend.create_namespace(&bloom, &base).unwrap();
     (SourceShell::new(Arc::new(backend)), fake, bloom, base)
 }
@@ -57,9 +57,11 @@ fn a_synthetic_bloom_snapshots_integrates_and_observes_gated_land() {
     assert_eq!(snapshot.tree, base_tree);
 
     // Record a checkpoint at the integration branch's current tree, then
-    // integrate a candidate against it.
+    // integrate a candidate against it — the candidate tree's git-object
+    // correspondence is seeded (materialized elsewhere) so integrate resolves it.
     let checkpoint = shell.checkpoint(&bloom, &snapshot.tree).unwrap();
     let candidate = digest(50);
+    fake.seed_git_object(&candidate);
     match shell.integrate(&bloom, &candidate, &checkpoint).unwrap() {
         IntegrateOutcome::Integrated { tree } => assert_eq!(tree, candidate),
         other => panic!("expected Integrated, got {other:?}"),
@@ -83,9 +85,11 @@ fn land_performs_the_compare_and_swap_when_enabled() {
     let (_gated, fake, bloom, base) = demo();
 
     // A second shell over the same fake with the gate enabled: the CAS advances
-    // mainline from the expected base and issues a receipt.
-    let enabled = SourceShell::new(Arc::new(GitSource::new(fake.clone(), true)));
+    // mainline from the expected base and issues a receipt. The new head's
+    // git-object correspondence is seeded so the CAS resolves its target.
+    let enabled = SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake.clone()), true)));
     let new_head = digest(90);
+    fake.seed_git_object(&new_head);
     match enabled.land(&bloom, &base, &new_head).unwrap() {
         LandOutcome::Landed(receipt) => {
             assert_eq!(receipt.previous_base, base);

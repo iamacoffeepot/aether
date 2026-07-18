@@ -31,7 +31,8 @@ use std::fmt;
 use aether_bloomery::{Conclusion, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, WorkHandle, WorkOrder};
 
 use crate::client::{ActionsApi, GithubError, RunConclusion, RunStatus, WorkflowRun};
-use crate::source::to_hex;
+use crate::correspondence::CorrespondenceError;
+use crate::source::SharedCorrespondence;
 
 /// An executor-port fault. Its own type because the port needs an arm the value
 /// vocabulary does not carry — a message asked to act on a run that does not
@@ -45,6 +46,14 @@ pub enum ExecutorError {
     /// reports the same condition as the clean [`ExecutionStatus::Unknown`],
     /// not this error, because reporting "no run yet" *is* its job.)
     NoRunForNonce(Nonce),
+    /// The order's checkout digest resolved no real git object through the
+    /// [`Correspondence`](crate::Correspondence) store (ADR-0150) — the sealed
+    /// source was never materialized or its correspondence never seeded, so the
+    /// executor refuses cleanly rather than dispatching a `subject` git cannot
+    /// check out.
+    UnresolvedCheckout(Nonce),
+    /// The correspondence store itself faulted while resolving the checkout.
+    Correspondence(CorrespondenceError),
 }
 
 impl fmt::Display for ExecutorError {
@@ -54,6 +63,14 @@ impl fmt::Display for ExecutorError {
             Self::NoRunForNonce(nonce) => {
                 write!(f, "actions executor backend: no run resolves for nonce `{}`", nonce.0)
             }
+            Self::UnresolvedCheckout(nonce) => {
+                write!(
+                    f,
+                    "actions executor backend: no git-object correspondence for the checkout of nonce `{}`",
+                    nonce.0
+                )
+            }
+            Self::Correspondence(error) => write!(f, "actions executor backend: {error}"),
         }
     }
 }
@@ -62,8 +79,15 @@ impl Error for ExecutorError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Github(error) => Some(error),
-            Self::NoRunForNonce(_) => None,
+            Self::Correspondence(error) => Some(error),
+            Self::NoRunForNonce(_) | Self::UnresolvedCheckout(_) => None,
         }
+    }
+}
+
+impl From<CorrespondenceError> for ExecutorError {
+    fn from(error: CorrespondenceError) -> Self {
+        Self::Correspondence(error)
     }
 }
 
@@ -78,15 +102,22 @@ impl From<GithubError> for ExecutorError {
 /// it is pinned at.
 pub struct ActionsExecutor<C: ActionsApi> {
     client: C,
+    correspondence: SharedCorrespondence,
     workflow_file: String,
     git_ref: String,
 }
 
 impl<C: ActionsApi> ActionsExecutor<C> {
-    /// Build an executor over `client`, dispatching `workflow_file` at the
-    /// protected `git_ref`.
-    pub fn new(client: C, workflow_file: impl Into<String>, git_ref: impl Into<String>) -> Self {
-        Self { client, workflow_file: workflow_file.into(), git_ref: git_ref.into() }
+    /// Build an executor over `client` and the shared `correspondence` (the seam
+    /// the `subject` checkout resolves through, ADR-0150), dispatching
+    /// `workflow_file` at the protected `git_ref`.
+    pub fn new(
+        client: C,
+        correspondence: SharedCorrespondence,
+        workflow_file: impl Into<String>,
+        git_ref: impl Into<String>,
+    ) -> Self {
+        Self { client, correspondence, workflow_file: workflow_file.into(), git_ref: git_ref.into() }
     }
 
     /// Borrow the underlying client (test introspection).
@@ -156,16 +187,22 @@ impl<C: ActionsApi> ExecutorBackend for ActionsExecutor<C> {
         //   so the wrapper *definition* that runs is always the reviewed one
         //   (invariant 1: the workflow definition stays pinned).
         // - The `subject` input carries the order's checkout target — the git
-        //   commit the wrapper feeds `actions/checkout`, hex-rendered from the
-        //   transformation's `checkout` digest (the sealed source a resolved work
-        //   order names). This is the tree the work runs *on*, distinct from the
-        //   scope-revision `inputs[0]` that binds the returned evidence.
+        //   commit the wrapper feeds `actions/checkout`, resolved from the
+        //   transformation's `checkout` digest to a **real git object sha**
+        //   through the correspondence store (ADR-0150), never hex-punned. This is
+        //   the tree the work runs *on*, distinct from the scope-revision
+        //   `inputs[0]` that binds the returned evidence.
         //
         // The two are separate keys precisely so a caller can never again put the
         // pinned ref where the checkout target belongs (the stub bug this fixes).
+        let subject = self
+            .correspondence
+            .resolve_git(&order.transformation.checkout)?
+            .ok_or_else(|| ExecutorError::UnresolvedCheckout(order.nonce.clone()))?
+            .to_hex();
         let mut inputs = BTreeMap::new();
         inputs.insert("command".to_owned(), order.transformation.command.clone());
-        inputs.insert("subject".to_owned(), to_hex(&order.transformation.checkout));
+        inputs.insert("subject".to_owned(), subject);
         inputs.insert("nonce".to_owned(), order.nonce.0.clone());
         self.client.dispatch_workflow(&self.workflow_file, &self.git_ref, &inputs)?;
         Ok(WorkHandle::new(order.nonce.clone()))
@@ -211,8 +248,11 @@ mod tests {
         WorkHandle, WorkOrder,
     };
 
-    use super::{ActionsExecutor, ExecutorError, to_hex};
+    use std::sync::Arc;
+
+    use super::{ActionsExecutor, ExecutorError};
     use crate::client::{Artifact, RunConclusion, RunStatus};
+    use crate::source::to_hex;
     use crate::testing::FakeGithub;
 
     const WORKFLOW: &str = "bloomery-transform.yml";
@@ -220,6 +260,10 @@ mod tests {
     // A distinctive checkout target so the dispatched `subject` input is
     // recognizable — hex-rendered, this is `"22"` repeated 32 times.
     const CHECKOUT: [u8; 32] = [0x22; 32];
+    // The real git object sha the checkout resolves to through the correspondence
+    // — a sha1 (40-hex), deliberately *not* the checkout digest's own 64-hex, so
+    // the test proves `subject` is the resolved git sha and never the digest hex.
+    const CHECKOUT_SHA1: &str = "abcdef0123456789abcdef0123456789abcdef01";
 
     fn order(nonce: &str) -> WorkOrder {
         WorkOrder {
@@ -238,7 +282,11 @@ mod tests {
     }
 
     fn executor(fake: FakeGithub) -> ActionsExecutor<FakeGithub> {
-        ActionsExecutor::new(fake, WORKFLOW, PINNED_REF)
+        // Every order in these tests checks out CHECKOUT; seed its correspondence
+        // to a real sha1 so `submit` resolves the `subject`.
+        fake.seed_correspondence(&Digest::from_bytes(CHECKOUT), CHECKOUT_SHA1);
+        let correspondence = Arc::new(fake.clone());
+        ActionsExecutor::new(fake, correspondence, WORKFLOW, PINNED_REF)
     }
 
     #[test]
@@ -257,7 +305,14 @@ mod tests {
         // checks out), never the pinned ref — the two are structurally separate.
         let inputs = fake.dispatched_inputs("n-1").unwrap();
         assert_eq!(inputs.get("command").map(String::as_str), Some("verify.clippy"));
-        assert_eq!(inputs.get("subject").map(String::as_str), Some(to_hex(&Digest::from_bytes(CHECKOUT)).as_str()));
+        // `subject` is the checkout's *resolved git sha* (a real sha1), never the
+        // pinned ref and never the digest's own hex (ADR-0150 — no hex-punning).
+        assert_eq!(inputs.get("subject").map(String::as_str), Some(CHECKOUT_SHA1));
+        assert_ne!(
+            inputs.get("subject").map(String::as_str),
+            Some(to_hex(&Digest::from_bytes(CHECKOUT)).as_str()),
+            "the subject is the resolved git sha, not the digest hex"
+        );
         assert_ne!(
             inputs.get("subject").map(String::as_str),
             Some(PINNED_REF),
@@ -265,6 +320,20 @@ mod tests {
         );
         assert!(!inputs.contains_key("ref"), "the ambiguous `ref` input is retired in favor of `subject`");
         assert_eq!(inputs.get("nonce").map(String::as_str), Some("n-1"));
+    }
+
+    #[test]
+    fn submit_errors_cleanly_when_the_checkout_is_unrecorded() {
+        // A checkout whose sealed source has no recorded correspondence is the
+        // clean `UnresolvedCheckout`, never a dispatched `subject` git cannot
+        // check out (ADR-0150 boundary).
+        let fake = FakeGithub::new();
+        let correspondence = Arc::new(fake.clone());
+        let exec = ActionsExecutor::new(fake, correspondence, WORKFLOW, PINNED_REF);
+        match exec.submit(&order("n-unrecorded")) {
+            Err(ExecutorError::UnresolvedCheckout(nonce)) => assert_eq!(nonce, Nonce("n-unrecorded".to_owned())),
+            other => panic!("expected UnresolvedCheckout, got {other:?}"),
+        }
     }
 
     #[test]

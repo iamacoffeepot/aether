@@ -32,7 +32,7 @@
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::fmt::{self, Write as _};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -41,7 +41,7 @@ use std::{fs, io};
 use aether_bloomery::{
     Conclusion, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, Nonce, WorkHandle, WorkOrder,
 };
-use aether_bloomery_github::StageVerdict;
+use aether_bloomery_github::{CorrespondenceError, SharedCorrespondence, StageVerdict};
 
 use super::CONSTRUCT_IMPLEMENT_COMMAND;
 use super::intake::attempt_artifact_name;
@@ -66,6 +66,13 @@ pub enum LocalExecutorError {
     /// order was never submitted to this backend, or was already consumed.
     /// (`inspect` reports the same condition as the clean [`ExecutionStatus::Unknown`].)
     NoRunForNonce(Nonce),
+    /// The order's checkout digest resolved no real git object through the
+    /// correspondence store (ADR-0150) — the sealed source was never materialized
+    /// or its correspondence never seeded, so the backend refuses cleanly rather
+    /// than `git worktree add`-ing a target git cannot resolve.
+    UnresolvedCheckout(Nonce),
+    /// The correspondence store itself faulted while resolving the checkout.
+    Correspondence(CorrespondenceError),
 }
 
 impl fmt::Display for LocalExecutorError {
@@ -78,6 +85,14 @@ impl fmt::Display for LocalExecutorError {
             Self::NoRunForNonce(nonce) => {
                 write!(f, "local executor backend: no run resolves for nonce `{}`", nonce.0)
             }
+            Self::UnresolvedCheckout(nonce) => {
+                write!(
+                    f,
+                    "local executor backend: no git-object correspondence for the checkout of nonce `{}`",
+                    nonce.0
+                )
+            }
+            Self::Correspondence(error) => write!(f, "local executor backend: {error}"),
         }
     }
 }
@@ -86,8 +101,15 @@ impl Error for LocalExecutorError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Spawn(error) | Self::Io(error) => Some(error),
-            Self::Worktree(_) | Self::Evidence(_) | Self::NoRunForNonce(_) => None,
+            Self::Correspondence(error) => Some(error),
+            Self::Worktree(_) | Self::Evidence(_) | Self::NoRunForNonce(_) | Self::UnresolvedCheckout(_) => None,
         }
+    }
+}
+
+impl From<CorrespondenceError> for LocalExecutorError {
+    fn from(error: CorrespondenceError) -> Self {
+        Self::Correspondence(error)
     }
 }
 
@@ -165,8 +187,8 @@ pub trait TransformRunner: Send + Sync {
     fn release(&self, worktree_dir: &Path) -> Result<(), LocalExecutorError>;
 }
 
-/// One tracked run: the spawned child, where its evidence lands, and the digest
-/// the returning evidence must bind to.
+/// One tracked run: the spawned child, its scratch worktree, where its evidence
+/// lands, and the digest the returning evidence must bind to.
 struct Run {
     process: Box<dyn RunProcess>,
     // The scratch worktree `start` materialized the checkout into, released on the
@@ -192,6 +214,7 @@ struct Run {
 /// keyed by nonce, over a [`TransformRunner`] spawn seam.
 pub struct LocalExecutor {
     runner: Arc<dyn TransformRunner>,
+    correspondence: SharedCorrespondence,
     base_dir: PathBuf,
     construct_model: Option<String>,
     construct_effort: Option<String>,
@@ -207,20 +230,30 @@ impl LocalExecutor {
     #[must_use]
     pub fn new(
         runner: Arc<dyn TransformRunner>,
+        correspondence: SharedCorrespondence,
         base_dir: impl Into<PathBuf>,
         construct_model: Option<String>,
         construct_effort: Option<String>,
     ) -> Self {
-        Self { runner, base_dir: base_dir.into(), construct_model, construct_effort, runs: Mutex::new(HashMap::new()) }
+        Self {
+            runner,
+            correspondence,
+            base_dir: base_dir.into(),
+            construct_model,
+            construct_effort,
+            runs: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Build the production backend from resolved config: the real git + cargo
-    /// [`ProcessTransformRunner`], the config'd scratch-worktree base dir, and the
-    /// config'd construct model/effort (empty strings resolve to `None`).
+    /// [`ProcessTransformRunner`], the shared `correspondence` the checkout
+    /// resolves through, the config'd scratch-worktree base dir, and the config'd
+    /// construct model/effort (empty strings resolve to `None`).
     #[must_use]
-    pub fn from_config(config: &super::mirror::GithubMirrorConfig) -> Self {
+    pub fn from_config(config: &super::mirror::GithubMirrorConfig, correspondence: SharedCorrespondence) -> Self {
         Self::new(
             Arc::new(ProcessTransformRunner),
+            correspondence,
             config.local_worktree_base.clone(),
             non_empty(&config.local_construct_model),
             non_empty(&config.local_construct_effort),
@@ -256,7 +289,14 @@ impl ExecutorBackend for LocalExecutor {
         let nonce = order.nonce.0.clone();
         let worktree_dir = self.base_dir.join(&nonce);
         let evidence_dir = self.base_dir.join(format!("{nonce}-evidence"));
-        let checkout_hex = hex_of(&order.transformation.checkout);
+        // Resolve the sealed checkout digest to its real git object sha through the
+        // correspondence store (ADR-0150) — the `git worktree add` target — rather
+        // than hex-punning the digest into a name git cannot resolve.
+        let checkout_hex = self
+            .correspondence
+            .resolve_git(&order.transformation.checkout)?
+            .ok_or_else(|| LocalExecutorError::UnresolvedCheckout(order.nonce.clone()))?
+            .to_hex();
         // The subject the returning evidence binds to is the order's subject input
         // (the scope-revision digest the broker displayed), falling back to the
         // checkout only for a malformed order that carries no input.
@@ -349,7 +389,8 @@ impl ExecutorBackend for LocalExecutor {
         let bytes = fs::read(&evidence_path)
             .map_err(|error| LocalExecutorError::Evidence(format!("{}: {error}", evidence_path.display())))?;
         // The evidence has been consumed — evict the run so the registry tracks
-        // only in-flight orders rather than growing for the process's lifetime. A
+        // only in-flight orders rather than growing for the process's lifetime, and
+        // reclaim its scratch worktree so the checkout does not outlive the run. A
         // failed read leaves the entry above so a later cycle can retry it.
         self.lock().remove(&handle.nonce.0);
         // The run is terminal now the evidence is read — release its scratch
@@ -478,16 +519,6 @@ impl RunProcess for ChildProcess {
 /// `Some(s)` for a non-empty config string, `None` for the empty default.
 fn non_empty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
-}
-
-/// Lowercase-hex a digest's 32 bytes — the render `git` and the `--subject` argv
-/// take the checkout target as.
-fn hex_of(digest: &Digest) -> String {
-    let mut hex = String::with_capacity(64);
-    for byte in digest.as_bytes() {
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
 }
 
 /// The last `max` bytes of `s`, snapped forward to a char boundary — a bounded
