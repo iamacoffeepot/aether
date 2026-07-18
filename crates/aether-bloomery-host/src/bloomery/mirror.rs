@@ -60,9 +60,12 @@ pub struct GithubMirrorConfig {
     /// §Execution on Actions, [#3500]). Carried on this shared GitHub-connection
     /// config the same way `cas_land_enabled` is — one config serves the mirror,
     /// source, and executor caps rather than duplicating the connection knobs.
+    /// The default must name the wrapper workflow that actually exists at
+    /// `.github/workflows/transform.yml` ([#3501]); the two must not drift.
     ///
     /// [#3500]: https://github.com/iamacoffeepot/aether/issues/3500
-    #[config(default = "bloomery-transform.yml")]
+    /// [#3501]: https://github.com/iamacoffeepot/aether/issues/3501
+    #[config(default = "transform.yml")]
     pub executor_workflow_file: String,
     /// The protected git ref the executor pins the wrapper dispatch at.
     #[config(default = "refs/heads/main")]
@@ -149,7 +152,7 @@ impl Default for GithubMirrorConfig {
             api_base: "https://api.github.com".to_owned(),
             cas_land_enabled: true,
             poll_interval_secs: 5,
-            executor_workflow_file: "bloomery-transform.yml".to_owned(),
+            executor_workflow_file: "transform.yml".to_owned(),
             executor_dispatch_ref: "refs/heads/main".to_owned(),
             store_path: ":memory:".to_owned(),
             approval_policy_file: "bloomery/approval-policy.yml".to_owned(),
