@@ -369,19 +369,13 @@ fn pull_and_admit(
         }
     };
 
-    for (nonce, age, status) in select_stale_handles(tracked, &report.pending, Instant::now(), stale_warn_after) {
-        tracing::warn!(
-            target: "aether_bloomery_host::executor",
-            nonce = %nonce.0,
-            age_secs = age.as_secs(),
-            last_status = ?status,
-            "dispatched run has not resolved past the staleness threshold",
-        );
-    }
-
     // Drop the handles whose order was consumed on admit — a still-outstanding
     // order (order lookup Some) stays tracked to poll again; a store fault leaves
-    // it tracked to retry rather than silently dropping it.
+    // it tracked to retry rather than silently dropping it. Prune before the
+    // staleness sweep below, so a handle that just resolved and was consumed this
+    // same cycle never spuriously selects as stale (#3635 review finding): its
+    // nonce carries no `pending` entry once consumed, so a pre-prune sweep would
+    // read that absence as "no status observed" rather than "just resolved".
     tracked.retain(|tracked_handle| match store.lookup_order(&tracked_handle.handle.nonce.0) {
         Ok(order) => order.is_some(),
         Err(error) => {
@@ -394,6 +388,17 @@ fn pull_and_admit(
             true
         }
     });
+
+    for (nonce, age, status) in select_stale_handles(tracked, &report.pending, Instant::now(), stale_warn_after) {
+        tracing::warn!(
+            target: "aether_bloomery_host::executor",
+            nonce = %nonce.0,
+            age_secs = age.as_secs(),
+            last_status = ?status,
+            "dispatched run has not resolved past the staleness threshold",
+        );
+    }
+
     sink.0.into_iter().map(|admission| admission.admit).collect()
 }
 
