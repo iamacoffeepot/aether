@@ -125,6 +125,8 @@ fn enqueue_construct_dispatch(store: &mut SqliteStore, bloom: BloomId, workpiece
         workpiece: WorkpieceId(workpiece.to_owned()),
         stage: StageId::Construct,
         transformation: Transformation::for_member_stage(StageId::Construct, digest(subject), digest(0xC0)),
+        scope_revision: digest(subject),
+        candidate: None,
     };
     let sequence = store.enqueue_outbox(DISPATCH_TOPIC, &to_vec(&payload).unwrap()).unwrap();
     (sequence, subject)
@@ -220,6 +222,8 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
         workpiece: WorkpieceId("wp-none".to_owned()),
         stage: StageId::Construct,
         transformation: subjectless,
+        scope_revision: digest(9),
+        candidate: None,
     };
     store.enqueue_outbox(DISPATCH_TOPIC, &to_vec(&payload).unwrap()).unwrap();
     enqueue_construct_dispatch(&mut store, bloom, "wp-c", 7);

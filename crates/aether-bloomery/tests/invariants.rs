@@ -14,9 +14,9 @@
 mod common;
 
 use aether_bloomery::{
-    AdmitEvidenceError, AdoptAnswerError, Artifact, AttemptCompletedError, BloomStatus, Decision, Digest, Evidence,
-    EvidenceKind, Fact, KeyId, LandError, Observation, Outcome, Provenance, Question, ResolveError, SealError,
-    SignatureEnvelope, Snapshot, StageCatalog, StageId, Statement, SupersedeError, reduce,
+    AdmitEvidenceError, AdoptAnswerError, Artifact, AttemptCompletedError, BloomStatus, CandidateRef, Decision, Digest,
+    Evidence, EvidenceKind, Fact, KeyId, LandError, Observation, Outcome, Provenance, Question, ResolveError,
+    SealError, SignatureEnvelope, Snapshot, StageCatalog, StageId, Statement, SupersedeError, reduce,
 };
 use aether_data::wire::to_vec;
 use common::{claim, digest, draft, event, membership, sealed_and_resolved, splice_bloom, step, workpiece};
@@ -808,6 +808,7 @@ fn a_passing_attempt_advances_one_stage_and_dispatches_the_next() {
             stage: StageId::Construct,
             passed: true,
             evidence: attempt_evidence(),
+            candidate: None,
         },
     );
     let (after, decided) = step(&snapshot, &pass);
@@ -852,6 +853,7 @@ fn a_failing_attempt_retries_within_budget_then_wedges() {
                 stage: StageId::Construct,
                 passed: false,
                 evidence: attempt_evidence(),
+                candidate: None,
             },
         )
     };
@@ -876,6 +878,125 @@ fn a_failing_attempt_retries_within_budget_then_wedges() {
     );
 }
 
+// ADR-0152 — a passing completion adopts the candidate it captured onto the
+// member's cursor, and the next dispatch re-targets from it: the returned
+// evidence binds the candidate tree (`inputs[0]`), the worker checks out the
+// capture commit, and the payload displays the tree while still carrying the
+// true scope revision. Catches the placeholder regression this arc removes —
+// every stage dispatching against the bare sealed base.
+#[test]
+fn a_passing_capture_retargets_the_next_dispatch_at_the_candidate() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    let captured = CandidateRef { tree: digest(21), checkout: digest(22) };
+    let pass = event(
+        "c-pass",
+        Fact::AttemptCompleted {
+            bloom,
+            workpiece: workpiece("wp"),
+            stage: StageId::Construct,
+            passed: true,
+            evidence: attempt_evidence(),
+            candidate: Some(captured),
+        },
+    );
+    let (after, decided) = step(&snapshot, &pass);
+
+    let progress = after.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
+    assert_eq!(progress.candidate, Some(captured), "the cursor adopts the passing capture");
+    match decided.effects.iter().find(|e| matches!(e, Decision::DispatchAttempt { .. })) {
+        Some(Decision::DispatchAttempt { transformation, scope_revision, candidate, .. }) => {
+            assert_eq!(transformation.inputs[0], captured.tree, "evidence binds the candidate tree");
+            assert_eq!(transformation.checkout, captured.checkout, "the worker checks out the capture commit");
+            assert_eq!(*scope_revision, digest(10), "the payload still names the true scope revision");
+            assert_eq!(*candidate, Some(captured.tree), "the payload displays the candidate tree");
+        }
+        other => panic!("expected a DispatchAttempt, got {other:?}"),
+    }
+}
+
+// ADR-0152 — a failing attempt's capture is never adopted: the retry re-targets
+// the candidate the member's last *pass* produced, and the cursor keeps it.
+// Catches the inverted adoption rule (adopting whatever the fact carries), which
+// would re-verify a tree that failed its own gate.
+#[test]
+fn a_failing_capture_is_discarded_and_the_retry_targets_the_prior_candidate() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+
+    // Construct passes with a capture, then Verify passes with none (mechanical
+    // lanes carry no capture) — the candidate rides the cursor forward to Refine.
+    let first = CandidateRef { tree: digest(21), checkout: digest(22) };
+    let (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "c-pass",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Construct,
+                passed: true,
+                evidence: attempt_evidence(),
+                candidate: Some(first),
+            },
+        ),
+    );
+    let (snapshot, verify_pass) = step(
+        &snapshot,
+        &event(
+            "v-pass",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Verify,
+                passed: true,
+                evidence: attempt_evidence(),
+                candidate: None,
+            },
+        ),
+    );
+    match verify_pass.effects.iter().find(|e| matches!(e, Decision::DispatchAttempt { .. })) {
+        Some(Decision::DispatchAttempt { transformation, .. }) => {
+            assert_eq!(transformation.checkout, first.checkout, "a capture-less pass carries the candidate forward");
+        }
+        other => panic!("expected a DispatchAttempt, got {other:?}"),
+    }
+
+    // Refine fails carrying a fresh capture: the capture is discarded — the
+    // retry targets the candidate the last pass produced, and the cursor holds it.
+    let rejected = CandidateRef { tree: digest(31), checkout: digest(32) };
+    let (after, retried) = step(
+        &snapshot,
+        &event(
+            "r-fail",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Refine,
+                passed: false,
+                evidence: attempt_evidence(),
+                candidate: Some(rejected),
+            },
+        ),
+    );
+    assert!(matches!(retried.outcome, Outcome::AttemptRetried { stage: StageId::Refine, .. }));
+    match retried.effects.iter().find(|e| matches!(e, Decision::DispatchAttempt { .. })) {
+        Some(Decision::DispatchAttempt { transformation, candidate, .. }) => {
+            assert_eq!(transformation.inputs[0], first.tree, "the retry binds the prior candidate, not the failure's");
+            assert_eq!(transformation.checkout, first.checkout);
+            assert_eq!(*candidate, Some(first.tree));
+        }
+        other => panic!("expected a DispatchAttempt, got {other:?}"),
+    }
+    let progress = after.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
+    assert_eq!(progress.candidate, Some(first), "the cursor keeps the last passing candidate");
+}
+
 // ADR-0149 §The line — Tripwire: the completion gate applies across the whole
 // member line, the terminal `Review` included. A *failing* `Review` retries within
 // its budget (2) and wedges on exhaustion here — it is never silently integrated;
@@ -897,6 +1018,7 @@ fn a_failing_terminal_review_retries_within_budget_then_wedges() {
                 stage,
                 passed: true,
                 evidence: attempt_evidence(),
+                candidate: None,
             },
         );
         let (next, _) = step(&snapshot, &pass);
@@ -917,6 +1039,7 @@ fn a_failing_terminal_review_retries_within_budget_then_wedges() {
                 stage: StageId::Review,
                 passed: false,
                 evidence: attempt_evidence(),
+                candidate: None,
             },
         )
     };
@@ -966,6 +1089,7 @@ fn attempt_completion_refuses_mismatch_terminal_non_member_and_unknown() {
                 stage,
                 passed: true,
                 evidence: attempt_evidence(),
+                candidate: None,
             },
         )
     };
@@ -1028,6 +1152,7 @@ proptest! {
                     stage: cursor.stage,
                     passed,
                     evidence: attempt_evidence(),
+                    candidate: None,
                 },
             );
             let (next, _) = step(&snapshot, &ev);

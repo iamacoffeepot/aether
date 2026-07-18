@@ -100,6 +100,13 @@ pub struct DispatchPayload {
     pub stage: StageId,
     /// The portable transformation to submit.
     pub transformation: Transformation,
+    /// The member's frozen scope-revision digest, explicit so the host driver
+    /// never infers it from `transformation.inputs` (ADR-0152).
+    pub scope_revision: Digest,
+    /// The candidate tree the attempt runs against, when the member has one
+    /// (ADR-0152). The driver displays it as the evidence-binding digest;
+    /// `None` displays the scope revision.
+    pub candidate: Option<Digest>,
 }
 
 /// The land dispatch outbox payload (ADR-0149 §The boundary, migration step 3):

@@ -385,6 +385,11 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
                 stage: record.stage,
                 passed: verdict_passed(upload.verdict),
                 evidence,
+                // Candidate capture is host-side work the local executor does
+                // after a model-lane run (#3649); until it reports one, the
+                // completion carries no capture and the member's cursor keeps
+                // its prior candidate.
+                candidate: None,
             },
         }
     } else if record.stage == StageId::Review {
@@ -408,6 +413,9 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
                     stage: record.stage,
                     passed: false,
                     evidence,
+                    // A failing attempt's capture is never adopted (ADR-0152),
+                    // and capture reporting itself lands with #3649.
+                    candidate: None,
                 },
             }
         }
