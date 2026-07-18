@@ -8,6 +8,16 @@ run-name: transform ${{ inputs.command }} ${{ inputs.nonce }}
 # the wrapper checks out, runs, uploads, and nothing else. Untrusted lanes
 # run zero-secret on ephemeral hosted runners per the ADR, so this workflow
 # carries `permissions: { contents: read }` and no secrets.
+#
+# The uploaded artifact's NAME is the intake's data channel (#3501): the
+# pull side decodes `attempt.<verdict>.<subject_hex>.<detail_hex>.<nonce>`
+# from the name alone (`NameEvidenceClaims`), no artifact-byte fetch. The
+# `displayed` input carries the scope-revision digest hex the evidence must
+# name (the executor resolves it from the work order's evidence-binding
+# input); the verdict token is `pass`/`fail` from the transform's exit, and
+# the detail hex is the sha256 of the evidence bytes. A dispatch without
+# `displayed` (a manual smoke run) falls back to the legacy
+# `evidence-<nonce>` name, which the intake skips as a stray upload.
 
 on:
   workflow_dispatch:
@@ -21,6 +31,10 @@ on:
       nonce:
         description: "Idempotency nonce stamped into evidence.json"
         required: true
+      displayed:
+        description: "Scope-revision digest hex the returned evidence names (attempt-artifact binding); empty = legacy evidence-<nonce> name"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -38,9 +52,32 @@ jobs:
           components: rustfmt, clippy
       - name: Install ALSA dev headers (cpal Linux backend)
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-      - run: cargo xtask transform ${{ inputs.command }} --out evidence --nonce ${{ inputs.nonce }}
+      - id: transform
+        continue-on-error: true
+        run: cargo xtask transform ${{ inputs.command }} --out evidence --nonce ${{ inputs.nonce }}
+      - name: Compose the attempt artifact name
+        id: artifact
+        env:
+          DISPLAYED: ${{ inputs.displayed }}
+          NONCE: ${{ inputs.nonce }}
+          OUTCOME: ${{ steps.transform.outcome }}
+        run: |
+          if [ -z "$DISPLAYED" ]; then
+            echo "name=evidence-$NONCE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$OUTCOME" = "success" ]; then verdict=pass; else verdict=fail; fi
+          if [ -f evidence/evidence.json ]; then
+            detail=$(sha256sum evidence/evidence.json | cut -d' ' -f1)
+          else
+            detail=$(printf '0%.0s' $(seq 64))
+          fi
+          echo "name=attempt.$verdict.$DISPLAYED.$detail.$NONCE" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: evidence-${{ inputs.nonce }}
+          name: ${{ steps.artifact.outputs.name }}
           path: evidence
+      - name: Propagate the transform's failure to the run conclusion
+        if: steps.transform.outcome == 'failure'
+        run: exit 1
