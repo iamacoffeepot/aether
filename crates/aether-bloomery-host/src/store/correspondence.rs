@@ -12,10 +12,13 @@
 //! driver does (#3505), so the WAL journal serializes the rare concurrent write.
 //!
 //! The `git_correspondence` table is keyed both directions: the 32-byte bloom
-//! digest is the primary key (forward), and a `(git_format, git_bytes)` index is
-//! the reverse. The git side is **format-tagged bytes** — `git_format` `1` for
-//! `sha1`/20, `2` for `sha256`/32 — so the schema survives a SHA-256
-//! object-format transition unchanged.
+//! digest is the primary key (forward), and a **unique** `(git_format, git_bytes)`
+//! index is the reverse. Both keys being unique makes `record`'s `INSERT OR
+//! REPLACE` last-writer-wins in *both* directions — re-recording either a digest
+//! or a git object evicts the stale row on the other axis, so a reverse lookup can
+//! never serve a digest an overwrite retired. The git side is **format-tagged
+//! bytes** — `git_format` `1` for `sha1`/20, `2` for `sha256`/32 — so the schema
+//! survives a SHA-256 object-format transition unchanged.
 //!
 //! [#3590]: https://github.com/iamacoffeepot/aether/issues/3590
 //! [#3603]: https://github.com/iamacoffeepot/aether/issues/3603
@@ -40,7 +43,7 @@ CREATE TABLE IF NOT EXISTS git_correspondence (
     git_format INTEGER NOT NULL,
     git_bytes  BLOB NOT NULL
 );
-CREATE INDEX IF NOT EXISTS git_correspondence_by_object ON git_correspondence (git_format, git_bytes);
+CREATE UNIQUE INDEX IF NOT EXISTS git_correspondence_by_object ON git_correspondence (git_format, git_bytes);
 ";
 
 /// A `SQLite`-backed [`Correspondence`] over the store file. Holds its connection
@@ -107,8 +110,11 @@ fn map_err(error: rusqlite::Error) -> CorrespondenceError {
 
 impl Correspondence for SqliteCorrespondence {
     fn record(&self, digest: &Digest, git: &GitObjectId) -> Result<(), CorrespondenceError> {
-        // Last-writer-wins on the digest key (INSERT OR REPLACE), so a re-record is
-        // idempotent and a rebuild that re-inserts is a no-op.
+        // Last-writer-wins on BOTH keys: `digest` is the primary key and
+        // `(git_format, git_bytes)` is a unique index, so INSERT OR REPLACE evicts a
+        // stale row on either axis — a re-record is idempotent, and re-pointing a git
+        // object at a new digest (or a digest at a new object) drops the prior row
+        // rather than leaving a stale reverse mapping `resolve_digest` could serve.
         self.lock()
             .execute(
                 "INSERT OR REPLACE INTO git_correspondence (digest, git_format, git_bytes) VALUES (?1, ?2, ?3)",
@@ -209,5 +215,21 @@ mod tests {
         assert_eq!(store.resolve_git(&d).unwrap(), Some(sha1(3)));
         // The superseded object no longer reverse-resolves to the digest.
         assert_eq!(store.resolve_digest(&sha1(2)).unwrap(), None);
+    }
+
+    #[test]
+    fn record_is_last_writer_wins_on_the_object_key() {
+        // Tripwire: re-pointing one git object at a new digest evicts the prior
+        // reverse row. Before `(git_format, git_bytes)` was a UNIQUE index the stale
+        // row survived — two rows shared the object and `resolve_digest`'s `LIMIT 1`
+        // could serve the retired digest.
+        let store = SqliteCorrespondence::open(":memory:").unwrap();
+        let g = sha1(2);
+        store.record(&digest(1), &g).unwrap();
+        store.record(&digest(9), &g).unwrap();
+        // The reverse resolves to the new digest, and the retired digest's forward
+        // row was dropped on the object-key conflict rather than left dangling.
+        assert_eq!(store.resolve_digest(&g).unwrap(), Some(digest(9)));
+        assert_eq!(store.resolve_git(&digest(1)).unwrap(), None);
     }
 }
