@@ -490,6 +490,15 @@ impl TransformRunner for ProcessTransformRunner {
         if !checkout.status.success() {
             return Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&checkout.stderr), 1000)));
         }
+        // The scratch worktree is a full checkout carrying the repo's interactive
+        // `.claude/settings.json` hooks, and the construct lane spawns headless
+        // `claude` in it — so the SessionStart worktree-rebind hook would fire and
+        // strand the candidate diff in a nested session worktree (#3632). Neutralize
+        // the hooks the same way the headless action does
+        // (`.github/actions/headless-claude/action.yml`): strip the `hooks` key and
+        // mark the file skip-worktree so the edit neither shows as a candidate nor
+        // can be committed.
+        neutralize_hooks(spec.worktree_dir)?;
         // Spawn the same portable entrypoint the wrappers run, in the checked-out
         // worktree, under the ambient local `claude` auth (ADR-0150).
         let mut cargo = Command::new("cargo");
@@ -572,6 +581,51 @@ fn tail(s: &str, max: usize) -> String {
         start += 1;
     }
     s[start..].to_owned()
+}
+
+/// Strip the top-level `hooks` key from a `.claude/settings.json` body, returning
+/// the re-serialized JSON (pretty, trailing newline, matching the checked-in
+/// shape). The pure core of the interactive-hook neutralization (#3632) —
+/// unit-tested in isolation; a body with no `hooks` key round-trips unchanged in
+/// content, malformed JSON is an `Err`.
+fn strip_hooks(settings: &str) -> Result<String, serde_json::Error> {
+    let mut value: serde_json::Value = serde_json::from_str(settings)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("hooks");
+    }
+    let mut rendered = serde_json::to_string_pretty(&value)?;
+    rendered.push('\n');
+    Ok(rendered)
+}
+
+/// Neutralize the interactive-session `.claude/settings.json` hooks in the scratch
+/// worktree (#3632): strip the `hooks` key through [`strip_hooks`] and mark the
+/// file skip-worktree so the edit neither reads as a candidate change nor can be
+/// committed. Absence of `.claude/settings.json` is a clean no-op (mirroring the
+/// headless action's absence handling); a read, parse, or write fault surfaces as
+/// an error rather than silently proceeding with live hooks.
+fn neutralize_hooks(worktree_dir: &Path) -> Result<(), LocalExecutorError> {
+    let settings_path = worktree_dir.join(".claude/settings.json");
+    let body = match fs::read_to_string(&settings_path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(LocalExecutorError::Io(error)),
+    };
+    let stripped = strip_hooks(&body).map_err(|error| LocalExecutorError::Io(io::Error::other(error)))?;
+    fs::write(&settings_path, stripped).map_err(LocalExecutorError::Io)?;
+    // Mark the stripped file skip-worktree so it stays out of the scratch-root
+    // `git status --porcelain` the candidate detection reads (#3632) and can never
+    // be committed as part of a candidate.
+    let marked = Command::new("git")
+        .arg("-C")
+        .arg(worktree_dir)
+        .args(["update-index", "--skip-worktree", ".claude/settings.json"])
+        .output()
+        .map_err(LocalExecutorError::Spawn)?;
+    if !marked.status.success() {
+        return Err(LocalExecutorError::Worktree(tail(&String::from_utf8_lossy(&marked.stderr), 1000)));
+    }
+    Ok(())
 }
 
 /// Read the verify lane's `status` field from an `evidence.json` byte string:
