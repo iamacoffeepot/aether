@@ -31,6 +31,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
     Admit, BloomId, Checkpoint, Digest, Event, Fact, IdempotencyKey, IntegrateOutcome, IntegratePayload, Topic,
@@ -48,13 +49,12 @@ use crate::bloomery::SourceShell;
 use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
+use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend};
 
 // The autoloaded control-core component's lineage mailbox — where an admitted
 // `Fact::Resolve` is sent. Resolved from the lineage path, mirroring the land
 // reactor's `control_mailbox`. The one exported spelling (#3668).
-use aether_bloomery::CONTROL_CORE_NAMESPACE;
-use aether_capabilities::resolve_embedded;
 
 /// The self-addressed wake the poll timer fires each interval; its handler
 /// drains the integrate topic and folds each entry. Zero-field — the timer
@@ -91,7 +91,7 @@ impl IntegrateReactorState {
         Self {
             source,
             store,
-            control_mailbox: resolve_embedded(CONTROL_CORE_NAMESPACE),
+            control_mailbox: <ControlCore as Addressable>::resolve(0, ()),
             mailer,
             self_mailbox,
             _timer: None,
@@ -264,7 +264,7 @@ impl NativeActor for IntegrateReactorCapability {
     fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<IntegrateReactorState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
-        let control_mailbox = resolve_embedded(CONTROL_CORE_NAMESPACE);
+        let control_mailbox = <ControlCore as Addressable>::resolve(0, ());
 
         // Unconfigured → disabled: no shell, no store, no timer. The integrate
         // outbox accumulates and drains once a token/owner/repo is supplied.

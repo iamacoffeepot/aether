@@ -69,10 +69,12 @@
 
 pub mod app_auth;
 pub mod artifacts;
+pub mod control;
 pub mod session;
 pub mod signing;
 pub mod source;
 pub mod store;
+pub use control::ControlCore;
 
 #[cfg(feature = "runtime")]
 pub mod api;

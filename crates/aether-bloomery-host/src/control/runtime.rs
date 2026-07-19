@@ -1,0 +1,564 @@
+//! The snapshot-owning runtime of the [`ControlCore`](super::ControlCore) cap.
+//!
+//! # The async store choreography
+//!
+//! A handler cannot block on a peer reply, so an admit is a two-message
+//! exchange. [`on_admit`](ControlCore::on_admit) reduces the event, projects the
+//! decision into a [`Commit`], stashes the pending admit (the held reply
+//! obligation, the decoded event, and the decisions) keyed by idempotency key,
+//! and sends the commit to `aether.store`. Only the *first* admit for a key opens
+//! that entry and forwards a commit; a same-key admit arriving while the commit is
+//! still outstanding gets its own entry and its own commit — the store dedups the
+//! second to a [`CommitResult::Duplicate`] no-op. The store and source caps are
+//! now native siblings addressed by type (`ctx.actor::<StoreCapability>()` /
+//! `ctx.actor::<SourceCapability>()`); the reply routes back by kind, correlated by
+//! the echoed idempotency key ([`CommitResult`]) or the dispatch correlation id
+//! ([`ClaimResult`]), exactly as the former wasm actor's name-addressed sends did.
+//!
+//! Boot **does not** drain or ack the outbox — outbox republish belongs to the
+//! reactor capabilities (#3499). This cap only *enqueues* outbox entries,
+//! atomically inside the commit.
+
+use std::collections::{BTreeMap, VecDeque};
+
+use aether_actor::{Manual, runtime};
+use aether_data::wire::{Error as WireError, from_bytes, to_vec};
+use aether_substrate::InboundMail;
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub use aether_substrate::chassis::error::BootError;
+
+use aether_bloomery::control::{
+    Admit, AdmitResult, AggregateReviewPayload, ClaimResult, ClaimSeal, Commit, CommitResult, DispatchPayload,
+    EnumerateClaims, EnumerateClaimsResult, HealOp, IntegratePayload, LandPayload, MembershipMutation, OutboxPayload,
+    Query, QueryResult, ReconcileOp, RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, Topic,
+    TransferSeal, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_seal_mail,
+    seal_claim_mail, transfer_seal_mail,
+};
+use aether_bloomery::{
+    BloomId, ClaimRefKind, ClaimRefState, Decision, Decisions, Event, Fact, Outcome, Snapshot, reduce, view_of,
+};
+
+use super::ControlCore;
+use crate::source::SourceCapability;
+use crate::store::StoreCapability;
+
+/// The cap on same-key admits in flight at once. A well-behaved client sends one
+/// admit per key and at most a few retries; without a bound a client spamming one
+/// key while its commits are outstanding would grow the per-key queue without
+/// limit, pinning memory on the single snapshot owner. An admit past the cap is
+/// refused rather than queued (CLAUDE.md §Runtime: error rather than grow
+/// unboundedly). The claim-gated (seal/supersede) admits awaiting a `ClaimResult`
+/// count toward the same per-key cap ([`ControlCoreState::inflight_for_key`]), so
+/// the pre-commit ref stage cannot dodge the back-pressure.
+const MAX_INFLIGHT_PER_KEY: usize = 64;
+
+/// An admit awaiting its durable commit reply — the held reply obligation, the
+/// decoded event, and the decisions to apply to the snapshot once the store
+/// confirms the commit landed. Each in-flight admit owns one, held in its key's
+/// FIFO queue. The held [`InboundMail`] keeps the admit's causal chain open across
+/// the async round-trip; `reply` is a no-op if the admitter did not await one.
+struct Pending {
+    inbound: InboundMail,
+    event: Event,
+    decisions: Decisions,
+}
+
+/// Which claim door an admit gated on, so a [`ClaimResult::Held`] maps to the
+/// right refusal vocabulary — a seal reports a `SealError`, a supersession a
+/// `SupersedeError`, each reading exactly as the local reducer's own refusal.
+enum ClaimKind {
+    Seal,
+    Supersede,
+}
+
+/// The pre-commit claim mail an accepted seal/supersession sends — an acquire
+/// over the member + admission refs, or a predecessor→successor transfer.
+enum SourceClaim {
+    Seal(ClaimSeal),
+    Transfer(TransferSeal),
+}
+
+/// A locally-accepted seal/supersession awaiting the shared claim-ref reply
+/// (ADR-0150). Carries everything the durable commit needs once the refs are
+/// acquired: the held reply obligation, the original event bytes (the journal
+/// source), the decoded event and its decisions, and which door to name a `Held`
+/// refusal after. Keyed by the dispatch correlation id.
+struct PendingClaim {
+    inbound: InboundMail,
+    raw: Vec<u8>,
+    event: Event,
+    decisions: Decisions,
+    kind: ClaimKind,
+}
+
+/// The control-core state: the live [`Snapshot`] plus the in-flight admits
+/// awaiting their commit replies, queued per idempotency key.
+///
+/// Each same-key admit gets its own `Pending` entry and its own [`Commit`], so
+/// every admit's inbound chain stays open (held by its `InboundMail`) until its
+/// reply is sent. The store's idempotency-key dedup collapses every same-key
+/// commit after the first to a [`CommitResult::Duplicate`] no-op, so the pair
+/// still yields one journal row and one applied decision. The per-key queue is
+/// FIFO: the store replies in send order, so `on_commit_result` pops the front
+/// entry to match each reply.
+///
+/// `pending_claims` holds the accepted seals/supersessions awaiting their shared
+/// claim-ref replies (the pre-commit cross-instance exclusivity gate, ADR-0150),
+/// keyed by the dispatch correlation id `ClaimResult` echoes.
+pub struct ControlCoreState {
+    snapshot: Snapshot,
+    pending: BTreeMap<String, VecDeque<Pending>>,
+    pending_claims: BTreeMap<u64, PendingClaim>,
+}
+
+#[runtime]
+impl NativeActor for ControlCore {
+    type State = ControlCoreState;
+    type Config = ();
+    const NAMESPACE: &'static str = aether_bloomery::CONTROL_CORE_NAMESPACE;
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<ControlCoreState, BootError> {
+        Ok(ControlCoreState {
+            snapshot: Snapshot::default(),
+            pending: BTreeMap::new(),
+            pending_claims: BTreeMap::new(),
+        })
+    }
+
+    /// Boot replay: ask the store for the whole journal; [`on_replay_result`](Self::on_replay_result)
+    /// folds it back into the snapshot. Lives in `wire` (post-init, mail-allowed).
+    fn wire(_state: &mut ControlCoreState, ctx: &mut NativeCtx<'_>) {
+        ctx.actor::<StoreCapability>().send_detached(&ReplayJournal);
+    }
+
+    /// The `aether.bloomery.admit` ingress. Decode the event, reduce it against
+    /// the live snapshot, and either reply immediately (a duplicate needs no
+    /// commit) or queue an in-flight entry under its idempotency key and send the
+    /// combined [`Commit`] to the store, answering on its reply. A second admit
+    /// for a key whose first commit is still outstanding gets its own entry and
+    /// its own commit — the store dedups the second to a [`CommitResult::Duplicate`]
+    /// no-op — so its inbound chain stays open (held by its `InboundMail`) until it
+    /// is answered.
+    #[handler::manual]
+    fn on_admit(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: Admit) {
+        let inbound = ctx.take_inbound();
+        let raw = mail.event;
+        let event: Event = match from_bytes(&raw) {
+            Ok(event) => event,
+            Err(error) => {
+                inbound.reply(&AdmitResult::Err { error: format!("admit decode failed: {error}") });
+                return;
+            }
+        };
+        let key = event.idempotency_key.0.clone();
+        // Back-pressure: cap the same-key admits in flight at once (CLAUDE.md
+        // §Runtime: error rather than grow unboundedly).
+        if state.inflight_for_key(&key) >= MAX_INFLIGHT_PER_KEY {
+            inbound
+                .reply(&AdmitResult::Err { error: "too many concurrent admits for this idempotency key".to_owned() });
+            return;
+        }
+        let decisions = reduce(&state.snapshot, &event);
+        // A duplicate key is already applied (in this process's life or rebuilt by
+        // replay), so it needs no durable commit — reply immediately.
+        if matches!(decisions.outcome, Outcome::Duplicate) {
+            inbound.reply(&admit_ok(&decisions.outcome));
+            return;
+        }
+        // A locally-accepted seal/supersession must first win the shared claim
+        // refs (ADR-0150 §The claim registry) before its durable commit: a seal
+        // acquires its member + admission refs, a supersession transfers the
+        // predecessor's carried + admission refs and fresh-acquires net-new. The
+        // reply gates the commit in `on_claim_result`. A locally-rejected seal (or
+        // any non-seal fact) carries no successful outcome, so it needs no ref op
+        // and commits straight through — a rejected event still journals (bare
+        // append) so its key is durably consumed and a replay stays a no-op.
+        let claim = match (&event.fact, &decisions.outcome) {
+            (Fact::Seal(spec), Outcome::Sealed(bloom)) => {
+                Some(seal_claim_mail(bloom, spec).map(|mail| (SourceClaim::Seal(mail), ClaimKind::Seal)))
+            }
+            (Fact::Supersede { predecessor, successor }, Outcome::Superseded { .. }) => Some(
+                transfer_seal_mail(&state.snapshot, predecessor, successor)
+                    .map(|mail| (SourceClaim::Transfer(mail), ClaimKind::Supersede)),
+            ),
+            _ => None,
+        };
+        match claim {
+            None => state.commit_admit(ctx, inbound, raw, event, decisions),
+            Some(Err(error)) => {
+                inbound.reply(&AdmitResult::Err { error: format!("admit claim encode failed: {error}") });
+            }
+            Some(Ok((claim, kind))) => {
+                // The dispatch mints a correlation id; the eventual `ClaimResult`
+                // echoes it, so `on_claim_result` recovers this exact pending admit.
+                let mail_id = match &claim {
+                    SourceClaim::Seal(mail) => ctx.actor::<SourceCapability>().send_detached_tracked(mail),
+                    SourceClaim::Transfer(mail) => ctx.actor::<SourceCapability>().send_detached_tracked(mail),
+                };
+                state
+                    .pending_claims
+                    .insert(mail_id.correlation_id, PendingClaim { inbound, raw, event, decisions, kind });
+            }
+        }
+    }
+
+    /// The `aether.source` claim/transfer/release reply. Correlate on the echoed
+    /// dispatch correlation id. A gated admit's [`ClaimResult::Acquired`] proceeds
+    /// to the durable commit; its [`ClaimResult::Held`] refuses the admit with the
+    /// matching `SealError`/`SupersedeError` (never committing, so a transient
+    /// foreign hold is retryable under a fresh key); a [`ClaimResult::Err`] fails
+    /// it. An uncorrelated reply — a fire-and-forget release or a boot-reconcile
+    /// re-assertion — has no pending entry and is ignored.
+    #[handler::manual]
+    fn on_claim_result(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: ClaimResult) {
+        let correlation = ctx.reply_target().correlation_id;
+        let Some(PendingClaim { inbound, raw, event, decisions, kind }) = state.pending_claims.remove(&correlation)
+        else {
+            return;
+        };
+        match mail {
+            ClaimResult::Acquired => state.commit_admit(ctx, inbound, raw, event, decisions),
+            ClaimResult::Held { ref_kind, held_by } => {
+                let (Ok(ref_kind), Ok(held_by)) =
+                    (from_bytes::<ClaimRefKind>(&ref_kind), from_bytes::<BloomId>(&held_by))
+                else {
+                    inbound.reply(&AdmitResult::Err { error: "claim held-reply did not decode".to_owned() });
+                    return;
+                };
+                let refusal = match kind {
+                    ClaimKind::Seal => Some(Outcome::SealRejected(held_to_seal_error(&ref_kind, held_by))),
+                    ClaimKind::Supersede => held_to_supersede_error(&ref_kind, held_by).map(Outcome::SupersedeRejected),
+                };
+                match refusal {
+                    Some(outcome) => {
+                        inbound.reply(&admit_ok(&outcome));
+                    }
+                    // A lost admission-ref transfer CAS is a concurrent mutation,
+                    // not a clean logical supersede refusal — no `SupersedeError`
+                    // names it, so surface it for retry.
+                    None => {
+                        inbound.reply(&AdmitResult::Err {
+                            error: "supersede refused: the mainline-admission claim ref moved under a concurrent \
+                                    mutation; retry"
+                                .to_owned(),
+                        });
+                    }
+                }
+            }
+            ClaimResult::Err { error } => {
+                inbound.reply(&AdmitResult::Err { error: format!("claim op failed: {error}") });
+            }
+        }
+    }
+
+    /// The store's reply to a [`Commit`]. Correlate on the echoed idempotency key,
+    /// pop the matching key's front in-flight entry (the store replies in send
+    /// order, so the queue is FIFO), apply the decision to the snapshot only when
+    /// the commit durably landed, and reply the outcome to that admitter. A
+    /// same-key follow-on admit's commit lands here as [`CommitResult::Duplicate`]
+    /// and answers its own admitter without re-applying.
+    #[handler::manual]
+    fn on_commit_result(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: CommitResult) {
+        let key = commit_key(&mail).to_owned();
+        let Some(queue) = state.pending.get_mut(&key) else {
+            // No admit is waiting on this key — a stray or double reply.
+            return;
+        };
+        let Some(Pending { inbound, event, decisions }) = queue.pop_front() else {
+            return;
+        };
+        // Drop the key's slot once its last in-flight entry is answered.
+        if queue.is_empty() {
+            state.pending.remove(&key);
+        }
+        let result = match mail {
+            CommitResult::Applied { .. } => {
+                state.snapshot = state.snapshot.apply(&event, &decisions);
+                // A durably-landed bloom frees its member + admission claim refs
+                // (ADR-0150) — release with the local release, fire-and-forget: the
+                // boot reconcile re-releases any ref an interrupted release stranded.
+                if matches!(decisions.outcome, Outcome::Landed(_))
+                    && let Some(Ok(release)) = release_seal_mail(&decisions)
+                {
+                    ctx.actor::<SourceCapability>().send_detached(&release);
+                }
+                admit_ok(&decisions.outcome)
+            }
+            // The store already held this key durably though our snapshot did not —
+            // a rare divergence (a reply racing a concurrent replay). Reply
+            // Duplicate and do not double-apply.
+            CommitResult::Duplicate { .. } => admit_ok(&Outcome::Duplicate),
+            // The durable uniqueness backstop refused a claim the reducer's snapshot
+            // screen missed — do not apply; report the conflict.
+            CommitResult::Conflict { workpiece, .. } => {
+                AdmitResult::Err { error: format!("store membership conflict on {workpiece}") }
+            }
+            CommitResult::Err { error, .. } => AdmitResult::Err { error },
+        };
+        inbound.reply(&result);
+    }
+
+    /// Boot journal replay reply: fold each record (decode the event, `reduce`,
+    /// `apply`) to rebuild the snapshot. No outbox drain/ack — republish is
+    /// #3499's. A read or a corrupt record at boot is unrecoverable, so it
+    /// fail-fasts (ADR-0063) rather than coming up on a torn snapshot.
+    #[handler::manual]
+    fn on_replay_result(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: ReplayJournalResult) {
+        let records = match mail {
+            ReplayJournalResult::Ok { records } => records,
+            ReplayJournalResult::Err { error } => {
+                ctx.fatal_abort(format!("boot journal replay failed: {error}"));
+            }
+        };
+        for record in records {
+            let event: Event = match from_bytes(&record.event) {
+                Ok(event) => event,
+                Err(error) => ctx.fatal_abort(format!(
+                    "boot journal replay: record {} ({}) did not decode: {error}",
+                    record.sequence, record.idempotency_key
+                )),
+            };
+            let decisions = reduce(&state.snapshot, &event);
+            state.snapshot = state.snapshot.apply(&event, &decisions);
+        }
+        state.reconcile_claim_refs(ctx);
+    }
+
+    /// Fold the enumerated claim refs into the boot-reconcile deep heals (ADR-0150
+    /// §The claim registry, amended PR #3556). The decode-then-plan is
+    /// [`plan_heals`] — pure and tested against the real source capability in the
+    /// `claim_reconcile` integration test — this handler only decodes the
+    /// enumeration and sends what it plans. Each heal is idempotent, so its
+    /// `ClaimResult` reply is discarded (an uncorrelated arrival at
+    /// [`on_claim_result`](Self::on_claim_result)). An enumeration or per-state
+    /// decode failure is unrecoverable at boot, so it fail-fasts (ADR-0063).
+    #[handler::manual]
+    fn on_enumerate_claims_result(
+        state: &mut ControlCoreState,
+        ctx: &mut NativeCtx<'_, Manual>,
+        mail: EnumerateClaimsResult,
+    ) {
+        let states = match mail {
+            EnumerateClaimsResult::Ok { states } => states,
+            EnumerateClaimsResult::Err { error } => {
+                ctx.fatal_abort(format!("boot claim-ref enumeration failed: {error}"));
+            }
+        };
+        let states: Vec<ClaimRefState> = match states.iter().map(|bytes| from_bytes(bytes)).collect() {
+            Ok(states) => states,
+            Err(error) => ctx.fatal_abort(format!("boot claim-ref enumeration: a ref state did not decode: {error}")),
+        };
+        for op in plan_heals(&state.snapshot, &states) {
+            match op {
+                Ok(HealOp::Transfer(mail)) => {
+                    ctx.actor::<SourceCapability>().send_detached(&mail);
+                }
+                Ok(HealOp::Release(mail)) => {
+                    ctx.actor::<SourceCapability>().send_detached(&mail);
+                }
+                Err(error) => ctx.fatal_abort(format!("boot claim-ref deep heal: ref mail did not encode: {error}")),
+            }
+        }
+    }
+
+    /// The `aether.bloomery.query` read surface. With `bloom` unset, reply the
+    /// whole [`ViewDocument`](aether_bloomery::ViewDocument); with `bloom` set to a
+    /// digest, reply that one bloom's [`BloomView`](aether_bloomery::BloomView) (or
+    /// [`QueryResult::NotFound`]). Reads off the live snapshot.
+    #[handler::manual]
+    fn on_query(state: &mut ControlCoreState, ctx: &mut NativeCtx<'_, Manual>, mail: Query) {
+        let inbound = ctx.take_inbound();
+        // The live-read path holds no artifact access, so it resolves no question
+        // bytes: a held member surfaces its pending decision only on the outward
+        // mirror path. The digest-only hold still gates resolution in the reducer.
+        let document = view_of(&state.snapshot, |_| None);
+        // On an encode failure reply the error path rather than substituting an
+        // empty payload a reader would decode as a valid-but-blank projection.
+        let result = match mail.bloom {
+            None => match to_vec(&document) {
+                Ok(document) => QueryResult::Document { document },
+                Err(error) => QueryResult::Err { error: format!("document encode failed: {error}") },
+            },
+            Some(bytes) => document
+                .blooms
+                .iter()
+                .find(|view| view.id.0.as_bytes().as_slice() == bytes.as_slice())
+                .map_or(QueryResult::NotFound, |view| match to_vec(view) {
+                    Ok(view) => QueryResult::Bloom { view },
+                    Err(error) => QueryResult::Err { error: format!("bloom view encode failed: {error}") },
+                }),
+        };
+        inbound.reply(&result);
+    }
+}
+
+impl ControlCoreState {
+    /// The same-key admits in flight across both stages — the committed queue plus
+    /// the accepted seals/supersessions still awaiting their claim reply — so the
+    /// [`MAX_INFLIGHT_PER_KEY`] back-pressure cannot be dodged by piling up
+    /// pre-commit ref stages for one key.
+    fn inflight_for_key(&self, key: &str) -> usize {
+        let queued = self.pending.get(key).map_or(0, VecDeque::len);
+        let claiming = self.pending_claims.values().filter(|claim| claim.event.idempotency_key.0 == key).count();
+        queued + claiming
+    }
+
+    /// Project a decided event and send its combined [`Commit`] to the store — the
+    /// durable-write stage every admit reaches, whether directly (a fact with no
+    /// ref op, or a rejected seal) or after winning the shared claim refs (an
+    /// accepted seal/supersession, gated in
+    /// [`on_claim_result`](ControlCore::on_claim_result)). Queues the pending admit
+    /// under its idempotency key (FIFO) so
+    /// [`on_commit_result`](ControlCore::on_commit_result) can answer the admitter
+    /// on the store reply.
+    fn commit_admit(
+        &mut self,
+        ctx: &mut NativeCtx<'_, Manual>,
+        inbound: InboundMail,
+        raw: Vec<u8>,
+        event: Event,
+        decisions: Decisions,
+    ) {
+        let key = event.idempotency_key.0.clone();
+        // Projecting the decision encodes each outbox receipt; a receipt-encode
+        // failure must reject the admit, not commit an empty payload the
+        // republisher would later route as a valid-but-blank receipt.
+        let (releases, claims, outbox) = match project(&decisions) {
+            Ok(effects) => effects,
+            Err(error) => {
+                inbound.reply(&AdmitResult::Err { error: format!("admit receipt encode failed: {error}") });
+                return;
+            }
+        };
+        // Every non-duplicate admitted event is journaled — even a rejected one, so
+        // a replay stays a no-op and the key is durably consumed. A rejection
+        // carries empty membership/outbox effects, so the commit is a bare append.
+        let commit = Commit { idempotency_key: key.clone(), event: raw, releases, claims, outbox };
+        ctx.actor::<StoreCapability>().send_detached(&commit);
+        self.pending.entry(key).or_default().push_back(Pending { inbound, event, decisions });
+    }
+
+    /// Boot-time claim-ref reconcile (ADR-0150 §The claim registry). After replay
+    /// rebuilds the snapshot, converge each bloom's refs to the holding its status
+    /// implies. The per-record decision is [`reconcile_op`] — pure and tested
+    /// against the real source capability in the `claim_reconcile` integration test
+    /// — this walk only sends what it plans. Both ops are idempotent via the
+    /// source's CAS read-guard, so a crash between a ref op and its local commit
+    /// heals on the next boot; a ref-mail encode failure is unrecoverable at boot,
+    /// so it fail-fasts (ADR-0063).
+    fn reconcile_claim_refs(&mut self, ctx: &mut NativeCtx<'_, Manual>) {
+        for record in self.snapshot.blooms.values() {
+            match reconcile_op(record) {
+                None => {}
+                Some(Ok(ReconcileOp::Assert(mail))) => {
+                    ctx.actor::<SourceCapability>().send_detached(&mail);
+                }
+                Some(Ok(ReconcileOp::Release(mail))) => {
+                    ctx.actor::<SourceCapability>().send_detached(&mail);
+                }
+                Some(Err(error)) => ctx.fatal_abort(format!(
+                    "boot claim-ref reconcile: bloom {:?} ref mail did not encode: {error}",
+                    record.spec.id()
+                )),
+            }
+        }
+        // Then drive the deep heals (ADR-0150 §The claim registry, amended PR
+        // #3556): enumerate every live ref so
+        // [`on_enumerate_claims_result`](ControlCore::on_enumerate_claims_result)
+        // can sweep tombstones and finish half-transfers the per-bloom V1 walk
+        // above cannot see. Fire-and-forget: the reply routes back to that handler.
+        ctx.actor::<SourceCapability>().send_detached(&EnumerateClaims);
+    }
+}
+
+/// The idempotency key echoed on every [`CommitResult`] variant (the correlation
+/// axis for the commit reply).
+fn commit_key(result: &CommitResult) -> &str {
+    match result {
+        CommitResult::Applied { idempotency_key, .. }
+        | CommitResult::Duplicate { idempotency_key }
+        | CommitResult::Conflict { idempotency_key, .. }
+        | CommitResult::Err { idempotency_key, .. } => idempotency_key,
+    }
+}
+
+/// Project a decided event's effects into the store commit's typed axes: the
+/// membership releases and claims the `active_membership` table applies, and the
+/// outbox payloads it enqueues. The snapshot-only effects carry no durable store
+/// row — they are rebuilt on replay by `reduce` + `apply` from the journaled event.
+#[allow(clippy::type_complexity)]
+fn project(
+    decisions: &Decisions,
+) -> Result<(Vec<MembershipMutation>, Vec<MembershipMutation>, Vec<OutboxPayload>), WireError> {
+    let mut releases = Vec::new();
+    let mut claims = Vec::new();
+    let mut outbox = Vec::new();
+    for effect in &decisions.effects {
+        match effect {
+            Decision::ClaimMembership { workpiece, bloom } => {
+                claims.push(MembershipMutation { workpiece: workpiece.0.clone(), bloom: bloom.0.as_bytes().to_vec() });
+            }
+            Decision::ReleaseMembership { workpiece, bloom } => {
+                releases
+                    .push(MembershipMutation { workpiece: workpiece.0.clone(), bloom: bloom.0.as_bytes().to_vec() });
+            }
+            Decision::EmitReceipt(receipt) => {
+                outbox.push(OutboxPayload::new(Topic::LandingReceipt, to_vec(receipt)?));
+            }
+            Decision::RedispatchStage { bloom, question, answer } => {
+                let payload = RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer };
+                outbox.push(OutboxPayload::new(Topic::Redispatch, to_vec(&payload)?));
+            }
+            Decision::DispatchAttempt { bloom, workpiece, stage, transformation, scope_revision, candidate } => {
+                let payload = DispatchPayload {
+                    bloom: bloom.0,
+                    workpiece: workpiece.clone(),
+                    stage: *stage,
+                    transformation: transformation.clone(),
+                    scope_revision: *scope_revision,
+                    candidate: *candidate,
+                };
+                outbox.push(OutboxPayload::new(Topic::Dispatch, to_vec(&payload)?));
+            }
+            Decision::DispatchLand { bloom, expected_base, new_head } => {
+                let payload = LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head };
+                outbox.push(OutboxPayload::new(Topic::Land, to_vec(&payload)?));
+            }
+            Decision::DispatchIntegration { bloom, base, candidates } => {
+                let payload = IntegratePayload { bloom: bloom.0, base: *base, candidates: candidates.clone() };
+                outbox.push(OutboxPayload::new(Topic::Integrate, to_vec(&payload)?));
+            }
+            Decision::DispatchAggregateReview { bloom, transformation, roll } => {
+                let payload = AggregateReviewPayload {
+                    bloom: bloom.0,
+                    transformation: transformation.clone(),
+                    pass: ReviewPass::from_roll(*roll),
+                };
+                outbox.push(OutboxPayload::new(Topic::AggregateReview, to_vec(&payload)?));
+            }
+            Decision::InheritClaim { .. }
+            | Decision::RecordResolution { .. }
+            | Decision::RecordEvidence { .. }
+            | Decision::ReleaseHold { .. }
+            | Decision::AdvanceStage { .. }
+            | Decision::MarkSuperseded { .. }
+            | Decision::SetResolved { .. }
+            | Decision::RecordIntegration { .. }
+            | Decision::RecordAggregateRoll { .. }
+            | Decision::RecordReviewPark { .. }
+            | Decision::RevokeResolution { .. }
+            | Decision::AdvanceMainline { .. } => {}
+        }
+    }
+    Ok((releases, claims, outbox))
+}
+
+/// Encode a reducer [`Outcome`] into an [`AdmitResult`], mapping an encode failure
+/// to the `Err` reply rather than an empty `Ok` payload the admitter would decode
+/// as a valid-but-blank outcome.
+fn admit_ok(outcome: &Outcome) -> AdmitResult {
+    match to_vec(outcome) {
+        Ok(outcome) => AdmitResult::Ok { outcome },
+        Err(error) => AdmitResult::Err { error: format!("admit outcome encode failed: {error}") },
+    }
+}

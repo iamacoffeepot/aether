@@ -38,6 +38,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AggregateReviewPayload, BloomId, Digest, DispatchPayload, ExecutionStatus, Fact, Nonce, ReviewPass, StageId,
@@ -61,10 +62,8 @@ use crate::bloomery::intake::{
 use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
+use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend};
-
-use aether_bloomery::CONTROL_CORE_NAMESPACE;
-use aether_capabilities::resolve_embedded;
 
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the dispatch topic and pulls matched results. Zero-field — the timer carries
@@ -218,7 +217,7 @@ impl ExecutorReactorState {
             store,
             claims: NameEvidenceClaims,
             tracked: Vec::new(),
-            control_mailbox: resolve_embedded(CONTROL_CORE_NAMESPACE),
+            control_mailbox: <ControlCore as Addressable>::resolve(0, ()),
             mailer,
             self_mailbox,
             _timer: None,
@@ -746,7 +745,7 @@ impl NativeActor for ExecutorReactorCapability {
     fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<ExecutorReactorState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
-        let control_mailbox = resolve_embedded(CONTROL_CORE_NAMESPACE);
+        let control_mailbox = <ControlCore as Addressable>::resolve(0, ());
 
         // Unconfigured → disabled: no shell, no store, no timer. The dispatch
         // outbox accumulates and drains once a token/owner/repo is supplied.

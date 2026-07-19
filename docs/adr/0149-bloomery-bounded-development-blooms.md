@@ -147,6 +147,18 @@ tokens, or shells:
   *(amended 2026-07-15: the first port draft carried opaque ids only, which no adapter can render; found
   by the judge pass on the projection-mirror slice, twin of the checkpoint-enumeration amendment)*
 
+*Amended 2026-07-19 (the wasm-boundary retirement):* the six ports above stay native-owned, but the
+control core they front — the single-writer reducer-owner — is no longer a wasm component. The sandbox was
+meant to keep control logic from touching keys, the database, or a shell; but a sandbox is only a boundary
+across a *trust asymmetry*, and the operator controls the host binary and the control logic alike — one trust
+domain, no asymmetry. So the wasm line guarded a door in a field while forcing every native peer to address
+the core by mailbox rather than by type (the friction that surfaced it, #3672/#3684). The control core is now
+a native capability (`aether-bloomery-host`'s `control`, a `#[actor(singleton)]` beside the store / signing /
+artifacts / source caps it already drove): `reduce()` links directly and the api and reactors address it as a
+typed peer. wasm stays reserved for genuine *extension* surfaces — user- or agent-authored logic on a fixed,
+trusted host — which the bounded control reducer is not. The typed-port boundary itself is unchanged; only
+the thing behind it moved from a sandbox to a sibling.
+
 The artifacts capability reuses the engine store's storage layer rather than growing a rival. The
 content-addressed core inside the hub's binary/component store (ADR-0115/0116) — sha256 addressing, atomic
 sidecar writes, index restore, pid-locking — is domain-clean and tested, but its public entry type is a
@@ -196,18 +208,22 @@ port: a backend swap, deferred until one of those limits bites.
 Three public crates in the Aether workspace, following the `aether-kit` rlib/cdylib precedent:
 
 ```text
-aether-bloomery         canonical values + pure reducer + wasm actors (rlib/cdylib)
-aether-bloomery-host    BloomeryChassis + native capabilities + API/console + bloomery bin
+aether-bloomery         canonical values + pure reducer + control/source mail kinds (rlib leaf)
+aether-bloomery-host    BloomeryChassis + native capabilities (incl. the control core) + API/console + bin
 aether-bloomery-github  GitHub intake/source/projection adapter, statically linked by the host
 ```
+
+*(amended 2026-07-19: `aether-bloomery` was formerly also a `cdylib` compiling the control-core wasm actor;
+with the control core native (§The boundary, amended), it is a pure rlib — no wasm component, no guest-SDK
+dependency — that the host and the GitHub adapter both link inward, cycle-free.)*
 
 No kinds crate (mail shapes live with their owning modules), no separate CLI or console crate (both ship
 with the host), no plugin SDK or dynamic ABI (v1 statically links reviewed adapters). A new crate appears
 only when an integration brings a real dependency, release, or isolation boundary. Bloomery-specific
 concepts stay in Bloomery; a primitive moves down into `aether-actor` / `aether-substrate` /
 `aether-capabilities` only once proven useful outside this application. The dedicated `BloomeryChassis`
-hosts the capabilities and autoloads the policy component; the generic hub and headless chassis do not
-become a build server.
+mounts the capabilities — the control core among them, now native (§The boundary, amended) rather than an
+autoloaded wasm component; the generic hub and headless chassis do not become a build server.
 
 ### Migration
 

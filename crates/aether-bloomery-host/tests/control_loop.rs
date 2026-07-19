@@ -1,8 +1,9 @@
 //! The ADR-0149 migration step 1 exit gate, cross-process: boot the `bloomery`
-//! bin, load the control-core wasm actor, seal a synthetic single-workpiece
-//! bloom by admitting a `Fact::Seal` event through the `aether.bloomery.admit`
-//! ingress, `kill -9` the process, restart it against the same database, reload
-//! the control core (its `wire` replays the journal), and prove convergence
+//! bin — the control core is a native capability mounted into the chassis at
+//! boot, so it comes up already live — seal a synthetic single-workpiece bloom
+//! by admitting a `Fact::Seal` event through the `aether.bloomery.admit`
+//! ingress, `kill -9` the process, restart it against the same database (the
+//! control core's `wire` replays the journal on boot), and prove convergence
 //! **through the reducer**: `aether.bloomery.query` returns the rebuilt bloom,
 //! and a second overlapping seal loses cleanly.
 //!
@@ -10,51 +11,27 @@
 //! drives the admit/query mail and reply outcomes only — never the store
 //! directly — so it exercises the whole control loop: admit → reduce → combined
 //! commit → snapshot apply, and boot replay → rebuild.
-//!
-//! The test needs the control-core wasm pre-built for `wasm32-unknown-unknown`
-//! (CI's "Pre-build component wasm" step / `cargo xtask dist`). A dev box that
-//! hasn't built it skips cleanly, unless `AETHER_REQUIRE_RUNTIME` is set.
 
 #![allow(clippy::unwrap_used)]
-// The wasm-availability skip prints a diagnostic to stderr and reads the
-// `AETHER_REQUIRE_RUNTIME` opt-out — legitimate test harness controls, not cap
-// config (the `headless_autoload.rs` precedent).
-#![allow(clippy::print_stderr)]
+// The test addresses the native control cap by its lineage path
+// (`mailbox_id_from_path`), disallowed-by-default outside the id/routing API and
+// permitted here per the clippy.toml test carve-out.
 #![allow(clippy::disallowed_methods)]
 
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
-use std::{env, fs, thread};
 
 use aether_bloomery::{
-    Admit, AdmitResult, BloomDraft, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, Membership, Outcome,
-    Query, QueryResult, StageCatalog, ViewDocument, WorkpieceId,
+    Admit, AdmitResult, BloomDraft, CONTROL_CORE_NAMESPACE, Digest, Event, Evidence, EvidenceKind, Fact,
+    IdempotencyKey, Membership, Outcome, Query, QueryResult, StageCatalog, ViewDocument, WorkpieceId,
 };
 use aether_capabilities::rpc::{Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
-use aether_kinds::{LoadComponent, LoadResult};
 use serde::Serialize;
-
-/// Locate the control-core wasm artifact under the workspace target dir,
-/// preferring `release` over `debug`. `None` when neither exists (an unbuilt
-/// dev box).
-fn control_core_wasm() -> Option<PathBuf> {
-    // `CARGO_BIN_EXE_bloomery` sits at `<target>/<profile>/bloomery`, so its
-    // grandparent is `<target>`.
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_bloomery"));
-    let target = bin.parent()?.parent()?;
-    for profile in ["release", "debug"] {
-        let candidate = target.join("wasm32-unknown-unknown").join(profile).join("aether_bloomery.wasm");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
-}
 
 /// Reserve a free localhost port by binding `:0`, then release it for the bin to
 /// claim. A small race window, tolerated by the connect retry loop.
@@ -204,13 +181,10 @@ where
     )
 }
 
-/// Load the control-core component and return its assigned mailbox id.
-fn load_control_core(stream: &mut TcpStream, cid: u64, wasm: &[u8]) -> MailboxId {
-    let load = LoadComponent { wasm: wasm.to_vec(), name: None, config: Vec::new(), export: None };
-    match call::<_, LoadResult>(stream, cid, mailbox_id_from_path("aether.component"), &load) {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
-        LoadResult::Err { error } => panic!("control-core load failed: {error}"),
-    }
+/// The native control-core capability's mailbox — mounted into the chassis at
+/// boot under `aether.bloomery.control`, addressed by its lineage path.
+fn control_mailbox() -> MailboxId {
+    mailbox_id_from_path(CONTROL_CORE_NAMESPACE)
 }
 
 /// A valid `Fact::Seal` event for a single-workpiece bloom on `base`, its member
@@ -277,19 +251,6 @@ fn kill9(mut child: Child) {
 
 #[test]
 fn control_loop_converges_through_the_reducer_across_a_restart() {
-    let Some(wasm_path) = control_core_wasm() else {
-        assert!(
-            env::var_os("AETHER_REQUIRE_RUNTIME").is_none(),
-            "AETHER_REQUIRE_RUNTIME set but the control-core wasm is not pre-built"
-        );
-        eprintln!(
-            "skipping: control-core wasm not built; run \
-             `cargo build -p aether-bloomery --target wasm32-unknown-unknown`"
-        );
-        return;
-    };
-    let wasm = fs::read(&wasm_path).unwrap();
-
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("bloomery.db");
     let db = db.to_str().unwrap();
@@ -301,7 +262,7 @@ fn control_loop_converges_through_the_reducer_across_a_restart() {
     let mut stream = connect(port);
     handshake(&mut stream);
 
-    let control = load_control_core(&mut stream, 1, &wasm);
+    let control = control_mailbox();
     let sealed = admit(&mut stream, 2, control, &seal_event("seal-1", 0, "wp"));
     assert!(matches!(sealed, Outcome::Sealed(_)), "the first seal admits and seals: {sealed:?}");
 
@@ -315,7 +276,7 @@ fn control_loop_converges_through_the_reducer_across_a_restart() {
     let child = spawn(port, db);
     let mut stream = connect(port);
     handshake(&mut stream);
-    let control = load_control_core(&mut stream, 1, &wasm);
+    let control = control_mailbox();
 
     // Convergence through the reducer: the rebuilt snapshot names the bloom.
     let document = query_until_blooms(&mut stream, 10, control, 1);
@@ -336,19 +297,6 @@ fn control_loop_converges_through_the_reducer_across_a_restart() {
 
 #[test]
 fn concurrent_same_key_admits_each_get_a_coherent_ok() {
-    let Some(wasm_path) = control_core_wasm() else {
-        assert!(
-            env::var_os("AETHER_REQUIRE_RUNTIME").is_none(),
-            "AETHER_REQUIRE_RUNTIME set but the control-core wasm is not pre-built"
-        );
-        eprintln!(
-            "skipping: control-core wasm not built; run \
-             `cargo build -p aether-bloomery --target wasm32-unknown-unknown`"
-        );
-        return;
-    };
-    let wasm = fs::read(&wasm_path).unwrap();
-
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("bloomery.db");
     let db = db.to_str().unwrap();
@@ -357,7 +305,7 @@ fn concurrent_same_key_admits_each_get_a_coherent_ok() {
     let child = spawn(port, db);
     let mut stream = connect(port);
     handshake(&mut stream);
-    let control = load_control_core(&mut stream, 1, &wasm);
+    let control = control_mailbox();
 
     // Two admits sharing one idempotency key, pipelined before either reply is
     // read, so the second sits in the mailbox while the first's store round-trip

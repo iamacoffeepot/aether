@@ -74,11 +74,10 @@ use crate::bloomery::{
 use crate::signing::{SigningCapability, Verify, VerifyResult};
 use crate::store::{RecordDispatchDescription, RecordDispatchDescriptionResult, StoreCapability};
 
-// The control core is addressed by its one exported namespace const, its
-// ADR-0099 lineage computed by the component host's own `resolve_embedded` —
-// never a re-spelled path literal (#3668).
-use aether_bloomery::CONTROL_CORE_NAMESPACE;
-use aether_capabilities::resolve_embedded;
+// The control core is a native sibling cap since the wasm-boundary retirement
+// (ADR-0149 §The boundary, amended), addressed as a typed peer
+// (`ctx.actor::<ControlCore>()`) rather than a `resolve_embedded` component lineage.
+use crate::control::ControlCore;
 
 /// Per-process ceilings on the pre-seal shaping maps. Staged workpieces and
 /// open drafts are pure in-memory shaping state with no durable owner to evict
@@ -788,7 +787,7 @@ impl ApiCapabilityState {
         match result {
             VerifyResult::Ok { verified: true } => match to_vec(&event) {
                 Ok(bytes) => {
-                    let correlation = self.send_tracked_control(ctx, &Admit { event: bytes });
+                    let correlation = self.send_tracked(ctx.actor::<ControlCore>(), &Admit { event: bytes });
                     self.pending.insert(correlation, inbound);
                 }
                 Err(error) => {
@@ -837,7 +836,7 @@ impl ApiCapabilityState {
                 let key = idempotency_key.unwrap_or_else(|| hex_encode(spec.id().0.as_bytes()));
                 match to_vec(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::Seal(spec) }) {
                     Ok(bytes) => {
-                        let correlation = self.send_tracked_control(ctx, &Admit { event: bytes });
+                        let correlation = self.send_tracked(ctx.actor::<ControlCore>(), &Admit { event: bytes });
                         self.pending.insert(correlation, inbound);
                     }
                     Err(error) => {
@@ -872,7 +871,7 @@ impl ApiCapabilityState {
 
     /// `GET /blooms` and `GET /view` — read the whole live projection.
     fn query(&self, ctx: &NativeCtx<'_, Manual>, bloom: Option<Vec<u8>>) -> Routed {
-        Routed::Deferred(self.send_tracked_control(ctx, &Query { bloom }))
+        Routed::Deferred(self.send_tracked(ctx.actor::<ControlCore>(), &Query { bloom }))
     }
 
     /// `GET /blooms/{id}` — read one bloom's live view by hex id.
@@ -890,7 +889,7 @@ impl ApiCapabilityState {
             Ok(bytes) => bytes,
             Err(error) => return Routed::Reply(error_response(500, &format!("event encode failed: {error}"))),
         };
-        Routed::Deferred(self.send_tracked_control(ctx, &Admit { event: bytes }))
+        Routed::Deferred(self.send_tracked(ctx.actor::<ControlCore>(), &Admit { event: bytes }))
     }
 
     /// Dispatch a mail to a peer cap's typed handle as a fresh causal root,
@@ -904,15 +903,6 @@ impl ApiCapabilityState {
         K: Kind,
     {
         self.track(target.send_detached_tracked(payload))
-    }
-
-    /// The control-core variant of [`send_tracked`](Self::send_tracked): the
-    /// control core is a loaded wasm component, not a nameable native sibling
-    /// type, so its dispatch stays on the raw envelope against the
-    /// `resolve_embedded`-computed mailbox.
-    fn send_tracked_control<K: Kind>(&self, ctx: &NativeCtx<'_, Manual>, payload: &K) -> u64 {
-        let bytes = payload.encode_into_bytes();
-        self.track(ctx.send_envelope_detached(control_mailbox(), K::ID, &bytes))
     }
 
     /// Subscribe this cap to `mail_id`'s settlement and return the correlation
@@ -1062,10 +1052,6 @@ fn artifact_response(result: GetResult) -> HttpServerResponse {
         GetResult::Err { error: ArtifactsError::NotFound, .. } => error_response(404, "no such artifact"),
         GetResult::Err { error, .. } => error_response(500, &format!("artifacts error: {error:?}")),
     }
-}
-
-fn control_mailbox() -> MailboxId {
-    resolve_embedded(CONTROL_CORE_NAMESPACE)
 }
 
 /// A `Content-Type: application/json` header set.
