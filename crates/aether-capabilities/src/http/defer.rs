@@ -1,80 +1,113 @@
-//! Native deferred-reply machinery for the typed route surface (ADR-0154
-//! §2/§3). A deferred route forwards its request to a peer capability and
-//! answers only when that reply lands. This module holds the request's
-//! reply obligation across the async boundary, arms the `504` settlement
-//! net, and hands the obligation back to the paired `#[http::reply]` route.
+//! Deferred HTTP routes, built on the ADR-0139 relay machinery — no bespoke
+//! obligation table, nothing on the actor SDK.
 //!
-//! Native-only: the reply-obligation hold is [`InboundMail`], a native
-//! construct (a wasm guest's reply handle is one-shot and instance-local,
-//! ADR-0133), so the whole module sits behind the `runtime` feature. The
-//! table lives in the HTTP surface, not the actor SDK (ADR-0154 §3): only
-//! the correlation half (the echoed `correlation_id`) is generic, and the
-//! `504` reclamation is HTTP-specific.
+//! A deferred route forwards its request to a peer and answers only when that
+//! reply lands. This is the exact pattern audio / text / aether-kit already
+//! use for fs replies: capture the requester's `Source`, `send_with_context`
+//! to the peer, and answer later via `take_context` + `reply_to`. The send
+//! *inherits* the request's causal chain (ADR-0080 §7), so the request stays
+//! in flight across the round-trip and the HTTP server never `502`s it early
+//! — the framework holds the chain open for free, no `take_inbound` guard.
+//!
+//! Peers are addressed by their marker type, so the `send_with_context`
+//! `HandlesKind<K>` gate compile-checks the request against the peer:
+//! [`Ctx::defer`] for a native singleton peer, [`Ctx::defer_at`] for a peer
+//! reached by a resolved [`MailboxId`] (an embedded/wasm component, whose id
+//! folds the host's carry and so can't be derived from the caller). Native,
+//! because the reply obligation and `reply_to` are native; behind the
+//! `runtime` feature.
+//!
+//! The reply route recovers the requester the same way `take_context` does —
+//! by the reply's `in_reply_to` correlation, no correlation in any signature —
+//! and answers. A peer that settles without replying yields the server's own
+//! `502` net; one that never settles, its request timeout. Neither needs
+//! anything here.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use aether_actor::{Addressable, HandlesKind, Manual, OutboundReply, Singleton};
+use aether_data::{Kind, Source};
+use aether_substrate::actor::native::{NativeActorMailbox, NativeCtx};
 
-use aether_actor::Manual;
-use aether_data::{Kind, MailboxId};
-use aether_kinds::trace::Settled;
-use aether_substrate::InboundMail;
-use aether_substrate::actor::native::NativeCtx;
-
+use super::kinds::HttpServerResponse;
 use super::typed::{Ctx, Outcome};
+use crate::component::ComponentHostCapability;
 
-/// The process-global reply-obligation table (ADR-0154 §3): a deferred
-/// request's held [`InboundMail`] keyed by `(routing actor, downstream
-/// correlation)`. The actor half scopes entries per instance; the
-/// correlation half is the detached dispatch's `MailId.correlation_id`,
-/// which the downstream reply echoes (so the reply route recovers it via
-/// `in_reply_to`) and the settlement notice carries as its root. Bounded
-/// by in-flight deferred requests — an entry frees when its reply route
-/// answers or the `504` settlement net fires.
-fn deferrals() -> &'static Mutex<HashMap<(MailboxId, u64), InboundMail>> {
-    static DEFERRALS: OnceLock<Mutex<HashMap<(MailboxId, u64), InboundMail>>> = OnceLock::new();
-    DEFERRALS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Remove and return the held reply obligation for `(self_id, correlation)`.
-/// The generated `#[http::reply]` glue and the `504` settlement handler
-/// both call this to answer (or fail-close) a held request. Public for the
-/// macro-generated glue only — not an author-facing surface.
-///
-/// # Panics
-/// Panics if the deferral-table mutex is poisoned — fail-fast per ADR-0063.
+/// The requester's reply target, carried from a deferred route's request
+/// handler to its reply route through the ADR-0139 request-context table (a
+/// serializable `Source`, unlike the native reply guard). [`answer_deferred`]
+/// recovers it and answers the original request.
+#[derive(Kind, aether_data::Schema, serde::Serialize, serde::Deserialize)]
+#[kind(name = "aether.http.deferred_source")]
 #[doc(hidden)]
-#[must_use]
-pub fn take_deferred(self_id: MailboxId, correlation: u64) -> Option<InboundMail> {
-    deferrals().lock().expect("http deferral table poisoned; fail-fast per ADR-0063").remove(&(self_id, correlation))
+pub struct DeferredSource {
+    /// The original HTTP requester (the server), correlation included.
+    pub source: Source,
 }
 
 impl Ctx<'_, NativeCtx<'_, Manual>> {
-    /// Forward this route's request to `recipient` and answer only when
-    /// that reply lands (ADR-0154 §2). Takes the request's reply
-    /// obligation across the async boundary (so the request's chain does
-    /// not settle and trip the HTTP server's `502` net), dispatches
-    /// `request` as a fresh detached root, arms a settlement subscription
-    /// that answers `504` if the downstream chain settles without a reply,
-    /// and holds the obligation keyed by the dispatch's correlation. A
-    /// paired `#[http::reply]` route recovers it via `in_reply_to` and
-    /// answers.
+    /// Name the singleton peer `R` a deferred route will forward to, capturing
+    /// the requester's reply target from this ctx; [`Peer::defer`] then
+    /// forwards the request and holds the route open until `R`'s reply lands
+    /// (ADR-0154 §2). Reads `ctx.peer::<R>().defer(&request)`.
     ///
-    /// # Panics
-    /// Panics if the deferral-table mutex is poisoned — fail-fast per
-    /// ADR-0063 (a poisoned table means another handler panicked mid-op).
-    pub fn defer<K: Kind>(mut self, recipient: MailboxId, request: &K) -> Outcome {
-        let self_id = self.self_id();
-        let inbound = self.take_inbound();
-        let bytes = request.encode_into_bytes();
-        let mail_id = self.send_envelope_detached(recipient, K::ID, &bytes);
-        let mailer = self.mailer();
-        if let Some(registry) = mailer.settlement_registry() {
-            registry.subscribe_settlement_mail(mail_id, self_id, <Settled as Kind>::ID, Arc::clone(mailer));
-        }
-        deferrals()
-            .lock()
-            .expect("http deferral table poisoned; fail-fast per ADR-0063")
-            .insert((self_id, mail_id.correlation_id), inbound);
+    /// This is *not* `ctx.actor::<R>()`: `actor` resolves `R` against the
+    /// caller's own carry, which is correct for a native root singleton but
+    /// resolves an **embedded** component to the wrong mailbox — an embedded
+    /// id folds the *component-host's* carry
+    /// ([`resolve_embedded`](crate::component::resolve_embedded)), not the
+    /// caller's. `peer` resolves against the host carry, so a native root cap
+    /// (whose [`One`](aether_actor::One) resolver ignores the carry) and an
+    /// embedded component (whose [`Embedded`](aether_actor::Embedded) resolver
+    /// folds it to the same id `resolve_embedded(R::NAMESPACE)` gives) are both
+    /// correct and identical at the call site.
+    #[must_use = "a peer does nothing until `.defer(&request)` forwards to it"]
+    pub fn peer<R: Singleton>(&self) -> Peer<'_, R> {
+        let host_carry = <ComponentHostCapability as Addressable>::resolve(0, ()).0;
+        Peer { mailbox: self.actor_at::<R>(R::resolve(host_carry, ())), source: self.reply_target() }
+    }
+}
+
+/// A deferred route's named peer, produced by [`Ctx::peer`]: the resolved
+/// singleton mailbox plus the requester's reply target. [`defer`](Self::defer)
+/// forwards the request and holds the route open.
+pub struct Peer<'a, R: Addressable> {
+    mailbox: NativeActorMailbox<'a, R>,
+    source: Source,
+}
+
+impl<R: Addressable> Peer<'_, R> {
+    /// Forward `request` to this peer and hold the route open until its reply.
+    /// The send is *inherited* (ADR-0080 §7), so the request's chain stays open
+    /// and the HTTP server does not `502` it before the reply;
+    /// `send_with_context` stashes the requester's reply target for the paired
+    /// `#[http::reply]` route to answer through. `R: HandlesKind<K>`
+    /// compile-checks the request kind against the peer; `K` is inferred.
+    pub fn defer<K>(self, request: &K) -> Outcome
+    where
+        R: HandlesKind<K>,
+        K: Kind,
+    {
+        let _ = self.mailbox.send_with_context(request, &DeferredSource { source: self.source });
         Outcome::Deferred
     }
+}
+
+/// Answer a deferred route's held request from the downstream reply the reply
+/// route just mapped. Recovers the requester's `Source` via `take_context`
+/// (keyed by the reply's `in_reply_to`, no correlation exposed) and replies to
+/// it. A miss (no stored context — an unmatched reply) is a no-op. Public for
+/// the macro-generated `#[http::reply]` glue only.
+#[doc(hidden)]
+pub fn answer_deferred(ctx: &mut NativeCtx<'_, Manual>, response: &HttpServerResponse) {
+    if let Some(deferred) = ctx.take_context::<DeferredSource>() {
+        ctx.reply_to(deferred.source, response);
+    }
+}
+
+/// Answer a deferred route's request inline — the synchronous arm of
+/// [`Outcome`] (`Outcome::Reply`), for a route that decides its answer without
+/// forwarding (e.g. a validation `400`). Replies to the current inbound.
+/// Public for the macro-generated `#[http::route]` glue only.
+#[doc(hidden)]
+pub fn answer_now(ctx: &mut NativeCtx<'_, Manual>, response: &HttpServerResponse) {
+    ctx.reply(response);
 }

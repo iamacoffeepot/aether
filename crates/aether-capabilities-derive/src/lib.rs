@@ -374,17 +374,9 @@ fn expand_router(mut item: ItemImpl, shared: bool) -> syn::Result<TokenStream2> 
 
     let groups = build_groups(&routed, &self_ident, &namespace)?;
 
-    // A deferred route or a reply route needs the shared `Settled` handler
-    // that answers `504` for a downstream chain that settles without a
-    // reply (ADR-0154 §2).
-    let needs_settled = groups.iter().any(|group| group.deferred) || !reply_routes.is_empty();
-
     let minted = groups.iter().map(emit_minted_kind).collect::<Vec<_>>();
     let mut glue = groups.iter().map(emit_group_glue).collect::<Vec<_>>();
     glue.extend(reply_routes.iter().map(emit_reply_glue));
-    if needs_settled {
-        glue.push(emit_settled_handler(&groups, &reply_routes)?);
-    }
     for handler in glue {
         item.items.push(parse_quote!(#handler));
     }
@@ -939,13 +931,14 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
         CallStyle::State(_) => quote! { Self::#fn_name(__aether_state, __aether_http_ctx #(, #param_idents)*) },
     };
     // A synchronous route returns the response, which the glue returns; a
-    // deferred route returns `Outcome`, which the glue answers (`Reply`) or
-    // holds (`Deferred`) before returning unit.
+    // deferred route returns `Outcome`, which the glue answers inline
+    // (`Reply`) or lets stand (`Deferred` — `defer` already forwarded the
+    // inherited send, so the reply route answers when the peer replies).
     let call_and_tail = if group.deferred {
         quote! {
             match #invoke {
                 ::aether_capabilities::http::Outcome::Reply(__aether_response) => {
-                    __aether_ctx.take_inbound().reply(&__aether_response);
+                    ::aether_capabilities::http::answer_now(__aether_ctx, &__aether_response);
                 }
                 ::aether_capabilities::http::Outcome::Deferred => {}
             }
@@ -975,11 +968,11 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
 }
 
 /// The `#[handler::manual]` glue for one `#[http::reply]` route (ADR-0154
-/// §2): call the retained user method to map the downstream reply into a
-/// response, recover the request obligation held for this reply's
-/// correlation (`reply_target().correlation_id`), and answer it. An
-/// unmatched reply (no held obligation — already answered, or evicted by
-/// the `504` net) is a no-op.
+/// §2): call the user method to map the downstream reply into a response,
+/// then `answer_deferred`, which recovers the requester's `Source` via
+/// `take_context` (keyed by the reply's `in_reply_to`, no correlation crosses
+/// the call) and answers the original request with `reply_to`. An unmatched
+/// reply (no stored context) is a no-op.
 fn emit_reply_glue(reply: &ReplyRoute) -> TokenStream2 {
     let ReplyRoute { fn_name, reply_kind, first_arg, call_style, ctx_c, docs } = reply;
     let glue_name = format_ident!("__aether_reply_{fn_name}");
@@ -996,60 +989,9 @@ fn emit_reply_glue(reply: &ReplyRoute) -> TokenStream2 {
         #[handler::manual]
         fn #glue_name(#glue_first, __aether_ctx: &mut #ctx_c, __aether_reply: #reply_kind) {
             let __aether_response = #call;
-            let __aether_self = __aether_ctx.self_id();
-            let __aether_correlation = __aether_ctx.reply_target().correlation_id;
-            if let ::core::option::Option::Some(__aether_inbound) =
-                ::aether_capabilities::http::take_deferred(__aether_self, __aether_correlation)
-            {
-                __aether_inbound.reply(&__aether_response);
-            }
+            ::aether_capabilities::http::answer_deferred(__aether_ctx, &__aether_response);
         }
     }
-}
-
-/// The shared `#[handler::manual]` `Settled` handler (ADR-0154 §2): a
-/// deferred request whose downstream chain settles without ever replying
-/// (a dropped or unloaded peer) is answered `504` rather than left to hang
-/// the client. Its receiver / ctx shape is copied from the first deferred
-/// route or reply route (all share the impl's transport). Emitted once per
-/// router that has any deferred or reply route.
-fn emit_settled_handler(groups: &[Group<'_>], reply_routes: &[ReplyRoute]) -> syn::Result<TokenStream2> {
-    let (first_arg, call_style, ctx_c) = groups
-        .iter()
-        .find(|group| group.deferred)
-        .map(|group| (&group.first_arg, &group.call_style, &group.ctx_c))
-        .or_else(|| reply_routes.first().map(|reply| (&reply.first_arg, &reply.call_style, &reply.ctx_c)))
-        .ok_or_else(|| {
-            syn::Error::new(Span::call_site(), "internal: settled handler emitted with no deferred routes")
-        })?;
-
-    // The handler reads neither self nor state (the obligation table is
-    // process-global), so name an unused receiver and silence the lint.
-    let (settled_first, allow) = match call_style {
-        CallStyle::SelfReceiver => (quote! { #first_arg }, quote! { #[allow(clippy::unused_self)] }),
-        CallStyle::State(state_ty) => (quote! { _aether_state: #state_ty }, quote! {}),
-    };
-
-    Ok(quote! {
-        #allow
-        #[handler::manual]
-        fn __aether_route_settled(
-            #settled_first,
-            __aether_ctx: &mut #ctx_c,
-            __aether_settled: ::aether_capabilities::http::Settled,
-        ) {
-            let __aether_self = __aether_ctx.self_id();
-            if let ::core::option::Option::Some(__aether_inbound) =
-                ::aether_capabilities::http::take_deferred(__aether_self, __aether_settled.root.correlation_id)
-            {
-                __aether_inbound.reply(&::aether_capabilities::http::kinds::HttpServerResponse {
-                    status: 504,
-                    headers: ::std::vec::Vec::new(),
-                    body: ::std::vec::Vec::from(&b"downstream settled without a reply"[..]),
-                });
-            }
-        }
-    })
 }
 
 /// Build the `RegisterRouteSelf` send for one route group, addressed with
