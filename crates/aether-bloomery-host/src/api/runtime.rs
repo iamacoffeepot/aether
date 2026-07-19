@@ -4,10 +4,12 @@
 //! A native `aether.http.server`-mounted router that lets an operator drive a
 //! bloom end-to-end from `curl`: stage workpieces, shape and seal drafts,
 //! supersede, and read the live blooms / view document / journal / artifacts —
-//! no typed-mail RPC vocabulary required. It claims a small set of path
-//! prefixes on the `aether.http.server` ingress cap (ADR-0108/ADR-0130) and
-//! dispatches every request through one manual handler that switches on method
-//! + path.
+//! no typed-mail RPC vocabulary required. Its routes are authored through the
+//! typed `#[http::router]` / `#[http::route]` surface (ADR-0131/ADR-0154): each
+//! `#[http::route]` method claims one exact path + method on the
+//! `aether.http.server` ingress cap (ADR-0108/ADR-0130), and the macro generates
+//! the segment dispatch and path-capture binding the hand-rolled
+//! method-plus-path `match` used to carry (#3672).
 //!
 //! # The two route shapes
 //!
@@ -33,7 +35,7 @@
 //!   correlation deliberately does *not* go through a `#[fallback]`: a fallback
 //!   would widen the actor's accept-set to every kind — including the request-
 //!   stream kinds — and the HTTP server would then route each request down the
-//!   streaming path instead of delivering a buffered [`HttpServerRequest`].
+//!   streaming path instead of delivering a buffered `HttpServerRequest`.
 //! - A settlement subscription answers `504` for a request whose downstream
 //!   chain settles without ever replying (a dropped or unloaded control core).
 
@@ -49,9 +51,7 @@ use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, BloomId, BloomView, Digest, Event, Fact, IdempotencyKey, Membership, Outcome,
     Query, QueryResult, ReplayJournal, ReplayJournalResult, Statement, ViewDocument, Workpiece, digest_of,
 };
-use aether_capabilities::http::{
-    HttpHeader, HttpMethod, HttpServerCapability, HttpServerRequest, HttpServerResponse, RegisterRouteSelf,
-};
+use aether_capabilities::http::{self, HttpHeader, HttpServerResponse};
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailId, MailboxId};
 use aether_kinds::trace::Settled;
@@ -79,11 +79,6 @@ use crate::store::{RecordDispatchDescription, RecordDispatchDescriptionResult, S
 // never a re-spelled path literal (#3668).
 use aether_bloomery::CONTROL_CORE_NAMESPACE;
 use aether_capabilities::resolve_embedded;
-
-/// The path prefixes the router claims on the HTTP ingress cap; every one
-/// dispatches to [`BloomeryApiCapability::on_request`] under the
-/// [`HttpServerRequest`] kind, which switches on method + remaining path.
-const ROUTE_PREFIXES: [&str; 6] = ["/workpieces", "/drafts", "/blooms", "/view", "/journal", "/artifacts"];
 
 /// Per-process ceilings on the pre-seal shaping maps. Staged workpieces and
 /// open drafts are pure in-memory shaping state with no durable owner to evict
@@ -253,6 +248,7 @@ enum Routed {
     DeferredSeal(Box<PendingSealSetup>),
 }
 
+#[http::router]
 #[runtime]
 impl NativeActor for BloomeryApiCapability {
     type State = ApiCapabilityState;
@@ -296,50 +292,144 @@ impl NativeActor for BloomeryApiCapability {
         })
     }
 
-    /// Claim the route prefixes on the HTTP ingress cap (ADR-0130). Runs
-    /// post-init, where mail is allowed; each claim routes its prefix to this
-    /// actor under the [`HttpServerRequest`] kind.
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
-        for prefix in ROUTE_PREFIXES {
-            ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
-                prefix: prefix.to_owned(),
-                method: None,
-                kind: <HttpServerRequest as Kind>::ID,
-                shared: false,
-            });
-        }
+    /// `#[http::router]` appends the per-route `RegisterRouteSelf` sends to
+    /// this body — one exact-match claim per `(static head, method)` group,
+    /// registered on the HTTP ingress cap (ADR-0130) post-init (#3672).
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {}
+
+    /// `POST /workpieces` — stage a workpiece for later draft membership.
+    #[http::route(Post, "/workpieces")]
+    fn on_post_workpieces(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = state.stage_workpiece(&ctx.request().body);
+        finish(state, ctx, routed)
     }
 
-    /// The single ingress: take the request's reply obligation (keeping its
-    /// chain open across any deferral), route it, and either answer now or
-    /// stash the guard against the downstream correlation.
-    #[handler::manual]
-    fn on_request(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: HttpServerRequest) {
-        let inbound = ctx.take_inbound();
-        match state.route(ctx, mail) {
-            Routed::Reply(response) => {
-                inbound.reply(&response);
-            }
-            Routed::Deferred(correlation) => {
-                state.pending.insert(correlation, inbound);
-            }
-            Routed::DeferredVerify { correlation, event } => {
-                state.verifying.insert(correlation, VerifyPending { inbound, event: *event });
-            }
-            Routed::DeferredSeal(setup) => {
-                let PendingSealSetup { gated, descriptions, idempotency_key, verifications } = *setup;
-                let seal = state.next_seal;
-                state.next_seal += 1;
-                let remaining = verifications.len();
-                for verify in verifications {
-                    let PendingVerify { correlation, member_index, scope_revision, statement } = verify;
-                    state
-                        .seal_verifications
-                        .insert(correlation, SealVerify { seal, member_index, scope_revision, statement });
-                }
-                state.seals.insert(seal, PendingSeal { inbound, gated, descriptions, idempotency_key, remaining });
-            }
-        }
+    /// `GET /workpieces` — list the staged workpieces.
+    #[http::route(Get, "/workpieces")]
+    fn on_get_workpieces(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = Routed::Reply(json(200, &WorkpiecesView { workpieces: state.staged.values().cloned().collect() }));
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /drafts` — open a fresh empty draft under a new handle.
+    #[http::route(Post, "/drafts")]
+    fn on_post_drafts(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = state.open_draft();
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /drafts` — list the open drafts.
+    #[http::route(Get, "/drafts")]
+    fn on_get_drafts(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = Routed::Reply(json(200, &state.drafts_view()));
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /drafts/{id}` — read one open draft.
+    #[http::route(Get, "/drafts/{id}")]
+    fn on_get_draft(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.get_draft(&id);
+        finish(state, ctx, routed)
+    }
+
+    /// `PATCH /drafts/{id}` — replace the present fields of an open draft.
+    #[http::route(Patch, "/drafts/{id}")]
+    fn on_patch_draft(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.patch_draft(&id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /drafts/{id}/seal` — run the pre-seal approve gate over every
+    /// membership, then freeze the draft and admit `Fact::Seal`.
+    #[http::route(Post, "/drafts/{id}/seal")]
+    fn on_seal_draft(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.seal_draft(&ctx, &id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /blooms` — read the whole live projection.
+    #[http::route(Get, "/blooms")]
+    fn on_get_blooms(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = state.query(&ctx, None);
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /view` — read the whole live projection (the `GET /blooms` alias).
+    #[http::route(Get, "/view")]
+    fn on_get_view(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = state.query(&ctx, None);
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /blooms/{id}` — read one bloom's live view by hex id.
+    #[http::route(Get, "/blooms/{id}")]
+    fn on_get_bloom(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.query_bloom(&ctx, &id);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /blooms/{id}/supersede` — seal the successor draft and admit
+    /// `Fact::Supersede` against the `{id}` predecessor bloom.
+    #[http::route(Post, "/blooms/{id}/supersede")]
+    fn on_supersede(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.supersede(&ctx, &id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `POST /blooms/{id}/answer` — adopt a signed answer to a parked question.
+    #[http::route(Post, "/blooms/{id}/answer")]
+    fn on_answer(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        id: http::Path<String>,
+    ) -> http::Outcome {
+        let id = id.0;
+        let routed = state.answer_bloom(&ctx, &id, &ctx.request().body);
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /journal` — read the durable event journal from the store.
+    #[http::route(Get, "/journal")]
+    fn on_get_journal(state: &mut ApiCapabilityState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+        let routed = Routed::Deferred(state.send_tracked(ctx.actor::<StoreCapability>(), &ReplayJournal));
+        finish(state, ctx, routed)
+    }
+
+    /// `GET /artifacts/{digest}` — fetch a content-addressed artifact.
+    #[http::route(Get, "/artifacts/{digest}")]
+    fn on_get_artifact(
+        state: &mut ApiCapabilityState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+        digest: http::Path<String>,
+    ) -> http::Outcome {
+        let routed =
+            Routed::Deferred(state.send_tracked(ctx.actor::<ArtifactsCapability>(), &Get { digest: digest.0 }));
+        finish(state, ctx, routed)
     }
 
     /// The control core's reply to a `Fact::Seal` / `Fact::Supersede` admit —
@@ -420,37 +510,6 @@ impl NativeActor for BloomeryApiCapability {
 }
 
 impl ApiCapabilityState {
-    /// Route one request. Pure-shaping routes reply inline; durable
-    /// read/write routes dispatch downstream and defer.
-    fn route(&mut self, ctx: &NativeCtx<'_, Manual>, req: HttpServerRequest) -> Routed {
-        // Destructure so the body is owned into the route arms rather than
-        // borrowed from a by-value param the handler ABI hands us.
-        let HttpServerRequest { method, path, body, .. } = req;
-        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        match (method, segments.as_slice()) {
-            (HttpMethod::Post, ["workpieces"]) => self.stage_workpiece(&body),
-            (HttpMethod::Get, ["workpieces"]) => {
-                Routed::Reply(json(200, &WorkpiecesView { workpieces: self.staged.values().cloned().collect() }))
-            }
-            (HttpMethod::Post, ["drafts"]) => self.open_draft(),
-            (HttpMethod::Get, ["drafts"]) => Routed::Reply(json(200, &self.drafts_view())),
-            (HttpMethod::Get, ["drafts", id]) => self.get_draft(id),
-            (HttpMethod::Patch, ["drafts", id]) => self.patch_draft(id, &body),
-            (HttpMethod::Post, ["drafts", id, "seal"]) => self.seal_draft(ctx, id, &body),
-            (HttpMethod::Get, ["blooms" | "view"]) => self.query(ctx, None),
-            (HttpMethod::Get, ["blooms", id]) => self.query_bloom(ctx, id),
-            (HttpMethod::Post, ["blooms", id, "supersede"]) => self.supersede(ctx, id, &body),
-            (HttpMethod::Post, ["blooms", id, "answer"]) => self.answer_bloom(ctx, id, &body),
-            (HttpMethod::Get, ["journal"]) => {
-                Routed::Deferred(self.send_tracked(ctx.actor::<StoreCapability>(), &ReplayJournal))
-            }
-            (HttpMethod::Get, ["artifacts", digest]) => Routed::Deferred(
-                self.send_tracked(ctx.actor::<ArtifactsCapability>(), &Get { digest: (*digest).to_owned() }),
-            ),
-            _ => Routed::Reply(error_response(404, "no such route")),
-        }
-    }
-
     /// `POST /workpieces` — stage a workpiece for later draft membership.
     fn stage_workpiece(&mut self, body: &[u8]) -> Routed {
         let workpiece: Workpiece = match serde_json::from_slice(body) {
@@ -895,6 +954,46 @@ impl ApiCapabilityState {
         let correlation = ctx.reply_target().correlation_id;
         if let Some(inbound) = self.pending.remove(&correlation) {
             inbound.reply(response);
+        }
+    }
+}
+
+/// Adapt a route helper's [`Routed`] disposition into the `http::Outcome` a
+/// `#[http::route]` method returns, carrying the reply-obligation stash that the
+/// single `on_request` ingress did before the router became per-route (#3672).
+/// `Reply` answers inline — the macro glue replies through the still-held
+/// inbound — while every deferred variant moves the request's inbound into its
+/// correlation table and returns `Deferred` so the glue does not also answer;
+/// the reply / settlement handlers recover it by correlation exactly as before.
+fn finish(
+    state: &mut ApiCapabilityState,
+    mut ctx: http::Ctx<'_, NativeCtx<'_, Manual>>,
+    routed: Routed,
+) -> http::Outcome {
+    match routed {
+        Routed::Reply(response) => http::Outcome::Reply(response),
+        Routed::Deferred(correlation) => {
+            state.pending.insert(correlation, ctx.take_inbound());
+            http::Outcome::Deferred
+        }
+        Routed::DeferredVerify { correlation, event } => {
+            state.verifying.insert(correlation, VerifyPending { inbound: ctx.take_inbound(), event: *event });
+            http::Outcome::Deferred
+        }
+        Routed::DeferredSeal(setup) => {
+            let PendingSealSetup { gated, descriptions, idempotency_key, verifications } = *setup;
+            let seal = state.next_seal;
+            state.next_seal += 1;
+            let remaining = verifications.len();
+            for verify in verifications {
+                let PendingVerify { correlation, member_index, scope_revision, statement } = verify;
+                state
+                    .seal_verifications
+                    .insert(correlation, SealVerify { seal, member_index, scope_revision, statement });
+            }
+            let inbound = ctx.take_inbound();
+            state.seals.insert(seal, PendingSeal { inbound, gated, descriptions, idempotency_key, remaining });
+            http::Outcome::Deferred
         }
     }
 }

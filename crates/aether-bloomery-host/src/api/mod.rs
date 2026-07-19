@@ -18,11 +18,12 @@ mod runtime;
 use aether_actor::actor;
 
 // The handled-kind types the `#[actor(singleton)]` dispatch table references —
-// the request ingress, the downstream reply kinds (one typed handler each, so
-// the accept-set stays buffered rather than tripping the streaming path a
-// broad `#[fallback]` would), and the settlement-notice safety net.
+// the downstream reply kinds (one typed handler each, so the accept-set stays
+// buffered rather than tripping the streaming path a broad `#[fallback]` would)
+// and the settlement-notice safety net. The request-ingress kinds are the
+// per-route kinds `#[http::router]` mints in `runtime.rs`, registered by the
+// generated glue rather than a bare `HttpServerRequest` handler (#3672).
 use aether_bloomery::{AdmitResult, QueryResult, ReplayJournalResult};
-use aether_capabilities::http::HttpServerRequest;
 use aether_kinds::trace::Settled;
 
 use crate::artifacts::GetResult;
