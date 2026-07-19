@@ -133,7 +133,9 @@ pub struct ControlCore {
 
 #[actor]
 impl WasmActor for ControlCore {
-    const NAMESPACE: &'static str = "aether.bloomery.control";
+    // Forward-fed from the always-compiled control module (#3668): the one
+    // literal, registered here and resolved by the host consumers.
+    const NAMESPACE: &'static str = super::CONTROL_CORE_NAMESPACE;
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self { snapshot: Snapshot::default(), pending: BTreeMap::new(), pending_claims: BTreeMap::new() })
@@ -605,21 +607,3 @@ fn admit_ok(outcome: &Outcome) -> AdmitResult {
 }
 
 aether_actor::export!(ControlCore);
-
-#[cfg(test)]
-mod tests {
-    use aether_actor::Addressable;
-
-    use super::ControlCore;
-    use crate::control::CONTROL_CORE_PATH;
-
-    // Tripwire: the exported control-core mailbox path is the ADR-0099 lineage
-    // address composed from the actor's own NAMESPACE. The path is a computed
-    // pin — it drifts if the namespace is renamed or the embedded-lineage
-    // prefix changes — so the one spelling every host consumer imports cannot
-    // silently diverge from the component the host actually loads (#3668).
-    #[test]
-    fn control_core_path_derives_from_the_namespace() {
-        assert_eq!(CONTROL_CORE_PATH, format!("aether.component/aether.embedded:{}", ControlCore::NAMESPACE));
-    }
-}

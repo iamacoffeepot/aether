@@ -65,7 +65,7 @@ pub mod values;
 #[cfg(feature = "runtime")]
 pub use control::ControlCore;
 pub use control::{
-    Admit, AdmitResult, CONTROL_CORE_PATH, ClaimResult, ClaimSeal, Commit, CommitResult, CompleteRelease,
+    Admit, AdmitResult, CONTROL_CORE_NAMESPACE, ClaimResult, ClaimSeal, Commit, CommitResult, CompleteRelease,
     CompleteTransfer, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, IntegratePayload, JournalRecord,
     LandPayload, MembershipMutation, OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal, ReplayJournal,
     ReplayJournalResult, TOPIC_DISPATCH, TOPIC_INTEGRATE, TOPIC_LAND, TOPIC_LANDING_RECEIPT, TOPIC_REDISPATCH,

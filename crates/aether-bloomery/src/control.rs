@@ -104,14 +104,15 @@ pub const TOPIC_LAND: &str = "topic:land";
 /// bloom's integration branch.
 pub const TOPIC_INTEGRATE: &str = "topic:integrate";
 
-/// The runtime mailbox path of the loaded control-core component — the
-/// ADR-0099 lineage address the component host registers the autoloaded actor
-/// at (`aether.component/aether.embedded:<NAMESPACE>`). One exported constant
-/// so the host's api and driver capabilities resolve the control core from a
-/// single spelling instead of each re-typing the lineage prefix and the
-/// namespace (#3668); a tripwire test pins it to the control actor's
-/// `NAMESPACE`.
-pub const CONTROL_CORE_PATH: &str = "aether.component/aether.embedded:aether.bloomery.control";
+/// The control-core actor's namespace — the sole owner of the literal.
+/// Defined here (always compiled) and forward-fed into the `runtime`-gated
+/// actor's `NAMESPACE` (the `EMBEDDED_SCOPE` forward-feed precedent in
+/// `aether-actor`), so the `default-features = false` host consumers resolve
+/// the loaded component from the exact const the actor registers under
+/// (#3668). The lineage math (`aether.component/aether.embedded:<this>`) is
+/// the component host's, never re-spelled here: the host resolves the mailbox
+/// through `aether_capabilities::resolve_embedded(CONTROL_CORE_NAMESPACE)`.
+pub const CONTROL_CORE_NAMESPACE: &str = "aether.bloomery.control";
 
 /// The re-dispatch outbox payload (ADR-0151): the bloom, the released question,
 /// and the adopting answer, each by digest. The wasm control actor enqueues it

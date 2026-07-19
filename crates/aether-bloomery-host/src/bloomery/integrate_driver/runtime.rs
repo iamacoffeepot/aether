@@ -35,7 +35,7 @@ use aether_bloomery::{
     Admit, BloomId, Checkpoint, Digest, Event, Fact, IdempotencyKey, IntegrateOutcome, IntegratePayload,
 };
 use aether_data::wire::{from_bytes, to_vec};
-use aether_data::{Kind, MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -56,7 +56,8 @@ pub use aether_bloomery::TOPIC_INTEGRATE;
 // The autoloaded control-core component's lineage mailbox — where an admitted
 // `Fact::Resolve` is sent. Resolved from the lineage path, mirroring the land
 // driver's `control_mailbox`. The one exported spelling (#3668).
-use aether_bloomery::CONTROL_CORE_PATH;
+use aether_bloomery::CONTROL_CORE_NAMESPACE;
+use aether_capabilities::resolve_embedded;
 
 /// The self-addressed wake the poll timer fires each interval; its handler
 /// drains the integrate topic and folds each entry. Zero-field — the timer
@@ -93,7 +94,7 @@ impl IntegrateDriverState {
         Self {
             source,
             store,
-            control_mailbox: mailbox_id_from_path(CONTROL_CORE_PATH),
+            control_mailbox: resolve_embedded(CONTROL_CORE_NAMESPACE),
             mailer,
             self_mailbox,
             _timer: None,
@@ -266,7 +267,7 @@ impl NativeActor for IntegrateDriverCapability {
     fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<IntegrateDriverState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
-        let control_mailbox = mailbox_id_from_path(CONTROL_CORE_PATH);
+        let control_mailbox = resolve_embedded(CONTROL_CORE_NAMESPACE);
 
         // Unconfigured → disabled: no shell, no store, no timer. The integrate
         // outbox accumulates and drains once a token/owner/repo is supplied.

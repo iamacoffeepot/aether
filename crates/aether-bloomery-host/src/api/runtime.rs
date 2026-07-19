@@ -72,10 +72,11 @@ use crate::bloomery::{
 use crate::signing::{SigningCapability, Verify, VerifyResult};
 use crate::store::{RecordDispatchDescription, RecordDispatchDescriptionResult, StoreCapability};
 
-// The control-core mailbox path — the ADR-0099 lineage address, resolved with
-// `mailbox_id_from_path` rather than the depth-1 `mailbox_id_from_name`. The
-// one exported spelling (#3668).
-use aether_bloomery::CONTROL_CORE_PATH;
+// The control core is addressed by its one exported namespace const, its
+// ADR-0099 lineage computed by the component host's own `resolve_embedded` —
+// never a re-spelled path literal (#3668).
+use aether_bloomery::CONTROL_CORE_NAMESPACE;
+use aether_capabilities::resolve_embedded;
 
 /// The path prefixes the router claims on the HTTP ingress cap; every one
 /// dispatches to [`BloomeryApiCapability::on_request`] under the
@@ -963,7 +964,7 @@ fn signing_mailbox() -> MailboxId {
 }
 
 fn control_mailbox() -> MailboxId {
-    mailbox_id_from_path(CONTROL_CORE_PATH)
+    resolve_embedded(CONTROL_CORE_NAMESPACE)
 }
 
 /// A `Content-Type: application/json` header set.

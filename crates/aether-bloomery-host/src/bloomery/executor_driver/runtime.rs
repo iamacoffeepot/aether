@@ -41,7 +41,7 @@ use aether_actor::runtime;
 use aether_bloomery::{Admit, BloomId, Digest, DispatchPayload, ExecutionStatus, Fact, Nonce, WorkHandle, WorkOrder};
 use aether_bloomery_github::SharedCorrespondence;
 use aether_data::wire::from_bytes;
-use aether_data::{Kind, MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -58,13 +58,15 @@ use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::store::{SqliteStore, StoreBackend};
 
+use aether_bloomery::CONTROL_CORE_NAMESPACE;
 /// The outbox topic the reducer enqueues a per-member attempt dispatch under —
 /// the control actor's producer constant, imported so the two sides cannot
 /// drift (#3668). This capability is its sole consumer; the control-core
 /// lineage path rides along for `control_mailbox` (`mailbox_id_from_path` —
 /// the control actor is not a native singleton, so the sibling-cap typed send
 /// does not apply).
-pub use aether_bloomery::{CONTROL_CORE_PATH, TOPIC_DISPATCH};
+pub use aether_bloomery::TOPIC_DISPATCH;
+use aether_capabilities::resolve_embedded;
 
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the dispatch topic and pulls matched results. Zero-field — the timer carries
@@ -218,7 +220,7 @@ impl ExecutorDriverState {
             store,
             claims: NameEvidenceClaims,
             tracked: Vec::new(),
-            control_mailbox: mailbox_id_from_path(CONTROL_CORE_PATH),
+            control_mailbox: resolve_embedded(CONTROL_CORE_NAMESPACE),
             mailer,
             self_mailbox,
             _timer: None,
@@ -575,7 +577,7 @@ impl NativeActor for ExecutorDriverCapability {
     fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<ExecutorDriverState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
-        let control_mailbox = mailbox_id_from_path(CONTROL_CORE_PATH);
+        let control_mailbox = resolve_embedded(CONTROL_CORE_NAMESPACE);
 
         // Unconfigured → disabled: no shell, no store, no timer. The dispatch
         // outbox accumulates and drains once a token/owner/repo is supplied.
