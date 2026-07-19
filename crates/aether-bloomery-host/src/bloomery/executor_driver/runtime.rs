@@ -482,6 +482,13 @@ fn drain_and_dispatch_aggregate(
             );
             break;
         }
+        // A roll-1 dispatch opens a fresh review cycle — the first ever, or an
+        // owner re-arm after a park (ADR-0153). Clear any stale frozen row so
+        // the new cycle's first failure freezes cleanly instead of appending
+        // itself under the spent cycle's delta-confirm label.
+        if payload.roll <= 1 {
+            store.clear_review_findings(payload.bloom.as_bytes(), "")?;
+        }
         let task = compose_aggregate_task(store, &payload, entry.sequence)?;
         let mut transformation = payload.transformation;
         // The evidence-binding subject is the integrated tree the reducer

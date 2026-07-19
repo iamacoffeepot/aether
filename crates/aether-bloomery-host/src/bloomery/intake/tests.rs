@@ -114,6 +114,7 @@ fn sealed_snapshot(workpiece: &WorkpieceId, scope_revision: Digest) -> (Snapshot
             progress: BTreeMap::new(),
             integration: None,
             aggregate_rolls: 0,
+            review_park: None,
             superseded_by: None,
         },
     );
