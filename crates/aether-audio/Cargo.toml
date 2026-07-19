@@ -1,0 +1,89 @@
+[package]
+name = "aether-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ADR-0039 / ADR-0103 / ADR-0127 `aether.audio` capability, extracted from
+# `aether-capabilities` (iamacoffeepot/aether#3723) as a leaf per-cap crate of
+# the arc that dissolves the capabilities monolith. Owns the full audio stack:
+# the mail kinds (`kinds`), the `AudioConfig` synth config, and the
+# `AudioCapability` identity + cpal worker / hand-rolled synth / built-in +
+# sampled instrument runtime. It is a pure leaf — no other capability depends
+# on it, so capabilities keeps no `aether-audio` dependency (no facade).
+#
+# The audio cap loads track / instrument assets through the `aether.fs` cap, so
+# it depends on `aether-fs` (identity-only by default; the `runtime` feature
+# forwards `aether-fs/runtime`).
+#
+# The ADR-0122 identity/runtime split rides the `runtime` feature: the
+# wasm-safe identity, kinds, and `HandlesKind` markers compile always-on; the
+# `aether_substrate`-typed runtime half (plus the native cpal stream, synth
+# pipeline, and WAV decode) is gated so a marker-only wasm guest can address
+# `ctx.actor::<AudioCapability>()` without dragging the substrate through.
+
+[features]
+default = ["runtime"]
+runtime = [
+    "dep:aether-substrate",
+    "aether-fs/runtime",
+    "dep:cpal",
+    "dep:crossbeam-queue",
+    "dep:hound",
+    "dep:clap",
+    "dep:confique",
+    "dep:tracing",
+]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+# The audio cap loads track / instrument assets through `aether.fs`: it
+# addresses `FsCapability` + its `Read` / `ReadResult` / `FsError` kinds.
+# `default-features = false` keeps the marker-only wasm build from dragging the
+# fs runtime; the `runtime` feature above forwards `aether-fs/runtime`.
+aether-fs = { path = "../aether-fs", default-features = false }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+# The always-on cast-shaped real-time trigger kinds (`NoteOn` / `NoteOff` /
+# `SetMasterGain`) are `#[repr(C)]` + `#[derive(Pod, Zeroable)]`, so `bytemuck`
+# (with `derive`) is a real always-on dependency.
+bytemuck = { workspace = true, features = ["derive"] }
+# Native-only runtime half — gated so wasm/marker builds skip the substrate
+# runtime + the cpal stream / synth pipeline / WAV decode.
+aether-substrate = { path = "../aether-substrate", optional = true }
+cpal = { workspace = true, optional = true }
+crossbeam-queue = { version = "0.3", optional = true }
+# ADR-0103 §1: WAV decode for the track lane + sampled instrument banks.
+# Pure-Rust, small; rides the `runtime` feature so wasm / marker-only builds
+# skip it.
+hound = { workspace = true, optional = true }
+# The `Config` derive emits per-cap `*Overlay` (`#[derive(clap::Args)]`) +
+# `*Layer` (`#[derive(confique::Config)]`) structs; both ride the `runtime`
+# feature so wasm builds skip them.
+clap = { workspace = true, optional = true }
+confique = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
+
+# The `Kind` derive emits a `cfg(not(target_family = "wasm"))`-gated
+# `inventory::submit!` per kind, so native builds need `inventory`
+# reachable; wasm guests don't (the derive's gate skips emission).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]
+aether-data = { path = "../aether-data", features = ["derive"] }
+# The cap unit tests boot a chassis through the `aether_substrate::testing`
+# fixture, enabled by the substrate `test-support` feature.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+
+# cargo-machete (the CI unused-deps gate) scans source without resolving
+# features, so it cannot see that `clap` and `confique` are used only through
+# the `Config` derive's codegen under the optional `runtime` feature —
+# `confique` via the `#[derive(confique::Config)]` on the config layer, `clap`
+# via the `#[derive(clap::Args)]` the same derive emits on the `*Overlay`
+# struct. Both are false positives: the deps are real and runtime-gated.
+[package.metadata.cargo-machete]
+ignored = ["clap", "confique"]
+
+[lints]
+workspace = true

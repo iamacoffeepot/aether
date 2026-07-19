@@ -11,7 +11,7 @@ use super::sample::{
 use super::sfz::parse_sfz;
 use super::track::{DecodeOutput, TrackDecodeContext};
 use super::{AudioCapabilityState, FsCapability, Manual, NativeCtx, Read};
-use crate::audio::kinds::{LoadInstrumentResult, PlayTrackResult};
+use crate::kinds::{LoadInstrumentResult, PlayTrackResult};
 
 /// Context stored under each `aether.fs.read` request correlation while an
 /// audio load is in flight. One enum covers the shared `ReadResult` handler's

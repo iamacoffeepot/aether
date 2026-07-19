@@ -38,7 +38,7 @@ ignored = ["clap"]
 # Default-on: chassis-target builds get the full cap set with their
 # substrate-side runtime impls. Wasm consumers do
 # `default-features = false` and opt into per-cap marker features
-# (`render` / `audio`) for the caps they typed-send to.
+# (`text`) for the caps they typed-send to.
 default = ["runtime"]
 
 # iamacoffeepot/aether#2311 (identity/runtime split): the `#[actor]` macro gates
@@ -77,19 +77,14 @@ runtime = [
 ]
 
 # Wasm-safe marker layers. Activate from a wasm component that wants to
-# address the cap via `ctx.actor::<RenderCapability>().send(&kind)` —
+# address the cap via `ctx.actor::<TextCapability>().send(&kind)` —
 # the feature gates the cap module so its always-on `Actor` /
 # `Singleton` / `HandlesKind` impls + wasm-stub `pub struct` are
-# reachable, without dragging the GPU / audio native deps in.
+# reachable, without dragging the `fontdue` native dep in.
 # (The render cap was extracted to the `aether-render` crate,
-# iamacoffeepot/aether#3721; its marker/identity now rides the retained
-# `aether-render` dependency below, not a local feature.)
-# ADR-0121: the audio cap owns its kinds in `audio/kinds.rs`. Its
-# cast-shaped triggers (`NoteOn` / `NoteOff` / `SetMasterGain`) are
-# `#[repr(C)]` + `Pod`/`Zeroable` and need `bytemuck` (with `derive`),
-# but the always-on `aether.input` cast kinds (`UnsubscribeAll`) already
-# pull `bytemuck` unconditionally, so this marker is empty like the rest.
-audio = []
+# iamacoffeepot/aether#3721, and the audio cap to `aether-audio`,
+# iamacoffeepot/aether#3723; their marker/identity now ride their own
+# crates, not a local feature.)
 # ADR-0105 `aether.text` cap marker. CPU-only (no GPU dep) — it composes
 # the render texture surface entirely by mail — but gated the same two-
 # layer way so a wasm component can address it via
@@ -103,10 +98,9 @@ text = []
 # Runtime impl layers — adds the substrate-side runtime + heavy deps
 # atop the marker layer. Chassis bins activate these. Each implies its
 # marker layer + `runtime` so chassis builds still see the full cap.
-audio-runtime = ["audio", "runtime", "dep:cpal", "dep:crossbeam-queue", "dep:hound"]
-# `fontdue` rides `text-runtime` the way `hound` rides `audio-runtime`:
-# the pure-Rust TTF parse + rasterize + horizontal layout the cap runs
-# off the hot path. Implies the marker layer + `runtime`.
+# `fontdue` rides `text-runtime`: the pure-Rust TTF parse + rasterize +
+# horizontal layout the cap runs off the hot path. Implies the marker
+# layer + `runtime`.
 text-runtime = ["text", "runtime", "aether-render/runtime", "dep:fontdue"]
 
 [dependencies]
@@ -117,7 +111,7 @@ aether-actor = { path = "../aether-actor" }
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data" }
 # The `aether.fs` cap now lives in its own crate (iamacoffeepot/aether#3706);
-# the audio / text / gemini caps still address `FsCapability` + its kinds.
+# the text / gemini caps still address `FsCapability` + its kinds.
 # `default-features = false` keeps the marker-only wasm build from dragging the
 # fs runtime; the `runtime` feature below forwards `aether-fs/runtime`.
 aether-fs = { path = "../aether-fs", default-features = false }
@@ -207,19 +201,13 @@ uuid = { version = "1", optional = true, features = ["v4"] }
 # version aether-substrate uses; chassis builds get a single wasmtime
 # in the dep tree.
 wasmtime = { workspace = true, optional = true }
-cpal = { workspace = true, optional = true }
-crossbeam-queue = { version = "0.3", optional = true }
-# ADR-0103 §1: WAV decode for the audio cap's track lane + (future)
-# sampled instrument banks. Pure-Rust, small; rides the `audio-runtime`
-# feature so wasm / marker-only builds skip it.
-hound = { workspace = true, optional = true }
 # ADR-0105 §text: pure-Rust TTF parse + glyph rasterize + horizontal
 # layout metrics for the `aether.text` cap. Rides the `text-runtime`
 # feature so wasm / marker-only builds skip it.
 fontdue = { version = "0.9", optional = true }
 
-# ADR-0121: the `Kind` derive (now used by the audio cap's owned kinds
-# in `audio/kinds.rs`) emits a `cfg(not(target_family = "wasm"))`-gated
+# ADR-0121: the `Kind` derive (used by caps that own their kinds, e.g.
+# `http/kinds.rs`) emits a `cfg(not(target_family = "wasm"))`-gated
 # `inventory::submit!` per kind, so native builds need `inventory`
 # reachable. Wasm guests don't (the derive's gate skips emission).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]

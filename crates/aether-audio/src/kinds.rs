@@ -3,10 +3,10 @@
 //! (`NoteOn` / `NoteOff` / `SetMasterGain`) and the structured control
 //! plane (`SetMasterGain`'s reply, the ADR-0104 scheduled batch, the
 //! ADR-0103 track lane, and the ADR-0103 sampled-bank loader) — live
-//! here under the always-on `audio` marker, so a wasm guest addressing
-//! the cap through the marker feature sees the types without the
-//! `audio-runtime` synth stack. Re-exported at the `audio` module root
-//! (`pub use kinds::*`), so `aether_capabilities::audio::NoteOn`
+//! here always-on, so a wasm guest addressing the cap through the
+//! marker-only (`default-features = false`) build sees the types without
+//! the `runtime` synth stack. Re-exported at the crate root
+//! (`pub use kinds::*`), so `aether_audio::NoteOn`
 //! resolves for callers.
 
 use bytemuck::{Pod, Zeroable};

@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_actor::Addressable;
+use aether_audio::{SetMasterGain, SetMasterGainResult};
 use aether_capabilities::LifecycleCapability;
-use aether_capabilities::audio::{SetMasterGain, SetMasterGainResult};
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
     AnthropicConfig, ComponentHostConfig, ContentGenConfig, GeminiConfig, HttpServerConfig, InputConfig,
