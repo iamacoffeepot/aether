@@ -92,16 +92,20 @@ impl StageCatalog {
     }
 
     /// The per-member stage line a sealed bloom's members walk (ADR-0149 §The
-    /// line): the dispatched sub-sequence `Construct → Verify → Refine → Review`.
-    /// Its head [`entry_stage`](Self::entry_stage) is the stage a member enters at
-    /// seal; passing its terminal `Review` produces the member's
-    /// [`ResolutionClaim`](crate::values::ResolutionClaim), which folds into the
-    /// existing integrate path rather than dispatching a further attempt. The
-    /// bloom-level tail (`Integrate` / `AggregateVerify` / `AggregateReview` /
-    /// `Land` / `Study`) is the coarse lifecycle the reducer already owns — never
-    /// a dispatched per-member stage.
-    pub const MEMBER_LINE: &'static [StageId] =
-        &[StageId::Construct, StageId::Verify, StageId::Refine, StageId::Review];
+    /// line, ADR-0153): the dispatched sub-sequence `Construct → Verify`. Its
+    /// head [`entry_stage`](Self::entry_stage) is the stage a member enters at
+    /// seal; passing its terminal `Verify` produces the member's
+    /// [`ResolutionClaim`](crate::values::ResolutionClaim) — the verification
+    /// evidence binds the exact candidate tree — which folds into the existing
+    /// integrate path rather than dispatching a further attempt. `Refine` is off
+    /// the standing line: the repair re-entry, dispatched only when a failing
+    /// `Verify` routes into it, its pass returning to `Verify` for the
+    /// delta-confirm. `Review` binds no dispatched member stage (the model
+    /// review runs once per bloom at `AggregateReview`, ADR-0153); it stays in
+    /// [`StageId`] for wire stability. The bloom-level tail (`Integrate` /
+    /// `AggregateVerify` / `AggregateReview` / `Land` / `Study`) is the coarse
+    /// lifecycle the reducer already owns — never a dispatched per-member stage.
+    pub const MEMBER_LINE: &'static [StageId] = &[StageId::Construct, StageId::Verify];
 
     /// The stage a sealed bloom's members enter the line at — the head of
     /// [`MEMBER_LINE`](Self::MEMBER_LINE), `Construct`.
@@ -111,10 +115,11 @@ impl StageCatalog {
     }
 
     /// The stage a member advances to after `stage`'s completion gate passes, or
-    /// `None` at the per-member terminus (`Review`) — a passing `Review` integrates
-    /// the member instead of dispatching a successor. `None` for any stage outside
-    /// [`MEMBER_LINE`](Self::MEMBER_LINE): the bloom-level tail is not a dispatched
-    /// per-member progression.
+    /// `None` at the per-member terminus (`Verify`) — a passing `Verify` integrates
+    /// the member instead of dispatching a successor (ADR-0153). `None` for any
+    /// stage outside [`MEMBER_LINE`](Self::MEMBER_LINE): the repair-only `Refine`
+    /// routes back to `Verify` in the reducer, not through the line walk, and the
+    /// bloom-level tail is not a dispatched per-member progression.
     #[must_use]
     pub fn next_member_stage(stage: StageId) -> Option<StageId> {
         let index = Self::MEMBER_LINE.iter().position(|member_stage| *member_stage == stage)?;
@@ -305,10 +310,11 @@ impl Transformation {
     /// posture) are the initial calibration — refinable without an ADR, like the
     /// catalog's tag/gate strings. Security splits by lane (ADR-0149 §Execution on
     /// Actions): the mechanical `Verify` lane runs zero-egress
-    /// ([`NetworkProfile::None`]); the model-driven `Construct` / `Refine` /
-    /// `Review` lanes reach the model API under a restricted egress allowlist,
-    /// never full network. A stage outside [`StageCatalog::MEMBER_LINE`] is not a
-    /// dispatched per-member stage and has no lane here.
+    /// ([`NetworkProfile::None`]); the model-driven `Construct` / `Refine` lanes
+    /// reach the model API under a restricted egress allowlist, never full
+    /// network. The `Review` lane keeps its `review.critic` command for the
+    /// bloom-level `AggregateReview` position that dispatches it (ADR-0153) — it
+    /// is no longer a standing member stage.
     #[must_use]
     pub fn for_member_stage(stage: StageId, subject: Digest, checkout: Digest) -> Self {
         let (command, image, network): (&str, &str, NetworkProfile) = match stage {
@@ -454,18 +460,21 @@ mod tests {
         );
     }
 
-    // ADR-0149 §The line — the per-member line is the linear sub-sequence
-    // Construct → Verify → Refine → Review, entered at Construct and terminating
-    // (no successor) at Review. Tripwire: a reordered or dropped member-line stage
-    // breaks the dispatched progression the reducer walks.
+    // ADR-0153 — the per-member line is the linear sub-sequence
+    // Construct → Verify, entered at Construct and terminating (no successor) at
+    // Verify; Refine and Review are off the standing line (repair re-entry and
+    // the aggregate-position lane respectively). Tripwire: a reordered, dropped,
+    // or re-grown member-line stage breaks the dispatched progression the
+    // reducer walks.
     #[test]
-    fn member_line_is_construct_verify_refine_review() {
+    fn member_line_is_construct_verify() {
         assert_eq!(StageCatalog::entry_stage(), StageId::Construct);
         assert_eq!(StageCatalog::next_member_stage(StageId::Construct), Some(StageId::Verify));
-        assert_eq!(StageCatalog::next_member_stage(StageId::Verify), Some(StageId::Refine));
-        assert_eq!(StageCatalog::next_member_stage(StageId::Refine), Some(StageId::Review));
-        assert_eq!(StageCatalog::next_member_stage(StageId::Review), None, "Review is the per-member terminus");
-        // A bloom-level tail stage is not part of the dispatched per-member line.
+        assert_eq!(StageCatalog::next_member_stage(StageId::Verify), None, "Verify is the per-member terminus");
+        // The repair-only Refine and the aggregate-position Review are not on the
+        // standing line; neither is a bloom-level tail stage.
+        assert_eq!(StageCatalog::next_member_stage(StageId::Refine), None);
+        assert_eq!(StageCatalog::next_member_stage(StageId::Review), None);
         assert_eq!(StageCatalog::next_member_stage(StageId::Integrate), None);
     }
 

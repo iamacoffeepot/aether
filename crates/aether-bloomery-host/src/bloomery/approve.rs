@@ -2,7 +2,7 @@
 //! (ADR-0149 §The line, ADR-0151, issue #3571).
 //!
 //! Approve is **not** a dispatched worker lane. The member-line dispatch loop
-//! (`Construct → Verify → Refine → Review`) is post-seal; Approve is pre-seal,
+//! (`Construct → Verify`, ADR-0153) is post-seal; Approve is pre-seal,
 //! every check is deterministic, and what "approve" realizes is a host-side
 //! admission decision. So this gate runs on the coordinator host — beside the
 //! evidence-intake gate ([`super::intake`]) at the host admission boundary — and

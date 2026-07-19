@@ -929,8 +929,9 @@ fn a_failing_capture_is_discarded_and_the_retry_targets_the_prior_candidate() {
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
 
-    // Construct passes with a capture, then Verify passes with none (mechanical
-    // lanes carry no capture) — the candidate rides the cursor forward to Refine.
+    // Construct passes with a capture, then Verify fails with none (mechanical
+    // lanes carry no capture) — the candidate rides the cursor into the Refine
+    // repair re-entry (ADR-0153).
     let first = CandidateRef { tree: digest(21), checkout: digest(22) };
     let (snapshot, _) = step(
         &snapshot,
@@ -946,23 +947,23 @@ fn a_failing_capture_is_discarded_and_the_retry_targets_the_prior_candidate() {
             },
         ),
     );
-    let (snapshot, verify_pass) = step(
+    let (snapshot, verify_fail) = step(
         &snapshot,
         &event(
-            "v-pass",
+            "v-fail",
             Fact::AttemptCompleted {
                 bloom,
                 workpiece: workpiece("wp"),
                 stage: StageId::Verify,
-                passed: true,
+                passed: false,
                 evidence: attempt_evidence(),
                 candidate: None,
             },
         ),
     );
-    match verify_pass.effects.iter().find(|e| matches!(e, Decision::DispatchAttempt { .. })) {
+    match verify_fail.effects.iter().find(|e| matches!(e, Decision::DispatchAttempt { .. })) {
         Some(Decision::DispatchAttempt { transformation, .. }) => {
-            assert_eq!(transformation.checkout, first.checkout, "a capture-less pass carries the candidate forward");
+            assert_eq!(transformation.checkout, first.checkout, "the re-entry carries the candidate forward");
         }
         other => panic!("expected a DispatchAttempt, got {other:?}"),
     }
@@ -997,101 +998,80 @@ fn a_failing_capture_is_discarded_and_the_retry_targets_the_prior_candidate() {
     assert_eq!(progress.candidate, Some(first), "the cursor keeps the last passing candidate");
 }
 
-// ADR-0149 §The line — Tripwire: the completion gate applies across the whole
-// member line, the terminal `Review` included. A *failing* `Review` retries within
-// its budget (2) and wedges on exhaustion here — it is never silently integrated;
-// only a *passing* `Review` leaves this path (through `Fact::Integrate`).
+// ADR-0153 — Tripwire: the completion gate applies across the whole member
+// line, the terminal `Verify` included. A *failing* `Verify` re-enters the
+// repair-only `Refine` within Verify's budget (3) and wedges on exhaustion —
+// it is never silently integrated; only a *passing* `Verify` leaves this path
+// (through `Fact::Integrate`).
 #[test]
-fn a_failing_terminal_review_reenters_refine_then_wedges_at_the_ceiling() {
+fn a_failing_verify_reenters_refine_then_wedges_at_the_ceiling() {
     let base = Snapshot::new(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
-    let (mut snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
 
-    // Advance the member Construct → Verify → Refine → Review with passing gates.
-    for stage in [StageId::Construct, StageId::Verify, StageId::Refine] {
-        let pass = event(
-            &format!("adv-{stage:?}"),
-            Fact::AttemptCompleted {
-                bloom,
-                workpiece: workpiece("wp"),
-                stage,
-                passed: true,
-                evidence: attempt_evidence(),
-                candidate: None,
-            },
-        );
-        let (next, _) = step(&snapshot, &pass);
-        snapshot = next;
-    }
-    assert_eq!(
-        snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap().stage,
-        StageId::Review,
-        "the member advanced to the terminal Review stage",
-    );
-
-    let fail = |key: &str, stage: StageId| {
+    let completion = |key: &str, stage: StageId, passed: bool| {
         event(
             key,
             Fact::AttemptCompleted {
                 bloom,
                 workpiece: workpiece("wp"),
                 stage,
-                passed: false,
+                passed,
                 evidence: attempt_evidence(),
                 candidate: None,
             },
         )
     };
 
-    // The first failing Review re-enters Refine (#3657) — never a same-stage
-    // Review retry (re-rolling the critic on an unchanged candidate), never an
-    // Integrate of the failing verdict.
-    let (after1, d1) = step(&snapshot, &fail("r-fail-1", StageId::Review));
+    let (snapshot, _) = step(&snapshot, &completion("c-pass", StageId::Construct, true));
+    assert_eq!(
+        snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap().stage,
+        StageId::Verify,
+        "the member advanced to the terminal Verify stage",
+    );
+
+    // The first failing Verify re-enters Refine (ADR-0153) — never a same-stage
+    // Verify retry (re-running the mechanical gate on an unchanged candidate),
+    // never an Integrate of the failing verdict.
+    let (after1, d1) = step(&snapshot, &completion("v-fail-1", StageId::Verify, false));
     match d1.outcome {
-        Outcome::ReviewReentered { rolls, .. } => assert_eq!(rolls, 1),
-        other => panic!("expected ReviewReentered, got {other:?}"),
+        Outcome::RefineReentered { rolls, .. } => assert_eq!(rolls, 1),
+        other => panic!("expected RefineReentered, got {other:?}"),
     }
     assert!(
         d1.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { stage: StageId::Refine, .. })),
-        "a failing terminal Review dispatches the Refine re-entry",
+        "a failing terminal Verify dispatches the Refine re-entry",
     );
     let progress = after1.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
     assert_eq!(progress.stage, StageId::Refine);
-    assert_eq!(progress.review_rolls, 1, "the roll count survives the stage move");
+    assert_eq!(progress.repair_rolls, 1, "the roll count survives the stage move");
 
-    // The re-entered Refine passes — back to Review for the delta-confirm, with
+    // The re-entered Refine passes — back to Verify for the delta-confirm, with
     // the roll count intact (the per-stage attempts reset must not clear it).
-    let (after2, _) = step(
-        &after1,
-        &event(
-            "refine-pass",
-            Fact::AttemptCompleted {
-                bloom,
-                workpiece: workpiece("wp"),
-                stage: StageId::Refine,
-                passed: true,
-                evidence: attempt_evidence(),
-                candidate: None,
-            },
-        ),
-    );
+    let (after2, _) = step(&after1, &completion("refine-pass-1", StageId::Refine, true));
     let progress = after2.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
-    assert_eq!(progress.stage, StageId::Review);
-    assert_eq!(progress.review_rolls, 1, "the delta-confirm carries the ceiling cursor");
+    assert_eq!(progress.stage, StageId::Verify);
+    assert_eq!(progress.repair_rolls, 1, "the delta-confirm carries the ceiling cursor");
 
-    // The second failing Review verdict hits the ceiling: the member wedges — no
-    // third roll, no re-entry, and no ResolutionClaim from the failing verdict.
-    let (_after3, d2) = step(&after2, &fail("r-fail-2", StageId::Review));
-    assert!(matches!(d2.outcome, Outcome::AttemptWedged { stage: StageId::Review, .. }));
+    // A second failing verdict still re-enters (Verify's budget is 3), and the
+    // repaired member returns for one more delta-confirm.
+    let (after3, d2) = step(&after2, &completion("v-fail-2", StageId::Verify, false));
+    assert!(matches!(d2.outcome, Outcome::RefineReentered { rolls: 2, .. }));
+    let (after4, _) = step(&after3, &completion("refine-pass-2", StageId::Refine, true));
+
+    // The third failing Verify verdict hits the ceiling: the member wedges — no
+    // further roll, no re-entry, and no ResolutionClaim from the failing verdict.
+    let (_after5, d3) = step(&after4, &completion("v-fail-3", StageId::Verify, false));
+    assert!(matches!(d3.outcome, Outcome::AttemptWedged { stage: StageId::Verify, .. }));
     assert!(
-        !d2.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. })),
-        "a wedged terminal Review stops dispatching",
+        !d3.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. })),
+        "a wedged terminal Verify stops dispatching",
     );
 }
 
 // ADR-0149 §The line — an attempt completion is refused when it does not name the
-// member's current cursor stage, when it names the terminal `Review` with a
+// member's current cursor stage, when it names the terminal `Verify` with a
 // *passing* verdict (which integrates through `Fact::Integrate`, never completes
 // here), for a non-member, and for an unknown bloom.
 #[test]
@@ -1115,8 +1095,23 @@ fn attempt_completion_refuses_mismatch_terminal_non_member_and_unknown() {
         )
     };
 
-    // The cursor is at Construct; a completion naming Verify is a stage mismatch.
-    let mismatch = reduce(&snapshot, &completion("m", "wp", StageId::Verify));
+    // The cursor is at Construct; a *failing* completion naming Verify is a
+    // stage mismatch (the passing case is the terminal mis-route below, which
+    // is caught first).
+    let mismatch = reduce(
+        &snapshot,
+        &event(
+            "m",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Verify,
+                passed: false,
+                evidence: attempt_evidence(),
+                candidate: None,
+            },
+        ),
+    );
     assert!(matches!(
         mismatch.outcome,
         Outcome::AttemptCompletedRejected(AttemptCompletedError::StageMismatch {
@@ -1125,10 +1120,19 @@ fn attempt_completion_refuses_mismatch_terminal_non_member_and_unknown() {
         }),
     ));
 
-    // The terminal Review never completes here.
-    let terminal = reduce(&snapshot, &completion("t", "wp", StageId::Review));
+    // A passing terminal Verify never completes here — it integrates through
+    // Fact::Integrate.
+    let terminal = reduce(&snapshot, &completion("t", "wp", StageId::Verify));
     assert!(matches!(
         terminal.outcome,
+        Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(StageId::Verify)),
+    ));
+
+    // A passing Review is off the dispatched line entirely (ADR-0153) and reads
+    // as the same terminal mis-route.
+    let off_line = reduce(&snapshot, &completion("r", "wp", StageId::Review));
+    assert!(matches!(
+        off_line.outcome,
         Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(StageId::Review)),
     ));
 
@@ -1145,26 +1149,23 @@ fn attempt_completion_refuses_mismatch_terminal_non_member_and_unknown() {
 }
 
 proptest! {
-    // ADR-0149 §The line — the per-member cursor only ever advances forward one
-    // step through MEMBER_LINE (on a passing gate) or holds in place (on a
-    // failing gate / a wedge); it never moves backward or off the line. Driving a
-    // random pass/fail sequence through reduce+apply is journal replay, so this
-    // also pins that replay reconstructs in-flight line position.
+    // ADR-0153 — the per-member cursor only ever moves along the allowed repair
+    // graph: Construct advances to Verify on a pass and holds on a fail; a
+    // failing Verify re-enters Refine (or holds, wedged, at the ceiling); a
+    // passing Refine returns to Verify and a failing one holds; a passing
+    // Verify never completes here (the terminal mis-route is rejected with the
+    // cursor untouched). Driving a random pass/fail sequence through
+    // reduce+apply is journal replay, so this also pins that replay
+    // reconstructs in-flight line position.
     #[test]
-    fn cursor_advances_forward_or_holds_in_place(passes in prop::collection::vec(any::<bool>(), 0..8)) {
+    fn cursor_moves_only_along_the_repair_graph(passes in prop::collection::vec(any::<bool>(), 0..8)) {
         let base = Snapshot::new(digest(1));
         let spec = draft(1, vec![membership("wp", 10)]).seal();
         let bloom = spec.id();
         let (mut snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
-        let line = StageCatalog::MEMBER_LINE;
 
         for (i, passed) in passes.into_iter().enumerate() {
             let cursor = snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).copied().unwrap();
-            // The terminal cursor integrates elsewhere — stop before it.
-            if StageCatalog::next_member_stage(cursor.stage).is_none() {
-                break;
-            }
-            let prev_index = line.iter().position(|stage| *stage == cursor.stage).unwrap();
             let ev = event(
                 &format!("a-{i}"),
                 Fact::AttemptCompleted {
@@ -1176,15 +1177,30 @@ proptest! {
                     candidate: None,
                 },
             );
-            let (next, _) = step(&snapshot, &ev);
+            let (next, decided) = step(&snapshot, &ev);
             snapshot = next;
 
-            let new = snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
-            let new_index = line.iter().position(|stage| *stage == new.stage).unwrap();
-            if passed {
-                prop_assert_eq!(new_index, prev_index + 1, "a pass advances exactly one stage");
-            } else {
-                prop_assert_eq!(new_index, prev_index, "a fail holds the cursor in place");
+            let new = snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).copied().unwrap();
+            match decided.outcome {
+                Outcome::AttemptAdvanced { from, to, .. } => {
+                    prop_assert_eq!(from, cursor.stage);
+                    prop_assert_eq!(to, new.stage);
+                    // The only passing advances are Construct → Verify and the
+                    // repair Refine → Verify delta-confirm.
+                    prop_assert!(matches!((from, to), (StageId::Construct | StageId::Refine, StageId::Verify)));
+                }
+                Outcome::RefineReentered { .. } => {
+                    prop_assert_eq!(cursor.stage, StageId::Verify, "only a failing Verify re-enters");
+                    prop_assert_eq!(new.stage, StageId::Refine);
+                }
+                Outcome::AttemptRetried { .. } | Outcome::AttemptWedged { .. } => {
+                    prop_assert_eq!(new.stage, cursor.stage, "a retry or wedge holds the cursor in place");
+                }
+                Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(_)) => {
+                    prop_assert!(passed && cursor.stage == StageId::Verify);
+                    prop_assert_eq!(new, cursor, "a rejected terminal mis-route leaves the cursor untouched");
+                }
+                other => return Err(TestCaseError::fail(format!("unexpected outcome {other:?}"))),
             }
         }
     }
