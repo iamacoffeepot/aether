@@ -45,6 +45,60 @@ impl FromRequest for HttpServerRequest {
     }
 }
 
+/// A path parameter captured from a route template's `{name}` segment
+/// (ADR-0154). A routed method receives the parsed value wrapped in
+/// `Path`; the `#[http::route]` glue binds captures to the method's
+/// `Path<_>` parameters positionally, in template-capture order, so
+/// `#[http::route(Get, "/drafts/{id}")] fn get(.., id: Path<u64>)` binds
+/// `{id}` into `id.0`. The parse is [`FromPathSegment`]; its `Err` short-
+/// circuits to the response the glue replies with (typically a `400`).
+pub struct Path<T>(pub T);
+
+/// Parse a value out of one captured path segment — the path-parameter
+/// twin of [`FromRequest`] (ADR-0154). The `Ok` value is threaded into a
+/// routed method wrapped in [`Path`]; the `Err` is the
+/// [`HttpServerResponse`] the generated glue replies with instead of
+/// dispatching the handler, the boundary where an unparseable segment
+/// becomes a `400` rather than an ad-hoc failure inside the handler.
+///
+/// Implemented for [`String`] (any segment) and the integer id types; a
+/// domain id type implements it to be captured directly.
+pub trait FromPathSegment: Sized {
+    /// Parse `self` from one raw path segment, or return the response to
+    /// send in place of dispatching the handler.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`HttpServerResponse`] (typically a `400`) to reply
+    /// with when the segment cannot be parsed into this type.
+    fn from_path_segment(segment: &str) -> Result<Self, HttpServerResponse>;
+}
+
+/// Any segment is a valid `String` capture.
+impl FromPathSegment for String {
+    fn from_path_segment(segment: &str) -> Result<Self, HttpServerResponse> {
+        Ok(segment.to_string())
+    }
+}
+
+/// Integer path parameters parse through `FromStr`; a non-numeric segment
+/// is the glue's `400`.
+macro_rules! from_path_segment_via_fromstr {
+    ($($ty:ty),* $(,)?) => {$(
+        impl FromPathSegment for $ty {
+            fn from_path_segment(segment: &str) -> Result<Self, HttpServerResponse> {
+                segment.parse::<$ty>().map_err(|_| HttpServerResponse {
+                    status: 400,
+                    headers: Vec::new(),
+                    body: b"path parameter is not a valid integer".to_vec(),
+                })
+            }
+        }
+    )*};
+}
+
+from_path_segment_via_fromstr!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
+
 /// The route a glue handler serves — compile-time constants the
 /// `#[http::route]` macro stamps in, surfaced through [`Ctx::route`].
 /// `prefix` is the claimed path prefix; `method` is the method filter
