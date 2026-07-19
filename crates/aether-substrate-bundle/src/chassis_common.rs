@@ -31,13 +31,13 @@ use aether_capabilities::lifecycle::LifecycleGraphData;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig, EngineConfigLayer,
-    FsCapability, GameGatewayCapability, GameGatewayConfig, GeminiCapability, GeminiConfig, HttpCapability,
-    HttpServerCapability, HttpServerConfig, InputCapability, InputConfig, InventoryCapability, LifecycleConfig,
-    TcpCapability, TextCapability,
+    GameGatewayCapability, GameGatewayConfig, GeminiCapability, GeminiConfig, HttpCapability, HttpServerCapability,
+    HttpServerConfig, InputCapability, InputConfig, InventoryCapability, LifecycleConfig, TcpCapability,
+    TextCapability,
     http::HttpConfig,
     shared::contentgen::{ContentGenConfig, ContentGenConfigLayer},
 };
-use aether_fs::{NamespaceRoots, NamespaceRootsLayer};
+use aether_fs::{FsCapability, NamespaceRoots, NamespaceRootsLayer};
 use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
 use aether_render::RenderTuningConfigLayer;
 use aether_substrate::chassis::Chassis;
