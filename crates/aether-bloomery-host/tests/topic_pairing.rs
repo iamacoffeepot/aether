@@ -51,10 +51,10 @@ fn every_reducer_topic_pairs_with_exactly_one_drainer() {
                 drainers,
                 0,
                 "{} is listed as a known orphan but now has {drainers} drainer(s) — remove it from KNOWN_ORPHANS",
-                topic.as_str(),
+                topic.as_str()
             );
         } else {
-            assert_eq!(drainers, 1, "{} must be drained by exactly one host driver, found {drainers}", topic.as_str(),);
+            assert_eq!(drainers, 1, "{} must be drained by exactly one host driver, found {drainers}", topic.as_str());
         }
     }
 
@@ -65,7 +65,7 @@ fn every_reducer_topic_pairs_with_exactly_one_drainer() {
         assert!(
             Topic::ALL.contains(declared),
             "{} is declared drained but is not a reducer Topic in Topic::ALL",
-            declared.as_str(),
+            declared.as_str()
         );
     }
 }

@@ -94,41 +94,41 @@ pub struct Topic(&'static str);
 impl Topic {
     /// A landing receipt (from [`Decision::EmitReceipt`]),
     /// drained by the mirror driver and routed to #3499's republisher.
-    pub const LANDING_RECEIPT: Topic = Topic("topic:landing_receipt");
+    pub const LANDING_RECEIPT: Self = Self("topic:landing_receipt");
     /// A stage re-dispatch (from
     /// [`Decision::RedispatchStage`]),
     /// re-assembling the held attempt naming both question and answer digests
     /// (ADR-0151). Still awaiting a draining consumer (#3664).
-    pub const REDISPATCH: Topic = Topic("topic:redispatch");
+    pub const REDISPATCH: Self = Self("topic:redispatch");
     /// A per-member attempt dispatch (from
     /// [`Decision::DispatchAttempt`]),
     /// drained by the executor driver, wrapped in a work order, and submitted
     /// through the executor port (ADR-0149 §The line).
-    pub const DISPATCH: Topic = Topic("topic:dispatch");
+    pub const DISPATCH: Self = Self("topic:dispatch");
     /// A land dispatch (from [`Decision::DispatchLand`]),
     /// drained by the land driver, which issues the source-port compare-and-swap
     /// land (ADR-0149 migration step 3).
-    pub const LAND: Topic = Topic("topic:land");
+    pub const LAND: Self = Self("topic:land");
     /// An integration dispatch (from
     /// [`Decision::DispatchIntegration`]),
     /// drained by the integrate driver, which folds the claimed candidates onto
     /// the bloom's integration branch (ADR-0152).
-    pub const INTEGRATE: Topic = Topic("topic:integrate");
+    pub const INTEGRATE: Self = Self("topic:integrate");
     /// A whole-bloom aggregate-review dispatch (from
     /// [`Decision::DispatchAggregateReview`]),
     /// drained by the executor driver, which runs the `review.critic` lane
     /// against the integrated head under a bloom-level order record (ADR-0153).
-    pub const AGGREGATE_REVIEW: Topic = Topic("topic:aggregate_review");
+    pub const AGGREGATE_REVIEW: Self = Self("topic:aggregate_review");
 
     /// Every topic the reducer's effectful decisions enqueue under — the closed
     /// enumeration the producer/consumer pairing tripwire walks against the host
     /// drivers. A new effectful decision reaches this list through its
     /// [`of_decision`](Self::of_decision) arm and its own associated const.
-    pub const ALL: &'static [Topic] =
+    pub const ALL: &'static [Self] =
         &[Self::LANDING_RECEIPT, Self::REDISPATCH, Self::DISPATCH, Self::LAND, Self::INTEGRATE, Self::AGGREGATE_REVIEW];
 
     /// The `topic:` display spelling — the exact string persisted to the outbox
-    /// row and matched by the draining driver. The wire and SQLite surfaces
+    /// row and matched by the draining driver. The wire and `SQLite` surfaces
     /// carry this plain string; the [`Topic`] type is the closed producer /
     /// consumer edge over it.
     #[must_use]
@@ -145,7 +145,7 @@ impl Topic {
     /// classifier; the producer projection and the pairing tripwire both read
     /// the vocabulary it defines.
     #[must_use]
-    pub fn of_decision(decision: &Decision) -> Option<Topic> {
+    pub fn of_decision(decision: &Decision) -> Option<Self> {
         match decision {
             Decision::EmitReceipt(_) => Some(Self::LANDING_RECEIPT),
             Decision::RedispatchStage { .. } => Some(Self::REDISPATCH),
