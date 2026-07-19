@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use test_handlers::{
-    ApiRouteHandler, ApiV2Handler, EchoHttpHandler, ExclusiveMacroPoolHandler, ExtractRouteHandler,
+    ApiRouteHandler, ApiV2Handler, BookRouteHandler, EchoHttpHandler, ExclusiveMacroPoolHandler, ExtractRouteHandler,
     FixedBodyHttpHandler, FloodHttpHandler, MethodAnyHandler, MethodPostHandler, STREAM_CHUNK_COUNT,
     SharedAlphaHandler, SharedBetaHandler, SharedMacroPoolHandler, SilentHttpHandler, StreamHttpHandler,
     StreamingUploadHandler, TmpRouteHandler, WiredRouteHandler, stream_chunk_body,
@@ -196,6 +196,60 @@ mod test_handlers {
         #[http::route(any, "/wired")]
         fn on_wired(_state: &mut WiredRouteHandlerState, _ctx: http::Ctx<'_, NativeCtx<'_>>) -> HttpServerResponse {
             HttpServerResponse { status: 200, headers: Vec::new(), body: b"wired-macro".to_vec() }
+        }
+    }
+
+    /// Path-template routing (ADR-0154) over a small `/books` REST
+    /// resource: nested routes that share the `/books` static head
+    /// collapse into one registration per method and dispatch by segment,
+    /// and `{id}` binds through `http::Path<u64>` — a non-numeric segment
+    /// short-circuits to the `FromPathSegment` `400`. `GET /books`
+    /// (collection) and `GET /books/{id}` (member) share one group;
+    /// `POST /books/{id}/checkout` is the sibling POST group under the
+    /// same static head.
+    pub struct BookRouteHandler;
+    pub struct BookRouteHandlerState;
+
+    #[http::router]
+    #[actor(singleton)]
+    impl NativeActor for BookRouteHandler {
+        type State = BookRouteHandlerState;
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.http.test_route_books";
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<BookRouteHandlerState, BootError> {
+            Ok(BookRouteHandlerState)
+        }
+
+        /// `GET /books` — the collection.
+        #[http::route(Get, "/books")]
+        fn list_books(_state: &mut BookRouteHandlerState, _ctx: http::Ctx<'_, NativeCtx<'_>>) -> HttpServerResponse {
+            HttpServerResponse { status: 200, headers: Vec::new(), body: b"books:list".to_vec() }
+        }
+
+        /// `GET /books/{id}` — one member, `{id}` bound through `Path<u64>`.
+        #[http::route(Get, "/books/{id}")]
+        fn get_book(
+            _state: &mut BookRouteHandlerState,
+            _ctx: http::Ctx<'_, NativeCtx<'_>>,
+            id: http::Path<u64>,
+        ) -> HttpServerResponse {
+            HttpServerResponse { status: 200, headers: Vec::new(), body: format!("books:get:{}", id.0).into_bytes() }
+        }
+
+        /// `POST /books/{id}/checkout` — an action on a member, the sibling
+        /// POST group under the same static head.
+        #[http::route(Post, "/books/{id}/checkout")]
+        fn checkout_book(
+            _state: &mut BookRouteHandlerState,
+            _ctx: http::Ctx<'_, NativeCtx<'_>>,
+            id: http::Path<u64>,
+        ) -> HttpServerResponse {
+            HttpServerResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: format!("books:checkout:{}", id.0).into_bytes(),
+            }
         }
     }
 
@@ -1434,6 +1488,34 @@ fn routed_extractor_success_and_failure() {
     let missing = round_trip(port, b"GET /extract HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(missing.starts_with("HTTP/1.1 400 "), "extractor Err becomes the reply status: {missing:?}");
     assert_eq!(body_of(&missing), "missing name query parameter", "extractor Err body is replied verbatim");
+}
+
+/// ADR-0154 path templates end to end: nested routes sharing the `/books`
+/// static head dispatch by segment + method, `{id}` binds through
+/// `Path<u64>`, a non-numeric id is the `FromPathSegment` `400`, and a
+/// path the group has no exact template for is a `404`.
+#[test]
+fn path_template_routes_dispatch_and_capture() {
+    let chassis = routed_chassis!(BookRouteHandler);
+    let port = port_of(&chassis);
+
+    // Collection and captured-member routes share one (Get, /books) group;
+    // the exact `/books/{id}` wins over the `/books` prefix for a member.
+    poll_body(port, b"GET /books HTTP/1.1\r\nHost: localhost\r\n\r\n", "books:list");
+    poll_body(port, b"GET /books/42 HTTP/1.1\r\nHost: localhost\r\n\r\n", "books:get:42");
+
+    // The sibling POST group under the same static head, with the capture.
+    poll_body(port, b"POST /books/7/checkout HTTP/1.1\r\nHost: localhost\r\n\r\n", "books:checkout:7");
+
+    // A non-numeric capture short-circuits to the FromPathSegment 400
+    // rather than falling through to the `/books` prefix.
+    let bad = round_trip(port, b"GET /books/notanumber HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(bad.starts_with("HTTP/1.1 400 "), "non-numeric id is a 400: {bad:?}");
+
+    // The POST group has only the exact `/books/{id}/checkout` template and
+    // no bare-prefix fallback, so a POST the group can't match is a 404.
+    let miss = round_trip(port, b"POST /books/7 HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    assert!(miss.starts_with("HTTP/1.1 404 "), "no exact template match is a 404: {miss:?}");
 }
 
 /// Longest prefix wins among overlapping routes, matching stops at

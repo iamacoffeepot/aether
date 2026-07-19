@@ -20,7 +20,7 @@ pub use kinds::*;
 // to — consumers write `#[http::router]` / `#[http::route]` next to
 // `http::FromRequest` / `http::Ctx` / `http::Route`.
 pub use aether_capabilities_derive::{route, router};
-pub use typed::{Ctx, FromRequest, Route};
+pub use typed::{Ctx, FromPathSegment, FromRequest, Path, Route};
 
 // ADR-0133 reply-based data-phase stream handles. Wasm-safe like `typed`,
 // so a `default-features = false` guest that streams gets them without the
