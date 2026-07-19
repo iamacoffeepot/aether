@@ -1,6 +1,6 @@
 # ADR-0153: Whole-bloom review
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-18
 
 ## Context
