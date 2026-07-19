@@ -388,6 +388,75 @@ fn drain_and_dispatch(
 /// the integrated diff against. Same ack-prefix / park / backoff semantics as
 /// [`drain_and_dispatch`]; the returned handles ride the same intake cycle,
 /// and the intake routes the verdict by the record's `AggregateReview` stage.
+/// Compose the aggregate-review task prompt (ADR-0153): the whole membership's
+/// persisted work orders — the sealed intent the critic judges the integrated
+/// diff against — plus the roll's framing. The first roll instructs the
+/// attribution convention the findings decomposition parses back (each finding
+/// block opens with the owning task id in square brackets); a later roll is
+/// the delta-confirm, framed against the frozen findings row instead — judge
+/// whether that set was resolved, never a fresh hunt. `None` when there is
+/// nothing to compose (no orders, no frozen row) — the subject-only prompt.
+fn compose_aggregate_task(
+    store: &mut dyn StoreBackend,
+    payload: &AggregateReviewPayload,
+    sequence: u64,
+) -> rusqlite::Result<Option<String>> {
+    use core::fmt::Write;
+
+    let orders = store.list_dispatch_descriptions(payload.bloom.as_bytes())?;
+    if orders.is_empty() {
+        tracing::warn!(
+            target: "aether_bloomery_host::executor",
+            sequence,
+            "no work-order descriptions persisted for the reviewed bloom; assembling a subject-only prompt",
+        );
+    }
+    let frozen = if payload.roll > 1 {
+        let frozen = store.lookup_review_findings(payload.bloom.as_bytes(), "")?;
+        if frozen.is_none() {
+            tracing::warn!(
+                target: "aether_bloomery_host::executor",
+                sequence,
+                roll = payload.roll,
+                "delta-confirm dispatch found no frozen findings row; framing a full review",
+            );
+        }
+        frozen
+    } else {
+        None
+    };
+    if orders.is_empty() && frozen.is_none() {
+        return Ok(None);
+    }
+    let mut task = String::from(if frozen.is_some() {
+        "Delta-confirm review: the first pass failed with the frozen findings below, and the implicated \
+         members have repaired and re-integrated. Judge only whether the frozen findings are resolved in \
+         this integrated tree — new findings do not extend the review. Every member's work order follows \
+         for context."
+    } else {
+        "Review the whole integrated diff against the sealed intent: every member's work order follows."
+    });
+    for (workpiece, description) in &orders {
+        let _ = write!(task, "\n\n## Task — {workpiece}\n\n{description}");
+    }
+    match &frozen {
+        Some(findings) => {
+            let _ = write!(task, "\n\n## Frozen findings\n\n{findings}");
+        }
+        None => {
+            if let Some((example, _)) = orders.first() {
+                let _ = write!(
+                    task,
+                    "\n\nAttribute each finding to the task that owns it: open the finding's first line \
+                     with the owning task id in square brackets, e.g. `[{example}]`. Leave a finding that \
+                     spans tasks untagged."
+                );
+            }
+        }
+    }
+    Ok(Some(task))
+}
+
 fn drain_and_dispatch_aggregate(
     store: &mut dyn StoreBackend,
     executor: &ExecutorShell,
@@ -413,66 +482,13 @@ fn drain_and_dispatch_aggregate(
             );
             break;
         }
+        let task = compose_aggregate_task(store, &payload, entry.sequence)?;
         let mut transformation = payload.transformation;
         // The evidence-binding subject is the integrated tree the reducer
         // pinned as inputs[0] — also the displayed digest the returning
         // verdict must bind.
         let displayed = transformation.inputs[0];
-        let orders = store.list_dispatch_descriptions(payload.bloom.as_bytes())?;
-        if orders.is_empty() {
-            tracing::warn!(
-                target: "aether_bloomery_host::executor",
-                sequence = entry.sequence,
-                "no work-order descriptions persisted for the reviewed bloom; assembling a subject-only prompt",
-            );
-        }
-        // A dispatch past the first roll is the delta-confirm (ADR-0153): it
-        // judges whether the frozen findings — the bloom row the first failing
-        // verdict recorded — were resolved, never a fresh hunt. The first roll
-        // instead instructs the critic to attribute each finding so the intake
-        // can slice the set back to the owning members.
-        let frozen = if payload.roll > 1 {
-            let frozen = store.lookup_review_findings(payload.bloom.as_bytes(), "")?;
-            if frozen.is_none() {
-                tracing::warn!(
-                    target: "aether_bloomery_host::executor",
-                    sequence = entry.sequence,
-                    roll = payload.roll,
-                    "delta-confirm dispatch found no frozen findings row; framing a full review",
-                );
-            }
-            frozen
-        } else {
-            None
-        };
-        if !orders.is_empty() || frozen.is_some() {
-            use core::fmt::Write;
-            let mut task = String::from(if frozen.is_some() {
-                "Delta-confirm review: the first pass failed with the frozen findings below, and the implicated \
-                 members have repaired and re-integrated. Judge only whether the frozen findings are resolved in \
-                 this integrated tree — new findings do not extend the review. Every member's work order follows \
-                 for context."
-            } else {
-                "Review the whole integrated diff against the sealed intent: every member's work order follows."
-            });
-            for (workpiece, description) in &orders {
-                let _ = write!(task, "\n\n## Task — {workpiece}\n\n{description}");
-            }
-            match &frozen {
-                Some(findings) => {
-                    let _ = write!(task, "\n\n## Frozen findings\n\n{findings}");
-                }
-                None => {
-                    if let Some((example, _)) = orders.first() {
-                        let _ = write!(
-                            task,
-                            "\n\nAttribute each finding to the task that owns it: open the finding's first line \
-                             with the owning task id in square brackets, e.g. `[{example}]`. Leave a finding that \
-                             spans tasks untagged."
-                        );
-                    }
-                }
-            }
+        if let Some(task) = task {
             transformation.description = Some(task);
         }
         let nonce = Nonce(format!("dispatch-{}", entry.sequence));

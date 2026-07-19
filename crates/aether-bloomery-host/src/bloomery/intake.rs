@@ -351,6 +351,39 @@ fn aggregate_decomposition(
     Ok(Some(decompose_findings(findings, &members)))
 }
 
+/// Persist a consumed aggregate verdict's findings (ADR-0153). A pass clears
+/// the bloom row. A failure freezes the full set on the bloom row under the
+/// empty workpiece key — verbatim on the first failure, appended under its own
+/// label on a later one (the delta-confirm at the ceiling), never clobbering
+/// the set the members were re-opened against — and a complete decomposition
+/// additionally slices each owner's blocks into its member row, which the
+/// Refine re-entry prompt prefers over the bloom row.
+fn persist_aggregate_findings(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    upload: &UploadedEvidence,
+    decomposition: Option<&FindingsDecomposition>,
+) -> rusqlite::Result<()> {
+    if verdict_passed(upload.verdict) {
+        return store.clear_review_findings(record.bloom.0.as_bytes(), "");
+    }
+    let Some(findings) = &upload.findings else {
+        return Ok(());
+    };
+    let frozen = store
+        .lookup_review_findings(record.bloom.0.as_bytes(), "")?
+        .map_or_else(|| findings.clone(), |existing| format!("{existing}\n\n## Delta-confirm findings\n\n{findings}"));
+    store.record_review_findings(record.bloom.0.as_bytes(), "", &frozen)?;
+    if let Some(decomposition) = decomposition
+        && decomposition.is_complete()
+    {
+        for (workpiece, slice) in &decomposition.slices {
+            store.record_review_findings(record.bloom.0.as_bytes(), workpiece, slice)?;
+        }
+    }
+    Ok(())
+}
+
 /// The broker accept-gate + normalize → admit (#3502, the trust boundary).
 ///
 /// Look the upload's nonce up in the outstanding-order registry; admit only when
@@ -497,29 +530,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, findings)?;
         }
     } else if record.stage == StageId::AggregateReview {
-        if verdict_passed(upload.verdict) {
-            store.clear_review_findings(record.bloom.0.as_bytes(), "")?;
-        } else if let Some(findings) = &upload.findings {
-            // The bloom row under the empty workpiece key is the FROZEN set
-            // (ADR-0153): the first failing verdict records it verbatim, and a
-            // later failing verdict (the delta-confirm at the ceiling) appends
-            // under its own label rather than clobbering what the members were
-            // re-opened against. A complete decomposition additionally slices
-            // each owner's blocks into its member row, which the Refine
-            // re-entry prompt prefers over the bloom row.
-            let frozen = match store.lookup_review_findings(record.bloom.0.as_bytes(), "")? {
-                Some(existing) => format!("{existing}\n\n## Delta-confirm findings\n\n{findings}"),
-                None => findings.clone(),
-            };
-            store.record_review_findings(record.bloom.0.as_bytes(), "", &frozen)?;
-            if let Some(decomposition) = &aggregate_findings
-                && decomposition.is_complete()
-            {
-                for (workpiece, slice) in &decomposition.slices {
-                    store.record_review_findings(record.bloom.0.as_bytes(), workpiece, slice)?;
-                }
-            }
-        }
+        persist_aggregate_findings(store, &record, upload, aggregate_findings.as_ref())?;
     }
     Ok(AdmitDecision::Admitted(Box::new(Admission { admit, event })))
 }
