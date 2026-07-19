@@ -102,7 +102,7 @@ Flags ADRs in `docs/adr/NNNN-*.md` whose recorded **Status** line has drifted fr
 
 3. **Surface the plan.** Table per drifted ADR: number, title, current status, **proposed** status, and the one-line evidence (`cited by N source files: …`, `ADR-00B says "supersedes" but A still Accepted`, …). Group by signal; put the highest-confidence (Proposed-but-shipped with many citations, asymmetric supersession) first. Then the "intentional / pending — left as-is" group for completeness. Confirm — but note there is nothing to auto-apply.
 
-4. **Act — surface only.** Print, for each drifted ADR, the exact edit the user could make (`- **Status:** Proposed` → `- **Status:** Accepted (shipped — see crates/…)`), but **do not edit any ADR**. If the user explicitly asks, *then* apply a specific status change as a normal edit (and only the ones they name) — an ADR status change is a decision-record amendment and may warrant its own commit / PR.
+4. **Act — surface only.** Print, for each drifted ADR, the exact edit the user could make (`- **Status:** Proposed` → `- **Status:** Accepted (shipped — see crates/…)`), but **do not edit any ADR**. If the user explicitly asks, *then* apply a specific status change as a normal edit (and only the ones they name) — an ADR status change is a decision-record amendment and may warrant its own commit / PR. Flipping a multi-slice ADR to Accepted is the arc-complete checkpoint: it is a natural point to run `/retrospect`'s design-debt pass across that arc's PRs before moving on.
 
 5. **Report** — counts per signal (drifted-shipped, asymmetric-supersession, stale-phase), the ADRs flagged, and the intentional/pending set left untouched. No files changed unless the user asked for a named edit in beat 4.
 
