@@ -1187,10 +1187,7 @@ proptest! {
                     prop_assert_eq!(to, new.stage);
                     // The only passing advances are Construct → Verify and the
                     // repair Refine → Verify delta-confirm.
-                    prop_assert!(matches!(
-                        (from, to),
-                        (StageId::Construct, StageId::Verify) | (StageId::Refine, StageId::Verify)
-                    ));
+                    prop_assert!(matches!((from, to), (StageId::Construct | StageId::Refine, StageId::Verify)));
                 }
                 Outcome::RefineReentered { .. } => {
                     prop_assert_eq!(cursor.stage, StageId::Verify, "only a failing Verify re-enters");

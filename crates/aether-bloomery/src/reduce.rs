@@ -1106,6 +1106,32 @@ fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: &Statement)
 /// an unchanged candidate changes nothing — bounded by Verify's `retry_budget`
 /// over the cursor-carried `repair_rolls`, wedging once the budget's worth of
 /// failing verdicts is consumed.
+/// The move-and-dispatch effect pair every cursor move of
+/// [`reduce_attempt_completed`] emits — an advance, a Refine re-entry, and a
+/// same-stage retry all land the cursor at `progress` and dispatch the stage it
+/// names against the member's current targets (`subject` binds the returned
+/// evidence, `checkout` is the commit the worker checks out, ADR-0152).
+fn move_effects(
+    bloom: BloomId,
+    workpiece: &WorkpieceId,
+    scope_revision: Digest,
+    progress: StageProgress,
+    subject: Digest,
+    checkout: Digest,
+) -> [Decision; 2] {
+    [
+        Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress },
+        Decision::DispatchAttempt {
+            bloom,
+            workpiece: workpiece.clone(),
+            stage: progress.stage,
+            transformation: Transformation::for_member_stage(progress.stage, subject, checkout),
+            scope_revision,
+            candidate: progress.candidate.map(|current| current.tree),
+        },
+    ]
+}
+
 fn reduce_attempt_completed(
     snapshot: &Snapshot,
     bloom: &BloomId,
@@ -1176,19 +1202,8 @@ fn reduce_attempt_completed(
     // rejected above, so a passing stage always has a successor.
     let repair_rolls = cursor.map_or(0, |progress| progress.repair_rolls);
     if let Some(next) = next.filter(|_| passed) {
-        effects.push(Decision::AdvanceStage {
-            bloom: *bloom,
-            workpiece: workpiece.clone(),
-            progress: StageProgress { stage: next, attempts: 1, candidate, repair_rolls },
-        });
-        effects.push(Decision::DispatchAttempt {
-            bloom: *bloom,
-            workpiece: workpiece.clone(),
-            stage: next,
-            transformation: Transformation::for_member_stage(next, subject, checkout),
-            scope_revision: member.scope_revision,
-            candidate: candidate.map(|current| current.tree),
-        });
+        let progress = StageProgress { stage: next, attempts: 1, candidate, repair_rolls };
+        effects.extend(move_effects(*bloom, workpiece, member.scope_revision, progress, subject, checkout));
         return Decisions {
             outcome: Outcome::AttemptAdvanced { bloom: *bloom, workpiece: workpiece.clone(), from: stage, to: next },
             effects,
@@ -1206,19 +1221,8 @@ fn reduce_attempt_completed(
     if stage == StageId::Verify {
         let rolls = repair_rolls + 1;
         if rolls < StageCatalog::retry_budget_of(StageId::Verify).unwrap_or(1) {
-            effects.push(Decision::AdvanceStage {
-                bloom: *bloom,
-                workpiece: workpiece.clone(),
-                progress: StageProgress { stage: StageId::Refine, attempts: 1, candidate, repair_rolls: rolls },
-            });
-            effects.push(Decision::DispatchAttempt {
-                bloom: *bloom,
-                workpiece: workpiece.clone(),
-                stage: StageId::Refine,
-                transformation: Transformation::for_member_stage(StageId::Refine, subject, checkout),
-                scope_revision: member.scope_revision,
-                candidate: candidate.map(|current| current.tree),
-            });
+            let progress = StageProgress { stage: StageId::Refine, attempts: 1, candidate, repair_rolls: rolls };
+            effects.extend(move_effects(*bloom, workpiece, member.scope_revision, progress, subject, checkout));
             return Decisions {
                 outcome: Outcome::RefineReentered { bloom: *bloom, workpiece: workpiece.clone(), rolls },
                 effects,
@@ -1235,19 +1239,8 @@ fn reduce_attempt_completed(
     let budget = StageCatalog::retry_budget_of(stage).unwrap_or(1);
     if attempts < budget {
         let attempt = attempts + 1;
-        effects.push(Decision::AdvanceStage {
-            bloom: *bloom,
-            workpiece: workpiece.clone(),
-            progress: StageProgress { stage, attempts: attempt, candidate, repair_rolls },
-        });
-        effects.push(Decision::DispatchAttempt {
-            bloom: *bloom,
-            workpiece: workpiece.clone(),
-            stage,
-            transformation: Transformation::for_member_stage(stage, subject, checkout),
-            scope_revision: member.scope_revision,
-            candidate: candidate.map(|current| current.tree),
-        });
+        let progress = StageProgress { stage, attempts: attempt, candidate, repair_rolls };
+        effects.extend(move_effects(*bloom, workpiece, member.scope_revision, progress, subject, checkout));
         return Decisions {
             outcome: Outcome::AttemptRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, attempt },
             effects,
