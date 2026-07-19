@@ -239,6 +239,39 @@ fn the_second_aggregate_roll_frames_a_delta_confirm_against_the_frozen_findings(
     );
 }
 
+// ADR-0153 — a roll-1 aggregate dispatch opens a fresh review cycle (the
+// owner re-arm after a park included), so it clears a stale frozen findings
+// row: the new cycle's first failure must freeze cleanly, not append itself
+// under the spent cycle's delta-confirm label — and the fresh prompt frames a
+// full review, not a delta-confirm against the dead set.
+#[test]
+fn a_fresh_roll_one_aggregate_dispatch_clears_the_stale_frozen_row() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-a", "build the widget").unwrap();
+    store.record_review_findings(bloom.0.as_bytes(), "", "[wp-a] stale findings from the spent cycle").unwrap();
+    let payload = AggregateReviewPayload {
+        bloom: bloom.0,
+        transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
+        roll: 1,
+    };
+    store.enqueue_outbox(TOPIC_AGGREGATE_REVIEW, &to_vec(&payload).unwrap()).unwrap();
+
+    drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
+
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap(),
+        None,
+        "the fresh cycle starts with a clean bloom row",
+    );
+    let orders = backend.orders();
+    let description = orders[0].transformation.description.as_deref().unwrap();
+    assert!(!description.contains("## Frozen findings"), "the fresh cycle frames a full review");
+    assert!(description.contains("Attribute each finding"), "with the attribution instruction");
+}
+
 #[test]
 fn drain_and_dispatch_submits_each_dispatch_and_records_its_order() {
     let mut store = SqliteStore::open(":memory:").unwrap();

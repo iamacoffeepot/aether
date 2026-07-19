@@ -565,10 +565,10 @@ fn re_integration_overwrites_the_stale_claim() {
 // implicated member's claim is revoked and its cursor re-enters the
 // repair-only Refine (the bloom cannot resolve while any member is re-open),
 // the stale fold clears, the re-fold dispatches the delta-confirm, and the
-// second failing verdict wedges the bloom at the two-pass ceiling — never a
+// second failing verdict parks the bloom at the two-pass ceiling — never a
 // third roll. Tripwire for every arm of the fail path.
 #[test]
-fn a_failing_aggregate_review_reopens_members_then_wedges_at_the_ceiling() {
+fn a_failing_aggregate_review_reopens_members_then_parks_at_the_ceiling() {
     let base = Snapshot::new(digest(1));
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
@@ -640,20 +640,115 @@ fn a_failing_aggregate_review_reopens_members_then_wedges_at_the_ceiling() {
         step(&after2, &event("r2", Fact::Resolve { bloom, tree: digest(44), head: digest(45), lineage: vec![] }));
     assert!(matches!(d2.outcome, Outcome::AggregateReviewDispatched { roll: 2, .. }));
 
-    // The failing delta-confirm hits the ceiling: the bloom wedges — no member
-    // re-opens, nothing further dispatches.
+    // The failing delta-confirm hits the ceiling: the bloom parks to the owner
+    // (ADR-0151's hold vocabulary at bloom scope) — no member re-opens,
+    // nothing further dispatches, and the failing review's record artifact
+    // becomes the parked question holding the bloom.
     let (after4, d3) = step(&after3, &verdict("fail-2", false, 44, vec!["alpha"]));
-    assert!(matches!(d3.outcome, Outcome::AggregateReviewWedged { rolls: 2, .. }));
+    assert!(matches!(d3.outcome, Outcome::AggregateReviewParked { rolls: 2, question, .. } if question == digest(50)));
     assert!(
         !d3.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. } | Decision::RevokeResolution { .. })),
-        "a wedged bloom re-opens nothing and dispatches nothing",
+        "a parked bloom re-opens nothing and dispatches nothing",
     );
-    // A fold arriving past the ceiling is refused fail-closed.
+    let record = after4.blooms.get(&bloom).unwrap();
+    assert_eq!(record.review_park, Some(digest(50)), "the park marker names the failing review's record artifact");
+    assert!(record.holds.contains(&digest(50)), "the park raises the pending-decision hold");
+    assert!(record.integration.is_some(), "the fold stays held as the owner's decision context");
+    // A re-fold while parked is refused by the pending decision — the named
+    // reason is the owner's open question, not a bare ceiling count.
     assert!(matches!(
         reduce(&after4, &event("r3", Fact::Resolve { bloom, tree: digest(46), head: digest(47), lineage: vec![] }))
             .outcome,
-        Outcome::ResolveRejected(ResolveError::ReviewCeiling { rolls: 2 }),
+        Outcome::ResolveRejected(ResolveError::PendingDecision { question }) if question == digest(50),
     ));
+}
+
+// ADR-0153 — the owner's answer to a parked bloom re-arms the review cycle:
+// adopting the park question releases the hold, clears the marker, resets the
+// roll cursor, and dispatches a fresh full review from the still-held fold.
+// The owner bought the new cycle explicitly; the machine never buys its own
+// third roll. Tripwire: the bloom-scope adoption falling through to the
+// member-stage redispatch path, whose payload no consumer could resolve.
+#[test]
+fn adopting_the_park_question_rearms_the_review_cycle() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&snapshot, &event("i1", Fact::Integrate { bloom, claim: claim("wp", 10, 100) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+
+    let fail = |key: &str, subject: u8, detail: u8| {
+        event(
+            key,
+            Fact::AggregateReviewCompleted {
+                bloom,
+                passed: false,
+                evidence: Evidence {
+                    subject: digest(subject),
+                    kind: EvidenceKind::ReviewFinding,
+                    detail: digest(detail),
+                },
+                implicated: vec![],
+            },
+        )
+    };
+    let (snapshot, _) = step(&snapshot, &fail("f1", 40, 50));
+    let (snapshot, _) = step(&snapshot, &event("i2", Fact::Integrate { bloom, claim: claim("wp", 10, 101) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r2", Fact::Resolve { bloom, tree: digest(42), head: digest(43), lineage: vec![] }));
+    let (parked, decided) = step(&snapshot, &fail("f2", 42, 51));
+    assert!(matches!(decided.outcome, Outcome::AggregateReviewParked { question, .. } if question == digest(51)));
+
+    let (rearmed, adopted) =
+        step(&parked, &event("ans", Fact::AdoptAnswer { bloom, answer: answer_adopting(digest(51)) }));
+    assert!(matches!(adopted.outcome, Outcome::AnswerAdopted { question, .. } if question == digest(51)));
+    assert!(
+        adopted.effects.iter().any(|e| matches!(e, Decision::DispatchAggregateReview { roll: 1, .. })),
+        "the re-armed cycle dispatches a fresh full review from the held fold",
+    );
+    assert!(
+        !adopted.effects.iter().any(|e| matches!(e, Decision::RedispatchStage { .. })),
+        "a bloom-scope adoption never routes down the member-stage redispatch path",
+    );
+    let record = rearmed.blooms.get(&bloom).unwrap();
+    assert!(record.holds.is_empty(), "the park hold is released");
+    assert_eq!(record.review_park, None, "the park marker clears");
+    assert_eq!(record.aggregate_rolls, 0, "the roll cursor resets — a whole owner-bought cycle");
+
+    // The re-armed cycle runs whole: a failing verdict re-enters the member
+    // again instead of tripping the spent ceiling.
+    let reentered = reduce(&rearmed, &fail("f3", 42, 52));
+    assert!(matches!(reentered.outcome, Outcome::AggregateReviewReentered { rolls: 1, .. }));
+}
+
+// ADR-0153 — the aggregate review itself parking ("the findings are
+// contested") raises the bloom-scope park: a Question bound to the held
+// fold's tree sets the park marker alongside the ordinary ADR-0151 hold, so
+// its adoption re-arms the review cycle rather than re-dispatching a member
+// stage.
+#[test]
+fn a_question_bound_to_the_held_fold_marks_the_review_park() {
+    let base = Snapshot::new(digest(1));
+    let spec = draft(1, vec![membership("wp", 10)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&snapshot, &event("i1", Fact::Integrate { bloom, claim: claim("wp", 10, 100) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+
+    let contested = Evidence { subject: digest(40), kind: EvidenceKind::Question, detail: digest(60) };
+    let (held, _) = step(&snapshot, &event("park", Fact::AdmitEvidence { bloom, evidence: contested }));
+    let record = held.blooms.get(&bloom).unwrap();
+    assert_eq!(record.review_park, Some(digest(60)), "the fold-bound question is the review park");
+    assert!(record.holds.contains(&digest(60)), "the ordinary hold rises with it");
+
+    let adopted = reduce(&held, &event("ans", Fact::AdoptAnswer { bloom, answer: answer_adopting(digest(60)) }));
+    assert!(
+        adopted.effects.iter().any(|e| matches!(e, Decision::DispatchAggregateReview { roll: 1, .. })),
+        "adopting the contested park re-arms the review, not a member redispatch",
+    );
 }
 
 // ADR-0151 — a study-record evidence admitted against a sealed bloom is recorded

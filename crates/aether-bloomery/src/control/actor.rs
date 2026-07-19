@@ -599,6 +599,7 @@ fn project(
             | Decision::SetResolved { .. }
             | Decision::RecordIntegration { .. }
             | Decision::RecordAggregateRoll { .. }
+            | Decision::RecordReviewPark { .. }
             | Decision::RevokeResolution { .. }
             | Decision::AdvanceMainline { .. } => {}
         }

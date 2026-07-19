@@ -104,9 +104,18 @@ pub struct BloomRecord {
     /// How many aggregate-review verdicts this bloom has consumed — the
     /// two-pass ceiling's cursor (ADR-0153). `0` before the first verdict;
     /// after a first failing verdict the re-fold dispatches the delta-confirm,
-    /// and a second failing verdict wedges the bloom: the machine never buys a
-    /// third roll.
+    /// and a second failing verdict parks the bloom to the owner: the machine
+    /// never buys a third roll. An adopting answer resets it — the owner
+    /// buying a whole fresh cycle.
     pub aggregate_rolls: u32,
+    /// The bloom-scope park (ADR-0153): the pending-decision question raised
+    /// when the delta-confirm still failed at the two-pass ceiling — the
+    /// failing review's record artifact digest, held in
+    /// [`holds`](Self::holds) like any ADR-0151 question while the owner
+    /// decides. An adopting answer that names it releases the hold and re-arms
+    /// the review cycle instead of re-dispatching a member stage. `None` when
+    /// the bloom is not parked.
+    pub review_park: Option<Digest>,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
 }
@@ -301,8 +310,8 @@ pub enum Fact {
     /// from its held [`FoldedIntegration`]; a failing one routes every
     /// implicated member back into `Refine` (revoking its claim — the bloom
     /// cannot resolve while any member is re-open) until the two-pass ceiling
-    /// wedges the bloom. Appended past [`Fact::AttemptCompleted`] so the prior
-    /// facts' wire discriminants are unchanged.
+    /// parks the bloom to the owner. Appended past [`Fact::AttemptCompleted`]
+    /// so the prior facts' wire discriminants are unchanged.
     AggregateReviewCompleted {
         /// The reviewed bloom.
         bloom: BloomId,
@@ -468,15 +477,19 @@ pub enum Outcome {
         /// The aggregate-review verdicts consumed, this one included.
         rolls: u32,
     },
-    /// A failing aggregate review hit the two-pass ceiling: the bloom wedges —
-    /// no third roll of the dice; the contested residue routes to the owner
-    /// (the bloom-scope park is the ADR-0153 follow-on; supersession is the
-    /// standing escape).
-    AggregateReviewWedged {
-        /// The wedged bloom.
+    /// A failing aggregate review hit the two-pass ceiling: the bloom parks to
+    /// the owner as a pending decision (ADR-0151's hold vocabulary at bloom
+    /// scope) — the machine never buys a third roll. The owner resolves it by
+    /// adopting an answer that names the parked question (re-arming the review
+    /// cycle), superseding, or abandoning.
+    AggregateReviewParked {
+        /// The parked bloom.
         bloom: BloomId,
         /// The verdicts consumed, this one included.
         rolls: u32,
+        /// The parked question's digest — the failing review's record
+        /// artifact, held open until an adopting answer names it.
+        question: Digest,
     },
     /// An aggregate-review completion was refused.
     AggregateReviewRejected(AggregateReviewError),
@@ -712,6 +725,20 @@ pub enum Decision {
         /// Which review pass this dispatches (`1` the full review, `2` the
         /// delta-confirm against the frozen finding set).
         roll: u32,
+    },
+    /// Record (or clear) the bloom-scope park (ADR-0153): raised when the
+    /// delta-confirm still fails at the two-pass ceiling, holding the failing
+    /// review's record artifact as a pending question (ADR-0151's hold
+    /// vocabulary at bloom scope). Recording inserts the question into the
+    /// bloom's open holds; clearing drops only the marker — the hold's release
+    /// is [`Decision::ReleaseHold`]'s, emitted alongside by the adopting
+    /// answer. Appended so the prior decisions' wire discriminants are
+    /// unchanged.
+    RecordReviewPark {
+        /// The parked bloom.
+        bloom: BloomId,
+        /// The parked question digest, or `None` to clear on adoption.
+        question: Option<Digest>,
     },
 }
 
@@ -1221,10 +1248,18 @@ fn reduce_admit_evidence(snapshot: &Snapshot, bloom: &BloomId, evidence: &Eviden
     ) {
         return Decisions::rejected(Outcome::AdmitEvidenceRejected(AdmitEvidenceError::EvidenceNotBound));
     }
-    Decisions {
-        outcome: Outcome::EvidenceAdmitted { bloom: *bloom, subject: evidence.subject },
-        effects: alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }],
+    let mut effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
+    // A question bound to the held fold's tree is the aggregate review itself
+    // parking — the ADR-0153 "findings are contested" branch. Mark it as the
+    // bloom-scope park so the adopting answer re-arms the review cycle rather
+    // than routing down the member-stage redispatch path.
+    if evidence.kind == EvidenceKind::Question
+        && let Some(integration) = &record.integration
+        && evidence.subject == integration.tree
+    {
+        effects.push(Decision::RecordReviewPark { bloom: *bloom, question: Some(evidence.detail) });
     }
+    Decisions { outcome: Outcome::EvidenceAdmitted { bloom: *bloom, subject: evidence.subject }, effects }
 }
 
 /// Adopt an answer to a parked question (ADR-0151, [`Fact::AdoptAnswer`]).
@@ -1260,6 +1295,30 @@ fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: &Statement)
         return Decisions::rejected(Outcome::AdoptAnswerRejected(AdoptAnswerError::NoMatchingHold));
     };
     let answer_digest = digest_of(answer);
+    // The bloom-scope park adopts differently (ADR-0153): the owner's answer
+    // re-arms the review cycle — the roll cursor resets and, with the fold
+    // still held from the park, a fresh full review dispatches. The owner
+    // bought the new cycle explicitly; the machine still never buys its own
+    // third roll. A member-scope question re-dispatches the held stage as
+    // before.
+    if record.review_park == Some(question) {
+        let mut effects = alloc::vec![
+            Decision::ReleaseHold { bloom: *bloom, question },
+            Decision::RecordReviewPark { bloom: *bloom, question: None },
+            Decision::RecordAggregateRoll { bloom: *bloom, rolls: 0 },
+        ];
+        // The park keeps the fold held, so the re-armed review dispatches from
+        // it directly; a missing fold (unreachable through the park path) just
+        // resets the cycle and leaves the re-fold to dispatch the review.
+        if let Some(integration) = &record.integration {
+            effects.push(Decision::DispatchAggregateReview {
+                bloom: *bloom,
+                transformation: Transformation::for_aggregate_review(integration.tree, integration.head),
+                roll: 1,
+            });
+        }
+        return Decisions { outcome: Outcome::AnswerAdopted { bloom: *bloom, question }, effects };
+    }
     Decisions {
         outcome: Outcome::AnswerAdopted { bloom: *bloom, question },
         effects: alloc::vec![
@@ -1499,8 +1558,9 @@ fn reduce_resolve(snapshot: &Snapshot, bloom: &BloomId, tree: &Digest, head: &Di
 /// its cursor re-enters the repair-only `Refine` (the host threads the
 /// findings slice onto the dispatch), the stale fold is cleared, and the
 /// re-fold that follows re-integration dispatches the delta-confirm. The
-/// second failing verdict wedges the bloom — the two-pass ceiling; the machine
-/// never buys a third roll.
+/// second failing verdict parks the bloom to the owner — the two-pass
+/// ceiling; the machine never buys a third roll, though an adopting answer
+/// lets the owner buy a fresh cycle.
 fn reduce_aggregate_review_completed(
     snapshot: &Snapshot,
     bloom: &BloomId,
@@ -1574,10 +1634,17 @@ fn reduce_aggregate_review_completed(
         implicated.to_vec()
     };
     if rolls >= StageCatalog::retry_budget_of(StageId::AggregateReview).unwrap_or(1) {
-        // The delta-confirm still failed: the two-pass ceiling wedges the
-        // bloom. The fold stays held (the owner's decision context); no member
-        // re-opens, no further review dispatches.
-        return Decisions { outcome: Outcome::AggregateReviewWedged { bloom: *bloom, rolls }, effects };
+        // The delta-confirm still failed: the two-pass ceiling parks the bloom
+        // to the owner (ADR-0151's hold vocabulary at bloom scope). The fold
+        // stays held (the owner's decision context), no member re-opens, no
+        // further review dispatches; the failing review's record artifact is
+        // the parked question an adopting answer must name to re-arm the
+        // cycle.
+        effects.push(Decision::RecordReviewPark { bloom: *bloom, question: Some(evidence.detail) });
+        return Decisions {
+            outcome: Outcome::AggregateReviewParked { bloom: *bloom, rolls, question: evidence.detail },
+            effects,
+        };
     }
     // First failing verdict: re-open every implicated member — revoke its
     // claim and route it into the repair-only Refine against its own claimed
@@ -1742,6 +1809,19 @@ impl Snapshot {
                     record.aggregate_rolls = *rolls;
                 }
             }
+            Decision::RecordReviewPark { bloom, question } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.review_park = *question;
+                    // Recording raises the hold in the same fold (idempotent
+                    // when an admitted Question already inserted it through
+                    // RecordEvidence — the marker then only classifies it);
+                    // clearing leaves the release to the adopting answer's
+                    // ReleaseHold.
+                    if let Some(question) = question {
+                        record.holds.insert(*question);
+                    }
+                }
+            }
             Decision::RevokeResolution { bloom, workpiece } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.claims.remove(workpiece);
@@ -1781,6 +1861,7 @@ impl BloomRecord {
             progress: BTreeMap::new(),
             integration: None,
             aggregate_rolls: 0,
+            review_park: None,
             superseded_by: None,
         }
     }
