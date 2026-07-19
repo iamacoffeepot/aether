@@ -20,15 +20,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_actor::Addressable;
+use aether_anthropic::AnthropicConfig;
 use aether_audio::{AudioCapability, AudioConfig as AudioConf};
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
-    AnthropicConfig, ComponentHostConfig, ContentGenConfig, GeminiConfig, HttpServerConfig, InputConfig,
-    UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
+    ComponentHostConfig, HttpServerConfig, InputConfig, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
 };
 use aether_clipboard::{ClipboardCapability, ClipboardConfig};
+use aether_contentgen::ContentGenConfig;
 use aether_fs::NamespaceRoots;
+use aether_gemini::GeminiConfig;
 use aether_kinds::BinaryManifest;
 use aether_kinds::WindowMode;
 use aether_render::{CaptureBackend, RenderCapability, RenderConfig, RenderTuningConfig};

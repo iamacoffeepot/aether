@@ -5,7 +5,7 @@ use std::time::Duration;
 /// read env (`GEMINI_API_KEY`, `AETHER_GEMINI_DISABLE`,
 /// `AETHER_GEMINI_MAX_IN_FLIGHT`, `AETHER_GEMINI_TIMEOUT_MS`). The staging
 /// root is resolved separately at chassis boot
-/// ([`ContentGenConfig`](crate::shared::contentgen::ContentGenConfig)) and
+/// ([`ContentGenConfig`](aether_contentgen::ContentGenConfig)) and
 /// threaded into the cap. Tests build it directly.
 ///
 /// ADR-0090 unit g (iamacoffeepot/aether#1264): the

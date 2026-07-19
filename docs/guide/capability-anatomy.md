@@ -16,13 +16,25 @@ examples.
 A capability lives either as a module of `aether-capabilities` or as its own
 `aether-<cap>` crate. A crate of its own keeps the capability off its
 neighbours' reverse-dependency closure, so a change to it reruns only the tests
-that actually depend on it; `aether-fs` is the standalone form. The module shape
-below is the same either way. A standalone cap carries its own feature ladder —
+that actually depend on it. The standalone single caps are `aether-fs`,
+`aether-clipboard`, `aether-render`, `aether-trace`, `aether-window`,
+`aether-audio`, `aether-inventory`, and `aether-text`. The module shape below is
+the same either way. A standalone cap carries its own feature ladder —
 `default = ["runtime"]`, with a `runtime` feature gating the substrate-typed
 half and the marker face compiling under `default-features = false` — and each
 downstream crate depends directly on the cap crate it uses, never through a
 re-export facade (a facade would put every downstream back in the cap's
 reverse-dependency closure).
+
+A cap that shares infrastructure with a sibling extracts as a small cluster of
+interdependent crates rather than one grab-bag crate: a thin foundation crate
+holds the shared layer, and each cap crate depends on it. The content-gen
+providers are the standing instance — `aether-contentgen` owns the shared
+adapter traits, HTTP transport, and `gen/` output staging, and the two provider
+caps `aether-anthropic` and `aether-gemini` depend on it. The foundation crate is
+a plain dependency of the providers, not a facade over them: nothing re-exports
+the cap crates through the foundation, so a provider stays a leaf and only its
+own reverse-dependency closure reruns on a change to it.
 
 ## Typical directory
 

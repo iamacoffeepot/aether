@@ -32,25 +32,17 @@
 extern crate alloc;
 extern crate self as aether_capabilities;
 
-// `aether.anthropic` content-gen cap (ADR-0050, issue 1014). Native-
-// only — embeds the native-only contentgen dispatch helper and makes
-// blocking ureq / subprocess calls.
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-pub mod anthropic;
 pub mod component;
-// Shared infrastructure for capabilities (ADR-0050 §2). Native-only — the
-// dispatch helper, staging, and adapter traits all lean on the
-// substrate runtime (`Mailer`, `LocalFileAdapter`), so the module
-// elides cleanly on the wasm-component build.
+// Shared infrastructure for capabilities. Native-only — the `net`
+// address-parsing helpers lean on the substrate runtime, so the module
+// elides cleanly on the wasm-component build. (The content-gen provider
+// cluster that also lived here moved to the `aether-contentgen` /
+// `aether-anthropic` / `aether-gemini` crates, iamacoffeepot/aether#3705.)
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub mod shared;
 
 pub mod engine;
 pub mod game;
-// `aether.gemini` content-gen cap (ADR-0050, issue 1015). Native-only
-// for the same reason as `anthropic`.
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-pub mod gemini;
 // The two HTTP capabilities, co-located under one submodule (ADR-0121):
 // the `aether.http` egress client and the `aether.http.server` inbound
 // server (a native singleton modeled on `RpcServerCapability` — binds a
@@ -68,19 +60,7 @@ pub mod tcp;
 pub mod test_bench;
 pub mod trampoline;
 
-// ADR-0050 `aether.anthropic` cap (issue 1014). `AnthropicConfig` is
-// part of the same native-only module.
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-pub use anthropic::{AnthropicCapability, AnthropicConfig};
 pub use component::{ComponentHostCapability, resolve_embedded};
-// ADR-0050 §2 shared content-gen infrastructure. Native-only — the two
-// provider caps (issue 1014 / 1015) embed these.
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-pub use shared::contentgen::ContentGenConfigLayer;
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-pub use shared::contentgen::{
-    AnthropicAdapter, ContentGenConfig, GeminiAdapter, StubAnthropicAdapter, StubGeminiAdapter,
-};
 // `ComponentHostConfig` is wasmtime-bound (it holds `Arc<Engine>` /
 // `Arc<Linker<ComponentCtx>>`). Under the ADR-0122 split it lives behind
 // the `feature = "runtime"` gate (only the runtime half names it), so it
@@ -119,9 +99,6 @@ pub use lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 #[cfg(feature = "runtime")]
 pub use game::GameGatewayConfig;
 pub use game::{GameGatewayCapability, PlayerSessionActor};
-// ADR-0050 `aether.gemini` cap (issue 1015).
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-pub use gemini::{GeminiCapability, GeminiConfig};
 pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;
 pub use trampoline::WasmTrampoline;

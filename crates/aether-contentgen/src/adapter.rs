@@ -33,7 +33,7 @@ pub struct AnthropicResponse {
 
 /// One generated media artifact from a Gemini adapter. The bytes are staged as
 /// `gen/<uuid>.{png,wav}` below the configured root by the cap (via
-/// [`crate::shared::contentgen::staging::stage_gen_output_under`]); the
+/// [`crate::staging::stage_gen_output_under`]); the
 /// adapter just returns the raw bytes + extension.
 #[derive(Clone, Debug)]
 pub struct GeminiArtifact {

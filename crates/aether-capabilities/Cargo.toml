@@ -26,13 +26,22 @@ license.workspace = true
 # consumer flips features.
 
 # cargo-machete (the CI unused-deps gate) scans source without resolving
-# features, so it cannot see that `clap` is used only through the
-# `#[derive(clap::Args)]` the Config derive emits on the per-cap
-# `*Overlay` structs under the optional `runtime` feature (see the `clap`
-# dependency comment below). That is a false positive — the dep is real —
-# so it is ignored here rather than removed.
+# features, so both entries below are false positives — the deps are real —
+# and are ignored here rather than removed.
+#
+# `clap` is used only through the `#[derive(clap::Args)]` the Config derive
+# emits on the per-cap `*Overlay` structs under the optional `runtime` feature
+# (see the `clap` dependency comment below).
+#
+# `aether-fs` is retained for the rustdoc intra-doc links to
+# `aether_fs::FsMailboxExt` that several cap modules reference (the shared
+# cap-mailbox-extension shape), which CI's `broken_intra_doc_links` gate would
+# flag if the dep were dropped, plus the `aether-fs/runtime` forward the
+# chassis-boot cap tests exercise. machete counts neither doc-links nor feature
+# forwards as usage. (Its former in-code consumers, the text / gemini caps,
+# were extracted to their own crates, #3727 / #3705.)
 [package.metadata.cargo-machete]
-ignored = ["clap"]
+ignored = ["aether-fs", "clap"]
 
 [features]
 # Default-on: chassis-target builds get the full cap set with their
@@ -62,7 +71,6 @@ runtime = [
     "dep:tracing",
     "dep:ureq",
     "dep:url",
-    "dep:uuid",
     "dep:wasmtime",
     # The retained `aether-window` dep (below) is identity-only by default;
     # forward its runtime half so chassis / test builds of this crate boot
@@ -87,10 +95,14 @@ runtime = [
 aether-actor = { path = "../aether-actor" }
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data" }
-# The `aether.fs` cap now lives in its own crate (iamacoffeepot/aether#3706);
-# the text / gemini caps still address `FsCapability` + its kinds.
+# The `aether.fs` cap lives in its own crate (iamacoffeepot/aether#3706).
+# Retained here identity-only for the rustdoc intra-doc links several cap
+# modules make to `aether_fs::FsMailboxExt` (the shared cap-mailbox-extension
+# shape) plus the chassis-boot cap tests that exercise the fs runtime.
 # `default-features = false` keeps the marker-only wasm build from dragging the
-# fs runtime; the `runtime` feature below forwards `aether-fs/runtime`.
+# fs runtime; the `runtime` feature below forwards `aether-fs/runtime`. (See the
+# `[package.metadata.cargo-machete]` note above — machete counts neither
+# doc-links nor feature forwards as usage.)
 aether-fs = { path = "../aether-fs", default-features = false }
 # ADR-0131: the `#[http::router]` / `#[http::route]` proc macros, re-exported
 # through the wasm-safe `http` module. Proc-macro crates are host-compiled, so
@@ -144,8 +156,8 @@ dirs = { version = "6", optional = true }
 # `aether.http.server` cap. Pure-Rust, no_std-capable, already a transitive
 # dependency; rides the `runtime` feature so wasm / marker-only builds skip it.
 httparse = { version = "1", optional = true }
-# JSON request/response bodies for the content-gen provider APIs
-# (ADR-0050) — the Anthropic Messages API and the Gemini media APIs.
+# JSON serialization for the engine artifact registry + the hub binary
+# store (`engine/server/artifacts.rs`, `engine/store`).
 serde_json = { workspace = true, optional = true }
 # ADR-0115 (issue 1953): sha256 content addressing for the hub binary
 # store. Rides the `runtime` feature — the store is native-only (it forks
@@ -156,12 +168,6 @@ sha2 = { workspace = true, optional = true, features = ["std"] }
 tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
 ureq = { version = "3", optional = true, features = ["rustls"] }
 url = { version = "2", optional = true }
-# `v4` random-name generation for `gen/<uuid>.{png,wav}` output paths
-# below the configured staging root (ADR-0050). `aether-data` pulls `uuid` with `serde`-only
-# features for its `Uuid` wire type; the staging helper needs the
-# random `v4` constructor, hence a direct dep here (issue 1013 §Side
-# findings — direct-dep keeps `aether-data`'s no_std/alloc posture clean).
-uuid = { version = "1", optional = true, features = ["v4"] }
 # wasmtime is reached for by ComponentHostCapability (issue 603 +
 # issue 638 phase 3 rename) — the cap holds the Engine/Linker/Module
 # the substrate previously held in its `ControlPlane` struct. Same

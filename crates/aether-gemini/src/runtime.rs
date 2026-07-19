@@ -15,10 +15,8 @@ use super::{
     GeminiCapability, GeminiError, GroundingMetadata, LyriaGenerate, LyriaGenerateResult, NanobananaGenerate,
     NanobananaGenerateResult, lyria, nanobanana,
 };
-use crate::shared::contentgen::adapter::{
-    AdapterUsage, GeminiAdapter, GeminiImageRequest, GeminiMusicRequest, GeminiResponse,
-};
-use crate::shared::contentgen::staging::stage_gen_output_under;
+use aether_contentgen::adapter::{AdapterUsage, GeminiAdapter, GeminiImageRequest, GeminiMusicRequest, GeminiResponse};
+use aether_contentgen::staging::stage_gen_output_under;
 use aether_fs::{Access, FileAdapter, LocalFileAdapter};
 
 pub use aether_substrate::actor::native::TaskQueue;
@@ -219,7 +217,7 @@ impl NativeActor for GeminiCapability {
 pub fn build_adapter(config: &GeminiConfig) -> Arc<dyn GeminiAdapter> {
     if config.disabled {
         tracing::info!(
-            target: "aether_capabilities::gemini",
+            target: "aether_gemini",
             "gemini adapter disabled — every request replies Unauthorized",
         );
         return Arc::new(DisabledGeminiAdapter);
@@ -227,14 +225,14 @@ pub fn build_adapter(config: &GeminiConfig) -> Arc<dyn GeminiAdapter> {
     config.api_key.as_ref().map_or_else(
         || {
             tracing::info!(
-                target: "aether_capabilities::gemini",
+                target: "aether_gemini",
                 "GEMINI_API_KEY unset — every request replies Unauthorized",
             );
             Arc::new(DisabledGeminiAdapter) as Arc<dyn GeminiAdapter>
         },
         |key| {
             tracing::info!(
-                target: "aether_capabilities::gemini",
+                target: "aether_gemini",
                 "gemini adapter configured (nanobanana + lyria)",
             );
             Arc::new(UreqGeminiAdapter::new(key.clone(), config.timeout)) as Arc<dyn GeminiAdapter>
@@ -343,16 +341,16 @@ pub fn lyria_reply(root: &Path, request_id: u64, result: Result<GeminiResponse, 
 
 #[cfg(all(test, feature = "runtime"))]
 mod tests {
-    use crate::gemini::DisabledGeminiAdapter;
-    use crate::gemini::GeminiCapability;
-    use crate::gemini::runtime::{GeminiCapabilityState, nanobanana_reply};
-    use crate::gemini::{
+    use crate::DisabledGeminiAdapter;
+    use crate::GeminiCapability;
+    use crate::runtime::{GeminiCapabilityState, nanobanana_reply};
+    use crate::{
         AspectRatio, GeminiError, ImageSize, LyriaGenerate, LyriaGenerateResult, NanobananaGenerate,
         NanobananaGenerateResult,
     };
-    use crate::shared::contentgen::adapter::STUB_PNG;
-    use crate::shared::contentgen::adapter::StubGeminiAdapter;
-    use crate::shared::contentgen::adapter::{AdapterUsage, GeminiArtifact, GeminiResponse};
+    use aether_contentgen::adapter::STUB_PNG;
+    use aether_contentgen::adapter::StubGeminiAdapter;
+    use aether_contentgen::adapter::{AdapterUsage, GeminiArtifact, GeminiResponse};
     use aether_data::{Kind, MailboxId, SessionToken, Source, SourceAddr, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;

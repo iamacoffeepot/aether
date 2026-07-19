@@ -31,12 +31,13 @@ use std::str::from_utf8;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_anthropic::AnthropicConfig;
+use aether_contentgen::ContentGenConfig;
+use aether_gemini::GeminiConfig;
 use aether_substrate_bundle::Chassis as _;
 use aether_substrate_bundle::autoload::AutoloadComponent;
 use aether_substrate_bundle::capabilities::http::HttpConfig;
-use aether_substrate_bundle::capabilities::{
-    AnthropicConfig, ContentGenConfig, GeminiConfig, HttpServerConfig, HttpServerHandle, WasmTrampoline,
-};
+use aether_substrate_bundle::capabilities::{HttpServerConfig, HttpServerHandle, WasmTrampoline};
 use aether_substrate_bundle::headless::{HeadlessChassis, HeadlessEnv};
 use aether_substrate_bundle::test_bench::test_helpers::{
     init_save_sandbox, locate_component_wasm, test_namespace_roots,

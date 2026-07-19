@@ -91,6 +91,14 @@ aether-text = { path = "../aether-text", features = ["runtime"] }
 # the desktop chassis wires `AudioCapability` (cpal synth) + resolves
 # `AudioConfig` / `AudioConfigLayer` / `AudioOverlay`, so it needs the runtime half.
 aether-audio = { path = "../aether-audio", features = ["runtime"] }
+# iamacoffeepot/aether#3705: the content-gen provider cluster was extracted to
+# the `aether-contentgen` (shared layer) + `aether-anthropic` + `aether-gemini`
+# crates; every chassis wires `AnthropicCapability` / `GeminiCapability` and
+# resolves their configs + `ContentGenConfig`, so it needs each crate's runtime
+# half.
+aether-contentgen = { path = "../aether-contentgen", features = ["runtime"] }
+aether-anthropic = { path = "../aether-anthropic", features = ["runtime"] }
+aether-gemini = { path = "../aether-gemini", features = ["runtime"] }
 aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
 aether-window = { path = "../aether-window", features = ["runtime"] }
 # The `aether.trace` cap (extracted from capabilities, #3719): every

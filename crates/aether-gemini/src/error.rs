@@ -7,7 +7,7 @@
 
 use super::GeminiError;
 
-use crate::shared::contentgen::transport::{parse_status_prefix, snippet};
+use aether_contentgen::transport::{parse_status_prefix, snippet};
 
 /// Sentinel an adapter returns to mean "no API key" so the cap maps it
 /// onto [`GeminiError::Unauthorized`]. The `DisabledGeminiAdapter`
@@ -51,7 +51,7 @@ pub fn adapter_error_to_typed(raw: &str) -> GeminiError {
 #[cfg(test)]
 mod tests {
     use super::{adapter_error_to_typed, status_to_error};
-    use crate::gemini::GeminiError;
+    use crate::GeminiError;
 
     #[test]
     fn unauthorized_statuses_map_to_unauthorized() {

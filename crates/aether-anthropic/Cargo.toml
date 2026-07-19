@@ -1,0 +1,89 @@
+[package]
+name = "aether-anthropic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ADR-0050 `aether.anthropic` content-gen cap, extracted from
+# `aether-capabilities` (iamacoffeepot/aether#3705) as a leaf provider crate of
+# the provider-cluster split. Owns the full Anthropic stack: the mail kinds
+# (`kinds`), the `AnthropicConfig`, and the `AnthropicCapability` identity + the
+# `ureq` Messages backend / `claude` subprocess backend / task-queue runtime. It
+# is a pure leaf — no other cap depends on it, so `aether-capabilities` keeps no
+# `aether-anthropic` dependency (no facade).
+#
+# It builds on the shared content-gen layer `aether-contentgen` (the adapter
+# traits + the `ureq` transport plumbing), so it depends on `aether-contentgen`
+# (identity-only by default; the `runtime` feature forwards
+# `aether-contentgen/runtime`). Long-tail calls ride the substrate's
+# `aether_substrate::actor::native::TaskQueue`.
+#
+# The ADR-0122 identity/runtime split rides the `runtime` feature: the wasm-safe
+# identity, kinds, and `AnthropicConfig` domain struct compile always-on; the
+# `aether_substrate`-typed runtime half (the adapters + `ureq` Messages backend +
+# `claude` subprocess backend + task queue) is gated so a marker-only wasm guest
+# can address `ctx.actor::<AnthropicCapability>()` without dragging the transport
+# / substrate stack through.
+
+[features]
+default = ["runtime"]
+runtime = [
+    "dep:aether-substrate",
+    "aether-contentgen/runtime",
+    "dep:ureq",
+    "dep:serde_json",
+    "dep:clap",
+    "dep:confique",
+    "dep:tracing",
+]
+
+[dependencies]
+# Always-on: the `#[actor]` identity SDK + data / kind types the marker face
+# carries.
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+# The `MessagesSend` / `CliSend` result kinds carry an `aether.Usage` token +
+# clock accounting — always-on.
+aether-kinds = { path = "../aether-kinds" }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+# The shared content-gen layer: the `AnthropicAdapter` trait + request /
+# response types the cap converts its wire kinds into, and the `ureq` transport
+# both backends run through. `default-features = false` keeps the marker-only
+# build from dragging the transport runtime; the `runtime` feature above
+# forwards `aether-contentgen/runtime`.
+aether-contentgen = { path = "../aether-contentgen", default-features = false }
+# Native-only runtime half — gated so marker builds skip the substrate runtime
+# + the `ureq` Messages backend / `claude` subprocess backend / task queue.
+aether-substrate = { path = "../aether-substrate", optional = true }
+# ADR-0050 §1: the Messages API request runs through `ureq`; the body is JSON.
+ureq = { version = "3", optional = true, features = ["rustls"] }
+serde_json = { workspace = true, optional = true }
+# The `Config` derive emits the `AnthropicConfigLayer`
+# (`#[derive(confique::Config)]`) + `AnthropicOverlay` (`#[derive(clap::Args)]`)
+# structs; both ride the `runtime` feature so marker builds skip them.
+clap = { workspace = true, optional = true }
+confique = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
+
+# The `Kind` derive emits a `cfg(not(target_family = "wasm"))`-gated
+# `inventory::submit!` per kind, so native builds need `inventory` reachable;
+# wasm guests don't (the derive's gate skips emission).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]
+aether-data = { path = "../aether-data", features = ["derive"] }
+# The runtime unit tests boot a chassis through the canonical
+# `aether_substrate::testing` fixture, enabled by the substrate `test-support`
+# feature.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+
+# cargo-machete (the CI unused-deps gate) scans source without resolving
+# features, so it cannot see that `clap` and `confique` are used only through
+# the `Config` derive's codegen under the optional `runtime` feature. Both are
+# false positives: the deps are real and runtime-gated.
+[package.metadata.cargo-machete]
+ignored = ["clap", "confique"]
+
+[lints]
+workspace = true

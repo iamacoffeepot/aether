@@ -64,6 +64,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-anthropic"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-contentgen",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "clap",
+ "confique",
+ "inventory",
+ "serde",
+ "serde_json",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "aether-audio"
 version = "0.3.0-alpha"
 dependencies = [
@@ -188,7 +206,6 @@ dependencies = [
  "tracing",
  "ureq",
  "url",
- "uuid",
  "wasmtime",
  "wat",
 ]
@@ -223,6 +240,18 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "aether-contentgen"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-fs",
+ "aether-substrate",
+ "clap",
+ "confique",
+ "ureq",
+ "uuid",
 ]
 
 [[package]]
@@ -290,6 +319,25 @@ dependencies = [
  "inventory",
  "serde",
  "tracing",
+]
+
+[[package]]
+name = "aether-gemini"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-contentgen",
+ "aether-data",
+ "aether-fs",
+ "aether-kinds",
+ "aether-substrate",
+ "clap",
+ "confique",
+ "inventory",
+ "serde",
+ "serde_json",
+ "tracing",
+ "ureq",
 ]
 
 [[package]]
@@ -440,12 +488,15 @@ name = "aether-substrate-bundle"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-anthropic",
  "aether-audio",
  "aether-capabilities",
  "aether-clipboard",
  "aether-codec",
+ "aether-contentgen",
  "aether-data",
  "aether-fs",
+ "aether-gemini",
  "aether-inventory",
  "aether-kinds",
  "aether-kit",
