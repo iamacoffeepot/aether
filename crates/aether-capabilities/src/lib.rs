@@ -33,14 +33,6 @@ extern crate alloc;
 extern crate self as aether_capabilities;
 
 pub mod component;
-// Shared infrastructure for capabilities. Native-only — the `net`
-// address-parsing helpers lean on the substrate runtime, so the module
-// elides cleanly on the wasm-component build. (The content-gen provider
-// cluster that also lived here moved to the `aether-contentgen` /
-// `aether-anthropic` / `aether-gemini` crates, iamacoffeepot/aether#3705.)
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-pub mod shared;
-
 pub mod engine;
 pub mod game;
 // The two HTTP capabilities, co-located under one submodule (ADR-0121):
