@@ -249,7 +249,7 @@ pub(super) fn connect_mcp(port: u16) -> Mcp {
 /// `aether.inventory.kinds`.
 //noinspection DuplicatedCode -- this variant extends the base hub with inventory and extra descriptors.
 pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChassis<TestChassis>, u16) {
-    use aether_capabilities::InventoryCapability;
+    use aether_inventory::InventoryCapability;
 
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {

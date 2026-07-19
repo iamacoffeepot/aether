@@ -59,10 +59,6 @@ pub mod gemini;
 // shared wire kinds in `http/kinds.rs`.
 pub mod http;
 pub mod input;
-// `aether.inventory` reverse-lookup inventory cap (ADR-0088 §6, issue
-// 1122). Serves the per-build name/template manifest + dynamic-instance
-// resolve over mail.
-pub mod inventory;
 // `aether.lifecycle` cap (ADR-0082). The non-generic capability the
 // chassis drives one frame at a time. Always-native via `#[actor(singleton)]`,
 // so a wasm component can address it by name.
@@ -119,7 +115,6 @@ pub use http::{HttpServerCapability, HttpServerConfig};
 pub use input::InputCapability;
 #[cfg(feature = "runtime")]
 pub use input::InputConfig;
-pub use inventory::InventoryCapability;
 // ADR-0122 split: `LifecycleConfig` configures the runtime-only
 // `LifecycleCapabilityState`, so it rides the `runtime` gate with the
 // rest of the lifecycle runtime half.

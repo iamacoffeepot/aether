@@ -96,6 +96,10 @@ aether-trace = { path = "../aether-trace", features = ["runtime"] }
 # The `aether.fs` cap (iamacoffeepot/aether#3706) — the chassis wires
 # `FsCapability` + resolves `NamespaceRoots`, so it needs the fs runtime (default).
 aether-fs = { path = "../aether-fs" }
+# The `aether.inventory` cap (extracted from capabilities, #3725) — every
+# chassis mounts `InventoryCapability` via `with_common_caps`, so it needs the
+# runtime half (the `Arc<Registry>` projection state).
+aether-inventory = { path = "../aether-inventory", features = ["runtime"] }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
