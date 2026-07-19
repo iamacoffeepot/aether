@@ -314,8 +314,11 @@ pub enum Fact {
         evidence: Evidence,
         /// The members owning the frozen findings a failing verdict routes to
         /// (ADR-0153 §Findings freeze) — each re-enters `Refine` once. Empty
-        /// on a passing verdict; a failing verdict naming no member is
-        /// refused (findings with no owner route nowhere).
+        /// on a passing verdict; a *failing* verdict with an empty implication
+        /// routes to every member — the host admits verdicts without
+        /// membership knowledge, and over-routing is the fail-closed
+        /// direction. The findings decomposition narrows it where ownership
+        /// is parsed.
         implicated: Vec<WorkpieceId>,
     },
 }
@@ -497,9 +500,6 @@ pub enum AggregateReviewError {
     },
     /// A failing verdict implicated a workpiece that is not a member.
     NotAMember(WorkpieceId),
-    /// A failing verdict implicated no member at all — findings with no owner
-    /// route nowhere, so the verdict is malformed.
-    NoImplicatedMembers,
 }
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -1554,11 +1554,13 @@ fn reduce_aggregate_review_completed(
         });
         return Decisions { outcome: Outcome::Resolved(resolved), effects };
     }
-    // A failing verdict must route its findings to owners — validated before
-    // any effect applies, so a malformed verdict changes nothing.
-    if implicated.is_empty() {
-        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::NoImplicatedMembers));
-    }
+    // A failing verdict routes to owners. A named non-member is malformed —
+    // validated before any effect applies, so such a verdict changes nothing.
+    // An *empty* implication routes to every member: the host admits the
+    // verdict without membership knowledge (only the reducer holds the sealed
+    // set), and over-routing is the fail-closed direction — a failing verdict
+    // must never strand for want of an owner. The findings decomposition
+    // (ADR-0153 §Findings freeze) narrows the set where ownership is parsed.
     if let Some(stranger) =
         implicated.iter().find(|wp| !record.spec.members().iter().any(|member| member.workpiece == **wp))
     {
@@ -1566,6 +1568,11 @@ fn reduce_aggregate_review_completed(
             stranger.clone(),
         )));
     }
+    let implicated: Vec<WorkpieceId> = if implicated.is_empty() {
+        record.spec.members().iter().map(|member| member.workpiece.clone()).collect()
+    } else {
+        implicated.to_vec()
+    };
     if rolls >= StageCatalog::retry_budget_of(StageId::AggregateReview).unwrap_or(1) {
         // The delta-confirm still failed: the two-pass ceiling wedges the
         // bloom. The fold stays held (the owner's decision context); no member
@@ -1579,7 +1586,7 @@ fn reduce_aggregate_review_completed(
     // re-opened members re-integrate, the completing claim re-dispatches the
     // fold and the fresh head gets the delta-confirm.
     effects.push(Decision::RecordIntegration { bloom: *bloom, integration: None });
-    for workpiece in implicated {
+    for workpiece in &implicated {
         effects.push(Decision::RevokeResolution { bloom: *bloom, workpiece: workpiece.clone() });
         let member = record.spec.members().iter().find(|member| member.workpiece == *workpiece);
         let candidate = record.claims.get(workpiece).map(|claim| claim.candidate);
@@ -1606,10 +1613,7 @@ fn reduce_aggregate_review_completed(
             checkout,
         ));
     }
-    Decisions {
-        outcome: Outcome::AggregateReviewReentered { bloom: *bloom, members: implicated.to_vec(), rolls },
-        effects,
-    }
+    Decisions { outcome: Outcome::AggregateReviewReentered { bloom: *bloom, members: implicated, rolls }, effects }
 }
 
 fn reduce_land(snapshot: &Snapshot, bloom: &BloomId, new_head: &Digest) -> Decisions {

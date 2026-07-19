@@ -175,6 +175,12 @@ pub trait StoreBackend: Send {
     /// [`Transformation::description`](aether_bloomery::Transformation) `None` and
     /// warns rather than dispatching blind.
     fn lookup_dispatch_description(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
+    /// Every persisted work-order description for one bloom as
+    /// (`workpiece`, `description`) pairs in workpiece order — the aggregate
+    /// review composes its task context from the whole membership's orders
+    /// (ADR-0153): the sealed intent the critic judges the integrated diff
+    /// against.
+    fn list_dispatch_descriptions(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<(String, String)>>;
     /// Record the review critic's findings for (`bloom`, `workpiece`) (#3656) —
     /// what a Refine re-entry is directed by. Last-writer-wins on the key: a
     /// newer review's findings supersede older ones.
@@ -398,6 +404,15 @@ impl StoreBackend for SqliteStore {
         let mut rows = stmt.query_map(rusqlite::params![bloom, workpiece], |row| row.get::<_, String>(0))?;
         // The (bloom, workpiece) pair is the primary key, so at most one row.
         rows.next().transpose()
+    }
+
+    fn list_dispatch_descriptions(&mut self, bloom: &[u8]) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT workpiece, description FROM dispatch_description WHERE bloom = ?1 ORDER BY workpiece")?;
+        let rows =
+            stmt.query_map(rusqlite::params![bloom], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        rows.collect()
     }
 
     fn record_review_findings(&mut self, bloom: &[u8], workpiece: &str, findings: &str) -> rusqlite::Result<()> {

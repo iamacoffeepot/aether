@@ -538,6 +538,62 @@ fn a_failing_terminal_verify_admits_attempt_completed_not_integrate() {
     ));
 }
 
+// ADR-0153 — an AggregateReview order's verdict admits as
+// Fact::AggregateReviewCompleted: a bloom-level fact with an empty implication
+// (the reducer expands it to every member on a fail). A failing verdict's
+// findings persist bloom-scoped under the empty workpiece key — the row every
+// re-opened member's Refine dispatch reads — and a passing verdict clears it.
+#[test]
+fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let tree = Digest::from_bytes([30; 32]);
+    let mut record = dispatch_record("n-agg", bloom, &WorkpieceId(String::new()), tree, tree);
+    record.stage = StageId::AggregateReview;
+    record_dispatch(&mut store, &record).unwrap();
+
+    let failing = UploadedEvidence {
+        nonce: Nonce("n-agg".to_owned()),
+        subject: tree,
+        verdict: StageVerdict::ReviewFinding,
+        detail: Digest::from_bytes([7; 32]),
+        candidate: None,
+        findings: Some("pillar 2: the members disagree about the tick order".to_owned()),
+    };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &failing).unwrap() else {
+        panic!("a matching aggregate verdict is admitted");
+    };
+    let Fact::AggregateReviewCompleted { bloom: reviewed, passed, implicated, .. } = &admission.event.fact else {
+        panic!("an AggregateReview order admits AggregateReviewCompleted, got {:?}", admission.event.fact);
+    };
+    assert_eq!(*reviewed, bloom);
+    assert!(!*passed, "a ReviewFinding verdict fails the gate");
+    assert!(implicated.is_empty(), "the intake names no members — the reducer expands the empty implication");
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap().as_deref(),
+        Some("pillar 2: the members disagree about the tick order"),
+        "a failing aggregate verdict's findings persist bloom-scoped",
+    );
+
+    // A second (delta-confirm) order whose passing verdict clears the bloom row.
+    let mut second = dispatch_record("n-agg2", bloom, &WorkpieceId(String::new()), tree, tree);
+    second.stage = StageId::AggregateReview;
+    record_dispatch(&mut store, &second).unwrap();
+    let passing = UploadedEvidence {
+        nonce: Nonce("n-agg2".to_owned()),
+        subject: tree,
+        verdict: StageVerdict::Approved,
+        detail: Digest::from_bytes([8; 32]),
+        candidate: None,
+        findings: None,
+    };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &passing).unwrap() else {
+        panic!("the passing aggregate verdict is admitted");
+    };
+    assert!(matches!(&admission.event.fact, Fact::AggregateReviewCompleted { passed: true, .. }));
+    assert_eq!(store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap(), None, "the pass clears the bloom row");
+}
+
 #[test]
 fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
     // A well-formed dispatch only ever carries a dispatched member stage
