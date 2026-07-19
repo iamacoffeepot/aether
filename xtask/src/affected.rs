@@ -188,9 +188,10 @@ fn select(
 /// selected tests: the chassis package's scenario tests execute component
 /// wasm, a wasm-source crate's own tests may read its wasm, and a crate
 /// that depends on a wasm source can execute that source's wasm at test
-/// time (issue #3617 — `aether-bloomery-host`'s control-loop tests run
-/// `aether-bloomery`'s control-core wasm and hard-fail under
-/// `AETHER_REQUIRE_RUNTIME` when it was not pre-built).
+/// time (issue #3617 — the original such consumer was `aether-bloomery-host`
+/// running `aether-bloomery`'s control-core wasm; that retired when the control
+/// core became a native cap, but the rule stays generic for any future consumer
+/// that would hard-fail under `AETHER_REQUIRE_RUNTIME` without the pre-build).
 fn derive_wasm_needed(
     packages: &BTreeSet<String>,
     wasm_sources: &BTreeSet<String>,
@@ -311,11 +312,14 @@ mod tests {
 
     #[test]
     fn wasm_needed_covers_consumers_beyond_the_chassis() {
-        // The canary shape from issue #3617: aether-bloomery-host is not
-        // the chassis and not a wasm source, but its tests execute
-        // aether-bloomery's control-core wasm — deriving wasm_needed from
-        // chassis membership alone skipped the dist pre-build and
-        // hard-failed under AETHER_REQUIRE_RUNTIME.
+        // The invariant from issue #3617: a crate that is neither the chassis
+        // nor a wasm source, but whose tests execute a wasm source's component at
+        // runtime, still needs the dist pre-build — deriving wasm_needed from
+        // chassis membership alone would skip it and hard-fail under
+        // AETHER_REQUIRE_RUNTIME. (The original instance was aether-bloomery-host
+        // running aether-bloomery's control-core wasm; that retired when the
+        // control core became a native cap, so the labels below are illustrative
+        // — the generic rule stays for any future such consumer.)
         let wasm_sources = string_set(&["aether-bloomery"]);
         let wasm_consumers = string_set(&["aether-bloomery-host"]);
         assert!(

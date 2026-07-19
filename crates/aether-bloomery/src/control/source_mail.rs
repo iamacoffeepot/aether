@@ -8,7 +8,7 @@
 //! *defined here* in `aether-bloomery` rather
 //! than in `aether-bloomery-host` alongside the rest of the `aether.source.*`
 //! family, for the same reason the store's [`Commit`](super::Commit) family
-//! lives here: the wasm [`ControlCore`](super::ControlCore) actor's `on_admit`
+//! lives here: the native `ControlCore` cap's `on_admit`
 //! must construct and send them (the seal/supersede/release interposition,
 //! ADR-0150 §The claim registry), and `aether-bloomery-host` depends on
 //! `aether-bloomery`, so a reverse edge would be a package cycle. Defining them

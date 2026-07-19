@@ -8,7 +8,7 @@
 use clap::Parser;
 
 use crate::artifacts::ArtifactsOverlay;
-use crate::bloomery::chassis::{ControlCoreOverlay, HttpPortOverlay, RpcPortOverlay};
+use crate::bloomery::chassis::{HttpPortOverlay, RpcPortOverlay};
 use crate::bloomery::mirror::GithubMirrorOverlay;
 use crate::session::SessionOverlay;
 use crate::signing::SigningOverlay;
@@ -58,11 +58,6 @@ pub struct BloomeryCli {
     /// `aether.signing` capability verifies answer signatures against.
     #[command(flatten)]
     pub signing: SigningOverlay,
-
-    /// `--control-core-wasm` shadows `AETHER_CONTROL_CORE_WASM` — the control-core
-    /// component wasm to autoload at boot (unset → no autoload).
-    #[command(flatten)]
-    pub control_core: ControlCoreOverlay,
 
     /// Print this binary's `BinaryManifest` (chassis kind, linked caps, build
     /// provenance) as JSON and exit before boot (ADR-0115). The hub's binary

@@ -3,7 +3,7 @@
 //! land, or boot reconcile implies, and how a `Held` refusal maps back into the
 //! reducer's own refusal vocabulary.
 //!
-//! The wasm [`ControlCore`](super::ControlCore) actor is only the sender; every
+//! The native `ControlCore` cap is only the sender; every
 //! decision here is a pure function of the snapshot and the event's decisions.
 //! That split is what makes the interposition's enforcement and reconcile
 //! decisions testable without a wasm host: `aether-bloomery-host`'s
@@ -44,7 +44,7 @@ pub enum ReconcileOp {
 }
 
 /// The boot reconcile decision for one replayed bloom record — the walk
-/// [`ControlCore`](super::ControlCore) drives after journal replay maps each
+/// `ControlCore` drives after journal replay maps each
 /// record through this and sends what comes back. Statuses through the
 /// [`is_active_unlanded`] predicate re-assert (the same predicate the V1 seal
 /// guard reads, so the two never drift); `Landed` re-releases; a `Superseded`

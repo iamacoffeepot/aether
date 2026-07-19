@@ -3,19 +3,14 @@
 //! bloom lifecycle over raw HTTP the way an operator's `curl` would — stage
 //! workpieces, shape and seal a draft, read the sealed bloom / view document /
 //! journal, and 404 a missing artifact. No typed-mail RPC vocabulary is used;
-//! every request is plain HTTP against the `aether.bloomery.api` router.
-//!
-//! Like `control_loop.rs`, the write / live-read half needs the control-core
-//! wasm pre-built (CI's "Pre-build component wasm" step); a dev box that hasn't
-//! built it skips cleanly unless `AETHER_REQUIRE_RUNTIME` is set.
+//! every request is plain HTTP against the `aether.bloomery.api` router. The
+//! control core is a native capability mounted into the chassis at boot, so the
+//! bin comes up with it already live and the write / live-read half always runs.
 
 #![allow(clippy::unwrap_used)]
-// The wasm-availability skip prints a diagnostic and reads `AETHER_REQUIRE_RUNTIME`
-// — test-harness controls, not cap config (the `control_loop.rs` precedent).
-#![allow(clippy::print_stderr)]
 #![allow(clippy::disallowed_methods)]
-// Test-harness ergonomics: fully-qualified std paths in a one-off client, a
-// request head assembled with `format!`, and an explicit skip-panic.
+// Test-harness ergonomics: fully-qualified std paths in a one-off client and a
+// request head assembled with `format!`.
 #![allow(clippy::absolute_paths)]
 #![allow(clippy::format_push_string)]
 #![allow(clippy::format_collect)]
@@ -23,10 +18,9 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
-use std::{env, thread};
 
 use aether_bloomery::{
     BloomDraft, Digest, Evidence, EvidenceKind, KeyId, Membership, Provenance, SignatureEnvelope, StageCatalog,
@@ -144,19 +138,6 @@ fn owner_allowlist() -> String {
     format!("owner:{hex}")
 }
 
-/// Locate the control-core wasm artifact, preferring `release` over `debug`.
-fn control_core_wasm() -> Option<PathBuf> {
-    let bin = PathBuf::from(env!("CARGO_BIN_EXE_bloomery"));
-    let target = bin.parent()?.parent()?;
-    for profile in ["release", "debug"] {
-        let candidate = target.join("wasm32-unknown-unknown").join(profile).join("aether_bloomery.wasm");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
 /// Reserve a free localhost port by binding `:0`, then release it for the bin to
 /// claim (a small race the connect-retry loop tolerates).
 fn free_port() -> u16 {
@@ -166,14 +147,13 @@ fn free_port() -> u16 {
 
 /// Fork the `bloomery` bin with the HTTP ingress and control core autoloaded,
 /// pointing the pre-seal approve gate at `policy_path` (#3583).
-fn spawn(http_port: u16, rpc_port: u16, wasm: &PathBuf, policy_path: &str) -> Child {
+fn spawn(http_port: u16, rpc_port: u16, policy_path: &str) -> Child {
     Command::new(env!("CARGO_BIN_EXE_bloomery"))
         .env("AETHER_HTTP_PORT", http_port.to_string())
         .env("AETHER_RPC_PORT", rpc_port.to_string())
         .env("AETHER_STORE_PATH", ":memory:")
         .env("AETHER_SIGNING_ALLOWLIST", owner_allowlist())
         .env("AETHER_APPROVAL_POLICY_FILE", policy_path)
-        .env("AETHER_CONTROL_CORE_WASM", wasm)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -328,19 +308,11 @@ fn assert_gate_fails_closed(http_port: u16, seal_path: &str) {
 
 #[test]
 fn rest_api_drives_a_bloom_end_to_end() {
-    let Some(wasm) = control_core_wasm() else {
-        if env::var("AETHER_REQUIRE_RUNTIME").is_ok() {
-            panic!("control-core wasm not built but AETHER_REQUIRE_RUNTIME is set");
-        }
-        eprintln!("skipping rest_api_drives_a_bloom_end_to_end: control-core wasm not built");
-        return;
-    };
-
     let http_port = free_port();
     let rpc_port = free_port();
     // The gate loads this policy at init; kept alive for the child's lifetime.
     let (_policy_dir, policy_path) = test_policy();
-    let mut child = spawn(http_port, rpc_port, &wasm, &policy_path);
+    let mut child = spawn(http_port, rpc_port, &policy_path);
 
     // Run the whole flow in a closure so a panic still reaps the child.
     let result = std::panic::catch_unwind(|| {
@@ -496,22 +468,13 @@ fn mixed_auto_and_above_auto_seal_admits_when_verified() {
 }
 
 /// Boot the `bloomery` bin, wait for both readiness signals (`/drafts` for the
-/// HTTP router, `/view` for the loaded control core), run `body` against its HTTP
-/// port inside a panic guard, then reap the child. Skips cleanly when the
-/// control-core wasm is not built (unless `AETHER_REQUIRE_RUNTIME` is set).
-fn run_with_bloomery(label: &str, body: impl FnOnce(u16) + std::panic::UnwindSafe) {
-    let Some(wasm) = control_core_wasm() else {
-        if env::var("AETHER_REQUIRE_RUNTIME").is_ok() {
-            panic!("control-core wasm not built but AETHER_REQUIRE_RUNTIME is set");
-        }
-        eprintln!("skipping {label}: control-core wasm not built");
-        return;
-    };
-
+/// HTTP router, `/view` for the live control core), run `body` against its HTTP
+/// port inside a panic guard, then reap the child.
+fn run_with_bloomery(_label: &str, body: impl FnOnce(u16) + std::panic::UnwindSafe) {
     let http_port = free_port();
     let rpc_port = free_port();
     let (_policy_dir, policy_path) = test_policy();
-    let mut child = spawn(http_port, rpc_port, &wasm, &policy_path);
+    let mut child = spawn(http_port, rpc_port, &policy_path);
 
     let result = std::panic::catch_unwind(|| {
         wait_for_200(http_port, "/drafts");

@@ -30,6 +30,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{Admit, BloomId, Digest, Event, Fact, IdempotencyKey, LandOutcome, LandPayload};
 use aether_data::wire::{from_bytes, to_vec};
@@ -45,10 +46,10 @@ use crate::bloomery::SourceShell;
 use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
+use crate::control::ControlCore;
 use crate::store::{SqliteStore, StoreBackend};
 
-use aether_bloomery::{CONTROL_CORE_NAMESPACE, Topic};
-use aether_capabilities::resolve_embedded;
+use aether_bloomery::Topic;
 
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the land topic and issues each land. Zero-field — the timer carries only the
@@ -85,7 +86,7 @@ impl LandReactorState {
         Self {
             source,
             store,
-            control_mailbox: resolve_embedded(CONTROL_CORE_NAMESPACE),
+            control_mailbox: <ControlCore as Addressable>::resolve(0, ()),
             mailer,
             self_mailbox,
             _timer: None,
@@ -185,7 +186,7 @@ impl NativeActor for LandReactorCapability {
     fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<LandReactorState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
-        let control_mailbox = resolve_embedded(CONTROL_CORE_NAMESPACE);
+        let control_mailbox = <ControlCore as Addressable>::resolve(0, ());
 
         // Unconfigured → disabled: no shell, no store, no timer. The land outbox
         // accumulates and drains once a token/owner/repo is supplied.

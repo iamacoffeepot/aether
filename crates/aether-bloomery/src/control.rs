@@ -1,24 +1,24 @@
 //! The control loop — admitted events driven through the reducer with
 //! boot-time journal replay (ADR-0149 §The control core, §Migration step 1).
 //!
-//! This module carries two things: the control-plane mail vocabulary (always
-//! compiled, so both the native host and the wasm control actor share one
-//! definition), and — behind the `runtime` feature — the [`ControlCore`] wasm
-//! actor that owns the live [`Snapshot`](crate::reduce::Snapshot), drives
-//! [`reduce`](crate::reduce::reduce), and commits decisions through the
-//! `aether.store` capability.
+//! This module carries the control-plane mail vocabulary — the
+//! `aether.bloomery.{admit,query}` ingress plus the store/source transact-mails
+//! the control core drives — always compiled so every side shares one
+//! definition. The control core that owns the live
+//! [`Snapshot`](crate::reduce::Snapshot), drives [`reduce`](crate::reduce::reduce),
+//! and commits through `aether.store` is a **native** capability in
+//! `aether-bloomery-host` (ADR-0149 §The boundary, amended); this crate is the
+//! pure leaf it and the GitHub adapter both depend on.
 //!
-//! # Why the store transact-mails the actor drives live here
+//! # Why the store transact-mails live here
 //!
 //! [`Commit`] and the [`ReplayJournal`] family are the store's own
-//! transact-mails (ADR-0149 §The boundary), but they are *defined* here in
-//! `aether-bloomery` rather than in `aether-bloomery-host` alongside the rest
-//! of the `aether.store.*` family. The wasm [`ControlCore`] actor lives in this
-//! crate and must construct and send them; `aether-bloomery-host` depends on
-//! `aether-bloomery` (for the reducer and value vocabulary), so the reverse
-//! edge would be a package cycle. Defining these kinds here keeps one
-//! definition both sides share — the host's `StoreCapability` imports them
-//! inward, cycle-free, exactly as it imports [`Event`](crate::reduce::Event).
+//! transact-mails (ADR-0149 §The boundary), defined here in `aether-bloomery`
+//! rather than in `aether-bloomery-host` alongside the rest of the
+//! `aether.store.*` family, so the value layer and the host's store + control
+//! caps share one definition. The wire contract is the `#[kind(name = "…")]`
+//! literal wherever the type is declared, and the host's `StoreCapability`
+//! imports them inward exactly as it imports [`Event`](crate::reduce::Event).
 //! The wire contract is identical wherever the type is declared: the
 //! `#[kind(name = "…")]` literal is the identity.
 //!
@@ -581,8 +581,3 @@ pub use claim_plan::{
     HealOp, ReconcileOp, held_to_seal_error, held_to_supersede_error, plan_heals, reconcile_op, release_reclaim_mail,
     release_seal_mail, seal_claim_mail, transfer_seal_mail,
 };
-
-#[cfg(feature = "runtime")]
-mod actor;
-#[cfg(feature = "runtime")]
-pub use actor::ControlCore;

@@ -62,8 +62,6 @@ pub mod sign;
 pub mod study_report;
 pub mod values;
 
-#[cfg(feature = "runtime")]
-pub use control::ControlCore;
 pub use control::{
     Admit, AdmitResult, AggregateReviewPayload, CONTROL_CORE_NAMESPACE, ClaimResult, ClaimSeal, Commit, CommitResult,
     CompleteRelease, CompleteTransfer, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, IntegratePayload,
