@@ -110,7 +110,7 @@ impl NativeActor for RenderCapability {
     /// The `aether.<name>` form is the post-ADR-0074 Phase 5
     /// convention for chassis-owned mailboxes; ADR-0074 §Decision 7
     /// folded the camera mailbox into render under this name.
-    const NAMESPACE: &'static str = "aether.render";
+    const NAMESPACE: &'static str = RENDER_NAMESPACE;
 
     /// Allocate the accumulator state up front. Idempotent on the
     /// driver-facing side: every chassis main passes a fresh

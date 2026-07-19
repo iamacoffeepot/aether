@@ -56,7 +56,7 @@ impl NativeActor for HeadlessRenderCapability {
 
     type Config = ();
 
-    const NAMESPACE: &'static str = "aether.render";
+    const NAMESPACE: &'static str = RENDER_NAMESPACE;
 
     fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<HeadlessRenderCapabilityState, BootError> {
         let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {

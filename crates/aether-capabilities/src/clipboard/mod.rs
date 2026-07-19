@@ -9,6 +9,15 @@
 pub mod kinds;
 pub use kinds::*;
 
+// The single owner of the `aether.clipboard` mailbox name: the system-backed
+// `ClipboardCapability` and the fail-fast `HeadlessClipboardCapability` claim
+// the same identity, so both `impl`s reference this one const (via a `use`, the
+// `trampoline` / `EMBEDDED_SCOPE` idiom) instead of re-typing the literal — the
+// two chassis variants cannot drift apart. Always-on because the always-on
+// identity `Addressable` reads it. Enforced by the duplicate-`NAMESPACE` source
+// invariant (tests/source_invariants.rs).
+const CLIPBOARD_NAMESPACE: &str = "aether.clipboard";
+
 #[cfg(feature = "clipboard-runtime")]
 mod config;
 #[cfg(feature = "clipboard-runtime")]

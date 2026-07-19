@@ -18,7 +18,7 @@ impl NativeActor for HeadlessClipboardCapability {
     type State = HeadlessClipboardCapabilityState;
     type Config = ();
 
-    const NAMESPACE: &'static str = "aether.clipboard";
+    const NAMESPACE: &'static str = CLIPBOARD_NAMESPACE;
 
     fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<HeadlessClipboardCapabilityState, BootError> {
         Ok(HeadlessClipboardCapabilityState)

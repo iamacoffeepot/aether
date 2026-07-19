@@ -4,6 +4,7 @@
 //! `TestEchoReply` values. The whole module is `#[cfg(test)]` (gated at
 //! its `mod` declaration), so none of it ships in the cap's surface.
 
+use crate::engine::ENGINE_NAMESPACE;
 use crate::engine::kinds::{EngineAlive, EngineDied};
 use crate::rpc::server::test_echo::TestEchoReply;
 use aether_actor::actor;
@@ -35,7 +36,7 @@ pub struct EngineCapSink {
 #[actor(singleton)]
 impl NativeActor for EngineCapSink {
     type Config = EngineCapCells;
-    const NAMESPACE: &'static str = "aether.engine";
+    const NAMESPACE: &'static str = ENGINE_NAMESPACE;
 
     fn init(cells: EngineCapCells, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { cells })

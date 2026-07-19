@@ -162,7 +162,7 @@ impl NativeActor for EngineServer {
     /// supervised-fleet table plus the content-addressed artifact store.
     type State = EngineServerState;
     type Config = EngineConfig;
-    const NAMESPACE: &'static str = "aether.engine";
+    const NAMESPACE: &'static str = ENGINE_NAMESPACE;
 
     fn init(config: EngineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<EngineServerState, BootError> {
         // Build the hub-scoped store from `EngineConfig` (ADR-0090): the

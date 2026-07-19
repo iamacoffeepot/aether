@@ -63,7 +63,7 @@ impl NativeActor for ClipboardCapability {
     type State = ClipboardCapabilityState;
     type Config = ClipboardConfig;
 
-    const NAMESPACE: &'static str = "aether.clipboard";
+    const NAMESPACE: &'static str = CLIPBOARD_NAMESPACE;
 
     fn init(config: ClipboardConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<ClipboardCapabilityState, BootError> {
         let backend: Box<dyn ClipboardBackend> = match config {

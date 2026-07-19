@@ -45,6 +45,15 @@
 // where a sibling tick's producer mutates the buffer in between.
 #![allow(clippy::significant_drop_tightening)]
 
+// The single owner of the `aether.render` mailbox name: the GPU
+// `RenderCapability` and the GPU-less `HeadlessRenderCapability` claim the same
+// identity, so both `impl`s reference this one const (via a `use`, the
+// `trampoline` / `EMBEDDED_SCOPE` idiom) instead of re-typing the literal — the
+// two chassis variants cannot drift apart. Always-on because the always-on
+// identity `Addressable` reads it. Enforced by the duplicate-`NAMESPACE` source
+// invariant (tests/source_invariants.rs).
+const RENDER_NAMESPACE: &str = "aether.render";
+
 // The cap's drawing + texture mail kinds (ADR-0121). Always-on (the
 // `render` marker feature gates the whole module) so a wasm guest on the
 // marker-only `render` feature sees the kind types.
