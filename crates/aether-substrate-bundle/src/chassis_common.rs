@@ -32,7 +32,7 @@ use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
     AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig, EngineConfigLayer,
     GameGatewayCapability, GameGatewayConfig, GeminiCapability, GeminiConfig, HttpCapability, HttpServerCapability,
-    HttpServerConfig, InputCapability, InputConfig, LifecycleConfig, TcpCapability, TextCapability,
+    HttpServerConfig, InputCapability, InputConfig, LifecycleConfig, TcpCapability,
     http::HttpConfig,
     shared::contentgen::{ContentGenConfig, ContentGenConfigLayer},
 };
@@ -48,6 +48,7 @@ use aether_substrate::config::{
 };
 use aether_substrate::runtime::RUNTIME_KNOBS;
 use aether_substrate::runtime::lifecycle::FatalAborter;
+use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
 use confique::Config as _;
 use confique::meta::Meta;

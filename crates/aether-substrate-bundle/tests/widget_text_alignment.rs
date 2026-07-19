@@ -41,7 +41,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
-use aether_capabilities::text::{LoadFont, LoadFontResult};
 use aether_data::Kind;
 use aether_fs::NamespaceRoots;
 use aether_kinds::{
@@ -54,6 +53,7 @@ use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{init_save_sandbox, require_runtime},
 };
+use aether_text::{LoadFont, LoadFontResult};
 
 /// Panel origin and stack width (widget-local `(0, 0)` maps to this window
 /// point). Chosen so the whole stack fits the capture surface with margin.

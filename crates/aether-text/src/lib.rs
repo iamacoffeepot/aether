@@ -47,7 +47,7 @@ use aether_render::CreateTextureResult;
 
 // ADR-0121: the cap owns its mail kinds. Always-on + wasm-safe (only
 // `aether-data` + `serde`), re-exported so callers address them as
-// `aether_capabilities::text::DrawText`.
+// `aether_text::DrawText`.
 mod kinds;
 pub use kinds::*;
 
@@ -57,7 +57,7 @@ pub use kinds::*;
 /// emitted always-on by `#[actor]`. The state-bearing runtime
 /// (`TextCapabilityState`, which holds the `fontdue` font registry, the
 /// glyph atlas, and the request-context relay logic) lives behind the one
-/// `feature = "text-runtime"` gate, so a transport-only build never names
+/// `feature = "runtime"` gate, so a transport-only build never names
 /// `TextCapabilityState` nor pulls `fontdue` / `aether_substrate` through
 /// this cap.
 #[actor(singleton)]
@@ -67,12 +67,12 @@ pub struct TextCapability;
 // (NAMESPACE + per-handler `HandlesKind` markers + the singleton
 // name-inventory entry) from the `#[runtime] impl NativeActor` in
 // `runtime.rs`, all emitted always-on against the ZST. The behaviour and
-// state live in that runtime module, gated once by `feature = "text-runtime"`.
+// state live in that runtime module, gated once by `feature = "runtime"`.
 use aether_actor::actor;
 
 // The runtime half — the whole `fontdue` / `aether_substrate`-typed surface
 // (imports, `TextCapabilityState`, the `#[runtime] impl NativeActor`, the
 // helper methods) — lives in `runtime.rs`, gated once here. The struct-hosted
 // `#[actor(singleton)]` above reads this module off disk to lift the identity.
-#[cfg(feature = "text-runtime")]
+#[cfg(feature = "runtime")]
 mod runtime;

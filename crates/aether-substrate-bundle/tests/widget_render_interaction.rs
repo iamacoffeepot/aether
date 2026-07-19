@@ -43,7 +43,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
-use aether_capabilities::text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
 use aether_clipboard::{ClipboardCapability, GetClipboardText, GetClipboardTextResult};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 use aether_fs::NamespaceRoots;
@@ -72,6 +71,7 @@ use aether_substrate_bundle::test_bench::{
 };
 use aether_substrate_bundle::visual::{Image, decode_png};
 use aether_test_fixtures_kinds::{DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig};
+use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
 
 /// Panel origin and stack width (widget-local `(0, 0)` maps to this window
 /// point), matching `widget_set` / `widget_text_alignment`.

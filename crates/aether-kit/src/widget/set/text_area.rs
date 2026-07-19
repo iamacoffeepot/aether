@@ -8,11 +8,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::text::FontMetricsResult;
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use aether_kinds::{
     CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput, mouse_button,
 };
+use aether_text::FontMetricsResult;
 
 use crate::widget::set::{
     apply_text_control_state, apply_text_theme, pump_text_font_metrics, push_control_outlines, quad, release_left,

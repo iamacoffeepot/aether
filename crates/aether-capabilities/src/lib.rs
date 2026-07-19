@@ -66,12 +66,6 @@ pub mod lifecycle;
 pub mod rpc;
 pub mod tcp;
 pub mod test_bench;
-// `aether.text` cap (ADR-0105). CPU-only — composes the render texture
-// surface by mail — but feature-gated the two-layer way so a wasm
-// component can address it by type without pulling `fontdue` into the
-// wasm graph.
-#[cfg(feature = "text")]
-pub mod text;
 pub mod trampoline;
 
 // ADR-0050 `aether.anthropic` cap (issue 1014). `AnthropicConfig` is
@@ -130,8 +124,6 @@ pub use game::{GameGatewayCapability, PlayerSessionActor};
 pub use gemini::{GeminiCapability, GeminiConfig};
 pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;
-#[cfg(feature = "text")]
-pub use text::TextCapability;
 pub use trampoline::WasmTrampoline;
 #[cfg(feature = "runtime")]
 pub use trampoline::WasmTrampolineConfig;

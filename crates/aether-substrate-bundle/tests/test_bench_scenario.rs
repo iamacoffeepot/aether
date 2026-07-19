@@ -33,7 +33,6 @@
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use aether_capabilities::text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
 use aether_clipboard::{GetClipboardText, GetClipboardTextResult, SetClipboardText, SetClipboardTextResult};
 use aether_data::{Kind, MailboxId};
 use aether_fs::{Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult};
@@ -61,6 +60,7 @@ use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe,
     SetRender, TagSpawnQuery, TagSpawnReport,
 };
+use aether_text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary. Without the reference, the

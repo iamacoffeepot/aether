@@ -16,7 +16,7 @@
 //!
 //! Caret placement and pointer hit-testing are exact once the font's metrics
 //! settle: the field drives a single-flight
-//! [`FontMetricsRequest`](aether_capabilities::text::FontMetricsRequest) for its
+//! [`FontMetricsRequest`](aether_text::FontMetricsRequest) for its
 //! theme's font and measures against the resolved
 //! [`CachedFontMetrics`]. Until then it falls
 //! back to the proportional approximation as a bounded font-warm-up placement.
@@ -26,11 +26,11 @@
 //! keys.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::text::FontMetricsResult;
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_ENTER, KEY_LEFT, KEY_RIGHT};
 use aether_kinds::{
     CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput,
 };
+use aether_text::FontMetricsResult;
 use alloc::string::String;
 
 use crate::widget::set::{

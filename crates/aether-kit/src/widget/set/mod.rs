@@ -56,11 +56,10 @@ pub use virtual_list::VirtualListWidget;
 use alloc::vec::Vec;
 
 use aether_actor::WasmCtx;
-use aether_capabilities::TextCapability;
-use aether_capabilities::text::{FontMetricsRequest, FontRef};
 use aether_kinds::keycode::{KEY_ENTER, KEY_SPACE};
 use aether_kinds::{CachedFontMetrics, Modifiers, MouseButton, MouseButtonRelease, mouse_button};
 use aether_math::Rgba;
+use aether_text::{FontMetricsRequest, FontRef, TextCapability};
 
 use crate::widget::state::{InteractionState, emit_state_changed};
 use crate::widget::text_edit::{DisplayedEdit, FontMetricsAdapter, SingleLineLayout, TextEditState};

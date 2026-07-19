@@ -30,10 +30,13 @@ aether-actor = { path = "../aether-actor" }
 # marker face is off (`default-features = false`); the `host` feature the kit
 # forwards to turns on exactly the host surface, not the guest `runtime` SDK.
 aether-behavior = { path = "../aether-behavior", default-features = false, optional = true }
-aether-capabilities = { path = "../aether-capabilities", default-features = false, features = ["text"] }
+aether-capabilities = { path = "../aether-capabilities", default-features = false }
 # iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`.
 # kit is a wasm guest, so it takes the marker-only identity face.
 aether-render = { path = "../aether-render", default-features = false }
+# iamacoffeepot/aether#3727: the text cap was extracted to `aether-text`.
+# kit is a wasm guest, so it takes the marker-only identity face.
+aether-text = { path = "../aether-text", default-features = false }
 aether-clipboard = { path = "../aether-clipboard", default-features = false }
 # The `aether.fs` cap (iamacoffeepot/aether#3706) — kit loads meshes / worlds
 # through it. Marker face only (kit is a wasm component addressing fs by mail).
