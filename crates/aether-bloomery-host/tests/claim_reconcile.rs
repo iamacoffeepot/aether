@@ -122,6 +122,19 @@ fn land(snapshot: Snapshot, spec: &BloomSpec, tree: u8, head: u8) -> (Snapshot, 
         &snapshot,
         &event("resolve", Fact::Resolve { bloom, tree: digest(tree), head: digest(head), lineage: vec![] }),
     );
+    // The fold's aggregate review must pass before the bloom resolves (ADR-0153).
+    (snapshot, _) = step(
+        &snapshot,
+        &event(
+            "aggregate-review-pass",
+            Fact::AggregateReviewCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: digest(tree), kind: EvidenceKind::ReviewFinding, detail: digest(202) },
+                implicated: vec![],
+            },
+        ),
+    );
     let (snapshot, decisions) = step(&snapshot, &event("land", Fact::Land { bloom, new_head: digest(head) }));
     assert!(
         matches!(decisions.outcome, aether_bloomery::Outcome::Landed(_)),

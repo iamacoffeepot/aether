@@ -14,11 +14,13 @@
 
 mod common;
 
-use aether_bloomery::{Decisions, Digest, Event, Fact, Outcome, Snapshot, reduce};
+use aether_bloomery::{Decisions, Digest, Event, Evidence, EvidenceKind, Fact, Outcome, Snapshot, reduce};
 use aether_data::wire::{from_bytes, to_vec};
 use common::{claim, digest, draft, event, membership};
 
-/// The canonical five-stage bloom, as the journal of admitted events.
+/// The canonical bloom, as the journal of admitted events: seal → integrate
+/// each member → resolve (the fold, which dispatches the aggregate review) →
+/// the passing aggregate verdict (which resolves) → land (ADR-0153).
 fn script() -> Vec<Event> {
     let members = vec![membership("alpha", 10), membership("beta", 11)];
     let spec = draft(1, members).seal();
@@ -30,6 +32,15 @@ fn script() -> Vec<Event> {
         event(
             "resolve",
             Fact::Resolve { bloom, tree: digest(30), head: digest(40), lineage: vec![digest(20), digest(21)] },
+        ),
+        event(
+            "aggregate-review",
+            Fact::AggregateReviewCompleted {
+                bloom,
+                passed: true,
+                evidence: Evidence { subject: digest(30), kind: EvidenceKind::ReviewFinding, detail: digest(50) },
+                implicated: vec![],
+            },
         ),
         event("land", Fact::Land { bloom, new_head: digest(40) }),
     ]
@@ -58,11 +69,12 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
     assert!(matches!(decisions[0].outcome, Outcome::Sealed(_)));
     assert!(matches!(decisions[1].outcome, Outcome::Integrated { .. }));
     assert!(matches!(decisions[2].outcome, Outcome::Integrated { .. }));
-    match &decisions[3].outcome {
+    assert!(matches!(decisions[3].outcome, Outcome::AggregateReviewDispatched { roll: 1, .. }));
+    match &decisions[4].outcome {
         Outcome::Resolved(resolved) => assert_eq!(resolved.resolution_claims.len(), 2),
         other => panic!("expected Resolved, got {other:?}"),
     }
-    assert!(matches!(decisions[4].outcome, Outcome::Landed(_)));
+    assert!(matches!(decisions[5].outcome, Outcome::Landed(_)));
     assert_eq!(snapshot.mainline, digest(40));
 }
 
@@ -112,9 +124,15 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // cursor (a failing Review re-enters Refine instead of re-rolling the critic),
 // so every cursor-carrying decision's wire shape changed — an intended,
 // coordinated break, recomputed.
+// Repinned again for ADR-0153: `Fact::Resolve` now records the fold and
+// dispatches the whole-bloom aggregate review instead of resolving directly,
+// and the appended `Fact::AggregateReviewCompleted`'s passing verdict is what
+// emits `SetResolved` + `DispatchLand` — the script gained the aggregate hop
+// and the resolve step's decided output changed shape, an intended,
+// coordinated break, recomputed.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0x49, 0xdf, 0xfe, 0xe0, 0x85, 0x23, 0x7c, 0x04, 0x1f, 0x83, 0xc2, 0xc7, 0x0e, 0x09, 0x21, 0xc9, 0x28, 0x72, 0x90,
-    0xfa, 0xc1, 0x63, 0xcb, 0xab, 0x9c, 0xdf, 0xc5, 0x51, 0xe0, 0x4b, 0xf8, 0x00,
+    0x0a, 0xe9, 0x5d, 0xb6, 0x1b, 0xd2, 0x6b, 0x8a, 0xd2, 0xae, 0x4b, 0xa4, 0x73, 0xa4, 0x96, 0x38, 0xc3, 0x33, 0x82,
+    0x8e, 0xe2, 0x6d, 0x39, 0x41, 0x1f, 0xf8, 0x21, 0xeb, 0xc0, 0xd0, 0x8d, 0x2b,
 ];
 
 #[test]

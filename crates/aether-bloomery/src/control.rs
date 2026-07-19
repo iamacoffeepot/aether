@@ -104,6 +104,12 @@ pub const TOPIC_LAND: &str = "topic:land";
 /// bloom's integration branch.
 pub const TOPIC_INTEGRATE: &str = "topic:integrate";
 
+/// The outbox topic a whole-bloom aggregate-review dispatch enqueues under
+/// (ADR-0153), so the host review consumer drains it and runs the
+/// `review.critic` lane against the integrated head under a bloom-level order
+/// record.
+pub const TOPIC_AGGREGATE_REVIEW: &str = "topic:aggregate_review";
+
 /// The control-core actor's namespace — the sole owner of the literal.
 /// Defined here (always compiled) and forward-fed into the `runtime`-gated
 /// actor's `NAMESPACE` (the `EMBEDDED_SCOPE` forward-feed precedent in
@@ -174,6 +180,25 @@ pub struct IntegratePayload {
     pub base: Digest,
     /// Every member's claimed candidate tree, in member order.
     pub candidates: Vec<Digest>,
+}
+
+/// The whole-bloom aggregate-review dispatch outbox payload (ADR-0153): the
+/// reviewed bloom, the review-lane [`Transformation`] (its `inputs[0]` the
+/// integrated tree the returned evidence binds, its `checkout` the landable
+/// head the critic checks out), and which review pass this is. The wasm
+/// control actor enqueues it under [`TOPIC_AGGREGATE_REVIEW`] from a
+/// [`Decision::DispatchAggregateReview`](crate::reduce::Decision::DispatchAggregateReview).
+/// Defined here (always compiled) so the host consumer can decode it inward,
+/// cycle-free — like [`OutboxPayload`] / [`DispatchPayload`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AggregateReviewPayload {
+    /// The reviewed bloom.
+    pub bloom: Digest,
+    /// The review-lane transformation to submit.
+    pub transformation: Transformation,
+    /// Which review pass this dispatches (`1` the full review, `2` the
+    /// delta-confirm).
+    pub roll: u32,
 }
 
 /// The land dispatch outbox payload (ADR-0149 §The boundary, migration step 3):

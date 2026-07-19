@@ -365,6 +365,27 @@ impl Transformation {
             description: None,
         }
     }
+
+    /// The whole-bloom aggregate-review transformation (ADR-0153): the
+    /// `review.critic` lane dispatched once per bloom against the integrated
+    /// head — `subject` is the integrated tree digest the returned evidence
+    /// binds, `checkout` the landable head commit the critic checks out. The
+    /// same lane shape as the member `Review` egress it replaces (restricted
+    /// egress to the model API); the sealed intent the critic judges against
+    /// rides the advisory description the host threads on at dispatch.
+    #[must_use]
+    pub fn for_aggregate_review(subject: Digest, checkout: Digest) -> Self {
+        Self {
+            command: String::from(REVIEW_CRITIC_COMMAND),
+            inputs: alloc::vec![subject],
+            checkout,
+            outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
+            image: String::from("iama/review-claude:1"),
+            limits: Budget::default(),
+            network: NetworkProfile::Restricted,
+            description: None,
+        }
+    }
 }
 
 /// A captured candidate — the source tree a model-lane attempt produced, as the

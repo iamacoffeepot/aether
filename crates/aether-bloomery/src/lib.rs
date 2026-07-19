@@ -65,11 +65,11 @@ pub mod values;
 #[cfg(feature = "runtime")]
 pub use control::ControlCore;
 pub use control::{
-    Admit, AdmitResult, CONTROL_CORE_NAMESPACE, ClaimResult, ClaimSeal, Commit, CommitResult, CompleteRelease,
-    CompleteTransfer, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, IntegratePayload, JournalRecord,
-    LandPayload, MembershipMutation, OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal, ReplayJournal,
-    ReplayJournalResult, TOPIC_DISPATCH, TOPIC_INTEGRATE, TOPIC_LAND, TOPIC_LANDING_RECEIPT, TOPIC_REDISPATCH,
-    TransferSeal,
+    Admit, AdmitResult, AggregateReviewPayload, CONTROL_CORE_NAMESPACE, ClaimResult, ClaimSeal, Commit, CommitResult,
+    CompleteRelease, CompleteTransfer, DispatchPayload, EnumerateClaims, EnumerateClaimsResult, IntegratePayload,
+    JournalRecord, LandPayload, MembershipMutation, OutboxPayload, Query, QueryResult, RedispatchPayload, ReleaseSeal,
+    ReplayJournal, ReplayJournalResult, TOPIC_AGGREGATE_REVIEW, TOPIC_DISPATCH, TOPIC_INTEGRATE, TOPIC_LAND,
+    TOPIC_LANDING_RECEIPT, TOPIC_REDISPATCH, TransferSeal,
 };
 pub use digest::{ContentAddressed, Digest, digest_of};
 pub use ids::{BloomId, IdempotencyKey, KeyId, Nonce, StageId, WorkpieceId};
@@ -82,9 +82,9 @@ pub use port::{
     PendingDecisionView, ProjectionBackend, SourceBackend, SourceSnapshot, ViewDocument, WorkHandle, WorkOrder,
 };
 pub use reduce::{
-    AdmitEvidenceError, AdoptAnswerError, AttemptCompletedError, BaseMismatch, BloomRecord, BloomStatus, Decision,
-    Decisions, Event, Fact, IntegrateError, LandError, Outcome, ResolveError, SealConflict, SealError, Snapshot,
-    StageProgress, SupersedeError, is_active_unlanded, reduce, view_of,
+    AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AttemptCompletedError, BaseMismatch, BloomRecord,
+    BloomStatus, Decision, Decisions, Event, Fact, FoldedIntegration, IntegrateError, LandError, Outcome, ResolveError,
+    SealConflict, SealError, Snapshot, StageProgress, SupersedeError, is_active_unlanded, reduce, view_of,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use sign::Ed25519KeyProvider;

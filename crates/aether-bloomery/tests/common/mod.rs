@@ -97,6 +97,18 @@ pub fn sealed_and_resolved(mainline: u8, members: Vec<Membership>, tree: u8) -> 
         Fact::Resolve { bloom, tree: digest(tree), head: digest(tree.wrapping_add(1)), lineage: vec![] },
     );
     snapshot = snapshot.apply(&resolve, &reduce(&snapshot, &resolve));
+    // The fold dispatches the whole-bloom aggregate review (ADR-0153); a
+    // passing verdict bound to the integrated tree is what resolves the bloom.
+    let verdict = event(
+        "aggregate-review-pass",
+        Fact::AggregateReviewCompleted {
+            bloom,
+            passed: true,
+            evidence: Evidence { subject: digest(tree), kind: EvidenceKind::ReviewFinding, detail: digest(203) },
+            implicated: vec![],
+        },
+    );
+    snapshot = snapshot.apply(&verdict, &reduce(&snapshot, &verdict));
     (snapshot, spec)
 }
 
@@ -120,6 +132,8 @@ pub fn splice_bloom(snapshot: &mut Snapshot, spec: &BloomSpec, status: BloomStat
             evidence: Vec::new(),
             holds: BTreeSet::new(),
             progress: BTreeMap::new(),
+            integration: None,
+            aggregate_rolls: 0,
             superseded_by: None,
         },
     );

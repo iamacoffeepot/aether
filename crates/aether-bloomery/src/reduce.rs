@@ -94,8 +94,35 @@ pub struct BloomRecord {
     /// in-flight line position. A member drops out of the map only implicitly (it
     /// never does in V1; the record is discarded whole on supersession).
     pub progress: BTreeMap<WorkpieceId, StageProgress>,
+    /// The integration fold's output held while the bloom's aggregate review
+    /// runs (ADR-0153): set when [`Fact::Resolve`] verifies the claim set and
+    /// dispatches the review, consumed by a passing
+    /// [`Fact::AggregateReviewCompleted`] (which resolves from it), and
+    /// cleared when a failing verdict re-opens members — the fold is stale the
+    /// moment any member's claim is revoked. `None` outside that window.
+    pub integration: Option<FoldedIntegration>,
+    /// How many aggregate-review verdicts this bloom has consumed — the
+    /// two-pass ceiling's cursor (ADR-0153). `0` before the first verdict;
+    /// after a first failing verdict the re-fold dispatches the delta-confirm,
+    /// and a second failing verdict wedges the bloom: the machine never buys a
+    /// third roll.
+    pub aggregate_rolls: u32,
     /// If superseded, the successor that replaced this bloom.
     pub superseded_by: Option<BloomId>,
+}
+
+/// The integration fold's output — the axes [`Fact::Resolve`] carries, held on
+/// the bloom record while the whole-bloom aggregate review judges the
+/// integrated head (ADR-0153).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct FoldedIntegration {
+    /// The final integrated tree digest — the subject the review evidence binds.
+    pub tree: Digest,
+    /// The landable head commit's digest — the checkout the critic reviews and
+    /// the head a subsequent land swaps mainline onto.
+    pub head: Digest,
+    /// The integration lineage.
+    pub lineage: Vec<Digest>,
 }
 
 /// One member's position in the per-member line: the stage it currently sits at
@@ -268,6 +295,29 @@ pub enum Fact {
         /// on a passing completion.
         candidate: Option<CandidateRef>,
     },
+    /// A dispatched whole-bloom aggregate review completed with evidence
+    /// (ADR-0153). Admitted when the review the fold dispatched returns a
+    /// verdict against the integrated head: a passing one resolves the bloom
+    /// from its held [`FoldedIntegration`]; a failing one routes every
+    /// implicated member back into `Refine` (revoking its claim — the bloom
+    /// cannot resolve while any member is re-open) until the two-pass ceiling
+    /// wedges the bloom. Appended past [`Fact::AttemptCompleted`] so the prior
+    /// facts' wire discriminants are unchanged.
+    AggregateReviewCompleted {
+        /// The reviewed bloom.
+        bloom: BloomId,
+        /// The review gate's pass/fail verdict.
+        passed: bool,
+        /// The review evidence, bound to the integrated tree it judged — the
+        /// reducer refuses a verdict whose subject is not the held fold's
+        /// tree, so a stale verdict cannot act on a newer integration.
+        evidence: Evidence,
+        /// The members owning the frozen findings a failing verdict routes to
+        /// (ADR-0153 §Findings freeze) — each re-enters `Refine` once. Empty
+        /// on a passing verdict; a failing verdict naming no member is
+        /// refused (findings with no owner route nowhere).
+        implicated: Vec<WorkpieceId>,
+    },
 }
 
 /// The result of reducing one event: an outcome plus the ordered effects that
@@ -392,6 +442,64 @@ pub enum Outcome {
         /// the repair ceiling's cursor (wedges at Verify's retry budget).
         rolls: u32,
     },
+    /// A verified integration fold dispatched the whole-bloom aggregate review
+    /// (ADR-0153) — every member's claim checked out and the review lane now
+    /// judges the integrated head. Appended so the prior outcomes' wire
+    /// discriminants are unchanged, like every variant below.
+    AggregateReviewDispatched {
+        /// The bloom under review.
+        bloom: BloomId,
+        /// Which review pass was dispatched (`1` the full review, `2` the
+        /// delta-confirm).
+        roll: u32,
+    },
+    /// A failing aggregate review routed its implicated members back into
+    /// Refine (ADR-0153 §Findings freeze): each claim is revoked and the bloom
+    /// cannot resolve until every re-opened member re-verifies and
+    /// re-integrates, after which the re-fold dispatches the delta-confirm.
+    AggregateReviewReentered {
+        /// The reviewed bloom.
+        bloom: BloomId,
+        /// The re-opened members, in the verdict's order.
+        members: Vec<WorkpieceId>,
+        /// The aggregate-review verdicts consumed, this one included.
+        rolls: u32,
+    },
+    /// A failing aggregate review hit the two-pass ceiling: the bloom wedges —
+    /// no third roll of the dice; the contested residue routes to the owner
+    /// (the bloom-scope park is the ADR-0153 follow-on; supersession is the
+    /// standing escape).
+    AggregateReviewWedged {
+        /// The wedged bloom.
+        bloom: BloomId,
+        /// The verdicts consumed, this one included.
+        rolls: u32,
+    },
+    /// An aggregate-review completion was refused.
+    AggregateReviewRejected(AggregateReviewError),
+}
+
+/// Why an aggregate-review completion was refused (ADR-0153).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum AggregateReviewError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The bloom holds no folded integration — no review was dispatched, or a
+    /// failing verdict already cleared the stale fold.
+    NoPendingIntegration,
+    /// The verdict's evidence binds a tree other than the held fold's — a
+    /// stale verdict from a superseded fold, never acted on.
+    SubjectMismatch {
+        /// The held fold's integrated tree.
+        expected: Digest,
+        /// The tree the verdict's evidence binds.
+        got: Digest,
+    },
+    /// A failing verdict implicated a workpiece that is not a member.
+    NotAMember(WorkpieceId),
+    /// A failing verdict implicated no member at all — findings with no owner
+    /// route nowhere, so the verdict is malformed.
+    NoImplicatedMembers,
 }
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -561,6 +669,50 @@ pub enum Decision {
         /// sequence, and the resolve's integration lineage.
         candidates: Vec<Digest>,
     },
+    /// Record (or clear) the folded integration held on the bloom while its
+    /// aggregate review runs (ADR-0153): a verified [`Fact::Resolve`] sets it,
+    /// a failing review verdict clears it (the fold is stale once a member's
+    /// claim is revoked). Appended so the prior decisions' wire discriminants
+    /// are unchanged.
+    RecordIntegration {
+        /// The bloom the fold is held on.
+        bloom: BloomId,
+        /// The fold to hold, or `None` to clear a stale one.
+        integration: Option<FoldedIntegration>,
+    },
+    /// Record the bloom's consumed aggregate-review verdict count — the
+    /// two-pass ceiling's cursor (ADR-0153).
+    RecordAggregateRoll {
+        /// The reviewed bloom.
+        bloom: BloomId,
+        /// The verdicts consumed so far, this one included.
+        rolls: u32,
+    },
+    /// Revoke a member's resolution claim (ADR-0153): a failing aggregate
+    /// review re-opens every implicated member, and a bloom with a revoked
+    /// claim cannot resolve until the member re-verifies and re-integrates.
+    RevokeResolution {
+        /// The bloom the claim is revoked on.
+        bloom: BloomId,
+        /// The re-opened member.
+        workpiece: WorkpieceId,
+    },
+    /// Dispatch the whole-bloom aggregate review against the integrated head
+    /// (ADR-0153) — the `review.critic` lane run once per bloom, judging the
+    /// whole diff against the sealed intent. A snapshot-inert outbox effect
+    /// like [`Decision::DispatchAttempt`]; the host wraps the transformation
+    /// in a work order under a bloom-level order record.
+    DispatchAggregateReview {
+        /// The reviewed bloom.
+        bloom: BloomId,
+        /// The review lane transformation: `inputs[0]` is the integrated tree
+        /// digest the returned evidence binds, `checkout` the landable head
+        /// commit the critic checks out.
+        transformation: Transformation,
+        /// Which review pass this dispatches (`1` the full review, `2` the
+        /// delta-confirm against the frozen finding set).
+        roll: u32,
+    },
 }
 
 /// One member already claimed by a foreign active bloom — the conflict that
@@ -665,6 +817,14 @@ pub enum ResolveError {
         /// An open question digest holding the bloom.
         question: Digest,
     },
+    /// The bloom has consumed its aggregate-review ceiling (ADR-0153): a fold
+    /// arriving past the two-pass budget is refused fail-closed rather than
+    /// buying a roll the vocabulary forbids. Appended so the prior variants'
+    /// wire discriminants are unchanged.
+    ReviewCeiling {
+        /// The verdicts already consumed.
+        rolls: u32,
+    },
 }
 
 /// Why an answer adoption was refused (ADR-0151).
@@ -752,6 +912,9 @@ pub fn reduce(snapshot: &Snapshot, event: &Event) -> Decisions {
             reduce_attempt_completed(snapshot, bloom, workpiece, *stage, *passed, evidence, *candidate)
         }
         Fact::Resolve { bloom, tree, head, lineage } => reduce_resolve(snapshot, bloom, tree, head, lineage),
+        Fact::AggregateReviewCompleted { bloom, passed, evidence, implicated } => {
+            reduce_aggregate_review_completed(snapshot, bloom, *passed, evidence, implicated)
+        }
         Fact::Land { bloom, new_head } => reduce_land(snapshot, bloom, new_head),
     }
 }
@@ -1295,30 +1458,157 @@ fn reduce_resolve(snapshot: &Snapshot, bloom: &BloomId, tree: &Digest, head: &Di
     // Every frozen member must carry a resolution claim before the bloom can
     // resolve — a resolved bloom carries a claim for every member (ADR-0149
     // §The bloom).
-    let mut resolution_claims = Vec::with_capacity(record.spec.members().len());
-    for member in record.spec.members() {
-        let Some(claim) = record.claims.get(&member.workpiece) else {
-            return Decisions::rejected(Outcome::ResolveRejected(ResolveError::MemberNotIntegrated {
-                workpiece: member.workpiece.clone(),
-            }));
-        };
-        resolution_claims.push(claim.clone());
+    if let Some(member) = record.spec.members().iter().find(|member| !record.claims.contains_key(&member.workpiece)) {
+        return Decisions::rejected(Outcome::ResolveRejected(ResolveError::MemberNotIntegrated {
+            workpiece: member.workpiece.clone(),
+        }));
     }
-    let resolved =
-        ResolvedBloom { bloom: *bloom, tree: *tree, head: *head, lineage: lineage.to_vec(), resolution_claims };
-    // Resolution is land-readiness: the bloom now carries its one artifact and a
-    // claim for every member, so the source-port CAS land can be driven. Emit the
-    // land decision on the same resolve commit — the host land driver drains it,
-    // issues the CAS against `expected_base`, and admits `Fact::Land` on success
-    // (ADR-0149 migration step 3). `new_head` is the resolved integrated head
-    // commit's digest (distinct from the artifact `tree`), the head mainline
-    // advances to; the reducer never does the I/O.
+    // The claim set checked out, so the fold's head is judged before the bloom
+    // may resolve (ADR-0153): hold the fold on the record and dispatch the
+    // whole-bloom aggregate review against it — the claim scan above stays the
+    // integrity gate, the review is the judgment gate. The
+    // ceiling is AggregateReview's catalog retry budget over the record's
+    // consumed-verdict count; a fold arriving past it is refused fail-closed
+    // (unreachable through this reducer — a wedged bloom's members stay
+    // closed, so no re-fold dispatches — but a buggy driver must not buy a
+    // roll the vocabulary forbids).
+    let roll = record.aggregate_rolls + 1;
+    if roll > StageCatalog::retry_budget_of(StageId::AggregateReview).unwrap_or(1) {
+        return Decisions::rejected(Outcome::ResolveRejected(ResolveError::ReviewCeiling {
+            rolls: record.aggregate_rolls,
+        }));
+    }
+    let integration = FoldedIntegration { tree: *tree, head: *head, lineage: lineage.to_vec() };
     Decisions {
-        outcome: Outcome::Resolved(resolved.clone()),
+        outcome: Outcome::AggregateReviewDispatched { bloom: *bloom, roll },
         effects: alloc::vec![
-            Decision::SetResolved { bloom: *bloom, resolved },
-            Decision::DispatchLand { bloom: *bloom, expected_base: record.spec.base(), new_head: *head },
+            Decision::RecordIntegration { bloom: *bloom, integration: Some(integration) },
+            Decision::DispatchAggregateReview {
+                bloom: *bloom,
+                transformation: Transformation::for_aggregate_review(*tree, *head),
+                roll,
+            },
         ],
+    }
+}
+
+/// Reduce a whole-bloom aggregate-review verdict (ADR-0153). A passing verdict
+/// resolves the bloom from its held fold — [`Decision::SetResolved`] plus the
+/// [`Decision::DispatchLand`] the land driver consumes. A failing verdict
+/// freezes into member routing: every implicated member's claim is revoked and
+/// its cursor re-enters the repair-only `Refine` (the host threads the
+/// findings slice onto the dispatch), the stale fold is cleared, and the
+/// re-fold that follows re-integration dispatches the delta-confirm. The
+/// second failing verdict wedges the bloom — the two-pass ceiling; the machine
+/// never buys a third roll.
+fn reduce_aggregate_review_completed(
+    snapshot: &Snapshot,
+    bloom: &BloomId,
+    passed: bool,
+    evidence: &Evidence,
+    implicated: &[WorkpieceId],
+) -> Decisions {
+    let Some(record) = snapshot.blooms.get(bloom) else {
+        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::UnknownOrInactiveBloom));
+    };
+    if record.status != BloomStatus::Sealed {
+        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::UnknownOrInactiveBloom));
+    }
+    let Some(integration) = record.integration.clone() else {
+        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::NoPendingIntegration));
+    };
+    // The verdict must bind the exact tree the held fold produced — a stale
+    // verdict from a superseded fold cannot act on a newer integration.
+    if !evidence.validates(&integration.tree) {
+        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::SubjectMismatch {
+            expected: integration.tree,
+            got: evidence.subject,
+        }));
+    }
+    let rolls = record.aggregate_rolls + 1;
+    let mut effects = alloc::vec![
+        Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() },
+        Decision::RecordAggregateRoll { bloom: *bloom, rolls },
+    ];
+    if passed {
+        let resolution_claims = record.claims.values().cloned().collect::<Vec<_>>();
+        let resolved = ResolvedBloom {
+            bloom: *bloom,
+            tree: integration.tree,
+            head: integration.head,
+            lineage: integration.lineage.clone(),
+            resolution_claims,
+        };
+        // Resolution is land-readiness: the bloom now carries its one judged
+        // artifact and a claim for every member, so the source-port CAS land
+        // can be driven (ADR-0149 migration step 3). `new_head` is the
+        // integrated head commit's digest (distinct from the artifact `tree`),
+        // the head mainline advances to; the reducer never does the I/O. The
+        // consumed fold is cleared — a resolved bloom holds no pending review.
+        effects.push(Decision::RecordIntegration { bloom: *bloom, integration: None });
+        effects.push(Decision::SetResolved { bloom: *bloom, resolved: resolved.clone() });
+        effects.push(Decision::DispatchLand {
+            bloom: *bloom,
+            expected_base: record.spec.base(),
+            new_head: integration.head,
+        });
+        return Decisions { outcome: Outcome::Resolved(resolved), effects };
+    }
+    // A failing verdict must route its findings to owners — validated before
+    // any effect applies, so a malformed verdict changes nothing.
+    if implicated.is_empty() {
+        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::NoImplicatedMembers));
+    }
+    if let Some(stranger) =
+        implicated.iter().find(|wp| !record.spec.members().iter().any(|member| member.workpiece == **wp))
+    {
+        return Decisions::rejected(Outcome::AggregateReviewRejected(AggregateReviewError::NotAMember(
+            stranger.clone(),
+        )));
+    }
+    if rolls >= StageCatalog::retry_budget_of(StageId::AggregateReview).unwrap_or(1) {
+        // The delta-confirm still failed: the two-pass ceiling wedges the
+        // bloom. The fold stays held (the owner's decision context); no member
+        // re-opens, no further review dispatches.
+        return Decisions { outcome: Outcome::AggregateReviewWedged { bloom: *bloom, rolls }, effects };
+    }
+    // First failing verdict: re-open every implicated member — revoke its
+    // claim and route it into the repair-only Refine against its own claimed
+    // candidate (the fold's tree is the whole bloom's, never one member's
+    // repair target). The cleared fold marks the integration stale; when the
+    // re-opened members re-integrate, the completing claim re-dispatches the
+    // fold and the fresh head gets the delta-confirm.
+    effects.push(Decision::RecordIntegration { bloom: *bloom, integration: None });
+    for workpiece in implicated {
+        effects.push(Decision::RevokeResolution { bloom: *bloom, workpiece: workpiece.clone() });
+        let member = record.spec.members().iter().find(|member| member.workpiece == *workpiece);
+        let candidate = record.claims.get(workpiece).map(|claim| claim.candidate);
+        let cursor = record.progress.get(workpiece).copied();
+        let progress = StageProgress {
+            stage: StageId::Refine,
+            attempts: 1,
+            candidate: cursor.and_then(|progress| progress.candidate),
+            repair_rolls: cursor.map_or(0, |progress| progress.repair_rolls),
+        };
+        // The dispatch targets re-resolve like a member-line move (ADR-0152):
+        // the claimed candidate tree binds the evidence and its capture commit
+        // is the checkout; the cursor's candidate carries the checkout pair.
+        let (subject, checkout) = progress.candidate.map_or_else(
+            || (candidate.or_else(|| member.map(|m| m.scope_revision)).unwrap_or(integration.tree), record.spec.base()),
+            |current| (current.tree, current.checkout),
+        );
+        effects.extend(move_effects(
+            *bloom,
+            workpiece,
+            member.map_or(integration.tree, |m| m.scope_revision),
+            progress,
+            subject,
+            checkout,
+        ));
+    }
+    Decisions {
+        outcome: Outcome::AggregateReviewReentered { bloom: *bloom, members: implicated.to_vec(), rolls },
+        effects,
     }
 }
 
@@ -1436,7 +1726,23 @@ impl Snapshot {
             Decision::RedispatchStage { .. }
             | Decision::DispatchAttempt { .. }
             | Decision::DispatchLand { .. }
-            | Decision::DispatchIntegration { .. } => {}
+            | Decision::DispatchIntegration { .. }
+            | Decision::DispatchAggregateReview { .. } => {}
+            Decision::RecordIntegration { bloom, integration } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.integration.clone_from(integration);
+                }
+            }
+            Decision::RecordAggregateRoll { bloom, rolls } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.aggregate_rolls = *rolls;
+                }
+            }
+            Decision::RevokeResolution { bloom, workpiece } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.claims.remove(workpiece);
+                }
+            }
             Decision::MarkSuperseded { bloom, by } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.status = BloomStatus::Superseded;
@@ -1469,6 +1775,8 @@ impl BloomRecord {
             evidence: Vec::new(),
             holds: BTreeSet::new(),
             progress: BTreeMap::new(),
+            integration: None,
+            aggregate_rolls: 0,
             superseded_by: None,
         }
     }
