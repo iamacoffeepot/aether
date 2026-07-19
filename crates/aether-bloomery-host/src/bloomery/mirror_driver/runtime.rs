@@ -46,14 +46,6 @@ use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::bloomery::{GithubMirrorConfig, ProjectionShell, SourceShell};
 use crate::store::{AckOutbox, AckOutboxResult, DrainOutbox, DrainOutboxResult, OutboxEntry, StoreCapability};
 
-/// The outbox topic carrying `ViewDocument` payloads — reconciled onto the
-/// outward mirror. Host-produced and host-drained (this driver is both
-/// sides), under the same `topic:` non-address scheme as the control actor's
-/// topics (#3668). Host-local, so it stays a plain string const rather than a
-/// reducer-minted [`Topic`] — no [`Decision`](aether_bloomery::reduce::Decision)
-/// projects onto it, and it is deliberately outside [`Topic::ALL`].
-pub const TOPIC_VIEW_DOCUMENT: &str = "topic:view_document";
-
 /// The self-addressed wake the poll timer fires each interval; its handler
 /// drains the store outbox. Zero-field — the timer carries only the schedule.
 #[derive(Kind, aether_data::Schema, Serialize, Deserialize, Debug, Clone, Default)]
@@ -96,7 +88,7 @@ impl MirrorDriverState {
 /// A projection error or an unknown / undecodable topic is a failure that stalls
 /// that topic's ack prefix; the entry re-delivers on the next drain.
 fn deliver(projection: &ProjectionShell, entry: &OutboxEntry) -> Result<(), String> {
-    if entry.topic == TOPIC_VIEW_DOCUMENT {
+    if entry.topic == Topic::VIEW_DOCUMENT {
         let view: ViewDocument = from_bytes(&entry.payload).map_err(|e| e.to_string())?;
         projection.reconcile_view(&view).map_err(|e| e.to_string())
     } else if entry.topic == Topic::LANDING_RECEIPT {
@@ -211,8 +203,7 @@ impl NativeActor for MirrorDriverCapability {
         if state.projection.is_none() {
             return;
         }
-        let drains =
-            [DrainOutbox { topic: Some(TOPIC_VIEW_DOCUMENT.to_owned()) }, DrainOutbox::scoped(Topic::LANDING_RECEIPT)];
+        let drains = [DrainOutbox::scoped(Topic::VIEW_DOCUMENT), DrainOutbox::scoped(Topic::LANDING_RECEIPT)];
         for drain in drains {
             ctx.send::<StoreCapability, DrainOutbox>(&drain);
         }
@@ -281,7 +272,7 @@ mod tests {
 
     use super::{
         AckOutbox, DrainOutbox, DrainOutboxResult, DrainTick, Kind, MirrorDriverCapability, MirrorDriverState,
-        OutboxEntry, ProjectionShell, TOPIC_VIEW_DOCUMENT, project_batch,
+        OutboxEntry, ProjectionShell, project_batch,
     };
     use crate::bloomery::outbox::TopicOutbox;
     use crate::store::{SqliteStore, StoreBackend};
@@ -350,23 +341,23 @@ mod tests {
         // project it, and ack the delivered prefix.
         {
             let mut store = SqliteStore::open(db).unwrap();
-            store.enqueue_outbox(TOPIC_VIEW_DOCUMENT, &encoded_view()).unwrap();
+            store.enqueue_topic(Topic::VIEW_DOCUMENT, &encoded_view()).unwrap();
 
-            let entries = store.drain_outbox(Some(TOPIC_VIEW_DOCUMENT)).unwrap();
+            let entries = store.drain_topic(Topic::VIEW_DOCUMENT).unwrap();
             assert_eq!(entries.len(), 1, "the enqueued view is drainable on its topic");
 
             let acks = project_batch(&shell, &entries);
             assert_eq!(fake.issue_count(), 2, "the carbon copy: one umbrella issue plus one workpiece issue");
             assert_eq!(acks.len(), 1);
-            assert_eq!(acks[0].topic.as_deref(), Some(TOPIC_VIEW_DOCUMENT));
+            assert!(
+                acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::VIEW_DOCUMENT),
+                "the ack covers the view-document topic",
+            );
             assert_eq!(acks[0].through_sequence, entries[0].sequence, "ack covers the delivered entry");
 
             // On success only: apply the ack the worker would send.
             store.ack_outbox(acks[0].topic.as_deref(), acks[0].through_sequence).unwrap();
-            assert!(
-                store.drain_outbox(Some(TOPIC_VIEW_DOCUMENT)).unwrap().is_empty(),
-                "the acked entry does not re-drain"
-            );
+            assert!(store.drain_topic(Topic::VIEW_DOCUMENT).unwrap().is_empty(), "the acked entry does not re-drain");
         }
 
         // Phase 2 — boot republish: a second view is enqueued but the process
@@ -376,12 +367,12 @@ mod tests {
         // idempotent, so the re-projection converges to the same carbon copy.
         {
             let mut store = SqliteStore::open(db).unwrap();
-            store.enqueue_outbox(TOPIC_VIEW_DOCUMENT, &encoded_view()).unwrap();
+            store.enqueue_topic(Topic::VIEW_DOCUMENT, &encoded_view()).unwrap();
             drop(store);
 
             // Simulated restart: reopen the same database file.
             let mut restarted = SqliteStore::open(db).unwrap();
-            let republished = restarted.drain_outbox(Some(TOPIC_VIEW_DOCUMENT)).unwrap();
+            let republished = restarted.drain_topic(Topic::VIEW_DOCUMENT).unwrap();
             assert_eq!(republished.len(), 1, "the unacked entry survived the restart and re-drains");
 
             let acks = project_batch(&shell, &republished);
@@ -389,10 +380,7 @@ mod tests {
             assert_eq!(acks.len(), 1);
 
             restarted.ack_outbox(acks[0].topic.as_deref(), acks[0].through_sequence).unwrap();
-            assert!(
-                restarted.drain_outbox(Some(TOPIC_VIEW_DOCUMENT)).unwrap().is_empty(),
-                "republished entry now acked"
-            );
+            assert!(restarted.drain_topic(Topic::VIEW_DOCUMENT).unwrap().is_empty(), "republished entry now acked");
         }
     }
     #[test]
@@ -449,14 +437,15 @@ mod tests {
             collect_sends::<DrainOutbox>(&rx, 2).into_iter().map(|d| d.topic).collect();
         drained_topics.sort();
         let mut expected =
-            vec![DrainOutbox::scoped(Topic::LANDING_RECEIPT).topic, Some(TOPIC_VIEW_DOCUMENT.to_owned())];
+            vec![DrainOutbox::scoped(Topic::LANDING_RECEIPT).topic, DrainOutbox::scoped(Topic::VIEW_DOCUMENT).topic];
         expected.sort();
         assert_eq!(drained_topics, expected, "each owned projection topic is drained, scoped by topic");
 
         // on_drain_result projects the entry and — on success — the detached
         // worker acks the delivered prefix. The ack landing on egress proves the
         // worker ran (it sends the ack only after the reconcile returns Ok).
-        let entry = OutboxEntry { sequence: 7, topic: TOPIC_VIEW_DOCUMENT.to_owned(), payload: encoded_view() };
+        let entry =
+            OutboxEntry { sequence: 7, topic: Topic::VIEW_DOCUMENT.as_str().to_owned(), payload: encoded_view() };
         {
             let mut ctx = NativeCtx::new_dispatching(&binding, Source::NONE, MailId::NONE, MailId::NONE);
             MirrorDriverCapability::on_drain_result(
@@ -467,7 +456,10 @@ mod tests {
         }
         let acks = collect_sends::<AckOutbox>(&rx, 1);
         assert_eq!(fake.issue_count(), 2, "the worker reconciled the carbon copy before acking");
-        assert_eq!(acks[0].topic.as_deref(), Some(TOPIC_VIEW_DOCUMENT));
+        assert!(
+            acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::VIEW_DOCUMENT),
+            "the ack covers the view-document topic",
+        );
         assert_eq!(acks[0].through_sequence, 7, "the ack covers the delivered entry's sequence");
     }
 }

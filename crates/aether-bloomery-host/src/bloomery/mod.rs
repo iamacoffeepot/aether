@@ -43,7 +43,7 @@ pub use local_executor::{
     LocalExecutor, LocalExecutorError, ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, TransformRunner,
 };
 pub use mirror::{GithubMirrorConfig, GithubMirrorOverlay, ProjectionShell};
-pub use mirror_driver::{DrainTick, MirrorDriverCapability, MirrorDriverState, TOPIC_VIEW_DOCUMENT};
+pub use mirror_driver::{DrainTick, MirrorDriverCapability, MirrorDriverState};
 pub use outbox::TopicOutbox;
 pub use routing_executor::RoutingExecutor;
 pub use source::SourceShell;

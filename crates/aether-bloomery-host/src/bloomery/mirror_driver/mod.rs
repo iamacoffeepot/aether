@@ -14,19 +14,19 @@ use aether_bloomery::Topic;
 // does the same): `DrainTick` from the runtime module, the two store reply
 // kinds from `crate::store`.
 use crate::store::{AckOutboxResult, DrainOutboxResult};
-pub use runtime::{DrainTick, MirrorDriverState, TOPIC_VIEW_DOCUMENT};
+pub use runtime::{DrainTick, MirrorDriverState};
 
 /// Addressing identity for the outbox-consumer / mirror-driver capability.
 #[actor(singleton)]
 pub struct MirrorDriverCapability;
 
 impl MirrorDriverCapability {
-    /// The reducer-minted outbox topics this driver drains — its half of the
-    /// producer/consumer pairing the topic tripwire checks against
-    /// [`Topic::ALL`]. Only [`Topic::LANDING_RECEIPT`]: the host-local
-    /// `TOPIC_VIEW_DOCUMENT` this driver also drains is not a reducer [`Topic`]
-    /// and is deliberately outside `ALL`.
-    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::LANDING_RECEIPT];
+    /// The outbox topics this driver drains — its half of the producer/consumer
+    /// pairing the topic tripwire checks against [`Topic::ALL`]. Two topics: the
+    /// reducer-minted [`Topic::LANDING_RECEIPT`] and the host-minted
+    /// [`Topic::VIEW_DOCUMENT`] (host-produced and host-drained — this driver is
+    /// both sides), both members of the closed set.
+    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::LANDING_RECEIPT, Topic::VIEW_DOCUMENT];
 }
 
 mod runtime;

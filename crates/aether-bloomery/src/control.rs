@@ -77,29 +77,37 @@ impl OutboxPayload {
     }
 }
 
-/// A first-class outbox topic — the stringly projection of an effectful
-/// [`Decision`] variant across the store boundary
-/// (ADR-0149 §The boundary). A topic is a producer-consumer contract: the
-/// control actor enqueues a decision's payload under it and exactly one host
-/// driver drains it, so a drifted spelling would enqueue under a topic nobody
-/// drains, accumulating undelivered rows silently (#3668). Always compiled like
-/// the payload types, so the `default-features = false` host consumers reach it
-/// without the `runtime` actor.
+/// A bloomery outbox topic — the routing key naming what an outbox row carries,
+/// so exactly one host driver drains it across the store boundary
+/// (ADR-0149 §The boundary). A topic is a producer-consumer contract: a payload
+/// is enqueued under it and exactly one host driver drains it, so a drifted
+/// spelling would enqueue under a topic nobody drains, accumulating undelivered
+/// rows silently (#3668). An outbox topic is only useful if compiled code drains
+/// it — there is no runtime drainer registration — so the set of meaningful
+/// topics is closed by construction and this enumeration is total. Always
+/// compiled like the payload types, so the `default-features = false` host
+/// consumers reach it without the `runtime` actor.
 ///
 /// Construction is closed: the wrapped `&'static str` is private, so the only
-/// values are the associated consts below, and the exhaustive
-/// [`of_decision`](Self::of_decision) match mints exactly one for each effectful
-/// decision — a new effectful `Decision` variant fails to compile until it names
-/// its topic (the `StageCatalog::binding_of` idiom). [`ALL`](Self::ALL)
-/// enumerates the closed set the producer/consumer pairing tripwire walks
-/// against the host drivers.
+/// values are the associated consts below, in two minting classes:
+///
+/// - **Reducer-minted** — the projection of an effectful [`Decision`] variant.
+///   The exhaustive [`of_decision`](Self::of_decision) match mints exactly one
+///   for each effectful decision, so a new effectful `Decision` variant fails to
+///   compile until it names its topic (the `StageCatalog::binding_of` idiom).
+///   `of_decision` returns only these — it never returns a host-minted value.
+/// - **Host-minted** — a projection the host both produces and drains, with no
+///   `Decision` behind it (e.g. [`VIEW_DOCUMENT`](Self::VIEW_DOCUMENT)).
+///
+/// [`ALL`](Self::ALL) enumerates the closed set — both classes — that the
+/// producer/consumer pairing tripwire walks against the host drivers.
 ///
 /// Every topic carries the `topic:` prefix — the display spelling persisted to
 /// the outbox row and matched by the draining driver, preserved exactly (a
 /// changed spelling would strand undelivered rows). A topic is a store-local
-/// routing key between the reducer's decisions and the driver that drains them,
-/// never an actor address — no mail can be sent to it — and the sigil
-/// (impossible in a dot-separated aether name) makes that unmistakable.
+/// routing key between a producer's payload and the driver that drains it, never
+/// an actor address — no mail can be sent to it — and the sigil (impossible in a
+/// dot-separated aether name) makes that unmistakable.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Topic(&'static str);
 
@@ -132,12 +140,31 @@ impl Topic {
     /// against the integrated head under a bloom-level order record (ADR-0153).
     pub const AGGREGATE_REVIEW: Self = Self("topic:aggregate_review");
 
-    /// Every topic the reducer's effectful decisions enqueue under — the closed
-    /// enumeration the producer/consumer pairing tripwire walks against the host
-    /// drivers. A new effectful decision reaches this list through its
-    /// [`of_decision`](Self::of_decision) arm and its own associated const.
-    pub const ALL: &'static [Self] =
-        &[Self::LANDING_RECEIPT, Self::REDISPATCH, Self::DISPATCH, Self::LAND, Self::INTEGRATE, Self::AGGREGATE_REVIEW];
+    /// A whole-document projection (host-minted): the view-document producer
+    /// (#3497) enqueues [`ViewDocument`](crate::port::ViewDocument) payloads and
+    /// the mirror driver drains them onto the outward mirror. No [`Decision`]
+    /// projects onto it — it is host-produced and host-drained, so
+    /// [`of_decision`](Self::of_decision) never returns it — but it is a real
+    /// outbox topic exactly one driver drains, so it belongs to the closed set.
+    /// Its payload type [`ViewDocument`](crate::port::ViewDocument) already lives
+    /// in this crate, so the const belongs here too.
+    pub const VIEW_DOCUMENT: Self = Self("topic:view_document");
+
+    /// Every bloomery outbox topic — both reducer-minted and host-minted — the
+    /// closed enumeration the producer/consumer pairing tripwire walks against the
+    /// host drivers. A new reducer-minted topic reaches this list through its
+    /// [`of_decision`](Self::of_decision) arm and its own associated const; a
+    /// host-minted one (e.g. [`VIEW_DOCUMENT`](Self::VIEW_DOCUMENT)) through its
+    /// const alone.
+    pub const ALL: &'static [Self] = &[
+        Self::LANDING_RECEIPT,
+        Self::REDISPATCH,
+        Self::DISPATCH,
+        Self::LAND,
+        Self::INTEGRATE,
+        Self::AGGREGATE_REVIEW,
+        Self::VIEW_DOCUMENT,
+    ];
 
     /// The `topic:` display spelling — the exact string persisted to the outbox
     /// row and matched by the draining driver. The wire and `SQLite` surfaces

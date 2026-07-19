@@ -1,41 +1,42 @@
-//! Producer/consumer pairing tripwire for the reducer's outbox topics.
+//! Producer/consumer pairing tripwire for the bloomery outbox topics.
 //!
-//! Every effectful `Decision` the reducer emits projects onto a
-//! [`Topic`](aether_bloomery::Topic) (enumerated by `Topic::ALL`), and each
-//! topic must be drained by exactly one host driver — otherwise its enqueued
-//! rows accumulate in the store's outbox forever, undelivered and silent. That
-//! is not hypothetical: `Topic::REDISPATCH` is a live orphan (#3664), the exact
-//! failure the shared string consts never checked. This test collects every
-//! driver's declared drain set and asserts the 1:1 pairing against `Topic::ALL`,
-//! with the still-orphaned topics named in an explicit exception set.
+//! Every bloomery outbox topic ([`Topic::ALL`](aether_bloomery::Topic::ALL)) —
+//! the reducer-minted ones each effectful `Decision` projects onto, plus the
+//! host-minted ones the host both produces and drains — must be drained by
+//! exactly one host driver, otherwise its enqueued rows accumulate in the store's
+//! outbox forever, undelivered and silent. That is not hypothetical:
+//! `Topic::REDISPATCH` is a live orphan (#3664), the exact failure the shared
+//! string consts never checked. This test collects every driver's declared drain
+//! set and asserts the 1:1 pairing against `Topic::ALL`, with the still-orphaned
+//! topics named in an explicit exception set.
 
 use aether_bloomery::Topic;
 use aether_bloomery_host::bloomery::{
     ExecutorDriverCapability, IntegrateDriverCapability, LandDriverCapability, MirrorDriverCapability,
 };
 
-/// The reducer topics that still have no draining host driver, each with the
-/// issue tracking the missing consumer. A topic listed here must have *zero*
-/// drainers; the moment one gains a consumer this list is wrong and the test
-/// below fails, forcing the entry's removal — so the exception can never outlive
-/// the orphan it documents.
+/// The topics that still have no draining host driver, each with the issue
+/// tracking the missing consumer. A topic listed here must have *zero* drainers;
+/// the moment one gains a consumer this list is wrong and the test below fails,
+/// forcing the entry's removal — so the exception can never outlive the orphan it
+/// documents.
 const KNOWN_ORPHANS: &[Topic] = &[
     // #3664 — the parked-question redispatch the reducer enqueues from an
     // adopted answer (ADR-0151), with no host consumer yet.
     Topic::REDISPATCH,
 ];
 
-/// Every reducer [`Topic`] pairs with exactly one draining host driver — except
-/// the still-orphaned ones, which pair with none.
+/// Every bloomery outbox [`Topic`] pairs with exactly one draining host driver —
+/// except the still-orphaned ones, which pair with none.
 #[test]
 fn every_reducer_topic_pairs_with_exactly_one_drainer() {
-    // Tripwire: the producer/consumer pairing between the reducer's outbox
-    // topics (`Topic::ALL`, minted from the effectful `Decision` variants by
-    // `Topic::of_decision`) and the host drivers that drain them. A new
-    // effectful decision reaches `ALL` through its `of_decision` arm; if no
-    // driver declares it below, its rows would enqueue and never drain — the
-    // #3664 orphan bug class — and this fails naming the unpaired topic. A
-    // second drainer (double-processing) fails the same way.
+    // Tripwire: the producer/consumer pairing between the bloomery outbox topics
+    // (`Topic::ALL` — reducer-minted via `Topic::of_decision`, plus host-minted)
+    // and the host drivers that drain them. A new topic reaches `ALL` through its
+    // const (and, when reducer-minted, its `of_decision` arm); if no driver
+    // declares it below, its rows would enqueue and never drain — the #3664
+    // orphan bug class — and this fails naming the unpaired topic. A second
+    // drainer (double-processing) fails the same way.
     let drained: Vec<Topic> = [
         ExecutorDriverCapability::DRAINED_TOPICS,
         IntegrateDriverCapability::DRAINED_TOPICS,
@@ -58,14 +59,10 @@ fn every_reducer_topic_pairs_with_exactly_one_drainer() {
         }
     }
 
-    // No driver declares a drain for a topic outside the reducer vocabulary: a
-    // host-local topic (the mirror's `view_document`) is intentionally not a
-    // `Topic` and must never leak into a driver's declared reducer-topic set.
+    // Every declared drain is a member of the closed `Topic::ALL` set — a driver
+    // cannot declare a topic const that was never added to the enumeration the
+    // tripwire walks.
     for declared in &drained {
-        assert!(
-            Topic::ALL.contains(declared),
-            "{} is declared drained but is not a reducer Topic in Topic::ALL",
-            declared.as_str()
-        );
+        assert!(Topic::ALL.contains(declared), "{} is declared drained but is not in Topic::ALL", declared.as_str());
     }
 }
