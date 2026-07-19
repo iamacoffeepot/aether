@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use aether_capabilities::trace::walk::TreeWalk;
-use aether_data::{EngineId, Kind, MailId, Uuid, mailbox_id_from_path};
+use aether_data::{EngineId, Kind, MailId, Uuid};
 use aether_kinds::trace::{DescribeTreeResult, DispatchTraced, TRACE_MAILBOX_NAME, TraceTail, TraceTailResult};
 use rmcp::ErrorData as McpError;
 
@@ -9,7 +9,7 @@ use crate::args::{
     MailSpec, MailStatus, ReplyEventJson, ReplyProjection, SendMailArgs, SendMailTracedArgs, SendMailTracedResponse,
 };
 
-use super::envelope::{engine_envelope, engine_envelope_by_id};
+use super::envelope::{engine_envelope, engine_envelope_by_id, recipient_mailbox};
 use super::ids::{mail_id_to_json, parse_engine_id, render_compact_tree};
 use super::render::{internal, internal_msg, json};
 use super::reply::{decode_reply_events, decode_traced_ack, project_replies, strip_ack};
@@ -51,7 +51,7 @@ pub(super) async fn settle_mail_item(
     // cache for component-defined reply kinds (issue 1804).
     let engine = Uuid::parse_str(&spec.engine_id).ok().map(EngineId);
     let declared_reply = engine.and_then(|e| {
-        let mbx = mailbox_id_from_path(&spec.mail.recipient_name);
+        let mbx = recipient_mailbox(&spec.mail.recipient_name);
         let cache = mcp.components.lock().expect("component cache mutex is never poisoned");
         cache.get(&(e, mbx)).and_then(|caps| {
             caps.handlers

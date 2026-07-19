@@ -35,6 +35,9 @@
 // `mul_add` rewrite obscures the layout math for no accuracy that matters to a
 // pixel region.
 #![allow(clippy::suboptimal_flops)]
+// The scenario addresses loaded widget components by their rendered lineage
+// paths — the recipient-name resolution surface the interaction drives.
+#![allow(clippy::disallowed_methods)]
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -172,6 +172,25 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
         let _ = self.binding.push_envelope_buffered(self.mailbox, K::ID.0, &bytes, 1, None, None);
     }
 
+    /// Like [`Self::send_detached`] but returns the minted `MailId` — the
+    /// fresh chain's root — so the caller can correlate the recipient's
+    /// eventual reply (ADR-0042 echoes the correlation id) and subscribe to
+    /// the chain's settlement. The typed form of the deferral pattern a
+    /// request/reply-shaped handler uses when it must not extend its own
+    /// inbound chain (e.g. an HTTP router holding the reply obligation across
+    /// the async boundary): the downstream dispatch roots a new tree, and the
+    /// returned id keys the held reply guard. The compile-time
+    /// `R: HandlesKind<K>` gate is the same as [`Self::send`].
+    #[must_use]
+    pub fn send_detached_tracked<K>(&self, payload: &K) -> MailId
+    where
+        R: HandlesKind<K>,
+        K: Kind,
+    {
+        let bytes = payload.encode_into_bytes();
+        self.binding.push_envelope_buffered(self.mailbox, K::ID.0, &bytes, 1, None, None)
+    }
+
     /// Like [`Self::send`] but returns the minted `MailId` so the caller
     /// can subscribe to its settlement via the chassis
     /// [`crate::chassis::settlement::SettlementRegistry`]. Inherits the

@@ -6,7 +6,7 @@ use super::{
     EngineNames, INVENTORY_CAP, Kind, KindDescriptor, KindId, ListKinds, ListKindsResult, MailEnvelope, MailNodeJson,
     MailNodeWire, MailSpec, MailboxAddress, Manifest, ManifestResult, Mcp, McpError, NamedMail, Resolve,
     ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType, Uuid, component_config_bytes, descriptors,
-    engine_envelope, frame_size_aware_error, internal_msg, local_envelope, mailbox_id_from_path, max_frame_size,
+    engine_envelope, frame_size_aware_error, internal_msg, local_envelope, max_frame_size, recipient_mailbox,
     reject_zero_replicas, replica_base_name, replica_names, selector_with_explicit_export, tagged_id,
     validate_recipient_scope, wire,
 };
@@ -234,7 +234,7 @@ impl Mcp {
                 // reaches its lineage-folded id. A root-cap name is a
                 // single segment and folds to the same id `hash(name)`
                 // gives.
-                mailbox: mailbox_id_from_path(&spec.mail.recipient_name),
+                mailbox: recipient_mailbox(&spec.mail.recipient_name),
             },
             from: None,
             kind: KindId(kind_id_from_parts(&desc.name, &desc.schema)),

@@ -5,6 +5,10 @@
     clippy::unwrap_used,
     reason = "test-setup unwraps: fixture construction and decode panic on failure is the assertion"
 )]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "these tests exercise the rendered-path resolution machinery itself — mailbox_id_from_path is the surface under test"
+)]
 use std::sync::Arc;
 
 use wasmtime::{Engine, Linker, Module};

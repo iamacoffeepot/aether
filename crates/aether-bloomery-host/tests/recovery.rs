@@ -9,6 +9,10 @@
 //! complement to the in-process reopen test in `src/store/tests.rs`.
 
 #![allow(clippy::unwrap_used)]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "cross-process wire fixtures address root caps by their rendered runtime name — the RPC Call surface under test"
+)]
 
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};

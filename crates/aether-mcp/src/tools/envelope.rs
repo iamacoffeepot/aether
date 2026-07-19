@@ -19,11 +19,21 @@ pub(super) fn validate_recipient_scope(recipient_name: &str) -> anyhow::Result<(
     })
 }
 
+/// Resolve an operator-supplied recipient name into its wire mailbox id — the
+/// runtime-name forwarding path the MCP front owns: names arrive as strings on
+/// the tool call (`recipient_name`, a lineage address, a component path), so
+/// there is no typed actor to resolve through. The one sanctioned
+/// `mailbox_id_from_path` call site in this crate; every tool funnels here.
+#[allow(clippy::disallowed_methods)] // the runtime-name wire-forwarding escape hatch — the tool surface receives names as strings
+pub(super) fn recipient_mailbox(name: &str) -> MailboxId {
+    mailbox_id_from_path(name)
+}
+
 /// Build a `MailEnvelope` addressed at a hub-local mailbox
 /// (`engine = None`) carrying a typed kind.
 pub(super) fn local_envelope<K: Kind>(mailbox: &str, kind: &K) -> MailEnvelope {
     MailEnvelope {
-        to: MailboxAddress::local(mailbox_id_from_path(mailbox)),
+        to: MailboxAddress::local(recipient_mailbox(mailbox)),
         from: None,
         kind: K::ID,
         correlation_id: None,
@@ -35,7 +45,7 @@ pub(super) fn local_envelope<K: Kind>(mailbox: &str, kind: &K) -> MailEnvelope {
 /// substrate (`engine = Some`) carrying a typed kind — the hub routes
 /// it through to that engine's proxy.
 pub(super) fn engine_envelope<K: Kind>(engine: EngineId, mailbox: &str, kind: &K) -> MailEnvelope {
-    engine_envelope_by_id(engine, mailbox_id_from_path(mailbox), kind)
+    engine_envelope_by_id(engine, recipient_mailbox(mailbox), kind)
 }
 
 /// Like [`engine_envelope`] but addresses the recipient by

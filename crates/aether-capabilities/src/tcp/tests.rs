@@ -1,5 +1,9 @@
 //! Tests for the `aether.tcp` control plane: connect / bind / list / unbind
 //! round-trips through a passive chassis with a real loopback socket.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "these tests register and address session consumers by rendered lineage path — the nested-name registration surface under test"
+)]
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
