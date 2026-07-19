@@ -83,7 +83,6 @@ pub mod test_bench;
 pub mod text;
 pub mod trace;
 pub mod trampoline;
-pub mod window;
 
 #[cfg(feature = "audio")]
 pub use audio::AudioCapability;
@@ -158,4 +157,3 @@ pub use text::TextCapability;
 pub use trampoline::WasmTrampoline;
 #[cfg(feature = "runtime")]
 pub use trampoline::WasmTrampolineConfig;
-pub use window::HeadlessWindowCapability;

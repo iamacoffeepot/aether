@@ -151,6 +151,7 @@ dependencies = [
  "aether-kinds",
  "aether-math",
  "aether-substrate",
+ "aether-window",
  "base64",
  "bytemuck",
  "clap",
@@ -380,6 +381,7 @@ dependencies = [
  "aether-math",
  "aether-substrate",
  "aether-test-fixtures-kinds",
+ "aether-window",
  "anyhow",
  "bytemuck",
  "clap",
@@ -481,6 +483,17 @@ dependencies = [
  "aether-data",
  "aether-test-fixtures-kinds",
  "serde",
+]
+
+[[package]]
+name = "aether-window"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "inventory",
 ]
 
 [[package]]

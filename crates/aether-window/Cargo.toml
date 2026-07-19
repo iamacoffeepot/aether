@@ -1,0 +1,57 @@
+[package]
+name = "aether-window"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `aether.window` capability, extracted from `aether-capabilities`
+# (iamacoffeepot/aether#3717) as a per-cap crate of the arc that dissolves
+# the capabilities monolith. Owns the chassis-without-window companion:
+# the `HeadlessWindowCapability` identity + its fail-fast `Err`-replying
+# runtime (`runtime`). The window request/reply mail kinds themselves
+# (`SetWindowMode` / `SetWindowTitle` / `FocusWindow` + `*Result`) live in
+# `aether-kinds`, so this crate only references them.
+#
+# Unlike the pure-leaf `aether-clipboard`, `aether-capabilities` RETAINS a
+# `default-features = false` dependency on this crate: its `rpc` server
+# test still addresses `HeadlessWindowCapability` to exercise the
+# `Component` local-RPC-server reply path. So capabilities keeps the
+# identity-only dep and forwards `aether-window/runtime` from its own
+# `runtime` feature.
+#
+# The ADR-0122 identity/runtime split rides the `runtime` feature: the
+# wasm-safe identity + `HandlesKind` markers compile always-on; the
+# `aether_substrate`-typed runtime half is gated so a marker-only wasm
+# guest can address `ctx.actor::<HeadlessWindowCapability>()` without
+# dragging the substrate through.
+
+# The `#[actor]` macro's generated dispatch / `HandlerEntry` inventory code
+# names `aether_data::` paths (`KindId`, the encode/decode helpers), but this
+# crate defines no kinds of its own (they live in `aether-kinds`), so
+# `aether_data` never appears in this crate's source. cargo-machete's
+# source-only scan therefore flags it as unused — a false positive (the
+# macro-emitted use is real and the crate fails to compile without it), so
+# it is ignored here rather than dropped.
+[package.metadata.cargo-machete]
+ignored = ["aether-data"]
+
+[features]
+default = ["runtime"]
+runtime = ["dep:aether-substrate"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+# Native-only runtime half — gated so wasm/marker builds skip the substrate
+# runtime.
+aether-substrate = { path = "../aether-substrate", optional = true }
+
+# The `#[actor]` macro emits a `cfg(not(target_family = "wasm"))`-gated
+# `inventory::submit!` HandlerEntry per handler, so native builds need
+# `inventory` reachable; wasm guests don't (the gate skips emission).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+inventory = { workspace = true }
+
+[lints]
+workspace = true

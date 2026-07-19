@@ -21,6 +21,7 @@ members = [
     "crates/aether-kit",
     "crates/aether-capabilities",
     "crates/aether-clipboard",
+    "crates/aether-window",
     "crates/aether-mcp",
     "crates/aether-context-canary",
     # Test fixtures — a container dir of single-output crates: one shared
