@@ -283,6 +283,16 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         self.binding.mailer()
     }
 
+    /// The actor's own [`MailboxId`] — the handler-ctx mirror of
+    /// [`NativeInitCtx::self_id`]. A cap that subscribes settlement or
+    /// keys a per-instance table from inside a handler needs its own
+    /// address without caching it from `init`; the deferred-reply route
+    /// glue (ADR-0154) is the motivating consumer.
+    #[must_use]
+    pub fn self_id(&self) -> MailboxId {
+        self.binding.self_mailbox()
+    }
+
     /// ADR-0080 §12 spawn primitive: launch a worker thread that
     /// inherits this handler's in-flight `(mail_id, root)` so its
     /// sends fold into the current causal chain. The closure `f`
