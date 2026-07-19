@@ -863,6 +863,16 @@ mod tests {
             "routed handler",
         );
 
+        // `/routed/drop` is a second exact route (#3697) with its own async
+        // registration — confirm it live before the destructive POST so that
+        // request cannot race its registration. An empty body is a clean 400
+        // ("decimal mailbox id"), so this probe drops nothing.
+        poll_body_contains(
+            port,
+            b"GET /routed/drop HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            "decimal mailbox id",
+        );
+
         // Drop the routed component through the guest bridge: the body
         // carries the trampoline mailbox id to drop.
         let drop_body = routed_mailbox.0.to_string();
