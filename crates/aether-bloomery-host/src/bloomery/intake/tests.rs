@@ -594,6 +594,74 @@ fn an_aggregate_review_verdict_admits_a_bloom_level_completion() {
     assert_eq!(store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap(), None, "the pass clears the bloom row");
 }
 
+// ADR-0153 — a *completely attributed* failing aggregate verdict narrows the
+// implication to the owning members and slices the findings per member: the
+// owner's Refine re-entry reads its own slice, the un-implicated member stays
+// resolved, and the bloom row freezes the full set. A later failing verdict
+// (the delta-confirm) appends under its own label — the frozen set the members
+// were re-opened against is never clobbered.
+#[test]
+fn attributed_aggregate_findings_narrow_the_implication_and_slice_per_member() {
+    let mut store = store();
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let tree = Digest::from_bytes([30; 32]);
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-a", "build the widget").unwrap();
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-b", "wire the widget").unwrap();
+    let mut record = dispatch_record("n-agg", bloom, &WorkpieceId(String::new()), tree, tree);
+    record.stage = StageId::AggregateReview;
+    record_dispatch(&mut store, &record).unwrap();
+
+    let findings = "[wp-a] The widget leaks its handle.\n\n[wp-a] The tick order inverts.";
+    let failing = UploadedEvidence {
+        nonce: Nonce("n-agg".to_owned()),
+        subject: tree,
+        verdict: StageVerdict::ReviewFinding,
+        detail: Digest::from_bytes([7; 32]),
+        candidate: None,
+        findings: Some(findings.to_owned()),
+    };
+    let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &failing).unwrap() else {
+        panic!("a matching aggregate verdict is admitted");
+    };
+    let Fact::AggregateReviewCompleted { implicated, .. } = &admission.event.fact else {
+        panic!("an AggregateReview order admits AggregateReviewCompleted, got {:?}", admission.event.fact);
+    };
+    assert_eq!(implicated.as_slice(), &[WorkpieceId("wp-a".to_owned())], "only the owning member is implicated");
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), "wp-a").unwrap().as_deref(),
+        Some(findings),
+        "the owner's blocks slice into its member row",
+    );
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), "wp-b").unwrap(),
+        None,
+        "the un-implicated member gets no slice",
+    );
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap().as_deref(),
+        Some(findings),
+        "the bloom row freezes the full set",
+    );
+
+    let mut second = dispatch_record("n-agg2", bloom, &WorkpieceId(String::new()), tree, tree);
+    second.stage = StageId::AggregateReview;
+    record_dispatch(&mut store, &second).unwrap();
+    let delta_fail = UploadedEvidence {
+        nonce: Nonce("n-agg2".to_owned()),
+        subject: tree,
+        verdict: StageVerdict::ReviewFinding,
+        detail: Digest::from_bytes([8; 32]),
+        candidate: None,
+        findings: Some("[wp-a] Still leaking.".to_owned()),
+    };
+    assert!(matches!(admit_uploaded(&mut store, &delta_fail).unwrap(), AdmitDecision::Admitted(_)));
+    assert_eq!(
+        store.lookup_review_findings(bloom.0.as_bytes(), "").unwrap().as_deref(),
+        Some(format!("{findings}\n\n## Delta-confirm findings\n\n[wp-a] Still leaking.").as_str()),
+        "the delta-confirm's failure appends under its own label, keeping the frozen head",
+    );
+}
+
 #[test]
 fn an_out_of_line_stage_is_refused_and_the_order_stays_live() {
     // A well-formed dispatch only ever carries a dispatched member stage

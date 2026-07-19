@@ -52,6 +52,7 @@ use aether_bloomery_github::{
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 
 use super::executor::{ExecutorPortError, ExecutorShell};
+use super::findings::{FindingsDecomposition, decompose_findings};
 use crate::store::{OutstandingOrder, RecordOutcome, StoreBackend};
 
 /// A work order's reducer context, captured host-side at dispatch time — the
@@ -324,6 +325,32 @@ fn verdict_passed(verdict: StageVerdict) -> bool {
     matches!(verdict, StageVerdict::Approved | StageVerdict::VerificationPassed)
 }
 
+/// Decompose a failing aggregate verdict's findings against the bloom's
+/// persisted work-order roster — exactly the workpiece ids the critic's
+/// `## Task — {workpiece}` prompt sections named, so the tag vocabulary is
+/// self-consistent with what the critic was shown. `None` for a passing
+/// verdict or one carrying no findings.
+fn aggregate_decomposition(
+    store: &mut dyn StoreBackend,
+    record: &DispatchRecord,
+    upload: &UploadedEvidence,
+    passed: bool,
+) -> Result<Option<FindingsDecomposition>, IntakeError> {
+    if passed {
+        return Ok(None);
+    }
+    let Some(findings) = upload.findings.as_deref() else {
+        return Ok(None);
+    };
+    let members: Vec<String> = store
+        .list_dispatch_descriptions(record.bloom.0.as_bytes())?
+        .into_iter()
+        .map(|(workpiece, _)| workpiece)
+        .filter(|workpiece| !workpiece.is_empty())
+        .collect();
+    Ok(Some(decompose_findings(findings, &members)))
+}
+
 /// The broker accept-gate + normalize → admit (#3502, the trust boundary).
 ///
 /// Look the upload's nonce up in the outstanding-order registry; admit only when
@@ -382,6 +409,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     // - An out-of-line stage (Review included — the model review is the
     //   bloom-level AggregateReview position, never a member dispatch) is a
     //   corrupt order and is refused, never routed to Integrate.
+    let mut aggregate_findings: Option<FindingsDecomposition> = None;
     let event = if upload.verdict == StageVerdict::Parked {
         Event {
             idempotency_key: IdempotencyKey(format!("aether.bloomery.park:{}", record.nonce.0)),
@@ -427,18 +455,24 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             },
         }
     } else if record.stage == StageId::AggregateReview {
-        // The whole-bloom aggregate verdict (ADR-0153) — a bloom-level order,
-        // no member axis. `implicated` stays empty here: the intake holds no
-        // membership knowledge, and the reducer expands an empty implication
-        // to every member (the findings decomposition narrows it later).
+        // The whole-bloom aggregate verdict (ADR-0153) — a bloom-level order, no
+        // member axis. A failing verdict's findings decompose against the ids
+        // the critic's own prompt showed (the persisted work-order roster); a
+        // *complete* attribution narrows the implication to the owning members,
+        // anything less leaves it empty and the reducer expands the empty
+        // implication to every member (fail-closed over-routing).
+        let passed = verdict_passed(upload.verdict);
+        let decomposition = aggregate_decomposition(store, &record, upload, passed)?;
+        let implicated = match &decomposition {
+            Some(decomposition) if decomposition.is_complete() => {
+                decomposition.owners().into_iter().map(WorkpieceId).collect()
+            }
+            _ => Vec::new(),
+        };
+        aggregate_findings = decomposition;
         Event {
             idempotency_key: IdempotencyKey(format!("aether.bloomery.aggregate_review:{}", record.nonce.0)),
-            fact: Fact::AggregateReviewCompleted {
-                bloom: record.bloom,
-                passed: verdict_passed(upload.verdict),
-                evidence,
-                implicated: Vec::new(),
-            },
+            fact: Fact::AggregateReviewCompleted { bloom: record.bloom, passed, evidence, implicated },
         }
     } else {
         // An out-of-line stage never comes from a well-formed dispatch; refuse it
@@ -454,17 +488,37 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     }
     // A failing Verify's findings — the mechanical failure output — persist
     // keyed by the member so the Refine repair re-entry is directed by them; a
-    // passing Verify clears the stale row (#3656, ADR-0153). A failing
-    // aggregate review's findings persist bloom-scoped under the empty
-    // workpiece key (the record carries no member axis) — every re-opened
-    // member's Refine dispatch reads that bloom row until the decomposition
-    // slices per member. Only after the consume — a refused upload writes
-    // nothing.
-    if record.stage == StageId::Verify || record.stage == StageId::AggregateReview {
+    // passing Verify clears the stale row (#3656, ADR-0153). Only after the
+    // consume — a refused upload writes nothing.
+    if record.stage == StageId::Verify {
         if verdict_passed(upload.verdict) {
             store.clear_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0)?;
         } else if let Some(findings) = &upload.findings {
             store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, findings)?;
+        }
+    } else if record.stage == StageId::AggregateReview {
+        if verdict_passed(upload.verdict) {
+            store.clear_review_findings(record.bloom.0.as_bytes(), "")?;
+        } else if let Some(findings) = &upload.findings {
+            // The bloom row under the empty workpiece key is the FROZEN set
+            // (ADR-0153): the first failing verdict records it verbatim, and a
+            // later failing verdict (the delta-confirm at the ceiling) appends
+            // under its own label rather than clobbering what the members were
+            // re-opened against. A complete decomposition additionally slices
+            // each owner's blocks into its member row, which the Refine
+            // re-entry prompt prefers over the bloom row.
+            let frozen = match store.lookup_review_findings(record.bloom.0.as_bytes(), "")? {
+                Some(existing) => format!("{existing}\n\n## Delta-confirm findings\n\n{findings}"),
+                None => findings.clone(),
+            };
+            store.record_review_findings(record.bloom.0.as_bytes(), "", &frozen)?;
+            if let Some(decomposition) = &aggregate_findings
+                && decomposition.is_complete()
+            {
+                for (workpiece, slice) in &decomposition.slices {
+                    store.record_review_findings(record.bloom.0.as_bytes(), workpiece, slice)?;
+                }
+            }
         }
     }
     Ok(AdmitDecision::Admitted(Box::new(Admission { admit, event })))

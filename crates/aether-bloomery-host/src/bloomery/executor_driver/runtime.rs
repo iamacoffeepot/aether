@@ -425,13 +425,53 @@ fn drain_and_dispatch_aggregate(
                 sequence = entry.sequence,
                 "no work-order descriptions persisted for the reviewed bloom; assembling a subject-only prompt",
             );
+        }
+        // A dispatch past the first roll is the delta-confirm (ADR-0153): it
+        // judges whether the frozen findings — the bloom row the first failing
+        // verdict recorded — were resolved, never a fresh hunt. The first roll
+        // instead instructs the critic to attribute each finding so the intake
+        // can slice the set back to the owning members.
+        let frozen = if payload.roll > 1 {
+            let frozen = store.lookup_review_findings(payload.bloom.as_bytes(), "")?;
+            if frozen.is_none() {
+                tracing::warn!(
+                    target: "aether_bloomery_host::executor",
+                    sequence = entry.sequence,
+                    roll = payload.roll,
+                    "delta-confirm dispatch found no frozen findings row; framing a full review",
+                );
+            }
+            frozen
         } else {
+            None
+        };
+        if !orders.is_empty() || frozen.is_some() {
             use core::fmt::Write;
-            let mut task = String::from(
-                "Review the whole integrated diff against the sealed intent: every member's work order follows.",
-            );
-            for (workpiece, description) in orders {
+            let mut task = String::from(if frozen.is_some() {
+                "Delta-confirm review: the first pass failed with the frozen findings below, and the implicated \
+                 members have repaired and re-integrated. Judge only whether the frozen findings are resolved in \
+                 this integrated tree — new findings do not extend the review. Every member's work order follows \
+                 for context."
+            } else {
+                "Review the whole integrated diff against the sealed intent: every member's work order follows."
+            });
+            for (workpiece, description) in &orders {
                 let _ = write!(task, "\n\n## Task — {workpiece}\n\n{description}");
+            }
+            match &frozen {
+                Some(findings) => {
+                    let _ = write!(task, "\n\n## Frozen findings\n\n{findings}");
+                }
+                None => {
+                    if let Some((example, _)) = orders.first() {
+                        let _ = write!(
+                            task,
+                            "\n\nAttribute each finding to the task that owns it: open the finding's first line \
+                             with the owning task id in square brackets, e.g. `[{example}]`. Leave a finding that \
+                             spans tasks untagged."
+                        );
+                    }
+                }
             }
             transformation.description = Some(task);
         }
