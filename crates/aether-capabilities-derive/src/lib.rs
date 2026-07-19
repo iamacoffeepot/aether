@@ -63,6 +63,24 @@ pub fn route(_args: TokenStream, item: TokenStream) -> TokenStream {
     .into()
 }
 
+/// `#[http::reply(ReplyKind)]` — a marker attribute consumed by
+/// `#[http::router]` (ADR-0154 §2): it names the method that maps a
+/// deferred route's downstream reply into the response, and the router
+/// generates the glue that recovers the held request and answers it.
+/// Like `#[http::route]`, reaching this expansion means the enclosing
+/// impl is missing `#[http::router]`.
+#[proc_macro_attribute]
+pub fn reply(_args: TokenStream, item: TokenStream) -> TokenStream {
+    let item = TokenStream2::from(item);
+    quote_spanned! { item.span() =>
+        ::core::compile_error!(
+            "#[http::reply] requires #[http::router] on the enclosing impl block (written above #[actor])"
+        );
+        #item
+    }
+    .into()
+}
+
 /// `#[http::router]` — the impl-block attribute that expands the typed
 /// route-authoring surface (ADR-0131 / ADR-0154). Written above
 /// `#[actor]`. Takes no arguments (today's exclusive registration) or the
@@ -249,8 +267,32 @@ struct Routed {
     ctx_c: Type,
     /// Each parameter after the receiver + ctx, in signature order.
     params: Vec<Param>,
+    /// `true` when the method returns `http::Outcome` (deferred-capable,
+    /// ADR-0154 §2); `false` for a synchronous `HttpServerResponse` route.
+    /// Every route sharing a `(static-head, method)` claim must agree.
+    returns_outcome: bool,
     /// `#[doc]` attributes carried onto the glue handler for
     /// `describe_component` prose.
+    docs: Vec<Attribute>,
+}
+
+/// A `#[http::reply(ReplyKind)]` method (ADR-0154 §2): maps a deferred
+/// route's downstream reply into the response and answers the held
+/// request. It registers no route; the `#[actor]` dispatch table routes
+/// its reply kind to the generated glue, which recovers the obligation.
+struct ReplyRoute {
+    /// The retained user method's name.
+    fn_name: Ident,
+    /// The reply kind this method maps — its third parameter's type, the
+    /// kind the generated glue dispatches on.
+    reply_kind: Type,
+    /// The receiver parameter, copied onto the glue.
+    first_arg: FnArg,
+    /// How the glue calls back into the retained method.
+    call_style: CallStyle,
+    /// The transport ctx type `C` (from `ctx: &mut C`).
+    ctx_c: Type,
+    /// `#[doc]` attributes carried onto the glue.
     docs: Vec<Attribute>,
 }
 
@@ -291,6 +333,10 @@ struct Group<'a> {
     call_style: CallStyle,
     /// The transport ctx type `C`.
     ctx_c: Type,
+    /// `true` when the group's routes return `http::Outcome` — the glue
+    /// is `manual`-class and may hold the reply (ADR-0154 §2). All routes
+    /// in a group agree (mixed is a compile error).
+    deferred: bool,
 }
 
 fn expand_router(mut item: ItemImpl, shared: bool) -> syn::Result<TokenStream2> {
@@ -301,15 +347,21 @@ fn expand_router(mut item: ItemImpl, shared: bool) -> syn::Result<TokenStream2> 
     let namespace = read_namespace(&item)?;
     let self_ident = self_type_ident(&item.self_ty)?;
 
-    // Collect routed methods, stripping the `#[http::route]` marker so
-    // each survives as a plain helper `#[actor]` re-emits verbatim.
+    // Collect routed + reply methods, stripping the `#[http::route]` /
+    // `#[http::reply]` markers so each survives as a plain helper `#[actor]`
+    // re-emits verbatim.
     let mut routed = Vec::new();
+    let mut reply_routes = Vec::new();
     for impl_item in &mut item.items {
         let ImplItem::Fn(method) = impl_item else {
             continue;
         };
         if let Some(desc) = take_routed(method)? {
             routed.push(desc);
+            continue;
+        }
+        if let Some(desc) = take_reply(method)? {
+            reply_routes.push(desc);
         }
     }
 
@@ -322,8 +374,17 @@ fn expand_router(mut item: ItemImpl, shared: bool) -> syn::Result<TokenStream2> 
 
     let groups = build_groups(&routed, &self_ident, &namespace)?;
 
+    // A deferred route or a reply route needs the shared `Settled` handler
+    // that answers `504` for a downstream chain that settles without a
+    // reply (ADR-0154 §2).
+    let needs_settled = groups.iter().any(|group| group.deferred) || !reply_routes.is_empty();
+
     let minted = groups.iter().map(emit_minted_kind).collect::<Vec<_>>();
-    let glue = groups.iter().map(emit_group_glue).collect::<Vec<_>>();
+    let mut glue = groups.iter().map(emit_group_glue).collect::<Vec<_>>();
+    glue.extend(reply_routes.iter().map(emit_reply_glue));
+    if needs_settled {
+        glue.push(emit_settled_handler(&groups, &reply_routes)?);
+    }
     for handler in glue {
         item.items.push(parse_quote!(#handler));
     }
@@ -402,7 +463,7 @@ fn take_routed(method: &mut ImplItemFn) -> syn::Result<Option<Routed>> {
     let (first_arg, call_style) = parse_receiver(method)?;
     let ctx_c = parse_ctx_type(method)?;
     let params = classify_params(method)?;
-    ensure_response_return(&method.sig.output)?;
+    let returns_outcome = parse_return_kind(&method.sig.output)?;
 
     let path_count = params.iter().filter(|param| matches!(param, Param::Path { .. })).count();
     if path_count != template.capture_count {
@@ -418,7 +479,17 @@ fn take_routed(method: &mut ImplItemFn) -> syn::Result<Option<Routed>> {
 
     let docs = method.attrs.iter().filter(|attr| attr.path().is_ident("doc")).cloned().collect();
 
-    Ok(Some(Routed { fn_name, method_ident: args.method, template, first_arg, call_style, ctx_c, params, docs }))
+    Ok(Some(Routed {
+        fn_name,
+        method_ident: args.method,
+        template,
+        first_arg,
+        call_style,
+        ctx_c,
+        params,
+        returns_outcome,
+        docs,
+    }))
 }
 
 /// Group routes by `(static-head, method)`, minting one kind + glue name
@@ -428,6 +499,16 @@ fn build_groups<'a>(routed: &'a [Routed], self_ident: &Ident, namespace: &LitStr
     for route in routed {
         let key = (route.template.static_head.clone(), route.method_ident.to_string());
         if let Some(group) = groups.iter_mut().find(|group| group.key == key) {
+            // Routes sharing a claim compile into one dispatcher, so they
+            // share a reply class (ADR-0154 §2): all synchronous or all
+            // deferred, never mixed.
+            if route.returns_outcome != group.deferred {
+                return Err(syn::Error::new(
+                    route.fn_name.span(),
+                    "routes sharing a (prefix, method) claim must all return HttpServerResponse \
+                     or all return http::Outcome — they compile into one dispatcher",
+                ));
+            }
             group.routes.push(route);
             continue;
         }
@@ -448,6 +529,7 @@ fn build_groups<'a>(routed: &'a [Routed], self_ident: &Ident, namespace: &LitStr
             first_arg: route.first_arg.clone(),
             call_style: route.call_style.clone(),
             ctx_c: route.ctx_c.clone(),
+            deferred: route.returns_outcome,
         });
     }
     for group in &mut groups {
@@ -488,6 +570,80 @@ fn slug_of(head: &str) -> String {
 /// segment, so it works through any import style).
 fn attr_is_route(attr: &Attribute) -> bool {
     attr.path().segments.last().is_some_and(|seg| seg.ident == "route")
+}
+
+/// True for `#[http::reply]` / `#[reply]` (matched on the last path
+/// segment, like [`attr_is_route`]).
+fn attr_is_reply(attr: &Attribute) -> bool {
+    attr.path().segments.last().is_some_and(|seg| seg.ident == "reply")
+}
+
+/// If `method` carries `#[http::reply]`, strip it and build the reply-route
+/// descriptor (ADR-0154 §2): a `fn(&mut self | state, ctx: &mut C, reply:
+/// K) -> HttpServerResponse` that maps a deferred route's downstream reply
+/// `K` into the response answered through the held obligation.
+fn take_reply(method: &mut ImplItemFn) -> syn::Result<Option<ReplyRoute>> {
+    let positions: Vec<usize> =
+        method.attrs.iter().enumerate().filter(|(_, attr)| attr_is_reply(attr)).map(|(index, _)| index).collect();
+    let Some(&index) = positions.first() else {
+        return Ok(None);
+    };
+    if positions.len() > 1 {
+        return Err(syn::Error::new(
+            method.attrs[positions[1]].span(),
+            "a reply method takes exactly one #[http::reply] attribute",
+        ));
+    }
+    method.attrs.remove(index);
+
+    let fn_name = method.sig.ident.clone();
+    let (first_arg, call_style) = parse_receiver(method)?;
+    let ctx_c = parse_ref_ctx_type(method)?;
+    let reply_kind = parse_reply_kind(method)?;
+    if parse_return_kind(&method.sig.output)? {
+        return Err(syn::Error::new(
+            method.sig.output.span(),
+            "a #[http::reply] method must return HttpServerResponse (it maps the downstream reply into the response)",
+        ));
+    }
+    let docs = method.attrs.iter().filter(|attr| attr.path().is_ident("doc")).cloned().collect();
+
+    Ok(Some(ReplyRoute { fn_name, reply_kind, first_arg, call_style, ctx_c, docs }))
+}
+
+/// Extract the transport ctx type `C` from a `#[http::reply]` method's
+/// second parameter, which is `ctx: &mut C` (a reply method takes the raw
+/// transport ctx, not the request-shaped `Ctx`, since it serves a reply
+/// rather than a request).
+fn parse_ref_ctx_type(method: &ImplItemFn) -> syn::Result<Type> {
+    let ctx_arg = method.sig.inputs.iter().nth(1).ok_or_else(|| {
+        syn::Error::new(
+            method.sig.span(),
+            "a reply method's second parameter must be `ctx: &mut NativeCtx<'_, Manual>`",
+        )
+    })?;
+    let FnArg::Typed(PatType { ty, .. }) = ctx_arg else {
+        return Err(syn::Error::new(ctx_arg.span(), "a reply method's second parameter must be `ctx: &mut …`"));
+    };
+    let Type::Reference(reference) = ty.as_ref() else {
+        return Err(syn::Error::new(ty.span(), "a reply method's ctx parameter must be a `&mut` transport ctx"));
+    };
+    Ok((*reference.elem).clone())
+}
+
+/// The reply kind a `#[http::reply]` method maps — its third parameter's
+/// type (after the receiver and ctx).
+fn parse_reply_kind(method: &ImplItemFn) -> syn::Result<Type> {
+    let arg = method.sig.inputs.iter().nth(2).ok_or_else(|| {
+        syn::Error::new(
+            method.sig.span(),
+            "a reply method needs a reply-kind parameter (`fn(&mut self, ctx, reply: K)`)",
+        )
+    })?;
+    let FnArg::Typed(PatType { ty, .. }) = arg else {
+        return Err(syn::Error::new(arg.span(), "a reply method's reply parameter must be a plainly-typed kind"));
+    };
+    Ok((**ty).clone())
 }
 
 /// Map a `#[http::route]` method identifier to its
@@ -612,24 +768,23 @@ fn path_param_inner(ty: &Type) -> Option<Type> {
     })
 }
 
-/// Require the routed method to return `HttpServerResponse` — the v1
-/// buffered-reply contract. Streaming routes keep the raw `#[handler]`
-/// surface, so a non-`HttpServerResponse` return is an error here.
-fn ensure_response_return(output: &ReturnType) -> syn::Result<()> {
+/// Read the routed method's return type: `HttpServerResponse` (a
+/// synchronous route, the rung-1 shape) or `http::Outcome` (a deferred
+/// route, ADR-0154 §2). Returns `true` for `Outcome`. Any other return is
+/// an error — a streaming route keeps the raw `#[handler]` surface.
+fn parse_return_kind(output: &ReturnType) -> syn::Result<bool> {
+    const EXPECTED: &str = "a routed method must return HttpServerResponse or http::Outcome \
+                            (a streaming route keeps the raw #[handler] surface)";
     let ReturnType::Type(_, ty) = output else {
-        return Err(syn::Error::new(output.span(), "a routed method must return HttpServerResponse"));
+        return Err(syn::Error::new(output.span(), EXPECTED));
     };
     let Type::Path(TypePath { path, .. }) = ty.as_ref() else {
-        return Err(syn::Error::new(ty.span(), "a routed method must return HttpServerResponse"));
+        return Err(syn::Error::new(ty.span(), EXPECTED));
     };
-    let is_response = path.segments.last().is_some_and(|seg| seg.ident == "HttpServerResponse");
-    if is_response {
-        Ok(())
-    } else {
-        Err(syn::Error::new(
-            ty.span(),
-            "a routed method must return HttpServerResponse (a streaming route keeps the raw #[handler] surface)",
-        ))
+    match path.segments.last() {
+        Some(seg) if seg.ident == "HttpServerResponse" => Ok(false),
+        Some(seg) if seg.ident == "Outcome" => Ok(true),
+        _ => Err(syn::Error::new(ty.span(), EXPECTED)),
     }
 }
 
@@ -662,32 +817,54 @@ fn emit_minted_kind(group: &Group<'_>) -> TokenStream2 {
 /// calling the matched user method. A request matching no template
 /// answers `404`.
 fn emit_group_glue(group: &Group<'_>) -> TokenStream2 {
-    let Group { routes, kind_struct, glue_name, first_arg, call_style, ctx_c, .. } = group;
+    let Group { routes, kind_struct, glue_name, first_arg, call_style, ctx_c, deferred, .. } = group;
 
     let glue_first = match call_style {
         CallStyle::SelfReceiver => quote! { #first_arg },
         CallStyle::State(state_ty) => quote! { __aether_state: #state_ty },
     };
     let docs = routes.iter().flat_map(|route| route.docs.iter());
-    let arms = routes.iter().map(|route| emit_route_arm(route, group));
+    let arms = routes.iter().map(|route| emit_route_arm(route, group)).collect::<Vec<_>>();
 
-    quote! {
-        #(#docs)*
-        #[handler::single]
-        fn #glue_name(
-            #glue_first,
-            __aether_ctx: &mut #ctx_c,
-            __aether_mail: #kind_struct,
-        ) -> ::aether_capabilities::http::kinds::HttpServerResponse {
-            let __aether_request = __aether_mail.request;
-            let __aether_path = __aether_request.path.clone();
-            let __aether_segs: ::std::vec::Vec<&str> =
-                __aether_path.split('/').filter(|__aether_seg| !__aether_seg.is_empty()).collect();
-            #(#arms)*
-            ::aether_capabilities::http::kinds::HttpServerResponse {
-                status: 404,
-                headers: ::std::vec::Vec::new(),
-                body: ::std::vec::Vec::from(&b"no matching route"[..]),
+    let preamble = quote! {
+        let __aether_request = __aether_mail.request;
+        let __aether_path = __aether_request.path.clone();
+        let __aether_segs: ::std::vec::Vec<&str> =
+            __aether_path.split('/').filter(|__aether_seg| !__aether_seg.is_empty()).collect();
+    };
+    let not_found = quote! {
+        ::aether_capabilities::http::kinds::HttpServerResponse {
+            status: 404,
+            headers: ::std::vec::Vec::new(),
+            body: ::std::vec::Vec::from(&b"no matching route"[..]),
+        }
+    };
+
+    if *deferred {
+        // A deferred group is `manual`-class: an arm replies inline for
+        // `Outcome::Reply`, holds for `Outcome::Deferred`, and the
+        // no-match fallthrough answers `404` through the taken obligation.
+        quote! {
+            #(#docs)*
+            #[handler::manual]
+            fn #glue_name(#glue_first, __aether_ctx: &mut #ctx_c, __aether_mail: #kind_struct) {
+                #preamble
+                #(#arms)*
+                __aether_ctx.take_inbound().reply(&#not_found);
+            }
+        }
+    } else {
+        quote! {
+            #(#docs)*
+            #[handler::single]
+            fn #glue_name(
+                #glue_first,
+                __aether_ctx: &mut #ctx_c,
+                __aether_mail: #kind_struct,
+            ) -> ::aether_capabilities::http::kinds::HttpServerResponse {
+                #preamble
+                #(#arms)*
+                #not_found
             }
         }
     }
@@ -704,6 +881,15 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
         quote! { __aether_segs.len() >= #seglen }
     } else {
         quote! { __aether_segs.len() == #seglen }
+    };
+    // On a bind failure (unparseable capture / rejected extractor), a
+    // synchronous glue returns the response; a deferred (`manual`) glue has
+    // no return value, so it replies through the taken obligation and
+    // returns unit. Both use the `__aether_response` bound by the `Err` arm.
+    let on_fail = if group.deferred {
+        quote! { { __aether_ctx.take_inbound().reply(&__aether_response); return; } }
+    } else {
+        quote! { return __aether_response }
     };
     let literal_checks = route.template.segments.iter().enumerate().filter_map(|(index, seg)| match seg {
         Segment::Literal(text) => {
@@ -729,7 +915,7 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
                 ) {
                     ::core::result::Result::Ok(__aether_value) =>
                         ::aether_capabilities::http::Path(__aether_value),
-                    ::core::result::Result::Err(__aether_response) => return __aether_response,
+                    ::core::result::Result::Err(__aether_response) => #on_fail,
                 };
             }
         });
@@ -748,11 +934,25 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
 
     let param_idents = route.params.iter().map(Param::ident).collect::<Vec<_>>();
     let fn_name = &route.fn_name;
-    let call = match &group.call_style {
-        CallStyle::SelfReceiver => quote! { return self.#fn_name(__aether_http_ctx #(, #param_idents)*); },
-        CallStyle::State(_) => {
-            quote! { return Self::#fn_name(__aether_state, __aether_http_ctx #(, #param_idents)*); }
+    let invoke = match &group.call_style {
+        CallStyle::SelfReceiver => quote! { self.#fn_name(__aether_http_ctx #(, #param_idents)*) },
+        CallStyle::State(_) => quote! { Self::#fn_name(__aether_state, __aether_http_ctx #(, #param_idents)*) },
+    };
+    // A synchronous route returns the response, which the glue returns; a
+    // deferred route returns `Outcome`, which the glue answers (`Reply`) or
+    // holds (`Deferred`) before returning unit.
+    let call_and_tail = if group.deferred {
+        quote! {
+            match #invoke {
+                ::aether_capabilities::http::Outcome::Reply(__aether_response) => {
+                    __aether_ctx.take_inbound().reply(&__aether_response);
+                }
+                ::aether_capabilities::http::Outcome::Deferred => {}
+            }
+            return;
         }
+    } else {
+        quote! { return #invoke; }
     };
 
     let static_head = LitStr::new(&group.static_head, Span::call_site());
@@ -769,9 +969,87 @@ fn emit_route_arm(route: &Routed, group: &Group<'_>) -> TokenStream2 {
                     method: #method_expr,
                 },
             );
-            #call
+            #call_and_tail
         }
     }
+}
+
+/// The `#[handler::manual]` glue for one `#[http::reply]` route (ADR-0154
+/// §2): call the retained user method to map the downstream reply into a
+/// response, recover the request obligation held for this reply's
+/// correlation (`reply_target().correlation_id`), and answer it. An
+/// unmatched reply (no held obligation — already answered, or evicted by
+/// the `504` net) is a no-op.
+fn emit_reply_glue(reply: &ReplyRoute) -> TokenStream2 {
+    let ReplyRoute { fn_name, reply_kind, first_arg, call_style, ctx_c, docs } = reply;
+    let glue_name = format_ident!("__aether_reply_{fn_name}");
+    let glue_first = match call_style {
+        CallStyle::SelfReceiver => quote! { #first_arg },
+        CallStyle::State(state_ty) => quote! { __aether_state: #state_ty },
+    };
+    let call = match call_style {
+        CallStyle::SelfReceiver => quote! { self.#fn_name(__aether_ctx, __aether_reply) },
+        CallStyle::State(_) => quote! { Self::#fn_name(__aether_state, __aether_ctx, __aether_reply) },
+    };
+    quote! {
+        #(#docs)*
+        #[handler::manual]
+        fn #glue_name(#glue_first, __aether_ctx: &mut #ctx_c, __aether_reply: #reply_kind) {
+            let __aether_response = #call;
+            let __aether_self = __aether_ctx.self_id();
+            let __aether_correlation = __aether_ctx.reply_target().correlation_id;
+            if let ::core::option::Option::Some(__aether_inbound) =
+                ::aether_capabilities::http::take_deferred(__aether_self, __aether_correlation)
+            {
+                __aether_inbound.reply(&__aether_response);
+            }
+        }
+    }
+}
+
+/// The shared `#[handler::manual]` `Settled` handler (ADR-0154 §2): a
+/// deferred request whose downstream chain settles without ever replying
+/// (a dropped or unloaded peer) is answered `504` rather than left to hang
+/// the client. Its receiver / ctx shape is copied from the first deferred
+/// route or reply route (all share the impl's transport). Emitted once per
+/// router that has any deferred or reply route.
+fn emit_settled_handler(groups: &[Group<'_>], reply_routes: &[ReplyRoute]) -> syn::Result<TokenStream2> {
+    let (first_arg, call_style, ctx_c) = groups
+        .iter()
+        .find(|group| group.deferred)
+        .map(|group| (&group.first_arg, &group.call_style, &group.ctx_c))
+        .or_else(|| reply_routes.first().map(|reply| (&reply.first_arg, &reply.call_style, &reply.ctx_c)))
+        .ok_or_else(|| {
+            syn::Error::new(Span::call_site(), "internal: settled handler emitted with no deferred routes")
+        })?;
+
+    // The handler reads neither self nor state (the obligation table is
+    // process-global), so name an unused receiver and silence the lint.
+    let (settled_first, allow) = match call_style {
+        CallStyle::SelfReceiver => (quote! { #first_arg }, quote! { #[allow(clippy::unused_self)] }),
+        CallStyle::State(state_ty) => (quote! { _aether_state: #state_ty }, quote! {}),
+    };
+
+    Ok(quote! {
+        #allow
+        #[handler::manual]
+        fn __aether_route_settled(
+            #settled_first,
+            __aether_ctx: &mut #ctx_c,
+            __aether_settled: ::aether_capabilities::http::Settled,
+        ) {
+            let __aether_self = __aether_ctx.self_id();
+            if let ::core::option::Option::Some(__aether_inbound) =
+                ::aether_capabilities::http::take_deferred(__aether_self, __aether_settled.root.correlation_id)
+            {
+                __aether_inbound.reply(&::aether_capabilities::http::kinds::HttpServerResponse {
+                    status: 504,
+                    headers: ::std::vec::Vec::new(),
+                    body: ::std::vec::Vec::from(&b"downstream settled without a reply"[..]),
+                });
+            }
+        }
+    })
 }
 
 /// Build the `RegisterRouteSelf` send for one route group, addressed with
@@ -790,6 +1068,25 @@ fn registration_send(group: &Group<'_>, ctx: &Ident, shared: bool) -> TokenStrea
                 shared: #shared,
             });
     }
+}
+
+/// Strip a transport ctx type down to its base by dropping any non-lifetime
+/// generic arguments (the reply-class marker a deferred route carries):
+/// `NativeCtx<'a, Manual>` → `NativeCtx<'a>`, `WasmCtx<'a>` → `WasmCtx<'a>`.
+/// The synthesized `wire` needs the base ctx because `wire` is a
+/// `Lifecycle` method with the default reply class, not the handler's.
+fn base_ctx_type(ty: &Type) -> Type {
+    let mut ty = ty.clone();
+    if let Type::Path(TypePath { path, .. }) = &mut ty
+        && let Some(seg) = path.segments.last_mut()
+        && let PathArguments::AngleBracketed(args) = &mut seg.arguments
+    {
+        args.args = args.args.iter().filter(|arg| matches!(arg, GenericArgument::Lifetime(_))).cloned().collect();
+        if args.args.is_empty() {
+            seg.arguments = PathArguments::None;
+        }
+    }
+    ty
 }
 
 /// Inject the per-group `RegisterRouteSelf` registrations into `wire` —
@@ -814,10 +1111,13 @@ fn inject_registration(item: &mut ItemImpl, groups: &[Group<'_>], shared: bool) 
     }
 
     // Synthesize a fresh `wire`, copying the receiver + ctx shape from
-    // the first group (all routes on one impl share a transport).
+    // the first group (all routes on one impl share a transport). `wire`
+    // is a `Lifecycle` method with the base (default reply-class) ctx, so
+    // strip any reply-class type arg a deferred route carries
+    // (`NativeCtx<'_, Manual>` → `NativeCtx<'_>`).
     let template = &groups[0];
     let first_arg = &template.first_arg;
-    let ctx_c = &template.ctx_c;
+    let ctx_c = base_ctx_type(&template.ctx_c);
     let ctx = format_ident!("__aether_ctx");
     let sends = groups.iter().map(|group| registration_send(group, &ctx, shared)).collect::<Vec<_>>();
     let wire: ImplItemFn = parse_quote! {

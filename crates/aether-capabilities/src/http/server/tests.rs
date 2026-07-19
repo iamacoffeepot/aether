@@ -16,10 +16,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use test_handlers::{
-    ApiRouteHandler, ApiV2Handler, BookRouteHandler, EchoHttpHandler, ExclusiveMacroPoolHandler, ExtractRouteHandler,
-    FixedBodyHttpHandler, FloodHttpHandler, MethodAnyHandler, MethodPostHandler, STREAM_CHUNK_COUNT,
-    SharedAlphaHandler, SharedBetaHandler, SharedMacroPoolHandler, SilentHttpHandler, StreamHttpHandler,
-    StreamingUploadHandler, TmpRouteHandler, WiredRouteHandler, stream_chunk_body,
+    ApiRouteHandler, ApiV2Handler, BookRouteHandler, DeferRouteHandler, EchoHttpHandler, EchoPeer,
+    ExclusiveMacroPoolHandler, ExtractRouteHandler, FixedBodyHttpHandler, FloodHttpHandler, MethodAnyHandler,
+    MethodPostHandler, STREAM_CHUNK_COUNT, SharedAlphaHandler, SharedBetaHandler, SharedMacroPoolHandler,
+    SilentHttpHandler, SilentPeer, StreamHttpHandler, StreamingUploadHandler, TmpRouteHandler, WiredRouteHandler,
+    stream_chunk_body,
 };
 
 mod test_handlers {
@@ -250,6 +251,107 @@ mod test_handlers {
                 headers: Vec::new(),
                 body: format!("books:checkout:{}", id.0).into_bytes(),
             }
+        }
+    }
+
+    /// The request/reply kind pair for the deferred-route fixtures
+    /// (ADR-0154 §2): a route forwards `EchoAsk` to a peer cap, which
+    /// replies `EchoSay`.
+    #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize)]
+    #[kind(name = "aether.http.test_echo_ask")]
+    pub struct EchoAsk {
+        pub text: String,
+    }
+
+    #[derive(aether_data::Kind, aether_data::Schema, serde::Serialize, serde::Deserialize)]
+    #[kind(name = "aether.http.test_echo_say")]
+    pub struct EchoSay {
+        pub text: String,
+    }
+
+    /// A peer cap that answers `EchoAsk` with `EchoSay` — the downstream a
+    /// deferred route forwards to and answers on.
+    pub struct EchoPeer;
+    pub struct EchoPeerState;
+
+    #[actor(singleton)]
+    impl NativeActor for EchoPeer {
+        type State = EchoPeerState;
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.http.test_echo_peer";
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<EchoPeerState, BootError> {
+            Ok(EchoPeerState)
+        }
+
+        #[handler::single]
+        fn on_ask(_state: &mut EchoPeerState, _ctx: &mut NativeCtx<'_>, ask: EchoAsk) -> EchoSay {
+            EchoSay { text: ask.text }
+        }
+    }
+
+    /// A peer that receives `EchoAsk` and never replies — the downstream a
+    /// deferred route's `504` settlement net catches.
+    pub struct SilentPeer;
+    pub struct SilentPeerState;
+
+    #[actor(singleton)]
+    impl NativeActor for SilentPeer {
+        type State = SilentPeerState;
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.http.test_silent_peer";
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<SilentPeerState, BootError> {
+            Ok(SilentPeerState)
+        }
+
+        // Deliberately manual + no reply: the deferred route's downstream
+        // chain settles without an answer, arming the `504`.
+        #[handler::manual]
+        fn on_ask(_state: &mut SilentPeerState, _ctx: &mut NativeCtx<'_, Manual>, _ask: EchoAsk) {}
+    }
+
+    /// A deferred-route handler (ADR-0154 §2): `/echo` forwards to
+    /// [`EchoPeer`] and answers on its `EchoSay` reply; `/blackhole`
+    /// forwards to [`SilentPeer`] and is answered `504` by the settlement
+    /// net when that chain settles without a reply.
+    pub struct DeferRouteHandler;
+    pub struct DeferRouteHandlerState;
+
+    #[http::router]
+    #[actor(singleton)]
+    impl NativeActor for DeferRouteHandler {
+        type State = DeferRouteHandlerState;
+        type Config = ();
+        const NAMESPACE: &'static str = "aether.http.test_route_defer";
+
+        fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<DeferRouteHandlerState, BootError> {
+            Ok(DeferRouteHandlerState)
+        }
+
+        /// `GET /echo` — forward to the echo peer, answer on its reply.
+        #[http::route(Get, "/echo")]
+        fn echo(_state: &mut DeferRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+            let peer = ctx.actor::<EchoPeer>().mailbox_id();
+            ctx.defer(peer, &EchoAsk { text: "hi".to_string() })
+        }
+
+        /// `GET /blackhole` — forward to the silent peer; the `504` net answers.
+        #[http::route(Get, "/blackhole")]
+        fn blackhole(_state: &mut DeferRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+            let peer = ctx.actor::<SilentPeer>().mailbox_id();
+            ctx.defer(peer, &EchoAsk { text: "void".to_string() })
+        }
+
+        /// Map the peer's `EchoSay` reply into the response answered through
+        /// the held request obligation.
+        #[http::reply]
+        fn on_say(
+            _state: &mut DeferRouteHandlerState,
+            _ctx: &mut NativeCtx<'_, Manual>,
+            say: EchoSay,
+        ) -> HttpServerResponse {
+            HttpServerResponse { status: 200, headers: Vec::new(), body: format!("echoed:{}", say.text).into_bytes() }
         }
     }
 
@@ -1516,6 +1618,34 @@ fn path_template_routes_dispatch_and_capture() {
     // no bare-prefix fallback, so a POST the group can't match is a 404.
     let miss = round_trip(port, b"POST /books/7 HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(miss.starts_with("HTTP/1.1 404 "), "no exact template match is a 404: {miss:?}");
+}
+
+/// ADR-0154 §2 deferred routes end to end: `GET /echo` forwards its request
+/// to a peer cap over a detached dispatch, holds the request obligation,
+/// and answers on the peer's reply; `GET /blackhole` forwards to a peer
+/// that never replies and is answered `504` by the settlement net when that
+/// chain settles without a reply.
+#[test]
+fn deferred_route_forwards_and_answers_on_reply() {
+    let chassis = routed_chassis!(DeferRouteHandler, EchoPeer, SilentPeer);
+    let port = port_of(&chassis);
+
+    // The reply arrives from the peer and the reply route answers the held
+    // request; poll it live past the async route registration.
+    poll_body(port, b"GET /echo HTTP/1.1\r\nHost: localhost\r\n\r\n", "echoed:hi");
+
+    // The silent peer never replies, so the deferred chain settles and the
+    // 504 net answers. Before the `/blackhole` registration lands the path
+    // takes the `/` catch-all (a 200), so poll until the 504 appears.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let response = round_trip(port, b"GET /blackhole HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        if response.starts_with("HTTP/1.1 504 ") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "expected a 504 within 10s; last response: {response:?}");
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Longest prefix wins among overlapping routes, matching stops at

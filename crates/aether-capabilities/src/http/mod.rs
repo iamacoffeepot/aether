@@ -12,6 +12,12 @@ pub mod server;
 pub mod stream;
 pub mod typed;
 
+// ADR-0154 §2/§3 native deferred-reply machinery for the typed route
+// surface (`Ctx::defer`, the reply-obligation table). Native-only — the
+// obligation hold is `InboundMail` — so behind the `runtime` feature.
+#[cfg(feature = "runtime")]
+mod defer;
+
 pub use kinds::*;
 
 // ADR-0131 typed route-authoring surface. The `#[router]` / `#[route]`
@@ -19,8 +25,18 @@ pub use kinds::*;
 // cap-owned derive crate, alongside the runtime types they compile down
 // to — consumers write `#[http::router]` / `#[http::route]` next to
 // `http::FromRequest` / `http::Ctx` / `http::Route`.
-pub use aether_capabilities_derive::{route, router};
-pub use typed::{Ctx, FromPathSegment, FromRequest, Path, Route};
+pub use aether_capabilities_derive::{reply, route, router};
+pub use typed::{Ctx, FromPathSegment, FromRequest, Outcome, Path, Route};
+
+// Native deferred-reply glue helper the `#[http::route]` / `#[http::reply]`
+// macros emit calls to (ADR-0154), plus the `Settled` kind the generated
+// `504` handler dispatches on — re-exported here so the macro emits one
+// `::aether_capabilities::http::…` path a consumer resolves through its
+// existing dependency. Runtime-only.
+#[cfg(feature = "runtime")]
+pub use aether_kinds::trace::Settled;
+#[cfg(feature = "runtime")]
+pub use defer::take_deferred;
 
 // ADR-0133 reply-based data-phase stream handles. Wasm-safe like `typed`,
 // so a `default-features = false` guest that streams gets them without the

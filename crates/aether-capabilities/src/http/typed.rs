@@ -157,3 +157,27 @@ impl<C> DerefMut for Ctx<'_, C> {
         self.transport
     }
 }
+
+/// What a routed method answers with (ADR-0154 §2). A synchronous route
+/// returns [`HttpServerResponse`] directly (the rung-1 shape, unchanged);
+/// a deferred route returns `Outcome` so it can choose between replying
+/// inline and forwarding the request to a peer capability and answering
+/// only when that reply lands.
+///
+/// - [`Reply`](Outcome::Reply) answers the request now with the carried
+///   response.
+/// - [`Deferred`](Outcome::Deferred) is what [`Ctx::defer`] returns on the
+///   native transport: it has taken the request's reply obligation across
+///   the async boundary and dispatched downstream, so the glue holds — a
+///   later `#[http::reply]` route (or the `504` settlement net) answers.
+///
+/// `Ctx::defer` is native-only, so `Deferred` is only reachable on the
+/// native transport; a wasm-guest route returns `Reply` (or an
+/// `HttpServerResponse` directly).
+pub enum Outcome {
+    /// Answer the request now with this response.
+    Reply(HttpServerResponse),
+    /// The reply obligation was taken by [`Ctx::defer`]; the glue holds and
+    /// a later reply route answers.
+    Deferred,
+}
