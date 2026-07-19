@@ -11,6 +11,7 @@ Require a citation to `AGENTS.md`, an accepted ADR, `docs/guide/`, or an establi
 - `driver-naming`: calls an active driver a passive capability.
 - `module-siblings`: adds suffix siblings where a parent module directory is required.
 - `actor-state`: adds locks, cells, or atomics to actor state contrary to the run-token architecture.
+- `closed-set-behind-a-string`: consolidates producer-consumer string literals whose vocabulary is a 1:1 projection of an existing enum or a bounded decision set, without a closed-construction wrapper type, an enumerable `ALL`, or a pairing/exhaustiveness tripwire.
 - `adr-conformance`: violates mail-only actor communication, substrate/actor boundaries, lineage addressing, or another accepted decision.
 
 ## Bar
