@@ -35,11 +35,13 @@ use super::claim_plan::{
     seal_claim_mail, transfer_seal_mail,
 };
 use super::{
-    Admit, AdmitResult, ClaimResult, ClaimSeal, Commit, CommitResult, DispatchPayload, EnumerateClaims,
-    EnumerateClaimsResult, IntegratePayload, LandPayload, MembershipMutation, OutboxPayload, Query, QueryResult,
-    RedispatchPayload, ReplayJournal, ReplayJournalResult, TransferSeal,
+    Admit, AdmitResult, AggregateReviewPayload, ClaimResult, ClaimSeal, Commit, CommitResult, DispatchPayload,
+    EnumerateClaims, EnumerateClaimsResult, IntegratePayload, LandPayload, MembershipMutation, OutboxPayload, Query,
+    QueryResult, RedispatchPayload, ReplayJournal, ReplayJournalResult, TransferSeal,
 };
-use super::{TOPIC_DISPATCH, TOPIC_INTEGRATE, TOPIC_LAND, TOPIC_LANDING_RECEIPT, TOPIC_REDISPATCH};
+use super::{
+    TOPIC_AGGREGATE_REVIEW, TOPIC_DISPATCH, TOPIC_INTEGRATE, TOPIC_LAND, TOPIC_LANDING_RECEIPT, TOPIC_REDISPATCH,
+};
 use crate::ids::BloomId;
 use crate::port::{ClaimRefKind, ClaimRefState};
 use crate::reduce::{Decision, Decisions, Event, Fact, Outcome, Snapshot, reduce, view_of};
@@ -583,6 +585,11 @@ fn project(
                 let payload = IntegratePayload { bloom: bloom.0, base: *base, candidates: candidates.clone() };
                 outbox.push(OutboxPayload { topic: TOPIC_INTEGRATE.to_owned(), payload: to_vec(&payload)? });
             }
+            Decision::DispatchAggregateReview { bloom, transformation, roll } => {
+                let payload =
+                    AggregateReviewPayload { bloom: bloom.0, transformation: transformation.clone(), roll: *roll };
+                outbox.push(OutboxPayload { topic: TOPIC_AGGREGATE_REVIEW.to_owned(), payload: to_vec(&payload)? });
+            }
             Decision::InheritClaim { .. }
             | Decision::RecordResolution { .. }
             | Decision::RecordEvidence { .. }
@@ -590,6 +597,9 @@ fn project(
             | Decision::AdvanceStage { .. }
             | Decision::MarkSuperseded { .. }
             | Decision::SetResolved { .. }
+            | Decision::RecordIntegration { .. }
+            | Decision::RecordAggregateRoll { .. }
+            | Decision::RevokeResolution { .. }
             | Decision::AdvanceMainline { .. } => {}
         }
     }
