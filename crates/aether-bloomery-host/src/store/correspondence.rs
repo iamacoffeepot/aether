@@ -9,7 +9,7 @@
 //! store inside itself (the trait-in-port + host-impl seam, mirroring
 //! [`GitDataApi`](aether_bloomery_github::GitDataApi)). It opens its own
 //! [`rusqlite::Connection`] to the store path exactly as the executor dispatch
-//! driver does (#3505), so the WAL journal serializes the rare concurrent write.
+//! reactor does (#3505), so the WAL journal serializes the rare concurrent write.
 //!
 //! The `git_correspondence` table is keyed both directions: the 32-byte bloom
 //! digest is the primary key (forward), and a **unique** `(git_format, git_bytes)`

@@ -40,10 +40,10 @@ pub struct BloomeryCli {
 
     /// `--github-*` shadow `AETHER_GITHUB_*` / `GITHUB_TOKEN` — the shared GitHub
     /// connection knobs (token / owner / repo / api-base / cas-land-enabled) plus
-    /// the mirror poll cadence. One flag set serves both the outbox-consumer
-    /// mirror driver and the git source-port capability (`SourceOverlay` is a
+    /// the mirror poll cadence. One flag set serves both the mirror reactor
+    /// and the git source-port capability (`SourceOverlay` is a
     /// re-export of `GithubMirrorOverlay`); unset → unconfigured, so the mirror
-    /// driver mounts disabled.
+    /// reactor mounts disabled.
     #[command(flatten)]
     pub github: GithubMirrorOverlay,
 

@@ -47,10 +47,10 @@ pub struct GithubMirrorConfig {
     /// (ADR-0149 migration step 3 moved landing authority to the source port —
     /// the CAS `land` is the landing of record); consumed by the git source
     /// port to gate [`GitSource::land`](aether_bloomery_github::GitSource) and by
-    /// the land driver ([`super::LandDriverCapability`]) that drives it.
+    /// the land reactor ([`super::LandReactorCapability`]) that drives it.
     #[config(default = true)]
     pub cas_land_enabled: bool,
-    /// How often the outbox-consumer mirror driver ([`super::MirrorDriverCapability`])
+    /// How often the mirror reactor ([`super::MirrorReactorCapability`])
     /// polls the store outbox for undelivered projection entries, in seconds.
     /// The connection knobs and the poll cadence share this config because one
     /// GitHub-mirror configuration governs the whole outbound path; the source
@@ -71,10 +71,10 @@ pub struct GithubMirrorConfig {
     /// The protected git ref the executor pins the wrapper dispatch at.
     #[config(default = "refs/heads/main")]
     pub executor_dispatch_ref: String,
-    /// The `SQLite` store path the executor dispatch driver ([`super::ExecutorDriverCapability`])
+    /// The `SQLite` store path the executor dispatch reactor ([`super::ExecutorReactorCapability`])
     /// opens its own connection to, to drive the intake registry directly (#3505).
     /// Reads the **same** `AETHER_STORE_PATH` env the [`StoreConfig`](crate::store::StoreConfig)
-    /// resolves, so the driver's connection targets the store the `StoreCapability`
+    /// resolves, so the reactor's connection targets the store the `StoreCapability`
     /// owns; carried on this shared config the same way the executor knobs are (one
     /// config serves the mirror, source, and executor caps).
     #[config(env = "AETHER_STORE_PATH", default = ":memory:")]
@@ -145,7 +145,7 @@ pub struct GithubMirrorConfig {
     #[config(default = "")]
     pub local_construct_effort: String,
     /// How long (in seconds) a tracked dispatch may stay unresolved before the
-    /// executor driver logs a `warn` naming the wedge ([`super::ExecutorDriverCapability`],
+    /// executor reactor logs a `warn` naming the wedge ([`super::ExecutorReactorCapability`],
     /// #3635) — observability only, never a behavior change to admission or
     /// re-drive. `0` disables the warn.
     #[config(default = 1800)]

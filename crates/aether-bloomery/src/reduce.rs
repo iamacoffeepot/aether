@@ -592,7 +592,7 @@ pub enum Decision {
     /// Re-dispatch a held stage with the adopted answer in its input closure
     /// (from an adopted answer). A snapshot-inert outbox effect — like
     /// [`Decision::EmitReceipt`], it carries no store-projection row and is
-    /// republished to the dispatch consumer, which re-assembles the attempt's
+    /// republished to the dispatch reactor, which re-assembles the attempt's
     /// prompt manifest naming both the question and the answer digests
     /// (ADR-0151).
     RedispatchStage {
@@ -622,7 +622,7 @@ pub enum Decision {
         /// (adding the idempotency nonce) and submits through the executor port.
         transformation: Transformation,
         /// The member's frozen scope-revision digest, carried explicitly so the
-        /// host driver records it without inferring it from the transformation's
+        /// host reactor records it without inferring it from the transformation's
         /// inputs (ADR-0152 — once a candidate exists, `inputs[0]` is the
         /// candidate tree, not the revision).
         scope_revision: Digest,
@@ -646,14 +646,14 @@ pub enum Decision {
         progress: StageProgress,
     },
     /// Drive the source-port compare-and-swap land of a just-resolved bloom —
-    /// the transactional-outbox intent the host's land driver drains and issues
+    /// the transactional-outbox intent the host's land reactor drains and issues
     /// through the source port's `aether.source.land` op (ADR-0149 §The boundary,
     /// migration step 3). Emitted alongside [`Decision::SetResolved`] the moment a
     /// bloom resolves: resolution is land-readiness (a resolved bloom carries its
     /// one artifact and every member's claim), so the land decision rides the same
     /// resolve commit. A snapshot-inert outbox effect like [`Decision::EmitReceipt`]
     /// / [`Decision::DispatchAttempt`] — the actual mainline advance folds in later
-    /// from the driver's [`Fact::Land`] admit, never from this decision. Appended so
+    /// from the reactor's [`Fact::Land`] admit, never from this decision. Appended so
     /// the prior decisions' wire discriminants are unchanged.
     DispatchLand {
         /// The resolving bloom to land.
@@ -668,9 +668,9 @@ pub enum Decision {
     /// Drive the bloom's git-side integration (ADR-0152 §Resolution drives
     /// integration): emitted by the [`Fact::Integrate`] that completes the claim
     /// set — every member now carries a resolution — so the host integrate
-    /// driver folds each claim's candidate tree onto the bloom's integration
+    /// reactor folds each claim's candidate tree onto the bloom's integration
     /// branch in member order and admits the [`Fact::Resolve`] whose
-    /// `DispatchLand` the land driver then consumes. A snapshot-inert outbox
+    /// `DispatchLand` the land reactor then consumes. A snapshot-inert outbox
     /// effect like [`Decision::DispatchAttempt`], appended so the prior
     /// decisions' wire discriminants are unchanged.
     DispatchIntegration {
@@ -1189,7 +1189,7 @@ fn reduce_integrate(snapshot: &Snapshot, bloom: &BloomId, claim: &ResolutionClai
     let mut effects = alloc::vec![Decision::RecordResolution { bloom: *bloom, claim: claim.clone() }];
     // The claim that completes the set dispatches integration (ADR-0152
     // §Resolution drives integration): with every member now carrying a
-    // resolution, the host driver folds each claimed candidate tree onto the
+    // resolution, the host reactor folds each claimed candidate tree onto the
     // integration branch in member order and admits the resulting
     // `Fact::Resolve`. The snapshot has not folded this claim yet, so the
     // completeness check counts it alongside the recorded ones.
@@ -1529,7 +1529,7 @@ fn reduce_resolve(snapshot: &Snapshot, bloom: &BloomId, tree: &Digest, head: &Di
     // ceiling is AggregateReview's catalog retry budget over the record's
     // consumed-verdict count; a fold arriving past it is refused fail-closed
     // (unreachable through this reducer — a wedged bloom's members stay
-    // closed, so no re-fold dispatches — but a buggy driver must not buy a
+    // closed, so no re-fold dispatches — but a buggy reactor must not buy a
     // roll the vocabulary forbids).
     let roll = record.aggregate_rolls + 1;
     if roll > StageCatalog::retry_budget_of(StageId::AggregateReview).unwrap_or(1) {
@@ -1553,7 +1553,7 @@ fn reduce_resolve(snapshot: &Snapshot, bloom: &BloomId, tree: &Digest, head: &Di
 
 /// Reduce a whole-bloom aggregate-review verdict (ADR-0153). A passing verdict
 /// resolves the bloom from its held fold — [`Decision::SetResolved`] plus the
-/// [`Decision::DispatchLand`] the land driver consumes. A failing verdict
+/// [`Decision::DispatchLand`] the land reactor consumes. A failing verdict
 /// freezes into member routing: every implicated member's claim is revoked and
 /// its cursor re-enters the repair-only `Refine` (the host threads the
 /// findings slice onto the dispatch), the stale fold is cleared, and the

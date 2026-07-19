@@ -588,7 +588,7 @@ impl ApiCapabilityState {
             let spec = gated.seal();
             // Persist each member's advisory work-order description keyed by the
             // sealed bloom id, before the seal defers — the text is operator-supplied
-            // context (#3595) the executor driver reads back at dispatch, and the api
+            // context (#3595) the executor reactor reads back at dispatch, and the api
             // cap is mail-only, so it rides a store write rather than the sealed spec.
             // Best-effort and fire-and-forget: a description write never gates the
             // seal, and a member with none simply dispatches subject-only.

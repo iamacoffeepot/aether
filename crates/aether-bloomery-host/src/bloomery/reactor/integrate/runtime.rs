@@ -1,4 +1,4 @@
-//! The runtime for the integrate-driver capability (ADR-0152 §Resolution drives
+//! The runtime for the integrate-reactor capability (ADR-0152 §Resolution drives
 //! integration — issue #3650).
 //!
 //! A poll-driven loop that turns the reducer's integration decisions into the
@@ -6,7 +6,7 @@
 //!
 //! 1. **Drain.** Each tick drains the store's
 //!    [`Topic::Integrate`](aether_bloomery::Topic::Integrate) outbox
-//!    topic (its own connection, mirroring the land driver's store ownership) and
+//!    topic (its own connection, mirroring the land reactor's store ownership) and
 //!    decodes each [`IntegratePayload`](aether_bloomery::IntegratePayload) — the
 //!    bloom whose members all carry claims, its sealed base, and every member's
 //!    claimed candidate tree in member order.
@@ -15,18 +15,18 @@
 //!    candidate onto the branch through the CAS-guarded
 //!    [`SourceShell::integrate`], chaining each `Integrated` outcome's tree into
 //!    the next fold's expected checkpoint. The bootstrap checkpoint also carries
-//!    resume position: a driver restarted mid-fold reads the branch at the last
+//!    resume position: a reactor restarted mid-fold reads the branch at the last
 //!    integrated candidate and continues after it rather than re-folding.
 //! 3. **Admit.** After the last candidate integrates it admits a
 //!    [`Fact::Resolve`] carrying the final tree, the landable head, and the
 //!    candidate lineage — where `reduce_resolve` verifies every member's claim
-//!    and emits the `DispatchLand` the existing land driver consumes.
+//!    and emits the `DispatchLand` the existing land reactor consumes.
 //!
 //! A stale checkpoint mid-fold (a concurrent writer on the single-writer branch)
 //! stops the ack prefix so the entry re-drains and re-resumes; a branch tree that
 //! matches neither the base nor any candidate is a foreign advance — a definitive
 //! refusal, acked with a loud warn rather than re-driven forever. Config-gated
-//! exactly like the mirror / executor / land drivers.
+//! exactly like the mirror / executor / land reactors.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,7 +43,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
-use super::IntegrateDriverCapability;
+use super::IntegrateReactorCapability;
 use crate::bloomery::SourceShell;
 use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
@@ -52,7 +52,7 @@ use crate::store::{SqliteStore, StoreBackend};
 
 // The autoloaded control-core component's lineage mailbox — where an admitted
 // `Fact::Resolve` is sent. Resolved from the lineage path, mirroring the land
-// driver's `control_mailbox`. The one exported spelling (#3668).
+// reactor's `control_mailbox`. The one exported spelling (#3668).
 use aether_bloomery::CONTROL_CORE_NAMESPACE;
 use aether_capabilities::resolve_embedded;
 
@@ -63,9 +63,9 @@ use aether_capabilities::resolve_embedded;
 #[kind(name = "aether.bloomery.integrate.integrate_tick")]
 pub struct IntegrateTick {}
 
-/// Runtime state for [`IntegrateDriverCapability`]. The shell + store are `Some`
-/// only when configured; a disabled driver holds neither and spawns no timer.
-pub struct IntegrateDriverState {
+/// Runtime state for [`IntegrateReactorCapability`]. The shell + store are `Some`
+/// only when configured; a disabled reactor holds neither and spawns no timer.
+pub struct IntegrateReactorState {
     source: Option<SourceShell>,
     store: Option<SqliteStore>,
     control_mailbox: MailboxId,
@@ -76,7 +76,7 @@ pub struct IntegrateDriverState {
     _timer: Option<TimerHandle>,
 }
 
-impl IntegrateDriverState {
+impl IntegrateReactorState {
     /// Build state over an explicit shell + store — the seam the runtime tests
     /// drive with a fake-GitHub-backed shell and an in-memory store, bypassing
     /// `init`. Spawns no timer; a test drives the loop by feeding an
@@ -255,13 +255,13 @@ fn drain_and_integrate(
 }
 
 #[runtime]
-impl NativeActor for IntegrateDriverCapability {
-    type State = IntegrateDriverState;
+impl NativeActor for IntegrateReactorCapability {
+    type State = IntegrateReactorState;
     type Config = GithubMirrorConfig;
 
     const NAMESPACE: &'static str = "aether.bloomery.integrate";
 
-    fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<IntegrateDriverState, BootError> {
+    fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<IntegrateReactorState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
         let control_mailbox = resolve_embedded(CONTROL_CORE_NAMESPACE);
@@ -272,9 +272,9 @@ impl NativeActor for IntegrateDriverCapability {
         if !configured {
             tracing::info!(
                 target: "aether_bloomery_host::integrate",
-                "integrate driver mounted disabled (unconfigured token/owner/repo); integrate outbox will accumulate",
+                "integrate reactor mounted disabled (unconfigured token/owner/repo); integrate outbox will accumulate",
             );
-            return Ok(IntegrateDriverState {
+            return Ok(IntegrateReactorState {
                 source: None,
                 store: None,
                 control_mailbox,
@@ -300,9 +300,9 @@ impl NativeActor for IntegrateDriverCapability {
             owner = %config.owner,
             repo = %config.repo,
             poll_interval_secs = config.poll_interval_secs,
-            "integrate driver mounted; polling the store for integration decisions",
+            "integrate reactor mounted; polling the store for integration decisions",
         );
-        Ok(IntegrateDriverState {
+        Ok(IntegrateReactorState {
             source: Some(source),
             store: Some(store),
             control_mailbox,
@@ -313,7 +313,7 @@ impl NativeActor for IntegrateDriverCapability {
     }
 
     /// Fire an immediate boot tick so an integration left undrained by a prior
-    /// crash folds without waiting a full poll interval. Disabled drivers push
+    /// crash folds without waiting a full poll interval. Disabled reactors push
     /// nothing.
     fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
         if state.source.is_some() {

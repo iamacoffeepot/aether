@@ -164,7 +164,7 @@ pub enum EnqueueOutboxResult {
 /// Read every undelivered outbox entry, in sequence order (non-destructive —
 /// republish, then [`AckOutbox`] the delivered range).
 ///
-/// The outbox is partitioned by `topic` so disjoint consumers never race on the
+/// The outbox is partitioned by `topic` so disjoint reactors never race on the
 /// shared `delivered` flag (ADR-0149 §Outbox consumption): `topic: Some(t)`
 /// drains only that topic's undelivered entries; `topic: None` drains all (the
 /// legacy recovery-drill path).
@@ -177,9 +177,9 @@ pub struct DrainOutbox {
 
 impl DrainOutbox {
     /// A drain scoped to a reducer [`Topic`](aether_bloomery::Topic) — the
-    /// mail-path consumer edge's one topic-to-string conversion. The `topic`
+    /// mail-path reactor edge's one topic-to-string conversion. The `topic`
     /// field stays an open `String` (any caller-defined topic drains by name);
-    /// a consumer of a reducer topic constructs through here so its call site
+    /// a reactor of a reducer topic constructs through here so its call site
     /// cannot spell an arbitrary string.
     #[must_use]
     pub fn scoped(topic: aether_bloomery::Topic) -> Self {
@@ -215,7 +215,7 @@ pub enum DrainOutboxResult {
 }
 
 /// Mark every outbox entry up to and including `through_sequence` as delivered,
-/// scoped to a topic so acking one consumer's delivered prefix never marks
+/// scoped to a topic so acking one reactor's delivered prefix never marks
 /// another's entries delivered (ADR-0149 §Outbox consumption). `topic: Some(t)`
 /// acks only that topic's entries; `topic: None` acks across every topic (the
 /// legacy path).
@@ -246,7 +246,7 @@ pub enum AckOutboxResult {
 
 /// Persist a member's advisory work-order description (#3595), keyed by the
 /// sealed bloom id and workpiece. The coordinator writes one per member at seal
-/// so the text survives to dispatch, where the executor driver reads it back and
+/// so the text survives to dispatch, where the executor reactor reads it back and
 /// threads it onto the construct lane's prompt. Advisory model context that binds
 /// no evidence and never enters the content-addressed spec — a plain projection
 /// row, not a journalled event. Last-writer-wins on (`bloom`, `workpiece`).

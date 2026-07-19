@@ -28,7 +28,7 @@ use crate::bloomery::cli::BloomeryCli;
 use crate::bloomery::driver::BloomeryDriverCapability;
 use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::{
-    ExecutorDriverCapability, IntegrateDriverCapability, LandDriverCapability, MirrorDriverCapability,
+    ExecutorReactorCapability, IntegrateReactorCapability, LandReactorCapability, MirrorReactorCapability,
 };
 use crate::session::{SessionConfig, SessionPoolCapability};
 use crate::signing::{SigningCapability, SigningConfig};
@@ -106,10 +106,10 @@ pub struct BloomeryEnv {
     pub store: StoreConfig,
     /// The eviction-free artifacts content-store configuration.
     pub artifacts: ArtifactsConfig,
-    /// The shared GitHub connection configuration serving both the outbox-consumer
-    /// mirror driver and the git source-port capability (one config, not two —
+    /// The shared GitHub connection configuration serving both the mirror reactor
+    /// and the git source-port capability (one config, not two —
     /// `SourceConfig` is a re-export of `GithubMirrorConfig`). Unconfigured
-    /// (empty token/owner/repo) mounts the mirror driver disabled.
+    /// (empty token/owner/repo) mounts the mirror reactor disabled.
     pub github: GithubMirrorConfig,
     /// The executor session-reuse pool configuration.
     pub session: SessionConfig,
@@ -183,10 +183,10 @@ impl BloomeryChassis {
             <TraceDispatchCapability as Addressable>::NAMESPACE.to_owned(),
             <StoreCapability as Addressable>::NAMESPACE.to_owned(),
             <ArtifactsCapability as Addressable>::NAMESPACE.to_owned(),
-            <MirrorDriverCapability as Addressable>::NAMESPACE.to_owned(),
-            <ExecutorDriverCapability as Addressable>::NAMESPACE.to_owned(),
-            <LandDriverCapability as Addressable>::NAMESPACE.to_owned(),
-            <IntegrateDriverCapability as Addressable>::NAMESPACE.to_owned(),
+            <MirrorReactorCapability as Addressable>::NAMESPACE.to_owned(),
+            <ExecutorReactorCapability as Addressable>::NAMESPACE.to_owned(),
+            <LandReactorCapability as Addressable>::NAMESPACE.to_owned(),
+            <IntegrateReactorCapability as Addressable>::NAMESPACE.to_owned(),
             <SessionPoolCapability as Addressable>::NAMESPACE.to_owned(),
             <SourceCapability as Addressable>::NAMESPACE.to_owned(),
             <SigningCapability as Addressable>::NAMESPACE.to_owned(),
@@ -234,23 +234,23 @@ impl BloomeryChassis {
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<StoreCapability>(store)
             .with_actor::<ArtifactsCapability>(artifacts)
-            .with_actor::<MirrorDriverCapability>(github.clone())
-            // The executor dispatch driver (#3505): drains the reducer's
+            .with_actor::<MirrorReactorCapability>(github.clone())
+            // The executor dispatch reactor (#3505): drains the reducer's
             // dispatch-topic decisions, submits them through the
             // executor port, and admits matched results back to the control core.
             // Reuses the one GitHub-connection config the mirror + source caps do.
-            .with_actor::<ExecutorDriverCapability>(github.clone())
-            // The land driver (#3559, ADR-0149 migration step 3): drains the
+            .with_actor::<ExecutorReactorCapability>(github.clone())
+            // The land reactor (#3559, ADR-0149 migration step 3): drains the
             // reducer's `aether.bloomery.land` decisions, issues the source-port
             // compare-and-swap that is now the landing of record, and admits
             // `Fact::Land` back to the control core. Reuses the one
             // GitHub-connection config the mirror + executor + source caps do.
-            .with_actor::<LandDriverCapability>(github.clone())
-            // The integrate driver (#3650, ADR-0152): drains the reducer's
+            .with_actor::<LandReactorCapability>(github.clone())
+            // The integrate reactor (#3650, ADR-0152): drains the reducer's
             // `aether.bloomery.integrate` decisions, folds the claimed candidate
             // onto the bloom's integration branch, and admits `Fact::Resolve`
             // back to the control core. Reuses the same GitHub-connection config.
-            .with_actor::<IntegrateDriverCapability>(github.clone())
+            .with_actor::<IntegrateReactorCapability>(github.clone())
             // App-key custody (ADR-0149 §Migration step 3) is not a mounted
             // mailbox: the host-local minter (`app_auth::AppTokenSource`) is an
             // in-process `TokenSource` the port shells' client pulls from in
@@ -315,7 +315,7 @@ mod tests {
         // Port 0 → an OS-assigned ephemeral RPC port; the default `:memory:`
         // store touches no filesystem, and the artifacts store points at a temp
         // root so the test opens no data dir. The default (unconfigured) shared
-        // GitHub config mounts the mirror driver disabled — no timer, no network
+        // GitHub config mounts the mirror reactor disabled — no timer, no network
         // — and connects no source network (`ReqwestGithub::new` builds a client
         // with no request); the default `:memory:` session pool touches no
         // filesystem. A successful `build` boots every passive (store, artifacts,
@@ -325,7 +325,7 @@ mod tests {
         // the `aether.store`, `aether.artifacts`, `aether.bloomery.mirror`,
         // `aether.bloomery.land`, `aether.session`, `aether.source`,
         // `aether.signing`, and `aether.component` mailboxes were claimed (the
-        // land driver mounts disabled under the default config; the component host is the
+        // land reactor mounts disabled under the default config; the component host is the
         // reducer-actor load surface, ADR-0149 §Packaging). App-key custody is
         // not a mounted mailbox — the shells' `connect_client` reads the key
         // in-process (ADR-0150), so the default (unconfigured) github config

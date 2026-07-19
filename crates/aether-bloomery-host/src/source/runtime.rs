@@ -59,8 +59,8 @@ pub struct SourceCapabilityState {
     shell: SourceShell,
     /// Whether the inter-instance claim registry is live. Off when the GitHub
     /// connection is unconfigured (empty token / owner / repo), mirroring the
-    /// mirror driver's "unconfigured → disabled" mount
-    /// (`bloomery/mirror_driver/runtime.rs`): a solo / offline / test bin has no
+    /// mirror reactor's "unconfigured → disabled" mount
+    /// (`bloomery/reactor/mirror/runtime.rs`): a solo / offline / test bin has no
     /// shared repository to hold refs in, so the claim ops no-op to
     /// [`ClaimResult::Acquired`] and the seal path relies on the store's
     /// active-membership uniqueness backstop alone (ADR-0150 demotes that
@@ -372,8 +372,8 @@ impl NativeActor for SourceCapability {
     const NAMESPACE: &'static str = "aether.source";
 
     fn init(config: super::SourceConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<SourceCapabilityState, BootError> {
-        // Same "unconfigured → disabled" predicate the mirror driver mounts on
-        // (`bloomery/mirror_driver/runtime.rs`): with no token / owner / repo
+        // Same "unconfigured → disabled" predicate the mirror reactor mounts on
+        // (`bloomery/reactor/mirror/runtime.rs`): with no token / owner / repo
         // there is no shared repository to hold claim refs in, so the claim
         // registry is off and the seal path leans on the store backstop. The
         // shell is still connected (it opens no network until driven) so a
@@ -398,7 +398,7 @@ impl NativeActor for SourceCapability {
     /// A failure logs and continues — `wire` cannot fail boot, so a transient
     /// GitHub blip does not crash the chassis. There is no in-process re-drive:
     /// this request/reply capability owns no timer, so unlike the
-    /// `mirror_driver` / `land_driver` / `executor_driver` polling drivers it
+    /// `reactor::mirror` / `reactor::land` / `reactor::executor` polling reactors it
     /// pushes no self-addressed tick to retry on a cadence. A missed genesis
     /// therefore surfaces as a land-time `UnresolvedCorrespondence` fault, and
     /// recovery is a process restart — which re-runs `init` then this boot

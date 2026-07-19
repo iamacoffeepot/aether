@@ -1,11 +1,11 @@
-//! The shared poll-timer sidecar for the outbox-consumer drivers.
+//! The shared poll-timer sidecar for the outbox reactors.
 //!
-//! The mirror / executor / land drivers each run a fixed-interval poll loop over
+//! The mirror / executor / land reactors each run a fixed-interval poll loop over
 //! the store outbox, driven by the same sidecar shape: a thread that sleeps
 //! `interval` on a `recv_timeout` over a stop channel, fires a self-addressed
 //! wake mail each interval, and exits when the handle drops (the channel
 //! disconnects, so the next `recv_timeout` returns `Disconnected`). Only the wake
-//! kind differs per driver — each has its own zero-field tick — so the sidecar is
+//! kind differs per reactor — each has its own zero-field tick — so the sidecar is
 //! parameterized by the wake mail's kind id and encoded payload. Mirrors the
 //! engine proxy's heartbeat sidecar; an infra timer below the mail layer, so its
 //! wake carries no inbound causal chain.

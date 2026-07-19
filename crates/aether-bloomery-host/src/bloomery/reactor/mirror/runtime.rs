@@ -1,9 +1,9 @@
-//! The runtime for the outbox-consumer / mirror-driver capability (ADR-0149
+//! The runtime for the mirror outbox reactor capability (ADR-0149
 //! migration step 1, third slice — issue #3499).
 //!
 //! `ProjectionShell` and `SourceShell` wrap the GitHub backends behind an
 //! `Arc<dyn …>` boundary, but until this slice nothing in the running process
-//! ever called them. This capability mounts both shells as consumers of the
+//! ever called them. This capability mounts both shells as reactors of the
 //! store's transactional outbox: a poll-driven drain routes each undelivered
 //! entry through the right shell (view documents reconcile the outward mirror,
 //! landing receipts project outward), and the delivered prefix is acked **only
@@ -14,9 +14,9 @@
 //! re-delivery (at-least-once with idempotent reconcile).
 //!
 //! Ownership (ADR-0149 §Outbox consumption): this capability is the **sole
-//! consumer of the projection topics** `view_document` and `landing_receipt` —
+//! reactor of the projection topics** `view_document` and `landing_receipt` —
 //! it alone drains and acks them, scoped by topic so a future executor-dispatch
-//! consumer (#3505) coexists without racing on the shared `delivered` flag. The
+//! reactor (#3505) coexists without racing on the shared `delivered` flag. The
 //! producer (#3497) only enqueues; it never acks.
 //!
 //! Config-gated: when the mirror is unconfigured (empty token / owner / repo)
@@ -41,7 +41,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
-use super::MirrorDriverCapability;
+use super::MirrorReactorCapability;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::bloomery::{GithubMirrorConfig, ProjectionShell, SourceShell};
 use crate::store::{AckOutbox, AckOutboxResult, DrainOutbox, DrainOutboxResult, OutboxEntry, StoreCapability};
@@ -52,11 +52,11 @@ use crate::store::{AckOutbox, AckOutboxResult, DrainOutbox, DrainOutboxResult, O
 #[kind(name = "aether.bloomery.mirror.drain_tick")]
 pub struct DrainTick {}
 
-/// Runtime state for [`MirrorDriverCapability`]. The shells are `Some` only when
-/// the mirror is configured; a disabled driver holds neither and spawns no
+/// Runtime state for [`MirrorReactorCapability`]. The shells are `Some` only when
+/// the mirror is configured; a disabled reactor holds neither and spawns no
 /// timer. `mailer` + `self_mailbox` are the loopback wake handle `wire` uses to
 /// fire the immediate boot-republish tick.
-pub struct MirrorDriverState {
+pub struct MirrorReactorState {
     projection: Option<ProjectionShell>,
     // Mounted for recovery-drill completeness; dormant until the step-2
     // executor bridge produces source-driven topics.
@@ -68,7 +68,7 @@ pub struct MirrorDriverState {
     _timer: Option<TimerHandle>,
 }
 
-impl MirrorDriverState {
+impl MirrorReactorState {
     /// Build state over explicit shells — the seam the handler / integration
     /// tests drive with fake-GitHub-backed shells, bypassing `connect` (which
     /// needs a real network). Spawns no timer; tests drive the drain by feeding
@@ -104,7 +104,7 @@ fn deliver(projection: &ProjectionShell, entry: &OutboxEntry) -> Result<(), Stri
 /// highest **contiguously delivered** sequence and stops at the first failure,
 /// so a stalled entry (undecodable, unknown topic, or a GitHub error) is left
 /// undelivered to re-drive rather than acked past. This is the network side of
-/// [`MirrorDriverCapability::on_drain_result`], factored out so it is unit-
+/// [`MirrorReactorCapability::on_drain_result`], factored out so it is unit-
 /// testable against a fake-GitHub-backed shell without the mail harness.
 fn project_batch(projection: &ProjectionShell, entries: &[OutboxEntry]) -> Vec<AckOutbox> {
     let mut delivered: BTreeMap<String, u64> = BTreeMap::new();
@@ -133,13 +133,13 @@ fn project_batch(projection: &ProjectionShell, entries: &[OutboxEntry]) -> Vec<A
 }
 
 #[runtime]
-impl NativeActor for MirrorDriverCapability {
-    type State = MirrorDriverState;
+impl NativeActor for MirrorReactorCapability {
+    type State = MirrorReactorState;
     type Config = GithubMirrorConfig;
 
     const NAMESPACE: &'static str = "aether.bloomery.mirror";
 
-    fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<MirrorDriverState, BootError> {
+    fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<MirrorReactorState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
 
@@ -149,9 +149,9 @@ impl NativeActor for MirrorDriverCapability {
         if !configured {
             tracing::info!(
                 target: "aether_bloomery_host::mirror",
-                "mirror driver mounted disabled (unconfigured token/owner/repo); outbox will accumulate",
+                "mirror reactor mounted disabled (unconfigured token/owner/repo); outbox will accumulate",
             );
-            return Ok(MirrorDriverState { projection: None, _source: None, mailer, self_mailbox, _timer: None });
+            return Ok(MirrorReactorState { projection: None, _source: None, mailer, self_mailbox, _timer: None });
         }
 
         let projection = ProjectionShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
@@ -170,9 +170,9 @@ impl NativeActor for MirrorDriverCapability {
             owner = %config.owner,
             repo = %config.repo,
             poll_interval_secs = config.poll_interval_secs,
-            "mirror driver mounted; polling the store outbox for projection topics",
+            "mirror reactor mounted; polling the store outbox for projection topics",
         );
-        Ok(MirrorDriverState {
+        Ok(MirrorReactorState {
             projection: Some(projection),
             _source: Some(source),
             mailer,
@@ -183,7 +183,7 @@ impl NativeActor for MirrorDriverCapability {
 
     /// Fire the immediate boot-republish tick: the first drain pass republishes
     /// everything left undelivered by a prior crash, so recovery does not wait a
-    /// full poll interval. Disabled drivers push nothing.
+    /// full poll interval. Disabled reactors push nothing.
     fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
         if state.projection.is_some() {
             state.mailer.push(Mail::new(
@@ -196,7 +196,7 @@ impl NativeActor for MirrorDriverCapability {
     }
 
     /// Poll wake: drain each owned projection topic. Topic-scoped so this
-    /// consumer never touches another's rows; the reply lands at
+    /// reactor never touches another's rows; the reply lands at
     /// [`Self::on_drain_result`].
     #[handler::single]
     fn on_drain_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: DrainTick) {
@@ -227,7 +227,7 @@ impl NativeActor for MirrorDriverCapability {
                 return;
             }
         };
-        ctx.spawn_detached::<MirrorDriverCapability, _>(move |mut root| {
+        ctx.spawn_detached::<MirrorReactorCapability, _>(move |mut root| {
             for ack in project_batch(&projection, &entries) {
                 root.send::<StoreCapability, AckOutbox>(&ack);
             }
@@ -271,7 +271,7 @@ mod tests {
     use serde::de::DeserializeOwned;
 
     use super::{
-        AckOutbox, DrainOutbox, DrainOutboxResult, DrainTick, Kind, MirrorDriverCapability, MirrorDriverState,
+        AckOutbox, DrainOutbox, DrainOutboxResult, DrainTick, Kind, MirrorReactorCapability, MirrorReactorState,
         OutboxEntry, ProjectionShell, project_batch,
     };
     use crate::bloomery::outbox::TopicOutbox;
@@ -361,7 +361,7 @@ mod tests {
         }
 
         // Phase 2 — boot republish: a second view is enqueued but the process
-        // crashes before acking it. A fresh consumer against the same store
+        // crashes before acking it. A fresh reactor against the same store
         // re-drains the still-undelivered entry on its first pass and delivers
         // it (the boot-republish Done that moved here from #3497). Reconcile is
         // idempotent, so the re-projection converges to the same carbon copy.
@@ -387,8 +387,8 @@ mod tests {
     fn a_landing_receipt_projects_a_comment_on_its_topic() {
         // ADR-0149 migration step 3: a gate-enabled land emits a `LandingReceipt`
         // the control actor enqueues under the receipt topic, which the mirror
-        // driver drains and projects as a comment on the bloom's umbrella issue.
-        // This pins the receipt path — and that the consumer topic matches the
+        // reactor drains and projects as a comment on the bloom's umbrella issue.
+        // This pins the receipt path — and that the reactor topic matches the
         // producer's, the mismatch step 3 reconciled (a stranded receipt would
         // drain nothing and project no comment).
         let fake = FakeGithub::new();
@@ -425,12 +425,12 @@ mod tests {
 
         let fake = FakeGithub::new();
         let shell = ProjectionShell::new(Arc::new(GithubProjection::new(fake.clone())));
-        let mut state = MirrorDriverState::with_shells(Some(shell), None, Arc::clone(&mailer), self_mailbox);
+        let mut state = MirrorReactorState::with_shells(Some(shell), None, Arc::clone(&mailer), self_mailbox);
 
         // on_drain_tick fans one topic-scoped drain per owned projection topic.
         {
             let mut ctx = NativeCtx::new_dispatching(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-            MirrorDriverCapability::on_drain_tick(&mut state, ctx.as_single(), DrainTick::default());
+            MirrorReactorCapability::on_drain_tick(&mut state, ctx.as_single(), DrainTick::default());
         }
         binding.flush_outbound();
         let mut drained_topics: Vec<Option<String>> =
@@ -448,7 +448,7 @@ mod tests {
             OutboxEntry { sequence: 7, topic: Topic::ViewDocument.as_str().to_owned(), payload: encoded_view() };
         {
             let mut ctx = NativeCtx::new_dispatching(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-            MirrorDriverCapability::on_drain_result(
+            MirrorReactorCapability::on_drain_result(
                 &mut state,
                 ctx.as_single(),
                 DrainOutboxResult::Ok { entries: vec![entry] },

@@ -3,6 +3,8 @@
 - **Status:** Accepted
 - **Date:** 2026-07-18
 
+> **Terminology note (2026-07-19):** the host outbox *drivers* this ADR introduced were renamed to *reactors* — they react to the reducer's outbox topics on a poll, and "driver" is reserved for the substrate chassis `DriverCapability`. The prose below uses the current term; no design changed.
+
 ## Context
 
 ADR-0149 defines the member line — Construct → Verify → Refine → Review — over a *candidate*: the source tree a model-lane attempt produces against the sealed base. ADR-0150 defines how bloom digests map to real git objects (persisted, format-tagged correspondence) and pins the trust boundary: workers never hold credentials, and a worker cannot verify its own candidate. ADR-0151 defines evidence admission — a verdict binds to an exact subject digest via `Evidence.subject`, and `ResolutionClaim` carries the candidate digest its evidence must validate.
@@ -13,7 +15,7 @@ The vocabulary is in place; the candidate itself has no home. Concretely, in the
 - `StageProgress` (the per-member cursor) stores `{stage, attempts}` only. The reducer has no state slot for "the candidate this member is currently at".
 - `Fact::AttemptCompleted` carries `{passed, evidence}` only, so the reducer cannot learn a produced candidate's digest from a completed attempt.
 - Both dispatch builders pin `Transformation.checkout` to the bloom's sealed base for every stage — `Transformation::checkout`'s own rustdoc concedes the per-member checkpoint as future work. Verify therefore verifies the *base*, and Review diffs the base against itself and sees no candidate at all.
-- The executor driver stamps `DispatchRecord.{scope_revision, candidate, displayed_digest}` all from the same subject input, so the `ResolutionClaim` minted on a Review pass names the scope revision as its "candidate".
+- The executor reactor stamps `DispatchRecord.{scope_revision, candidate, displayed_digest}` all from the same subject input, so the `ResolutionClaim` minted on a Review pass names the scope revision as its "candidate".
 - `SourceBackend::integrate` — which turns a candidate tree into a commit on the bloom's integration branch under a checkpoint guard — has no caller in the resolution flow, and nothing produces the `Fact::Resolve { tree, head, .. }` that `Decision::DispatchLand` consumes. A bloom can currently record resolutions and "land" a head identical to its base.
 
 Every downstream property of the bloomery — meaningful verification, meaningful review, evidence that actually vouches for the work, and a landing head that contains the work — depends on closing this gap. It is the prerequisite for the agreed review restructuring (whole-bloom aggregate review) and for retiring the GitHub pipeline (#3564 chain).
@@ -48,16 +50,16 @@ The child process (the model lane) never stages, commits, or pushes: candidate c
 
 ### The reducer learns, stores, and re-targets
 
-- `Fact::AttemptCompleted` gains `candidate: Option<CandidateRef>` — populated by the driver from the capture step on model-lane completions, absent on mechanical lanes and failed runs.
+- `Fact::AttemptCompleted` gains `candidate: Option<CandidateRef>` — populated by the reactor from the capture step on model-lane completions, absent on mechanical lanes and failed runs.
 - `StageProgress` gains `candidate: Option<CandidateRef>` — the member's current candidate, written when a passing Construct/Refine completion carries one, carried forward otherwise.
 - The dispatch builders resolve per stage from the cursor: a member with a candidate dispatches Verify/Review with `inputs[0] = candidate.tree` and `checkout = candidate.checkout`; Refine likewise starts from the candidate it is refining. Construct (no candidate yet) keeps today's `inputs[0] = scope_revision`, `checkout = sealed base`. A stage-retry re-dispatches against the member's current candidate, not the bare base.
-- `DispatchPayload` gains `scope_revision: Digest` and `candidate: Option<Digest>` (the tree), so the driver stops inferring record fields from `inputs[0]`: `DispatchRecord.scope_revision` is always the true scope revision, and `displayed_digest = candidate` when present, else `scope_revision`. The intake's existing name-claim check (`claimed subject == displayed`) then binds post-Construct evidence to the candidate with no contract change, and the `ResolutionClaim` minted on Review pass names the real candidate — `reduce_integrate`'s `evidence.validates(&claim.candidate)` becomes a meaningful check.
+- `DispatchPayload` gains `scope_revision: Digest` and `candidate: Option<Digest>` (the tree), so the reactor stops inferring record fields from `inputs[0]`: `DispatchRecord.scope_revision` is always the true scope revision, and `displayed_digest = candidate` when present, else `scope_revision`. The intake's existing name-claim check (`claimed subject == displayed`) then binds post-Construct evidence to the candidate with no contract change, and the `ResolutionClaim` minted on Review pass names the real candidate — `reduce_integrate`'s `evidence.validates(&claim.candidate)` becomes a meaningful check.
 
 These are journal-format changes to appended-evolution types. The position: break them now, once, together. Bloomery journals are per-developer instance state (ADR-0150) and every existing journal is migration-trial throwaway; there is no compatibility surface to preserve pre-1.0, and holding the fact schema hostage to trial databases would buy nothing.
 
 ### Resolution drives integration
 
-A new host driver closes the `Fact::Integrate` → `SourceBackend::integrate` gap: when a bloom's members have all recorded resolutions, the driver folds each claim's candidate tree onto the bloom's integration branch in member order (each `integrate` call CAS-guarded on the prior checkpoint, per the port contract), then admits `Fact::Resolve` with the final `IntegrateOutcome`'s `{tree, head}`. `Decision::DispatchLand` and the existing land driver consume it unchanged. Integration happens once per bloom, at resolution — member-line stages read candidates from candidate refs and never touch the integration branch.
+A new host reactor closes the `Fact::Integrate` → `SourceBackend::integrate` gap: when a bloom's members have all recorded resolutions, the reactor folds each claim's candidate tree onto the bloom's integration branch in member order (each `integrate` call CAS-guarded on the prior checkpoint, per the port contract), then admits `Fact::Resolve` with the final `IntegrateOutcome`'s `{tree, head}`. `Decision::DispatchLand` and the existing land reactor consume it unchanged. Integration happens once per bloom, at resolution — member-line stages read candidates from candidate refs and never touch the integration branch.
 
 This ordering also positions the agreed whole-bloom aggregate review: the integrated head is the tree an `AggregateReview` stage checks out and judges. This ADR builds the substrate for that stage; the stage itself and the findings→Refine re-entry loop are their own change.
 

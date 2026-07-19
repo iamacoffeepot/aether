@@ -1,5 +1,5 @@
 //! The drain → submit → record and pull → admit core of the executor dispatch
-//! driver, over a real `SqliteStore` and a fake-GitHub-backed `ExecutorShell` —
+//! reactor, over a real `SqliteStore` and a fake-GitHub-backed `ExecutorShell` —
 //! the network side the running capability drives, without the mail harness.
 //! `init` / the timer / the ctx send are the thin glue the chassis-boot test and
 //! compilation cover; this pins the loop that actually dispatches and admits.
@@ -448,7 +448,7 @@ fn seed_tracked_recovers_a_dispatched_order_across_a_restart() {
         // result was ever pulled, with no in-memory `tracked` surviving it.
     };
 
-    // Restart: reopen the same file. A fresh driver state's `init` seeds
+    // Restart: reopen the same file. A fresh reactor state's `init` seeds
     // `tracked` from the persisted registry instead of starting empty.
     let mut store = SqliteStore::open(&path).unwrap();
     let mut tracked: Vec<TrackedHandle> = seed_tracked(&mut store)

@@ -1,28 +1,28 @@
-//! The runtime for the land-driver capability (ADR-0149 migration step 3 —
+//! The runtime for the land-reactor capability (ADR-0149 migration step 3 —
 //! issue #3559).
 //!
 //! A poll-driven loop that turns the reducer's land decisions into the
 //! source-port compare-and-swap that is now the landing of record:
 //!
 //! 1. **Drain.** Each tick drains the store's `aether.bloomery.land` outbox topic
-//!    (its own connection, mirroring the executor driver's store ownership) and
+//!    (its own connection, mirroring the executor reactor's store ownership) and
 //!    decodes each [`LandPayload`](aether_bloomery::LandPayload) — the resolving
 //!    bloom, its sealed `expected_base`, and the `new_head` mainline advances to.
 //! 2. **Land.** It issues the [`SourceShell::land`] compare-and-swap against
 //!    `expected_base`. On [`LandOutcome::Landed`] it admits a [`Fact::Land`] back
 //!    to the control core — where [`reduce_land`](aether_bloomery) advances the
 //!    mainline and emits the [`LandingReceipt`](aether_bloomery::LandingReceipt)
-//!    that the mirror driver projects outward. On [`LandOutcome::BaseMoved`] it
+//!    that the mirror reactor projects outward. On [`LandOutcome::BaseMoved`] it
 //!    declines to land: a moved mainline forces supersession, never a land onto
 //!    the new head (ADR-0149 §The bloom), and V1 permits one unlanded bloom per
 //!    mainline so this is the defensive case. The bloom stays `Resolved` and thus
-//!    supersedable through the intent-native supersede path — a driver has no
+//!    supersedable through the intent-native supersede path — a reactor has no
 //!    re-authored successor spec to fabricate, and the ADR's successor-seal is a
-//!    caller act, not a driver one. The declined entry is acked (a definitive
+//!    caller act, not a reactor one. The declined entry is acked (a definitive
 //!    refusal, not a transient fault) so it does not re-drive forever; a transport
 //!    fault stops the ack prefix so the entry re-drains next tick.
 //!
-//! Config-gated exactly like the mirror / executor drivers: unconfigured (empty
+//! Config-gated exactly like the mirror / executor reactors: unconfigured (empty
 //! token/owner/repo) mounts disabled — no shell, no store, no timer — so a
 //! zero-secret dev boot neither errors nor spins; the land outbox accumulates
 //! until a token is supplied.
@@ -40,7 +40,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
-use super::LandDriverCapability;
+use super::LandReactorCapability;
 use crate::bloomery::SourceShell;
 use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::outbox::TopicOutbox;
@@ -57,9 +57,9 @@ use aether_capabilities::resolve_embedded;
 #[kind(name = "aether.bloomery.land.land_tick")]
 pub struct LandTick {}
 
-/// Runtime state for [`LandDriverCapability`]. The shell + store are `Some` only
-/// when configured; a disabled driver holds neither and spawns no timer.
-pub struct LandDriverState {
+/// Runtime state for [`LandReactorCapability`]. The shell + store are `Some` only
+/// when configured; a disabled reactor holds neither and spawns no timer.
+pub struct LandReactorState {
     source: Option<SourceShell>,
     store: Option<SqliteStore>,
     control_mailbox: MailboxId,
@@ -70,7 +70,7 @@ pub struct LandDriverState {
     _timer: Option<TimerHandle>,
 }
 
-impl LandDriverState {
+impl LandReactorState {
     /// Build state over an explicit shell + store — the seam the runtime tests
     /// drive with a fake-GitHub-backed shell and an in-memory store, bypassing
     /// `init` (which needs config and a real connect). Spawns no timer; a test
@@ -151,7 +151,7 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
             }
             Ok(LandOutcome::BaseMoved { .. }) => {
                 // A moved mainline forces supersession, never a land onto the new
-                // head (ADR-0149 §The bloom). The driver declines: the bloom stays
+                // head (ADR-0149 §The bloom). The reactor declines: the bloom stays
                 // Resolved and supersedable through the intent-native path. Ack the
                 // definitive refusal so it does not re-drive on every tick.
                 tracing::warn!(
@@ -176,13 +176,13 @@ fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlit
 }
 
 #[runtime]
-impl NativeActor for LandDriverCapability {
-    type State = LandDriverState;
+impl NativeActor for LandReactorCapability {
+    type State = LandReactorState;
     type Config = GithubMirrorConfig;
 
     const NAMESPACE: &'static str = "aether.bloomery.land";
 
-    fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<LandDriverState, BootError> {
+    fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<LandReactorState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
         let control_mailbox = resolve_embedded(CONTROL_CORE_NAMESPACE);
@@ -193,9 +193,9 @@ impl NativeActor for LandDriverCapability {
         if !configured {
             tracing::info!(
                 target: "aether_bloomery_host::land",
-                "land driver mounted disabled (unconfigured token/owner/repo); land outbox will accumulate",
+                "land reactor mounted disabled (unconfigured token/owner/repo); land outbox will accumulate",
             );
-            return Ok(LandDriverState {
+            return Ok(LandReactorState {
                 source: None,
                 store: None,
                 control_mailbox,
@@ -222,9 +222,9 @@ impl NativeActor for LandDriverCapability {
             repo = %config.repo,
             poll_interval_secs = config.poll_interval_secs,
             cas_land_enabled = config.cas_land_enabled,
-            "land driver mounted; polling the store for land decisions",
+            "land reactor mounted; polling the store for land decisions",
         );
-        Ok(LandDriverState {
+        Ok(LandReactorState {
             source: Some(source),
             store: Some(store),
             control_mailbox,
@@ -235,7 +235,7 @@ impl NativeActor for LandDriverCapability {
     }
 
     /// Fire an immediate boot tick so a land left undrained by a prior crash
-    /// issues without waiting a full poll interval. Disabled drivers push nothing.
+    /// issues without waiting a full poll interval. Disabled reactors push nothing.
     fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
         if state.source.is_some() {
             state.mailer.push(Mail::new(state.self_mailbox, LandTick::ID, LandTick::default().encode_into_bytes(), 1));

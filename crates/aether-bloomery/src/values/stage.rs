@@ -341,7 +341,7 @@ impl Transformation {
                 "Scope is a pre-seal operator-harness process staged via the REST control API, never a dispatched member transformation"
             ),
             StageId::Land => unreachable!(
-                "Land is a host-native source-port CAS (LandDriverCapability, #3559), never a dispatched member transformation"
+                "Land is a host-native source-port CAS (LandReactorCapability, #3559), never a dispatched member transformation"
             ),
             StageId::Construct
             | StageId::Refine
@@ -522,7 +522,7 @@ mod tests {
         let _ = Transformation::for_member_stage(StageId::Scope, subject, checkout);
     }
 
-    // Land is a host-native source-port CAS (LandDriverCapability, #3559), never
+    // Land is a host-native source-port CAS (LandReactorCapability, #3559), never
     // a dispatched member transformation — a mis-dispatch must fail loudly rather
     // than silently running the Claude construct lane on a zero-secret worker.
     #[test]

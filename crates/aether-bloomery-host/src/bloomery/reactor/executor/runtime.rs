@@ -1,4 +1,4 @@
-//! The runtime for the executor dispatch-driver capability (ADR-0149 migration
+//! The runtime for the executor dispatch-reactor capability (ADR-0149 migration
 //! step 2 — issue #3505).
 //!
 //! A poll-driven loop that turns the reducer's dispatch decisions into running
@@ -20,19 +20,19 @@
 //!    actor as an [`Admit`] — where the reducer advances the member's cursor and
 //!    (via the dispatch topic) dispatches its next stage.
 //!
-//! Config-gated exactly like the mirror driver: unconfigured (empty
+//! Config-gated exactly like the mirror reactor: unconfigured (empty
 //! token/owner/repo) mounts disabled — no shell, no store, no timer — so a
 //! zero-secret dev boot neither errors nor spins; the outbox accumulates until a
 //! token is supplied.
 //!
-//! Store ownership: this driver opens its **own** [`SqliteStore`] on the shared
+//! Store ownership: this reactor opens its **own** [`SqliteStore`] on the shared
 //! `AETHER_STORE_PATH` because the intake helpers ([`dispatch_and_record`] /
 //! [`run_intake_cycle`]) drive the registry in-process over a `StoreBackend`, not
 //! over mail. It is the sole writer of the `outstanding_orders` table and acks
 //! only its own dispatch topic; the `busy_timeout` on every connection serializes
 //! the rare concurrent WAL write with the `StoreCapability`'s. Routing the outbox
 //! drain/ack through the store's `DrainOutbox`/`AckOutbox` mail (as the mirror
-//! driver does) is a follow-up once the registry ops gain a mail surface.
+//! reactor does) is a follow-up once the registry ops gain a mail surface.
 
 use std::process::Command;
 use std::sync::Arc;
@@ -52,7 +52,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use serde::{Deserialize, Serialize};
 
-use super::ExecutorDriverCapability;
+use super::ExecutorReactorCapability;
 use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
 use crate::bloomery::ExecutorShell;
 use crate::bloomery::intake::{
@@ -175,10 +175,10 @@ fn select_stale_handles(
     warnings
 }
 
-/// Runtime state for [`ExecutorDriverCapability`]. The shell + store are `Some`
-/// only when configured; a disabled driver holds neither and spawns no timer.
+/// Runtime state for [`ExecutorReactorCapability`]. The shell + store are `Some`
+/// only when configured; a disabled reactor holds neither and spawns no timer.
 /// `tracked` accumulates the dispatched handles the pull side inspects each tick.
-pub struct ExecutorDriverState {
+pub struct ExecutorReactorState {
     executor: Option<ExecutorShell>,
     store: Option<SqliteStore>,
     claims: NameEvidenceClaims,
@@ -195,13 +195,13 @@ pub struct ExecutorDriverState {
     // (#3635); `None` when `stale_warn_after_secs == 0` disables the sweep.
     stale_warn_after: Option<Duration>,
     // The correspondence the push side resolves an admitted capture's commit
-    // through (ADR-0152); `None` on a disabled driver.
+    // through (ADR-0152); `None` on a disabled reactor.
     correspondence: Option<SharedCorrespondence>,
     // The candidate-ref push seam (ADR-0152); production shells git.
     pusher: Arc<dyn CandidatePush>,
 }
 
-impl ExecutorDriverState {
+impl ExecutorReactorState {
     /// Build state over an explicit shell + store — the seam the runtime tests
     /// drive with a fake-GitHub-backed shell and an in-memory store, bypassing
     /// `init` (which needs config and a real connect). Spawns no timer; a test
@@ -737,13 +737,13 @@ fn pull_and_admit(
 }
 
 #[runtime]
-impl NativeActor for ExecutorDriverCapability {
-    type State = ExecutorDriverState;
+impl NativeActor for ExecutorReactorCapability {
+    type State = ExecutorReactorState;
     type Config = GithubMirrorConfig;
 
     const NAMESPACE: &'static str = "aether.bloomery.executor";
 
-    fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<ExecutorDriverState, BootError> {
+    fn init(config: GithubMirrorConfig, ctx: &mut NativeInitCtx<'_>) -> Result<ExecutorReactorState, BootError> {
         let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
         let control_mailbox = resolve_embedded(CONTROL_CORE_NAMESPACE);
@@ -754,9 +754,9 @@ impl NativeActor for ExecutorDriverCapability {
         if !configured {
             tracing::info!(
                 target: "aether_bloomery_host::executor",
-                "executor dispatch driver mounted disabled (unconfigured token/owner/repo); dispatch outbox will accumulate",
+                "executor dispatch reactor mounted disabled (unconfigured token/owner/repo); dispatch outbox will accumulate",
             );
-            return Ok(ExecutorDriverState {
+            return Ok(ExecutorReactorState {
                 executor: None,
                 store: None,
                 claims: NameEvidenceClaims,
@@ -774,7 +774,7 @@ impl NativeActor for ExecutorDriverCapability {
 
         let executor = ExecutorShell::connect(&config).map_err(|e| BootError::Other(Box::new(e)))?;
         let mut store = SqliteStore::open(&config.store_path).map_err(|e| BootError::Other(Box::new(e)))?;
-        // Restart recovery (#3641): a driver that cannot read its recovery set
+        // Restart recovery (#3641): a reactor that cannot read its recovery set
         // must not silently start with an empty one — that is the bug this
         // seed exists to fix, so a read error fails boot rather than mounting
         // with a stranded `tracked` vec.
@@ -799,12 +799,12 @@ impl NativeActor for ExecutorDriverCapability {
             repo = %config.repo,
             poll_interval_secs = config.poll_interval_secs,
             retracked = tracked.len(),
-            "executor dispatch driver mounted; polling the store for dispatch decisions",
+            "executor dispatch reactor mounted; polling the store for dispatch decisions",
         );
         // The push side resolves an admitted capture's commit through its own
         // correspondence handle on the shared store (ADR-0152).
         let correspondence = config.connect_correspondence().map_err(|e| BootError::Other(Box::new(e)))?;
-        Ok(ExecutorDriverState {
+        Ok(ExecutorReactorState {
             executor: Some(executor),
             store: Some(store),
             claims: NameEvidenceClaims,
@@ -821,7 +821,7 @@ impl NativeActor for ExecutorDriverCapability {
     }
 
     /// Fire an immediate boot tick so a dispatch left undrained by a prior crash
-    /// submits without waiting a full poll interval. Disabled drivers push nothing.
+    /// submits without waiting a full poll interval. Disabled reactors push nothing.
     fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
         if state.executor.is_some() {
             state.mailer.push(Mail::new(

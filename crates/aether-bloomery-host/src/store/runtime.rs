@@ -155,7 +155,7 @@ pub trait StoreBackend: Send {
     /// consume-once semantics the trust boundary rests on.
     fn consume_order(&mut self, nonce: &str) -> rusqlite::Result<bool>;
     /// Every nonce still outstanding — the restart recovery set (issue #3641):
-    /// the executor driver's `init` seeds its in-memory tracked-handle set from
+    /// the executor reactor's `init` seeds its in-memory tracked-handle set from
     /// this so a dispatched-but-unresolved order is polled again after a
     /// restart, rather than only from the (already-consumed-nothing) empty
     /// vec `init` used to start with.
@@ -172,13 +172,13 @@ pub trait StoreBackend: Send {
     /// Record a member's advisory work-order description (#3595), keyed by
     /// (`bloom`, `workpiece`). The coordinator persists it at seal so it survives
     /// to dispatch — the api cap that holds the operator's text and the executor
-    /// driver that reads it at dispatch are different capabilities, so the store
+    /// reactor that reads it at dispatch are different capabilities, so the store
     /// is the only carrier between them. Last-writer-wins on the key: a re-seal of
     /// the same member overwrites rather than erroring.
     fn record_dispatch_description(&mut self, bloom: &[u8], workpiece: &str, description: &str)
     -> rusqlite::Result<()>;
     /// The advisory work-order description recorded for (`bloom`, `workpiece`), or
-    /// `None` when the coordinator persisted none — the executor driver leaves
+    /// `None` when the coordinator persisted none — the executor reactor leaves
     /// [`Transformation::description`](aether_bloomery::Transformation) `None` and
     /// warns rather than dispatching blind.
     fn lookup_dispatch_description(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<Option<String>>;
@@ -257,7 +257,7 @@ impl SqliteStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         // A busy timeout so a second connection to the same file (the executor
-        // dispatch driver opens its own to drive the intake registry, #3505) waits
+        // dispatch reactor opens its own to drive the intake registry, #3505) waits
         // for the WAL write lock rather than failing fast with SQLITE_BUSY; WAL is
         // still single-writer, so the timeout serializes the rare concurrent write.
         conn.busy_timeout(Duration::from_secs(5))?;

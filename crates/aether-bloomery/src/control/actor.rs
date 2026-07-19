@@ -27,7 +27,7 @@
 //! waiting admitter.
 //!
 //! Boot **does not** drain or ack the outbox — outbox republish belongs to the
-//! consumer capabilities (#3499). This actor only *enqueues* outbox entries,
+//! reactor capabilities (#3499). This actor only *enqueues* outbox entries,
 //! atomically inside the commit.
 
 use super::claim_plan::{
@@ -133,7 +133,7 @@ pub struct ControlCore {
 #[actor]
 impl WasmActor for ControlCore {
     // Forward-fed from the always-compiled control module (#3668): the one
-    // literal, registered here and resolved by the host consumers.
+    // literal, registered here and resolved by the host reactors.
     const NAMESPACE: &'static str = super::CONTROL_CORE_NAMESPACE;
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {

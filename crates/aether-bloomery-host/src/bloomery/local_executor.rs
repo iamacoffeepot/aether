@@ -842,7 +842,7 @@ fn construct_conclusion(bytes: &[u8]) -> bool {
 /// A deterministic spawn seam for tests: writes a fixed `evidence.json` into the
 /// run's output dir and hands back a process pinned to a fixed lifecycle — the
 /// whole seam, without a real repo or Claude credential. Shared by this module's
-/// unit tests and the executor-driver runtime test.
+/// unit tests and the executor-reactor runtime test.
 #[cfg(test)]
 pub mod testing {
     use std::fs;
