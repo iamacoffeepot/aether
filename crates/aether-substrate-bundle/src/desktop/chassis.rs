@@ -20,11 +20,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_actor::Addressable;
+use aether_audio::{AudioCapability, AudioConfig as AudioConf};
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
-    AnthropicConfig, AudioCapability, ComponentHostConfig, ContentGenConfig, GeminiConfig, HttpServerConfig,
-    InputConfig, UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf, http::HttpConfig as HttpConf,
+    AnthropicConfig, ComponentHostConfig, ContentGenConfig, GeminiConfig, HttpServerConfig, InputConfig,
+    UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
 };
 use aether_clipboard::{ClipboardCapability, ClipboardConfig};
 use aether_fs::NamespaceRoots;

@@ -3,8 +3,8 @@
 //! [`NativeActor`] — owning its mailbox name, state, and handlers.
 //! The `Builder::with_actor` boot path on `aether-substrate` is the
 //! installation site; chassis mains pick which caps to load
-//! (Log/Io/Http are universal; Audio gates behind the `audio`
-//! feature; the render cap now lives in the `aether-render` crate).
+//! (Log/Io/Http are universal; the audio and render caps now live in
+//! the `aether-audio` / `aether-render` crates).
 //!
 //! Pre-stage-2e these modules lived under
 //! `aether_substrate::capabilities`. The split decouples the
@@ -37,8 +37,6 @@ extern crate self as aether_capabilities;
 // blocking ureq / subprocess calls.
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub mod anthropic;
-#[cfg(feature = "audio")]
-pub mod audio;
 pub mod component;
 // Shared infrastructure for capabilities (ADR-0050 §2). Native-only — the
 // dispatch helper, staging, and adapter traits all lean on the
@@ -80,10 +78,6 @@ pub mod test_bench;
 pub mod text;
 pub mod trampoline;
 
-#[cfg(feature = "audio")]
-pub use audio::AudioCapability;
-#[cfg(feature = "audio-runtime")]
-pub use audio::AudioConfig;
 // ADR-0050 `aether.anthropic` cap (issue 1014). `AnthropicConfig` is
 // part of the same native-only module.
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]

@@ -53,10 +53,10 @@
 //! `NoteOn` / `NoteOff` are dropped silently and `SetMasterGain`
 //! replies `Err` so agents fail fast instead of hanging.
 
-// ADR-0121: the `aether.audio.*` mail vocabulary the cap owns, riding
-// the always-on `audio` marker (not native-gated) so a wasm guest
-// addressing the cap through the marker feature sees the types. The
-// glob re-export surfaces every audio kind at `aether_capabilities::audio::*`
+// ADR-0121: the `aether.audio.*` mail vocabulary the cap owns, always-on
+// (not native-gated) so a wasm guest addressing the cap through the
+// marker-only (`default-features = false`) build sees the types. The
+// glob re-export surfaces every audio kind at `aether_audio::*`
 // for external callers.
 pub mod kinds;
 pub use kinds::*;
@@ -72,11 +72,11 @@ use aether_fs::ReadResult;
 // that build it from env (`from_env`) and pass it to
 // `with_actor::<AudioCapability>(cfg)`. The config seam now lives under
 // the `runtime` directory beside the rest of the runtime half, so the
-// re-export sources through `runtime` and re-gates to `audio-runtime`
-// (the `mod runtime;` gate) — wasm components opting into the marker-only
-// `audio` feature don't need the config struct (sends are typed; config
-// is the chassis's concern).
-#[cfg(feature = "audio-runtime")]
+// re-export sources through `runtime` and gates on the crate's `runtime`
+// feature (the `mod runtime;` gate) — wasm components opting into the
+// marker-only (`default-features = false`) build don't need the config
+// struct (sends are typed; config is the chassis's concern).
+#[cfg(feature = "runtime")]
 pub use runtime::{AudioConfig, AudioConfigLayer, AudioOverlay};
 
 /// `aether.audio` cap **identity** (ADR-0122 identity/runtime split). A ZST
@@ -85,7 +85,7 @@ pub use runtime::{AudioConfig, AudioConfigLayer, AudioOverlay};
 /// a marker-only / wasm build names the cap without pulling cpal or the synth
 /// pipeline. The state-bearing runtime (`runtime::AudioCapabilityState`, which
 /// owns the cpal worker thread + the deferred-load bookkeeping) lives behind
-/// the one `feature = "audio-runtime"` gate, so a marker-only build never names
+/// the one `feature = "runtime"` gate, so a marker-only build never names
 /// `AudioCapabilityState` nor pulls the native audio stack through this cap.
 #[actor(singleton)]
 pub struct AudioCapability;
@@ -94,15 +94,15 @@ pub struct AudioCapability;
 // emits). Everything that names an `aether_substrate` or cpal/synth type — the
 // handler/init ctx, the runtime state, the worker, the fan-out helpers, `Drop`,
 // and the `#[runtime] impl` itself — lives in the `runtime` module below, gated
-// once on `feature = "audio-runtime"`. The handler-signature kinds stay always-on
+// once on `feature = "runtime"`. The handler-signature kinds stay always-on
 // at file root (the `kinds` glob + `aether_fs::ReadResult`) — the always-on
 // `HandlesKind<K>` markers name them.
 use aether_actor::actor;
 
 // The runtime half — the whole cpal/synth + `aether_substrate`-typed surface
 // (imports, `AudioCapabilityState`, its helpers + `Drop`, `spawn_audio_worker`,
-// `sender_mailbox_id`, and the `#[runtime] impl`) — lives in `runtime.rs`, gated
-// once here on the media cap's own `audio-runtime` feature (it implies the
-// generic `runtime`, adding the cpal/synth deps atop it).
-#[cfg(feature = "audio-runtime")]
+// `sender_mailbox_id`, and the `#[runtime] impl`) — lives under `runtime/`, gated
+// once here on the crate's `runtime` feature (it pulls the cpal/synth deps and
+// forwards `aether-fs/runtime`).
+#[cfg(feature = "runtime")]
 mod runtime;

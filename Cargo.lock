@@ -64,6 +64,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-audio"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-fs",
+ "aether-substrate",
+ "bytemuck",
+ "clap",
+ "confique",
+ "cpal",
+ "crossbeam-queue",
+ "hound",
+ "inventory",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "aether-behavior"
 version = "0.3.0-alpha"
 dependencies = [
@@ -161,11 +180,8 @@ dependencies = [
  "bytemuck",
  "clap",
  "confique",
- "cpal",
- "crossbeam-queue",
  "dirs",
  "fontdue",
- "hound",
  "httparse",
  "inventory",
  "serde",
@@ -412,6 +428,7 @@ name = "aether-substrate-bundle"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-audio",
  "aether-capabilities",
  "aether-clipboard",
  "aether-codec",

@@ -9,6 +9,7 @@ members = [
     "crates/aether-math",
     "crates/aether-actor",
     "crates/aether-actor-derive",
+    "crates/aether-audio",
     "crates/aether-behavior",
     "crates/aether-behavior-derive",
     "crates/aether-bloomery",

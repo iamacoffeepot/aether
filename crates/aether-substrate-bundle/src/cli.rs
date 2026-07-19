@@ -39,9 +39,9 @@ use clap::{Args, Parser};
 // (`NamespaceRootsOverlay`), not the namespace prefix (`FsOverlay`) —
 // alias the historical name so the bundle's compose code keeps
 // reading.
+pub use aether_audio::AudioOverlay;
 pub use aether_capabilities::EngineOverlay;
 pub use aether_capabilities::anthropic::AnthropicOverlay;
-pub use aether_capabilities::audio::AudioOverlay;
 pub use aether_capabilities::gemini::GeminiOverlay;
 pub use aether_capabilities::http::HttpOverlay;
 pub use aether_capabilities::http::HttpServerOverlay;
