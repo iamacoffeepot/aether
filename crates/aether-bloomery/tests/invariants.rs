@@ -595,10 +595,13 @@ fn a_failing_aggregate_review_reopens_members_then_wedges_at_the_ceiling() {
         reduce(&snapshot, &verdict("stale", false, 99, vec!["alpha"])).outcome,
         Outcome::AggregateReviewRejected(AggregateReviewError::SubjectMismatch { .. }),
     ));
-    // A failing verdict must name owners; an empty implication routes nowhere.
+    // A failing verdict with an empty implication routes to every member —
+    // the host admits verdicts without membership knowledge, so the reducer
+    // expands the empty set rather than stranding the verdict.
     assert!(matches!(
-        reduce(&snapshot, &verdict("empty", false, 40, vec![])).outcome,
-        Outcome::AggregateReviewRejected(AggregateReviewError::NoImplicatedMembers),
+        &reduce(&snapshot, &verdict("empty", false, 40, vec![])).outcome,
+        Outcome::AggregateReviewReentered { members, rolls: 1, .. }
+            if *members == vec![workpiece("alpha"), workpiece("beta")],
     ));
     // A failing verdict naming a non-member is malformed.
     assert!(matches!(

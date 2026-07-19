@@ -426,6 +426,20 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
                 candidate: upload.candidate,
             },
         }
+    } else if record.stage == StageId::AggregateReview {
+        // The whole-bloom aggregate verdict (ADR-0153) — a bloom-level order,
+        // no member axis. `implicated` stays empty here: the intake holds no
+        // membership knowledge, and the reducer expands an empty implication
+        // to every member (the findings decomposition narrows it later).
+        Event {
+            idempotency_key: IdempotencyKey(format!("aether.bloomery.aggregate_review:{}", record.nonce.0)),
+            fact: Fact::AggregateReviewCompleted {
+                bloom: record.bloom,
+                passed: verdict_passed(upload.verdict),
+                evidence,
+                implicated: Vec::new(),
+            },
+        }
     } else {
         // An out-of-line stage never comes from a well-formed dispatch; refuse it
         // rather than folding a non-line result into the member's resolution. The
@@ -440,9 +454,13 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     }
     // A failing Verify's findings — the mechanical failure output — persist
     // keyed by the member so the Refine repair re-entry is directed by them; a
-    // passing Verify clears the stale row (#3656, ADR-0153). Only after the
-    // consume — a refused upload writes nothing.
-    if record.stage == StageId::Verify {
+    // passing Verify clears the stale row (#3656, ADR-0153). A failing
+    // aggregate review's findings persist bloom-scoped under the empty
+    // workpiece key (the record carries no member axis) — every re-opened
+    // member's Refine dispatch reads that bloom row until the decomposition
+    // slices per member. Only after the consume — a refused upload writes
+    // nothing.
+    if record.stage == StageId::Verify || record.stage == StageId::AggregateReview {
         if verdict_passed(upload.verdict) {
             store.clear_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0)?;
         } else if let Some(findings) = &upload.findings {

@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{
-    BloomId, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Nonce, StageCatalog, StageId,
-    Transformation, WorkHandle, WorkOrder, WorkpieceId,
+    AggregateReviewPayload, BloomId, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend, Fact, Nonce,
+    StageCatalog, StageId, TOPIC_AGGREGATE_REVIEW, Transformation, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::testing::FakeGithub;
 use aether_bloomery_github::{
@@ -19,8 +19,8 @@ use aether_data::wire::{from_bytes, to_vec};
 
 use super::{
     BACKOFF_CAP, CandidatePush, NameEvidenceClaims, TOPIC_DISPATCH, TrackedHandle, backoff_delay, candidate_ref_name,
-    drain_and_dispatch, is_stale, next_backoff, pull_and_admit, push_admitted_candidates, seed_tracked,
-    select_stale_handles,
+    drain_and_dispatch, drain_and_dispatch_aggregate, is_stale, next_backoff, pull_and_admit, push_admitted_candidates,
+    seed_tracked, select_stale_handles,
 };
 use crate::bloomery::intake::{Admission, attempt_artifact_name};
 use crate::bloomery::local_executor::testing::FixedRunner;
@@ -155,6 +155,46 @@ fn enqueue_construct_dispatch(store: &mut SqliteStore, bloom: BloomId, workpiece
     };
     let sequence = store.enqueue_outbox(TOPIC_DISPATCH, &to_vec(&payload).unwrap()).unwrap();
     (sequence, subject)
+}
+
+// ADR-0153 — the aggregate-review topic drains into a bloom-level order: the
+// review.critic transformation submits with a task composed from every
+// member's persisted work order, and the intake record carries the
+// AggregateReview stage with no member axis (the empty workpiece) and the
+// integrated tree as its displayed digest. Catches the aggregate dispatch
+// never leaving the outbox, and a record mis-keyed to a member.
+#[test]
+fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-a", "build the widget").unwrap();
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-b", "wire the widget").unwrap();
+    let payload = AggregateReviewPayload {
+        bloom: bloom.0,
+        transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
+        roll: 1,
+    };
+    let sequence = store.enqueue_outbox(TOPIC_AGGREGATE_REVIEW, &to_vec(&payload).unwrap()).unwrap();
+
+    let (handles, ack_through, _transient) = drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
+    assert_eq!(handles.len(), 1);
+    assert_eq!(ack_through, Some(sequence));
+
+    let orders = backend.orders();
+    let order = &orders[0];
+    assert_eq!(order.transformation.command, "review.critic");
+    assert_eq!(order.transformation.inputs[0], digest(30), "the evidence binds the integrated tree");
+    assert_eq!(order.transformation.checkout, digest(40), "the critic checks out the integrated head");
+    let description = order.transformation.description.as_deref().unwrap();
+    assert!(description.contains("## Task — wp-a\n\nbuild the widget"), "every member's order composes in");
+    assert!(description.contains("## Task — wp-b\n\nwire the widget"));
+
+    let stored = store.lookup_order(&order.nonce.0).unwrap().expect("the bloom-level order is recorded");
+    assert_eq!(stored.workpiece, "", "a bloom-level order has no member axis");
+    assert_eq!(stored.displayed_digest, digest(30).as_bytes().to_vec(), "the verdict must bind the integrated tree");
+    assert_eq!(stored.bloom, bloom.0.as_bytes().to_vec());
 }
 
 #[test]

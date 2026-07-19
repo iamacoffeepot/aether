@@ -38,7 +38,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aether_actor::runtime;
-use aether_bloomery::{Admit, BloomId, Digest, DispatchPayload, ExecutionStatus, Fact, Nonce, WorkHandle, WorkOrder};
+use aether_bloomery::{
+    Admit, AggregateReviewPayload, BloomId, Digest, DispatchPayload, ExecutionStatus, Fact, Nonce, StageId,
+    TOPIC_AGGREGATE_REVIEW, WorkHandle, WorkOrder, WorkpieceId,
+};
 use aether_bloomery_github::SharedCorrespondence;
 use aether_data::wire::from_bytes;
 use aether_data::{Kind, MailboxId};
@@ -308,9 +311,17 @@ fn drain_and_dispatch(
             // A failing verdict's persisted findings ride the same advisory
             // channel as their own labeled section (#3656, ADR-0153), so a
             // Refine re-entry's prompt names both the original order and what
-            // the failing gate flagged. The assembled prompt is plain markdown
-            // concatenation, so the section header composes in-channel.
-            if let Some(findings) = store.lookup_review_findings(payload.bloom.as_bytes(), &payload.workpiece.0)? {
+            // the failing gate flagged. The member row wins; a failing
+            // aggregate review persists bloom-scoped findings under the empty
+            // workpiece key until the decomposition slices them per member,
+            // and every re-opened member reads that bloom row. The assembled
+            // prompt is plain markdown concatenation, so the section header
+            // composes in-channel.
+            let findings = match store.lookup_review_findings(payload.bloom.as_bytes(), &payload.workpiece.0)? {
+                Some(findings) => Some(findings),
+                None => store.lookup_review_findings(payload.bloom.as_bytes(), "")?,
+            };
+            if let Some(findings) = findings {
                 let task = transformation.description.take().unwrap_or_default();
                 transformation.description = Some(format!("{task}\n\n## Findings\n\n{findings}"));
             }
@@ -361,6 +372,106 @@ fn drain_and_dispatch(
                     sequence = entry.sequence,
                     %error,
                     "dispatch submit/record failed; stopping the ack prefix to re-drive",
+                );
+                transient_failure = Some(entry.sequence);
+                break;
+            }
+        }
+    }
+    Ok((handles, ack_through, transient_failure))
+}
+
+/// Drain the aggregate-review topic and submit each entry through the executor
+/// under a bloom-level order record (ADR-0153): the `review.critic` lane run
+/// against the integrated head, its task context composed from the whole
+/// membership's persisted work orders — the sealed intent the critic judges
+/// the integrated diff against. Same ack-prefix / park / backoff semantics as
+/// [`drain_and_dispatch`]; the returned handles ride the same intake cycle,
+/// and the intake routes the verdict by the record's `AggregateReview` stage.
+fn drain_and_dispatch_aggregate(
+    store: &mut dyn StoreBackend,
+    executor: &ExecutorShell,
+) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
+    let entries = store.drain_outbox(Some(TOPIC_AGGREGATE_REVIEW))?;
+    let mut handles = Vec::new();
+    let mut ack_through = None;
+    let mut transient_failure = None;
+    for entry in entries {
+        let Ok(payload) = from_bytes::<AggregateReviewPayload>(&entry.payload) else {
+            tracing::warn!(
+                target: "aether_bloomery_host::executor",
+                sequence = entry.sequence,
+                "aggregate-review outbox entry did not decode; stopping the ack prefix to re-drain",
+            );
+            break;
+        };
+        if payload.transformation.inputs.is_empty() {
+            tracing::warn!(
+                target: "aether_bloomery_host::executor",
+                sequence = entry.sequence,
+                "aggregate-review transformation carries no subject input; stopping the ack prefix to re-drain",
+            );
+            break;
+        }
+        let mut transformation = payload.transformation;
+        // The evidence-binding subject is the integrated tree the reducer
+        // pinned as inputs[0] — also the displayed digest the returning
+        // verdict must bind.
+        let displayed = transformation.inputs[0];
+        let orders = store.list_dispatch_descriptions(payload.bloom.as_bytes())?;
+        if orders.is_empty() {
+            tracing::warn!(
+                target: "aether_bloomery_host::executor",
+                sequence = entry.sequence,
+                "no work-order descriptions persisted for the reviewed bloom; assembling a subject-only prompt",
+            );
+        } else {
+            use core::fmt::Write;
+            let mut task = String::from(
+                "Review the whole integrated diff against the sealed intent: every member's work order follows.",
+            );
+            for (workpiece, description) in orders {
+                let _ = write!(task, "\n\n## Task — {workpiece}\n\n{description}");
+            }
+            transformation.description = Some(task);
+        }
+        let nonce = Nonce(format!("dispatch-{}", entry.sequence));
+        let order = WorkOrder { transformation, nonce: nonce.clone() };
+        let record = DispatchRecord {
+            nonce,
+            bloom: BloomId(payload.bloom),
+            // A bloom-level order has no member axis (ADR-0153): the stage
+            // discriminates at intake, and the empty workpiece never routes.
+            workpiece: WorkpieceId(String::new()),
+            scope_revision: displayed,
+            candidate: displayed,
+            displayed_digest: displayed,
+            stage: StageId::AggregateReview,
+        };
+        match dispatch_and_record(executor, store, &order, &record) {
+            Ok(handle) => {
+                handles.push(handle);
+                ack_through = Some(entry.sequence);
+            }
+            Err(error) if error.is_permanent() => {
+                tracing::error!(
+                    target: "aether_bloomery_host::executor",
+                    sequence = entry.sequence,
+                    bloom = ?record.bloom.0,
+                    roll = payload.roll,
+                    nonce = %record.nonce.0,
+                    %error,
+                    "aggregate-review submit refused permanently; parking the entry instead of re-driving",
+                );
+                ack_through = Some(entry.sequence);
+                break;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_bloomery_host::executor",
+                    sequence = entry.sequence,
+                    %error,
+                    "aggregate-review submit/record failed; stopping the ack prefix to re-drive",
                 );
                 transient_failure = Some(entry.sequence);
                 break;
@@ -696,6 +807,26 @@ impl NativeActor for ExecutorDriverCapability {
                 }
                 Err(error) => {
                     tracing::warn!(target: "aether_bloomery_host::executor", %error, "dispatch drain failed");
+                }
+            }
+            // Drain + submit the whole-bloom aggregate reviews (ADR-0153) the
+            // same way — its handles ride the same intake cycle, and a
+            // transient failure joins the shared backoff window.
+            match drain_and_dispatch_aggregate(store, &executor) {
+                Ok((handles, ack_through, transient_failure)) => {
+                    if let Some(sequence) = ack_through
+                        && let Err(error) = store.ack_outbox(Some(TOPIC_AGGREGATE_REVIEW), sequence)
+                    {
+                        tracing::warn!(target: "aether_bloomery_host::executor", %error, "aggregate-review ack failed; entries re-drive");
+                    }
+                    let now = Instant::now();
+                    state.tracked.extend(handles.into_iter().map(|handle| TrackedHandle::new(handle, now)));
+                    if transient_failure.is_some() {
+                        state.backoff = next_backoff(state.backoff.as_ref(), transient_failure);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(target: "aether_bloomery_host::executor", %error, "aggregate-review drain failed");
                 }
             }
         }
