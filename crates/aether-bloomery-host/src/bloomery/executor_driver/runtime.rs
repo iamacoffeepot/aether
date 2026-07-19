@@ -4,7 +4,8 @@
 //! A poll-driven loop that turns the reducer's dispatch decisions into running
 //! work and matched results back into admitted facts:
 //!
-//! 1. **Drain + submit.** Each tick drains the store's [`TOPIC_DISPATCH`]
+//! 1. **Drain + submit.** Each tick drains the store's
+//!    [`Topic::Dispatch`](aether_bloomery::Topic::Dispatch)
 //!    outbox topic (its own connection, so the intake registry the pull side
 //!    reads/consumes is one store), decodes each
 //!    [`DispatchPayload`](aether_bloomery::DispatchPayload), submits it through the
@@ -39,8 +40,8 @@ use std::time::{Duration, Instant};
 
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, AggregateReviewPayload, BloomId, Digest, DispatchPayload, ExecutionStatus, Fact, Nonce, StageId,
-    TOPIC_AGGREGATE_REVIEW, WorkHandle, WorkOrder, WorkpieceId,
+    Admit, AggregateReviewPayload, BloomId, Digest, DispatchPayload, ExecutionStatus, Fact, Nonce, ReviewPass, StageId,
+    Topic, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_bloomery_github::SharedCorrespondence;
 use aether_data::wire::from_bytes;
@@ -58,17 +59,11 @@ use crate::bloomery::intake::{
     Admission, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims, dispatch_and_record, run_intake_cycle,
 };
 use crate::bloomery::mirror::GithubMirrorConfig;
+use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::store::{SqliteStore, StoreBackend};
 
 use aether_bloomery::CONTROL_CORE_NAMESPACE;
-/// The outbox topic the reducer enqueues a per-member attempt dispatch under —
-/// the control actor's producer constant, imported so the two sides cannot
-/// drift (#3668). This capability is its sole consumer; the control-core
-/// lineage path rides along for `control_mailbox` (`mailbox_id_from_path` —
-/// the control actor is not a native singleton, so the sibling-cap typed send
-/// does not apply).
-pub use aether_bloomery::TOPIC_DISPATCH;
 use aether_capabilities::resolve_embedded;
 
 /// The self-addressed wake the poll timer fires each interval; its handler drains
@@ -258,7 +253,7 @@ fn drain_and_dispatch(
     store: &mut dyn StoreBackend,
     executor: &ExecutorShell,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
-    let entries = store.drain_outbox(Some(TOPIC_DISPATCH))?;
+    let entries = store.drain_topic(Topic::Dispatch)?;
     let mut handles = Vec::new();
     let mut ack_through = None;
     // The outbox sequence of a transient submit failure that stopped the drain —
@@ -411,13 +406,13 @@ fn compose_aggregate_task(
             "no work-order descriptions persisted for the reviewed bloom; assembling a subject-only prompt",
         );
     }
-    let frozen = if payload.roll > 1 {
+    let frozen = if matches!(payload.pass, ReviewPass::DeltaConfirm) {
         let frozen = store.lookup_review_findings(payload.bloom.as_bytes(), "")?;
         if frozen.is_none() {
             tracing::warn!(
                 target: "aether_bloomery_host::executor",
                 sequence,
-                roll = payload.roll,
+                pass = ?payload.pass,
                 "delta-confirm dispatch found no frozen findings row; framing a full review",
             );
         }
@@ -461,7 +456,7 @@ fn drain_and_dispatch_aggregate(
     store: &mut dyn StoreBackend,
     executor: &ExecutorShell,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
-    let entries = store.drain_outbox(Some(TOPIC_AGGREGATE_REVIEW))?;
+    let entries = store.drain_topic(Topic::AggregateReview)?;
     let mut handles = Vec::new();
     let mut ack_through = None;
     let mut transient_failure = None;
@@ -482,11 +477,11 @@ fn drain_and_dispatch_aggregate(
             );
             break;
         }
-        // A roll-1 dispatch opens a fresh review cycle — the first ever, or an
+        // A full-pass dispatch opens a fresh review cycle — the first ever, or an
         // owner re-arm after a park (ADR-0153). Clear any stale frozen row so
         // the new cycle's first failure freezes cleanly instead of appending
         // itself under the spent cycle's delta-confirm label.
-        if payload.roll <= 1 {
+        if matches!(payload.pass, ReviewPass::Full) {
             store.clear_review_findings(payload.bloom.as_bytes(), "")?;
         }
         let task = compose_aggregate_task(store, &payload, entry.sequence)?;
@@ -521,7 +516,7 @@ fn drain_and_dispatch_aggregate(
                     target: "aether_bloomery_host::executor",
                     sequence = entry.sequence,
                     bloom = ?record.bloom.0,
-                    roll = payload.roll,
+                    pass = ?payload.pass,
                     nonce = %record.nonce.0,
                     %error,
                     "aggregate-review submit refused permanently; parking the entry instead of re-driving",
@@ -860,7 +855,7 @@ impl NativeActor for ExecutorDriverCapability {
             match drain_and_dispatch(store, &executor) {
                 Ok((handles, ack_through, transient_failure)) => {
                     if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_outbox(Some(TOPIC_DISPATCH), sequence)
+                        && let Err(error) = store.ack_topic(Topic::Dispatch, sequence)
                     {
                         tracing::warn!(target: "aether_bloomery_host::executor", %error, "dispatch ack failed; entries re-drive");
                     }
@@ -878,7 +873,7 @@ impl NativeActor for ExecutorDriverCapability {
             match drain_and_dispatch_aggregate(store, &executor) {
                 Ok((handles, ack_through, transient_failure)) => {
                     if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_outbox(Some(TOPIC_AGGREGATE_REVIEW), sequence)
+                        && let Err(error) = store.ack_topic(Topic::AggregateReview, sequence)
                     {
                         tracing::warn!(target: "aether_bloomery_host::executor", %error, "aggregate-review ack failed; entries re-drive");
                     }

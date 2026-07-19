@@ -32,7 +32,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_actor::{MailSender, runtime};
-use aether_bloomery::{LandingReceipt, ViewDocument};
+use aether_bloomery::{LandingReceipt, Topic, ViewDocument};
 use aether_data::wire::from_bytes;
 use aether_data::{Kind, MailboxId};
 use aether_substrate::Mail;
@@ -45,16 +45,6 @@ use super::MirrorDriverCapability;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::bloomery::{GithubMirrorConfig, ProjectionShell, SourceShell};
 use crate::store::{AckOutbox, AckOutboxResult, DrainOutbox, DrainOutboxResult, OutboxEntry, StoreCapability};
-
-/// The outbox topic carrying `ViewDocument` payloads — reconciled onto the
-/// outward mirror. Host-produced and host-drained (this driver is both
-/// sides), under the same `topic:` non-address scheme as the control actor's
-/// topics (#3668).
-pub const TOPIC_VIEW_DOCUMENT: &str = "topic:view_document";
-/// The outbox topic carrying `LandingReceipt` payloads — projected outward.
-/// The control actor's producer constant, imported under its producer name so
-/// the coupling is greppable and the two sides cannot drift (#3668).
-pub use aether_bloomery::TOPIC_LANDING_RECEIPT;
 
 /// The self-addressed wake the poll timer fires each interval; its handler
 /// drains the store outbox. Zero-field — the timer carries only the schedule.
@@ -98,16 +88,14 @@ impl MirrorDriverState {
 /// A projection error or an unknown / undecodable topic is a failure that stalls
 /// that topic's ack prefix; the entry re-delivers on the next drain.
 fn deliver(projection: &ProjectionShell, entry: &OutboxEntry) -> Result<(), String> {
-    match entry.topic.as_str() {
-        TOPIC_VIEW_DOCUMENT => {
-            let view: ViewDocument = from_bytes(&entry.payload).map_err(|e| e.to_string())?;
-            projection.reconcile_view(&view).map_err(|e| e.to_string())
-        }
-        TOPIC_LANDING_RECEIPT => {
-            let receipt: LandingReceipt = from_bytes(&entry.payload).map_err(|e| e.to_string())?;
-            projection.project_receipt(&receipt).map_err(|e| e.to_string())
-        }
-        other => Err(format!("unknown outbox topic {other:?}")),
+    if entry.topic == Topic::ViewDocument {
+        let view: ViewDocument = from_bytes(&entry.payload).map_err(|e| e.to_string())?;
+        projection.reconcile_view(&view).map_err(|e| e.to_string())
+    } else if entry.topic == Topic::LandingReceipt {
+        let receipt: LandingReceipt = from_bytes(&entry.payload).map_err(|e| e.to_string())?;
+        projection.project_receipt(&receipt).map_err(|e| e.to_string())
+    } else {
+        Err(format!("unknown outbox topic {:?}", entry.topic))
     }
 }
 
@@ -215,8 +203,9 @@ impl NativeActor for MirrorDriverCapability {
         if state.projection.is_none() {
             return;
         }
-        for topic in [TOPIC_VIEW_DOCUMENT, TOPIC_LANDING_RECEIPT] {
-            ctx.send::<StoreCapability, DrainOutbox>(&DrainOutbox { topic: Some(topic.to_owned()) });
+        let drains = [DrainOutbox::scoped(Topic::ViewDocument), DrainOutbox::scoped(Topic::LandingReceipt)];
+        for drain in drains {
+            ctx.send::<StoreCapability, DrainOutbox>(&drain);
         }
     }
 
@@ -270,7 +259,7 @@ mod tests {
 
     use aether_bloomery::{
         BloomDraft, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, IdempotencyKey, LandingReceipt, Membership,
-        Snapshot, StageCatalog, WorkpieceId, reduce, view_of,
+        Snapshot, StageCatalog, Topic, WorkpieceId, reduce, view_of,
     };
     use aether_bloomery_github::{GithubProjection, testing::FakeGithub};
     use aether_data::wire::{from_bytes, to_vec};
@@ -283,8 +272,9 @@ mod tests {
 
     use super::{
         AckOutbox, DrainOutbox, DrainOutboxResult, DrainTick, Kind, MirrorDriverCapability, MirrorDriverState,
-        OutboxEntry, ProjectionShell, TOPIC_LANDING_RECEIPT, TOPIC_VIEW_DOCUMENT, project_batch,
+        OutboxEntry, ProjectionShell, project_batch,
     };
+    use crate::bloomery::outbox::TopicOutbox;
     use crate::store::{SqliteStore, StoreBackend};
 
     fn digest(seed: u8) -> Digest {
@@ -351,23 +341,23 @@ mod tests {
         // project it, and ack the delivered prefix.
         {
             let mut store = SqliteStore::open(db).unwrap();
-            store.enqueue_outbox(TOPIC_VIEW_DOCUMENT, &encoded_view()).unwrap();
+            store.enqueue_topic(Topic::ViewDocument, &encoded_view()).unwrap();
 
-            let entries = store.drain_outbox(Some(TOPIC_VIEW_DOCUMENT)).unwrap();
+            let entries = store.drain_topic(Topic::ViewDocument).unwrap();
             assert_eq!(entries.len(), 1, "the enqueued view is drainable on its topic");
 
             let acks = project_batch(&shell, &entries);
             assert_eq!(fake.issue_count(), 2, "the carbon copy: one umbrella issue plus one workpiece issue");
             assert_eq!(acks.len(), 1);
-            assert_eq!(acks[0].topic.as_deref(), Some(TOPIC_VIEW_DOCUMENT));
+            assert!(
+                acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::ViewDocument),
+                "the ack covers the view-document topic",
+            );
             assert_eq!(acks[0].through_sequence, entries[0].sequence, "ack covers the delivered entry");
 
             // On success only: apply the ack the worker would send.
             store.ack_outbox(acks[0].topic.as_deref(), acks[0].through_sequence).unwrap();
-            assert!(
-                store.drain_outbox(Some(TOPIC_VIEW_DOCUMENT)).unwrap().is_empty(),
-                "the acked entry does not re-drain"
-            );
+            assert!(store.drain_topic(Topic::ViewDocument).unwrap().is_empty(), "the acked entry does not re-drain");
         }
 
         // Phase 2 — boot republish: a second view is enqueued but the process
@@ -377,12 +367,12 @@ mod tests {
         // idempotent, so the re-projection converges to the same carbon copy.
         {
             let mut store = SqliteStore::open(db).unwrap();
-            store.enqueue_outbox(TOPIC_VIEW_DOCUMENT, &encoded_view()).unwrap();
+            store.enqueue_topic(Topic::ViewDocument, &encoded_view()).unwrap();
             drop(store);
 
             // Simulated restart: reopen the same database file.
             let mut restarted = SqliteStore::open(db).unwrap();
-            let republished = restarted.drain_outbox(Some(TOPIC_VIEW_DOCUMENT)).unwrap();
+            let republished = restarted.drain_topic(Topic::ViewDocument).unwrap();
             assert_eq!(republished.len(), 1, "the unacked entry survived the restart and re-drains");
 
             let acks = project_batch(&shell, &republished);
@@ -390,10 +380,7 @@ mod tests {
             assert_eq!(acks.len(), 1);
 
             restarted.ack_outbox(acks[0].topic.as_deref(), acks[0].through_sequence).unwrap();
-            assert!(
-                restarted.drain_outbox(Some(TOPIC_VIEW_DOCUMENT)).unwrap().is_empty(),
-                "republished entry now acked"
-            );
+            assert!(restarted.drain_topic(Topic::ViewDocument).unwrap().is_empty(), "republished entry now acked");
         }
     }
     #[test]
@@ -409,15 +396,18 @@ mod tests {
         let mut store = SqliteStore::open(":memory:").unwrap();
 
         let receipt = LandingReceipt { bloom: BloomId(digest(1)), previous_base: digest(10), new_head: digest(20) };
-        store.enqueue_outbox(TOPIC_LANDING_RECEIPT, &to_vec(&receipt).unwrap()).unwrap();
+        store.enqueue_topic(Topic::LandingReceipt, &to_vec(&receipt).unwrap()).unwrap();
 
-        let entries = store.drain_outbox(Some(TOPIC_LANDING_RECEIPT)).unwrap();
+        let entries = store.drain_topic(Topic::LandingReceipt).unwrap();
         assert_eq!(entries.len(), 1, "the enqueued receipt is drainable on the receipt topic");
 
         let acks = project_batch(&shell, &entries);
         assert_eq!(fake.comment_count(), 1, "the receipt projects one landing comment on the umbrella issue");
         assert_eq!(acks.len(), 1);
-        assert_eq!(acks[0].topic.as_deref(), Some(TOPIC_LANDING_RECEIPT), "the ack covers the receipt topic");
+        assert!(
+            acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::LandingReceipt),
+            "the ack covers the receipt topic",
+        );
         assert_eq!(acks[0].through_sequence, entries[0].sequence);
     }
 
@@ -446,16 +436,16 @@ mod tests {
         let mut drained_topics: Vec<Option<String>> =
             collect_sends::<DrainOutbox>(&rx, 2).into_iter().map(|d| d.topic).collect();
         drained_topics.sort();
-        assert_eq!(
-            drained_topics,
-            vec![Some(TOPIC_LANDING_RECEIPT.to_owned()), Some(TOPIC_VIEW_DOCUMENT.to_owned())],
-            "each owned projection topic is drained, scoped by topic",
-        );
+        let mut expected =
+            vec![DrainOutbox::scoped(Topic::LandingReceipt).topic, DrainOutbox::scoped(Topic::ViewDocument).topic];
+        expected.sort();
+        assert_eq!(drained_topics, expected, "each owned projection topic is drained, scoped by topic");
 
         // on_drain_result projects the entry and — on success — the detached
         // worker acks the delivered prefix. The ack landing on egress proves the
         // worker ran (it sends the ack only after the reconcile returns Ok).
-        let entry = OutboxEntry { sequence: 7, topic: TOPIC_VIEW_DOCUMENT.to_owned(), payload: encoded_view() };
+        let entry =
+            OutboxEntry { sequence: 7, topic: Topic::ViewDocument.as_str().to_owned(), payload: encoded_view() };
         {
             let mut ctx = NativeCtx::new_dispatching(&binding, Source::NONE, MailId::NONE, MailId::NONE);
             MirrorDriverCapability::on_drain_result(
@@ -466,7 +456,10 @@ mod tests {
         }
         let acks = collect_sends::<AckOutbox>(&rx, 1);
         assert_eq!(fake.issue_count(), 2, "the worker reconciled the carbon copy before acking");
-        assert_eq!(acks[0].topic.as_deref(), Some(TOPIC_VIEW_DOCUMENT));
+        assert!(
+            acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::ViewDocument),
+            "the ack covers the view-document topic",
+        );
         assert_eq!(acks[0].through_sequence, 7, "the ack covers the delivered entry's sequence");
     }
 }

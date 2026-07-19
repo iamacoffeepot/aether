@@ -37,10 +37,7 @@ use super::claim_plan::{
 use super::{
     Admit, AdmitResult, AggregateReviewPayload, ClaimResult, ClaimSeal, Commit, CommitResult, DispatchPayload,
     EnumerateClaims, EnumerateClaimsResult, IntegratePayload, LandPayload, MembershipMutation, OutboxPayload, Query,
-    QueryResult, RedispatchPayload, ReplayJournal, ReplayJournalResult, TransferSeal,
-};
-use super::{
-    TOPIC_AGGREGATE_REVIEW, TOPIC_DISPATCH, TOPIC_INTEGRATE, TOPIC_LAND, TOPIC_LANDING_RECEIPT, TOPIC_REDISPATCH,
+    QueryResult, RedispatchPayload, ReplayJournal, ReplayJournalResult, ReviewPass, Topic, TransferSeal,
 };
 use crate::ids::BloomId;
 use crate::port::{ClaimRefKind, ClaimRefState};
@@ -560,11 +557,11 @@ fn project(
                     .push(MembershipMutation { workpiece: workpiece.0.clone(), bloom: bloom.0.as_bytes().to_vec() });
             }
             Decision::EmitReceipt(receipt) => {
-                outbox.push(OutboxPayload { topic: TOPIC_LANDING_RECEIPT.to_owned(), payload: to_vec(receipt)? });
+                outbox.push(OutboxPayload::new(Topic::LandingReceipt, to_vec(receipt)?));
             }
             Decision::RedispatchStage { bloom, question, answer } => {
                 let payload = RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer };
-                outbox.push(OutboxPayload { topic: TOPIC_REDISPATCH.to_owned(), payload: to_vec(&payload)? });
+                outbox.push(OutboxPayload::new(Topic::Redispatch, to_vec(&payload)?));
             }
             Decision::DispatchAttempt { bloom, workpiece, stage, transformation, scope_revision, candidate } => {
                 let payload = DispatchPayload {
@@ -575,20 +572,23 @@ fn project(
                     scope_revision: *scope_revision,
                     candidate: *candidate,
                 };
-                outbox.push(OutboxPayload { topic: TOPIC_DISPATCH.to_owned(), payload: to_vec(&payload)? });
+                outbox.push(OutboxPayload::new(Topic::Dispatch, to_vec(&payload)?));
             }
             Decision::DispatchLand { bloom, expected_base, new_head } => {
                 let payload = LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head };
-                outbox.push(OutboxPayload { topic: TOPIC_LAND.to_owned(), payload: to_vec(&payload)? });
+                outbox.push(OutboxPayload::new(Topic::Land, to_vec(&payload)?));
             }
             Decision::DispatchIntegration { bloom, base, candidates } => {
                 let payload = IntegratePayload { bloom: bloom.0, base: *base, candidates: candidates.clone() };
-                outbox.push(OutboxPayload { topic: TOPIC_INTEGRATE.to_owned(), payload: to_vec(&payload)? });
+                outbox.push(OutboxPayload::new(Topic::Integrate, to_vec(&payload)?));
             }
             Decision::DispatchAggregateReview { bloom, transformation, roll } => {
-                let payload =
-                    AggregateReviewPayload { bloom: bloom.0, transformation: transformation.clone(), roll: *roll };
-                outbox.push(OutboxPayload { topic: TOPIC_AGGREGATE_REVIEW.to_owned(), payload: to_vec(&payload)? });
+                let payload = AggregateReviewPayload {
+                    bloom: bloom.0,
+                    transformation: transformation.clone(),
+                    pass: ReviewPass::from_roll(*roll),
+                };
+                outbox.push(OutboxPayload::new(Topic::AggregateReview, to_vec(&payload)?));
             }
             Decision::InheritClaim { .. }
             | Decision::RecordResolution { .. }

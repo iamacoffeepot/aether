@@ -4,7 +4,8 @@
 //! A poll-driven loop that turns the reducer's integration decisions into the
 //! git-side fold that produces the landable head:
 //!
-//! 1. **Drain.** Each tick drains the store's [`TOPIC_INTEGRATE`] outbox
+//! 1. **Drain.** Each tick drains the store's
+//!    [`Topic::Integrate`](aether_bloomery::Topic::Integrate) outbox
 //!    topic (its own connection, mirroring the land driver's store ownership) and
 //!    decodes each [`IntegratePayload`](aether_bloomery::IntegratePayload) — the
 //!    bloom whose members all carry claims, its sealed base, and every member's
@@ -32,7 +33,7 @@ use std::time::Duration;
 
 use aether_actor::runtime;
 use aether_bloomery::{
-    Admit, BloomId, Checkpoint, Digest, Event, Fact, IdempotencyKey, IntegrateOutcome, IntegratePayload,
+    Admit, BloomId, Checkpoint, Digest, Event, Fact, IdempotencyKey, IntegrateOutcome, IntegratePayload, Topic,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_data::{Kind, MailboxId};
@@ -45,13 +46,9 @@ use serde::{Deserialize, Serialize};
 use super::IntegrateDriverCapability;
 use crate::bloomery::SourceShell;
 use crate::bloomery::mirror::GithubMirrorConfig;
+use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::store::{SqliteStore, StoreBackend};
-
-/// The outbox topic the reducer enqueues a completed claim set's integration
-/// under — the control actor's producer constant, imported so the two sides
-/// cannot drift (#3668). This capability is its sole consumer.
-pub use aether_bloomery::TOPIC_INTEGRATE;
 
 // The autoloaded control-core component's lineage mailbox — where an admitted
 // `Fact::Resolve` is sent. Resolved from the lineage path, mirroring the land
@@ -209,7 +206,7 @@ fn drain_and_integrate(
     store: &mut dyn StoreBackend,
     source: &SourceShell,
 ) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
-    let entries = store.drain_outbox(Some(TOPIC_INTEGRATE))?;
+    let entries = store.drain_topic(Topic::Integrate)?;
     let mut admits = Vec::new();
     let mut ack_through = None;
     for entry in entries {
@@ -346,7 +343,7 @@ impl NativeActor for IntegrateDriverCapability {
         match drain_and_integrate(store, &source) {
             Ok((admits, ack_through)) => {
                 if let Some(sequence) = ack_through
-                    && let Err(error) = store.ack_outbox(Some(TOPIC_INTEGRATE), sequence)
+                    && let Err(error) = store.ack_topic(Topic::Integrate, sequence)
                 {
                     tracing::warn!(target: "aether_bloomery_host::integrate", %error, "integrate ack failed; entries re-drive");
                 }

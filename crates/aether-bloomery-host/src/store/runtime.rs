@@ -135,6 +135,13 @@ pub struct StudyRow {
 
 /// The durable store the capability drives. One method per transact-mail kind;
 /// each is one atomic `SQLite` transaction.
+///
+/// Outbox `topic` parameters stay `&str` deliberately: this trait sits below
+/// the mail handler, whose wire surface accepts arbitrary caller-defined
+/// topics — a `Topic`-typed backend would force a failing string-to-`Topic`
+/// conversion on unknown values, re-closing the open set through the back
+/// door. The typed edge for the reducer's own topics is
+/// [`TopicOutbox`](crate::bloomery::TopicOutbox).
 pub trait StoreBackend: Send {
     /// Record an outstanding work order at its nonce (the evidence-intake
     /// registry write side, #3502). Idempotent: a nonce already outstanding is

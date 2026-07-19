@@ -28,7 +28,9 @@ fn claim(workpiece: &str, bloom: &[u8]) -> MembershipMutation {
 fn commit_journals_claims_and_outbox_in_one_transaction() {
     // The combined commit is the control-loop primitive: one transact-mail that
     // journals the event, claims membership, and enqueues the outbox atomically.
-    // A successful commit leaves all three durable.
+    // A successful commit leaves all three durable. Topics here are raw strings
+    // on purpose: these tests exercise the store's open string surface (any
+    // caller-defined topic), below the typed `Topic` edge.
     let mut store = memory();
     let outcome = store
         .commit(
