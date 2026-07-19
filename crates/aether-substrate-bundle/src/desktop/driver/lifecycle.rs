@@ -150,8 +150,7 @@ mod tests {
 
         // The window inbox forwards armed envelopes onto the
         // `SettlingInbox`'s channel, exactly as `claim_mailbox` does.
-        let window_mailbox =
-            mailbox_id_from_name(<aether_capabilities::HeadlessWindowCapability as Addressable>::NAMESPACE);
+        let window_mailbox = mailbox_id_from_name(<aether_window::HeadlessWindowCapability as Addressable>::NAMESPACE);
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
             let _ = tx.send(d);
@@ -212,8 +211,7 @@ mod tests {
         }
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
 
-        let window_mailbox =
-            mailbox_id_from_name(<aether_capabilities::HeadlessWindowCapability as Addressable>::NAMESPACE);
+        let window_mailbox = mailbox_id_from_name(<aether_window::HeadlessWindowCapability as Addressable>::NAMESPACE);
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
             let _ = tx.send(d);
@@ -277,8 +275,7 @@ mod tests {
 
         // Register the window mailbox forwarding armed envelopes onto the
         // `SettlingInbox`'s channel, exactly as `claim_mailbox` does.
-        let window_mailbox =
-            mailbox_id_from_name(<aether_capabilities::HeadlessWindowCapability as Addressable>::NAMESPACE);
+        let window_mailbox = mailbox_id_from_name(<aether_window::HeadlessWindowCapability as Addressable>::NAMESPACE);
         let (tx, rx) = mpsc::channel::<Envelope>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |d: Envelope| {
             let _ = tx.send(d);

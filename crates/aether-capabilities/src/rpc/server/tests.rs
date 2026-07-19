@@ -221,10 +221,10 @@ fn call_echo_round_trip_event_then_end() {
 #[test]
 fn call_headless_window_set_mode_err_reaches_component_reply() {
     use crate::rpc::{MailEnvelope, MailboxAddress};
-    use crate::window::HeadlessWindowCapability;
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
     use aether_kinds::{SetWindowMode, SetWindowModeResult, WindowMode};
+    use aether_window::HeadlessWindowCapability;
 
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))

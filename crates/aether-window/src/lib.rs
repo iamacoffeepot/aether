@@ -3,8 +3,8 @@
 //! On desktop the chassis driver claims `aether.window` directly and
 //! drains the inbox between frames — window mutations require the
 //! chassis main thread (winit / macOS), and the driver is already
-//! there. The driver-as-actor path lives in
-//! `crate::desktop::driver`; this module hosts the chassis-without-window
+//! there. The driver-as-actor path lives in the desktop chassis
+//! driver; this crate hosts the chassis-without-window
 //! companion that headless and test-bench compose to fail-fast with
 //! `Err`-replies on `set_mode` / `set_title`.
 
@@ -25,7 +25,7 @@ use aether_actor::actor;
 ///
 /// Chassis-without-window companion to the desktop driver's
 /// driver-as-actor `aether.window` claim. Mirrors
-/// [`crate::HeadlessRenderCapability`]: same mailbox the desktop
+/// `HeadlessRenderCapability`: same mailbox the desktop
 /// owner claims, `Err`-replying handlers so MCP `set_window_mode`
 /// / `set_window_title` fail fast on chassis without a window
 /// (headless and test-bench).

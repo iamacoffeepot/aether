@@ -63,6 +63,11 @@ runtime = [
     "dep:url",
     "dep:uuid",
     "dep:wasmtime",
+    # The retained `aether-window` dep (below) is identity-only by default;
+    # forward its runtime half so chassis / test builds of this crate boot
+    # the fail-fast `HeadlessWindowCapability` runtime the `rpc` server test
+    # exercises.
+    "aether-window/runtime",
 ]
 
 # Wasm-safe marker layers. Activate from a wasm component that wants to
@@ -119,6 +124,15 @@ aether-math = { path = "../aether-math" }
 # alloc impls even in the marker-only isolated build.
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 
+# iamacoffeepot/aether#3717: the `aether.window` cap was extracted to its
+# own `aether-window` crate, but capabilities RETAINS an identity-only
+# dependency on it — the `rpc` server test (`rpc/server/tests.rs`) still
+# addresses `HeadlessWindowCapability` to exercise the `Component`
+# local-RPC-server reply path. `default-features = false` keeps only the
+# wasm-safe identity; the `runtime` feature above forwards
+# `aether-window/runtime` so chassis / test builds get the fail-fast
+# runtime half.
+aether-window = { path = "../aether-window", default-features = false }
 # Native-only: gated behind the `runtime` feature so wasm builds
 # don't drag in wasmtime / cpal / wgpu transitively.
 aether-substrate = { path = "../aether-substrate", optional = true }
