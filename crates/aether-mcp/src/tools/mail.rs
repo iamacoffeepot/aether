@@ -1,8 +1,8 @@
 use std::time::Duration;
 
-use aether_capabilities::trace::walk::TreeWalk;
 use aether_data::{EngineId, Kind, MailId, Uuid};
 use aether_kinds::trace::{DescribeTreeResult, DispatchTraced, TRACE_MAILBOX_NAME, TraceTail, TraceTailResult};
+use aether_trace::walk::TreeWalk;
 use rmcp::ErrorData as McpError;
 
 use crate::args::{

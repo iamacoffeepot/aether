@@ -39,7 +39,6 @@ use aether_capabilities::{
     fs::NamespaceRoots,
     http::HttpConfig,
     shared::contentgen::{ContentGenConfig, ContentGenConfigLayer},
-    trace::TraceDispatchCapability,
 };
 use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
 use aether_substrate::chassis::Chassis;
@@ -50,6 +49,7 @@ use aether_substrate::config::{
 };
 use aether_substrate::runtime::RUNTIME_KNOBS;
 use aether_substrate::runtime::lifecycle::FatalAborter;
+use aether_trace::TraceDispatchCapability;
 use confique::Config as _;
 use confique::meta::Meta;
 

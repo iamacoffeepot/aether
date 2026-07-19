@@ -1,0 +1,57 @@
+[package]
+name = "aether-trace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `aether.trace` capability, extracted from `aether-capabilities`
+# (iamacoffeepot/aether#3719) as a per-cap crate of the arc that dissolves
+# the capabilities monolith. Owns the thin `aether.trace` dispatch cap
+# (ADR-0080 §4 / ADR-0086 Phase 3c): the `TraceDispatchCapability`
+# identity + its `aether_substrate`-typed runtime that services
+# `DispatchTraced` (backing the MCP `send_mail_traced` tool), plus the
+# transport-agnostic guided walk/stitch (`walk`) over the per-actor trace
+# rings. The trace mail kinds themselves (`DispatchTraced`,
+# `DispatchTracedAck`, `TraceEvent`, `TraceRingEntry`, …) live in
+# `aether-kinds`, so this crate only references them.
+#
+# Like `aether-window` / `aether-fs` and unlike the pure-leaf
+# `aether-clipboard`, `aether-capabilities` RETAINS a
+# `default-features = false` dependency on this crate: `engine/proxy`
+# (real code) plus the `rpc` and `http` server tests still address the
+# trace cap. So capabilities keeps the identity-only dep and forwards
+# `aether-trace/runtime` from its own `runtime` feature.
+#
+# The ADR-0122 identity/runtime split rides the `runtime` feature: the
+# wasm-safe identity + `HandlesKind` markers (and the always-on `walk`
+# module) compile always-on; the `aether_substrate`-typed runtime half is
+# gated so a marker-only wasm guest can address
+# `ctx.actor::<TraceDispatchCapability>()` without dragging the substrate
+# through.
+
+[features]
+default = ["runtime"]
+runtime = ["dep:aether-substrate"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+# Native-only runtime half — gated so wasm/marker builds skip the substrate
+# runtime.
+aether-substrate = { path = "../aether-substrate", optional = true }
+
+# The `#[actor]` macro emits a `cfg(not(target_family = "wasm"))`-gated
+# `inventory::submit!` HandlerEntry per handler, so native builds need
+# `inventory` reachable; wasm guests don't (the gate skips emission).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]
+# The `runtime` module's `on_dispatch_traced` tests boot the
+# `aether_substrate` `NativeBinding::new_for_test` / `HubOutbound`
+# loopback fixtures, enabled by the substrate `test-support` feature.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+
+[lints]
+workspace = true

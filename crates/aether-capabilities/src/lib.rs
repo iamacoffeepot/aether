@@ -81,7 +81,6 @@ pub mod test_bench;
 // wasm graph.
 #[cfg(feature = "text")]
 pub mod text;
-pub mod trace;
 pub mod trampoline;
 
 #[cfg(feature = "audio")]

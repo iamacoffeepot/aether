@@ -81,6 +81,10 @@ aether-substrate = { path = "../aether-substrate", features = ["render"] }
 aether-capabilities = { path = "../aether-capabilities", features = ["render-runtime", "audio-runtime", "text-runtime"] }
 aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
 aether-window = { path = "../aether-window", features = ["runtime"] }
+# The `aether.trace` cap (extracted from capabilities, #3719): every
+# chassis mounts `TraceDispatchCapability`; the perf/test_bench harnesses
+# stitch trace trees via `walk`. Runtime half.
+aether-trace = { path = "../aether-trace", features = ["runtime"] }
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }

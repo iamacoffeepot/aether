@@ -125,6 +125,7 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "aether-substrate",
+ "aether-trace",
  "anyhow",
  "clap",
  "confique",
@@ -151,6 +152,7 @@ dependencies = [
  "aether-kinds",
  "aether-math",
  "aether-substrate",
+ "aether-trace",
  "aether-window",
  "base64",
  "bytemuck",
@@ -311,6 +313,7 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "aether-substrate",
+ "aether-trace",
  "anyhow",
  "axum",
  "base64",
@@ -381,6 +384,7 @@ dependencies = [
  "aether-math",
  "aether-substrate",
  "aether-test-fixtures-kinds",
+ "aether-trace",
  "aether-window",
  "anyhow",
  "bytemuck",
@@ -483,6 +487,17 @@ dependencies = [
  "aether-data",
  "aether-test-fixtures-kinds",
  "serde",
+]
+
+[[package]]
+name = "aether-trace"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "inventory",
 ]
 
 [[package]]

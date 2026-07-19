@@ -3,11 +3,11 @@
 #![allow(clippy::disallowed_methods)]
 use super::*;
 use crate::rpc::{Hello, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
-use crate::trace::TraceDispatchCapability;
 use aether_codec::frame::{read_frame, write_frame};
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::chassis::builder::PassiveChassis;
 use aether_substrate::testing::{TestChassis, fresh_substrate};
+use aether_trace::TraceDispatchCapability;
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
@@ -369,11 +369,11 @@ fn call_deferred_echo_settles_after_reply() {
 fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
     use crate::rpc::server::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
     use crate::rpc::{MailEnvelope, MailboxAddress};
-    use crate::trace::TraceDispatchCapability;
     use aether_actor::Addressable;
     use aether_data::{Kind, mailbox_id_from_name};
     use aether_kinds::NamedMail;
     use aether_kinds::trace::DispatchTraced;
+    use aether_trace::TraceDispatchCapability;
 
     let (_chassis, mut stream) = boot_with_deferred_echo(Duration::from_secs(10));
 
