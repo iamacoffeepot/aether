@@ -26,6 +26,7 @@ default = ["runtime"]
 runtime = [
     "dep:aether-substrate",
     "dep:aether-capabilities",
+    "dep:aether-trace",
     "dep:aether-kinds",
     "dep:dirs",
     "dep:ed25519-dalek",
@@ -57,6 +58,9 @@ serde = { workspace = true, features = ["derive", "alloc"] }
 # Runtime-only (native).
 aether-substrate = { path = "../aether-substrate", optional = true }
 aether-capabilities = { path = "../aether-capabilities", optional = true }
+# The `aether.trace` cap (extracted from capabilities, #3719) the bloomery
+# chassis mounts (`TraceDispatchCapability`). Runtime half (default-on).
+aether-trace = { path = "../aether-trace", optional = true }
 # The substrate kind vocabulary — `BinaryManifest` for the `--describe` probe.
 aether-kinds = { path = "../aether-kinds", optional = true }
 # Platform data-dir resolution for the artifacts store-root default (mirrors

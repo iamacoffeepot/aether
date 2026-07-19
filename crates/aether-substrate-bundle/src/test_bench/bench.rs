@@ -30,13 +30,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
-use aether_capabilities::trace::walk::TreeWalk;
 use aether_data::{Kind, KindId, SessionToken, Uuid, encode_empty};
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
 use aether_kinds::{LogTail, LogTailResult, Tick};
+#[cfg(test)]
+use aether_trace::walk::TreeWalk;
 // `push_to_mailbox` encodes any sent kind through the descriptor-aware
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape);
 // `encode_empty` builds the zero-byte payload for unit lifecycle kinds.

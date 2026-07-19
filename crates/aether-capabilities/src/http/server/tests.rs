@@ -1,6 +1,5 @@
 use super::{HttpServerCapability, HttpServerConfig, HttpServerHandle};
 use crate::http::kinds::{HttpServerRequest as RequestKind, RegisterRoute};
-use crate::trace::TraceDispatchCapability;
 use aether_actor::Addressable;
 use aether_data::Kind as KindTrait;
 use aether_data::KindId;
@@ -9,6 +8,7 @@ use aether_substrate::Subname;
 use aether_substrate::actor::native::NativeActor;
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::testing::{TestChassis, fresh_substrate};
+use aether_trace::TraceDispatchCapability;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;

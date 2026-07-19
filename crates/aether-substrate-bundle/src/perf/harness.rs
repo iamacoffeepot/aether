@@ -30,11 +30,11 @@ use std::time::{Duration, Instant};
 
 use aether_actor::OutboundReply;
 use aether_actor::trace::DEFAULT_TRACE_RING_CAP;
-use aether_capabilities::trace::walk::fold_nodes;
 use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
 use aether_kinds::trace::{MailNodeWire, TraceRingEntry, TraceTail, TraceTailResult};
 use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeResult, Tick};
 use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, Subname};
+use aether_trace::walk::fold_nodes;
 
 use crate::perf::report::LatencySection;
 use crate::test_bench::TestBench;

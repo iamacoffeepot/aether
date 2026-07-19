@@ -17,12 +17,13 @@ use std::time::Duration;
 
 use aether_actor::Addressable;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
-use aether_capabilities::{EngineConfig, EngineServer, trace::TraceDispatchCapability};
+use aether_capabilities::{EngineConfig, EngineServer};
 use aether_kinds::BinaryManifest;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::{ConfigError, RingCapacities, SchedulerTuning, validate_env};
 use aether_substrate::{Chassis, SubstrateBoot};
+use aether_trace::TraceDispatchCapability;
 
 use crate::chassis_common::{
     ActorRingConfig, SchedulerTuningConfig, hub_known_keys, load_chassis_config, resolve_env_with_file,

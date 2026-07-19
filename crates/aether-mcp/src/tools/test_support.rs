@@ -3,7 +3,6 @@
 use super::*;
 pub(super) use crate::args::*;
 pub(super) use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle};
-pub(super) use aether_capabilities::trace::TraceDispatchCapability;
 pub(super) use aether_capabilities::{EngineConfig, EngineServer};
 pub(super) use aether_data::{mailbox_id_from_name, mailbox_id_from_path, with_tag};
 pub(super) use aether_kinds::descriptors;
@@ -12,6 +11,7 @@ pub(super) use aether_substrate::mail::mailer::Mailer;
 pub(super) use aether_substrate::mail::outbound::HubOutbound;
 pub(super) use aether_substrate::mail::registry::Registry;
 pub(super) use aether_substrate::testing::TestChassis;
+pub(super) use aether_trace::TraceDispatchCapability;
 pub(super) use std::path::PathBuf;
 pub(super) use std::process;
 pub(super) use std::sync::atomic::{AtomicUsize, Ordering};

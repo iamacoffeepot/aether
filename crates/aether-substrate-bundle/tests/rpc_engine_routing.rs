@@ -26,7 +26,6 @@ use aether_capabilities::rpc::{
     Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig, WIRE_VERSION,
     WireFrame,
 };
-use aether_capabilities::trace::TraceDispatchCapability;
 use aether_capabilities::{EngineConfig, EngineServer};
 use aether_codec::frame::{read_frame, write_frame};
 use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
@@ -37,6 +36,7 @@ use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use aether_substrate::testing::TestChassis;
+use aether_trace::TraceDispatchCapability;
 use std::collections::HashSet;
 use std::net::TcpStream;
 use std::sync::Arc;

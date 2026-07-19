@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use aether_capabilities::{
     CaptureBackend, FsCapability, InputCapability, InputConfig, RenderCapability, RenderConfig, RenderHandles,
-    TcpCapability, TextCapability, fs::NamespaceRoots, trace::TraceDispatchCapability,
+    TcpCapability, TextCapability, fs::NamespaceRoots,
 };
 use aether_capabilities::{ComponentHostCapability, ComponentHostConfig};
 use aether_capabilities::{GameGatewayCapability, GameGatewayConfig, LifecycleCapability};
@@ -26,6 +26,7 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::{
     Chassis, RingCapacities, SchedulerTuning, SubstrateBoot, capture::CaptureQueue, render::VERTEX_BUFFER_BYTES,
 };
+use aether_trace::TraceDispatchCapability;
 use aether_window::HeadlessWindowCapability;
 
 use super::cap::{TestBenchCapConfig, TestBenchCapability};

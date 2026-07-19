@@ -38,6 +38,10 @@ path = "src/bin/aether-tunnel.rs"
 # this to `default-features = false` once the marker-only host build is
 # green.
 aether-capabilities = { path = "../aether-capabilities" }
+# The `aether.trace` cap (extracted from capabilities, #3719): the
+# always-on `walk::TreeWalk` stitch (`tools/mail.rs`) plus the runtime
+# `TraceDispatchCapability` the test-support chassis mounts.
+aether-trace = { path = "../aether-trace", features = ["runtime"] }
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }

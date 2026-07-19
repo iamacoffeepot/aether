@@ -47,7 +47,6 @@ use aether_capabilities::rpc::{
     Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle,
     WIRE_VERSION, WireFrame,
 };
-use aether_capabilities::trace::TraceDispatchCapability;
 use aether_capabilities::{EngineConfig, EngineServer};
 use aether_codec::frame::{FrameError, read_frame, write_frame};
 use aether_data::{EngineId, Kind, KindId, MailId, MailboxId, Uuid, mailbox_id_from_path};
@@ -66,6 +65,7 @@ use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use aether_substrate::testing::TestChassis;
+use aether_trace::TraceDispatchCapability;
 use serde::Serialize;
 
 /// Re-arm interval for the client→hub socket read: how often a blocked
