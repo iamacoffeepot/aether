@@ -12,7 +12,7 @@ use aether_bloomery::{
 use aether_bloomery_github::ExecutorError;
 
 use super::RoutingExecutor;
-use crate::bloomery::local_executor::LocalExecutorError;
+use crate::bloomery::executor::local::LocalExecutorError;
 
 /// The shared record of nonces a recorder backend was asked to submit.
 type Seen = Arc<Mutex<Vec<String>>>;

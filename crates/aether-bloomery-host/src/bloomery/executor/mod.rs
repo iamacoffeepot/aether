@@ -33,9 +33,15 @@ use std::sync::Arc;
 use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
 use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError};
 
-use super::local_executor::{LocalExecutor, LocalExecutorError};
 use super::mirror::GithubMirrorConfig;
-use super::routing_executor::RoutingExecutor;
+
+pub mod local;
+mod routing;
+
+pub use local::{
+    LocalExecutor, LocalExecutorError, ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, TransformRunner,
+};
+pub use routing::RoutingExecutor;
 
 /// A fault from any executor-port backend the shell fronts — the host-owned union
 /// that generalizes the shell's error bound past a single backend's error
