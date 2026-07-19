@@ -17,10 +17,9 @@ use tempfile::TempDir;
 use aether_bloomery_github::Correspondence as _;
 use aether_bloomery_github::testing::FakeGithub;
 
+use super::runner::CapturedObjects;
 use super::testing::{FixedRunner, canned_capture};
-use super::{
-    CapturedObjects, LocalExecutor, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner, strip_hooks,
-};
+use super::{LocalExecutor, LocalExecutorError, RunLifecycle, RunProcess, RunSpec, TransformRunner};
 use crate::bloomery::intake::{EvidenceClaims, NameEvidenceClaims};
 
 fn digest(seed: u8) -> Digest {
@@ -407,30 +406,6 @@ fn an_exited_run_with_no_evidence_yields_a_failed_verdict_and_evicts() {
         &[base.path().join(&nonce)],
         "the terminal evidence-less run releases its scratch worktree",
     );
-}
-
-#[test]
-fn strip_hooks_removes_the_hooks_key() {
-    let settings = r#"{"hooks": {"SessionStart": [{"command": "rebind"}]}, "model": "opus"}"#;
-    let stripped = strip_hooks(settings).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&stripped).unwrap();
-    assert!(value.get("hooks").is_none(), "the hooks key must be gone");
-    assert_eq!(value.get("model").and_then(serde_json::Value::as_str), Some("opus"), "other keys survive");
-    assert!(stripped.ends_with('\n'), "the checked-in shape carries a trailing newline");
-}
-
-#[test]
-fn strip_hooks_leaves_a_hookless_body_unchanged_in_content() {
-    let settings = r#"{"model": "opus", "permissions": {"allow": []}}"#;
-    let stripped = strip_hooks(settings).unwrap();
-    let before: serde_json::Value = serde_json::from_str(settings).unwrap();
-    let after: serde_json::Value = serde_json::from_str(&stripped).unwrap();
-    assert_eq!(before, after, "a body with no hooks key round-trips unchanged");
-}
-
-#[test]
-fn strip_hooks_errs_on_malformed_json() {
-    assert!(strip_hooks("{not json").is_err(), "malformed JSON surfaces as an error, not a silent no-op");
 }
 
 // ADR-0152 — a passing construct run's capture rides the evidence reference and
