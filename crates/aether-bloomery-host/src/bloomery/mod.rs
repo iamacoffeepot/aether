@@ -16,6 +16,7 @@ mod land_driver;
 mod local_executor;
 mod mirror;
 mod mirror_driver;
+mod outbox;
 mod poll_timer;
 mod routing_executor;
 mod source;
@@ -43,6 +44,7 @@ pub use local_executor::{
 };
 pub use mirror::{GithubMirrorConfig, GithubMirrorOverlay, ProjectionShell};
 pub use mirror_driver::{DrainTick, MirrorDriverCapability, MirrorDriverState, TOPIC_VIEW_DOCUMENT};
+pub use outbox::TopicOutbox;
 pub use routing_executor::RoutingExecutor;
 pub use source::SourceShell;
 pub use study::{

@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use super::IntegrateDriverCapability;
 use crate::bloomery::SourceShell;
 use crate::bloomery::mirror::GithubMirrorConfig;
+use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::store::{SqliteStore, StoreBackend};
 
@@ -205,7 +206,7 @@ fn drain_and_integrate(
     store: &mut dyn StoreBackend,
     source: &SourceShell,
 ) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
-    let entries = store.drain_outbox(Some(Topic::INTEGRATE.as_str()))?;
+    let entries = store.drain_topic(Topic::INTEGRATE)?;
     let mut admits = Vec::new();
     let mut ack_through = None;
     for entry in entries {
@@ -342,7 +343,7 @@ impl NativeActor for IntegrateDriverCapability {
         match drain_and_integrate(store, &source) {
             Ok((admits, ack_through)) => {
                 if let Some(sequence) = ack_through
-                    && let Err(error) = store.ack_outbox(Some(Topic::INTEGRATE.as_str()), sequence)
+                    && let Err(error) = store.ack_topic(Topic::INTEGRATE, sequence)
                 {
                     tracing::warn!(target: "aether_bloomery_host::integrate", %error, "integrate ack failed; entries re-drive");
                 }

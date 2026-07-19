@@ -59,6 +59,7 @@ use crate::bloomery::intake::{
     Admission, AdmitSink, CycleReport, DispatchRecord, NameEvidenceClaims, dispatch_and_record, run_intake_cycle,
 };
 use crate::bloomery::mirror::GithubMirrorConfig;
+use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::store::{SqliteStore, StoreBackend};
 
@@ -252,7 +253,7 @@ fn drain_and_dispatch(
     store: &mut dyn StoreBackend,
     executor: &ExecutorShell,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
-    let entries = store.drain_outbox(Some(Topic::DISPATCH.as_str()))?;
+    let entries = store.drain_topic(Topic::DISPATCH)?;
     let mut handles = Vec::new();
     let mut ack_through = None;
     // The outbox sequence of a transient submit failure that stopped the drain —
@@ -455,7 +456,7 @@ fn drain_and_dispatch_aggregate(
     store: &mut dyn StoreBackend,
     executor: &ExecutorShell,
 ) -> rusqlite::Result<(Vec<WorkHandle>, Option<u64>, Option<u64>)> {
-    let entries = store.drain_outbox(Some(Topic::AGGREGATE_REVIEW.as_str()))?;
+    let entries = store.drain_topic(Topic::AGGREGATE_REVIEW)?;
     let mut handles = Vec::new();
     let mut ack_through = None;
     let mut transient_failure = None;
@@ -854,7 +855,7 @@ impl NativeActor for ExecutorDriverCapability {
             match drain_and_dispatch(store, &executor) {
                 Ok((handles, ack_through, transient_failure)) => {
                     if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_outbox(Some(Topic::DISPATCH.as_str()), sequence)
+                        && let Err(error) = store.ack_topic(Topic::DISPATCH, sequence)
                     {
                         tracing::warn!(target: "aether_bloomery_host::executor", %error, "dispatch ack failed; entries re-drive");
                     }
@@ -872,7 +873,7 @@ impl NativeActor for ExecutorDriverCapability {
             match drain_and_dispatch_aggregate(store, &executor) {
                 Ok((handles, ack_through, transient_failure)) => {
                     if let Some(sequence) = ack_through
-                        && let Err(error) = store.ack_outbox(Some(Topic::AGGREGATE_REVIEW.as_str()), sequence)
+                        && let Err(error) = store.ack_topic(Topic::AGGREGATE_REVIEW, sequence)
                     {
                         tracing::warn!(target: "aether_bloomery_host::executor", %error, "aggregate-review ack failed; entries re-drive");
                     }

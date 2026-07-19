@@ -175,6 +175,18 @@ pub struct DrainOutbox {
     pub topic: Option<String>,
 }
 
+impl DrainOutbox {
+    /// A drain scoped to a reducer [`Topic`](aether_bloomery::Topic) — the
+    /// mail-path consumer edge's one topic-to-string conversion. The `topic`
+    /// field stays an open `String` (any caller-defined topic drains by name);
+    /// a consumer of a reducer topic constructs through here so its call site
+    /// cannot spell an arbitrary string.
+    #[must_use]
+    pub fn scoped(topic: aether_bloomery::Topic) -> Self {
+        Self { topic: Some(topic.as_str().to_owned()) }
+    }
+}
+
 /// One undelivered outbox entry.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct OutboxEntry {

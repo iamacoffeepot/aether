@@ -96,15 +96,14 @@ impl MirrorDriverState {
 /// A projection error or an unknown / undecodable topic is a failure that stalls
 /// that topic's ack prefix; the entry re-delivers on the next drain.
 fn deliver(projection: &ProjectionShell, entry: &OutboxEntry) -> Result<(), String> {
-    let topic = entry.topic.as_str();
-    if topic == TOPIC_VIEW_DOCUMENT {
+    if entry.topic == TOPIC_VIEW_DOCUMENT {
         let view: ViewDocument = from_bytes(&entry.payload).map_err(|e| e.to_string())?;
         projection.reconcile_view(&view).map_err(|e| e.to_string())
-    } else if topic == Topic::LANDING_RECEIPT.as_str() {
+    } else if entry.topic == Topic::LANDING_RECEIPT {
         let receipt: LandingReceipt = from_bytes(&entry.payload).map_err(|e| e.to_string())?;
         projection.project_receipt(&receipt).map_err(|e| e.to_string())
     } else {
-        Err(format!("unknown outbox topic {topic:?}"))
+        Err(format!("unknown outbox topic {:?}", entry.topic))
     }
 }
 
@@ -212,8 +211,10 @@ impl NativeActor for MirrorDriverCapability {
         if state.projection.is_none() {
             return;
         }
-        for topic in [TOPIC_VIEW_DOCUMENT, Topic::LANDING_RECEIPT.as_str()] {
-            ctx.send::<StoreCapability, DrainOutbox>(&DrainOutbox { topic: Some(topic.to_owned()) });
+        let drains =
+            [DrainOutbox { topic: Some(TOPIC_VIEW_DOCUMENT.to_owned()) }, DrainOutbox::scoped(Topic::LANDING_RECEIPT)];
+        for drain in drains {
+            ctx.send::<StoreCapability, DrainOutbox>(&drain);
         }
     }
 
@@ -282,6 +283,7 @@ mod tests {
         AckOutbox, DrainOutbox, DrainOutboxResult, DrainTick, Kind, MirrorDriverCapability, MirrorDriverState,
         OutboxEntry, ProjectionShell, TOPIC_VIEW_DOCUMENT, project_batch,
     };
+    use crate::bloomery::outbox::TopicOutbox;
     use crate::store::{SqliteStore, StoreBackend};
 
     fn digest(seed: u8) -> Digest {
@@ -406,15 +408,18 @@ mod tests {
         let mut store = SqliteStore::open(":memory:").unwrap();
 
         let receipt = LandingReceipt { bloom: BloomId(digest(1)), previous_base: digest(10), new_head: digest(20) };
-        store.enqueue_outbox(Topic::LANDING_RECEIPT.as_str(), &to_vec(&receipt).unwrap()).unwrap();
+        store.enqueue_topic(Topic::LANDING_RECEIPT, &to_vec(&receipt).unwrap()).unwrap();
 
-        let entries = store.drain_outbox(Some(Topic::LANDING_RECEIPT.as_str())).unwrap();
+        let entries = store.drain_topic(Topic::LANDING_RECEIPT).unwrap();
         assert_eq!(entries.len(), 1, "the enqueued receipt is drainable on the receipt topic");
 
         let acks = project_batch(&shell, &entries);
         assert_eq!(fake.comment_count(), 1, "the receipt projects one landing comment on the umbrella issue");
         assert_eq!(acks.len(), 1);
-        assert_eq!(acks[0].topic.as_deref(), Some(Topic::LANDING_RECEIPT.as_str()), "the ack covers the receipt topic");
+        assert!(
+            acks[0].topic.as_deref().is_some_and(|topic| topic == Topic::LANDING_RECEIPT),
+            "the ack covers the receipt topic",
+        );
         assert_eq!(acks[0].through_sequence, entries[0].sequence);
     }
 
@@ -443,11 +448,10 @@ mod tests {
         let mut drained_topics: Vec<Option<String>> =
             collect_sends::<DrainOutbox>(&rx, 2).into_iter().map(|d| d.topic).collect();
         drained_topics.sort();
-        assert_eq!(
-            drained_topics,
-            vec![Some(Topic::LANDING_RECEIPT.as_str().to_owned()), Some(TOPIC_VIEW_DOCUMENT.to_owned())],
-            "each owned projection topic is drained, scoped by topic",
-        );
+        let mut expected =
+            vec![DrainOutbox::scoped(Topic::LANDING_RECEIPT).topic, Some(TOPIC_VIEW_DOCUMENT.to_owned())];
+        expected.sort();
+        assert_eq!(drained_topics, expected, "each owned projection topic is drained, scoped by topic");
 
         // on_drain_result projects the entry and — on success — the detached
         // worker acks the delivered prefix. The ack landing on egress proves the

@@ -557,14 +557,11 @@ fn project(
                     .push(MembershipMutation { workpiece: workpiece.0.clone(), bloom: bloom.0.as_bytes().to_vec() });
             }
             Decision::EmitReceipt(receipt) => {
-                outbox.push(OutboxPayload {
-                    topic: Topic::LANDING_RECEIPT.as_str().to_owned(),
-                    payload: to_vec(receipt)?,
-                });
+                outbox.push(OutboxPayload::new(Topic::LANDING_RECEIPT, to_vec(receipt)?));
             }
             Decision::RedispatchStage { bloom, question, answer } => {
                 let payload = RedispatchPayload { bloom: bloom.0, question: *question, answer: *answer };
-                outbox.push(OutboxPayload { topic: Topic::REDISPATCH.as_str().to_owned(), payload: to_vec(&payload)? });
+                outbox.push(OutboxPayload::new(Topic::REDISPATCH, to_vec(&payload)?));
             }
             Decision::DispatchAttempt { bloom, workpiece, stage, transformation, scope_revision, candidate } => {
                 let payload = DispatchPayload {
@@ -575,15 +572,15 @@ fn project(
                     scope_revision: *scope_revision,
                     candidate: *candidate,
                 };
-                outbox.push(OutboxPayload { topic: Topic::DISPATCH.as_str().to_owned(), payload: to_vec(&payload)? });
+                outbox.push(OutboxPayload::new(Topic::DISPATCH, to_vec(&payload)?));
             }
             Decision::DispatchLand { bloom, expected_base, new_head } => {
                 let payload = LandPayload { bloom: bloom.0, expected_base: *expected_base, new_head: *new_head };
-                outbox.push(OutboxPayload { topic: Topic::LAND.as_str().to_owned(), payload: to_vec(&payload)? });
+                outbox.push(OutboxPayload::new(Topic::LAND, to_vec(&payload)?));
             }
             Decision::DispatchIntegration { bloom, base, candidates } => {
                 let payload = IntegratePayload { bloom: bloom.0, base: *base, candidates: candidates.clone() };
-                outbox.push(OutboxPayload { topic: Topic::INTEGRATE.as_str().to_owned(), payload: to_vec(&payload)? });
+                outbox.push(OutboxPayload::new(Topic::INTEGRATE, to_vec(&payload)?));
             }
             Decision::DispatchAggregateReview { bloom, transformation, roll } => {
                 let payload = AggregateReviewPayload {
@@ -591,10 +588,7 @@ fn project(
                     transformation: transformation.clone(),
                     pass: ReviewPass::from_roll(*roll),
                 };
-                outbox.push(OutboxPayload {
-                    topic: Topic::AGGREGATE_REVIEW.as_str().to_owned(),
-                    payload: to_vec(&payload)?,
-                });
+                outbox.push(OutboxPayload::new(Topic::AGGREGATE_REVIEW, to_vec(&payload)?));
             }
             Decision::InheritClaim { .. }
             | Decision::RecordResolution { .. }

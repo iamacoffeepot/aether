@@ -65,6 +65,18 @@ pub struct OutboxPayload {
     pub payload: Vec<u8>,
 }
 
+impl OutboxPayload {
+    /// Build an outbox entry under a reducer [`Topic`] — the producer edge's
+    /// one topic-to-string conversion. The raw fields stay public plain data
+    /// (the wire decodes into them, and the string surface stays open for
+    /// caller-defined topics); reducer-enqueued entries construct through here
+    /// so a producer call site cannot spell an arbitrary topic string.
+    #[must_use]
+    pub fn new(topic: Topic, payload: Vec<u8>) -> Self {
+        Self { topic: topic.as_str().to_owned(), payload }
+    }
+}
+
 /// A first-class outbox topic — the stringly projection of an effectful
 /// [`Decision`] variant across the store boundary
 /// (ADR-0149 §The boundary). A topic is a producer-consumer contract: the
@@ -168,6 +180,27 @@ impl Topic {
             | Decision::RevokeResolution { .. }
             | Decision::RecordReviewPark { .. } => None,
         }
+    }
+}
+
+/// A drained outbox row's topic string compares directly against a [`Topic`]
+/// (`entry.topic == Topic::LAND`), so a consumer classifies entries through the
+/// typed vocabulary without re-spelling the persisted string at the call site.
+impl PartialEq<Topic> for str {
+    fn eq(&self, other: &Topic) -> bool {
+        self == other.0
+    }
+}
+
+impl PartialEq<Topic> for &str {
+    fn eq(&self, other: &Topic) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialEq<Topic> for String {
+    fn eq(&self, other: &Topic) -> bool {
+        self == other.0
     }
 }
 

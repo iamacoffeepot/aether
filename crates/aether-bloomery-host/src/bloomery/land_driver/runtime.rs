@@ -43,6 +43,7 @@ use serde::{Deserialize, Serialize};
 use super::LandDriverCapability;
 use crate::bloomery::SourceShell;
 use crate::bloomery::mirror::GithubMirrorConfig;
+use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::store::{SqliteStore, StoreBackend};
 
@@ -114,7 +115,7 @@ fn land_key(bloom: &Digest) -> IdempotencyKey {
 /// network side, unit-testable against a `SqliteStore` + a fake-GitHub-backed
 /// shell without the mail harness.
 fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
-    let entries = store.drain_outbox(Some(Topic::LAND.as_str()))?;
+    let entries = store.drain_topic(Topic::LAND)?;
     let mut admits = Vec::new();
     let mut ack_through = None;
     for entry in entries {
@@ -257,7 +258,7 @@ impl NativeActor for LandDriverCapability {
         match drain_and_land(store, &source) {
             Ok((admits, ack_through)) => {
                 if let Some(sequence) = ack_through
-                    && let Err(error) = store.ack_outbox(Some(Topic::LAND.as_str()), sequence)
+                    && let Err(error) = store.ack_topic(Topic::LAND, sequence)
                 {
                     tracing::warn!(target: "aether_bloomery_host::land", %error, "land ack failed; entries re-drive");
                 }

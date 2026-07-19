@@ -13,7 +13,8 @@ use aether_data::wire::{from_bytes, to_vec};
 
 use super::drain_and_land;
 use crate::bloomery::SourceShell;
-use crate::store::{SqliteStore, StoreBackend};
+use crate::bloomery::outbox::TopicOutbox;
+use crate::store::SqliteStore;
 
 fn digest(seed: u8) -> Digest {
     Digest::from_bytes([seed; 32])
@@ -38,7 +39,7 @@ fn seeded() -> (FakeGithub, Digest) {
 // `DispatchLand` projection would enqueue), returning its outbox sequence.
 fn enqueue_land(store: &mut SqliteStore, bloom: BloomId, expected_base: Digest, new_head: Digest) -> u64 {
     let payload = LandPayload { bloom: bloom.0, expected_base, new_head };
-    store.enqueue_outbox(Topic::LAND.as_str(), &to_vec(&payload).unwrap()).unwrap()
+    store.enqueue_topic(Topic::LAND, &to_vec(&payload).unwrap()).unwrap()
 }
 
 #[test]
