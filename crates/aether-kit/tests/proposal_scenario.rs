@@ -4,7 +4,6 @@ use std::fs;
 use std::path::Path;
 
 use aether_actor::Addressable;
-use aether_capabilities::render::ViewProjection;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     FrameCheck, FrameCheckResult, FrameReduction, LoadComponent, LoadResult, NamedMail, Render, ReplaceComponent,
@@ -17,6 +16,7 @@ use aether_kit::world::{
     SetChunk, SetProposalPreview, WorldPoint,
 };
 use aether_math::{Mat4, Vec3};
+use aether_render::ViewProjection;
 use aether_substrate_bundle::test_bench::{ArtifactGuard, BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{
     ColorRegionStats, FramePoint, Rect, decode_png, mean_absolute_error, run_checks, target_color_stats,

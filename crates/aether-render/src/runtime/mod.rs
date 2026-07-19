@@ -234,7 +234,7 @@ impl NativeActor for RenderCapability {
         let sender = ctx.reply_target();
         let Some(backend) = state.config.capture_backend.as_ref() else {
             tracing::warn!(
-                target: "aether_capabilities::render",
+                target: "aether_render",
                 "RenderCapability received capture_frame without capture_backend; replying Err",
             );
             return;
@@ -409,7 +409,7 @@ impl NativeActor for RenderCapability {
         }
         if mail.texture_id == WHITE_TEXTURE_ID {
             tracing::warn!(
-                target: "aether_capabilities::render",
+                target: "aether_render",
                 texture_id = mail.texture_id,
                 "update_texture for reserved internal texture id; dropping",
             );
@@ -418,7 +418,7 @@ impl NativeActor for RenderCapability {
         let mut registry = state.handles.textures.lock().expect("mutex poisoned; fail-fast per ADR-0063");
         let Some(entry) = registry.entries.get_mut(&mail.texture_id) else {
             tracing::warn!(
-                target: "aether_capabilities::render",
+                target: "aether_render",
                 texture_id = mail.texture_id,
                 "update_texture for unknown texture id; dropping",
             );
@@ -426,7 +426,7 @@ impl NativeActor for RenderCapability {
         };
         if !entry.apply_subrect(mail.x, mail.y, mail.width, mail.height, &mail.pixels) {
             tracing::warn!(
-                target: "aether_capabilities::render",
+                target: "aether_render",
                 texture_id = mail.texture_id,
                 "update_texture rect out of bounds, zero-sized, or pixel length mismatch; \
                  dropping",
@@ -450,7 +450,7 @@ impl NativeActor for RenderCapability {
         }
         if mail.texture_id == WHITE_TEXTURE_ID {
             tracing::warn!(
-                target: "aether_capabilities::render",
+                target: "aether_render",
                 texture_id = mail.texture_id,
                 "destroy_texture for reserved internal texture id; dropping",
             );
@@ -459,7 +459,7 @@ impl NativeActor for RenderCapability {
         let mut registry = state.handles.textures.lock().expect("mutex poisoned; fail-fast per ADR-0063");
         if registry.entries.remove(&mail.texture_id).is_none() {
             tracing::warn!(
-                target: "aether_capabilities::render",
+                target: "aether_render",
                 texture_id = mail.texture_id,
                 "destroy_texture for unknown texture id; dropping",
             );

@@ -19,10 +19,10 @@
 //! gate) live in `aether_substrate_bundle::test_bench::test_helpers`
 //! (issues 460 + 821).
 
-use aether_capabilities::render::ViewProjection;
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_kit::camera::CameraDestroy;
+use aether_render::ViewProjection;
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{decode_png, not_all_black};
 

@@ -61,10 +61,10 @@
 use aether_actor::{ActorInitError, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::{DrawTriangle, Vertex};
-use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
+use aether_capabilities::{InputCapability, LifecycleCapability};
 use aether_kinds::{Key, TextInput, Tick};
 use aether_math::Rgb;
+use aether_render::{DrawTriangle, RenderCapability, Vertex};
 use aether_test_fixtures_kinds::{
     ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig, SetRender, TEST_BENCH_OBSERVER_MAILBOX_NAME, TextInputObserved,
     TickObserved,

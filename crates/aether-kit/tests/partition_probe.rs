@@ -5,7 +5,6 @@
 //! Partition tiling and frame-budget tripwires over a demo-shaped world
 //! (a lake with a sand ring on a grass-default region, four chunks).
 
-use aether_capabilities::render::DrawTriangle;
 use aether_kit::{
     CELLS_PER_CHUNK_AREA, Chunk, ChunkPos, Material, Region, WaterPlane, World,
     world::{
@@ -13,6 +12,7 @@ use aether_kit::{
         mesher::{mesh_chunk, style::StyleTable},
     },
 };
+use aether_render::DrawTriangle;
 
 fn lake_world() -> World {
     let mut world = World::new();

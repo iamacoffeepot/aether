@@ -23,13 +23,14 @@ use aether_actor::Addressable;
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
-    AnthropicConfig, AudioCapability, CaptureBackend, ComponentHostConfig, ContentGenConfig, GeminiConfig,
-    HttpServerConfig, InputConfig, RenderCapability, RenderConfig, RenderTuningConfig, UnsupportedTestBenchCapability,
-    audio::AudioConfig as AudioConf, fs::NamespaceRoots, http::HttpConfig as HttpConf,
+    AnthropicConfig, AudioCapability, ComponentHostConfig, ContentGenConfig, GeminiConfig, HttpServerConfig,
+    InputConfig, UnsupportedTestBenchCapability, audio::AudioConfig as AudioConf, fs::NamespaceRoots,
+    http::HttpConfig as HttpConf,
 };
 use aether_clipboard::{ClipboardCapability, ClipboardConfig};
 use aether_kinds::BinaryManifest;
 use aether_kinds::WindowMode;
+use aether_render::{CaptureBackend, RenderCapability, RenderConfig, RenderTuningConfig};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot, capture::CaptureQueue};

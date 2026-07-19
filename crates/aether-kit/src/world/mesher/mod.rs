@@ -89,7 +89,7 @@ mod tests;
 
 use alloc::vec::Vec;
 
-use aether_capabilities::render::DrawTriangle;
+use aether_render::DrawTriangle;
 
 use crate::world::{ChunkPos, World};
 use cliffs::CliffPlan;

@@ -14,7 +14,6 @@ use std::fs;
 use std::path::Path;
 
 use aether_actor::Addressable;
-use aether_capabilities::render::ViewProjection;
 use aether_data::Kind;
 use aether_kinds::{LoadComponent, LoadResult, NamedMail, Render};
 use aether_kit::mark::{MarkId, MarkRef};
@@ -23,6 +22,7 @@ use aether_kit::world::{
     OperatorChunk, OperatorError, OperatorResult, OperatorStats, RunAutomaton, SetChunk, StampHexagon, WorldPoint,
 };
 use aether_math::{Mat4, Vec3};
+use aether_render::ViewProjection;
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{
     Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,

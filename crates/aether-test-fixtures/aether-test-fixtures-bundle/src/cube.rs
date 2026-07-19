@@ -30,11 +30,11 @@
 use core::f32::consts::FRAC_PI_4;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_capabilities::LifecycleCapability;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::{DrawTriangle, Vertex, ViewProjection};
-use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::Tick;
 use aether_math::{Mat4, Rgb, Vec3};
+use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewProjection};
 
 /// Half-extent of the unit cube: corners sit at ±`HALF` on every axis,
 /// so the cube spans one world unit and is centered at the origin.

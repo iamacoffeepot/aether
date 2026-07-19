@@ -28,7 +28,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::world::SCALAR_COVERAGE_THRESHOLD;
-use aether_capabilities::render::{DrawTriangle, Vertex};
+use aether_render::{DrawTriangle, Vertex};
 /// Octimeters per meter (`1 cell = 1 m = 256 octimeters`), for the
 /// octimeter-to-meter conversion at vertex emit.
 const OCTIMETERS_PER_METER: f32 = 256.0;

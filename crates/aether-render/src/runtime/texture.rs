@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use aether_substrate::render::{RealizedTexture, TextureBindings, realize_texture, upload_texture_full};
 
-use crate::render::TextureFormat;
+use crate::TextureFormat;
 
 /// A texture registered via `create_texture`: the staged pixels (the CPU
 /// source of truth), plus the lazily-realized GPU texture + bind group.

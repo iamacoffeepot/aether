@@ -48,7 +48,10 @@ tracing = { workspace = true, default-features = false }
 # default `cfg(not(target_family = "wasm"))`, not on the `native`
 # feature). `aether-substrate` deps back on `aether-actor`, but cargo
 # permits dev-dep cycles for the test-target build graph.
-aether-capabilities = { path = "../aether-capabilities", features = ["render"] }
+aether-capabilities = { path = "../aether-capabilities" }
+# iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`;
+# the `hello` example addresses `RenderCapability` + the render kinds (marker face).
+aether-render = { path = "../aether-render", default-features = false }
 aether-math = { path = "../aether-math" }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 bytemuck = { workspace = true, features = ["derive"] }

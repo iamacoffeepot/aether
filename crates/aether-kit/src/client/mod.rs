@@ -24,13 +24,13 @@ use aether_capabilities::game::{
 };
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::{DrawTriangle, Vertex};
 use aether_capabilities::tcp::{ConnectResult, SessionClosed, SessionData, TcpWasmExt};
-use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability, TcpCapability};
+use aether_capabilities::{InputCapability, LifecycleCapability, TcpCapability};
 use aether_codec::frame::encode_frame;
 use aether_data::{Kind, MailboxId, wire};
 use aether_kinds::{Key, KeyRelease, Render, Tick, keycode};
 use aether_math::Rgb;
+use aether_render::{DrawTriangle, RenderCapability, Vertex};
 
 use crate::OCTIMETERS_PER_TILE;
 use crate::world::WorldPoint;

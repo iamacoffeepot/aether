@@ -43,9 +43,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
-use aether_capabilities::RenderCapability;
 use aether_capabilities::fs::NamespaceRoots;
-use aether_capabilities::render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
 use aether_capabilities::text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
 use aether_clipboard::{ClipboardCapability, GetClipboardText, GetClipboardTextResult};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
@@ -66,6 +64,8 @@ use aether_kit::{
     WidgetControlState, WidgetDrawItem, WidgetKind, WidgetValidation,
 };
 use aether_math::Rgba;
+use aether_render::RenderCapability;
+use aether_render::{DrawTexturedQuads, WHITE_TEXTURE_ID};
 use aether_substrate_bundle::test_bench::{
     ArtifactGuard, BenchOp, TestBench,
     test_helpers::{init_save_sandbox, require_runtime},

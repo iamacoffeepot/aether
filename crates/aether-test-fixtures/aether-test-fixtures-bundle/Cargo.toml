@@ -20,7 +20,10 @@ aether-actor = { path = "../../aether-actor" }
 # aether-capabilities — the cap markers (Actor / Singleton / HandlesKind)
 # compile for wasm without dragging the native runtime in. `render` opts
 # into the marker layer for `RenderCapability`; `audio` is unused here.
-aether-capabilities = { path = "../../aether-capabilities", default-features = false, features = ["render"] }
+aether-capabilities = { path = "../../aether-capabilities", default-features = false }
+# iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`;
+# these wasm fixtures take its marker-only identity face.
+aether-render = { path = "../../aether-render", default-features = false }
 aether-data = { path = "../../aether-data", features = ["derive"] }
 aether-kinds = { path = "../../aether-kinds" }
 aether-math = { path = "../../aether-math" }

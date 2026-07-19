@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use aether_capabilities::render::DrawTriangle;
+use aether_render::DrawTriangle;
 
 use crate::world::World;
 

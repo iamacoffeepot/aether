@@ -68,10 +68,10 @@ use aether_actor::{
 use aether_capabilities::component::ComponentHostWasmExt;
 use aether_capabilities::fs::{Read, ReadResult};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::DrawTriangle;
-use aether_capabilities::{ComponentHostCapability, FsCapability, LifecycleCapability, RenderCapability};
+use aether_capabilities::{ComponentHostCapability, FsCapability, LifecycleCapability};
 use aether_data::Source;
 use aether_kinds::Render;
+use aether_render::{DrawTriangle, RenderCapability};
 use serde::{Deserialize, Serialize};
 
 use crate::mark::{Mark, MarkBook, MarkId, MarkList, MarkListResult, MarkRef};

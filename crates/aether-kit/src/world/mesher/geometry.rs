@@ -1,5 +1,5 @@
-use aether_capabilities::render::{DrawTriangle, Vertex};
 use aether_math::Rgb;
+use aether_render::{DrawTriangle, Vertex};
 
 use super::constants::OCTIMETERS_PER_METER;
 

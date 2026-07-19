@@ -11,16 +11,16 @@
 use std::fs;
 
 use aether_actor::Addressable;
-use aether_capabilities::render::{
-    CreateTexture, CreateTextureResult, DestroyTexture, DrawTexturedQuads, TextureFormat,
-    TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
-};
 use aether_data::Kind;
 use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, QuadSpace, Tick};
 use aether_kit::{
     ImageConfig, ImageFit, PanelConfig, SetWidgetState, Theme, WidgetChildSpec, WidgetControlState, WidgetKind,
 };
 use aether_math::Rgba;
+use aether_render::{
+    CreateTexture, CreateTextureResult, DestroyTexture, DrawTexturedQuads, TextureFormat,
+    TexturedQuad as RenderTexturedQuad, WHITE_TEXTURE_ID,
+};
 use aether_substrate_bundle::test_bench::{BenchOp, TestBench, test_helpers::require_runtime};
 use aether_substrate_bundle::visual::{Image, Rect, decode_png, target_color_stats};
 

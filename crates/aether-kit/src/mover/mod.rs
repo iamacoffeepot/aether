@@ -57,10 +57,10 @@ use core::f32::consts::{FRAC_PI_2, PI, TAU};
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::{DrawTriangle, Vertex, ViewProjection};
-use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
+use aether_capabilities::{InputCapability, LifecycleCapability};
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseMove, Render, Tick, WindowSize, keycode, mouse_button};
 use aether_math::{Mat4, Rgb, Vec3};
+use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewProjection};
 
 use crate::OCTIMETERS_PER_TILE;
 use crate::world::CellPos;

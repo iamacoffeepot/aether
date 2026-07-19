@@ -24,7 +24,6 @@ use std::iter::once;
 use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
-use aether_capabilities::render::{RenderCapability, ViewProjection};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, FrameVerdict,
@@ -35,6 +34,7 @@ use aether_kit::world::{
     SetCellHeights, SetCellPoints, SetChunk, SetRegion, WorldPoint,
 };
 use aether_math::{Mat4, Vec3};
+use aether_render::{RenderCapability, ViewProjection};
 use aether_substrate_bundle::test_bench::{ArtifactGuard, BenchOp, TestBench, test_helpers::require_runtime};
 
 const WINDOW_WIDTH: u32 = 320;

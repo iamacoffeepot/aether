@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
 use aether_capabilities::InputCapability;
-use aether_capabilities::RenderHandles;
 use aether_data::Kind;
 use aether_data::{encode, encode_empty, mailbox_id_from_name};
 use aether_kinds::{
@@ -30,6 +29,7 @@ use aether_kinds::{
     MouseButtonRelease, MouseMove, MouseWheel, Quit, SetWindowMode, SetWindowModeResult, SetWindowTitle,
     SetWindowTitleResult, TextInput, Tick, WindowMode, WindowSize,
 };
+use aether_render::RenderHandles;
 use aether_substrate::actor::native::local;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;

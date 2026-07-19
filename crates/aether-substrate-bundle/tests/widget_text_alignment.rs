@@ -41,7 +41,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
-use aether_capabilities::RenderCapability;
 use aether_capabilities::fs::NamespaceRoots;
 use aether_capabilities::text::{LoadFont, LoadFontResult};
 use aether_data::Kind;
@@ -50,6 +49,7 @@ use aether_kinds::{
     LoadResult, NamedMail, Tick,
 };
 use aether_kit::{PanelConfig, Theme};
+use aether_render::RenderCapability;
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{init_save_sandbox, require_runtime},

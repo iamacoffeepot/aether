@@ -1,0 +1,102 @@
+[package]
+name = "aether-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# `aether.render` capability, extracted from `aether-capabilities`
+# (iamacoffeepot/aether#3721) as a per-cap crate of the arc that dissolves
+# the capabilities monolith. The largest of the per-cap extractions: it
+# owns the full render stack — the `aether.render` mailbox surface, the
+# drawing + texture mail kinds (`kinds`, ADR-0121), the driver-facing
+# accumulator + wgpu GPU bundle (`runtime`: `pipeline` / `texture` /
+# `quad` / `capture` / `config` / `material`), the `RenderCapability`
+# identity, and the fail-fast `HeadlessRenderCapability` companion
+# (`headless_runtime`).
+#
+# Like `aether-window` / `aether-trace` and unlike the pure-leaf
+# `aether-clipboard`, `aether-capabilities` RETAINS a
+# `default-features = false` dependency on this crate: the `aether.text`
+# cap (which stays in capabilities) composes the render surface —
+# `text/mod.rs`, `text/runtime/mod.rs`, `text/runtime/layout.rs`
+# reference `crate::render` items. So capabilities keeps the identity-only
+# dep and forwards `aether-render/runtime` from its own `text-runtime`
+# feature (no re-export facade).
+#
+# The ADR-0122 identity/runtime split rides the `runtime` feature: the
+# wasm-safe identity (`RenderCapability` / `HeadlessRenderCapability`
+# ZSTs), the drawing/texture kinds, and the `HandlesKind` markers compile
+# always-on; the `aether_substrate`-typed runtime half (plus the wgpu GPU
+# pipeline) is gated so a marker-only wasm guest can address
+# `ctx.actor::<RenderCapability>().send(&triangle)` without dragging the
+# GPU stack through. The old capabilities `render` marker maps to this
+# crate's default-off face; `render-runtime` maps to `runtime`.
+
+# cargo-machete scans source without expanding macros, so it cannot see that
+# `clap` and `confique` are used only through the `#[derive(aether_substrate::Config)]`
+# on `RenderTuningConfig` (runtime/config.rs) — the derive emits
+# `#[derive(clap::Args)]` / `#[derive(confique::Config)]` on its generated
+# `*Overlay` / `*Layer` structs, so both crates are real deps (the crate fails
+# to compile without them) even though neither is named in this crate's source.
+# False positives, so ignored here rather than dropped.
+[package.metadata.cargo-machete]
+ignored = ["clap", "confique"]
+
+[features]
+default = ["runtime"]
+# Pulls the substrate-side runtime half + the wgpu GPU pipeline. Chassis
+# builds activate it (via capabilities' `text-runtime` forward, or the
+# bundle's direct `features = ["runtime"]` dep). The `#[actor]` runtime
+# gate, the `RenderCapability` GPU state, and the headless companion's
+# runtime all ride this one feature.
+runtime = [
+    "dep:aether-substrate",
+    "aether-substrate/render",
+    "dep:wgpu",
+    "dep:tracing",
+    "dep:clap",
+    "dep:confique",
+]
+
+[dependencies]
+# Always-on: target-agnostic SDK + data + kind types + math. These
+# compile for `wasm32-unknown-unknown` and carry the identity markers a
+# marker-only wasm guest relies on.
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+aether-kinds = { path = "../aether-kinds" }
+aether-math = { path = "../aether-math" }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+# The render cast-shaped kinds (`DrawTriangle` / `Vertex` /
+# `ViewProjection` / `TexturedQuad`) derive `bytemuck::Pod` + `Zeroable`,
+# and the runtime accumulator `cast_slice`s vertices — always-on.
+bytemuck = { workspace = true, features = ["derive"] }
+# Native-only runtime half — gated so wasm / marker builds skip the
+# substrate runtime and the wgpu GPU stack.
+aether-substrate = { path = "../aether-substrate", optional = true }
+wgpu = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
+# ADR-0090: the `#[derive(aether_substrate::Config)]` on `RenderTuningConfig`
+# (runtime/config.rs) emits a clap-shaped `RenderTuningOverlay`
+# (`#[derive(clap::Args)]`) and a confique-shaped `RenderTuningConfigLayer`
+# (`#[derive(confique::Config)]`), so the runtime half needs both crates
+# reachable even though neither is named in this crate's own source.
+clap = { workspace = true, optional = true }
+confique = { workspace = true, optional = true }
+
+# The `#[actor]` macro emits a `cfg(not(target_family = "wasm"))`-gated
+# `inventory::submit!` HandlerEntry per handler, and the `Kind` derive emits
+# a gated `inventory::submit!` per kind, so native builds need `inventory`
+# reachable; wasm guests don't (the gates skip emission).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]
+aether-data = { path = "../aether-data", features = ["derive"] }
+# The `runtime` module's unit tests boot a chassis through the canonical
+# `aether_substrate::testing` fixture, enabled by the substrate
+# `test-support` feature.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+
+[lints]
+workspace = true
