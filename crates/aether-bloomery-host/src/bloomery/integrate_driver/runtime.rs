@@ -49,9 +49,9 @@ use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::store::{SqliteStore, StoreBackend};
 
 /// The outbox topic the reducer enqueues a completed claim set's integration
-/// under — the mirror of the control actor's `INTEGRATE_TOPIC` producer
-/// constant. This capability is its sole consumer.
-pub const INTEGRATE_TOPIC: &str = "aether.bloomery.integrate";
+/// under — the control actor's producer constant, imported so the two sides
+/// cannot drift (#3668). This capability is its sole consumer.
+pub use aether_bloomery::INTEGRATE_TOPIC;
 
 /// The autoloaded control-core component's lineage mailbox — where an admitted
 /// `Fact::Resolve` is sent. Resolved from the lineage path, mirroring the land

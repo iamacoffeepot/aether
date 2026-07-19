@@ -30,6 +30,7 @@ use crate::client::{
     RunConclusion, RunStatus, WorkflowRun,
 };
 use crate::correspondence::{Correspondence, CorrespondenceError, GitObjectId};
+use crate::executor::INPUT_NONCE;
 use crate::marker::parse_marker;
 use crate::source::{EMPTY_TREE, digest_from_hex, render_claim_message, render_tombstone_message, to_hex};
 
@@ -442,7 +443,7 @@ impl ActionsApi for FakeGithub {
         git_ref: &str,
         inputs: &BTreeMap<String, String>,
     ) -> Result<(), GithubError> {
-        let nonce = inputs.get("nonce").cloned().unwrap_or_default();
+        let nonce = inputs.get(INPUT_NONCE).cloned().unwrap_or_default();
         self.lock().dispatches.push(StoredDispatch {
             workflow_file: workflow_file.to_owned(),
             git_ref: git_ref.to_owned(),

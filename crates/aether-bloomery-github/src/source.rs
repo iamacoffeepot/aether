@@ -404,8 +404,11 @@ impl<C: GitDataApi> GitSource<C> {
         Ok(())
     }
 
+    // Built from `claims_prefix` so the writer and the `enumerate_claims`
+    // reader cannot drift byte-wise (#3668) — a mismatched prefix would
+    // mis-parse every enumerated workpiece id.
     fn workpiece_claim_ref(workpiece: &WorkpieceId) -> String {
-        format!("bloomery/claims/{}", workpiece.0)
+        format!("{}{}", Self::claims_prefix(), workpiece.0)
     }
 
     // The `heads/…`-form ref name a single `ClaimRefKind` addresses — the per-ref

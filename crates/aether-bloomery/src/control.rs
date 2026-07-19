@@ -64,6 +64,47 @@ pub struct OutboxPayload {
     pub payload: Vec<u8>,
 }
 
+/// The outbox topic a landing receipt enqueues under, so #3499's republisher
+/// can route it.
+///
+/// A topic string is a producer-consumer contract: the control actor enqueues
+/// under it and exactly one host driver drains it, so both sides import the
+/// one constant (this one and its siblings below) rather than re-typing the
+/// literal — a drifted copy would enqueue under a topic nobody drains,
+/// accumulating silently (#3668). Defined here (always compiled) like the
+/// payload types, so the `default-features = false` host consumers see them
+/// without the `runtime` actor.
+pub const RECEIPT_TOPIC: &str = "aether.bloomery.landing_receipt";
+
+/// The outbox topic a stage re-dispatch enqueues under, so the dispatch
+/// consumer (#3505) re-assembles the held attempt naming both question and
+/// answer digests (ADR-0151).
+pub const REDISPATCH_TOPIC: &str = "aether.bloomery.redispatch";
+
+/// The outbox topic a per-member attempt dispatch enqueues under, so the
+/// executor dispatch consumer (#3505) drains it, wraps the transformation in a
+/// work order, and submits it through the executor port (ADR-0149 §The line).
+pub const DISPATCH_TOPIC: &str = "aether.bloomery.dispatch";
+
+/// The outbox topic a land dispatch enqueues under, so the land driver
+/// (ADR-0149 migration step 3) drains it and issues the source-port
+/// compare-and-swap land.
+pub const LAND_TOPIC: &str = "aether.bloomery.land";
+
+/// The outbox topic an integration dispatch enqueues under (ADR-0152), so the
+/// host integrate driver drains it and folds the claimed candidates onto the
+/// bloom's integration branch.
+pub const INTEGRATE_TOPIC: &str = "aether.bloomery.integrate";
+
+/// The runtime mailbox path of the loaded control-core component — the
+/// ADR-0099 lineage address the component host registers the autoloaded actor
+/// at (`aether.component/aether.embedded:<NAMESPACE>`). One exported constant
+/// so the host's api and driver capabilities resolve the control core from a
+/// single spelling instead of each re-typing the lineage prefix and the
+/// namespace (#3668); a tripwire test pins it to the control actor's
+/// `NAMESPACE`.
+pub const CONTROL_CORE_PATH: &str = "aether.component/aether.embedded:aether.bloomery.control";
+
 /// The re-dispatch outbox payload (ADR-0151): the bloom, the released question,
 /// and the adopting answer, each by digest. The wasm control actor enqueues it
 /// under the `aether.bloomery.redispatch` topic from a

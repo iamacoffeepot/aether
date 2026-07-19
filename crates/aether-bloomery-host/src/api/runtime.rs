@@ -44,7 +44,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use aether_actor::{Manual, runtime};
+use aether_actor::{Addressable, Manual, runtime};
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, BloomId, BloomView, Digest, Event, Fact, IdempotencyKey, Membership, Outcome,
     Query, QueryResult, ReplayJournal, ReplayJournalResult, Statement, ViewDocument, Workpiece, digest_of,
@@ -65,18 +65,17 @@ use super::dto::{
     DraftPatch, DraftView, DraftsView, ErrorView, JournalEntry, JournalView, MemberProjection, OutcomeView,
     SealRequest, SupersedeRequest, WorkpiecesView,
 };
-use crate::artifacts::{ArtifactsError, Get, GetResult};
+use crate::artifacts::{ArtifactsCapability, ArtifactsError, Get, GetResult};
 use crate::bloomery::{
     AdmissionRequest, ApprovalPolicy, Decision, Gate, precheck_statement, verified_statement_approval,
 };
-use crate::signing::{Verify, VerifyResult};
-use crate::store::{RecordDispatchDescription, RecordDispatchDescriptionResult};
+use crate::signing::{SigningCapability, Verify, VerifyResult};
+use crate::store::{RecordDispatchDescription, RecordDispatchDescriptionResult, StoreCapability};
 
-/// The runtime name of the control-core wasm component's mailbox — the
-/// ADR-0099 lineage address the component host registers the autoloaded actor
-/// at (`aether.component/aether.embedded:<NAMESPACE>`), resolved with
-/// `mailbox_id_from_path` rather than the depth-1 `mailbox_id_from_name`.
-const CONTROL_CORE_PATH: &str = "aether.component/aether.embedded:aether.bloomery.control";
+// The control-core mailbox path — the ADR-0099 lineage address, resolved with
+// `mailbox_id_from_path` rather than the depth-1 `mailbox_id_from_name`. The
+// one exported spelling (#3668).
+use aether_bloomery::CONTROL_CORE_PATH;
 
 /// The path prefixes the router claims on the HTTP ingress cap; every one
 /// dispatches to [`BloomeryApiCapability::on_request`] under the
@@ -945,19 +944,22 @@ fn artifact_response(result: GetResult) -> HttpServerResponse {
     }
 }
 
-/// The `aether.store` mailbox (a depth-1 root cap).
+/// The `aether.store` mailbox (a depth-1 root cap), addressed by the cap's own
+/// `NAMESPACE` so a rename cannot leave this pointing at a dead mailbox (#3668).
 fn store_mailbox() -> MailboxId {
-    mailbox_id_from_path("aether.store")
+    mailbox_id_from_path(StoreCapability::NAMESPACE)
 }
 
-/// The `aether.artifacts` mailbox (a depth-1 root cap).
+/// The `aether.artifacts` mailbox (a depth-1 root cap), addressed like
+/// [`store_mailbox`].
 fn artifacts_mailbox() -> MailboxId {
-    mailbox_id_from_path("aether.artifacts")
+    mailbox_id_from_path(ArtifactsCapability::NAMESPACE)
 }
 
-/// The autoloaded control-core component's lineage mailbox.
+/// The `aether.signing` mailbox (a depth-1 root cap), addressed like
+/// [`store_mailbox`].
 fn signing_mailbox() -> MailboxId {
-    mailbox_id_from_path("aether.signing")
+    mailbox_id_from_path(SigningCapability::NAMESPACE)
 }
 
 fn control_mailbox() -> MailboxId {

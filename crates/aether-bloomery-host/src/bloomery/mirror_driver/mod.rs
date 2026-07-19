@@ -13,7 +13,7 @@ use aether_actor::actor;
 // does the same): `DrainTick` from the runtime module, the two store reply
 // kinds from `crate::store`.
 use crate::store::{AckOutboxResult, DrainOutboxResult};
-pub use runtime::{DrainTick, MirrorDriverState, TOPIC_LANDING_RECEIPT, TOPIC_VIEW_DOCUMENT};
+pub use runtime::{DrainTick, MirrorDriverState, RECEIPT_TOPIC, TOPIC_VIEW_DOCUMENT};
 
 /// Addressing identity for the outbox-consumer / mirror-driver capability.
 #[actor(singleton)]

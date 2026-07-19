@@ -39,6 +39,7 @@ use super::{
     EnumerateClaimsResult, IntegratePayload, LandPayload, MembershipMutation, OutboxPayload, Query, QueryResult,
     RedispatchPayload, ReplayJournal, ReplayJournalResult, TransferSeal,
 };
+use super::{DISPATCH_TOPIC, INTEGRATE_TOPIC, LAND_TOPIC, RECEIPT_TOPIC, REDISPATCH_TOPIC};
 use crate::ids::BloomId;
 use crate::port::{ClaimRefKind, ClaimRefState};
 use crate::reduce::{Decision, Decisions, Event, Fact, Outcome, Snapshot, reduce, view_of};
@@ -69,33 +70,6 @@ const SOURCE: &str = "aether.source";
 /// count toward the same per-key cap ([`ControlCore::inflight_for_key`]), so the
 /// pre-commit ref stage cannot dodge the back-pressure.
 const MAX_INFLIGHT_PER_KEY: usize = 64;
-
-/// The outbox topic a landing receipt enqueues under, so #3499's republisher
-/// can route it.
-const RECEIPT_TOPIC: &str = "aether.bloomery.landing_receipt";
-
-/// The outbox topic a stage re-dispatch enqueues under, so the dispatch consumer
-/// (#3505) re-assembles the held attempt naming both question and answer digests
-/// (ADR-0151). Producer-only here, like [`RECEIPT_TOPIC`].
-const REDISPATCH_TOPIC: &str = "aether.bloomery.redispatch";
-
-/// The outbox topic a per-member attempt dispatch enqueues under, so the executor
-/// dispatch consumer (#3505) drains it, wraps the transformation in a work order,
-/// and submits it through the executor port (ADR-0149 §The line). Producer-only
-/// here, like [`RECEIPT_TOPIC`] / [`REDISPATCH_TOPIC`].
-const DISPATCH_TOPIC: &str = "aether.bloomery.dispatch";
-
-/// The outbox topic a land dispatch enqueues under, so the land driver (ADR-0149
-/// migration step 3) drains it and issues the source-port compare-and-swap land.
-/// Producer-only here, like the other dispatch topics; the land driver's
-/// consumer-side constant mirrors this string.
-const LAND_TOPIC: &str = "aether.bloomery.land";
-
-/// The outbox topic an integration dispatch enqueues under (ADR-0152), so the
-/// host integrate driver drains it and folds the claimed candidates onto the
-/// bloom's integration branch. Producer-only here, like the other dispatch
-/// topics; the integrate driver's consumer-side constant mirrors this string.
-const INTEGRATE_TOPIC: &str = "aether.bloomery.integrate";
 
 /// An admit awaiting its durable commit reply — the reply handle to answer, the
 /// decoded event, and the decisions to apply to the snapshot once the store
@@ -631,3 +605,21 @@ fn admit_ok(outcome: &Outcome) -> AdmitResult {
 }
 
 aether_actor::export!(ControlCore);
+
+#[cfg(test)]
+mod tests {
+    use aether_actor::Addressable;
+
+    use super::ControlCore;
+    use crate::control::CONTROL_CORE_PATH;
+
+    // Tripwire: the exported control-core mailbox path is the ADR-0099 lineage
+    // address composed from the actor's own NAMESPACE. The path is a computed
+    // pin — it drifts if the namespace is renamed or the embedded-lineage
+    // prefix changes — so the one spelling every host consumer imports cannot
+    // silently diverge from the component the host actually loads (#3668).
+    #[test]
+    fn control_core_path_derives_from_the_namespace() {
+        assert_eq!(CONTROL_CORE_PATH, format!("aether.component/aether.embedded:{}", ControlCore::NAMESPACE));
+    }
+}

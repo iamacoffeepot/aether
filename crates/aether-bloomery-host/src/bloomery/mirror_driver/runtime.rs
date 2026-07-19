@@ -49,11 +49,10 @@ use crate::store::{AckOutbox, AckOutboxResult, DrainOutbox, DrainOutboxResult, O
 /// The outbox topic carrying `ViewDocument` payloads — reconciled onto the
 /// outward mirror.
 pub const TOPIC_VIEW_DOCUMENT: &str = "view_document";
-/// The outbox topic carrying `LandingReceipt` payloads — projected outward. Must
-/// equal the control actor's producer constant (`RECEIPT_TOPIC` in
-/// `aether-bloomery`), which enqueues receipts under this exact string; a
-/// mismatch silently strands every receipt undrained.
-pub const TOPIC_LANDING_RECEIPT: &str = "aether.bloomery.landing_receipt";
+/// The outbox topic carrying `LandingReceipt` payloads — projected outward.
+/// The control actor's producer constant, imported under its producer name so
+/// the coupling is greppable and the two sides cannot drift (#3668).
+pub use aether_bloomery::RECEIPT_TOPIC;
 
 /// The self-addressed wake the poll timer fires each interval; its handler
 /// drains the store outbox. Zero-field — the timer carries only the schedule.
@@ -102,7 +101,7 @@ fn deliver(projection: &ProjectionShell, entry: &OutboxEntry) -> Result<(), Stri
             let view: ViewDocument = from_bytes(&entry.payload).map_err(|e| e.to_string())?;
             projection.reconcile_view(&view).map_err(|e| e.to_string())
         }
-        TOPIC_LANDING_RECEIPT => {
+        RECEIPT_TOPIC => {
             let receipt: LandingReceipt = from_bytes(&entry.payload).map_err(|e| e.to_string())?;
             projection.project_receipt(&receipt).map_err(|e| e.to_string())
         }
@@ -214,7 +213,7 @@ impl NativeActor for MirrorDriverCapability {
         if state.projection.is_none() {
             return;
         }
-        for topic in [TOPIC_VIEW_DOCUMENT, TOPIC_LANDING_RECEIPT] {
+        for topic in [TOPIC_VIEW_DOCUMENT, RECEIPT_TOPIC] {
             ctx.send::<StoreCapability, DrainOutbox>(&DrainOutbox { topic: Some(topic.to_owned()) });
         }
     }
@@ -282,7 +281,7 @@ mod tests {
 
     use super::{
         AckOutbox, DrainOutbox, DrainOutboxResult, DrainTick, Kind, MirrorDriverCapability, MirrorDriverState,
-        OutboxEntry, ProjectionShell, TOPIC_LANDING_RECEIPT, TOPIC_VIEW_DOCUMENT, project_batch,
+        OutboxEntry, ProjectionShell, RECEIPT_TOPIC, TOPIC_VIEW_DOCUMENT, project_batch,
     };
     use crate::store::{SqliteStore, StoreBackend};
 
@@ -408,15 +407,15 @@ mod tests {
         let mut store = SqliteStore::open(":memory:").unwrap();
 
         let receipt = LandingReceipt { bloom: BloomId(digest(1)), previous_base: digest(10), new_head: digest(20) };
-        store.enqueue_outbox(TOPIC_LANDING_RECEIPT, &to_vec(&receipt).unwrap()).unwrap();
+        store.enqueue_outbox(RECEIPT_TOPIC, &to_vec(&receipt).unwrap()).unwrap();
 
-        let entries = store.drain_outbox(Some(TOPIC_LANDING_RECEIPT)).unwrap();
+        let entries = store.drain_outbox(Some(RECEIPT_TOPIC)).unwrap();
         assert_eq!(entries.len(), 1, "the enqueued receipt is drainable on the receipt topic");
 
         let acks = project_batch(&shell, &entries);
         assert_eq!(fake.comment_count(), 1, "the receipt projects one landing comment on the umbrella issue");
         assert_eq!(acks.len(), 1);
-        assert_eq!(acks[0].topic.as_deref(), Some(TOPIC_LANDING_RECEIPT), "the ack covers the receipt topic");
+        assert_eq!(acks[0].topic.as_deref(), Some(RECEIPT_TOPIC), "the ack covers the receipt topic");
         assert_eq!(acks[0].through_sequence, entries[0].sequence);
     }
 
@@ -447,7 +446,7 @@ mod tests {
         drained_topics.sort();
         assert_eq!(
             drained_topics,
-            vec![Some(TOPIC_LANDING_RECEIPT.to_owned()), Some(TOPIC_VIEW_DOCUMENT.to_owned())],
+            vec![Some(RECEIPT_TOPIC.to_owned()), Some(TOPIC_VIEW_DOCUMENT.to_owned())],
             "each owned projection topic is drained, scoped by topic",
         );
 

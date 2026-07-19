@@ -59,15 +59,12 @@ use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::store::{SqliteStore, StoreBackend};
 
 /// The outbox topic the reducer enqueues a per-member attempt dispatch under —
-/// the mirror of the control actor's `DISPATCH_TOPIC` producer constant. This
-/// capability is its sole consumer.
-pub const DISPATCH_TOPIC: &str = "aether.bloomery.dispatch";
-
-/// The autoloaded control-core component's lineage mailbox — where an admitted
-/// attempt result is sent. Resolved from the lineage path (`mailbox_id_from_path`),
-/// mirroring the REST API's `control_mailbox()`; the control actor is not a native
-/// singleton, so the sibling-cap typed send does not apply.
-const CONTROL_CORE_PATH: &str = "aether.component/aether.embedded:aether.bloomery.control";
+/// the control actor's producer constant, imported so the two sides cannot
+/// drift (#3668). This capability is its sole consumer; the control-core
+/// lineage path rides along for `control_mailbox` (`mailbox_id_from_path` —
+/// the control actor is not a native singleton, so the sibling-cap typed send
+/// does not apply).
+pub use aether_bloomery::{CONTROL_CORE_PATH, DISPATCH_TOPIC};
 
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the dispatch topic and pulls matched results. Zero-field — the timer carries

@@ -22,6 +22,17 @@ use crate::values::{AgentProfile, Budget, ReasoningEffort, ToolPolicy};
 /// here so every per-member stage's [`Transformation`] declares the same output.
 pub const RESULT_RECORD_OUTPUT: &str = "result_record";
 
+/// The construct/refine lane's typed command — the one spelling shared by the
+/// catalog binding's `process`, the dispatched [`Transformation::command`], and
+/// the host executors that route on it (#3668). A drifted copy would dispatch
+/// a lane no executor recognizes.
+pub const CONSTRUCT_IMPLEMENT_COMMAND: &str = "construct.implement";
+
+/// The review lane's typed command — shared with the host local executor that
+/// routes it onto the xtask critic, like
+/// [`CONSTRUCT_IMPLEMENT_COMMAND`] (#3668).
+pub const REVIEW_CRITIC_COMMAND: &str = "review.critic";
+
 /// One stage's declared contract (ADR-0149 §The line).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct StageBinding {
@@ -161,12 +172,14 @@ impl StageCatalog {
                 StageId::Approve => {
                     (&["bloom.scope"], &["bloom.ready"], "aether.bloomery.approve_gate", "phase-ready", 1)
                 }
-                StageId::Construct => (&["bloom.ready"], &["bloom.candidate"], "construct.implement", "pr-open", 2),
+                StageId::Construct => {
+                    (&["bloom.ready"], &["bloom.candidate"], CONSTRUCT_IMPLEMENT_COMMAND, "pr-open", 2)
+                }
                 StageId::Verify => {
                     (&["bloom.candidate"], &["bloom.verify_evidence"], "transform.verify", "ci-green", 3)
                 }
                 StageId::Refine => {
-                    (&["bloom.verify_evidence"], &["bloom.candidate"], "construct.implement", "ci-green", 3)
+                    (&["bloom.verify_evidence"], &["bloom.candidate"], CONSTRUCT_IMPLEMENT_COMMAND, "ci-green", 3)
                 }
                 StageId::Review => (&["bloom.candidate"], &["bloom.review_rollup"], "review", "review-approved", 2),
                 StageId::Integrate => {
@@ -323,7 +336,7 @@ impl Transformation {
             // the construct lane here) reaches the model API under restricted
             // egress. Review is its own model lane.
             StageId::Verify => ("verify.check", "iama/verify:1", NetworkProfile::None),
-            StageId::Review => ("review.critic", "iama/review-claude:1", NetworkProfile::Restricted),
+            StageId::Review => (REVIEW_CRITIC_COMMAND, "iama/review-claude:1", NetworkProfile::Restricted),
             StageId::Scope => unreachable!(
                 "Scope is a pre-seal operator-harness process staged via the REST control API, never a dispatched member transformation"
             ),
@@ -337,7 +350,7 @@ impl Transformation {
             | StageId::Integrate
             | StageId::AggregateVerify
             | StageId::AggregateReview
-            | StageId::Study => ("construct.implement", "iama/construct-claude:1", NetworkProfile::Restricted),
+            | StageId::Study => (CONSTRUCT_IMPLEMENT_COMMAND, "iama/construct-claude:1", NetworkProfile::Restricted),
         };
         Self {
             command: String::from(command),

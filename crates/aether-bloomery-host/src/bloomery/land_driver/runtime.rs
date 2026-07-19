@@ -47,15 +47,10 @@ use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::store::{SqliteStore, StoreBackend};
 
 /// The outbox topic the reducer enqueues a resolved bloom's land under — the
-/// mirror of the control actor's `LAND_TOPIC` producer constant. This capability
-/// is its sole consumer.
-pub const LAND_TOPIC: &str = "aether.bloomery.land";
-
-/// The autoloaded control-core component's lineage mailbox — where an admitted
-/// `Fact::Land` is sent. Resolved from the lineage path, mirroring the executor
-/// driver's `control_mailbox`; the control actor is not a native singleton, so
-/// the sibling-cap typed send does not apply.
-const CONTROL_CORE_PATH: &str = "aether.component/aether.embedded:aether.bloomery.control";
+/// control actor's producer constant, imported so the two sides cannot drift
+/// (#3668). This capability is its sole consumer; the control-core lineage
+/// path rides along for `control_mailbox`, mirroring the executor driver's.
+pub use aether_bloomery::{CONTROL_CORE_PATH, LAND_TOPIC};
 
 /// The self-addressed wake the poll timer fires each interval; its handler drains
 /// the land topic and issues each land. Zero-field — the timer carries only the
