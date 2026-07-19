@@ -190,11 +190,53 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
     let description = order.transformation.description.as_deref().unwrap();
     assert!(description.contains("## Task — wp-a\n\nbuild the widget"), "every member's order composes in");
     assert!(description.contains("## Task — wp-b\n\nwire the widget"));
+    assert!(
+        description.contains("Attribute each finding") && description.contains("`[wp-a]`"),
+        "the first roll instructs attribution with a real task id as the example",
+    );
+    assert!(!description.contains("## Frozen findings"), "the first roll has no frozen set to confirm against");
 
     let stored = store.lookup_order(&order.nonce.0).unwrap().expect("the bloom-level order is recorded");
     assert_eq!(stored.workpiece, "", "a bloom-level order has no member axis");
     assert_eq!(stored.displayed_digest, digest(30).as_bytes().to_vec(), "the verdict must bind the integrated tree");
     assert_eq!(stored.bloom, bloom.0.as_bytes().to_vec());
+}
+
+// ADR-0153 — the second aggregate roll is the delta-confirm: its prompt frames
+// the frozen bloom-scoped findings row and judges whether that set was
+// resolved, never a fresh hunt — so it carries the frozen section instead of
+// the attribution instruction. Catches the delta-confirm re-opening the
+// finding exchange the freeze exists to close.
+#[test]
+fn the_second_aggregate_roll_frames_a_delta_confirm_against_the_frozen_findings() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-a", "build the widget").unwrap();
+    store.record_review_findings(bloom.0.as_bytes(), "", "[wp-a] The widget leaks its handle.").unwrap();
+    let payload = AggregateReviewPayload {
+        bloom: bloom.0,
+        transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
+        roll: 2,
+    };
+    store.enqueue_outbox(TOPIC_AGGREGATE_REVIEW, &to_vec(&payload).unwrap()).unwrap();
+
+    let (handles, _ack, _transient) = drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
+    assert_eq!(handles.len(), 1);
+
+    let orders = backend.orders();
+    let description = orders[0].transformation.description.as_deref().unwrap();
+    assert!(description.starts_with("Delta-confirm review:"), "the second roll is framed as the delta-confirm");
+    assert!(
+        description.contains("## Frozen findings\n\n[wp-a] The widget leaks its handle."),
+        "the frozen set composes in verbatim",
+    );
+    assert!(description.contains("## Task — wp-a"), "the member orders still compose in for context");
+    assert!(
+        !description.contains("Attribute each finding"),
+        "the delta-confirm never re-instructs attribution — the set is frozen",
+    );
 }
 
 #[test]
