@@ -116,6 +116,13 @@ pub struct StageProgress {
     /// base). Later dispatches re-target from it: evidence binds `tree`, the
     /// worker checks out `checkout`.
     pub candidate: Option<CandidateRef>,
+    /// How many failing terminal-Review verdicts this member has consumed
+    /// (#3657) — the model-review ceiling's counter, carried across the Refine
+    /// re-entry a failing Review routes into (the `attempts` reset on every
+    /// stage advance, so the ceiling needs its own cursor field). A failing
+    /// Review at `review_rolls >= retry_budget_of(Review)` wedges instead of
+    /// re-entering.
+    pub review_rolls: u32,
 }
 
 /// A bloom's position in the one-way lifecycle.
@@ -370,6 +377,19 @@ pub enum Outcome {
     /// An attempt completion was refused (unknown bloom, non-member, or a stage
     /// that is not the member's current cursor).
     AttemptCompletedRejected(AttemptCompletedError),
+    /// A failing terminal Review routed the member back into Refine (#3657) —
+    /// the findings-directed re-entry that replaces re-rolling the critic on an
+    /// unchanged candidate. Appended so the prior outcomes' wire discriminants
+    /// are unchanged.
+    ReviewReentered {
+        /// The bloom the member belongs to.
+        bloom: BloomId,
+        /// The re-entered member.
+        workpiece: WorkpieceId,
+        /// The count of failing Review verdicts consumed, this one included —
+        /// the model-review ceiling's cursor (wedges at Review's retry budget).
+        rolls: u32,
+    },
 }
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -744,7 +764,7 @@ fn entry_dispatch_effects(bloom: BloomId, member: &Membership, checkout: Digest)
         Decision::AdvanceStage {
             bloom,
             workpiece: member.workpiece.clone(),
-            progress: StageProgress { stage, attempts: 1, candidate: None },
+            progress: StageProgress { stage, attempts: 1, candidate: None, review_rolls: 0 },
         },
         Decision::DispatchAttempt {
             bloom,
@@ -1074,11 +1094,13 @@ fn reduce_adopt_answer(snapshot: &Snapshot, bloom: &BloomId, answer: &Statement)
 /// a failing gate re-dispatches the same stage while the stage's `retry_budget`
 /// allows and wedges the member once it is exhausted (a wedged member stops
 /// dispatching — a supersession is the escape). The attempt's evidence is recorded
-/// in the bloom's evidence log either way. The completion gate applies across the
-/// whole member line, the terminal `Review` included: a *passing* `Review` integrates
-/// the member through [`Fact::Integrate`] and never completes here (a passing terminal
-/// completion is a mis-route, [`AttemptCompletedError::TerminalStage`]), but a *failing*
-/// `Review` retries within budget and wedges on exhaustion here like any other stage.
+/// in the bloom's evidence log either way. The terminal `Review` is the exception
+/// to same-stage retry (#3657): a *passing* `Review` integrates the member through
+/// [`Fact::Integrate`] and never completes here (a passing terminal completion is
+/// a mis-route, [`AttemptCompletedError::TerminalStage`]); a *failing* `Review`
+/// re-enters `Refine` — the findings-directed fix, since re-rolling the critic on
+/// an unchanged candidate changes nothing — bounded by Review's `retry_budget`
+/// over the cursor-carried `review_rolls`, wedging on the second failing verdict.
 fn reduce_attempt_completed(
     snapshot: &Snapshot,
     bloom: &BloomId,
@@ -1141,11 +1163,12 @@ fn reduce_attempt_completed(
     // A passing gate advances the cursor to the next member stage and dispatches
     // it. `next` is `Some` on this branch — a passing terminal completion was
     // rejected above, so a passing stage always has a successor.
+    let review_rolls = cursor.map_or(0, |progress| progress.review_rolls);
     if let Some(next) = next.filter(|_| passed) {
         effects.push(Decision::AdvanceStage {
             bloom: *bloom,
             workpiece: workpiece.clone(),
-            progress: StageProgress { stage: next, attempts: 1, candidate },
+            progress: StageProgress { stage: next, attempts: 1, candidate, review_rolls },
         });
         effects.push(Decision::DispatchAttempt {
             bloom: *bloom,
@@ -1160,17 +1183,50 @@ fn reduce_attempt_completed(
             effects,
         };
     }
+    // A failing terminal Review re-enters Refine instead of re-rolling the
+    // critic on an unchanged candidate (#3657): only a findings-directed fix
+    // changes the next verdict, so the member routes back to the stage that can
+    // produce one (the host threads the persisted findings onto the dispatch,
+    // #3656). The ceiling is Review's retry budget over `review_rolls` — the
+    // cursor-carried count the per-stage `attempts` reset cannot clear — so the
+    // second failing verdict wedges: never a third roll, never a silent
+    // integrate.
+    if stage == StageId::Review {
+        let rolls = review_rolls + 1;
+        if rolls < StageCatalog::retry_budget_of(StageId::Review).unwrap_or(1) {
+            effects.push(Decision::AdvanceStage {
+                bloom: *bloom,
+                workpiece: workpiece.clone(),
+                progress: StageProgress { stage: StageId::Refine, attempts: 1, candidate, review_rolls: rolls },
+            });
+            effects.push(Decision::DispatchAttempt {
+                bloom: *bloom,
+                workpiece: workpiece.clone(),
+                stage: StageId::Refine,
+                transformation: Transformation::for_member_stage(StageId::Refine, subject, checkout),
+                scope_revision: member.scope_revision,
+                candidate: candidate.map(|current| current.tree),
+            });
+            return Decisions {
+                outcome: Outcome::ReviewReentered { bloom: *bloom, workpiece: workpiece.clone(), rolls },
+                effects,
+            };
+        }
+        return Decisions {
+            outcome: Outcome::AttemptWedged { bloom: *bloom, workpiece: workpiece.clone(), stage },
+            effects,
+        };
+    }
     // A failing gate re-dispatches the same stage while its retry budget allows;
     // an exhausted budget wedges the member — it stops dispatching rather than
-    // looping (the tripwire). Uniform across the line: a failing terminal `Review`
-    // retries within its budget and wedges here too, never a silent integrate.
+    // looping (the tripwire).
     let budget = StageCatalog::retry_budget_of(stage).unwrap_or(1);
     if attempts < budget {
         let attempt = attempts + 1;
         effects.push(Decision::AdvanceStage {
             bloom: *bloom,
             workpiece: workpiece.clone(),
-            progress: StageProgress { stage, attempts: attempt, candidate },
+            progress: StageProgress { stage, attempts: attempt, candidate, review_rolls },
         });
         effects.push(Decision::DispatchAttempt {
             bloom: *bloom,

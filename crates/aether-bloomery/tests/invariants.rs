@@ -1002,7 +1002,7 @@ fn a_failing_capture_is_discarded_and_the_retry_targets_the_prior_candidate() {
 // its budget (2) and wedges on exhaustion here — it is never silently integrated;
 // only a *passing* `Review` leaves this path (through `Fact::Integrate`).
 #[test]
-fn a_failing_terminal_review_retries_within_budget_then_wedges() {
+fn a_failing_terminal_review_reenters_refine_then_wedges_at_the_ceiling() {
     let base = Snapshot::new(digest(1));
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
@@ -1030,13 +1030,13 @@ fn a_failing_terminal_review_retries_within_budget_then_wedges() {
         "the member advanced to the terminal Review stage",
     );
 
-    let fail = |key: &str| {
+    let fail = |key: &str, stage: StageId| {
         event(
             key,
             Fact::AttemptCompleted {
                 bloom,
                 workpiece: workpiece("wp"),
-                stage: StageId::Review,
+                stage,
                 passed: false,
                 evidence: attempt_evidence(),
                 candidate: None,
@@ -1044,24 +1044,45 @@ fn a_failing_terminal_review_retries_within_budget_then_wedges() {
         )
     };
 
-    // Review's retry_budget is 2: the first fail retries Review in place to attempt
-    // 2 — a re-dispatch of Review, never an Integrate of the failing review.
-    let (after1, d1) = step(&snapshot, &fail("r-fail-1"));
+    // The first failing Review re-enters Refine (#3657) — never a same-stage
+    // Review retry (re-rolling the critic on an unchanged candidate), never an
+    // Integrate of the failing verdict.
+    let (after1, d1) = step(&snapshot, &fail("r-fail-1", StageId::Review));
     match d1.outcome {
-        Outcome::AttemptRetried { stage, attempt, .. } => {
-            assert_eq!(stage, StageId::Review);
-            assert_eq!(attempt, 2);
-        }
-        other => panic!("expected AttemptRetried, got {other:?}"),
+        Outcome::ReviewReentered { rolls, .. } => assert_eq!(rolls, 1),
+        other => panic!("expected ReviewReentered, got {other:?}"),
     }
     assert!(
-        d1.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { stage: StageId::Review, .. })),
-        "a failing terminal Review re-dispatches Review",
+        d1.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { stage: StageId::Refine, .. })),
+        "a failing terminal Review dispatches the Refine re-entry",
     );
+    let progress = after1.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
+    assert_eq!(progress.stage, StageId::Refine);
+    assert_eq!(progress.review_rolls, 1, "the roll count survives the stage move");
 
-    // Attempt 2 fails: the budget is exhausted, so the member wedges — no dispatch,
-    // and no ResolutionClaim was ever produced from the failing verdict.
-    let (_after2, d2) = step(&after1, &fail("r-fail-2"));
+    // The re-entered Refine passes — back to Review for the delta-confirm, with
+    // the roll count intact (the per-stage attempts reset must not clear it).
+    let (after2, _) = step(
+        &after1,
+        &event(
+            "refine-pass",
+            Fact::AttemptCompleted {
+                bloom,
+                workpiece: workpiece("wp"),
+                stage: StageId::Refine,
+                passed: true,
+                evidence: attempt_evidence(),
+                candidate: None,
+            },
+        ),
+    );
+    let progress = after2.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).unwrap();
+    assert_eq!(progress.stage, StageId::Review);
+    assert_eq!(progress.review_rolls, 1, "the delta-confirm carries the ceiling cursor");
+
+    // The second failing Review verdict hits the ceiling: the member wedges — no
+    // third roll, no re-entry, and no ResolutionClaim from the failing verdict.
+    let (_after3, d2) = step(&after2, &fail("r-fail-2", StageId::Review));
     assert!(matches!(d2.outcome, Outcome::AttemptWedged { stage: StageId::Review, .. }));
     assert!(
         !d2.effects.iter().any(|e| matches!(e, Decision::DispatchAttempt { .. })),
