@@ -41,7 +41,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::capabilities::fs::NamespaceRoots;
+use aether_fs::NamespaceRoots;
 use std::env;
 use std::fs;
 use std::process;

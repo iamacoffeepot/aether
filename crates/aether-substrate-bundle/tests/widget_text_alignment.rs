@@ -41,9 +41,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
-use aether_capabilities::fs::NamespaceRoots;
 use aether_capabilities::text::{LoadFont, LoadFontResult};
 use aether_data::Kind;
+use aether_fs::NamespaceRoots;
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, LoadComponent,
     LoadResult, NamedMail, Tick,

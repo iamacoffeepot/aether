@@ -42,7 +42,7 @@
 // kinds (ADR-0121) live in `kinds` and re-export here; `ReadResult` comes
 // from the `aether.fs` cap, and `CreateTextureResult` from the render cap —
 // both are replies the text cap receives.
-use crate::fs::ReadResult;
+use aether_fs::ReadResult;
 use aether_render::CreateTextureResult;
 
 // ADR-0121: the cap owns its mail kinds. Always-on + wasm-safe (only

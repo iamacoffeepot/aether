@@ -32,7 +32,7 @@ mod config;
 /// - `#[config(default = <lit>)]` — confique default literal.
 /// - `#[config(parse = <fn_path>)]` — an explicit confique `parse_env`
 ///   function (turbofish-bearing paths supported), for a genuinely-custom
-///   mapping like `aether-capabilities::fs`'s `parse_dir`. A plain
+///   mapping like `aether-fs`'s `parse_dir`. A plain
 ///   numeric / `Duration` / `bool` / `String` field needs none — see
 ///   "Type-driven emission" below.
 /// - `#[config(ms_duration)]` — domain field is `Duration`; Layer
@@ -74,7 +74,7 @@ mod config;
 ///
 /// ## Escape hatch
 ///
-/// `NamespaceRoots` (`aether-capabilities::fs`) carries runtime-computed
+/// `NamespaceRoots` (`aether-fs`) carries runtime-computed
 /// defaults (`dirs::data_dir()` / `current_exe()`) that confique cannot
 /// express as literals. The cap declares `#[config(skip_from_layer)]`
 /// at the container level — the derive emits the Layer + Overlay +

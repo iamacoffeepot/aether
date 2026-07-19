@@ -11,6 +11,19 @@ Use this page to route a change. Use [Adding a chassis capability](recipes/addin
 for a worked implementation and current neighboring modules as compile-ready
 examples.
 
+## Crate placement
+
+A capability lives either as a module of `aether-capabilities` or as its own
+`aether-<cap>` crate. A crate of its own keeps the capability off its
+neighbours' reverse-dependency closure, so a change to it reruns only the tests
+that actually depend on it; `aether-fs` is the standalone form. The module shape
+below is the same either way. A standalone cap carries its own feature ladder —
+`default = ["runtime"]`, with a `runtime` feature gating the substrate-typed
+half and the marker face compiling under `default-features = false` — and each
+downstream crate depends directly on the cap crate it uses, never through a
+re-export facade (a facade would put every downstream back in the cap's
+reverse-dependency closure).
+
 ## Typical directory
 
 ```text

@@ -14,7 +14,7 @@ use crate::trampoline::WasmTrampoline;
 /// "Sending mail to a loaded component" isn't a SDK primitive — it
 /// only exists *because* this cap loaded a wasm component and gave it
 /// a trampoline address. So the helper lives here, attached to the
-/// cap's FFI mailbox, mirroring [`crate::fs::FsMailboxExt`]'s
+/// cap's FFI mailbox, mirroring [`aether_fs::FsMailboxExt`]'s
 /// cap-owned facade pattern (issue 580).
 ///
 /// `.loaded::<R>(name)` resolves a typed peer handle. The trampoline

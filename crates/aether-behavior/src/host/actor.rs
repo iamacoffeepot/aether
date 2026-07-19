@@ -22,9 +22,8 @@ use aether_actor::{
     ActorInitError, ActorTypeTag, Mail, MailboxId, Manual, OutboundReply, PriorState, ReplyHandle, SpawnError, Subname,
     WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
 };
-use aether_capabilities::FsCapability;
-use aether_capabilities::fs::{Read, ReadResult};
 use aether_data::KindId;
+use aether_fs::{FsCapability, Read, ReadResult};
 use wasmi::Engine;
 
 use crate::envelope::EffectTarget;

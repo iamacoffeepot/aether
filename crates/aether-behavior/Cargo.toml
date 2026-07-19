@@ -28,10 +28,10 @@ default = ["runtime"]
 runtime = ["dep:aether-behavior-derive"]
 # ADR-0137 / issue 2687: the in-cluster behavior script host. Pulls the
 # actor SDK (the host is a wasm `#[actor]`), the `wasmi` interpreter it
-# embeds (no_std, built-in fuel metering), the capability crate for the
-# `aether.fs` surface the host fetches scripts through, and `tracing` for
-# the fail-open trap logs.
-host = ["dep:aether-actor", "dep:wasmi", "dep:aether-capabilities", "dep:tracing"]
+# embeds (no_std, built-in fuel metering), the `aether-fs` cap crate for
+# the `aether.fs` surface the host fetches scripts through, and `tracing`
+# for the fail-open trap logs.
+host = ["dep:aether-actor", "dep:wasmi", "dep:aether-fs", "dep:tracing"]
 
 [dependencies]
 aether-data = { path = "../aether-data", default-features = false, features = ["derive"] }
@@ -45,10 +45,11 @@ aether-behavior-derive = { path = "../aether-behavior-derive", optional = true }
 # aether-behavior` shows neither `wasmi` nor `aether-actor`; `-F host`
 # shows both).
 aether-actor = { path = "../aether-actor", optional = true }
-# The capability crate carries the `aether.fs.{read,read_result}` kinds +
-# `FsCapability` the host fetches an `FsRef` script through. Marker layer
-# only (`default-features = false`) — no substrate runtime.
-aether-capabilities = { path = "../aether-capabilities", default-features = false, optional = true }
+# The `aether.fs` cap (iamacoffeepot/aether#3706) carries the
+# `aether.fs.{read,read_result}` kinds + `FsCapability` the host fetches an
+# `FsRef` script through. Marker face only (`default-features = false`) — no
+# substrate runtime.
+aether-fs = { path = "../aether-fs", default-features = false, optional = true }
 wasmi = { version = "1.1", default-features = false, optional = true }
 tracing = { workspace = true, default-features = false, optional = true }
 

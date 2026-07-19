@@ -12,8 +12,8 @@
 mod fleetbench;
 
 mod tests {
-    use aether_capabilities::fs::{List, ListResult};
     use aether_data::{Kind, MailId};
+    use aether_fs::{List, ListResult};
     use aether_kinds::trace::DispatchTraced;
     use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 

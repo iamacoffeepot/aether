@@ -104,7 +104,7 @@ mod runtime;
 /// `unsubscribe_all(mailbox)`) one indirection above the raw
 /// `.send(&SubscribeInput { .. })` so component code stops
 /// reconstructing the kind struct at every call site. Same shape and
-/// rationale as [`crate::fs::FsMailboxExt`]
+/// rationale as [`aether_fs::FsMailboxExt`]
 /// (issue 580) and [`crate::component::ComponentHostWasmExt`] (issue
 /// 654) — the cap module owns receive-side ([`InputCapability`]) AND
 /// send-side ([`InputMailboxExt`]) so future kind additions land both

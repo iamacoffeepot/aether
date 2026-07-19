@@ -1,0 +1,62 @@
+[package]
+name = "aether-fs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ADR-0041 `aether.fs` capability, extracted from `aether-capabilities`
+# (iamacoffeepot/aether#3706) as the first per-cap crate of the arc that
+# dissolves the capabilities monolith. Owns the full fs stack: the mail
+# kinds (`kinds`), the `FileAdapter` trait + `LocalFileAdapter` backend
+# (`adapter`), the `AdapterRegistry` + env-driven `NamespaceRoots`
+# (`config` / `registry`), and the `FsCapability` identity + runtime.
+#
+# The ADR-0122 identity/runtime split rides the `runtime` feature: the
+# wasm-safe identity, kinds, and `HandlesKind` markers compile always-on;
+# the `aether_substrate`-typed runtime half is gated so a marker-only wasm
+# guest can address `ctx.actor::<FsCapability>()` without dragging the
+# substrate through.
+
+[features]
+default = ["runtime"]
+runtime = ["dep:aether-substrate", "dep:clap", "dep:confique", "dep:dirs", "dep:tracing"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+# Native-only runtime half — gated so wasm/marker builds skip the substrate
+# runtime + the `Config` derive's clap/confique codegen.
+aether-substrate = { path = "../aether-substrate", optional = true }
+clap = { workspace = true, optional = true }
+confique = { workspace = true, optional = true }
+# `NamespaceRoots::from_layer` resolves `data_dir()` / `config_dir()` defaults;
+# runtime-gated (native config resolution), like the rest of the runtime half.
+dirs = { version = "6", optional = true }
+tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
+
+# The `Kind` derive emits a `cfg(not(target_family = "wasm"))`-gated
+# `inventory::submit!` per kind, so native builds need `inventory`
+# reachable; wasm guests don't (the derive's gate skips emission).
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+inventory = { workspace = true }
+
+[dev-dependencies]
+aether-data = { path = "../aether-data", features = ["derive"] }
+# The cap unit tests boot a chassis through the `aether_substrate::testing`
+# fixture, enabled by the substrate `test-support` feature.
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+
+# cargo-machete (the CI unused-deps gate) scans source without resolving
+# features, so it cannot see that `clap` and `confique` are used only
+# through the `Config` derive's codegen under the optional `runtime`
+# feature — `confique` via the `#[derive(confique::Config)]` on the config
+# layer, `clap` via the `#[derive(clap::Args)]` the same derive emits on
+# the `*Overlay` struct. Both are false positives: the deps are real and
+# runtime-gated. (aether-capabilities ignores only `clap` because it also
+# calls confique's API directly elsewhere; isolated here, both surface.)
+[package.metadata.cargo-machete]
+ignored = ["clap", "confique"]
+
+[lints]
+workspace = true

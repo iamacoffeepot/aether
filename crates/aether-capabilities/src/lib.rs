@@ -48,7 +48,6 @@ pub mod component;
 pub mod shared;
 
 pub mod engine;
-pub mod fs;
 pub mod game;
 // `aether.gemini` content-gen cap (ADR-0050, issue 1015). Native-only
 // for the same reason as `anthropic`.
@@ -134,7 +133,6 @@ pub use inventory::InventoryCapability;
 pub use lifecycle::LifecycleConfig;
 pub use lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 
-pub use fs::FsCapability;
 #[cfg(feature = "runtime")]
 pub use game::GameGatewayConfig;
 pub use game::{GameGatewayCapability, PlayerSessionActor};

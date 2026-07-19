@@ -45,7 +45,7 @@ fn session_mailbox_id(cap_carry: u64, listener_name: &str, session_name: &str) -
 ///    [`session_close`](Self::session_close),
 ///    [`connect_session_write`](Self::connect_session_write), and
 ///    [`connect_session_close`](Self::connect_session_close). Mirror
-///    [`crate::fs::FsMailboxExt`] (issue 580): lift the cap-shaped
+///    [`aether_fs::FsMailboxExt`] (issue 580): lift the cap-shaped
 ///    kinds (`Close`, `SessionWrite`, ...) one indirection above the
 ///    raw `.send(&Kind { .. })` so component code stops reconstructing
 ///    the struct (and the `.into()` ceremony) at every call site.

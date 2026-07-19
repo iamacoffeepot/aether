@@ -66,7 +66,7 @@ pub use kinds::*;
 // identity (always-on, outside the runtime gate). The audio kinds resolve
 // through the `kinds` glob above; `ReadResult` is an `aether.fs` kind (a
 // different cap) the audio cap receives as the track-load reply.
-use crate::fs::ReadResult;
+use aether_fs::ReadResult;
 
 // `AudioConfig` rides through file root for chassis-bin consumers
 // that build it from env (`from_env`) and pass it to
@@ -95,7 +95,7 @@ pub struct AudioCapability;
 // handler/init ctx, the runtime state, the worker, the fan-out helpers, `Drop`,
 // and the `#[runtime] impl` itself — lives in the `runtime` module below, gated
 // once on `feature = "audio-runtime"`. The handler-signature kinds stay always-on
-// at file root (the `kinds` glob + `crate::fs::ReadResult`) — the always-on
+// at file root (the `kinds` glob + `aether_fs::ReadResult`) — the always-on
 // `HandlesKind<K>` markers name them.
 use aether_actor::actor;
 

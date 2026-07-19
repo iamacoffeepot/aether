@@ -51,6 +51,7 @@ default = ["runtime"]
 # macro arm references. Always on for chassis.
 runtime = [
     "dep:aether-substrate",
+    "aether-fs/runtime",
     "dep:base64",
     "dep:clap",
     "dep:confique",
@@ -115,6 +116,11 @@ text-runtime = ["text", "runtime", "aether-render/runtime", "dep:fontdue"]
 aether-actor = { path = "../aether-actor" }
 aether-codec = { path = "../aether-codec" }
 aether-data = { path = "../aether-data" }
+# The `aether.fs` cap now lives in its own crate (iamacoffeepot/aether#3706);
+# the audio / text / gemini caps still address `FsCapability` + its kinds.
+# `default-features = false` keeps the marker-only wasm build from dragging the
+# fs runtime; the `runtime` feature below forwards `aether-fs/runtime`.
+aether-fs = { path = "../aether-fs", default-features = false }
 # ADR-0131: the `#[http::router]` / `#[http::route]` proc macros, re-exported
 # through the wasm-safe `http` module. Proc-macro crates are host-compiled, so
 # an unconditional dep leaves the wasm-header-only build unaffected.
