@@ -257,10 +257,15 @@ fn stamp_construct_evidence(
 /// along for downstream study. Pure so the binding is testable without running
 /// Claude.
 fn stamp_review_evidence(nonce: Option<&str>, passed: bool, record: &serde_json::Value) -> serde_json::Value {
+    // The critic's final message IS the findings (#3656) — stamped top-level so
+    // the local backend can persist it and a later Refine re-entry is directed
+    // by what the critic actually found, not a blind re-roll.
+    let findings = record.get("result").and_then(|r| r.get("result")).and_then(serde_json::Value::as_str);
     serde_json::json!({
         "command": REVIEW_CRITIC,
         "nonce": nonce,
         "status": if passed { "pass" } else { "fail" },
+        "findings": findings,
         "result_record": record,
     })
 }
@@ -695,15 +700,19 @@ mod tests {
 
     #[test]
     fn review_evidence_stamps_the_status_claim_the_local_backend_reads() {
-        // The top-level `status` field is the whole cross-crate contract with the
-        // local backend's `parse_status` — the verdict claim the intake admits.
-        let record = serde_json::json!({"schema": 1});
+        // The top-level `status` and `findings` fields are the cross-crate
+        // contract with the local backend (`parse_status` / `parse_findings`) —
+        // the verdict claim the intake admits, and the prose a Refine re-entry
+        // is directed by (#3656).
+        let record = serde_json::json!({"schema": 1, "result": {"result": "pillar 2: off-by-one.\nVERDICT: finding"}});
         let passed = stamp_review_evidence(Some("n-9"), true, &record);
         assert_eq!(passed["command"], "review.critic");
         assert_eq!(passed["nonce"], "n-9");
         assert_eq!(passed["status"], "pass");
-        let finding = stamp_review_evidence(None, false, &record);
+        assert_eq!(passed["findings"], "pillar 2: off-by-one.\nVERDICT: finding");
+        let finding = stamp_review_evidence(None, false, &serde_json::json!({"schema": 1}));
         assert_eq!(finding["status"], "fail");
+        assert!(finding["findings"].is_null(), "a dead run stamps no findings");
     }
 
     #[test]

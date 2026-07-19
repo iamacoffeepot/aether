@@ -534,6 +534,7 @@ impl ExecutorBackend for LocalExecutor {
                         artifact_id: 0,
                         size_bytes: 0,
                         candidate: None,
+                        findings: None,
                     }]);
                 }
                 return Err(LocalExecutorError::Evidence(format!("{}: {read_error}", evidence_path.display())));
@@ -588,6 +589,7 @@ impl ExecutorBackend for LocalExecutor {
             artifact_id: 0,
             size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
             candidate,
+            findings: parse_findings(&bytes),
         }])
     }
 }
@@ -805,6 +807,14 @@ fn parse_status(bytes: &[u8]) -> Option<bool> {
         "fail" => Some(false),
         _ => None,
     }
+}
+
+// The evidence's top-level `findings` prose — what the review critic stamped
+// (#3656), threaded onto a later Refine re-entry. Presence-driven: a lane that
+// stamps none yields `None`, no lane flag needed.
+fn parse_findings(bytes: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value.get("findings").and_then(serde_json::Value::as_str).map(str::to_owned)
 }
 
 /// Whether a construct lane's `evidence.json` byte string shows a **substantive

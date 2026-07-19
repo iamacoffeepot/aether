@@ -136,6 +136,10 @@ pub struct UploadedEvidence {
     /// The candidate the run captured (ADR-0152), authoritative from the port
     /// reference like the nonce — host-recorded state, never name-decoded.
     pub candidate: Option<CandidateRef>,
+    /// The review critic's findings prose (#3656), authoritative from the port
+    /// reference like the candidate. Persisted keyed by the order's member on a
+    /// failing review so a Refine re-entry is directed by it.
+    pub findings: Option<String>,
 }
 
 /// Why the broker refused an upload without touching the reducer.
@@ -430,6 +434,16 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     if !store.consume_order(&record.nonce.0)? {
         return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
     }
+    // A failing Review's findings persist keyed by the member so the Refine
+    // re-entry is directed by them; a passing Review clears the stale row
+    // (#3656). Only after the consume — a refused upload writes nothing.
+    if record.stage == StageId::Review {
+        if verdict_passed(upload.verdict) {
+            store.clear_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0)?;
+        } else if let Some(findings) = &upload.findings {
+            store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, findings)?;
+        }
+    }
     Ok(AdmitDecision::Admitted(Box::new(Admission { admit, event })))
 }
 
@@ -490,6 +504,7 @@ impl EvidenceClaims for NameEvidenceClaims {
             verdict,
             detail,
             candidate: reference.candidate,
+            findings: reference.findings.clone(),
         })
     }
 }

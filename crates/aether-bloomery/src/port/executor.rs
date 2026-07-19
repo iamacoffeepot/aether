@@ -104,6 +104,12 @@ pub struct EvidenceRef {
     /// a zero-secret backend (the Actions lane captures nothing) and from every
     /// mechanical or failing run.
     pub candidate: Option<CandidateRef>,
+    /// The review critic's findings prose (#3656) — reported by a backend that
+    /// reads the run's evidence bytes itself (the local executor, from the
+    /// evidence's top-level `findings`); `None` from the name-only Actions lane
+    /// and from every lane that stamps none. Host-recorded state riding the
+    /// reference, like `candidate` — never part of the artifact-name contract.
+    pub findings: Option<String>,
 }
 
 /// The disposable-worker boundary (ADR-0149 §The boundary). Exactly the four
