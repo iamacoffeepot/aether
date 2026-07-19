@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
+use crate::reduce::Decision;
 use crate::values::Transformation;
 
 /// One active-membership mutation the store applies inside the combined
@@ -64,51 +65,111 @@ pub struct OutboxPayload {
     pub payload: Vec<u8>,
 }
 
-/// The outbox topic a landing receipt enqueues under, so #3499's republisher
-/// can route it.
-///
-/// A topic string is a producer-consumer contract: the control actor enqueues
-/// under it and a host driver drains it, so both sides import the one
-/// constant (this one and its siblings below) rather than re-typing the
-/// literal — a drifted copy would enqueue under a topic nobody drains,
-/// accumulating silently (#3668). Defined here (always compiled) like the
-/// payload types, so the `default-features = false` host consumers see them
+/// A first-class outbox topic — the stringly projection of an effectful
+/// [`Decision`](crate::reduce::Decision) variant across the store boundary
+/// (ADR-0149 §The boundary). A topic is a producer-consumer contract: the
+/// control actor enqueues a decision's payload under it and exactly one host
+/// driver drains it, so a drifted spelling would enqueue under a topic nobody
+/// drains, accumulating undelivered rows silently (#3668). Always compiled like
+/// the payload types, so the `default-features = false` host consumers reach it
 /// without the `runtime` actor.
 ///
-/// Every topic carries the `topic:` prefix: a topic is a store-local routing
-/// key between the reducer's decisions and the driver that drains them, never
-/// an actor address — no mail can be sent to it — and the sigil (impossible in
-/// a dot-separated aether name) makes that unmistakable. The former
-/// `aether.bloomery.*` topic spellings read as addresses while matching no
-/// actor (and two collided byte-for-byte with real driver namespaces), so the
-/// class is now marked structurally.
-pub const TOPIC_LANDING_RECEIPT: &str = "topic:landing_receipt";
+/// Construction is closed: the wrapped `&'static str` is private, so the only
+/// values are the associated consts below, and the exhaustive
+/// [`of_decision`](Self::of_decision) match mints exactly one for each effectful
+/// decision — a new effectful `Decision` variant fails to compile until it names
+/// its topic (the `StageCatalog::binding_of` idiom). [`ALL`](Self::ALL)
+/// enumerates the closed set the producer/consumer pairing tripwire walks
+/// against the host drivers.
+///
+/// Every topic carries the `topic:` prefix — the display spelling persisted to
+/// the outbox row and matched by the draining driver, preserved exactly (a
+/// changed spelling would strand undelivered rows). A topic is a store-local
+/// routing key between the reducer's decisions and the driver that drains them,
+/// never an actor address — no mail can be sent to it — and the sigil
+/// (impossible in a dot-separated aether name) makes that unmistakable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct Topic(&'static str);
 
-/// The outbox topic a stage re-dispatch enqueues under, so the dispatch
-/// consumer (#3505) re-assembles the held attempt naming both question and
-/// answer digests (ADR-0151).
-pub const TOPIC_REDISPATCH: &str = "topic:redispatch";
+impl Topic {
+    /// A landing receipt (from [`Decision::EmitReceipt`](crate::reduce::Decision::EmitReceipt)),
+    /// drained by the mirror driver and routed to #3499's republisher.
+    pub const LANDING_RECEIPT: Topic = Topic("topic:landing_receipt");
+    /// A stage re-dispatch (from
+    /// [`Decision::RedispatchStage`](crate::reduce::Decision::RedispatchStage)),
+    /// re-assembling the held attempt naming both question and answer digests
+    /// (ADR-0151). Still awaiting a draining consumer (#3664).
+    pub const REDISPATCH: Topic = Topic("topic:redispatch");
+    /// A per-member attempt dispatch (from
+    /// [`Decision::DispatchAttempt`](crate::reduce::Decision::DispatchAttempt)),
+    /// drained by the executor driver, wrapped in a work order, and submitted
+    /// through the executor port (ADR-0149 §The line).
+    pub const DISPATCH: Topic = Topic("topic:dispatch");
+    /// A land dispatch (from [`Decision::DispatchLand`](crate::reduce::Decision::DispatchLand)),
+    /// drained by the land driver, which issues the source-port compare-and-swap
+    /// land (ADR-0149 migration step 3).
+    pub const LAND: Topic = Topic("topic:land");
+    /// An integration dispatch (from
+    /// [`Decision::DispatchIntegration`](crate::reduce::Decision::DispatchIntegration)),
+    /// drained by the integrate driver, which folds the claimed candidates onto
+    /// the bloom's integration branch (ADR-0152).
+    pub const INTEGRATE: Topic = Topic("topic:integrate");
+    /// A whole-bloom aggregate-review dispatch (from
+    /// [`Decision::DispatchAggregateReview`](crate::reduce::Decision::DispatchAggregateReview)),
+    /// drained by the executor driver, which runs the `review.critic` lane
+    /// against the integrated head under a bloom-level order record (ADR-0153).
+    pub const AGGREGATE_REVIEW: Topic = Topic("topic:aggregate_review");
 
-/// The outbox topic a per-member attempt dispatch enqueues under, so the
-/// executor dispatch consumer (#3505) drains it, wraps the transformation in a
-/// work order, and submits it through the executor port (ADR-0149 §The line).
-pub const TOPIC_DISPATCH: &str = "topic:dispatch";
+    /// Every topic the reducer's effectful decisions enqueue under — the closed
+    /// enumeration the producer/consumer pairing tripwire walks against the host
+    /// drivers. A new effectful decision reaches this list through its
+    /// [`of_decision`](Self::of_decision) arm and its own associated const.
+    pub const ALL: &'static [Topic] =
+        &[Self::LANDING_RECEIPT, Self::REDISPATCH, Self::DISPATCH, Self::LAND, Self::INTEGRATE, Self::AGGREGATE_REVIEW];
 
-/// The outbox topic a land dispatch enqueues under, so the land driver
-/// (ADR-0149 migration step 3) drains it and issues the source-port
-/// compare-and-swap land.
-pub const TOPIC_LAND: &str = "topic:land";
+    /// The `topic:` display spelling — the exact string persisted to the outbox
+    /// row and matched by the draining driver. The wire and SQLite surfaces
+    /// carry this plain string; the [`Topic`] type is the closed producer /
+    /// consumer edge over it.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        self.0
+    }
 
-/// The outbox topic an integration dispatch enqueues under (ADR-0152), so the
-/// host integrate driver drains it and folds the claimed candidates onto the
-/// bloom's integration branch.
-pub const TOPIC_INTEGRATE: &str = "topic:integrate";
-
-/// The outbox topic a whole-bloom aggregate-review dispatch enqueues under
-/// (ADR-0153), so the host review consumer drains it and runs the
-/// `review.critic` lane against the integrated head under a bloom-level order
-/// record.
-pub const TOPIC_AGGREGATE_REVIEW: &str = "topic:aggregate_review";
+    /// The outbox [`Topic`] an effectful [`Decision`](crate::reduce::Decision)
+    /// enqueues its payload under, or `None` for a snapshot-only or
+    /// membership-only decision that carries no outbox row. An exhaustive match
+    /// over the closed `Decision` enum — the compile-time guard that a new
+    /// effectful variant names its topic before it compiles (the
+    /// `StageCatalog::binding_of` idiom). This is the sole decision → topic
+    /// classifier; the producer projection and the pairing tripwire both read
+    /// the vocabulary it defines.
+    #[must_use]
+    pub fn of_decision(decision: &Decision) -> Option<Topic> {
+        match decision {
+            Decision::EmitReceipt(_) => Some(Self::LANDING_RECEIPT),
+            Decision::RedispatchStage { .. } => Some(Self::REDISPATCH),
+            Decision::DispatchAttempt { .. } => Some(Self::DISPATCH),
+            Decision::DispatchLand { .. } => Some(Self::LAND),
+            Decision::DispatchIntegration { .. } => Some(Self::INTEGRATE),
+            Decision::DispatchAggregateReview { .. } => Some(Self::AGGREGATE_REVIEW),
+            Decision::ClaimMembership { .. }
+            | Decision::ReleaseMembership { .. }
+            | Decision::InheritClaim { .. }
+            | Decision::RecordResolution { .. }
+            | Decision::RecordEvidence { .. }
+            | Decision::MarkSuperseded { .. }
+            | Decision::SetResolved { .. }
+            | Decision::AdvanceMainline { .. }
+            | Decision::ReleaseHold { .. }
+            | Decision::AdvanceStage { .. }
+            | Decision::RecordIntegration { .. }
+            | Decision::RecordAggregateRoll { .. }
+            | Decision::RevokeResolution { .. }
+            | Decision::RecordReviewPark { .. } => None,
+        }
+    }
+}
 
 /// The control-core actor's namespace — the sole owner of the literal.
 /// Defined here (always compiled) and forward-fed into the `runtime`-gated
@@ -122,7 +183,7 @@ pub const CONTROL_CORE_NAMESPACE: &str = "aether.bloomery.control";
 
 /// The re-dispatch outbox payload (ADR-0151): the bloom, the released question,
 /// and the adopting answer, each by digest. The wasm control actor enqueues it
-/// under [`TOPIC_REDISPATCH`] from a
+/// under [`Topic::REDISPATCH`] from a
 /// [`Decision::RedispatchStage`](crate::reduce::Decision::RedispatchStage); the
 /// executor dispatch consumer (#3505) decodes it to re-assemble the held attempt
 /// naming both digests. Defined here (always compiled) so the host consumer can
@@ -142,7 +203,7 @@ pub struct RedispatchPayload {
 /// [`Transformation`] the executor dispatch
 /// consumer (#3505) wraps in a work order (adding an idempotency nonce) and
 /// submits through the executor port. The wasm control actor enqueues it under
-/// [`TOPIC_DISPATCH`] from a
+/// [`Topic::DISPATCH`] from a
 /// [`Decision::DispatchAttempt`](crate::reduce::Decision::DispatchAttempt).
 /// Defined here (always compiled) so the host consumer can decode it inward,
 /// cycle-free — like [`OutboxPayload`].
@@ -166,8 +227,8 @@ pub struct DispatchPayload {
 }
 
 /// The integration dispatch outbox payload (ADR-0152 §Resolution drives
-/// integration): the wasm control actor enqueues it under the
-/// `aether.bloomery.integrate` topic from a
+/// integration): the wasm control actor enqueues it under
+/// [`Topic::INTEGRATE`] from a
 /// [`Decision::DispatchIntegration`](crate::reduce::Decision::DispatchIntegration);
 /// the host integrate driver drains it, folds each candidate tree onto the
 /// bloom's integration branch in member order, and admits the resulting
@@ -186,7 +247,7 @@ pub struct IntegratePayload {
 /// reviewed bloom, the review-lane [`Transformation`] (its `inputs[0]` the
 /// integrated tree the returned evidence binds, its `checkout` the landable
 /// head the critic checks out), and which review pass this is. The wasm
-/// control actor enqueues it under [`TOPIC_AGGREGATE_REVIEW`] from a
+/// control actor enqueues it under [`Topic::AGGREGATE_REVIEW`] from a
 /// [`Decision::DispatchAggregateReview`](crate::reduce::Decision::DispatchAggregateReview).
 /// Defined here (always compiled) so the host consumer can decode it inward,
 /// cycle-free — like [`OutboxPayload`] / [`DispatchPayload`].
@@ -196,15 +257,46 @@ pub struct AggregateReviewPayload {
     pub bloom: Digest,
     /// The review-lane transformation to submit.
     pub transformation: Transformation,
-    /// Which review pass this dispatches (`1` the full review, `2` the
-    /// delta-confirm).
-    pub roll: u32,
+    /// Which pass of the two-pass review this dispatches (ADR-0153).
+    pub pass: ReviewPass,
+}
+
+/// Which pass of the two-pass whole-bloom aggregate review (ADR-0153) a dispatch
+/// is. Replaces the former `roll: u32` (`1` the full review, `2` the
+/// delta-confirm): the two passes are a closed set the reducer's ceiling caps at,
+/// so the type names them rather than leaving a reader to decode a magic count.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewPass {
+    /// The first review — the full critic pass over the whole integrated head.
+    Full,
+    /// The second review — the delta-confirm against the frozen finding set the
+    /// first failing pass raised, judging only whether those findings are
+    /// resolved rather than hunting fresh ones.
+    DeltaConfirm,
+}
+
+impl ReviewPass {
+    /// Map the reducer's 1-based aggregate-review roll counter onto the pass —
+    /// the first roll is the [`Full`](Self::Full) review, every later roll the
+    /// [`DeltaConfirm`](Self::DeltaConfirm). The reducer caps the counter at the
+    /// two-pass ceiling, so only these two passes ever dispatch (ADR-0153). The
+    /// reducer's [`Decision`] and [`Outcome`](crate::reduce::Outcome) keep the
+    /// numeric roll (their own journaled/wire vocabulary); this is the edge that
+    /// projects it onto the typed outbox payload.
+    #[must_use]
+    pub fn from_roll(roll: u32) -> Self {
+        if roll > 1 {
+            Self::DeltaConfirm
+        } else {
+            Self::Full
+        }
+    }
 }
 
 /// The land dispatch outbox payload (ADR-0149 §The boundary, migration step 3):
 /// the resolved bloom plus the compare-and-swap arguments the host's land driver
 /// issues through the source port's `aether.source.land` op. The wasm control
-/// actor enqueues it under the `aether.bloomery.land` topic from a
+/// actor enqueues it under [`Topic::LAND`] from a
 /// [`Decision::DispatchLand`](crate::reduce::Decision::DispatchLand) the moment a
 /// bloom resolves. Defined here (always compiled) so the host consumer can decode
 /// it inward, cycle-free — like [`OutboxPayload`] / [`DispatchPayload`].

@@ -7,16 +7,26 @@
 //! state machine, and the config-gating — lives in `runtime.rs`.
 
 use aether_actor::actor;
+use aether_bloomery::Topic;
 
 // The handler kinds the `#[actor]` macro references when it emits this cap's
 // `HandlesKind` markers must be in scope here (the store's `pub use kinds::*`
 // does the same): `DrainTick` from the runtime module, the two store reply
 // kinds from `crate::store`.
 use crate::store::{AckOutboxResult, DrainOutboxResult};
-pub use runtime::{DrainTick, MirrorDriverState, TOPIC_LANDING_RECEIPT, TOPIC_VIEW_DOCUMENT};
+pub use runtime::{DrainTick, MirrorDriverState, TOPIC_VIEW_DOCUMENT};
 
 /// Addressing identity for the outbox-consumer / mirror-driver capability.
 #[actor(singleton)]
 pub struct MirrorDriverCapability;
+
+impl MirrorDriverCapability {
+    /// The reducer-minted outbox topics this driver drains — its half of the
+    /// producer/consumer pairing the topic tripwire checks against
+    /// [`Topic::ALL`]. Only [`Topic::LANDING_RECEIPT`]: the host-local
+    /// `TOPIC_VIEW_DOCUMENT` this driver also drains is not a reducer [`Topic`]
+    /// and is deliberately outside `ALL`.
+    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::LANDING_RECEIPT];
+}
 
 mod runtime;

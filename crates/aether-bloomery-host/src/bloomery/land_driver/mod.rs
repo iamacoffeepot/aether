@@ -7,11 +7,19 @@
 //! ZST is the addressing identity; the state-bearing logic is [`runtime`].
 
 use aether_actor::actor;
+use aether_bloomery::Topic;
 
-pub use runtime::{LandDriverState, LandTick, TOPIC_LAND};
+pub use runtime::{LandDriverState, LandTick};
 
 /// Addressing identity for the land-driver capability.
 #[actor(singleton)]
 pub struct LandDriverCapability;
+
+impl LandDriverCapability {
+    /// The outbox topics this driver drains — its half of the producer/consumer
+    /// pairing the topic tripwire checks against [`Topic::ALL`]. The land driver
+    /// is the sole consumer of [`Topic::LAND`].
+    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::LAND];
+}
 
 mod runtime;

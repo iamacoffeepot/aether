@@ -6,12 +6,12 @@
 
 use std::sync::Arc;
 
-use aether_bloomery::{BloomId, Digest, Event, Fact, LandPayload};
+use aether_bloomery::{BloomId, Digest, Event, Fact, LandPayload, Topic};
 use aether_bloomery_github::GitSource;
 use aether_bloomery_github::testing::FakeGithub;
 use aether_data::wire::{from_bytes, to_vec};
 
-use super::{TOPIC_LAND, drain_and_land};
+use super::drain_and_land;
 use crate::bloomery::SourceShell;
 use crate::store::{SqliteStore, StoreBackend};
 
@@ -38,7 +38,7 @@ fn seeded() -> (FakeGithub, Digest) {
 // `DispatchLand` projection would enqueue), returning its outbox sequence.
 fn enqueue_land(store: &mut SqliteStore, bloom: BloomId, expected_base: Digest, new_head: Digest) -> u64 {
     let payload = LandPayload { bloom: bloom.0, expected_base, new_head };
-    store.enqueue_outbox(TOPIC_LAND, &to_vec(&payload).unwrap()).unwrap()
+    store.enqueue_outbox(Topic::LAND.as_str(), &to_vec(&payload).unwrap()).unwrap()
 }
 
 #[test]

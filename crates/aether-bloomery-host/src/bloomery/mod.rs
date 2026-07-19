@@ -30,21 +30,19 @@ pub use cli::BloomeryCli;
 pub use construct::{CONSTRUCT_IMPLEMENT_COMMAND, build_construct_order};
 pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
 pub use executor::{ExecutorPortError, ExecutorShell};
-pub use executor_driver::{DispatchTick, ExecutorDriverCapability, ExecutorDriverState, TOPIC_DISPATCH};
+pub use executor_driver::{DispatchTick, ExecutorDriverCapability, ExecutorDriverState};
 pub use intake::{
     Admission, AdmitDecision, AdmitSink, CycleError, CycleReport, DispatchError, DispatchRecord, EvidenceClaims,
     IntakeError, IntakeRefusal, NameEvidenceClaims, UploadedEvidence, admit_uploaded, attempt_artifact_name,
     dispatch_and_record, record_dispatch, run_intake_cycle,
 };
-pub use integrate_driver::{IntegrateDriverCapability, IntegrateDriverState, IntegrateTick, TOPIC_INTEGRATE};
-pub use land_driver::{LandDriverCapability, LandDriverState, LandTick, TOPIC_LAND};
+pub use integrate_driver::{IntegrateDriverCapability, IntegrateDriverState, IntegrateTick};
+pub use land_driver::{LandDriverCapability, LandDriverState, LandTick};
 pub use local_executor::{
     LocalExecutor, LocalExecutorError, ProcessTransformRunner, RunLifecycle, RunProcess, RunSpec, TransformRunner,
 };
 pub use mirror::{GithubMirrorConfig, GithubMirrorOverlay, ProjectionShell};
-pub use mirror_driver::{
-    DrainTick, MirrorDriverCapability, MirrorDriverState, TOPIC_LANDING_RECEIPT, TOPIC_VIEW_DOCUMENT,
-};
+pub use mirror_driver::{DrainTick, MirrorDriverCapability, MirrorDriverState, TOPIC_VIEW_DOCUMENT};
 pub use routing_executor::RoutingExecutor;
 pub use source::SourceShell;
 pub use study::{

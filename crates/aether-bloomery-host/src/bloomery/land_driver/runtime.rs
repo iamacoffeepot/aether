@@ -46,12 +46,7 @@ use crate::bloomery::mirror::GithubMirrorConfig;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::store::{SqliteStore, StoreBackend};
 
-use aether_bloomery::CONTROL_CORE_NAMESPACE;
-/// The outbox topic the reducer enqueues a resolved bloom's land under — the
-/// control actor's producer constant, imported so the two sides cannot drift
-/// (#3668). This capability is its sole consumer; the control-core lineage
-/// path rides along for `control_mailbox`, mirroring the executor driver's.
-pub use aether_bloomery::TOPIC_LAND;
+use aether_bloomery::{CONTROL_CORE_NAMESPACE, Topic};
 use aether_capabilities::resolve_embedded;
 
 /// The self-addressed wake the poll timer fires each interval; its handler drains
@@ -119,7 +114,7 @@ fn land_key(bloom: &Digest) -> IdempotencyKey {
 /// network side, unit-testable against a `SqliteStore` + a fake-GitHub-backed
 /// shell without the mail harness.
 fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
-    let entries = store.drain_outbox(Some(TOPIC_LAND))?;
+    let entries = store.drain_outbox(Some(Topic::LAND.as_str()))?;
     let mut admits = Vec::new();
     let mut ack_through = None;
     for entry in entries {
@@ -262,7 +257,7 @@ impl NativeActor for LandDriverCapability {
         match drain_and_land(store, &source) {
             Ok((admits, ack_through)) => {
                 if let Some(sequence) = ack_through
-                    && let Err(error) = store.ack_outbox(Some(TOPIC_LAND), sequence)
+                    && let Err(error) = store.ack_outbox(Some(Topic::LAND.as_str()), sequence)
                 {
                     tracing::warn!(target: "aether_bloomery_host::land", %error, "land ack failed; entries re-drive");
                 }
