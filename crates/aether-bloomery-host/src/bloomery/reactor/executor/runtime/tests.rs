@@ -22,8 +22,8 @@ use super::{
     drain_and_dispatch, drain_and_dispatch_aggregate, is_stale, next_backoff, pull_and_admit, push_admitted_candidates,
     seed_tracked, select_stale_handles,
 };
+use crate::bloomery::executor::local::testing::FixedRunner;
 use crate::bloomery::intake::{Admission, attempt_artifact_name};
-use crate::bloomery::local_executor::testing::FixedRunner;
 use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::{ExecutorPortError, ExecutorShell, LocalExecutor, RoutingExecutor, RunLifecycle};
 use crate::store::{SqliteStore, StoreBackend};

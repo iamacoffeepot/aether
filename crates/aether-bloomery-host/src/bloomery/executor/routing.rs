@@ -25,8 +25,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use aether_bloomery::{EvidenceRef, ExecutionStatus, ExecutorBackend, WorkHandle, WorkOrder};
 use aether_bloomery_github::ExecutorError;
 
-use super::executor::ExecutorPortError;
-use super::local_executor::LocalExecutorError;
+use super::ExecutorPortError;
+use super::local::LocalExecutorError;
 
 /// Which backend an order routed to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

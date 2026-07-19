@@ -20,7 +20,7 @@
 //! synthesizes the nonce-tagged [`EvidenceRef`] name from the run's
 //! `evidence.json` itself (`attempt.<verdict>.<subject_hex>.<detail_hex>.<nonce>`,
 //! the [`attempt_artifact_name`] contract the intake path's
-//! [`NameEvidenceClaims`](super::intake::NameEvidenceClaims) decodes) — no
+//! [`NameEvidenceClaims`](crate::bloomery::intake::NameEvidenceClaims) decodes) — no
 //! artifact-upload naming step to depend on.
 //!
 //! # The spawn seam
@@ -46,8 +46,9 @@ use aether_bloomery::{
 use aether_bloomery_github::{CorrespondenceError, GitObjectId, SharedCorrespondence, StageVerdict};
 use serde::Serialize;
 
-use super::CONSTRUCT_IMPLEMENT_COMMAND;
-use super::intake::attempt_artifact_name;
+use crate::bloomery::CONSTRUCT_IMPLEMENT_COMMAND;
+use crate::bloomery::intake::attempt_artifact_name;
+use crate::bloomery::mirror::GithubMirrorConfig;
 
 // The typed id of the model-driven review lane. It rides the same model-lane
 // plumbing as the construct command — subject/model/effort/task argv — but not
@@ -282,7 +283,7 @@ impl LocalExecutor {
     /// resolves through, the config'd scratch-worktree base dir, and the config'd
     /// construct model/effort (empty strings resolve to `None`).
     #[must_use]
-    pub fn from_config(config: &super::mirror::GithubMirrorConfig, correspondence: SharedCorrespondence) -> Self {
+    pub fn from_config(config: &GithubMirrorConfig, correspondence: SharedCorrespondence) -> Self {
         Self::new(
             Arc::new(ProcessTransformRunner),
             correspondence,
