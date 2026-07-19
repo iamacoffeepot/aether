@@ -6,12 +6,12 @@ use alloc::{format, string::String};
 use core::f32::consts::PI;
 
 use aether_actor::{ActorInitError, Manual, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_capabilities::LifecycleCapability;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::ViewProjection;
-use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_data::MailboxId;
 use aether_kinds::{MouseButton, Render, mouse_button};
 use aether_math::{Mat4, Vec3};
+use aether_render::{RenderCapability, ViewProjection};
 use serde::{Deserialize, Serialize};
 
 use crate::widget::EditorRegionRect;

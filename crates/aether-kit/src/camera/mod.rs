@@ -53,10 +53,10 @@ use std::collections::HashMap;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::input::InputMailboxExt;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::ViewProjection;
-use aether_capabilities::{InputCapability, LifecycleCapability, RenderCapability};
+use aether_capabilities::{InputCapability, LifecycleCapability};
 use aether_kinds::{Render, Tick, WindowSize};
 use aether_math::{Mat4, PI, Quat, TAU, Vec2, Vec3};
+use aether_render::{RenderCapability, ViewProjection};
 
 const Z_NEAR: f32 = 0.1;
 const Z_FAR: f32 = 100.0;

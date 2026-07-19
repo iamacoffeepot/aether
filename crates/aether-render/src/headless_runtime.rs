@@ -141,7 +141,7 @@ impl NativeActor for HeadlessRenderCapability {
 #[cfg(all(test, feature = "runtime"))]
 mod headless_tests {
     use super::*;
-    use crate::render::TextureFormat;
+    use crate::TextureFormat;
     use aether_data::{MailboxId, Source, SourceAddr};
     use aether_data::{SessionToken, Uuid};
     use aether_substrate::actor::native::NativeCtx;

@@ -80,12 +80,9 @@ runtime = [
 # the feature gates the cap module so its always-on `Actor` /
 # `Singleton` / `HandlesKind` impls + wasm-stub `pub struct` are
 # reachable, without dragging the GPU / audio native deps in.
-# Empty body: the render cap's cast-shaped kinds (`DrawTriangle` /
-# `Vertex` / `ViewProjection`) derive `bytemuck::Pod` + `Zeroable`, but `bytemuck`
-# is already an unconditional dependency (the always-on `aether.input`
-# cast kinds pull it), so a marker-only guest sees the kind types with no
-# extra feature wiring.
-render = []
+# (The render cap was extracted to the `aether-render` crate,
+# iamacoffeepot/aether#3721; its marker/identity now rides the retained
+# `aether-render` dependency below, not a local feature.)
 # ADR-0121: the audio cap owns its kinds in `audio/kinds.rs`. Its
 # cast-shaped triggers (`NoteOn` / `NoteOff` / `SetMasterGain`) are
 # `#[repr(C)]` + `Pod`/`Zeroable` and need `bytemuck` (with `derive`),
@@ -96,20 +93,20 @@ audio = []
 # the render texture surface entirely by mail — but gated the same two-
 # layer way so a wasm component can address it via
 # `ctx.actor::<TextCapability>()` without dragging `fontdue` into the wasm
-# graph. Pulls the `render` marker because the text cap receives the
-# render-owned `CreateTextureResult` reply kind (ADR-0121) and addresses
-# the render texture/quad kinds — both now live in `crate::render`.
-text = ["render"]
+# graph. The text cap receives the render-owned `CreateTextureResult`
+# reply kind (ADR-0121) and addresses the render texture/quad kinds, both
+# in the retained `aether-render` dep — whose identity is always present
+# (non-optional, `default-features = false`), so no marker feature.
+text = []
 
 # Runtime impl layers — adds the substrate-side runtime + heavy deps
 # atop the marker layer. Chassis bins activate these. Each implies its
 # marker layer + `runtime` so chassis builds still see the full cap.
-render-runtime = ["render", "runtime", "aether-substrate/render", "dep:wgpu"]
 audio-runtime = ["audio", "runtime", "dep:cpal", "dep:crossbeam-queue", "dep:hound"]
 # `fontdue` rides `text-runtime` the way `hound` rides `audio-runtime`:
 # the pure-Rust TTF parse + rasterize + horizontal layout the cap runs
 # off the hot path. Implies the marker layer + `runtime`.
-text-runtime = ["text", "runtime", "render", "dep:fontdue"]
+text-runtime = ["text", "runtime", "aether-render/runtime", "dep:fontdue"]
 
 [dependencies]
 # Always-on: target-agnostic SDK + data layer + kind types. These
@@ -146,6 +143,15 @@ aether-window = { path = "../aether-window", default-features = false }
 # forwards `aether-trace/runtime` so chassis / test builds get the
 # `TraceDispatchCapability` runtime half.
 aether-trace = { path = "../aether-trace", default-features = false }
+# iamacoffeepot/aether#3721: the `aether.render` cap was extracted to its
+# own `aether-render` crate, but capabilities RETAINS an identity-only
+# dependency on it — the `aether.text` cap (which stays here) composes the
+# render surface: `text/mod.rs`, `text/runtime/mod.rs`, and
+# `text/runtime/layout.rs` reference `aether_render` items (the texture /
+# quad kinds + `RenderCapability`). `default-features = false` keeps only
+# the wasm-safe identity + kinds; the `text-runtime` feature above forwards
+# `aether-render/runtime` so chassis / test builds get the wgpu runtime half.
+aether-render = { path = "../aether-render", default-features = false }
 # Native-only: gated behind the `runtime` feature so wasm builds
 # don't drag in wasmtime / cpal / wgpu transitively.
 aether-substrate = { path = "../aether-substrate", optional = true }
@@ -195,7 +201,6 @@ uuid = { version = "1", optional = true, features = ["v4"] }
 # version aether-substrate uses; chassis builds get a single wasmtime
 # in the dep tree.
 wasmtime = { workspace = true, optional = true }
-wgpu = { workspace = true, optional = true }
 cpal = { workspace = true, optional = true }
 crossbeam-queue = { version = "0.3", optional = true }
 # ADR-0103 §1: WAV decode for the audio cap's track lane + (future)

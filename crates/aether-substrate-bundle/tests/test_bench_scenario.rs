@@ -34,11 +34,6 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use aether_capabilities::fs::{Delete, DeleteResult, FsError, List, ListResult, Read, ReadResult, Write, WriteResult};
-use aether_capabilities::render::{
-    CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
-    DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect, MaterialTexturedRect, SolidQuad,
-    TextureFormat, TexturedQuad, UpdateTexture, Vertex, ViewProjection, WHITE_TEXTURE_ID,
-};
 use aether_capabilities::text::{DrawText, FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult};
 use aether_clipboard::{GetClipboardText, GetClipboardTextResult, SetClipboardText, SetClipboardTextResult};
 use aether_data::{Kind, MailboxId};
@@ -48,6 +43,11 @@ use aether_kinds::{
     NamedMail, Ping, QuadScale, QuadSpace, ReplaceComponent, ReplaceResult, SimilarityCheck,
 };
 use aether_math::{Mat4, Rgb, Rgba, Vec3};
+use aether_render::{
+    CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured, DrawSolidQuads,
+    DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect, MaterialTexturedRect, SolidQuad,
+    TextureFormat, TexturedQuad, UpdateTexture, Vertex, ViewProjection, WHITE_TEXTURE_ID,
+};
 use aether_substrate::render as substrate_render;
 use aether_substrate::render::{QUAD_VERTEX_BUFFER_BYTES, QUAD_VERTEX_STRIDE, QUAD_VERTICES_PER_QUAD};
 use aether_substrate_bundle::test_bench::{

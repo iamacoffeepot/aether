@@ -22,13 +22,14 @@ use aether_capabilities::LifecycleCapability;
 use aether_capabilities::audio::{SetMasterGain, SetMasterGainResult};
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
-    AnthropicConfig, ComponentHostConfig, ContentGenConfig, GeminiConfig, HeadlessRenderCapability, HttpServerConfig,
-    InputConfig, UnsupportedTestBenchCapability, fs::NamespaceRoots, http::HttpConfig as HttpConf,
+    AnthropicConfig, ComponentHostConfig, ContentGenConfig, GeminiConfig, HttpServerConfig, InputConfig,
+    UnsupportedTestBenchCapability, fs::NamespaceRoots, http::HttpConfig as HttpConf,
 };
 use aether_clipboard::HeadlessClipboardCapability;
 use aether_data::Kind;
 use aether_kinds::BinaryManifest;
 use aether_kinds::Tick;
+use aether_render::HeadlessRenderCapability;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::{Chassis, SubstrateBoot};

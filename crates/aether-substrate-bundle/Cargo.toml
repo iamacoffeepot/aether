@@ -78,7 +78,11 @@ runtime = []
 
 [dependencies]
 aether-substrate = { path = "../aether-substrate", features = ["render"] }
-aether-capabilities = { path = "../aether-capabilities", features = ["render-runtime", "audio-runtime", "text-runtime"] }
+aether-capabilities = { path = "../aether-capabilities", features = ["audio-runtime", "text-runtime"] }
+# iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`;
+# the chassis bundle needs its wgpu runtime half (RenderCapability / RenderGpu /
+# RenderHandles / RenderTuningConfigLayer for the desktop + test-bench drivers).
+aether-render = { path = "../aether-render", features = ["runtime"] }
 aether-clipboard = { path = "../aether-clipboard", features = ["runtime"] }
 aether-window = { path = "../aether-window", features = ["runtime"] }
 # The `aether.trace` cap (extracted from capabilities, #3719): every

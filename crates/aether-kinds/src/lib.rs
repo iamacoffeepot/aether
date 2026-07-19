@@ -46,7 +46,7 @@ pub use utility::{Ping, Pong};
 
 // The render cap's drawing/texture kinds — `Vertex` / `DrawTriangle` /
 // `DRAW_TRIANGLE_BYTES` / `ViewProjection` and the `aether.render.*` texture +
-// quad family — moved to `aether_capabilities::render::kinds` (ADR-0121,
+// quad family — moved to `aether_render::kinds` (ADR-0121,
 // "capabilities own their kinds"). The capture-request and `FrameCheck`
 // verification kinds stay below: `aether-mcp` and the substrate core
 // consume them, so moving them would close a dependency cycle.
@@ -994,7 +994,7 @@ mod control_plane {
     // ADR-0105 textured-quad render surface. The texture + quad draw
     // kinds (`CreateTexture` / `CreateTextureResult` / `UpdateTexture` /
     // `TexturedQuad` / `DrawTexturedQuads` / `SolidQuad` /
-    // `DrawSolidQuads`) moved to `aether_capabilities::render::kinds`
+    // `DrawSolidQuads`) moved to `aether_render::kinds`
     // (ADR-0121). The `QuadScale` / `QuadSpace` projection types stay
     // central: the `aether.text.draw` kind below consumes `QuadSpace`,
     // and `aether-kinds` has no dependency on `aether-capabilities`, so

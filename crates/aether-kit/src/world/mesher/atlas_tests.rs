@@ -2,7 +2,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use aether_capabilities::render::DrawTriangle;
+use aether_render::DrawTriangle;
 
 use super::atlas_support::{
     QuantizedGroundPointOctimeters, assert_height_break_walls_close_where, quantize_meters_to_octimeters,

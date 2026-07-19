@@ -23,6 +23,7 @@ members = [
     "crates/aether-clipboard",
     "crates/aether-window",
     "crates/aether-trace",
+    "crates/aether-render",
     "crates/aether-mcp",
     "crates/aether-context-canary",
     # Test fixtures — a container dir of single-output crates: one shared

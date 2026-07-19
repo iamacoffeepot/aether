@@ -10,7 +10,7 @@ use aether_kinds::{ClipRect, FontMetrics, GlyphAdvance, QuadSpace};
 use aether_math::Rgba;
 use aether_substrate::actor::native::NativeCtx;
 
-use crate::render::{DrawTexturedQuads, RenderCapability, TexturedQuad};
+use aether_render::{DrawTexturedQuads, RenderCapability, TexturedQuad};
 
 use super::atlas::AtlasEntry;
 

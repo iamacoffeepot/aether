@@ -4,7 +4,7 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
-use aether_capabilities::render::DrawTriangle;
+use aether_render::DrawTriangle;
 
 use super::mesher::mesh_chunk;
 use super::mesher::style::StyleTable;
@@ -276,8 +276,8 @@ fn include_triangle(bounds: &mut Option<ProposalBounds>, triangle: &DrawTriangle
 mod tests {
     use core::ptr::from_mut;
 
-    use aether_capabilities::render::Vertex;
     use aether_math::Rgb;
+    use aether_render::Vertex;
 
     use super::*;
     use crate::mark::{MarkId, MarkRef};

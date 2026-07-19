@@ -19,10 +19,10 @@ pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx,
 pub use aether_substrate::chassis::error::BootError;
 
 pub use crate::fs::{FsCapability, Read, ReadResult};
-pub use crate::render::{
+use crate::text::MEMORY_FONT_NAMESPACE;
+pub use aether_render::{
     CreateTexture, CreateTextureResult, RenderCapability, TextureFormat, TexturedQuad, UpdateTexture,
 };
-use crate::text::MEMORY_FONT_NAMESPACE;
 
 // ADR-0105 shelf-packed RGBA8 glyph atlas (`atlas`) and the pure layout /
 // rasterization helpers (`layout`), now nested under this `runtime` directory
@@ -636,9 +636,9 @@ mod tests {
     use super::layout::build_font_metrics;
     use super::{Arc, CreateTexture, NativeCtx, QuadSpace, Read, Source, TextCapabilityState, UpdateTexture};
     use crate::fs::FsError;
-    use crate::render::DrawTexturedQuads;
     use aether_data::{Kind, MailId, SessionToken, SourceAddr, Uuid};
     use aether_math::Rgba;
+    use aether_render::DrawTexturedQuads;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::testing::{

@@ -6,8 +6,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::f32::consts::TAU;
 
-use aether_capabilities::render::{DrawTriangle, Vertex};
 use aether_math::Rgb;
+use aether_render::{DrawTriangle, Vertex};
 
 use crate::mark::{Mark, MarkGeometry, MarkId, MarkRef};
 

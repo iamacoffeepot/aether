@@ -3,8 +3,8 @@
 //! [`NativeActor`] — owning its mailbox name, state, and handlers.
 //! The `Builder::with_actor` boot path on `aether-substrate` is the
 //! installation site; chassis mains pick which caps to load
-//! (Log/Io/Http are universal; Audio + Render gate behind the
-//! `audio` / `render` features).
+//! (Log/Io/Http are universal; Audio gates behind the `audio`
+//! feature; the render cap now lives in the `aether-render` crate).
 //!
 //! Pre-stage-2e these modules lived under
 //! `aether_substrate::capabilities`. The split decouples the
@@ -70,8 +70,6 @@ pub mod inventory;
 // chassis drives one frame at a time. Always-native via `#[actor(singleton)]`,
 // so a wasm component can address it by name.
 pub mod lifecycle;
-#[cfg(feature = "render")]
-pub mod render;
 pub mod rpc;
 pub mod tcp;
 pub mod test_bench;
@@ -143,12 +141,6 @@ pub use game::{GameGatewayCapability, PlayerSessionActor};
 // ADR-0050 `aether.gemini` cap (issue 1015).
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub use gemini::{GeminiCapability, GeminiConfig};
-#[cfg(feature = "render")]
-pub use render::HeadlessRenderCapability;
-#[cfg(feature = "render")]
-pub use render::RenderCapability;
-#[cfg(feature = "render-runtime")]
-pub use render::{CaptureBackend, RenderConfig, RenderGpu, RenderHandles, RenderTuningConfig};
 pub use tcp::{TcpCapability, TcpListenerActor};
 pub use test_bench::UnsupportedTestBenchCapability;
 #[cfg(feature = "text")]

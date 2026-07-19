@@ -66,7 +66,7 @@ use aether_kinds::CaptureFrame;
 // `runtime` so wasm components that opt into the marker-only `render` feature
 // see only the identity ZST + Actor / HandlesKind impls, not these heavy
 // GPU-bound types.
-#[cfg(feature = "render-runtime")]
+#[cfg(feature = "runtime")]
 pub use runtime::{
     CaptureBackend, RenderConfig, RenderGpu, RenderHandles, RenderTuningConfig, RenderTuningConfigLayer,
     RenderTuningOverlay, WHITE_TEXTURE_ID,
@@ -89,7 +89,7 @@ use aether_actor::actor;
 // The render runtime half — the wgpu-typed surface (state, ctx imports,
 // accumulator helpers) — lives in `runtime.rs`, gated once here on the
 // `render-runtime` override (matching the `#[actor] impl`'s runtime gate).
-#[cfg(feature = "render-runtime")]
+#[cfg(feature = "runtime")]
 mod runtime;
 
 // The headless companion's runtime half lives in `headless_runtime.rs`,
@@ -131,7 +131,7 @@ pub struct RenderCapability;
 #[actor(singleton, headless_runtime)]
 pub struct HeadlessRenderCapability;
 
-#[cfg(all(test, feature = "render-runtime"))]
+#[cfg(all(test, feature = "runtime"))]
 mod tests {
     use std::sync::Arc;
     use std::time::Duration;

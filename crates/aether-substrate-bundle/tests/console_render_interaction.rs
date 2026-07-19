@@ -18,7 +18,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
-use aether_capabilities::RenderCapability;
 use aether_capabilities::fs::NamespaceRoots;
 use aether_data::{Kind, MailboxId};
 use aether_kinds::keycode::KEY_BACKQUOTE;
@@ -29,6 +28,7 @@ use aether_kinds::{
 use aether_kit::{
     ConsoleCommandOutput, ConsoleConfig, EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec,
 };
+use aether_render::RenderCapability;
 use aether_substrate_bundle::test_bench::{
     BenchOp, TestBench,
     test_helpers::{init_save_sandbox, require_runtime},

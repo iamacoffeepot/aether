@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use aether_capabilities::{RenderGpu, RenderHandles};
 use aether_kinds::{FrameCheck, FrameVerdict};
+use aether_render::{RenderGpu, RenderHandles};
 use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::render::{self, RenderError, encode_png, vertex_buffer_layout};
 use winit::dpi::PhysicalSize;

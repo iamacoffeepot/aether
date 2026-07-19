@@ -1,7 +1,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use aether_capabilities::render::DrawTriangle;
+use aether_render::DrawTriangle;
 
 use crate::world::{CellPos, ChunkPos, Material, World};
 

@@ -1,6 +1,6 @@
 use core::ops::Range;
 
-use aether_capabilities::render::{DrawTriangle, Vertex};
+use aether_render::{DrawTriangle, Vertex};
 
 use super::atlas_support::{
     assert_height_break_walls_close, quantized_vertex_octimeters, total_wall_top_edge_length, xz_area_doubled, y_span,

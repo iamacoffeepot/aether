@@ -1,7 +1,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use aether_capabilities::render::{DrawTriangle, Vertex};
+use aether_render::{DrawTriangle, Vertex};
 
 use super::constants::OCTIMETERS_PER_METER;
 

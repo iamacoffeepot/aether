@@ -43,7 +43,7 @@
 // from the `aether.fs` cap, and `CreateTextureResult` from the render cap —
 // both are replies the text cap receives.
 use crate::fs::ReadResult;
-use crate::render::CreateTextureResult;
+use aether_render::CreateTextureResult;
 
 // ADR-0121: the cap owns its mail kinds. Always-on + wasm-safe (only
 // `aether-data` + `serde`), re-exported so callers address them as

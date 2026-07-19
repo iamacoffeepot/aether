@@ -20,11 +20,11 @@ use alloc::vec::Vec;
 use core::mem;
 
 use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_capabilities::LifecycleCapability;
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::{DrawTriangle, Vertex, ViewProjection};
-use aether_capabilities::{LifecycleCapability, RenderCapability};
 use aether_kinds::{Render, Tick};
 use aether_math::{Mat4, Rgb, Vec3};
+use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewProjection};
 
 use crate::world::CellPos;
 

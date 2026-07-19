@@ -55,12 +55,14 @@ pub use scroll::ScrollWidget;
 
 use aether_actor::{ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::{DrawSolidQuads, DrawTexturedQuads, SolidQuad, TexturedQuad as RenderTexturedQuad};
 use aether_capabilities::text::{DrawText, DrawTextBatch};
-use aether_capabilities::{LifecycleCapability, RenderCapability, TextCapability};
+use aether_capabilities::{LifecycleCapability, TextCapability};
 use aether_data::Kind;
 use aether_kinds::{ClipRect, QuadSpace, Tick};
 use aether_math::Vec2;
+use aether_render::{
+    DrawSolidQuads, DrawTexturedQuads, RenderCapability, SolidQuad, TexturedQuad as RenderTexturedQuad,
+};
 
 use crate::widget::composite::Composite;
 use crate::widget::kinds::WidgetClipIntersection;

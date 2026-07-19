@@ -29,7 +29,7 @@ use aether_substrate::render::{
 use super::material::{MaterialBatch, accepts_coverage_texture};
 use super::quad::QuadBatch;
 use super::texture::TextureRegistry;
-use crate::render::DrawTexturedQuads;
+use crate::DrawTexturedQuads;
 
 /// Bundle of accumulator state plus GPU resources, shared between
 /// the cap's dispatcher thread (write side for accumulators) and the
@@ -324,7 +324,7 @@ impl RenderHandles {
                 entry.ensure_realized(&gpu.device, &gpu.queue, &gpu.texture_bindings);
             } else {
                 tracing::warn!(
-                    target: "aether_capabilities::render",
+                    target: "aether_render",
                     texture_id = batch.texture_id,
                     "draw_textured_quads for unknown texture id; dropping the batch",
                 );
@@ -446,7 +446,7 @@ impl RenderHandles {
                 entry.ensure_realized(&gpu.device, &gpu.queue, &gpu.texture_bindings);
             } else {
                 tracing::warn!(
-                    target: "aether_capabilities::render",
+                    target: "aether_render",
                     texture_id,
                     "material draw for unknown texture id; dropping the batch",
                 );
@@ -471,7 +471,7 @@ impl RenderHandles {
                         let Some(params_offset) = push_textured_params(&mut textured_params, rect.tint.to_array())
                         else {
                             tracing::warn!(
-                                target: "aether_capabilities::render",
+                                target: "aether_render",
                                 texture_id,
                                 "textured material params overflow; dropping rect",
                             );
@@ -498,7 +498,7 @@ impl RenderHandles {
                     };
                     if !accepts_coverage_texture(entry.format) {
                         tracing::warn!(
-                            target: "aether_capabilities::render",
+                            target: "aether_render",
                             texture_id,
                             ?entry.format,
                             "coverage material requires an R8 texture; dropping the batch",
@@ -516,7 +516,7 @@ impl RenderHandles {
                             rect.rim_width,
                         ) else {
                             tracing::warn!(
-                                target: "aether_capabilities::render",
+                                target: "aether_render",
                                 texture_id,
                                 "coverage material params overflow; dropping rect",
                             );
@@ -740,7 +740,7 @@ mod tests {
     use aether_kinds::ClipRect;
     use aether_math::Rgba;
 
-    use crate::render::TexturedQuad;
+    use crate::TexturedQuad;
 
     fn handles_with_committed_overlays(batches: Vec<QuadBatch>) -> RenderHandles {
         let recorded = batches.iter().map(observed_batch).collect();

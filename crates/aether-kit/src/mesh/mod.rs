@@ -38,11 +38,11 @@ pub use kinds::*;
 use aether_actor::{ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_capabilities::fs::{Read, ReadResult};
 use aether_capabilities::lifecycle::LifecycleMailboxExt;
-use aether_capabilities::render::{DrawTriangle, Vertex};
-use aether_capabilities::{FsCapability, LifecycleCapability, RenderCapability};
+use aether_capabilities::{FsCapability, LifecycleCapability};
 use aether_kinds::{MeshLoadResult, Render};
 use aether_math::{Rgb, Vec3};
 use aether_mesh::{Point3, Polygon, tessellate_polygon};
+use aether_render::{DrawTriangle, RenderCapability, Vertex};
 use serde::{Deserialize, Serialize};
 
 use core::str;

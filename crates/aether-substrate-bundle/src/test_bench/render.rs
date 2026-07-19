@@ -7,8 +7,8 @@
 
 use std::sync::Arc;
 
-use aether_capabilities::{RenderGpu, RenderHandles, render::DrawTexturedQuads};
 use aether_kinds::{FrameCheck, FrameVerdict};
+use aether_render::{DrawTexturedQuads, RenderGpu, RenderHandles};
 use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::render::{RenderError, encode_png};
 

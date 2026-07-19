@@ -5,7 +5,6 @@ use std::fs;
 use std::path::Path;
 
 use aether_actor::Addressable;
-use aether_capabilities::render::ViewProjection;
 use aether_data::Kind;
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, FrameCheck, FrameCheckResult, FrameReduction, LoadComponent,
@@ -21,6 +20,7 @@ use aether_kit::world::{
     WorldPositionMeters,
 };
 use aether_math::{Mat4, Vec3};
+use aether_render::ViewProjection;
 use aether_substrate_bundle::test_bench::{
     ArtifactGuard, BenchOp, TestBench,
     test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots},
