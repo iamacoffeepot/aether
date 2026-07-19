@@ -471,6 +471,8 @@ impl Registry {
         // nested actor's id is the lineage fold, so the whole-string hash
         // would miss it. The depth-1 case (every root cap) folds to the
         // same id `hash(name)` gives.
+        #[allow(clippy::disallowed_methods)]
+        // the runtime-name resolution path itself — the registry is the one owner of the parse → fold
         let id = mailbox_id_from_path(name);
         let inner = self.inner.read().expect("registry lock poisoned; fail-fast per ADR-0063");
         match inner.mailboxes.get(&id) {

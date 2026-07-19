@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use aether_data::{EngineId, Kind, KindDescriptor, Uuid, mailbox_id_from_path, tagged_id};
+use aether_data::{EngineId, Kind, KindDescriptor, Uuid, tagged_id};
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, HandlersResult, ListEngines, ListEnginesResult, ListHandlers,
     descriptors,
@@ -12,7 +12,7 @@ use crate::args::{
     NativeCapHandlers, NativeHandlerJson, TransformListing,
 };
 
-use super::envelope::{engine_envelope, local_envelope};
+use super::envelope::{engine_envelope, local_envelope, recipient_mailbox};
 use super::ids::{parse_engine_id, parse_mailbox_id, static_kind_name};
 use super::render::{internal, internal_msg, json, project_capabilities, render_shape};
 use super::{COMPONENT_CAP, ENGINE_CAP, INVENTORY_CAP, Mcp};
@@ -117,7 +117,7 @@ pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -
     let (mailbox_id, forward_name) = if args.component.starts_with("mbx-") {
         (parse_mailbox_id(&args.component)?, None)
     } else {
-        (mailbox_id_from_path(&args.component), Some(args.component.clone()))
+        (recipient_mailbox(&args.component), Some(args.component.clone()))
     };
 
     // Cache fast-path: populated by load_component / replace_component or

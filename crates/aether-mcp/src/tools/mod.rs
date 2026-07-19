@@ -93,7 +93,7 @@ use self::components::{MAX_REPLICAS, components_all_loaded, reject_replicas_out_
 use self::components::{
     component_config_bytes, reject_zero_replicas, replica_base_name, replica_names, selector_with_explicit_export,
 };
-use self::envelope::{engine_envelope, local_envelope, validate_recipient_scope};
+use self::envelope::{engine_envelope, local_envelope, recipient_mailbox, validate_recipient_scope};
 #[cfg(test)]
 use self::ids::{parse_kind_id, render_compact_tree, static_kind_name};
 #[cfg(test)]

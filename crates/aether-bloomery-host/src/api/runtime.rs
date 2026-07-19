@@ -44,7 +44,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use aether_actor::{Addressable, Manual, runtime};
+use aether_actor::{Manual, runtime};
 use aether_bloomery::{
     Admit, AdmitResult, BloomDraft, BloomId, BloomView, Digest, Event, Fact, IdempotencyKey, Membership, Outcome,
     Query, QueryResult, ReplayJournal, ReplayJournalResult, Statement, ViewDocument, Workpiece, digest_of,
@@ -53,10 +53,12 @@ use aether_capabilities::http::{
     HttpHeader, HttpMethod, HttpServerCapability, HttpServerRequest, HttpServerResponse, RegisterRouteSelf,
 };
 use aether_data::wire::{from_bytes, to_vec};
-use aether_data::{Kind, MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, MailId, MailboxId};
 use aether_kinds::trace::Settled;
 use aether_substrate::{InboundMail, Mailer};
 
+use aether_actor::HandlesKind;
+use aether_substrate::actor::native::NativeActorMailbox;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 
@@ -439,10 +441,12 @@ impl ApiCapabilityState {
             (HttpMethod::Get, ["blooms", id]) => self.query_bloom(ctx, id),
             (HttpMethod::Post, ["blooms", id, "supersede"]) => self.supersede(ctx, id, &body),
             (HttpMethod::Post, ["blooms", id, "answer"]) => self.answer_bloom(ctx, id, &body),
-            (HttpMethod::Get, ["journal"]) => Routed::Deferred(self.send_tracked(ctx, store_mailbox(), &ReplayJournal)),
-            (HttpMethod::Get, ["artifacts", digest]) => {
-                Routed::Deferred(self.send_tracked(ctx, artifacts_mailbox(), &Get { digest: (*digest).to_owned() }))
+            (HttpMethod::Get, ["journal"]) => {
+                Routed::Deferred(self.send_tracked(ctx.actor::<StoreCapability>(), &ReplayJournal))
             }
+            (HttpMethod::Get, ["artifacts", digest]) => Routed::Deferred(
+                self.send_tracked(ctx.actor::<ArtifactsCapability>(), &Get { digest: (*digest).to_owned() }),
+            ),
             _ => Routed::Reply(error_response(404, "no such route")),
         }
     }
@@ -616,7 +620,8 @@ impl ApiCapabilityState {
         }
         let mut verifications = Vec::with_capacity(encoded.len());
         for (member_index, scope_revision, statement, statement_bytes) in encoded {
-            let correlation = self.send_tracked(ctx, signing_mailbox(), &Verify { statement: statement_bytes });
+            let correlation =
+                self.send_tracked(ctx.actor::<SigningCapability>(), &Verify { statement: statement_bytes });
             verifications.push(PendingVerify { correlation, member_index, scope_revision, statement });
         }
         Routed::DeferredSeal(Box::new(PendingSealSetup {
@@ -651,11 +656,7 @@ impl ApiCapabilityState {
             };
             // Fire-and-forget: the seal replies from its own admit outcome, so the
             // returned MailId is deliberately dropped (no settlement subscription).
-            let _ = ctx.send_envelope_detached(
-                store_mailbox(),
-                <RecordDispatchDescription as Kind>::ID,
-                &record.encode_into_bytes(),
-            );
+            ctx.actor::<StoreCapability>().send_detached(&record);
         }
     }
 
@@ -712,7 +713,7 @@ impl ApiCapabilityState {
         // trip; it admits only if the signature verifies (`resolve_verify`).
         let key = format!("aether.bloomery.answer:{}", hex_encode(digest_of(&answer).as_bytes()));
         let event = Event { idempotency_key: IdempotencyKey(key), fact: Fact::AdoptAnswer { bloom, answer } };
-        let correlation = self.send_tracked(ctx, signing_mailbox(), &Verify { statement });
+        let correlation = self.send_tracked(ctx.actor::<SigningCapability>(), &Verify { statement });
         Routed::DeferredVerify { correlation, event: Box::new(event) }
     }
 
@@ -728,7 +729,7 @@ impl ApiCapabilityState {
         match result {
             VerifyResult::Ok { verified: true } => match to_vec(&event) {
                 Ok(bytes) => {
-                    let correlation = self.send_tracked(ctx, control_mailbox(), &Admit { event: bytes });
+                    let correlation = self.send_tracked_control(ctx, &Admit { event: bytes });
                     self.pending.insert(correlation, inbound);
                 }
                 Err(error) => {
@@ -777,7 +778,7 @@ impl ApiCapabilityState {
                 let key = idempotency_key.unwrap_or_else(|| hex_encode(spec.id().0.as_bytes()));
                 match to_vec(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::Seal(spec) }) {
                     Ok(bytes) => {
-                        let correlation = self.send_tracked(ctx, control_mailbox(), &Admit { event: bytes });
+                        let correlation = self.send_tracked_control(ctx, &Admit { event: bytes });
                         self.pending.insert(correlation, inbound);
                     }
                     Err(error) => {
@@ -812,7 +813,7 @@ impl ApiCapabilityState {
 
     /// `GET /blooms` and `GET /view` — read the whole live projection.
     fn query(&self, ctx: &NativeCtx<'_, Manual>, bloom: Option<Vec<u8>>) -> Routed {
-        Routed::Deferred(self.send_tracked(ctx, control_mailbox(), &Query { bloom }))
+        Routed::Deferred(self.send_tracked_control(ctx, &Query { bloom }))
     }
 
     /// `GET /blooms/{id}` — read one bloom's live view by hex id.
@@ -830,15 +831,34 @@ impl ApiCapabilityState {
             Ok(bytes) => bytes,
             Err(error) => return Routed::Reply(error_response(500, &format!("event encode failed: {error}"))),
         };
-        Routed::Deferred(self.send_tracked(ctx, control_mailbox(), &Admit { event: bytes }))
+        Routed::Deferred(self.send_tracked_control(ctx, &Admit { event: bytes }))
     }
 
-    /// Dispatch a mail to `recipient` as a fresh causal root, subscribe to its
-    /// settlement (the no-reply safety net), and return the correlation the
-    /// reply will echo.
-    fn send_tracked<K: Kind>(&self, ctx: &NativeCtx<'_, Manual>, recipient: MailboxId, payload: &K) -> u64 {
+    /// Dispatch a mail to a peer cap's typed handle as a fresh causal root,
+    /// subscribe to its settlement (the no-reply safety net), and return the
+    /// correlation the reply will echo. The `HandlesKind` gate makes a
+    /// wrong-kind dispatch a compile error — the raw-envelope form this
+    /// replaces had no such check.
+    fn send_tracked<R, K>(&self, target: NativeActorMailbox<'_, R>, payload: &K) -> u64
+    where
+        R: HandlesKind<K>,
+        K: Kind,
+    {
+        self.track(target.send_detached_tracked(payload))
+    }
+
+    /// The control-core variant of [`send_tracked`](Self::send_tracked): the
+    /// control core is a loaded wasm component, not a nameable native sibling
+    /// type, so its dispatch stays on the raw envelope against the
+    /// `resolve_embedded`-computed mailbox.
+    fn send_tracked_control<K: Kind>(&self, ctx: &NativeCtx<'_, Manual>, payload: &K) -> u64 {
         let bytes = payload.encode_into_bytes();
-        let mail_id = ctx.send_envelope_detached(recipient, K::ID, &bytes);
+        self.track(ctx.send_envelope_detached(control_mailbox(), K::ID, &bytes))
+    }
+
+    /// Subscribe this cap to `mail_id`'s settlement and return the correlation
+    /// id that keys the held HTTP reply guard.
+    fn track(&self, mail_id: MailId) -> u64 {
         if let Some(registry) = self.mailer.settlement_registry() {
             registry.subscribe_settlement_mail(
                 mail_id,
@@ -943,24 +963,6 @@ fn artifact_response(result: GetResult) -> HttpServerResponse {
         GetResult::Err { error: ArtifactsError::NotFound, .. } => error_response(404, "no such artifact"),
         GetResult::Err { error, .. } => error_response(500, &format!("artifacts error: {error:?}")),
     }
-}
-
-/// The `aether.store` mailbox (a depth-1 root cap), addressed by the cap's own
-/// `NAMESPACE` so a rename cannot leave this pointing at a dead mailbox (#3668).
-fn store_mailbox() -> MailboxId {
-    mailbox_id_from_path(StoreCapability::NAMESPACE)
-}
-
-/// The `aether.artifacts` mailbox (a depth-1 root cap), addressed like
-/// [`store_mailbox`].
-fn artifacts_mailbox() -> MailboxId {
-    mailbox_id_from_path(ArtifactsCapability::NAMESPACE)
-}
-
-/// The `aether.signing` mailbox (a depth-1 root cap), addressed like
-/// [`store_mailbox`].
-fn signing_mailbox() -> MailboxId {
-    mailbox_id_from_path(SigningCapability::NAMESPACE)
 }
 
 fn control_mailbox() -> MailboxId {
