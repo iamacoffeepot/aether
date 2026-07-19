@@ -66,6 +66,7 @@ pub mod binding;
 pub(crate) mod blob_lifecycle;
 pub(crate) mod blob_work;
 pub mod ctx;
+pub(crate) mod deferred_reply;
 pub(crate) mod dispatch;
 pub mod dispatch_blocking;
 pub(crate) mod dispatcher_slot;

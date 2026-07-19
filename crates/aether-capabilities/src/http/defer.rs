@@ -1,52 +1,31 @@
-//! Native deferred-reply machinery for the typed route surface (ADR-0154
-//! §2/§3). A deferred route forwards its request to a peer capability and
-//! answers only when that reply lands. This module holds the request's
-//! reply obligation across the async boundary, arms the `504` settlement
-//! net, and hands the obligation back to the paired `#[http::reply]` route.
+//! Native deferred-reply surface for the typed route macro (ADR-0154 §2).
+//! A deferred route forwards its request to a peer capability and answers
+//! only when that reply lands. [`Ctx::defer`] holds the request's reply
+//! obligation across the async boundary, arms the `504` settlement net, and
+//! hands the obligation to the paired `#[http::reply]` route.
 //!
-//! Native-only: the reply-obligation hold is [`InboundMail`], a native
-//! construct (a wasm guest's reply handle is one-shot and instance-local,
-//! ADR-0133), so the whole module sits behind the `runtime` feature. The
-//! table lives in the HTTP surface, not the actor SDK (ADR-0154 §3): only
-//! the correlation half (the echoed `correlation_id`) is generic, and the
-//! `504` reclamation is HTTP-specific.
+//! Native-only: the reply obligation is an
+//! [`InboundMail`](aether_substrate::InboundMail), a native construct (a
+//! wasm guest's reply handle is one-shot and instance-local, ADR-0133), so
+//! the whole module sits behind the `runtime` feature. The obligations are
+//! parked in a per-actor table on the actor's binding (ADR-0154 §3, hardened
+//! per iamacoffeepot/aether#3683): it drops with the actor (reclaiming
+//! stranded sockets), its lock is scoped to one actor's traffic, and it is
+//! bounded — `defer` answers `503` at the ceiling rather than growing
+//! without bound at a slow or dead peer. The `504` reclamation stays here
+//! because that status is HTTP-specific; the hold/take storage is generic
+//! and lives on the SDK binding.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use aether_actor::Manual;
-use aether_data::{Kind, MailboxId};
+use aether_data::Kind;
+use aether_data::MailboxId;
 use aether_kinds::trace::Settled;
-use aether_substrate::InboundMail;
 use aether_substrate::actor::native::NativeCtx;
 
+use super::kinds::HttpServerResponse;
 use super::typed::{Ctx, Outcome};
-
-/// The process-global reply-obligation table (ADR-0154 §3): a deferred
-/// request's held [`InboundMail`] keyed by `(routing actor, downstream
-/// correlation)`. The actor half scopes entries per instance; the
-/// correlation half is the detached dispatch's `MailId.correlation_id`,
-/// which the downstream reply echoes (so the reply route recovers it via
-/// `in_reply_to`) and the settlement notice carries as its root. Bounded
-/// by in-flight deferred requests — an entry frees when its reply route
-/// answers or the `504` settlement net fires.
-fn deferrals() -> &'static Mutex<HashMap<(MailboxId, u64), InboundMail>> {
-    static DEFERRALS: OnceLock<Mutex<HashMap<(MailboxId, u64), InboundMail>>> = OnceLock::new();
-    DEFERRALS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Remove and return the held reply obligation for `(self_id, correlation)`.
-/// The generated `#[http::reply]` glue and the `504` settlement handler
-/// both call this to answer (or fail-close) a held request. Public for the
-/// macro-generated glue only — not an author-facing surface.
-///
-/// # Panics
-/// Panics if the deferral-table mutex is poisoned — fail-fast per ADR-0063.
-#[doc(hidden)]
-#[must_use]
-pub fn take_deferred(self_id: MailboxId, correlation: u64) -> Option<InboundMail> {
-    deferrals().lock().expect("http deferral table poisoned; fail-fast per ADR-0063").remove(&(self_id, correlation))
-}
 
 impl Ctx<'_, NativeCtx<'_, Manual>> {
     /// Forward this route's request to `recipient` and answer only when
@@ -59,10 +38,18 @@ impl Ctx<'_, NativeCtx<'_, Manual>> {
     /// paired `#[http::reply]` route recovers it via `in_reply_to` and
     /// answers.
     ///
-    /// # Panics
-    /// Panics if the deferral-table mutex is poisoned — fail-fast per
-    /// ADR-0063 (a poisoned table means another handler panicked mid-op).
+    /// If the actor's per-actor obligation table is already at its ceiling,
+    /// the request is refused with `503` and left un-forwarded rather than
+    /// growing the table — the request's own reply obligation answers, so no
+    /// obligation is taken and no downstream dispatch is made.
     pub fn defer<K: Kind>(mut self, recipient: MailboxId, request: &K) -> Outcome {
+        if !self.deferred_reply_capacity_available() {
+            return Outcome::Reply(HttpServerResponse {
+                status: 503,
+                headers: Vec::new(),
+                body: Vec::from(&b"deferred-route obligation table full"[..]),
+            });
+        }
         let self_id = self.self_id();
         let inbound = self.take_inbound();
         let bytes = request.encode_into_bytes();
@@ -71,10 +58,7 @@ impl Ctx<'_, NativeCtx<'_, Manual>> {
         if let Some(registry) = mailer.settlement_registry() {
             registry.subscribe_settlement_mail(mail_id, self_id, <Settled as Kind>::ID, Arc::clone(mailer));
         }
-        deferrals()
-            .lock()
-            .expect("http deferral table poisoned; fail-fast per ADR-0063")
-            .insert((self_id, mail_id.correlation_id), inbound);
+        self.hold_deferred_reply(mail_id.correlation_id, inbound);
         Outcome::Deferred
     }
 }

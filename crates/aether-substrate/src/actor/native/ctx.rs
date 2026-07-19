@@ -293,6 +293,31 @@ impl<M: ReplyMode> NativeCtx<'_, M> {
         self.binding.self_mailbox()
     }
 
+    /// Whether this actor can hold another deferred-reply obligation
+    /// (ADR-0154 §3). The deferred HTTP route glue pre-checks this so it can
+    /// answer `503` without consuming the request when the per-actor
+    /// obligation table is at its ceiling.
+    #[must_use]
+    pub fn deferred_reply_capacity_available(&self) -> bool {
+        self.binding.deferred_reply_capacity_available()
+    }
+
+    /// Park a deferred route's reply obligation (an [`InboundMail`] taken via
+    /// [`Self::take_inbound`]) under `correlation`, to be answered when the
+    /// downstream reply lands. The generated `#[http::route]` deferred glue
+    /// is the only caller (ADR-0154).
+    pub fn hold_deferred_reply(&self, correlation: u64, inbound: InboundMail) {
+        self.binding.hold_deferred_reply(correlation, inbound);
+    }
+
+    /// Recover the deferred-reply obligation held under `correlation`, or
+    /// `None` if already answered / reclaimed by the `504` net. The generated
+    /// reply glue and `Settled` handler are the only callers (ADR-0154).
+    #[must_use]
+    pub fn take_deferred_reply(&self, correlation: u64) -> Option<InboundMail> {
+        self.binding.take_deferred_reply(correlation)
+    }
+
     /// ADR-0080 §12 spawn primitive: launch a worker thread that
     /// inherits this handler's in-flight `(mail_id, root)` so its
     /// sends fold into the current causal chain. The closure `f`

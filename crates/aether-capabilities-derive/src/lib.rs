@@ -996,10 +996,9 @@ fn emit_reply_glue(reply: &ReplyRoute) -> TokenStream2 {
         #[handler::manual]
         fn #glue_name(#glue_first, __aether_ctx: &mut #ctx_c, __aether_reply: #reply_kind) {
             let __aether_response = #call;
-            let __aether_self = __aether_ctx.self_id();
             let __aether_correlation = __aether_ctx.reply_target().correlation_id;
             if let ::core::option::Option::Some(__aether_inbound) =
-                ::aether_capabilities::http::take_deferred(__aether_self, __aether_correlation)
+                __aether_ctx.take_deferred_reply(__aether_correlation)
             {
                 __aether_inbound.reply(&__aether_response);
             }
@@ -1024,7 +1023,8 @@ fn emit_settled_handler(groups: &[Group<'_>], reply_routes: &[ReplyRoute]) -> sy
         })?;
 
     // The handler reads neither self nor state (the obligation table is
-    // process-global), so name an unused receiver and silence the lint.
+    // per-actor, reached through the transport ctx), so name an unused
+    // receiver and silence the lint.
     let (settled_first, allow) = match call_style {
         CallStyle::SelfReceiver => (quote! { #first_arg }, quote! { #[allow(clippy::unused_self)] }),
         CallStyle::State(state_ty) => (quote! { _aether_state: #state_ty }, quote! {}),
@@ -1038,9 +1038,8 @@ fn emit_settled_handler(groups: &[Group<'_>], reply_routes: &[ReplyRoute]) -> sy
             __aether_ctx: &mut #ctx_c,
             __aether_settled: ::aether_capabilities::http::Settled,
         ) {
-            let __aether_self = __aether_ctx.self_id();
             if let ::core::option::Option::Some(__aether_inbound) =
-                ::aether_capabilities::http::take_deferred(__aether_self, __aether_settled.root.correlation_id)
+                __aether_ctx.take_deferred_reply(__aether_settled.root.correlation_id)
             {
                 __aether_inbound.reply(&::aether_capabilities::http::kinds::HttpServerResponse {
                     status: 504,

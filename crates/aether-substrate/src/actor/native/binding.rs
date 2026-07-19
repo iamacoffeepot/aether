@@ -39,9 +39,10 @@ use std::sync::{Arc, OnceLock};
 
 use aether_kinds::trace::Nanos;
 
+use super::deferred_reply::DeferredReplyTable;
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::ctx::ChassisCtx;
-use crate::chassis::inbox::{ReplyLineage, SettlingInbox};
+use crate::chassis::inbox::{InboundMail, ReplyLineage, SettlingInbox};
 use crate::mail::mailer::Mailer;
 use crate::mail::ring::{MailLoc, MailRing, RingFull};
 use crate::mail::{KindId, Mail, MailId, MailRef, MailboxId, Source, SourceAddr};
@@ -228,6 +229,15 @@ pub struct NativeBinding {
     inflight: super::dispatch_blocking::InflightLedger,
     /// ADR-0139: typed request contexts keyed by reply correlation id.
     request_contexts: Mutex<RequestContextTable>,
+    /// ADR-0154 §3 (hardened per iamacoffeepot/aether#3683): held reply
+    /// obligations for this actor's in-flight deferred HTTP routes, keyed by
+    /// the downstream dispatch's correlation id. Per-actor so it drops with
+    /// the actor (reclaiming stranded sockets) and its lock is scoped to one
+    /// actor's own traffic. `Mutex` only for the `&self` interior-mutability
+    /// and `Sync` requirements — the same single-logical-writer discipline as
+    /// `request_contexts`, since deferred routes, their reply routes, and the
+    /// `Settled` net all run on this actor's own dispatch thread.
+    deferred_replies: Mutex<DeferredReplyTable>,
 }
 
 impl NativeBinding {
@@ -267,6 +277,7 @@ impl NativeBinding {
             blob_producer: Mutex::new(None),
             inflight: Mutex::new(super::dispatch_blocking::InflightTable::new()),
             request_contexts: Mutex::new(RequestContextTable::new()),
+            deferred_replies: Mutex::new(DeferredReplyTable::new()),
         }
     }
 
@@ -483,6 +494,41 @@ impl NativeBinding {
     /// Panics if the request-context mutex is poisoned.
     pub fn take_request_context<C: Kind>(&self, request: RequestId) -> Option<C> {
         self.request_contexts.lock().expect("request context table poisoned; fail-fast per ADR-0063").take(request)
+    }
+
+    /// Whether this actor can hold another deferred-reply obligation
+    /// (ADR-0154 §3). A deferred HTTP route pre-checks this before taking its
+    /// inbound so it can answer `503` without consuming the request when the
+    /// per-actor table is at its ceiling.
+    ///
+    /// # Panics
+    /// Panics if the deferred-reply mutex is poisoned — fail-fast per ADR-0063.
+    pub fn deferred_reply_capacity_available(&self) -> bool {
+        self.deferred_replies.lock().expect("deferred-reply table poisoned; fail-fast per ADR-0063").has_capacity()
+    }
+
+    /// Park a deferred route's reply obligation under `correlation` (the
+    /// downstream dispatch's id, which the reply echoes and the `504`
+    /// settlement net carries as its root). Recovered later by
+    /// [`Self::take_deferred_reply`].
+    ///
+    /// # Panics
+    /// Panics if the deferred-reply mutex is poisoned — fail-fast per ADR-0063.
+    pub fn hold_deferred_reply(&self, correlation: u64, inbound: InboundMail) {
+        self.deferred_replies
+            .lock()
+            .expect("deferred-reply table poisoned; fail-fast per ADR-0063")
+            .hold(correlation, inbound);
+    }
+
+    /// Remove and return the reply obligation held under `correlation`, or
+    /// `None` if none is held (already answered, or reclaimed by the `504`
+    /// net). The generated reply glue and `Settled` handler both call this.
+    ///
+    /// # Panics
+    /// Panics if the deferred-reply mutex is poisoned — fail-fast per ADR-0063.
+    pub fn take_deferred_reply(&self, correlation: u64) -> Option<InboundMail> {
+        self.deferred_replies.lock().expect("deferred-reply table poisoned; fail-fast per ADR-0063").take(correlation)
     }
 }
 
