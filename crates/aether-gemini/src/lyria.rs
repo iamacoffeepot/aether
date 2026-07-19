@@ -75,7 +75,7 @@ pub fn parse_clip_response(json: &str) -> Result<Vec<Vec<u8>>, String> {
 #[cfg(test)]
 mod tests {
     use super::{is_supported, parse_clip_response, supported_model_ids, validate};
-    use crate::gemini::GeminiError;
+    use crate::GeminiError;
 
     #[test]
     fn known_models_are_supported() {

@@ -22,21 +22,20 @@ use std::time::Duration;
 use aether_actor::Addressable;
 use aether_actor::log::DEFAULT_RING_CAP;
 use aether_actor::trace::{DEFAULT_TRACE_RING_CAP, DEFAULT_TRACE_RING_MAX_CAP};
+use aether_anthropic::{AnthropicCapability, AnthropicConfig, AnthropicConfigLayer};
 use aether_audio::AudioConfigLayer;
-use aether_capabilities::anthropic::AnthropicConfigLayer;
-use aether_capabilities::gemini::{GeminiBoot, GeminiConfigLayer};
 use aether_capabilities::http::HttpConfigLayer;
 use aether_capabilities::http::HttpServerConfigLayer;
 use aether_capabilities::lifecycle::LifecycleGraphData;
 use aether_capabilities::rpc::{PeerKind, RpcServerCapability, RpcServerConfig};
 use aether_capabilities::{
-    AnthropicCapability, AnthropicConfig, ComponentHostCapability, ComponentHostConfig, EngineConfigLayer,
-    GameGatewayCapability, GameGatewayConfig, GeminiCapability, GeminiConfig, HttpCapability, HttpServerCapability,
-    HttpServerConfig, InputCapability, InputConfig, LifecycleConfig, TcpCapability,
-    http::HttpConfig,
-    shared::contentgen::{ContentGenConfig, ContentGenConfigLayer},
+    ComponentHostCapability, ComponentHostConfig, EngineConfigLayer, GameGatewayCapability, GameGatewayConfig,
+    HttpCapability, HttpServerCapability, HttpServerConfig, InputCapability, InputConfig, LifecycleConfig,
+    TcpCapability, http::HttpConfig,
 };
+use aether_contentgen::{ContentGenConfig, ContentGenConfigLayer};
 use aether_fs::{FsCapability, NamespaceRoots, NamespaceRootsLayer};
+use aether_gemini::{GeminiBoot, GeminiCapability, GeminiConfig, GeminiConfigLayer};
 use aether_inventory::InventoryCapability;
 use aether_kinds::{BinaryManifest, Present, Render, Shutdown, Tick};
 use aether_render::RenderTuningConfigLayer;

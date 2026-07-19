@@ -18,16 +18,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aether_actor::Addressable;
+use aether_anthropic::AnthropicConfig;
 use aether_audio::{SetMasterGain, SetMasterGainResult};
 use aether_capabilities::LifecycleCapability;
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
-    AnthropicConfig, ComponentHostConfig, ContentGenConfig, GeminiConfig, HttpServerConfig, InputConfig,
-    UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
+    ComponentHostConfig, HttpServerConfig, InputConfig, UnsupportedTestBenchCapability, http::HttpConfig as HttpConf,
 };
 use aether_clipboard::HeadlessClipboardCapability;
+use aether_contentgen::ContentGenConfig;
 use aether_data::Kind;
 use aether_fs::NamespaceRoots;
+use aether_gemini::GeminiConfig;
 use aether_kinds::BinaryManifest;
 use aether_kinds::Tick;
 use aether_render::HeadlessRenderCapability;

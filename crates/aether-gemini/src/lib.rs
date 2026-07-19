@@ -23,23 +23,35 @@
 //! and their supporting enums live in `kinds`, decomposed alongside the
 //! `config` and `adapter` seams.
 
-mod adapter;
+// Always-on: the mail kinds + the `GeminiConfig` domain struct carry the marker
+// face. The handler-signature kinds resolve at file root because `#[actor]`
+// emits `impl HandlesKind<K>` markers against the identity.
 mod config;
-mod error;
 mod kinds;
-mod lyria;
-mod nanobanana;
 
 // The `aether.gemini` runtime half (ADR-0122 identity/runtime split): the
 // `aether_substrate`-typed state + reply helpers the `#[actor] impl`
-// reaches through `use super::runtime::*`. Gated once here so a
-// transport-only build of the `GeminiCapability` identity never names the
-// state nor pulls `aether_substrate` through this cap.
+// reaches through `use super::runtime::*`, plus the `ureq` Nano Banana / Lyria
+// backends (`adapter`), the media decode (`lyria` / `nanobanana`), and the
+// error taxonomy (`error`). Gated once here so a transport-only build of the
+// `GeminiCapability` identity never names them nor pulls the transport /
+// substrate stack through this cap.
+#[cfg(feature = "runtime")]
+mod adapter;
+#[cfg(feature = "runtime")]
+mod error;
+#[cfg(feature = "runtime")]
+mod lyria;
+#[cfg(feature = "runtime")]
+mod nanobanana;
 #[cfg(feature = "runtime")]
 mod runtime;
 
+#[cfg(feature = "runtime")]
 pub use adapter::{DisabledGeminiAdapter, UreqGeminiAdapter};
-pub use config::{GeminiConfig, GeminiConfigLayer, GeminiOverlay};
+pub use config::GeminiConfig;
+#[cfg(feature = "runtime")]
+pub use config::{GeminiConfigLayer, GeminiOverlay};
 pub use kinds::*;
 #[cfg(feature = "runtime")]
 pub use runtime::GeminiBoot;

@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::shared::contentgen::adapter::{
+use aether_contentgen::adapter::{
     AdapterUsage, GeminiAdapter, GeminiArtifact, GeminiImageRequest, GeminiMusicRequest, GeminiResponse,
 };
-use crate::shared::contentgen::transport;
+use aether_contentgen::transport;
 
 use super::{AspectRatio, GeminiError, ImageSize, ThinkingLevel};
 use super::{error, lyria, nanobanana};
@@ -248,7 +248,7 @@ mod tests {
     /// `includeThoughts`, and `tools[0].google_search` (issue 1167).
     #[test]
     fn nanobanana_body_carries_set_params() {
-        use crate::shared::contentgen::adapter::GeminiImageRequest;
+        use aether_contentgen::adapter::GeminiImageRequest;
         let body = super::build_nanobanana_body(&GeminiImageRequest {
             model: "gemini-3.1-flash-image-preview".to_string(),
             prompt: "a cat".to_string(),
@@ -272,7 +272,7 @@ mod tests {
     /// `aspectRatio` survives under `imageConfig`.
     #[test]
     fn nanobanana_body_omits_unset_params() {
-        use crate::shared::contentgen::adapter::GeminiImageRequest;
+        use aether_contentgen::adapter::GeminiImageRequest;
         let body = super::build_nanobanana_body(&GeminiImageRequest {
             model: "gemini-3.1-flash-image-preview".to_string(),
             prompt: "a cat".to_string(),
@@ -292,7 +292,7 @@ mod tests {
     #[ignore = "needs GEMINI_API_KEY"]
     fn gemini_lyria_smoke() {
         use super::UreqGeminiAdapter;
-        use crate::shared::contentgen::adapter::{GeminiAdapter, GeminiMusicRequest};
+        use aether_contentgen::adapter::{GeminiAdapter, GeminiMusicRequest};
         use std::env;
         use std::time::Duration;
         // Test-only: the live-API smoke reads an external credential

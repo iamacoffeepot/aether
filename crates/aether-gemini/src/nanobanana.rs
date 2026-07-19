@@ -309,7 +309,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::{ModelShape, ValidationInputs, base64_decode, lookup_model, parse_image_response, validate};
-    use crate::gemini::{AspectRatio, GeminiError, ImageSize};
+    use crate::{AspectRatio, GeminiError, ImageSize};
 
     fn nb2() -> &'static ModelShape {
         lookup_model("gemini-3.1-flash-image-preview").expect("NB2 is a supported model")

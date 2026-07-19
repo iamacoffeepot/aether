@@ -12,7 +12,7 @@ use super::{
     AnthropicAdapter, AnthropicCapability, AnthropicConfig, CliSendResult, CombinedAnthropicAdapter,
     DisabledAnthropicAdapter, map_adapter_error,
 };
-use crate::shared::contentgen::adapter::{AdapterUsage, AnthropicRequest, AnthropicResponse};
+use aether_contentgen::adapter::{AdapterUsage, AnthropicRequest, AnthropicResponse};
 
 pub use aether_substrate::actor::native::TaskQueue;
 pub use std::sync::Arc;
@@ -210,7 +210,7 @@ impl NativeActor for AnthropicCapability {
 pub fn build_adapter(config: &AnthropicConfig) -> Arc<dyn AnthropicAdapter> {
     if config.disabled {
         tracing::info!(
-            target: "aether_capabilities::anthropic",
+            target: "aether_anthropic",
             "anthropic adapter disabled — messages reply Unauthorized; cli still routes",
         );
         return Arc::new(DisabledAnthropicAdapter::new(config.timeout));
@@ -218,14 +218,14 @@ pub fn build_adapter(config: &AnthropicConfig) -> Arc<dyn AnthropicAdapter> {
     config.api_key.as_ref().map_or_else(
         || {
             tracing::info!(
-                target: "aether_capabilities::anthropic",
+                target: "aether_anthropic",
                 "ANTHROPIC_API_KEY unset — messages reply Unauthorized; cli still routes",
             );
             Arc::new(DisabledAnthropicAdapter::new(config.timeout)) as Arc<dyn AnthropicAdapter>
         },
         |key| {
             tracing::info!(
-                target: "aether_capabilities::anthropic",
+                target: "aether_anthropic",
                 "anthropic adapter configured (messages + cli)",
             );
             Arc::new(CombinedAnthropicAdapter::new(key.clone(), config.timeout)) as Arc<dyn AnthropicAdapter>
@@ -283,11 +283,11 @@ pub fn cli_reply(request_id: u64, result: Result<AnthropicResponse, String>) -> 
 #[cfg(all(test, feature = "runtime"))]
 mod tests {
     use super::AnthropicCapabilityState;
-    use crate::anthropic::{AnthropicAdapter, ClaudeCliAdapter, DisabledAnthropicAdapter};
-    use crate::anthropic::{
+    use crate::{AnthropicAdapter, ClaudeCliAdapter, DisabledAnthropicAdapter};
+    use crate::{
         AnthropicCapability, AnthropicError, CliSend, CliSendResult, Message, MessagesSend, MessagesSendResult, Role,
     };
-    use crate::shared::contentgen::adapter::{AnthropicRequest, AnthropicResponse, StubAnthropicAdapter};
+    use aether_contentgen::adapter::{AnthropicRequest, AnthropicResponse, StubAnthropicAdapter};
     use aether_data::{Kind, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
@@ -477,7 +477,7 @@ mod tests {
     /// `Err { CliNotFound }` — a graceful skip, not a hang.
     #[test]
     fn anthropic_cli_skips_when_no_claude_on_path() {
-        use crate::anthropic::error::UNAUTHORIZED_SENTINEL;
+        use crate::error::UNAUTHORIZED_SENTINEL;
         // A disabled adapter routes CLI through the real subprocess
         // backend; pointing it at a missing binary exercises the
         // CliNotFound path without depending on the host's `claude`.
@@ -567,8 +567,8 @@ mod tests {
     #[test]
     #[ignore = "needs ANTHROPIC_API_KEY"]
     fn anthropic_api_smoke() {
-        use crate::anthropic::UreqAnthropicAdapter;
-        use crate::shared::contentgen::adapter::AnthropicRequest;
+        use crate::UreqAnthropicAdapter;
+        use aether_contentgen::adapter::AnthropicRequest;
         use std::env;
         // Test-only: the live-API smoke reads an external credential
         // (ANTHROPIC_API_KEY), not cap config; gated `#[ignore]`.

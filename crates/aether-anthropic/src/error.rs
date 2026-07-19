@@ -6,10 +6,10 @@
 //! failure modes inline. Keeping the status table here keeps the
 //! provider-compat translation in one place per ADR-0050 §4.
 
-use crate::anthropic::kinds::AnthropicError;
+use crate::kinds::AnthropicError;
 
-use crate::anthropic::cli::{CLI_NOT_FOUND, TIMEOUT_SENTINEL};
-use crate::shared::contentgen::transport::{parse_status_prefix, snippet};
+use crate::cli::{CLI_NOT_FOUND, TIMEOUT_SENTINEL};
+use aether_contentgen::transport::{parse_status_prefix, snippet};
 
 /// Sentinel an adapter returns to mean "no API key" so the cap maps it
 /// onto [`AnthropicError::Unauthorized`] without the adapter depending
@@ -69,8 +69,8 @@ fn status_to_error(status: u16, retry_after_millis: Option<u32>, body: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::{adapter_error_to_typed, status_to_error};
-    use crate::anthropic::cli::TIMEOUT_SENTINEL;
-    use crate::anthropic::kinds::AnthropicError;
+    use crate::cli::TIMEOUT_SENTINEL;
+    use crate::kinds::AnthropicError;
 
     #[test]
     fn timeout_sentinel_maps_to_timeout() {
