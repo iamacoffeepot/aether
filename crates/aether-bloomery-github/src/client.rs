@@ -768,6 +768,28 @@ pub struct Artifact {
     pub size_bytes: u64,
 }
 
+/// Does `name` carry `nonce` as a delimiter-bounded segment? The wrapper embeds
+/// the nonce in a run's display title and in each artifact's name between
+/// non-alphanumeric delimiters (or at a name edge, e.g. `evidence-{nonce}-log`).
+/// A raw `contains` would let a nonce that is a prefix of a longer one (`n-1`
+/// inside `n-12`) resolve an unrelated concern's run or pull its evidence, so a
+/// match counts only when the character on each side of the occurrence is a
+/// boundary — a non-alphanumeric character or the string's edge. The nonce
+/// itself may contain `-`, so a split-on-delimiter test would over-segment it;
+/// bounding each occurrence is the delimiter-safe form. The one nonce-matching
+/// predicate both the run resolution (`find_run`) and the artifact filter
+/// (`stream_evidence`) share, so the two sides cannot drift (#3662).
+pub fn name_carries_nonce(name: &str, nonce: &str) -> bool {
+    if nonce.is_empty() {
+        return false;
+    }
+    name.match_indices(nonce).any(|(start, matched)| {
+        let before_is_boundary = name[..start].chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric());
+        let after_is_boundary = name[start + matched.len()..].chars().next().is_none_or(|c| !c.is_ascii_alphanumeric());
+        before_is_boundary && after_is_boundary
+    })
+}
+
 /// The GitHub Actions REST surface the executor port drives — `workflow_dispatch`
 /// plus the run + artifacts API. A sibling of [`GithubApi`] / [`GitDataApi`]
 /// (each backend is generic over only the surface it touches), implemented by
@@ -992,13 +1014,18 @@ impl<T: HttpTransport> ActionsApi for ReqwestGithub<T> {
     fn find_run(&self, workflow_file: &str, nonce: &str) -> Result<Option<WorkflowRun>, GithubError> {
         // The runs list is newest-first, so the first name-embedding-nonce match
         // is the run this nonce dispatched. Page-walk like the other list ops.
+        // The match is delimiter-bounded (`name_carries_nonce`), never a raw
+        // `contains`: nonces are `dispatch-<int>`-shaped, so `dispatch-4` is a
+        // prefix of `dispatch-42`, and the newer run's title would otherwise
+        // shadow the older nonce's — mis-resolving inspect, cancelling the
+        // wrong run, and returning silently empty evidence (#3662).
         let base = self.actions_url(&format!("workflows/{workflow_file}/runs"));
         for page in 1..=MAX_LIST_PAGES {
             let response = self.request(Method::Get, format!("{base}?per_page={PER_PAGE}&page={page}"), None)?;
             let list: GhRunList = decode(&response)?;
             let count = list.workflow_runs.len();
             for gh in list.workflow_runs {
-                if gh.display_title.contains(nonce) {
+                if name_carries_nonce(&gh.display_title, nonce) {
                     return Ok(Some(gh.into_workflow_run()));
                 }
             }
@@ -1333,6 +1360,23 @@ mod tests {
             r#"{"workflow_runs":[{"id":8,"display_title":"transform x n-other","status":"queued","conclusion":null}]}"#;
         let github = client(200, body);
         assert_eq!(github.find_run("bloomery-transform.yml", "n-abc").expect("2xx decodes"), None);
+    }
+
+    // #3662 — the nonce match is delimiter-bounded, never a raw `contains`.
+    // Nonces are `dispatch-<int>`-shaped, so `dispatch-4` is a prefix of
+    // `dispatch-42`; the newer superstring run sits first in the newest-first
+    // list and a raw `contains` would resolve it for the older nonce —
+    // mis-reporting status, cancelling the wrong run, and returning silently
+    // empty evidence once the artifact filter drops everything.
+    #[test]
+    fn find_run_never_resolves_a_superstring_nonce() {
+        let body = r#"{"workflow_runs":[
+            {"id":42,"display_title":"transform verify.check dispatch-42","status":"in_progress","conclusion":null},
+            {"id":4,"display_title":"transform verify.check dispatch-4","status":"completed","conclusion":"success"}
+        ]}"#;
+        let github = client(200, body);
+        let run = github.find_run("bloomery-transform.yml", "dispatch-4").expect("2xx decodes").expect("a match");
+        assert_eq!(run.id, 4, "the bounded match skips the superstring title");
     }
 
     #[test]
