@@ -8,7 +8,7 @@
 //!
 //! - [`store`] — the native `aether.store` capability. `SQLite` in WAL mode holds
 //!   the append-only journal (with inbox dedup by idempotency key), a
-//!   transactional outbox **partitioned by topic** (so disjoint consumers drain
+//!   transactional outbox **partitioned by topic** (so disjoint reactors drain
 //!   and ack their own rows without racing on the shared `delivered` flag), and
 //!   the active-membership table whose uniqueness constraint makes bloom sealing
 //!   all-or-nothing. The guest sees typed `aether.store.*` transact mail, never
@@ -50,12 +50,12 @@
 //! - [`bloomery`] — [`BloomeryChassis`], a
 //!   coordinator-shaped chassis (no render/audio surface) that registers the
 //!   store, artifacts, source, trace, RPC, HTTP (REST control api), and the
-//!   `aether.bloomery.mirror` outbox-consumer capability behind a
+//!   `aether.bloomery.mirror` outbox reactor capability behind a
 //!   signal-blocking driver. It also holds the GitHub port cap shells —
 //!   `ProjectionShell` (outward mirror), `SourceShell` (git source), and
 //!   `ExecutorShell` (the Actions dispatch backend, ADR-0149 migration step 2)
 //!   — each mounting an `aether-bloomery-github` backend behind an
-//!   `Arc<dyn …>` so no core module names a GitHub type. The mirror driver
+//!   `Arc<dyn …>` so no core module names a GitHub type. The mirror reactor
 //!   polls the store outbox and drives the `ProjectionShell` so a live bloomery
 //!   continuously projects its journal to GitHub (config-gated off when
 //!   unconfigured); `SourceShell` is also wired behind the `aether.source`
@@ -63,7 +63,7 @@
 //!
 //! Recovery is journal replay + outbox republish: reopen the same database
 //! file, replay the journal through the reducer, and republish undelivered
-//! outbox entries — the mirror driver's first drain pass on boot is that
+//! outbox entries — the mirror reactor's first drain pass on boot is that
 //! republish, acking each topic's delivered prefix only after the GitHub write
 //! succeeds (at-least-once with idempotent reconcile).
 

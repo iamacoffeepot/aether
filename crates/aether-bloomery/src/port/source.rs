@@ -196,8 +196,8 @@ pub trait SourceBackend {
     /// head the branch's current commit reverse-resolves to when a prior
     /// integrate recorded one (ADR-0152 §Resolution drives integration). A
     /// fresh branch is created at the base commit; an existing branch is left
-    /// as is, so a driver restarting mid-fold reads where the fold stopped —
-    /// and a driver restarting *after* the final fold recovers the head it
+    /// as is, so a reactor restarting mid-fold reads where the fold stopped —
+    /// and a reactor restarting *after* the final fold recovers the head it
     /// needs for the resolve without re-integrating.
     ///
     /// # Errors

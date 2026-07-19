@@ -16,7 +16,7 @@
 //! carry only the nonce handle, not the command, so the router records which lane
 //! each submitted nonce went to and re-resolves `inspect` / `cancel` /
 //! `stream_evidence` against that record. A nonce never submitted through this
-//! router (which the dispatch driver never produces — it submits before it
+//! router (which the dispatch reactor never produces — it submits before it
 //! inspects) falls back to the Actions arm.
 
 use std::collections::HashMap;
@@ -69,7 +69,7 @@ impl RoutingExecutor {
     }
 
     // The lane a submitted nonce routed to, or Actions for a nonce this router
-    // never submitted (the dispatch driver always submits before it inspects, so
+    // never submitted (the dispatch reactor always submits before it inspects, so
     // a miss is only the fallback path, never the normal one).
     fn lane_of(&self, nonce: &str) -> Lane {
         self.lock().get(nonce).copied().unwrap_or(Lane::Actions)
@@ -118,7 +118,7 @@ impl ExecutorBackend for RoutingExecutor {
         };
         // `stream_evidence` is the last message the intake cycle sends for a
         // completed order (`run_intake_cycle` inspects, then streams, then the
-        // driver prunes the handle), so evict the routing record here to bound
+        // reactor prunes the handle), so evict the routing record here to bound
         // `routed`. Eviction cannot ride `inspect` instead: the cycle streams the
         // same nonce immediately after a `Completed` inspect, and dropping the
         // record there would misroute that stream to the Actions fallback.

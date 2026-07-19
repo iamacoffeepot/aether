@@ -1,4 +1,4 @@
-//! The drain → fold → resolve core of the integrate driver, over a real
+//! The drain → fold → resolve core of the integrate reactor, over a real
 //! `SqliteStore` and a fake-GitHub-backed `SourceShell` — the network side the
 //! running capability drives, without the mail harness. `init` / the timer / the
 //! ctx send are the thin glue the chassis-boot test and compilation cover; this

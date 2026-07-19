@@ -250,9 +250,9 @@ fn outbox_enqueue_drain_ack_cycle() {
 
 #[test]
 fn outbox_topic_scoped_drain_and_ack_are_independent() {
-    // Two consumers share one outbox partitioned by topic (ADR-0149 §Outbox
+    // Two reactors share one outbox partitioned by topic (ADR-0149 §Outbox
     // consumption): draining and acking one topic must never touch the other's
-    // rows, so disjoint consumers never race on the shared `delivered` flag.
+    // rows, so disjoint reactors never race on the shared `delivered` flag.
     let mut store = memory();
     assert_eq!(store.enqueue_outbox("view_document", b"v1").unwrap(), 1);
     assert_eq!(store.enqueue_outbox("landing_receipt", b"r1").unwrap(), 2);
@@ -352,7 +352,7 @@ fn recording_a_replayed_nonce_is_an_idempotent_no_op() {
 #[test]
 fn list_outstanding_nonces_reflects_recorded_and_consumed_orders() {
     // The restart recovery set (#3641): every nonce still outstanding, so the
-    // executor driver's init can re-track a dispatched-but-unresolved order
+    // executor reactor's init can re-track a dispatched-but-unresolved order
     // after a crash instead of starting with an empty `tracked` vec.
     let mut store = memory();
     assert_eq!(store.list_outstanding_nonces().unwrap(), Vec::<String>::new());
@@ -474,7 +474,7 @@ fn crash_between_enqueue_and_ack_preserves_the_entry_for_republish() {
 fn dispatch_description_records_looks_up_and_is_key_scoped() {
     // The #3595 dispatch-description projection: the operator's work-order text
     // the coordinator persists at seal must read back verbatim for its
-    // (bloom, workpiece) key, an absent key misses (so the driver leaves the
+    // (bloom, workpiece) key, an absent key misses (so the reactor leaves the
     // transformation `None` rather than dispatching blind), and last-writer-wins
     // overwrites in place.
     let mut store = memory();

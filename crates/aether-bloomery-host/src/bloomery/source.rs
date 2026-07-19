@@ -16,7 +16,7 @@
 //! This slice ships the shell and the demo that drives a synthetic bloom
 //! through it (see `tests/source_demo.rs`). Wiring the shell into the chassis
 //! boot as an integrate/land-driving capability lands with the migration
-//! step 2 executor/review bridge, when the driver that consumes it exists —
+//! step 2 executor/review bridge, when the reactor that consumes it exists —
 //! mirroring the mirror shell's staging.
 //!
 //! [#3465]: https://github.com/iamacoffeepot/aether/issues/3465

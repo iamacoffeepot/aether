@@ -664,7 +664,7 @@ pub struct CycleReport {
     /// Uploads refused by the broker.
     pub refused: u32,
     /// Handles inspected this cycle that were not yet `Completed`, paired with
-    /// their observed status (#3635) — feeds the executor driver's staleness
+    /// their observed status (#3635) — feeds the executor reactor's staleness
     /// sweep so a wedged dispatch's last status is visible in its warn without a
     /// second `inspect` call.
     pub pending: Vec<(Nonce, ExecutionStatus)>,

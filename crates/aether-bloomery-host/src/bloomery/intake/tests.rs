@@ -386,7 +386,7 @@ fn intake_cycle_refuses_a_mismatched_upload_and_the_reducer_is_untouched() {
 fn a_pending_handle_is_reported_and_neither_completed_nor_admitted() {
     // A run that hasn't resolved yet (#3635) is skipped as before, but now
     // surfaces in `report.pending` with its observed status — the data the
-    // executor driver's staleness sweep reads, rather than silence.
+    // executor reactor's staleness sweep reads, rather than silence.
     let workpiece = WorkpieceId("wp-pending".to_owned());
     let scope_revision = Digest::from_bytes([2; 32]);
     let candidate = Digest::from_bytes([5; 32]);

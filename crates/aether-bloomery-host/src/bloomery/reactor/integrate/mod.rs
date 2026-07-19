@@ -1,4 +1,4 @@
-//! The integrate-driver capability (ADR-0152 §Resolution drives integration —
+//! The integrate reactor capability (ADR-0152 §Resolution drives integration —
 //! issue #3650).
 //!
 //! The bridge between recorded resolutions and the landable head: it drains the
@@ -6,23 +6,23 @@
 //! claimed candidate tree onto the bloom's integration branch through the
 //! source port's CAS-guarded `integrate`, and admits the resulting
 //! `Fact::Resolve` back through the control core — whose `DispatchLand` the
-//! existing land driver then consumes. The identity/runtime split follows
+//! land reactor then drains. The identity/runtime split follows
 //! ADR-0122 — this ZST is the addressing identity; the state-bearing logic is
 //! [`runtime`].
 
 use aether_actor::actor;
 use aether_bloomery::Topic;
 
-pub use runtime::{IntegrateDriverState, IntegrateTick};
+pub use runtime::{IntegrateReactorState, IntegrateTick};
 
-/// Addressing identity for the integrate-driver capability.
+/// Addressing identity for the integrate reactor capability.
 #[actor(singleton)]
-pub struct IntegrateDriverCapability;
+pub struct IntegrateReactorCapability;
 
-impl IntegrateDriverCapability {
-    /// The outbox topics this driver drains — its half of the producer/consumer
+impl IntegrateReactorCapability {
+    /// The outbox topics this reactor drains — its half of the producer/reactor
     /// pairing the topic tripwire checks against [`Topic::ALL`]. The integrate
-    /// driver is the sole consumer of [`Topic::Integrate`].
+    /// reactor is the sole drainer of [`Topic::Integrate`].
     pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::Integrate];
 }
 

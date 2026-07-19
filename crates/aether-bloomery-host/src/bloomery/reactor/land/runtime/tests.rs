@@ -1,4 +1,4 @@
-//! The drain → land core of the land driver, over a real `SqliteStore` and a
+//! The drain → land core of the land reactor, over a real `SqliteStore` and a
 //! fake-GitHub-backed `SourceShell` — the network side the running capability
 //! drives, without the mail harness. `init` / the timer / the ctx send are the
 //! thin glue the chassis-boot test and compilation cover; this pins the loop that
@@ -21,7 +21,7 @@ fn digest(seed: u8) -> Digest {
 }
 
 // A fake-GitHub-backed source shell with the CAS-land gate set explicitly, so a
-// test drives the same shell the running driver holds.
+// test drives the same shell the running reactor holds.
 fn shell(fake: FakeGithub, cas_land_enabled: bool) -> SourceShell {
     SourceShell::new(Arc::new(GitSource::new(fake.clone(), Arc::new(fake), cas_land_enabled)))
 }

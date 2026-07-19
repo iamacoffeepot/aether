@@ -86,15 +86,15 @@ impl OutboxPayload {
 macro_rules! topic_vocabulary {
     ($($(#[$vmeta:meta])* $variant:ident),+ $(,)?) => {
         /// A bloomery outbox topic — the routing key naming what an outbox row
-        /// carries, so exactly one host driver drains it across the store
-        /// boundary (ADR-0149 §The boundary). A topic is a producer-consumer
-        /// contract: a payload is enqueued under it and exactly one host driver
+        /// carries, so exactly one host reactor drains it across the store
+        /// boundary (ADR-0149 §The boundary). A topic is a producer/reactor
+        /// contract: a payload is enqueued under it and exactly one host reactor
         /// drains it, so a drifted spelling would enqueue under a topic nobody
         /// drains, accumulating undelivered rows silently (#3668). An outbox
         /// topic is only useful if compiled code drains it — there is no runtime
         /// drainer registration — so the set of meaningful topics is closed by
         /// construction and this enumeration is total. Always compiled like the
-        /// payload types, so the `default-features = false` host consumers reach
+        /// payload types, so the `default-features = false` host reactors reach
         /// it without the `runtime` actor.
         ///
         /// A fieldless enum, so anything that can be a topic is one and every
@@ -112,13 +112,13 @@ macro_rules! topic_vocabulary {
         ///   [`ViewDocument`](Self::ViewDocument)).
         ///
         /// [`ALL`](Self::ALL) enumerates the closed set — both classes — that the
-        /// producer/consumer pairing tripwire walks against the host drivers.
+        /// producer/reactor pairing tripwire walks against the host reactors.
         ///
         /// Each variant maps through [`as_str`](Self::as_str) to a
         /// `topic:`-prefixed display spelling — the string persisted to the
-        /// outbox row and matched by the draining driver, preserved exactly (a
+        /// outbox row and matched by the draining reactor, preserved exactly (a
         /// changed spelling would strand undelivered rows). A topic is a
-        /// store-local routing key between a producer's payload and the driver
+        /// store-local routing key between a producer's payload and the reactor
         /// that drains it, never an actor address — no mail can be sent to it —
         /// and the sigil (impossible in a dot-separated aether name) makes that
         /// unmistakable.
@@ -129,8 +129,8 @@ macro_rules! topic_vocabulary {
 
         impl Topic {
             /// Every bloomery outbox topic — both reducer-minted and host-minted
-            /// — the closed enumeration the producer/consumer pairing tripwire
-            /// walks against the host drivers. Generated with the enum from the
+            /// — the closed enumeration the producer/reactor pairing tripwire
+            /// walks against the host reactors. Generated with the enum from the
             /// same variant list, so it is complete and duplicate-free by
             /// construction: a new topic cannot be silently omitted.
             pub const ALL: &'static [Topic] = &[$(Topic::$variant),+];
@@ -140,37 +140,37 @@ macro_rules! topic_vocabulary {
 
 topic_vocabulary! {
     /// A landing receipt (reducer-minted, from [`Decision::EmitReceipt`]),
-    /// drained by the mirror driver and routed to #3499's republisher.
+    /// drained by the mirror reactor and routed to #3499's republisher.
     LandingReceipt,
     /// A stage re-dispatch (reducer-minted, from [`Decision::RedispatchStage`]),
     /// re-assembling the held attempt naming both question and answer digests
-    /// (ADR-0151). Still awaiting a draining consumer (#3664).
+    /// (ADR-0151). Still awaiting a draining reactor (#3664).
     Redispatch,
     /// A per-member attempt dispatch (reducer-minted, from
-    /// [`Decision::DispatchAttempt`]), drained by the executor driver, wrapped in
+    /// [`Decision::DispatchAttempt`]), drained by the executor reactor, wrapped in
     /// a work order, and submitted through the executor port (ADR-0149 §The
     /// line).
     Dispatch,
     /// A land dispatch (reducer-minted, from [`Decision::DispatchLand`]), drained
-    /// by the land driver, which issues the source-port compare-and-swap land
+    /// by the land reactor, which issues the source-port compare-and-swap land
     /// (ADR-0149 migration step 3).
     Land,
     /// An integration dispatch (reducer-minted, from
-    /// [`Decision::DispatchIntegration`]), drained by the integrate driver, which
+    /// [`Decision::DispatchIntegration`]), drained by the integrate reactor, which
     /// folds the claimed candidates onto the bloom's integration branch
     /// (ADR-0152).
     Integrate,
     /// A whole-bloom aggregate-review dispatch (reducer-minted, from
-    /// [`Decision::DispatchAggregateReview`]), drained by the executor driver,
+    /// [`Decision::DispatchAggregateReview`]), drained by the executor reactor,
     /// which runs the `review.critic` lane against the integrated head under a
     /// bloom-level order record (ADR-0153).
     AggregateReview,
     /// A whole-document projection (host-minted): the view-document producer
     /// (#3497) enqueues [`ViewDocument`](crate::port::ViewDocument) payloads and
-    /// the mirror driver drains them onto the outward mirror. No [`Decision`]
+    /// the mirror reactor drains them onto the outward mirror. No [`Decision`]
     /// projects onto it — it is host-produced and host-drained, so
     /// [`of_decision`](Self::of_decision) never returns it — but it is a real
-    /// outbox topic exactly one driver drains, so it belongs to the closed set.
+    /// outbox topic exactly one reactor drains, so it belongs to the closed set.
     /// Its payload type [`ViewDocument`](crate::port::ViewDocument) already lives
     /// in this crate.
     ViewDocument,
@@ -178,11 +178,11 @@ topic_vocabulary! {
 
 impl Topic {
     /// The `topic:` display spelling — the exact string persisted to the outbox
-    /// row and matched by the draining driver. One exhaustive match over the
+    /// row and matched by the draining reactor. One exhaustive match over the
     /// closed enum, so a new variant fails to compile until it names its wire
     /// spelling, and the spellings appear only here (and the boundary
     /// constructors). The wire and `SQLite` surfaces carry this plain string; the
-    /// [`Topic`] type is the closed producer / consumer edge over it.
+    /// [`Topic`] type is the closed producer / reactor edge over it.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -232,7 +232,7 @@ impl Topic {
 }
 
 /// A drained outbox row's topic string compares directly against a [`Topic`]
-/// (`entry.topic == Topic::Land`), so a consumer classifies entries through the
+/// (`entry.topic == Topic::Land`), so a reactor classifies entries through the
 /// typed vocabulary without re-spelling the persisted string at the call site.
 impl PartialEq<Topic> for str {
     fn eq(&self, other: &Topic) -> bool {
@@ -255,7 +255,7 @@ impl PartialEq<Topic> for String {
 /// The control-core actor's namespace — the sole owner of the literal.
 /// Defined here (always compiled) and forward-fed into the `runtime`-gated
 /// actor's `NAMESPACE` (the `EMBEDDED_SCOPE` forward-feed precedent in
-/// `aether-actor`), so the `default-features = false` host consumers resolve
+/// `aether-actor`), so the `default-features = false` host reactors resolve
 /// the loaded component from the exact const the actor registers under
 /// (#3668). The lineage math (`aether.component/aether.embedded:<this>`) is
 /// the component host's, never re-spelled here: the host resolves the mailbox
@@ -266,8 +266,8 @@ pub const CONTROL_CORE_NAMESPACE: &str = "aether.bloomery.control";
 /// and the adopting answer, each by digest. The wasm control actor enqueues it
 /// under [`Topic::Redispatch`] from a
 /// [`Decision::RedispatchStage`]; the
-/// executor dispatch consumer (#3505) decodes it to re-assemble the held attempt
-/// naming both digests. Defined here (always compiled) so the host consumer can
+/// executor dispatch reactor (#3505) decodes it to re-assemble the held attempt
+/// naming both digests. Defined here (always compiled) so the host reactor can
 /// decode it inward, cycle-free — like [`OutboxPayload`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RedispatchPayload {
@@ -282,11 +282,11 @@ pub struct RedispatchPayload {
 /// The per-member attempt dispatch outbox payload (ADR-0149 §The line): the
 /// bloom, the member, the stage, and the fully-built portable
 /// [`Transformation`] the executor dispatch
-/// consumer (#3505) wraps in a work order (adding an idempotency nonce) and
+/// reactor (#3505) wraps in a work order (adding an idempotency nonce) and
 /// submits through the executor port. The wasm control actor enqueues it under
 /// [`Topic::Dispatch`] from a
 /// [`Decision::DispatchAttempt`].
-/// Defined here (always compiled) so the host consumer can decode it inward,
+/// Defined here (always compiled) so the host reactor can decode it inward,
 /// cycle-free — like [`OutboxPayload`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DispatchPayload {
@@ -298,11 +298,11 @@ pub struct DispatchPayload {
     pub stage: StageId,
     /// The portable transformation to submit.
     pub transformation: Transformation,
-    /// The member's frozen scope-revision digest, explicit so the host driver
+    /// The member's frozen scope-revision digest, explicit so the host reactor
     /// never infers it from `transformation.inputs` (ADR-0152).
     pub scope_revision: Digest,
     /// The candidate tree the attempt runs against, when the member has one
-    /// (ADR-0152). The driver displays it as the evidence-binding digest;
+    /// (ADR-0152). The reactor displays it as the evidence-binding digest;
     /// `None` displays the scope revision.
     pub candidate: Option<Digest>,
 }
@@ -311,7 +311,7 @@ pub struct DispatchPayload {
 /// integration): the wasm control actor enqueues it under
 /// [`Topic::Integrate`] from a
 /// [`Decision::DispatchIntegration`];
-/// the host integrate driver drains it, folds each candidate tree onto the
+/// the host integrate reactor drains it, folds each candidate tree onto the
 /// bloom's integration branch in member order, and admits the resulting
 /// [`Fact::Resolve`](crate::reduce::Fact::Resolve).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -330,7 +330,7 @@ pub struct IntegratePayload {
 /// head the critic checks out), and which review pass this is. The wasm
 /// control actor enqueues it under [`Topic::AggregateReview`] from a
 /// [`Decision::DispatchAggregateReview`].
-/// Defined here (always compiled) so the host consumer can decode it inward,
+/// Defined here (always compiled) so the host reactor can decode it inward,
 /// cycle-free — like [`OutboxPayload`] / [`DispatchPayload`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct AggregateReviewPayload {
@@ -375,11 +375,11 @@ impl ReviewPass {
 }
 
 /// The land dispatch outbox payload (ADR-0149 §The boundary, migration step 3):
-/// the resolved bloom plus the compare-and-swap arguments the host's land driver
+/// the resolved bloom plus the compare-and-swap arguments the host's land reactor
 /// issues through the source port's `aether.source.land` op. The wasm control
 /// actor enqueues it under [`Topic::Land`] from a
 /// [`Decision::DispatchLand`] the moment a
-/// bloom resolves. Defined here (always compiled) so the host consumer can decode
+/// bloom resolves. Defined here (always compiled) so the host reactor can decode
 /// it inward, cycle-free — like [`OutboxPayload`] / [`DispatchPayload`].
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LandPayload {
