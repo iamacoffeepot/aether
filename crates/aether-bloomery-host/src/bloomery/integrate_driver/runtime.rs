@@ -5,7 +5,7 @@
 //! git-side fold that produces the landable head:
 //!
 //! 1. **Drain.** Each tick drains the store's
-//!    [`Topic::INTEGRATE`](aether_bloomery::Topic::INTEGRATE) outbox
+//!    [`Topic::Integrate`](aether_bloomery::Topic::Integrate) outbox
 //!    topic (its own connection, mirroring the land driver's store ownership) and
 //!    decodes each [`IntegratePayload`](aether_bloomery::IntegratePayload) — the
 //!    bloom whose members all carry claims, its sealed base, and every member's
@@ -206,7 +206,7 @@ fn drain_and_integrate(
     store: &mut dyn StoreBackend,
     source: &SourceShell,
 ) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
-    let entries = store.drain_topic(Topic::INTEGRATE)?;
+    let entries = store.drain_topic(Topic::Integrate)?;
     let mut admits = Vec::new();
     let mut ack_through = None;
     for entry in entries {
@@ -343,7 +343,7 @@ impl NativeActor for IntegrateDriverCapability {
         match drain_and_integrate(store, &source) {
             Ok((admits, ack_through)) => {
                 if let Some(sequence) = ack_through
-                    && let Err(error) = store.ack_topic(Topic::INTEGRATE, sequence)
+                    && let Err(error) = store.ack_topic(Topic::Integrate, sequence)
                 {
                     tracing::warn!(target: "aether_bloomery_host::integrate", %error, "integrate ack failed; entries re-drive");
                 }

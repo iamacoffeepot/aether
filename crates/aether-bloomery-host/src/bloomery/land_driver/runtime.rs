@@ -115,7 +115,7 @@ fn land_key(bloom: &Digest) -> IdempotencyKey {
 /// network side, unit-testable against a `SqliteStore` + a fake-GitHub-backed
 /// shell without the mail harness.
 fn drain_and_land(store: &mut dyn StoreBackend, source: &SourceShell) -> rusqlite::Result<(Vec<Admit>, Option<u64>)> {
-    let entries = store.drain_topic(Topic::LAND)?;
+    let entries = store.drain_topic(Topic::Land)?;
     let mut admits = Vec::new();
     let mut ack_through = None;
     for entry in entries {
@@ -258,7 +258,7 @@ impl NativeActor for LandDriverCapability {
         match drain_and_land(store, &source) {
             Ok((admits, ack_through)) => {
                 if let Some(sequence) = ack_through
-                    && let Err(error) = store.ack_topic(Topic::LAND, sequence)
+                    && let Err(error) = store.ack_topic(Topic::Land, sequence)
                 {
                     tracing::warn!(target: "aether_bloomery_host::land", %error, "land ack failed; entries re-drive");
                 }

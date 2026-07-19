@@ -22,8 +22,8 @@ pub struct IntegrateDriverCapability;
 impl IntegrateDriverCapability {
     /// The outbox topics this driver drains — its half of the producer/consumer
     /// pairing the topic tripwire checks against [`Topic::ALL`]. The integrate
-    /// driver is the sole consumer of [`Topic::INTEGRATE`].
-    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::INTEGRATE];
+    /// driver is the sole consumer of [`Topic::Integrate`].
+    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::Integrate];
 }
 
 mod runtime;

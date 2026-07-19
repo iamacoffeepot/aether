@@ -154,7 +154,7 @@ fn enqueue_construct_dispatch(store: &mut SqliteStore, bloom: BloomId, workpiece
         scope_revision: digest(subject),
         candidate: None,
     };
-    let sequence = store.enqueue_topic(Topic::DISPATCH, &to_vec(&payload).unwrap()).unwrap();
+    let sequence = store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
     (sequence, subject)
 }
 
@@ -177,7 +177,7 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
         transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
         pass: ReviewPass::Full,
     };
-    let sequence = store.enqueue_topic(Topic::AGGREGATE_REVIEW, &to_vec(&payload).unwrap()).unwrap();
+    let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
 
     let (handles, ack_through, _transient) = drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
     assert_eq!(handles.len(), 1);
@@ -221,7 +221,7 @@ fn the_second_aggregate_roll_frames_a_delta_confirm_against_the_frozen_findings(
         transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
         pass: ReviewPass::DeltaConfirm,
     };
-    store.enqueue_topic(Topic::AGGREGATE_REVIEW, &to_vec(&payload).unwrap()).unwrap();
+    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
 
     let (handles, _ack, _transient) = drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
     assert_eq!(handles.len(), 1);
@@ -258,7 +258,7 @@ fn a_fresh_roll_one_aggregate_dispatch_clears_the_stale_frozen_row() {
         transformation: Transformation::for_aggregate_review(digest(30), digest(40)),
         pass: ReviewPass::Full,
     };
-    store.enqueue_topic(Topic::AGGREGATE_REVIEW, &to_vec(&payload).unwrap()).unwrap();
+    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap()).unwrap();
 
     drain_and_dispatch_aggregate(&mut store, &shell).unwrap();
 
@@ -292,8 +292,8 @@ fn drain_and_dispatch_submits_each_dispatch_and_records_its_order() {
     assert_eq!(order.workpiece, "wp-line");
 
     // Acking the prefix means the entry does not re-drain.
-    store.ack_topic(Topic::DISPATCH, sequence).unwrap();
-    assert!(store.drain_topic(Topic::DISPATCH).unwrap().is_empty(), "the acked dispatch does not re-drain");
+    store.ack_topic(Topic::Dispatch, sequence).unwrap();
+    assert!(store.drain_topic(Topic::Dispatch).unwrap().is_empty(), "the acked dispatch does not re-drain");
 }
 
 #[test]
@@ -366,7 +366,7 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
         scope_revision: digest(9),
         candidate: None,
     };
-    store.enqueue_topic(Topic::DISPATCH, &to_vec(&payload).unwrap()).unwrap();
+    store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
     enqueue_construct_dispatch(&mut store, bloom, "wp-c", 7);
 
     let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
@@ -377,8 +377,8 @@ fn drain_stops_the_ack_prefix_at_a_missing_subject_entry() {
     assert_eq!(ack_through, Some(first), "the ack prefix stops at the last success, not a later one");
 
     // The subject-less entry and the one behind it re-drain — nothing acked them away.
-    store.ack_topic(Topic::DISPATCH, ack_through.unwrap()).unwrap();
-    let remaining = store.drain_topic(Topic::DISPATCH).unwrap();
+    store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
+    let remaining = store.drain_topic(Topic::Dispatch).unwrap();
     assert_eq!(remaining.len(), 2, "the subject-less entry and the one behind it are not acked past");
 }
 
@@ -395,7 +395,7 @@ fn pull_and_admit_admits_a_matching_construct_result_as_attempt_completed() {
     let (sequence, subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
 
     let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
-    store.ack_topic(Topic::DISPATCH, ack_through.unwrap()).unwrap();
+    store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
     let mut tracked = track(handles);
     let nonce = format!("dispatch-{sequence}");
 
@@ -442,7 +442,7 @@ fn seed_tracked_recovers_a_dispatched_order_across_a_restart() {
         let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-line", 5);
         let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
         assert_eq!(handles.len(), 1, "the order dispatched and was recorded before the simulated crash");
-        store.ack_topic(Topic::DISPATCH, ack_through.unwrap()).unwrap();
+        store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
         format!("dispatch-{sequence}")
         // `store` drops here — the process stops before this dispatch's
         // result was ever pulled, with no in-memory `tracked` surviving it.
@@ -504,7 +504,7 @@ fn a_construct_dispatch_runs_local_through_the_routing_shell_and_admits() {
     let (sequence, _subject) = enqueue_construct_dispatch(&mut store, bloom, "wp-local", 5);
 
     let (handles, ack_through, _transient_failure) = drain_and_dispatch(&mut store, &shell).unwrap();
-    store.ack_topic(Topic::DISPATCH, ack_through.unwrap()).unwrap();
+    store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
     assert_eq!(handles.len(), 1, "the construct order dispatched to the local backend");
     assert_eq!(handles[0].nonce.0, format!("dispatch-{sequence}"), "the handle carries the dispatch nonce");
     let mut tracked = track(handles);
@@ -538,8 +538,8 @@ fn drain_and_dispatch_parks_a_permanent_refusal_instead_of_re_driving() {
     assert_eq!(ack_through, Some(sequence), "a permanent refusal acks the entry past rather than re-driving it");
     assert_eq!(transient_failure, None, "a permanent park is not a transient failure the backoff cursor tracks");
 
-    store.ack_topic(Topic::DISPATCH, ack_through.unwrap()).unwrap();
-    assert!(store.drain_topic(Topic::DISPATCH).unwrap().is_empty(), "the parked entry does not re-drain");
+    store.ack_topic(Topic::Dispatch, ack_through.unwrap()).unwrap();
+    assert!(store.drain_topic(Topic::Dispatch).unwrap().is_empty(), "the parked entry does not re-drain");
 }
 
 #[test]
@@ -554,7 +554,7 @@ fn drain_and_dispatch_leaves_a_transient_refusal_undrained_to_retry() {
     assert!(handles.is_empty(), "the refused entry never dispatched");
     assert_eq!(ack_through, None, "a transient refusal stops the ack prefix so the entry re-drains");
     assert_eq!(transient_failure, Some(sequence), "the transient failure names the head sequence for backoff");
-    assert_eq!(store.drain_topic(Topic::DISPATCH).unwrap().len(), 1, "the un-acked entry re-drains on the next tick");
+    assert_eq!(store.drain_topic(Topic::Dispatch).unwrap().len(), 1, "the un-acked entry re-drains on the next tick");
 }
 
 #[test]
@@ -668,7 +668,7 @@ fn drain_stamps_the_record_axes_from_the_payload() {
         scope_revision: digest(5),
         candidate: Some(candidate_tree),
     };
-    let sequence = store.enqueue_topic(Topic::DISPATCH, &to_vec(&payload).unwrap()).unwrap();
+    let sequence = store.enqueue_topic(Topic::Dispatch, &to_vec(&payload).unwrap()).unwrap();
 
     drain_and_dispatch(&mut store, &shell).unwrap();
 

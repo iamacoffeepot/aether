@@ -5,7 +5,7 @@
 //! host-minted ones the host both produces and drains — must be drained by
 //! exactly one host driver, otherwise its enqueued rows accumulate in the store's
 //! outbox forever, undelivered and silent. That is not hypothetical:
-//! `Topic::REDISPATCH` is a live orphan (#3664), the exact failure the shared
+//! `Topic::Redispatch` is a live orphan (#3664), the exact failure the shared
 //! string consts never checked. This test collects every driver's declared drain
 //! set and asserts the 1:1 pairing against `Topic::ALL`, with the still-orphaned
 //! topics named in an explicit exception set.
@@ -23,7 +23,7 @@ use aether_bloomery_host::bloomery::{
 const KNOWN_ORPHANS: &[Topic] = &[
     // #3664 — the parked-question redispatch the reducer enqueues from an
     // adopted answer (ADR-0151), with no host consumer yet.
-    Topic::REDISPATCH,
+    Topic::Redispatch,
 ];
 
 /// Every bloomery outbox [`Topic`] pairs with exactly one draining host driver —

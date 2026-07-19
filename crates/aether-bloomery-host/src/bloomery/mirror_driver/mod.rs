@@ -23,10 +23,10 @@ pub struct MirrorDriverCapability;
 impl MirrorDriverCapability {
     /// The outbox topics this driver drains — its half of the producer/consumer
     /// pairing the topic tripwire checks against [`Topic::ALL`]. Two topics: the
-    /// reducer-minted [`Topic::LANDING_RECEIPT`] and the host-minted
-    /// [`Topic::VIEW_DOCUMENT`] (host-produced and host-drained — this driver is
+    /// reducer-minted [`Topic::LandingReceipt`] and the host-minted
+    /// [`Topic::ViewDocument`] (host-produced and host-drained — this driver is
     /// both sides), both members of the closed set.
-    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::LANDING_RECEIPT, Topic::VIEW_DOCUMENT];
+    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::LandingReceipt, Topic::ViewDocument];
 }
 
 mod runtime;

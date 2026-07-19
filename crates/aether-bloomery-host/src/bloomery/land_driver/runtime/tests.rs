@@ -39,7 +39,7 @@ fn seeded() -> (FakeGithub, Digest) {
 // `DispatchLand` projection would enqueue), returning its outbox sequence.
 fn enqueue_land(store: &mut SqliteStore, bloom: BloomId, expected_base: Digest, new_head: Digest) -> u64 {
     let payload = LandPayload { bloom: bloom.0, expected_base, new_head };
-    store.enqueue_topic(Topic::LAND, &to_vec(&payload).unwrap()).unwrap()
+    store.enqueue_topic(Topic::Land, &to_vec(&payload).unwrap()).unwrap()
 }
 
 #[test]

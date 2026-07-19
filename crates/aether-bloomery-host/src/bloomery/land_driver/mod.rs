@@ -18,8 +18,8 @@ pub struct LandDriverCapability;
 impl LandDriverCapability {
     /// The outbox topics this driver drains — its half of the producer/consumer
     /// pairing the topic tripwire checks against [`Topic::ALL`]. The land driver
-    /// is the sole consumer of [`Topic::LAND`].
-    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::LAND];
+    /// is the sole consumer of [`Topic::Land`].
+    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::Land];
 }
 
 mod runtime;

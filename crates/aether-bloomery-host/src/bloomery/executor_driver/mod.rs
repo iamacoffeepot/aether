@@ -3,7 +3,7 @@
 //!
 //! The reducer decides to dispatch a per-member attempt and enqueues a
 //! [`DispatchPayload`](aether_bloomery::DispatchPayload) on the store's
-//! [`Topic::DISPATCH`](aether_bloomery::Topic::DISPATCH) outbox topic; nothing
+//! [`Topic::Dispatch`](aether_bloomery::Topic::Dispatch) outbox topic; nothing
 //! drained it until this
 //! capability. It is the executor-dispatch consumer the reducer's producer side
 //! (#3497) and the `MirrorDriverCapability` doc both reserved: a poll-driven drain
@@ -28,9 +28,9 @@ pub struct ExecutorDriverCapability;
 impl ExecutorDriverCapability {
     /// The outbox topics this driver drains — its half of the producer/consumer
     /// pairing the topic tripwire checks against [`Topic::ALL`]. The executor
-    /// driver is the sole consumer of both the per-member [`Topic::DISPATCH`]
-    /// and the whole-bloom [`Topic::AGGREGATE_REVIEW`] (ADR-0153).
-    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::DISPATCH, Topic::AGGREGATE_REVIEW];
+    /// driver is the sole consumer of both the per-member [`Topic::Dispatch`]
+    /// and the whole-bloom [`Topic::AggregateReview`] (ADR-0153).
+    pub const DRAINED_TOPICS: &'static [Topic] = &[Topic::Dispatch, Topic::AggregateReview];
 }
 
 mod runtime;
