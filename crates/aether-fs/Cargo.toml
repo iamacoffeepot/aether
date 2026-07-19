@@ -19,7 +19,7 @@ license.workspace = true
 
 [features]
 default = ["runtime"]
-runtime = ["dep:aether-substrate", "dep:clap", "dep:confique", "dep:tracing"]
+runtime = ["dep:aether-substrate", "dep:clap", "dep:confique", "dep:dirs", "dep:tracing"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
@@ -30,6 +30,9 @@ serde = { workspace = true, default-features = false, features = ["derive", "all
 aether-substrate = { path = "../aether-substrate", optional = true }
 clap = { workspace = true, optional = true }
 confique = { workspace = true, optional = true }
+# `NamespaceRoots::from_layer` resolves `data_dir()` / `config_dir()` defaults;
+# runtime-gated (native config resolution), like the rest of the runtime half.
+dirs = { version = "6", optional = true }
 tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
 
 # The `Kind` derive emits a `cfg(not(target_family = "wasm"))`-gated

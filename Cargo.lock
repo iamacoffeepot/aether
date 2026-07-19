@@ -71,6 +71,7 @@ dependencies = [
  "aether-behavior-derive",
  "aether-capabilities",
  "aether-data",
+ "aether-fs",
  "serde",
  "tracing",
  "wasmi",
@@ -150,6 +151,7 @@ dependencies = [
  "aether-capabilities-derive",
  "aether-codec",
  "aether-data",
+ "aether-fs",
  "aether-kinds",
  "aether-math",
  "aether-render",
@@ -264,6 +266,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-fs"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-substrate",
+ "clap",
+ "confique",
+ "dirs",
+ "inventory",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "aether-kinds"
 version = "0.3.0-alpha"
 dependencies = [
@@ -284,6 +301,7 @@ dependencies = [
  "aether-clipboard",
  "aether-codec",
  "aether-data",
+ "aether-fs",
  "aether-kinds",
  "aether-math",
  "aether-mesh",
@@ -399,6 +417,7 @@ dependencies = [
  "aether-clipboard",
  "aether-codec",
  "aether-data",
+ "aether-fs",
  "aether-kinds",
  "aether-kit",
  "aether-math",
@@ -455,6 +474,7 @@ dependencies = [
  "aether-actor",
  "aether-capabilities",
  "aether-data",
+ "aether-fs",
  "aether-kinds",
  "aether-math",
  "aether-render",
