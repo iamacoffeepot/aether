@@ -12,7 +12,7 @@
 //!
 //! Under the bound, [`TaskQueue::submit`] hands the work straight to
 //! `ctx.dispatch_blocking`. Over the bound, it captures the chain context
-//! *now* — a [`SettlementHold`](aether_substrate::runtime::trace::SettlementHold)
+//! *now* — a [`SettlementHold`](crate::runtime::trace::SettlementHold)
 //! on the current root plus the originating reply target — and buffers a
 //! thunk that, when a slot later frees, replays the work via
 //! `ctx.dispatch_blocking_resumed(hold, reply_to, work)` so the deferred
@@ -29,8 +29,8 @@
 
 use std::collections::VecDeque;
 
+use crate::actor::native::NativeCtx;
 use aether_data::Kind;
-use aether_substrate::actor::native::NativeCtx;
 
 /// Default per-cap concurrency bound when a cap doesn't override it.
 /// Doubles as rate-limit throttling for the paid provider endpoints
@@ -81,7 +81,7 @@ impl TaskQueue {
     /// Accept a unit of blocking work. Under the bound, dispatch it now
     /// via [`NativeCtx::dispatch_blocking_with`] (which acquires the hold +
     /// reply target from `ctx`). Over the bound, capture the chain
-    /// context *now* — a [`SettlementHold`](aether_substrate::runtime::trace::SettlementHold)
+    /// context *now* — a [`SettlementHold`](crate::runtime::trace::SettlementHold)
     /// on the current root plus this handler's reply target — and buffer
     /// a thunk that replays the work via
     /// [`NativeCtx::dispatch_blocking_resumed`] when a slot later frees,
@@ -133,12 +133,12 @@ mod tests {
     // sibling-cap addressing.
     #![allow(clippy::disallowed_methods)]
     use super::TaskQueue;
+    use crate::actor::native::binding::NativeBinding;
+    use crate::actor::native::ctx::NativeCtx;
     use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr, mailbox_id_from_name};
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::actor::native::ctx::NativeCtx;
     use std::sync::Arc;
 
-    use aether_substrate::testing::fresh_substrate;
+    use crate::testing::fresh_substrate;
 
     /// A `#[repr(C)]` `Pod` reply kind the worker produces and `resolve`
     /// re-replies. Hand-rolled `Kind` (cast-shape) so the tests don't

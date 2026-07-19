@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 // behind `feature = "runtime"`. The kind types above stay always-on so
 // their `Kind`-derived inventory submissions register for the test
 // substrate's registry walk.
-use crate::shared::contentgen::task_queue::TaskQueue;
 use aether_actor::actor;
+use aether_substrate::actor::native::TaskQueue;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
 use aether_substrate::chassis::error::BootError;
 use std::thread;

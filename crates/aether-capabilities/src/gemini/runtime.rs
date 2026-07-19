@@ -21,7 +21,7 @@ use crate::shared::contentgen::adapter::{
 };
 use crate::shared::contentgen::staging::stage_gen_output_under;
 
-pub use crate::shared::contentgen::task_queue::TaskQueue;
+pub use aether_substrate::actor::native::TaskQueue;
 pub use std::path::{Path, PathBuf};
 pub use std::sync::Arc;
 

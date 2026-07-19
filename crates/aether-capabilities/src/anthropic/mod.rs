@@ -8,7 +8,7 @@
 //! Long-tail calls (a multi-second Messages request, a `claude`
 //! subprocess) ride the ADR-0093 hold-until-resolve dispatch: the
 //! generate handler submits the blocking call to a
-//! [`TaskQueue`](crate::shared::contentgen::TaskQueue), which hands it to
+//! [`TaskQueue`](aether_substrate::actor::native::TaskQueue), which hands it to
 //! `ctx.dispatch_blocking` — the substrate spawns an ephemeral worker,
 //! holds the chain open in its in-flight ledger, and routes the
 //! completion to the cap's `#[handler(task)]` as a `TaskDone`. The cap
