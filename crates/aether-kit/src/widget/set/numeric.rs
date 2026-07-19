@@ -12,9 +12,9 @@
 //! selection and parse paths as typed edits.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_capabilities::clipboard::{GetClipboardTextResult, SetClipboardTextResult};
+use aether_capabilities::TextCapability;
 use aether_capabilities::text::{FontMetricsRequest, FontMetricsResult, FontRef};
-use aether_capabilities::{ClipboardCapability, ClipboardMailboxExt, TextCapability};
+use aether_clipboard::{ClipboardCapability, ClipboardMailboxExt, GetClipboardTextResult, SetClipboardTextResult};
 use aether_kinds::keycode::{
     KEY_A, KEY_BACKSPACE, KEY_C, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_V, KEY_X,
 };

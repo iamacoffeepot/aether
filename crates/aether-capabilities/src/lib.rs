@@ -39,8 +39,6 @@ extern crate self as aether_capabilities;
 pub mod anthropic;
 #[cfg(feature = "audio")]
 pub mod audio;
-#[cfg(feature = "clipboard")]
-pub mod clipboard;
 pub mod component;
 // Shared infrastructure for capabilities (ADR-0050 §2). Native-only — the
 // dispatch helper, staging, and adapter traits all lean on the
@@ -91,10 +89,6 @@ pub mod window;
 pub use audio::AudioCapability;
 #[cfg(feature = "audio-runtime")]
 pub use audio::AudioConfig;
-#[cfg(feature = "clipboard-runtime")]
-pub use clipboard::ClipboardConfig;
-#[cfg(feature = "clipboard")]
-pub use clipboard::{ClipboardCapability, ClipboardMailboxExt, HeadlessClipboardCapability};
 // ADR-0050 `aether.anthropic` cap (issue 1014). `AnthropicConfig` is
 // part of the same native-only module.
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]

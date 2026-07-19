@@ -9,9 +9,9 @@
 pub mod kinds;
 pub use kinds::*;
 
-#[cfg(feature = "clipboard-runtime")]
+#[cfg(feature = "runtime")]
 mod config;
-#[cfg(feature = "clipboard-runtime")]
+#[cfg(feature = "runtime")]
 pub use config::ClipboardConfig;
 
 use aether_actor::{WasmActorMailbox, actor};
@@ -56,7 +56,7 @@ impl ClipboardMailboxExt for NativeActorMailbox<'_, ClipboardCapability> {
     }
 }
 
-#[cfg(feature = "clipboard-runtime")]
+#[cfg(feature = "runtime")]
 mod headless_runtime;
-#[cfg(feature = "clipboard-runtime")]
+#[cfg(feature = "runtime")]
 mod runtime;

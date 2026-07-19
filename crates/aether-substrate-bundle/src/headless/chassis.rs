@@ -22,10 +22,11 @@ use aether_capabilities::LifecycleCapability;
 use aether_capabilities::audio::{SetMasterGain, SetMasterGainResult};
 use aether_capabilities::rpc::RpcServerCapability;
 use aether_capabilities::{
-    AnthropicConfig, ComponentHostConfig, ContentGenConfig, GeminiConfig, HeadlessClipboardCapability,
-    HeadlessRenderCapability, HeadlessWindowCapability, HttpServerConfig, InputConfig, UnsupportedTestBenchCapability,
-    fs::NamespaceRoots, http::HttpConfig as HttpConf,
+    AnthropicConfig, ComponentHostConfig, ContentGenConfig, GeminiConfig, HeadlessRenderCapability,
+    HeadlessWindowCapability, HttpServerConfig, InputConfig, UnsupportedTestBenchCapability, fs::NamespaceRoots,
+    http::HttpConfig as HttpConf,
 };
+use aether_clipboard::HeadlessClipboardCapability;
 use aether_data::Kind;
 use aether_kinds::BinaryManifest;
 use aether_kinds::Tick;
